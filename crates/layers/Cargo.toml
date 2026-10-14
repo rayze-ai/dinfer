@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "dinfer 共享层：Linear / RMSNorm / RoPE / MLA / MoE / Sampler（基于 dinfer-kernels）"
+description = "dinfer 共享层：Tensor / Linear / RMSNorm / RoPE / MLA / MLP / Sampler（基于 dinfer-kernels）"
 
 [features]
 default = []
@@ -16,3 +16,5 @@ dinfer-kernels.workspace = true
 anyhow.workspace = true
 half.workspace = true
 tracing.workspace = true
+memmap2.workspace = true
+serde_json.workspace = true

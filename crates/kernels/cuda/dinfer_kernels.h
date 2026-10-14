@@ -46,6 +46,39 @@ int topk_topp_mask_f32(float* logits, const int32_t* top_k, const float* top_p, 
 int sample_f32(const float* logits, const float* temperature, const uint64_t* seeds, const uint64_t* offsets,
                int32_t* out, int64_t batch, int64_t vocab, cudaStream_t stream);
 
+
+// ---- MLA（参考版，见 mla.cu）----
+// latent: [tokens, entry] bf16（entry = kv_lora + rope）→ paged cache [num_blocks, block_size, entry]；slot<0 跳过。
+int mla_cache_write_bf16(const void* latent, void* cache, const int64_t* slot_mapping, int64_t tokens, int64_t entry,
+                         int64_t block_size, cudaStream_t stream);
+// causal attention（展开 K/V）：q/k: [T, heads, dq]，v: [T, heads, dv]，out: [T, heads, dv]，cu_seqlens: [num_reqs+1]。
+int mla_prefill_bf16(const void* q, const void* k, const void* v, void* out, const int32_t* cu_seqlens,
+                     int64_t num_reqs, int64_t heads, int64_t dq, int64_t dv, float scale, cudaStream_t stream);
+// 吸收后 MQA decode：q: [batch, heads, entry]，out: [batch, heads, kv_lora]（latent 空间）。
+int mla_decode_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens, void* out,
+                    int64_t batch, int64_t heads, int64_t entry, int64_t kv_lora, int64_t block_size,
+                    int64_t max_blocks, float scale, cudaStream_t stream);
+
+
+// ---- 布局搬运（layout.cu）----
+int copy_cols_bf16(const void* src, void* dst, int64_t tokens, int64_t src_cols, int64_t col0, int64_t dst_cols,
+                   int64_t dcol0, int64_t width, cudaStream_t stream);
+int bcast_kpe_bf16(const void* kpe, void* k, int64_t tokens, int64_t heads, int64_t qk, int64_t nope, int64_t rope,
+                   cudaStream_t stream);
+int copy_head_cols_bf16(const void* src, void* dst, int64_t tokens, int64_t heads, int64_t in_w, int64_t in_col0,
+                        int64_t out_w, int64_t out_col0, int64_t width, cudaStream_t stream);
+int gather_head_bf16(const void* src, void* dst, int64_t tokens, int64_t heads, int64_t w, int64_t head, int64_t col0,
+                     int64_t width, cudaStream_t stream);
+int scatter_head_bf16(const void* src, void* dst, int64_t tokens, int64_t heads, int64_t w, int64_t head, int64_t col0,
+                      int64_t width, cudaStream_t stream);
+
+
+// ---- 逐元素（elementwise.cu）----
+int add_inplace_bf16(const void* x, void* y, int64_t n, cudaStream_t stream);  // y += x
+int gather_rows_bf16(const void* src, void* dst, const int32_t* rows, int64_t num_rows, int64_t width,
+                     cudaStream_t stream);  // dst[r] = src[rows[r]]
+int bf16_to_f32(const void* x, float* y, int64_t n, cudaStream_t stream);
+
 #ifdef __cplusplus
 }
 #endif

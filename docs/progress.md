@@ -4,22 +4,20 @@
 ## 当前状态
 
 - 更新日期：2026-10-14
-- 阶段：**P2 通过**（`scripts/verify/p2.sh` exit 0 = p0 + p1 + 10 个算子 PyTorch 对拍）。commits：P0 `cda9aea`，P1 `65a67f1`，P2 待 commit
-- 正在做：P2 收尾 → 开 P3（稠密 MLA 通路，GLM 侧）
+- 阶段：**P3 通过**（`scripts/verify/p3.sh` exit 0 = p2 + tiny GLM 三个对拍）。commits：P0 `cda9aea`，P1 `65a67f1`，P2 `d44e49f`，P3 待 commit
+- 正在做：P3 收尾 → 开 P4（MoE：路由 + grouped GEMM bf16 → FP8 块量化；顺带把 core::runner 最小版做出来）
 - 环境：本机 3090（sm86）日常开发；k8s `admin@polaris` 两节点各 8 × RTX 4090（sm_89，驱动 580.178.04），Pod 需 `runtimeClassName: nvidia`，见 `scripts/dev/k8s/README.md`。用户决定：先做 sm8x 能完成的部分，sm90 以后再给
 - P1 产出：`core/src/sched/mod.rs`（running-first / waiting、token 预算、chunked prefill、`long_prefill_token_threshold`、末尾抢占、async scheduling 占位 + spec 回退、slab 索引）、`core/src/kv/{block_pool,hash,manager}.rs`（LRU 双链表 + (group,hash) 索引、xxh3-128 链式块哈希、多 group 管理器含 Mamba 单状态块、decode 零分配快路径）、`sched/output.rs`（`StepResults` 扁平缓冲）、`examples/probe_sched.rs`、`docs/loops/p1-scheduler-perf.md`
 - P1 已知简化（P7 补）：Mamba 组只在 block 对齐边界登记/命中，不做逐级回退与 checkpoint 多块；所有 group 要求同 page 大小；无 priority 调度、无 encoder 预算
 - P2 产出：`kernels/cuda/{common.cuh,add,norm,rope,activation,sampling}.cu`（9 个参考算子，sm80+，bf16 用 `__nv_bfloat16`），`kernels/src/{ffi,ops,gemm}.rs`（类型安全包装 + cuBLASLt bf16 GEMM，权重 `[N,K]` 行主序），`kernels/tests/ref_tests.rs`（feature `ref-tests`，读 `.npy`，路径按 `CARGO_MANIFEST_DIR/../..` 解析），`scripts/verify/{gen_kernel_refs.py,kernels.sh,p2.sh}`，`docs/loops/p2-kernels.md`。**C ABI 符号不带 `dinfer_` 前缀（用户要求）**。本机 torch 2.6.0+cu124 / numpy 1.26 / safetensors 0.5 可用
-- P2 有意留到 P3 的：`layers` crate 的 Linear/RmsNorm/… 包装（P3 做 MLA 时一起定接口，避免先写一版再改）
+- P3 产出：`kernels/cuda/{mla,layout,elementwise}.cu`（mla_cache_write / mla_prefill / mla_decode；copy_cols / bcast_kpe / copy_head_cols / gather_head / scatter_head；add_inplace / gather_rows / bf16_to_f32）+ 对应 ffi/ops；`layers/src/{tensor,weights,nn,mla}.rs`（WeightSource 自解析 safetensors mmap；MlaAttention 含 W_UK^T/W_UV 按 head 拆分、prefill 展开路径与 decode 吸收路径）；`glm53/src/model.rs::Glm53Dense`；`glm53/tests/tiny_parity.rs`（3 个测试）；`scripts/verify/{gen_tiny_glm.py,p3.sh}`；`docs/loops/p3-mla-dense.md`
+- P3 已知简化（后续补）：decode 路径每 head 一次小 GEMM（W_UK/W_UV），H 个 launch → P10 换 batched GEMM；prefill 不支持 chunked context（有历史 KV 的 prefill）→ P4 runner 接 chunked prefill 时补 "prefill + 读 cache" 路径；无 runner / Sampler 层，测试直接喂 Forward 结构体
 - 下一步（具体到可直接执行）：
-  1. commit P2
-  2. P3 稠密 MLA 通路（GLM 侧先行）：
-     a. `kernels/cuda/mla_prefill.cu`：q·k^T 分块 causal attention（bf16，fp32 累加，先不做 chunked context merge）；`mla_decode.cu`：paged MQA decode（W_UK 吸收后 q_latent[heads, 576] 对 kv_latent[576] paged cache），每 block 一个 (req, head-group)
-     b. `kernels/cuda/kv_cache.cu`：latent KV 写入 paged cache（slot_mapping）
-     c. `layers`：`Linear / RmsNorm / Rope / Embedding / MlaAttention{fused_qkv_a, q_a_norm, q_b, kv_a_norm, kv_b 吸收成 W_UK/W_UV, o_proj}` + `Sampler`
-     d. tiny GLM 结构模型（4 层、hidden 256、4 头、无 MoE、无索引器）：`glm53/src/model.rs` 前向 + `core::runner` 最小版（flat batch → forward → logits_indices → sample）
-     e. 对拍：`scripts/verify/gen_tiny_glm.py` 用 HF transformers 实现同结构随机权重模型，存 safetensors + 期望 logits；Rust 加载后 greedy 32 token 一致
-  3. `scripts/verify/p3.sh` = p2 + tiny GLM greedy 对拍
+  1. commit P3
+  2. P4-a `core::runner`（最小版）：输入 `SchedulerOutput` → 组 flat batch（input_ids / positions / slot_mapping / cu_seqlens 或 block_table+seq_lens / logits_rows）→ `Model::forward` → 采样（greedy 先）→ `ModelRunnerOutput`。先用 tiny GLM 把 Scheduler + Runner 串起来跑 2 个并发请求的 prefill→decode→finish，对拍 HF greedy
+  3. P4-b 混合 batch：同一 step 既有 prefill 又有 decode → MLA 要支持 "prefill 带历史 KV"（chunked context），参考 kernel 加 `mla_prefill_paged`（q 对 [cache 历史 | 本步新 K] 做 causal）
+  4. P4-c MoE：`gen_tiny_glm.py --first-k-dense 1` 开 MoE；kernels：sigmoid+bias 分组 top-k（noaux_tc）、token 排序、grouped GEMM（bf16 参考版）、加权归约 + shared expert；对拍
+  5. P4-d FP8 块量化 GEMM（128×128 scale_inv，1×128 激活动态量化）参考版（3090 上 dequant 到 bf16 算；4090 Pod 上真 FP8）
 - 阻塞 / 待决策：`docs/design.md` §9（KDA kernel 手写 CUDA 还是 Triton AOT；structured output；性能对比基线配置）
 - 本机工具链：rustc/cargo 1.89.0，nvcc 12.4 在 `/usr/local/cuda/bin`（不在默认 PATH；p0.sh 已自动加）；crates.io 直连可用
 - 进行中的 loop 规格：无

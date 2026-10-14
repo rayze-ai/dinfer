@@ -9,10 +9,14 @@ description = "GLM-5.3 模型实现：MLA + DSA 稀疏索引器 + FP8 MoE + MTP 
 [features]
 default = []
 no-nvcc = ["dinfer-layers/no-nvcc"]
+# tiny 模型对拍（读 scripts/verify/gen_tiny_glm.py 的产物）
+ref-tests = ["dep:npyz"]
 
 [dependencies]
 dinfer-core.workspace = true
 dinfer-layers.workspace = true
+dinfer-kernels.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+npyz = { version = "=0.8.3", optional = true }

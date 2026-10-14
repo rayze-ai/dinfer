@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# P3 验收：p2 全部 + tiny GLM（MLA + dense MLP）与 HF 对拍。exit 0 = 通过。
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+export PATH="$CUDA_HOME/bin:$PATH"
+TINY="$(realpath -m "${DINFER_TINY_GLM:-test/tiny_glm}")"
+
+step() { printf '\n==> %s\n' "$*"; }
+
+scripts/verify/p2.sh
+
+step "generate tiny GLM reference → $TINY"
+python3 scripts/verify/gen_tiny_glm.py "$TINY"
+
+step "tiny GLM parity (prefill logits + greedy 32)"
+DINFER_TINY_GLM="$TINY" cargo test -p dinfer-glm53 --features ref-tests --test tiny_parity -- --ignored --test-threads=1 2>&1 \
+  | tee /tmp/dinfer_p3.log | grep -E '^test |test result|panicked|diverges|max abs|argmax'
+grep -qE "test result: ok\. 3 passed" /tmp/dinfer_p3.log
+
+printf '\n==> P3 PASS\n'

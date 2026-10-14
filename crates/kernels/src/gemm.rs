@@ -33,9 +33,10 @@ impl Gemm {
         n: usize,
         k: usize,
     ) -> Result<()> {
-        ensure!(a.len() == m * k, "gemm: a.len {} != m*k {}", a.len(), m * k);
+        // a / out 允许是按 max_tokens 预分配的更大缓冲（只用前 m 行）；权重必须精确。
+        ensure!(a.len() >= m * k, "gemm: a.len {} < m*k {}", a.len(), m * k);
         ensure!(w.len() == n * k, "gemm: w.len {} != n*k {}", w.len(), n * k);
-        ensure!(out.len() == m * n, "gemm: out.len {} != m*n {}", out.len(), m * n);
+        ensure!(out.len() >= m * n, "gemm: out.len {} < m*n {}", out.len(), m * n);
         if let Some(b) = bias {
             ensure!(b.len() == n, "gemm: bias.len {} != n {n}", b.len());
         }

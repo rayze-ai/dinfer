@@ -11,6 +11,30 @@
 >     - 如何避免：
 >     - 相关：`文件/命令/链接`
 
+## 2026-10-14 用 scratch 缓冲的 `shape[0]` 当 token 数，把 max_tokens 当成了本步 token 数
+
+- 现象：MLA forward 内 `rope_n` ensure 失败：`q.len 12288 < 64*4*16`，positions 只有 14。
+- 根因：所有层的 scratch 按 `max_tokens` 预分配；`forward` 里 `let t = x.shape[0]` 取到的是预分配的 64，不是本步的 14。
+- 解法：`forward(stream, gemm, t, x, ...)` 显式传 `t`；所有 `_n` 后缀的 kernel 包装按"容量 ≥ 所需"校验；GEMM 的激活/输出缓冲也改 `>=`，权重仍精确相等。
+- 如何避免：张量形状只用于校验容量，不用于推导"本步有多少 token"；token 数永远从调度器/输入显式传。
+- 相关：`crates/layers/src/{mla,nn}.rs`、`crates/kernels/src/{ops,gemm}.rs`
+
+## 2026-10-14 Rust 包装层参数顺序与 C ABI 不一致（copy_cols）
+
+- 现象：`copy_cols: range` ensure 失败，但调用处参数看起来合理。
+- 根因：`ops.rs` 里 `copy_cols_bf16` 的参数顺序写成 `(src_cols, col0, width, dcol0, dst_cols)`，头文件是 `(src_cols, col0, dst_cols, dcol0, width)`；调用方按头文件传。
+- 解法：包装层参数顺序改成与 `dinfer_kernels.h` 完全一致。
+- 如何避免：写包装时直接从头文件复制参数列表；考虑在 ops.rs 里给多 usize 参数的函数用结构体参数（P4 起）。
+- 相关：`crates/kernels/src/ops.rs::copy_cols_bf16`
+
+## 2026-10-14 greedy 对拍在 bf16 平局步必然分叉，不是 bug
+
+- 现象：prefill logits 全对、32 步 decode logits 最大偏差 0.007，但 greedy 第 7 步 token 不同。
+- 根因：HF 该步 top1=0.508、top2=0.504，差 0.0039 = bf16 在 0.5 附近的 1 ULP；两边各自的累加顺序决定谁略大，无法也不应要求一致。
+- 解法：对拍口径改为三层：① 全词表 logits max abs < 0.05；② argmax 只在 HF top1-top2 gap > 0.02 时要求一致；③ greedy 允许在平局步分叉，且分叉 token 必须是 HF top-2 之一。
+- 如何避免：所有 greedy 对拍都带 `expect_step_logits`（HF 全序列前向逐步取最后一行），用 gap 判定平局，不用"token 序列完全一致"做唯一标准。
+- 相关：`crates/glm53/tests/tiny_parity.rs`、`scripts/verify/gen_tiny_glm.py`、`docs/loops/p3-mla-dense.md`
+
 ## 2026-10-14 top-p 掩码与 vLLM 口径不一致：top-p 必须在 top-k 之后的分布上算
 
 - 现象：`topk_topp_mask` 对拍，`k=5, p=0.5` 这一行 kernel 保留 5 个、参考保留 2 个。

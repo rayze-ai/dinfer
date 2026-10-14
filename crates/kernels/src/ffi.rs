@@ -83,6 +83,108 @@ extern "C" {
         vocab: i64,
         stream: cudaStream_t,
     ) -> i32;
+    pub fn mla_cache_write_bf16(
+        latent: *const c_void,
+        cache: *mut c_void,
+        slot_mapping: *const i64,
+        tokens: i64,
+        entry: i64,
+        block_size: i64,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn mla_prefill_bf16(
+        q: *const c_void,
+        k: *const c_void,
+        v: *const c_void,
+        out: *mut c_void,
+        cu_seqlens: *const i32,
+        num_reqs: i64,
+        heads: i64,
+        dq: i64,
+        dv: i64,
+        scale: f32,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn mla_decode_bf16(
+        q: *const c_void,
+        cache: *const c_void,
+        block_table: *const i32,
+        seq_lens: *const i32,
+        out: *mut c_void,
+        batch: i64,
+        heads: i64,
+        entry: i64,
+        kv_lora: i64,
+        block_size: i64,
+        max_blocks: i64,
+        scale: f32,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn copy_cols_bf16(
+        src: *const c_void,
+        dst: *mut c_void,
+        tokens: i64,
+        src_cols: i64,
+        col0: i64,
+        dst_cols: i64,
+        dcol0: i64,
+        width: i64,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn bcast_kpe_bf16(
+        kpe: *const c_void,
+        k: *mut c_void,
+        tokens: i64,
+        heads: i64,
+        qk: i64,
+        nope: i64,
+        rope: i64,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn copy_head_cols_bf16(
+        src: *const c_void,
+        dst: *mut c_void,
+        tokens: i64,
+        heads: i64,
+        in_w: i64,
+        in_col0: i64,
+        out_w: i64,
+        out_col0: i64,
+        width: i64,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn gather_head_bf16(
+        src: *const c_void,
+        dst: *mut c_void,
+        tokens: i64,
+        heads: i64,
+        w: i64,
+        head: i64,
+        col0: i64,
+        width: i64,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn scatter_head_bf16(
+        src: *const c_void,
+        dst: *mut c_void,
+        tokens: i64,
+        heads: i64,
+        w: i64,
+        head: i64,
+        col0: i64,
+        width: i64,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn add_inplace_bf16(x: *const c_void, y: *mut c_void, n: i64, stream: cudaStream_t) -> i32;
+    pub fn gather_rows_bf16(
+        src: *const c_void,
+        dst: *mut c_void,
+        rows: *const i32,
+        num_rows: i64,
+        width: i64,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn bf16_to_f32(x: *const c_void, y: *mut f32, n: i64, stream: cudaStream_t) -> i32;
 }
 
 #[cfg(dinfer_no_nvcc)]
@@ -105,6 +207,17 @@ mod stubs {
     stub!(argmax_f32(l: *const f32, o: *mut i32, b: i64, v: i64, s: cudaStream_t));
     stub!(topk_topp_mask_f32(l: *mut f32, k: *const i32, p: *const f32, b: i64, v: i64, s: cudaStream_t));
     stub!(sample_f32(l: *const f32, t: *const f32, sd: *const u64, of: *const u64, o: *mut i32, b: i64, v: i64, s: cudaStream_t));
+    stub!(mla_cache_write_bf16(l: *const c_void, c: *mut c_void, sm: *const i64, t: i64, e: i64, bs: i64, s: cudaStream_t));
+    stub!(mla_prefill_bf16(q: *const c_void, k: *const c_void, v: *const c_void, o: *mut c_void, cu: *const i32, n: i64, h: i64, dq: i64, dv: i64, sc: f32, s: cudaStream_t));
+    stub!(mla_decode_bf16(q: *const c_void, c: *const c_void, bt: *const i32, sl: *const i32, o: *mut c_void, b: i64, h: i64, e: i64, l: i64, bs: i64, mb: i64, sc: f32, s: cudaStream_t));
+    stub!(copy_cols_bf16(a: *const c_void, b: *mut c_void, t: i64, sc: i64, c0: i64, dc: i64, d0: i64, w: i64, s: cudaStream_t));
+    stub!(bcast_kpe_bf16(a: *const c_void, b: *mut c_void, t: i64, h: i64, qk: i64, n: i64, r: i64, s: cudaStream_t));
+    stub!(copy_head_cols_bf16(a: *const c_void, b: *mut c_void, t: i64, h: i64, iw: i64, ic: i64, ow: i64, oc: i64, w: i64, s: cudaStream_t));
+    stub!(gather_head_bf16(a: *const c_void, b: *mut c_void, t: i64, h: i64, w: i64, hd: i64, c0: i64, wd: i64, s: cudaStream_t));
+    stub!(scatter_head_bf16(a: *const c_void, b: *mut c_void, t: i64, h: i64, w: i64, hd: i64, c0: i64, wd: i64, s: cudaStream_t));
+    stub!(add_inplace_bf16(x: *const c_void, y: *mut c_void, n: i64, s: cudaStream_t));
+    stub!(gather_rows_bf16(a: *const c_void, b: *mut c_void, r: *const i32, n: i64, w: i64, s: cudaStream_t));
+    stub!(bf16_to_f32(x: *const c_void, y: *mut f32, n: i64, s: cudaStream_t));
 }
 #[cfg(dinfer_no_nvcc)]
 pub use stubs::*;
