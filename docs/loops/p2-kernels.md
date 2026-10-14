@@ -40,3 +40,8 @@
 
 | 日期 | 算子 | 结果 |
 |---|---|---|
+| 2026-10-14 | rmsnorm / fused_add_rmsnorm / rope×2 / silu_and_mul / embedding / gemm / argmax | 首轮即过（修了测试读文件的 cwd 问题后） |
+| 2026-10-14 | sample（分布级） | 20k 次采样 L1 略超 0.03；采样数提到 100k 后过。kernel 本身正确（小 vocab 逐 token 频率与期望差 < 0.003） |
+| 2026-10-14 | topk_topp_mask | 第 1 轮：`k=5,p=0.5` 行保留 5 vs 2 —— top-p 在原始分布而非 top-k 后分布上算。第 2 轮：改为 vLLM 口径（top-p 只统计 ≥ top-k 阈值的元素）后过 |
+
+**loop 结束**：`scripts/verify/p2.sh` exit 0（2026-10-14）。
