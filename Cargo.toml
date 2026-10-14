@@ -45,7 +45,7 @@ memmap2 = "=0.9.5"
 safetensors = "=0.5.3"
 tokenizers = { version = "=0.21.2", default-features = false, features = ["onig"] }
 minijinja = { version = "=2.10.2", features = ["json", "loader"] }
-cudarc = { version = "=0.18.2", default-features = false, features = ["std", "driver", "nvrtc", "cublas", "cublaslt", "dynamic-linking", "cuda-12040"] }
+cudarc = { version = "=0.18.2", default-features = false, features = ["std", "driver", "nvrtc", "cublas", "cublaslt", "f16", "dynamic-linking", "cuda-12040"] }
 criterion = "=0.6.0"
 cc = "=1.2.27"
 

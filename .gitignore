@@ -5,3 +5,4 @@
 /test/**/*.nsys-rep
 /test/**/*.sqlite
 .env
+/test/kernel_refs/

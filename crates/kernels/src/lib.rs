@@ -5,7 +5,10 @@
 
 pub mod device;
 pub mod ffi;
+pub mod gemm;
 pub mod ops;
 
 pub use device::{Device, Stream};
-pub use ops::add_f32;
+pub use gemm::Gemm;
+pub use half::bf16;
+pub use ops::*;

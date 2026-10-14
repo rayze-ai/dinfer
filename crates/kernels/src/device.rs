@@ -69,6 +69,11 @@ impl Stream {
         self.inner.cu_stream()
     }
 
+    /// 给 cudarc 的其他库（cublasLt 等）用。
+    pub fn inner_arc(&self) -> Arc<CudaStream> {
+        self.inner.clone()
+    }
+
     /// 只读设备指针（以 u64 形式，供 FFI）。
     pub fn ptr<T: DeviceRepr>(&self, s: &CudaSlice<T>) -> u64 {
         let (p, _guard) = s.device_ptr(&self.inner);

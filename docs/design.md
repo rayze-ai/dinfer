@@ -303,7 +303,7 @@ glm53/src/
 |---|---|---|
 | P0 骨架 ✅ 2026-10-14 | workspace、CI（`cargo build/test/clippy`）、`cudarc` 能建流/分配/launch 一个 add kernel | `scripts/verify/p0.sh` |
 | P1 core 纯逻辑 ✅ 2026-10-14 | config、Request、Scheduler、KvCacheManager（含 prefix cache、混合 group、抢占）、SamplingParams；全部 CPU 单测，用 mock Model | `scripts/verify/p1.sh`：27 单测 + 1024 decode step < 200 µs（实测 86 / 138 µs） |
-| P2 基础算子 + layers | rmsnorm/rope/gemm(cuBLASLt)/silu/embedding/sampler；Linear/RmsNorm/Mlp；与 PyTorch 逐算子对拍（atol 1e-2 bf16） | `scripts/verify/kernels.sh` |
+| P2 基础算子 ✅ 2026-10-14（layers 包装层移到 P3 随 MLA 一起做） | rmsnorm / fused_add_rmsnorm / rope（interleave+neox）/ silu_and_mul / embedding / cuBLASLt bf16 GEMM / argmax / topk_topp_mask / sample（Philox）；全部 sm80+ 参考版 | `scripts/verify/p2.sh`：10 个算子与 PyTorch 对拍全过 |
 | P3 稠密 MLA 通路（GLM 侧先行） | MLA prefill/decode（参考版 kernel，sm80+）、paged KV、runner 端到端 greedy 生成；用 GLM-5.3 结构的 tiny 模型（例如 4 层、hidden 256、4 专家）与 HF 对拍 logits | 前 32 token 与 HF 一致（greedy） |
 | P4 MoE | 路由 + grouped GEMM（bf16），再 FP8 块量化路径；tiny GLM 全层对拍 | 同上 |
 | P5 DSA | 索引器、top-k、稀疏 MLA；长序列（>2048）对拍 | tiny GLM 在 seq 4096 与 HF 一致 |

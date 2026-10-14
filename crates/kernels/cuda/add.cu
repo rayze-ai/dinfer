@@ -9,8 +9,7 @@ __global__ void add_f32_kernel(const float* __restrict__ a, const float* __restr
 }
 }  // namespace
 
-extern "C" int dinfer_add_f32(const float* a, const float* b, float* out, int64_t n,
-                              cudaStream_t stream) {
+extern "C" int add_f32(const float* a, const float* b, float* out, int64_t n, cudaStream_t stream) {
   if (n <= 0) return 0;
   int threads = 256;
   int64_t want = (n + threads - 1) / threads;

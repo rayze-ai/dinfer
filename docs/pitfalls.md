@@ -11,6 +11,29 @@
 >     - 如何避免：
 >     - 相关：`文件/命令/链接`
 
+## 2026-10-14 top-p 掩码与 vLLM 口径不一致：top-p 必须在 top-k 之后的分布上算
+
+- 现象：`topk_topp_mask` 对拍，`k=5, p=0.5` 这一行 kernel 保留 5 个、参考保留 2 个。
+- 根因：第一版 kernel 把 top-k 阈值和 top-p 阈值各自在 **原始分布** 上算再取 max；vLLM `apply_top_k_top_p_pytorch` 是先 top-k 置 -inf，再对剩余元素 softmax 后做 top-p（`probs_sum <= 1 - p` 置 -inf，至少留 1 个）。两者在 k 小、p 小时结果不同。
+- 解法：kernel 里 top-p 的 softmax 分母与质量累计只统计 `v >= top_k_threshold` 的元素；Python 参考改成升序 + `cumsum <= 1-p` 与 vLLM 完全同形。
+- 如何避免：采样链的任何算子先抄 vLLM 的 PyTorch 参考实现到 `gen_kernel_refs.py`，再写 kernel；容差按"边界 token 可能差 ≤ max(2, 0.1%)"设。
+- 相关：`crates/kernels/cuda/sampling.cu::topk_topp_mask_kernel`、`scripts/verify/gen_kernel_refs.py::mask_ref`、`vllm/v1/sample/ops/topk_topp_sampler.py:473`
+
+## 2026-10-14 cargo 集成测试的 cwd 是 crate 目录，不是工作区根
+
+- 现象：`tests/ref_tests.rs` 用相对路径 `test/kernel_refs` 读 `.npy`，10 个测试全部 "No such file"。
+- 根因：`cargo test` 跑集成测试时 cwd = `crates/kernels/`。
+- 解法：相对路径按 `env!("CARGO_MANIFEST_DIR")/../..` 解析；脚本里用 `realpath -m` 传绝对路径。
+- 如何避免：测试读外部文件一律走环境变量 + `CARGO_MANIFEST_DIR` 兜底。
+- 相关：`crates/kernels/tests/ref_tests.rs::refs()`
+
+## 2026-10-14 clippy 偶发 "failed to run rustc to learn about target-specific information"
+
+- 现象：`cargo clippy` 报 rustc 解析 `<anon>` 失败，错误内容是一段 shell 脚本（`awk '-F: '`、`SN='Not Specified'`）。
+- 根因：cargo 用 `rustc -` 从 stdin 探测目标信息，本机某个后台进程（疑似监控 agent）往同一终端 stdin 写了东西。与代码无关，重跑即过。
+- 解法：重跑。若频繁出现，给 verify 脚本的 cargo 命令加 `< /dev/null`。
+- 相关：`test/2026-10-14/p2.log`（第一次运行）
+
 ## 2026-10-14 criterion `iter_batched` 把 setup 成本算进了被测函数
 
 - 现象：调度器 bench 报 197 / 310 µs，但手工 `Instant` 分段计时只有 62 / 92 µs；两条 bench 之间 110 µs 的差距与代码路径差异不符。

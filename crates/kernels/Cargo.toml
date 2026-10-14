@@ -11,6 +11,8 @@ build = "build.rs"
 default = []
 # 不编译任何 .cu，只提供 cudarc 的流/内存/事件封装；用于无 nvcc 的机器跑 CPU 测试。
 no-nvcc = []
+# 读取 scripts/verify/gen_kernel_refs.py 生成的 .npy 做对拍（tests/ref_tests.rs）。
+ref-tests = ["dep:npyz"]
 
 [dependencies]
 anyhow.workspace = true
@@ -19,6 +21,7 @@ cudarc.workspace = true
 half.workspace = true
 bytemuck.workspace = true
 tracing.workspace = true
+npyz = { version = "=0.8.3", optional = true }
 
 [build-dependencies]
 cc.workspace = true
