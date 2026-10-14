@@ -6,6 +6,7 @@
 pub mod config;
 pub mod kv;
 pub mod request;
+pub mod runner;
 pub mod sample;
 pub mod sched;
 pub mod util;

@@ -122,4 +122,16 @@ with torch.no_grad():
         step_logits.append(model(seq).logits[0, -1].float())
     np.save(out / "expect_step_logits.npy", torch.stack(step_logits).numpy())  # [gen, V]
 
+    # 第二条 prompt（长度 11，不对齐 block=16）：runner 多请求并发对拍用。
+    prompt2 = torch.tensor([[300, 1, 44, 888, 9, 620, 71, 15, 402, 33, 256]], dtype=torch.long)
+    gen2 = model.generate(prompt2, max_new_tokens=args.gen, do_sample=False, min_new_tokens=args.gen,
+                          pad_token_id=0, eos_token_id=None)
+    np.save(out / "prompt2.npy", prompt2[0].to(torch.int32).numpy())
+    np.save(out / "expect_greedy2.npy", gen2[0, prompt2.shape[1]:].to(torch.int32).numpy())
+    step_logits2 = []
+    for i in range(args.gen):
+        seq = gen2[:, : prompt2.shape[1] + i]
+        step_logits2.append(model(seq).logits[0, -1].float())
+    np.save(out / "expect_step_logits2.npy", torch.stack(step_logits2).numpy())
+
 print(f"wrote tiny GLM ({args.layers} layers) to {out}; greedy[:8] = {gen[0, prompt.shape[1]:prompt.shape[1]+8].tolist()}")

@@ -18,4 +18,15 @@ DINFER_TINY_GLM="$TINY_MOE" cargo test -p dinfer-glm53 --features ref-tests --te
   | tee /tmp/dinfer_p4_moe.log | grep -E '^test |test result|panicked|diverges|max abs|argmax'
 grep -qE "test result: ok\. 3 passed" /tmp/dinfer_p4_moe.log
 
+step "core runner unit tests (mock executor)"
+cargo test -p dinfer-core runner:: 2>&1 | tee /tmp/dinfer_p4_runner_unit.log | grep -E '^test |test result|panicked'
+grep -qE "test result: ok\. 2 passed" /tmp/dinfer_p4_runner_unit.log
+
+for d in "$(realpath -m "${DINFER_TINY_GLM:-test/tiny_glm}")" "$TINY_MOE"; do
+  step "scheduler + runner + Glm53Executor: 2 concurrent requests vs HF ($d)"
+  DINFER_TINY_GLM="$d" cargo test -p dinfer-glm53 --features ref-tests --test runner_parity -- --ignored --nocapture 2>&1 \
+    | tee /tmp/dinfer_p4_runner.log | grep -E '^test |test result|panicked|steps =|gap 0\.0[01]'
+  grep -qE "test result: ok\. 1 passed" /tmp/dinfer_p4_runner.log
+done
+
 printf '\n==> P4 PASS\n'

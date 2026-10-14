@@ -38,6 +38,15 @@
 |---|---|---|---|
 | 1 | MoE tiny 模型 prefill 对拍：logits max abs 0.0069 但 3 行 argmax 不一致（row 7/9/10） | 三行 HF 自身 top1-top2 gap = 0.0000 / 0.0020 / 0.0000，bf16 平局；与 P3 踩坑同类 | prefill 测试改为与 step 测试一致的"gap ≤ TIE_GAP 视为平局不计"；3 测试全过 |
 | 1 | clippy `large_enum_variant`（`FeedForward::Moe` 1640 B vs Dense 520 B） | — | `Moe(Box<Moe>)`，Dense 不再包一层，enum 上 `#[allow]` |
+| 2 | runner 对拍（dense）：第 3 步 req2 "sampled token must be argmax"，GPU 选 230、host 选 336，两者 logits 完全相等 | 测试里 host argmax 用 `max_by` → 平局取**大**下标；GPU kernel / torch 取**小**下标 | host argmax 改为首个最大值；该行其实是精确平局（fp32 相等） |
+| 2 | runner 对拍：结束后 `runner.num_states() != 0` | 完成请求的 id 在**下一次** `schedule()` 的 `finished_req_ids` 里才传给 worker（vLLM 同） | 测试末尾多做一次 schedule+execute 再断言 |
+
+## 结果（runner 部分，2026-10-14）
+
+- `core/src/runner.rs`：`ReqState` / `BatchPlan` / `ModelExecutor` trait / `Runner`（update_states → build_plan → forward_sample → 回填）；2 个 mock 单测。
+- `glm53/src/executor.rs`：`Glm53Executor`（H2D 全部输入 → `Glm53Model::forward` → `argmax_f32_n` → D2H）。
+- `glm53/tests/runner_parity.rs`：Scheduler + Runner + Executor 跑 2 个并发请求（prompt 14 / 11，block 16 不对齐），1 步双 prefill + 31 步双 decode；dense 与 MoE tiny 模型各跑一遍，每步每请求 logits 对 HF 全序列前向：dense worst 0.0063、MoE worst 0.0071；greedy 均只在 HF 平局步分叉（dense req1 第 8 步 gap 0.0039、MoE req2 第 8 步 gap 0.0059，均 ≤ 2 ULP）。
+- 限制（P4-b 放开）：一个 step 内不能混 prefill 与 decode；chunked prefill 带历史 KV 不支持（runner 直接报错）。
 
 ## 结果（MoE 部分，2026-10-14）
 

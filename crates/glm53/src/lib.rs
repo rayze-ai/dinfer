@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 pub mod config;
+pub mod executor;
 pub mod model;
 
 pub const MODEL_NAME: &str = "glm-5.3";
