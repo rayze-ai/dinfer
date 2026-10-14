@@ -1,0 +1,24 @@
+[package]
+name = "dinfer-kernels"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "dinfer CUDA 算子与 FFI；唯一允许 unsafe 的 crate"
+build = "build.rs"
+
+[features]
+default = []
+# 不编译任何 .cu，只提供 cudarc 的流/内存/事件封装；用于无 nvcc 的机器跑 CPU 测试。
+no-nvcc = []
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+cudarc.workspace = true
+half.workspace = true
+bytemuck.workspace = true
+tracing.workspace = true
+
+[build-dependencies]
+cc.workspace = true

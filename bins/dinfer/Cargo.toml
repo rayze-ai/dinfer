@@ -1,0 +1,29 @@
+[package]
+name = "dinfer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "dinfer 单一二进制；用 feature 选择链接哪个模型 crate"
+
+[[bin]]
+name = "dinfer"
+path = "src/main.rs"
+
+[features]
+default = []
+kimik3 = ["dep:dinfer-kimik3"]
+glm53 = ["dep:dinfer-glm53"]
+no-nvcc = ["dinfer-layers/no-nvcc", "dinfer-kimik3?/no-nvcc", "dinfer-glm53?/no-nvcc"]
+
+[dependencies]
+dinfer-core.workspace = true
+dinfer-layers.workspace = true
+dinfer-server.workspace = true
+dinfer-kimik3 = { workspace = true, optional = true }
+dinfer-glm53 = { workspace = true, optional = true }
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

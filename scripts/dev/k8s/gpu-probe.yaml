@@ -1,0 +1,25 @@
+# 一次性 Pod：报告 GPU 型号 / 算力 / 驱动。用法：
+#   kubectl apply -f scripts/dev/k8s/gpu-probe.yaml
+#   kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/dinfer-gpu-probe --timeout=240s
+#   kubectl logs dinfer-gpu-probe; kubectl delete pod dinfer-gpu-probe
+# 注意：集群用 containerd + nvidia RuntimeClass，不加 runtimeClassName 容器里没有 /dev/nvidia* 与 nvidia-smi。
+apiVersion: v1
+kind: Pod
+metadata:
+  name: dinfer-gpu-probe
+  labels: { app: dinfer, role: probe }
+spec:
+  restartPolicy: Never
+  runtimeClassName: nvidia
+  nodeSelector:
+    kubernetes.io/hostname: host-10-121-192-44
+  containers:
+    - name: probe
+      image: nvidia/cuda:12.4.1-base-ubuntu22.04
+      command: ["sh", "-c"]
+      args:
+        - |
+          nvidia-smi --query-gpu=name,compute_cap,memory.total,driver_version --format=csv
+          nvidia-smi -L
+      resources:
+        limits: { nvidia.com/gpu: "1" }

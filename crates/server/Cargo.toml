@@ -1,0 +1,16 @@
+[package]
+name = "dinfer-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "dinfer HTTP 服务：OpenAI 兼容接口、SSE、健康检查、指标"
+
+[dependencies]
+dinfer-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+axum.workspace = true
+tracing.workspace = true

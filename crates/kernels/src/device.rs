@@ -1,0 +1,82 @@
+//! 设备 / 流 的薄封装。基于 cudarc driver API。
+
+use anyhow::{Context, Result};
+use cudarc::driver::{
+    CudaContext, CudaSlice, CudaStream, DevicePtr, DevicePtrMut, DeviceRepr, ValidAsZeroBits,
+};
+use std::sync::Arc;
+
+#[derive(Clone)]
+pub struct Device {
+    ctx: Arc<CudaContext>,
+}
+
+#[derive(Clone)]
+pub struct Stream {
+    inner: Arc<CudaStream>,
+}
+
+impl Device {
+    pub fn new(ordinal: usize) -> Result<Self> {
+        let ctx = CudaContext::new(ordinal).with_context(|| format!("cuda device {ordinal}"))?;
+        Ok(Self { ctx })
+    }
+
+    pub fn default_stream(&self) -> Stream {
+        Stream { inner: self.ctx.default_stream() }
+    }
+
+    pub fn new_stream(&self) -> Result<Stream> {
+        Ok(Stream { inner: self.ctx.new_stream()? })
+    }
+
+    pub fn name(&self) -> Result<String> {
+        Ok(self.ctx.name()?)
+    }
+
+    /// (major, minor)
+    pub fn compute_capability(&self) -> Result<(i32, i32)> {
+        use cudarc::driver::sys::CUdevice_attribute as A;
+        let major = self.ctx.attribute(A::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)?;
+        let minor = self.ctx.attribute(A::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)?;
+        Ok((major, minor))
+    }
+
+    pub fn ordinal(&self) -> usize {
+        self.ctx.ordinal()
+    }
+}
+
+impl Stream {
+    pub fn alloc_zeros<T: DeviceRepr + ValidAsZeroBits>(&self, len: usize) -> Result<CudaSlice<T>> {
+        Ok(self.inner.alloc_zeros::<T>(len)?)
+    }
+
+    pub fn htod_copy<T: DeviceRepr>(&self, src: Vec<T>) -> Result<CudaSlice<T>> {
+        Ok(self.inner.clone_htod(&src)?)
+    }
+
+    pub fn dtoh_sync_copy<T: DeviceRepr>(&self, src: &CudaSlice<T>) -> Result<Vec<T>> {
+        Ok(self.inner.clone_dtoh(src)?)
+    }
+
+    pub fn synchronize(&self) -> Result<()> {
+        Ok(self.inner.synchronize()?)
+    }
+
+    /// 裸 cudaStream_t，传给 C ABI kernel。
+    pub fn raw(&self) -> cudarc::driver::sys::CUstream {
+        self.inner.cu_stream()
+    }
+
+    /// 只读设备指针（以 u64 形式，供 FFI）。
+    pub fn ptr<T: DeviceRepr>(&self, s: &CudaSlice<T>) -> u64 {
+        let (p, _guard) = s.device_ptr(&self.inner);
+        p
+    }
+
+    pub fn ptr_mut<T: DeviceRepr>(&self, s: &mut CudaSlice<T>) -> u64 {
+        let (p, _guard) = s.device_ptr_mut(&self.inner);
+        p
+    }
+}

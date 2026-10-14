@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+*.pdb
+/test/**/*.log
+/test/**/*.nsys-rep
+/test/**/*.sqlite
+.env

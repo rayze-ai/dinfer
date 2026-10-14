@@ -1,0 +1,59 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/kernels",
+    "crates/layers",
+    "crates/server",
+    "crates/kimik3",
+    "crates/glm53",
+    "bins/dinfer",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://example.invalid/dinfer"
+
+[workspace.dependencies]
+# 本地 crate
+dinfer-core = { path = "crates/core" }
+dinfer-kernels = { path = "crates/kernels" }
+dinfer-layers = { path = "crates/layers" }
+dinfer-server = { path = "crates/server" }
+dinfer-kimik3 = { path = "crates/kimik3" }
+dinfer-glm53 = { path = "crates/glm53" }
+
+# 第三方：固定版本（见 docs/design.md §3.1）
+anyhow = "=1.0.98"
+thiserror = "=2.0.12"
+serde = { version = "=1.0.219", features = ["derive"] }
+serde_json = "=1.0.140"
+clap = { version = "=4.5.40", features = ["derive"] }
+tracing = "=0.1.41"
+tracing-subscriber = { version = "=0.3.19", features = ["env-filter", "fmt"] }
+tokio = { version = "=1.45.1", features = ["full"] }
+axum = { version = "=0.8.4", features = ["json", "macros"] }
+crossbeam-channel = "=0.5.15"
+parking_lot = "=0.12.4"
+xxhash-rust = { version = "=0.8.15", features = ["xxh3"] }
+half = { version = "=2.6.0", features = ["bytemuck"] }
+bytemuck = { version = "=1.23.1", features = ["derive"] }
+memmap2 = "=0.9.5"
+safetensors = "=0.5.3"
+tokenizers = { version = "=0.21.2", default-features = false, features = ["onig"] }
+minijinja = { version = "=2.10.2", features = ["json", "loader"] }
+cudarc = { version = "=0.18.2", default-features = false, features = ["std", "driver", "nvrtc", "cublas", "cublaslt", "dynamic-linking", "cuda-12040"] }
+criterion = "=0.6.0"
+cc = "=1.2.27"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+debug = 1
+
+[profile.bench]
+inherits = "release"

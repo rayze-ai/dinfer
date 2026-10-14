@@ -1,0 +1,18 @@
+[package]
+name = "dinfer-layers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "dinfer 共享层：Linear / RMSNorm / RoPE / MLA / MoE / Sampler（基于 dinfer-kernels）"
+
+[features]
+default = []
+no-nvcc = ["dinfer-kernels/no-nvcc"]
+
+[dependencies]
+dinfer-core.workspace = true
+dinfer-kernels.workspace = true
+anyhow.workspace = true
+half.workspace = true
+tracing.workspace = true

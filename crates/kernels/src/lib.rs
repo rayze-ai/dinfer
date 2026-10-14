@@ -1,0 +1,11 @@
+//! dinfer-kernels：CUDA 算子 FFI 与设备运行时封装。
+//!
+//! 本 crate 是整个工作区唯一允许出现 `unsafe` 的地方；上层 `dinfer-layers` 之上不再有 `unsafe`。
+//! 每个 kernel 一个 `extern "C"` 入口（见 `cuda/dinfer_kernels.h`），这里做类型安全的包装。
+
+pub mod device;
+pub mod ffi;
+pub mod ops;
+
+pub use device::{Device, Stream};
+pub use ops::add_f32;

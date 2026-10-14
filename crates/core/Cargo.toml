@@ -1,0 +1,24 @@
+[package]
+name = "dinfer-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "dinfer 模型无关核心：配置、请求、调度、KV 管理、runner 抽象、采样参数"
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+crossbeam-channel.workspace = true
+parking_lot.workspace = true
+xxhash-rust.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "scheduler"
+harness = false

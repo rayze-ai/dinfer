@@ -1,0 +1,47 @@
+# 开发 Pod：CUDA 12.4 devel + Rust 1.89，挂一张 4090。源码用 git 同步到 /work。
+# 用法：
+#   kubectl apply -f scripts/dev/k8s/dev-pod.yaml
+#   kubectl wait --for=condition=Ready pod/dinfer-dev --timeout=900s
+#   kubectl exec -it dinfer-dev -- bash
+#   # 容器内：cd /work && git clone <repo> dinfer && cd dinfer && scripts/verify/p0.sh
+# 注意：
+# - 必须 runtimeClassName: nvidia（containerd + nvidia RuntimeClass）。
+# - 没有 StorageClass，/work 是 emptyDir，Pod 删了就没；只做验证，不当开发盘。
+apiVersion: v1
+kind: Pod
+metadata:
+  name: dinfer-dev
+  labels: { app: dinfer, role: dev }
+spec:
+  restartPolicy: Never
+  runtimeClassName: nvidia
+  nodeSelector:
+    kubernetes.io/hostname: host-10-121-192-44
+  containers:
+    - name: dev
+      image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+      command: ["sh", "-c"]
+      args:
+        - |
+          set -e
+          apt-get update -qq && apt-get install -y -qq --no-install-recommends curl git build-essential pkg-config ca-certificates >/dev/null
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.89.0 --profile minimal -c rustfmt -c clippy
+          echo 'export PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH CUDA_HOME=/usr/local/cuda' >> /root/.bashrc
+          mkdir -p /work
+          touch /tmp/ready
+          sleep infinity
+      readinessProbe:
+        exec: { command: ["test", "-f", "/tmp/ready"] }
+        initialDelaySeconds: 30
+        periodSeconds: 10
+      resources:
+        limits: { nvidia.com/gpu: "1", cpu: "16", memory: "64Gi" }
+        requests: { cpu: "8", memory: "32Gi" }
+      volumeMounts:
+        - { name: work, mountPath: /work }
+        - { name: shm, mountPath: /dev/shm }
+  volumes:
+    - name: work
+      emptyDir: { sizeLimit: 200Gi }
+    - name: shm
+      emptyDir: { medium: Memory, sizeLimit: 16Gi }
