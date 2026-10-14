@@ -1,5 +1,6 @@
-//! GLM-5.3 结构的稠密子集（P3）：embed → N × (RMSNorm → MLA → +res → RMSNorm → MLP → +res) → norm → lm_head。
-//! MoE / DSA 索引器 / MTP 在 P4 / P5 加。权重名按 HF：`model.layers.N.self_attn.*`、`model.layers.N.mlp.*`、
+//! GLM-5.3 主干（P3 dense MLA + P4 MoE）：embed → N × (RMSNorm → MLA → +res → RMSNorm → FFN → +res) → norm → lm_head。
+//! 前 `first_k_dense_replace` 层 FFN 为 dense MLP，其后为 MoE（HF `DeepseekV3MoE`）。
+//! DSA 索引器 / MTP 在 P5 加。权重名按 HF：`model.layers.N.self_attn.*`、`model.layers.N.mlp.*`、
 //! `model.embed_tokens`、`model.norm`、`lm_head`。
 
 use crate::config::GlmMoeDsaConfig;
@@ -7,18 +8,41 @@ use anyhow::{ensure, Context, Result};
 use dinfer_kernels as k;
 use dinfer_layers::mla::AttnMeta;
 use dinfer_layers::{
-    bf16, Embedding, Gemm, Linear, MlaAttention, MlaConfig, Mlp, PagedKv, RmsNorm, RopeStyle, Stream, Tensor,
-    WeightSource,
+    bf16, Embedding, Gemm, Linear, MlaAttention, MlaConfig, Mlp, Moe, MoeConfig, PagedKv, RmsNorm, RopeStyle,
+    Stream, Tensor, WeightSource,
 };
+
+/// 每层一份、堆上只建一次，变体大小差异无关紧要（Moe 已 Box，Dense 不值得再包一层）。
+#[allow(clippy::large_enum_variant)]
+pub enum FeedForward {
+    Dense(Mlp),
+    Moe(Box<Moe>),
+}
+
+impl FeedForward {
+    fn forward(
+        &mut self,
+        stream: &Stream,
+        gemm: &Gemm,
+        t: usize,
+        x: &Tensor<bf16>,
+        out: &mut Tensor<bf16>,
+    ) -> Result<()> {
+        match self {
+            FeedForward::Dense(m) => m.forward(stream, gemm, t, x, out),
+            FeedForward::Moe(m) => m.forward(stream, gemm, t, x, out),
+        }
+    }
+}
 
 pub struct DecoderLayer {
     pub input_norm: RmsNorm,
     pub attn: MlaAttention,
     pub post_norm: RmsNorm,
-    pub mlp: Mlp,
+    pub mlp: FeedForward,
 }
 
-pub struct Glm53Dense {
+pub struct Glm53Model {
     pub cfg: GlmMoeDsaConfig,
     pub embed: Embedding,
     pub layers: Vec<DecoderLayer>,
@@ -44,7 +68,21 @@ pub struct Forward<'a> {
     pub logits_rows: &'a Tensor<i32>,
 }
 
-impl Glm53Dense {
+impl Glm53Model {
+    pub fn moe_config(cfg: &GlmMoeDsaConfig) -> Result<MoeConfig> {
+        ensure!(cfg.scoring_func == "sigmoid", "unsupported scoring_func {}", cfg.scoring_func);
+        ensure!(cfg.topk_method == "noaux_tc", "unsupported topk_method {}", cfg.topk_method);
+        ensure!(cfg.n_group == 1 && cfg.topk_group == 1, "P4 MoE only supports n_group = topk_group = 1");
+        Ok(MoeConfig {
+            hidden: cfg.hidden_size as usize,
+            num_experts: cfg.n_routed_experts as usize,
+            topk: cfg.num_experts_per_tok as usize,
+            num_shared: cfg.n_shared_experts as usize,
+            renormalize: cfg.norm_topk_prob,
+            scale: cfg.routed_scaling_factor,
+        })
+    }
+
     pub fn mla_config(cfg: &GlmMoeDsaConfig) -> MlaConfig {
         MlaConfig {
             hidden: cfg.hidden_size as usize,
@@ -69,13 +107,10 @@ impl Glm53Dense {
         num_blocks: usize,
         block_size: usize,
     ) -> Result<Self> {
-        ensure!(
-            cfg.first_k_dense_replace >= cfg.num_hidden_layers,
-            "P3 dense model requires all layers dense (first_k_dense_replace={} < layers={})",
-            cfg.first_k_dense_replace,
-            cfg.num_hidden_layers
-        );
+        ensure!(cfg.moe_layer_freq == 1, "moe_layer_freq != 1 unsupported");
         let mla = Self::mla_config(&cfg);
+        let has_moe = cfg.first_k_dense_replace < cfg.num_hidden_layers;
+        let moe = if has_moe { Some(Self::moe_config(&cfg)?) } else { None };
         let embed = Embedding::load(stream, src, "model.embed_tokens")?;
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers as usize);
         let mut kv = Vec::with_capacity(cfg.num_hidden_layers as usize);
@@ -91,8 +126,17 @@ impl Glm53Dense {
                     &format!("{p}.post_attention_layernorm"),
                     cfg.rms_norm_eps,
                 )?,
-                mlp: Mlp::load(stream, src, &format!("{p}.mlp"), max_tokens)
-                    .with_context(|| format!("layer {l} mlp"))?,
+                mlp: if l < cfg.first_k_dense_replace {
+                    FeedForward::Dense(
+                        Mlp::load(stream, src, &format!("{p}.mlp"), max_tokens)
+                            .with_context(|| format!("layer {l} mlp"))?,
+                    )
+                } else {
+                    FeedForward::Moe(Box::new(
+                        Moe::load(stream, src, &format!("{p}.mlp"), moe.clone().unwrap(), max_tokens)
+                            .with_context(|| format!("layer {l} moe"))?,
+                    ))
+                },
             });
             kv.push(PagedKv::new(stream, num_blocks, block_size, mla.entry())?);
         }

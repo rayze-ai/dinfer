@@ -7,3 +7,4 @@
 .env
 /test/kernel_refs/
 /test/tiny_glm/
+/test/tiny_glm_moe/

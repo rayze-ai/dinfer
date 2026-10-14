@@ -185,6 +185,61 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
     pub fn bf16_to_f32(x: *const c_void, y: *mut f32, n: i64, stream: cudaStream_t) -> i32;
+
+    // ---- MoE ----
+    pub fn moe_gate_f32(
+        x: *const c_void,
+        w: *const c_void,
+        logits: *mut f32,
+        tokens: i64,
+        num_experts: i64,
+        hidden: i64,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn moe_route_f32(
+        logits: *const f32,
+        bias: *const f32,
+        topk_ids: *mut i32,
+        topk_w: *mut f32,
+        tokens: i64,
+        num_experts: i64,
+        topk: i64,
+        renormalize: i32,
+        scale: f32,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn moe_bucket(
+        topk_ids: *const i32,
+        counts: *mut i32,
+        offsets: *mut i32,
+        cursor: *mut i32,
+        sorted_tok: *mut i32,
+        sorted_k: *mut i32,
+        tokens: i64,
+        num_experts: i64,
+        topk: i64,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn moe_gather_bf16(
+        x: *const c_void,
+        xg: *mut c_void,
+        sorted_tok: *const i32,
+        n: i64,
+        hidden: i64,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn moe_scatter_add_f32(
+        y: *const c_void,
+        acc: *mut f32,
+        sorted_tok: *const i32,
+        sorted_k: *const i32,
+        topk_w: *const f32,
+        n: i64,
+        topk: i64,
+        hidden: i64,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn f32_add_to_bf16(acc: *const f32, out: *mut c_void, n: i64, stream: cudaStream_t) -> i32;
 }
 
 #[cfg(dinfer_no_nvcc)]
@@ -215,6 +270,12 @@ mod stubs {
     stub!(copy_head_cols_bf16(a: *const c_void, b: *mut c_void, t: i64, h: i64, iw: i64, ic: i64, ow: i64, oc: i64, w: i64, s: cudaStream_t));
     stub!(gather_head_bf16(a: *const c_void, b: *mut c_void, t: i64, h: i64, w: i64, hd: i64, c0: i64, wd: i64, s: cudaStream_t));
     stub!(scatter_head_bf16(a: *const c_void, b: *mut c_void, t: i64, h: i64, w: i64, hd: i64, c0: i64, wd: i64, s: cudaStream_t));
+    stub!(moe_gate_f32(x: *const c_void, w: *const c_void, l: *mut f32, t: i64, e: i64, h: i64, s: cudaStream_t));
+    stub!(moe_route_f32(l: *const f32, b: *const f32, ti: *mut i32, tw: *mut f32, t: i64, e: i64, k: i64, r: i32, sc: f32, s: cudaStream_t));
+    stub!(moe_bucket(ti: *const i32, c: *mut i32, o: *mut i32, cu: *mut i32, st: *mut i32, sk: *mut i32, t: i64, e: i64, k: i64, s: cudaStream_t));
+    stub!(moe_gather_bf16(x: *const c_void, xg: *mut c_void, st: *const i32, n: i64, h: i64, s: cudaStream_t));
+    stub!(moe_scatter_add_f32(y: *const c_void, a: *mut f32, st: *const i32, sk: *const i32, tw: *const f32, n: i64, k: i64, h: i64, s: cudaStream_t));
+    stub!(f32_add_to_bf16(a: *const f32, o: *mut c_void, n: i64, s: cudaStream_t));
     stub!(add_inplace_bf16(x: *const c_void, y: *mut c_void, n: i64, s: cudaStream_t));
     stub!(gather_rows_bf16(a: *const c_void, b: *mut c_void, r: *const i32, n: i64, w: i64, s: cudaStream_t));
     stub!(bf16_to_f32(x: *const c_void, y: *mut f32, n: i64, s: cudaStream_t));

@@ -305,7 +305,7 @@ glm53/src/
 | P1 core 纯逻辑 ✅ 2026-10-14 | config、Request、Scheduler、KvCacheManager（含 prefix cache、混合 group、抢占）、SamplingParams；全部 CPU 单测，用 mock Model | `scripts/verify/p1.sh`：27 单测 + 1024 decode step < 200 µs（实测 86 / 138 µs） |
 | P2 基础算子 ✅ 2026-10-14（layers 包装层移到 P3 随 MLA 一起做） | rmsnorm / fused_add_rmsnorm / rope（interleave+neox）/ silu_and_mul / embedding / cuBLASLt bf16 GEMM / argmax / topk_topp_mask / sample（Philox）；全部 sm80+ 参考版 | `scripts/verify/p2.sh`：10 个算子与 PyTorch 对拍全过 |
 | P3 稠密 MLA 通路 ✅ 2026-10-14（runner 未做，用测试直接驱动模型；runner 移到 P4 与 MoE 一起） | MLA prefill（展开 K/V causal）/ decode（W_UK/W_UV 吸收 + paged latent cache）参考 kernel；layers：Tensor / WeightSource(safetensors mmap) / Linear / RmsNorm / Rope / Embedding / Mlp / MlaAttention；`glm53::Glm53Dense`（2 层 tiny，HF DeepseekV3 同构）| `scripts/verify/p3.sh`：prefill 14 行 logits max abs 0.004；32 步 decode logits max abs 0.007；greedy 仅在 bf16 平局步分叉 |
-| P4 MoE | 路由 + grouped GEMM（bf16），再 FP8 块量化路径；tiny GLM 全层对拍 | 同上 |
+| P4 MoE + runner（MoE 部分 ✅ 2026-10-14；runner / 混合 batch / FP8 进行中） | MoE 参考路径：fp32 gate、sigmoid+bias top-k（noaux_tc，n_group=1）、专家分桶 + 逐专家 MLP + fp32 加权归约 + shared expert；`glm53::Glm53Model`（`FeedForward::{Dense,Moe}` 按 `first_k_dense_replace` 选）；之后 `core::runner` 最小版、chunked-context prefill、FP8 块量化参考版 | `scripts/verify/p4.sh`：p3 + tiny MoE GLM（第 1 层 MoE 4 专家 top-2 + shared）3 个对拍全过 |
 | P5 DSA | 索引器、top-k、稀疏 MLA；长序列（>2048）对拍 | tiny GLM 在 seq 4096 与 HF 一致 |
 | P6 GLM-5.3 完整 | tokenizer、chat 模板、parser、server、SSE、MTP 投机；真权重需 ≥ 8×H200 级别机器（见 §7） | OpenAI SDK 跑通 chat 流式 + tool call |
 | P7 KDA | conv1d、chunk prefill、recurrent decode、Mamba 类状态管理、混合 group；tiny Kimi-Linear 对拍 | 同 P3 口径 |

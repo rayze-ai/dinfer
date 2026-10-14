@@ -809,6 +809,233 @@ pub fn bf16_to_f32_n(stream: &Stream, x: &CudaSlice<bf16>, y: &mut CudaSlice<f32
     check(unsafe { ffi::bf16_to_f32(px, py, n as i64, stream.raw() as _) }, "bf16_to_f32")
 }
 
+// ---------------------------------------------------------------------------
+// MoE
+// ---------------------------------------------------------------------------
+
+/// 路由 logits（fp32）：logits[tokens, E] = x[tokens, H] · w[E, H]^T。
+pub fn moe_gate_f32(
+    stream: &Stream,
+    x: &CudaSlice<bf16>,
+    w: &CudaSlice<bf16>,
+    logits: &mut CudaSlice<f32>,
+    tokens: usize,
+    num_experts: usize,
+    hidden: usize,
+) -> Result<()> {
+    ensure!(x.len() >= tokens * hidden && w.len() == num_experts * hidden, "moe_gate: input");
+    ensure!(logits.len() >= tokens * num_experts, "moe_gate: logits");
+    let px = stream.ptr(x) as *const c_void;
+    let pw = stream.ptr(w) as *const c_void;
+    let pl = stream.ptr_mut(logits) as *mut f32;
+    // SAFETY: 容量已校验。
+    check(
+        unsafe {
+            ffi::moe_gate_f32(px, pw, pl, tokens as i64, num_experts as i64, hidden as i64, stream.raw() as _)
+        },
+        "moe_gate_f32",
+    )
+}
+
+/// 路由：logits[tokens*E] f32 → (topk_ids[tokens*K], topk_w[tokens*K])。
+#[allow(clippy::too_many_arguments)]
+pub fn moe_route_f32(
+    stream: &Stream,
+    logits: &CudaSlice<f32>,
+    bias: Option<&CudaSlice<f32>>,
+    topk_ids: &mut CudaSlice<i32>,
+    topk_w: &mut CudaSlice<f32>,
+    tokens: usize,
+    num_experts: usize,
+    topk: usize,
+    renormalize: bool,
+    scale: f32,
+) -> Result<()> {
+    ensure!(logits.len() >= tokens * num_experts, "moe_route: logits");
+    ensure!(topk_ids.len() >= tokens * topk && topk_w.len() >= tokens * topk, "moe_route: out");
+    if let Some(b) = bias {
+        ensure!(b.len() == num_experts, "moe_route: bias len");
+    }
+    let pl = stream.ptr(logits) as *const f32;
+    let pb = bias.map_or(std::ptr::null(), |b| stream.ptr(b) as *const f32);
+    let pi = stream.ptr_mut(topk_ids) as *mut i32;
+    let pw = stream.ptr_mut(topk_w) as *mut f32;
+    // SAFETY: 容量已校验；bias 可为 null（kernel 内判空）。
+    check(
+        unsafe {
+            ffi::moe_route_f32(
+                pl,
+                pb,
+                pi,
+                pw,
+                tokens as i64,
+                num_experts as i64,
+                topk as i64,
+                renormalize as i32,
+                scale,
+                stream.raw() as _,
+            )
+        },
+        "moe_route_f32",
+    )
+}
+
+/// 分桶工作区：counts[E] / offsets[E+1] / cursor[E] / sorted_tok[T*K] / sorted_k[T*K]。
+pub struct MoeBuckets {
+    pub counts: CudaSlice<i32>,
+    pub offsets: CudaSlice<i32>,
+    pub cursor: CudaSlice<i32>,
+    pub sorted_tok: CudaSlice<i32>,
+    pub sorted_k: CudaSlice<i32>,
+    pub num_experts: usize,
+    pub max_pairs: usize,
+}
+
+impl MoeBuckets {
+    pub fn new(stream: &Stream, num_experts: usize, max_tokens: usize, topk: usize) -> Result<Self> {
+        let max_pairs = max_tokens * topk;
+        Ok(Self {
+            counts: stream.alloc_zeros::<i32>(num_experts)?,
+            offsets: stream.alloc_zeros::<i32>(num_experts + 1)?,
+            cursor: stream.alloc_zeros::<i32>(num_experts)?,
+            sorted_tok: stream.alloc_zeros::<i32>(max_pairs)?,
+            sorted_k: stream.alloc_zeros::<i32>(max_pairs)?,
+            num_experts,
+            max_pairs,
+        })
+    }
+}
+
+/// 按专家分桶。之后 `offsets` 可 D2H 读出每专家的 [start, end)。
+pub fn moe_bucket(
+    stream: &Stream,
+    topk_ids: &CudaSlice<i32>,
+    b: &mut MoeBuckets,
+    tokens: usize,
+    topk: usize,
+) -> Result<()> {
+    ensure!(tokens * topk <= b.max_pairs && topk_ids.len() >= tokens * topk, "moe_bucket: capacity");
+    let pi = stream.ptr(topk_ids) as *const i32;
+    let pc = stream.ptr_mut(&mut b.counts) as *mut i32;
+    let po = stream.ptr_mut(&mut b.offsets) as *mut i32;
+    let pcu = stream.ptr_mut(&mut b.cursor) as *mut i32;
+    let pst = stream.ptr_mut(&mut b.sorted_tok) as *mut i32;
+    let psk = stream.ptr_mut(&mut b.sorted_k) as *mut i32;
+    // SAFETY: 容量已校验。
+    check(
+        unsafe {
+            ffi::moe_bucket(
+                pi,
+                pc,
+                po,
+                pcu,
+                pst,
+                psk,
+                tokens as i64,
+                b.num_experts as i64,
+                topk as i64,
+                stream.raw() as _,
+            )
+        },
+        "moe_bucket",
+    )
+}
+
+/// xg[i] = x[sorted_tok[start + i]]，i < n（取排序后 [start, start+n) 这一段，即某个专家的全部 token 行）。
+#[allow(clippy::too_many_arguments)]
+pub fn moe_gather_bf16(
+    stream: &Stream,
+    x: &CudaSlice<bf16>,
+    xg: &mut CudaSlice<bf16>,
+    sorted_tok: &CudaSlice<i32>,
+    start: usize,
+    n: usize,
+    hidden: usize,
+) -> Result<()> {
+    ensure!(
+        xg.len() >= n * hidden && sorted_tok.len() >= start + n && x.len() % hidden == 0,
+        "moe_gather: capacity"
+    );
+    let px = stream.ptr(x) as *const c_void;
+    let pg = stream.ptr_mut(xg) as *mut c_void;
+    let ps = stream.ptr(sorted_tok) as *const i32;
+    // SAFETY: 容量已校验（start+n ≤ len，i32 偏移在界内）；sorted_tok 内 token 下标 < x.len()/hidden 由 bucket 保证。
+    let ps = unsafe { ps.add(start) };
+    check(
+        unsafe { ffi::moe_gather_bf16(px, pg, ps, n as i64, hidden as i64, stream.raw() as _) },
+        "moe_gather_bf16",
+    )
+}
+
+/// acc[sorted_tok[start+i]] += topk_w[sorted_tok[start+i], sorted_k[start+i]] * y[i]，i < n。acc 需先清零。
+#[allow(clippy::too_many_arguments)]
+pub fn moe_scatter_add_f32(
+    stream: &Stream,
+    y: &CudaSlice<bf16>,
+    acc: &mut CudaSlice<f32>,
+    sorted_tok: &CudaSlice<i32>,
+    sorted_k: &CudaSlice<i32>,
+    topk_w: &CudaSlice<f32>,
+    start: usize,
+    n: usize,
+    topk: usize,
+    hidden: usize,
+) -> Result<()> {
+    ensure!(
+        y.len() >= n * hidden && sorted_tok.len() >= start + n && sorted_k.len() >= start + n,
+        "moe_scatter_add: capacity"
+    );
+    let py = stream.ptr(y) as *const c_void;
+    let pa = stream.ptr_mut(acc) as *mut f32;
+    let pst = stream.ptr(sorted_tok) as *const i32;
+    let psk = stream.ptr(sorted_k) as *const i32;
+    let pw = stream.ptr(topk_w) as *const f32;
+    // SAFETY: 容量已校验；偏移 start 在界内。
+    let (pst, psk) = unsafe { (pst.add(start), psk.add(start)) };
+    check(
+        unsafe {
+            ffi::moe_scatter_add_f32(
+                py,
+                pa,
+                pst,
+                psk,
+                pw,
+                n as i64,
+                topk as i64,
+                hidden as i64,
+                stream.raw() as _,
+            )
+        },
+        "moe_scatter_add_f32",
+    )
+}
+
+/// out[:n] += acc[:n]（fp32 → bf16）。
+pub fn f32_add_to_bf16_n(
+    stream: &Stream,
+    acc: &CudaSlice<f32>,
+    out: &mut CudaSlice<bf16>,
+    n: usize,
+) -> Result<()> {
+    ensure!(acc.len() >= n && out.len() >= n, "f32_add_to_bf16: capacity");
+    let pa = stream.ptr(acc) as *const f32;
+    let po = stream.ptr_mut(out) as *mut c_void;
+    // SAFETY: 容量已校验。
+    check(unsafe { ffi::f32_add_to_bf16(pa, po, n as i64, stream.raw() as _) }, "f32_add_to_bf16")
+}
+
+/// 把 D2H 读出的 offsets 变成 (expert, start, len) 列表（只含非空专家）。
+pub fn moe_expert_ranges(offsets: &[i32]) -> Vec<(usize, usize, usize)> {
+    let mut v = Vec::new();
+    for e in 0..offsets.len() - 1 {
+        let (s, t) = (offsets[e] as usize, offsets[e + 1] as usize);
+        if t > s {
+            v.push((e, s, t - s));
+        }
+    }
+    v
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

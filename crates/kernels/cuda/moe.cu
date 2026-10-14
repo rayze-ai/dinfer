@@ -1,0 +1,204 @@
+// MoE 参考 kernel（sm80+）。不追求性能：每 token 一个 block 做路由；专家分组用 count + prefix + scatter。
+//
+//   moe_route_f32        logits[T,E] fp32 → topk_ids[T,K] i32, topk_w[T,K] f32
+//                        语义 = HF DeepseekV3TopkRouter / vLLM grouped_topk（n_group=1）：
+//                        scores = sigmoid(logits); choice = scores + bias; top-k by choice;
+//                        weights = scores[chosen]（不含 bias）; if renorm: w /= sum(w)+1e-20; w *= scale
+//   moe_bucket_bf16      按专家分桶：counts[E] → offsets[E+1]（exclusive scan），sorted_tok[T*K] / sorted_k[T*K]
+//                        （两 kernel：count + fill；offsets 由 host 读 counts 做 scan 再传回，或 GPU 单 block scan）
+//   moe_gather_bf16      按 sorted_tok 把 x[T,H] 行收集到 xg[T*K, H]
+//   moe_scatter_add_bf16 out[tok] += w * y[i]（i 为 sorted 下标）
+#include "common.cuh"
+#include "dinfer_kernels.h"
+
+using namespace dinfer;
+
+namespace {
+
+constexpr int MAX_E = 1024;  // GLM 256 / K3 896
+constexpr int MAX_K = 32;
+
+__global__ void route_kernel(const float* __restrict__ logits, const float* __restrict__ bias,
+                             int32_t* __restrict__ topk_ids, float* __restrict__ topk_w, int E, int K, int renorm,
+                             float scale) {
+  const int64_t t = blockIdx.x;
+  __shared__ float s_score[MAX_E];
+  __shared__ float s_choice[MAX_E];
+  __shared__ int s_sel[MAX_K];
+  for (int e = threadIdx.x; e < E; e += blockDim.x) {
+    const float sc = 1.f / (1.f + __expf(-logits[t * E + e]));
+    s_score[e] = sc;
+    s_choice[e] = sc + (bias ? bias[e] : 0.f);
+  }
+  __syncthreads();
+  // 单线程做 K 次 argmax（E ≤ 1024，K ≤ 32：参考实现足够）。相等取小下标，与 torch.topk 稳定序一致。
+  if (threadIdx.x == 0) {
+    float wsum = 0.f;
+    for (int k = 0; k < K; ++k) {
+      int best = -1;
+      float bv = -INFINITY;
+      for (int e = 0; e < E; ++e) {
+        const float v = s_choice[e];
+        if (v > bv) {
+          bv = v;
+          best = e;
+        }
+      }
+      s_sel[k] = best;
+      s_choice[best] = -INFINITY;
+      wsum += s_score[best];
+    }
+    const float denom = renorm ? (wsum + 1e-20f) : 1.f;
+    for (int k = 0; k < K; ++k) {
+      topk_ids[t * K + k] = s_sel[k];
+      topk_w[t * K + k] = s_score[s_sel[k]] / denom * scale;
+    }
+  }
+}
+
+// logits[t,e] = Σ_d f32(x[t,d]) · f32(w[e,d])，全程 fp32（HF 路由把 x 与 gate.weight 都 cast 到 fp32 再 linear）。
+// 一个 block 算一个 (t, e)；参考版，不追求性能。
+__global__ void gate_kernel(const bf16* __restrict__ x, const bf16* __restrict__ w, float* __restrict__ logits, int E,
+                            int H) {
+  const int64_t t = blockIdx.x / E;
+  const int e = blockIdx.x % E;
+  const bf16* xr = x + t * H;
+  const bf16* wr = w + (int64_t)e * H;
+  float acc = 0.f;
+  for (int d = threadIdx.x; d < H; d += blockDim.x) acc += to_f32(xr[d]) * to_f32(wr[d]);
+  acc = block_reduce_sum<128>(acc);
+  if (threadIdx.x == 0) logits[t * E + e] = acc;
+}
+
+__global__ void count_kernel(const int32_t* __restrict__ topk_ids, int32_t* __restrict__ counts, int64_t n) {
+  int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
+  const int64_t stride = (int64_t)gridDim.x * blockDim.x;
+  for (; i < n; i += stride) atomicAdd(&counts[topk_ids[i]], 1);
+}
+
+// 单 block exclusive scan（E ≤ 1024）：offsets[0..E] ；并把 cursor[e] = offsets[e] 作为填充游标。
+__global__ void scan_kernel(const int32_t* __restrict__ counts, int32_t* __restrict__ offsets,
+                            int32_t* __restrict__ cursor, int E) {
+  __shared__ int s[MAX_E];
+  for (int e = threadIdx.x; e < E; e += blockDim.x) s[e] = counts[e];
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    int acc = 0;
+    for (int e = 0; e < E; ++e) {
+      offsets[e] = acc;
+      cursor[e] = acc;
+      acc += s[e];
+    }
+    offsets[E] = acc;
+  }
+}
+
+// 把 (t, k) 对填到其专家的区间；区间内顺序不定（无需稳定：归约是加法）。
+__global__ void fill_kernel(const int32_t* __restrict__ topk_ids, int32_t* __restrict__ cursor,
+                            int32_t* __restrict__ sorted_tok, int32_t* __restrict__ sorted_k, int K, int64_t n) {
+  int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
+  const int64_t stride = (int64_t)gridDim.x * blockDim.x;
+  for (; i < n; i += stride) {
+    const int e = topk_ids[i];
+    const int pos = atomicAdd(&cursor[e], 1);
+    sorted_tok[pos] = (int32_t)(i / K);
+    sorted_k[pos] = (int32_t)(i % K);
+  }
+}
+
+__global__ void gather_kernel(const bf16* __restrict__ x, bf16* __restrict__ xg, const int32_t* __restrict__ sorted_tok,
+                              int H) {
+  const int64_t i = blockIdx.x;
+  const bf16* src = x + (int64_t)sorted_tok[i] * H;
+  bf16* dst = xg + i * H;
+  for (int d = threadIdx.x; d < H; d += blockDim.x) dst[d] = src[d];
+}
+
+// out[sorted_tok[i], :] += topk_w[sorted_tok[i]*K + sorted_k[i]] * y[i, :]
+// 同一 token 的 K 个专家可能并发写同一行 → 用 fp32 atomicAdd 到临时 fp32 累加器更稳；
+// 参考版直接 bf16 读-加-写会有竞争。这里 out 用 fp32 累加器，最后 cast。
+__global__ void scatter_add_kernel(const bf16* __restrict__ y, float* __restrict__ acc,
+                                   const int32_t* __restrict__ sorted_tok, const int32_t* __restrict__ sorted_k,
+                                   const float* __restrict__ topk_w, int K, int H) {
+  const int64_t i = blockIdx.x;
+  const int tok = sorted_tok[i];
+  const float w = topk_w[(int64_t)tok * K + sorted_k[i]];
+  const bf16* src = y + i * H;
+  float* dst = acc + (int64_t)tok * H;
+  for (int d = threadIdx.x; d < H; d += blockDim.x) atomicAdd(&dst[d], w * to_f32(src[d]));
+}
+
+// out = bf16(acc) + out：先把 fp32 累加器 cast 成 bf16，再与 out（shared expert 输出）bf16 相加 → 与 HF
+// `moe(...).type(bf16) + shared_experts(x)` 的舍入顺序一致。
+__global__ void f32_add_to_bf16_kernel(const float* __restrict__ acc, bf16* __restrict__ out, int64_t n) {
+  int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
+  const int64_t stride = (int64_t)gridDim.x * blockDim.x;
+  for (; i < n; i += stride) out[i] = to_bf16(to_f32(to_bf16(acc[i])) + to_f32(out[i]));
+}
+
+inline int grid_for(int64_t n) {
+  const int64_t want = (n + 255) / 256;
+  return (int)(want > 4096 ? 4096 : want);
+}
+
+}  // namespace
+
+extern "C" int moe_gate_f32(const void* x, const void* w, float* logits, int64_t tokens, int64_t num_experts,
+                            int64_t hidden, cudaStream_t stream) {
+  if (tokens <= 0) return 0;
+  if (tokens * num_experts > 0x7fffffff) return err(cudaErrorInvalidValue);
+  gate_kernel<<<(unsigned)(tokens * num_experts), 128, 0, stream>>>(static_cast<const bf16*>(x),
+                                                                    static_cast<const bf16*>(w), logits,
+                                                                    (int)num_experts, (int)hidden);
+  return last_err();
+}
+
+extern "C" int moe_route_f32(const float* logits, const float* bias, int32_t* topk_ids, float* topk_w, int64_t tokens,
+                             int64_t num_experts, int64_t topk, int renormalize, float scale, cudaStream_t stream) {
+  if (tokens <= 0) return 0;
+  if (num_experts <= 0 || num_experts > MAX_E || topk <= 0 || topk > MAX_K || topk > num_experts)
+    return err(cudaErrorInvalidValue);
+  route_kernel<<<(unsigned)tokens, 256, 0, stream>>>(logits, bias, topk_ids, topk_w, (int)num_experts, (int)topk,
+                                                     renormalize, scale);
+  return last_err();
+}
+
+// counts/offsets/cursor: 调用方提供的 [E] / [E+1] / [E] 缓冲（counts 需先清零）。
+extern "C" int moe_bucket(const int32_t* topk_ids, int32_t* counts, int32_t* offsets, int32_t* cursor,
+                          int32_t* sorted_tok, int32_t* sorted_k, int64_t tokens, int64_t num_experts, int64_t topk,
+                          cudaStream_t stream) {
+  if (tokens <= 0) return 0;
+  if (num_experts <= 0 || num_experts > MAX_E) return err(cudaErrorInvalidValue);
+  const int64_t n = tokens * topk;
+  if (cudaMemsetAsync(counts, 0, num_experts * sizeof(int32_t), stream) != cudaSuccess) return last_err();
+  count_kernel<<<grid_for(n), 256, 0, stream>>>(topk_ids, counts, n);
+  scan_kernel<<<1, 1024, 0, stream>>>(counts, offsets, cursor, (int)num_experts);
+  fill_kernel<<<grid_for(n), 256, 0, stream>>>(topk_ids, cursor, sorted_tok, sorted_k, (int)topk, n);
+  return last_err();
+}
+
+extern "C" int moe_gather_bf16(const void* x, void* xg, const int32_t* sorted_tok, int64_t n, int64_t hidden,
+                               cudaStream_t stream) {
+  if (n <= 0) return 0;
+  const int threads = hidden >= 256 ? 256 : (int)(((hidden + 31) / 32) * 32);
+  gather_kernel<<<(unsigned)n, threads, 0, stream>>>(static_cast<const bf16*>(x), static_cast<bf16*>(xg), sorted_tok,
+                                                     (int)hidden);
+  return last_err();
+}
+
+// acc: [tokens, hidden] fp32，需先清零；y: [n, hidden] bf16（n = tokens*topk 的排序后行）。
+extern "C" int moe_scatter_add_f32(const void* y, float* acc, const int32_t* sorted_tok, const int32_t* sorted_k,
+                                   const float* topk_w, int64_t n, int64_t topk, int64_t hidden, cudaStream_t stream) {
+  if (n <= 0) return 0;
+  const int threads = hidden >= 256 ? 256 : (int)(((hidden + 31) / 32) * 32);
+  scatter_add_kernel<<<(unsigned)n, threads, 0, stream>>>(static_cast<const bf16*>(y), acc, sorted_tok, sorted_k,
+                                                          topk_w, (int)topk, (int)hidden);
+  return last_err();
+}
+
+// out[:n] (bf16) += acc[:n] (fp32)
+extern "C" int f32_add_to_bf16(const float* acc, void* out, int64_t n, cudaStream_t stream) {
+  if (n <= 0) return 0;
+  f32_add_to_bf16_kernel<<<grid_for(n), 256, 0, stream>>>(acc, static_cast<bf16*>(out), n);
+  return last_err();
+}

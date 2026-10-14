@@ -60,6 +60,17 @@ impl Stream {
         Ok(self.inner.clone_dtoh(src)?)
     }
 
+    /// 异步清零前 `n` 个元素（在本流上排队）。
+    pub fn memset_zeros_n<T: DeviceRepr + ValidAsZeroBits>(
+        &self,
+        s: &mut CudaSlice<T>,
+        n: usize,
+    ) -> Result<()> {
+        anyhow::ensure!(n <= s.len(), "memset_zeros_n: n {n} > len {}", s.len());
+        let mut v = s.slice_mut(..n);
+        Ok(self.inner.memset_zeros(&mut v)?)
+    }
+
     pub fn synchronize(&self) -> Result<()> {
         Ok(self.inner.synchronize()?)
     }

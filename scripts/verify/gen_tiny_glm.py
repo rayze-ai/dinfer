@@ -24,6 +24,7 @@ ap.add_argument("out", nargs="?", default="test/tiny_glm")
 ap.add_argument("--layers", type=int, default=2)
 ap.add_argument("--seed", type=int, default=7)
 ap.add_argument("--gen", type=int, default=32)
+ap.add_argument("--first-k-dense", type=int, default=None, help="默认 = layers（全 dense）；设 1 → 第 1 层起 MoE")
 args = ap.parse_args()
 out = Path(args.out)
 out.mkdir(parents=True, exist_ok=True)
@@ -40,7 +41,13 @@ cfg = DeepseekV3Config(
     n_routed_experts=4,
     num_experts_per_tok=2,
     n_shared_experts=1,
-    first_k_dense_replace=args.layers,  # P3：全部 dense；P4 改小开 MoE
+    n_group=1,
+    topk_group=1,
+    norm_topk_prob=True,
+    routed_scaling_factor=2.5,
+    scoring_func="sigmoid",
+    topk_method="noaux_tc",
+    first_k_dense_replace=args.layers if args.first_k_dense is None else args.first_k_dense,
     q_lora_rank=64,
     kv_lora_rank=32,
     qk_nope_head_dim=32,
@@ -62,6 +69,11 @@ with torch.no_grad():
         if p.dim() >= 2:
             p.mul_(0.5 if "embed" in n or "lm_head" in n else 1.0)
 
+# e_score_correction_bias 随机化（HF 默认全 0 会掩盖 bias 逻辑错误）
+with torch.no_grad():
+    for n, b in model.named_buffers():
+        if n.endswith("e_score_correction_bias"):
+            b.copy_(torch.randn_like(b) * 0.1)
 state = {k: v.contiguous() for k, v in model.state_dict().items()}
 save_file(state, out / "model.safetensors", metadata={"format": "pt"})
 
@@ -80,7 +92,7 @@ c.update({
     "eos_token_id": [999],
     "pad_token_id": 0,
     "moe_layer_freq": 1,
-    "routed_scaling_factor": 1.0,
+    "routed_scaling_factor": cfg.routed_scaling_factor,
     "scoring_func": "sigmoid",
     "topk_method": "noaux_tc",
     "n_group": 1,

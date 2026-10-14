@@ -79,6 +79,23 @@ int gather_rows_bf16(const void* src, void* dst, const int32_t* rows, int64_t nu
                      cudaStream_t stream);  // dst[r] = src[rows[r]]
 int bf16_to_f32(const void* x, float* y, int64_t n, cudaStream_t stream);
 
+// ---- MoE 参考（moe.cu）----
+// logits[T,E] f32 = x[T,H] bf16 · w[E,H] bf16，fp32 累加（与 HF 路由的 fp32 linear 一致）
+int moe_gate_f32(const void* x, const void* w, float* logits, int64_t tokens, int64_t num_experts, int64_t hidden,
+                 cudaStream_t stream);
+// logits[T,E] f32 → topk_ids[T,K] i32, topk_w[T,K] f32。语义 = vLLM grouped_topk(n_group=1, sigmoid, bias)。
+int moe_route_f32(const float* logits, const float* bias, int32_t* topk_ids, float* topk_w, int64_t tokens,
+                  int64_t num_experts, int64_t topk, int renormalize, float scale, cudaStream_t stream);
+// 按专家分桶：counts[E]（内部清零）/ offsets[E+1] / cursor[E] / sorted_tok[T*K] / sorted_k[T*K]
+int moe_bucket(const int32_t* topk_ids, int32_t* counts, int32_t* offsets, int32_t* cursor, int32_t* sorted_tok,
+               int32_t* sorted_k, int64_t tokens, int64_t num_experts, int64_t topk, cudaStream_t stream);
+int moe_gather_bf16(const void* x, void* xg, const int32_t* sorted_tok, int64_t n, int64_t hidden, cudaStream_t stream);
+// acc[tok] += topk_w[tok,k] * y[i]（fp32 累加器，调用方清零）
+int moe_scatter_add_f32(const void* y, float* acc, const int32_t* sorted_tok, const int32_t* sorted_k,
+                        const float* topk_w, int64_t n, int64_t topk, int64_t hidden, cudaStream_t stream);
+// out[:n] = bf16(bf16(acc) + out)
+int f32_add_to_bf16(const float* acc, void* out, int64_t n, cudaStream_t stream);
+
 #ifdef __cplusplus
 }
 #endif

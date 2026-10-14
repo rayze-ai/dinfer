@@ -5,7 +5,7 @@
 #![cfg(feature = "ref-tests")]
 
 use dinfer_glm53::config::GlmMoeDsaConfig;
-use dinfer_glm53::model::{Forward, Glm53Dense};
+use dinfer_glm53::model::{Forward, Glm53Model};
 use dinfer_layers::mla::AttnMeta;
 use dinfer_layers::{Device, Gemm, Tensor, WeightSource};
 use std::path::PathBuf;
@@ -38,7 +38,7 @@ const TIE_GAP: f32 = 0.02;
 struct Harness {
     dev: Device,
     gemm: Gemm,
-    model: Glm53Dense,
+    model: Glm53Model,
     cfg: GlmMoeDsaConfig,
 }
 
@@ -49,7 +49,7 @@ fn load(max_tokens: usize) -> Harness {
     let cfg =
         GlmMoeDsaConfig::from_json(&std::fs::read_to_string(dir().join("config.json")).unwrap()).unwrap();
     let src = WeightSource::open_dir(&dir()).unwrap();
-    let model = Glm53Dense::load(&s, &src, cfg.clone(), max_tokens, 64, BLOCK).unwrap();
+    let model = Glm53Model::load(&s, &src, cfg.clone(), max_tokens, 64, BLOCK).unwrap();
     Harness { dev, gemm, model, cfg }
 }
 
@@ -120,15 +120,20 @@ fn tiny_glm_prefill_logits_parity() {
     let mut h = load(64);
     let got = prefill(&mut h, &prompt, true);
     assert_eq!(got.len(), want.len());
-    // 逐行：argmax 一致 + 数值接近（bf16 两层累积误差）
+    // 逐行：argmax 一致（HF top1/top2 平局 ≤ TIE_GAP 的行除外）+ 数值接近（bf16 两层累积误差）
     let mut max_abs = 0f32;
     let mut argmax_mismatch = 0;
     for r in 0..shape[0] {
         let g = &got[r * v..(r + 1) * v];
         let w = &want[r * v..(r + 1) * v];
         if argmax(g) != argmax(w) {
-            argmax_mismatch += 1;
-            eprintln!("row {r}: argmax got {} want {}", argmax(g), argmax(w));
+            let mut sorted: Vec<f32> = w.to_vec();
+            sorted.sort_by(|a, b| b.partial_cmp(a).unwrap());
+            let gap = sorted[0] - sorted[1];
+            eprintln!("row {r}: argmax got {} want {} (hf top1-top2 gap {gap:.4})", argmax(g), argmax(w));
+            if gap > TIE_GAP {
+                argmax_mismatch += 1;
+            }
         }
         for i in 0..v {
             max_abs = max_abs.max((g[i] - w[i]).abs());

@@ -1,5 +1,5 @@
 //! dinfer-glm53：GLM-5.3（`zai-org/GLM-5.3`，`GlmMoeDsaForCausalLM`）模型 crate。
-//! P3：稠密 MLA 子集（`model::Glm53Dense`）；MoE / DSA / MTP 后续阶段加。
+//! P3/P4：MLA + dense/MoE FFN 主干（`model::Glm53Model`）；DSA / MTP 后续阶段加。
 
 #![forbid(unsafe_code)]
 
