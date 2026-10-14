@@ -8,6 +8,7 @@ pub mod kv;
 pub mod request;
 pub mod sample;
 pub mod sched;
+pub mod util;
 
 pub use config::EngineConfig;
 pub use request::{Request, RequestId, RequestStatus};

@@ -1,12 +1,15 @@
 //! 请求生命周期。对应 vLLM `v1/request.py`。
 
+use crate::kv::BlockHasher;
 use crate::sample::SamplingParams;
 
 pub type RequestId = u64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FinishReason {
+    /// 命中 eos 或 stop token。
     Stop,
+    /// 达到 max_tokens 或 max_model_len。
     Length,
     Abort,
 }
@@ -22,59 +25,118 @@ pub enum RequestStatus {
 #[derive(Debug)]
 pub struct Request {
     pub id: RequestId,
-    pub prompt_ids: Vec<u32>,
     pub sampling: SamplingParams,
     pub status: RequestStatus,
-    /// 已经算过 KV 的 token 数（含 prefix cache 命中）。
+    pub arrival_ns: u64,
+    pub priority: i32,
+
+    /// prompt + output 的完整 token 序列（prefix hash 基于它）。
+    all_token_ids: Vec<u32>,
+    num_prompt_tokens: u32,
+
+    /// 已经算过 KV 的 token 数（含 prefix cache 命中、含异步调度的乐观推进）。
     pub num_computed_tokens: u32,
-    pub output_ids: Vec<u32>,
-    /// 异步调度下已调度但尚未拿到采样结果的 token 数。
+    /// 异步调度：已调度但采样结果未回的 token 数。
     pub num_output_placeholders: u32,
     /// 当前 step 的 draft token（投机解码）。
     pub spec_ids: Vec<u32>,
-    pub arrival_ns: u64,
+    /// prefix cache 用的链式块哈希。
+    pub block_hashes: BlockHasher,
+    pub num_preemptions: u32,
 }
 
 impl Request {
     pub fn new(id: RequestId, prompt_ids: Vec<u32>, sampling: SamplingParams, arrival_ns: u64) -> Self {
+        let num_prompt_tokens = prompt_ids.len() as u32;
         Self {
             id,
-            prompt_ids,
             sampling,
             status: RequestStatus::Waiting,
+            arrival_ns,
+            priority: 0,
+            all_token_ids: prompt_ids,
+            num_prompt_tokens,
             num_computed_tokens: 0,
-            output_ids: Vec::new(),
             num_output_placeholders: 0,
             spec_ids: Vec::new(),
-            arrival_ns,
+            block_hashes: BlockHasher::default(),
+            num_preemptions: 0,
         }
     }
 
+    /// 启用 prefix cache 哈希（由 Scheduler 在 add_request 时调用）。
+    pub fn init_block_hasher(&mut self, hash_block_size: u32, salt: Vec<u8>) {
+        self.block_hashes = BlockHasher::new(hash_block_size, salt);
+        self.block_hashes.update(&self.all_token_ids);
+    }
+
+    #[inline]
+    pub fn block_hashes_block_size(&self) -> u32 {
+        self.block_hashes.hash_block_size().max(1)
+    }
+
+    #[inline]
+    pub fn all_token_ids(&self) -> &[u32] {
+        &self.all_token_ids
+    }
+    #[inline]
+    pub fn prompt_ids(&self) -> &[u32] {
+        &self.all_token_ids[..self.num_prompt_tokens as usize]
+    }
+    #[inline]
+    pub fn output_ids(&self) -> &[u32] {
+        &self.all_token_ids[self.num_prompt_tokens as usize..]
+    }
     #[inline]
     pub fn num_prompt_tokens(&self) -> u32 {
-        self.prompt_ids.len() as u32
+        self.num_prompt_tokens
     }
-
-    /// 总 token 数 = prompt + 已产出 + 占位。
+    #[inline]
+    pub fn num_output_tokens(&self) -> u32 {
+        self.all_token_ids.len() as u32 - self.num_prompt_tokens
+    }
+    /// prompt + 已产出 output（不含占位、不含 spec）。
     #[inline]
     pub fn num_tokens(&self) -> u32 {
-        self.num_prompt_tokens() + self.output_ids.len() as u32 + self.num_output_placeholders
+        self.all_token_ids.len() as u32
     }
-
-    /// 本 step 还需要调度的 token 数（含 spec）。
+    /// num_tokens + spec。
     #[inline]
     pub fn num_tokens_with_spec(&self) -> u32 {
         self.num_tokens() + self.spec_ids.len() as u32
     }
-
     #[inline]
     pub fn is_finished(&self) -> bool {
         matches!(self.status, RequestStatus::Finished(_))
     }
-
-    /// 还在 prefill 阶段（prompt 没算完）。
+    /// 仍在 prefill（包含 chunked prefill 的中间 step）。
     #[inline]
-    pub fn is_prefilling(&self) -> bool {
-        self.num_computed_tokens < self.num_prompt_tokens()
+    pub fn is_prefill_chunk(&self) -> bool {
+        self.num_computed_tokens < self.num_tokens() + self.num_output_placeholders
+    }
+
+    pub fn append_output(&mut self, tok: u32) {
+        self.all_token_ids.push(tok);
+        let hbs = self.block_hashes.hash_block_size();
+        // 只在恰好凑满一个 hash 块时才算（热路径：decode 每 step 一次）。
+        if hbs > 0 && self.all_token_ids.len() as u32 % hbs == 0 {
+            self.block_hashes.update(&self.all_token_ids);
+        }
+    }
+
+    /// 本 step 是否跨过了一个 hash 块边界（用于决定要不要走 cache_blocks）。
+    #[inline]
+    pub fn crossed_hash_block_boundary(&self, before_len: u32) -> bool {
+        let hbs = self.block_hashes.hash_block_size();
+        hbs > 0 && before_len / hbs != self.num_tokens() / hbs
+    }
+
+    /// 抢占：清空计算进度，回到 waiting。
+    pub fn reset_for_preemption(&mut self) {
+        self.status = RequestStatus::Preempted;
+        self.num_computed_tokens = 0;
+        self.num_output_placeholders = 0;
+        self.spec_ids.clear();
+        self.num_preemptions += 1;
     }
 }

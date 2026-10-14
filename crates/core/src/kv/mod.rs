@@ -1,9 +1,11 @@
-//! KV cache 管理。对应 vLLM `v1/core/{kv_cache_manager,block_pool,kv_cache_utils}.py`。
-//!
-//! P0 只放类型与 BlockPool 的最小实现；prefix cache、多 group、Mamba 状态在 P1 补齐。
+//! KV cache 管理。对应 vLLM `v1/core/{kv_cache_manager,block_pool,kv_cache_utils,kv_cache_coordinator}.py`。
 
 pub mod block_pool;
+pub mod hash;
+pub mod manager;
 pub mod spec;
 
 pub use block_pool::{BlockId, BlockPool};
+pub use hash::{hash_block, BlockHash, BlockHasher};
+pub use manager::{GroupInfo, KvBlocks, KvCacheManager};
 pub use spec::KvCacheSpec;
