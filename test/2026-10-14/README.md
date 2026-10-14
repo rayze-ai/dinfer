@@ -9,6 +9,8 @@
 | `p1.log` | `scripts/verify/p1.sh` 全量输出 | **P1 PASS**：p0 + 27 个 core 单测 + criterion 门禁（1024 decode step：pc=off 95 µs，pc=on 146 µs，< 200 µs） |
 | `kernels.log` | `scripts/verify/kernels.sh` 中间几轮 | 路径 bug → 8/10 → top-p 口径修正 |
 | `p2.log` | `scripts/verify/p2.sh` 全量输出 | **P2 PASS**：p1 + 10 个算子 PyTorch 对拍（rmsnorm / fused_add_rmsnorm / rope×2 / silu_and_mul / embedding / gemm / argmax / topk_topp_mask / sample 分布）全过 |
+| `p3.log` | `scripts/verify/p3.sh` 全量输出 | **P3 PASS**：p2 + tiny GLM（2 层 MLA + dense MLP，HF DeepseekV3 同构）prefill logits max abs 0.004 / 32 步 decode logits max abs 0.007 / greedy 仅在 bf16 平局步（gap 0.0039）分叉 |
+| `../tiny_glm/` | `gen_tiny_glm.py` 产出（不进 git） | config.json、model.safetensors（bf16 2.9 MB）、prompt、expect_prefill_logits、expect_step_logits、expect_greedy |
 | `../kernel_refs/` | `gen_kernel_refs.py` 产出的 `.npy`（不进 git） | 输入与期望，29 个文件 |
 
 环境：本机 RTX 3090 / CUDA 12.4 / rustc 1.89.0；k8s `admin@polaris`。
