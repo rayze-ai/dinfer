@@ -32,7 +32,11 @@
 ## 常用命令
 
 ```bash
-# 启动 / 测试 / 构建，按实际填写
+export CUDA_HOME=/usr/local/cuda PATH=/usr/local/cuda/bin:$PATH   # nvcc 不在默认 PATH
+cargo build --workspace --features glm53          # 或 --features kimik3；无 nvcc 加 --features no-nvcc
+cargo test --workspace --features glm53           # CPU 单测；GPU 测试：cargo test -p dinfer-kernels -- --ignored
+scripts/verify/p0.sh                              # 阶段验收，exit 0 = 通过
+kubectl apply -f scripts/dev/k8s/dev-pod.yaml     # 4090 开发 Pod（runtimeClassName: nvidia 必带）
 ```
 
 ## 硬性规则
