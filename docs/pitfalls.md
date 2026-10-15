@@ -11,21 +11,13 @@
 >     - 如何避免：
 >     - 相关：`文件/命令/链接`
 
-## 2026-10-15 Claude Code 设了 `bypassPermissions` 仍每条问 yes，Shift+Tab 也切不到 bypass
-
-- 现象：`.claude/settings.local.json` 写了 `permissions.defaultMode = bypassPermissions` + `skipDangerousModePermissionPrompt`，重启后仍逐条询问；Shift+Tab 循环里没有 bypass 选项。auto 模式分类器不可用时还会报 "claude-opus-5[1m] is temporarily unavailable, so auto mode cannot determine the safety of Bash"。
-- 根因：本机以 **root（uid 0）** 跑 claude。Claude Code 在 root 且非沙箱环境下禁用 bypassPermissions（防止 `--dangerously-skip-permissions` 在裸机 root 下跑），settings 里的 defaultMode 被静默忽略，Shift+Tab 也不提供该模式。
-- 解法：启动前 `export IS_SANDBOX=1`（已加进 `/root/.profile`），再 `claude` 即按 settings 进入 bypass；或改用非 root 用户。
-- 如何避免：root 环境首次配 Claude Code 时先 `id -u`，是 0 就直接加 `IS_SANDBOX=1`，别在 settings 里反复试。`git add -A` 可能撞上 Claude Code 重写 `settings.local.json` 的临时文件（`unable to stat ...tmp...`），重跑即可。
-- 相关：`.claude/settings.local.json`（全局 gitignore，不进仓库）、`/root/.profile`
-
 ## 2026-10-15 Claude Code 会话报 `API Error: 400 Input is too long`，整段上下文丢失，只能 /clear
 
 - 现象：长会话（多轮 bisect、反复贴测试日志）突然所有请求报 400 Input is too long，无法继续也无法 compact，只能 `/clear` 重来。本项目已发生两次（10-14 P4、10-15 P5），每次丢掉未写进文件的中间结论。
 - 根因：上下文被工具输出撑满——整段 `cat` 测试日志 / `cargo test --nocapture` 全量输出 / 大 diff 直接进对话；自动压缩来不及或压缩后仍超限。
 - 解法：发生后按 CLAUDE.md 开场流程从 `docs/progress.md` 交接区恢复；本次恢复后先做 wrap 把状态落盘。
-- 如何避免：① 所有 Bash 输出先 `| grep -E ... | tail -n` 截断，日志 `tee` 到 `/tmp` 后只看摘要；② 每完成一轮 loop 迭代就把结论写进 `docs/loops/<feature>.md` 记录表和 `test/YYYY-MM-DD/`，不要攒到最后；③ 长 bisect 前先 wrap 一次；④ 已开 `bypassPermissions`，减少每条确认带来的往返消息。
-- 相关：`docs/progress.md` 交接区"会话注意"、`.claude/settings.local.json`
+- 如何避免：① 所有 Bash 输出先 `| grep -E ... | tail -n` 截断，日志 `tee` 到 `/tmp` 后只看摘要；② 每完成一轮 loop 迭代就把结论写进 `docs/loops/<feature>.md` 记录表和 `test/YYYY-MM-DD/`，不要攒到最后；③ 长 bisect 前先 wrap 一次。
+- 相关：`docs/progress.md` 交接区"会话注意"
 
 ## 2026-10-15 DSA 索引器 top-k 与 HF 不一致，但分数公式逐位正确：bf16 下硬判决本质不可复现
 
