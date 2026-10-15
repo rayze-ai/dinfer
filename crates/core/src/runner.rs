@@ -1,18 +1,20 @@
 //! 模型无关的 runner：把 `SchedulerOutput` 组成扁平 batch（`BatchPlan`），交给 `ModelExecutor` 执行，
 //! 回填 `ModelRunnerOutput`。对应 vLLM `gpu_model_runner.py` 的 `_update_states` + `_prepare_inputs` 的 CPU 部分。
 //!
-//! P4 最小版约束（后续阶段放开）：
-//! - 一个 step 内要么全是 prefill（每请求本步 token 数 > 1 或 `num_computed == 0`），要么全是单 token decode；
-//!   混合 batch / 带历史 KV 的 chunked prefill 返回错误（P4-b 加 `mla_prefill_paged` 后放开）。
-//! - 只支持单 KV group（MLA）。
-//! - 采样由 executor 决定（P4 为 greedy）；本模块不做 logits 后处理。
+//! batch 形态（`BatchMode`）由本模块判定，executor 据此选 attention 路径：
+//! - `Prefill`：全部请求从 0 开始 prefill（无历史 KV）→ 展开 K/V 的 causal attention；
+//! - `Decode`：全部请求单 token decode → 吸收路径读 paged cache；
+//! - `Paged`：其余（chunked prefill 带历史 / prefill+decode 混合）→ 吸收路径、任意 query 长、对 cache 做 causal。
+//!
+//! P4 约束（后续阶段放开）：只支持单 KV group（MLA）；采样由 executor 决定（P4 为 greedy），本模块不做 logits 后处理；
+//! 无投机解码（每请求每 step 恰好采样 1 个 token；prefill 中间 chunk 的采样结果由 scheduler 忽略）。
 
 use crate::kv::BlockId;
 use crate::request::RequestId;
 use crate::sample::SamplingParams;
 use crate::sched::{ModelRunnerOutput, SchedulerOutput};
 use crate::util::{id_hash_map, IdHashMap};
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{ensure, Context, Result};
 
 /// worker 侧每请求的持久状态（跨 step），对应 vLLM `CachedRequestState`。
 #[derive(Debug, Clone)]
@@ -48,7 +50,18 @@ pub struct BatchPlan {
     pub max_blocks: usize,
     /// 要取 logits 的 token 行（每请求最后一个 token，按 batch 顺序）。
     pub logits_rows: Vec<i32>,
-    pub is_prefill: bool,
+    pub mode: BatchMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BatchMode {
+    /// 全部请求从位置 0 开始 prefill。
+    #[default]
+    Prefill,
+    /// 全部请求单 token decode。
+    Decode,
+    /// 混合 / 带历史的 chunked prefill。
+    Paged,
 }
 
 impl BatchPlan {
@@ -104,7 +117,8 @@ impl<E: ModelExecutor> Runner<E> {
             self.sampled.len(),
             self.plan.num_reqs()
         );
-        // 回填：computed 推进；prefill 末块 / decode 都把采样 token 追加到序列。
+        // 回填：computed 推进；只有 "本步算到了序列末尾"（prefill 末块 / decode）的采样才是真 token，
+        // prefill 中间 chunk 的采样无意义：不追加、也不上报（scheduler 侧同样忽略，见 vLLM `_prepare_inputs`）。
         let mut out = ModelRunnerOutput {
             req_ids: self.plan.req_ids.clone(),
             sampled: Vec::with_capacity(self.plan.num_reqs()),
@@ -112,9 +126,13 @@ impl<E: ModelExecutor> Runner<E> {
         for (i, &rid) in self.plan.req_ids.iter().enumerate() {
             let st = self.states.get_mut(&rid).unwrap();
             st.num_computed += self.plan.num_tokens[i] as usize;
-            let tok = self.sampled[i];
-            st.token_ids.push(tok);
-            out.sampled.push(vec![tok]);
+            if st.num_computed == st.token_ids.len() {
+                let tok = self.sampled[i];
+                st.token_ids.push(tok);
+                out.sampled.push(vec![tok]);
+            } else {
+                out.sampled.push(Vec::new());
+            }
         }
         Ok(out)
     }
@@ -170,21 +188,19 @@ impl<E: ModelExecutor> Runner<E> {
 
         let mut any_prefill = false;
         let mut any_decode = false;
+        let mut any_paged = false;
         let mut max_blocks = 0usize;
         for &(rid, n) in &so.num_scheduled_tokens {
             let st = self.states.get(&rid).with_context(|| format!("scheduled req {rid} unknown"))?;
             let n = n as usize;
             let start = st.num_computed;
             ensure!(start + n <= st.token_ids.len(), "req {rid}: scheduled {n} tokens past end");
-            let is_prefill = start == 0 || n > 1;
-            if is_prefill {
-                ensure!(
-                    start == 0,
-                    "req {rid}: chunked prefill with history (computed={start}) not supported yet"
-                );
+            if start == 0 {
                 any_prefill = true;
-            } else {
+            } else if n == 1 {
                 any_decode = true;
+            } else {
+                any_paged = true; // 带历史的 chunked prefill
             }
             p.req_ids.push(rid);
             p.num_tokens.push(n as u32);
@@ -203,10 +219,11 @@ impl<E: ModelExecutor> Runner<E> {
             p.logits_rows.push(total as i32 - 1);
             max_blocks = max_blocks.max(st.block_ids.len());
         }
-        if any_prefill && any_decode {
-            bail!("mixed prefill/decode batch not supported yet (P4-b)");
-        }
-        p.is_prefill = any_prefill;
+        p.mode = match (any_prefill, any_decode, any_paged) {
+            (true, false, false) => BatchMode::Prefill,
+            (false, true, false) => BatchMode::Decode,
+            _ => BatchMode::Paged,
+        };
         p.max_blocks = max_blocks;
         p.block_table.resize(p.req_ids.len() * max_blocks, -1);
         for (i, rid) in p.req_ids.iter().enumerate() {
@@ -275,7 +292,7 @@ mod tests {
         let mro = r.execute(&so).unwrap();
         let res = s.update_from_output(&so, &mro);
         let p = &r.exec.plans[0];
-        assert!(p.is_prefill);
+        assert_eq!(p.mode, BatchMode::Prefill);
         assert_eq!(p.req_ids, vec![1, 2]);
         assert_eq!(p.cu_seqlens, vec![0, 20, 25]);
         assert_eq!(p.logits_rows, vec![19, 24]);
@@ -293,7 +310,7 @@ mod tests {
         let mro = r.execute(&so).unwrap();
         let res = s.update_from_output(&so, &mro);
         let p = &r.exec.plans[1];
-        assert!(!p.is_prefill);
+        assert_eq!(p.mode, BatchMode::Decode);
         assert_eq!(p.input_ids, vec![1020, 1005]);
         assert_eq!(p.positions, vec![20, 5]);
         assert_eq!(p.seq_lens, vec![21, 6]);
@@ -316,17 +333,41 @@ mod tests {
     }
 
     #[test]
-    fn mixed_batch_is_rejected_for_now() {
-        let mut s = sched(1000);
-        let sp = SamplingParams { max_tokens: 10, temperature: 0.0, ..Default::default() };
-        s.add_request(Request::new(1, (0..8).collect(), sp.clone(), 0));
+    fn mixed_and_chunked_batches_use_paged_mode() {
+        // 预算 12：req1 prompt 20 分两块 prefill（12 + 8），第二块带历史 → Paged；
+        // 同时 req2（prompt 4）在第 2 步进来 → 与 req1 的 chunk 混合。
+        let mut s = sched(12);
+        let sp = SamplingParams { max_tokens: 4, temperature: 0.0, ..Default::default() };
+        s.add_request(Request::new(1, (0..20).collect(), sp.clone(), 0));
         let mut r = Runner::new(Echo { plans: vec![] }, 16);
         let so = s.schedule();
+        assert_eq!(so.num_scheduled_tokens, vec![(1, 12)]);
         let mro = r.execute(&so).unwrap();
         s.update_from_output(&so, &mro);
-        s.add_request(Request::new(2, (0..8).collect(), sp, 0));
+        assert_eq!(r.exec.plans[0].mode, BatchMode::Prefill);
+        // 中间 chunk 的采样结果被 scheduler 忽略，但 runner 也不应把它追加到序列
+        assert_eq!(r.state(1).unwrap().token_ids.len(), 20);
+
+        s.add_request(Request::new(2, (0..4).collect(), sp, 0));
         let so = s.schedule();
-        assert_eq!(so.num_scheduled_tokens.len(), 2);
-        assert!(r.execute(&so).is_err());
+        assert_eq!(so.num_scheduled_tokens, vec![(1, 8), (2, 4)]);
+        let mro = r.execute(&so).unwrap();
+        let p = &r.exec.plans[1];
+        assert_eq!(p.mode, BatchMode::Paged);
+        assert_eq!(p.cu_seqlens, vec![0, 8, 12]);
+        assert_eq!(p.positions[..8], [12, 13, 14, 15, 16, 17, 18, 19]);
+        assert_eq!(p.seq_lens, vec![20, 4]);
+        assert_eq!(p.logits_rows, vec![7, 11]);
+        let res = s.update_from_output(&so, &mro);
+        assert_eq!(res.tokens_of(0), &[1020]);
+        assert_eq!(res.tokens_of(1), &[1004]);
+        assert_eq!(r.state(1).unwrap().token_ids.len(), 21);
+
+        // 之后两者都 decode
+        let so = s.schedule();
+        let mro = r.execute(&so).unwrap();
+        assert_eq!(r.exec.plans[2].mode, BatchMode::Decode);
+        assert_eq!(r.exec.plans[2].input_ids, vec![1020, 1004]);
+        s.update_from_output(&so, &mro);
     }
 }

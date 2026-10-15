@@ -74,10 +74,19 @@ impl PagedKv {
 
 /// 一步前向的 attention 元数据（由 runner 构造）。
 pub enum AttnMeta<'a> {
-    /// 所有请求都是 prefill（本 step 内无历史 KV；P3 不做 chunked context 合并）。
+    /// 所有请求都是从 0 开始的 prefill（本 step 内无历史 KV）：展开 K/V 的 causal attention。
     Prefill { cu_seqlens: &'a Tensor<i32>, num_reqs: usize },
-    /// 所有请求都是单 token decode。
+    /// 所有请求都是单 token decode：吸收路径读 paged cache。
     Decode { block_table: &'a Tensor<i32>, seq_lens: &'a Tensor<i32>, max_blocks: usize },
+    /// 通用：每请求任意 query 长 + 历史在 cache 中（chunked prefill / prefill+decode 混合 batch）。
+    /// 吸收路径（q 投影到 latent 空间，对 cache 做 causal attention）。`seq_lens[b]` = 历史 + 本步。
+    Paged {
+        cu_seqlens_q: &'a Tensor<i32>,
+        block_table: &'a Tensor<i32>,
+        seq_lens: &'a Tensor<i32>,
+        num_reqs: usize,
+        max_blocks: usize,
+    },
 }
 
 pub struct MlaAttention {
@@ -195,6 +204,89 @@ impl MlaAttention {
             cfg,
             max_tokens,
         })
+    }
+
+    /// 吸收路径 step 6：q_lat[t, h, entry] = [q_nope[h] · W_UK_h | q_pe[h]]（每 head 一次小 GEMM，P10 换 batched）。
+    fn absorbed_q(&mut self, stream: &Stream, gemm: &Gemm, t: usize) -> Result<()> {
+        let c = &self.cfg;
+        let (h, nope, rope, kv_lora) = (c.heads, c.nope, c.rope, c.kv_lora);
+        let (qk, entry) = (nope + rope, kv_lora + rope);
+        for hh in 0..h {
+            k::gather_head_bf16(stream, &self.q.data, &mut self.head_in.data, t, h, qk, hh, 0, nope)?;
+            gemm.forward_bf16(
+                &self.head_in.data,
+                &self.w_uk_t[hh].data,
+                None,
+                &mut self.head_out.data,
+                t,
+                kv_lora,
+                nope,
+            )?;
+            k::scatter_head_bf16(
+                stream,
+                &self.head_out.data,
+                &mut self.q_lat.data,
+                t,
+                h,
+                entry,
+                hh,
+                0,
+                kv_lora,
+            )?;
+            k::gather_head_bf16(stream, &self.q.data, &mut self.head_in.data, t, h, qk, hh, nope, rope)?;
+            k::scatter_head_bf16(
+                stream,
+                &self.head_in.data,
+                &mut self.q_lat.data,
+                t,
+                h,
+                entry,
+                hh,
+                kv_lora,
+                rope,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// 吸收路径 step 7：attn_out[t, h, v] = o_lat[h] · W_UV_h^T。
+    fn absorbed_o(&mut self, stream: &Stream, gemm: &Gemm, t: usize) -> Result<()> {
+        let c = &self.cfg;
+        let (h, kv_lora, v_dim) = (c.heads, c.kv_lora, c.v_dim);
+        for hh in 0..h {
+            k::gather_head_bf16(
+                stream,
+                &self.o_lat.data,
+                &mut self.head_in.data,
+                t,
+                h,
+                kv_lora,
+                hh,
+                0,
+                kv_lora,
+            )?;
+            gemm.forward_bf16(
+                &self.head_in.data,
+                &self.w_uv[hh].data,
+                None,
+                &mut self.head_out.data,
+                t,
+                v_dim,
+                kv_lora,
+            )?;
+            k::scatter_head_bf16(
+                stream,
+                &self.head_out.data,
+                &mut self.attn_out.data,
+                t,
+                h,
+                v_dim,
+                hh,
+                0,
+                v_dim,
+            )?;
+        }
+        Ok(())
     }
 
     /// x: [tokens, hidden] → out: [tokens, hidden]。`slot_mapping`: 每 token 写入 cache 的槽位（-1 跳过）。
@@ -368,53 +460,7 @@ impl MlaAttention {
                 )?;
             }
             AttnMeta::Decode { block_table, seq_lens, max_blocks } => {
-                // 6b. q_lat[h] = [q_nope[h] · W_UK_h | q_pe[h]]
-                for hh in 0..h {
-                    // q_nope[hh]: [t, nope] → head_in → · W_UK_hh^T → [t, kv_lora] → q_lat[:, hh, :kv_lora]
-                    k::gather_head_bf16(stream, &self.q.data, &mut self.head_in.data, t, h, qk, hh, 0, nope)?;
-                    gemm.forward_bf16(
-                        &self.head_in.data,
-                        &self.w_uk_t[hh].data,
-                        None,
-                        &mut self.head_out.data,
-                        t,
-                        kv_lora,
-                        nope,
-                    )?;
-                    k::scatter_head_bf16(
-                        stream,
-                        &self.head_out.data,
-                        &mut self.q_lat.data,
-                        t,
-                        h,
-                        entry,
-                        hh,
-                        0,
-                        kv_lora,
-                    )?;
-                    k::gather_head_bf16(
-                        stream,
-                        &self.q.data,
-                        &mut self.head_in.data,
-                        t,
-                        h,
-                        qk,
-                        hh,
-                        nope,
-                        rope,
-                    )?;
-                    k::scatter_head_bf16(
-                        stream,
-                        &self.head_in.data,
-                        &mut self.q_lat.data,
-                        t,
-                        h,
-                        entry,
-                        hh,
-                        kv_lora,
-                        rope,
-                    )?;
-                }
+                self.absorbed_q(stream, gemm, t)?;
                 k::mla_decode_bf16(
                     stream,
                     &self.q_lat.data,
@@ -430,40 +476,28 @@ impl MlaAttention {
                     *max_blocks,
                     c.scale(),
                 )?;
-                // 7b. o[h] = o_lat[h] · W_UV_h^T → attn_out[t, h, v]
-                for hh in 0..h {
-                    k::gather_head_bf16(
-                        stream,
-                        &self.o_lat.data,
-                        &mut self.head_in.data,
-                        t,
-                        h,
-                        kv_lora,
-                        hh,
-                        0,
-                        kv_lora,
-                    )?;
-                    gemm.forward_bf16(
-                        &self.head_in.data,
-                        &self.w_uv[hh].data,
-                        None,
-                        &mut self.head_out.data,
-                        t,
-                        v_dim,
-                        kv_lora,
-                    )?;
-                    k::scatter_head_bf16(
-                        stream,
-                        &self.head_out.data,
-                        &mut self.attn_out.data,
-                        t,
-                        h,
-                        v_dim,
-                        hh,
-                        0,
-                        v_dim,
-                    )?;
-                }
+                self.absorbed_o(stream, gemm, t)?;
+            }
+            AttnMeta::Paged { cu_seqlens_q, block_table, seq_lens, num_reqs, max_blocks } => {
+                self.absorbed_q(stream, gemm, t)?;
+                k::mla_prefill_paged_bf16(
+                    stream,
+                    &self.q_lat.data,
+                    &kv.cache.data,
+                    &block_table.data,
+                    &seq_lens.data,
+                    &cu_seqlens_q.data,
+                    &mut self.o_lat.data,
+                    *num_reqs,
+                    t,
+                    h,
+                    entry,
+                    kv_lora,
+                    kv.block_size,
+                    *max_blocks,
+                    c.scale(),
+                )?;
+                self.absorbed_o(stream, gemm, t)?;
             }
         }
         // 8. o_proj

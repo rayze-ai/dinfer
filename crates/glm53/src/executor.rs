@@ -3,7 +3,7 @@
 
 use crate::model::{Forward, Glm53Model};
 use anyhow::{ensure, Result};
-use dinfer_core::runner::{BatchPlan, ModelExecutor};
+use dinfer_core::runner::{BatchMode, BatchPlan, ModelExecutor};
 use dinfer_kernels as k;
 use dinfer_layers::mla::AttnMeta;
 use dinfer_layers::{Gemm, Stream, Tensor};
@@ -52,10 +52,18 @@ impl ModelExecutor for Glm53Executor {
         let cu = Tensor::from_vec(s, plan.cu_seqlens.clone(), &[n + 1])?;
         let seq = Tensor::from_vec(s, plan.seq_lens.clone(), &[n])?;
         let bt = Tensor::from_vec(s, plan.block_table.clone(), &[n, plan.max_blocks.max(1)])?;
-        let meta = if plan.is_prefill {
-            AttnMeta::Prefill { cu_seqlens: &cu, num_reqs: n }
-        } else {
-            AttnMeta::Decode { block_table: &bt, seq_lens: &seq, max_blocks: plan.max_blocks }
+        let meta = match plan.mode {
+            BatchMode::Prefill => AttnMeta::Prefill { cu_seqlens: &cu, num_reqs: n },
+            BatchMode::Decode => {
+                AttnMeta::Decode { block_table: &bt, seq_lens: &seq, max_blocks: plan.max_blocks }
+            }
+            BatchMode::Paged => AttnMeta::Paged {
+                cu_seqlens_q: &cu,
+                block_table: &bt,
+                seq_lens: &seq,
+                num_reqs: n,
+                max_blocks: plan.max_blocks,
+            },
         };
         let f = Forward { input_ids: &ids, positions: &pos, slot_mapping: &slots, meta, logits_rows: &rows };
         self.model.forward(s, &self.gemm, &f, &mut self.logits)?;

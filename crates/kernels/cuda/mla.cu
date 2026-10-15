@@ -209,6 +209,99 @@ extern "C" int mla_prefill_bf16(const void* q, const void* k, const void* v, voi
   return last_err();
 }
 
+// ---------- paged prefill (absorbed MQA, arbitrary query length, history in cache) ----------
+// q: [T, H, E]（latent 空间，T = Σ query 长），cache 同 decode；cu_seqlens_q: [B+1]；seq_lens: [B] = 每请求
+// 本 step 结束后的总长（历史 + 本步）。query 行 i（0-based 于本请求）对应绝对位置 pos = seq_len - q_len + i，
+// 可见 key = [0, pos]。本 step 的 K 已由 mla_cache_write 写入 cache，所以历史与新 token 统一从 cache 读。
+// 每 block 一个 (req, head)；逐 query 行三遍扫 key（max / sum / 加权累加），与 decode_kernel 同结构。
+__global__ void prefill_paged_kernel(const bf16* __restrict__ q, const bf16* __restrict__ cache,
+                                     const int32_t* __restrict__ block_table, const int32_t* __restrict__ seq_lens,
+                                     const int32_t* __restrict__ cu_seqlens_q, bf16* __restrict__ out, int H, int E,
+                                     int L, int block_size, int max_blocks, float scale) {
+  const int b = blockIdx.x, h = blockIdx.y;
+  const int q0 = cu_seqlens_q[b], q1 = cu_seqlens_q[b + 1];
+  const int q_len = q1 - q0;
+  const int seq_len = seq_lens[b];
+  if (q_len <= 0) return;
+  const int hist = seq_len - q_len;
+  __shared__ float s_q[MAX_E];
+  __shared__ float s_p[DC_BLOCK];
+  __shared__ float s_stat[2];
+  const int32_t* bt = block_table + (int64_t)b * max_blocks;
+  auto key_ptr = [&](int j) -> const bf16* {
+    const int64_t blk = bt[j / block_size];
+    return cache + (blk * block_size + (j % block_size)) * E;
+  };
+
+  for (int i = 0; i < q_len; ++i) {
+    const int n = hist + i + 1;  // 可见 key 数
+    const bf16* qb = q + ((int64_t)(q0 + i) * H + h) * E;
+    for (int d = threadIdx.x; d < E; d += DC_BLOCK) s_q[d] = to_f32(qb[d]);
+    __syncthreads();
+    float lmax = -INFINITY;
+    for (int j = threadIdx.x; j < n; j += DC_BLOCK) {
+      const bf16* kj = key_ptr(j);
+      float s = 0.f;
+      for (int d = 0; d < E; ++d) s += s_q[d] * to_f32(kj[d]);
+      lmax = fmaxf(lmax, s * scale);
+    }
+    const float m = block_reduce_max<DC_BLOCK>(lmax);
+    float lsum = 0.f;
+    for (int j = threadIdx.x; j < n; j += DC_BLOCK) {
+      const bf16* kj = key_ptr(j);
+      float s = 0.f;
+      for (int d = 0; d < E; ++d) s += s_q[d] * to_f32(kj[d]);
+      lsum += __expf(s * scale - m);
+    }
+    const float denom = block_reduce_sum<DC_BLOCK>(lsum);
+    if (threadIdx.x == 0) {
+      s_stat[0] = m;
+      s_stat[1] = denom;
+    }
+    __syncthreads();
+    float acc[MAX_E / DC_BLOCK + 1];
+#pragma unroll
+    for (int c = 0; c < MAX_E / DC_BLOCK + 1; ++c) acc[c] = 0.f;
+    for (int base = 0; base < n; base += DC_BLOCK) {
+      const int j = base + threadIdx.x;
+      float p = 0.f;
+      if (j < n) {
+        const bf16* kj = key_ptr(j);
+        float s = 0.f;
+        for (int d = 0; d < E; ++d) s += s_q[d] * to_f32(kj[d]);
+        p = __expf(s * scale - s_stat[0]) / s_stat[1];
+      }
+      s_p[threadIdx.x] = p;
+      __syncthreads();
+      const int cnt = min(DC_BLOCK, n - base);
+      for (int d = threadIdx.x, c = 0; d < L; d += DC_BLOCK, ++c) {
+        float a = 0.f;
+        for (int jj = 0; jj < cnt; ++jj) a += s_p[jj] * to_f32(key_ptr(base + jj)[d]);
+        acc[c] += a;
+      }
+      __syncthreads();
+    }
+    bf16* ob = out + ((int64_t)(q0 + i) * H + h) * L;
+    for (int d = threadIdx.x, c = 0; d < L; d += DC_BLOCK, ++c) ob[d] = to_bf16(acc[c]);
+    __syncthreads();
+  }
+}
+
+extern "C" int mla_prefill_paged_bf16(const void* q, const void* cache, const int32_t* block_table,
+                                      const int32_t* seq_lens, const int32_t* cu_seqlens_q, void* out, int64_t num_reqs,
+                                      int64_t heads, int64_t entry, int64_t kv_lora, int64_t block_size,
+                                      int64_t max_blocks, float scale, cudaStream_t stream) {
+  if (num_reqs <= 0) return 0;
+  if (entry <= 0 || entry > MAX_E || kv_lora <= 0 || kv_lora > entry || heads <= 0 || block_size <= 0)
+    return err(cudaErrorInvalidValue);
+  dim3 grid((unsigned)num_reqs, (unsigned)heads);
+  prefill_paged_kernel<<<grid, DC_BLOCK, 0, stream>>>(static_cast<const bf16*>(q), static_cast<const bf16*>(cache),
+                                                      block_table, seq_lens, cu_seqlens_q, static_cast<bf16*>(out),
+                                                      (int)heads, (int)entry, (int)kv_lora, (int)block_size,
+                                                      (int)max_blocks, scale);
+  return last_err();
+}
+
 extern "C" int mla_decode_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens,
                                void* out, int64_t batch, int64_t heads, int64_t entry, int64_t kv_lora,
                                int64_t block_size, int64_t max_blocks, float scale, cudaStream_t stream) {

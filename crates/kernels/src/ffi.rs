@@ -105,6 +105,22 @@ extern "C" {
         scale: f32,
         stream: cudaStream_t,
     ) -> i32;
+    pub fn mla_prefill_paged_bf16(
+        q: *const c_void,
+        cache: *const c_void,
+        block_table: *const i32,
+        seq_lens: *const i32,
+        cu_seqlens_q: *const i32,
+        out: *mut c_void,
+        num_reqs: i64,
+        heads: i64,
+        entry: i64,
+        kv_lora: i64,
+        block_size: i64,
+        max_blocks: i64,
+        scale: f32,
+        stream: cudaStream_t,
+    ) -> i32;
     pub fn mla_decode_bf16(
         q: *const c_void,
         cache: *const c_void,
@@ -264,6 +280,7 @@ mod stubs {
     stub!(sample_f32(l: *const f32, t: *const f32, sd: *const u64, of: *const u64, o: *mut i32, b: i64, v: i64, s: cudaStream_t));
     stub!(mla_cache_write_bf16(l: *const c_void, c: *mut c_void, sm: *const i64, t: i64, e: i64, bs: i64, s: cudaStream_t));
     stub!(mla_prefill_bf16(q: *const c_void, k: *const c_void, v: *const c_void, o: *mut c_void, cu: *const i32, n: i64, h: i64, dq: i64, dv: i64, sc: f32, s: cudaStream_t));
+    stub!(mla_prefill_paged_bf16(q: *const c_void, c: *const c_void, bt: *const i32, sl: *const i32, cu: *const i32, o: *mut c_void, n: i64, h: i64, e: i64, l: i64, bs: i64, mb: i64, sc: f32, s: cudaStream_t));
     stub!(mla_decode_bf16(q: *const c_void, c: *const c_void, bt: *const i32, sl: *const i32, o: *mut c_void, b: i64, h: i64, e: i64, l: i64, bs: i64, mb: i64, sc: f32, s: cudaStream_t));
     stub!(copy_cols_bf16(a: *const c_void, b: *mut c_void, t: i64, sc: i64, c0: i64, dc: i64, d0: i64, w: i64, s: cudaStream_t));
     stub!(bcast_kpe_bf16(a: *const c_void, b: *mut c_void, t: i64, h: i64, qk: i64, n: i64, r: i64, s: cudaStream_t));

@@ -54,6 +54,11 @@ int mla_cache_write_bf16(const void* latent, void* cache, const int64_t* slot_ma
 // causal attention（展开 K/V）：q/k: [T, heads, dq]，v: [T, heads, dv]，out: [T, heads, dv]，cu_seqlens: [num_reqs+1]。
 int mla_prefill_bf16(const void* q, const void* k, const void* v, void* out, const int32_t* cu_seqlens,
                      int64_t num_reqs, int64_t heads, int64_t dq, int64_t dv, float scale, cudaStream_t stream);
+// 吸收后 MQA、任意 query 长、历史在 cache 中（chunked prefill / 混合 batch）：q: [T, heads, entry]，
+// cu_seqlens_q: [num_reqs+1]，seq_lens: [num_reqs] = 历史 + 本步；out: [T, heads, kv_lora]。
+int mla_prefill_paged_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens,
+                           const int32_t* cu_seqlens_q, void* out, int64_t num_reqs, int64_t heads, int64_t entry,
+                           int64_t kv_lora, int64_t block_size, int64_t max_blocks, float scale, cudaStream_t stream);
 // 吸收后 MQA decode：q: [batch, heads, entry]，out: [batch, heads, kv_lora]（latent 空间）。
 int mla_decode_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens, void* out,
                     int64_t batch, int64_t heads, int64_t entry, int64_t kv_lora, int64_t block_size,

@@ -518,6 +518,67 @@ pub fn mla_prefill_bf16(
     )
 }
 
+/// 吸收后 MQA、任意 query 长、历史 KV 在 paged cache 中。q: [total_q, heads, entry]，out: [total_q, heads, kv_lora]。
+/// `seq_lens[b]` = 该请求历史 + 本步 query 数；本步的 latent 必须已写入 cache。
+#[allow(clippy::too_many_arguments)]
+pub fn mla_prefill_paged_bf16(
+    stream: &Stream,
+    q: &CudaSlice<bf16>,
+    cache: &CudaSlice<bf16>,
+    block_table: &CudaSlice<i32>,
+    seq_lens: &CudaSlice<i32>,
+    cu_seqlens_q: &CudaSlice<i32>,
+    out: &mut CudaSlice<bf16>,
+    num_reqs: usize,
+    total_q: usize,
+    heads: usize,
+    entry: usize,
+    kv_lora: usize,
+    block_size: usize,
+    max_blocks: usize,
+    scale: f32,
+) -> Result<()> {
+    ensure!(
+        q.len() >= total_q * heads * entry && out.len() >= total_q * heads * kv_lora,
+        "mla_prefill_paged: q/out"
+    );
+    ensure!(
+        block_table.len() >= num_reqs * max_blocks
+            && seq_lens.len() >= num_reqs
+            && cu_seqlens_q.len() > num_reqs,
+        "mla_prefill_paged: table/seq_lens/cu"
+    );
+    ensure!(kv_lora <= entry, "mla_prefill_paged: kv_lora > entry");
+    let pq = stream.ptr(q) as *const c_void;
+    let pc = stream.ptr(cache) as *const c_void;
+    let pbt = stream.ptr(block_table) as *const i32;
+    let psl = stream.ptr(seq_lens) as *const i32;
+    let pcu = stream.ptr(cu_seqlens_q) as *const i32;
+    let po = stream.ptr_mut(out) as *mut c_void;
+    // SAFETY: 缓冲容量已校验；block_table 内 id < num_blocks、cu_seqlens_q 末值 == total_q 由调用方保证。
+    check(
+        unsafe {
+            ffi::mla_prefill_paged_bf16(
+                pq,
+                pc,
+                pbt,
+                psl,
+                pcu,
+                po,
+                num_reqs as i64,
+                heads as i64,
+                entry as i64,
+                kv_lora as i64,
+                block_size as i64,
+                max_blocks as i64,
+                scale,
+                stream.raw() as _,
+            )
+        },
+        "mla_prefill_paged_bf16",
+    )
+}
+
 /// 吸收后 MQA decode。q: [batch, heads, entry]，out: [batch, heads, kv_lora]。
 #[allow(clippy::too_many_arguments)]
 pub fn mla_decode_bf16(
