@@ -570,6 +570,7 @@ dependencies = [
  "dinfer-kernels",
  "dinfer-layers",
  "dinfer-server",
+ "dinfer-text",
  "minijinja",
  "npyz",
  "serde",
@@ -609,6 +610,7 @@ name = "dinfer-layers"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "dinfer-core",
  "dinfer-kernels",
  "half",
@@ -626,6 +628,7 @@ dependencies = [
  "dinfer-kernels",
  "dinfer-layers",
  "dinfer-server",
+ "dinfer-text",
  "minijinja",
  "npyz",
  "serde",
@@ -648,6 +651,16 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+]
+
+[[package]]
+name = "dinfer-text"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "minijinja",
+ "serde_json",
+ "tokenizers",
 ]
 
 [[package]]

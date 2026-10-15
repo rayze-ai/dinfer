@@ -4,5 +4,9 @@
 #![forbid(unsafe_code)]
 
 pub mod config;
+pub mod executor;
+pub mod model;
+pub mod parser;
+pub mod service;
 
 pub const MODEL_NAME: &str = "qwen3-0.6b";

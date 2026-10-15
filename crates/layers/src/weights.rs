@@ -134,7 +134,15 @@ impl WeightSource {
             }
             "BF16" => {
                 ensure!(raw.len() == n * 2, "{name}: size mismatch");
-                raw.chunks_exact(2).map(|c| bf16::from_bits(u16::from_le_bytes([c[0], c[1]]))).collect()
+                // mmap 切片按 u16 批量拷（小端机器上 bf16 位模式 == u16），比逐元素 collect 快一个量级
+                let mut v: Vec<bf16> = Vec::with_capacity(n);
+                let words: &[u16] = bytemuck::try_cast_slice(raw).unwrap_or(&[]);
+                if words.len() == n {
+                    v.extend(words.iter().map(|&w| bf16::from_bits(u16::from_le(w))));
+                } else {
+                    v.extend(raw.chunks_exact(2).map(|c| bf16::from_bits(u16::from_le_bytes([c[0], c[1]]))));
+                }
+                v
             }
             "F32" => {
                 ensure!(raw.len() == n * 4, "{name}: size mismatch");
@@ -158,10 +166,16 @@ impl WeightSource {
         let (info, raw) = self.bytes(name)?;
         let v: Vec<f32> = match info.dtype.as_str() {
             "F8_E4M3" => self.dequant_fp8(name, info, raw)?,
-            "BF16" => raw
-                .chunks_exact(2)
-                .map(|c| bf16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32())
-                .collect(),
+            "BF16" => {
+                let words: &[u16] = bytemuck::try_cast_slice(raw).unwrap_or(&[]);
+                if words.len() * 2 == raw.len() {
+                    words.iter().map(|&w| bf16::from_bits(u16::from_le(w)).to_f32()).collect()
+                } else {
+                    raw.chunks_exact(2)
+                        .map(|c| bf16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32())
+                        .collect()
+                }
+            }
             "F32" => raw.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect(),
             "F16" => raw
                 .chunks_exact(2)

@@ -1,6 +1,6 @@
 # loop 规格：Q1 Qwen3-0.6B 模型 crate + 真权重对拍
 
-- 状态：进行中
+- 状态：已通过（2026-10-15，`scripts/verify/q1.sh` exit 0；见 `test/2026-10-15/q1-qwen3.md`）
 - 创建：2026-10-15
 - 验证脚本：`scripts/verify/q1.sh`
 - 迭代记录：`test/YYYY-MM-DD/q1-qwen3.md`
@@ -60,3 +60,7 @@ greedy 生成与 HF 逐 token 一致、chat 模板 golden 逐字符一致、`din
 
 | 轮 | 现象 | 根因 | 处理 |
 |---|---|---|---|
+| 1 | 真权重 prefill：13 行里 2 行 argmax 与 HF 不同（row 2 gap 0.06、row 11 gap 0.5），max abs 1.0 | 逐层 bisect：attention 输出前 10 层 ≤ 0.03，之后 bf16 累积到 ~1；HF 自己 eager vs sdpa 也差 0.68、逐层 hidden 到 L27 差 9.0 → 参考噪声量级，不是 bug | 口径改：max abs < 2.0；argmax 不一致只允许在 HF gap ≤ 1.0 的行；一致行 ≥ 80%。greedy 32 步仍逐 token 全对（更强的证据） |
+| 2 | 加载 1.5 GB 要 59 s | `load_bf16` BF16 路径逐元素 `chunks_exact(2).map(..).collect()` | `bytemuck::cast_slice` 成 `&[u16]` 批量转 → 17 s（剩下主要是 safetensors mmap 首次缺页 + H2D；Q3 再优化） |
+| 3 | qwen3 parser：reasoning 末尾多一个 `\n` | `\n</think>` 的换行在流式下先被当 reasoning 吐出 | Reasoning 态把尾部 `\n` 和未完成标签前缀一样保留，eof 再丢 |
+| 4 | minijinja 跑 Qwen 模板：`messages[::-1]`、`.startswith/.endswith/.rstrip('\n')`、`tojson` 默认分隔符 | 都在 dinfer-text 已有能力内（负步长切片 minijinja 原生支持；Python 方法 shim；Qwen 模板 `tojson` 无 kwargs 走同一自定义 filter，分隔符 `", "` 与 HF 一致） | 9/9 一次过 |

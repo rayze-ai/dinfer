@@ -125,6 +125,46 @@ extern "C" {
         scale: f32,
         stream: cudaStream_t,
     ) -> i32;
+    pub fn gqa_cache_write_bf16(
+        k: *const c_void,
+        v: *const c_void,
+        cache: *mut c_void,
+        slot_mapping: *const i64,
+        tokens: i64,
+        kv_heads: i64,
+        head_dim: i64,
+        block_size: i64,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn gqa_prefill_bf16(
+        q: *const c_void,
+        k: *const c_void,
+        v: *const c_void,
+        out: *mut c_void,
+        cu_seqlens: *const i32,
+        num_reqs: i64,
+        heads: i64,
+        kv_heads: i64,
+        head_dim: i64,
+        scale: f32,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn gqa_paged_bf16(
+        q: *const c_void,
+        cache: *const c_void,
+        block_table: *const i32,
+        seq_lens: *const i32,
+        cu_seqlens_q: *const i32,
+        out: *mut c_void,
+        num_reqs: i64,
+        heads: i64,
+        kv_heads: i64,
+        head_dim: i64,
+        block_size: i64,
+        max_blocks: i64,
+        scale: f32,
+        stream: cudaStream_t,
+    ) -> i32;
     pub fn mla_decode_bf16(
         q: *const c_void,
         cache: *const c_void,

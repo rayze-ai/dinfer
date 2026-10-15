@@ -13,7 +13,7 @@ import numpy as np
 import torch
 
 torch.manual_seed(1234)
-out = Path(sys.argv[1] if len(sys.argv) > 1 else "test/kernel_refs")
+out = Path(next((a for a in sys.argv[1:] if not a.startswith("--")), "test/kernel_refs"))  # 允许 --gqa 等开关（当前全部用例总是生成）
 out.mkdir(parents=True, exist_ok=True)
 
 
@@ -142,3 +142,61 @@ save("mask_top_p", top_p)
 save("mask_out_isinf", torch.isinf(masked).to(torch.int32))
 
 print(f"wrote refs to {out}")
+
+# ---- GQA paged attention（Q1 Qwen3）：2 个请求，H=4 / Hkv=2 / D=32，block 8；prefill（无历史）+ paged（带历史）----
+# 口径：fp32 SDPA 参考；输入 bf16。cache 布局 [num_blocks, block_size, Hkv, 2, D]（K 在 V 前）。
+GH, GHK, GD, GBS = 4, 2, 32, 8
+glens = [11, 6]                      # prefill 两个请求的长度
+gq = bf(torch.randn(sum(glens), GH, GD))
+gk = bf(torch.randn(sum(glens), GHK, GD))
+gv = bf(torch.randn(sum(glens), GHK, GD))
+gcu = torch.tensor([0, glens[0], glens[0] + glens[1]], dtype=torch.int32)
+save("gqa_q", gq); save("gqa_k", gk); save("gqa_v", gv); save("gqa_cu", gcu)
+
+
+def sdpa_causal(q, k, v, hist=0):
+    """q [Tq,H,D]; k,v [Tk,Hkv,D]（Tk = hist + Tq）；query i 看 key [0, hist+i]。"""
+    rep = GH // GHK
+    kk = k.float().repeat_interleave(rep, dim=1); vv = v.float().repeat_interleave(rep, dim=1)
+    s = torch.einsum("qhd,khd->hqk", q.float(), kk) * GD ** -0.5
+    Tq, Tk = q.shape[0], k.shape[0]
+    mask = torch.arange(Tk)[None, :] > (torch.arange(Tq)[:, None] + hist)
+    s = s.masked_fill(mask[None], float("-inf"))
+    p = torch.softmax(s, dim=-1)
+    return torch.einsum("hqk,khd->qhd", p, vv)
+
+
+outs = [sdpa_causal(gq[a:b], gk[a:b], gv[a:b]) for a, b in zip(gcu[:-1].tolist(), gcu[1:].tolist())]
+save("gqa_prefill_out", torch.cat(outs))
+
+# paged：请求 0 历史 11（上面的 k/v）+ 新 3 行；请求 1 历史 6 + 新 1 行（decode）。block 表：req0 块 [0,1]（11+3=14 ≤ 16），req1 块 [2]（7 ≤ 8）。
+gnew = [3, 1]
+gq2 = bf(torch.randn(sum(gnew), GH, GD))
+gk2 = bf(torch.randn(sum(gnew), GHK, GD)); gv2 = bf(torch.randn(sum(gnew), GHK, GD))
+num_blocks = 3
+cache = torch.zeros(num_blocks, GBS, GHK, 2, GD, dtype=torch.bfloat16)
+bt = torch.tensor([[0, 1], [2, -1]], dtype=torch.int32)
+slots_hist = []
+for r, (a, b) in enumerate(zip(gcu[:-1].tolist(), gcu[1:].tolist())):
+    for pos in range(b - a):
+        blk = bt[r, pos // GBS].item(); slot = blk * GBS + pos % GBS; slots_hist.append(slot)
+        cache[blk, pos % GBS, :, 0] = gk[a + pos]; cache[blk, pos % GBS, :, 1] = gv[a + pos]
+slots_new = []
+cur = 0
+for r in range(2):
+    for i in range(gnew[r]):
+        pos = glens[r] + i; blk = bt[r, pos // GBS].item(); slot = blk * GBS + pos % GBS; slots_new.append(slot)
+        cache[blk, pos % GBS, :, 0] = gk2[cur]; cache[blk, pos % GBS, :, 1] = gv2[cur]; cur += 1
+save("gqa_hist_slots", torch.tensor(slots_hist, dtype=torch.int64))
+save("gqa_new_slots", torch.tensor(slots_new, dtype=torch.int64))
+save("gqa_q2", gq2); save("gqa_k2", gk2); save("gqa_v2", gv2)
+save("gqa_cache_expect", cache.view(num_blocks, GBS, GHK * 2 * GD))
+save("gqa_bt", bt); save("gqa_seq_lens", torch.tensor([glens[0] + gnew[0], glens[1] + gnew[1]], dtype=torch.int32))
+save("gqa_cu_q", torch.tensor([0, gnew[0], gnew[0] + gnew[1]], dtype=torch.int32))
+outs2 = []
+cur = 0
+for r, (a, b) in enumerate(zip(gcu[:-1].tolist(), gcu[1:].tolist())):
+    kall = torch.cat([gk[a:b], gk2[cur:cur + gnew[r]]]); vall = torch.cat([gv[a:b], gv2[cur:cur + gnew[r]]])
+    outs2.append(sdpa_causal(gq2[cur:cur + gnew[r]], kall, vall, hist=b - a)); cur += gnew[r]
+save("gqa_paged_out", torch.cat(outs2))
+print("gqa refs: prefill", tuple(torch.cat(outs).shape), "paged", tuple(torch.cat(outs2).shape))

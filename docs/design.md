@@ -340,7 +340,7 @@ tool_call 为 JSON `{"name","arguments"}`。
 
 | 阶段 | 产出 | 验收 |
 |---|---|---|
-| Q1 Qwen3 crate + 真权重 | `crates/qwen3`：config、权重加载（tied lm_head）、GQA attention（新 kernel：`gqa_prefill / gqa_decode / gqa_prefill_paged`，K/V paged cache）、Qwen3Model、Executor、tokenizer（Qwen2Tokenizer = BPE，`tokenizers` 加载）、chat 模板（含 `enable_thinking`）、parser（`<think>` + JSON tool_call）、Service；`--features qwen3` 构建 | `scripts/verify/q1.sh`：真权重 prefill logits 与 HF max abs < 0.05（bf16，同机 3090）；greedy 32 token 与 HF 逐个一致（允许 bf16 平局步分叉，口径同 P3）；chat 模板 golden 逐字符；server e2e 用真模型回答一个问题且 `<think>` 段被正确拆出 |
+| ✅ Q1 Qwen3 crate + 真权重（2026-10-15） | `crates/qwen3`：config、权重加载（tied lm_head）、GQA attention（新 kernel：`gqa_prefill / gqa_decode / gqa_prefill_paged`，K/V paged cache）、Qwen3Model、Executor、tokenizer（Qwen2Tokenizer = BPE，`tokenizers` 加载）、chat 模板（含 `enable_thinking`）、parser（`<think>` + JSON tool_call）、Service；`--features qwen3` 构建 | `scripts/verify/q1.sh`：真权重 prefill logits 与 HF max abs < 0.05（bf16，同机 3090）；greedy 32 token 与 HF 逐个一致（允许 bf16 平局步分叉，口径同 P3）；chat 模板 golden 逐字符；server e2e 用真模型回答一个问题且 `<think>` 段被正确拆出 |
 | Q2 采样 + 请求功能 | temperature / top_p / top_k / min_p / repetition / seed（接 P2 的 `topk_topp_mask` + Philox `sample`）、stop 字符串、logprobs、`n>1`、prefix cache 开启、`/metrics`、按显存算 `num_blocks` | 采样分布与 PyTorch 同 seed 对拍；prefix cache 命中率；OpenAI SDK 全字段 |
 | Q3 单卡性能 | CUDA graph（decode FULL 图）、pinned + 双缓冲 + 异步 D2H、算子融合（§8.2）、GQA flash-style kernel（或接 FlashAttention/FlashInfer）、异步调度 | §8.4 场景 ①②③ 与 vLLM 同机（3090）对比：TPOT P50 优于 ≥ 20% |
 | Q4 PD 分离 | prefill 实例与 decode 实例分进程 / 分卡，KV 传输（本机先 CUDA IPC / NCCL，跨机 RDMA 留接口），proxy 路由，与 vLLM `KVConnector` 语义对照 | 两进程 PD 跑通，输出与单机一致；TTFT / TPOT 对比单机 |

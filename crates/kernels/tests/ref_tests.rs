@@ -250,3 +250,103 @@ fn sample_distribution_matches_softmax() {
     let l1: f32 = (0..v).map(|i| (counts[i] / n as f32 - exps[i] / z).abs()).sum();
     assert!(l1 < 0.03, "sample L1 distance {l1}");
 }
+
+// ---- GQA paged attention（Q1）----
+
+fn load_i64(name: &str) -> Vec<i64> {
+    let bytes =
+        std::fs::read(refs().join(format!("{name}.npy"))).unwrap_or_else(|e| panic!("{name}.npy: {e}"));
+    let arr: npyz::NpyFile<_> = npyz::NpyFile::new(&bytes[..]).unwrap();
+    arr.into_vec::<i64>().unwrap()
+}
+
+#[test]
+#[ignore]
+fn gqa_prefill_ref() {
+    let (_d, s) = dev();
+    let (qs, q) = load_f32("gqa_q");
+    let (ks, k) = load_f32("gqa_k");
+    let (_, v) = load_f32("gqa_v");
+    let (_, cu) = load_i32("gqa_cu");
+    let (_, want) = load_f32("gqa_prefill_out");
+    let (t, h, d) = (qs[0], qs[1], qs[2]);
+    let hk = ks[1];
+    let dq = s.htod_copy(to_bf16(&q)).unwrap();
+    let dk = s.htod_copy(to_bf16(&k)).unwrap();
+    let dv = s.htod_copy(to_bf16(&v)).unwrap();
+    let dcu = s.htod_copy(cu.clone()).unwrap();
+    let mut out = s.alloc_zeros::<bf16>(t * h * d).unwrap();
+    dinfer_kernels::gqa_prefill_bf16(
+        &s,
+        &dq,
+        &dk,
+        &dv,
+        &mut out,
+        &dcu,
+        cu.len() - 1,
+        h,
+        hk,
+        d,
+        (d as f32).powf(-0.5),
+    )
+    .unwrap();
+    assert_close("gqa_prefill", &s.dtoh_sync_copy(&out).unwrap(), &want, 1e-2, 1e-2);
+}
+
+#[test]
+#[ignore]
+fn gqa_cache_write_and_paged_ref() {
+    let (_d, s) = dev();
+    let (ks, k) = load_f32("gqa_k");
+    let (_, v) = load_f32("gqa_v");
+    let (q2s, q2) = load_f32("gqa_q2");
+    let (_, k2) = load_f32("gqa_k2");
+    let (_, v2) = load_f32("gqa_v2");
+    let hist_slots = load_i64("gqa_hist_slots");
+    let new_slots = load_i64("gqa_new_slots");
+    let (cs, cache_want) = load_f32("gqa_cache_expect");
+    let (bts, bt) = load_i32("gqa_bt");
+    let (_, seq_lens) = load_i32("gqa_seq_lens");
+    let (_, cu_q) = load_i32("gqa_cu_q");
+    let (_, want) = load_f32("gqa_paged_out");
+    let (hk, d) = (ks[1], ks[2]);
+    let (tq, h) = (q2s[0], q2s[1]);
+    let (num_blocks, bs) = (cs[0], cs[1]);
+    let mut cache = s.alloc_zeros::<bf16>(num_blocks * bs * hk * 2 * d).unwrap();
+    // 写历史 + 新 token
+    let dk = s.htod_copy(to_bf16(&k)).unwrap();
+    let dv = s.htod_copy(to_bf16(&v)).unwrap();
+    let dsl = s.htod_copy(hist_slots.clone()).unwrap();
+    dinfer_kernels::gqa_cache_write_bf16(&s, &dk, &dv, &mut cache, &dsl, hist_slots.len(), hk, d, bs)
+        .unwrap();
+    let dk2 = s.htod_copy(to_bf16(&k2)).unwrap();
+    let dv2 = s.htod_copy(to_bf16(&v2)).unwrap();
+    let dsl2 = s.htod_copy(new_slots.clone()).unwrap();
+    dinfer_kernels::gqa_cache_write_bf16(&s, &dk2, &dv2, &mut cache, &dsl2, new_slots.len(), hk, d, bs)
+        .unwrap();
+    assert_close("gqa_cache", &s.dtoh_sync_copy(&cache).unwrap(), &cache_want, 0.0, 0.0);
+    // paged attention（req0 3 行带历史 11，req1 1 行 decode 带历史 6）
+    let dq2 = s.htod_copy(to_bf16(&q2)).unwrap();
+    let dbt = s.htod_copy(bt).unwrap();
+    let dseq = s.htod_copy(seq_lens.clone()).unwrap();
+    let dcu = s.htod_copy(cu_q.clone()).unwrap();
+    let mut out = s.alloc_zeros::<bf16>(tq * h * d).unwrap();
+    dinfer_kernels::gqa_paged_bf16(
+        &s,
+        &dq2,
+        &cache,
+        &dbt,
+        &dseq,
+        &dcu,
+        &mut out,
+        seq_lens.len(),
+        h,
+        hk,
+        d,
+        bs,
+        bts[1],
+        (d as f32).powf(-0.5),
+    )
+    .unwrap();
+    assert_close("gqa_paged", &s.dtoh_sync_copy(&out).unwrap(), &want, 1e-2, 1e-2);
+}

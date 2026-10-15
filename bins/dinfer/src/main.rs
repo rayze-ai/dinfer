@@ -3,8 +3,12 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-#[cfg(all(feature = "kimik3", feature = "glm53"))]
-compile_error!("enable exactly one model feature: `kimik3` or `glm53`");
+#[cfg(any(
+    all(feature = "kimik3", feature = "glm53"),
+    all(feature = "kimik3", feature = "qwen3"),
+    all(feature = "glm53", feature = "qwen3")
+))]
+compile_error!("enable exactly one model feature: `kimik3`, `glm53` or `qwen3`");
 
 #[derive(Parser)]
 #[command(name = "dinfer", version, about = "Rust LLM inference engine for Kimi-K3 / GLM-5.3")]
@@ -62,7 +66,11 @@ fn model_name() -> &'static str {
     {
         dinfer_glm53::MODEL_NAME
     }
-    #[cfg(not(any(feature = "kimik3", feature = "glm53")))]
+    #[cfg(feature = "qwen3")]
+    {
+        dinfer_qwen3::MODEL_NAME
+    }
+    #[cfg(not(any(feature = "kimik3", feature = "glm53", feature = "qwen3")))]
     {
         "none"
     }
@@ -113,7 +121,28 @@ async fn main() -> Result<()> {
                 tracing::info!(%addr, "dinfer serving (no auth; bind to localhost unless fronted by a gateway)");
                 dinfer_server::serve(&addr, std::sync::Arc::new(svc)).await?;
             }
-            #[cfg(not(feature = "glm53"))]
+            #[cfg(feature = "qwen3")]
+            {
+                let _ = mtp;
+                let opt = dinfer_qwen3::service::ServeOptions {
+                    model_dir: model,
+                    tokenizer_dir: tokenizer,
+                    max_model_len,
+                    max_num_seqs,
+                    max_num_batched_tokens,
+                    num_blocks,
+                    block_size,
+                    enable_chunked_prefill: true,
+                    device,
+                };
+                let svc = tokio::task::spawn_blocking(move || {
+                    dinfer_qwen3::service::Qwen3Service::start(opt, name)
+                })
+                .await??;
+                tracing::info!(%addr, "dinfer serving (no auth; bind to localhost unless fronted by a gateway)");
+                dinfer_server::serve(&addr, std::sync::Arc::new(svc)).await?;
+            }
+            #[cfg(not(any(feature = "glm53", feature = "qwen3")))]
             {
                 let _ = (
                     &addr,
@@ -128,7 +157,7 @@ async fn main() -> Result<()> {
                     mtp,
                 );
                 anyhow::bail!(
-                    "serve for model `{name}` is not implemented yet (build with --features glm53)"
+                    "serve for model `{name}` is not implemented yet (build with --features glm53 or qwen3)"
                 );
             }
         }

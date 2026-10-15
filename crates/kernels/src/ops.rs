@@ -1293,6 +1293,148 @@ pub fn zero_rows_where_pos0_bf16(
     )
 }
 
+// ---------------------------------------------------------------------------
+// GQA paged attention（gqa.cu）
+// ---------------------------------------------------------------------------
+
+/// k, v: [tokens, kv_heads, head_dim] → cache [num_blocks, block_size, kv_heads, 2, head_dim]（slot_mapping，-1 跳过）。
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_cache_write_bf16(
+    stream: &Stream,
+    k: &CudaSlice<bf16>,
+    v: &CudaSlice<bf16>,
+    cache: &mut CudaSlice<bf16>,
+    slot_mapping: &CudaSlice<i64>,
+    tokens: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    block_size: usize,
+) -> Result<()> {
+    ensure!(
+        k.len() >= tokens * kv_heads * head_dim && v.len() >= tokens * kv_heads * head_dim,
+        "gqa_cache_write: k/v"
+    );
+    ensure!(slot_mapping.len() >= tokens, "gqa_cache_write: slot_mapping");
+    let pk = stream.ptr(k) as *const c_void;
+    let pv = stream.ptr(v) as *const c_void;
+    let pc = stream.ptr_mut(cache) as *mut c_void;
+    let ps = stream.ptr(slot_mapping) as *const i64;
+    // SAFETY: 容量已校验；slot < num_blocks*block_size 由调度器保证。
+    check(
+        unsafe {
+            ffi::gqa_cache_write_bf16(
+                pk,
+                pv,
+                pc,
+                ps,
+                tokens as i64,
+                kv_heads as i64,
+                head_dim as i64,
+                block_size as i64,
+                stream.raw() as _,
+            )
+        },
+        "gqa_cache_write_bf16",
+    )
+}
+
+/// 无历史 causal prefill。q: [T, heads, D]，k/v: [T, kv_heads, D]，out: [T, heads, D]。
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_prefill_bf16(
+    stream: &Stream,
+    q: &CudaSlice<bf16>,
+    k: &CudaSlice<bf16>,
+    v: &CudaSlice<bf16>,
+    out: &mut CudaSlice<bf16>,
+    cu_seqlens: &CudaSlice<i32>,
+    num_reqs: usize,
+    heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    scale: f32,
+) -> Result<()> {
+    ensure!(cu_seqlens.len() > num_reqs, "gqa_prefill: cu_seqlens");
+    ensure!(heads % kv_heads == 0, "gqa_prefill: heads % kv_heads");
+    let pq = stream.ptr(q) as *const c_void;
+    let pk = stream.ptr(k) as *const c_void;
+    let pv = stream.ptr(v) as *const c_void;
+    let po = stream.ptr_mut(out) as *mut c_void;
+    let pcu = stream.ptr(cu_seqlens) as *const i32;
+    // SAFETY: 调用方保证 q/k/v/out 覆盖 cu_seqlens 的总 token 数。
+    check(
+        unsafe {
+            ffi::gqa_prefill_bf16(
+                pq,
+                pk,
+                pv,
+                po,
+                pcu,
+                num_reqs as i64,
+                heads as i64,
+                kv_heads as i64,
+                head_dim as i64,
+                scale,
+                stream.raw() as _,
+            )
+        },
+        "gqa_prefill_bf16",
+    )
+}
+
+/// 从 paged cache 读的 attention：decode（q_len = 1）与带历史 chunked prefill 统一。q: [Tq, heads, D]，out 同形。
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_paged_bf16(
+    stream: &Stream,
+    q: &CudaSlice<bf16>,
+    cache: &CudaSlice<bf16>,
+    block_table: &CudaSlice<i32>,
+    seq_lens: &CudaSlice<i32>,
+    cu_seqlens_q: &CudaSlice<i32>,
+    out: &mut CudaSlice<bf16>,
+    num_reqs: usize,
+    heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    block_size: usize,
+    max_blocks: usize,
+    scale: f32,
+) -> Result<()> {
+    ensure!(
+        block_table.len() >= num_reqs * max_blocks && seq_lens.len() >= num_reqs,
+        "gqa_paged: table/seq_lens"
+    );
+    ensure!(cu_seqlens_q.len() > num_reqs, "gqa_paged: cu_seqlens_q");
+    ensure!(heads % kv_heads == 0, "gqa_paged: heads % kv_heads");
+    let pq = stream.ptr(q) as *const c_void;
+    let pc = stream.ptr(cache) as *const c_void;
+    let pbt = stream.ptr(block_table) as *const i32;
+    let psl = stream.ptr(seq_lens) as *const i32;
+    let pcu = stream.ptr(cu_seqlens_q) as *const i32;
+    let po = stream.ptr_mut(out) as *mut c_void;
+    // SAFETY: 容量已校验；block_table 内 id < num_blocks 由调度器保证。
+    check(
+        unsafe {
+            ffi::gqa_paged_bf16(
+                pq,
+                pc,
+                pbt,
+                psl,
+                pcu,
+                po,
+                num_reqs as i64,
+                heads as i64,
+                kv_heads as i64,
+                head_dim as i64,
+                block_size as i64,
+                max_blocks as i64,
+                scale,
+                stream.raw() as _,
+            )
+        },
+        "gqa_paged_bf16",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -4,6 +4,8 @@
 pub enum KvCacheSpec {
     /// MLA：每 token 一个 latent 向量，`head_size = kv_lora_rank + rope_dim`。
     Mla { block_size: u32, head_size: u32, dtype_bytes: u32 },
+    /// 标准 GQA/MHA：每 token K+V 各 `kv_heads × head_size`。
+    FullAttention { block_size: u32, kv_heads: u32, head_size: u32, dtype_bytes: u32 },
     /// 递归状态（KDA / Mamba）：每请求固定若干 slot，不按 token 增长。
     Mamba { shapes: Vec<Vec<u32>>, dtype_bytes: Vec<u32>, block_size: u32 },
     /// DSA 索引器的 fp8 K cache：每 token 固定字节数。
@@ -14,6 +16,7 @@ impl KvCacheSpec {
     pub fn block_size(&self) -> u32 {
         match self {
             KvCacheSpec::Mla { block_size, .. }
+            | KvCacheSpec::FullAttention { block_size, .. }
             | KvCacheSpec::Mamba { block_size, .. }
             | KvCacheSpec::Indexer { block_size, .. } => *block_size,
         }
@@ -22,6 +25,9 @@ impl KvCacheSpec {
     /// 一个 block 占多少字节。
     pub fn page_size_bytes(&self) -> u64 {
         match self {
+            KvCacheSpec::FullAttention { block_size, kv_heads, head_size, dtype_bytes } => {
+                *block_size as u64 * 2 * *kv_heads as u64 * *head_size as u64 * *dtype_bytes as u64
+            }
             KvCacheSpec::Mla { block_size, head_size, dtype_bytes } => {
                 *block_size as u64 * *head_size as u64 * *dtype_bytes as u64
             }

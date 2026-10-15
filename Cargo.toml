@@ -9,6 +9,7 @@ members = [
     "crates/glm53",
     "bins/dinfer",
     "crates/qwen3",
+    "crates/text",
 ]
 
 [workspace.package]
@@ -27,6 +28,7 @@ dinfer-server = { path = "crates/server" }
 dinfer-kimik3 = { path = "crates/kimik3" }
 dinfer-glm53 = { path = "crates/glm53" }
 dinfer-qwen3 = { path = "crates/qwen3" }
+dinfer-text = { path = "crates/text" }
 
 # 第三方：固定版本（见 docs/design.md §3.1）
 anyhow = "=1.0.98"

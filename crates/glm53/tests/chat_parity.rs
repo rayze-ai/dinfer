@@ -4,7 +4,7 @@
 //!       cargo test -p dinfer-glm53 --features ref-tests --test chat_parity -- --nocapture
 #![cfg(feature = "ref-tests")]
 
-use dinfer_glm53::chat::{ChatTemplate, RenderParams};
+use dinfer_glm53::chat::{render, ChatTemplate, RenderParams};
 use dinfer_glm53::tokenizer::GlmTokenizer;
 use std::path::PathBuf;
 
@@ -117,7 +117,7 @@ fn chat_template_matches_hf() {
         let want_text = c["text"].as_str().unwrap();
         let want_ids: Vec<u32> =
             c["ids"].as_array().unwrap().iter().map(|x| x.as_u64().unwrap() as u32).collect();
-        match tmpl.render(&p) {
+        match render(&tmpl, &p) {
             Err(e) => fails.push(format!("{name}: render error: {e:#}")),
             Ok(text) => {
                 if text != want_text {

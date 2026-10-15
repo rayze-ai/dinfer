@@ -17,6 +17,7 @@ dinfer-core.workspace = true
 dinfer-layers.workspace = true
 dinfer-kernels.workspace = true
 dinfer-server.workspace = true
+dinfer-text.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 anyhow.workspace = true

@@ -1,7 +1,7 @@
 //! GLM-5.3 的 `ChatBackend` 实现：加载模型 + tokenizer + chat 模板，起引擎线程，提供渲染 / 提交 / 输出流。
 //! server crate 只认 `dinfer_server::backend::ChatBackend`，这里是模型侧的唯一接入点。
 
-use crate::chat::{ChatTemplate, RenderParams};
+use crate::chat::{render, ChatTemplate, RenderParams};
 use crate::config::GlmMoeDsaConfig;
 use crate::executor::Glm53Executor;
 use crate::model::Glm53Model;
@@ -249,7 +249,7 @@ impl ChatBackend for Glm53Service {
             clear_thinking: req.clear_thinking,
             add_generation_prompt: true,
         };
-        let text = self.tmpl.render(&p)?;
+        let text = render(&self.tmpl, &p)?;
         let ids = self.tok.encode(&text)?;
         Ok(Prompt { text, ids })
     }
