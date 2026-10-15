@@ -25,6 +25,8 @@ ap.add_argument("--layers", type=int, default=2)
 ap.add_argument("--seed", type=int, default=7)
 ap.add_argument("--gen", type=int, default=32)
 ap.add_argument("--first-k-dense", type=int, default=None, help="默认 = layers（全 dense）；设 1 → 第 1 层起 MoE")
+ap.add_argument("--fp8", action="store_true",
+                help="把投影权重按 GLM-5.3 格式做 128×128 块 fp8(e4m3) 量化存盘（weight + weight_scale_inv），期望值用解量化后的权重算")
 args = ap.parse_args()
 out = Path(args.out)
 out.mkdir(parents=True, exist_ok=True)
@@ -75,6 +77,46 @@ with torch.no_grad():
         if n.endswith("e_score_correction_bias"):
             b.copy_(torch.randn_like(b) * 0.1)
 state = {k: v.contiguous() for k, v in model.state_dict().items()}
+
+# ---- fp8 块量化（可选）：与 GLM-5.3 真权重同格式 ----
+# 量化白名单 = 所有 Linear 投影（attention 的 5 个 + MLP/专家的 3 个）；embed / lm_head / norm / 路由 gate 不量化。
+FP8_BLOCK = (128, 128)
+FP8_MAX = torch.finfo(torch.float8_e4m3fn).max  # 448
+QUANT_SUFFIXES = ("q_a_proj.weight", "kv_a_proj_with_mqa.weight", "q_b_proj.weight", "kv_b_proj.weight",
+                  "o_proj.weight", "gate_proj.weight", "up_proj.weight", "down_proj.weight")
+
+
+def quant_block_fp8(w: torch.Tensor):
+    """w [N,K] → (w8 [N,K] e4m3, scale_inv [⌈N/bn⌉,⌈K/bk⌉] f32, w_deq bf16)。最后一块可不满。"""
+    n, k = w.shape
+    bn, bk = FP8_BLOCK
+    sn, sk = -(-n // bn), -(-k // bk)
+    w32 = w.float()
+    pad = torch.zeros(sn * bn, sk * bk)
+    pad[:n, :k] = w32
+    blocks = pad.view(sn, bn, sk, bk).permute(0, 2, 1, 3)  # [sn, sk, bn, bk]
+    amax = blocks.abs().amax(dim=(-1, -2)).clamp(min=1e-12)  # [sn, sk]
+    scale_inv = (amax / FP8_MAX).float()  # 乘法因子（vLLM 命名 weight_scale_inv）
+    q = (blocks / scale_inv[..., None, None]).to(torch.float8_e4m3fn)
+    deq = q.float() * scale_inv[..., None, None]
+    q = q.permute(0, 2, 1, 3).reshape(sn * bn, sk * bk)[:n, :k].contiguous()
+    deq = deq.permute(0, 2, 1, 3).reshape(sn * bn, sk * bk)[:n, :k].contiguous()
+    return q, scale_inv.contiguous(), deq.to(torch.bfloat16)
+
+
+if args.fp8:
+    n_q = 0
+    with torch.no_grad():
+        params = dict(model.named_parameters())
+        for name in list(state):
+            if name.endswith(QUANT_SUFFIXES) and state[name].dim() == 2:
+                q, s, deq = quant_block_fp8(state[name])
+                state[name] = q
+                state[name[: -len(".weight")] + ".weight_scale_inv"] = s
+                params[name].copy_(deq)  # HF 侧用解量化后的权重算期望
+                n_q += 1
+    print(f"fp8: quantized {n_q} projection weights (block {FP8_BLOCK})")
+
 save_file(state, out / "model.safetensors", metadata={"format": "pt"})
 
 # 导出 config.json：只保留 Rust 侧要读的字段，名字与 GLM-5.3 config.json 一致
@@ -104,6 +146,9 @@ c.update({
     "index_n_heads": 2, "index_head_dim": 16, "index_topk": 64, "index_topk_freq": 1,
     "index_skip_topk_offset": 0, "index_topk_pattern": None, "indexer_rope_interleave": True,
 })
+if args.fp8:
+    c["quantization_config"] = {"activation_scheme": "dynamic", "fmt": "e4m3", "quant_method": "fp8",
+                                "weight_block_size": list(FP8_BLOCK)}
 (out / "config.json").write_text(json.dumps(c, indent=2))
 
 prompt = torch.tensor([[5, 17, 42, 99, 123, 7, 8, 500, 321, 64, 2, 77, 900, 13]], dtype=torch.long)

@@ -11,6 +11,7 @@ pub mod moe;
 pub mod nn;
 pub mod tensor;
 pub mod weights;
+pub mod weights_fp8;
 
 pub use dinfer_kernels::{bf16, Device, Gemm, RopeStyle, Stream};
 pub use mla::{MlaAttention, MlaConfig, PagedKv};

@@ -58,6 +58,18 @@ pub struct GlmMoeDsaConfig {
     pub quantization_config: Option<serde_json::Value>,
 }
 
+impl GlmMoeDsaConfig {
+    /// `quantization_config.weight_block_size`（fp8 块量化），无量化时 None。
+    pub fn fp8_block_size(&self) -> Option<(usize, usize)> {
+        let q = self.quantization_config.as_ref()?;
+        if q.get("quant_method").and_then(|v| v.as_str()) != Some("fp8") {
+            return None;
+        }
+        let b = q.get("weight_block_size")?.as_array()?;
+        Some((b.first()?.as_u64()? as usize, b.get(1)?.as_u64()? as usize))
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum EosIds {

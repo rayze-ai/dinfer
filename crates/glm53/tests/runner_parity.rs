@@ -55,15 +55,32 @@ const MAX_ABS: f32 = 0.05;
 const TIE_GAP: f32 = 0.02;
 const GEN: u32 = 32;
 
+/// 两请求同时进入、预算充足：1 步双 prefill（展开 K/V 路径）+ 31 步双 decode（吸收路径）。
 #[test]
 #[ignore]
 fn runner_two_requests_match_hf() {
+    run(1024, false, 0, GEN as usize);
+}
+
+/// 预算 8（< 两个 prompt 长 14 / 11）、开 chunked prefill：req1 分 14 = 8 + 6（第二块带历史 → Paged 路径），
+/// 之后与 req2 的 chunk / decode 混合 → 覆盖 `mla_prefill_paged` 的三种情形（纯 chunk、chunk+decode 混合、全 decode）。
+#[test]
+#[ignore]
+fn runner_chunked_mixed_match_hf() {
+    // 总 token = 14 + 11 + 2×31 = 87；每步最多 8 → 步数 ≥ 11；具体步数由调度器决定，不做精确断言
+    run(8, true, 0, 0);
+}
+
+fn run(budget: u32, chunked: bool, _unused: u32, expect_steps: usize) {
     let dev = Device::new(0).unwrap();
     let s = dev.default_stream();
     let gemm = Gemm::new(&s).unwrap();
     let cfg =
         GlmMoeDsaConfig::from_json(&std::fs::read_to_string(dir().join("config.json")).unwrap()).unwrap();
-    let src = WeightSource::open_dir(&dir()).unwrap();
+    let mut src = WeightSource::open_dir(&dir()).unwrap();
+    if let Some((bn, bk)) = cfg.fp8_block_size() {
+        src = src.with_quant_block(bn, bk);
+    }
     let num_blocks = 64;
     let model = Glm53Model::load(&s, &src, cfg.clone(), 128, num_blocks, BLOCK).unwrap();
     let exec = Glm53Executor::new(s.clone(), gemm, model).unwrap();
@@ -72,8 +89,8 @@ fn runner_two_requests_match_hf() {
     let params = SchedulerParams {
         sched: SchedulerConfig {
             max_num_seqs: 8,
-            max_num_batched_tokens: 1024,
-            enable_chunked_prefill: false,
+            max_num_batched_tokens: budget,
+            enable_chunked_prefill: chunked,
             long_prefill_token_threshold: 0,
         },
         cache: CacheConfig { block_size: BLOCK as u32, enable_prefix_caching: false, ..Default::default() },
@@ -104,16 +121,20 @@ fn runner_two_requests_match_hf() {
     let mut comparable = [true; 2];
     let mut worst = 0f32;
     let mut steps = 0;
+    let mut modes = std::collections::BTreeMap::<String, usize>::new();
+    let mut finished = 0usize;
     while sched.has_requests() {
         let so = sched.schedule();
+        finished += so.finished_req_ids.len();
         let mro = runner.execute(&so).unwrap();
         steps += 1;
+        *modes.entry(format!("{:?}", runner.last_plan().mode)).or_default() += 1;
         let n = so.num_scheduled_tokens.len();
         let logits = runner.exec.last_logits(n).unwrap();
         for (bi, &(rid, _)) in so.num_scheduled_tokens.iter().enumerate() {
             let r = rid as usize - 1;
-            if !comparable[r] {
-                continue;
+            if !comparable[r] || mro.sampled[bi].is_empty() {
+                continue; // 不可比，或 prefill 中间 chunk（无采样）
             }
             let step = compared[r];
             let got = &logits[bi * v..(bi + 1) * v];
@@ -146,12 +167,18 @@ fn runner_two_requests_match_hf() {
         }
     }
     eprintln!(
-        "steps = {steps}, compared = {compared:?}, comparable_to_end = {comparable:?}, worst = {worst}"
+        "steps = {steps}, modes = {modes:?}, compared = {compared:?}, comparable_to_end = {comparable:?}, worst = {worst}"
     );
-    assert_eq!(steps, GEN as usize, "1 prefill step + {} decode steps", GEN - 1);
-    // 完成的请求在下一次 schedule 的 finished_req_ids 里才传给 worker
+    if expect_steps > 0 {
+        assert_eq!(steps, expect_steps, "1 prefill step + {} decode steps", GEN - 1);
+    }
+    if chunked {
+        assert!(modes.contains_key("Paged"), "chunked run must exercise the Paged path: {modes:?}");
+    }
+    // 完成的请求在下一次 schedule 的 finished_req_ids 里才传给 worker（两请求可能不同步结束）
     let so = sched.schedule();
-    assert_eq!(so.finished_req_ids.len(), 2);
+    finished += so.finished_req_ids.len();
+    assert_eq!(finished, 2);
     runner.execute(&so).unwrap();
     assert_eq!(runner.num_states(), 0, "runner states must be cleaned after finish");
     // 两个请求都应至少对拍到相当多步（平局分叉是允许的，但不能一开始就分叉）

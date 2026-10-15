@@ -11,6 +11,38 @@
 >     - 如何避免：
 >     - 相关：`文件/命令/链接`
 
+## 2026-10-15 所有 cargo 命令假失败："failed to run rustc to learn about target-specific information"
+
+- 现象：`cargo build/test/clippy` 全部报该错，stderr 是 rustc 把一段 bash trace（`++ awk '-F: ' '{if($1~"Serial Number")print$2}'`）当 Rust 源码编译；直接跑同一条 `rustc -` 命令却正常；在 `/tmp` 新建 crate 也正常。
+- 根因：cargo 用 `rustc - --print=...` 探测目标信息（stdin 读源码），结果缓存在 `target/.rustc_info.json`。本机 `/etc/cron.d/lldpd_config_update` 每分钟跑一个 `set -x` 的脚本，某次它的 trace 文本进了那次探测的 stdin，失败结果被缓存，之后每次 cargo 直接读缓存里的失败。
+- 解法：`rm target/.rustc_info.json`。`scripts/verify/p4.sh` 开头已加这一行。
+- 如何避免：验证脚本里凡 cargo 都 `< /dev/null`；看到 `<anon>` 里出现 shell 文本就是这个坑，别去查代码。
+- 相关：`target/.rustc_info.json`、`/etc/cron.d/lldpd_config_update`
+
+## 2026-10-14 MoE 路由用 bf16 GEMM 算 logits 会翻转 top-k 选择
+
+- 现象：按"gate 权重 bf16 → cuBLASLt bf16 GEMM → 转 fp32 → sigmoid/top-k"实现，专家选择与 HF 偶发不一致（分数接近的两个专家互换）。
+- 根因：HF `DeepseekV3TopkRouter.forward` 把 x 与 gate.weight 都 cast 到 **fp32** 再 linear；bf16 GEMM 的输出先被舍到 bf16（3 位有效数字），sigmoid 后分差 < 1 ULP 的专家对会乱序，而 top-k 是硬判决，之后误差不可恢复。
+- 解法：`moe_gate_f32` 参考 kernel：bf16 输入升 fp32 做点积，输出 fp32 logits；真机版也必须保持 fp32 路由（vLLM `moe_router_dtype: float32` 同义）。
+- 如何避免：任何"硬判决"（top-k、argmax、路由）前的运算精度要与参考实现逐算子对齐，不能只看最终 logits 误差。
+- 相关：`crates/kernels/cuda/moe.cu::gate_kernel`、`crates/layers/src/moe.rs`
+
+## 2026-10-14 host 侧 argmax 平局规则与 torch / GPU kernel 相反
+
+- 现象：runner 对拍报 "sampled token must be argmax"，GPU 选 230、host 选 336，但两者的 logits **完全相等**。
+- 根因：测试里 `(0..v).max_by(|a,b| row[a].partial_cmp(&row[b]))` 在相等时返回**最后一个**最大值；torch.argmax 与我们的 argmax kernel 都取**第一个**（小下标）。
+- 解法：host 参考 argmax 写成显式循环 `if row[i] > row[best]`（严格大于才更新）。
+- 如何避免：所有 host 侧 "参考实现" 的平局规则显式写出来，并与 kernel 注释对齐；不要依赖标准库迭代器的平局行为。
+- 相关：`crates/glm53/tests/{tiny_parity,runner_parity}.rs::argmax`、`crates/kernels/cuda/sampling.cu`
+
+## 2026-10-14 请求完成后 runner 状态没被清理：`finished_req_ids` 晚一步到达
+
+- 现象：所有请求 `update_from_output` 都报 Finish 后，`runner.num_states()` 仍为 2。
+- 根因：与 vLLM 一致，scheduler 在 `update_from_output` 里只把完成请求记进内部列表，**下一次** `schedule()` 才通过 `SchedulerOutput.finished_req_ids` 告知 worker 释放状态。
+- 解法：引擎主循环结束条件要再多跑一次 `schedule()` + `runner.execute()`（空 batch）；测试同样处理。另：两个请求可能不同步完成，`finished_req_ids` 要跨 step 累计。
+- 如何避免：runner 状态的生命周期以 `SchedulerOutput` 的 `new_reqs / finished_req_ids` 为唯一来源，不要从 `StepResults.finish` 推。
+- 相关：`crates/core/src/runner.rs::update_states`、`crates/glm53/tests/runner_parity.rs`
+
 ## 2026-10-14 用 scratch 缓冲的 `shape[0]` 当 token 数，把 max_tokens 当成了本步 token 数
 
 - 现象：MLA forward 内 `rope_n` ensure 失败：`q.len 12288 < 64*4*16`，positions 只有 14。

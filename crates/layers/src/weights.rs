@@ -28,6 +28,8 @@ pub struct WeightSource {
     maps: Vec<Mmap>,
     data_base: Vec<usize>,
     index: HashMap<String, TensorInfo>,
+    /// fp8 块量化的 (block_n, block_k)。
+    quant_block: (usize, usize),
 }
 
 /// 本 crate 唯一的 unsafe：只读 mmap。安全前提：文件在映射期间不被修改（权重文件只读，约定成立）。
@@ -48,6 +50,12 @@ impl WeightSource {
         files.sort();
         ensure!(!files.is_empty(), "no *.safetensors under {}", dir.display());
         Self::open_files(&files)
+    }
+
+    /// 设置 fp8 块量化的块大小（`quantization_config.weight_block_size`，GLM-5.3 为 [128,128]）。默认 128×128。
+    pub fn with_quant_block(mut self, bn: usize, bk: usize) -> Self {
+        self.quant_block = (bn, bk);
+        self
     }
 
     pub fn open_files(files: &[PathBuf]) -> Result<Self> {
@@ -83,7 +91,7 @@ impl WeightSource {
             maps.push(map);
             data_base.push(base);
         }
-        Ok(Self { maps, data_base, index })
+        Ok(Self { maps, data_base, index, quant_block: (128, 128) })
     }
 
     pub fn names(&self) -> impl Iterator<Item = &str> {
@@ -102,11 +110,28 @@ impl WeightSource {
         Ok((info, &self.maps[info.file][base + info.start..base + info.end]))
     }
 
-    /// 读为 bf16（支持 BF16 直读、F32/F16 转换）。
+    /// 块量化 fp8 权重的解量化（CPU）；`name` 需为 `*.weight` 且存在同前缀 `*.weight_scale_inv`。
+    fn dequant_fp8(&self, name: &str, info: &TensorInfo, raw: &[u8]) -> Result<Vec<f32>> {
+        let scale_name = format!("{name}_scale_inv");
+        let (sinfo, sraw) = self.bytes(&scale_name).with_context(|| {
+            format!("{name}: F8_E4M3 weight needs {scale_name} (block-quantized); per-tensor fp8 unsupported")
+        })?;
+        ensure!(sinfo.dtype == "F32", "{scale_name}: expected F32 scale_inv, got {}", sinfo.dtype);
+        let scales: Vec<f32> =
+            sraw.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let (bn, bk) = self.quant_block;
+        Ok(crate::weights_fp8::dequant_block(raw, &info.shape, &scales, &sinfo.shape, (bn, bk)))
+    }
+
+    /// 读为 bf16（支持 BF16 直读、F32/F16 转换、F8_E4M3 块量化解码）。
     pub fn load_bf16(&self, stream: &Stream, name: &str) -> Result<Tensor<bf16>> {
         let (info, raw) = self.bytes(name)?;
         let n: usize = info.shape.iter().product();
         let v: Vec<bf16> = match info.dtype.as_str() {
+            "F8_E4M3" => {
+                ensure!(raw.len() == n, "{name}: size mismatch");
+                self.dequant_fp8(name, info, raw)?.into_iter().map(bf16::from_f32).collect()
+            }
             "BF16" => {
                 ensure!(raw.len() == n * 2, "{name}: size mismatch");
                 raw.chunks_exact(2).map(|c| bf16::from_bits(u16::from_le_bytes([c[0], c[1]]))).collect()
@@ -128,10 +153,11 @@ impl WeightSource {
         Tensor::from_vec(stream, v, &info.shape)
     }
 
-    /// 读为 host f32（用于 CPU 侧预处理，如 W_UK / W_UV 拆分）。
+    /// 读为 host f32（用于 CPU 侧预处理，如 W_UK / W_UV 拆分）。fp8 块量化权重先解量化。
     pub fn load_f32_host(&self, name: &str) -> Result<(Vec<usize>, Vec<f32>)> {
         let (info, raw) = self.bytes(name)?;
         let v: Vec<f32> = match info.dtype.as_str() {
+            "F8_E4M3" => self.dequant_fp8(name, info, raw)?,
             "BF16" => raw
                 .chunks_exact(2)
                 .map(|c| bf16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32())

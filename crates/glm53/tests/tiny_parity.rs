@@ -48,7 +48,10 @@ fn load(max_tokens: usize) -> Harness {
     let gemm = Gemm::new(&s).unwrap();
     let cfg =
         GlmMoeDsaConfig::from_json(&std::fs::read_to_string(dir().join("config.json")).unwrap()).unwrap();
-    let src = WeightSource::open_dir(&dir()).unwrap();
+    let mut src = WeightSource::open_dir(&dir()).unwrap();
+    if let Some((bn, bk)) = cfg.fp8_block_size() {
+        src = src.with_quant_block(bn, bk);
+    }
     let model = Glm53Model::load(&s, &src, cfg.clone(), max_tokens, 64, BLOCK).unwrap();
     Harness { dev, gemm, model, cfg }
 }
