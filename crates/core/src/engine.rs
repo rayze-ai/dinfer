@@ -169,13 +169,7 @@ pub fn scheduler_params(
     cache: crate::config::CacheConfig,
     max_model_len: u32,
     eos_token_ids: Vec<u32>,
+    num_spec_tokens: u32,
 ) -> SchedulerParams {
-    SchedulerParams {
-        sched,
-        cache,
-        max_model_len,
-        num_spec_tokens: 0,
-        async_scheduling: false,
-        eos_token_ids,
-    }
+    SchedulerParams { sched, cache, max_model_len, num_spec_tokens, async_scheduling: false, eos_token_ids }
 }

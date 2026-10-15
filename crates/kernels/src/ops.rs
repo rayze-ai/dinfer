@@ -1275,6 +1275,24 @@ pub fn moe_expert_ranges(offsets: &[i32]) -> Vec<(usize, usize, usize)> {
     v
 }
 
+/// x[t, :] = 0 where pos[t] == 0（MTP：位置 0 的 embedding 置零，vLLM `torch.where(positions == 0, 0, inputs_embeds)`）。
+pub fn zero_rows_where_pos0_bf16(
+    stream: &Stream,
+    x: &mut CudaSlice<bf16>,
+    pos: &CudaSlice<i32>,
+    tokens: usize,
+    cols: usize,
+) -> Result<()> {
+    ensure!(x.len() >= tokens * cols && pos.len() >= tokens, "zero_rows_where_pos0: buffer");
+    let px = stream.ptr_mut(x) as *mut c_void;
+    let pp = stream.ptr(pos) as *const i32;
+    // SAFETY: 容量已校验。
+    check(
+        unsafe { ffi::zero_rows_where_pos0_bf16(px, pp, tokens as i64, cols as i64, stream.raw() as _) },
+        "zero_rows_where_pos0",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -21,7 +21,7 @@ pub enum FeedForward {
 }
 
 impl FeedForward {
-    fn forward(
+    pub(crate) fn forward(
         &mut self,
         stream: &Stream,
         gemm: &Gemm,
@@ -235,6 +235,16 @@ impl Glm53Model {
             logits_bf16: Tensor::zeros(stream, &[max_tokens, v])?,
             cfg,
         })
+    }
+
+    /// MTP 借用：共享 top-k 缓冲（DSA）、k、decode_cu。
+    pub(crate) fn sparse_parts(&mut self) -> (Option<&mut Tensor<i32>>, usize, &Tensor<i32>) {
+        (self.topk.as_mut(), self.topk_k, &self.decode_cu)
+    }
+
+    /// 上一次 forward 后主干最后一层的输出（残差流，`model.norm` 之前）[t, h] bf16 —— MTP 的 previous_hidden。
+    pub fn last_hidden(&self) -> &Tensor<bf16> {
+        &self.hidden
     }
 
     /// 返回 logits（fp32，[num_logits_rows, vocab]）。

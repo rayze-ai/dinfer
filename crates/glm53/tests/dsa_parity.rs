@@ -96,6 +96,8 @@ fn full_layers(h: &H) -> Vec<usize> {
 }
 
 type Capture = Vec<(usize, Vec<i32>, Vec<f32>, usize)>;
+/// decode 注入表：(每 full 层的 (layer, 全部步的 top-k 平铺), 本步序号)。
+type StepOverride<'a> = Option<(&'a [(usize, Vec<i32>)], usize)>;
 
 /// 单请求 prefill（slot = position）。`override_tag`：Some(tag) → 用 `indexer_topk_L{l}{tag}.npy` 注入。
 fn prefill(h: &mut H, prompt: &[i32], override_tag: Option<&str>) -> (Vec<f32>, Capture) {
@@ -157,12 +159,7 @@ fn drift_rows(h: &H, tag: &str, t: usize) -> Vec<BTreeSet<usize>> {
 }
 
 /// 单请求 decode 一步。`override_step`：Some((steps 表, step i)) → 注入 HF 该步的 top-k。
-fn decode(
-    h: &mut H,
-    token: i32,
-    pos: usize,
-    override_step: Option<(&[(usize, Vec<i32>)], usize)>,
-) -> Vec<f32> {
+fn decode(h: &mut H, token: i32, pos: usize, override_step: StepOverride<'_>) -> Vec<f32> {
     let s = h.dev.default_stream();
     let v = h.cfg.vocab_size as usize;
     let k = h.cfg.index_topk as usize;
@@ -347,12 +344,12 @@ fn dsa_sparse_attention_with_hf_topk() {
         .map(|l| npy_f32(&format!("hidden_L{l}_long_prefix_drift_steps.npy")).1)
         .collect();
     let n_steps = want_tok.len();
-    for li in 0..h.cfg.num_hidden_layers as usize {
+    for (li, pd) in prefix_drift.iter().enumerate() {
         for i in 0..n_steps {
             for r in 0..t {
-                if prefix_drift[li][i * t + r] > DRIFT {
-                    for l2 in li..h.cfg.num_hidden_layers as usize {
-                        drift[l2].insert(r);
+                if pd[i * t + r] > DRIFT {
+                    for d in drift.iter_mut().skip(li) {
+                        d.insert(r);
                     }
                 }
             }

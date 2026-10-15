@@ -1,6 +1,6 @@
 # loop 规格：P6 GLM-5.3 tokenizer / chat 模板 / 流式解析 / server / MTP
 
-- 状态：进行中
+- 状态：已通过（2026-10-15，`scripts/verify/p6.sh` exit 0；详见 `test/2026-10-15/p6-glm-serve.md`）
 - 创建：2026-10-15
 - 验证脚本：`scripts/verify/p6.sh`
 - 迭代记录：`test/YYYY-MM-DD/p6-glm-serve.md`
@@ -65,3 +65,11 @@
 
 | 轮 | 现象 | 根因 | 处理 |
 |---|---|---|---|
+| 1 | a：minijinja 解析报 `unexpected float`（`m.content.0.type`） | minijinja 把 `.0.type` 词法成 float `0.` | 加载前把 `x.N.attr` 改写为 `x[N].attr` |
+| 2 | a：`string has no method named strip/split`、`map has no method named items` | minijinja 2.10 无 Python 方法 | `set_unknown_method_callback` 实现 strip/lstrip/rstrip/lower/upper/split/startswith/endswith/replace + items/keys/values/get |
+| 3 | a：tools case 多一个 `\n`，且 JSON key 序乱 | HF 的 jinja 环境是 `trim_blocks=True, lstrip_blocks=True`；minijinja/serde_json 默认 BTreeMap 排序 key | `set_trim_blocks/lstrip_blocks(true)`；minijinja + serde_json 开 `preserve_order`；自写 Python 风格 `tojson`（`", "` / `": "`，非 ASCII 原样）→ 15/15 一致 |
+| 4 | c：e2e 等 "listening" 120s 超时 | tracing 默认写 stdout，测试只读了 stderr | 两路都转发 |
+| 5 | c：请求 500 `indexer: block_table covers 16 < max_seq 1024` | 索引器 / ops 层要求 block_table 宽度覆盖整个 cache 容量；runner 只给本 batch 最长请求的块数 | 删掉两处过严 ensure（kernel 只读 `bt[j / bs]`，j < vis ≤ seq_len）→ e2e PASS |
+| 6 | d：fixture `GlmMoeDsaDecoderLayer(cfg, 3)` 越界 | HF `indexer_types/mlp_layer_types` 只有 num_hidden_layers 项 | 用 "多一层" 的 config 构造 MTP 层（规则同主干） |
+| 7 | d：`create_causal_mask` kwargs | HF 5.19 签名是 `inputs_embeds` 且无 `cache_position` | 按 `GlmMoeDsaModel.forward` 的调用方式传 |
+| 8 | d：draft logits 63/64 行 worst 0.0088、0 错；真 draft 接受 0/31 | tiny 随机权重下 HF 自己的 MTP 与主干一致率 0.000，接受率不可用作验收 | 加 oracle-draft 测试（draft = plain greedy 的真答案）：接受 16/16、17 步出 32 token、输出 == plain → verify / KV / 位置路径正确 |

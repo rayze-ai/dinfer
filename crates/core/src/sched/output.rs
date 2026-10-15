@@ -55,6 +55,8 @@ pub struct ModelRunnerOutput {
     pub req_ids: Vec<RequestId>,
     /// 每请求本 step 产出的 token（prefill 中间 chunk 为空；投机解码为 1 + 接受数）。
     pub sampled: Vec<Vec<u32>>,
+    /// 每请求下一步的 draft token（MTP 产出；无投机时为空）。与 req_ids 平行。
+    pub drafts: Vec<Vec<u32>>,
 }
 
 /// `update_from_output` 的结果：扁平 token 缓冲 + 每请求一条记录（零小对象分配）。

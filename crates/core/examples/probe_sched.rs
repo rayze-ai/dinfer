@@ -27,7 +27,11 @@ fn make(n: u64, pc: bool) -> (Scheduler, ModelRunnerOutput) {
         s.add_request(Request::new(i, (0..64).map(|t| (t + i as u32) % 1000).collect(), sp, 0));
     }
     let o = s.schedule();
-    let mro = ModelRunnerOutput { req_ids: (0..n).collect(), sampled: (0..n).map(|_| vec![7]).collect() };
+    let mro = ModelRunnerOutput {
+        req_ids: (0..n).collect(),
+        sampled: (0..n).map(|_| vec![7]).collect(),
+        drafts: vec![Vec::new(); n as usize],
+    };
     s.update_from_output(&o, &mro);
     (s, mro)
 }

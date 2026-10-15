@@ -5,10 +5,12 @@
 
 - 更新日期：2026-10-15
 - 历史：P0 `cda9aea`，P1 `65a67f1`，P2 `d44e49f`，P3 `17930a5`，P4 `35b54e3`/`69c8478`/`ea415e3`/`3c317d1`（`scripts/verify/p4.sh` exit 0 = p0–p3 + MoE + runner + 双请求 + fp8），P5 WIP `1a774f0` + 本次收尾 commit
-- 阶段：**P5 通过**（`dsa_parity` 3/3 PASS 2026-10-15 19:10；`scripts/verify/p5.sh` = p4 + tiny DSA GLM 三道对拍，结果见本日日志）。P5 产出：`kernels/cuda/dsa.cu`（layernorm / 索引分数（paged 索引 cache）/ top-k / row_vis）、`mla.cu` 三条 attention 路径的 `topk_indices` gather 模式、`layers/src/indexer.rs`、`mla.rs::SparseCtx{topk, topk_override, topk_self}`、`glm53::model` 每 full 层索引器 + 跨层共享 top-k 缓冲 + 对拍钩子（`capture_topk / capture_layers / capture_routing / capture_attn_pre`）、`glm53/tests/{dsa_parity,dsa_diag}.rs`、`gen_tiny_glm.py --dsa`（transformers 5.19 GlmMoeDsa；导出 top-k / 索引分数 / 路由 margin / 逐层 hidden / 每步前缀漂移）、`docs/loops/p5-dsa-indexer.md`（7 轮）
+- 阶段：**P6 通过**（2026-10-15，`scripts/verify/p6.sh` exit 0 = p0–p5 回归 + chat_parity 4 测试 + parser 8 单测 + serve_e2e + mtp_parity 3 测试；见 `test/2026-10-15/p6-glm-serve.md`）。P6 产出：`glm53/src/{tokenizer,chat,parser,service,mtp}.rs`、`core/src/engine.rs`、`server/src/{backend,openai,chat}.rs`、`bins/dinfer`（`serve --model --tokenizer --max-model-len --num-blocks --mtp`）+ `tests/serve_e2e.rs`（feature `e2e`）、`glm53/tests/{chat_parity,mtp_parity}.rs`、`scripts/verify/{gen_chat_golden.py,p6.sh}`、`gen_tiny_glm.py --vocab/--mtp`、`docs/loops/p6-glm-serve.md`（8 轮）。P5 产出见日志 2026-10-15。
+- P6 已知简化（后续补）：采样只有 greedy（temperature/top_p 字段接收但不生效）；无 logprobs / n>1 / stop 字符串（只有 stop token id）；`num_blocks` 固定分配（不按显存算）；prefix cache 关；MTP 只 nextn=1、每 step 1 draft，MTP 层 KV 与主干同大小；索引器 K cache bf16；server 无鉴权 / 无 metrics；K3 crate 仍是骨架
+- 真权重待办（需 ≥ 8×H200 / 或 4090 ×8 先跑 fp8 dequant 小规模）：GLM-5.3 权重名映射核对（`layers.78` MTP、fp8 `weight_scale_inv`）、1M 上下文 rope 参数、输出合理性。本机 3090 只能跑 tiny fixture
 - P5 对拍口径（重要，后续 P6+ 沿用）：硬判决（索引器 top-k、MoE 路由）bf16 下不可逐位复现 → ① 注入 HF top-k 逐层隔离比每层自算 top-k；② 行过滤用 **实测 hidden 漂移**（注入后逐层比 hidden > 0.02），不用路由 margin 代理；③ HF 全序列重算在 bf16 下 **不前缀稳定**（5/256 前缀行 top-k 在加 2 个 token 后翻转），fixture 每步导出前缀漂移，命中的 decode 步不断言。详见 pitfalls 2026-10-15 三条、`test/2026-10-15/p5-dsa-parity.md`
 - P5 已知简化（P10 / 真机补）：索引器 K cache bf16（真机 fp8 + scale）；索引分数 kernel 按 head 循环、top-k 单 block K 轮 argmax（真机 DeepGEMM fp8_mqa_logits + radix top-k）；稀疏 attention 仍是参考 kernel 逐 key gather；tiny fixture 用 `wq_b/wk ×6`、`mlp.gate ×8` 放大分差（真模型训练后自然有分辨力）
-- 下一步：**P6**（tokenizer / chat 模板 / server / MTP）。开工前先 `/project-skill loop p6-<feature>` 写规格。另：`crates/glm53/tests/dsa_diag.rs` 是诊断工具（`--ignored`，`STEP=<n>` 选 decode 步），不进 p5.sh
+- 下一步：**P7**（Kimi-K3：KDA、latent MoE、AttnRes，见 design.md 阶段表）或 **P10 性能**（CUDA graph、pinned/双缓冲、grouped GEMM、真 fp8）——由用户定。另：`crates/glm53/tests/dsa_diag.rs` 是诊断工具（`--ignored`，`STEP=<n>` 选 decode 步），不进 p5/p6.sh
 - 代码命名规则（用户要求）：代码 / 脚本 / 环境变量不出现 `DINFER` 前缀（已改 `TINY_GLM_DIR / KERNEL_REFS_DIR / CUDA_ARCHS / PY_TF519 / P1_SCHED_US`）；C ABI 符号不带 `dinfer_`
 - P4 产出：`kernels/cuda/moe.cu`（gate_f32 / route / bucket / gather / scatter_add / f32_add_to_bf16）、`kernels/cuda/mla.cu::mla_prefill_paged`、`layers/src/moe.rs`、`layers/src/mla.rs::AttnMeta::Paged + absorbed_q/absorbed_o`、`core/src/runner.rs`（ReqState / BatchPlan / BatchMode / ModelExecutor / Runner）、`glm53/src/{model.rs::Glm53Model+FeedForward, executor.rs::Glm53Executor}`、`glm53/tests/{tiny_parity,runner_parity}.rs`、`scripts/verify/p4.sh`、`docs/loops/p4-moe-runner.md`
 - P4 已知简化（P10 / 后续补）：runner 每 step 全量 H2D 输入、argmax 后同步 D2H，无 pinned / 双缓冲 / CUDA graph；MoE 逐专家循环 + 一次 D2H 读 offsets（真机换 grouped GEMM）；Decode/Paged 路径每 head 一次小 GEMM（W_UK/W_UV）；fp8 只做加载期 dequant（sm86 无 fp8 张量核，1×128 激活量化 + 真 FP8 GEMM 留 4090/sm90）；采样只有 greedy；无投机解码；只支持单 KV group
@@ -20,7 +22,7 @@
 - P3 已知简化（后续补）：decode 路径每 head 一次小 GEMM（W_UK/W_UV），H 个 launch → P10 换 batched GEMM；prefill 不支持 chunked context（有历史 KV 的 prefill）→ P4 runner 接 chunked prefill 时补 "prefill + 读 cache" 路径；无 runner / Sampler 层，测试直接喂 Forward 结构体
 - 阻塞 / 待决策：`docs/design.md` §9（KDA kernel 手写 CUDA 还是 Triton AOT；structured output；性能对比基线配置）
 - 本机工具链：rustc/cargo 1.89.0，nvcc 12.4 在 `/usr/local/cuda/bin`（不在默认 PATH；p0.sh 已自动加）；crates.io 直连可用。**cargo 假失败时 `rm target/.rustc_info.json`**（cron trace 污染，见 pitfalls 2026-10-15）
-- 进行中的 loop 规格：`docs/loops/p5-dsa-indexer.md`（第 5 轮，未通过）
+- 进行中的 loop 规格：无（p5 / p6 均已通过）
 - 会话注意：本项目会话两次因 `API Error: 400 Input is too long` 被迫 /clear（10-14 P4、10-15 P5）。长 bisect / 大日志输出前先 wrap；Bash 输出一律 `grep`/`tail` 截断，不要整段 cat 日志
 - 参考材料：`/data/ref/vllm`（main de8291e）、`/data/ref/models/{kimik3,glm53}`（config.json、modeling_*.py、tokenizer、chat 模板、safetensors index；无权重）
 
@@ -41,6 +43,17 @@
   - 读 vLLM v1 的 engine/core、scheduler output、kv_cache_interface、cudagraph_dispatcher、gpu_worker、sampler metadata，以及 `vllm/models/kimi_k3`、`vllm/models/deepseek_v32` 的模型/attention/MoE/MTP 实现。
   - 写 `docs/design.md`：vLLM 启动与推理链路分析、两模型结构事实表、6 crate 划分、每 crate 模块清单、kernel 清单、P0–P10 分阶段计划、决策与风险；补 `docs/requirements.md` 的"不做什么 / 验收口径 / 约束"（标注待确认）；回写 CLAUDE.md"项目是什么"。
 - 怎么验证的：结构参数均出自 config.json 与 vLLM 源码，文中带文件:行号；未做运行验证（无代码）。后台"启动路径"分析返回后核实并补进 design.md §1.4b：Model Runner V2 为默认、两模型走 breakable cudagraph 不走 torch.compile、GLM 用通用 hf tokenizer/parser 模式。
+
+### 2026-10-15（P6 GLM-5.3 tokenizer / chat / server / MTP，通过）
+
+- 做了什么：
+  - a：`tokenizer.rs`（`tokenizers` 0.21 加载 `tokenizer.json`，eos 从 generation_config，`DecodeStream` 增量 decode）；`chat.rs`（minijinja 2.10 跑官方 `chat_template.jinja`：HF 环境 `trim_blocks/lstrip_blocks`、`.N.attr` 改写、Python 方法 shim、Python 风格 `tojson`、`preserve_order`）；`gen_chat_golden.py` 15 case；`chat_parity` 4 测试全过（逐字符 / 逐 id）。下载了 `tokenizer.json`（20 MB）到 `/data/ref/models/glm53`。
+  - b：`parser.rs` 流式解析（`<think>…</think>` → reasoning，`<tool_call>name<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>` → tool_calls，标签前缀保留策略），8 单测含 "每个字符边界切分" 枚举。
+  - c：`core/engine.rs`（请求通道 → Scheduler → Runner → 每请求 `EngineEvent` 流，空闲阻塞）；`server/{backend,openai,chat}.rs`（模型无关 `ChatBackend` trait；OpenAI 类型含 reasoning_content / tool_calls / stream_options / reasoning_effort / clear_thinking；SSE：role chunk → delta → finish → usage → [DONE]）；`glm53/service.rs`（`ChatBackend` 实现）；bin `serve`；`serve_e2e` 起真进程打 HTTP 全过。顺手删掉索引器 / ops 两处过严的 `block_table 覆盖 max_seq` 检查。
+  - d：`mtp.rs`（enorm/hnorm/eh_proj + 同构 decoder 层 + shared_head.norm，复用主干 embed/lm_head/共享 top-k）；runner 协议扩展（`spec_tokens / logits_row_start / next_known`，executor 返回 `(generated, drafts)`，拒绝回退）；executor greedy verify + MTP draft（位置 pos+1，KV 按位置重写无需回滚）；engine 把 draft 交回 scheduler；`--mtp` 开关；`gen_tiny_glm.py --mtp` 用 HF decoder 层 + 胶水做参考；`mtp_parity` 3 测试全过。
+- 怎么验证的：`scripts/verify/p6.sh` exit 0（`test/2026-10-15/p6.log`）；各步数字见 `test/2026-10-15/p6-glm-serve.md`。
+- 未完成：真权重跑通（需大机器）；采样 / logprobs / metrics 等见交接区 "P6 已知简化"。
+- 踩坑：见 `docs/loops/p6-glm-serve.md` 记录表 8 轮；可提炼进 pitfalls 的两条：minijinja 跑 HF 模板的 5 个坑（已写）、runner 侧 `block_table` 宽度语义（已写）。
 
 ### 2026-10-15（P5 DSA，进行中）
 

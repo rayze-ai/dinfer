@@ -500,6 +500,7 @@ mod tests {
         let mro = ModelRunnerOutput {
             req_ids: toks.iter().map(|(i, _)| *i).collect(),
             sampled: toks.iter().map(|(_, t)| t.clone()).collect(),
+            drafts: vec![Vec::new(); toks.len()],
         };
         let r = s.update_from_output(&o, &mro);
         (o, r)
@@ -639,7 +640,10 @@ mod tests {
         let o = s.schedule();
         assert_eq!(o.num_scheduled_tokens, vec![(1, 40)], "single request ignores threshold");
         // r1 prefill 完成产出 1 个 token（max_tokens=1 → 完成）。此时加入 r2 与 r3：两个候选 → 阈值生效。
-        s.update_from_output(&o, &ModelRunnerOutput { req_ids: vec![1], sampled: vec![vec![1]] });
+        s.update_from_output(
+            &o,
+            &ModelRunnerOutput { req_ids: vec![1], sampled: vec![vec![1]], drafts: vec![Vec::new(); 1] },
+        );
         s.add_request(req(2, 40, 1));
         s.add_request(req(3, 40, 1));
         let o = s.schedule();
@@ -666,10 +670,16 @@ mod tests {
         assert_eq!(o2.num_scheduled_tokens, vec![(1, 3)]);
         assert_eq!(o2.scheduled_spec_tokens[0].1.len(), 2);
         assert_eq!(s.request(1).unwrap().num_output_placeholders, 4);
-        s.update_from_output(&o, &ModelRunnerOutput { req_ids: vec![1], sampled: vec![vec![50]] });
+        s.update_from_output(
+            &o,
+            &ModelRunnerOutput { req_ids: vec![1], sampled: vec![vec![50]], drafts: vec![Vec::new(); 1] },
+        );
         assert_eq!(s.request(1).unwrap().num_output_placeholders, 3);
         // step 2 结果：bonus + 1 accepted（拒绝 1）
-        s.update_from_output(&o2, &ModelRunnerOutput { req_ids: vec![1], sampled: vec![vec![51, 52]] });
+        s.update_from_output(
+            &o2,
+            &ModelRunnerOutput { req_ids: vec![1], sampled: vec![vec![51, 52]], drafts: vec![Vec::new(); 1] },
+        );
         let r = s.request(1).unwrap();
         assert_eq!(r.num_output_tokens(), 3);
         assert_eq!(r.num_computed_tokens, 10 + 3 - 1, "one rejected draft rolled back");

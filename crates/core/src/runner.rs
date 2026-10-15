@@ -6,8 +6,11 @@
 //! - `Decode`：全部请求单 token decode → 吸收路径读 paged cache；
 //! - `Paged`：其余（chunked prefill 带历史 / prefill+decode 混合）→ 吸收路径、任意 query 长、对 cache 做 causal。
 //!
-//! P4 约束（后续阶段放开）：只支持单 KV group（MLA）；采样由 executor 决定（P4 为 greedy），本模块不做 logits 后处理；
-//! 无投机解码（每请求每 step 恰好采样 1 个 token；prefill 中间 chunk 的采样结果由 scheduler 忽略）。
+//! 约束：只支持单 KV group（MLA）；采样由 executor 决定（greedy），本模块不做 logits 后处理。
+//!
+//! 投机解码（P6-d）：scheduler 给每请求的 draft（`scheduled_spec_tokens`）追加到该请求本步的 token 之后；executor 对
+//! 每请求返回 `generated = [新采样…]`（长度 1 + 接受数）与下一步的 `draft`。本模块把 `num_computed` 回退被拒绝的
+//! draft 数，并把 draft 通过 `ModelRunnerOutput::drafts` 交还 scheduler（`update_draft_tokens`）。
 
 use crate::kv::BlockId;
 use crate::request::RequestId;
@@ -48,8 +51,15 @@ pub struct BatchPlan {
     /// `[num_reqs, max_blocks]`，-1 填充。
     pub block_table: Vec<i32>,
     pub max_blocks: usize,
-    /// 要取 logits 的 token 行（每请求最后一个 token，按 batch 顺序）。
+    /// 要取 logits 的 token 行（按 batch 顺序）：无 draft 的请求取最后一行；带 draft 的请求取本步全部 `1 + 草稿数` 行
+    /// （verify 要逐行 argmax）。`logits_row_start[i]..logits_row_start[i+1]` 是请求 i 的行区间。
     pub logits_rows: Vec<i32>,
+    pub logits_row_start: Vec<usize>,
+    /// 每请求本步的 draft token（已追加进 input_ids 尾部）；空 = 无投机。
+    pub spec_tokens: Vec<Vec<u32>>,
+    /// 每请求：本步最后一行的 "下一个 token" 若已知（prefill 中间 chunk：序列里已有）则给出，否则 -1（要采样）。
+    /// MTP 用它做中间 chunk 行的输入。
+    pub next_known: Vec<i32>,
     pub mode: BatchMode,
 }
 
@@ -73,9 +83,16 @@ impl BatchPlan {
     }
 }
 
-/// GPU 执行器：由模型 crate 实现。`forward_sample` 对每个请求产出恰好一个 token（P4 无投机解码）。
+/// GPU 执行器：由模型 crate 实现。
+/// `forward_sample`：对每个请求 push 一个 `generated`（verify 后的新 token：长度 1 + 接受的 draft 数；无 draft 时恰 1 个）
+/// 与一个 `draft`（下一步的投机 token，无 MTP 时为空）。prefill 中间 chunk 也要 push（内容由 runner 忽略）。
 pub trait ModelExecutor {
-    fn forward_sample(&mut self, plan: &BatchPlan, sampled: &mut Vec<u32>) -> Result<()>;
+    fn forward_sample(
+        &mut self,
+        plan: &BatchPlan,
+        generated: &mut Vec<Vec<u32>>,
+        drafts: &mut Vec<Vec<u32>>,
+    ) -> Result<()>;
 }
 
 pub struct Runner<E: ModelExecutor> {
@@ -83,12 +100,20 @@ pub struct Runner<E: ModelExecutor> {
     pub block_size: usize,
     states: IdHashMap<ReqState>,
     plan: BatchPlan,
-    sampled: Vec<u32>,
+    generated: Vec<Vec<u32>>,
+    drafts: Vec<Vec<u32>>,
 }
 
 impl<E: ModelExecutor> Runner<E> {
     pub fn new(exec: E, block_size: usize) -> Self {
-        Self { exec, block_size, states: id_hash_map(64), plan: BatchPlan::default(), sampled: Vec::new() }
+        Self {
+            exec,
+            block_size,
+            states: id_hash_map(64),
+            plan: BatchPlan::default(),
+            generated: Vec::new(),
+            drafts: Vec::new(),
+        }
     }
 
     pub fn num_states(&self) -> usize {
@@ -109,29 +134,47 @@ impl<E: ModelExecutor> Runner<E> {
             return Ok(ModelRunnerOutput::default());
         }
         self.build_plan(so)?;
-        self.sampled.clear();
-        self.exec.forward_sample(&self.plan, &mut self.sampled)?;
+        self.generated.clear();
+        self.drafts.clear();
+        self.exec.forward_sample(&self.plan, &mut self.generated, &mut self.drafts)?;
         ensure!(
-            self.sampled.len() == self.plan.num_reqs(),
-            "executor returned {} tokens for {} requests",
-            self.sampled.len(),
+            self.generated.len() == self.plan.num_reqs() && self.drafts.len() == self.plan.num_reqs(),
+            "executor returned {}/{} entries for {} requests",
+            self.generated.len(),
+            self.drafts.len(),
             self.plan.num_reqs()
         );
         // 回填：computed 推进；只有 "本步算到了序列末尾"（prefill 末块 / decode）的采样才是真 token，
         // prefill 中间 chunk 的采样无意义：不追加、也不上报（scheduler 侧同样忽略，见 vLLM `_prepare_inputs`）。
+        // 投机：本步 n = base + 草稿数；executor 返回 1 + 接受数个 token；被拒绝的 draft 行从 computed 回退。
         let mut out = ModelRunnerOutput {
             req_ids: self.plan.req_ids.clone(),
             sampled: Vec::with_capacity(self.plan.num_reqs()),
+            drafts: Vec::with_capacity(self.plan.num_reqs()),
         };
         for (i, &rid) in self.plan.req_ids.iter().enumerate() {
             let st = self.states.get_mut(&rid).unwrap();
-            st.num_computed += self.plan.num_tokens[i] as usize;
-            if st.num_computed == st.token_ids.len() {
-                let tok = self.sampled[i];
-                st.token_ids.push(tok);
-                out.sampled.push(vec![tok]);
+            let n = self.plan.num_tokens[i] as usize;
+            let num_draft = self.plan.spec_tokens[i].len();
+            let base = n - num_draft;
+            let end_of_seq = st.num_computed + base == st.token_ids.len();
+            if end_of_seq {
+                let gen = &self.generated[i];
+                ensure!(
+                    !gen.is_empty() && gen.len() <= 1 + num_draft,
+                    "req {rid}: executor returned {} tokens",
+                    gen.len()
+                );
+                let accepted = gen.len() - 1;
+                st.num_computed += base + accepted;
+                st.token_ids.extend_from_slice(gen);
+                out.sampled.push(gen.clone());
+                out.drafts.push(self.drafts[i].clone());
             } else {
+                ensure!(num_draft == 0, "req {rid}: draft on a mid-prefill chunk");
+                st.num_computed += n;
                 out.sampled.push(Vec::new());
+                out.drafts.push(Vec::new());
             }
         }
         Ok(out)
@@ -184,7 +227,11 @@ impl<E: ModelExecutor> Runner<E> {
         p.seq_lens.clear();
         p.block_table.clear();
         p.logits_rows.clear();
+        p.logits_row_start.clear();
+        p.spec_tokens.clear();
+        p.next_known.clear();
         p.cu_seqlens.push(0);
+        p.logits_row_start.push(0);
 
         let mut any_prefill = false;
         let mut any_decode = false;
@@ -194,18 +241,29 @@ impl<E: ModelExecutor> Runner<E> {
             let st = self.states.get(&rid).with_context(|| format!("scheduled req {rid} unknown"))?;
             let n = n as usize;
             let start = st.num_computed;
-            ensure!(start + n <= st.token_ids.len(), "req {rid}: scheduled {n} tokens past end");
+            let spec: &[u32] = so
+                .scheduled_spec_tokens
+                .iter()
+                .find(|(id, _)| *id == rid)
+                .map(|(_, s)| s.as_slice())
+                .unwrap_or(&[]);
+            let base = n
+                .checked_sub(spec.len())
+                .with_context(|| format!("req {rid}: {n} tokens < {} drafts", spec.len()))?;
+            ensure!(start + base <= st.token_ids.len(), "req {rid}: scheduled {base} tokens past end");
             if start == 0 {
                 any_prefill = true;
             } else if n == 1 {
                 any_decode = true;
             } else {
-                any_paged = true; // 带历史的 chunked prefill
+                any_paged = true; // 带历史的 chunked prefill / 带 draft 的 decode
             }
             p.req_ids.push(rid);
             p.num_tokens.push(n as u32);
-            for pos in start..start + n {
-                p.input_ids.push(st.token_ids[pos] as i32);
+            let row0 = p.input_ids.len();
+            for (k, pos) in (start..start + n).enumerate() {
+                let tok = if k < base { st.token_ids[pos] } else { spec[k - base] };
+                p.input_ids.push(tok as i32);
                 p.positions.push(pos as i32);
                 let b = st
                     .block_ids
@@ -216,7 +274,17 @@ impl<E: ModelExecutor> Runner<E> {
             let total = p.input_ids.len();
             p.cu_seqlens.push(total as i32);
             p.seq_lens.push((start + n) as i32);
-            p.logits_rows.push(total as i32 - 1);
+            if spec.is_empty() {
+                p.logits_rows.push(total as i32 - 1);
+            } else {
+                p.logits_rows.extend((row0 + base - 1..total).map(|r| r as i32));
+            }
+            p.logits_row_start.push(p.logits_rows.len());
+            p.spec_tokens.push(spec.to_vec());
+            // 中间 chunk：最后一行的下一个 token 已在序列里
+            let next_known =
+                if start + base < st.token_ids.len() { st.token_ids[start + base] as i32 } else { -1 };
+            p.next_known.push(next_known);
             max_blocks = max_blocks.max(st.block_ids.len());
         }
         p.mode = match (any_prefill, any_decode, any_paged) {
@@ -249,10 +317,16 @@ mod tests {
         plans: Vec<BatchPlan>,
     }
     impl ModelExecutor for Echo {
-        fn forward_sample(&mut self, plan: &BatchPlan, sampled: &mut Vec<u32>) -> Result<()> {
+        fn forward_sample(
+            &mut self,
+            plan: &BatchPlan,
+            generated: &mut Vec<Vec<u32>>,
+            drafts: &mut Vec<Vec<u32>>,
+        ) -> Result<()> {
             self.plans.push(plan.clone());
             for &s in &plan.seq_lens {
-                sampled.push(1000 + s as u32);
+                generated.push(vec![1000 + s as u32]);
+                drafts.push(Vec::new());
             }
             Ok(())
         }

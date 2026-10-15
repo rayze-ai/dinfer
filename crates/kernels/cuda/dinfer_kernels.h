@@ -82,6 +82,8 @@ int scatter_head_bf16(const void* src, void* dst, int64_t tokens, int64_t heads,
 
 
 // ---- 逐元素（elementwise.cu）----
+// x[t,:] = 0 where pos[t] == 0（MTP）
+int zero_rows_where_pos0_bf16(void* x, const int32_t* pos, int64_t tokens, int64_t cols, cudaStream_t stream);
 int add_inplace_bf16(const void* x, void* y, int64_t n, cudaStream_t stream);  // y += x
 int gather_rows_bf16(const void* src, void* dst, const int32_t* rows, int64_t num_rows, int64_t width,
                      cudaStream_t stream);  // dst[r] = src[rows[r]]

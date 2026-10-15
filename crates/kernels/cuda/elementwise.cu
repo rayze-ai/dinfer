@@ -66,3 +66,20 @@ extern "C" int bf16_to_f32(const void* x, float* y, int64_t n, cudaStream_t stre
   bf16_to_f32_kernel<<<grid_for(n), 256, 0, stream>>>(static_cast<const bf16*>(x), y, n);
   return last_err();
 }
+
+// ---------- zero_rows_where_pos0: x[t, :] = 0 where pos[t] == 0（MTP：位置 0 的 embedding 置零） ----------
+namespace {
+__global__ void zero_rows_pos0_kernel(bf16* __restrict__ x, const int32_t* __restrict__ pos, int64_t cols) {
+  const int64_t t = blockIdx.x;
+  if (pos[t] != 0) return;
+  bf16* row = x + t * cols;
+  for (int64_t c = threadIdx.x; c < cols; c += blockDim.x) row[c] = to_bf16(0.f);
+}
+}  // namespace
+
+extern "C" int zero_rows_where_pos0_bf16(void* x, const int32_t* pos, int64_t tokens, int64_t cols, cudaStream_t stream) {
+  if (tokens <= 0) return 0;
+  if (cols <= 0) return err(cudaErrorInvalidValue);
+  zero_rows_pos0_kernel<<<(unsigned)tokens, 256, 0, stream>>>(static_cast<bf16*>(x), pos, cols);
+  return last_err();
+}

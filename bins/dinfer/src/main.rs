@@ -42,6 +42,9 @@ enum Cmd {
         block_size: u32,
         #[arg(long, default_value_t = 0)]
         device: usize,
+        /// 开启 MTP 投机解码（nextn=1）
+        #[arg(long, default_value_t = false)]
+        mtp: bool,
     },
     /// 打印 CUDA 设备信息
     DeviceInfo {
@@ -84,6 +87,7 @@ async fn main() -> Result<()> {
             num_blocks,
             block_size,
             device,
+            mtp,
         } => {
             let name = served_model_name.unwrap_or_else(|| model_name().to_string());
             let addr = format!("{host}:{port}");
@@ -99,6 +103,7 @@ async fn main() -> Result<()> {
                     block_size,
                     enable_chunked_prefill: true,
                     device,
+                    mtp,
                 };
                 // 模型加载是阻塞的 CUDA 工作，放到 blocking 线程，避免卡 tokio runtime
                 let svc = tokio::task::spawn_blocking(move || {
@@ -111,6 +116,7 @@ async fn main() -> Result<()> {
             #[cfg(not(feature = "glm53"))]
             {
                 let _ = (
+                    &addr,
                     model,
                     tokenizer,
                     max_model_len,
@@ -119,6 +125,7 @@ async fn main() -> Result<()> {
                     num_blocks,
                     block_size,
                     device,
+                    mtp,
                 );
                 anyhow::bail!(
                     "serve for model `{name}` is not implemented yet (build with --features glm53)"

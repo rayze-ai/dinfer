@@ -83,7 +83,7 @@ fn run(budget: u32, chunked: bool, _unused: u32, expect_steps: usize) {
     }
     let num_blocks = 64;
     let model = Glm53Model::load(&s, &src, cfg.clone(), 128, num_blocks, BLOCK).unwrap();
-    let exec = Glm53Executor::new(s.clone(), gemm, model).unwrap();
+    let exec = Glm53Executor::new(s.clone(), gemm, model, None).unwrap();
     let mut runner = Runner::new(exec, BLOCK);
 
     let params = SchedulerParams {

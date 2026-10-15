@@ -5,6 +5,7 @@ use crate::chat::{ChatTemplate, RenderParams};
 use crate::config::GlmMoeDsaConfig;
 use crate::executor::Glm53Executor;
 use crate::model::Glm53Model;
+use crate::mtp::MtpLayer;
 use crate::parser::OutputParser;
 use crate::tokenizer::GlmTokenizer;
 use anyhow::{Context, Result};
@@ -31,6 +32,8 @@ pub struct ServeOptions {
     pub block_size: u32,
     pub enable_chunked_prefill: bool,
     pub device: usize,
+    /// MTP 投机解码（nextn=1）；需要 config `num_nextn_predict_layers == 1` 与 `model.layers.{N}.*` 权重。
+    pub mtp: bool,
 }
 
 impl Default for ServeOptions {
@@ -45,6 +48,7 @@ impl Default for ServeOptions {
             block_size: 16,
             enable_chunked_prefill: true,
             device: 0,
+            mtp: false,
         }
     }
 }
@@ -93,7 +97,23 @@ impl Glm53Service {
             opt.num_blocks as usize,
             opt.block_size as usize,
         )?;
-        let exec = Glm53Executor::new(s.clone(), gemm, model)?;
+        let mtp = if opt.mtp {
+            anyhow::ensure!(
+                cfg.num_nextn_predict_layers == 1,
+                "--mtp: model has no MTP layer (num_nextn_predict_layers != 1)"
+            );
+            Some(MtpLayer::load(
+                &s,
+                &src,
+                &cfg,
+                max_tokens,
+                opt.num_blocks as usize,
+                opt.block_size as usize,
+            )?)
+        } else {
+            None
+        };
+        let exec = Glm53Executor::new(s.clone(), gemm, model, mtp)?;
         let runner = Runner::new(exec, opt.block_size as usize);
 
         let params = engine::scheduler_params(
@@ -106,6 +126,7 @@ impl Glm53Service {
             CacheConfig { block_size: opt.block_size, enable_prefix_caching: false, ..Default::default() },
             opt.max_model_len,
             tok.eos_ids().to_vec(),
+            if opt.mtp { 1 } else { 0 },
         );
         let entry = cfg.kv_lora_rank + cfg.qk_rope_head_dim;
         let groups = vec![GroupInfo {
@@ -114,7 +135,7 @@ impl Glm53Service {
         }];
         let sched = Scheduler::new(params, groups, opt.num_blocks);
         let (handle, jh) = engine::spawn(sched, runner);
-        tracing::info!(model = %served_name, max_model_len = opt.max_model_len, num_blocks = opt.num_blocks, "glm53 engine started");
+        tracing::info!(model = %served_name, max_model_len = opt.max_model_len, num_blocks = opt.num_blocks, mtp = opt.mtp, "glm53 engine started");
         Ok(Self {
             tok,
             tmpl,

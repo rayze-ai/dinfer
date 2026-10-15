@@ -197,6 +197,13 @@ extern "C" {
         width: i64,
         stream: cudaStream_t,
     ) -> i32;
+    pub fn zero_rows_where_pos0_bf16(
+        x: *mut c_void,
+        pos: *const i32,
+        tokens: i64,
+        cols: i64,
+        stream: cudaStream_t,
+    ) -> i32;
     pub fn add_inplace_bf16(x: *const c_void, y: *mut c_void, n: i64, stream: cudaStream_t) -> i32;
     pub fn gather_rows_bf16(
         src: *const c_void,

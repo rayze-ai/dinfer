@@ -35,7 +35,8 @@
 export CUDA_HOME=/usr/local/cuda PATH=/usr/local/cuda/bin:$PATH   # nvcc 不在默认 PATH
 cargo build --workspace --features glm53          # 或 --features kimik3；无 nvcc 加 --features no-nvcc
 cargo test --workspace --features glm53           # CPU 单测；GPU 测试：cargo test -p dinfer-kernels -- --ignored
-scripts/verify/p5.sh                              # 当前阶段验收（含 p0–p4），exit 0 = 通过
+scripts/verify/p6.sh                              # 当前阶段验收（含 p0–p5），exit 0 = 通过
+cargo run -p dinfer --features glm53 -- serve --model test/tiny_glm_dsa_fullvocab --tokenizer /data/ref/models/glm53 --port 8011 [--mtp]
 kubectl apply -f scripts/dev/k8s/dev-pod.yaml     # 4090 开发 Pod（runtimeClassName: nvidia 必带）
 rm -f target/.rustc_info.json                     # cargo 报 "failed to run rustc to learn about target" 时（见 pitfalls）
 ```

@@ -38,6 +38,7 @@ ap.add_argument("--dsa", action="store_true", help="用 GlmMoeDsaForCausalLM（D
 ap.add_argument("--index-topk", type=int, default=8)
 ap.add_argument("--long", type=int, default=256, help="--dsa 时额外生成的长 prompt 长度")
 ap.add_argument("--vocab", type=int, default=1000, help="词表大小；server e2e 用 154880 以兼容真 GLM-5.3 tokenizer")
+ap.add_argument("--mtp", action="store_true", help="附加一个 MTP 层（model.layers.<L>：enorm/hnorm/eh_proj + decoder 层 + shared_head.norm），导出 draft logits golden")
 args = ap.parse_args()
 out = Path(args.out)
 out.mkdir(parents=True, exist_ok=True)
@@ -109,7 +110,56 @@ with torch.no_grad():
     for n, b in model.named_buffers():
         if n.endswith("e_score_correction_bias"):
             b.copy_(torch.randn_like(b) * 0.1)
+
+# ---- MTP 层（可选）：结构同 DeepSeek-V3 nextn：enorm / hnorm / eh_proj(2h→h) / 一个 decoder 层 / shared_head.norm，
+# lm_head 与 embed 复用主干。HF transformers 没有 GLM MTP 实现，这里用 HF 的 decoder 层 + 自写胶水当参考。
+mtp = None
+if args.mtp:
+    assert args.dsa, "--mtp 需要 --dsa（GLM-5.3 的 MTP 层带 DSA 索引器）"
+    from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import GlmMoeDsaDecoderLayer, GlmMoeDsaRMSNorm
+    L = args.layers  # MTP 层编号 = num_hidden_layers（真模型 layers.78）
+    # HF 的 indexer_types / mlp_layer_types 只有 num_hidden_layers 项；MTP 层用 "多一层" 的 config 构造（规则同主干：
+    # indexer 按 freq/offset，mlp 按 first_k_dense_replace），这与真 GLM-5.3 config 里 indexer_types 含第 78 项一致。
+    import copy
+    cfg_mtp = copy.deepcopy(cfg)
+    cfg_mtp.num_hidden_layers = L + 1
+    shifted = (L + 1) - IDX["index_skip_topk_offset"]
+    mtp_indexer = "full" if shifted % IDX["index_topk_freq"] == 0 else "shared"
+    cfg_mtp.indexer_types = list(cfg.indexer_types) + [mtp_indexer]
+    cfg_mtp.mlp_layer_types = list(cfg.mlp_layer_types) + ["sparse" if L >= common["first_k_dense_replace"] else "dense"]
+    mtp = torch.nn.ModuleDict({
+        "enorm": GlmMoeDsaRMSNorm(cfg.hidden_size, eps=cfg.rms_norm_eps),
+        "hnorm": GlmMoeDsaRMSNorm(cfg.hidden_size, eps=cfg.rms_norm_eps),
+        "eh_proj": torch.nn.Linear(cfg.hidden_size * 2, cfg.hidden_size, bias=False),
+        "block": GlmMoeDsaDecoderLayer(cfg_mtp, L),
+        "shared_head_norm": GlmMoeDsaRMSNorm(cfg.hidden_size, eps=cfg.rms_norm_eps),
+    }).to(torch.bfloat16).eval()
+    with torch.no_grad():
+        for n, p_ in mtp.named_parameters():
+            if p_.dim() >= 2:
+                p_.mul_(1.0)
+            if ".indexer.wq_b" in n or ".indexer.wk." in n:
+                p_.mul_(6.0)
+            if n.endswith(".mlp.gate.weight"):
+                p_.mul_(8.0)
+        for n, b in mtp.named_buffers():
+            if n.endswith("e_score_correction_bias"):
+                b.copy_(torch.randn_like(b) * 0.1)
+    # 真模型 MTP 层是 full 索引器层吗？GLM-5.3 indexer_types[78]：freq 4 / offset 3 → (78 - 3) % 4 == 3 → shared。
+    # tiny：layers=3, freq 2 / offset 1 → (3-1)%2 == 0 → full。两种都要能跑；Rust 侧按 config 的 indexer_types 判断。
+    print("mtp block indexer:", "full" if mtp["block"].self_attn.indexer is not None else "shared (reuses main-model top-k)")
+
 state = {k: v.contiguous() for k, v in model.state_dict().items()}
+if mtp is not None:
+    L = args.layers
+    for k, v in mtp.state_dict().items():
+        if k.startswith("block."):
+            name = f"model.layers.{L}." + k[len("block."):]
+        elif k == "shared_head_norm.weight":
+            name = f"model.layers.{L}.shared_head.norm.weight"
+        else:
+            name = f"model.layers.{L}." + k   # enorm.weight / hnorm.weight / eh_proj.weight
+        state[name] = v.contiguous()
 
 # transformers ≥ 5 把专家权重存成融合 3D 张量 `experts.gate_up_proj [E, 2I, H]` / `experts.down_proj [E, H, I]`；
 # 真 GLM-5.3 safetensors 与 Rust 加载器用逐专家 `experts.{e}.{gate,up,down}_proj.weight`。这里拆回逐专家布局。
@@ -186,11 +236,12 @@ c.update({
     "n_group": 1,
     "topk_group": 1,
     "norm_topk_prob": True,
-    "num_nextn_predict_layers": 0,
+    "num_nextn_predict_layers": 1 if args.mtp else 0,
+    "index_share_for_mtp_iteration": True,
     "rope_parameters": {"rope_theta": cfg.rope_theta, "rope_type": "default"},
     # 索引器字段（--dsa 时真用；否则占位，Rust 侧不读 indexer 权重）
     **IDX, "index_topk_pattern": None, "indexer_rope_interleave": True,
-    "indexer_types": list(cfg.indexer_types) if args.dsa else None,
+    "indexer_types": (list(cfg_mtp.indexer_types) if args.mtp else list(cfg.indexer_types)) if args.dsa else None,
     "dsa": bool(args.dsa),
 })
 if args.fp8:
@@ -376,4 +427,53 @@ if args.dsa:
     n_drift = int(sum((np.stack(prefix_drift[li]) > 0.02).any(axis=0).sum() for li in prefix_drift))
     print("dumped decode hidden:", sorted(steps_h), f"[{args.gen}, hidden]; prefix rows that drift in some step (any layer): {n_drift}")
 
-print(f"wrote tiny GLM ({args.layers} layers{', DSA' if args.dsa else ''}) to {out}; greedy[:8] = {gen[0, prompt.shape[1]:prompt.shape[1]+8].tolist()}")
+
+def mtp_reference(seq: torch.Tensor):
+    """MTP draft logits 参考：对整条序列 seq [1,T]，主干前向取 **最后一层输出（norm 之前）** 作为 previous_hidden；
+    MTP 输入 token = seq 右移一位（第 i 行吃 seq[i+1]，最后一行无下一 token → 用 0 占位且只取 [:T-1] 行有效）。
+    返回 [T-1, V] 的 draft logits：第 i 行预测 seq[i+2]。"""
+    model_m = model.model
+    caps = {}
+    h = model_m.layers[-1].register_forward_hook(lambda mod, a, o: caps.__setitem__("last", (o[0] if isinstance(o, tuple) else o)))
+    tk = {}
+    for li, Lr in enumerate(model_m.layers):
+        if Lr.self_attn.indexer is not None:
+            Lr.self_attn.register_forward_hook(lambda mod, a, o, li=li: tk.__setitem__(li, o[2]))
+    with torch.no_grad():
+        model(seq)
+    h.remove()
+    prev_hidden = caps["last"]                                  # [1, T, H]（最后一层 decoder 输出，未过 model.norm）
+    T = seq.shape[1]
+    nxt = torch.cat([seq[:, 1:], torch.zeros_like(seq[:, :1])], dim=1)   # 右移
+    emb = model_m.embed_tokens(nxt)
+    pos = torch.arange(T)[None]
+    emb = torch.where(pos.unsqueeze(-1) == 0, torch.zeros_like(emb), emb)  # position 0 置零（vLLM 同）
+    x = mtp["eh_proj"](torch.cat([mtp["enorm"](emb), mtp["hnorm"](prev_hidden)], dim=-1))
+    pe = model_m.rotary_emb(x, position_ids=pos)
+    from transformers.masking_utils import create_causal_mask
+    mask = create_causal_mask(config=cfg, inputs_embeds=x, attention_mask=None, past_key_values=None, position_ids=pos, allow_is_causal_skip=False)
+    # shared 索引器层复用主干最后一个 full 层的 top-k（index_share_for_mtp_iteration）；full 层自己算
+    last_full = max(tk) if tk else None
+    with torch.no_grad():
+        y, _ = mtp["block"](x, attention_mask=mask, position_ids=pos, position_embeddings=pe,
+                            prev_topk_indices=(tk[last_full] if last_full is not None else None))
+        logits = model.lm_head(mtp["shared_head_norm"](y))     # [1, T, V]
+    return logits[0, : T - 1].float().numpy(), (tk[last_full][0].to(torch.int32).numpy() if last_full is not None else None)
+
+if mtp is not None:
+    with torch.no_grad():
+        d_long, tk_long = mtp_reference(prompt_long)
+        np.save(out / "mtp_draft_logits_long.npy", d_long)                     # [T-1, V]：第 i 行 = 看完 prompt[..=i+1] 后对 prompt[i+2] 的 draft
+        if tk_long is not None:
+            np.save(out / "mtp_main_topk_long.npy", tk_long)                  # 主干最后一个 full 层的 top-k [T, K]（注入用）
+        # decode 第 1 步：序列 = prompt_long + gen[0]；draft 的最后一行（第 T-1 行，看完 gen[0]）预测 gen[1] 的候选
+        seq1 = gen_l[:, : args.long + 1]
+        d1, tk1 = mtp_reference(seq1)
+        np.save(out / "mtp_draft_logits_step1.npy", d1[-1])                  # [V]
+        if tk1 is not None:
+            np.save(out / "mtp_main_topk_step1.npy", tk1)
+        np.save(out / "mtp_greedy_draft_long.npy", d_long.argmax(-1).astype(np.int32))
+        acc = (d_long.argmax(-1)[: args.long - 2] == prompt_long[0, 2:].numpy()).mean()
+        print(f"mtp golden: draft logits [{d_long.shape}], random-weight draft 'accuracy' on prompt {acc:.3f} (expected ~0 for tiny random)")
+
+print(f"wrote tiny GLM ({args.layers} layers{', DSA' if args.dsa else ''}{', MTP' if args.mtp else ''}) to {out}; greedy[:8] = {gen[0, prompt.shape[1]:prompt.shape[1]+8].tolist()}")

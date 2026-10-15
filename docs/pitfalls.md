@@ -11,6 +11,22 @@
 >     - 如何避免：
 >     - 相关：`文件/命令/链接`
 
+## 2026-10-15 minijinja 跑 HF chat_template.jinja：5 处方言差异导致解析失败或输出不逐字符一致
+
+- 现象：① `syntax error: unexpected float`（`m.content.0.type`）；② `string has no method named strip/split`、`map has no method named items`；③ tools 段多出一个 `\n`；④ JSON 里 key 顺序被排序、分隔符是 `,`/`:`（Python 是 `", "`/`": "`）。
+- 根因：minijinja 把 `.0.type` 词法成 float；没有 Python 字符串 / dict 方法；HF 的 jinja 环境是 `trim_blocks=True, lstrip_blocks=True`（`chat_template_utils._compile_jinja_template`）而 minijinja 默认关；minijinja/serde_json 默认 BTreeMap 排序 key，`tojson` 用紧凑分隔符且不认 `ensure_ascii` kwarg。
+- 解法：加载前 `x.N.attr` → `x[N].attr`；`set_unknown_method_callback` 补 strip/split/items 等；`set_trim_blocks/lstrip_blocks(true)`；minijinja 与 serde_json 都开 `preserve_order`；自写 `tojson` filter 按 Python `json.dumps(ensure_ascii=False)` 输出。验收口径必须是 "渲染文本与 HF `apply_chat_template(tokenize=False)` 逐字符一致"，再 encode 比 id —— 只比 id 会漏掉空白差异。
+- 如何避免：新模板先用 `gen_chat_golden.py` 产 golden（含 tools / 多轮 / tool 结果乱序 / `clear_thinking` / 非法 `reasoning_effort`），跑 `chat_parity` 看 `first diff at char N` 定位。
+- 相关：`crates/glm53/src/chat.rs`、`scripts/verify/gen_chat_golden.py`、`crates/glm53/tests/chat_parity.rs`
+
+## 2026-10-15 server 请求 500 `indexer: block_table covers 16 < max_seq 1024`：block_table 宽度不是 cache 容量
+
+- 现象：单测 / 对拍里 block_table 是 `[1, NUM_BLOCKS]`（全 cache），一切正常；接上 runner 后第一个请求就 500。
+- 根因：runner 的 `BatchPlan.max_blocks` 是本 batch **最长请求的块数**（vLLM 同），不是 cache 容量；索引器层与 `ops::dsa_index_score_f32` 各有一条 `max_blocks*block_size >= max_seq` 的 ensure，把 "score 行步长 = cache 容量" 和 "block_table 宽度" 混为一谈。kernel 实际只读 `bt[j / bs]`，j < vis ≤ seq_len，宽度覆盖每个请求自己的 seq_len 即可。
+- 解法：删掉两处 ensure；注释写清两个量的语义。
+- 如何避免：新 kernel 的 host 侧 ensure 只检查 "会越界读写" 的条件，不要把测试 harness 的巧合（全表）写成约束；接 runner 的路径（`serve_e2e`）要尽早跑。
+- 相关：`crates/layers/src/indexer.rs`、`crates/kernels/src/ops.rs::dsa_index_score_f32`、`crates/core/src/runner.rs::build_plan`
+
 ## 2026-10-15 HF 参考在 bf16 下不是"前缀稳定"的：同一 prompt 加两个 token 重算，前缀行的 top-k / 路由会翻转
 
 - 现象：注入 HF top-k 后 prefill 全对（attention ≤ 0.0005），但 decode 第 2 步起 L1（shared 层）attention 误差 0.02（L0/L2 仅 0.0005），logits 0.06；且与步数无关、不累积（step 1 好，step 2 坏，step 21 坏）。逐层 bisect 到 cache：我们 L1 cache 第 142 行与 HF 同一行差 1.87，但 prefill 刚结束时该行是对的。
