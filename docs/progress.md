@@ -4,12 +4,14 @@
 ## 当前状态
 
 - 更新日期：2026-10-15
-- 阶段：**P4 通过（a/b/c/d）**，`scripts/verify/p4.sh` exit 0（= p0–p3 + MoE 对拍 + runner 单测 + Scheduler+Runner+Executor 双请求对拍 plain/chunked × dense/MoE + tiny fp8 GLM 同套 3+2 对拍）。commits：P0 `cda9aea`，P1 `65a67f1`，P2 `d44e49f`，P3 `17930a5`，P4-c `35b54e3`，P4-a `69c8478`，P4-b `ea415e3`，P4-d + docs 见 git log
-- P4-d fp8（已验证）：`layers/src/weights_fp8.rs`（e4m3 解码 + 128×128 块 dequant，2 单测）、`WeightSource::{with_quant_block, dequant_fp8}`（`load_bf16 / load_f32_host` 对 `F8_E4M3` 自动解量化，需同名 `weight_scale_inv`，块数 `⌈N/128⌉×⌈K/128⌉` 末块可不满）、`GlmMoeDsaConfig::fp8_block_size()`、`gen_tiny_glm.py --fp8`（28 个投影权重量化，期望值用解量化权重算）。tiny fp8 GLM：prefill 0.0076 / 32 步 worst 0.0073 / runner plain 0.0077 / chunked 0.0078
-- 正在做：**P5 DSA 索引器 + 稀疏 MLA**。代码齐、能编译、**24 个文件未提交**；`scripts/verify/p5.sh` **未通过：3 道 `dsa_parity` 全 FAIL**（2026-10-15 16:30 实跑，详见 `test/2026-10-15/p5-dsa-parity.md`）。失败都不是算错而是"可判定行太少"：self 自算可判定 28/256（需 ≥ 64，可判定行 worst 0.0078 ✅）；注入 HF top-k 路由 near-tie 45/256（需 ≤ 25，211 可判定行 worst 0.0098 ✅）；topk 集合 L2_long row 124 分差 0.1166 刚超 band 0.1130（索引器分数误差涨到 0.11，之前 0.024，原因未查）。**下一步（可直接执行）**：① 改 `gen_tiny_glm.py --dsa` 的 fixture 让平局率降下来（路由 near-tie < 10%、索引器可判定 ≥ 64：调索引器权重放大系数 ×6 / 换 seed / 减专家数），重跑 `DINFER_TINY_GLM=$(realpath test/tiny_glm_dsa) cargo test -p dinfer-glm53 --features ref-tests --test dsa_parity -- --ignored --test-threads=1 --nocapture`；② 查 row 124 的 0.11 分数误差；③ PASS 后 `scripts/verify/p5.sh` → commit "P5: DSA indexer + sparse MLA"，design.md P5 行打勾 → P6。loop 规格 `docs/loops/p5-dsa-indexer.md` 已记 5 轮，上限 10
+- 历史：P0 `cda9aea`，P1 `65a67f1`，P2 `d44e49f`，P3 `17930a5`，P4 `35b54e3`/`69c8478`/`ea415e3`/`3c317d1`（`scripts/verify/p4.sh` exit 0 = p0–p3 + MoE + runner + 双请求 + fp8），P5 WIP `1a774f0` + 本次收尾 commit
+- 阶段：**P5 通过**（`dsa_parity` 3/3 PASS 2026-10-15 19:10；`scripts/verify/p5.sh` = p4 + tiny DSA GLM 三道对拍，结果见本日日志）。P5 产出：`kernels/cuda/dsa.cu`（layernorm / 索引分数（paged 索引 cache）/ top-k / row_vis）、`mla.cu` 三条 attention 路径的 `topk_indices` gather 模式、`layers/src/indexer.rs`、`mla.rs::SparseCtx{topk, topk_override, topk_self}`、`glm53::model` 每 full 层索引器 + 跨层共享 top-k 缓冲 + 对拍钩子（`capture_topk / capture_layers / capture_routing / capture_attn_pre`）、`glm53/tests/{dsa_parity,dsa_diag}.rs`、`gen_tiny_glm.py --dsa`（transformers 5.19 GlmMoeDsa；导出 top-k / 索引分数 / 路由 margin / 逐层 hidden / 每步前缀漂移）、`docs/loops/p5-dsa-indexer.md`（7 轮）
+- P5 对拍口径（重要，后续 P6+ 沿用）：硬判决（索引器 top-k、MoE 路由）bf16 下不可逐位复现 → ① 注入 HF top-k 逐层隔离比每层自算 top-k；② 行过滤用 **实测 hidden 漂移**（注入后逐层比 hidden > 0.02），不用路由 margin 代理；③ HF 全序列重算在 bf16 下 **不前缀稳定**（5/256 前缀行 top-k 在加 2 个 token 后翻转），fixture 每步导出前缀漂移，命中的 decode 步不断言。详见 pitfalls 2026-10-15 三条、`test/2026-10-15/p5-dsa-parity.md`
+- P5 已知简化（P10 / 真机补）：索引器 K cache bf16（真机 fp8 + scale）；索引分数 kernel 按 head 循环、top-k 单 block K 轮 argmax（真机 DeepGEMM fp8_mqa_logits + radix top-k）；稀疏 attention 仍是参考 kernel 逐 key gather；tiny fixture 用 `wq_b/wk ×6`、`mlp.gate ×8` 放大分差（真模型训练后自然有分辨力）
+- 下一步：**P6**（tokenizer / chat 模板 / server / MTP）。开工前先 `/project-skill loop p6-<feature>` 写规格。另：`crates/glm53/tests/dsa_diag.rs` 是诊断工具（`--ignored`，`STEP=<n>` 选 decode 步），不进 p5.sh
+- 代码命名规则（用户要求）：代码 / 脚本 / 环境变量不出现 `DINFER` 前缀（已改 `TINY_GLM_DIR / KERNEL_REFS_DIR / CUDA_ARCHS / PY_TF519 / P1_SCHED_US`）；C ABI 符号不带 `dinfer_`
 - P4 产出：`kernels/cuda/moe.cu`（gate_f32 / route / bucket / gather / scatter_add / f32_add_to_bf16）、`kernels/cuda/mla.cu::mla_prefill_paged`、`layers/src/moe.rs`、`layers/src/mla.rs::AttnMeta::Paged + absorbed_q/absorbed_o`、`core/src/runner.rs`（ReqState / BatchPlan / BatchMode / ModelExecutor / Runner）、`glm53/src/{model.rs::Glm53Model+FeedForward, executor.rs::Glm53Executor}`、`glm53/tests/{tiny_parity,runner_parity}.rs`、`scripts/verify/p4.sh`、`docs/loops/p4-moe-runner.md`
 - P4 已知简化（P10 / 后续补）：runner 每 step 全量 H2D 输入、argmax 后同步 D2H，无 pinned / 双缓冲 / CUDA graph；MoE 逐专家循环 + 一次 D2H 读 offsets（真机换 grouped GEMM）；Decode/Paged 路径每 head 一次小 GEMM（W_UK/W_UV）；fp8 只做加载期 dequant（sm86 无 fp8 张量核，1×128 激活量化 + 真 FP8 GEMM 留 4090/sm90）；采样只有 greedy；无投机解码；只支持单 KV group
-- 下一步（P4 收尾后）：P5 DSA 索引器（`index_n_heads 32 / index_head_dim 128 / index_topk 2048 / index_topk_freq 4`，`indexer_types` full/shared 交替；参考 vLLM `deepseek_v32/indexer.py`），tiny GLM seq 4096 对拍
 - 环境：本机 3090（sm86）日常开发；k8s `admin@polaris` 两节点各 8 × RTX 4090（sm_89，驱动 580.178.04），Pod 需 `runtimeClassName: nvidia`，见 `scripts/dev/k8s/README.md`。用户决定：先做 sm8x 能完成的部分，sm90 以后再给
 - P1 产出：`core/src/sched/mod.rs`（running-first / waiting、token 预算、chunked prefill、`long_prefill_token_threshold`、末尾抢占、async scheduling 占位 + spec 回退、slab 索引）、`core/src/kv/{block_pool,hash,manager}.rs`（LRU 双链表 + (group,hash) 索引、xxh3-128 链式块哈希、多 group 管理器含 Mamba 单状态块、decode 零分配快路径）、`sched/output.rs`（`StepResults` 扁平缓冲）、`examples/probe_sched.rs`、`docs/loops/p1-scheduler-perf.md`
 - P1 已知简化（P7 补）：Mamba 组只在 block 对齐边界登记/命中，不做逐级回退与 checkpoint 多块；所有 group 要求同 page 大小；无 priority 调度、无 encoder 预算
@@ -51,7 +53,14 @@
   - `gen_tiny_glm.py --dsa`：用 5.19 GlmMoeDsa（3 层 full/shared/full，4 头 × 32，top-k 8，索引器权重 ×6 让分数有分辨力），拆融合专家权重为逐专家布局，导出每 full 层 top-k 与 index_scores（prefill 短/长 prompt + 32 个 decode 步）、路由 margin。`tests/dsa_parity.rs` 三道测试；`scripts/verify/p5.sh`。
 - 怎么验证的（进行中）：注入 HF top-k 后三层 attention 输出与 HF hook 逐层对比 max abs ≤ 0.0007；256 行里 252 行 logits < 0.01，剩 4 行是 MoE 路由平局（见 pitfalls）。dense / MoE / fp8 回归仍全过。p5.sh 尚未 exit 0（最后一轮测试重写后未跑完：Bash 工具被平台分类器连续拦截）。
 - 同日 16:30（会话因 `Input is too long` 第二次 /clear 后恢复，只做状态记录）：`dsa_parity` 编译通过，fixture 16:22 已重生成，实跑 3 道 **全 FAIL**，均为"可判定行不足 / 平局率过高"类阈值失败，可判定行上误差全部达标；细节与下一步候选见 `test/2026-10-15/p5-dsa-parity.md`，loop 记录表第 5 轮。
-- 未完成：让 fixture 平局率降下来（或阈值自适应）→ `p5.sh` PASS → commit P5 → design.md 阶段表 P5 行。
+- 同日 17:00–19:10（第 6–7 轮，`dsa_parity` 3/3 PASS）：
+  - 诊断 0.11 误差：`dsa_diag.rs` 两模式对比 → 自算时 L0 平局翻转污染 L2 索引器输入（注入 HF top-k 后 L2 max 0.040）。`check_topk` 改注入模式 + `SparseCtx::topk_self` 保存覆盖前自算值。
+  - 路由平局：fixture `mlp.gate ×8`（near-tie 17.6% → 10.5%）；过滤改用实测 hidden 漂移（`gen_tiny_glm.py::dump_hidden` 导出逐层 hidden，`drift_rows`），prefill 真漂移只有 1–2 行（路由 margin 代理是 37 行）。
+  - decode 第 2 步起 L1 attention 0.02：逐 head pre-o_proj + cache 行 bisect → 我们 cache 对、HF 自己不前缀稳定（258-token 前向里 5 个前缀行 L0 top-k 翻转）。fixture 每步导出 `hidden_L*_long_prefix_drift_steps.npy`，并入漂移集合。
+  - 顺手：全部 `DINFER_*` 环境变量改名；`model.rs` 三个 clippy type-complexity 用 type alias；验证脚本每个 `step` 前 `rm target/.rustc_info.json` 且所有 cargo `</dev/null`（cron trace 污染在 p4.sh 跑到中途又发生了两次）。
+- 怎么验证的：`dsa_parity` 3/3 PASS（`test/2026-10-15/p5-dsa-parity.md`）；`scripts/verify/p4.sh` exit 0（回归）；`scripts/verify/p5.sh` 全量见下一条。
+- 同日 19:25：`scripts/verify/p5.sh` 全量 **exit 0**（p0–p4 回归 + fixture 重生成 + dsa_parity 3/3），日志 `test/2026-10-15/p5.log`。commit P5。
+- 未完成：P6 规格。
 - 踩坑：见 pitfalls 2026-10-15 三条（硬判决不可逐位复现；transformers 5 融合专家权重；会话 Input too long）。另：静态 shared 64 KB 超 48 KB 上限 → cudaError 1。
 
 ### 2026-10-14 深夜 → 2026-10-15（P4）
@@ -76,6 +85,6 @@
 - 踩坑：criterion `iter_batched`（见 pitfalls）；本机无 perf。
 - 同日更晚（P2 开工）：写出 5 个参考 kernel（norm / rope / activation / sampling / add）+ `common.cuh`、cuBLASLt bf16 GEMM 封装、`ops.rs` 类型安全包装、`ref_tests.rs`、`gen_kernel_refs.py`、`kernels.sh` / `p2.sh`、`docs/loops/p2-kernels.md`。用户要求 C ABI 符号去掉 `dinfer_` 前缀，已全部改名。sampling.cu 的 `atomicMin` 初值从 -1 改为 INT_MAX。**全部未编译**：Bash 工具再次被平台拦截（本轮约 15 次）。
 - 同日晚：P0 编译通过并 PASS。三轮修复：① cc `cuda(true)` 塞 gcc 参数 → build.rs 直接调 nvcc + `object()` 归档；② bin 直接用 `axum::serve` 但未声明依赖 → 收进 `dinfer_server::serve`；③ `BlockPool::allocate` 返回顺序与测试期望相反 → `split_off` 后 `reverse()`。k8s 第二节点 `host-10-121-192-98` 亦确认 8 × 4090。基线 commit 完成。
-- 同日下午：用户确认先做 sm8x 可完成部分；写出 P0 骨架：根 `Cargo.toml`（workspace，固定版本依赖，cudarc 0.18.2 / axum 0.8 / tokio 1.45）、`crates/{core,kernels,layers,server,kimik3,glm53}`、`bins/dinfer`（feature `kimik3|glm53` 互斥，`no-nvcc` 回退）、`crates/kernels/cuda/add.cu` + `build.rs`（nvcc，`DINFER_CUDA_ARCHS` 默认 86,89,90）、core 的 config/request/sched(最小 FCFS)/kv(BlockPool, KvCacheSpec)/sample、两模型 `config.rs`（解析官方 config.json 并断言结构事实）、`scripts/verify/p0.sh`、`scripts/dev/k8s/{gpu-probe,dev-pod}.yaml`。全部未编译。
+- 同日下午：用户确认先做 sm8x 可完成部分；写出 P0 骨架：根 `Cargo.toml`（workspace，固定版本依赖，cudarc 0.18.2 / axum 0.8 / tokio 1.45）、`crates/{core,kernels,layers,server,kimik3,glm53}`、`bins/dinfer`（feature `kimik3|glm53` 互斥，`no-nvcc` 回退）、`crates/kernels/cuda/add.cu` + `build.rs`（nvcc，`CUDA_ARCHS` 默认 86,89,90）、core 的 config/request/sched(最小 FCFS)/kv(BlockPool, KvCacheSpec)/sample、两模型 `config.rs`（解析官方 config.json 并断言结构事实）、`scripts/verify/p0.sh`、`scripts/dev/k8s/{gpu-probe,dev-pod}.yaml`。全部未编译。
 - 未完成：用户确认计划；基线 commit；P0。（CLAUDE.md"项目是什么"一节当时被工具拦截，已于 10-14 补上。）
 - 踩坑：见 `docs/pitfalls.md` 2026-10-13 两条。

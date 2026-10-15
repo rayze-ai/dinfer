@@ -35,7 +35,7 @@
 export CUDA_HOME=/usr/local/cuda PATH=/usr/local/cuda/bin:$PATH   # nvcc 不在默认 PATH
 cargo build --workspace --features glm53          # 或 --features kimik3；无 nvcc 加 --features no-nvcc
 cargo test --workspace --features glm53           # CPU 单测；GPU 测试：cargo test -p dinfer-kernels -- --ignored
-scripts/verify/p4.sh                              # 当前阶段验收（含 p0–p3），exit 0 = 通过
+scripts/verify/p5.sh                              # 当前阶段验收（含 p0–p4），exit 0 = 通过
 kubectl apply -f scripts/dev/k8s/dev-pod.yaml     # 4090 开发 Pod（runtimeClassName: nvidia 必带）
 rm -f target/.rustc_info.json                     # cargo 报 "failed to run rustc to learn about target" 时（见 pitfalls）
 ```
@@ -44,6 +44,7 @@ rm -f target/.rustc_info.json                     # cargo 报 "failed to run rus
 
 <!-- 不能动什么、必须兼容什么、安全/合规约束 -->
 - 文档用中文，命令与代码原样。
+- 代码 / 脚本 / 环境变量 / C ABI 符号不带项目名前缀（`DINFER_*`、`dinfer_*`），项目可能改名；新代码前 `grep -rn DINFER crates scripts` 自查。
 - 所有跨会话要记住的事写进文件并进 git，不要只留在对话里。
 
 ## 收功（每次结束前）

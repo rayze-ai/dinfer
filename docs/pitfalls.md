@@ -11,6 +11,14 @@
 >     - 如何避免：
 >     - 相关：`文件/命令/链接`
 
+## 2026-10-15 HF 参考在 bf16 下不是"前缀稳定"的：同一 prompt 加两个 token 重算，前缀行的 top-k / 路由会翻转
+
+- 现象：注入 HF top-k 后 prefill 全对（attention ≤ 0.0005），但 decode 第 2 步起 L1（shared 层）attention 误差 0.02（L0/L2 仅 0.0005），logits 0.06；且与步数无关、不累积（step 1 好，step 2 坏，step 21 坏）。逐层 bisect 到 cache：我们 L1 cache 第 142 行与 HF 同一行差 1.87，但 prefill 刚结束时该行是对的。
+- 根因：HF 侧参考是对 `prompt + gen[:i]` 整条序列重新前向。bf16 下 SDPA/MoE 的 batch 内部归约顺序随序列长变化，L0 索引器对 12 个 **前缀行** 的 top-k 在 256 与 258 token 两次前向里不同（其中 7 行是前 8 行的 "可见 ≤ k" 退化，无影响；5 行 142/163/172/233/246 是真翻转），这 5 行的 attention 输出变了 0.02–0.03 → 它们在 HF 里的后续层 KV 与我们 prefill 时写进 cache 的不同。任何 decode 步只要 top-k 选中这 5 行之一，L1/L2 attention 就与 HF 不可比。不是 bug：我们的增量 cache 才是 "正确" 的语义，HF 的全序列重算在 bf16 下自己都不自洽。
+- 解法：`gen_tiny_glm.py` 每个 decode 步额外导出 `hidden_L<i>_long_prefix_drift_steps.npy`（[gen, T]：每前缀行相对 prefill-only 前向的 hidden max abs 变化）；`dsa_parity` 把变化 > 0.02 的行并入 "漂移行" 集合，注入 top-k 命中漂移行的 decode 步不断言。可判定步 18/32，其余步只上报。
+- 如何避免：参考实现用全序列重算做 decode 对拍时，先验证它自己是前缀稳定的（对比 prefill-only 与更长序列的前缀 hidden）；不稳定就导出逐步漂移并过滤，不要调阈值硬凑。对拍脚本的 `dump_dsa` 之类 hook 一律用 `.copy()`，否则多次前向后拿到的是最后一次的张量。
+- 相关：`scripts/verify/gen_tiny_glm.py::dump_hidden`、`crates/glm53/tests/dsa_parity.rs::drift_rows`、`crates/glm53/tests/dsa_diag.rs`（逐层 / 逐 head / cache 行 bisect 工具，保留）
+
 ## 2026-10-15 Claude Code 会话报 `API Error: 400 Input is too long`，整段上下文丢失，只能 /clear
 
 - 现象：长会话（多轮 bisect、反复贴测试日志）突然所有请求报 400 Input is too long，无法继续也无法 compact，只能 `/clear` 重来。本项目已发生两次（10-14 P4、10-15 P5），每次丢掉未写进文件的中间结论。
