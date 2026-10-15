@@ -11,6 +11,14 @@
 >     - 如何避免：
 >     - 相关：`文件/命令/链接`
 
+## 2026-10-15 HF forward hook 里直接存张量，多次前向后拿到的全是最后一次的值
+
+- 现象：`gen_tiny_glm.py` 对同一模型连做多次 `model(seq)`（每个 decode 步一次），hook 存的 `attn_L1` 等在后面分析时与当次前向对不上。
+- 根因：hook 保存的是 `o[0][0].float().numpy()` 的视图 / 共享存储，下一次前向复用缓冲后内容被覆盖。
+- 解法：hook 里一律 `.copy()`（numpy）或 `.detach().clone()`（torch）。
+- 如何避免：写对拍 dump 时，hook 保存值后立刻 `np.save`，或用 `.copy()`；对比前先校验 "dump 的 logits 与 fixture 的 expect 逐位相等"（本次就是靠这一步发现的）。
+- 相关：`scripts/verify/gen_tiny_glm.py::dump_hidden/dump_dsa`
+
 ## 2026-10-15 minijinja 跑 HF chat_template.jinja：5 处方言差异导致解析失败或输出不逐字符一致
 
 - 现象：① `syntax error: unexpected float`（`m.content.0.type`）；② `string has no method named strip/split`、`map has no method named items`；③ tools 段多出一个 `\n`；④ JSON 里 key 顺序被排序、分隔符是 `,`/`:`（Python 是 `", "`/`": "`）。

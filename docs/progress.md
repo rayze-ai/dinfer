@@ -12,14 +12,11 @@
 - P5 已知简化（P10 / 真机补）：索引器 K cache bf16（真机 fp8 + scale）；索引分数 kernel 按 head 循环、top-k 单 block K 轮 argmax（真机 DeepGEMM fp8_mqa_logits + radix top-k）；稀疏 attention 仍是参考 kernel 逐 key gather；tiny fixture 用 `wq_b/wk ×6`、`mlp.gate ×8` 放大分差（真模型训练后自然有分辨力）
 - 下一步：**P7**（Kimi-K3：KDA、latent MoE、AttnRes，见 design.md 阶段表）或 **P10 性能**（CUDA graph、pinned/双缓冲、grouped GEMM、真 fp8）——由用户定。另：`crates/glm53/tests/dsa_diag.rs` 是诊断工具（`--ignored`，`STEP=<n>` 选 decode 步），不进 p5/p6.sh
 - 代码命名规则（用户要求）：代码 / 脚本 / 环境变量不出现 `DINFER` 前缀（已改 `TINY_GLM_DIR / KERNEL_REFS_DIR / CUDA_ARCHS / PY_TF519 / P1_SCHED_US`）；C ABI 符号不带 `dinfer_`
+- P1–P3 产出：见 `docs/design.md` §4 模块表与各阶段 commit（P1 scheduler/KV、P2 参考 kernel + cuBLASLt GEMM、P3 MLA dense 主干 + WeightSource）；P2 约定 **C ABI 符号不带 `dinfer_` 前缀**
 - P4 产出：`kernels/cuda/moe.cu`（gate_f32 / route / bucket / gather / scatter_add / f32_add_to_bf16）、`kernels/cuda/mla.cu::mla_prefill_paged`、`layers/src/moe.rs`、`layers/src/mla.rs::AttnMeta::Paged + absorbed_q/absorbed_o`、`core/src/runner.rs`（ReqState / BatchPlan / BatchMode / ModelExecutor / Runner）、`glm53/src/{model.rs::Glm53Model+FeedForward, executor.rs::Glm53Executor}`、`glm53/tests/{tiny_parity,runner_parity}.rs`、`scripts/verify/p4.sh`、`docs/loops/p4-moe-runner.md`
 - P4 已知简化（P10 / 后续补）：runner 每 step 全量 H2D 输入、argmax 后同步 D2H，无 pinned / 双缓冲 / CUDA graph；MoE 逐专家循环 + 一次 D2H 读 offsets（真机换 grouped GEMM）；Decode/Paged 路径每 head 一次小 GEMM（W_UK/W_UV）；fp8 只做加载期 dequant（sm86 无 fp8 张量核，1×128 激活量化 + 真 FP8 GEMM 留 4090/sm90）；采样只有 greedy；无投机解码；只支持单 KV group
 - 环境：本机 3090（sm86）日常开发；k8s `admin@polaris` 两节点各 8 × RTX 4090（sm_89，驱动 580.178.04），Pod 需 `runtimeClassName: nvidia`，见 `scripts/dev/k8s/README.md`。用户决定：先做 sm8x 能完成的部分，sm90 以后再给
-- P1 产出：`core/src/sched/mod.rs`（running-first / waiting、token 预算、chunked prefill、`long_prefill_token_threshold`、末尾抢占、async scheduling 占位 + spec 回退、slab 索引）、`core/src/kv/{block_pool,hash,manager}.rs`（LRU 双链表 + (group,hash) 索引、xxh3-128 链式块哈希、多 group 管理器含 Mamba 单状态块、decode 零分配快路径）、`sched/output.rs`（`StepResults` 扁平缓冲）、`examples/probe_sched.rs`、`docs/loops/p1-scheduler-perf.md`
 - P1 已知简化（P7 补）：Mamba 组只在 block 对齐边界登记/命中，不做逐级回退与 checkpoint 多块；所有 group 要求同 page 大小；无 priority 调度、无 encoder 预算
-- P2 产出：`kernels/cuda/{common.cuh,add,norm,rope,activation,sampling}.cu`（9 个参考算子，sm80+，bf16 用 `__nv_bfloat16`），`kernels/src/{ffi,ops,gemm}.rs`（类型安全包装 + cuBLASLt bf16 GEMM，权重 `[N,K]` 行主序），`kernels/tests/ref_tests.rs`（feature `ref-tests`，读 `.npy`，路径按 `CARGO_MANIFEST_DIR/../..` 解析），`scripts/verify/{gen_kernel_refs.py,kernels.sh,p2.sh}`，`docs/loops/p2-kernels.md`。**C ABI 符号不带 `dinfer_` 前缀（用户要求）**。本机 torch 2.6.0+cu124 / numpy 1.26 / safetensors 0.5 可用
-- P3 产出：`kernels/cuda/{mla,layout,elementwise}.cu`（mla_cache_write / mla_prefill / mla_decode；copy_cols / bcast_kpe / copy_head_cols / gather_head / scatter_head；add_inplace / gather_rows / bf16_to_f32）+ 对应 ffi/ops；`layers/src/{tensor,weights,nn,mla}.rs`（WeightSource 自解析 safetensors mmap；MlaAttention 含 W_UK^T/W_UV 按 head 拆分、prefill 展开路径与 decode 吸收路径）；`glm53/src/model.rs::Glm53Dense`；`glm53/tests/tiny_parity.rs`（3 个测试）；`scripts/verify/{gen_tiny_glm.py,p3.sh}`；`docs/loops/p3-mla-dense.md`
-- P3 已知简化（后续补）：decode 路径每 head 一次小 GEMM（W_UK/W_UV），H 个 launch → P10 换 batched GEMM；prefill 不支持 chunked context（有历史 KV 的 prefill）→ P4 runner 接 chunked prefill 时补 "prefill + 读 cache" 路径；无 runner / Sampler 层，测试直接喂 Forward 结构体
 - 阻塞 / 待决策：`docs/design.md` §9（KDA kernel 手写 CUDA 还是 Triton AOT；structured output；性能对比基线配置）
 - 本机工具链：rustc/cargo 1.89.0，nvcc 12.4 在 `/usr/local/cuda/bin`（不在默认 PATH；p0.sh 已自动加）；crates.io 直连可用。**cargo 假失败时 `rm target/.rustc_info.json`**（cron trace 污染，见 pitfalls 2026-10-15）
 - 进行中的 loop 规格：无（p5 / p6 均已通过）
@@ -53,6 +50,7 @@
   - d：`mtp.rs`（enorm/hnorm/eh_proj + 同构 decoder 层 + shared_head.norm，复用主干 embed/lm_head/共享 top-k）；runner 协议扩展（`spec_tokens / logits_row_start / next_known`，executor 返回 `(generated, drafts)`，拒绝回退）；executor greedy verify + MTP draft（位置 pos+1，KV 按位置重写无需回滚）；engine 把 draft 交回 scheduler；`--mtp` 开关；`gen_tiny_glm.py --mtp` 用 HF decoder 层 + 胶水做参考；`mtp_parity` 3 测试全过。
 - 怎么验证的：`scripts/verify/p6.sh` exit 0（`test/2026-10-15/p6.log`）；各步数字见 `test/2026-10-15/p6-glm-serve.md`。
 - 未完成：真权重跑通（需大机器）；采样 / logprobs / metrics 等见交接区 "P6 已知简化"。
+- 收功（同日晚）：工作区干净，HEAD `ee05aa6`。本会话 3 次重启（Input too long → /clear；bypass 权限两次重开），P5 收尾 + P6 全部在同一天完成；下次开场直接按 "下一步" 选 P7 / P10。
 - 踩坑：见 `docs/loops/p6-glm-serve.md` 记录表 8 轮；可提炼进 pitfalls 的两条：minijinja 跑 HF 模板的 5 个坑（已写）、runner 侧 `block_table` 宽度语义（已写）。
 
 ### 2026-10-15（P5 DSA，进行中）
