@@ -308,10 +308,10 @@ glm53/src/
 | P4 MoE + runner + 混合 batch + FP8 加载 ✅ 2026-10-15 | MoE 参考路径（fp32 gate、sigmoid+bias top-k noaux_tc、专家分桶 + 逐专家 MLP + fp32 加权归约 + shared expert）；`glm53::Glm53Model`（`FeedForward::{Dense,Moe}`）；`core::runner`（`ReqState / BatchPlan / BatchMode / ModelExecutor / Runner`）+ `Glm53Executor`（greedy）；`mla_prefill_paged`（吸收路径、任意 query 长、历史在 cache）→ chunked prefill 与 prefill/decode 混合 batch；fp8 e4m3 128×128 块量化权重加载期解量化（`weights_fp8.rs`，sm86 无 fp8 张量核） | `scripts/verify/p4.sh`：p3 + tiny MoE GLM 3 对拍 + runner 2 单测 + Scheduler+Runner+Executor 双请求对拍（plain 32 步 / chunked+mixed 35 步）× dense/MoE + tiny fp8 GLM 同套对拍；logits worst ≤ 0.008，greedy 仅平局步分叉 |
 | ✅ P5 DSA（2026-10-15，`dsa_parity` 3/3 PASS） | 索引器参考 kernel（`dsa.cu`：layernorm / 索引分数（paged 索引 cache）/ top-k / row_vis）、`layers::Indexer`（wq_b / wk / k_norm / weights_proj、前 rope 维 interleave RoPE、索引 K cache）、三条 MLA attention 路径加 `topk_indices` gather 模式、跨层共享 top-k 缓冲（full 写 / shared 读）；对拍基准换 transformers 5.19 `GlmMoeDsa`（隔离 venv）；对拍口径：注入 HF top-k 逐层隔离比每层自算 top-k（差异限于 HF k-th 分数 ± 实测分数误差）；行过滤用实测 hidden 漂移（> 0.02）而非路由 margin；HF 全序列重算在 bf16 下不前缀稳定，fixture 导出每步前缀漂移、命中的 decode 步不断言；全程自算只在可判定行断言（见 pitfalls 2026-10-15 三条） | `scripts/verify/p5.sh`：p4 + tiny DSA GLM（3 层 full/shared/full，top-k 8，长 prompt 256 + 32 步 decode）3 道测试；注入 HF top-k 时三层 attention 输出与 HF 逐层 max abs ≤ 0.0007 |
 | ✅ P6 GLM-5.3 完整（2026-10-15，tiny fixture + 真 tokenizer/模板） | tokenizer（`tokenizers`）、chat 模板（minijinja 跑官方 jinja，HF 15/15 逐字符一致）、流式解析器（think / tool_call）、engine 循环、OpenAI server（stream/非 stream、usage、tool_calls、reasoning_content）、MTP nextn=1（draft logits 对拍 + oracle-draft 验证 verify 路径）；真权重验收待 ≥ 8×H200 机器 | `scripts/verify/p6.sh`：chat_parity / parser 单测 / serve_e2e（真进程 HTTP）/ mtp_parity |
-| P7 KDA | conv1d、chunk prefill、recurrent decode、Mamba 类状态管理、混合 group；tiny Kimi-Linear 对拍 | 同 P3 口径 |
-| P8 K3 特有 | AttnRes、latent MoE + situ、MXFP4 解包/GEMM、无 RoPE MLA + 输出门；tiny K3 文本对拍 | 同上 |
-| P9 K3 多模态 + tokenizer | MoonViT、投影、图像 token 计数、XTML 渲染、tiktoken；图文对拍 | 图像请求端到端 |
-| P10 性能 | CUDA graph（decode FULL 图含 attention 与采样）、FlashMLA/DeepGEMM 快路径、TP/EP、EP 下 all-to-all、§8.2 算子融合、draft+target 同图 | §8.4 五个场景与 vLLM 同机对比，达到 requirements 口径 |
+| ⏸ P7 KDA（挂起，等资源） | conv1d、chunk prefill、recurrent decode、Mamba 类状态管理、混合 group；tiny Kimi-Linear 对拍 | 同 P3 口径 |
+| ⏸ P8 K3 特有（挂起） | AttnRes、latent MoE + situ、MXFP4 解包/GEMM、无 RoPE MLA + 输出门；tiny K3 文本对拍 | 同上 |
+| ⏸ P9 K3 多模态 + tokenizer（挂起） | MoonViT、投影、图像 token 计数、XTML 渲染、tiktoken；图文对拍 | 图像请求端到端 |
+| ⏸ P10 性能（真机部分挂起；单卡部分并入 Q3） | CUDA graph（decode FULL 图含 attention 与采样）、FlashMLA/DeepGEMM 快路径、TP/EP、EP 下 all-to-all、§8.2 算子融合、draft+target 同图 | §8.4 五个场景与 vLLM 同机对比，达到 requirements 口径 |
 
 性能相关的早期门禁（不等到 P10）：
 - P1：scheduler 微基准，1024 请求 × 1 step 的 `schedule() + update_from_output()` < 200 µs（CPU，criterion）。
@@ -319,6 +319,34 @@ glm53/src/
 - P4/P5/P7/P8：每新增一类层，记录 decode 路径 launch 数，超过 §8.2 目标即在该阶段内融合，不留到 P10。
 
 建议 GLM 先于 K3：GLM 结构 = 标准 MLA + MoE + 一个索引器，覆盖了 core 的全部路径；K3 再叠 KDA/AttnRes/latent MoE/视觉四个增量。
+
+## 5b. 方向调整（2026-10-15）：先用 Qwen3-0.6B 把主流程做实
+
+**背景**：P0–P6 在 tiny 随机权重上验证了 GLM-5.3 整条链路，但真权重（GLM 755 GB / K3 1.56 TB）需要 ≥ 8×H200 级别机器，
+暂时没有。继续在 tiny 模型上堆 K3 特性（P7–P9）或做性能（P10）都缺少真实反馈。
+
+**决定（用户）**：先实现 **Qwen/Qwen3-0.6B**（dense GQA，bf16 1.5 GB，本机 3090 能跑真权重）作为第三个模型 crate，用它验证
+**与模型无关的主流程**：真权重端到端、采样、性能（CUDA graph / 融合 / pinned / 双缓冲）、**PD 分离（prefill-decode disaggregation）**。
+kimik3 / glm53 只是"不同模型的实现"，当前进度记为阶段性成果，等有资源再做 P7–P9 与真权重验收。
+
+**Qwen3-0.6B 结构事实**（`/data/ref/models/qwen3-0.6b/config.json`）：28 层、hidden 1024、16 q 头 / 8 kv 头、head_dim 128、
+q_norm / k_norm（per-head RMSNorm，在 RoPE 之前）、neox RoPE θ=1e6、SwiGLU intermediate 3072、tied embeddings、vocab 151936、
+eos {151645, 151643}、无 sliding window、无 bias。chat 模板：`<|im_start|>role\n…<|im_end|>`，`enable_thinking` 控制 `<think>` 段，
+tool_call 为 JSON `{"name","arguments"}`。
+与现有代码的差异：需要 **GQA paged attention kernel**（prefill / decode / paged，K/V 分开存，`[num_blocks, block_size, kv_heads, head_dim]`）
+与 `KvCacheSpec::FullAttention`；其余（RMSNorm、neox RoPE、SwiGLU、GEMM、scheduler、runner、engine、server、tokenizer、minijinja 模板）全部复用。
+
+**新阶段编号用 Q 前缀**（与 P7–P10 并存，P 系列挂起）：
+
+| 阶段 | 产出 | 验收 |
+|---|---|---|
+| Q1 Qwen3 crate + 真权重 | `crates/qwen3`：config、权重加载（tied lm_head）、GQA attention（新 kernel：`gqa_prefill / gqa_decode / gqa_prefill_paged`，K/V paged cache）、Qwen3Model、Executor、tokenizer（Qwen2Tokenizer = BPE，`tokenizers` 加载）、chat 模板（含 `enable_thinking`）、parser（`<think>` + JSON tool_call）、Service；`--features qwen3` 构建 | `scripts/verify/q1.sh`：真权重 prefill logits 与 HF max abs < 0.05（bf16，同机 3090）；greedy 32 token 与 HF 逐个一致（允许 bf16 平局步分叉，口径同 P3）；chat 模板 golden 逐字符；server e2e 用真模型回答一个问题且 `<think>` 段被正确拆出 |
+| Q2 采样 + 请求功能 | temperature / top_p / top_k / min_p / repetition / seed（接 P2 的 `topk_topp_mask` + Philox `sample`）、stop 字符串、logprobs、`n>1`、prefix cache 开启、`/metrics`、按显存算 `num_blocks` | 采样分布与 PyTorch 同 seed 对拍；prefix cache 命中率；OpenAI SDK 全字段 |
+| Q3 单卡性能 | CUDA graph（decode FULL 图）、pinned + 双缓冲 + 异步 D2H、算子融合（§8.2）、GQA flash-style kernel（或接 FlashAttention/FlashInfer）、异步调度 | §8.4 场景 ①②③ 与 vLLM 同机（3090）对比：TPOT P50 优于 ≥ 20% |
+| Q4 PD 分离 | prefill 实例与 decode 实例分进程 / 分卡，KV 传输（本机先 CUDA IPC / NCCL，跨机 RDMA 留接口），proxy 路由，与 vLLM `KVConnector` 语义对照 | 两进程 PD 跑通，输出与单机一致；TTFT / TPOT 对比单机 |
+| Q5 多卡（可选） | TP（GQA 按头切）、两卡 3090 或 4090 Pod | 输出一致 + 吞吐 |
+
+PD 分离的详细设计写进 §10（待补），动代码前先定：KV 传输介质、块粒度、谁持有 block table、失败回退。
 
 ## 6. 关键决策
 

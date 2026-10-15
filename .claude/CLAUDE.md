@@ -11,8 +11,8 @@
 ## 项目是什么
 
 用 Rust 重写 vLLM v1 引擎主干（启动 / 调度 / KV / 执行 / 采样 / HTTP），去掉通用插件层，目标之一是性能超越 vLLM（瓶颈分析见 design.md §8）；
-每个模型一个 crate，只支持 Kimi-K3 与 GLM-5.3。构建 = `core + server + 一个模型 crate`（cargo feature）。
-分析基线：vLLM main `de8291e`（0.31.0），源码在 `/data/ref/vllm`；两模型 HF 文件在 `/data/ref/models/{kimik3,glm53}`（均不进仓库）。
+每个模型一个 crate：Kimi-K3、GLM-5.3、**Qwen3-0.6B**（2026-10-15 起用它做主流程验证：真权重 / 采样 / 性能 / PD 分离，因为暂无高端卡；K3/GLM 真权重挂起，见 design.md §5b）。构建 = `core + server + 一个模型 crate`（cargo feature）。
+分析基线：vLLM main `de8291e`（0.31.0），源码在 `/data/ref/vllm`；模型 HF 文件在 `/data/ref/models/{kimik3,glm53,qwen3-0.6b}`（qwen3 含真权重；均不进仓库）。
 详细模块划分与分阶段计划见 `docs/design.md`。
 
 ## 目录约定
@@ -33,9 +33,9 @@
 
 ```bash
 export CUDA_HOME=/usr/local/cuda PATH=/usr/local/cuda/bin:$PATH   # nvcc 不在默认 PATH
-cargo build --workspace --features glm53          # 或 --features kimik3；无 nvcc 加 --features no-nvcc
+cargo build --workspace --features glm53          # 或 --features kimik3 / qwen3；无 nvcc 加 --features no-nvcc
 cargo test --workspace --features glm53           # CPU 单测；GPU 测试：cargo test -p dinfer-kernels -- --ignored
-scripts/verify/p6.sh                              # 当前阶段验收（含 p0–p5），exit 0 = 通过
+scripts/verify/p6.sh                              # GLM 线验收（含 p0–p5）；Qwen3 线：scripts/verify/q1.sh
 cargo run -p dinfer --features glm53 -- serve --model test/tiny_glm_dsa_fullvocab --tokenizer /data/ref/models/glm53 --port 8011 [--mtp]
 kubectl apply -f scripts/dev/k8s/dev-pod.yaml     # 4090 开发 Pod（runtimeClassName: nvidia 必带）
 rm -f target/.rustc_info.json                     # cargo 报 "failed to run rustc to learn about target" 时（见 pitfalls）

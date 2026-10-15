@@ -39,3 +39,9 @@ glm53: glm53的具体模型实现
 - 语言：Rust；CUDA/C++ 仅限 kernel 与 FFI 层。
 - 依赖固定版本；第三方 kernel（FlashMLA、DeepGEMM 等）以 git submodule 或 vendored 源码引入，许可证需为 MIT/Apache/BSD。
 - 文档中文，代码与命令原样。
+
+## 范围调整（2026-10-15）
+
+- 暂无高端卡：GLM-5.3 / Kimi-K3 真权重验收挂起，已完成部分（GLM-5.3 全链路在 tiny fixture 上通过 P0–P6）记为阶段性成果。
+- 新增 **Qwen/Qwen3-0.6B** 作为主流程验证模型（本机 3090 可跑真权重）：真权重端到端、采样、性能、PD 分离都在它上做。
+- kimik3 / glm53 / qwen3 三个模型 crate 地位相同：`core + server + 一个模型 crate`。详见 design.md §5b。

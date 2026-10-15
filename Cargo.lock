@@ -536,6 +536,7 @@ dependencies = [
  "dinfer-glm53",
  "dinfer-kimik3",
  "dinfer-layers",
+ "dinfer-qwen3",
  "dinfer-server",
  "reqwest",
  "serde_json",
@@ -613,6 +614,24 @@ dependencies = [
  "half",
  "memmap2",
  "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "dinfer-qwen3"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dinfer-core",
+ "dinfer-kernels",
+ "dinfer-layers",
+ "dinfer-server",
+ "minijinja",
+ "npyz",
+ "serde",
+ "serde_json",
+ "tokenizers",
+ "tokio",
  "tracing",
 ]
 
