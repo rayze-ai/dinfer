@@ -1,5 +1,5 @@
 //! 与 PyTorch 期望值对拍。先跑 `scripts/verify/gen_kernel_refs.py <dir>`，
-//! 再 `DINFER_KERNEL_REFS=<dir> cargo test -p dinfer-kernels --features ref-tests -- --ignored`。
+//! 再 `KERNEL_REFS_DIR=<dir> cargo test -p dinfer-kernels --features ref-tests -- --ignored`。
 #![cfg(feature = "ref-tests")]
 
 use dinfer_kernels::{bf16, Device, Gemm, RopeStyle, Stream};
@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 /// 期望值目录。相对路径按 **工作区根** 解析（cargo 跑集成测试时 cwd 是 crate 目录）。
 fn refs() -> PathBuf {
-    let p = PathBuf::from(std::env::var("DINFER_KERNEL_REFS").unwrap_or_else(|_| "test/kernel_refs".into()));
+    let p = PathBuf::from(std::env::var("KERNEL_REFS_DIR").unwrap_or_else(|_| "test/kernel_refs".into()));
     if p.is_absolute() {
         return p;
     }

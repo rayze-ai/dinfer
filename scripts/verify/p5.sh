@@ -4,11 +4,11 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 export PATH="$CUDA_HOME/bin:$PATH"
-TINY_DSA="$(realpath -m "${DINFER_TINY_GLM_DSA:-test/tiny_glm_dsa}")"
-PY519="${DINFER_PY_TF519:-/data/ref/venv-tf519/bin/python}"
+TINY_DSA="$(realpath -m "${TINY_GLM_DSA_DIR:-test/tiny_glm_dsa}")"
+PY519="${PY_TF519:-/data/ref/venv-tf519/bin/python}"
 rm -f target/.rustc_info.json
 
-step() { printf '\n==> %s\n' "$*"; }
+step() { rm -f target/.rustc_info.json; printf '\n==> %s\n' "$*"; }  # 每步前清掉可能被 cron trace 污染的 rustc 探测缓存
 
 scripts/verify/p4.sh
 
@@ -21,7 +21,7 @@ step "generate tiny DSA GLM reference → $TINY_DSA"
 # 注：tiny_parity / runner_parity 的 "每步 logits < 0.05" 口径不适用于 DSA fixture —— 索引器 top-k 与 MoE 路由两类硬判决
 # 在 bf16 下会在两边翻转（见 docs/pitfalls.md 2026-10-15），翻转后的行/步不可比。DSA 的验收全部放在 dsa_parity（可判定行上断言）。
 step "tiny DSA GLM: indexer top-k sets vs HF; sparse attention with HF top-k injected; self-run (tie-aware)"
-DINFER_TINY_GLM="$TINY_DSA" cargo test -p dinfer-glm53 --features ref-tests --test dsa_parity -- --ignored --test-threads=1 --nocapture 2>&1 \
+TINY_GLM_DIR="$TINY_DSA" cargo test -p dinfer-glm53 --features ref-tests --test dsa_parity -- --ignored --test-threads=1 --nocapture </dev/null 2>&1 \
   | tee /tmp/dinfer_p5_dsa.log | grep -E '^test |test result|panicked|topk rows|worst|decidable'
 grep -qE "test result: ok\. 3 passed" /tmp/dinfer_p5_dsa.log
 

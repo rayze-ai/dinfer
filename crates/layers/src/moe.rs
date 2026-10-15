@@ -90,6 +90,14 @@ impl Moe {
         })
     }
 
+    /// 调试 / 对拍：上一次 forward 的路由结果（[t, K] 专家 id 与归一化后权重）。
+    pub fn last_routing(&self, stream: &Stream, t: usize) -> Result<(Vec<i32>, Vec<f32>)> {
+        let k = self.cfg.topk;
+        let ids = self.topk_ids.to_vec(stream)?;
+        let w = self.topk_w.to_vec(stream)?;
+        Ok((ids[..t * k].to_vec(), w[..t * k].to_vec()))
+    }
+
     /// out[:t] = MoE(x[:t])（覆盖写）。
     pub fn forward(
         &mut self,

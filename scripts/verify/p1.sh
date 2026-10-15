@@ -5,19 +5,19 @@ cd "$(dirname "$0")/../.."
 
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 export PATH="$CUDA_HOME/bin:$PATH"
-THRESHOLD_US="${DINFER_P1_SCHED_US:-200}"
+THRESHOLD_US="${P1_SCHED_US:-200}"
 
-step() { printf '\n==> %s\n' "$*"; }
+step() { rm -f target/.rustc_info.json; printf '\n==> %s\n' "$*"; }  # 每步前清掉可能被 cron trace 污染的 rustc 探测缓存
 
 step "p0"
 scripts/verify/p0.sh
 
 step "core unit tests (verbose)"
-cargo test -p dinfer-core -- --nocapture 2>&1 | grep -E '^test |test result' | tail -40
+cargo test -p dinfer-core -- --nocapture </dev/null 2>&1 | grep -E '^test |test result' | tail -40
 
 step "criterion bench (scheduler)"
 # criterion 输出形如：time:   [123.45 µs 125.00 µs 126.80 µs]
-cargo bench -p dinfer-core --bench scheduler -- --warm-up-time 1 --measurement-time 3 2>&1 | tee /tmp/dinfer_bench.log | grep -E 'schedule\+update|time:'
+cargo bench -p dinfer-core --bench scheduler -- --warm-up-time 1 --measurement-time 3 </dev/null 2>&1 | tee /tmp/dinfer_bench.log | grep -E 'schedule\+update|time:'
 
 step "threshold check (< ${THRESHOLD_US} µs median)"
 python3 - "$THRESHOLD_US" <<'EOF'

@@ -97,6 +97,11 @@ with torch.no_grad():
         # 放大 wq_b / wk 使分数有分辨力（真模型训练后分数自然有分辨力）；weights_proj 保持。
         if args.dsa and ".indexer.wq_b" in n or args.dsa and ".indexer.wk." in n:
             p.mul_(6.0)
+        # MoE 路由：随机 gate 下 sigmoid 分数挤在 [0.3, 0.8]，第 2/3 名专家分差 ≤ 0.01 的行约 9%（4 专家 top-2），
+        # 两边 bf16 下会选不同专家 → 该行 logits 不可比，且该行作为后续层索引器的 key 也不可比（shared 层复用 L0 top-k，
+        # 几乎每个 decode 步都会选中几个平局行）。放大 gate 让分差拉开（×8：margin ≤ 0.02 的行约 7%）。
+        if args.dsa and n.endswith(".mlp.gate.weight"):
+            p.mul_(8.0)
 
 # e_score_correction_bias 随机化（HF 默认全 0 会掩盖 bias 逻辑错误）
 with torch.no_grad():
@@ -243,6 +248,22 @@ def dump_router_margin(tag: str, p: torch.Tensor):
     return float(np.median(margin)), int((margin < 0.01).sum())
 
 
+def dump_hidden(tag: str, p: torch.Tensor):
+    """每个 decoder 层的输出 hidden（残差流，[T, hidden] f32）→ hidden_L<i><tag>.npy。
+    对拍用：两边逐层比 hidden，找出 **实际漂移** 的行（MoE 路由平局翻转导致），只排除这些行而不是所有 near-tie 行。"""
+    caps, hooks = {}, []
+    for li, L in enumerate(model.model.layers):
+        hooks.append(L.register_forward_hook(
+            lambda mod, a, o, li=li: caps.__setitem__(li, (o[0] if isinstance(o, tuple) else o)[0].float().cpu().numpy())))
+    with torch.no_grad():
+        model(p)
+    for h in hooks:
+        h.remove()
+    for li, v in caps.items():
+        np.save(out / f"hidden_L{li}{tag}.npy", v)
+    return sorted(caps)
+
+
 def dump_dsa(tag: str, p: torch.Tensor):
     """抓每个 full 层索引器的 top-k（HF 原始输出）与 index_scores（重算，口径同 GlmMoeDsaIndexer.forward）。"""
     caps = {}
@@ -290,6 +311,7 @@ def dump_dsa(tag: str, p: torch.Tensor):
 
 if args.dsa:
     print("indexer_types =", cfg.indexer_types, "dumped:", dump_dsa("", prompt))
+    print("hidden layers (short):", dump_hidden("", prompt))
     print("router margin (short):", dump_router_margin("", prompt), " (short2):", dump_router_margin("2", prompt2))
     # 长 prompt：确定性伪随机 token（种子固定），长度 args.long；期望同短 prompt 三件套
     g = torch.Generator().manual_seed(12345)
@@ -305,6 +327,7 @@ if args.dsa:
             step_l.append(model(gen_l[:, : args.long + i]).logits[0, -1].float())
         np.save(out / "expect_step_logits_long.npy", torch.stack(step_l).numpy())
     print("dumped long:", dump_dsa("_long", prompt_long))
+    print("hidden layers (long):", dump_hidden("_long", prompt_long))
     print("router margin (long):", dump_router_margin("_long", prompt_long))
     # decode 步的路由 margin：输入 prompt_long + gen[:i] 的最后一行
     rm_steps = []
@@ -333,5 +356,23 @@ if args.dsa:
         np.save(out / f"indexer_topk_{L}_steps.npy", np.stack(steps_tk[L]).astype(np.int32))
         np.save(out / f"indexer_score_{L}_steps.npy", np.stack(steps_sc[L]).astype(np.float32))
     print("dumped decode steps:", sorted(steps_tk), f"[{args.gen}, K] / [{args.gen}, {Lmax}]")
+    # 每个 decode 步每层输出 hidden 的最后一行 → hidden_L<i>_long_steps.npy [gen, hidden]（decode 路径的漂移检测）
+    # 同时记录每步前向里 **前缀行** 相对 prefill-only 前向的 hidden 变化（HF 对整条序列重算，MoE 专家分发在 bf16 下
+    # 不是 batch 稳定的，个别路由平局行会翻转 → 该行的 KV 在 HF 里与我们 cache 里的不同，选中它的步不可比）
+    # → hidden_L<i>_long_prefix_drift_steps.npy [gen, T] f32 = 每行 max abs diff
+    steps_h, prefix_drift = {}, {}
+    base_h = {li: np.load(out / f"hidden_L{li}_long.npy") for li in range(args.layers)}
+    for i in range(args.gen):
+        names = dump_hidden(f"_tmp", gen_l[:, : args.long + i])
+        for li in names:
+            arr = np.load(out / f"hidden_L{li}_tmp.npy")
+            (out / f"hidden_L{li}_tmp.npy").unlink()
+            steps_h.setdefault(li, []).append(arr[-1])
+            prefix_drift.setdefault(li, []).append(np.abs(arr[: args.long] - base_h[li]).max(axis=1))
+    for li, rows in steps_h.items():
+        np.save(out / f"hidden_L{li}_long_steps.npy", np.stack(rows).astype(np.float32))
+        np.save(out / f"hidden_L{li}_long_prefix_drift_steps.npy", np.stack(prefix_drift[li]).astype(np.float32))
+    n_drift = int(sum((np.stack(prefix_drift[li]) > 0.02).any(axis=0).sum() for li in prefix_drift))
+    print("dumped decode hidden:", sorted(steps_h), f"[{args.gen}, hidden]; prefix rows that drift in some step (any layer): {n_drift}")
 
 print(f"wrote tiny GLM ({args.layers} layers{', DSA' if args.dsa else ''}) to {out}; greedy[:8] = {gen[0, prompt.shape[1]:prompt.shape[1]+8].tolist()}")

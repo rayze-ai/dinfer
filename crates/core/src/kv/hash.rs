@@ -10,7 +10,7 @@ use xxhash_rust::xxh3::xxh3_128_with_seed;
 pub struct BlockHash(pub u128);
 
 const ROOT: u128 = 0x6d69_6e66_6572_2d72_6f6f_742d_6861_7368; // "dinfer-root-hash"
-const SEED: u64 = 0x5f44_494e_4645_525f; // "_DINFER_"
+const SEED: u64 = 0x5f44_494e_4645_525f;
 
 #[inline]
 pub fn hash_block(parent: Option<BlockHash>, tokens: &[u32], extra: &[u8]) -> BlockHash {

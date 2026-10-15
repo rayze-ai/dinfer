@@ -11,7 +11,7 @@ use dinfer_layers::{Device, Gemm, Tensor, WeightSource};
 use std::path::PathBuf;
 
 fn dir() -> PathBuf {
-    let p = PathBuf::from(std::env::var("DINFER_TINY_GLM").unwrap_or_else(|_| "test/tiny_glm".into()));
+    let p = PathBuf::from(std::env::var("TINY_GLM_DIR").unwrap_or_else(|_| "test/tiny_glm".into()));
     if p.is_absolute() {
         p
     } else {

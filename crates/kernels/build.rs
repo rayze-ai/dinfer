@@ -4,7 +4,7 @@
 //! 这里直接调用 nvcc 生成 .o，再用 `cc::Build` 只做归档（`ar`）。
 //!
 //! 环境变量：
-//! - `DINFER_CUDA_ARCHS`：逗号分隔的 sm 列表，默认 `86,89,90`（3090 / 4090 / H100）。
+//! - `CUDA_ARCHS`：逗号分隔的 sm 列表，默认 `86,89,90`（3090 / 4090 / H100）。
 //! - `CUDA_HOME` / `CUDA_PATH`：CUDA 安装目录，默认 `/usr/local/cuda`。
 //! - feature `no-nvcc`：跳过编译，kernel 入口以 stub 形式存在（调用即 panic）。
 
@@ -14,7 +14,7 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-changed=cuda");
-    println!("cargo:rerun-if-env-changed=DINFER_CUDA_ARCHS");
+    println!("cargo:rerun-if-env-changed=CUDA_ARCHS");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rustc-check-cfg=cfg(dinfer_no_nvcc)");
@@ -31,7 +31,7 @@ fn main() {
         panic!("nvcc not found at {}. Set CUDA_HOME, or build with `--features no-nvcc`.", nvcc.display());
     }
 
-    let archs = env::var("DINFER_CUDA_ARCHS").unwrap_or_else(|_| "86,89,90".into());
+    let archs = env::var("CUDA_ARCHS").unwrap_or_else(|_| "86,89,90".into());
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let profile = env::var("PROFILE").unwrap_or_default();
     let opt = if profile == "release" { "-O3" } else { "-O2" };

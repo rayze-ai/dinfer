@@ -45,6 +45,13 @@ pub struct DecoderLayer {
     pub mlp: FeedForward,
 }
 
+/// 对拍捕获：(layer_idx, topk [t*k] i32, 索引器分数 [t*stride] f32, stride)。
+pub type TopkCapture = (usize, Vec<i32>, Vec<f32>, usize);
+/// 对拍捕获：(layer_idx, 专家 id [t*K], 归一化权重 [t*K])。
+pub type RoutingCapture = (usize, Vec<i32>, Vec<f32>);
+/// 调试捕获：(layer_idx, attn_out [t*h] f32, 本层输出 hidden [t*h] f32)。
+pub type LayerCapture = (usize, Vec<f32>, Vec<f32>);
+
 pub struct Glm53Model {
     pub cfg: GlmMoeDsaConfig,
     pub embed: Embedding,
@@ -58,12 +65,18 @@ pub struct Glm53Model {
     pub topk_k: usize,
     /// 调试 / 对拍：若非空，每个 full 层 forward 后把 `topk[:t*k]` 与索引器分数拷回 host：
     /// (layer_idx, topk [t*k] i32, scores [t*stride] f32, stride)。
-    pub capture_topk: Option<Vec<(usize, Vec<i32>, Vec<f32>, usize)>>,
+    pub capture_topk: Option<Vec<TopkCapture>>,
     /// 对拍隔离：若非空，每个 full 层算完自己的 top-k 后用这里的 (layer_idx, [t*k] i32) **覆盖** 共享缓冲，
     /// 让稀疏 attention 吃参考实现的索引（把 "索引器平局分叉" 与 "稀疏 attention 正确性" 分开验证）。
     pub topk_override: Option<Vec<(usize, Vec<i32>)>>,
+    /// 对拍：注入覆盖时，每个 full 层自算的 top-k 落到这里（覆盖前拷出），`capture_topk` 记录的是它而不是注入值。
+    topk_self: Option<Tensor<i32>>,
+    /// 对拍：Some 时每个 MoE 层 push (layer, topk_ids[t*K], topk_w[t*K])。
+    pub capture_routing: Option<Vec<RoutingCapture>>,
+    /// 对拍：Some 时每层 push (layer, o_proj 输入 [t*H*v] f32)。
+    pub capture_attn_pre: Option<Vec<(usize, Vec<f32>)>>,
     /// 调试：若非空，每层 forward 后记录 (layer, attn_out[:t*h] f32, hidden_after_layer[:t*h] f32)。
-    pub capture_layers: Option<Vec<(usize, Vec<f32>, Vec<f32>)>>,
+    pub capture_layers: Option<Vec<LayerCapture>>,
     decode_cu: Tensor<i32>,
     // scratch
     hidden: Tensor<bf16>,
@@ -209,6 +222,9 @@ impl Glm53Model {
             topk_k: cfg.index_topk as usize,
             capture_topk: None,
             topk_override: None,
+            topk_self: None,
+            capture_routing: None,
+            capture_attn_pre: None,
             capture_layers: None,
             decode_cu: Tensor::from_vec(stream, (0..=max_tokens as i32).collect(), &[max_tokens + 1])?,
             hidden: Tensor::zeros(stream, &[max_tokens, h])?,
@@ -252,12 +268,16 @@ impl Glm53Model {
                 (Some(ov), true) => ov.iter().find(|(l, _)| *l == li).map(|(_, v)| v.clone()),
                 _ => None,
             };
+            if override_rows.is_some() && self.topk_self.is_none() {
+                self.topk_self = Some(Tensor::zeros(stream, &[self.max_tokens, self.topk_k])?);
+            }
             let sparse = self.topk.as_mut().map(|tk| SparseCtx {
                 indexer: layer.indexer.as_mut().map(|(i, c)| (i, c)),
                 topk: tk,
                 topk_k: self.topk_k,
                 decode_cu: &self.decode_cu,
                 topk_override: override_rows.as_deref(),
+                topk_self: self.topk_self.as_mut(),
             });
             layer.attn.forward(
                 stream,
@@ -274,7 +294,12 @@ impl Glm53Model {
             if let (Some(cap), Some(tk), Some((idx, _))) =
                 (self.capture_topk.as_mut(), self.topk.as_ref(), layer.indexer.as_ref())
             {
-                let all = tk.to_vec(stream)?;
+                // 注入模式下记录自算值（覆盖前拷出的），否则共享缓冲里就是自算值
+                let src = match (&override_rows, self.topk_self.as_ref()) {
+                    (Some(_), Some(own)) => own,
+                    _ => tk,
+                };
+                let all = src.to_vec(stream)?;
                 let (sc, stride) = idx.last_scores(stream, t)?;
                 cap.push((li, all[..t * self.topk_k].to_vec(), sc, stride));
             }
@@ -296,6 +321,13 @@ impl Glm53Model {
                 let a = self.attn_out.to_vec_f32(stream)?[..t * h].to_vec();
                 let hd = self.hidden.to_vec_f32(stream)?[..t * h].to_vec();
                 cap.push((li, a, hd));
+            }
+            if let Some(cap) = self.capture_attn_pre.as_mut() {
+                cap.push((li, layer.attn.last_attn_pre(stream, t)?));
+            }
+            if let (Some(cap), FeedForward::Moe(m)) = (self.capture_routing.as_mut(), &layer.mlp) {
+                let (ids, w) = m.last_routing(stream, t)?;
+                cap.push((li, ids, w));
             }
         }
         // final norm on selected rows → lm_head → fp32（gather 到 attn_out 作临时，norm 到 final_normed）

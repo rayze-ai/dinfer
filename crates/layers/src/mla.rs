@@ -137,6 +137,8 @@ pub struct SparseCtx<'a> {
     pub decode_cu: &'a Tensor<i32>,
     /// 对拍隔离：本层索引器算完（写了索引 K cache）后，用这些 host 侧索引（[t*topk] i32）覆盖共享缓冲。
     pub topk_override: Option<&'a [i32]>,
+    /// 对拍：注入覆盖前，把本层**自算**的 top-k 另存到这里（[max_tokens, topk] i32），供逐层隔离比较。
+    pub topk_self: Option<&'a mut Tensor<i32>>,
 }
 
 pub struct MlaAttention {
@@ -299,6 +301,21 @@ impl MlaAttention {
         Ok(())
     }
 
+    /// 调试 / 对拍：上一次 decode/paged forward 的吸收路径中间量 (q_lat [t,H,entry], o_lat [t,H,kv_lora])。
+    pub fn last_absorbed(&self, stream: &Stream, t: usize) -> Result<(Vec<f32>, Vec<f32>)> {
+        let (h, e, l) = (self.cfg.heads, self.cfg.entry(), self.cfg.kv_lora);
+        Ok((
+            self.q_lat.to_vec_f32(stream)?[..t * h * e].to_vec(),
+            self.o_lat.to_vec_f32(stream)?[..t * h * l].to_vec(),
+        ))
+    }
+
+    /// 调试 / 对拍：上一次 forward 的 o_proj 输入（[t, H*v] bf16 → f32）。
+    pub fn last_attn_pre(&self, stream: &Stream, t: usize) -> Result<Vec<f32>> {
+        let n = t * self.cfg.heads * self.cfg.v_dim;
+        Ok(self.attn_out.to_vec_f32(stream)?[..n].to_vec())
+    }
+
     /// 吸收路径 step 7：attn_out[t, h, v] = o_lat[h] · W_UV_h^T。
     fn absorbed_o(&mut self, stream: &Stream, gemm: &Gemm, t: usize) -> Result<()> {
         let c = &self.cfg;
@@ -432,6 +449,9 @@ impl MlaAttention {
                 idx.forward(stream, gemm, t, x, &self.q_c, positions, slot_mapping, ikv, &im, sp.topk)?;
                 if let Some(ov) = sp.topk_override {
                     ensure!(ov.len() == t * sp.topk_k, "topk_override: {} != t*k", ov.len());
+                    if let Some(own) = sp.topk_self.as_deref_mut() {
+                        k::copy_i32_n(stream, &sp.topk.data, &mut own.data, t * sp.topk_k)?;
+                    }
                     let tmp = Tensor::from_vec(stream, ov.to_vec(), &[t, sp.topk_k])?;
                     k::copy_i32_n(stream, &tmp.data, &mut sp.topk.data, t * sp.topk_k)?;
                 }

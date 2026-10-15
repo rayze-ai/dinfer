@@ -6,7 +6,7 @@ cd "$(dirname "$0")/../.."
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 export PATH="$CUDA_HOME/bin:$PATH"
 
-step() { printf '\n==> %s\n' "$*"; }
+step() { rm -f target/.rustc_info.json; printf '\n==> %s\n' "$*"; }  # 每步前清掉可能被 cron trace 污染的 rustc 探测缓存
 
 if command -v nvcc >/dev/null 2>&1; then
   FEAT=()
@@ -17,26 +17,26 @@ else
 fi
 
 step "cargo fmt --check"
-cargo fmt --all -- --check
+cargo fmt --all -- --check </dev/null
 
 step "cargo build (workspace, glm53)"
-cargo build --workspace --features glm53 "${FEAT[@]}"
+cargo build --workspace --features glm53 "${FEAT[@]}" </dev/null
 
 step "cargo build (bin, kimik3)"
-cargo build -p dinfer --features kimik3 "${FEAT[@]}"
+cargo build -p dinfer --features kimik3 "${FEAT[@]}" </dev/null
 
 step "cargo clippy"
-cargo clippy --workspace --features glm53 "${FEAT[@]}" -- -D warnings
+cargo clippy --workspace --features glm53 "${FEAT[@]}" -- -D warnings </dev/null
 
 step "cargo test (CPU)"
-cargo test --workspace --features glm53 "${FEAT[@]}"
+cargo test --workspace --features glm53 "${FEAT[@]}" </dev/null
 
 if [ ${#FEAT[@]} -eq 0 ] && command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
   step "GPU present: $(nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader | head -1)"
   step "cargo test (GPU, ignored tests)"
-  cargo test -p dinfer-kernels -- --ignored
+  cargo test -p dinfer-kernels -- --ignored </dev/null
   step "dinfer device-info"
-  cargo run -q -p dinfer --features glm53 -- device-info
+  cargo run -q -p dinfer --features glm53 -- device-info </dev/null
 else
   step "no GPU: skipping GPU tests"
 fi
