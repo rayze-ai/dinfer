@@ -52,17 +52,20 @@ int sample_f32(const float* logits, const float* temperature, const uint64_t* se
 int mla_cache_write_bf16(const void* latent, void* cache, const int64_t* slot_mapping, int64_t tokens, int64_t entry,
                          int64_t block_size, cudaStream_t stream);
 // causal attention（展开 K/V）：q/k: [T, heads, dq]，v: [T, heads, dv]，out: [T, heads, dv]，cu_seqlens: [num_reqs+1]。
+// topk_indices（可为 NULL = 稠密 causal）：[T, topk] i32，DSA 稀疏时每 query 行只看列出的 key（请求内位置，-1 空槽）。
 int mla_prefill_bf16(const void* q, const void* k, const void* v, void* out, const int32_t* cu_seqlens,
-                     int64_t num_reqs, int64_t heads, int64_t dq, int64_t dv, float scale, cudaStream_t stream);
+                     const int32_t* topk_indices, int64_t topk, int64_t num_reqs, int64_t heads, int64_t dq,
+                     int64_t dv, float scale, cudaStream_t stream);
 // 吸收后 MQA、任意 query 长、历史在 cache 中（chunked prefill / 混合 batch）：q: [T, heads, entry]，
 // cu_seqlens_q: [num_reqs+1]，seq_lens: [num_reqs] = 历史 + 本步；out: [T, heads, kv_lora]。
 int mla_prefill_paged_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens,
-                           const int32_t* cu_seqlens_q, void* out, int64_t num_reqs, int64_t heads, int64_t entry,
-                           int64_t kv_lora, int64_t block_size, int64_t max_blocks, float scale, cudaStream_t stream);
+                           const int32_t* cu_seqlens_q, const int32_t* topk_indices, int64_t topk, void* out,
+                           int64_t num_reqs, int64_t heads, int64_t entry, int64_t kv_lora, int64_t block_size,
+                           int64_t max_blocks, float scale, cudaStream_t stream);
 // 吸收后 MQA decode：q: [batch, heads, entry]，out: [batch, heads, kv_lora]（latent 空间）。
-int mla_decode_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens, void* out,
-                    int64_t batch, int64_t heads, int64_t entry, int64_t kv_lora, int64_t block_size,
-                    int64_t max_blocks, float scale, cudaStream_t stream);
+int mla_decode_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens,
+                    const int32_t* topk_indices, int64_t topk, void* out, int64_t batch, int64_t heads, int64_t entry,
+                    int64_t kv_lora, int64_t block_size, int64_t max_blocks, float scale, cudaStream_t stream);
 
 
 // ---- 布局搬运（layout.cu）----
@@ -83,6 +86,7 @@ int add_inplace_bf16(const void* x, void* y, int64_t n, cudaStream_t stream);  /
 int gather_rows_bf16(const void* src, void* dst, const int32_t* rows, int64_t num_rows, int64_t width,
                      cudaStream_t stream);  // dst[r] = src[rows[r]]
 int bf16_to_f32(const void* x, float* y, int64_t n, cudaStream_t stream);
+int scale_f32(float* x, int64_t n, float a, cudaStream_t stream);  // x[:n] *= a
 
 // ---- MoE 参考（moe.cu）----
 // logits[T,E] f32 = x[T,H] bf16 · w[E,H] bf16，fp32 累加（与 HF 路由的 fp32 linear 一致）
@@ -100,6 +104,25 @@ int moe_scatter_add_f32(const void* y, float* acc, const int32_t* sorted_tok, co
                         const float* topk_w, int64_t n, int64_t topk, int64_t hidden, cudaStream_t stream);
 // out[:n] = bf16(bf16(acc) + out)
 int f32_add_to_bf16(const float* acc, void* out, int64_t n, cudaStream_t stream);
+
+// ---- DSA 索引器参考（dsa.cu）----
+// LayerNorm（带 bias，fp32 计算，bf16 出）：out = (x - mean) / sqrt(var + eps) * w + b
+int layernorm_bf16(const void* x, const void* w, const void* b, void* out, int64_t tokens, int64_t hidden, float eps,
+                   cudaStream_t stream);
+// 索引分数：score[row, j] = Σ_h w[row,h] · relu(q[row,h,:]·k_cache[j,:] · scale)，j ∈ [0, vis(row))，其余 -inf。
+//   q: [T, H, D] bf16；w: [T, H] f32（已含 H^-0.5）；k_cache: paged [num_blocks, block_size, D] bf16；
+//   seq_lens[b] = 请求本步结束后总长；cu_seqlens_q 划分 row → 请求；row i 的 vis = seq_len - q_len + i + 1；
+//   score: [T, max_seq] f32（行步长 max_seq）。
+int dsa_index_score_f32(const void* q, const float* w, const void* k_cache, const int32_t* block_table,
+                        const int32_t* seq_lens, const int32_t* cu_seqlens_q, float* score, int64_t num_reqs,
+                        int64_t heads, int64_t head_dim, int64_t block_size, int64_t max_blocks, int64_t max_seq,
+                        float scale, cudaStream_t stream);
+// 每行 top-k 下标（相等取小下标），不足 k 填 -1。vis[row] = 有效列数；out: [rows, topk] i32。
+int dsa_topk_i32(const float* score, const int32_t* vis, int32_t* out, int64_t rows, int64_t max_seq, int64_t topk,
+                 cudaStream_t stream);
+// vis[row] = seq_lens[b] - q_len[b] + i + 1
+int dsa_row_vis_i32(const int32_t* seq_lens, const int32_t* cu_seqlens_q, int32_t* vis, int64_t num_reqs,
+                    cudaStream_t stream);
 
 #ifdef __cplusplus
 }

@@ -6,7 +6,7 @@
 - 更新日期：2026-10-15
 - 阶段：**P4 通过（a/b/c/d）**，`scripts/verify/p4.sh` exit 0（= p0–p3 + MoE 对拍 + runner 单测 + Scheduler+Runner+Executor 双请求对拍 plain/chunked × dense/MoE + tiny fp8 GLM 同套 3+2 对拍）。commits：P0 `cda9aea`，P1 `65a67f1`，P2 `d44e49f`，P3 `17930a5`，P4-c `35b54e3`，P4-a `69c8478`，P4-b `ea415e3`，P4-d + docs 见 git log
 - P4-d fp8（已验证）：`layers/src/weights_fp8.rs`（e4m3 解码 + 128×128 块 dequant，2 单测）、`WeightSource::{with_quant_block, dequant_fp8}`（`load_bf16 / load_f32_host` 对 `F8_E4M3` 自动解量化，需同名 `weight_scale_inv`，块数 `⌈N/128⌉×⌈K/128⌉` 末块可不满）、`GlmMoeDsaConfig::fp8_block_size()`、`gen_tiny_glm.py --fp8`（28 个投影权重量化，期望值用解量化权重算）。tiny fp8 GLM：prefill 0.0076 / 32 步 worst 0.0073 / runner plain 0.0077 / chunked 0.0078
-- 正在做：无（P4 收功完成）。下一步：P5
+- 正在做：**P5 DSA 索引器 + 稀疏 MLA**。代码齐、能编译、**24 个文件未提交**；`scripts/verify/p5.sh` **未通过：3 道 `dsa_parity` 全 FAIL**（2026-10-15 16:30 实跑，详见 `test/2026-10-15/p5-dsa-parity.md`）。失败都不是算错而是"可判定行太少"：self 自算可判定 28/256（需 ≥ 64，可判定行 worst 0.0078 ✅）；注入 HF top-k 路由 near-tie 45/256（需 ≤ 25，211 可判定行 worst 0.0098 ✅）；topk 集合 L2_long row 124 分差 0.1166 刚超 band 0.1130（索引器分数误差涨到 0.11，之前 0.024，原因未查）。**下一步（可直接执行）**：① 改 `gen_tiny_glm.py --dsa` 的 fixture 让平局率降下来（路由 near-tie < 10%、索引器可判定 ≥ 64：调索引器权重放大系数 ×6 / 换 seed / 减专家数），重跑 `DINFER_TINY_GLM=$(realpath test/tiny_glm_dsa) cargo test -p dinfer-glm53 --features ref-tests --test dsa_parity -- --ignored --test-threads=1 --nocapture`；② 查 row 124 的 0.11 分数误差；③ PASS 后 `scripts/verify/p5.sh` → commit "P5: DSA indexer + sparse MLA"，design.md P5 行打勾 → P6。loop 规格 `docs/loops/p5-dsa-indexer.md` 已记 5 轮，上限 10
 - P4 产出：`kernels/cuda/moe.cu`（gate_f32 / route / bucket / gather / scatter_add / f32_add_to_bf16）、`kernels/cuda/mla.cu::mla_prefill_paged`、`layers/src/moe.rs`、`layers/src/mla.rs::AttnMeta::Paged + absorbed_q/absorbed_o`、`core/src/runner.rs`（ReqState / BatchPlan / BatchMode / ModelExecutor / Runner）、`glm53/src/{model.rs::Glm53Model+FeedForward, executor.rs::Glm53Executor}`、`glm53/tests/{tiny_parity,runner_parity}.rs`、`scripts/verify/p4.sh`、`docs/loops/p4-moe-runner.md`
 - P4 已知简化（P10 / 后续补）：runner 每 step 全量 H2D 输入、argmax 后同步 D2H，无 pinned / 双缓冲 / CUDA graph；MoE 逐专家循环 + 一次 D2H 读 offsets（真机换 grouped GEMM）；Decode/Paged 路径每 head 一次小 GEMM（W_UK/W_UV）；fp8 只做加载期 dequant（sm86 无 fp8 张量核，1×128 激活量化 + 真 FP8 GEMM 留 4090/sm90）；采样只有 greedy；无投机解码；只支持单 KV group
 - 下一步（P4 收尾后）：P5 DSA 索引器（`index_n_heads 32 / index_head_dim 128 / index_topk 2048 / index_topk_freq 4`，`indexer_types` full/shared 交替；参考 vLLM `deepseek_v32/indexer.py`），tiny GLM seq 4096 对拍
@@ -18,7 +18,8 @@
 - P3 已知简化（后续补）：decode 路径每 head 一次小 GEMM（W_UK/W_UV），H 个 launch → P10 换 batched GEMM；prefill 不支持 chunked context（有历史 KV 的 prefill）→ P4 runner 接 chunked prefill 时补 "prefill + 读 cache" 路径；无 runner / Sampler 层，测试直接喂 Forward 结构体
 - 阻塞 / 待决策：`docs/design.md` §9（KDA kernel 手写 CUDA 还是 Triton AOT；structured output；性能对比基线配置）
 - 本机工具链：rustc/cargo 1.89.0，nvcc 12.4 在 `/usr/local/cuda/bin`（不在默认 PATH；p0.sh 已自动加）；crates.io 直连可用。**cargo 假失败时 `rm target/.rustc_info.json`**（cron trace 污染，见 pitfalls 2026-10-15）
-- 进行中的 loop 规格：无
+- 进行中的 loop 规格：`docs/loops/p5-dsa-indexer.md`（第 5 轮，未通过）
+- 会话注意：本项目会话两次因 `API Error: 400 Input is too long` 被迫 /clear（10-14 P4、10-15 P5）。长 bisect / 大日志输出前先 wrap；Bash 输出一律 `grep`/`tail` 截断，不要整段 cat 日志
 - 参考材料：`/data/ref/vllm`（main de8291e）、`/data/ref/models/{kimik3,glm53}`（config.json、modeling_*.py、tokenizer、chat 模板、safetensors index；无权重）
 
 <!-- ===== 日志：按日期追加，不改旧条目 ===== -->
@@ -38,6 +39,20 @@
   - 读 vLLM v1 的 engine/core、scheduler output、kv_cache_interface、cudagraph_dispatcher、gpu_worker、sampler metadata，以及 `vllm/models/kimi_k3`、`vllm/models/deepseek_v32` 的模型/attention/MoE/MTP 实现。
   - 写 `docs/design.md`：vLLM 启动与推理链路分析、两模型结构事实表、6 crate 划分、每 crate 模块清单、kernel 清单、P0–P10 分阶段计划、决策与风险；补 `docs/requirements.md` 的"不做什么 / 验收口径 / 约束"（标注待确认）；回写 CLAUDE.md"项目是什么"。
 - 怎么验证的：结构参数均出自 config.json 与 vLLM 源码，文中带文件:行号；未做运行验证（无代码）。后台"启动路径"分析返回后核实并补进 design.md §1.4b：Model Runner V2 为默认、两模型走 breakable cudagraph 不走 torch.compile、GLM 用通用 hf tokenizer/parser 模式。
+
+### 2026-10-15（P5 DSA，进行中）
+
+- 做了什么：
+  - 对拍基准升级：本机 transformers 4.52.4 无 `GlmMoeDsa`；建隔离 venv `/data/ref/venv-tf519`（`--system-site-packages`，复用 torch 2.6.0+cu124）装 transformers 5.19.0；源码抽到 `/data/ref/hf_tf519/`。比对 5.19 的 MoE/MLA/RoPE 语义与 4.52 DeepseekV3 一致，P3/P4 结论不受影响。
+  - `docs/loops/p5-dsa-indexer.md`：目标 / 环境 / 观察方法 / 停止条件 / 8 个已知风险点。
+  - kernels：`dsa.cu`（`layernorm_bf16`、`dsa_index_score_f32`（paged 索引 cache 上 Σ_h w·relu(q·k·scale)）、`dsa_topk_i32`、`dsa_row_vis_i32`）；`mla.cu` 三个 attention kernel 加可选 `topk_indices`（gather 模式：每行只看列出的 key）；`scale_f32`。
+  - layers：`indexer.rs`（`Indexer` / `IndexerKv` / `IndexerMeta`：wq_b、wk、k_norm LayerNorm、weights_proj、前 rope 维 interleave RoPE、写 paged 索引 cache、score + top-k）；`mla.rs`：`AttnMeta::Prefill` 加 block_table/seq_lens/max_blocks，`SparseCtx`（索引器 + 共享 top-k 缓冲 + decode_cu + 对拍注入 `topk_override`），`AttnMeta::indexer_meta()`。
+  - glm53：`config.rs` 加 `indexer_types` / `dsa`（`from_json` 在真 config 带 indexer_types 时自动开）；`model.rs`：每 full 层 `Option<(Indexer, IndexerKv)>`，跨层共享 `topk` 缓冲，`capture_topk`（含索引器分数）/ `topk_override` / `capture_layers` 三个对拍钩子。
+  - `gen_tiny_glm.py --dsa`：用 5.19 GlmMoeDsa（3 层 full/shared/full，4 头 × 32，top-k 8，索引器权重 ×6 让分数有分辨力），拆融合专家权重为逐专家布局，导出每 full 层 top-k 与 index_scores（prefill 短/长 prompt + 32 个 decode 步）、路由 margin。`tests/dsa_parity.rs` 三道测试；`scripts/verify/p5.sh`。
+- 怎么验证的（进行中）：注入 HF top-k 后三层 attention 输出与 HF hook 逐层对比 max abs ≤ 0.0007；256 行里 252 行 logits < 0.01，剩 4 行是 MoE 路由平局（见 pitfalls）。dense / MoE / fp8 回归仍全过。p5.sh 尚未 exit 0（最后一轮测试重写后未跑完：Bash 工具被平台分类器连续拦截）。
+- 同日 16:30（会话因 `Input is too long` 第二次 /clear 后恢复，只做状态记录）：`dsa_parity` 编译通过，fixture 16:22 已重生成，实跑 3 道 **全 FAIL**，均为"可判定行不足 / 平局率过高"类阈值失败，可判定行上误差全部达标；细节与下一步候选见 `test/2026-10-15/p5-dsa-parity.md`，loop 记录表第 5 轮。另：`.claude/settings.local.json` 加 `permissions.defaultMode = bypassPermissions` + `skipDangerousModePermissionPrompt`（用户要求不再逐条确认；该文件被全局 gitignore，不进仓库）。
+- 未完成：让 fixture 平局率降下来（或阈值自适应）→ `p5.sh` PASS → commit P5 → design.md 阶段表 P5 行。
+- 踩坑：见 pitfalls 2026-10-15 三条（硬判决不可逐位复现；transformers 5 融合专家权重；会话 Input too long）。另：静态 shared 64 KB 超 48 KB 上限 → cudaError 1。
 
 ### 2026-10-14 深夜 → 2026-10-15（P4）
 

@@ -108,6 +108,8 @@ impl Rope {
             for i in 0..half {
                 let inv = 1.0 / theta.powf(2.0 * i as f64 / rope_dim as f64);
                 let f = p as f64 * inv;
+                // 注：HF 在 bf16 模型里把 cos/sin cast 到 bf16 再逐项乘加；这里存 fp32 表、fp32 旋转后一次舍入。
+                // 实测对 logits 的影响 ≤ 1 ULP（P3/P4/P5 对拍均用此表），不改。
                 table[p * rope_dim + i] = f.cos() as f32;
                 table[p * rope_dim + half + i] = f.sin() as f32;
             }

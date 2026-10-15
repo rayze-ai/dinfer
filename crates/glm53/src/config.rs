@@ -36,6 +36,14 @@ pub struct GlmMoeDsaConfig {
     pub index_topk_pattern: Option<Vec<String>>,
     #[serde(default)]
     pub indexer_rope_interleave: bool,
+    /// 每层 "full"（自带索引器）/ "shared"（复用上一 full 层 top-k）。真 GLM-5.3 config.json 直接给出；
+    /// 缺省时按 `index_topk_freq / index_skip_topk_offset` 推导（见 `has_indexer`）。
+    #[serde(default)]
+    pub indexer_types: Option<Vec<String>>,
+    /// 是否启用 DSA（索引器权重 + 稀疏 attention）。真 GLM-5.3 config.json 不含此字段，由 `from_json`
+    /// 在 `indexer_types` 存在时置 true；tiny dense/MoE 对拍模型显式写 false。
+    #[serde(default)]
+    pub dsa: bool,
 
     // MoE
     pub n_routed_experts: u32,
@@ -101,12 +109,21 @@ fn two() -> u32 {
 
 impl GlmMoeDsaConfig {
     pub fn from_json(s: &str) -> anyhow::Result<Self> {
-        Ok(serde_json::from_str(s)?)
+        let v: serde_json::Value = serde_json::from_str(s)?;
+        let mut c: Self = serde_json::from_value(v.clone())?;
+        // 真 GLM-5.3 config.json 没有 `dsa` 字段但带 `indexer_types` → 默认开 DSA；tiny 对拍模型显式给出。
+        if v.get("dsa").is_none() && c.indexer_types.is_some() {
+            c.dsa = true;
+        }
+        Ok(c)
     }
 
     /// 该层是否自己算 top-k（否则复用上一个 full 层写入的索引）。
     /// 对照 vLLM `deepseek_v32/attention.py:166-177`。
     pub fn has_indexer(&self, layer_idx: u32) -> bool {
+        if let Some(t) = &self.indexer_types {
+            return t.get(layer_idx as usize).is_none_or(|s| s != "shared");
+        }
         if let Some(p) = &self.index_topk_pattern {
             return p.get(layer_idx as usize).is_none_or(|s| s != "S");
         }

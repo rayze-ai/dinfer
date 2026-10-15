@@ -49,6 +49,18 @@ extern "C" int gather_rows_bf16(const void* src, void* dst, const int32_t* rows,
   return last_err();
 }
 
+__global__ void scale_f32_kernel(float* __restrict__ x, int64_t n, float a) {
+  int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
+  const int64_t stride = (int64_t)gridDim.x * blockDim.x;
+  for (; i < n; i += stride) x[i] *= a;
+}
+
+extern "C" int scale_f32(float* x, int64_t n, float a, cudaStream_t stream) {
+  if (n <= 0) return 0;
+  scale_f32_kernel<<<grid_for(n), 256, 0, stream>>>(x, n, a);
+  return last_err();
+}
+
 extern "C" int bf16_to_f32(const void* x, float* y, int64_t n, cudaStream_t stream) {
   if (n <= 0) return 0;
   bf16_to_f32_kernel<<<grid_for(n), 256, 0, stream>>>(static_cast<const bf16*>(x), y, n);

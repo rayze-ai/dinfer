@@ -34,9 +34,12 @@ constexpr int PF_BLOCK = 256;
 constexpr int MAX_DQ = 320;  // 支持到 GLM 的 256 / K3 的 192
 constexpr int MAX_DV = 256;
 
+// topk_indices（可选，DSA 稀疏）：[T_total, topk] i32，每个 query 行只看列出的 key（请求内位置，-1 = 空）；
+// 为空指针时 = 稠密 causal。gather 模式下 "第 jj 个可见 key" = topk_indices[row][jj]，不再是 j。
 __global__ void prefill_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k, const bf16* __restrict__ v,
-                               bf16* __restrict__ out, const int32_t* __restrict__ cu_seqlens, int H, int Dq,
-                               int Dv, float scale) {
+                               bf16* __restrict__ out, const int32_t* __restrict__ cu_seqlens,
+                               const int32_t* __restrict__ topk_indices, int topk, int H, int Dq, int Dv,
+                               float scale) {
   const int req = blockIdx.x, h = blockIdx.y;
   const int start = cu_seqlens[req], end = cu_seqlens[req + 1];
   const int T = end - start;
@@ -44,6 +47,7 @@ __global__ void prefill_kernel(const bf16* __restrict__ q, const bf16* __restric
 
   __shared__ float s_q[MAX_DQ];
   __shared__ float s_p[PF_BLOCK];  // 当前 chunk 的概率
+  __shared__ int s_j[PF_BLOCK];    // 当前 chunk 的 key 位置（-1 = 跳过）
   __shared__ float s_stat[2];      // max, sum
 
   for (int i = 0; i < T; ++i) {
@@ -51,10 +55,18 @@ __global__ void prefill_kernel(const bf16* __restrict__ q, const bf16* __restric
     const bf16* qi = q + ((int64_t)(start + i) * H + h) * Dq;
     for (int d = threadIdx.x; d < Dq; d += PF_BLOCK) s_q[d] = to_f32(qi[d]);
     __syncthreads();
+    const int32_t* sel = topk_indices ? topk_indices + (int64_t)(start + i) * topk : nullptr;
+    const int n = sel ? topk : i + 1;  // 候选数（gather 模式含 -1 空槽）
+    auto key_pos = [&](int jj) -> int {
+      const int j = sel ? sel[jj] : jj;
+      return (j >= 0 && j <= i) ? j : -1;
+    };
 
-    // pass 1：score max（key j in [0, i]）
+    // pass 1：score max
     float lmax = -INFINITY;
-    for (int j = threadIdx.x; j <= i; j += PF_BLOCK) {
+    for (int jj = threadIdx.x; jj < n; jj += PF_BLOCK) {
+      const int j = key_pos(jj);
+      if (j < 0) continue;
       const bf16* kj = k + ((int64_t)(start + j) * H + h) * Dq;
       float s = 0.f;
       for (int d = 0; d < Dq; ++d) s += s_q[d] * to_f32(kj[d]);
@@ -63,7 +75,9 @@ __global__ void prefill_kernel(const bf16* __restrict__ q, const bf16* __restric
     const float m = block_reduce_max<PF_BLOCK>(lmax);
     // pass 2：sum of exp
     float lsum = 0.f;
-    for (int j = threadIdx.x; j <= i; j += PF_BLOCK) {
+    for (int jj = threadIdx.x; jj < n; jj += PF_BLOCK) {
+      const int j = key_pos(jj);
+      if (j < 0) continue;
       const bf16* kj = k + ((int64_t)(start + j) * H + h) * Dq;
       float s = 0.f;
       for (int d = 0; d < Dq; ++d) s += s_q[d] * to_f32(kj[d]);
@@ -80,23 +94,29 @@ __global__ void prefill_kernel(const bf16* __restrict__ q, const bf16* __restric
     float acc[MAX_DV / PF_BLOCK + 1];
 #pragma unroll
     for (int c = 0; c < MAX_DV / PF_BLOCK + 1; ++c) acc[c] = 0.f;
-    for (int base = 0; base <= i; base += PF_BLOCK) {
-      const int j = base + threadIdx.x;
+    for (int base = 0; base < n; base += PF_BLOCK) {
+      const int jj = base + threadIdx.x;
       float p = 0.f;
-      if (j <= i) {
-        const bf16* kj = k + ((int64_t)(start + j) * H + h) * Dq;
-        float s = 0.f;
-        for (int d = 0; d < Dq; ++d) s += s_q[d] * to_f32(kj[d]);
-        p = __expf(s * scale - s_stat[0]) / s_stat[1];
+      int j = -1;
+      if (jj < n) {
+        j = key_pos(jj);
+        if (j >= 0) {
+          const bf16* kj = k + ((int64_t)(start + j) * H + h) * Dq;
+          float s = 0.f;
+          for (int d = 0; d < Dq; ++d) s += s_q[d] * to_f32(kj[d]);
+          p = __expf(s * scale - s_stat[0]) / s_stat[1];
+        }
       }
       s_p[threadIdx.x] = p;
+      s_j[threadIdx.x] = j;
       __syncthreads();
-      const int n = min(PF_BLOCK, i + 1 - base);
+      const int cnt = min(PF_BLOCK, n - base);
       for (int d = threadIdx.x, c = 0; d < Dv; d += PF_BLOCK, ++c) {
         float a = 0.f;
-        for (int jj = 0; jj < n; ++jj) {
-          const bf16* vj = v + ((int64_t)(start + base + jj) * H + h) * Dv;
-          a += s_p[jj] * to_f32(vj[d]);
+        for (int q2 = 0; q2 < cnt; ++q2) {
+          if (s_j[q2] < 0) continue;
+          const bf16* vj = v + ((int64_t)(start + s_j[q2]) * H + h) * Dv;
+          a += s_p[q2] * to_f32(vj[d]);
         }
         acc[c] += a;
       }
@@ -117,12 +137,15 @@ constexpr int MAX_E = 640;  // kv_lora 512 + rope 64 = 576
 
 __global__ void decode_kernel(const bf16* __restrict__ q, const bf16* __restrict__ cache,
                               const int32_t* __restrict__ block_table, const int32_t* __restrict__ seq_lens,
-                              bf16* __restrict__ out, int H, int E, int L, int block_size, int max_blocks,
-                              float scale) {
+                              const int32_t* __restrict__ topk_indices, int topk, bf16* __restrict__ out, int H,
+                              int E, int L, int block_size, int max_blocks, float scale) {
   const int b = blockIdx.x, h = blockIdx.y;
-  const int n = seq_lens[b];
+  const int seq_len = seq_lens[b];
+  const int32_t* sel = topk_indices ? topk_indices + (int64_t)b * topk : nullptr;
+  const int n = sel ? topk : seq_len;  // 候选数（gather 模式含 -1 空槽）
   __shared__ float s_q[MAX_E];
   __shared__ float s_p[DC_BLOCK];
+  __shared__ int s_j[DC_BLOCK];
   __shared__ float s_stat[2];
   const bf16* qb = q + ((int64_t)b * H + h) * E;
   for (int d = threadIdx.x; d < E; d += DC_BLOCK) s_q[d] = to_f32(qb[d]);
@@ -133,10 +156,16 @@ __global__ void decode_kernel(const bf16* __restrict__ q, const bf16* __restrict
     const int64_t blk = bt[j / block_size];
     return cache + (blk * block_size + (j % block_size)) * E;
   };
+  auto key_pos = [&](int jj) -> int {
+    const int j = sel ? sel[jj] : jj;
+    return (j >= 0 && j < seq_len) ? j : -1;
+  };
 
   // pass 1/2：max 与 sum
   float lmax = -INFINITY;
-  for (int j = threadIdx.x; j < n; j += DC_BLOCK) {
+  for (int jj = threadIdx.x; jj < n; jj += DC_BLOCK) {
+    const int j = key_pos(jj);
+    if (j < 0) continue;
     const bf16* kj = key_ptr(j);
     float s = 0.f;
     for (int d = 0; d < E; ++d) s += s_q[d] * to_f32(kj[d]);
@@ -144,7 +173,9 @@ __global__ void decode_kernel(const bf16* __restrict__ q, const bf16* __restrict
   }
   const float m = block_reduce_max<DC_BLOCK>(lmax);
   float lsum = 0.f;
-  for (int j = threadIdx.x; j < n; j += DC_BLOCK) {
+  for (int jj = threadIdx.x; jj < n; jj += DC_BLOCK) {
+    const int j = key_pos(jj);
+    if (j < 0) continue;
     const bf16* kj = key_ptr(j);
     float s = 0.f;
     for (int d = 0; d < E; ++d) s += s_q[d] * to_f32(kj[d]);
@@ -162,20 +193,28 @@ __global__ void decode_kernel(const bf16* __restrict__ q, const bf16* __restrict
 #pragma unroll
   for (int c = 0; c < MAX_E / DC_BLOCK + 1; ++c) acc[c] = 0.f;
   for (int base = 0; base < n; base += DC_BLOCK) {
-    const int j = base + threadIdx.x;
+    const int jj = base + threadIdx.x;
     float p = 0.f;
-    if (j < n) {
-      const bf16* kj = key_ptr(j);
-      float s = 0.f;
-      for (int d = 0; d < E; ++d) s += s_q[d] * to_f32(kj[d]);
-      p = __expf(s * scale - s_stat[0]) / s_stat[1];
+    int j = -1;
+    if (jj < n) {
+      j = key_pos(jj);
+      if (j >= 0) {
+        const bf16* kj = key_ptr(j);
+        float s = 0.f;
+        for (int d = 0; d < E; ++d) s += s_q[d] * to_f32(kj[d]);
+        p = __expf(s * scale - s_stat[0]) / s_stat[1];
+      }
     }
     s_p[threadIdx.x] = p;
+    s_j[threadIdx.x] = j;
     __syncthreads();
     const int cnt = min(DC_BLOCK, n - base);
     for (int d = threadIdx.x, c = 0; d < L; d += DC_BLOCK, ++c) {
       float a = 0.f;
-      for (int jj = 0; jj < cnt; ++jj) a += s_p[jj] * to_f32(key_ptr(base + jj)[d]);
+      for (int q2 = 0; q2 < cnt; ++q2) {
+        if (s_j[q2] < 0) continue;
+        a += s_p[q2] * to_f32(key_ptr(s_j[q2])[d]);
+      }
       acc[c] += a;
     }
     __syncthreads();
@@ -198,14 +237,15 @@ extern "C" int mla_cache_write_bf16(const void* latent, void* cache, const int64
 }
 
 extern "C" int mla_prefill_bf16(const void* q, const void* k, const void* v, void* out, const int32_t* cu_seqlens,
-                                int64_t num_reqs, int64_t heads, int64_t dq, int64_t dv, float scale,
-                                cudaStream_t stream) {
+                                const int32_t* topk_indices, int64_t topk, int64_t num_reqs, int64_t heads,
+                                int64_t dq, int64_t dv, float scale, cudaStream_t stream) {
   if (num_reqs <= 0) return 0;
   if (dq <= 0 || dq > MAX_DQ || dv <= 0 || dv > MAX_DV || heads <= 0) return err(cudaErrorInvalidValue);
+  if (topk_indices && topk <= 0) return err(cudaErrorInvalidValue);
   dim3 grid((unsigned)num_reqs, (unsigned)heads);
   prefill_kernel<<<grid, PF_BLOCK, 0, stream>>>(static_cast<const bf16*>(q), static_cast<const bf16*>(k),
                                                 static_cast<const bf16*>(v), static_cast<bf16*>(out), cu_seqlens,
-                                                (int)heads, (int)dq, (int)dv, scale);
+                                                topk_indices, (int)topk, (int)heads, (int)dq, (int)dv, scale);
   return last_err();
 }
 
@@ -216,8 +256,9 @@ extern "C" int mla_prefill_bf16(const void* q, const void* k, const void* v, voi
 // 每 block 一个 (req, head)；逐 query 行三遍扫 key（max / sum / 加权累加），与 decode_kernel 同结构。
 __global__ void prefill_paged_kernel(const bf16* __restrict__ q, const bf16* __restrict__ cache,
                                      const int32_t* __restrict__ block_table, const int32_t* __restrict__ seq_lens,
-                                     const int32_t* __restrict__ cu_seqlens_q, bf16* __restrict__ out, int H, int E,
-                                     int L, int block_size, int max_blocks, float scale) {
+                                     const int32_t* __restrict__ cu_seqlens_q,
+                                     const int32_t* __restrict__ topk_indices, int topk, bf16* __restrict__ out,
+                                     int H, int E, int L, int block_size, int max_blocks, float scale) {
   const int b = blockIdx.x, h = blockIdx.y;
   const int q0 = cu_seqlens_q[b], q1 = cu_seqlens_q[b + 1];
   const int q_len = q1 - q0;
@@ -226,6 +267,7 @@ __global__ void prefill_paged_kernel(const bf16* __restrict__ q, const bf16* __r
   const int hist = seq_len - q_len;
   __shared__ float s_q[MAX_E];
   __shared__ float s_p[DC_BLOCK];
+  __shared__ int s_j[DC_BLOCK];
   __shared__ float s_stat[2];
   const int32_t* bt = block_table + (int64_t)b * max_blocks;
   auto key_ptr = [&](int j) -> const bf16* {
@@ -234,12 +276,20 @@ __global__ void prefill_paged_kernel(const bf16* __restrict__ q, const bf16* __r
   };
 
   for (int i = 0; i < q_len; ++i) {
-    const int n = hist + i + 1;  // 可见 key 数
+    const int vis = hist + i + 1;  // causal 可见 key 数
+    const int32_t* sel = topk_indices ? topk_indices + (int64_t)(q0 + i) * topk : nullptr;
+    const int n = sel ? topk : vis;
+    auto key_pos = [&](int jj) -> int {
+      const int j = sel ? sel[jj] : jj;
+      return (j >= 0 && j < vis) ? j : -1;
+    };
     const bf16* qb = q + ((int64_t)(q0 + i) * H + h) * E;
     for (int d = threadIdx.x; d < E; d += DC_BLOCK) s_q[d] = to_f32(qb[d]);
     __syncthreads();
     float lmax = -INFINITY;
-    for (int j = threadIdx.x; j < n; j += DC_BLOCK) {
+    for (int jj = threadIdx.x; jj < n; jj += DC_BLOCK) {
+      const int j = key_pos(jj);
+      if (j < 0) continue;
       const bf16* kj = key_ptr(j);
       float s = 0.f;
       for (int d = 0; d < E; ++d) s += s_q[d] * to_f32(kj[d]);
@@ -247,7 +297,9 @@ __global__ void prefill_paged_kernel(const bf16* __restrict__ q, const bf16* __r
     }
     const float m = block_reduce_max<DC_BLOCK>(lmax);
     float lsum = 0.f;
-    for (int j = threadIdx.x; j < n; j += DC_BLOCK) {
+    for (int jj = threadIdx.x; jj < n; jj += DC_BLOCK) {
+      const int j = key_pos(jj);
+      if (j < 0) continue;
       const bf16* kj = key_ptr(j);
       float s = 0.f;
       for (int d = 0; d < E; ++d) s += s_q[d] * to_f32(kj[d]);
@@ -263,20 +315,28 @@ __global__ void prefill_paged_kernel(const bf16* __restrict__ q, const bf16* __r
 #pragma unroll
     for (int c = 0; c < MAX_E / DC_BLOCK + 1; ++c) acc[c] = 0.f;
     for (int base = 0; base < n; base += DC_BLOCK) {
-      const int j = base + threadIdx.x;
+      const int jj = base + threadIdx.x;
       float p = 0.f;
-      if (j < n) {
-        const bf16* kj = key_ptr(j);
-        float s = 0.f;
-        for (int d = 0; d < E; ++d) s += s_q[d] * to_f32(kj[d]);
-        p = __expf(s * scale - s_stat[0]) / s_stat[1];
+      int j = -1;
+      if (jj < n) {
+        j = key_pos(jj);
+        if (j >= 0) {
+          const bf16* kj = key_ptr(j);
+          float s = 0.f;
+          for (int d = 0; d < E; ++d) s += s_q[d] * to_f32(kj[d]);
+          p = __expf(s * scale - s_stat[0]) / s_stat[1];
+        }
       }
       s_p[threadIdx.x] = p;
+      s_j[threadIdx.x] = j;
       __syncthreads();
       const int cnt = min(DC_BLOCK, n - base);
       for (int d = threadIdx.x, c = 0; d < L; d += DC_BLOCK, ++c) {
         float a = 0.f;
-        for (int jj = 0; jj < cnt; ++jj) a += s_p[jj] * to_f32(key_ptr(base + jj)[d]);
+        for (int q2 = 0; q2 < cnt; ++q2) {
+          if (s_j[q2] < 0) continue;
+          a += s_p[q2] * to_f32(key_ptr(s_j[q2])[d]);
+        }
         acc[c] += a;
       }
       __syncthreads();
@@ -288,29 +348,34 @@ __global__ void prefill_paged_kernel(const bf16* __restrict__ q, const bf16* __r
 }
 
 extern "C" int mla_prefill_paged_bf16(const void* q, const void* cache, const int32_t* block_table,
-                                      const int32_t* seq_lens, const int32_t* cu_seqlens_q, void* out, int64_t num_reqs,
+                                      const int32_t* seq_lens, const int32_t* cu_seqlens_q,
+                                      const int32_t* topk_indices, int64_t topk, void* out, int64_t num_reqs,
                                       int64_t heads, int64_t entry, int64_t kv_lora, int64_t block_size,
                                       int64_t max_blocks, float scale, cudaStream_t stream) {
   if (num_reqs <= 0) return 0;
   if (entry <= 0 || entry > MAX_E || kv_lora <= 0 || kv_lora > entry || heads <= 0 || block_size <= 0)
     return err(cudaErrorInvalidValue);
+  if (topk_indices && topk <= 0) return err(cudaErrorInvalidValue);
   dim3 grid((unsigned)num_reqs, (unsigned)heads);
   prefill_paged_kernel<<<grid, DC_BLOCK, 0, stream>>>(static_cast<const bf16*>(q), static_cast<const bf16*>(cache),
-                                                      block_table, seq_lens, cu_seqlens_q, static_cast<bf16*>(out),
-                                                      (int)heads, (int)entry, (int)kv_lora, (int)block_size,
-                                                      (int)max_blocks, scale);
+                                                      block_table, seq_lens, cu_seqlens_q, topk_indices, (int)topk,
+                                                      static_cast<bf16*>(out), (int)heads, (int)entry, (int)kv_lora,
+                                                      (int)block_size, (int)max_blocks, scale);
   return last_err();
 }
 
 extern "C" int mla_decode_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens,
-                               void* out, int64_t batch, int64_t heads, int64_t entry, int64_t kv_lora,
-                               int64_t block_size, int64_t max_blocks, float scale, cudaStream_t stream) {
+                               const int32_t* topk_indices, int64_t topk, void* out, int64_t batch, int64_t heads,
+                               int64_t entry, int64_t kv_lora, int64_t block_size, int64_t max_blocks, float scale,
+                               cudaStream_t stream) {
   if (batch <= 0) return 0;
   if (entry <= 0 || entry > MAX_E || kv_lora <= 0 || kv_lora > entry || heads <= 0 || block_size <= 0)
     return err(cudaErrorInvalidValue);
+  if (topk_indices && topk <= 0) return err(cudaErrorInvalidValue);
   dim3 grid((unsigned)batch, (unsigned)heads);
   decode_kernel<<<grid, DC_BLOCK, 0, stream>>>(static_cast<const bf16*>(q), static_cast<const bf16*>(cache),
-                                               block_table, seq_lens, static_cast<bf16*>(out), (int)heads, (int)entry,
-                                               (int)kv_lora, (int)block_size, (int)max_blocks, scale);
+                                               block_table, seq_lens, topk_indices, (int)topk,
+                                               static_cast<bf16*>(out), (int)heads, (int)entry, (int)kv_lora,
+                                               (int)block_size, (int)max_blocks, scale);
   return last_err();
 }

@@ -98,6 +98,8 @@ extern "C" {
         v: *const c_void,
         out: *mut c_void,
         cu_seqlens: *const i32,
+        topk_indices: *const i32,
+        topk: i64,
         num_reqs: i64,
         heads: i64,
         dq: i64,
@@ -111,6 +113,8 @@ extern "C" {
         block_table: *const i32,
         seq_lens: *const i32,
         cu_seqlens_q: *const i32,
+        topk_indices: *const i32,
+        topk: i64,
         out: *mut c_void,
         num_reqs: i64,
         heads: i64,
@@ -126,6 +130,8 @@ extern "C" {
         cache: *const c_void,
         block_table: *const i32,
         seq_lens: *const i32,
+        topk_indices: *const i32,
+        topk: i64,
         out: *mut c_void,
         batch: i64,
         heads: i64,
@@ -201,6 +207,52 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
     pub fn bf16_to_f32(x: *const c_void, y: *mut f32, n: i64, stream: cudaStream_t) -> i32;
+    pub fn scale_f32(x: *mut f32, n: i64, a: f32, stream: cudaStream_t) -> i32;
+
+    // ---- DSA ----
+    pub fn layernorm_bf16(
+        x: *const c_void,
+        w: *const c_void,
+        b: *const c_void,
+        out: *mut c_void,
+        tokens: i64,
+        hidden: i64,
+        eps: f32,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn dsa_index_score_f32(
+        q: *const c_void,
+        w: *const f32,
+        k_cache: *const c_void,
+        block_table: *const i32,
+        seq_lens: *const i32,
+        cu_seqlens_q: *const i32,
+        score: *mut f32,
+        num_reqs: i64,
+        heads: i64,
+        head_dim: i64,
+        block_size: i64,
+        max_blocks: i64,
+        max_seq: i64,
+        scale: f32,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn dsa_topk_i32(
+        score: *const f32,
+        vis: *const i32,
+        out: *mut i32,
+        rows: i64,
+        max_seq: i64,
+        topk: i64,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn dsa_row_vis_i32(
+        seq_lens: *const i32,
+        cu_seqlens_q: *const i32,
+        vis: *mut i32,
+        num_reqs: i64,
+        stream: cudaStream_t,
+    ) -> i32;
 
     // ---- MoE ----
     pub fn moe_gate_f32(
@@ -279,9 +331,13 @@ mod stubs {
     stub!(topk_topp_mask_f32(l: *mut f32, k: *const i32, p: *const f32, b: i64, v: i64, s: cudaStream_t));
     stub!(sample_f32(l: *const f32, t: *const f32, sd: *const u64, of: *const u64, o: *mut i32, b: i64, v: i64, s: cudaStream_t));
     stub!(mla_cache_write_bf16(l: *const c_void, c: *mut c_void, sm: *const i64, t: i64, e: i64, bs: i64, s: cudaStream_t));
-    stub!(mla_prefill_bf16(q: *const c_void, k: *const c_void, v: *const c_void, o: *mut c_void, cu: *const i32, n: i64, h: i64, dq: i64, dv: i64, sc: f32, s: cudaStream_t));
-    stub!(mla_prefill_paged_bf16(q: *const c_void, c: *const c_void, bt: *const i32, sl: *const i32, cu: *const i32, o: *mut c_void, n: i64, h: i64, e: i64, l: i64, bs: i64, mb: i64, sc: f32, s: cudaStream_t));
-    stub!(mla_decode_bf16(q: *const c_void, c: *const c_void, bt: *const i32, sl: *const i32, o: *mut c_void, b: i64, h: i64, e: i64, l: i64, bs: i64, mb: i64, sc: f32, s: cudaStream_t));
+    stub!(mla_prefill_bf16(q: *const c_void, k: *const c_void, v: *const c_void, o: *mut c_void, cu: *const i32, ti: *const i32, tk: i64, n: i64, h: i64, dq: i64, dv: i64, sc: f32, s: cudaStream_t));
+    stub!(mla_prefill_paged_bf16(q: *const c_void, c: *const c_void, bt: *const i32, sl: *const i32, cu: *const i32, ti: *const i32, tk: i64, o: *mut c_void, n: i64, h: i64, e: i64, l: i64, bs: i64, mb: i64, sc: f32, s: cudaStream_t));
+    stub!(mla_decode_bf16(q: *const c_void, c: *const c_void, bt: *const i32, sl: *const i32, ti: *const i32, tk: i64, o: *mut c_void, b: i64, h: i64, e: i64, l: i64, bs: i64, mb: i64, sc: f32, s: cudaStream_t));
+    stub!(layernorm_bf16(x: *const c_void, w: *const c_void, b: *const c_void, o: *mut c_void, t: i64, h: i64, e: f32, s: cudaStream_t));
+    stub!(dsa_index_score_f32(q: *const c_void, w: *const f32, kc: *const c_void, bt: *const i32, sl: *const i32, cu: *const i32, sc: *mut f32, n: i64, h: i64, d: i64, bs: i64, mb: i64, ms: i64, scale: f32, s: cudaStream_t));
+    stub!(dsa_topk_i32(sc: *const f32, vis: *const i32, o: *mut i32, r: i64, ms: i64, k: i64, s: cudaStream_t));
+    stub!(dsa_row_vis_i32(sl: *const i32, cu: *const i32, v: *mut i32, n: i64, s: cudaStream_t));
     stub!(copy_cols_bf16(a: *const c_void, b: *mut c_void, t: i64, sc: i64, c0: i64, dc: i64, d0: i64, w: i64, s: cudaStream_t));
     stub!(bcast_kpe_bf16(a: *const c_void, b: *mut c_void, t: i64, h: i64, qk: i64, n: i64, r: i64, s: cudaStream_t));
     stub!(copy_head_cols_bf16(a: *const c_void, b: *mut c_void, t: i64, h: i64, iw: i64, ic: i64, ow: i64, oc: i64, w: i64, s: cudaStream_t));
@@ -296,6 +352,7 @@ mod stubs {
     stub!(add_inplace_bf16(x: *const c_void, y: *mut c_void, n: i64, s: cudaStream_t));
     stub!(gather_rows_bf16(a: *const c_void, b: *mut c_void, r: *const i32, n: i64, w: i64, s: cudaStream_t));
     stub!(bf16_to_f32(x: *const c_void, y: *mut f32, n: i64, s: cudaStream_t));
+    stub!(scale_f32(x: *mut f32, n: i64, a: f32, s: cudaStream_t));
 }
 #[cfg(dinfer_no_nvcc)]
 pub use stubs::*;

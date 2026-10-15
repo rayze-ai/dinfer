@@ -7,9 +7,10 @@ use crate::config::GlmMoeDsaConfig;
 use anyhow::{ensure, Context, Result};
 use dinfer_kernels as k;
 use dinfer_layers::mla::AttnMeta;
+use dinfer_layers::mla::SparseCtx;
 use dinfer_layers::{
-    bf16, Embedding, Gemm, Linear, MlaAttention, MlaConfig, Mlp, Moe, MoeConfig, PagedKv, RmsNorm, RopeStyle,
-    Stream, Tensor, WeightSource,
+    bf16, Embedding, Gemm, Indexer, IndexerConfig, IndexerKv, Linear, MlaAttention, MlaConfig, Mlp, Moe,
+    MoeConfig, PagedKv, RmsNorm, RopeStyle, Stream, Tensor, WeightSource,
 };
 
 /// 每层一份、堆上只建一次，变体大小差异无关紧要（Moe 已 Box，Dense 不值得再包一层）。
@@ -38,6 +39,8 @@ impl FeedForward {
 pub struct DecoderLayer {
     pub input_norm: RmsNorm,
     pub attn: MlaAttention,
+    /// DSA `full` 层：自带索引器 + 索引 K cache；`shared` 层为 None（复用上一 full 层的 top-k）。
+    pub indexer: Option<(Indexer, IndexerKv)>,
     pub post_norm: RmsNorm,
     pub mlp: FeedForward,
 }
@@ -50,6 +53,18 @@ pub struct Glm53Model {
     pub lm_head: Linear,
     pub kv: Vec<PagedKv>,
     pub max_tokens: usize,
+    /// DSA：跨层共享的 top-k 索引缓冲 [max_tokens, index_topk]；None = 稠密模型（tiny dense/MoE）。
+    pub topk: Option<Tensor<i32>>,
+    pub topk_k: usize,
+    /// 调试 / 对拍：若非空，每个 full 层 forward 后把 `topk[:t*k]` 与索引器分数拷回 host：
+    /// (layer_idx, topk [t*k] i32, scores [t*stride] f32, stride)。
+    pub capture_topk: Option<Vec<(usize, Vec<i32>, Vec<f32>, usize)>>,
+    /// 对拍隔离：若非空，每个 full 层算完自己的 top-k 后用这里的 (layer_idx, [t*k] i32) **覆盖** 共享缓冲，
+    /// 让稀疏 attention 吃参考实现的索引（把 "索引器平局分叉" 与 "稀疏 attention 正确性" 分开验证）。
+    pub topk_override: Option<Vec<(usize, Vec<i32>)>>,
+    /// 调试：若非空，每层 forward 后记录 (layer, attn_out[:t*h] f32, hidden_after_layer[:t*h] f32)。
+    pub capture_layers: Option<Vec<(usize, Vec<f32>, Vec<f32>)>>,
+    decode_cu: Tensor<i32>,
     // scratch
     hidden: Tensor<bf16>,
     normed: Tensor<bf16>,
@@ -83,6 +98,21 @@ impl Glm53Model {
         })
     }
 
+    pub fn indexer_config(cfg: &GlmMoeDsaConfig, max_seq: usize) -> IndexerConfig {
+        IndexerConfig {
+            hidden: cfg.hidden_size as usize,
+            q_lora: cfg.q_lora_rank as usize,
+            heads: cfg.index_n_heads as usize,
+            head_dim: cfg.index_head_dim as usize,
+            rope: cfg.qk_rope_head_dim as usize,
+            topk: cfg.index_topk as usize,
+            rope_style: if cfg.indexer_rope_interleave { RopeStyle::Interleave } else { RopeStyle::Neox },
+            rope_theta: cfg.rope_parameters.rope_theta,
+            max_pos: cfg.max_position_embeddings as usize,
+            max_seq,
+        }
+    }
+
     pub fn mla_config(cfg: &GlmMoeDsaConfig) -> MlaConfig {
         MlaConfig {
             hidden: cfg.hidden_size as usize,
@@ -112,6 +142,11 @@ impl Glm53Model {
         let has_moe = cfg.first_k_dense_replace < cfg.num_hidden_layers;
         let moe = if has_moe { Some(Self::moe_config(&cfg)?) } else { None };
         let embed = Embedding::load(stream, src, "model.embed_tokens")?;
+        let max_seq = num_blocks * block_size;
+        let idx_cfg = Self::indexer_config(&cfg, max_seq);
+        if cfg.dsa {
+            ensure!(cfg.has_indexer(0), "DSA: layer 0 must be a full indexer layer");
+        }
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers as usize);
         let mut kv = Vec::with_capacity(cfg.num_hidden_layers as usize);
         for l in 0..cfg.num_hidden_layers {
@@ -120,6 +155,21 @@ impl Glm53Model {
                 input_norm: RmsNorm::load(stream, src, &format!("{p}.input_layernorm"), cfg.rms_norm_eps)?,
                 attn: MlaAttention::load(stream, src, &format!("{p}.self_attn"), mla.clone(), max_tokens)
                     .with_context(|| format!("layer {l} attn"))?,
+                indexer: if cfg.dsa && cfg.has_indexer(l) {
+                    Some((
+                        Indexer::load(
+                            stream,
+                            src,
+                            &format!("{p}.self_attn.indexer"),
+                            idx_cfg.clone(),
+                            max_tokens,
+                        )
+                        .with_context(|| format!("layer {l} indexer"))?,
+                        IndexerKv::new(stream, num_blocks, block_size, idx_cfg.head_dim)?,
+                    ))
+                } else {
+                    None
+                },
                 post_norm: RmsNorm::load(
                     stream,
                     src,
@@ -151,6 +201,16 @@ impl Glm53Model {
             lm_head,
             kv,
             max_tokens,
+            topk: if cfg.dsa {
+                Some(Tensor::zeros(stream, &[max_tokens, cfg.index_topk as usize])?)
+            } else {
+                None
+            },
+            topk_k: cfg.index_topk as usize,
+            capture_topk: None,
+            topk_override: None,
+            capture_layers: None,
+            decode_cu: Tensor::from_vec(stream, (0..=max_tokens as i32).collect(), &[max_tokens + 1])?,
             hidden: Tensor::zeros(stream, &[max_tokens, h])?,
             normed: Tensor::zeros(stream, &[max_tokens, h])?,
             attn_out: Tensor::zeros(stream, &[max_tokens, h])?,
@@ -187,6 +247,18 @@ impl Glm53Model {
                 h,
                 eps,
             )?;
+            let is_full = layer.indexer.is_some();
+            let override_rows = match (&self.topk_override, is_full) {
+                (Some(ov), true) => ov.iter().find(|(l, _)| *l == li).map(|(_, v)| v.clone()),
+                _ => None,
+            };
+            let sparse = self.topk.as_mut().map(|tk| SparseCtx {
+                indexer: layer.indexer.as_mut().map(|(i, c)| (i, c)),
+                topk: tk,
+                topk_k: self.topk_k,
+                decode_cu: &self.decode_cu,
+                topk_override: override_rows.as_deref(),
+            });
             layer.attn.forward(
                 stream,
                 gemm,
@@ -196,8 +268,16 @@ impl Glm53Model {
                 f.slot_mapping,
                 &mut self.kv[li],
                 &f.meta,
+                sparse,
                 &mut self.attn_out,
             )?;
+            if let (Some(cap), Some(tk), Some((idx, _))) =
+                (self.capture_topk.as_mut(), self.topk.as_ref(), layer.indexer.as_ref())
+            {
+                let all = tk.to_vec(stream)?;
+                let (sc, stride) = idx.last_scores(stream, t)?;
+                cap.push((li, all[..t * self.topk_k].to_vec(), sc, stride));
+            }
             // hidden += attn_out; normed = rmsnorm(hidden)
             k::fused_add_rmsnorm_bf16_n(
                 stream,
@@ -212,6 +292,11 @@ impl Glm53Model {
             layer.mlp.forward(stream, gemm, t, &self.normed, &mut self.mlp_out)?;
             // hidden += mlp_out（用 fused_add_rmsnorm 的 res 更新顺带做下一层的 input norm 会更省，但这里保持清晰：下一轮循环顶部做 norm）
             k::add_inplace_bf16_n(stream, &self.mlp_out.data, &mut self.hidden.data, t * h)?;
+            if let Some(cap) = self.capture_layers.as_mut() {
+                let a = self.attn_out.to_vec_f32(stream)?[..t * h].to_vec();
+                let hd = self.hidden.to_vec_f32(stream)?[..t * h].to_vec();
+                cap.push((li, a, hd));
+            }
         }
         // final norm on selected rows → lm_head → fp32（gather 到 attn_out 作临时，norm 到 final_normed）
         let rows = f.logits_rows.numel();

@@ -6,6 +6,7 @@
 // 唯一例外：weights.rs 的只读 mmap（见 `weights::map_readonly`）。其余代码禁止 unsafe。
 #![deny(unsafe_code)]
 
+pub mod indexer;
 pub mod mla;
 pub mod moe;
 pub mod nn;
@@ -14,6 +15,7 @@ pub mod weights;
 pub mod weights_fp8;
 
 pub use dinfer_kernels::{bf16, Device, Gemm, RopeStyle, Stream};
+pub use indexer::{Indexer, IndexerConfig, IndexerKv, IndexerMeta};
 pub use mla::{MlaAttention, MlaConfig, PagedKv};
 pub use moe::{Moe, MoeConfig};
 pub use nn::{Embedding, Linear, Mlp, RmsNorm, Rope};

@@ -53,7 +53,13 @@ impl ModelExecutor for Glm53Executor {
         let seq = Tensor::from_vec(s, plan.seq_lens.clone(), &[n])?;
         let bt = Tensor::from_vec(s, plan.block_table.clone(), &[n, plan.max_blocks.max(1)])?;
         let meta = match plan.mode {
-            BatchMode::Prefill => AttnMeta::Prefill { cu_seqlens: &cu, num_reqs: n },
+            BatchMode::Prefill => AttnMeta::Prefill {
+                cu_seqlens: &cu,
+                num_reqs: n,
+                block_table: &bt,
+                seq_lens: &seq,
+                max_blocks: plan.max_blocks,
+            },
             BatchMode::Decode => {
                 AttnMeta::Decode { block_table: &bt, seq_lens: &seq, max_blocks: plan.max_blocks }
             }

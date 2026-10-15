@@ -71,6 +71,19 @@ impl Stream {
         Ok(self.inner.memset_zeros(&mut v)?)
     }
 
+    /// 设备内拷贝前 n 个元素（同流异步）。
+    pub fn dtod_copy_n<T: DeviceRepr>(
+        &self,
+        src: &CudaSlice<T>,
+        dst: &mut CudaSlice<T>,
+        n: usize,
+    ) -> Result<()> {
+        anyhow::ensure!(n <= src.len() && n <= dst.len(), "dtod_copy_n: n {n} > len");
+        let s = src.slice(..n);
+        let mut d = dst.slice_mut(..n);
+        Ok(self.inner.memcpy_dtod(&s, &mut d)?)
+    }
+
     pub fn synchronize(&self) -> Result<()> {
         Ok(self.inner.synchronize()?)
     }

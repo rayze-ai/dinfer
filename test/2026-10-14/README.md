@@ -14,6 +14,8 @@
 | `p4_runner_parity_{dense,moe}.log` | Scheduler+Runner+Glm53Executor 2 并发请求逐步对拍（plain：1 prefill + 31 decode；chunked/mixed：预算 8 → Prefill 1 + Paged 3 + Decode 31 = 35 步） | plain：dense worst 0.0063 / MoE 0.0071；chunked：dense 0.0059 / MoE 0.0078；greedy 仅在 HF 平局步（gap ≤ 0.0059）分叉 |
 | `p4_fp8_parity.log` | tiny fp8 GLM（128×128 块量化 e4m3 权重，加载期解量化）同套 3 + 2 对拍 | **P4-d PASS**：prefill 0.0076 / 32 步 worst 0.0073 / runner plain 0.0077 / chunked 0.0078；greedy 仅平局步分叉 |
 | `../tiny_glm_fp8/` | `gen_tiny_glm.py --first-k-dense 1 --fp8` 产出（不进 git） | 投影权重 F8_E4M3 + `weight_scale_inv` F32，与 GLM-5.3 真权重同格式；期望值用解量化权重算 |
+| `p5_dsa_parity.log` | tiny DSA GLM `dsa_parity` 三道测试 `--nocapture`（P5，2026-10-15） | 见文件；p5.sh 最终结果以 `p5.log` 为准 |
+| `../tiny_glm_dsa/` | `/data/ref/venv-tf519/bin/python gen_tiny_glm.py --layers 3 --first-k-dense 1 --dsa` 产出（不进 git） | transformers 5.19 GlmMoeDsa：3 层 full/shared/full，索引器 4 头 × 32、top-k 8；含每 full 层 top-k / index_scores（短、长 prompt、32 decode 步）与路由 margin |
 | `p4_moe_parity.log` | tiny MoE GLM 对拍 `--nocapture` 输出 | prefill logits max abs 0.0069（3 行 bf16 平局行 argmax 不同、HF gap ≤ 0.002）；逐步 decode / greedy 见文件 |
 | `../tiny_glm_moe/` | `gen_tiny_glm.py --first-k-dense 1` 产出（不进 git） | 第 0 层 dense、第 1 层 MoE（4 专家 top-2 + 1 shared，e_score_correction_bias 随机） |
 | `../tiny_glm/` | `gen_tiny_glm.py` 产出（不进 git） | config.json、model.safetensors（bf16 2.9 MB）、prompt、expect_prefill_logits、expect_step_logits、expect_greedy |

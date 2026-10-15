@@ -11,6 +11,30 @@
 >     - 如何避免：
 >     - 相关：`文件/命令/链接`
 
+## 2026-10-15 Claude Code 会话报 `API Error: 400 Input is too long`，整段上下文丢失，只能 /clear
+
+- 现象：长会话（多轮 bisect、反复贴测试日志）突然所有请求报 400 Input is too long，无法继续也无法 compact，只能 `/clear` 重来。本项目已发生两次（10-14 P4、10-15 P5），每次丢掉未写进文件的中间结论。
+- 根因：上下文被工具输出撑满——整段 `cat` 测试日志 / `cargo test --nocapture` 全量输出 / 大 diff 直接进对话；自动压缩来不及或压缩后仍超限。
+- 解法：发生后按 CLAUDE.md 开场流程从 `docs/progress.md` 交接区恢复；本次恢复后先做 wrap 把状态落盘。
+- 如何避免：① 所有 Bash 输出先 `| grep -E ... | tail -n` 截断，日志 `tee` 到 `/tmp` 后只看摘要；② 每完成一轮 loop 迭代就把结论写进 `docs/loops/<feature>.md` 记录表和 `test/YYYY-MM-DD/`，不要攒到最后；③ 长 bisect 前先 wrap 一次；④ 已开 `bypassPermissions`，减少每条确认带来的往返消息。
+- 相关：`docs/progress.md` 交接区"会话注意"、`.claude/settings.local.json`
+
+## 2026-10-15 DSA 索引器 top-k 与 HF 不一致，但分数公式逐位正确：bf16 下硬判决本质不可复现
+
+- 现象：tiny DSA 模型长 prompt 256 行里 21 行的索引器 top-k 集合与 HF 不同；两边 index_scores max abs diff 0.024。注入 HF 的 top-k 后仍有 4 行 logits 差 0.2+。
+- 根因：① 把 HF 自己的 q/k 喂进我们的分数公式，与 HF 分数逐位相等 → 公式无误；差异全来自 q/k 各自 bf16 舍入后的 fp32 点积（~1e-2），而 HF 自身 k-th 与 (k+1)-th 分差中位数只有 0.006 → top-k 是对噪声级分差做硬判决，两套实现不可能逐位一致。② 剩下 4 行是 MoE 路由第 2/3 名专家分差 < 0.01 时选了不同专家（P4 已见过的 bf16 平局，tiny 随机权重下约 2%）。逐层 bisect 显示三层 attention 输出 max abs ≤ 0.0007。
+- 解法：对拍分三道：top-k 集合差异只允许落在 "HF k-th 分数 ± 本行两边分数实测误差" 内；注入 HF top-k 验证稀疏 attention（排除索引器）；全程自算只在 "索引器 k-th 分差 > 实测误差 且 路由分差 > 0.01" 的行/步上断言。参考侧额外导出 `indexer_score_*`、`router_margin_*`。
+- 如何避免：任何 top-k / argmax / 路由类硬判决都不要用 "集合完全一致" 做验收；先从参考实现导出判决依据的分数，用分差判定该行是否可判定。试过把 RoPE cos/sin 表改成 bf16 对齐 HF（无改善，21 → 24 行），不要再试。
+- 相关：`crates/glm53/tests/dsa_parity.rs`、`scripts/verify/gen_tiny_glm.py::dump_dsa/dump_router_margin`、`docs/loops/p5-dsa-indexer.md`
+
+## 2026-10-15 transformers ≥ 5 的 MoE 专家权重是融合 3D 张量，与 GLM-5.3 safetensors 逐专家布局不同
+
+- 现象：用 transformers 5.19 `GlmMoeDsaForCausalLM.state_dict()` 存的 tiny 模型，Rust 加载报 `missing tensor model.layers.1.mlp.experts.0.gate_proj.weight`。
+- 根因：5.x 的 `GlmMoeDsaExperts` 用 `gate_up_proj [E, 2I, H]` / `down_proj [E, H, I]` 两个参数存全部专家；真 GLM-5.3 safetensors（以及 4.x DeepseekV3）是 `experts.{e}.{gate,up,down}_proj.weight`。
+- 解法：`gen_tiny_glm.py --dsa` 存盘前拆回逐专家：`gate_up[e].chunk(2, dim=0)` → gate、up。
+- 如何避免：以真模型 safetensors index 的张量名为唯一真相，参考实现的 state_dict 只是导出格式；加载器不要迁就某个 transformers 版本。
+- 相关：`scripts/verify/gen_tiny_glm.py`、`/data/ref/models/glm53/model.safetensors.index.json`
+
 ## 2026-10-15 所有 cargo 命令假失败："failed to run rustc to learn about target-specific information"
 
 - 现象：`cargo build/test/clippy` 全部报该错，stderr 是 rustc 把一段 bash trace（`++ awk '-F: ' '{if($1~"Serial Number")print$2}'`）当 Rust 源码编译；直接跑同一条 `rustc -` 命令却正常；在 `/tmp` 新建 crate 也正常。

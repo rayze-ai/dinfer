@@ -65,6 +65,9 @@ fn prefill(h: &mut Harness, prompt: &[i32], all_rows: bool) -> Vec<f32> {
     let pos = Tensor::from_vec(&s, (0..t as i32).collect(), &[t]).unwrap();
     let slots = Tensor::from_vec(&s, (0..t as i64).collect(), &[t]).unwrap();
     let cu = Tensor::from_vec(&s, vec![0i32, t as i32], &[2]).unwrap();
+    let max_blocks = 64;
+    let bt_t = Tensor::from_vec(&s, (0..max_blocks as i32).collect(), &[1, max_blocks]).unwrap();
+    let seq = Tensor::from_vec(&s, vec![t as i32], &[1]).unwrap();
     let rows: Vec<i32> = if all_rows { (0..t as i32).collect() } else { vec![t as i32 - 1] };
     let nrows = rows.len();
     let rows_t = Tensor::from_vec(&s, rows, &[nrows]).unwrap();
@@ -73,7 +76,13 @@ fn prefill(h: &mut Harness, prompt: &[i32], all_rows: bool) -> Vec<f32> {
         input_ids: &ids,
         positions: &pos,
         slot_mapping: &slots,
-        meta: AttnMeta::Prefill { cu_seqlens: &cu, num_reqs: 1 },
+        meta: AttnMeta::Prefill {
+            cu_seqlens: &cu,
+            num_reqs: 1,
+            block_table: &bt_t,
+            seq_lens: &seq,
+            max_blocks,
+        },
         logits_rows: &rows_t,
     };
     h.model.forward(&s, &h.gemm, &f, &mut logits).unwrap();

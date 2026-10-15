@@ -480,6 +480,7 @@ pub fn mla_prefill_bf16(
     v: &CudaSlice<bf16>,
     out: &mut CudaSlice<bf16>,
     cu_seqlens: &CudaSlice<i32>,
+    topk: Option<(&CudaSlice<i32>, usize)>,
     num_reqs: usize,
     total_tokens: usize,
     heads: usize,
@@ -488,6 +489,7 @@ pub fn mla_prefill_bf16(
     scale: f32,
 ) -> Result<()> {
     ensure!(cu_seqlens.len() > num_reqs, "mla_prefill: cu_seqlens");
+    let (pti, tk) = topk_ptr(stream, topk, total_tokens, "mla_prefill")?;
     ensure!(q.len() >= total_tokens * heads * dq && k.len() >= total_tokens * heads * dq, "mla_prefill: q/k");
     ensure!(
         v.len() >= total_tokens * heads * dv && out.len() >= total_tokens * heads * dv,
@@ -506,6 +508,8 @@ pub fn mla_prefill_bf16(
                 pv,
                 po,
                 pc,
+                pti,
+                tk,
                 num_reqs as i64,
                 heads as i64,
                 dq as i64,
@@ -528,6 +532,7 @@ pub fn mla_prefill_paged_bf16(
     block_table: &CudaSlice<i32>,
     seq_lens: &CudaSlice<i32>,
     cu_seqlens_q: &CudaSlice<i32>,
+    topk: Option<(&CudaSlice<i32>, usize)>,
     out: &mut CudaSlice<bf16>,
     num_reqs: usize,
     total_q: usize,
@@ -549,6 +554,7 @@ pub fn mla_prefill_paged_bf16(
         "mla_prefill_paged: table/seq_lens/cu"
     );
     ensure!(kv_lora <= entry, "mla_prefill_paged: kv_lora > entry");
+    let (pti, tk) = topk_ptr(stream, topk, total_q, "mla_prefill_paged")?;
     let pq = stream.ptr(q) as *const c_void;
     let pc = stream.ptr(cache) as *const c_void;
     let pbt = stream.ptr(block_table) as *const i32;
@@ -564,6 +570,8 @@ pub fn mla_prefill_paged_bf16(
                 pbt,
                 psl,
                 pcu,
+                pti,
+                tk,
                 po,
                 num_reqs as i64,
                 heads as i64,
@@ -587,6 +595,7 @@ pub fn mla_decode_bf16(
     cache: &CudaSlice<bf16>,
     block_table: &CudaSlice<i32>,
     seq_lens: &CudaSlice<i32>,
+    topk: Option<(&CudaSlice<i32>, usize)>,
     out: &mut CudaSlice<bf16>,
     batch: usize,
     heads: usize,
@@ -599,6 +608,7 @@ pub fn mla_decode_bf16(
     ensure!(q.len() >= batch * heads * entry && out.len() >= batch * heads * kv_lora, "mla_decode: q/out");
     ensure!(block_table.len() >= batch * max_blocks && seq_lens.len() >= batch, "mla_decode: table/seq_lens");
     ensure!(kv_lora <= entry, "mla_decode: kv_lora > entry");
+    let (pti, tk) = topk_ptr(stream, topk, batch, "mla_decode")?;
     let pq = stream.ptr(q) as *const c_void;
     let pc = stream.ptr(cache) as *const c_void;
     let pbt = stream.ptr(block_table) as *const i32;
@@ -612,6 +622,8 @@ pub fn mla_decode_bf16(
                 pc,
                 pbt,
                 psl,
+                pti,
+                tk,
                 po,
                 batch as i64,
                 heads as i64,
@@ -868,6 +880,172 @@ pub fn bf16_to_f32_n(stream: &Stream, x: &CudaSlice<bf16>, y: &mut CudaSlice<f32
     let py = stream.ptr_mut(y) as *mut f32;
     // SAFETY: 容量已校验。
     check(unsafe { ffi::bf16_to_f32(px, py, n as i64, stream.raw() as _) }, "bf16_to_f32")
+}
+
+/// dst[:n] = src[:n]（i32，设备内拷贝）。
+pub fn copy_i32_n(stream: &Stream, src: &CudaSlice<i32>, dst: &mut CudaSlice<i32>, n: usize) -> Result<()> {
+    stream.dtod_copy_n(src, dst, n)
+}
+
+/// x[:n] *= a（fp32，就地）。
+pub fn scale_f32_n(stream: &Stream, x: &mut CudaSlice<f32>, n: usize, a: f32) -> Result<()> {
+    ensure!(x.len() >= n, "scale_f32: buffer");
+    let px = stream.ptr_mut(x) as *mut f32;
+    // SAFETY: 容量已校验。
+    check(unsafe { ffi::scale_f32(px, n as i64, a, stream.raw() as _) }, "scale_f32")
+}
+
+// ---------------------------------------------------------------------------
+// DSA 索引器
+// ---------------------------------------------------------------------------
+
+/// 可选 top-k 索引 → (裸指针或 null, topk)。`rows`：需要覆盖的 query 行数。
+fn topk_ptr(
+    stream: &Stream,
+    topk: Option<(&CudaSlice<i32>, usize)>,
+    rows: usize,
+    what: &str,
+) -> Result<(*const i32, i64)> {
+    match topk {
+        None => Ok((std::ptr::null(), 0)),
+        Some((t, k)) => {
+            ensure!(k > 0 && t.len() >= rows * k, "{what}: topk_indices capacity ({} < {rows}*{k})", t.len());
+            Ok((stream.ptr(t) as *const i32, k as i64))
+        }
+    }
+}
+
+/// LayerNorm（带 bias）：x/out [tokens, hidden] bf16，w/b [hidden] bf16，fp32 计算。
+#[allow(clippy::too_many_arguments)]
+pub fn layernorm_bf16_n(
+    stream: &Stream,
+    x: &CudaSlice<bf16>,
+    w: &CudaSlice<bf16>,
+    b: &CudaSlice<bf16>,
+    out: &mut CudaSlice<bf16>,
+    tokens: usize,
+    hidden: usize,
+    eps: f32,
+) -> Result<()> {
+    ensure!(x.len() >= tokens * hidden && out.len() >= tokens * hidden, "layernorm: buffer");
+    ensure!(w.len() == hidden && b.len() == hidden, "layernorm: w/b");
+    let px = stream.ptr(x) as *const c_void;
+    let pw = stream.ptr(w) as *const c_void;
+    let pb = stream.ptr(b) as *const c_void;
+    let po = stream.ptr_mut(out) as *mut c_void;
+    // SAFETY: 容量已校验。
+    check(
+        unsafe { ffi::layernorm_bf16(px, pw, pb, po, tokens as i64, hidden as i64, eps, stream.raw() as _) },
+        "layernorm_bf16",
+    )
+}
+
+/// vis[row] = 该 query 行的 causal 可见 key 数。
+pub fn dsa_row_vis_i32(
+    stream: &Stream,
+    seq_lens: &CudaSlice<i32>,
+    cu_seqlens_q: &CudaSlice<i32>,
+    vis: &mut CudaSlice<i32>,
+    num_reqs: usize,
+    total_q: usize,
+) -> Result<()> {
+    ensure!(
+        seq_lens.len() >= num_reqs && cu_seqlens_q.len() > num_reqs && vis.len() >= total_q,
+        "dsa_row_vis"
+    );
+    let psl = stream.ptr(seq_lens) as *const i32;
+    let pcu = stream.ptr(cu_seqlens_q) as *const i32;
+    let pv = stream.ptr_mut(vis) as *mut i32;
+    // SAFETY: 容量已校验；cu_seqlens_q 末值 == total_q 由调用方保证。
+    check(
+        unsafe { ffi::dsa_row_vis_i32(psl, pcu, pv, num_reqs as i64, stream.raw() as _) },
+        "dsa_row_vis_i32",
+    )
+}
+
+/// score[row, j] = Σ_h w[row,h] · relu(q[row,h]·k_cache[j] · scale)，j < vis(row)，其余 -inf。
+#[allow(clippy::too_many_arguments)]
+pub fn dsa_index_score_f32(
+    stream: &Stream,
+    q: &CudaSlice<bf16>,
+    w: &CudaSlice<f32>,
+    k_cache: &CudaSlice<bf16>,
+    block_table: &CudaSlice<i32>,
+    seq_lens: &CudaSlice<i32>,
+    cu_seqlens_q: &CudaSlice<i32>,
+    score: &mut CudaSlice<f32>,
+    num_reqs: usize,
+    total_q: usize,
+    heads: usize,
+    head_dim: usize,
+    block_size: usize,
+    max_blocks: usize,
+    max_seq: usize,
+    scale: f32,
+) -> Result<()> {
+    ensure!(q.len() >= total_q * heads * head_dim && w.len() >= total_q * heads, "dsa_index_score: q/w");
+    ensure!(score.len() >= total_q * max_seq, "dsa_index_score: score [{total_q}, {max_seq}]");
+    ensure!(
+        block_table.len() >= num_reqs * max_blocks
+            && seq_lens.len() >= num_reqs
+            && cu_seqlens_q.len() > num_reqs,
+        "dsa_index_score: table/seq_lens/cu"
+    );
+    ensure!(max_blocks * block_size >= max_seq, "dsa_index_score: max_blocks*block_size < max_seq");
+    let pq = stream.ptr(q) as *const c_void;
+    let pw = stream.ptr(w) as *const f32;
+    let pk = stream.ptr(k_cache) as *const c_void;
+    let pbt = stream.ptr(block_table) as *const i32;
+    let psl = stream.ptr(seq_lens) as *const i32;
+    let pcu = stream.ptr(cu_seqlens_q) as *const i32;
+    let ps = stream.ptr_mut(score) as *mut f32;
+    // SAFETY: 容量已校验；block_table 内 id < num_blocks 由调度器保证；seq_lens ≤ max_seq 由调用方保证。
+    check(
+        unsafe {
+            ffi::dsa_index_score_f32(
+                pq,
+                pw,
+                pk,
+                pbt,
+                psl,
+                pcu,
+                ps,
+                num_reqs as i64,
+                heads as i64,
+                head_dim as i64,
+                block_size as i64,
+                max_blocks as i64,
+                max_seq as i64,
+                scale,
+                stream.raw() as _,
+            )
+        },
+        "dsa_index_score_f32",
+    )
+}
+
+/// 每行 top-k 下标（相等取小下标），不足 k 填 -1。
+pub fn dsa_topk_i32(
+    stream: &Stream,
+    score: &CudaSlice<f32>,
+    vis: &CudaSlice<i32>,
+    out: &mut CudaSlice<i32>,
+    rows: usize,
+    max_seq: usize,
+    topk: usize,
+) -> Result<()> {
+    ensure!(
+        score.len() >= rows * max_seq && vis.len() >= rows && out.len() >= rows * topk,
+        "dsa_topk: buffer"
+    );
+    let ps = stream.ptr(score) as *const f32;
+    let pv = stream.ptr(vis) as *const i32;
+    let po = stream.ptr_mut(out) as *mut i32;
+    // SAFETY: 容量已校验。
+    check(
+        unsafe { ffi::dsa_topk_i32(ps, pv, po, rows as i64, max_seq as i64, topk as i64, stream.raw() as _) },
+        "dsa_topk_i32",
+    )
 }
 
 // ---------------------------------------------------------------------------

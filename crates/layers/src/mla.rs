@@ -16,6 +16,7 @@
 //! ```
 //! softmax scale = (nope + rope)^-0.5（无 yarn 时）。
 
+use crate::indexer::{Indexer, IndexerKv, IndexerMeta};
 use crate::nn::{Linear, RmsNorm, Rope};
 use crate::tensor::Tensor;
 use crate::weights::WeightSource;
@@ -75,7 +76,14 @@ impl PagedKv {
 /// 一步前向的 attention 元数据（由 runner 构造）。
 pub enum AttnMeta<'a> {
     /// 所有请求都是从 0 开始的 prefill（本 step 内无历史 KV）：展开 K/V 的 causal attention。
-    Prefill { cu_seqlens: &'a Tensor<i32>, num_reqs: usize },
+    /// `block_table / seq_lens / max_blocks` 只有 DSA 索引器（读 paged 索引 cache）用；稠密模型可给空表 + max_blocks 0。
+    Prefill {
+        cu_seqlens: &'a Tensor<i32>,
+        num_reqs: usize,
+        block_table: &'a Tensor<i32>,
+        seq_lens: &'a Tensor<i32>,
+        max_blocks: usize,
+    },
     /// 所有请求都是单 token decode：吸收路径读 paged cache。
     Decode { block_table: &'a Tensor<i32>, seq_lens: &'a Tensor<i32>, max_blocks: usize },
     /// 通用：每请求任意 query 长 + 历史在 cache 中（chunked prefill / prefill+decode 混合 batch）。
@@ -87,6 +95,48 @@ pub enum AttnMeta<'a> {
         num_reqs: usize,
         max_blocks: usize,
     },
+}
+
+impl<'a> AttnMeta<'a> {
+    /// 索引器视角的 batch 描述（三种 meta 统一成 cu_seqlens_q + seq_lens + block_table）。
+    /// Decode 没有 cu_seqlens_q（每请求 1 行）→ 调用方传 `decode_cu`（[0,1,…,B]）。
+    pub fn indexer_meta(&self, decode_cu: &'a Tensor<i32>) -> IndexerMeta<'a> {
+        match self {
+            AttnMeta::Prefill { cu_seqlens, num_reqs, block_table, seq_lens, max_blocks } => IndexerMeta {
+                cu_seqlens_q: cu_seqlens,
+                seq_lens,
+                block_table,
+                num_reqs: *num_reqs,
+                max_blocks: *max_blocks,
+            },
+            AttnMeta::Decode { block_table, seq_lens, max_blocks } => IndexerMeta {
+                cu_seqlens_q: decode_cu,
+                seq_lens,
+                block_table,
+                num_reqs: seq_lens.numel(),
+                max_blocks: *max_blocks,
+            },
+            AttnMeta::Paged { cu_seqlens_q, block_table, seq_lens, num_reqs, max_blocks } => IndexerMeta {
+                cu_seqlens_q,
+                seq_lens,
+                block_table,
+                num_reqs: *num_reqs,
+                max_blocks: *max_blocks,
+            },
+        }
+    }
+}
+
+/// DSA 稀疏上下文：本层若带索引器则在 forward 内算 top-k 写入 `topk`；否则复用 `topk` 里上一个 full 层的结果。
+pub struct SparseCtx<'a> {
+    pub indexer: Option<(&'a mut Indexer, &'a mut IndexerKv)>,
+    /// 共享 top-k 缓冲 [max_tokens, topk] i32（跨层传递）。
+    pub topk: &'a mut Tensor<i32>,
+    pub topk_k: usize,
+    /// Decode 用的 cu_seqlens_q = [0, 1, …, B]。
+    pub decode_cu: &'a Tensor<i32>,
+    /// 对拍隔离：本层索引器算完（写了索引 K cache）后，用这些 host 侧索引（[t*topk] i32）覆盖共享缓冲。
+    pub topk_override: Option<&'a [i32]>,
 }
 
 pub struct MlaAttention {
@@ -302,6 +352,7 @@ impl MlaAttention {
         slot_mapping: &Tensor<i64>,
         kv: &mut PagedKv,
         meta: &AttnMeta<'_>,
+        mut sparse: Option<SparseCtx<'_>>,
         out: &mut Tensor<bf16>,
     ) -> Result<()> {
         let c = self.cfg.clone();
@@ -374,6 +425,19 @@ impl MlaAttention {
             0,
             rope,
         )?;
+        // 2b. DSA 索引器：用 q_c 与本层输入 x 算 top-k（写索引 K cache）；shared 层跳过，直接用缓冲里的
+        if let Some(sp) = sparse.as_mut() {
+            if let Some((idx, ikv)) = sp.indexer.as_mut() {
+                let im = meta.indexer_meta(sp.decode_cu);
+                idx.forward(stream, gemm, t, x, &self.q_c, positions, slot_mapping, ikv, &im, sp.topk)?;
+                if let Some(ov) = sp.topk_override {
+                    ensure!(ov.len() == t * sp.topk_k, "topk_override: {} != t*k", ov.len());
+                    let tmp = Tensor::from_vec(stream, ov.to_vec(), &[t, sp.topk_k])?;
+                    k::copy_i32_n(stream, &tmp.data, &mut sp.topk.data, t * sp.topk_k)?;
+                }
+            }
+        }
+        let topk = sparse.as_ref().map(|sp| (&sp.topk.data, sp.topk_k));
         // 3. q = q_b(q_c): [t, H, qk]
         gemm.forward_bf16(&self.q_c.data, &self.q_b.w.data, None, &mut self.q.data, t, h * qk, q_lora)?;
         // 4. rope：q 的每 head 的 [nope:qk]；k_pe 作为 1 个 head、head_dim=rope 的张量整体旋转
@@ -408,7 +472,7 @@ impl MlaAttention {
         )?;
 
         match meta {
-            AttnMeta::Prefill { cu_seqlens, num_reqs } => {
+            AttnMeta::Prefill { cu_seqlens, num_reqs, .. } => {
                 // 6a. kv_full = kv_b(kv_c): [t, H, nope+v] → k_full = [nope | k_pe 广播], v_full
                 gemm.forward_bf16(
                     &self.kv_c.data,
@@ -451,6 +515,7 @@ impl MlaAttention {
                     &self.v_full.data,
                     &mut self.attn_out.data,
                     &cu_seqlens.data,
+                    topk,
                     *num_reqs,
                     t,
                     h,
@@ -467,6 +532,7 @@ impl MlaAttention {
                     &kv.cache.data,
                     &block_table.data,
                     &seq_lens.data,
+                    topk,
                     &mut self.o_lat.data,
                     t,
                     h,
@@ -487,6 +553,7 @@ impl MlaAttention {
                     &block_table.data,
                     &seq_lens.data,
                     &cu_seqlens_q.data,
+                    topk,
                     &mut self.o_lat.data,
                     *num_reqs,
                     t,
