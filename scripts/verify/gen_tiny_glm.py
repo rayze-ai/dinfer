@@ -37,13 +37,14 @@ ap.add_argument("--fp8", action="store_true",
 ap.add_argument("--dsa", action="store_true", help="用 GlmMoeDsaForCausalLM（DSA 索引器 + 稀疏 attention）")
 ap.add_argument("--index-topk", type=int, default=8)
 ap.add_argument("--long", type=int, default=256, help="--dsa 时额外生成的长 prompt 长度")
+ap.add_argument("--vocab", type=int, default=1000, help="词表大小；server e2e 用 154880 以兼容真 GLM-5.3 tokenizer")
 args = ap.parse_args()
 out = Path(args.out)
 out.mkdir(parents=True, exist_ok=True)
 torch.manual_seed(args.seed)
 
 common = dict(
-    vocab_size=1000,
+    vocab_size=args.vocab,
     hidden_size=256,
     intermediate_size=512,
     moe_intermediate_size=128,

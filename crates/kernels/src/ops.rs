@@ -991,7 +991,7 @@ pub fn dsa_index_score_f32(
             && cu_seqlens_q.len() > num_reqs,
         "dsa_index_score: table/seq_lens/cu"
     );
-    ensure!(max_blocks * block_size >= max_seq, "dsa_index_score: max_blocks*block_size < max_seq");
+    // block_table 宽度只需覆盖每个请求自己的 seq_len（kernel 只读 bt[j / block_size], j < vis）；不要求覆盖 max_seq
     let pq = stream.ptr(q) as *const c_void;
     let pw = stream.ptr(w) as *const f32;
     let pk = stream.ptr(k_cache) as *const c_void;

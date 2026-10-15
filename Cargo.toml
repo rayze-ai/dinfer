@@ -30,7 +30,7 @@ dinfer-glm53 = { path = "crates/glm53" }
 anyhow = "=1.0.98"
 thiserror = "=2.0.12"
 serde = { version = "=1.0.219", features = ["derive"] }
-serde_json = "=1.0.140"
+serde_json = { version = "=1.0.140", features = ["preserve_order"] }  # chat 模板 tojson 要保持 key 插入序（Python dict 语义）
 clap = { version = "=4.5.40", features = ["derive"] }
 tracing = "=0.1.41"
 tracing-subscriber = { version = "=0.3.19", features = ["env-filter", "fmt"] }
@@ -44,9 +44,12 @@ bytemuck = { version = "=1.23.1", features = ["derive"] }
 memmap2 = "=0.9.5"
 safetensors = "=0.5.3"
 tokenizers = { version = "=0.21.2", default-features = false, features = ["onig"] }
-minijinja = { version = "=2.10.2", features = ["json", "loader"] }
+minijinja = { version = "=2.10.2", features = ["json", "loader", "loop_controls", "builtins", "preserve_order"] }
 cudarc = { version = "=0.18.2", default-features = false, features = ["std", "driver", "nvrtc", "cublas", "cublaslt", "f16", "dynamic-linking", "cuda-12040"] }
 criterion = "=0.6.0"
+tokio-stream = "=0.1.17"
+futures-core = "=0.3.34"
+reqwest = { version = "=0.12.15", default-features = false, features = ["json", "stream"] }
 cc = "=1.2.27"
 
 [profile.release]

@@ -195,13 +195,11 @@ impl Indexer {
         k::bf16_to_f32_n(stream, &self.w_bf16.data, &mut self.w.data, t * h)?;
         k::scale_f32_n(stream, &mut self.w.data, t * h, (h as f32).powf(-0.5))?;
         // 5. score + top-k
-        // score 行步长固定为 cfg.max_seq（与 last_scores 一致）；block 表容量必须覆盖它
+        // score 行步长固定为 cfg.max_seq（= cache 容量 num_blocks·block_size，与 last_scores 一致）。
+        // block_table 宽度 meta.max_blocks 只是本 batch 最长请求的块数（runner 按需给），kernel 只在 j < vis ≤ seq_len
+        // 范围内读 bt[j / block_size]，所以这里只需保证每个请求 seq_len ≤ max_seq —— 由 scheduler 的 max_model_len /
+        // cache 容量保证，不另做设备侧检查。
         let max_seq = c.max_seq;
-        ensure!(
-            meta.max_blocks * kv.block_size >= max_seq,
-            "indexer: block_table covers {} < max_seq {max_seq}",
-            meta.max_blocks * kv.block_size
-        );
         k::dsa_row_vis_i32(
             stream,
             &meta.seq_lens.data,

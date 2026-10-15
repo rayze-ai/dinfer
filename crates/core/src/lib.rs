@@ -4,6 +4,7 @@
 //! 由 `dinfer-layers` / 模型 crate 提供实现。详见 `docs/design.md` §4.1。
 
 pub mod config;
+pub mod engine;
 pub mod kv;
 pub mod request;
 pub mod runner;
