@@ -45,3 +45,4 @@ dinfer 已快一个量级，主因是没有编译期；但 dinfer 的"权重 0.5
 | 33 | g | paged_tc 同工作量与 prefill_tc 持平（0.70 vs 0.67 ms）；慢在混批 decode 行占 block（+30%）+ 调度分两步 | 21:0x |
 | 34–35 | g | 混批分流（decode 行走 decode_v2）：微基准 C -12%，bench14 c8-long 0.90× 不变 → 差距在调度而非 kernel | 21:4x |
 | 36–39 | h | prefill v4（FA2 结构 mma.sync）：4090 T=1514 0.66→0.14 ms；bench15 **c1 1.12× / c8 1.07× / c32 1.02× / c8-long 1.00×，四组首次全 ≥ vLLM** | 22:3x |
+| 40–41 | 验收 | q3.sh：3/4 OK，c8-long 1.00× BELOW；bench16 预算 2048：c8-long 1.005×、TTFT 39 vs 68；常驻改 2048 | 23:0x |

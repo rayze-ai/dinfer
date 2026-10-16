@@ -40,7 +40,7 @@ scripts/dev/remote4090.sh run 'cd /data/yaochen/infer/dinfer && bash scripts/ver
 
 ## 常驻服务（2026-10-16 起）
 
-- dinfer Qwen3-0.6B：tmux 会话 `dinfer`，GPU 0，`0.0.0.0:8012`，日志 `/data/yaochen/infer/bootstrap/serve.log`。启动命令见 tmux 窗口（`--max-model-len 8192 --max-num-seqs 64 --max-num-batched-tokens 4096`，num_blocks 自动）。
+- dinfer Qwen3-0.6B：tmux 会话 `dinfer`，GPU 0，`0.0.0.0:8012`，日志 `/data/yaochen/infer/bootstrap/serve.log`。启动命令见 tmux 窗口（`--max-model-len 8192 --max-num-seqs 64 --max-num-batched-tokens 2048`（2026-10-16 起与 vLLM 对齐，bench16），num_blocks 自动）。
   重启：`tmux kill-session -t dinfer` 后按同样命令再起；代码更新后先 `remote4090.sh push` + 远端 `cargo build --features qwen3`。
 - **JumpServer 不放行任何端口转发**（2026-10-16 实测：`-L` 本地监听建立但连接被对端 reset，`-D` SOCKS 同样，`-W` 直接 `Session open refused by peer`）。所以本机不能直接 curl 到 8012；访问方式只有两种：① 在 4090 上 `scripts/dev/chat.sh`（或任何能到 10.121.192.98 内网的机器）；② `remote4090.sh run 'curl …'`。
 - 机器内网地址 10.121.192.98；端口 8012 是否对内网开放取决于机房策略（未验证）。服务**无鉴权**，不要暴露到公网。

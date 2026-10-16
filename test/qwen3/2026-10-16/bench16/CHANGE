@@ -1,0 +1,1 @@
+参数对齐实验（无代码改动）：--max-num-batched-tokens 4096 → 2048（= vLLM 4090 实际值），减少单个 prefill step 对 decode 的打断

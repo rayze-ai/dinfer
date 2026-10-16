@@ -167,3 +167,15 @@ bench15,2026-10-16,h prefill/paged attention v4：FA2 结构（裸 mma.sync m16n
 bench15,2026-10-16,h prefill/paged attention v4：FA2 结构（裸 mma.sync m16n8k16 + ldmatrix，S/P/O 全寄存器，64-key tile，34 KB smem 2 block/SM）；3090 T=1514 1.34→0.28 ms/层,c8-long,out_tok_per_s,1915.341,1908.278,1.004,10.8,higher
 bench15,2026-10-16,h prefill/paged attention v4：FA2 结构（裸 mma.sync m16n8k16 + ldmatrix，S/P/O 全寄存器，64-key tile，34 KB smem 2 block/SM）；3090 T=1514 1.34→0.28 ms/层,c8-long,ttft_p50_ms,68.327,67.472,1.013,32.2,lower
 bench15,2026-10-16,h prefill/paged attention v4：FA2 结构（裸 mma.sync m16n8k16 + ldmatrix，S/P/O 全寄存器，64-key tile，34 KB smem 2 block/SM）；3090 T=1514 1.34→0.28 ms/层,c8-long,tpot_p50_ms,3.798,3.743,1.015,1.5,lower
+bench16,2026-10-16,参数对齐实验（无代码改动）：--max-num-batched-tokens 4096 → 2048（= vLLM 4090 实际值），减少单个 prefill step 对 decode 的打断,c1,out_tok_per_s,500.931,445.674,1.124,-0.1,higher
+bench16,2026-10-16,参数对齐实验（无代码改动）：--max-num-batched-tokens 4096 → 2048（= vLLM 4090 实际值），减少单个 prefill step 对 decode 的打断,c1,ttft_p50_ms,4.055,18.375,0.221,-3.1,lower
+bench16,2026-10-16,参数对齐实验（无代码改动）：--max-num-batched-tokens 4096 → 2048（= vLLM 4090 实际值），减少单个 prefill step 对 decode 的打断,c1,tpot_p50_ms,1.978,2.121,0.932,-0.1,lower
+bench16,2026-10-16,参数对齐实验（无代码改动）：--max-num-batched-tokens 4096 → 2048（= vLLM 4090 实际值），减少单个 prefill step 对 decode 的打断,c8,out_tok_per_s,3092.217,2881.697,1.073,-0.0,higher
+bench16,2026-10-16,参数对齐实验（无代码改动）：--max-num-batched-tokens 4096 → 2048（= vLLM 4090 实际值），减少单个 prefill step 对 decode 的打断,c8,ttft_p50_ms,7.429,34.741,0.214,-3.2,lower
+bench16,2026-10-16,参数对齐实验（无代码改动）：--max-num-batched-tokens 4096 → 2048（= vLLM 4090 实际值），减少单个 prefill step 对 decode 的打断,c8,tpot_p50_ms,2.528,2.553,0.990,0.1,lower
+bench16,2026-10-16,参数对齐实验（无代码改动）：--max-num-batched-tokens 4096 → 2048（= vLLM 4090 实际值），减少单个 prefill step 对 decode 的打断,c32,out_tok_per_s,8440.812,8272.423,1.020,-0.0,higher
+bench16,2026-10-16,参数对齐实验（无代码改动）：--max-num-batched-tokens 4096 → 2048（= vLLM 4090 实际值），减少单个 prefill step 对 decode 的打断,c32,ttft_p50_ms,19.936,75.662,0.263,40.4,lower
+bench16,2026-10-16,参数对齐实验（无代码改动）：--max-num-batched-tokens 4096 → 2048（= vLLM 4090 实际值），减少单个 prefill step 对 decode 的打断,c32,tpot_p50_ms,3.626,3.314,1.094,-0.4,lower
+bench16,2026-10-16,参数对齐实验（无代码改动）：--max-num-batched-tokens 4096 → 2048（= vLLM 4090 实际值），减少单个 prefill step 对 decode 的打断,c8-long,out_tok_per_s,1906.361,1897.353,1.005,-0.5,higher
+bench16,2026-10-16,参数对齐实验（无代码改动）：--max-num-batched-tokens 4096 → 2048（= vLLM 4090 实际值），减少单个 prefill step 对 decode 的打断,c8-long,ttft_p50_ms,39.387,67.739,0.581,42.4,lower
+bench16,2026-10-16,参数对齐实验（无代码改动）：--max-num-batched-tokens 4096 → 2048（= vLLM 4090 实际值），减少单个 prefill step 对 decode 的打断,c8-long,tpot_p50_ms,3.884,3.745,1.037,-2.3,lower
