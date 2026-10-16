@@ -203,6 +203,27 @@ impl Attention {
                 meta.max_blocks,
                 scale,
                 qkv_w,
+                None,
+            )?,
+            // 混批（prefill 行 + decode 行）且 D=128：decode 行走 split-K kernel，其余走 paged tensor-core kernel（Q3 第 34 轮）
+            BatchMode::Paged if d == 128 => k::gqa_mixed_bf16(
+                stream,
+                &q_view,
+                &kv.cache.data,
+                &meta.block_table.data,
+                &meta.seq_lens.data,
+                &meta.cu_seqlens.data,
+                &mut self.attn.data,
+                &mut decode_scratch.data,
+                meta.num_reqs,
+                meta.max_seqlen,
+                h,
+                hk,
+                d,
+                kv.block_size,
+                meta.max_blocks,
+                scale,
+                qkv_w,
             )?,
             BatchMode::Decode | BatchMode::Paged => k::gqa_paged_bf16(
                 stream,
@@ -221,6 +242,7 @@ impl Attention {
                 meta.max_blocks,
                 scale,
                 qkv_w,
+                false,
             )?,
         }
         // 6. o_proj

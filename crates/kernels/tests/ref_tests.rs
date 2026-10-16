@@ -390,6 +390,7 @@ fn gqa_cache_write_and_paged_ref() {
         bts[1],
         (d as f32).powf(-0.5),
         0,
+        false,
     )
     .unwrap();
     assert_close("gqa_paged", &s.dtoh_sync_copy(&out).unwrap(), &want, 1e-2, 1e-2);
@@ -448,6 +449,7 @@ fn gqa_paged_d128_flash_ref() {
         bts[1],
         (d as f32).powf(-0.5),
         0,
+        false,
     )
     .unwrap();
     assert_close("gqa_paged_d128", &s.dtoh_sync_copy(&out).unwrap(), &want, 1e-2, 1e-2);
@@ -495,6 +497,7 @@ fn gqa_decode_d128_splitk_ref() {
         bts[1],
         (d as f32).powf(-0.5),
         0,
+        None,
     )
     .unwrap();
     assert_close("gqa_decode_d128", &s.dtoh_sync_copy(&out).unwrap(), &want, 1e-2, 1e-2);
@@ -542,6 +545,7 @@ fn gqa_decode_d128_b32_direct_ref() {
         bts[1],
         (d as f32).powf(-0.5),
         0,
+        None,
     )
     .unwrap();
     assert_close("gqa_decode_d128_b32", &s.dtoh_sync_copy(&out).unwrap(), &want, 1e-2, 1e-2);

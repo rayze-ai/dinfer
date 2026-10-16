@@ -1422,6 +1422,8 @@ pub fn gqa_paged_bf16<Q: DevicePtr<bf16> + ?Sized>(
     max_blocks: usize,
     scale: f32,
     q_stride: usize,
+    // 混批：跳过 q_len==1 的请求（它们由 gqa_decode_bf16 处理）。
+    skip_single: bool,
 ) -> Result<()> {
     ensure!(
         block_table.len() >= num_reqs * max_blocks && seq_lens.len() >= num_reqs,
@@ -1455,6 +1457,7 @@ pub fn gqa_paged_bf16<Q: DevicePtr<bf16> + ?Sized>(
                 max_blocks as i64,
                 scale,
                 q_stride as i64,
+                skip_single as i32,
                 stream.raw() as _,
             )
         },
@@ -1480,6 +1483,8 @@ pub fn gqa_decode_bf16<Q: DevicePtr<bf16> + ?Sized>(
     max_blocks: usize,
     scale: f32,
     q_stride: usize,
+    // 混批：Some 时只算 q_len==1 的请求，q/out 行号取 cu_seqlens_q[b]。
+    cu_seqlens_q: Option<&CudaSlice<i32>>,
 ) -> Result<()> {
     ensure!(head_dim == 128, "gqa_decode: head_dim must be 128");
     ensure!(
@@ -1487,8 +1492,9 @@ pub fn gqa_decode_bf16<Q: DevicePtr<bf16> + ?Sized>(
         "gqa_decode: table/seq_lens"
     );
     ensure!(
-        q.len() >= (num_reqs - 1) * q_stride.max(heads * head_dim) + heads * head_dim
-            && out.len() >= num_reqs * heads * head_dim,
+        cu_seqlens_q.is_some()
+            || (q.len() >= (num_reqs - 1) * q_stride.max(heads * head_dim) + heads * head_dim
+                && out.len() >= num_reqs * heads * head_dim),
         "gqa_decode: q/out"
     );
     ensure!(scratch.len() >= gqa_decode_scratch_len(num_reqs, heads, head_dim), "gqa_decode: scratch");
@@ -1510,10 +1516,44 @@ pub fn gqa_decode_bf16<Q: DevicePtr<bf16> + ?Sized>(
                 max_blocks as i64,
                 scale,
                 q_stride as i64,
+                cu_seqlens_q.map_or(std::ptr::null(), |c| stream.ptr(c) as *const i32),
                 stream.raw() as _,
             )
         },
         "gqa_decode_bf16",
+    )
+}
+
+/// 混批（prefill 行 + decode 行同一步）attention：q_len==1 的请求走 split-K decode kernel（按 cu_seqlens_q 定位行），
+/// 其余请求走 paged tensor-core kernel（跳过 q_len==1）。两个 kernel 同流串行，各自只写自己的行。仅 D=128。
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_mixed_bf16<Q: DevicePtr<bf16> + ?Sized>(
+    stream: &Stream,
+    q: &Q,
+    cache: &CudaSlice<bf16>,
+    block_table: &CudaSlice<i32>,
+    seq_lens: &CudaSlice<i32>,
+    cu_seqlens_q: &CudaSlice<i32>,
+    out: &mut CudaSlice<bf16>,
+    scratch: &mut CudaSlice<f32>,
+    num_reqs: usize,
+    max_q_len: usize,
+    heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    block_size: usize,
+    max_blocks: usize,
+    scale: f32,
+    q_stride: usize,
+) -> Result<()> {
+    ensure!(head_dim == 128, "gqa_mixed: head_dim must be 128");
+    gqa_decode_bf16(
+        stream, q, cache, block_table, seq_lens, out, scratch, num_reqs, heads, kv_heads, head_dim, block_size,
+        max_blocks, scale, q_stride, Some(cu_seqlens_q),
+    )?;
+    gqa_paged_bf16(
+        stream, q, cache, block_table, seq_lens, cu_seqlens_q, out, num_reqs, max_q_len, heads, kv_heads, head_dim,
+        block_size, max_blocks, scale, q_stride, true,
     )
 }
 

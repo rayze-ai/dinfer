@@ -205,6 +205,7 @@ extern "C" {
         max_blocks: i64,
         scale: f32,
         q_stride: i64,
+        skip_single: i32,
         stream: cudaStream_t,
     ) -> i32;
     pub fn gqa_decode_bf16(
@@ -222,6 +223,7 @@ extern "C" {
         max_blocks: i64,
         scale: f32,
         q_stride: i64,
+        cu_seqlens_q: *const i32,
         stream: cudaStream_t,
     ) -> i32;
     pub fn qkv_post_bf16(

@@ -74,6 +74,7 @@ fn cold_vs_warm_by_shape() {
                     blocks_per,
                     1.0 / (d as f32).sqrt(),
                     0,
+                    false,
                 )
                 .unwrap()
             };
@@ -96,6 +97,7 @@ fn cold_vs_warm_by_shape() {
                     blocks_per,
                     1.0 / (d as f32).sqrt(),
                     0,
+                    None,
                 )
                 .unwrap()
             };
@@ -188,12 +190,23 @@ fn cold_vs_warm_by_shape() {
                 dinfer_kernels::gqa_paged_bf16(
                     &s, &qd, &cache, &dbt, &dseq, &dcu, &mut od, b, max_q, h, hk, d, bs, blocks_per,
                     1.0 / (d as f32).sqrt(), 0,
+                    false,
                 )
                 .unwrap()
             };
             time(&mut f);
             let w = time(&mut f);
-            println!("  {name:<28} {w:>8.3}");
+            let mut scratch = s.alloc_zeros::<f32>(dinfer_kernels::gqa_decode_scratch_len(b, h, d)).unwrap();
+            let mut fm = || {
+                dinfer_kernels::gqa_mixed_bf16(
+                    &s, &qd, &cache, &dbt, &dseq, &dcu, &mut od, &mut scratch, b, max_q, h, hk, d, bs, blocks_per,
+                    1.0 / (d as f32).sqrt(), 0,
+                )
+                .unwrap()
+            };
+            time(&mut fm);
+            let wm = time(&mut fm);
+            println!("  {name:<28} paged_tc {w:>8.3}   mixed(decode_v2+paged_tc skip) {wm:>8.3}");
         }
         let cu = s.htod_copy(vec![0i32, 1024]).unwrap();
         let mut f = || {

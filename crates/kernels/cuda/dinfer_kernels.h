@@ -85,10 +85,10 @@ int gqa_prefill_bf16(const void* q, const void* k, const void* v, void* out, con
 int gqa_paged_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens,
                    const int32_t* cu_seqlens_q, void* out, int64_t num_reqs, int64_t max_q_len, int64_t heads,
                    int64_t kv_heads, int64_t head_dim, int64_t block_size, int64_t max_blocks, float scale,
-                   int64_t q_stride, cudaStream_t stream);
+                   int64_t q_stride, int skip_single, cudaStream_t stream);
 int gqa_decode_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens, void* out,
                     float* scratch, int64_t num_reqs, int64_t heads, int64_t kv_heads, int64_t head_dim,
-                    int64_t block_size, int64_t max_blocks, float scale, int64_t q_stride, cudaStream_t stream);
+                    int64_t block_size, int64_t max_blocks, float scale, int64_t q_stride, const int32_t* cu_seqlens_q, cudaStream_t stream);
 // Qwen3 QKV 后处理融合：q/k per-head RMSNorm + neox RoPE（原地）+ K/V 写 paged cache。D 必须 == 128。
 int qkv_post_bf16(void* qkv, const void* wq, const void* wk, const int32_t* positions, const float* cos_sin, void* cache,
                   const int64_t* slot_mapping, int64_t tokens, int64_t heads, int64_t kv_heads, int64_t head_dim, float eps,

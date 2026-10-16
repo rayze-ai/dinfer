@@ -210,7 +210,7 @@ __global__ void __launch_bounds__(V3_WARPS * 32) gqa_prefill_tc_kernel(
 __global__ void __launch_bounds__(V3_WARPS * 32) gqa_paged_tc_kernel(
     const bf16* __restrict__ q, const bf16* __restrict__ cache, const int32_t* __restrict__ block_table,
     const int32_t* __restrict__ seq_lens, const int32_t* __restrict__ cu_seqlens_q, bf16* __restrict__ out, int H,
-    int Hkv, int block_size, int max_blocks, float scale, int q_stride) {
+    int Hkv, int block_size, int max_blocks, float scale, int q_stride, int skip_single) {
   extern __shared__ __align__(128) unsigned char v3_smem[];
   bf16* sQ = reinterpret_cast<bf16*>(v3_smem);
   bf16* sK = sQ + V3_G * V3_BQ * PF_D;
@@ -223,6 +223,7 @@ __global__ void __launch_bounds__(V3_WARPS * 32) gqa_paged_tc_kernel(
   const int group = H / Hkv;
   const int q0 = cu_seqlens_q[b], q1 = cu_seqlens_q[b + 1];
   const int q_len = q1 - q0;
+  if (skip_single && q_len == 1) return;  // 混批：decode 行由 gqa_decode_v2 处理
   const int q_base = blockIdx.x * V3_BQ;
   if (q_base >= q_len) return;
   const int seq_len = seq_lens[b];
@@ -632,9 +633,16 @@ __device__ __forceinline__ float sum8(float v) {
 
 __global__ void __launch_bounds__(D2_WARPS * 32) gqa_decode_v2_kernel(
     const bf16* __restrict__ q, const bf16* __restrict__ cache, const int32_t* __restrict__ block_table,
-    const int32_t* __restrict__ seq_lens, float* __restrict__ scratch, bf16* __restrict__ out_direct, int H, int Hkv,
-    int block_size, int max_blocks, float scale, int q_stride, int splits) {
+    const int32_t* __restrict__ seq_lens, const int32_t* __restrict__ cu_seqlens_q, float* __restrict__ scratch,
+    bf16* __restrict__ out_direct, int H, int Hkv, int block_size, int max_blocks, float scale, int q_stride,
+    int splits) {
   const int b = blockIdx.x, hk = blockIdx.y, split = blockIdx.z;
+  // 混批（Q3 第 34 轮）：cu_seqlens_q 非空时只处理 q_len==1 的请求，q/out 行号 = cu_seqlens_q[b]（而不是 b）
+  int row = b;
+  if (cu_seqlens_q) {
+    if (cu_seqlens_q[b + 1] - cu_seqlens_q[b] != 1) return;
+    row = cu_seqlens_q[b];
+  }
   const int group = H / Hkv;  // ≤ D2_MAXG
   const int n = seq_lens[b];
   const int seg = (n + splits - 1) / splits;
@@ -650,7 +658,7 @@ __global__ void __launch_bounds__(D2_WARPS * 32) gqa_decode_v2_kernel(
 
   for (int g = 0; g < group; ++g)
     for (int d = threadIdx.x; d < PF_D; d += D2_WARPS * 32)
-      s_q[g][d] = to_f32(q[(int64_t)b * q_stride + (int64_t)(hk * group + g) * PF_D + d]) * scale;
+      s_q[g][d] = to_f32(q[(int64_t)row * q_stride + (int64_t)(hk * group + g) * PF_D + d]) * scale;
   __syncthreads();
   // 每 lane 把自己 16 维的 q 放寄存器（两个 head）
   float qreg[D2_MAXG][D2_DPL];
@@ -784,7 +792,7 @@ __global__ void __launch_bounds__(D2_WARPS * 32) gqa_decode_v2_kernel(
       if (out_direct) {
         // splits == 1：直接归一化写输出，省掉 merge kernel
         const float inv = 1.f / L;
-        bf16* op = out_direct + ((int64_t)b * H + h) * PF_D;
+        bf16* op = out_direct + ((int64_t)row * H + h) * PF_D;
 #pragma unroll
         for (int c = 0; c < PF_DPL; ++c) op[lane + 32 * c] = to_bf16(o[c] * inv);
       } else {
@@ -796,8 +804,14 @@ __global__ void __launch_bounds__(D2_WARPS * 32) gqa_decode_v2_kernel(
   }
 }
 
-__global__ void gqa_decode_merge_v2_kernel(const float* __restrict__ scratch, bf16* __restrict__ out, int H, int splits) {
+__global__ void gqa_decode_merge_v2_kernel(const float* __restrict__ scratch, const int32_t* __restrict__ cu_seqlens_q,
+                                           bf16* __restrict__ out, int H, int splits) {
   const int b = blockIdx.x, h = blockIdx.y;
+  int row = b;
+  if (cu_seqlens_q) {
+    if (cu_seqlens_q[b + 1] - cu_seqlens_q[b] != 1) return;
+    row = cu_seqlens_q[b];
+  }
   const float* base = scratch + ((int64_t)b * H + h) * splits * (PF_D + 2);
   float M = -INFINITY;
   for (int s = 0; s < splits; ++s) M = fmaxf(M, base[s * (PF_D + 2)]);
@@ -809,7 +823,7 @@ __global__ void gqa_decode_merge_v2_kernel(const float* __restrict__ scratch, bf
     L += p[1] * a;
     o += p[2 + d] * a;
   }
-  out[((int64_t)b * H + h) * PF_D + d] = to_bf16(o / L);
+  out[((int64_t)row * H + h) * PF_D + d] = to_bf16(o / L);
 }
 
 __global__ void gqa_decode_merge_kernel(const float* __restrict__ scratch, bf16* __restrict__ out, int H) {
@@ -877,7 +891,7 @@ extern "C" int gqa_prefill_bf16(const void* q, const void* k, const void* v, voi
 extern "C" int gqa_paged_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens,
                               const int32_t* cu_seqlens_q, void* out, int64_t num_reqs, int64_t max_q_len, int64_t heads,
                               int64_t kv_heads, int64_t head_dim, int64_t block_size, int64_t max_blocks, float scale,
-                              int64_t q_stride, cudaStream_t stream) {
+                              int64_t q_stride, int skip_single, cudaStream_t stream) {
   if (q_stride <= 0) q_stride = heads * head_dim;
   if (num_reqs <= 0) return 0;
   if (head_dim <= 0 || head_dim > MAX_D || heads <= 0 || kv_heads <= 0 || heads % kv_heads != 0 || block_size <= 0 ||
@@ -894,7 +908,8 @@ extern "C" int gqa_paged_bf16(const void* q, const void* cache, const int32_t* b
     dim3 grid((unsigned)((max_q_len + V3_BQ - 1) / V3_BQ), (unsigned)kv_heads, (unsigned)num_reqs);
     gqa_paged_tc_kernel<<<grid, V3_WARPS * 32, V3_SMEM, stream>>>(
         static_cast<const bf16*>(q), static_cast<const bf16*>(cache), block_table, seq_lens, cu_seqlens_q,
-        static_cast<bf16*>(out), (int)heads, (int)kv_heads, (int)block_size, (int)max_blocks, scale, (int)q_stride);
+        static_cast<bf16*>(out), (int)heads, (int)kv_heads, (int)block_size, (int)max_blocks, scale, (int)q_stride,
+        skip_single);
     return last_err();
   }
   dim3 grid((unsigned)num_reqs, (unsigned)heads);
@@ -909,7 +924,7 @@ extern "C" int gqa_paged_bf16(const void* q, const void* cache, const int32_t* b
 extern "C" int gqa_decode_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens,
                                void* out, float* scratch, int64_t num_reqs, int64_t heads, int64_t kv_heads,
                                int64_t head_dim, int64_t block_size, int64_t max_blocks, float scale, int64_t q_stride,
-                               cudaStream_t stream) {
+                               const int32_t* cu_seqlens_q, cudaStream_t stream) {
   if (q_stride <= 0) q_stride = heads * head_dim;
   if (num_reqs <= 0) return 0;
   if (head_dim != PF_D || heads <= 0 || kv_heads <= 0 || heads % kv_heads != 0 || block_size <= 0)
@@ -924,14 +939,16 @@ extern "C" int gqa_decode_bf16(const void* q, const void* cache, const int32_t* 
     dim3 grid1((unsigned)num_reqs, (unsigned)kv_heads, (unsigned)splits);
     bf16* direct = splits == 1 ? static_cast<bf16*>(out) : nullptr;
     gqa_decode_v2_kernel<<<grid1, D2_WARPS * 32, 0, stream>>>(
-        static_cast<const bf16*>(q), static_cast<const bf16*>(cache), block_table, seq_lens, scratch, direct, (int)heads,
-        (int)kv_heads, (int)block_size, (int)max_blocks, scale, (int)q_stride, splits);
+        static_cast<const bf16*>(q), static_cast<const bf16*>(cache), block_table, seq_lens, cu_seqlens_q, scratch, direct,
+        (int)heads, (int)kv_heads, (int)block_size, (int)max_blocks, scale, (int)q_stride, splits);
     if (splits > 1) {
       dim3 grid2((unsigned)num_reqs, (unsigned)heads);
-      gqa_decode_merge_v2_kernel<<<grid2, PF_D, 0, stream>>>(scratch, static_cast<bf16*>(out), (int)heads, splits);
+      gqa_decode_merge_v2_kernel<<<grid2, PF_D, 0, stream>>>(scratch, cu_seqlens_q, static_cast<bf16*>(out), (int)heads,
+                                                             splits);
     }
     return last_err();
   }
+  if (cu_seqlens_q) return 3;  // v1 路径不支持混批行映射
   dim3 grid1((unsigned)num_reqs, (unsigned)kv_heads, (unsigned)DC_SPLITS);
   gqa_decode_split_kernel<<<grid1, DC_WARPS * 32, 0, stream>>>(
       static_cast<const bf16*>(q), static_cast<const bf16*>(cache), block_table, seq_lens, scratch, (int)heads,
