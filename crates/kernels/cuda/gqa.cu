@@ -488,6 +488,196 @@ __global__ void __launch_bounds__(DC_WARPS * 32) gqa_decode_split_kernel(
   }
 }
 
+// ---- decode v2（Q3-e 续）：向量化 + 一 warp 四 key ----
+// grid = (num_reqs, Hkv, splits)，block = 4 warp。每 warp 一次处理 4 个 key：8 lane 一 key，每 lane 负责 16 维（两次 uint4 =
+// 16 个 bf16 读 K），8-lane shuffle 归约得分数；group 个 q head（Qwen3 = 2）同时算（K 读一次服务两头）。
+// online softmax 在 4-key 组内先做 lane 级，再归并到 warp 级。V 累加：每 lane 持 16 维（同 K 的分工），用 key 的 p 乘加。
+// block_table 每 16 key（block_size 对齐段）查一次。splits 由 host 自适应。scratch 布局同 v1：[B][H][splits][D+2]。
+constexpr int D2_WARPS = 4;
+constexpr int D2_KPW = 4;                 // keys per warp-iteration
+constexpr int D2_LPK = 8;                 // lanes per key
+constexpr int D2_DPL = PF_D / D2_LPK;     // 16 dims per lane
+constexpr int D2_MAXG = 2;                // group size (H / Hkv) supported in registers
+
+__device__ __forceinline__ float sum8(float v) {
+  v += __shfl_xor_sync(0xffffffffu, v, 4);
+  v += __shfl_xor_sync(0xffffffffu, v, 2);
+  v += __shfl_xor_sync(0xffffffffu, v, 1);
+  return v;
+}
+
+__global__ void __launch_bounds__(D2_WARPS * 32) gqa_decode_v2_kernel(
+    const bf16* __restrict__ q, const bf16* __restrict__ cache, const int32_t* __restrict__ block_table,
+    const int32_t* __restrict__ seq_lens, float* __restrict__ scratch, int H, int Hkv, int block_size, int max_blocks,
+    float scale, int q_stride, int splits) {
+  const int b = blockIdx.x, hk = blockIdx.y, split = blockIdx.z;
+  const int group = H / Hkv;  // ≤ D2_MAXG
+  const int n = seq_lens[b];
+  const int seg = (n + splits - 1) / splits;
+  const int k_begin = split * seg, k_end = min(n, k_begin + seg);
+  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+  const int kslot = lane / D2_LPK;          // 0..3：本 lane 处理的 key 槽
+  const int dl = (lane % D2_LPK) * D2_DPL;  // 本 lane 的起始维度
+  const int32_t* bt = block_table + (int64_t)b * max_blocks;
+
+  __shared__ float s_q[D2_MAXG][PF_D];
+  __shared__ float s_m[D2_MAXG][D2_WARPS], s_l[D2_MAXG][D2_WARPS];
+  __shared__ float s_acc[D2_MAXG][D2_WARPS][PF_D];
+
+  for (int g = 0; g < group; ++g)
+    for (int d = threadIdx.x; d < PF_D; d += D2_WARPS * 32)
+      s_q[g][d] = to_f32(q[(int64_t)b * q_stride + (int64_t)(hk * group + g) * PF_D + d]) * scale;
+  __syncthreads();
+  // 每 lane 把自己 16 维的 q 放寄存器（两个 head）
+  float qreg[D2_MAXG][D2_DPL];
+#pragma unroll
+  for (int g = 0; g < D2_MAXG; ++g)
+#pragma unroll
+    for (int c = 0; c < D2_DPL; ++c) qreg[g][c] = (g < group) ? s_q[g][dl + c] : 0.f;
+
+  float m[D2_MAXG], l[D2_MAXG], acc[D2_MAXG][D2_DPL];
+#pragma unroll
+  for (int g = 0; g < D2_MAXG; ++g) {
+    m[g] = -INFINITY; l[g] = 0.f;
+#pragma unroll
+    for (int c = 0; c < D2_DPL; ++c) acc[g][c] = 0.f;
+  }
+
+  if (k_begin < k_end) {
+    const int wlen = (k_end - k_begin + D2_WARPS - 1) / D2_WARPS;
+    const int w0 = k_begin + warp * wlen, w1 = min(k_end, w0 + wlen);
+    for (int base = w0; base < w1; base += D2_KPW) {
+      const int key = base + kslot;
+      const bool valid = key < w1;
+      // K 行指针（valid 时）
+      const bf16* kp = nullptr; const bf16* vp = nullptr;
+      if (valid) {
+        const int64_t blk = bt[key / block_size];
+        const bf16* slotp = cache + slot_off(blk * block_size + (key % block_size), Hkv, PF_D);
+        kp = slotp + (hk * 2) * PF_D + dl;
+        vp = slotp + (hk * 2 + 1) * PF_D + dl;
+      }
+      // 读 16 个 bf16 的 K（两次 uint4）
+      float kf[D2_DPL];
+      if (valid) {
+        const uint4* kp4 = reinterpret_cast<const uint4*>(kp);
+        uint4 r0 = kp4[0], r1 = kp4[1];
+        const __nv_bfloat162* p0 = reinterpret_cast<const __nv_bfloat162*>(&r0);
+        const __nv_bfloat162* p1 = reinterpret_cast<const __nv_bfloat162*>(&r1);
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+          float2 a = __bfloat1622float2(p0[i]);
+          float2 c2 = __bfloat1622float2(p1[i]);
+          kf[2 * i] = a.x; kf[2 * i + 1] = a.y;
+          kf[8 + 2 * i] = c2.x; kf[8 + 2 * i + 1] = c2.y;
+        }
+      } else {
+#pragma unroll
+        for (int c = 0; c < D2_DPL; ++c) kf[c] = 0.f;
+      }
+      // V 同样向量读
+      float vf[D2_DPL];
+      if (valid) {
+        const uint4* vp4 = reinterpret_cast<const uint4*>(vp);
+        uint4 r0 = vp4[0], r1 = vp4[1];
+        const __nv_bfloat162* p0 = reinterpret_cast<const __nv_bfloat162*>(&r0);
+        const __nv_bfloat162* p1 = reinterpret_cast<const __nv_bfloat162*>(&r1);
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+          float2 a = __bfloat1622float2(p0[i]);
+          float2 c2 = __bfloat1622float2(p1[i]);
+          vf[2 * i] = a.x; vf[2 * i + 1] = a.y;
+          vf[8 + 2 * i] = c2.x; vf[8 + 2 * i + 1] = c2.y;
+        }
+      } else {
+#pragma unroll
+        for (int c = 0; c < D2_DPL; ++c) vf[c] = 0.f;
+      }
+#pragma unroll
+      for (int g = 0; g < D2_MAXG; ++g) {
+        if (g >= group) break;
+        float part = 0.f;
+#pragma unroll
+        for (int c = 0; c < D2_DPL; ++c) part += qreg[g][c] * kf[c];
+        const float sc = valid ? sum8(part) : -INFINITY;  // 8 lane 归约 → 该 key 的分数（同 key 的 8 lane 都拿到）
+        // 4 个 key 的 max：跨 kslot 归约（xor 8, 16）
+        float kmax = sc;
+        kmax = fmaxf(kmax, __shfl_xor_sync(0xffffffffu, kmax, 8));
+        kmax = fmaxf(kmax, __shfl_xor_sync(0xffffffffu, kmax, 16));
+        const float m_new = fmaxf(m[g], kmax);
+        const float alpha = __expf(m[g] - m_new);
+        const float p = valid ? __expf(sc - m_new) : 0.f;
+        float psum = p;
+        psum += __shfl_xor_sync(0xffffffffu, psum, 8);
+        psum += __shfl_xor_sync(0xffffffffu, psum, 16);
+        l[g] = l[g] * alpha + psum;
+        // acc：本 lane 只累加自己 key 的贡献；4 个 key 的同一维度分散在 4 个 kslot 的 lane 上，最后归并
+#pragma unroll
+        for (int c = 0; c < D2_DPL; ++c) acc[g][c] = acc[g][c] * alpha + p * vf[c];
+        m[g] = m_new;
+      }
+    }
+  }
+  // 1) 4 个 kslot 的 acc 归并到 kslot 0（同维度 lane：xor 8, 16）；m/l 在 4 个 kslot 上已一致
+#pragma unroll
+  for (int g = 0; g < D2_MAXG; ++g)
+#pragma unroll
+    for (int c = 0; c < D2_DPL; ++c) {
+      float v = acc[g][c];
+      v += __shfl_xor_sync(0xffffffffu, v, 8);
+      v += __shfl_xor_sync(0xffffffffu, v, 16);
+      acc[g][c] = v;
+    }
+  // 2) warp 间合并（smem）
+  for (int g = 0; g < group; ++g) {
+    if (lane < D2_LPK) {
+#pragma unroll
+      for (int c = 0; c < D2_DPL; ++c) s_acc[g][warp][dl + c] = acc[g][c];
+    }
+    if (lane == 0) { s_m[g][warp] = m[g]; s_l[g][warp] = l[g]; }
+  }
+  __syncthreads();
+  if (warp == 0) {
+    for (int g = 0; g < group; ++g) {
+      const int h = hk * group + g;
+      float* part = scratch + (((int64_t)b * H + h) * splits + split) * (PF_D + 2);
+      float M = -INFINITY;
+#pragma unroll
+      for (int w = 0; w < D2_WARPS; ++w) M = fmaxf(M, s_m[g][w]);
+      float L = 0.f;
+      float o[PF_DPL];
+#pragma unroll
+      for (int c = 0; c < PF_DPL; ++c) o[c] = 0.f;
+#pragma unroll
+      for (int w = 0; w < D2_WARPS; ++w) {
+        const float a = (s_m[g][w] == -INFINITY) ? 0.f : __expf(s_m[g][w] - M);
+        L += s_l[g][w] * a;
+#pragma unroll
+        for (int c = 0; c < PF_DPL; ++c) o[c] += s_acc[g][w][lane + 32 * c] * a;
+      }
+      if (lane == 0) { part[0] = M; part[1] = L; }
+#pragma unroll
+      for (int c = 0; c < PF_DPL; ++c) part[2 + lane + 32 * c] = o[c];
+    }
+  }
+}
+
+__global__ void gqa_decode_merge_v2_kernel(const float* __restrict__ scratch, bf16* __restrict__ out, int H, int splits) {
+  const int b = blockIdx.x, h = blockIdx.y;
+  const float* base = scratch + ((int64_t)b * H + h) * splits * (PF_D + 2);
+  float M = -INFINITY;
+  for (int s = 0; s < splits; ++s) M = fmaxf(M, base[s * (PF_D + 2)]);
+  float L = 0.f, o = 0.f;
+  const int d = threadIdx.x;
+  for (int s = 0; s < splits; ++s) {
+    const float* p = base + s * (PF_D + 2);
+    const float a = (p[0] == -INFINITY) ? 0.f : __expf(p[0] - M);
+    L += p[1] * a;
+    o += p[2 + d] * a;
+  }
+  out[((int64_t)b * H + h) * PF_D + d] = to_bf16(o / L);
+}
+
 __global__ void gqa_decode_merge_kernel(const float* __restrict__ scratch, bf16* __restrict__ out, int H) {
   const int b = blockIdx.x, h = blockIdx.y;
   const float* base = scratch + ((int64_t)b * H + h) * DC_SPLITS * (PF_D + 2);
@@ -576,6 +766,19 @@ extern "C" int gqa_decode_bf16(const void* q, const void* cache, const int32_t* 
   if (num_reqs <= 0) return 0;
   if (head_dim != PF_D || heads <= 0 || kv_heads <= 0 || heads % kv_heads != 0 || block_size <= 0)
     return err(cudaErrorInvalidValue);
+  const int group = (int)(heads / kv_heads);
+  if (group <= D2_MAXG && block_size % 16 == 0) {
+    // splits 自适应：目标 ≥ 256 个 block；上限 8（scratch 按 8 分配）
+    int splits = (int)((256 + num_reqs * kv_heads - 1) / (num_reqs * kv_heads));
+    splits = splits < 1 ? 1 : (splits > DC_SPLITS ? DC_SPLITS : splits);
+    dim3 grid1((unsigned)num_reqs, (unsigned)kv_heads, (unsigned)splits);
+    gqa_decode_v2_kernel<<<grid1, D2_WARPS * 32, 0, stream>>>(
+        static_cast<const bf16*>(q), static_cast<const bf16*>(cache), block_table, seq_lens, scratch, (int)heads,
+        (int)kv_heads, (int)block_size, (int)max_blocks, scale, (int)q_stride, splits);
+    dim3 grid2((unsigned)num_reqs, (unsigned)heads);
+    gqa_decode_merge_v2_kernel<<<grid2, PF_D, 0, stream>>>(scratch, static_cast<bf16*>(out), (int)heads, splits);
+    return last_err();
+  }
   dim3 grid1((unsigned)num_reqs, (unsigned)kv_heads, (unsigned)DC_SPLITS);
   gqa_decode_split_kernel<<<grid1, DC_WARPS * 32, 0, stream>>>(
       static_cast<const bf16*>(q), static_cast<const bf16*>(cache), block_table, seq_lens, scratch, (int)heads,

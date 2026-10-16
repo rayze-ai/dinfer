@@ -51,6 +51,12 @@ scripts/dev/remote4090.sh run 'cd /data/yaochen/infer/dinfer && bash scripts/ver
 
 - GPU 0：dinfer 常驻服务；GPU 1：vLLM 容器（我们起的 `vllm-qwen3`）；**GPU 2：用户的 k8s pod `qwen3-06b-vllm`（2026-10-16 16:07 起，k8s.io namespace，不要动）**；GPU 3：跑测试（`remote4090_baseline.sh` / `q2.sh` 默认 `CUDA_VISIBLE_DEVICES=3`）。测试与常驻服务同卡会 OOM（dinfer 服务按 0.9 利用率吃满 KV）。跑前 `nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name --format=csv` 看一眼。
 
+## 性能趋势面板（用户要求：每轮改动 → 每个指标的提升，浏览器实时看）
+
+- 数据：`test/qwen3/perf-trend.csv`（长表：round, date, change, group, metric, dinfer, vllm, ratio, delta_pct_vs_prev_round）由 `scripts/dev/bench_trend.py` 从所有 `bench*/` 生成，`bench_compare.sh` 跑完自动刷新；同时出 `perf-trend.{md,json,svg,html}`。
+- 面板：4090 上 `tmux new -d -s trend 'bash scripts/dev/trend_server.sh 8090'`，浏览器开 `http://10.121.192.98:8090/perf-trend.html`（页面每 10 s 重读 CSV；四张曲线 + 每轮改动/提升表，hover 显示该轮改动）。本机没法转发端口，要在能到内网的机器上开。
+- 每轮必须带改动说明：`bench_compare.sh <OUT> "改动一句话"`（写进 `OUT/CHANGE`）。
+
 ## 压测工具（2026-10-16 起，后续常用）
 
 - `bins/bench`（二进制 `bench`，`cargo build --release -p dinfer-bench`）：OpenAI 流式接口压测，口径与 vLLM `benchmarks/serve.py` 一致（TTFT = 首个带内容 chunk；ITL = 相邻内容 chunk 间隔；TPOT = (latency − TTFT)/(out − 1)；输出 token 数以服务端 `usage` 为准）。闭环并发，prompt 由 seed 决定性生成，`ignore_eos` 让两边输出量一致，思考关。

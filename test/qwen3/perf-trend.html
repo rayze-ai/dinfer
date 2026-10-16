@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh"><head><meta charset="utf-8"><title>dinfer perf trend</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+:root{--bg:#fff;--fg:#1a1a1a;--muted:#666;--card:#f6f7f9;--line:#e3e5e8}
+@media (prefers-color-scheme: dark){:root:not([data-theme=light]){--bg:#111;--fg:#eee;--muted:#9a9a9a;--card:#1b1d20;--line:#2a2d31}}
+body{margin:0;padding:16px;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,sans-serif}
+h1{font-size:18px;margin:0 0 4px}.sub{color:var(--muted);margin-bottom:12px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px}
+.card h2{font-size:14px;margin:0 0 6px}
+table{border-collapse:collapse;width:100%;font-size:12.5px}th,td{border-bottom:1px solid var(--line);padding:4px 6px;text-align:right;vertical-align:top}
+th:first-child,td:first-child,td.change,th.change{text-align:left}
+.up{color:#1a7f37}.down{color:#c62828}.chg{max-width:420px;white-space:normal;color:var(--muted)}
+.updated{color:var(--muted);font-size:12px}
+</style></head><body>
+<h1>dinfer vs vLLM v0.31.0 — Qwen3-0.6B，4090（每轮 bench_compare 四组）</h1>
+<div class="sub">数据：<code>perf-trend.csv</code>（每 10 s 重读）。比值 = dinfer out tok/s ÷ vLLM；虚线 1.0 = 追平。TTFT/TPOT 越低越好。<span id="updated" class="updated"></span></div>
+<div class="grid">
+ <div class="card"><h2>out tok/s ÷ vLLM</h2><canvas id="ratio"></canvas></div>
+ <div class="card"><h2>TTFT p50 (ms)，实线 dinfer / 虚线 vLLM</h2><canvas id="ttft"></canvas></div>
+ <div class="card"><h2>TPOT p50 (ms)，实线 dinfer / 虚线 vLLM</h2><canvas id="tpot"></canvas></div>
+ <div class="card"><h2>out tok/s，实线 dinfer / 虚线 vLLM</h2><canvas id="tps"></canvas></div>
+</div>
+<div class="card" style="margin-top:14px"><h2>每轮改动与提升（相对上一轮；绿色 = 变好）</h2><div id="table"></div></div>
+<script>
+const GROUPS=["c1","c8","c32","c8-long"], COLORS=["#1f77b4","#ff7f0e","#2ca02c","#d62728"];
+const charts={};
+function parseCSV(t){const lines=t.trim().split(/\r?\n/);const hdr=lines[0].split(",");return lines.slice(1).map(l=>{const cells=[];let cur="",q=false;for(const ch of l){if(ch=='"'){q=!q;continue}if(ch==','&&!q){cells.push(cur);cur="";continue}cur+=ch}cells.push(cur);const o={};hdr.forEach((h,i)=>o[h]=cells[i]);return o;});}
+function build(rows){
+  const rounds=[...new Set(rows.map(r=>r.round))];
+  const change={};rows.forEach(r=>change[r.round]=r.change);
+  const get=(metric,g,field)=>rounds.map(rd=>{const x=rows.find(r=>r.round==rd&&r.group==g&&r.metric==metric);return x?parseFloat(x[field]):null;});
+  const mk=(id,metric,field,withV,refLine)=>{
+    const ds=[];GROUPS.forEach((g,i)=>{ds.push({label:g,data:get(metric,g,field),borderColor:COLORS[i],backgroundColor:COLORS[i],tension:.15,pointRadius:3});
+      if(withV)ds.push({label:g+" vLLM",data:get(metric,g,"vllm"),borderColor:COLORS[i],borderDash:[4,4],pointRadius:0,borderWidth:1});});
+    if(refLine)ds.push({label:"vLLM = 1.0",data:rounds.map(()=>1),borderColor:"#888",borderDash:[6,3],pointRadius:0,borderWidth:1});
+    const cfg={type:"line",data:{labels:rounds,datasets:ds},options:{animation:false,responsive:true,interaction:{mode:"index",intersect:false},
+      plugins:{legend:{labels:{boxWidth:10,font:{size:11}}},tooltip:{callbacks:{afterTitle:(it)=>"改动: "+(change[it[0].label]||"")}}},
+      scales:{y:{beginAtZero:true,ticks:{color:getComputedStyle(document.body).color}},x:{ticks:{color:getComputedStyle(document.body).color}}}}};
+    if(charts[id]){charts[id].data=cfg.data;charts[id].update();}else charts[id]=new Chart(document.getElementById(id),cfg);
+  };
+  mk("ratio","out_tok_per_s","ratio_dinfer_over_vllm",false,true);
+  mk("ttft","ttft_p50_ms","dinfer",true,false);
+  mk("tpot","tpot_p50_ms","dinfer",true,false);
+  mk("tps","out_tok_per_s","dinfer",true,false);
+  // 表
+  let h="<table><tr><th>轮</th><th class=change>改动</th>";GROUPS.forEach(g=>h+=`<th>${g} tok/s<br>(×vLLM, Δ)</th>`);GROUPS.forEach(g=>h+=`<th>${g} TTFT ms<br>(Δ)</th>`);GROUPS.forEach(g=>h+=`<th>${g} TPOT ms<br>(Δ)</th>`);h+="</tr>";
+  rounds.forEach(rd=>{h+=`<tr><td>${rd}</td><td class="change chg">${change[rd]||"—"}</td>`;
+    for(const m of ["out_tok_per_s","ttft_p50_ms","tpot_p50_ms"])GROUPS.forEach(g=>{const x=rows.find(r=>r.round==rd&&r.group==g&&r.metric==m);if(!x){h+="<td>—</td>";return;}
+      const d=x.delta_pct_vs_prev_round===""?"":parseFloat(x.delta_pct_vs_prev_round);const cls=d===""?"":(d>0.5?"up":(d<-0.5?"down":""));const ds=d===""?"":` <span class="${cls}">${d>0?"+":""}${d.toFixed(0)}%</span>`;
+      const v=parseFloat(x.dinfer);h+=m=="out_tok_per_s"?`<td>${v.toFixed(0)} (${parseFloat(x.ratio_dinfer_over_vllm).toFixed(2)}×)${ds}</td>`:`<td>${v.toFixed(m=="tpot_p50_ms"?2:1)} / ${parseFloat(x.vllm).toFixed(m=="tpot_p50_ms"?2:1)}${ds}</td>`;});
+    h+="</tr>";});
+  document.getElementById("table").innerHTML=h+"</table>";
+  document.getElementById("updated").textContent=" 更新于 "+new Date().toLocaleTimeString();
+}
+async function refresh(){try{const t=await (await fetch("perf-trend.csv?ts="+Date.now(),{cache:"no-store"})).text();build(parseCSV(t));}catch(e){document.getElementById("updated").textContent=" 读取 CSV 失败: "+e;}}
+refresh();setInterval(refresh,10000);
+</script></body></html>
