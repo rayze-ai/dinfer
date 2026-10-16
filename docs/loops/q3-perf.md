@@ -48,6 +48,16 @@ c1 out 221 vs 447 tok/s、c32 2707 vs 8065、c8 p1024 56 vs 1916；TTFT 84 vs 18
 v2：① BQ = 64 行/block（16 warp，每 warp 4 行，或 8 warp × 8 行），K/V 重读次数降 16×；② uint4 向量装载；③ 同一 kv head 的两个 q head 共用 K/V tile（grid 按 kv head 而非 q head，再省一半读）；④ 分数/PV 用 `mma.sync` bf16 m16n8k16（tensor core）—— 这是 FA2 的本质，第二步做；先做 ①②③（预期 9.6 → ~1.5 ms/层），再做 ④。
 验收：`gqa_prefill_d128_flash_ref` + `gqa_paged_d128_flash_ref` 过（paged 同样改）；cold_shape T=1514 ≤ 2 ms；bench c8-long TTFT ≤ 150 ms。
 
+## e 续 4：prefill v3（tensor core）设计
+
+现状（4090，v2）：T=1514 1.3 ms/层 × 28 = 36 ms/请求；c8-long 8 个请求排队 → TTFT 127 ms（vLLM 36）。v2 的分数 / PV 仍是标量 FMA（每 lane 128 次），只用了 CUDA core。
+v3：block 仍 = (req, kv head, 32 行 query)，但 32×32 的 S = Q·Kᵀ 与 O += P·V 用 `nvcuda::wmma` bf16 16×16×16 片：
+- S：Q [32×128] bf16（smem，预乘 scale）× Kᵀ（smem K [32×128] 行主 = col_major Kᵀ）→ 2×2 个 16×16 fp32 累加片，k 维 8 步；8 warp 分 4 个 S 片 × 2 个 head（每 warp 一片）；
+- S 写回 smem [2 head][32][32] fp32 → 每 warp 负责 8 行做 online softmax（max/sum、alpha、P=exp）→ P 写 bf16 smem [2][32][32]；O 累加器 [2][32][128] fp32 在 smem，整体 × alpha（按行）；
+- PV：P [32×32] × V [32×128] → 2×8 个 16×16 片，k 维 2 步；8 warp 分 16 片 × 2 head；累加到 smem O。
+smem：K 8K + V 8K + Q 2×8K + S 2×4K + P 2×2K + O 2×16K = 72 KB → 动态 smem + `cudaFuncSetAttribute` 到 96 KB（4090 每 SM 100 KB，1 block/SM；或 O 放寄存器以后再压）。
+验收：ref 同（1e-2）；4090 T=1514 ≤ 0.4 ms/层；bench c8-long TTFT ≤ 60、吞吐 ≥ 1.0×。
+
 ## 环境
 
 4090（`scripts/dev/remote4090.sh`），dinfer `--release` 常驻 :8012（tmux `dinfer`），vLLM Docker :8013。改 kernel 后：`push` → 远端 `cargo build --release -p dinfer --features qwen3` → 重启 tmux `dinfer` → `bench_compare.sh`。
