@@ -9,15 +9,17 @@
 在同卡、同模型、同配置下，dinfer 的 TTFT / TPOT / 吞吐**不低于** vLLM；先做单卡 mix 实例（无 PD）。基线见 `test/qwen3/2026-10-16/bench/summary.md`：
 c1 out 221 vs 447 tok/s、c32 2707 vs 8065、c8 p1024 56 vs 1916；TTFT 84 vs 18 ms（p171）、TPOT 3.9 vs 2.1 ms。
 
-## 范围（按收益排序，一块一轮验收）
+## 范围（顺序按用户 2026-10-16 建议：先补齐 CUDA graph 等结构性功能并与 vLLM 对齐，逐段比耗时；kernel 合并最后做）
 
-| 块 | 内容 | 现状 → 目标 |
-|---|---|---|
-| a prefill attention | 重写 `gqa_prefill`：grid (ceil(T/BQ), heads, reqs)，每 block 处理 BQ 个 query；K/V 按 tile 进 shared memory，online softmax 单遍；warp 内按 d 分工，fp32 累加，bf16 I/O。causal 只扫 ≤ 对角 tile。 | 1514 token 6.36 s → ≤ 50 ms（vLLM 0.04 s）；c8 p1024 组 TTFT 9.4 s → ≤ 150 ms |
-| b decode attention | `gqa_paged`：每 (req, head) 一个 block 串行扫 key → split-K：grid (reqs, heads, splits)，每 split 扫一段 key 出 (m, l, acc)，第二个小 kernel 合并；batch 大时并行度 ×splits | c32 TPOT 10.0 → ≤ 5 ms |
-| c CUDA graph | decode 步（全部请求单 token）整步捕获为一张图：H2D 输入先拷到固定地址缓冲，图内 forward + 采样；按 batch 大小分桶（1,2,4,8,16,32,64）各捕获一次 | c1 TPOT 3.9 → ≤ 2.5 ms |
-| d 小开销 | 每 step 7 次 `Tensor::from_vec` H2D → 一块 pinned 固定缓冲一次拷；采样管线 kernel 融合（temperature+min_p+topk/topp 一个 kernel；logprobs 不再复制 raw）；`copy_cols` ×4 → GEMM 直接写分块或一个 split kernel | 每 step 省 ~0.5 ms |
-| e 激活复用 | per-layer 的 qkv/q/k/v/attn/mlp 中间（28 层各一份 × max_tokens）→ 全模型共享一组 | 省 ~2.5 GiB 显存 → KV 更多 |
+| 块 | 内容 | 现状 → 目标 | 状态 |
+|---|---|---|---|
+| a prefill attention | flash 风格 tile kernel（prefill + paged 两条路径，D=128） | 1514 token 6.36 s → 0.27 s | ✅ 2026-10-16 |
+| b decode attention | split-K kernel（reqs × Hkv × 8 split × 4 warp + merge） | nsys 85% → 待 bench4 | 实现完，验收中 |
+| c CUDA graph（**下一步**） | ① 固定地址输入缓冲：runner 每 step 的 ids / positions / slot_mapping / block_table / seq_lens / 采样参数一次 H2D 到预分配 pinned→device 缓冲（替代每 step 7 次 `Tensor::from_vec`）；② decode 步（纯 Decode 模式）整步 forward + 采样捕获为 CUDA graph，按 batch 大小分桶 {1,2,4,8,16,32,64}，启动时捕获；③ 图内采样：penalties/temperature/min_p/topk-topp/sample/logprobs 全部按固定地址运行；非 decode 步照常 eager。与 vLLM 对齐：`cudagraph_mode=FULL`、`cudagraph_capture_sizes` | c1 TPOT 3.8 → ≤ 2.5 ms；c32 TPOT ≤ 5 ms | 待开 |
+| d 逐段对齐与耗时比对 | 对每个阶段（H2D 输入、embed、每层 attention/MLP、lm_head、采样、D2H、HTTP）与 vLLM 的同阶段并排：nsys 的 kernel 分组 + `/metrics` 的 step 直方图；写成一张表，找出每段差距 | 产出 `test/qwen3/<日期>/stage-compare.md` | 待开 |
+| e kernel 合并（最后） | rmsnorm+残差、rope+cache write、qkv 拆分并入 GEMM epilogue、采样管线一个 kernel、logprobs 不复制 raw | 每 step 省 ~0.5 ms | 待开 |
+| f 激活复用 | per-layer scratch → 全模型共享一组 | 省 ~2.5 GiB → KV 更多 | 待开 |
+| g 权重加载 | mmap 页 pinned + 异步 H2D / 多线程按张量并行 | 2.0 s → < 1 s | 待开 |
 
 不在 Q3：PD 分离（Q4）、fp8、多卡、Triton。
 
