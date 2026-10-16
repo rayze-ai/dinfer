@@ -12,6 +12,7 @@
 
 - **目录约束（用户，2026-10-16）**：远程一切只放 `/data/yaochen/infer`：`dinfer/` 仓库、`models/` 权重、`rustup/` + `cargo/` 工具链、
   `cuda-12.4/` toolkit、`bootstrap/` 日志、`env.sh`（每个 shell 先 `source /data/yaochen/infer/env.sh`）。不要往 `/root`、`/data/code`、`/usr/local` 放东西。
+- 代理（用户给，2026-10-16）：远端 `http://127.0.0.1:1081`（HTTP 代理，不支持 socks5）。实测经代理 huggingface 可达（307）、github 0.5 MB/s、nvidia 0.8 MB/s。`source env.sh` 后 `proxy_on` / `proxy_off` 切换；cargo / rustup 走 rsproxy 直连更快，不要套代理。
 - 镜像：`static.rust-lang.org` 实测 ~100 KB/s，`rsproxy.cn` 14 MB/s → rustup 与 crates registry 都走 rsproxy（`cargo/config.toml` 已写）。
 
 ## 首次 bootstrap
