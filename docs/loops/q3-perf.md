@@ -31,6 +31,7 @@ c1 out 221 vs 447 tok/s、c32 2707 vs 8065、c8 p1024 56 vs 1916；TTFT 84 vs 18
 
 | 看什么 | 怎么看 |
 |---|---|
+| 逐段耗时 vs vLLM（块 d） | 两边各起一个独立实例在 GPU 3 上跑同一 bench 负载，`nsys profile --trace=cuda --cuda-graph-trace=node`（图内 kernel 逐个计时）；vLLM 容器内无 nsys → 宿主 `nsys profile docker run ...`（nsys 注入 CUDA 层到子进程）或装 `nsys` 的 wheel；`scripts/dev/nsys_stage_compare.py a.csv b.csv --steps Na Nb` 出并排表 |
 | kernel 正确性 | `KERNEL_REFS_DIR=… cargo test -p dinfer-kernels --features ref-tests --test ref_tests gqa -- --ignored`（与 torch 对拍，atol 见测试） |
 | 端到端正确性 | `real_parity`（greedy 32 步 = HF）、`sampling_parity`、`serve_e2e_qwen3`（q2.sh 全套） |
 | 单 kernel 耗时 | `cargo test --release -p dinfer-kernels --test cold_shape -- --ignored --nocapture`（GEMM / attention 按形状） |
