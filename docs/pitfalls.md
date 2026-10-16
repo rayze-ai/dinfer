@@ -209,3 +209,11 @@
 - 解法：feature 改为 `cuda-version-from-build-system`，cudarc 在 build 时跑 `nvcc --version` 自动探测；本机得 12.4、远端得 13.0。不再设 `CUDARC_CUDA_VERSION`。
 - 如何避免：多机器多 CUDA 版本时不要在 Cargo.toml 固定 `cuda-NNNN0`；确保 build 时 `PATH` 里的 `nvcc` 就是 `CUDA_HOME` 那个（`env.sh` 已保证）。
 - 相关：`scripts/dev/README-remote4090.md`、`Cargo.toml` `[workspace.dependencies] cudarc`
+
+## 2026-10-16 CUDA 13.0 下链接 `dinfer` 报 `undefined reference to __cxa_guard_acquire / __gxx_personality_v0`
+
+- 现象：4090 机器（nvcc 13.0.88）`cargo build` 编译全过，最后链接 bin 时 133 个 undefined reference，全部来自 `libdinfer_kernels.rlib(*.o)` 的 `__device_stub_*`，符号是 `__cxa_guard_{acquire,release,abort}` 与 `__gxx_personality_v0`。本机 CUDA 12.4 不出现。
+- 根因：nvcc 13.0 生成的 host 侧 kernel stub 用了函数内 static 的线程安全初始化（C++ ABI `__cxa_guard_*`）并带异常 personality，需要 libstdc++；`build.rs` 只链了 `cudart`，12.4 的 stub 恰好不引用这些符号。
+- 解法：`kernels/build.rs` 加 `cargo:rustc-link-lib=dylib=stdc++`（12.4 下多链无害，已验证本机仍过）。
+- 如何避免：nvcc 产物当 C++ 对象看待，始终链 `stdc++`；换 CUDA 大版本后先在最小 bin 上做一次完整链接再跑测试。
+- 相关：`crates/kernels/build.rs`、`test/2026-10-16/remote4090-migration.md`
