@@ -267,6 +267,9 @@ impl ChatBackend for Qwen3Service {
     fn abort(&self, id: RequestId) {
         self.handle.abort(id);
     }
+    fn metrics(&self) -> Option<Arc<dinfer_core::metrics::Metrics>> {
+        Some(self.handle.metrics())
+    }
     fn new_output_stream(&self) -> Box<dyn OutputStream> {
         Box::new(Qwen3OutputStream {
             tok: self.tok.clone(),

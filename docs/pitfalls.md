@@ -233,3 +233,11 @@
 - 解法：需要逐字比较的 e2e 用 `--no-prefix-caching` 起服务；prefix cache 的正确性单独用 TTFT 下降 + 回答合理来验（`e2e_qwen3_prefix_cache`）。
 - 如何避免：任何"两次请求输出逐字相同"的断言都要先问 KV 路径是否相同；要么关 prefix cache，要么只比到第一个 near-tie 之前。
 - 相关：`bins/dinfer/tests/serve_e2e_qwen3.rs::spawn_server`
+
+## 2026-10-16 `n=3` 同 seed 的流式与非流式输出不逐字相同（prefix cache 已关）
+
+- 现象：`e2e_qwen3_request_features` 里 `n=3, seed=42, temperature=1.0` 非流式与流式各发一次，三个 choice 的文本在十几个 token 后各自翻词；而 `sampling_parity::seed_deterministic_and_batch_independent`（同 seed 两次、与另一请求混批）逐 token 相同。
+- 根因：Philox (seed, offset) 本身可复现，但 logits 不是：3 个请求两次调用时 batch 组成 / 调度顺序（哪些 token 一起 prefill、decode 时 batch 大小）不保证相同，bf16 GEMM / attention 的累加顺序随 batch 形状变，logits 漂 1e-2 量级，在 near-tie 处翻 token。vLLM 同样声明"同 seed 仅在相同 batch 下可复现"。
+- 解法：e2e 对 n>1 只断言形状保证（index 0..n、各有 finish、≥2 不同）；逐字可复现只在单请求同 seed（batch 形状确定）上断言；固定 batch 形状下的逐 token 复现由 `sampling_parity` 覆盖。
+- 如何避免：任何"两次运行逐字相同"的断言必须保证两次的 batch 形状相同（单请求或受控的测试 harness）；服务层只承诺 OpenAI 语义，不承诺跨 batch 位比特一致。
+- 相关：pitfalls 同日 "prefix cache 默认开后…"（同源）

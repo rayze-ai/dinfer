@@ -359,12 +359,26 @@ async fn e2e_qwen3_request_features() {
         .collect();
     eprintln!("e2e: n=3 sampled = {texts:?}");
     assert!(texts.iter().collect::<std::collections::HashSet<_>>().len() >= 2, "sampled n=3 should differ");
+    // 流式 n=3：按 index 交错、每个 choice 都有 finish_reason、三者不同。不与非流式逐字比：3 个请求的 batch 组成 /
+    // 调度顺序两次调用不保证相同，bf16 GEMM 随 batch 形状漂移会翻 near-tie token（同 seed 的逐 token 可复现由
+    // `sampling_parity::seed_deterministic_and_batch_independent` 在固定 batch 形状下验证）。
     b["stream"] = serde_json::json!(true);
     let text = c.post(&url).json(&b).send().await.unwrap().text().await.unwrap();
     let (content, finish, _, done) = parse_sse(&text, 3);
     assert!(done);
-    assert_eq!(content, texts, "stream n=3 content per index != non-stream (same seed)");
+    assert!(content.iter().all(|t| !t.trim().is_empty()), "every stream choice has content: {content:?}");
+    assert!(content.iter().collect::<std::collections::HashSet<_>>().len() >= 2, "stream n=3 should differ");
     assert!(finish.iter().all(|f| f.is_some()), "every choice gets a finish_reason");
+    // 单请求同 seed 两次：batch 形状相同（单独 prefill）→ 逐字相同
+    let mut one = b.clone();
+    one["n"] = serde_json::json!(1);
+    one["stream"] = serde_json::json!(false);
+    let a: serde_json::Value = c.post(&url).json(&one).send().await.unwrap().json().await.unwrap();
+    let b2: serde_json::Value = c.post(&url).json(&one).send().await.unwrap().json().await.unwrap();
+    assert_eq!(
+        a["choices"][0]["message"]["content"], b2["choices"][0]["message"]["content"],
+        "same seed, same single request → same text"
+    );
     eprintln!("e2e: Q2-b request features PASS");
     drop(srv);
 }
@@ -445,5 +459,94 @@ async fn e2e_qwen3_prefix_cache() {
     eprintln!("e2e: prefix-cached answer = {content:?}");
     assert!(!content.trim().is_empty());
     eprintln!("e2e: prefix cache PASS");
+    drop(srv);
+}
+
+/// Q2-e：`/metrics` Prometheus 文本：必备指标名；请求后 prompt/generation 计数与直方图增长；同一 prompt 第二次
+/// `prefix_cache_hits_total` 增长；空闲时 `num_requests_running == 0`、`kv_cache_usage_perc == 0`。
+#[tokio::test]
+#[ignore]
+async fn e2e_qwen3_metrics() {
+    let srv = spawn_server_with(&["--num-blocks", "512"]);
+    let c = reqwest::Client::new();
+    let murl = format!("{}/metrics", srv.base);
+    let url = format!("{}/v1/chat/completions", srv.base);
+    let get = |c: &reqwest::Client| {
+        let c = c.clone();
+        let murl = murl.clone();
+        async move {
+            let r = c.get(&murl).send().await.unwrap();
+            assert_eq!(r.status(), 200);
+            assert!(r.headers()["content-type"].to_str().unwrap().starts_with("text/plain"));
+            r.text().await.unwrap()
+        }
+    };
+    let val = |text: &str, name: &str| -> f64 {
+        text.lines()
+            .find(|l| l.starts_with(name) && l[name.len()..].starts_with(' '))
+            .unwrap_or_else(|| panic!("metric {name} missing:\n{text}"))
+            .split(' ')
+            .nth(1)
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    let m0 = get(&c).await;
+    for n in [
+        "dinfer:num_requests_running",
+        "dinfer:num_requests_waiting",
+        "dinfer:prompt_tokens_total",
+        "dinfer:generation_tokens_total",
+        "dinfer:kv_cache_usage_perc",
+        "dinfer:prefix_cache_hits_total",
+        "dinfer:prefix_cache_queries_total",
+    ] {
+        val(&m0, n);
+    }
+    for n in [
+        "dinfer:time_to_first_token_seconds_bucket",
+        "dinfer:time_per_output_token_seconds_bucket",
+        "dinfer:e2e_request_latency_seconds_bucket",
+        "dinfer:request_success_total{finished_reason=\"stop\"}",
+    ] {
+        assert!(m0.contains(n), "missing {n}");
+    }
+    assert_eq!(val(&m0, "dinfer:prompt_tokens_total"), 0.0);
+
+    let body = serde_json::json!({"messages": [{"role":"system","content":"You are terse."},{"role":"user","content":"Name three colors, comma separated."}],
+        "max_tokens": 12, "temperature": 0.0, "chat_template_kwargs": {"enable_thinking": false}});
+    let v: serde_json::Value = c.post(&url).json(&body).send().await.unwrap().json().await.unwrap();
+    let ptoks = v["usage"]["prompt_tokens"].as_f64().unwrap();
+    let gtoks = v["usage"]["completion_tokens"].as_f64().unwrap();
+    let m1 = get(&c).await;
+    assert_eq!(val(&m1, "dinfer:prompt_tokens_total"), ptoks);
+    assert_eq!(val(&m1, "dinfer:generation_tokens_total"), gtoks);
+    assert_eq!(val(&m1, "dinfer:time_to_first_token_seconds_count"), 1.0);
+    assert_eq!(val(&m1, "dinfer:e2e_request_latency_seconds_count"), 1.0);
+    assert!(val(&m1, "dinfer:time_per_output_token_seconds_count") >= gtoks - 1.0);
+    let hits1 = val(&m1, "dinfer:prefix_cache_hits_total");
+    let q1 = val(&m1, "dinfer:prefix_cache_queries_total");
+    assert_eq!(q1, ptoks - 1.0, "first request queries num_tokens-1");
+
+    // 第二次同 prompt：命中增长（整块对齐：≥ (ptoks-1)/16 向下取整 × 16）
+    let _: serde_json::Value = c.post(&url).json(&body).send().await.unwrap().json().await.unwrap();
+    let m2 = get(&c).await;
+    let hits2 = val(&m2, "dinfer:prefix_cache_hits_total");
+    let expect_hit = ((ptoks - 1.0) / 16.0).floor() * 16.0;
+    eprintln!("e2e: metrics prompt={ptoks} hits {hits1} → {hits2} (expect ≥ {expect_hit})");
+    assert!(
+        hits2 >= hits1 + expect_hit && expect_hit > 0.0,
+        "prefix cache hits should grow on the repeated prompt"
+    );
+    // 空闲
+    assert_eq!(val(&m2, "dinfer:num_requests_running"), 0.0);
+    assert_eq!(val(&m2, "dinfer:num_requests_waiting"), 0.0);
+    assert_eq!(val(&m2, "dinfer:kv_cache_usage_perc"), 0.0, "all KV blocks must be released when idle");
+    assert_eq!(
+        val(&m2, "dinfer:request_success_total{finished_reason=\"stop\"}")
+            + val(&m2, "dinfer:request_success_total{finished_reason=\"length\"}"),
+        2.0
+    );
+    eprintln!("e2e: metrics PASS");
     drop(srv);
 }

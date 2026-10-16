@@ -4,6 +4,7 @@
 //! 线程模型：一个专用线程跑 `run()`（持有 GPU 资源，不跨线程）；外部通过 `EngineHandle` 提交请求，
 //! 每个请求拿到一个 `tokio::sync::mpsc` 接收端收 `EngineEvent`。空闲时阻塞在请求通道上，不空转。
 
+use crate::metrics::Metrics;
 use crate::request::{FinishReason, Request, RequestId};
 use crate::runner::{ModelExecutor, Runner};
 use crate::sample::SamplingParams;
@@ -37,11 +38,12 @@ enum Cmd {
     Shutdown,
 }
 
-/// 跨线程句柄：提交 / 取消请求。
+/// 跨线程句柄：提交 / 取消请求 / 读指标。
 #[derive(Clone)]
 pub struct EngineHandle {
     tx: crossbeam_channel::Sender<Cmd>,
     next_id: Arc<AtomicU64>,
+    metrics: Arc<Metrics>,
 }
 
 impl EngineHandle {
@@ -56,6 +58,17 @@ impl EngineHandle {
     pub fn shutdown(&self) {
         let _ = self.tx.send(Cmd::Shutdown);
     }
+    pub fn metrics(&self) -> Arc<Metrics> {
+        self.metrics.clone()
+    }
+}
+
+/// 每请求计时（TTFT / TPOT / E2E）。
+struct Timing {
+    arrival: std::time::Instant,
+    prompt_len: u64,
+    first_token: Option<std::time::Instant>,
+    last_token: std::time::Instant,
 }
 
 pub struct Engine<E: ModelExecutor> {
@@ -63,13 +76,73 @@ pub struct Engine<E: ModelExecutor> {
     runner: Runner<E>,
     rx: crossbeam_channel::Receiver<Cmd>,
     outs: HashMap<RequestId, tokio::sync::mpsc::UnboundedSender<EngineEvent>>,
+    timing: HashMap<RequestId, Timing>,
+    metrics: Arc<Metrics>,
 }
 
 impl<E: ModelExecutor> Engine<E> {
     pub fn new(sched: Scheduler, runner: Runner<E>) -> (Self, EngineHandle) {
         let (tx, rx) = crossbeam_channel::unbounded();
-        let h = EngineHandle { tx, next_id: Arc::new(AtomicU64::new(1)) };
-        (Self { sched, runner, rx, outs: HashMap::new() }, h)
+        let metrics = Arc::new(Metrics::new());
+        let h = EngineHandle { tx, next_id: Arc::new(AtomicU64::new(1)), metrics: metrics.clone() };
+        (Self { sched, runner, rx, outs: HashMap::new(), timing: HashMap::new(), metrics }, h)
+    }
+
+    /// 一个 step 结束后的指标回填。
+    fn record_step(
+        &mut self,
+        so: &crate::sched::SchedulerOutput,
+        results: &crate::sched::StepResults,
+        t_step: std::time::Instant,
+    ) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let m = &self.metrics;
+        let now = std::time::Instant::now();
+        m.engine_steps_total.fetch_add(1, Relaxed);
+        m.step_time.observe(t_step.elapsed().as_secs_f64());
+        m.num_preemptions_total.fetch_add(so.preempted_req_ids.len() as u64, Relaxed);
+        for (rid, toks, finish) in results.iter() {
+            let Some(t) = self.timing.get_mut(&rid) else { continue };
+            if !toks.is_empty() {
+                m.generation_tokens_total.fetch_add(toks.len() as u64, Relaxed);
+                match t.first_token {
+                    None => {
+                        t.first_token = Some(now);
+                        m.time_to_first_token.observe((now - t.arrival).as_secs_f64());
+                        m.prompt_tokens_total.fetch_add(t.prompt_len, Relaxed);
+                    }
+                    Some(_) => {
+                        m.time_per_output_token
+                            .observe((now - t.last_token).as_secs_f64() / toks.len() as f64);
+                    }
+                }
+                t.last_token = now;
+            }
+            if let Some(f) = finish {
+                m.e2e_request_latency.observe((now - t.arrival).as_secs_f64());
+                match f {
+                    FinishReason::Stop => m.request_success_stop.fetch_add(1, Relaxed),
+                    FinishReason::Length => m.request_success_length.fetch_add(1, Relaxed),
+                    FinishReason::Abort => m.request_abort.fetch_add(1, Relaxed),
+                };
+                self.timing.remove(&rid);
+            }
+        }
+        for rid in &so.finished_req_ids {
+            self.timing.remove(rid);
+        }
+        self.refresh_gauges();
+    }
+
+    fn refresh_gauges(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let m = &self.metrics;
+        m.num_requests_running.store(self.sched.num_running() as u64, Relaxed);
+        m.num_requests_waiting.store(self.sched.num_waiting() as u64, Relaxed);
+        m.set_kv_cache_usage(self.sched.kv_usage());
+        let (q, h) = self.sched.prefix_cache_stats();
+        m.prefix_cache_queries_total.store(q, Relaxed);
+        m.prefix_cache_hits_total.store(h, Relaxed);
     }
 
     /// 阻塞运行直到 `Shutdown`。每轮：吸收所有待处理命令（空闲时阻塞等第一条）→ schedule → execute → 分发。
@@ -94,6 +167,7 @@ impl<E: ModelExecutor> Engine<E> {
             if !self.sched.has_requests() {
                 continue;
             }
+            let t_step = std::time::Instant::now();
             let so = self.sched.schedule();
             let mro = match self.runner.execute(&so) {
                 Ok(m) => m,
@@ -108,6 +182,7 @@ impl<E: ModelExecutor> Engine<E> {
                 }
             };
             let results = self.sched.update_from_output(&so, &mro);
+            self.record_step(&so, &results, t_step);
             for (i, (rid, toks, finish)) in results.iter().enumerate() {
                 let Some(tx) = self.outs.get(&rid) else { continue };
                 if !toks.is_empty() {
@@ -141,7 +216,18 @@ impl<E: ModelExecutor> Engine<E> {
                     .map(|d| d.as_nanos() as u64)
                     .unwrap_or(0);
                 self.outs.insert(id, sub.tx);
+                let inst = std::time::Instant::now();
+                self.timing.insert(
+                    id,
+                    Timing {
+                        arrival: inst,
+                        prompt_len: sub.prompt_ids.len() as u64,
+                        first_token: None,
+                        last_token: inst,
+                    },
+                );
                 self.sched.add_request(Request::new(id, sub.prompt_ids, sub.sampling, now));
+                self.refresh_gauges();
                 true
             }
             Cmd::Abort(id) => {
@@ -149,6 +235,11 @@ impl<E: ModelExecutor> Engine<E> {
                 if let Some(tx) = self.outs.remove(&id) {
                     let _ = tx.send(EngineEvent::Finished(FinishReason::Abort));
                 }
+                if let Some(t) = self.timing.remove(&id) {
+                    self.metrics.e2e_request_latency.observe(t.arrival.elapsed().as_secs_f64());
+                    self.metrics.request_abort.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                self.refresh_gauges();
                 true
             }
             Cmd::Shutdown => false,

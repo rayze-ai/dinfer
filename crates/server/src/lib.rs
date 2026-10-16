@@ -1,4 +1,4 @@
-//! dinfer-server：axum 路由。`/health`、`/v1/models`、`/v1/chat/completions`（流式 + 非流式）。
+//! dinfer-server：axum 路由。`/health`、`/metrics`（Prometheus）、`/v1/models`、`/v1/chat/completions`（流式 + 非流式）。
 //! 模型通过 `backend::ChatBackend` 接入（见 glm53 `service.rs`）；server 本身不依赖任何模型 crate。
 //!
 //! 安全：无鉴权。默认只绑 127.0.0.1；对外暴露必须放在网关后面。
@@ -44,12 +44,25 @@ pub async fn serve(addr: &str, backend: Arc<dyn ChatBackend>) -> anyhow::Result<
     Ok(())
 }
 
+/// Prometheus 指标名前缀（与 vLLM 的 `vllm:` 同位置）。
+pub const METRICS_PREFIX: &str = "dinfer:";
+
 pub fn router(backend: Arc<dyn ChatBackend>) -> Router {
     Router::new()
         .route("/health", get(|| async { Json(Health { status: "ok" }) }))
+        .route("/metrics", get(metrics))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat::chat_completions))
         .with_state(backend)
+}
+
+async fn metrics(State(be): State<Arc<dyn ChatBackend>>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let body = match be.metrics() {
+        Some(m) => m.render(METRICS_PREFIX),
+        None => String::new(),
+    };
+    ([(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")], body).into_response()
 }
 
 async fn models(State(be): State<Arc<dyn ChatBackend>>) -> Json<ModelList> {

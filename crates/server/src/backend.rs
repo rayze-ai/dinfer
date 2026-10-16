@@ -65,6 +65,10 @@ pub trait ChatBackend: Send + Sync + 'static {
     /// 取消请求（stop 字符串命中 / 客户端断开）：引擎释放 KV 并回 `Finished(Abort)`。
     fn abort(&self, id: RequestId);
     fn new_output_stream(&self) -> Box<dyn OutputStream>;
+    /// 引擎指标（`/metrics`）；None = 后端未接。
+    fn metrics(&self) -> Option<std::sync::Arc<dinfer_core::metrics::Metrics>> {
+        None
+    }
 }
 
 pub fn finish_reason_str(f: FinishReason) -> &'static str {

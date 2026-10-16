@@ -1,6 +1,6 @@
 # loop 规格：Q2 可生产的 mix 服务（Qwen3-0.6B）
 
-- 状态：进行中（a 采样、b 请求功能、c 资源、d prefix cache 完成 2026-10-16，共 8 轮；e metrics、f 健壮性 未开始）
+- 状态：进行中（a–e 完成 2026-10-16，共 10 轮；f 健壮性 + q2.sh 未开始）
 - 创建：2026-10-16
 - 验证脚本：`scripts/verify/q2.sh`
 - 迭代记录：`test/2026-10-16/q2-serving.md`
@@ -86,6 +86,13 @@ cargo run -p dinfer --features qwen3 -- serve --model /data/ref/models/qwen3-0.6
 - `--num-blocks` 仍可覆盖；`--gpu-memory-utilization`（默认 0.9）；日志 `kv_cache: auto num_blocks=N tokens=M kv_gib=… available_gib=… total_gib=…`。
 - prefix cache 默认开（`--no-prefix-caching` 关），`hash_block_size = block_size`。
 
+## Q2-e 实现口径
+
+- `core::metrics::Metrics`：全原子（counter/gauge `AtomicU64`，直方图固定桶 + 微秒整数 sum），engine 线程每 step 写、HTTP 线程读，无锁无 crate 依赖；不做 vLLM 的 per-request `request_*` 直方图族（先只要服务级）。
+- 计时在 engine 内：`Timing{arrival, first_token, last_token}`；TTFT = 首 token 出 step 时刻 − 入队；TPOT = 相邻 step 间隔 / 本步 token 数；E2E = finish − 入队；abort 也记 E2E 与 `request_success_total{abort}`。
+- prefix cache 命中率按 token（vLLM 口径）：首次调度 queries += `num_tokens-1`，hits += `num_new_computed`；scheduler 累计，engine 每 step 拷到 gauge。
+- `/metrics` 由 server 渲染，前缀 `dinfer:`（`METRICS_PREFIX` 常量；指标名是对外文本不是代码符号，不受"代码不带项目名"规则约束）。`ChatBackend::metrics()` 默认 None（glm53 未接）。
+
 ## 记录
 
 | 轮 | 现象 | 根因 | 处理 |
@@ -98,3 +105,5 @@ cargo run -p dinfer --features qwen3 -- serve --model /data/ref/models/qwen3-0.6
 | 6 | c 资源 + d prefix cache | `Qwen3Model::load_with_budget`：KV 最后分配，`cuMemGetInfo` 算 budget；`--num-blocks` 可选，`--gpu-memory-utilization`，`--no-prefix-caching`；服务默认开 prefix cache。4090 首跑：auto 得 9838 块（157k token，16.8 GiB，free 21.0 / total 23.5）；但 3 个 e2e 全挂 | ① 日志解析 `num_blocks=` 被 `kv_cache: auto num_blocks=` 里的空格前缀匹配错；② prefix cache 开后第二次请求走 paged 路径，bf16 漂移翻 near-tie token，"流式==非流式"逐字断言失败（见 pitfalls） | ① 按 " key=" 解析；② 逐字比较用例改 `--no-prefix-caching`，新增 `e2e_qwen3_prefix_cache`（TTFT 降 ≥30%） |
 | 7 | c/d 验收 | 修 ① ② 后重跑：auto_num_blocks 与 prefix_cache 仍挂 | 两者同一根因：tracing 给字段名上 ANSI 色，`num_blocks=` 实际是 `ESC[3mnum_blocks ESC[0m=`，`contains("prefix_caching=true")` 同理不匹配 | e2e 收日志时 `strip_ansi`；逐字比较用例已改 `--no-prefix-caching` |
 | 8 | c/d 验收 | 4090：`e2e_qwen3_auto_num_blocks` PASS（auto 9838 块 = 157k token / 16.8 GiB，≥ 估算 7848 的 80%）；`e2e_qwen3_prefix_cache` PASS（513 token prompt，TTFT 898.7 → 16.1 / 15.0 ms，答案 "Z7." 正确） | — | 停止条件 8 达成；9 的 TTFT 部分达成，命中率计数待 e `/metrics` |
+| 9 | e metrics | `core::metrics`（直方图 + 渲染 2 单测）、engine 计时与每 step 回填、scheduler prefix 命中计数、server `/metrics`、qwen3 `metrics()`；e2e `e2e_qwen3_metrics` 写好 | — | 待 4090 跑 |
+| 10 | e 验收 + b 补 | 4090：`e2e_qwen3_metrics` PASS（prompt 28 token：queries 27、二次命中 +16、空闲 running=0 / kv=0；TTFT/TPOT/E2E 直方图计数正确）；`request_features` 的 n=3 流式 vs 非流式逐字断言失败 | n=3 两次调用 batch 组成不同 → bf16 漂移翻 near-tie（见 pitfalls） | n>1 只断言形状保证；单请求同 seed 两次逐字相同另断 |

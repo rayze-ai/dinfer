@@ -59,6 +59,9 @@ pub struct Scheduler {
     sched_slots: Vec<usize>,
     finished_req_ids: Vec<RequestId>,
     preempted_req_ids: Vec<RequestId>,
+    /// prefix cache 统计（token 数，vLLM 口径）：首次调度时查询 `num_tokens-1`，命中 `num_new_computed`。
+    prefix_cache_queries: u64,
+    prefix_cache_hits: u64,
 }
 
 impl Scheduler {
@@ -76,6 +79,8 @@ impl Scheduler {
             sched_slots: Vec::with_capacity(cap),
             finished_req_ids: Vec::new(),
             preempted_req_ids: Vec::new(),
+            prefix_cache_queries: 0,
+            prefix_cache_hits: 0,
         }
     }
 
@@ -120,6 +125,10 @@ impl Scheduler {
     }
     pub fn kv_usage(&self) -> f32 {
         self.kv.usage()
+    }
+    /// (queries, hits) 累计 token 数。
+    pub fn prefix_cache_stats(&self) -> (u64, u64) {
+        (self.prefix_cache_queries, self.prefix_cache_hits)
     }
     pub fn request(&self, id: RequestId) -> Option<&Request> {
         self.id_to_slot.get(&id).map(|&s| self.req(s))
@@ -248,6 +257,10 @@ impl Scheduler {
 
                 // prefix cache（只在首次调度，即 num_computed_tokens == 0 时查）。
                 let (computed, num_new_computed) = self.kv.get_computed_blocks(r);
+                if self.p.cache.enable_prefix_caching && r.num_computed_tokens == 0 {
+                    self.prefix_cache_queries += r.num_tokens().saturating_sub(1) as u64;
+                    self.prefix_cache_hits += num_new_computed as u64;
+                }
                 let num_computed = r.num_computed_tokens + num_new_computed;
 
                 let mut num_new = r.num_tokens() - num_computed;
