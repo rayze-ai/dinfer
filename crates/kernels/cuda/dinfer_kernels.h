@@ -38,6 +38,13 @@ int embedding_bf16(const int32_t* ids, const void* table, void* out, int64_t tok
 
 // ---- 采样 ----
 // logits: [batch, vocab] fp32（就地修改允许）；out: [batch] i32。
+// ---- 采样（sampling.cu）：vLLM 顺序 penalties → temperature → min_p → top_k/top_p → sample；logprobs 用原始 logits ----
+int penalties_f32(float* logits, const int32_t* ids, const int32_t* offsets, const int32_t* prompt_len, const float* rep,
+                  const float* freq, const float* pres, int64_t batch, int64_t vocab, cudaStream_t stream);
+int min_p_mask_f32(float* logits, const float* min_p, int64_t batch, int64_t vocab, cudaStream_t stream);
+int temperature_f32(float* logits, const float* temperature, int64_t batch, int64_t vocab, cudaStream_t stream);
+int logprobs_f32(const float* logits, const int32_t* chosen, int64_t k, int32_t* out_ids, float* out_lp, int32_t* rank,
+                 int64_t batch, int64_t vocab, cudaStream_t stream);
 int argmax_f32(const float* logits, int32_t* out, int64_t batch, int64_t vocab, cudaStream_t stream);
 // 对每行做 top-k / top-p 掩码（不满足的置 -inf）。top_k<=0 表示不限；top_p>=1 表示不限。
 int topk_topp_mask_f32(float* logits, const int32_t* top_k, const float* top_p, int64_t batch, int64_t vocab,

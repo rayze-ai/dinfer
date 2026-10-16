@@ -23,10 +23,14 @@
 - 阻塞 / 待决策：`docs/design.md` §9（KDA kernel 手写 CUDA 还是 Triton AOT；structured output；性能对比基线配置）
 - 本机工具链：rustc/cargo 1.89.0，nvcc 12.4 在 `/usr/local/cuda/bin`（不在默认 PATH；p0.sh 已自动加）；crates.io 直连可用。**cargo 假失败时 `rm target/.rustc_info.json`**（cron trace 污染，见 pitfalls 2026-10-15）
 - 进行中的 loop 规格：无（p5 / p6 均已通过）
-- 会话注意：本项目会话两次因 `API Error: 400 Input is too long` 被迫 /clear（10-14 P4、10-15 P5）。长 bisect / 大日志输出前先 wrap；Bash 输出一律 `grep`/`tail` 截断，不要整段 cat 日志
+- 会话注意：本项目会话已 **三次** 因 `API Error: 400 Input is too long` 被迫 /clear（10-14 P4、10-15 P5、10-16 Q2-a）。规则升级：① Bash 输出一律 `grep`/`tail`/`cut -c1-200` 截断，日志 `tee` 到 `/tmp` 只看摘要；② 文件只读需要的行段，不整文件 cat；③ 每完成一个子块（kernel 对拍 / 一组单测）立即写 `docs/loops/*.md` 记录表 + `git commit`，不攒；④ 对话超过约 40 轮工具调用就主动 wrap 一次
 - 参考材料：`/data/ref/vllm`（main de8291e）、`/data/ref/models/{kimik3,glm53}`（config.json、modeling_*.py、tokenizer、chat 模板、safetensors index；无权重）
 
 <!-- ===== 日志：按日期追加，不改旧条目 ===== -->
+
+## 2026-10-16
+
+- 03:10 会话第三次因 `Input is too long` /clear，按交接区恢复。恢复时工作区：Q2-a 采样 kernel 未提交改动 8 文件（+483 行）：`sampling.cu` 新增 `penalties_f32 / temperature_f32 / min_p_mask_f32 / logprobs_f32`，`ops.rs/ffi.rs` 封装，`ref_tests.rs` 4 个新用例，`gen_kernel_refs.py` 对应参考；`core::sample` 加 `has_penalties / validate`；`docs/loops/q2-serving.md` 规格已写（12 条停止条件）。`cargo build --features qwen3` 通过。下一动作：跑 `scripts/verify/kernels.sh` 验证 4 kernel → commit → 继续 Q2-a executor 接线。
 ## 日志
 
 ### 2026-10-13

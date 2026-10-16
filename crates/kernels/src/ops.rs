@@ -1435,6 +1435,110 @@ pub fn gqa_paged_bf16(
     )
 }
 
+// ---------------------------------------------------------------------------
+// 采样（Q2）：penalties / temperature / min_p / logprobs；与 topk_topp_mask_f32 / sample_f32 组成 vLLM 顺序
+// ---------------------------------------------------------------------------
+
+/// 惩罚（原地）。`ids` CSR：`offsets[b]..offsets[b+1]`，前 `prompt_len[b]` 个是 prompt，其余是 output。
+#[allow(clippy::too_many_arguments)]
+pub fn penalties_f32(
+    stream: &Stream,
+    logits: &mut CudaSlice<f32>,
+    ids: &CudaSlice<i32>,
+    offsets: &CudaSlice<i32>,
+    prompt_len: &CudaSlice<i32>,
+    rep: &CudaSlice<f32>,
+    freq: &CudaSlice<f32>,
+    pres: &CudaSlice<f32>,
+    vocab: usize,
+) -> Result<()> {
+    ensure!(vocab > 0 && logits.len() % vocab == 0, "penalties: bad shape");
+    let batch = logits.len() / vocab;
+    ensure!(offsets.len() > batch && prompt_len.len() >= batch, "penalties: offsets/prompt_len");
+    ensure!(rep.len() >= batch && freq.len() >= batch && pres.len() >= batch, "penalties: params");
+    let pl = stream.ptr_mut(logits) as *mut f32;
+    // SAFETY: 长度已校验；ids 索引范围由 offsets 保证。
+    check(
+        unsafe {
+            ffi::penalties_f32(
+                pl,
+                stream.ptr(ids) as *const i32,
+                stream.ptr(offsets) as *const i32,
+                stream.ptr(prompt_len) as *const i32,
+                stream.ptr(rep) as *const f32,
+                stream.ptr(freq) as *const f32,
+                stream.ptr(pres) as *const f32,
+                batch as i64,
+                vocab as i64,
+                stream.raw() as _,
+            )
+        },
+        "penalties_f32",
+    )
+}
+
+/// 温度缩放（原地；t ≤ 1e-5 或 == 1 跳过）。
+pub fn temperature_f32(stream: &Stream, logits: &mut CudaSlice<f32>, temperature: &CudaSlice<f32>, vocab: usize) -> Result<()> {
+    ensure!(vocab > 0 && logits.len() % vocab == 0, "temperature: bad shape");
+    let batch = logits.len() / vocab;
+    ensure!(temperature.len() >= batch, "temperature: params");
+    let pl = stream.ptr_mut(logits) as *mut f32;
+    // SAFETY: 长度已校验。
+    check(
+        unsafe { ffi::temperature_f32(pl, stream.ptr(temperature) as *const f32, batch as i64, vocab as i64, stream.raw() as _) },
+        "temperature_f32",
+    )
+}
+
+/// min_p 掩码（原地）：概率 < min_p · max_prob 的置 -inf。
+pub fn min_p_mask_f32(stream: &Stream, logits: &mut CudaSlice<f32>, min_p: &CudaSlice<f32>, vocab: usize) -> Result<()> {
+    ensure!(vocab > 0 && logits.len() % vocab == 0, "min_p: bad shape");
+    let batch = logits.len() / vocab;
+    ensure!(min_p.len() >= batch, "min_p: params");
+    let pl = stream.ptr_mut(logits) as *mut f32;
+    // SAFETY: 长度已校验。
+    check(
+        unsafe { ffi::min_p_mask_f32(pl, stream.ptr(min_p) as *const f32, batch as i64, vocab as i64, stream.raw() as _) },
+        "min_p_mask_f32",
+    )
+}
+
+/// logprobs：对 **原始** logits 做 log_softmax；输出 `[batch, k+1]`（第 0 列 chosen，后 k 列 top-k 降序）与 chosen 的 rank。
+#[allow(clippy::too_many_arguments)]
+pub fn logprobs_f32(
+    stream: &Stream,
+    logits: &CudaSlice<f32>,
+    chosen: &CudaSlice<i32>,
+    k: usize,
+    out_ids: &mut CudaSlice<i32>,
+    out_lp: &mut CudaSlice<f32>,
+    rank: &mut CudaSlice<i32>,
+    vocab: usize,
+) -> Result<()> {
+    ensure!(vocab > 0 && logits.len() % vocab == 0, "logprobs: bad shape");
+    let batch = logits.len() / vocab;
+    ensure!(k <= 32, "logprobs: k > 32");
+    ensure!(chosen.len() >= batch && rank.len() >= batch, "logprobs: chosen/rank");
+    ensure!(out_ids.len() >= batch * (k + 1) && out_lp.len() >= batch * (k + 1), "logprobs: out");
+    // SAFETY: 长度已校验。
+    check(
+        unsafe {
+            ffi::logprobs_f32(
+                stream.ptr(logits) as *const f32,
+                stream.ptr(chosen) as *const i32,
+                k as i64,
+                stream.ptr_mut(out_ids) as *mut i32,
+                stream.ptr_mut(out_lp) as *mut f32,
+                stream.ptr_mut(rank) as *mut i32,
+                batch as i64,
+                vocab as i64,
+                stream.raw() as _,
+            )
+        },
+        "logprobs_f32",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -63,6 +63,31 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
 
+    pub fn penalties_f32(
+        logits: *mut f32,
+        ids: *const i32,
+        offsets: *const i32,
+        prompt_len: *const i32,
+        rep: *const f32,
+        freq: *const f32,
+        pres: *const f32,
+        batch: i64,
+        vocab: i64,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn min_p_mask_f32(logits: *mut f32, min_p: *const f32, batch: i64, vocab: i64, stream: cudaStream_t) -> i32;
+    pub fn temperature_f32(logits: *mut f32, temperature: *const f32, batch: i64, vocab: i64, stream: cudaStream_t) -> i32;
+    pub fn logprobs_f32(
+        logits: *const f32,
+        chosen: *const i32,
+        k: i64,
+        out_ids: *mut i32,
+        out_lp: *mut f32,
+        rank: *mut i32,
+        batch: i64,
+        vocab: i64,
+        stream: cudaStream_t,
+    ) -> i32;
     pub fn argmax_f32(logits: *const f32, out: *mut i32, batch: i64, vocab: i64, stream: cudaStream_t)
         -> i32;
     pub fn topk_topp_mask_f32(

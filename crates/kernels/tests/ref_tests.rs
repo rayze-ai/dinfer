@@ -350,3 +350,96 @@ fn gqa_cache_write_and_paged_ref() {
     .unwrap();
     assert_close("gqa_paged", &s.dtoh_sync_copy(&out).unwrap(), &want, 1e-2, 1e-2);
 }
+
+// ---- Q2 采样：penalties / temperature / min_p / logprobs ----
+
+fn assert_f32_close(name: &str, got: &[f32], want: &[f32], atol: f32) {
+    assert_eq!(got.len(), want.len(), "{name}: length");
+    let mut bad = 0;
+    let mut worst = 0f32;
+    for (i, (g, w)) in got.iter().zip(want).enumerate() {
+        let d = if g.is_infinite() && w.is_infinite() { 0.0 } else { (g - w).abs() };
+        if d > atol {
+            bad += 1;
+            if bad <= 5 {
+                eprintln!("{name} mismatch at {i}: got {g} want {w}");
+            }
+        }
+        worst = worst.max(d);
+    }
+    assert_eq!(bad, 0, "{name}: {bad} mismatches, worst {worst}");
+}
+
+#[test]
+#[ignore]
+fn penalties_ref() {
+    let (_d, s) = dev();
+    let (shape, logits) = load_f32("pen_logits");
+    let (_, ids) = load_i32("pen_ids");
+    let (_, offs) = load_i32("pen_offsets");
+    let (_, plen) = load_i32("pen_prompt_len");
+    let (_, rep) = load_f32("pen_rep");
+    let (_, freq) = load_f32("pen_freq");
+    let (_, pres) = load_f32("pen_pres");
+    let (_, want) = load_f32("pen_out");
+    let mut dl = s.htod_copy(logits).unwrap();
+    let dids = s.htod_copy(ids).unwrap();
+    let doffs = s.htod_copy(offs).unwrap();
+    let dplen = s.htod_copy(plen).unwrap();
+    let drep = s.htod_copy(rep).unwrap();
+    let dfreq = s.htod_copy(freq).unwrap();
+    let dpres = s.htod_copy(pres).unwrap();
+    dinfer_kernels::penalties_f32(&s, &mut dl, &dids, &doffs, &dplen, &drep, &dfreq, &dpres, shape[1]).unwrap();
+    assert_f32_close("penalties", &s.dtoh_sync_copy(&dl).unwrap(), &want, 1e-5);
+}
+
+#[test]
+#[ignore]
+fn temperature_ref() {
+    let (_d, s) = dev();
+    let (shape, logits) = load_f32("temp_in");
+    let (_, t) = load_f32("temp_t");
+    let (_, want) = load_f32("temp_out");
+    let mut dl = s.htod_copy(logits).unwrap();
+    let dt = s.htod_copy(t).unwrap();
+    dinfer_kernels::temperature_f32(&s, &mut dl, &dt, shape[1]).unwrap();
+    assert_f32_close("temperature", &s.dtoh_sync_copy(&dl).unwrap(), &want, 1e-5);
+}
+
+#[test]
+#[ignore]
+fn min_p_mask_ref() {
+    let (_d, s) = dev();
+    let (shape, logits) = load_f32("minp_in");
+    let (_, p) = load_f32("minp_p");
+    let (_, want_inf) = load_i32("minp_out_isinf");
+    let mut dl = s.htod_copy(logits).unwrap();
+    let dp = s.htod_copy(p).unwrap();
+    dinfer_kernels::min_p_mask_f32(&s, &mut dl, &dp, shape[1]).unwrap();
+    let got = s.dtoh_sync_copy(&dl).unwrap();
+    let got_inf: Vec<i32> = got.iter().map(|x| x.is_infinite() as i32).collect();
+    let diff = got_inf.iter().zip(&want_inf).filter(|(a, b)| a != b).count();
+    assert!(diff <= 2, "min_p mask: {diff} positions differ (fp32 threshold edge)");
+}
+
+#[test]
+#[ignore]
+fn logprobs_ref() {
+    let (_d, s) = dev();
+    let (shape, logits) = load_f32("lp_logits");
+    let (_, chosen) = load_i32("lp_chosen");
+    let (ids_shape, want_ids) = load_i32("lp_ids");
+    let (_, want_vals) = load_f32("lp_vals");
+    let (_, want_rank) = load_i32("lp_rank");
+    let (b, v) = (shape[0], shape[1]);
+    let k = ids_shape[1] - 1;
+    let dl = s.htod_copy(logits).unwrap();
+    let dc = s.htod_copy(chosen).unwrap();
+    let mut out_ids = s.alloc_zeros::<i32>(b * (k + 1)).unwrap();
+    let mut out_lp = s.alloc_zeros::<f32>(b * (k + 1)).unwrap();
+    let mut rank = s.alloc_zeros::<i32>(b).unwrap();
+    dinfer_kernels::logprobs_f32(&s, &dl, &dc, k, &mut out_ids, &mut out_lp, &mut rank, v).unwrap();
+    assert_eq!(s.dtoh_sync_copy(&out_ids).unwrap(), want_ids, "logprobs ids");
+    assert_f32_close("logprobs vals", &s.dtoh_sync_copy(&out_lp).unwrap(), &want_vals, 1e-4);
+    assert_eq!(s.dtoh_sync_copy(&rank).unwrap(), want_rank, "logprobs rank");
+}

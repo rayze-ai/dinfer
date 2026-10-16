@@ -261,7 +261,146 @@ __global__ void sample_kernel(const float* __restrict__ logits, const float* __r
   }
 }
 
+
+// ---- penalties（vLLM ops/penalties.py 语义）----
+// 对每行：对出现在 prompt 或 output 的 token：repetition：logit>0 ? /r : *r（r 作用于 prompt∪output）；
+// frequency：logit -= f · count_in_output；presence：logit -= p · [in_output]。
+// token 历史以 CSR 给：ids[offsets[b]..offsets[b+1]] 前 prompt_len[b] 个是 prompt，其余是 output。
+__global__ void penalties_kernel(float* __restrict__ logits, const int32_t* __restrict__ ids,
+                                 const int32_t* __restrict__ offsets, const int32_t* __restrict__ prompt_len,
+                                 const float* __restrict__ rep, const float* __restrict__ freq,
+                                 const float* __restrict__ pres, int vocab) {
+  const int b = blockIdx.x;
+  const float r = rep[b], f = freq[b], pr = pres[b];
+  if (r == 1.f && f == 0.f && pr == 0.f) return;
+  float* row = logits + (int64_t)b * vocab;
+  const int lo = offsets[b], hi = offsets[b + 1], np = prompt_len[b];
+  // 每个线程负责若干 token id 的 "出现次数" 统计需要跨线程归约；参考版：用 shared 的 vocab 位图太大（16 万）→
+  // 直接按历史 token 遍历，用 atomic 在 logits 上改。重复 token 的 repetition 只能应用一次 → 先标记。
+  // 简化：历史长度 ≤ max_model_len（几千），每线程处理一段历史；重复 id 由 "第一次出现才做 rep" 保证：
+  // 做法是对每个历史位置 i，检查 [lo, i) 内是否已有同 id（O(n^2) 参考版，n ≤ 4k 可接受）。
+  for (int i = lo + threadIdx.x; i < hi; i += blockDim.x) {
+    const int t = ids[i];
+    if (t < 0 || t >= vocab) continue;
+    bool first = true;
+    for (int j = lo; j < i; ++j) if (ids[j] == t) { first = false; break; }
+    if (!first) continue;
+    // 出现在 output 的次数
+    int cnt = 0;
+    for (int j = lo + np; j < hi; ++j) if (ids[j] == t) ++cnt;
+    float v = row[t];
+    if (r != 1.f) v = v > 0.f ? v / r : v * r;
+    if (cnt > 0) v -= f * cnt + pr;
+    row[t] = v;
+  }
+}
+
+// ---- min_p（vLLM apply_min_p）：p_i < min_p · max_i p_i 的置 -inf；在 temperature 之后、top_k/p 之前 ----
+__global__ void min_p_mask_kernel(float* __restrict__ logits, const float* __restrict__ min_p, int vocab) {
+  const int b = blockIdx.x;
+  const float mp = min_p[b];
+  if (mp <= 0.f) return;
+  float* row = logits + (int64_t)b * vocab;
+  const float m = row_max(row, vocab);
+  float d = 0.f;
+  for (int i = threadIdx.x; i < vocab; i += BLOCK) { const float v = row[i]; if (v > -INFINITY) d += __expf(v - m); }
+  const float denom = block_reduce_sum<BLOCK>(d);
+  const float thresh = mp * (1.f / denom);  // max prob = exp(0)/denom
+  __syncthreads();
+  for (int i = threadIdx.x; i < vocab; i += BLOCK) {
+    const float v = row[i];
+    if (v > -INFINITY && __expf(v - m) / denom < thresh) row[i] = -INFINITY;
+  }
+}
+
+// ---- 温度缩放（原地）----
+__global__ void temperature_kernel(float* __restrict__ logits, const float* __restrict__ temperature, int vocab) {
+  const int b = blockIdx.x;
+  const float t = temperature[b];
+  if (t <= 1e-5f || t == 1.f) return;
+  float* row = logits + (int64_t)b * vocab;
+  const float inv = 1.f / t;
+  for (int i = threadIdx.x; i < vocab; i += BLOCK) row[i] *= inv;
+}
+
+// ---- logprobs：对原始 logits 的 log_softmax，取 top-k（k ≤ 32）+ 指定 token 的 logprob 与 rank ----
+// out_ids/out_lp: [batch, k+1]：第 0 列是 chosen，之后 k 个 top（降序）；rank[b] = 严格大于 chosen logprob 的个数。
+constexpr int MAX_LP_K = 32;
+__global__ void logprobs_kernel(const float* __restrict__ logits, const int32_t* __restrict__ chosen, int k,
+                                int32_t* __restrict__ out_ids, float* __restrict__ out_lp, int32_t* __restrict__ rank,
+                                int vocab) {
+  const int b = blockIdx.x;
+  const float* row = logits + (int64_t)b * vocab;
+  const float m = row_max(row, vocab);
+  float d = 0.f;
+  for (int i = threadIdx.x; i < vocab; i += BLOCK) { const float v = row[i]; if (v > -INFINITY) d += __expf(v - m); }
+  const float lse = m + __logf(block_reduce_sum<BLOCK>(d));
+  const int c = chosen[b];
+  const float c_lp = row[c] - lse;
+  // rank
+  int gt = 0;
+  for (int i = threadIdx.x; i < vocab; i += BLOCK) if (row[i] > row[c]) ++gt;
+  gt = (int)block_reduce_sum<BLOCK>((float)gt);
+  if (threadIdx.x == 0) { out_ids[b * (k + 1)] = c; out_lp[b * (k + 1)] = c_lp; rank[b] = gt; }
+  // top-k：k 轮 argmax（排除已选），参考版
+  __shared__ int s_excl[MAX_LP_K];
+  for (int j = 0; j < k; ++j) {
+    float best = -INFINITY; int besti = 0x7fffffff;
+    for (int i = threadIdx.x; i < vocab; i += BLOCK) {
+      bool ex = false;
+      for (int e = 0; e < j; ++e) if (s_excl[e] == i) { ex = true; break; }
+      if (ex) continue;
+      const float v = row[i];
+      if (v > best || (v == best && i < besti)) { best = v; besti = i; }
+    }
+    __shared__ float sv[BLOCK / 32]; __shared__ int si[BLOCK / 32];
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) {
+      const float ov = __shfl_xor_sync(0xffffffffu, best, o); const int oi = __shfl_xor_sync(0xffffffffu, besti, o);
+      if (ov > best || (ov == best && oi < besti)) { best = ov; besti = oi; }
+    }
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    if (lane == 0) { sv[warp] = best; si[warp] = besti; }
+    __syncthreads();
+    if (warp == 0) {
+      best = lane < BLOCK / 32 ? sv[lane] : -INFINITY; besti = lane < BLOCK / 32 ? si[lane] : 0x7fffffff;
+#pragma unroll
+      for (int o = 16; o > 0; o >>= 1) {
+        const float ov = __shfl_xor_sync(0xffffffffu, best, o); const int oi = __shfl_xor_sync(0xffffffffu, besti, o);
+        if (ov > best || (ov == best && oi < besti)) { best = ov; besti = oi; }
+      }
+      if (lane == 0) { s_excl[j] = besti; out_ids[b * (k + 1) + 1 + j] = besti; out_lp[b * (k + 1) + 1 + j] = best - lse; }
+    }
+    __syncthreads();
+  }
+}
+
 }  // namespace
+
+extern "C" int penalties_f32(float* logits, const int32_t* ids, const int32_t* offsets, const int32_t* prompt_len,
+                             const float* rep, const float* freq, const float* pres, int64_t batch, int64_t vocab,
+                             cudaStream_t stream) {
+  if (batch <= 0) return 0;
+  penalties_kernel<<<(unsigned)batch, 256, 0, stream>>>(logits, ids, offsets, prompt_len, rep, freq, pres, (int)vocab);
+  return last_err();
+}
+extern "C" int min_p_mask_f32(float* logits, const float* min_p, int64_t batch, int64_t vocab, cudaStream_t stream) {
+  if (batch <= 0) return 0;
+  min_p_mask_kernel<<<(unsigned)batch, BLOCK, 0, stream>>>(logits, min_p, (int)vocab);
+  return last_err();
+}
+extern "C" int temperature_f32(float* logits, const float* temperature, int64_t batch, int64_t vocab, cudaStream_t stream) {
+  if (batch <= 0) return 0;
+  temperature_kernel<<<(unsigned)batch, BLOCK, 0, stream>>>(logits, temperature, (int)vocab);
+  return last_err();
+}
+extern "C" int logprobs_f32(const float* logits, const int32_t* chosen, int64_t k, int32_t* out_ids, float* out_lp,
+                            int32_t* rank, int64_t batch, int64_t vocab, cudaStream_t stream) {
+  if (batch <= 0) return 0;
+  if (k < 0 || k > MAX_LP_K) return err(cudaErrorInvalidValue);
+  logprobs_kernel<<<(unsigned)batch, BLOCK, 0, stream>>>(logits, chosen, (int)k, out_ids, out_lp, rank, (int)vocab);
+  return last_err();
+}
 
 extern "C" int argmax_f32(const float* logits, int32_t* out, int64_t batch, int64_t vocab, cudaStream_t stream) {
   if (batch <= 0) return 0;

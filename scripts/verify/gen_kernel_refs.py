@@ -200,3 +200,52 @@ for r, (a, b) in enumerate(zip(gcu[:-1].tolist(), gcu[1:].tolist())):
     outs2.append(sdpa_causal(gq2[cur:cur + gnew[r]], kall, vall, hist=b - a)); cur += gnew[r]
 save("gqa_paged_out", torch.cat(outs2))
 print("gqa refs: prefill", tuple(torch.cat(outs).shape), "paged", tuple(torch.cat(outs2).shape))
+
+# ---- Q2 采样：penalties / temperature / min_p / logprobs（vLLM 语义）----
+torch.manual_seed(77)
+SB, SV = 4, 512
+s_logits = torch.randn(SB, SV) * 3
+# 历史 token（CSR）：prompt + output，含重复
+hist = [([1, 5, 9, 5], [9, 9, 20]), ([3], []), ([7, 7, 7], [7, 100]), ([], [2, 4, 6, 4])]
+ids, offs, plen = [], [0], []
+for p_, o_ in hist:
+    ids += p_ + o_; offs.append(len(ids)); plen.append(len(p_))
+rep = torch.tensor([1.5, 1.0, 1.2, 1.0]); freq = torch.tensor([0.0, 0.0, 0.3, 0.5]); pres = torch.tensor([0.0, 0.0, 0.2, 0.1])
+def penal_ref(row, p_, o_, r, f, pr):
+    row = row.clone()
+    seen = set(p_) | set(o_)
+    for t in seen:
+        v = row[t].item()
+        if r != 1.0:
+            v = v / r if v > 0 else v * r
+        cnt = o_.count(t)
+        if cnt > 0:
+            v -= f * cnt + pr
+        row[t] = v
+    return row
+pen_out = torch.stack([penal_ref(s_logits[b], hist[b][0], hist[b][1], rep[b].item(), freq[b].item(), pres[b].item()) for b in range(SB)])
+save("pen_logits", s_logits); save("pen_ids", torch.tensor(ids, dtype=torch.int32)); save("pen_offsets", torch.tensor(offs, dtype=torch.int32))
+save("pen_prompt_len", torch.tensor(plen, dtype=torch.int32)); save("pen_rep", rep); save("pen_freq", freq); save("pen_pres", pres); save("pen_out", pen_out)
+# temperature
+temps = torch.tensor([0.7, 1.0, 1.3, 0.0])
+temp_out = s_logits.clone()
+for b in range(SB):
+    if temps[b] > 1e-5 and temps[b] != 1.0: temp_out[b] = s_logits[b] / temps[b]
+save("temp_in", s_logits); save("temp_t", temps); save("temp_out", temp_out)
+# min_p
+minp = torch.tensor([0.1, 0.0, 0.3, 0.05])
+mp_out = s_logits.clone()
+for b in range(SB):
+    if minp[b] > 0:
+        pr = torch.softmax(s_logits[b], -1); mp_out[b][pr < minp[b] * pr.max()] = float("-inf")
+save("minp_in", s_logits); save("minp_p", minp); save("minp_out_isinf", torch.isinf(mp_out).to(torch.int32))
+# logprobs: log_softmax of raw logits, chosen token, top-5, rank
+chosen = torch.tensor([3, 100, 0, 511], dtype=torch.int32)
+lsm = torch.log_softmax(s_logits, -1)
+k = 5
+top = torch.topk(lsm, k, dim=-1)
+lp_ids = torch.cat([chosen[:, None].long(), top.indices], 1).to(torch.int32)
+lp_vals = torch.cat([lsm.gather(1, chosen[:, None].long()), top.values], 1)
+rank = (lsm > lsm.gather(1, chosen[:, None].long())).sum(-1).to(torch.int32)
+save("lp_logits", s_logits); save("lp_chosen", chosen); save("lp_ids", lp_ids); save("lp_vals", lp_vals); save("lp_rank", rank)
+print("sampling refs: penalties/temperature/min_p/logprobs written")

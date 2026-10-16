@@ -442,13 +442,17 @@ impl Scheduler {
     }
 }
 
-/// 对应 vLLM `sched/utils.py::check_stop`：先 eos/stop，再 length。
+/// 对应 vLLM `sched/utils.py::check_stop`：先 eos / stop_token_ids（受 `min_tokens` / `ignore_eos` 约束），再 length。
+/// stop **字符串** 不在这里（需要 detokenize，由 server 侧 OutputStream 判定后 abort）。
 fn check_stop(r: &Request, eos: &[u32], max_model_len: u32) -> Option<FinishReason> {
     let last = *r.output_ids().last()?;
-    if eos.contains(&last) || r.sampling.stop_token_ids.contains(&last) {
-        return Some(FinishReason::Stop);
+    let sp = &r.sampling;
+    if r.num_output_tokens() > sp.min_tokens {
+        if (!sp.ignore_eos && eos.contains(&last)) || sp.stop_token_ids.contains(&last) {
+            return Some(FinishReason::Stop);
+        }
     }
-    if r.num_tokens() >= max_model_len || r.num_output_tokens() >= r.sampling.max_tokens {
+    if r.num_tokens() >= max_model_len || r.num_output_tokens() >= sp.max_tokens {
         return Some(FinishReason::Length);
     }
     None
