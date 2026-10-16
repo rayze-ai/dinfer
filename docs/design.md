@@ -107,15 +107,18 @@ attention 是标准 GQA（`kernels/cuda/gqa.cu`，`KvCacheSpec::FullAttention`�
 ```
 dinfer/
   Cargo.toml                   # workspace
-  crates/
-    core/        dinfer-core   # 模型无关：配置、调度、KV、runner、采样、加载、trait
+  crates/                      # 公用基础设施（模型无关）
+    core/        dinfer-core   # 配置、调度、KV、runner、采样、metrics、engine、trait
     kernels/     dinfer-kernels# CUDA/C++ 算子 + FFI（build.rs 调 nvcc），按 feature 裁剪
-    layers/      dinfer-layers # 基于 kernels 的 Rust 层：Linear/RMSNorm/RoPE/MLA/MoE/Sampler
-    server/      dinfer-server # axum HTTP：OpenAI 兼容接口、SSE、健康检查、指标
-    kimik3/      dinfer-kimik3 # Kimi-K3：模型、KDA、latent MoE、AttnRes、ViT、tokenizer、XTML
-    glm53/       dinfer-glm53  # GLM-5.3：模型、DSA 索引器、FP8 MoE、tokenizer、chat 模板
+    layers/      dinfer-layers # 基于 kernels 的 Rust 层：Linear/RMSNorm/RoPE/MLA/MoE/GQA
+    text/        dinfer-text   # tokenizer、chat 模板、StopChecker
+    server/      dinfer-server # axum HTTP：OpenAI 兼容接口、SSE、/metrics、健康检查
+  models/                      # 每个模型一个 crate（2026-10-16 起从 crates/ 挪出，便于区分公用与模型私有）
+    qwen3/       dinfer-qwen3  # Qwen3-0.6B：模型、executor、service（主流程验证模型）
+    glm53/       dinfer-glm53  # GLM-5.3：模型、DSA 索引器、FP8 MoE、MTP、chat 模板
+    kimik3/      dinfer-kimik3 # Kimi-K3：模型、KDA、latent MoE、AttnRes、ViT、XTML（骨架）
   bins/
-    dinfer/                    # 单一二进制；feature `kimik3` / `glm53` 决定链接哪个模型
+    dinfer/                    # 单一二进制；feature `qwen3` / `glm53` / `kimik3` 决定链接哪个模型
   tests/                       # 跨 crate 集成 / 数值对拍
   scripts/verify/              # exit 0 = 通过
 ```
@@ -279,7 +282,7 @@ kimik3 / glm53 只是"不同模型的实现"，当前进度记为阶段性成果
 
 | 阶段 | 产出 | 验收 |
 |---|---|---|
-| ✅ Q1 Qwen3 crate + 真权重（2026-10-15） | `crates/qwen3`：config、权重加载（tied lm_head）、GQA attention（新 kernel：`gqa_prefill / gqa_decode / gqa_prefill_paged`，K/V paged cache）、Qwen3Model、Executor、tokenizer（Qwen2Tokenizer = BPE，`tokenizers` 加载）、chat 模板（含 `enable_thinking`）、parser（`<think>` + JSON tool_call）、Service；`--features qwen3` 构建 | `scripts/verify/q1.sh`：真权重 prefill logits 与 HF max abs < 0.05（bf16，同机 3090）；greedy 32 token 与 HF 逐个一致（允许 bf16 平局步分叉，口径同 P3）；chat 模板 golden 逐字符；server e2e 用真模型回答一个问题且 `<think>` 段被正确拆出 |
+| ✅ Q1 Qwen3 crate + 真权重（2026-10-15） | `models/qwen3`：config、权重加载（tied lm_head）、GQA attention（新 kernel：`gqa_prefill / gqa_decode / gqa_prefill_paged`，K/V paged cache）、Qwen3Model、Executor、tokenizer（Qwen2Tokenizer = BPE，`tokenizers` 加载）、chat 模板（含 `enable_thinking`）、parser（`<think>` + JSON tool_call）、Service；`--features qwen3` 构建 | `scripts/verify/q1.sh`：真权重 prefill logits 与 HF max abs < 0.05（bf16，同机 3090）；greedy 32 token 与 HF 逐个一致（允许 bf16 平局步分叉，口径同 P3）；chat 模板 golden 逐字符；server e2e 用真模型回答一个问题且 `<think>` 段被正确拆出 |
 | Q2 采样 + 请求功能 | temperature / top_p / top_k / min_p / repetition / seed（接 P2 的 `topk_topp_mask` + Philox `sample`）、stop 字符串、logprobs、`n>1`、prefix cache 开启、`/metrics`、按显存算 `num_blocks` | 采样分布与 PyTorch 同 seed 对拍；prefix cache 命中率；OpenAI SDK 全字段 |
 | Q3 单卡性能 | CUDA graph（decode FULL 图）、pinned + 双缓冲 + 异步 D2H、算子融合（§8.2）、GQA flash-style kernel（或接 FlashAttention/FlashInfer）、异步调度 | §8.4 场景 ①②③ 与 vLLM 同机（3090）对比：TPOT P50 优于 ≥ 20% |
 | Q4 PD 分离 | prefill 实例与 decode 实例分进程 / 分卡，KV 传输（本机先 CUDA IPC / NCCL，跨机 RDMA 留接口），proxy 路由，与 vLLM `KVConnector` 语义对照 | 两进程 PD 跑通，输出与单机一致；TTFT / TPOT 对比单机 |

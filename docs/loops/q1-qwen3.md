@@ -7,7 +7,7 @@
 
 ## 目标
 
-`crates/qwen3` 用 **真权重**（`/data/ref/models/qwen3-0.6b`，bf16 1.5 GB）在本机 3090 上跑通 Qwen3-0.6B：prefill logits 与 HF 对拍、
+`models/qwen3` 用 **真权重**（`/data/ref/models/qwen3-0.6b`，bf16 1.5 GB）在本机 3090 上跑通 Qwen3-0.6B：prefill logits 与 HF 对拍、
 greedy 生成与 HF 逐 token 一致、chat 模板 golden 逐字符一致、`dinfer serve --features qwen3` 用真模型回答问题且 `<think>` 段正确拆出。
 这是第一次用真权重验证主流程（P0–P6 全是 tiny 随机权重）。
 
@@ -26,9 +26,9 @@ greedy 生成与 HF 逐 token 一致、chat 模板 golden 逐字符一致、`din
 
 | 看什么 | 在哪里 | 命令 |
 |---|---|---|
-| 结构事实 | `crates/qwen3/src/config.rs` 单测 | `cargo test -p dinfer-qwen3` |
+| 结构事实 | `models/qwen3/src/config.rs` 单测 | `cargo test -p dinfer-qwen3` |
 | GQA kernel vs torch | `kernels/tests/ref_tests.rs`（feature ref-tests） | `scripts/verify/kernels.sh`（新增 gqa 用例） |
-| 真权重 prefill / greedy vs HF | `crates/qwen3/tests/real_parity.rs` | `QWEN3_DIR=/data/ref/models/qwen3-0.6b QWEN3_GOLDEN=test/qwen3_golden cargo test -p dinfer-qwen3 --features ref-tests --test real_parity -- --ignored --nocapture` |
+| 真权重 prefill / greedy vs HF | `models/qwen3/tests/real_parity.rs` | `QWEN3_DIR=/data/ref/models/qwen3-0.6b QWEN3_GOLDEN=test/qwen3_golden cargo test -p dinfer-qwen3 --features ref-tests --test real_parity -- --ignored --nocapture` |
 | 模板 / tokenizer | `tests/chat_parity.rs` | 同上 |
 | server | `bins/dinfer/tests/serve_e2e_qwen3.rs` | curl / e2e |
 

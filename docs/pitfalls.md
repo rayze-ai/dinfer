@@ -25,7 +25,7 @@
 - 根因：minijinja 把 `.0.type` 词法成 float；没有 Python 字符串 / dict 方法；HF 的 jinja 环境是 `trim_blocks=True, lstrip_blocks=True`（`chat_template_utils._compile_jinja_template`）而 minijinja 默认关；minijinja/serde_json 默认 BTreeMap 排序 key，`tojson` 用紧凑分隔符且不认 `ensure_ascii` kwarg。
 - 解法：加载前 `x.N.attr` → `x[N].attr`；`set_unknown_method_callback` 补 strip/split/items 等；`set_trim_blocks/lstrip_blocks(true)`；minijinja 与 serde_json 都开 `preserve_order`；自写 `tojson` filter 按 Python `json.dumps(ensure_ascii=False)` 输出。验收口径必须是 "渲染文本与 HF `apply_chat_template(tokenize=False)` 逐字符一致"，再 encode 比 id —— 只比 id 会漏掉空白差异。
 - 如何避免：新模板先用 `gen_chat_golden.py` 产 golden（含 tools / 多轮 / tool 结果乱序 / `clear_thinking` / 非法 `reasoning_effort`），跑 `chat_parity` 看 `first diff at char N` 定位。
-- 相关：`crates/glm53/src/chat.rs`、`scripts/verify/gen_chat_golden.py`、`crates/glm53/tests/chat_parity.rs`
+- 相关：`models/glm53/src/chat.rs`、`scripts/verify/gen_chat_golden.py`、`models/glm53/tests/chat_parity.rs`
 
 ## 2026-10-15 server 请求 500 `indexer: block_table covers 16 < max_seq 1024`：block_table 宽度不是 cache 容量
 
@@ -41,7 +41,7 @@
 - 根因：HF 侧参考是对 `prompt + gen[:i]` 整条序列重新前向。bf16 下 SDPA/MoE 的 batch 内部归约顺序随序列长变化，L0 索引器对 12 个 **前缀行** 的 top-k 在 256 与 258 token 两次前向里不同（其中 7 行是前 8 行的 "可见 ≤ k" 退化，无影响；5 行 142/163/172/233/246 是真翻转），这 5 行的 attention 输出变了 0.02–0.03 → 它们在 HF 里的后续层 KV 与我们 prefill 时写进 cache 的不同。任何 decode 步只要 top-k 选中这 5 行之一，L1/L2 attention 就与 HF 不可比。不是 bug：我们的增量 cache 才是 "正确" 的语义，HF 的全序列重算在 bf16 下自己都不自洽。
 - 解法：`gen_tiny_glm.py` 每个 decode 步额外导出 `hidden_L<i>_long_prefix_drift_steps.npy`（[gen, T]：每前缀行相对 prefill-only 前向的 hidden max abs 变化）；`dsa_parity` 把变化 > 0.02 的行并入 "漂移行" 集合，注入 top-k 命中漂移行的 decode 步不断言。可判定步 18/32，其余步只上报。
 - 如何避免：参考实现用全序列重算做 decode 对拍时，先验证它自己是前缀稳定的（对比 prefill-only 与更长序列的前缀 hidden）；不稳定就导出逐步漂移并过滤，不要调阈值硬凑。对拍脚本的 `dump_dsa` 之类 hook 一律用 `.copy()`，否则多次前向后拿到的是最后一次的张量。
-- 相关：`scripts/verify/gen_tiny_glm.py::dump_hidden`、`crates/glm53/tests/dsa_parity.rs::drift_rows`、`crates/glm53/tests/dsa_diag.rs`（逐层 / 逐 head / cache 行 bisect 工具，保留）
+- 相关：`scripts/verify/gen_tiny_glm.py::dump_hidden`、`models/glm53/tests/dsa_parity.rs::drift_rows`、`models/glm53/tests/dsa_diag.rs`（逐层 / 逐 head / cache 行 bisect 工具，保留）
 
 ## 2026-10-15 Claude Code 会话报 `API Error: 400 Input is too long`，整段上下文丢失，只能 /clear
 
@@ -57,7 +57,7 @@
 - 根因：① 把 HF 自己的 q/k 喂进我们的分数公式，与 HF 分数逐位相等 → 公式无误；差异全来自 q/k 各自 bf16 舍入后的 fp32 点积（~1e-2），而 HF 自身 k-th 与 (k+1)-th 分差中位数只有 0.006 → top-k 是对噪声级分差做硬判决，两套实现不可能逐位一致。② 剩下 4 行是 MoE 路由第 2/3 名专家分差 < 0.01 时选了不同专家（P4 已见过的 bf16 平局，tiny 随机权重下约 2%）。逐层 bisect 显示三层 attention 输出 max abs ≤ 0.0007。
 - 解法：对拍分三道：top-k 集合差异只允许落在 "HF k-th 分数 ± 本行两边分数实测误差" 内；注入 HF top-k 验证稀疏 attention（排除索引器）；全程自算只在 "索引器 k-th 分差 > 实测误差 且 路由分差 > 0.01" 的行/步上断言。参考侧额外导出 `indexer_score_*`、`router_margin_*`。
 - 如何避免：任何 top-k / argmax / 路由类硬判决都不要用 "集合完全一致" 做验收；先从参考实现导出判决依据的分数，用分差判定该行是否可判定。试过把 RoPE cos/sin 表改成 bf16 对齐 HF（无改善，21 → 24 行），不要再试。
-- 相关：`crates/glm53/tests/dsa_parity.rs`、`scripts/verify/gen_tiny_glm.py::dump_dsa/dump_router_margin`、`docs/loops/p5-dsa-indexer.md`
+- 相关：`models/glm53/tests/dsa_parity.rs`、`scripts/verify/gen_tiny_glm.py::dump_dsa/dump_router_margin`、`docs/loops/p5-dsa-indexer.md`
 
 ## 2026-10-15 transformers ≥ 5 的 MoE 专家权重是融合 3D 张量，与 GLM-5.3 safetensors 逐专家布局不同
 
@@ -89,7 +89,7 @@
 - 根因：测试里 `(0..v).max_by(|a,b| row[a].partial_cmp(&row[b]))` 在相等时返回**最后一个**最大值；torch.argmax 与我们的 argmax kernel 都取**第一个**（小下标）。
 - 解法：host 参考 argmax 写成显式循环 `if row[i] > row[best]`（严格大于才更新）。
 - 如何避免：所有 host 侧 "参考实现" 的平局规则显式写出来，并与 kernel 注释对齐；不要依赖标准库迭代器的平局行为。
-- 相关：`crates/glm53/tests/{tiny_parity,runner_parity}.rs::argmax`、`crates/kernels/cuda/sampling.cu`
+- 相关：`models/glm53/tests/{tiny_parity,runner_parity}.rs::argmax`、`crates/kernels/cuda/sampling.cu`
 
 ## 2026-10-14 请求完成后 runner 状态没被清理：`finished_req_ids` 晚一步到达
 
@@ -97,7 +97,7 @@
 - 根因：与 vLLM 一致，scheduler 在 `update_from_output` 里只把完成请求记进内部列表，**下一次** `schedule()` 才通过 `SchedulerOutput.finished_req_ids` 告知 worker 释放状态。
 - 解法：引擎主循环结束条件要再多跑一次 `schedule()` + `runner.execute()`（空 batch）；测试同样处理。另：两个请求可能不同步完成，`finished_req_ids` 要跨 step 累计。
 - 如何避免：runner 状态的生命周期以 `SchedulerOutput` 的 `new_reqs / finished_req_ids` 为唯一来源，不要从 `StepResults.finish` 推。
-- 相关：`crates/core/src/runner.rs::update_states`、`crates/glm53/tests/runner_parity.rs`
+- 相关：`crates/core/src/runner.rs::update_states`、`models/glm53/tests/runner_parity.rs`
 
 ## 2026-10-14 用 scratch 缓冲的 `shape[0]` 当 token 数，把 max_tokens 当成了本步 token 数
 
@@ -121,7 +121,7 @@
 - 根因：HF 该步 top1=0.508、top2=0.504，差 0.0039 = bf16 在 0.5 附近的 1 ULP；两边各自的累加顺序决定谁略大，无法也不应要求一致。
 - 解法：对拍口径改为三层：① 全词表 logits max abs < 0.05；② argmax 只在 HF top1-top2 gap > 0.02 时要求一致；③ greedy 允许在平局步分叉，且分叉 token 必须是 HF top-2 之一。
 - 如何避免：所有 greedy 对拍都带 `expect_step_logits`（HF 全序列前向逐步取最后一行），用 gap 判定平局，不用"token 序列完全一致"做唯一标准。
-- 相关：`crates/glm53/tests/tiny_parity.rs`、`scripts/verify/gen_tiny_glm.py`、`docs/loops/p3-mla-dense.md`
+- 相关：`models/glm53/tests/tiny_parity.rs`、`scripts/verify/gen_tiny_glm.py`、`docs/loops/p3-mla-dense.md`
 
 ## 2026-10-14 top-p 掩码与 vLLM 口径不一致：top-p 必须在 top-k 之后的分布上算
 
@@ -200,7 +200,7 @@
 - 根因：Qwen3 chat 模板后的首 token 几乎确定（logprob ≈ −2e-4），任何 top-p < 1 都只剩一个候选；不是 kernel 问题。
 - 解法：先 greedy 跑 24 步，拿每步原始 logits 在 host 侧套同样 mask，选候选最多的一步（实测 step 23，候选 3），用 `prompt + greedy[..step]` 作采样 prompt。
 - 如何避免：分布 / 随机性测试先用 host 参考确认该位置的候选集 ≥ 2；不要默认首 token 有随机性。顺带：N 个 36-token prompt 要一次 prefill 放下，`max_num_batched_tokens` 与 KV 块数要按 `N × ceil(len/16)` 算（100 × 3 块 → 预算 8192、512 块）。
-- 相关：`crates/qwen3/tests/sampling_parity.rs::mask_and_distribution_match_host_reference`
+- 相关：`models/qwen3/tests/sampling_parity.rs::mask_and_distribution_match_host_reference`
 
 ## 2026-10-16 远端编译 cudarc 报 `E0428: the name CUDA_VERSION is defined multiple times`
 
