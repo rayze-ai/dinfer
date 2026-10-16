@@ -1,0 +1,1 @@
+e 续 4：prefill/paged attention v3 = WMMA bf16 tensor core（S=QKᵀ、O+=PV 走 mma；online softmax 在 smem）；3090 T=1514 2.6→1.34 ms/层

@@ -107,3 +107,15 @@ bench10,2026-10-16,e 续 3：prefill/paged attention v2（32 行/block 按 kv he
 bench10,2026-10-16,e 续 3：prefill/paged attention v2（32 行/block 按 kv head 分块、两 q head 共享 K/V tile、uint4 装载）；3090 T=1514 9.6→2.6 ms/层,c8-long,out_tok_per_s,1543.044,2098.590,0.735,94.0,higher
 bench10,2026-10-16,e 续 3：prefill/paged attention v2（32 行/block 按 kv head 分块、两 q head 共享 K/V tile、uint4 装载）；3090 T=1514 9.6→2.6 ms/层,c8-long,ttft_p50_ms,126.980,35.569,3.570,78.6,lower
 bench10,2026-10-16,e 续 3：prefill/paged attention v2（32 行/block 按 kv head 分块、两 q head 共享 K/V tile、uint4 装载）；3090 T=1514 9.6→2.6 ms/层,c8-long,tpot_p50_ms,4.182,3.546,1.179,22.7,lower
+bench11,2026-10-16,e 续 4：prefill/paged attention v3 = WMMA bf16 tensor core（S=QKᵀ、O+=PV 走 mma；online softmax 在 smem）；3090 T=1514 2.6→1.34 ms/层,c1,out_tok_per_s,499.737,455.677,1.097,-0.1,higher
+bench11,2026-10-16,e 续 4：prefill/paged attention v3 = WMMA bf16 tensor core（S=QKᵀ、O+=PV 走 mma；online softmax 在 smem）；3090 T=1514 2.6→1.34 ms/层,c1,ttft_p50_ms,4.686,11.786,0.398,2.5,lower
+bench11,2026-10-16,e 续 4：prefill/paged attention v3 = WMMA bf16 tensor core（S=QKᵀ、O+=PV 走 mma；online softmax 在 smem）；3090 T=1514 2.6→1.34 ms/层,c1,tpot_p50_ms,1.978,2.119,0.933,-0.2,lower
+bench11,2026-10-16,e 续 4：prefill/paged attention v3 = WMMA bf16 tensor core（S=QKᵀ、O+=PV 走 mma；online softmax 在 smem）；3090 T=1514 2.6→1.34 ms/层,c8,out_tok_per_s,3100.890,2942.754,1.054,0.1,higher
+bench11,2026-10-16,e 续 4：prefill/paged attention v3 = WMMA bf16 tensor core（S=QKᵀ、O+=PV 走 mma；online softmax 在 smem）；3090 T=1514 2.6→1.34 ms/层,c8,ttft_p50_ms,8.430,24.964,0.338,10.4,lower
+bench11,2026-10-16,e 续 4：prefill/paged attention v3 = WMMA bf16 tensor core（S=QKᵀ、O+=PV 走 mma；online softmax 在 smem）；3090 T=1514 2.6→1.34 ms/层,c8,tpot_p50_ms,2.510,2.540,0.988,-0.1,lower
+bench11,2026-10-16,e 续 4：prefill/paged attention v3 = WMMA bf16 tensor core（S=QKᵀ、O+=PV 走 mma；online softmax 在 smem）；3090 T=1514 2.6→1.34 ms/层,c32,out_tok_per_s,8521.461,8479.388,1.005,0.4,higher
+bench11,2026-10-16,e 续 4：prefill/paged attention v3 = WMMA bf16 tensor core（S=QKᵀ、O+=PV 走 mma；online softmax 在 smem）；3090 T=1514 2.6→1.34 ms/层,c32,ttft_p50_ms,38.578,66.646,0.579,6.7,lower
+bench11,2026-10-16,e 续 4：prefill/paged attention v3 = WMMA bf16 tensor core（S=QKᵀ、O+=PV 走 mma；online softmax 在 smem）；3090 T=1514 2.6→1.34 ms/层,c32,tpot_p50_ms,3.540,3.259,1.086,-0.3,lower
+bench11,2026-10-16,e 续 4：prefill/paged attention v3 = WMMA bf16 tensor core（S=QKᵀ、O+=PV 走 mma；online softmax 在 smem）；3090 T=1514 2.6→1.34 ms/层,c8-long,out_tok_per_s,1728.028,2075.713,0.832,12.0,higher
+bench11,2026-10-16,e 续 4：prefill/paged attention v3 = WMMA bf16 tensor core（S=QKᵀ、O+=PV 走 mma；online softmax 在 smem）；3090 T=1514 2.6→1.34 ms/层,c8-long,ttft_p50_ms,84.589,41.386,2.044,33.4,lower
+bench11,2026-10-16,e 续 4：prefill/paged attention v3 = WMMA bf16 tensor core（S=QKᵀ、O+=PV 走 mma；online softmax 在 smem）；3090 T=1514 2.6→1.34 ms/层,c8-long,tpot_p50_ms,3.970,3.547,1.119,5.1,lower
