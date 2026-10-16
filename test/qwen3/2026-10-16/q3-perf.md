@@ -26,3 +26,4 @@ dinfer 已快一个量级，主因是没有编译期；但 dinfer 的"权重 0.5
 | 11 | c | 4090 parity 8/8；bench5 vs vLLM：c1_p128_o128: tok/s 423/455 = 0.93×, TTFT 43/12 ms, TPOT 2.0/2.1 ms；c8_p128_o128: tok/s 2548/2943 = 0.87×, TTFT 43/26 ms, TPOT 2.9/2.5 ms；c32_p128_o128: tok/s 5166/8577 = 0.60×, TTFT 92/61 ms, TPOT 5.7/3.3 ms；c8_p1024_o128: tok/s 630/2104 = 0.30×, TTFT 497/36 ms, TPOT 8.8/3.5 ms | 19:1x |
 | 12 | d | stage-compare 完成，见 stage/README.md；结论：GPU 时间已追平，差在 CPU/GPU 串行 | 19:3x |
 | 13 | d | TTFT 43 ms = 5 ms prefill + ~38 ms Nagle 停顿（怀疑，待验证） | 19:4x |
+| 16 | d | bench6：TTFT 43→6.5 ms（Nagle 修复），已优于 vLLM；差距全在 execute | 19:5x |
