@@ -1,0 +1,1 @@
+g 混批分流：Paged 步里 decode 行走 decode_v2（cu_seqlens_q 行映射）、prefill 行走 paged_tc（跳过 q_len==1）；3090 微基准 C 形状 0.86→0.76 ms、D 0.32→0.07

@@ -143,3 +143,15 @@ bench13,2026-10-16,f decode splits：decode_v2 splits 目标 256 → 1024 block�
 bench13,2026-10-16,f decode splits：decode_v2 splits 目标 256 → 1024 block（B=8 长序列 64 → 512 block；4090 B=8 seq=2048 0.040 → 0.032 ms）,c8-long,out_tok_per_s,1729.759,1907.135,0.907,0.2,higher
 bench13,2026-10-16,f decode splits：decode_v2 splits 目标 256 → 1024 block（B=8 长序列 64 → 512 block；4090 B=8 seq=2048 0.040 → 0.032 ms）,c8-long,ttft_p50_ms,101.761,59.612,1.707,-20.3,lower
 bench13,2026-10-16,f decode splits：decode_v2 splits 目标 256 → 1024 block（B=8 长序列 64 → 512 block；4090 B=8 seq=2048 0.040 → 0.032 ms）,c8-long,tpot_p50_ms,3.869,3.744,1.033,2.5,lower
+bench14,2026-10-16,g 混批分流：Paged 步里 decode 行走 decode_v2（cu_seqlens_q 行映射）、prefill 行走 paged_tc（跳过 q_len==1）；3090 微基准 C 形状 0.86→0.76 ms、D 0.32→0.07,c1,out_tok_per_s,498.754,448.095,1.113,-0.2,higher
+bench14,2026-10-16,g 混批分流：Paged 步里 decode 行走 decode_v2（cu_seqlens_q 行映射）、prefill 行走 paged_tc（跳过 q_len==1）；3090 微基准 C 形状 0.86→0.76 ms、D 0.32→0.07,c1,ttft_p50_ms,4.653,16.806,0.277,0.7,lower
+bench14,2026-10-16,g 混批分流：Paged 步里 decode 行走 decode_v2（cu_seqlens_q 行映射）、prefill 行走 paged_tc（跳过 q_len==1）；3090 微基准 C 形状 0.86→0.76 ms、D 0.32→0.07,c1,tpot_p50_ms,1.981,2.117,0.936,-0.1,lower
+bench14,2026-10-16,g 混批分流：Paged 步里 decode 行走 decode_v2（cu_seqlens_q 行映射）、prefill 行走 paged_tc（跳过 q_len==1）；3090 微基准 C 形状 0.86→0.76 ms、D 0.32→0.07,c8,out_tok_per_s,3075.209,2930.523,1.049,-0.2,higher
+bench14,2026-10-16,g 混批分流：Paged 步里 decode 行走 decode_v2（cu_seqlens_q 行映射）、prefill 行走 paged_tc（跳过 q_len==1）；3090 微基准 C 形状 0.86→0.76 ms、D 0.32→0.07,c8,ttft_p50_ms,8.748,28.226,0.310,-5.6,lower
+bench14,2026-10-16,g 混批分流：Paged 步里 decode 行走 decode_v2（cu_seqlens_q 行映射）、prefill 行走 paged_tc（跳过 q_len==1）；3090 微基准 C 形状 0.86→0.76 ms、D 0.32→0.07,c8,tpot_p50_ms,2.528,2.533,0.998,-0.2,lower
+bench14,2026-10-16,g 混批分流：Paged 步里 decode 行走 decode_v2（cu_seqlens_q 行映射）、prefill 行走 paged_tc（跳过 q_len==1）；3090 微基准 C 形状 0.86→0.76 ms、D 0.32→0.07,c32,out_tok_per_s,8322.975,8305.756,1.002,-0.1,higher
+bench14,2026-10-16,g 混批分流：Paged 步里 decode 行走 decode_v2（cu_seqlens_q 行映射）、prefill 行走 paged_tc（跳过 q_len==1）；3090 微基准 C 形状 0.86→0.76 ms、D 0.32→0.07,c32,ttft_p50_ms,38.725,74.972,0.517,-0.1,lower
+bench14,2026-10-16,g 混批分流：Paged 步里 decode 行走 decode_v2（cu_seqlens_q 行映射）、prefill 行走 paged_tc（跳过 q_len==1）；3090 微基准 C 形状 0.86→0.76 ms、D 0.32→0.07,c32,tpot_p50_ms,3.630,3.304,1.099,-0.0,lower
+bench14,2026-10-16,g 混批分流：Paged 步里 decode 行走 decode_v2（cu_seqlens_q 行映射）、prefill 行走 paged_tc（跳过 q_len==1）；3090 微基准 C 形状 0.86→0.76 ms、D 0.32→0.07,c8-long,out_tok_per_s,1728.751,1913.041,0.904,-0.1,higher
+bench14,2026-10-16,g 混批分流：Paged 步里 decode 行走 decode_v2（cu_seqlens_q 行映射）、prefill 行走 paged_tc（跳过 q_len==1）；3090 微基准 C 形状 0.86→0.76 ms、D 0.32→0.07,c8-long,ttft_p50_ms,100.768,54.432,1.851,1.0,lower
+bench14,2026-10-16,g 混批分流：Paged 步里 decode 行走 decode_v2（cu_seqlens_q 行映射）、prefill 行走 paged_tc（跳过 q_len==1）；3090 微基准 C 形状 0.86→0.76 ms、D 0.32→0.07,c8-long,tpot_p50_ms,3.857,3.752,1.028,0.3,lower
