@@ -77,3 +77,5 @@ cargo run -p dinfer --features qwen3 -- serve --model /data/ref/models/qwen3-0.6
 | 轮 | 现象 | 根因 | 处理 |
 |---|---|---|---|
 | 1 | a 采样 kernel | 新增 `penalties_f32 / temperature_f32 / min_p_mask_f32 / logprobs_f32`，`kernels.sh` 16/16 PASS（fp32 atol 1e-5） | 停止条件 1 达成；接线 executor 待做 |
+| 2 | a executor 接线 | `core::sampler::SampleBatch` 随 BatchPlan 下发；qwen3 executor penalties→temperature→min_p→top-k/p→Philox sample→logprobs(原始 logits)；`EngineEvent::Logprobs`；server 接 min_p/penalties/stop_token_ids/ignore_eos/min_tokens + `validate()`→400。`sampling_parity` 5 测试：seed 确定性 + batch 无关 / 混批 greedy 32 步=HF / penalties 4 组 16 步逐步=host 公式 / logprobs=host log_softmax 全过；分布测试首轮 FAIL | 分布测试选在首 token：`<think>` logprob −2e-4，mask 后仅 1 候选（测试设计问题，非 kernel） | 改为 greedy 预跑 24 步选候选最多的一步做采样位置 |
+| 3 | a 验收 | 分布测试改选 greedy 24 步中 mask 后候选最多的一步（step 23，候选 3），N=100 一次 prefill：全部样本落在 host 候选集，L1 0.097；`sampling_parity` 5/5、`real_parity` 3/3、`serve_e2e_qwen3` 1/1、clippy 全目标干净 | — | Q2-a 完成（停止条件 1/2/3/7 的 kernel+执行侧达成；5 的 server 渲染与 4/6/8–11 属 b–f） |

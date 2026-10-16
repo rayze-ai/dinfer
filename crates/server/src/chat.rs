@@ -43,6 +43,27 @@ fn sampling_from(
     if req.seed.is_some() {
         sp.seed = req.seed;
     }
+    if let Some(x) = req.min_p {
+        sp.min_p = x;
+    }
+    if let Some(x) = req.repetition_penalty {
+        sp.repetition_penalty = x;
+    }
+    if let Some(x) = req.frequency_penalty {
+        sp.frequency_penalty = x;
+    }
+    if let Some(x) = req.presence_penalty {
+        sp.presence_penalty = x;
+    }
+    if let Some(x) = &req.stop_token_ids {
+        sp.stop_token_ids = x.clone();
+    }
+    if let Some(x) = req.ignore_eos {
+        sp.ignore_eos = x;
+    }
+    if let Some(x) = req.min_tokens {
+        sp.min_tokens = x;
+    }
     let room = max_model_len.saturating_sub(prompt_len);
     if room == 0 {
         return Err(format!("prompt has {prompt_len} tokens, max_model_len is {max_model_len}"));
@@ -51,6 +72,7 @@ fn sampling_from(
     if matches!(req.n, Some(n) if n != 1) {
         return Err("n != 1 is not supported".into());
     }
+    sp.validate()?;
     Ok(sp)
 }
 
@@ -102,6 +124,7 @@ pub async fn chat_completions(State(be): State<Backend>, Json(req): Json<ChatCom
                     Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("detokenize: {e:#}")),
                 }
             }
+            EngineEvent::Logprobs(_) => {} // 服务端 logprobs 渲染见 Q2-b
             EngineEvent::Finished(f) => {
                 finish = Some(f);
                 break;
@@ -245,6 +268,7 @@ fn stream_chunks(
                         }
                     }
                 }
+                EngineEvent::Logprobs(_) => {}
                 EngineEvent::Finished(f) => {
                     finish = Some(f);
                     break;

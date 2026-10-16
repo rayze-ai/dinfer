@@ -75,8 +75,20 @@ extern "C" {
         vocab: i64,
         stream: cudaStream_t,
     ) -> i32;
-    pub fn min_p_mask_f32(logits: *mut f32, min_p: *const f32, batch: i64, vocab: i64, stream: cudaStream_t) -> i32;
-    pub fn temperature_f32(logits: *mut f32, temperature: *const f32, batch: i64, vocab: i64, stream: cudaStream_t) -> i32;
+    pub fn min_p_mask_f32(
+        logits: *mut f32,
+        min_p: *const f32,
+        batch: i64,
+        vocab: i64,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn temperature_f32(
+        logits: *mut f32,
+        temperature: *const f32,
+        batch: i64,
+        vocab: i64,
+        stream: cudaStream_t,
+    ) -> i32;
     pub fn logprobs_f32(
         logits: *const f32,
         chosen: *const i32,

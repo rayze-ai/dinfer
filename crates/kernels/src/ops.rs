@@ -1478,27 +1478,53 @@ pub fn penalties_f32(
 }
 
 /// 温度缩放（原地；t ≤ 1e-5 或 == 1 跳过）。
-pub fn temperature_f32(stream: &Stream, logits: &mut CudaSlice<f32>, temperature: &CudaSlice<f32>, vocab: usize) -> Result<()> {
+pub fn temperature_f32(
+    stream: &Stream,
+    logits: &mut CudaSlice<f32>,
+    temperature: &CudaSlice<f32>,
+    vocab: usize,
+) -> Result<()> {
     ensure!(vocab > 0 && logits.len() % vocab == 0, "temperature: bad shape");
     let batch = logits.len() / vocab;
     ensure!(temperature.len() >= batch, "temperature: params");
     let pl = stream.ptr_mut(logits) as *mut f32;
     // SAFETY: 长度已校验。
     check(
-        unsafe { ffi::temperature_f32(pl, stream.ptr(temperature) as *const f32, batch as i64, vocab as i64, stream.raw() as _) },
+        unsafe {
+            ffi::temperature_f32(
+                pl,
+                stream.ptr(temperature) as *const f32,
+                batch as i64,
+                vocab as i64,
+                stream.raw() as _,
+            )
+        },
         "temperature_f32",
     )
 }
 
 /// min_p 掩码（原地）：概率 < min_p · max_prob 的置 -inf。
-pub fn min_p_mask_f32(stream: &Stream, logits: &mut CudaSlice<f32>, min_p: &CudaSlice<f32>, vocab: usize) -> Result<()> {
+pub fn min_p_mask_f32(
+    stream: &Stream,
+    logits: &mut CudaSlice<f32>,
+    min_p: &CudaSlice<f32>,
+    vocab: usize,
+) -> Result<()> {
     ensure!(vocab > 0 && logits.len() % vocab == 0, "min_p: bad shape");
     let batch = logits.len() / vocab;
     ensure!(min_p.len() >= batch, "min_p: params");
     let pl = stream.ptr_mut(logits) as *mut f32;
     // SAFETY: 长度已校验。
     check(
-        unsafe { ffi::min_p_mask_f32(pl, stream.ptr(min_p) as *const f32, batch as i64, vocab as i64, stream.raw() as _) },
+        unsafe {
+            ffi::min_p_mask_f32(
+                pl,
+                stream.ptr(min_p) as *const f32,
+                batch as i64,
+                vocab as i64,
+                stream.raw() as _,
+            )
+        },
         "min_p_mask_f32",
     )
 }

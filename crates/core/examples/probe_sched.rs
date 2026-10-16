@@ -31,6 +31,7 @@ fn make(n: u64, pc: bool) -> (Scheduler, ModelRunnerOutput) {
         req_ids: (0..n).collect(),
         sampled: (0..n).map(|_| vec![7]).collect(),
         drafts: vec![Vec::new(); n as usize],
+        logprobs: vec![],
     };
     s.update_from_output(&o, &mro);
     (s, mro)

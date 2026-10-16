@@ -408,7 +408,12 @@ impl Scheduler {
                 let r: &Request = r;
                 self.kv.cache_blocks(slot, r, n);
             }
-            results.push(rid, &generated[..n_used], finish);
+            match mro.logprobs.get(idx) {
+                Some(lp) if !lp.is_empty() => {
+                    results.push_with_logprobs(rid, &generated[..n_used], lp, finish)
+                }
+                _ => results.push(rid, &generated[..n_used], finish),
+            }
         }
         self.p.eos_token_ids = eos;
 
@@ -447,10 +452,10 @@ impl Scheduler {
 fn check_stop(r: &Request, eos: &[u32], max_model_len: u32) -> Option<FinishReason> {
     let last = *r.output_ids().last()?;
     let sp = &r.sampling;
-    if r.num_output_tokens() > sp.min_tokens {
-        if (!sp.ignore_eos && eos.contains(&last)) || sp.stop_token_ids.contains(&last) {
-            return Some(FinishReason::Stop);
-        }
+    if r.num_output_tokens() > sp.min_tokens
+        && ((!sp.ignore_eos && eos.contains(&last)) || sp.stop_token_ids.contains(&last))
+    {
+        return Some(FinishReason::Stop);
     }
     if r.num_tokens() >= max_model_len || r.num_output_tokens() >= sp.max_tokens {
         return Some(FinishReason::Length);
@@ -505,6 +510,7 @@ mod tests {
             req_ids: toks.iter().map(|(i, _)| *i).collect(),
             sampled: toks.iter().map(|(_, t)| t.clone()).collect(),
             drafts: vec![Vec::new(); toks.len()],
+            logprobs: vec![],
         };
         let r = s.update_from_output(&o, &mro);
         (o, r)
@@ -646,7 +652,12 @@ mod tests {
         // r1 prefill 完成产出 1 个 token（max_tokens=1 → 完成）。此时加入 r2 与 r3：两个候选 → 阈值生效。
         s.update_from_output(
             &o,
-            &ModelRunnerOutput { req_ids: vec![1], sampled: vec![vec![1]], drafts: vec![Vec::new(); 1] },
+            &ModelRunnerOutput {
+                req_ids: vec![1],
+                sampled: vec![vec![1]],
+                drafts: vec![Vec::new(); 1],
+                logprobs: vec![],
+            },
         );
         s.add_request(req(2, 40, 1));
         s.add_request(req(3, 40, 1));
@@ -676,13 +687,23 @@ mod tests {
         assert_eq!(s.request(1).unwrap().num_output_placeholders, 4);
         s.update_from_output(
             &o,
-            &ModelRunnerOutput { req_ids: vec![1], sampled: vec![vec![50]], drafts: vec![Vec::new(); 1] },
+            &ModelRunnerOutput {
+                req_ids: vec![1],
+                sampled: vec![vec![50]],
+                drafts: vec![Vec::new(); 1],
+                logprobs: vec![],
+            },
         );
         assert_eq!(s.request(1).unwrap().num_output_placeholders, 3);
         // step 2 结果：bonus + 1 accepted（拒绝 1）
         s.update_from_output(
             &o2,
-            &ModelRunnerOutput { req_ids: vec![1], sampled: vec![vec![51, 52]], drafts: vec![Vec::new(); 1] },
+            &ModelRunnerOutput {
+                req_ids: vec![1],
+                sampled: vec![vec![51, 52]],
+                drafts: vec![Vec::new(); 1],
+                logprobs: vec![],
+            },
         );
         let r = s.request(1).unwrap();
         assert_eq!(r.num_output_tokens(), 3);

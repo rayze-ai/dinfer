@@ -28,6 +28,21 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub seed: Option<u64>,
     #[serde(default)]
+    pub min_p: Option<f32>,
+    #[serde(default)]
+    pub repetition_penalty: Option<f32>,
+    #[serde(default)]
+    pub frequency_penalty: Option<f32>,
+    #[serde(default)]
+    pub presence_penalty: Option<f32>,
+    /// vLLM 扩展：按 token id 停（字符串 `stop` 见 Q2-b）。
+    #[serde(default)]
+    pub stop_token_ids: Option<Vec<u32>>,
+    #[serde(default)]
+    pub ignore_eos: Option<bool>,
+    #[serde(default)]
+    pub min_tokens: Option<u32>,
+    #[serde(default)]
     pub n: Option<u32>,
     /// `low` / `high` / `max`（GLM 模板只认 low/high，其余按 max）。
     #[serde(default)]

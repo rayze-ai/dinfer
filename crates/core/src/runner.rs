@@ -15,6 +15,7 @@
 use crate::kv::BlockId;
 use crate::request::RequestId;
 use crate::sample::SamplingParams;
+use crate::sampler::{SampleBatch, TokenLogprobs};
 use crate::sched::{ModelRunnerOutput, SchedulerOutput};
 use crate::util::{id_hash_map, IdHashMap};
 use anyhow::{ensure, Context, Result};
@@ -27,6 +28,8 @@ pub struct ReqState {
     pub token_ids: Vec<u32>,
     pub num_prompt: usize,
     pub sampling: SamplingParams,
+    /// Philox 种子：用户给的 `sampling.seed`，否则入队时随机生成一次（整个请求固定）。
+    pub seed: u64,
     /// 已在 KV 中算好的 token 数（本 step 开始时）。
     pub num_computed: usize,
     /// 全量 block 表（单 group）。
@@ -61,6 +64,8 @@ pub struct BatchPlan {
     /// MTP 用它做中间 chunk 行的输入。
     pub next_known: Vec<i32>,
     pub mode: BatchMode,
+    /// 每请求一行的采样参数（与 req_ids 平行）。
+    pub sample: SampleBatch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -93,6 +98,11 @@ pub trait ModelExecutor {
         generated: &mut Vec<Vec<u32>>,
         drafts: &mut Vec<Vec<u32>>,
     ) -> Result<()>;
+
+    /// 上一次 `forward_sample` 的 logprobs（与 req_ids 平行；不要 logprobs 的请求为空 Vec）。默认：不支持 → 全空。
+    fn take_logprobs(&mut self, num_reqs: usize) -> Vec<Vec<TokenLogprobs>> {
+        vec![Vec::new(); num_reqs]
+    }
 }
 
 pub struct Runner<E: ModelExecutor> {
@@ -151,7 +161,10 @@ impl<E: ModelExecutor> Runner<E> {
             req_ids: self.plan.req_ids.clone(),
             sampled: Vec::with_capacity(self.plan.num_reqs()),
             drafts: Vec::with_capacity(self.plan.num_reqs()),
+            logprobs: Vec::with_capacity(self.plan.num_reqs()),
         };
+        let mut lps = self.exec.take_logprobs(self.plan.num_reqs());
+        ensure!(lps.len() == self.plan.num_reqs(), "executor returned {} logprob entries", lps.len());
         for (i, &rid) in self.plan.req_ids.iter().enumerate() {
             let st = self.states.get_mut(&rid).unwrap();
             let n = self.plan.num_tokens[i] as usize;
@@ -170,11 +183,13 @@ impl<E: ModelExecutor> Runner<E> {
                 st.token_ids.extend_from_slice(gen);
                 out.sampled.push(gen.clone());
                 out.drafts.push(self.drafts[i].clone());
+                out.logprobs.push(std::mem::take(&mut lps[i]));
             } else {
                 ensure!(num_draft == 0, "req {rid}: draft on a mid-prefill chunk");
                 st.num_computed += n;
                 out.sampled.push(Vec::new());
                 out.drafts.push(Vec::new());
+                out.logprobs.push(Vec::new());
             }
         }
         Ok(out)
@@ -190,6 +205,7 @@ impl<E: ModelExecutor> Runner<E> {
                 req_id: n.req_id,
                 num_prompt: n.prompt_ids.len(),
                 token_ids: n.prompt_ids.clone(),
+                seed: n.sampling.seed.unwrap_or_else(|| crate::sampler::random_seed(n.req_id)),
                 sampling: n.sampling.clone(),
                 num_computed: n.num_computed_tokens as usize,
                 block_ids: n.block_ids.group(0).to_vec(),
@@ -230,6 +246,7 @@ impl<E: ModelExecutor> Runner<E> {
         p.logits_row_start.clear();
         p.spec_tokens.clear();
         p.next_known.clear();
+        p.sample.clear();
         p.cu_seqlens.push(0);
         p.logits_row_start.push(0);
 
@@ -285,6 +302,13 @@ impl<E: ModelExecutor> Runner<E> {
             let next_known =
                 if start + base < st.token_ids.len() { st.token_ids[start + base] as i32 } else { -1 };
             p.next_known.push(next_known);
+            // 采样行：历史 = 到本步末尾为止的 prompt + 已产出（中间 chunk 的行不会被采样，参数无意义但保持平行）
+            p.sample.push(
+                &st.sampling,
+                st.seed,
+                &st.token_ids[..(start + base).min(st.token_ids.len())],
+                st.num_prompt,
+            );
             max_blocks = max_blocks.max(st.block_ids.len());
         }
         p.mode = match (any_prefill, any_decode, any_paged) {

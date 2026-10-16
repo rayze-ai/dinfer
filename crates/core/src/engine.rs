@@ -18,6 +18,8 @@ use std::sync::Arc;
 pub enum EngineEvent {
     /// 本 step 新产出的 token（投机解码时可能 > 1 个）。
     Tokens(Vec<u32>),
+    /// 紧跟 `Tokens` 之后（仅请求了 logprobs 时）：与该批 token 平行的 logprobs。
+    Logprobs(Vec<crate::sampler::TokenLogprobs>),
     Finished(FinishReason),
     /// 引擎内部错误（该请求终止）。
     Error(String),
@@ -106,10 +108,14 @@ impl<E: ModelExecutor> Engine<E> {
                 }
             };
             let results = self.sched.update_from_output(&so, &mro);
-            for (rid, toks, finish) in results.iter() {
+            for (i, (rid, toks, finish)) in results.iter().enumerate() {
                 let Some(tx) = self.outs.get(&rid) else { continue };
                 if !toks.is_empty() {
                     let _ = tx.send(EngineEvent::Tokens(toks.to_vec()));
+                    let lps = results.logprobs_of(i);
+                    if !lps.is_empty() {
+                        let _ = tx.send(EngineEvent::Logprobs(lps.iter().flatten().cloned().collect()));
+                    }
                 }
                 if let Some(f) = finish {
                     let _ = tx.send(EngineEvent::Finished(f));

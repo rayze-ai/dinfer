@@ -389,7 +389,8 @@ fn penalties_ref() {
     let drep = s.htod_copy(rep).unwrap();
     let dfreq = s.htod_copy(freq).unwrap();
     let dpres = s.htod_copy(pres).unwrap();
-    dinfer_kernels::penalties_f32(&s, &mut dl, &dids, &doffs, &dplen, &drep, &dfreq, &dpres, shape[1]).unwrap();
+    dinfer_kernels::penalties_f32(&s, &mut dl, &dids, &doffs, &dplen, &drep, &dfreq, &dpres, shape[1])
+        .unwrap();
     assert_f32_close("penalties", &s.dtoh_sync_copy(&dl).unwrap(), &want, 1e-5);
 }
 
