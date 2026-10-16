@@ -3,18 +3,18 @@
 <!-- ===== 当前状态（交接区）：每次收功整体重写，保持 ≤ 20 行 ===== -->
 ## 当前状态
 
-- 更新日期：2026-10-16（晚）
-- 阶段：Q1 / Q2 通过；**Q3 单卡性能进行中**（规格 `docs/loops/q3-perf.md` 第 31 轮，记录 `test/qwen3/2026-10-16/q3-perf.md`，每轮 bench 归档 `test/qwen3/2026-10-16/bench*/`，趋势 `test/qwen3/perf-trend.{csv,md,svg,html}`）。GLM 线 P0–P6 通过（历史见 git log / `test/2026-10-1x/`），真权重挂起。
-- **最新成绩（bench12，公平口径）**：c1 1.12× / c8 1.06× / c32 1.04× vLLM（三组反超）；**c8-long 0.91×**（TTFT 85 vs 68 ms、TPOT 4.0 vs 3.7）。bench13 = decode splits 1024（见日志）。
-- **口径修正（第 29 轮，重要）**：bench 原固定 seed → 常驻 vLLM prefix cache 90% 命中、dinfer 每轮重启是冷的，历史 vLLM TTFT 偏低。`bench_compare.sh` 现每次换 seed（写 summary）。**bench≤11 的 TTFT / c8-long 不可与 bench12+ 直接比**（pitfalls）。
-- c8-long 剩余差距（第 30 轮 nsys，`stage/c8long_kern.csv`）：① 1024-prompt 大多与别人 decode 混批走 `gqa_paged_tc`（794 µs/次 vs 纯 prefill `prefill_tc` 431 µs，同 token 量）→ TTFT 双峰 85/141；② `gqa_decode_v2` 25.7%（B=8 长序列只 64–128 block）→ 第 31 轮 splits 目标 1024。
-- 下一步：① bench13 归档 + 记录；② paged_tc 为何比 prefill_tc 慢 1.8×（block_table 间接寻址 / hist 导致 tile 数翻倍？用 cold_shape 加 paged 形状对比）；③ 调度：`max_num_batched_tokens` 4096 vs vLLM 默认（4090 24 GB 走 else 分支，查 arg_utils 2960+ 行）；④ 采样 4 kernel 融一个；⑤ `scripts/verify/q3.sh` 四组 ≥1.0× 验收。
-- **上下文硬约束（2026-10-16，第 4 次 Input too long 后）**：`.claude/settings.json` `BASH_MAX_OUTPUT_LENGTH=8000` + `.claude/hooks/context_guard.sh`（拒绝无 limit 的大文件 Read、不截断的 cat/diff；40 次起每 10 次提醒）。**每轮必须 `bench_compare.sh <OUT> "改动一句话"` 进 CSV 趋势**（用户两次强调）。
-- 4090 常驻：dinfer tmux `dinfer` GPU 0 :8012（release，重启命令见 `scripts/dev/README-remote4090.md`）；vLLM Docker `vllm-qwen3` GPU 1 :8013；测试用 GPU 3；趋势面板 tmux `trend` :8090。远端无 torch/numpy → kernel_refs / golden 由本机生成后 `push`。`remote4090.sh push` 用 `--delete`，远端 bench 结果先 `pull` 再 push。
-- 验证入口：`scripts/verify/remote4090_baseline.sh`（refs + parity + 单测 + e2e）；本机 `scripts/verify/kernels.sh`（21 ref）；`cargo test --release -p dinfer-kernels --test cold_shape -- --ignored --nocapture`（形状微基准）。
-- 已知简化 / 历史阶段细节：见 git log、`docs/design.md` §4、各 `test/<model>/<日期>/*.md`；P5 对拍口径见 pitfalls 2026-10-15。
-- 环境：本机 3090（sm86）nvcc 12.4 `/usr/local/cuda/bin`；**cargo 假失败 `rm target/.rustc_info.json`**；`git@github.com:rayze-ai/dinfer.git` 分支 `dev`。
-- 阻塞 / 待决策：`docs/design.md` §9；GLM/K3 真权重需 ≥8×H200。
+- 更新日期：2026-10-16（深夜）
+- 阶段：Q1 / Q2 通过；**Q3 单卡性能：bench15 四组首次全部 ≥ vLLM**（c1 1.12× / c8 1.07× / c32 1.02× / c8-long 1.00×；`scripts/verify/q3.sh` 正式验收结果见日志末行与 `test/qwen3/2026-10-16/q3/`）。规格 `docs/loops/q3-perf.md`（第 39 轮），记录 `test/qwen3/2026-10-16/q3-perf.md`，每轮 bench `test/qwen3/2026-10-16/bench*/` + `CHANGE`，趋势 `test/qwen3/perf-trend.{csv,md,svg,html}`。GLM 线 P0–P6 通过，真权重挂起。
+- 本轮关键产出：**prefill/paged attention v4**（`gqa.cu::gqa_fa_v4_kernel<PAGED>`：FA2 结构，裸 `mma.sync m16n8k16` + `ldmatrix`，S/P/O 全寄存器，64-key tile，34 KB smem）4090 T=1514 0.66 → 0.14 ms/层；单发 1024 TTFT 25 → 15 ms（vLLM 21）。混批分流 `ops::gqa_mixed_bf16`（decode 行走 decode_v2 + `cu_seqlens_q` 行映射，paged 跳过 q_len==1）。decode splits 目标 1024。
+- **口径修正（重要）**：bench 原固定 seed → 常驻 vLLM prefix cache 90% 命中。`bench_compare.sh` 现每次换 seed（写 summary）；**bench≤11 的 TTFT / c8-long 不可与 bench12+ 直接比**。vLLM 4090 实际 `max_num_batched_tokens=2048`（dinfer 4096）。
+- c8-long 只是持平：TTFT 68 = 68、TPOT 3.8 vs 3.7。剩余想法：① prefill step 独占 / chunk 预算与 TTFT-TPOT 权衡（我们一步 4 个 1024 prompt ≈ 50 ms 打断 decode，vLLM 2048 预算每步 2 个）；② 采样 4 kernel 融一个；③ K/V tile cp.async 双缓冲（v5）；④ 权重加载 2.1 s → <1 s。
+- 下一阶段 **Q4 PD 分离**（design.md §5b）与"可生产"补齐：logprobs/n>1 已有；缺鉴权、限流、优雅停机、metrics 完整度、长上下文 >8k 验证、多卡；GLM/K3 真权重需 ≥8×H200。
+- **上下文硬约束（第 4 次 Input too long 后）**：`.claude/settings.json` `BASH_MAX_OUTPUT_LENGTH=8000` + `.claude/hooks/context_guard.sh`（拒绝无 limit 大文件 Read、不截断 cat/diff；40 次起每 10 次提醒）。**每轮必须 `bench_compare.sh <OUT> "改动一句话"` 进 CSV 趋势**（用户两次强调）。本会话 110+ 次调用后收功。
+- 4090 常驻：dinfer tmux `dinfer` GPU 0 :8012（release）；vLLM Docker `vllm-qwen3` GPU 1 :8013；测试 GPU 3；趋势面板 tmux `trend` :8090。远端无 torch/numpy → refs/golden 本机生成后 `push`；`push` 带 `--delete`，远端 bench 先 `pull`。
+- 验证入口：`scripts/verify/remote4090_baseline.sh`（refs 22 + parity 8 + 单测 8 + e2e 6）；`scripts/verify/q3.sh`；本机 `scripts/verify/kernels.sh`；`cargo test --release -p dinfer-kernels --test cold_shape -- --ignored --nocapture`（prefill / paged 四形状 / decode 微基准）。
+- 环境：本机 3090 nvcc 12.4 `/usr/local/cuda/bin`；**cargo 假失败 `rm target/.rustc_info.json`**；远程 `git@github.com:rayze-ai/dinfer.git` 分支 `dev`。
+- 历史阶段 / 已知简化 / 对拍口径：git log、`docs/design.md` §4、`test/<model>/<日期>/*.md`、pitfalls 2026-10-15/16。
+- 阻塞 / 待决策：`docs/design.md` §9。
 
 <!-- ===== 日志：按日期追加，不改旧条目 ===== -->
 
@@ -31,6 +31,7 @@
 - 全天 commit 20 个，`dev` 已推 GitHub（`git@github.com:rayze-ai/dinfer.git`）。
 - 15:30–22:20 Q3 性能（loop 1–26 轮，详见 `docs/loops/q3-perf.md` 记录表与 `test/qwen3/perf-trend.md`）：bench（基线 0.49/0.50/0.34/0.03×）→ a prefill flash → b decode split-K → c CUDA graph → d 逐段对比（GPU-bound；Nagle）→ e 融合（qkv_post、跨度读、残差并入、decode v2、merge 跳过、prefill/paged v2）→ **bench10：1.10 / 1.05 / 0.99 / 0.74×**，TTFT 四组 4.8 / 9.4 / 41 / 127 ms（vLLM 12 / 26 / 63 / 36）。工具：`bins/bench`（自检）、`bench_compare.sh <OUT> "改动"`、`bench_trend.py` → `perf-trend.{csv,html,svg,md}`、`trend_server.sh`（4090 :8090 面板，点轮次看详情）、`stage_profile.sh` + `nsys_stage_compare.py`、`cold_shape.rs`、`graph_probe.rs`、`q3.sh`。用户要求落实：目录 `test/<model>/<日期>/`；每轮改动→指标提升进 CSV + 浏览器实时曲线。踩坑 4 条（E0428、libstdc++、LD_LIBRARY_PATH、prefix-cache 逐字断言、ANSI、batch 形状、nsys 容器、`--delete` 覆盖 bench7、分叉 shuffle 死锁）。
 - 晚：第 4 次 `Input too long` /clear 后恢复。加硬约束（settings env + PreToolUse hook + CLAUDE.md 规则）。bench11（prefill v3）归档：c32 首次 1.00×；c8-long 0.83×。发现 bench 固定 seed 使常驻 vLLM prefix cache 90% 命中（口径不公），`bench_compare.sh` 改每次换 seed；bench12（公平口径）c1 1.12× / c8 1.06× / c32 1.04× / c8-long 0.91×。nsys 分解 c8-long（paged_tc 1.8× 慢于 prefill_tc；decode_v2 25.7%）。第 31 轮 decode splits 256 → 1024（4090 B=8 seq=2048 0.040 → 0.032 ms），bench13 见 perf-trend。
+- 深夜：第 29–39 轮。口径修正（每轮换 seed）→ bench12 0.91×；nsys 分解 c8-long；decode splits 1024（bench13 持平）；混批分流（bench14 持平）；单发 1024 TTFT 25 ms 定位到 prefill attention 占 step ~80%；**prefill v4（FA2 结构 mma.sync）4.8×**，bench15 四组 1.12 / 1.07 / 1.02 / 1.00× 首次全 ≥ vLLM。pitfalls +3。q3.sh 验收结果见下一条。
 
 ## 日志
 

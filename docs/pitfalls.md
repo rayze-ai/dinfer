@@ -297,3 +297,17 @@
 - 解法：`bench_compare.sh` 每次运行取新 seed（`SEED=${SEED:-$(date +%s)}`，写进 summary），prompt 不与历史重复；两边都只能命中聊天模板前缀。bench12 起为新口径，与 bench≤11 的 TTFT / c8-long 不可直接比。
 - 如何避免：对比压测时先看两边 `/metrics` 的 prefix cache 命中数；凡"常驻 vs 重启"的对比都要排除缓存状态差异。
 
+## 2026-10-16 WMMA 版 prefill（v3）比 FA2 结构（v4）慢 4.8×：S/P/O 走 smem + 每 tile 3 次 block sync 是主因
+
+- 现象：v3（WMMA 16×16×16，S/P/O 在 smem，76 KB → 1 block/SM）4090 T=1514 0.66 ms/层；v4（裸 `mma.sync.m16n8k16` + `ldmatrix`，每 warp 16 行 S/P/O 全寄存器，64-key tile，34 KB smem → 2 block/SM）0.14 ms。单发 1024 prompt TTFT 25 → 15 ms（vLLM 21）。
+- 根因：WMMA 的 fragment 布局不公开，行级 softmax 只能把 S 存 smem 再按行读、P 再写回、O 乘 alpha 也要走 smem；每 tile 3 次 `__syncthreads`；smem 大到每 SM 只驻 1 block，装载和计算不能重叠。
+- 解法：用 PTX `mma.sync.m16n8k16.row.col.f32.bf16.bf16.f32` 的公开 C 片布局（lane g=lane/4 持第 g 行和第 g+8 行、列 2(lane%4)+{0,1}）：4 lane 一行 shuffle 做 max/sum；P 的 C 片按 FA2 技巧直接 pack 成下一步的 A 片；V 用 `ldmatrix.trans` 取 B 片。K/V smem 行跨 136 个 bf16（272 B）避免 ldmatrix 8 行同 bank。
+- 如何避免：attention 类 kernel 直接按 FA2 结构写，不要先用 WMMA 过渡；可用 `cold_shape` 的 q1024 单形状先对比，再接服务。
+- 相关：`crates/kernels/cuda/gqa.cu::gqa_fa_v4_kernel<PAGED>`，round 37–39。
+
+## 2026-10-16 "kernel 微基准快了、端到端不动"两次：decode splits、混批分流
+
+- 现象：decode_v2 splits 256 → 1024 微基准 +20%，bench13 持平；混批分流（decode 行走 decode_v2）微基准 C 形状 -12%，bench14 持平。
+- 根因：两处优化的绝对量（每层几十 µs × 28 层 ≈ 1–3 ms）相对 c8-long 当时 85–100 ms 的 TTFT 不可见；真正的大头是 prefill attention（每 1024-token prefill step ~11 ms attention）。
+- 如何避免：改 kernel 前先用 nsys 总时间 × 占比估算"最多能省多少 ms / 请求"，低于端到端指标的 5% 不做；优先攻占比最大的 kernel。
+

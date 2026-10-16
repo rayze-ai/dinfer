@@ -1,0 +1,1 @@
+h prefill/paged attention v4：FA2 结构（裸 mma.sync m16n8k16 + ldmatrix，S/P/O 全寄存器，64-key tile，34 KB smem 2 block/SM）；3090 T=1514 1.34→0.28 ms/层

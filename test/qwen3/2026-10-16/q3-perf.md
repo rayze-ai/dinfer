@@ -44,3 +44,4 @@ dinfer 已快一个量级，主因是没有编译期；但 dinfer 的"权重 0.5
 | 31–32 | f | decode splits 1024：微基准 +20%，bench13 端到端持平（c1 1.12× / c8 1.06× / c32 1.00× / c8-long 0.91×）；c8-long 差距在 TTFT（paged_tc + 排队），非 decode | 20:4x |
 | 33 | g | paged_tc 同工作量与 prefill_tc 持平（0.70 vs 0.67 ms）；慢在混批 decode 行占 block（+30%）+ 调度分两步 | 21:0x |
 | 34–35 | g | 混批分流（decode 行走 decode_v2）：微基准 C -12%，bench14 c8-long 0.90× 不变 → 差距在调度而非 kernel | 21:4x |
+| 36–39 | h | prefill v4（FA2 结构 mma.sync）：4090 T=1514 0.66→0.14 ms；bench15 **c1 1.12× / c8 1.07× / c32 1.02× / c8-long 1.00×，四组首次全 ≥ vLLM** | 22:3x |
