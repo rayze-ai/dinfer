@@ -1,0 +1,1 @@
+bench 基线：参考 kernel（prefill 逐行三遍扫、decode 单 warp），debug 构建

@@ -1,0 +1,1 @@
+c CUDA graph：固定地址缓冲 + decode 按桶捕获（forward+采样图内）

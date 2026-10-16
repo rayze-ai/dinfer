@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # dinfer vs vLLM 对比压测（在 4090 上跑）。同一 bench 二进制、同 prompt 集（seed）、同 max_tokens、ignore_eos、思考关。
-#   bash scripts/verify/bench_compare.sh [OUT_DIR]      # 默认 test/qwen3/$(date +%F)/bench
+#   bash scripts/verify/bench_compare.sh [OUT_DIR] ["本轮改动一句话"]   # 默认 test/qwen3/$(date +%F)/bench；改动写进 OUT/CHANGE
 # 矩阵：并发 1 / 8 / 32 × (prompt 128, out 128)，再加一组长 prompt (1024, out 128) 并发 8。每组先 bench --self-check 一次。
 # 环境变量：DINFER_URL / VLLM_URL（默认 :8012 / :8013）、REQS（每组请求数，默认 = 4×并发，最少 16）。
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 OUT="${1:-test/qwen3/$(date +%F)/bench}"; mkdir -p "$OUT"
+# 本轮改了什么（进趋势表）：第二个参数或 $CHANGE
+[ -n "${2:-${CHANGE:-}}" ] && printf '%s\n' "${2:-$CHANGE}" > "$OUT/CHANGE"
 BENCH=./target/release/bench
 [ -x "$BENCH" ] || cargo build --release -p dinfer-bench
 A="${DINFER_URL:-http://127.0.0.1:8012}"
@@ -45,3 +47,5 @@ run_one 8 128 128
 run_one 32 128 128
 run_one 8 1024 128
 echo; cat "$MD"
+# 趋势：所有轮次汇总成表 + 曲线（用户要求：每轮改动在每个指标上的提升）
+python3 -I scripts/dev/bench_trend.py --root "$(dirname "$(dirname "$OUT")")" | tail -n +2 | tail -3

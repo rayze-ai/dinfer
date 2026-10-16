@@ -27,6 +27,10 @@ c1 out 221 vs 447 tok/s、c32 2707 vs 8065、c8 p1024 56 vs 1916；TTFT 84 vs 18
 
 4090（`scripts/dev/remote4090.sh`），dinfer `--release` 常驻 :8012（tmux `dinfer`），vLLM Docker :8013。改 kernel 后：`push` → 远端 `cargo build --release -p dinfer --features qwen3` → 重启 tmux `dinfer` → `bench_compare.sh`。
 
+## 每轮记录要求（用户 2026-10-16）
+
+每轮 bench 都用 `bench_compare.sh <OUT> "改动一句话"` 跑，`CHANGE` 进目录；`scripts/dev/bench_trend.py` 汇总所有轮次到 `test/qwen3/perf-trend.{md,json,svg}`：每组 tok/s（×vLLM）、TTFT、TPOT 的绝对值与相对上一轮的百分比，加三张曲线。改动 → 指标提升一一对应，不许只留最新一轮。
+
 ## 观察方法
 
 | 看什么 | 怎么看 |
