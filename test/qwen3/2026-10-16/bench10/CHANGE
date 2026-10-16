@@ -1,0 +1,1 @@
+e 续 3：prefill/paged attention v2（32 行/block 按 kv head 分块、两 q head 共享 K/V tile、uint4 装载）；3090 T=1514 9.6→2.6 ms/层

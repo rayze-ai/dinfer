@@ -95,3 +95,15 @@ bench9,2026-10-16,e 续：decode splits==1 时跳过 merge kernel（B≥32 少 2
 bench9,2026-10-16,e 续：decode splits==1 时跳过 merge kernel（B≥32 少 28 launch/step）；面板加点击轮次详情,c8-long,out_tok_per_s,795.427,2106.015,0.378,0.1,higher
 bench9,2026-10-16,e 续：decode splits==1 时跳过 merge kernel（B≥32 少 28 launch/step）；面板加点击轮次详情,c8-long,ttft_p50_ms,592.931,35.503,16.701,-21.4,lower
 bench9,2026-10-16,e 续：decode splits==1 时跳过 merge kernel（B≥32 少 28 launch/step）；面板加点击轮次详情,c8-long,tpot_p50_ms,5.411,3.539,1.529,13.4,lower
+bench10,2026-10-16,e 续 3：prefill/paged attention v2（32 行/block 按 kv head 分块、两 q head 共享 K/V tile、uint4 装载）；3090 T=1514 9.6→2.6 ms/层,c1,out_tok_per_s,500.389,454.637,1.101,0.7,higher
+bench10,2026-10-16,e 续 3：prefill/paged attention v2（32 行/block 按 kv head 分块、两 q head 共享 K/V tile、uint4 装载）；3090 T=1514 9.6→2.6 ms/层,c1,ttft_p50_ms,4.806,12.093,0.397,21.2,lower
+bench10,2026-10-16,e 续 3：prefill/paged attention v2（32 行/block 按 kv head 分块、两 q head 共享 K/V tile、uint4 装载）；3090 T=1514 9.6→2.6 ms/层,c1,tpot_p50_ms,1.974,2.119,0.931,0.2,lower
+bench10,2026-10-16,e 续 3：prefill/paged attention v2（32 行/block 按 kv head 分块、两 q head 共享 K/V tile、uint4 装载）；3090 T=1514 9.6→2.6 ms/层,c8,out_tok_per_s,3097.087,2946.983,1.051,2.8,higher
+bench10,2026-10-16,e 续 3：prefill/paged attention v2（32 行/block 按 kv head 分块、两 q head 共享 K/V tile、uint4 装载）；3090 T=1514 9.6→2.6 ms/层,c8,ttft_p50_ms,9.411,25.619,0.367,22.4,lower
+bench10,2026-10-16,e 续 3：prefill/paged attention v2（32 行/block 按 kv head 分块、两 q head 共享 K/V tile、uint4 装载）；3090 T=1514 9.6→2.6 ms/层,c8,tpot_p50_ms,2.508,2.532,0.990,0.1,lower
+bench10,2026-10-16,e 续 3：prefill/paged attention v2（32 行/block 按 kv head 分块、两 q head 共享 K/V tile、uint4 装载）；3090 T=1514 9.6→2.6 ms/层,c32,out_tok_per_s,8483.499,8546.865,0.993,10.3,higher
+bench10,2026-10-16,e 续 3：prefill/paged attention v2（32 行/block 按 kv head 分块、两 q head 共享 K/V tile、uint4 装载）；3090 T=1514 9.6→2.6 ms/层,c32,ttft_p50_ms,41.360,63.313,0.653,53.3,lower
+bench10,2026-10-16,e 续 3：prefill/paged attention v2（32 行/block 按 kv head 分块、两 q head 共享 K/V tile、uint4 装载）；3090 T=1514 9.6→2.6 ms/层,c32,tpot_p50_ms,3.528,3.256,1.083,3.9,lower
+bench10,2026-10-16,e 续 3：prefill/paged attention v2（32 行/block 按 kv head 分块、两 q head 共享 K/V tile、uint4 装载）；3090 T=1514 9.6→2.6 ms/层,c8-long,out_tok_per_s,1543.044,2098.590,0.735,94.0,higher
+bench10,2026-10-16,e 续 3：prefill/paged attention v2（32 行/block 按 kv head 分块、两 q head 共享 K/V tile、uint4 装载）；3090 T=1514 9.6→2.6 ms/层,c8-long,ttft_p50_ms,126.980,35.569,3.570,78.6,lower
+bench10,2026-10-16,e 续 3：prefill/paged attention v2（32 行/block 按 kv head 分块、两 q head 共享 K/V tile、uint4 装载）；3090 T=1514 9.6→2.6 ms/层,c8-long,tpot_p50_ms,4.182,3.546,1.179,22.7,lower
