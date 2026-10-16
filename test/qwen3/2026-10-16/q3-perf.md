@@ -31,3 +31,4 @@ dinfer 已快一个量级，主因是没有编译期；但 dinfer 的"权重 0.5
 | 18 | e | qkv_post 融合 + 跨度读 + 残差并入，kernel/层 17→8，编译中 | 20:2x |
 | 19 | e | 3090 ref 20/20 + parity 8/8 通过融合路径 | 20:3x |
 | 20 | e | bench7：c1 1.04× vLLM（首次反超）；见 perf-trend.md | 20:5x |
+| 21 | e | decode v2 kernel：3090 B=32 attention 1.24→0.33 ms；4090 bench8 进行中 | 21:0x |
