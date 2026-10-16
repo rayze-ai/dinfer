@@ -217,3 +217,11 @@
 - 解法：`kernels/build.rs` 加 `cargo:rustc-link-lib=dylib=stdc++`（12.4 下多链无害，已验证本机仍过）。
 - 如何避免：nvcc 产物当 C++ 对象看待，始终链 `stdc++`；换 CUDA 大版本后先在最小 bin 上做一次完整链接再跑测试。
 - 相关：`crates/kernels/build.rs`、`test/2026-10-16/remote4090-migration.md`
+
+## 2026-10-16 4090 上测试二进制 `error while loading shared libraries: libcudart.so.13`
+
+- 现象：`cargo build` 通过，`cargo test -- --ignored` 一跑就 exit 127，`ref_tests-*: error while loading shared libraries: libcudart.so.13: cannot open shared object file`。
+- 根因：CUDA 13.0 装在 `/data/yaochen/infer/cuda-13.0`（目录约束），不在 `/usr/local/cuda`，也没进 `ld.so.conf`；链接期靠 `rustc-link-search` 找到了 .so，运行期动态加载找不到。
+- 解法：`env.sh` 加 `export LD_LIBRARY_PATH=$CUDA_HOME/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}`；`remote4090_baseline.sh` 开头 `source env.sh`。
+- 如何避免：toolkit 不在系统路径时，PATH（nvcc）、CUDA_HOME（build.rs）、LD_LIBRARY_PATH（运行）三者一起设；`ldd target/debug/dinfer | grep "not found"` 作为 bootstrap 的最后一步检查。
+- 相关：`scripts/dev/bootstrap_remote4090.sh`、`scripts/dev/README-remote4090.md`
