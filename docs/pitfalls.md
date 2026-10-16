@@ -265,3 +265,11 @@
 - 解法：把宿主的 CUDA 13 toolkit 目录（含 `bin/nsys`）只读挂进容器（`-v $R/cuda-13.0:/opt/cuda13:ro`），`--entrypoint /opt/cuda13/bin/nsys profile … python3 -m vllm.entrypoints.openai.api_server …`，加 `--cap-add=SYS_ADMIN`；结束用 `docker kill -s INT` 让 nsys 正常落盘。实测能抓到 kernel。
 - 如何避免：对容器内进程做 profiling，profiler 必须在容器内启动被测进程；宿主 nsys 版本要与容器内 CUDA 驱动兼容（这里都是 CUDA 13）。
 - 相关：`scripts/verify/stage_profile.sh`
+
+## 2026-10-16 decode attention v2 kernel 在 ref 测试里 GPU 100% 卡死不返回
+
+- 现象：`gqa_decode_d128_splitk_ref` 调新 v2 kernel 后进程不结束，`nvidia-smi` 显示 100% 利用率，要 `kill -9`。
+- 根因：`const float sc = valid ? sum8(part) : -INFINITY;` —— `sum8` 内是 `__shfl_xor_sync(0xffffffff, …)`（全 warp mask），而 `valid` 在 lane 间不一致（尾部 key 不满 4 个时部分 lane 为 false），无效 lane 不进入 shuffle，有效 lane 永远等不到它们 → 死锁。
+- 解法：shuffle 无条件执行（所有 lane 都调 `sum8`），再按 `valid` 选结果；无效 lane 的输入已清零不影响和。
+- 如何避免：任何 `*_sync(0xffffffff, …)` 都不能放在 lane 间可能分叉的分支里；分叉只能在 shuffle 之后做选择。写 warp 级归约时先想"这个条件在 32 个 lane 上是否一致"。
+- 相关：`crates/kernels/cuda/gqa.cu::gqa_decode_v2_kernel`
