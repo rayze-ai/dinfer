@@ -150,4 +150,58 @@ fn cold_vs_warm_by_shape() {
         let w = time(&mut f);
         println!("{n:<6} {c:>8.2}/{w:<8.2}");
     }
+    // Q3 第 33 轮：paged_tc 为什么比 prefill_tc 慢 1.8×？同 token 量三维度对比：
+    //   A) 1 请求 q=1024 hist=0（与 prefill 完全同工作量，只差 block_table 间接寻址）
+    //   B) 1 请求 q=1024 hist=1024（历史 tile 多一倍）
+    //   C) 混批：1 请求 q=1024 hist=0 + 7 个 decode 行（q=1 hist=1100）——bench c8-long 的真实形状
+    {
+        let (bs, hk) = (16usize, 8usize);
+        let shapes: &[(&str, Vec<(usize, usize)>)] = &[
+            ("A q1024 h0", vec![(1024, 0)]),
+            ("B q1024 h1024", vec![(1024, 1024)]),
+            ("C q1024 + 7×decode h1100", {
+                let mut v = vec![(1024usize, 0usize)];
+                v.extend(std::iter::repeat((1, 1100)).take(7));
+                v
+            }),
+            ("D 7×decode h1100 only", vec![(1, 1100); 7]),
+        ];
+        println!("paged_tc vs prefill_tc (warm ms)   [prefill_tc q=1024 单请求作参照]");
+        for (name, reqs) in shapes {
+            let b = reqs.len();
+            let total_q: usize = reqs.iter().map(|r| r.0).sum();
+            let max_q = reqs.iter().map(|r| r.0).max().unwrap();
+            let blocks_per = reqs.iter().map(|r| (r.0 + r.1).div_ceil(bs)).max().unwrap();
+            let cache = s.alloc_zeros::<bf16>(b * blocks_per * bs * hk * 2 * d).unwrap();
+            let bt: Vec<i32> = (0..b * blocks_per).map(|x| x as i32).collect();
+            let dbt = s.htod_copy(bt).unwrap();
+            let seq: Vec<i32> = reqs.iter().map(|r| (r.0 + r.1) as i32).collect();
+            let dseq = s.htod_copy(seq).unwrap();
+            let mut cu = vec![0i32];
+            for r in reqs.iter() {
+                cu.push(cu.last().unwrap() + r.0 as i32);
+            }
+            let dcu = s.htod_copy(cu).unwrap();
+            let qd = s.alloc_zeros::<bf16>(total_q * h * d).unwrap();
+            let mut od = s.alloc_zeros::<bf16>(total_q * h * d).unwrap();
+            let mut f = || {
+                dinfer_kernels::gqa_paged_bf16(
+                    &s, &qd, &cache, &dbt, &dseq, &dcu, &mut od, b, max_q, h, hk, d, bs, blocks_per,
+                    1.0 / (d as f32).sqrt(), 0,
+                )
+                .unwrap()
+            };
+            time(&mut f);
+            let w = time(&mut f);
+            println!("  {name:<28} {w:>8.3}");
+        }
+        let cu = s.htod_copy(vec![0i32, 1024]).unwrap();
+        let mut f = || {
+            dinfer_kernels::gqa_prefill_bf16(&s, &q, &k, &v, &mut o, &cu, 1, 1024, h, hk, d, 1.0 / (d as f32).sqrt(), 0, 0)
+                .unwrap()
+        };
+        time(&mut f);
+        let w = time(&mut f);
+        println!("  {:<28} {w:>8.3}", "prefill_tc q1024");
+    }
 }

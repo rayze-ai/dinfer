@@ -42,3 +42,4 @@ dinfer 已快一个量级，主因是没有编译期；但 dinfer 的"权重 0.5
 | 29 | 口径 | bench12（每轮换 seed）：c1 1.12× / c8 1.06× / c32 1.04× / c8-long 0.91×（TTFT 85 vs 68、TPOT 4.0 vs 3.7）；三组反超，只剩 c8-long | 19:1x |
 | 30 | 分解 | nsys c8-long：paged_tc 794 µs/次（prefill_tc 431）占 11.7%，decode_v2 36.5 µs/层占 25.7%；见 stage/c8long_kern.csv | 19:5x |
 | 31–32 | f | decode splits 1024：微基准 +20%，bench13 端到端持平（c1 1.12× / c8 1.06× / c32 1.00× / c8-long 0.91×）；c8-long 差距在 TTFT（paged_tc + 排队），非 decode | 20:4x |
+| 33 | g | paged_tc 同工作量与 prefill_tc 持平（0.70 vs 0.67 ms）；慢在混批 decode 行占 block（+30%）+ 调度分两步 | 21:0x |
