@@ -11,7 +11,7 @@
   网络（GET 实测）：index.crates.io / static.crates.io / github.com / sh.rustup.rs / developer.download.nvidia.com 均可达（HEAD crates.io 的 403 是误报）；**huggingface.co 不通** → 模型权重从本机 rsync（`/data/ref/models/qwen3-0.6b` 1.5 GB）。
 
 - **目录约束（用户，2026-10-16）**：远程一切只放 `/data/yaochen/infer`：`dinfer/` 仓库、`models/` 权重、`rustup/` + `cargo/` 工具链、
-  `cuda-12.4/` toolkit、`bootstrap/` 日志、`env.sh`（每个 shell 先 `source /data/yaochen/infer/env.sh`）。不要往 `/root`、`/data/code`、`/usr/local` 放东西。
+  `cuda-13.0/` toolkit、`bootstrap/` 日志、`env.sh`（每个 shell 先 `source /data/yaochen/infer/env.sh`）。不要往 `/root`、`/data/code`、`/usr/local` 放东西。
 - 代理（用户给，2026-10-16）：远端 `http://127.0.0.1:1081`（HTTP 代理，不支持 socks5）。实测经代理 huggingface 可达（307）、github 0.5 MB/s、nvidia 0.8 MB/s。`source env.sh` 后 `proxy_on` / `proxy_off` 切换；cargo / rustup 走 rsproxy 直连更快，不要套代理。
 - 镜像：`static.rust-lang.org` 实测 ~100 KB/s，`rsproxy.cn` 14 MB/s → rustup 与 crates registry 都走 rsproxy（`cargo/config.toml` 已写）。
 
@@ -19,8 +19,8 @@
 
 ```bash
 scripts/dev/remote4090.sh up && scripts/dev/remote4090.sh push          # 仓库 → /data/yaochen/infer/dinfer
-scripts/dev/remote4090.sh run 'bash /data/yaochen/infer/dinfer/scripts/dev/bootstrap_remote4090.sh'   # tmux boot：rustup / cmake / CUDA 12.4
+scripts/dev/remote4090.sh run 'bash /data/yaochen/infer/dinfer/scripts/dev/bootstrap_remote4090.sh'   # tmux boot：rustup / cmake / CUDA 13.0.2
 rsync 本机 /data/ref/models/qwen3-0.6b → 远端 /data/yaochen/infer/models/；test/{qwen3_golden,kernel_refs} → 远端 dinfer/test/
 scripts/dev/remote4090.sh run 'source /data/yaochen/infer/env.sh && cd /data/yaochen/infer/dinfer && cargo build --workspace --features qwen3 2>&1 | tail -3'
 ```
-CUDA 12.4 与驱动 580 兼容；`CUDA_ARCHS=89` 是 kernels crate 的编译架构变量（见 build.rs）。
+**CUDA toolkit 用 13.0.2**（用户要求；驱动 580.178 支持 13.0，cudarc 0.18.2 有 `cuda-13000`）。注意 `nvidia-smi` 的 `CUDA Version: 13.0` 只是驱动能力，宿主机本身没装 toolkit（containerd 镜像层里的 cuda-13.0 / 12.9 是容器内的）。`.run` 安装器会自建 `/usr/local/cuda` 软链，装完要 `rm -f`（目录约束）。首次误装的 12.4 在 `cuda-12.4/`，13.0 验证通过后删。`CUDA_ARCHS=89` 是 kernels crate 的编译架构变量（见 build.rs）。
