@@ -42,6 +42,18 @@ pub struct ChatCompletionRequest {
     pub ignore_eos: Option<bool>,
     #[serde(default)]
     pub min_tokens: Option<u32>,
+    /// OpenAI `stop`：字符串或字符串数组（≤ 16 个）。
+    #[serde(default)]
+    pub stop: Option<serde_json::Value>,
+    /// vLLM 扩展：命中的 stop 字符串是否留在输出里（默认 false）。
+    #[serde(default)]
+    pub include_stop_str_in_output: Option<bool>,
+    /// OpenAI `logprobs`（bool）+ `top_logprobs`（0..=20）。
+    #[serde(default)]
+    pub logprobs: Option<bool>,
+    #[serde(default)]
+    pub top_logprobs: Option<u32>,
+    /// 1..=8：n 个独立采样（引擎侧 n 个请求，seed 依次 +1）。
     #[serde(default)]
     pub n: Option<u32>,
     /// `low` / `high` / `max`（GLM 模板只认 low/high，其余按 max）。
@@ -100,6 +112,29 @@ pub struct Choice {
     pub index: u32,
     pub message: ChatMessage,
     pub finish_reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logprobs: Option<ChatLogprobs>,
+}
+
+/// OpenAI `choices[].logprobs`：`{"content": [ {token, logprob, bytes, top_logprobs: [...]}, ... ]}`。
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct ChatLogprobs {
+    pub content: Vec<ChatLogprobContent>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatLogprobContent {
+    pub token: String,
+    pub logprob: f32,
+    pub bytes: Option<Vec<u8>>,
+    pub top_logprobs: Vec<ChatLogprob>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatLogprob {
+    pub token: String,
+    pub logprob: f32,
+    pub bytes: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -153,6 +188,8 @@ pub struct ChunkChoice {
     pub index: u32,
     pub delta: Delta,
     pub finish_reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logprobs: Option<ChatLogprobs>,
 }
 
 #[derive(Debug, Clone, Serialize)]

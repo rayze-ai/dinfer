@@ -2,8 +2,12 @@
 //! 字段形状对齐 vLLM：首个 chunk `delta.role = "assistant"`；思考段走 `reasoning_content`，回复走 `content`；
 //! tool_call 在 `</tool_call>` 闭合时一次性下发 `{index, id, type, function:{name, arguments}}`；
 //! 结束 chunk `finish_reason`；`stream_options.include_usage` 时再发一个只有 `usage` 的 chunk；最后 `data: [DONE]`。
+//!
+//! Q2-b：`n` 个 choice = 引擎侧 n 个独立请求（seed 依次 +1），一个 handler 并发驱动、按 `index` 交错下发；
+//! `stop` 字符串在 detokenize 之后、格式解析之前用 `StopChecker` 判定（只扫增量），命中即 `abort` 释放 KV；
+//! `logprobs` 由 executor 一次算好（`EngineEvent::Logprobs`），这里只做 token→文本映射；客户端断开 → 全部 abort。
 
-use crate::backend::{finish_reason_str, ChatBackend, OutDelta, RenderRequest};
+use crate::backend::{finish_reason_str, ChatBackend, OutDelta, OutputStream, RenderRequest};
 use crate::openai::*;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -11,8 +15,10 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use dinfer_core::engine::EngineEvent;
-use dinfer_core::request::FinishReason;
+use dinfer_core::request::RequestId;
 use dinfer_core::sample::SamplingParams;
+use dinfer_core::sampler::TokenLogprobs;
+use dinfer_text::StopChecker;
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -64,21 +70,197 @@ fn sampling_from(
     if let Some(x) = req.min_tokens {
         sp.min_tokens = x;
     }
+    if let Some(x) = req.include_stop_str_in_output {
+        sp.include_stop_str_in_output = x;
+    }
+    sp.stop = match &req.stop {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(serde_json::Value::String(s)) => vec![s.clone()],
+        Some(serde_json::Value::Array(a)) => {
+            let mut v = Vec::with_capacity(a.len());
+            for x in a {
+                match x.as_str() {
+                    Some(s) => v.push(s.to_string()),
+                    None => return Err("stop must be a string or an array of strings".into()),
+                }
+            }
+            v
+        }
+        Some(_) => return Err("stop must be a string or an array of strings".into()),
+    };
+    if req.logprobs == Some(true) {
+        sp.logprobs = Some(req.top_logprobs.unwrap_or(0));
+    } else if req.top_logprobs.is_some() {
+        return Err("top_logprobs requires logprobs=true".into());
+    }
     let room = max_model_len.saturating_sub(prompt_len);
     if room == 0 {
         return Err(format!("prompt has {prompt_len} tokens, max_model_len is {max_model_len}"));
     }
     sp.max_tokens = req.max_completion_tokens.or(req.max_tokens).unwrap_or(room).min(room);
-    if matches!(req.n, Some(n) if n != 1) {
-        return Err("n != 1 is not supported".into());
-    }
     sp.validate()?;
     Ok(sp)
+}
+
+const MAX_N: u32 = 8;
+
+/// 一个 choice 的流式状态。
+struct ChoiceState {
+    rid: RequestId,
+    out: Box<dyn OutputStream>,
+    stop: StopChecker,
+    /// 本 choice 已收到但尚未随 delta 下发的 logprobs（流式）/ 累计（非流式由 Aggregate 收）。
+    pending_lp: Vec<ChatLogprobContent>,
+    completion: u32,
+    finish: Option<&'static str>,
+    /// 产出 token id（`return_token_ids` 用；只在非流式收集）。
+    ids: Vec<u32>,
+}
+
+/// 多个 choice 的事件汇到一个 channel：(choice index, event)。
+type Merged = tokio::sync::mpsc::UnboundedReceiver<(u32, EngineEvent)>;
+
+/// handler / SSE 任务结束（含客户端断开）时取消所有未完成的引擎请求。
+struct AbortGuard {
+    be: Backend,
+    live: Vec<Option<RequestId>>,
+}
+impl AbortGuard {
+    fn done(&mut self, i: u32) {
+        self.live[i as usize] = None;
+    }
+}
+impl Drop for AbortGuard {
+    fn drop(&mut self) {
+        for rid in self.live.iter().flatten() {
+            self.be.abort(*rid);
+        }
+    }
+}
+
+fn submit_choices(
+    be: &Backend,
+    prompt_ids: &[u32],
+    sp: &SamplingParams,
+    n: u32,
+) -> (Merged, Vec<ChoiceState>, AbortGuard) {
+    let (mtx, merged) = tokio::sync::mpsc::unbounded_channel::<(u32, EngineEvent)>();
+    let mut states = Vec::with_capacity(n as usize);
+    let mut live = Vec::with_capacity(n as usize);
+    for i in 0..n {
+        let mut spi = sp.clone();
+        if let Some(seed) = sp.seed {
+            spi.seed = Some(seed.wrapping_add(i as u64)); // n 个 choice 不同种子；无 seed 时引擎各自随机
+        }
+        let (rid, mut rx) = be.submit(prompt_ids.to_vec(), spi);
+        let mtx = mtx.clone();
+        tokio::spawn(async move {
+            while let Some(ev) = rx.recv().await {
+                if mtx.send((i, ev)).is_err() {
+                    break;
+                }
+            }
+        });
+        states.push(ChoiceState {
+            rid,
+            out: be.new_output_stream(),
+            stop: StopChecker::new(&sp.stop, sp.include_stop_str_in_output),
+            pending_lp: Vec::new(),
+            completion: 0,
+            finish: None,
+            ids: Vec::new(),
+        });
+        live.push(Some(rid));
+    }
+    (merged, states, AbortGuard { be: be.clone(), live })
+}
+
+fn lp_entry(out: &dyn OutputStream, lp: &TokenLogprobs) -> ChatLogprobContent {
+    let text = |id: u32| out.token_text(id).unwrap_or_else(|| format!("token_id:{id}"));
+    let t = text(lp.token_id);
+    ChatLogprobContent {
+        bytes: Some(t.as_bytes().to_vec()),
+        token: t,
+        logprob: lp.logprob,
+        top_logprobs: lp
+            .top
+            .iter()
+            .map(|(id, l)| {
+                let t = text(*id);
+                ChatLogprob { bytes: Some(t.as_bytes().to_vec()), token: t, logprob: *l }
+            })
+            .collect(),
+    }
+}
+
+/// 驱动所有 choice 到结束。`emit(i, delta, logprobs)` 下发增量（返回 false = 客户端已断开，停止）；
+/// `finish(i, reason)` 在 choice 结束时调一次。返回 Err(msg) = 引擎错误。
+async fn consume(
+    merged: &mut Merged,
+    states: &mut [ChoiceState],
+    guard: &mut AbortGuard,
+    mut emit: impl FnMut(u32, &OutDelta, Vec<ChatLogprobContent>) -> bool,
+    mut finish: impl FnMut(u32, &'static str) -> bool,
+) -> Result<(), String> {
+    let mut remaining = states.len();
+    while remaining > 0 {
+        let Some((i, ev)) = merged.recv().await else { break };
+        let st = &mut states[i as usize];
+        if st.finish.is_some() {
+            continue; // stop 命中 abort 后引擎回的 Finished(Abort)
+        }
+        let mut end: Option<&'static str> = None;
+        match ev {
+            EngineEvent::Tokens(t) => {
+                st.completion += t.len() as u32;
+                st.ids.extend_from_slice(&t);
+                let text = st.out.push_text(&t).map_err(|e| format!("detokenize: {e:#}"))?;
+                let (text, hit) = st.stop.push(&text);
+                let d = st.out.parse(&text);
+                if !d.is_empty() && !emit(i, &d, std::mem::take(&mut st.pending_lp)) {
+                    return Ok(());
+                }
+                if hit.is_some() {
+                    guard.be.abort(st.rid);
+                    end = Some("stop");
+                }
+            }
+            EngineEvent::Logprobs(lps) => {
+                st.pending_lp.extend(lps.iter().map(|lp| lp_entry(st.out.as_ref(), lp)));
+            }
+            EngineEvent::Finished(f) => end = Some(finish_reason_str(f)),
+            EngineEvent::Error(m) => return Err(m),
+        }
+        if let Some(reason) = end {
+            let tail = st.stop.finish();
+            let mut d = st.out.parse(&tail);
+            if let Ok(fd) = st.out.finish() {
+                d.reasoning.push_str(&fd.reasoning);
+                d.content.push_str(&fd.content);
+                d.tool_calls.extend(fd.tool_calls);
+            }
+            let lps = std::mem::take(&mut st.pending_lp);
+            if (!d.is_empty() || !lps.is_empty()) && !emit(i, &d, lps) {
+                return Ok(());
+            }
+            st.finish = Some(reason);
+            guard.done(i);
+            remaining -= 1;
+            if !finish(i, reason) {
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
 }
 
 pub async fn chat_completions(State(be): State<Backend>, Json(req): Json<ChatCompletionRequest>) -> Response {
     if req.messages.is_empty() {
         return err(StatusCode::BAD_REQUEST, "messages must not be empty");
+    }
+    let n = req.n.unwrap_or(1);
+    if !(1..=MAX_N).contains(&n) {
+        return err(StatusCode::BAD_REQUEST, format!("n must be in 1..={MAX_N}, got {n}"));
     }
     let rr = RenderRequest {
         messages: &req.messages,
@@ -99,60 +281,103 @@ pub async fn chat_completions(State(be): State<Backend>, Json(req): Json<ChatCom
     let model = req.model.clone().unwrap_or_else(|| be.model_name().to_string());
     let id = new_id("chatcmpl");
     let created = now_secs();
-    let rx = be.submit(prompt.ids.clone(), sp);
-    let out = be.new_output_stream();
     let return_ids = req.return_token_ids.unwrap_or(false);
+    let want_lp = sp.logprobs.is_some();
+    let (mut merged, mut states, mut guard) = submit_choices(&be, &prompt.ids, &sp, n);
 
     if req.stream {
         let include_usage = req.stream_options.as_ref().is_some_and(|o| o.include_usage);
-        let stream = stream_chunks(rx, out, id, created, model, prompt_len, include_usage);
+        let stream = async_stream_lite(move |tx| async move {
+            let send = |c: &ChatCompletionChunk| {
+                tx.send(Event::default().data(serde_json::to_string(c).unwrap())).is_ok()
+            };
+            for i in 0..n {
+                // 首 chunk：role
+                let d = Delta { role: Some("assistant"), content: Some(String::new()), ..Default::default() };
+                if !send(&chunk(&id, created, &model, i, d, None, None)) {
+                    return;
+                }
+            }
+            let r = consume(
+                &mut merged,
+                &mut states,
+                &mut guard,
+                |i, d, lps| {
+                    let lp = want_lp.then_some(ChatLogprobs { content: lps });
+                    send(&chunk(&id, created, &model, i, delta_from(d), None, lp))
+                },
+                |i, reason| send(&chunk(&id, created, &model, i, Delta::default(), Some(reason), None)),
+            )
+            .await;
+            if let Err(m) = r {
+                let _ = tx.send(Event::default().event("error").data(m));
+                return;
+            }
+            if include_usage {
+                let completion: u32 = states.iter().map(|s| s.completion).sum();
+                let mut c = chunk(&id, created, &model, 0, Delta::default(), None, None);
+                c.choices.clear();
+                c.usage = Some(Usage {
+                    prompt_tokens: prompt_len,
+                    completion_tokens: completion,
+                    total_tokens: prompt_len + completion,
+                });
+                let _ = send(&c);
+            }
+            let _ = tx.send(Event::default().data("[DONE]"));
+            // guard 在这里 drop：未完成的 choice（客户端断开）全部 abort
+        });
         return Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
     }
 
     // 非流式：聚合
-    let mut agg = Aggregate::default();
-    let mut rx = rx;
-    let mut out = out;
-    let mut finish: Option<FinishReason> = None;
-    let mut all_ids = Vec::new();
-    while let Some(ev) = rx.recv().await {
-        match ev {
-            EngineEvent::Tokens(t) => {
-                all_ids.extend_from_slice(&t);
-                match out.push(&t) {
-                    Ok(d) => agg.push(&d),
-                    Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("detokenize: {e:#}")),
-                }
-            }
-            EngineEvent::Logprobs(_) => {} // 服务端 logprobs 渲染见 Q2-b
-            EngineEvent::Finished(f) => {
-                finish = Some(f);
-                break;
-            }
-            EngineEvent::Error(m) => return err(StatusCode::INTERNAL_SERVER_ERROR, m),
-        }
+    let mut aggs: Vec<Aggregate> = (0..n).map(|_| Aggregate::default()).collect();
+    let r = consume(
+        &mut merged,
+        &mut states,
+        &mut guard,
+        |i, d, lps| {
+            let a = &mut aggs[i as usize];
+            a.push(d);
+            a.logprobs.extend(lps);
+            true
+        },
+        |_, _| true,
+    )
+    .await;
+    if let Err(m) = r {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, m);
     }
-    if let Ok(d) = out.finish() {
-        agg.push(&d);
-    }
-    let completion = all_ids.len() as u32;
+    let completion: u32 = states.iter().map(|s| s.completion).sum();
+    let choices = aggs
+        .into_iter()
+        .zip(states.iter())
+        .enumerate()
+        .map(|(i, (a, st))| {
+            let lp = want_lp.then(|| ChatLogprobs { content: a.logprobs.clone() });
+            Choice {
+                index: i as u32,
+                message: a.into_message(),
+                finish_reason: Some(st.finish.unwrap_or("stop")),
+                logprobs: lp,
+            }
+        })
+        .collect();
+    // 单 choice 时沿用 Q1 的 token_ids 字段；多 choice 没有单一序列
+    let token_ids = (return_ids && n == 1).then(|| std::mem::take(&mut states[0].ids));
     let resp = ChatCompletionResponse {
         id,
         object: "chat.completion",
         created,
         model,
-        choices: vec![Choice {
-            index: 0,
-            message: agg.into_message(),
-            finish_reason: Some(finish.map(finish_reason_str).unwrap_or("stop")),
-        }],
+        choices,
         usage: Usage {
             prompt_tokens: prompt_len,
             completion_tokens: completion,
             total_tokens: prompt_len + completion,
         },
         prompt_token_ids: return_ids.then_some(prompt.ids),
-        token_ids: return_ids.then_some(all_ids),
+        token_ids,
     };
     Json(resp).into_response()
 }
@@ -162,6 +387,7 @@ struct Aggregate {
     reasoning: String,
     content: String,
     tool_calls: Vec<ToolCall>,
+    logprobs: Vec<ChatLogprobContent>,
 }
 
 impl Aggregate {
@@ -198,15 +424,17 @@ fn chunk(
     id: &str,
     created: u64,
     model: &str,
+    index: u32,
     delta: Delta,
     finish: Option<&'static str>,
+    logprobs: Option<ChatLogprobs>,
 ) -> ChatCompletionChunk {
     ChatCompletionChunk {
         id: id.to_string(),
         object: "chat.completion.chunk",
         created,
         model: model.to_string(),
-        choices: vec![ChunkChoice { index: 0, delta, finish_reason: finish }],
+        choices: vec![ChunkChoice { index, delta, finish_reason: finish, logprobs }],
         usage: None,
     }
 }
@@ -232,80 +460,6 @@ fn delta_from(d: &OutDelta) -> Delta {
             )
         },
     }
-}
-
-fn stream_chunks(
-    mut rx: tokio::sync::mpsc::UnboundedReceiver<EngineEvent>,
-    mut out: Box<dyn crate::backend::OutputStream>,
-    id: String,
-    created: u64,
-    model: String,
-    prompt_len: u32,
-    include_usage: bool,
-) -> impl futures_core::Stream<Item = Result<Event, Infallible>> + Send {
-    async_stream_lite(move |tx| async move {
-        let send = |tx: &tokio::sync::mpsc::UnboundedSender<Event>, c: &ChatCompletionChunk| {
-            let _ = tx.send(Event::default().data(serde_json::to_string(c).unwrap()));
-        };
-        // 首 chunk：role
-        let first = chunk(
-            &id,
-            created,
-            &model,
-            Delta { role: Some("assistant"), content: Some(String::new()), ..Default::default() },
-            None,
-        );
-        send(&tx, &first);
-        let mut completion = 0u32;
-        let mut finish: Option<FinishReason> = None;
-        while let Some(ev) = rx.recv().await {
-            match ev {
-                EngineEvent::Tokens(t) => {
-                    completion += t.len() as u32;
-                    if let Ok(d) = out.push(&t) {
-                        if !d.is_empty() {
-                            send(&tx, &chunk(&id, created, &model, delta_from(&d), None));
-                        }
-                    }
-                }
-                EngineEvent::Logprobs(_) => {}
-                EngineEvent::Finished(f) => {
-                    finish = Some(f);
-                    break;
-                }
-                EngineEvent::Error(m) => {
-                    let _ = tx.send(Event::default().event("error").data(m));
-                    break;
-                }
-            }
-        }
-        if let Ok(d) = out.finish() {
-            if !d.is_empty() {
-                send(&tx, &chunk(&id, created, &model, delta_from(&d), None));
-            }
-        }
-        send(
-            &tx,
-            &chunk(
-                &id,
-                created,
-                &model,
-                Delta::default(),
-                Some(finish.map(finish_reason_str).unwrap_or("stop")),
-            ),
-        );
-        if include_usage {
-            let mut c = chunk(&id, created, &model, Delta::default(), None);
-            c.choices.clear();
-            c.usage = Some(Usage {
-                prompt_tokens: prompt_len,
-                completion_tokens: completion,
-                total_tokens: prompt_len + completion,
-            });
-            send(&tx, &c);
-        }
-        let _ = tx.send(Event::default().data("[DONE]"));
-    })
 }
 
 /// 用一个 unbounded channel + spawn 把 async 生产者变成 Stream（避免引入 async-stream 宏 crate）。

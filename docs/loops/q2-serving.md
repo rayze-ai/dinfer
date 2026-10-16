@@ -1,6 +1,6 @@
 # loop 规格：Q2 可生产的 mix 服务（Qwen3-0.6B）
 
-- 状态：进行中（a 采样 完成 2026-10-16，3 轮；b–f 未开始）
+- 状态：进行中（a 采样、b 请求功能 完成 2026-10-16，共 5 轮；c–f 未开始）
 - 创建：2026-10-16
 - 验证脚本：`scripts/verify/q2.sh`
 - 迭代记录：`test/2026-10-16/q2-serving.md`
@@ -72,6 +72,14 @@ cargo run -p dinfer --features qwen3 -- serve --model /data/ref/models/qwen3-0.6
 6. 自动 num_blocks：模型加载后 `cuMemGetInfo` 的 free 已扣掉权重与 scratch；KV 分配后还要留 cuBLAS workspace / 临时张量余量（vLLM 用 profile run；我们先按 `free × util − 1 GiB`）。
 7. 客户端断开：axum 的 SSE stream drop → 要在 `stream_chunks` 的 future drop 时调 `EngineHandle::abort`（用 guard）。
 
+## Q2-b 实现口径（用户 2026-10-16："请求规则和范式一致就行，不必照搬 vLLM，目的之一是提高性能"）
+
+- stop 字符串：`dinfer_text::StopChecker` 只扫 `max_len-1` 尾巴 + 本步新增（vLLM 每步对全文 `find`）；扣住的尾巴最多 `max_len-1` 字节；命中立即 `abort` 释放 KV（vLLM 在 scheduler 侧下一步才停）。
+- 判定位置：detokenize 之后、格式解析（think/tool_call）之前的**原始文本流**，与 vLLM 一致；`OutputStream` 为此拆成 `push_text / parse / finish`。
+- logprobs：executor 一次 kernel 算 chosen + top-k（原始 logits log_softmax），server 只做 id→文本（`tokenizer.decode(&[id])`）；不做 vLLM 的 `prompt_logprobs`。
+- n>1：引擎层 n 个独立请求（seed 依次 +1；无 seed 各自随机），一个 handler 并发消费、按 `index` 交错；prefix cache 开启后（d 块）n 个请求的 prompt KV 自然共享，不另做 fork。
+- 客户端断开：`AbortGuard` drop 时对未完成 choice 全部 abort（流式任务结束 / handler 返回都会触发）。
+
 ## 记录
 
 | 轮 | 现象 | 根因 | 处理 |
@@ -79,3 +87,5 @@ cargo run -p dinfer --features qwen3 -- serve --model /data/ref/models/qwen3-0.6
 | 1 | a 采样 kernel | 新增 `penalties_f32 / temperature_f32 / min_p_mask_f32 / logprobs_f32`，`kernels.sh` 16/16 PASS（fp32 atol 1e-5） | 停止条件 1 达成；接线 executor 待做 |
 | 2 | a executor 接线 | `core::sampler::SampleBatch` 随 BatchPlan 下发；qwen3 executor penalties→temperature→min_p→top-k/p→Philox sample→logprobs(原始 logits)；`EngineEvent::Logprobs`；server 接 min_p/penalties/stop_token_ids/ignore_eos/min_tokens + `validate()`→400。`sampling_parity` 5 测试：seed 确定性 + batch 无关 / 混批 greedy 32 步=HF / penalties 4 组 16 步逐步=host 公式 / logprobs=host log_softmax 全过；分布测试首轮 FAIL | 分布测试选在首 token：`<think>` logprob −2e-4，mask 后仅 1 候选（测试设计问题，非 kernel） | 改为 greedy 预跑 24 步选候选最多的一步做采样位置 |
 | 3 | a 验收 | 分布测试改选 greedy 24 步中 mask 后候选最多的一步（step 23，候选 3），N=100 一次 prefill：全部样本落在 host 候选集，L1 0.097；`sampling_parity` 5/5、`real_parity` 3/3、`serve_e2e_qwen3` 1/1、clippy 全目标干净 | — | Q2-a 完成（停止条件 1/2/3/7 的 kernel+执行侧达成；5 的 server 渲染与 4/6/8–11 属 b–f） |
+| 4 | b 请求功能 | `dinfer_text::StopChecker`（增量匹配，只扫 max_len-1 尾巴 + 新增；6 单测过）；`OutputStream` 拆 `push_text / parse / finish / token_text`；`ChatBackend::submit` 回 id + `abort`；chat.rs：n 个 choice = n 个引擎请求（seed+i），`consume` 统一驱动，stop 命中即 abort，logprobs 渲染 OpenAI 形状，`AbortGuard` 断开即 abort；glm53/qwen3 两条编译过、clippy 干净 | — | e2e `e2e_qwen3_request_features` 待 4090 跑 |
+| 5 | b 验收 | 4090 e2e `e2e_qwen3_request_features` PASS（42 s 两测试）：非法参数 4 组 400；stop="10" 截到 "…9, "，finish=stop，29 token 即停（无 stop 64）；include_stop_str_in_output 以 "10" 结尾；流式 stop 与非流式一致；logprobs 每 token 一条（token/logprob/bytes/top_logprobs 3，greedy chosen=top-1）流式条数相同；n=3 greedy 三者相同、temperature 1.0 seed 42 三句不同、流式按 index 拼出与非流式逐字相同 | — | 停止条件 4/5/6 达成；b 完成 |

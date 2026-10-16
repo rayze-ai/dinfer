@@ -8,6 +8,7 @@ description = "dinfer HTTP 服务：OpenAI 兼容接口、SSE、健康检查、�
 
 [dependencies]
 dinfer-core.workspace = true
+dinfer-text.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -645,6 +645,7 @@ dependencies = [
  "anyhow",
  "axum",
  "dinfer-core",
+ "dinfer-text",
  "futures-core",
  "serde",
  "serde_json",

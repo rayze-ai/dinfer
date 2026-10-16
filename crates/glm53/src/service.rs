@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use dinfer_core::config::{CacheConfig, SchedulerConfig};
 use dinfer_core::engine::{self, EngineEvent, EngineHandle, Submission};
 use dinfer_core::kv::{GroupInfo, KvCacheSpec};
+use dinfer_core::request::RequestId;
 use dinfer_core::runner::Runner;
 use dinfer_core::sample::SamplingParams;
 use dinfer_core::sched::Scheduler;
@@ -204,22 +205,27 @@ impl GlmOutputStream {
 }
 
 impl OutputStream for GlmOutputStream {
-    fn push(&mut self, ids: &[u32]) -> Result<OutDelta> {
-        let mut d = OutDelta::default();
+    fn push_text(&mut self, ids: &[u32]) -> Result<String> {
+        let mut out = String::new();
         for &id in ids {
             if self.tok.is_eos(id) {
                 continue; // eos 不进文本
             }
             self.ids.push(id);
-            let s = self.decode_new()?;
-            if !s.is_empty() {
-                let pd = self.parser.feed(&s);
-                d.reasoning.push_str(&pd.reasoning);
-                d.content.push_str(&pd.content);
-                d.tool_calls.extend(pd.tool_calls.into_iter().map(|t| (t.index, t.name, t.arguments)));
-            }
+            out.push_str(&self.decode_new()?);
         }
-        Ok(d)
+        Ok(out)
+    }
+    fn parse(&mut self, text: &str) -> OutDelta {
+        if text.is_empty() {
+            return OutDelta::default();
+        }
+        let pd = self.parser.feed(text);
+        OutDelta {
+            reasoning: pd.reasoning,
+            content: pd.content,
+            tool_calls: pd.tool_calls.into_iter().map(|t| (t.index, t.name, t.arguments)).collect(),
+        }
     }
     fn finish(&mut self) -> Result<OutDelta> {
         let pd = self.parser.finish();
@@ -228,6 +234,9 @@ impl OutputStream for GlmOutputStream {
             content: pd.content,
             tool_calls: pd.tool_calls.into_iter().map(|t| (t.index, t.name, t.arguments)).collect(),
         })
+    }
+    fn token_text(&self, id: u32) -> Option<String> {
+        self.tok.token_text(id)
     }
 }
 
@@ -257,10 +266,13 @@ impl ChatBackend for Glm53Service {
         &self,
         prompt_ids: Vec<u32>,
         sampling: SamplingParams,
-    ) -> tokio::sync::mpsc::UnboundedReceiver<EngineEvent> {
+    ) -> (RequestId, tokio::sync::mpsc::UnboundedReceiver<EngineEvent>) {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        self.handle.submit(Submission { prompt_ids, sampling, tx });
-        rx
+        let id = self.handle.submit(Submission { prompt_ids, sampling, tx });
+        (id, rx)
+    }
+    fn abort(&self, id: RequestId) {
+        self.handle.abort(id);
     }
     fn new_output_stream(&self) -> Box<dyn OutputStream> {
         Box::new(GlmOutputStream {

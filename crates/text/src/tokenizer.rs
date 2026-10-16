@@ -64,6 +64,10 @@ impl HfTokenizer {
     pub fn id_to_token(&self, id: u32) -> Option<String> {
         self.inner.id_to_token(id)
     }
+    /// 单 token 的文本（`decode(&[id])`，与 vLLM logprobs 的 `token` / `bytes` 同口径：byte-level 半字符显示为 U+FFFD）。
+    pub fn token_text(&self, id: u32) -> Option<String> {
+        self.inner.decode(&[id], false).ok()
+    }
 
     /// 等价 HF `encode(text, add_special_tokens=False)`。
     pub fn encode(&self, text: &str) -> Result<Vec<u32>> {
