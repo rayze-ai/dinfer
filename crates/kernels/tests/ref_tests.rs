@@ -500,6 +500,53 @@ fn gqa_decode_d128_splitk_ref() {
     assert_close("gqa_decode_d128", &s.dtoh_sync_copy(&out).unwrap(), &want, 1e-2, 1e-2);
 }
 
+/// D=128 decode，B=32（B×Hkv=256 → splits=1，v2 直接写出路径），长度 1..64 随机。
+#[test]
+#[ignore]
+fn gqa_decode_d128_b32_direct_ref() {
+    let (_d, s) = dev();
+    let (ks, kall) = load_f32("gqa128d32_k");
+    let (_, vall) = load_f32("gqa128d32_v");
+    let slots = load_i64("gqa128d32_slots");
+    let (qs, q) = load_f32("gqa128d32_q");
+    let (bts, bt) = load_i32("gqa128d32_bt");
+    let (_, seq_lens) = load_i32("gqa128d32_seq_lens");
+    let (_, want) = load_f32("gqa128d32_out");
+    let (_, meta) = load_i32("gqa128d32_meta");
+    let (num_blocks, bs) = (meta[0] as usize, meta[1] as usize);
+    let (hk, d) = (ks[1], ks[2]);
+    let (b, h) = (qs[0], qs[1]);
+    let mut cache = s.alloc_zeros::<bf16>(num_blocks * bs * hk * 2 * d).unwrap();
+    let dk = s.htod_copy(to_bf16(&kall)).unwrap();
+    let dv = s.htod_copy(to_bf16(&vall)).unwrap();
+    let dsl = s.htod_copy(slots.clone()).unwrap();
+    dinfer_kernels::gqa_cache_write_bf16(&s, &dk, &dv, &mut cache, &dsl, slots.len(), hk, d, bs).unwrap();
+    let dq = s.htod_copy(to_bf16(&q)).unwrap();
+    let dbt = s.htod_copy(bt).unwrap();
+    let dseq = s.htod_copy(seq_lens.clone()).unwrap();
+    let mut out = s.alloc_zeros::<bf16>(b * h * d).unwrap();
+    let mut scratch = s.alloc_zeros::<f32>(dinfer_kernels::gqa_decode_scratch_len(b, h, d)).unwrap();
+    dinfer_kernels::gqa_decode_bf16(
+        &s,
+        &dq,
+        &cache,
+        &dbt,
+        &dseq,
+        &mut out,
+        &mut scratch,
+        b,
+        h,
+        hk,
+        d,
+        bs,
+        bts[1],
+        (d as f32).powf(-0.5),
+        0,
+    )
+    .unwrap();
+    assert_close("gqa_decode_d128_b32", &s.dtoh_sync_copy(&out).unwrap(), &want, 1e-2, 1e-2);
+}
+
 /// Qwen3 QKV 后处理融合 kernel：q/k per-head RMSNorm + neox RoPE 原地 + K/V 写 cache，与 torch 逐步参考比。
 #[test]
 #[ignore]

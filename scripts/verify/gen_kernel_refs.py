@@ -321,6 +321,33 @@ save("qkvpost_cos_sin", cs_table); save("qkvpost_slots", qslots); save("qkvpost_
 save("qkvpost_cache", qcache.view(2 * PBS, FHK * 2 * FD)); save("qkvpost_meta", torch.tensor([2, PBS], dtype=torch.int32))
 print("qkv_post refs:", tuple(qkv_out.shape))
 
+# decode D=128，B=32 请求（B×Hkv=256 → splits=1，走 v2 的直接写出路径）：每请求长度 1..64 随机，block 16
+torch.manual_seed(7)
+B32 = 32
+dlens32 = [int(x) for x in torch.randint(1, 65, (B32,))]
+dk32 = bf(torch.randn(sum(dlens32), FHK, FD)); dv32 = bf(torch.randn(sum(dlens32), FHK, FD)); dq32 = bf(torch.randn(B32, FH, FD))
+bp32 = [(n_ + PBS - 1) // PBS for n_ in dlens32]
+bt32 = torch.full((B32, max(bp32)), -1, dtype=torch.int32)
+nb = 0
+for r in range(B32):
+    for j in range(bp32[r]):
+        bt32[r, j] = nb; nb += 1
+slots32 = []
+cur = 0
+for r in range(B32):
+    for pos in range(dlens32[r]):
+        slots32.append(bt32[r, pos // PBS].item() * PBS + pos % PBS); cur += 1
+outs32 = []
+cur = 0
+for r in range(B32):
+    kk = dk32[cur:cur + dlens32[r]].float().repeat_interleave(FH // FHK, dim=1); vv = dv32[cur:cur + dlens32[r]].float().repeat_interleave(FH // FHK, dim=1)
+    s_ = torch.einsum("hd,khd->hk", dq32[r].float(), kk) * FD ** -0.5
+    outs32.append(torch.einsum("hk,khd->hd", torch.softmax(s_, -1), vv)[None]); cur += dlens32[r]
+save("gqa128d32_k", dk32); save("gqa128d32_v", dv32); save("gqa128d32_slots", torch.tensor(slots32, dtype=torch.int64)); save("gqa128d32_q", dq32)
+save("gqa128d32_bt", bt32); save("gqa128d32_seq_lens", torch.tensor(dlens32, dtype=torch.int32)); save("gqa128d32_out", torch.cat(outs32))
+save("gqa128d32_meta", torch.tensor([nb + 1, PBS], dtype=torch.int32))
+print("gqa128 decode B=32 refs:", tuple(torch.cat(outs32).shape))
+
 # ---- Q2 采样：penalties / temperature / min_p / logprobs（vLLM 语义）----
 torch.manual_seed(77)
 SB, SV = 4, 512

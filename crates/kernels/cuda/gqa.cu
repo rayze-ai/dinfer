@@ -508,8 +508,8 @@ __device__ __forceinline__ float sum8(float v) {
 
 __global__ void __launch_bounds__(D2_WARPS * 32) gqa_decode_v2_kernel(
     const bf16* __restrict__ q, const bf16* __restrict__ cache, const int32_t* __restrict__ block_table,
-    const int32_t* __restrict__ seq_lens, float* __restrict__ scratch, int H, int Hkv, int block_size, int max_blocks,
-    float scale, int q_stride, int splits) {
+    const int32_t* __restrict__ seq_lens, float* __restrict__ scratch, bf16* __restrict__ out_direct, int H, int Hkv,
+    int block_size, int max_blocks, float scale, int q_stride, int splits) {
   const int b = blockIdx.x, hk = blockIdx.y, split = blockIdx.z;
   const int group = H / Hkv;  // ≤ D2_MAXG
   const int n = seq_lens[b];
@@ -657,9 +657,17 @@ __global__ void __launch_bounds__(D2_WARPS * 32) gqa_decode_v2_kernel(
 #pragma unroll
         for (int c = 0; c < PF_DPL; ++c) o[c] += s_acc[g][w][lane + 32 * c] * a;
       }
-      if (lane == 0) { part[0] = M; part[1] = L; }
+      if (out_direct) {
+        // splits == 1：直接归一化写输出，省掉 merge kernel
+        const float inv = 1.f / L;
+        bf16* op = out_direct + ((int64_t)b * H + h) * PF_D;
 #pragma unroll
-      for (int c = 0; c < PF_DPL; ++c) part[2 + lane + 32 * c] = o[c];
+        for (int c = 0; c < PF_DPL; ++c) op[lane + 32 * c] = to_bf16(o[c] * inv);
+      } else {
+        if (lane == 0) { part[0] = M; part[1] = L; }
+#pragma unroll
+        for (int c = 0; c < PF_DPL; ++c) part[2 + lane + 32 * c] = o[c];
+      }
     }
   }
 }
@@ -774,11 +782,14 @@ extern "C" int gqa_decode_bf16(const void* q, const void* cache, const int32_t* 
     int splits = (int)((256 + num_reqs * kv_heads - 1) / (num_reqs * kv_heads));
     splits = splits < 1 ? 1 : (splits > DC_SPLITS ? DC_SPLITS : splits);
     dim3 grid1((unsigned)num_reqs, (unsigned)kv_heads, (unsigned)splits);
+    bf16* direct = splits == 1 ? static_cast<bf16*>(out) : nullptr;
     gqa_decode_v2_kernel<<<grid1, D2_WARPS * 32, 0, stream>>>(
-        static_cast<const bf16*>(q), static_cast<const bf16*>(cache), block_table, seq_lens, scratch, (int)heads,
+        static_cast<const bf16*>(q), static_cast<const bf16*>(cache), block_table, seq_lens, scratch, direct, (int)heads,
         (int)kv_heads, (int)block_size, (int)max_blocks, scale, (int)q_stride, splits);
-    dim3 grid2((unsigned)num_reqs, (unsigned)heads);
-    gqa_decode_merge_v2_kernel<<<grid2, PF_D, 0, stream>>>(scratch, static_cast<bf16*>(out), (int)heads, splits);
+    if (splits > 1) {
+      dim3 grid2((unsigned)num_reqs, (unsigned)heads);
+      gqa_decode_merge_v2_kernel<<<grid2, PF_D, 0, stream>>>(scratch, static_cast<bf16*>(out), (int)heads, splits);
+    }
     return last_err();
   }
   dim3 grid1((unsigned)num_reqs, (unsigned)kv_heads, (unsigned)DC_SPLITS);
