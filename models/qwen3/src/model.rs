@@ -48,6 +48,8 @@ pub struct AttnMeta<'a> {
     pub block_table: &'a Tensor<i32>,
     pub num_reqs: usize,
     pub max_blocks: usize,
+    /// 本步单请求最大 query 数（prefill flash kernel 的 grid 上界）。
+    pub max_seqlen: usize,
 }
 
 pub struct Forward<'a> {
@@ -206,6 +208,7 @@ impl Attention {
                 &mut self.attn.data,
                 &meta.cu_seqlens.data,
                 meta.num_reqs,
+                meta.max_seqlen,
                 h,
                 hk,
                 d,

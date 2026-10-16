@@ -26,7 +26,7 @@ fn cold_vs_warm_by_shape() {
     };
     println!("M      gemm_qkv cold/warm   gemm_gateup cold/warm   gemm_down cold/warm   (ms)");
     for &m in &[389usize, 639, 889, 1139, 1514, 1900] {
-        let r = |i: usize| {
+        let mut r = |i: usize| {
             let t1 = time(&mut || g.forward_bf16(&a, &w1, None, &mut out, m, qkv_w, hidden).unwrap());
             let t2 = time(&mut || g.forward_bf16(&a, &w2, None, &mut out, m, 2 * inter, hidden).unwrap());
             let t3 = time(&mut || g.forward_bf16(&a, &w3, None, &mut out, m, hidden, inter).unwrap());
@@ -54,6 +54,7 @@ fn cold_vs_warm_by_shape() {
                 &mut o,
                 &cu,
                 1,
+                n,
                 h,
                 hk,
                 d,

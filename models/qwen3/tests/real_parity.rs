@@ -109,6 +109,7 @@ fn real_prefill_logits_match_hf() {
             seq_lens: &seq,
             block_table: &bt,
             num_reqs: 1,
+            max_seqlen: prompt.len(),
             max_blocks: NUM_BLOCKS,
         },
         logits_rows: &rows,

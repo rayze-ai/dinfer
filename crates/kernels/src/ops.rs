@@ -1348,12 +1348,14 @@ pub fn gqa_prefill_bf16(
     out: &mut CudaSlice<bf16>,
     cu_seqlens: &CudaSlice<i32>,
     num_reqs: usize,
+    max_seqlen: usize,
     heads: usize,
     kv_heads: usize,
     head_dim: usize,
     scale: f32,
 ) -> Result<()> {
     ensure!(cu_seqlens.len() > num_reqs, "gqa_prefill: cu_seqlens");
+    ensure!(max_seqlen > 0, "gqa_prefill: max_seqlen");
     ensure!(heads % kv_heads == 0, "gqa_prefill: heads % kv_heads");
     let pq = stream.ptr(q) as *const c_void;
     let pk = stream.ptr(k) as *const c_void;
@@ -1370,6 +1372,7 @@ pub fn gqa_prefill_bf16(
                 po,
                 pcu,
                 num_reqs as i64,
+                max_seqlen as i64,
                 heads as i64,
                 kv_heads as i64,
                 head_dim as i64,

@@ -198,6 +198,7 @@ impl ModelExecutor for Qwen3Executor {
                 block_table: &bt,
                 num_reqs: n,
                 max_blocks: plan.max_blocks,
+                max_seqlen: plan.num_tokens.iter().copied().max().unwrap_or(0) as usize,
             };
             let f =
                 Forward { input_ids: &ids, positions: &pos, slot_mapping: &slots, meta, logits_rows: &rows };

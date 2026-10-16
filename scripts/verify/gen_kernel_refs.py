@@ -201,6 +201,22 @@ for r, (a, b) in enumerate(zip(gcu[:-1].tolist(), gcu[1:].tolist())):
 save("gqa_paged_out", torch.cat(outs2))
 print("gqa refs: prefill", tuple(torch.cat(outs).shape), "paged", tuple(torch.cat(outs2).shape))
 
+# ---- GQA prefill，Qwen3 真实头形状 D=128 / H=16 / Hkv=8（走 flash tile kernel）：3 个请求 70 / 33 / 5（跨多片、尾片不满、
+# 块内有不活跃 warp）。fp32 SDPA 参考，输入 bf16。
+FH, FHK, FD = 16, 8, 128
+flens = [70, 33, 5]
+fq = bf(torch.randn(sum(flens), FH, FD)); fk = bf(torch.randn(sum(flens), FHK, FD)); fv = bf(torch.randn(sum(flens), FHK, FD))
+fcu = torch.tensor([0] + list(torch.tensor(flens).cumsum(0).tolist()), dtype=torch.int32)
+def sdpa_causal_g(q, k, v, H, HK, D):
+    kk = k.float().repeat_interleave(H // HK, dim=1); vv = v.float().repeat_interleave(H // HK, dim=1)
+    s_ = torch.einsum("qhd,khd->hqk", q.float(), kk) * D ** -0.5
+    T = q.shape[0]
+    s_ = s_.masked_fill((torch.arange(T)[None, :] > torch.arange(T)[:, None])[None], float("-inf"))
+    return torch.einsum("hqk,khd->qhd", torch.softmax(s_, -1), vv)
+fouts = [sdpa_causal_g(fq[a:b], fk[a:b], fv[a:b], FH, FHK, FD) for a, b in zip(fcu[:-1].tolist(), fcu[1:].tolist())]
+save("gqa128_q", fq); save("gqa128_k", fk); save("gqa128_v", fv); save("gqa128_cu", fcu); save("gqa128_prefill_out", torch.cat(fouts))
+print("gqa128 refs: prefill", tuple(torch.cat(fouts).shape))
+
 # ---- Q2 采样：penalties / temperature / min_p / logprobs（vLLM 语义）----
 torch.manual_seed(77)
 SB, SV = 4, 512

@@ -284,6 +284,7 @@ fn gqa_prefill_ref() {
         &mut out,
         &dcu,
         cu.len() - 1,
+        cu.windows(2).map(|w| (w[1] - w[0]) as usize).max().unwrap(),
         h,
         hk,
         d,
@@ -291,6 +292,43 @@ fn gqa_prefill_ref() {
     )
     .unwrap();
     assert_close("gqa_prefill", &s.dtoh_sync_copy(&out).unwrap(), &want, 1e-2, 1e-2);
+}
+
+/// D=128（Qwen3 真实形状）走 flash tile kernel：3 个请求 70/33/5，覆盖多片、尾片不满、块内不活跃 warp。
+#[test]
+#[ignore]
+fn gqa_prefill_d128_flash_ref() {
+    let (_d, s) = dev();
+    let (qs, q) = load_f32("gqa128_q");
+    let (ks, k) = load_f32("gqa128_k");
+    let (_, v) = load_f32("gqa128_v");
+    let (_, cu) = load_i32("gqa128_cu");
+    let (_, want) = load_f32("gqa128_prefill_out");
+    let (t, h, d) = (qs[0], qs[1], qs[2]);
+    let hk = ks[1];
+    assert_eq!(d, 128);
+    let dq = s.htod_copy(to_bf16(&q)).unwrap();
+    let dk = s.htod_copy(to_bf16(&k)).unwrap();
+    let dv = s.htod_copy(to_bf16(&v)).unwrap();
+    let dcu = s.htod_copy(cu.clone()).unwrap();
+    let mut out = s.alloc_zeros::<bf16>(t * h * d).unwrap();
+    let max_len = cu.windows(2).map(|w| (w[1] - w[0]) as usize).max().unwrap();
+    dinfer_kernels::gqa_prefill_bf16(
+        &s,
+        &dq,
+        &dk,
+        &dv,
+        &mut out,
+        &dcu,
+        cu.len() - 1,
+        max_len,
+        h,
+        hk,
+        d,
+        (d as f32).powf(-0.5),
+    )
+    .unwrap();
+    assert_close("gqa_prefill_d128", &s.dtoh_sync_copy(&out).unwrap(), &want, 1e-2, 1e-2);
 }
 
 #[test]

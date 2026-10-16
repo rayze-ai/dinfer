@@ -63,6 +63,7 @@ fn qwen3_layer_bisect() {
             seq_lens: &seq,
             block_table: &bt,
             num_reqs: 1,
+            max_seqlen: prompt.len(),
             max_blocks: 64,
         },
         logits_rows: &rows,

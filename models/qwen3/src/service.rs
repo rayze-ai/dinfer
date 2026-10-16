@@ -65,6 +65,7 @@ pub struct Qwen3Service {
 
 impl Qwen3Service {
     pub fn start(opt: ServeOptions, served_name: String) -> Result<Self> {
+        let t_start = std::time::Instant::now();
         let model_dir = Path::new(&opt.model_dir);
         let tok_dir = opt.tokenizer_dir.as_deref().map(Path::new).unwrap_or(model_dir);
         let tok = Arc::new(
@@ -80,9 +81,11 @@ impl Qwen3Service {
             cfg.vocab_size,
             tok.vocab_size()
         );
+        let t_tok = t_start.elapsed();
         let dev = Device::new(opt.device)?;
         let s = dev.default_stream();
         let gemm = Gemm::new(&s)?;
+        let t_cuda = t_start.elapsed();
         let src = WeightSource::open_dir(model_dir)?;
         let max_tokens = opt.max_num_batched_tokens.max(opt.max_num_seqs) as usize;
         let model = Qwen3Model::load_with_budget(
@@ -97,6 +100,8 @@ impl Qwen3Service {
             512 << 20, // cuBLAS workspace / 临时张量余量
         )?;
         let num_blocks = model.num_blocks() as u32;
+        s.synchronize()?;
+        let t_model = t_start.elapsed();
         let exec = Qwen3Executor::new(s.clone(), gemm, model)?;
         let runner = Runner::new(exec, opt.block_size as usize);
         let params = engine::scheduler_params(
@@ -134,6 +139,15 @@ impl Qwen3Service {
             kv_tokens = num_blocks * opt.block_size,
             prefix_caching = opt.enable_prefix_caching,
             "qwen3 engine started"
+        );
+        // 加载各阶段耗时（用户要求记录，看是否值得优化）：tokenizer+模板 / CUDA 初始化 / 权重+scratch+KV / executor+engine
+        tracing::info!(
+            tokenizer_ms = t_tok.as_millis() as u64,
+            cuda_init_ms = (t_cuda - t_tok).as_millis() as u64,
+            model_load_ms = (t_model - t_cuda).as_millis() as u64,
+            engine_ms = (t_start.elapsed() - t_model).as_millis() as u64,
+            total_ms = t_start.elapsed().as_millis() as u64,
+            "startup timing"
         );
         Ok(Self {
             tok,

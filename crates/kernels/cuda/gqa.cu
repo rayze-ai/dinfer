@@ -7,6 +7,7 @@
 // 三个入口：
 //   gqa_cache_write_bf16   k, v: [T, Hkv, D] → cache（slot_mapping）
 //   gqa_prefill_bf16       无历史的 causal prefill，直接读 k/v [T, Hkv, D]（不走 cache；cache 由 cache_write 另写）
+//                          D=128 走 flash 风格 tile kernel（Q3-a，2026-10-16），其他 D 走旧参考实现
 //   gqa_paged_bf16         从 paged cache 读：decode（每请求 1 行）与带历史 chunked prefill（任意 query 长）统一路径
 #include "common.cuh"
 #include "dinfer_kernels.h"
@@ -37,9 +38,108 @@ __global__ void gqa_cache_write_kernel(const bf16* __restrict__ k, const bf16* _
 }
 
 // 一个 (req, q_head) block；q/k/v: [T, H|Hkv, D]；out: [T, H, D]。
-__global__ void gqa_prefill_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k, const bf16* __restrict__ v,
-                                   bf16* __restrict__ out, const int32_t* __restrict__ cu_seqlens, int H, int Hkv, int D,
-                                   float scale) {
+// prefill（无历史，causal）：flash 风格。grid = (ceil(max_seqlen / PF_WARPS), H, num_reqs)，block = PF_WARPS 个 warp，
+// 每 warp 负责一个 query 行；K/V 按 PF_TILE 个 key 一片进 shared memory（K 转置存成 [D][TILE] 让 lane 读连续地址），
+// 每 lane 算一个 key 的分数，warp 内 online softmax（m / l 随 tile 更新），PV 累加时 lane 持有 D/32 个维度、
+// p_j 由 __shfl 广播。只扫到对角 tile（causal），fp32 累加、bf16 I/O。
+// 复杂度 O(T²·D/2) 但并行度 = T/PF_WARPS × H × reqs 个 block（旧版 H × reqs 个 block 串行遍历 T 行）。
+constexpr int PF_WARPS = 4;
+constexpr int PF_TILE = 32;             // 每片 key 数 == warp 宽，一 lane 一 key
+constexpr int PF_D = 128;               // Qwen3 head_dim；其他 D 走通用慢路径（见 host 分派）
+constexpr int PF_DPL = PF_D / 32;       // 每 lane 持有的维度数
+
+__global__ void __launch_bounds__(PF_WARPS * 32) gqa_prefill_flash_kernel(
+    const bf16* __restrict__ q, const bf16* __restrict__ k, const bf16* __restrict__ v, bf16* __restrict__ out,
+    const int32_t* __restrict__ cu_seqlens, int H, int Hkv, float scale) {
+  const int req = blockIdx.z, h = blockIdx.y;
+  const int hk = h / (H / Hkv);
+  const int start = cu_seqlens[req], end = cu_seqlens[req + 1];
+  const int T = end - start;
+  const int q_base = blockIdx.x * PF_WARPS;
+  if (q_base >= T) return;
+  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+  const int qi = q_base + warp;             // 本 warp 的 query 行（相对请求）
+  const bool active = qi < T;
+
+  __shared__ float sKT[PF_D][PF_TILE];      // 转置：sKT[d][j]
+  __shared__ float sV[PF_TILE][PF_D];
+  __shared__ float sQ[PF_WARPS][PF_D];
+
+  // q → shared（每 warp 一行）
+  if (active) {
+    const bf16* qp = q + ((int64_t)(start + qi) * H + h) * PF_D;
+    for (int d = lane; d < PF_D; d += 32) sQ[warp][d] = to_f32(qp[d]) * scale;
+  }
+  float m = -INFINITY, l = 0.f;
+  float acc[PF_DPL];
+#pragma unroll
+  for (int c = 0; c < PF_DPL; ++c) acc[c] = 0.f;
+
+  // 本 block 要扫到的最后一个 key = block 内最大 query 位置
+  const int block_last = min(q_base + PF_WARPS - 1, T - 1);
+  const int n_tiles = block_last / PF_TILE + 1;
+  for (int tile = 0; tile < n_tiles; ++tile) {
+    const int k0 = tile * PF_TILE;
+    const int kn = min(PF_TILE, T - k0);   // 本片有效 key 数（请求末尾）
+    __syncthreads();                       // 上一片用完
+    // 装载 K（转置）与 V：PF_TILE × PF_D 个元素，PF_WARPS*32 个线程
+    for (int e = threadIdx.x; e < PF_TILE * PF_D; e += PF_WARPS * 32) {
+      const int j = e / PF_D, d = e % PF_D;
+      float kv_k = 0.f, kv_v = 0.f;
+      if (j < kn) {
+        const int64_t off = ((int64_t)(start + k0 + j) * Hkv + hk) * PF_D + d;
+        kv_k = to_f32(k[off]);
+        kv_v = to_f32(v[off]);
+      }
+      sKT[d][j] = kv_k;
+      sV[j][d] = kv_v;
+    }
+    __syncthreads();
+    if (!active) continue;
+    // 本 warp 在此片的有效 key 数（causal：key ≤ qi）
+    const int valid = min(kn, qi - k0 + 1);
+    if (valid <= 0) continue;
+    // 1) 分数：lane j 对 key j
+    float sc = -INFINITY;
+    if (lane < valid) {
+      float acc_s = 0.f;
+#pragma unroll 8
+      for (int d = 0; d < PF_D; ++d) acc_s += sQ[warp][d] * sKT[d][lane];
+      sc = acc_s;
+    }
+    // 2) online softmax
+    float tmax = sc;
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) tmax = fmaxf(tmax, __shfl_xor_sync(0xffffffffu, tmax, o));
+    const float m_new = fmaxf(m, tmax);
+    const float alpha = __expf(m - m_new);   // m=-inf 时为 0
+    const float p = (lane < valid) ? __expf(sc - m_new) : 0.f;
+    float psum = p;
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) psum += __shfl_xor_sync(0xffffffffu, psum, o);
+    l = l * alpha + psum;
+#pragma unroll
+    for (int c = 0; c < PF_DPL; ++c) acc[c] *= alpha;
+    m = m_new;
+    // 3) PV：lane 持有维度 d = lane + 32c；p_j 广播
+    for (int j = 0; j < valid; ++j) {
+      const float pj = __shfl_sync(0xffffffffu, p, j);
+#pragma unroll
+      for (int c = 0; c < PF_DPL; ++c) acc[c] += pj * sV[j][lane + 32 * c];
+    }
+  }
+  if (!active) return;
+  const float inv = 1.f / l;
+  bf16* op = out + ((int64_t)(start + qi) * H + h) * PF_D;
+#pragma unroll
+  for (int c = 0; c < PF_DPL; ++c) op[lane + 32 * c] = to_bf16(acc[c] * inv);
+}
+
+// 通用慢路径（任意 D ≤ MAX_D）：旧参考实现，每 (req, q_head) 一个 block 逐 query 行三遍扫 key。对拍 fixture（D=32）走这里。
+__global__ void gqa_prefill_ref_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k, const bf16* __restrict__ v,
+                                       bf16* __restrict__ out, const int32_t* __restrict__ cu_seqlens, int H, int Hkv, int D,
+                                       float scale) {
+
   const int req = blockIdx.x, h = blockIdx.y;
   const int hk = h / (H / Hkv);
   const int start = cu_seqlens[req], end = cu_seqlens[req + 1];
@@ -198,15 +298,22 @@ extern "C" int gqa_cache_write_bf16(const void* k, const void* v, void* cache, c
 }
 
 extern "C" int gqa_prefill_bf16(const void* q, const void* k, const void* v, void* out, const int32_t* cu_seqlens,
-                                int64_t num_reqs, int64_t heads, int64_t kv_heads, int64_t head_dim, float scale,
-                                cudaStream_t stream) {
+                                int64_t num_reqs, int64_t max_seqlen, int64_t heads, int64_t kv_heads, int64_t head_dim,
+                                float scale, cudaStream_t stream) {
   if (num_reqs <= 0) return 0;
-  if (head_dim <= 0 || head_dim > MAX_D || heads <= 0 || kv_heads <= 0 || heads % kv_heads != 0)
+  if (heads <= 0 || kv_heads <= 0 || head_dim <= 0 || head_dim > MAX_D || heads % kv_heads != 0 || max_seqlen <= 0)
     return err(cudaErrorInvalidValue);
-  dim3 grid((unsigned)num_reqs, (unsigned)heads);
-  gqa_prefill_kernel<<<grid, GQ_BLOCK, 0, stream>>>(static_cast<const bf16*>(q), static_cast<const bf16*>(k),
-                                                    static_cast<const bf16*>(v), static_cast<bf16*>(out), cu_seqlens,
-                                                    (int)heads, (int)kv_heads, (int)head_dim, scale);
+  if (head_dim == PF_D) {
+    dim3 grid((unsigned)((max_seqlen + PF_WARPS - 1) / PF_WARPS), (unsigned)heads, (unsigned)num_reqs);
+    gqa_prefill_flash_kernel<<<grid, PF_WARPS * 32, 0, stream>>>(
+        static_cast<const bf16*>(q), static_cast<const bf16*>(k), static_cast<const bf16*>(v), static_cast<bf16*>(out),
+        cu_seqlens, (int)heads, (int)kv_heads, scale);
+  } else {
+    dim3 grid((unsigned)num_reqs, (unsigned)heads);
+    gqa_prefill_ref_kernel<<<grid, GQ_BLOCK, 0, stream>>>(static_cast<const bf16*>(q), static_cast<const bf16*>(k),
+                                                          static_cast<const bf16*>(v), static_cast<bf16*>(out), cu_seqlens,
+                                                          (int)heads, (int)kv_heads, (int)head_dim, scale);
+  }
   return last_err();
 }
 

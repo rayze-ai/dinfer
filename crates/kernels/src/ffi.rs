@@ -180,6 +180,7 @@ extern "C" {
         out: *mut c_void,
         cu_seqlens: *const i32,
         num_reqs: i64,
+        max_seqlen: i64,
         heads: i64,
         kv_heads: i64,
         head_dim: i64,
