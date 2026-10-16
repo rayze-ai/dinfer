@@ -14,7 +14,7 @@ LOOPS="$ROOT/docs/loops"
 echo "<project-skill-resume>"
 echo "## 上次交接区（docs/progress.md）"
 # 打印从"## 当前状态"到"## 日志"之间的内容
-awk '/^## 当前状态/{p=1} /^## 日志/{p=0} p' "$PROGRESS" | sed '/^<!--/d' | head -40
+awk '/^## 当前状态/{p=1} /^## 日志/{p=0} p' "$PROGRESS" | sed '/^<!--/d' | head -22
 
 if [ -f "$PITFALLS" ]; then
   echo

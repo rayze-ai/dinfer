@@ -1,4 +1,8 @@
 {
+  "env": {
+    "BASH_MAX_OUTPUT_LENGTH": "8000",
+    "MAX_MCP_OUTPUT_TOKENS": "8000"
+  },
   "hooks": {
     "SessionStart": [
       {
@@ -6,6 +10,17 @@
           {
             "type": "command",
             "command": "bash \"$CLAUDE_PROJECT_DIR\"/scripts/dev/session-start.sh"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Read|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/context_guard.sh"
           }
         ]
       }
