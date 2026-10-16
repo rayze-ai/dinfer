@@ -25,3 +25,20 @@
 3. attention 已持平；norm 多一倍（3 次 vs 2 次）→ e 阶段融合（q_norm/k_norm 并入 qkv GEMM 后处理，rmsnorm+残差已有 fused 版）。
 4. copy_cols（qkv 拆分）0.15 ms/step 纯浪费 → e 阶段让 attention kernel 直接按 stride 读 qkv_buf。
 5. TTFT：HTTP 侧 CPU（模板 0.02 ms + 编码 0.3 ms + 解码 µs 级）可忽略；engine 内 174-token prefill 稳态 5.0 ms（首次 14.4 ms 含 cuBLASLt 启发式），非流式 wall 6 ms。bench 的 43 ms（p50 = p99，极稳定）减 5 ms ≈ 38 ms，与 **Nagle + 延迟 ACK 40 ms** 一致：SSE 首个 role chunk 和首个内容 chunk 都是小写入，复用连接上第二段被攒住；uvicorn 默认 TCP_NODELAY，axum 默认不设。修法 `axum::serve(...).tcp_nodelay(true)`（本轮加），待 bench6 验证。
+
+## 每 decode step 的 kernel 数（dinfer，stage 负载，192 步）
+
+| kernel | 次/step | 平均 µs | 备注 |
+|---|---|---|---|
+| copy_cols | 103 | 1.4 | 28 层 × (q/k/v 拆分 3 + k_norm 回写 1) ≈ 112 → **全部可删**（attention 按 stride 读 qkv_buf） |
+| rmsnorm（普通） | 78 | 1.5 | 28 × (input_norm + q_norm + k_norm) → q_norm/k_norm 合成一个 per-head kernel（-28） |
+| gemv / cutlass GEMM | 74 + 28 | 13 / 15 | 28 × (qkv, gate_up, down) + lm_head；带宽下限，不动 |
+| silu_and_mul | 26 | 4.2 | 可并入 gate_up GEMM epilogue（cuBLASLt 不直接支持 SwiGLU）→ 留 |
+| rope | 26 | 2.1 | 与 cache_write 合一（-28） |
+| fused_add_rmsnorm | 26 | 1.8 | 已融合 |
+| cache_write | 26 | 1.4 | 并入 rope |
+| add_inplace | 26 | 0.9 | 残差加（attention 输出）→ 并入 fused_add_rmsnorm 的模式（-28） |
+| decode split / merge | 25 + 25 | 17.6 / 1.2 | merge 可并入下一个 kernel（o_proj 前）；暂留 |
+| **合计** | **480 / step** | | 图内重放，launch 开销已被 graph 吃掉，但每个 kernel 仍有 ~1–2 µs 的 GPU 侧调度 + 尾部空泡；480 × ~1.5 µs ≈ 0.7 ms/step 是 e 阶段可拿回的量 |
+
+目标（e 阶段）：480 → ≈ 250 kernel/step（删 copy_cols 112、合 q/k norm 28、rope+cache_write 28、add 并入 norm 28、merge 并入 28）。
