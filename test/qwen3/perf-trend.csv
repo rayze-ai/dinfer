@@ -131,3 +131,15 @@ bench12,2026-10-16,口径修正：bench 每次运行换 seed（之前固定 seed
 bench12,2026-10-16,口径修正：bench 每次运行换 seed（之前固定 seed 让常驻 vLLM prefix cache 90% 命中、dinfer 冷）；代码与 bench11 相同（prefill v3）,c8-long,out_tok_per_s,1727.150,1904.808,0.907,-0.1,higher
 bench12,2026-10-16,口径修正：bench 每次运行换 seed（之前固定 seed 让常驻 vLLM prefix cache 90% 命中、dinfer 冷）；代码与 bench11 相同（prefill v3）,c8-long,ttft_p50_ms,84.559,68.044,1.243,0.0,lower
 bench12,2026-10-16,口径修正：bench 每次运行换 seed（之前固定 seed 让常驻 vLLM prefix cache 90% 命中、dinfer 冷）；代码与 bench11 相同（prefill v3）,c8-long,tpot_p50_ms,3.966,3.739,1.061,0.1,lower
+bench13,2026-10-16,f decode splits：decode_v2 splits 目标 256 → 1024 block（B=8 长序列 64 → 512 block；4090 B=8 seq=2048 0.040 → 0.032 ms）,c1,out_tok_per_s,499.689,446.804,1.118,0.1,higher
+bench13,2026-10-16,f decode splits：decode_v2 splits 目标 256 → 1024 block（B=8 长序列 64 → 512 block；4090 B=8 seq=2048 0.040 → 0.032 ms）,c1,ttft_p50_ms,4.687,17.532,0.267,5.4,lower
+bench13,2026-10-16,f decode splits：decode_v2 splits 目标 256 → 1024 block（B=8 长序列 64 → 512 block；4090 B=8 seq=2048 0.040 → 0.032 ms）,c1,tpot_p50_ms,1.978,2.118,0.934,0.1,lower
+bench13,2026-10-16,f decode splits：decode_v2 splits 目标 256 → 1024 block（B=8 长序列 64 → 512 block；4090 B=8 seq=2048 0.040 → 0.032 ms）,c8,out_tok_per_s,3082.334,2916.358,1.057,-0.4,higher
+bench13,2026-10-16,f decode splits：decode_v2 splits 目标 256 → 1024 block（B=8 长序列 64 → 512 block；4090 B=8 seq=2048 0.040 → 0.032 ms）,c8,ttft_p50_ms,8.283,28.588,0.290,13.1,lower
+bench13,2026-10-16,f decode splits：decode_v2 splits 目标 256 → 1024 block（B=8 长序列 64 → 512 block；4090 B=8 seq=2048 0.040 → 0.032 ms）,c8,tpot_p50_ms,2.524,2.540,0.994,-0.5,lower
+bench13,2026-10-16,f decode splits：decode_v2 splits 目标 256 → 1024 block（B=8 长序列 64 → 512 block；4090 B=8 seq=2048 0.040 → 0.032 ms）,c32,out_tok_per_s,8331.109,8302.845,1.003,-2.3,higher
+bench13,2026-10-16,f decode splits：decode_v2 splits 目标 256 → 1024 block（B=8 长序列 64 → 512 block；4090 B=8 seq=2048 0.040 → 0.032 ms）,c32,ttft_p50_ms,38.680,74.595,0.519,-0.3,lower
+bench13,2026-10-16,f decode splits：decode_v2 splits 目标 256 → 1024 block（B=8 长序列 64 → 512 block；4090 B=8 seq=2048 0.040 → 0.032 ms）,c32,tpot_p50_ms,3.628,3.304,1.098,-2.4,lower
+bench13,2026-10-16,f decode splits：decode_v2 splits 目标 256 → 1024 block（B=8 长序列 64 → 512 block；4090 B=8 seq=2048 0.040 → 0.032 ms）,c8-long,out_tok_per_s,1729.759,1907.135,0.907,0.2,higher
+bench13,2026-10-16,f decode splits：decode_v2 splits 目标 256 → 1024 block（B=8 长序列 64 → 512 block；4090 B=8 seq=2048 0.040 → 0.032 ms）,c8-long,ttft_p50_ms,101.761,59.612,1.707,-20.3,lower
+bench13,2026-10-16,f decode splits：decode_v2 splits 目标 256 → 1024 block（B=8 长序列 64 → 512 block；4090 B=8 seq=2048 0.040 → 0.032 ms）,c8-long,tpot_p50_ms,3.869,3.744,1.033,2.5,lower

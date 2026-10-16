@@ -1,0 +1,1 @@
+f decode splits：decode_v2 splits 目标 256 → 1024 block（B=8 长序列 64 → 512 block；4090 B=8 seq=2048 0.040 → 0.032 ms）
