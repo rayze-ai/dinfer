@@ -281,3 +281,11 @@
 - 解法：`push` 排除 `test/qwen3/*/bench*/`、`stage/`、`perf-trend.*`；bench7 的数值从 `bench_compare7.log` 的 summary 表恢复（JSON 不可恢复，这一轮在趋势里按 summary 手工补）。
 - 如何避免：产出在远端的目录只 pull 不 push；pull 后 `ls` 核对文件数再 commit；双向同步的目录绝不加 `--delete`。
 - 相关：`scripts/dev/remote4090.sh`
+
+## 2026-10-16 prefill v3（WMMA）要点：>48 KB 共享内存必须动态分配并 opt-in；P 以 bf16 进 tensor core
+
+- 现象 / 约束：v3 一个 block 用 76 KB smem（Q 16K + K/V 16K + S 8K + P 4K + O 32K），静态 `__shared__` 上限 48 KB 编译期就报错。
+- 解法：`extern __shared__` 动态 smem + 启动前 `cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes)`（只需一次，用 `static bool` 守卫），launch 第三参数传字节数。4090 每 SM 100 KB → 1 block/SM，8 warp，够用。
+- 数值：P = exp(s − m) 存成 bf16 再进 mma（FA2 同样做法），O 累加 fp32；对 HF 的 prefill logits worst-abs 从 0.81 → 0.97（bf16 噪声底 2.0 以内），greedy 32 步仍逐 token一致（一次 near-tie 翻转在允许口径内）。
+- 如何避免：改 attention 精度路径后一定跑 `real_parity`（不是只跑 kernel ref）；ref 的 1e-2 容差对 32×32 小 fixture 不敏感，长序列累积误差要靠真模型对拍看。
+- 相关：`crates/kernels/cuda/gqa.cu::gqa_prefill_tc_kernel / gqa_paged_tc_kernel`
