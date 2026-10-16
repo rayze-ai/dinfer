@@ -5,6 +5,8 @@
 set -uo pipefail
 ROOT=/data/yaochen/infer
 cd "$(dirname "$0")/../.."
+# shellcheck disable=SC1091
+source $ROOT/env.sh   # PATH / LD_LIBRARY_PATH（libcudart.so.13）/ CUDA_HOME / CUDA_ARCHS
 export QWEN3_DIR=$ROOT/models/qwen3-0.6b QWEN3_GOLDEN="$PWD/test/qwen3_golden" KERNEL_REFS_DIR="$PWD/test/kernel_refs"
 LOG=$ROOT/bootstrap/baseline.log; : > "$LOG"
 fail=0

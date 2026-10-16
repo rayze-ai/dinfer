@@ -13,6 +13,7 @@ export RUSTUP_HOME=$ROOT/rustup CARGO_HOME=$ROOT/cargo
 export RUSTUP_DIST_SERVER=https://rsproxy.cn RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
 export CUDA_HOME=$ROOT/cuda-13.0 CUDA_ARCHS=89   # cudarc 用 cuda-version-from-build-system 按 nvcc 自动探测
 export PATH=\$CARGO_HOME/bin:\$CUDA_HOME/bin:\$PATH
+export LD_LIBRARY_PATH=\$CUDA_HOME/lib64\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}   # toolkit 不在 /usr/local，运行时要能找到 libcudart.so.13
 export TMPDIR=$ROOT/tmp
 ENV
 mkdir -p $ROOT/tmp $ROOT/cargo
