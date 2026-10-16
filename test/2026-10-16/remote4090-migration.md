@@ -1,0 +1,17 @@
+# 4090 测试机迁移（2026-10-16）
+
+## 结论（截至 12:50）
+
+- 登录：JumpServer 公钥（本机 `~/.ssh/id_ed25519_gpu4090`）+ token 用户名，常驻 ControlMaster。token **密码**登录在第 2–4 个 token 上全部 `Permission denied`，第 1 个成功过；原因未查明，不再依赖密码。
+- 目录约束：远程只用 `/data/yaochen/infer`。12.4 安装器自建的 `/usr/local/cuda` 软链已删（指向我装的 `cuda-12.4/`，不是机器原有的）。
+- **机器原本没有 CUDA toolkit**（审计：dpkg 无 cuda/toolkit 包；`/usr/local` 下只有 2024 年的基础目录，`lib`/`bin` mtime 10-12/10-13 为驱动相关；宿主无 nvcc/libcudart/libcublasLt；`find` 到的 cuda-13.0 / 12.9 / cu13 全在 containerd 镜像层 `/var/lib/containerd/.../snapshots/*/fs`，是容器内的）。`nvidia-smi` 的 `CUDA Version: 13.0` 是驱动能力。没有覆盖任何已有安装。
+- 首次编译（CUDA 12.4，`CUDA_ARCHS=89`，`--features qwen3`）：**通过**，164 个 crate，含 nvcc 编译的 kernels。crates 走 rsproxy.cn（static.rust-lang.org 只有 ~100 KB/s）。
+- 用户要求改用 CUDA 13.0 → `cuda_13.0.2_580.95.05_linux.run`（4.3 GB，下载 ~0.8 MB/s 直连，约 10 min）安装到 `cuda-13.0/`，进行中。cudarc 0.18.2 支持 `cuda-13000`；Cargo.toml 当前固定 `cuda-12040`，远端需按 13.0 编译（方案见 progress）。
+- 权重 rsync：经跳板机约 0.4 MB/s，1.5 GB 预计 1 h+；`--partial --inplace` 可续传。golden / kernel_refs（76 MB）排在权重之后。
+- 未跑：kernels ref 测试（等 kernel_refs 到）、real_parity / sampling_parity（等权重 + 13.0 编译）。
+
+## 原始记录
+
+- 探测：8 × RTX 4090 24 GB，驱动 580.178.04，Ubuntu 22.04.5，128 核 / 503 GB，`/data` 7 TB。
+- 网络 GET（直连）：crates.io 206 / github 206 / rustup 206 / nvidia 301→200 / huggingface 000；代理 `127.0.0.1:1081`：hf 307、github 0.5 MB/s、nvidia 0.8 MB/s。
+- build.log：`BUILD_EXIT=0`，`Compiling` 164 行，无 error。
