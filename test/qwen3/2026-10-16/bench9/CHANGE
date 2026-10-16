@@ -1,0 +1,1 @@
+e 续：decode splits==1 时跳过 merge kernel（B≥32 少 28 launch/step）；面板加点击轮次详情

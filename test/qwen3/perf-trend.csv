@@ -83,3 +83,15 @@ bench8,2026-10-16,e 续：decode attention v2（8 lane/key、uint4 向量读 K/V
 bench8,2026-10-16,e 续：decode attention v2（8 lane/key、uint4 向量读 K/V、4 key/warp、两 q head 共享 K 读、splits 自适应）,c8-long,out_tok_per_s,794.665,2101.996,0.378,23.3,higher
 bench8,2026-10-16,e 续：decode attention v2（8 lane/key、uint4 向量读 K/V、4 key/warp、两 q head 共享 K 读、splits 自适应）,c8-long,ttft_p50_ms,488.327,35.423,13.785,0.2,lower
 bench8,2026-10-16,e 续：decode attention v2（8 lane/key、uint4 向量读 K/V、4 key/warp、两 q head 共享 K 读、splits 自适应）,c8-long,tpot_p50_ms,6.251,3.546,1.763,27.3,lower
+bench9,2026-10-16,e 续：decode splits==1 时跳过 merge kernel（B≥32 少 28 launch/step）；面板加点击轮次详情,c1,out_tok_per_s,496.712,455.471,1.091,-0.5,higher
+bench9,2026-10-16,e 续：decode splits==1 时跳过 merge kernel（B≥32 少 28 launch/step）；面板加点击轮次详情,c1,ttft_p50_ms,6.103,11.652,0.524,-3.9,lower
+bench9,2026-10-16,e 续：decode splits==1 时跳过 merge kernel（B≥32 少 28 launch/step）；面板加点击轮次详情,c1,tpot_p50_ms,1.979,2.120,0.934,-0.4,lower
+bench9,2026-10-16,e 续：decode splits==1 时跳过 merge kernel（B≥32 少 28 launch/step）；面板加点击轮次详情,c8,out_tok_per_s,3012.997,2930.912,1.028,-0.3,higher
+bench9,2026-10-16,e 续：decode splits==1 时跳过 merge kernel（B≥32 少 28 launch/step）；面板加点击轮次详情,c8,ttft_p50_ms,12.121,26.502,0.457,-2.6,lower
+bench9,2026-10-16,e 续：decode splits==1 时跳过 merge kernel（B≥32 少 28 launch/step）；面板加点击轮次详情,c8,tpot_p50_ms,2.511,2.539,0.989,-0.3,lower
+bench9,2026-10-16,e 续：decode splits==1 时跳过 merge kernel（B≥32 少 28 launch/step）；面板加点击轮次详情,c32,out_tok_per_s,7690.470,8593.346,0.895,0.4,higher
+bench9,2026-10-16,e 续：decode splits==1 时跳过 merge kernel（B≥32 少 28 launch/step）；面板加点击轮次详情,c32,ttft_p50_ms,88.544,63.007,1.405,0.0,lower
+bench9,2026-10-16,e 续：decode splits==1 时跳过 merge kernel（B≥32 少 28 launch/step）；面板加点击轮次详情,c32,tpot_p50_ms,3.671,3.261,1.126,0.4,lower
+bench9,2026-10-16,e 续：decode splits==1 时跳过 merge kernel（B≥32 少 28 launch/step）；面板加点击轮次详情,c8-long,out_tok_per_s,795.427,2106.015,0.378,0.1,higher
+bench9,2026-10-16,e 续：decode splits==1 时跳过 merge kernel（B≥32 少 28 launch/step）；面板加点击轮次详情,c8-long,ttft_p50_ms,592.931,35.503,16.701,-21.4,lower
+bench9,2026-10-16,e 续：decode splits==1 时跳过 merge kernel（B≥32 少 28 launch/step）；面板加点击轮次详情,c8-long,tpot_p50_ms,5.411,3.539,1.529,13.4,lower

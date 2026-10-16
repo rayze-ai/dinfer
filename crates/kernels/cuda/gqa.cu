@@ -50,91 +50,135 @@ constexpr int PF_TILE = 32;             // 每片 key 数 == warp 宽，一 lane
 constexpr int PF_D = 128;               // Qwen3 head_dim；其他 D 走通用慢路径（见 host 分派）
 constexpr int PF_DPL = PF_D / 32;       // 每 lane 持有的维度数
 
-__global__ void __launch_bounds__(PF_WARPS * 32) gqa_prefill_flash_kernel(
+// prefill v2（Q3-e 续 3）：一个 block 处理一个 (req, kv_head) 的 PV2_BQ=32 行 query × 该 kv head 的 group 个 q head；
+// 8 warp，每 warp 4 行 query（group=2 时即 2 行 × 2 head）；K/V tile 32 key 用 uint4 向量装进 smem（bf16 存，不转置）；
+// 每 lane 对 tile 里 1 个 key（lane = key），对自己 4 行各算一个分数（128 维 FMA，q 在寄存器 16 维/lane × 8 lane 一行 → 改为
+// 每行 q 在 smem、lane 读 K 列）。相对 v1：K/V 每 tile 服务 32×group=64 行（v1 4 行）→ 全局读量 /16；装载向量化。
+constexpr int PV2_WARPS = 8;
+constexpr int PV2_ROWS_PER_WARP = 4;      // 每 warp 的 (query 行, q head) 组合数
+constexpr int PV2_TILE = 32;
+
+__global__ void __launch_bounds__(PV2_WARPS * 32) gqa_prefill_flash_kernel(
     const bf16* __restrict__ q, const bf16* __restrict__ k, const bf16* __restrict__ v, bf16* __restrict__ out,
     const int32_t* __restrict__ cu_seqlens, int H, int Hkv, float scale, int q_stride, int kv_stride) {
-  const int req = blockIdx.z, h = blockIdx.y;
-  const int hk = h / (H / Hkv);
+  const int req = blockIdx.z, hk = blockIdx.y;
+  const int group = H / Hkv;  // 1 或 2
   const int start = cu_seqlens[req], end = cu_seqlens[req + 1];
   const int T = end - start;
-  const int q_base = blockIdx.x * PF_WARPS;
+  const int rows_per_block = (PV2_WARPS * PV2_ROWS_PER_WARP) / group;  // group=2 → 16 rows… 注意：下面按组合数分配
+  // 组合索引 c ∈ [0, PV2_WARPS*PV2_ROWS_PER_WARP)：row = c / group, g = c % group
+  const int q_base = blockIdx.x * rows_per_block;
   if (q_base >= T) return;
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-  const int qi = q_base + warp;             // 本 warp 的 query 行（相对请求）
-  const bool active = qi < T;
 
-  __shared__ float sKT[PF_D][PF_TILE];      // 转置：sKT[d][j]
-  __shared__ float sV[PF_TILE][PF_D];
-  __shared__ float sQ[PF_WARPS][PF_D];
+  __shared__ __align__(16) bf16 sK[PV2_TILE][PF_D];
+  __shared__ __align__(16) bf16 sV[PV2_TILE][PF_D];
+  __shared__ float sQ[PV2_WARPS * PV2_ROWS_PER_WARP][PF_D];
 
-  // q → shared（每 warp 一行）
-  if (active) {
-    const bf16* qp = q + (int64_t)(start + qi) * q_stride + (int64_t)h * PF_D;
-    for (int d = lane; d < PF_D; d += 32) sQ[warp][d] = to_f32(qp[d]) * scale;
-  }
-  float m = -INFINITY, l = 0.f;
-  float acc[PF_DPL];
+  // 本 warp 的 4 个组合
+  int rows[PV2_ROWS_PER_WARP], heads[PV2_ROWS_PER_WARP];
+  bool act[PV2_ROWS_PER_WARP];
+  int my_last = -1;
 #pragma unroll
-  for (int c = 0; c < PF_DPL; ++c) acc[c] = 0.f;
-
-  // 本 block 要扫到的最后一个 key = block 内最大 query 位置
-  const int block_last = min(q_base + PF_WARPS - 1, T - 1);
-  const int n_tiles = block_last / PF_TILE + 1;
+  for (int r = 0; r < PV2_ROWS_PER_WARP; ++r) {
+    const int c = warp * PV2_ROWS_PER_WARP + r;
+    rows[r] = q_base + c / group;
+    heads[r] = hk * group + c % group;
+    act[r] = rows[r] < T;
+    if (act[r]) my_last = max(my_last, rows[r]);
+  }
+  // q → smem（每组合一行，已乘 scale）
+#pragma unroll
+  for (int r = 0; r < PV2_ROWS_PER_WARP; ++r) {
+    const int c = warp * PV2_ROWS_PER_WARP + r;
+    if (act[r]) {
+      const bf16* qp = q + (int64_t)(start + rows[r]) * q_stride + (int64_t)heads[r] * PF_D;
+      for (int d = lane; d < PF_D; d += 32) sQ[c][d] = to_f32(qp[d]) * scale;
+    }
+  }
+  float m[PV2_ROWS_PER_WARP], l[PV2_ROWS_PER_WARP], acc[PV2_ROWS_PER_WARP][PF_DPL];
+#pragma unroll
+  for (int r = 0; r < PV2_ROWS_PER_WARP; ++r) {
+    m[r] = -INFINITY; l[r] = 0.f;
+#pragma unroll
+    for (int c = 0; c < PF_DPL; ++c) acc[r][c] = 0.f;
+  }
+  const int block_last = min(q_base + rows_per_block - 1, T - 1);
+  const int n_tiles = block_last / PV2_TILE + 1;
   for (int tile = 0; tile < n_tiles; ++tile) {
-    const int k0 = tile * PF_TILE;
-    const int kn = min(PF_TILE, T - k0);   // 本片有效 key 数（请求末尾）
-    __syncthreads();                       // 上一片用完
-    // 装载 K（转置）与 V：PF_TILE × PF_D 个元素，PF_WARPS*32 个线程
-    for (int e = threadIdx.x; e < PF_TILE * PF_D; e += PF_WARPS * 32) {
-      const int j = e / PF_D, d = e % PF_D;
-      float kv_k = 0.f, kv_v = 0.f;
+    const int k0 = tile * PV2_TILE;
+    const int kn = min(PV2_TILE, T - k0);
+    __syncthreads();
+    // 装载：32 key × 128 bf16 = 32 × 16 个 uint4；256 线程每线程 2 个 uint4（K、V 各一）
+    for (int e = threadIdx.x; e < PV2_TILE * (PF_D / 8); e += PV2_WARPS * 32) {
+      const int j = e / (PF_D / 8), d8 = (e % (PF_D / 8)) * 8;
+      uint4 kk = make_uint4(0, 0, 0, 0), vv = make_uint4(0, 0, 0, 0);
       if (j < kn) {
-        const int64_t off = (int64_t)(start + k0 + j) * kv_stride + (int64_t)hk * PF_D + d;
-        kv_k = to_f32(k[off]);
-        kv_v = to_f32(v[off]);
+        const int64_t off = (int64_t)(start + k0 + j) * kv_stride + (int64_t)hk * PF_D + d8;
+        kk = *reinterpret_cast<const uint4*>(k + off);
+        vv = *reinterpret_cast<const uint4*>(v + off);
       }
-      sKT[d][j] = kv_k;
-      sV[j][d] = kv_v;
+      *reinterpret_cast<uint4*>(&sK[j][d8]) = kk;
+      *reinterpret_cast<uint4*>(&sV[j][d8]) = vv;
     }
     __syncthreads();
-    if (!active) continue;
-    // 本 warp 在此片的有效 key 数（causal：key ≤ qi）
-    const int valid = min(kn, qi - k0 + 1);
-    if (valid <= 0) continue;
-    // 1) 分数：lane j 对 key j
-    float sc = -INFINITY;
-    if (lane < valid) {
-      float acc_s = 0.f;
-#pragma unroll 8
-      for (int d = 0; d < PF_D; ++d) acc_s += sQ[warp][d] * sKT[d][lane];
-      sc = acc_s;
+    if (my_last < k0) continue;  // 本 warp 全部行都看不到这片
+    // lane = key j；对 4 个组合各算一个分数
+    float sc[PV2_ROWS_PER_WARP];
+    {
+      // 把本 lane 的 K 列取成 float（128 维）分批读，减少 smem 流量：按 8 维一组
+      const bf16* kr = sK[lane];
+#pragma unroll
+      for (int r = 0; r < PV2_ROWS_PER_WARP; ++r) sc[r] = 0.f;
+      for (int d8 = 0; d8 < PF_D; d8 += 8) {
+        uint4 kk = *reinterpret_cast<const uint4*>(kr + d8);
+        const __nv_bfloat162* kp = reinterpret_cast<const __nv_bfloat162*>(&kk);
+        float kf[8];
+#pragma unroll
+        for (int i = 0; i < 4; ++i) { float2 t2 = __bfloat1622float2(kp[i]); kf[2 * i] = t2.x; kf[2 * i + 1] = t2.y; }
+#pragma unroll
+        for (int r = 0; r < PV2_ROWS_PER_WARP; ++r) {
+          const float* qr = sQ[warp * PV2_ROWS_PER_WARP + r] + d8;
+#pragma unroll
+          for (int i = 0; i < 8; ++i) sc[r] += qr[i] * kf[i];
+        }
+      }
     }
-    // 2) online softmax
-    float tmax = sc;
 #pragma unroll
-    for (int o = 16; o > 0; o >>= 1) tmax = fmaxf(tmax, __shfl_xor_sync(0xffffffffu, tmax, o));
-    const float m_new = fmaxf(m, tmax);
-    const float alpha = __expf(m - m_new);   // m=-inf 时为 0
-    const float p = (lane < valid) ? __expf(sc - m_new) : 0.f;
-    float psum = p;
+    for (int r = 0; r < PV2_ROWS_PER_WARP; ++r) {
+      const int valid = act[r] ? min(kn, rows[r] - k0 + 1) : 0;  // causal：key ≤ row
+      const float s_r = (lane < valid) ? sc[r] : -INFINITY;
+      float tmax = s_r;
 #pragma unroll
-    for (int o = 16; o > 0; o >>= 1) psum += __shfl_xor_sync(0xffffffffu, psum, o);
-    l = l * alpha + psum;
+      for (int o = 16; o > 0; o >>= 1) tmax = fmaxf(tmax, __shfl_xor_sync(0xffffffffu, tmax, o));
+      if (tmax == -INFINITY) continue;  // 该行此片无可见 key（warp 一致：valid 对所有 lane 相同）
+      const float m_new = fmaxf(m[r], tmax);
+      const float alpha = __expf(m[r] - m_new);
+      const float p = (lane < valid) ? __expf(s_r - m_new) : 0.f;
+      float psum = p;
 #pragma unroll
-    for (int c = 0; c < PF_DPL; ++c) acc[c] *= alpha;
-    m = m_new;
-    // 3) PV：lane 持有维度 d = lane + 32c；p_j 广播
-    for (int j = 0; j < valid; ++j) {
-      const float pj = __shfl_sync(0xffffffffu, p, j);
+      for (int o = 16; o > 0; o >>= 1) psum += __shfl_xor_sync(0xffffffffu, psum, o);
+      l[r] = l[r] * alpha + psum;
 #pragma unroll
-      for (int c = 0; c < PF_DPL; ++c) acc[c] += pj * sV[j][lane + 32 * c];
+      for (int c = 0; c < PF_DPL; ++c) acc[r][c] *= alpha;
+      m[r] = m_new;
+      // PV：lane 持维度 lane+32c；遍历 valid 个 key，p 广播
+      for (int j = 0; j < valid; ++j) {
+        const float pj = __shfl_sync(0xffffffffu, p, j);
+        const bf16* vr = sV[j];
+#pragma unroll
+        for (int c = 0; c < PF_DPL; ++c) acc[r][c] += pj * to_f32(vr[lane + 32 * c]);
+      }
     }
   }
-  if (!active) return;
-  const float inv = 1.f / l;
-  bf16* op = out + ((int64_t)(start + qi) * H + h) * PF_D;
 #pragma unroll
-  for (int c = 0; c < PF_DPL; ++c) op[lane + 32 * c] = to_bf16(acc[c] * inv);
+  for (int r = 0; r < PV2_ROWS_PER_WARP; ++r) {
+    if (!act[r]) continue;
+    const float inv = 1.f / l[r];
+    bf16* op = out + ((int64_t)(start + rows[r]) * H + heads[r]) * PF_D;
+#pragma unroll
+    for (int c = 0; c < PF_DPL; ++c) op[lane + 32 * c] = to_bf16(acc[r][c] * inv);
+  }
 }
 
 // 通用慢路径（任意 D ≤ MAX_D）：旧参考实现，每 (req, q_head) 一个 block 逐 query 行三遍扫 key。对拍 fixture（D=32）走这里。
@@ -728,9 +772,11 @@ extern "C" int gqa_prefill_bf16(const void* q, const void* k, const void* v, voi
   if (num_reqs <= 0) return 0;
   if (heads <= 0 || kv_heads <= 0 || head_dim <= 0 || head_dim > MAX_D || heads % kv_heads != 0 || max_seqlen <= 0)
     return err(cudaErrorInvalidValue);
-  if (head_dim == PF_D) {
-    dim3 grid((unsigned)((max_seqlen + PF_WARPS - 1) / PF_WARPS), (unsigned)heads, (unsigned)num_reqs);
-    gqa_prefill_flash_kernel<<<grid, PF_WARPS * 32, 0, stream>>>(
+  if (head_dim == PF_D && heads / kv_heads <= 2) {
+    const int64_t group = heads / kv_heads;
+    const int64_t rows_per_block = (PV2_WARPS * PV2_ROWS_PER_WARP) / group;
+    dim3 grid((unsigned)((max_seqlen + rows_per_block - 1) / rows_per_block), (unsigned)kv_heads, (unsigned)num_reqs);
+    gqa_prefill_flash_kernel<<<grid, PV2_WARPS * 32, 0, stream>>>(
         static_cast<const bf16*>(q), static_cast<const bf16*>(k), static_cast<const bf16*>(v), static_cast<bf16*>(out),
         cu_seqlens, (int)heads, (int)kv_heads, scale, (int)q_stride, (int)kv_stride);
   } else {
