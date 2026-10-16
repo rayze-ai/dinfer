@@ -46,3 +46,10 @@ scripts/dev/remote4090.sh run 'cd /data/yaochen/infer/dinfer && bash scripts/ver
 - 机器内网地址 10.121.192.98；端口 8012 是否对内网开放取决于机房策略（未验证）。服务**无鉴权**，不要暴露到公网。
 - vLLM 对照（Q3 基线，用户要求 Docker + 最新版）：`docker.m.daocloud.io/vllm/vllm-openai:v0.31.0`（PyPI / Docker Hub 最新 release，与 `/data/ref/vllm` `de8291e` 同版本；Docker Hub 直连不通、经代理 6 KB/s，daocloud 镜像站直连可拉，首次一次 502 重试即好；镜像 9 GB 落在 `/var/lib/docker`，docker 不支持按镜像指定目录），容器 `vllm-qwen3`，GPU 1，端口 8013，`--max-model-len 8192 --gpu-memory-utilization 0.9 --enable-prefix-caching`，模型目录只读挂 `/models`，`HF_HUB_OFFLINE=1`。启动 ~40 s，KV 181k token。脚本 `scripts/dev/vllm_docker.sh {pull,run,logs,smoke,stop}`。
 - 发请求：`scripts/dev/chat.sh http://127.0.0.1:8012 "问题" [--stream] [--think]`（8013 = vLLM）。测试都在 4090 上做，结果拿回来；不要试图把端口转发到本机（JumpServer 不放行，用户也不要）。
+
+## 压测工具（2026-10-16 起，后续常用）
+
+- `bins/bench`（二进制 `bench`，`cargo build --release -p dinfer-bench`）：OpenAI 流式接口压测，口径与 vLLM `benchmarks/serve.py` 一致（TTFT = 首个带内容 chunk；ITL = 相邻内容 chunk 间隔；TPOT = (latency − TTFT)/(out − 1)；输出 token 数以服务端 `usage` 为准）。闭环并发，prompt 由 seed 决定性生成，`ignore_eos` 让两边输出量一致，思考关。
+- **自检**：`bench --self-check` 起进程内 mock（TTFT 50 ms、每 token 10 ms）验证测量值 ±1–3 ms；`bench_compare.sh` 每次开头先跑它，不过就不出数。
+- 对比：`bash scripts/verify/bench_compare.sh [OUT_DIR]`（默认 `test/<日期>/bench`）：并发 1 / 8 / 32 × (prompt 128, out 128) + (1024, 128)@8，对 :8012 与 :8013 各跑，产出每组 JSON + `summary.md`。
+- 单跑：`bench --url http://127.0.0.1:8012 --concurrency 8 --num-requests 64 --prompt-len 256 --max-tokens 128 --label dinfer --out x.json`。
