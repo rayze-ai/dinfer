@@ -47,6 +47,10 @@ scripts/dev/remote4090.sh run 'cd /data/yaochen/infer/dinfer && bash scripts/ver
 - vLLM 对照（Q3 基线，用户要求 Docker + 最新版）：`docker.m.daocloud.io/vllm/vllm-openai:v0.31.0`（PyPI / Docker Hub 最新 release，与 `/data/ref/vllm` `de8291e` 同版本；Docker Hub 直连不通、经代理 6 KB/s，daocloud 镜像站直连可拉，首次一次 502 重试即好；镜像 9 GB 落在 `/var/lib/docker`，docker 不支持按镜像指定目录），容器 `vllm-qwen3`，GPU 1，端口 8013，`--max-model-len 8192 --gpu-memory-utilization 0.9 --enable-prefix-caching`，模型目录只读挂 `/models`，`HF_HUB_OFFLINE=1`。启动 ~40 s，KV 181k token。脚本 `scripts/dev/vllm_docker.sh {pull,run,logs,smoke,stop}`。
 - 发请求：`scripts/dev/chat.sh http://127.0.0.1:8012 "问题" [--stream] [--think]`（8013 = vLLM）。测试都在 4090 上做，结果拿回来；不要试图把端口转发到本机（JumpServer 不放行，用户也不要）。
 
+## GPU 分配（2026-10-16 起）
+
+- GPU 0：dinfer 常驻服务；GPU 1：vLLM 容器；GPU 2：跑测试（`remote4090_baseline.sh` / `q2.sh` 默认 `CUDA_VISIBLE_DEVICES=2`）。测试与常驻服务同卡会 OOM（dinfer 服务按 0.9 利用率吃满 KV）。
+
 ## 压测工具（2026-10-16 起，后续常用）
 
 - `bins/bench`（二进制 `bench`，`cargo build --release -p dinfer-bench`）：OpenAI 流式接口压测，口径与 vLLM `benchmarks/serve.py` 一致（TTFT = 首个带内容 chunk；ITL = 相邻内容 chunk 间隔；TPOT = (latency − TTFT)/(out − 1)；输出 token 数以服务端 `usage` 为准）。闭环并发，prompt 由 seed 决定性生成，`ignore_eos` 让两边输出量一致，思考关。

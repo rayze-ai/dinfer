@@ -7,6 +7,8 @@ ROOT=/data/yaochen/infer
 cd "$(dirname "$0")/../.."
 # shellcheck disable=SC1091
 source $ROOT/env.sh   # PATH / LD_LIBRARY_PATH（libcudart.so.13）/ CUDA_HOME / CUDA_ARCHS
+# 共享机器：GPU 0 / 1 常驻 dinfer / vLLM 服务，测试默认用 GPU 2（可用 CUDA_VISIBLE_DEVICES 覆盖）
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-2}"
 export QWEN3_DIR=$ROOT/models/qwen3-0.6b QWEN3_GOLDEN="$PWD/test/qwen3_golden" KERNEL_REFS_DIR="$PWD/test/kernel_refs"
 LOG=$ROOT/bootstrap/baseline.log; : > "$LOG"
 fail=0
