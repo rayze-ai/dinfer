@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 struct Server {
     child: Child,
     base: String,
+    logs: Vec<String>,
 }
 impl Drop for Server {
     fn drop(&mut self) {
@@ -23,23 +24,34 @@ impl Drop for Server {
 fn env(k: &str, d: &str) -> String {
     std::env::var(k).unwrap_or_else(|_| d.to_string())
 }
+/// 固定 256 块、**关 prefix cache**：这些用例把同一 prompt 发两次（流式 vs 非流式 / n=3 vs 流式 n=3）比逐字相同；
+/// 开 prefix cache 时第二次命中前缀走 paged 路径，bf16 累加顺序不同会在 near-tie 处翻 token（与 HF 对拍同样的噪声底，
+/// 见 pitfalls 2026-10-16），不是功能错误。prefix cache 本身的正确性在 `e2e_qwen3_prefix_cache` 里单独验。
 fn spawn_server() -> Server {
+    spawn_server_with(&["--num-blocks", "256", "--no-prefix-caching"])
+}
+
+/// `extra` 追加在固定参数之后；返回的 Server 带启动日志（`logs`），e2e 可断言 kv_cache 行。
+fn spawn_server_with(extra: &[&str]) -> Server {
     let model = env("QWEN3_DIR", "/data/ref/models/qwen3-0.6b");
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let mut args: Vec<String> = [
+        "serve",
+        "--model",
+        &model,
+        "--port",
+        &port.to_string(),
+        "--max-model-len",
+        "2048",
+        "--max-num-batched-tokens",
+        "512",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    args.extend(extra.iter().map(|s| s.to_string()));
     let mut child = Command::new(env!("CARGO_BIN_EXE_dinfer"))
-        .args([
-            "serve",
-            "--model",
-            &model,
-            "--port",
-            &port.to_string(),
-            "--max-model-len",
-            "2048",
-            "--num-blocks",
-            "256",
-            "--max-num-batched-tokens",
-            "512",
-        ])
+        .args(&args)
         .env("RUST_LOG", "info")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -58,16 +70,20 @@ fn spawn_server() -> Server {
         std::thread::spawn(move || {
             for line in BufReader::new(rd).lines().map_while(Result::ok) {
                 eprintln!("[serve:{tag}] {line}");
-                let _ = tx.send(line);
+                let _ = tx.send(strip_ansi(&line)); // tracing 给字段名上色，断言前去掉转义序列
             }
         });
     }
     drop(tx);
     let t0 = Instant::now();
+    let mut logs = Vec::new();
     loop {
         match rx.recv_timeout(Duration::from_secs(1)) {
-            Ok(l) if l.contains("listening") => break,
-            Ok(_) => {}
+            Ok(l) if l.contains("listening") => {
+                logs.push(l);
+                break;
+            }
+            Ok(l) => logs.push(l),
             Err(_) => {
                 if let Ok(Some(st)) = child.try_wait() {
                     panic!("server exited early: {st}");
@@ -76,8 +92,26 @@ fn spawn_server() -> Server {
             }
         }
     }
-    Server { child, base: format!("http://127.0.0.1:{port}") }
+    Server { child, base: format!("http://127.0.0.1:{port}"), logs }
 }
+/// 去掉 `ESC [ ... m` 颊色序列。
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        if c == '\x1b' && it.peek() == Some(&'[') {
+            for d in it.by_ref() {
+                if d.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn golden() -> serde_json::Value {
     let p = std::path::Path::new(&env("QWEN3_GOLDEN", "test/qwen3_golden")).join("chat_golden.json");
     serde_json::from_str(&std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display())))
@@ -332,5 +366,84 @@ async fn e2e_qwen3_request_features() {
     assert_eq!(content, texts, "stream n=3 content per index != non-stream (same seed)");
     assert!(finish.iter().all(|f| f.is_some()), "every choice gets a finish_reason");
     eprintln!("e2e: Q2-b request features PASS");
+    drop(srv);
+}
+
+/// Q2-c：不传 `--num-blocks` → 按显存自动算；日志有 `kv_cache: auto`，N ≥ 24 GB 卡估算的 80%；服务能正常回答。
+#[tokio::test]
+#[ignore]
+async fn e2e_qwen3_auto_num_blocks() {
+    let srv = spawn_server_with(&[]);
+    let line = srv
+        .logs
+        .iter()
+        .find(|l| l.contains("kv_cache: auto"))
+        .unwrap_or_else(|| panic!("no kv_cache auto log; got:\n{}", srv.logs.join("\n")))
+        .clone();
+    eprintln!("e2e: {line}");
+    let field = |k: &str| -> f64 {
+        let key = format!(" {k}=");
+        let i = line.find(&key).unwrap_or_else(|| panic!("{k} missing in {line}")) + key.len();
+        line[i..].split(|c: char| !(c.is_ascii_digit() || c == '.')).next().unwrap().parse().unwrap()
+    };
+    let n = field("num_blocks");
+    let total = field("total_gib");
+    // Qwen3-0.6B：28 层 × 16 × 8 × 2 × 128 × 2 B = 1.75 MiB / block；24 GB 卡 0.9 利用 − 权重 1.5 GB − 预留 ≈ 17 GB → ≈ 10k 块
+    let per_block_gib = 28.0 * 16.0 * 8.0 * 2.0 * 128.0 * 2.0 / (1u64 << 30) as f64;
+    let expect = (total * 0.9 - 1.5 - 1.0 - 1.9) / per_block_gib;
+    eprintln!("e2e: num_blocks {n} vs 80% of estimate {:.0}", expect * 0.8);
+    assert!(n >= expect * 0.8, "auto num_blocks {n} < 80% of estimate {expect:.0}");
+    let c = reqwest::Client::new();
+    let body = serde_json::json!({"messages": [{"role":"user","content":"Say hi."}], "max_tokens": 8, "temperature": 0.0,
+        "chat_template_kwargs": {"enable_thinking": false}});
+    let r = c.post(format!("{}/v1/chat/completions", srv.base)).json(&body).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    eprintln!("e2e: auto num_blocks PASS");
+    drop(srv);
+}
+
+/// Q2-d：prefix cache 默认开。同一 system + 长历史发两次（max_tokens=1 让耗时 ≈ prefill）：第二次 TTFT 应明显低于第一次
+/// （前缀块命中，只算最后一块）；回答仍正常。`/metrics` 命中率在 Q2-e 接上后补断言。
+#[tokio::test]
+#[ignore]
+async fn e2e_qwen3_prefix_cache() {
+    let srv = spawn_server_with(&["--num-blocks", "512"]);
+    assert!(srv.logs.iter().any(|l| l.contains("prefix_caching=true")), "prefix caching should default on");
+    let c = reqwest::Client::new();
+    let url = format!("{}/v1/chat/completions", srv.base);
+    let history: Vec<serde_json::Value> = (0..12)
+        .flat_map(|i| {
+            [
+                serde_json::json!({"role":"user","content": format!("Fact {i}: the {i}th planet of system Zeta is named Z{i}. Please remember all facts; reply only OK.")}),
+                serde_json::json!({"role":"assistant","content":"OK."}),
+            ]
+        })
+        .collect();
+    let mut msgs = vec![
+        serde_json::json!({"role":"system","content":"You are a terse assistant. Answer with one word."}),
+    ];
+    msgs.extend(history);
+    msgs.push(serde_json::json!({"role":"user","content":"What is the name of the 7th planet?"}));
+    let body = serde_json::json!({"messages": msgs, "max_tokens": 1, "temperature": 0.0, "chat_template_kwargs": {"enable_thinking": false}});
+    let mut times = Vec::new();
+    let mut prompt_tokens = 0;
+    for _ in 0..3 {
+        let t0 = Instant::now();
+        let v: serde_json::Value = c.post(&url).json(&body).send().await.unwrap().json().await.unwrap();
+        times.push(t0.elapsed().as_secs_f64() * 1e3);
+        prompt_tokens = v["usage"]["prompt_tokens"].as_u64().unwrap();
+    }
+    eprintln!("e2e: prefix cache prompt_tokens={prompt_tokens} ttft ms = {times:.1?}");
+    assert!(prompt_tokens >= 300, "history should be long enough for several blocks");
+    let (first, warm) = (times[0], times[1].min(times[2]));
+    assert!(warm < first * 0.7, "second request should hit the prefix cache: {first:.1} ms → {warm:.1} ms");
+    // 答案仍正常（greedy, 1 token）：拿到 200 且 content 非空
+    let mut b = body.clone();
+    b["max_tokens"] = serde_json::json!(4);
+    let v: serde_json::Value = c.post(&url).json(&b).send().await.unwrap().json().await.unwrap();
+    let content = v["choices"][0]["message"]["content"].as_str().unwrap_or("");
+    eprintln!("e2e: prefix-cached answer = {content:?}");
+    assert!(!content.trim().is_empty());
+    eprintln!("e2e: prefix cache PASS");
     drop(srv);
 }

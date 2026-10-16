@@ -25,9 +25,13 @@ pub struct ServeOptions {
     pub max_model_len: u32,
     pub max_num_seqs: u32,
     pub max_num_batched_tokens: u32,
-    pub num_blocks: u32,
+    /// None = 按显存自动算（见 `Qwen3Model::load_with_budget`）。
+    pub num_blocks: Option<u32>,
     pub block_size: u32,
+    /// 自动算 num_blocks 时的显存上限比例（vLLM 默认 0.9）。
+    pub gpu_memory_utilization: f32,
     pub enable_chunked_prefill: bool,
+    pub enable_prefix_caching: bool,
     pub device: usize,
 }
 
@@ -39,9 +43,11 @@ impl Default for ServeOptions {
             max_model_len: 4096,
             max_num_seqs: 16,
             max_num_batched_tokens: 2048,
-            num_blocks: 1024,
+            num_blocks: None,
             block_size: 16,
+            gpu_memory_utilization: 0.9,
             enable_chunked_prefill: true,
+            enable_prefix_caching: true,
             device: 0,
         }
     }
@@ -79,14 +85,17 @@ impl Qwen3Service {
         let gemm = Gemm::new(&s)?;
         let src = WeightSource::open_dir(model_dir)?;
         let max_tokens = opt.max_num_batched_tokens.max(opt.max_num_seqs) as usize;
-        let model = Qwen3Model::load(
+        let model = Qwen3Model::load_with_budget(
             &s,
             &src,
             cfg.clone(),
             max_tokens,
-            opt.num_blocks as usize,
+            opt.num_blocks.map(|n| n as usize),
             opt.block_size as usize,
+            opt.gpu_memory_utilization,
+            1 << 30,
         )?;
+        let num_blocks = model.num_blocks() as u32;
         let exec = Qwen3Executor::new(s.clone(), gemm, model)?;
         let runner = Runner::new(exec, opt.block_size as usize);
         let params = engine::scheduler_params(
@@ -96,7 +105,12 @@ impl Qwen3Service {
                 enable_chunked_prefill: opt.enable_chunked_prefill,
                 long_prefill_token_threshold: 0,
             },
-            CacheConfig { block_size: opt.block_size, enable_prefix_caching: false, ..Default::default() },
+            CacheConfig {
+                block_size: opt.block_size,
+                enable_prefix_caching: opt.enable_prefix_caching,
+                hash_block_size: opt.block_size,
+                gpu_memory_utilization: opt.gpu_memory_utilization,
+            },
             opt.max_model_len,
             tok.eos_ids().to_vec(),
             0,
@@ -110,9 +124,16 @@ impl Qwen3Service {
             },
             block_size: opt.block_size,
         }];
-        let sched = Scheduler::new(params, groups, opt.num_blocks);
+        let sched = Scheduler::new(params, groups, num_blocks);
         let (handle, jh) = engine::spawn(sched, runner);
-        tracing::info!(model = %served_name, max_model_len = opt.max_model_len, num_blocks = opt.num_blocks, "qwen3 engine started");
+        tracing::info!(
+            model = %served_name,
+            max_model_len = opt.max_model_len,
+            num_blocks,
+            kv_tokens = num_blocks * opt.block_size,
+            prefix_caching = opt.enable_prefix_caching,
+            "qwen3 engine started"
+        );
         Ok(Self {
             tok,
             tmpl,

@@ -225,3 +225,11 @@
 - 解法：`env.sh` 加 `export LD_LIBRARY_PATH=$CUDA_HOME/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}`；`remote4090_baseline.sh` 开头 `source env.sh`。
 - 如何避免：toolkit 不在系统路径时，PATH（nvcc）、CUDA_HOME（build.rs）、LD_LIBRARY_PATH（运行）三者一起设；`ldd target/debug/dinfer | grep "not found"` 作为 bootstrap 的最后一步检查。
 - 相关：`scripts/dev/bootstrap_remote4090.sh`、`scripts/dev/README-remote4090.md`
+
+## 2026-10-16 prefix cache 默认开后，e2e "流式 == 非流式" 逐字比较开始随机失败
+
+- 现象：Q2-c 把 `enable_prefix_caching` 默认打开后，`serve_e2e_qwen3` 里"同一 prompt 发两次（非流式 / 流式）逐字相同"的断言在第 100+ 字符处翻一个词（"to the stars" → "of the deep"），greedy 和固定 seed 都会。
+- 根因：第二次请求命中前缀块，调度只重算最后一块，attention 走 paged（带历史）路径；与第一次从 0 开始的 prefill 路径 bf16 累加顺序不同，logits 有 ~1e-2 级漂移，在 near-tie 位置翻 token。与 Q1 对 HF 对拍时的噪声底同源（pitfalls 2026-10-15 "HF 全序列重算 bf16 不前缀稳定"），不是功能 bug。
+- 解法：需要逐字比较的 e2e 用 `--no-prefix-caching` 起服务；prefix cache 的正确性单独用 TTFT 下降 + 回答合理来验（`e2e_qwen3_prefix_cache`）。
+- 如何避免：任何"两次请求输出逐字相同"的断言都要先问 KV 路径是否相同；要么关 prefix cache，要么只比到第一个 near-tie 之前。
+- 相关：`bins/dinfer/tests/serve_e2e_qwen3.rs::spawn_server`

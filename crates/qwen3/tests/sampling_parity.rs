@@ -65,7 +65,7 @@ fn engine(max_tokens: usize, max_seqs: u32, budget: u32) -> Engine {
     let cfg =
         Qwen3Config::from_json(&std::fs::read_to_string(model_dir().join("config.json")).unwrap()).unwrap();
     let src = WeightSource::open_dir(&model_dir()).unwrap();
-    let model = Qwen3Model::load(&s, &src, cfg.clone(), max_tokens, NUM_BLOCKS, BLOCK).unwrap();
+    let model = Qwen3Model::load(&s, &src, cfg.clone(), max_tokens, Some(NUM_BLOCKS), BLOCK).unwrap();
     let exec = Qwen3Executor::new(s, gemm, model).unwrap();
     let runner = Runner::new(exec, BLOCK);
     let params = SchedulerParams {

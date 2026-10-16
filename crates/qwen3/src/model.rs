@@ -237,14 +237,40 @@ impl Qwen3Model {
         src: &WeightSource,
         cfg: Qwen3Config,
         max_tokens: usize,
-        num_blocks: usize,
+        num_blocks: Option<usize>,
         block_size: usize,
+    ) -> Result<Self> {
+        Self::load_with_budget(stream, src, cfg, max_tokens, num_blocks, block_size, 0.9, 1 << 30)
+    }
+
+    /// 每个 KV block 的字节数（全部层）：`layers × block_size × kv_heads × 2(K,V) × head_dim × 2(bf16)`。
+    pub fn kv_bytes_per_block(cfg: &Qwen3Config, block_size: usize) -> usize {
+        cfg.num_hidden_layers as usize
+            * block_size
+            * cfg.num_key_value_heads as usize
+            * 2
+            * cfg.head_dim as usize
+            * 2
+    }
+
+    /// `num_blocks = None` 时按显存算：权重 + 激活 scratch 分配完后读 `free`，
+    /// `budget = min(free, total × gpu_memory_utilization − 已用) − reserve`，`num_blocks = budget / bytes_per_block`。
+    /// KV 最后分配，所以 free 已经扣掉了权重与 scratch（等价 vLLM profile run 的作用，但不用真跑一次 forward）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_with_budget(
+        stream: &Stream,
+        src: &WeightSource,
+        cfg: Qwen3Config,
+        max_tokens: usize,
+        num_blocks: Option<usize>,
+        block_size: usize,
+        gpu_memory_utilization: f32,
+        reserve_bytes: usize,
     ) -> Result<Self> {
         let hidden = cfg.hidden_size as usize;
         let (hk, d) = (cfg.num_key_value_heads as usize, cfg.head_dim as usize);
         let embed = Embedding::load(stream, src, "model.embed_tokens")?;
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers as usize);
-        let mut kv = Vec::with_capacity(cfg.num_hidden_layers as usize);
         for l in 0..cfg.num_hidden_layers {
             let p = format!("model.layers.{l}");
             layers.push(DecoderLayer {
@@ -260,11 +286,6 @@ impl Qwen3Model {
                 mlp: Mlp::load(stream, src, &format!("{p}.mlp"), max_tokens)
                     .with_context(|| format!("layer {l} mlp"))?,
             });
-            kv.push(PagedKv {
-                cache: Tensor::zeros(stream, &[num_blocks, block_size, hk, 2, d])?,
-                num_blocks,
-                block_size,
-            });
         }
         let norm = RmsNorm::load(stream, src, "model.norm", cfg.rms_norm_eps)?;
         let lm_head = if src.contains("lm_head.weight") {
@@ -276,6 +297,63 @@ impl Qwen3Model {
         let rope =
             Rope::new(stream, d, cfg.max_position_embeddings as usize, cfg.rope_theta, RopeStyle::Neox)?;
         let v = cfg.vocab_size as usize;
+        // 激活 scratch 先分配，KV 最后：这样 free 已含权重 + scratch 的占用
+        let hidden_t = Tensor::zeros(stream, &[max_tokens, hidden])?;
+        let normed = Tensor::zeros(stream, &[max_tokens, hidden])?;
+        let attn_out = Tensor::zeros(stream, &[max_tokens, hidden])?;
+        let mlp_out = Tensor::zeros(stream, &[max_tokens, hidden])?;
+        let final_normed = Tensor::zeros(stream, &[max_tokens, hidden])?;
+        let logits_bf16 = Tensor::zeros(stream, &[max_tokens, v])?;
+        // executor 还会分配 fp32 logits [max_tokens, vocab] + 采样工作区 ≤ 3 份：这里按 3 份预留
+        let exec_scratch = 3 * max_tokens * v * 4;
+
+        let per_block = Self::kv_bytes_per_block(&cfg, block_size);
+        let num_blocks = match num_blocks {
+            Some(n) => {
+                ensure!(n > 0, "num_blocks must be > 0");
+                tracing::info!(
+                    num_blocks = n,
+                    tokens = n * block_size,
+                    kv_gib = n as f64 * per_block as f64 / (1u64 << 30) as f64,
+                    "kv_cache: fixed"
+                );
+                n
+            }
+            None => {
+                stream.synchronize()?;
+                let (free, total) = stream.mem_info()?;
+                let used = total.saturating_sub(free);
+                let cap = (total as f64 * gpu_memory_utilization as f64) as usize;
+                let budget = free.min(cap.saturating_sub(used)).saturating_sub(reserve_bytes + exec_scratch);
+                let n = budget / per_block;
+                ensure!(
+                    n >= 1,
+                    "not enough GPU memory for KV cache: free {:.2} GiB, cap {:.0}% of {:.2} GiB, reserve {:.2} GiB",
+                    free as f64 / (1u64 << 30) as f64,
+                    gpu_memory_utilization * 100.0,
+                    total as f64 / (1u64 << 30) as f64,
+                    (reserve_bytes + exec_scratch) as f64 / (1u64 << 30) as f64
+                );
+                tracing::info!(
+                    num_blocks = n,
+                    tokens = n * block_size,
+                    kv_gib = n as f64 * per_block as f64 / (1u64 << 30) as f64,
+                    available_gib = free as f64 / (1u64 << 30) as f64,
+                    total_gib = total as f64 / (1u64 << 30) as f64,
+                    utilization = gpu_memory_utilization,
+                    "kv_cache: auto"
+                );
+                n
+            }
+        };
+        let mut kv = Vec::with_capacity(cfg.num_hidden_layers as usize);
+        for _ in 0..cfg.num_hidden_layers {
+            kv.push(PagedKv {
+                cache: Tensor::zeros(stream, &[num_blocks, block_size, hk, 2, d])?,
+                num_blocks,
+                block_size,
+            });
+        }
         Ok(Self {
             embed,
             layers,
@@ -285,14 +363,19 @@ impl Qwen3Model {
             kv,
             max_tokens,
             capture_layers: None,
-            hidden: Tensor::zeros(stream, &[max_tokens, hidden])?,
-            normed: Tensor::zeros(stream, &[max_tokens, hidden])?,
-            attn_out: Tensor::zeros(stream, &[max_tokens, hidden])?,
-            mlp_out: Tensor::zeros(stream, &[max_tokens, hidden])?,
-            final_normed: Tensor::zeros(stream, &[max_tokens, hidden])?,
-            logits_bf16: Tensor::zeros(stream, &[max_tokens, v])?,
+            hidden: hidden_t,
+            normed,
+            attn_out,
+            mlp_out,
+            final_normed,
+            logits_bf16,
             cfg,
         })
+    }
+
+    /// 实际分配的 KV block 数。
+    pub fn num_blocks(&self) -> usize {
+        self.kv.first().map_or(0, |k| k.num_blocks)
     }
 
     /// 上一次 forward 后最后一层输出（norm 前）[t, hidden]。

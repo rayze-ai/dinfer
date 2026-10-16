@@ -39,7 +39,7 @@ fn qwen3_layer_bisect() {
     let cfg =
         Qwen3Config::from_json(&std::fs::read_to_string(model_dir().join("config.json")).unwrap()).unwrap();
     let src = WeightSource::open_dir(&model_dir()).unwrap();
-    let mut model = Qwen3Model::load(&s, &src, cfg.clone(), 512, 64, 16).unwrap();
+    let mut model = Qwen3Model::load(&s, &src, cfg.clone(), 512, Some(64), 16).unwrap();
     let prompt = npy_i32("prompt_ids.npy");
     let t = prompt.len();
     let h = cfg.hidden_size as usize;

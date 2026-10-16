@@ -88,6 +88,11 @@ impl Stream {
         Ok(self.inner.synchronize()?)
     }
 
+    /// 当前设备 (free, total) 字节（`cuMemGetInfo`）。按显存算 KV block 数用。
+    pub fn mem_info(&self) -> Result<(usize, usize)> {
+        Ok(cudarc::driver::result::mem_get_info()?)
+    }
+
     /// 裸 cudaStream_t，传给 C ABI kernel。
     pub fn raw(&self) -> cudarc::driver::sys::CUstream {
         self.inner.cu_stream()

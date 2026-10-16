@@ -1,6 +1,6 @@
 # loop 规格：Q2 可生产的 mix 服务（Qwen3-0.6B）
 
-- 状态：进行中（a 采样、b 请求功能 完成 2026-10-16，共 5 轮；c–f 未开始）
+- 状态：进行中（a 采样、b 请求功能、c 资源、d prefix cache 完成 2026-10-16，共 8 轮；e metrics、f 健壮性 未开始）
 - 创建：2026-10-16
 - 验证脚本：`scripts/verify/q2.sh`
 - 迭代记录：`test/2026-10-16/q2-serving.md`
@@ -80,6 +80,12 @@ cargo run -p dinfer --features qwen3 -- serve --model /data/ref/models/qwen3-0.6
 - n>1：引擎层 n 个独立请求（seed 依次 +1；无 seed 各自随机），一个 handler 并发消费、按 `index` 交错；prefix cache 开启后（d 块）n 个请求的 prompt KV 自然共享，不另做 fork。
 - 客户端断开：`AbortGuard` drop 时对未完成 choice 全部 abort（流式任务结束 / handler 返回都会触发）。
 
+## Q2-c 实现口径
+
+- `num_blocks` 自动：权重 + 激活 scratch 分配完后读 `cuMemGetInfo`，`budget = min(free, total×util − used) − 1 GiB − executor fp32 logits 预留(3×max_tokens×vocab×4)`，`num_blocks = budget / bytes_per_block`；KV **最后**分配。不做 vLLM 的 profile run（我们的激活 scratch 是静态按 `max_tokens` 分配的，没有运行时峭）。
+- `--num-blocks` 仍可覆盖；`--gpu-memory-utilization`（默认 0.9）；日志 `kv_cache: auto num_blocks=N tokens=M kv_gib=… available_gib=… total_gib=…`。
+- prefix cache 默认开（`--no-prefix-caching` 关），`hash_block_size = block_size`。
+
 ## 记录
 
 | 轮 | 现象 | 根因 | 处理 |
@@ -89,3 +95,6 @@ cargo run -p dinfer --features qwen3 -- serve --model /data/ref/models/qwen3-0.6
 | 3 | a 验收 | 分布测试改选 greedy 24 步中 mask 后候选最多的一步（step 23，候选 3），N=100 一次 prefill：全部样本落在 host 候选集，L1 0.097；`sampling_parity` 5/5、`real_parity` 3/3、`serve_e2e_qwen3` 1/1、clippy 全目标干净 | — | Q2-a 完成（停止条件 1/2/3/7 的 kernel+执行侧达成；5 的 server 渲染与 4/6/8–11 属 b–f） |
 | 4 | b 请求功能 | `dinfer_text::StopChecker`（增量匹配，只扫 max_len-1 尾巴 + 新增；6 单测过）；`OutputStream` 拆 `push_text / parse / finish / token_text`；`ChatBackend::submit` 回 id + `abort`；chat.rs：n 个 choice = n 个引擎请求（seed+i），`consume` 统一驱动，stop 命中即 abort，logprobs 渲染 OpenAI 形状，`AbortGuard` 断开即 abort；glm53/qwen3 两条编译过、clippy 干净 | — | e2e `e2e_qwen3_request_features` 待 4090 跑 |
 | 5 | b 验收 | 4090 e2e `e2e_qwen3_request_features` PASS（42 s 两测试）：非法参数 4 组 400；stop="10" 截到 "…9, "，finish=stop，29 token 即停（无 stop 64）；include_stop_str_in_output 以 "10" 结尾；流式 stop 与非流式一致；logprobs 每 token 一条（token/logprob/bytes/top_logprobs 3，greedy chosen=top-1）流式条数相同；n=3 greedy 三者相同、temperature 1.0 seed 42 三句不同、流式按 index 拼出与非流式逐字相同 | — | 停止条件 4/5/6 达成；b 完成 |
+| 6 | c 资源 + d prefix cache | `Qwen3Model::load_with_budget`：KV 最后分配，`cuMemGetInfo` 算 budget；`--num-blocks` 可选，`--gpu-memory-utilization`，`--no-prefix-caching`；服务默认开 prefix cache。4090 首跑：auto 得 9838 块（157k token，16.8 GiB，free 21.0 / total 23.5）；但 3 个 e2e 全挂 | ① 日志解析 `num_blocks=` 被 `kv_cache: auto num_blocks=` 里的空格前缀匹配错；② prefix cache 开后第二次请求走 paged 路径，bf16 漂移翻 near-tie token，"流式==非流式"逐字断言失败（见 pitfalls） | ① 按 " key=" 解析；② 逐字比较用例改 `--no-prefix-caching`，新增 `e2e_qwen3_prefix_cache`（TTFT 降 ≥30%） |
+| 7 | c/d 验收 | 修 ① ② 后重跑：auto_num_blocks 与 prefix_cache 仍挂 | 两者同一根因：tracing 给字段名上 ANSI 色，`num_blocks=` 实际是 `ESC[3mnum_blocks ESC[0m=`，`contains("prefix_caching=true")` 同理不匹配 | e2e 收日志时 `strip_ansi`；逐字比较用例已改 `--no-prefix-caching` |
+| 8 | c/d 验收 | 4090：`e2e_qwen3_auto_num_blocks` PASS（auto 9838 块 = 157k token / 16.8 GiB，≥ 估算 7848 的 80%）；`e2e_qwen3_prefix_cache` PASS（513 token prompt，TTFT 898.7 → 16.1 / 15.0 ms，答案 "Z7." 正确） | — | 停止条件 8 达成；9 的 TTFT 部分达成，命中率计数待 e `/metrics` |

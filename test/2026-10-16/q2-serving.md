@@ -16,3 +16,4 @@
 - 教训：Qwen3 chat 首 token `<think>` logprob ≈ −2e-4，任何分布测试不能放在首 token；100×36 token 一次 prefill 需 budget 8192 + 512 块。
 | 4 | b | StopChecker 6/6；server/text/core/qwen3 单测过；qwen3 + glm53 feature 均编译；e2e 待跑 | 2026-10-16 14:0x |
 | 5 | b | serve_e2e_qwen3 2/2 on 4090（CUDA 13.0）：stop / include_stop / 流式 stop / logprobs / n=3 / 400 全过 | 2026-10-16 14:1x |
+| 8 | c/d | auto_num_blocks + prefix_cache e2e PASS on 4090（TTFT 899→16 ms） | 2026-10-16 14:3x |

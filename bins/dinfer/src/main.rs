@@ -39,11 +39,17 @@ enum Cmd {
         max_num_seqs: u32,
         #[arg(long, default_value_t = 2048)]
         max_num_batched_tokens: u32,
-        /// KV block 数（P6 固定分配；按显存自动算留 P10）
-        #[arg(long, default_value_t = 512)]
-        num_blocks: u32,
+        /// KV block 数；不传 = 按显存自动算（qwen3；glm53 暂为固定 512）
+        #[arg(long)]
+        num_blocks: Option<u32>,
         #[arg(long, default_value_t = 16)]
         block_size: u32,
+        /// 自动算 num_blocks 时可用显存比例
+        #[arg(long, default_value_t = 0.9)]
+        gpu_memory_utilization: f32,
+        /// 关闭 prefix cache（默认开）
+        #[arg(long, default_value_t = false)]
+        no_prefix_caching: bool,
         #[arg(long, default_value_t = 0)]
         device: usize,
         /// 开启 MTP 投机解码（nextn=1）
@@ -94,6 +100,8 @@ async fn main() -> Result<()> {
             max_num_batched_tokens,
             num_blocks,
             block_size,
+            gpu_memory_utilization,
+            no_prefix_caching,
             device,
             mtp,
         } => {
@@ -101,13 +109,14 @@ async fn main() -> Result<()> {
             let addr = format!("{host}:{port}");
             #[cfg(feature = "glm53")]
             {
+                let _ = (gpu_memory_utilization, no_prefix_caching); // glm53：固定 num_blocks，prefix cache 待接
                 let opt = dinfer_glm53::service::ServeOptions {
                     model_dir: model,
                     tokenizer_dir: tokenizer,
                     max_model_len,
                     max_num_seqs,
                     max_num_batched_tokens,
-                    num_blocks,
+                    num_blocks: num_blocks.unwrap_or(512),
                     block_size,
                     enable_chunked_prefill: true,
                     device,
@@ -132,7 +141,9 @@ async fn main() -> Result<()> {
                     max_num_batched_tokens,
                     num_blocks,
                     block_size,
+                    gpu_memory_utilization,
                     enable_chunked_prefill: true,
+                    enable_prefix_caching: !no_prefix_caching,
                     device,
                 };
                 let svc = tokio::task::spawn_blocking(move || {
@@ -153,6 +164,8 @@ async fn main() -> Result<()> {
                     max_num_batched_tokens,
                     num_blocks,
                     block_size,
+                    gpu_memory_utilization,
+                    no_prefix_caching,
                     device,
                     mtp,
                 );
