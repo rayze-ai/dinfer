@@ -32,6 +32,15 @@ c1 out 221 vs 447 tok/s、c32 2707 vs 8065、c8 p1024 56 vs 1916；TTFT 84 vs 18
 改法：① K/V 用 `bf16x2`/`uint4`（8 个 bf16）向量读，一 warp 一次读 4 个 key 的 K（lane 分工：8 lane 一 key，每 lane 16 维，warp 内 shuffle 归约）；② block_table 每 16 key 查一次（block_size 对齐）；③ splits 随 B 自适应：`splits = clamp(256 / (B×Hkv), 1, 16)`。
 验收：`gqa_decode_d128_splitk_ref` 仍过；`cold_shape` B=32 seq=2048 ≤ 0.6 ms；bench c32 TPOT ≤ 4.5 ms。
 
+## e 续 2：剩余融合候选（decode 每 step，28 层 × …）
+
+| 候选 | 现状 | 做法 | 预期 |
+|---|---|---|---|
+| silu_and_mul → down GEMM | gate_up GEMM → silu_and_mul kernel → down GEMM（3 launch/层） | cuBLASLt epilogue 只有 RELU/GELU，无 SwiGLU；可做：silu_and_mul 写成 down GEMM 的 A 侧预处理不可行（GEMM 要读两遍）。保留；或用 cuBLASLt 的 `GELU_AUX`？不是 SiLU → 放弃。 | 0 |
+| decode merge kernel | split kernel + merge kernel（2 launch/层） | splits==1 时跳过 merge 直接写 out（B×Hkv ≥ 256 时就是 1）；否则并入 o_proj 前的 gather | B≥32 时 -28 launch |
+| 采样 4 kernel + 1 dtod | temperature / min_p / topk_topp / sample 各一 launch + logits 复制 | 一个 `sample_fused` kernel：每行一 block，读原始 logits，依次做温度、min_p、top-k/p、Philox 采样，不写回 work（logprobs 时才复制） | -4 launch/step + 省 1 次 [B,V] fp32 复制 |
+| fused_add_rmsnorm 之前的 o_proj 输出 | o_proj 写 attn_out 再 fused_add 读 | cuBLASLt beta=1 直接累加进 hidden（C = A·B + hidden），再普通 rmsnorm | -0（kernel 数同），省一次读 |
+
 ## 环境
 
 4090（`scripts/dev/remote4090.sh`），dinfer `--release` 常驻 :8012（tmux `dinfer`），vLLM Docker :8013。改 kernel 后：`push` → 远端 `cargo build --release -p dinfer --features qwen3` → 重启 tmux `dinfer` → `bench_compare.sh`。
