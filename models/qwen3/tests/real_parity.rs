@@ -113,6 +113,8 @@ fn real_prefill_logits_match_hf() {
             max_blocks: NUM_BLOCKS,
         },
         logits_rows: &rows,
+        t,
+        rows: t,
     };
     let t0 = std::time::Instant::now();
     e.model.forward(s, &e.gemm, &f, &mut logits).unwrap();

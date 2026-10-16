@@ -5,7 +5,7 @@
 use crate::device::Stream;
 use crate::ffi;
 use anyhow::{bail, ensure, Result};
-use cudarc::driver::CudaSlice;
+use cudarc::driver::{CudaSlice, DevicePtr, DevicePtrMut};
 use half::bf16;
 use std::ffi::c_void;
 
@@ -209,11 +209,15 @@ pub fn argmax_f32(
 }
 
 /// 就地对 logits 做 top-k / top-p 掩码。top_k / top_p: [batch]。
-pub fn topk_topp_mask_f32(
+pub fn topk_topp_mask_f32<
+    L: DevicePtrMut<f32> + ?Sized,
+    K: DevicePtr<i32> + ?Sized,
+    P: DevicePtr<f32> + ?Sized,
+>(
     stream: &Stream,
-    logits: &mut CudaSlice<f32>,
-    top_k: &CudaSlice<i32>,
-    top_p: &CudaSlice<f32>,
+    logits: &mut L,
+    top_k: &K,
+    top_p: &P,
     vocab: usize,
 ) -> Result<()> {
     ensure!(vocab > 0 && logits.len() % vocab == 0, "topk_topp_mask: bad shape");
@@ -230,13 +234,19 @@ pub fn topk_topp_mask_f32(
 }
 
 /// 温度缩放 + softmax + 多项式采样。temperature<=0 的行走 argmax。seeds/offsets: [batch]。
-pub fn sample_f32(
+pub fn sample_f32<
+    L: DevicePtr<f32> + ?Sized,
+    T: DevicePtr<f32> + ?Sized,
+    S1: DevicePtr<u64> + ?Sized,
+    S2: DevicePtr<u64> + ?Sized,
+    O: DevicePtrMut<i32> + ?Sized,
+>(
     stream: &Stream,
-    logits: &CudaSlice<f32>,
-    temperature: &CudaSlice<f32>,
-    seeds: &CudaSlice<u64>,
-    offsets: &CudaSlice<u64>,
-    out: &mut CudaSlice<i32>,
+    logits: &L,
+    temperature: &T,
+    seeds: &S1,
+    offsets: &S2,
+    out: &mut O,
     vocab: usize,
 ) -> Result<()> {
     ensure!(vocab > 0 && logits.len() % vocab == 0, "sample: bad shape");
@@ -421,10 +431,10 @@ pub fn rope_bf16_n(
 }
 
 /// argmax 前 `batch` 行。
-pub fn argmax_f32_n(
+pub fn argmax_f32_n<L: DevicePtr<f32> + ?Sized, O: DevicePtrMut<i32> + ?Sized>(
     stream: &Stream,
-    logits: &CudaSlice<f32>,
-    out: &mut CudaSlice<i32>,
+    logits: &L,
+    out: &mut O,
     batch: usize,
     vocab: usize,
 ) -> Result<()> {
@@ -1504,15 +1514,23 @@ pub fn gqa_decode_scratch_len(num_reqs: usize, heads: usize, head_dim: usize) ->
 
 /// 惩罚（原地）。`ids` CSR：`offsets[b]..offsets[b+1]`，前 `prompt_len[b]` 个是 prompt，其余是 output。
 #[allow(clippy::too_many_arguments)]
-pub fn penalties_f32(
+pub fn penalties_f32<
+    L: DevicePtrMut<f32> + ?Sized,
+    I: DevicePtr<i32> + ?Sized,
+    O1: DevicePtr<i32> + ?Sized,
+    O2: DevicePtr<i32> + ?Sized,
+    R: DevicePtr<f32> + ?Sized,
+    F: DevicePtr<f32> + ?Sized,
+    Q: DevicePtr<f32> + ?Sized,
+>(
     stream: &Stream,
-    logits: &mut CudaSlice<f32>,
-    ids: &CudaSlice<i32>,
-    offsets: &CudaSlice<i32>,
-    prompt_len: &CudaSlice<i32>,
-    rep: &CudaSlice<f32>,
-    freq: &CudaSlice<f32>,
-    pres: &CudaSlice<f32>,
+    logits: &mut L,
+    ids: &I,
+    offsets: &O1,
+    prompt_len: &O2,
+    rep: &R,
+    freq: &F,
+    pres: &Q,
     vocab: usize,
 ) -> Result<()> {
     ensure!(vocab > 0 && logits.len() % vocab == 0, "penalties: bad shape");
@@ -1541,10 +1559,10 @@ pub fn penalties_f32(
 }
 
 /// 温度缩放（原地；t ≤ 1e-5 或 == 1 跳过）。
-pub fn temperature_f32(
+pub fn temperature_f32<L: DevicePtrMut<f32> + ?Sized, T: DevicePtr<f32> + ?Sized>(
     stream: &Stream,
-    logits: &mut CudaSlice<f32>,
-    temperature: &CudaSlice<f32>,
+    logits: &mut L,
+    temperature: &T,
     vocab: usize,
 ) -> Result<()> {
     ensure!(vocab > 0 && logits.len() % vocab == 0, "temperature: bad shape");
@@ -1567,10 +1585,10 @@ pub fn temperature_f32(
 }
 
 /// min_p 掩码（原地）：概率 < min_p · max_prob 的置 -inf。
-pub fn min_p_mask_f32(
+pub fn min_p_mask_f32<L: DevicePtrMut<f32> + ?Sized, T: DevicePtr<f32> + ?Sized>(
     stream: &Stream,
-    logits: &mut CudaSlice<f32>,
-    min_p: &CudaSlice<f32>,
+    logits: &mut L,
+    min_p: &T,
     vocab: usize,
 ) -> Result<()> {
     ensure!(vocab > 0 && logits.len() % vocab == 0, "min_p: bad shape");
@@ -1594,14 +1612,20 @@ pub fn min_p_mask_f32(
 
 /// logprobs：对 **原始** logits 做 log_softmax；输出 `[batch, k+1]`（第 0 列 chosen，后 k 列 top-k 降序）与 chosen 的 rank。
 #[allow(clippy::too_many_arguments)]
-pub fn logprobs_f32(
+pub fn logprobs_f32<
+    L: DevicePtr<f32> + ?Sized,
+    C: DevicePtr<i32> + ?Sized,
+    O1: DevicePtrMut<i32> + ?Sized,
+    O2: DevicePtrMut<f32> + ?Sized,
+    O3: DevicePtrMut<i32> + ?Sized,
+>(
     stream: &Stream,
-    logits: &CudaSlice<f32>,
-    chosen: &CudaSlice<i32>,
+    logits: &L,
+    chosen: &C,
     k: usize,
-    out_ids: &mut CudaSlice<i32>,
-    out_lp: &mut CudaSlice<f32>,
-    rank: &mut CudaSlice<i32>,
+    out_ids: &mut O1,
+    out_lp: &mut O2,
+    rank: &mut O3,
     vocab: usize,
 ) -> Result<()> {
     ensure!(vocab > 0 && logits.len() % vocab == 0, "logprobs: bad shape");

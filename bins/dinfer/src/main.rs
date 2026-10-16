@@ -50,6 +50,9 @@ enum Cmd {
         /// 关闭 prefix cache（默认开）
         #[arg(long, default_value_t = false)]
         no_prefix_caching: bool,
+        /// 关闭 decode CUDA graph（默认开；qwen3）
+        #[arg(long, default_value_t = false)]
+        no_cuda_graph: bool,
         #[arg(long, default_value_t = 0)]
         device: usize,
         /// 开启 MTP 投机解码（nextn=1）
@@ -102,6 +105,7 @@ async fn main() -> Result<()> {
             block_size,
             gpu_memory_utilization,
             no_prefix_caching,
+            no_cuda_graph,
             device,
             mtp,
         } => {
@@ -109,7 +113,7 @@ async fn main() -> Result<()> {
             let addr = format!("{host}:{port}");
             #[cfg(feature = "glm53")]
             {
-                let _ = (gpu_memory_utilization, no_prefix_caching); // glm53：固定 num_blocks，prefix cache 待接
+                let _ = (gpu_memory_utilization, no_prefix_caching, no_cuda_graph); // glm53：固定 num_blocks，prefix cache / graph 待接
                 let opt = dinfer_glm53::service::ServeOptions {
                     model_dir: model,
                     tokenizer_dir: tokenizer,
@@ -144,6 +148,7 @@ async fn main() -> Result<()> {
                     gpu_memory_utilization,
                     enable_chunked_prefill: true,
                     enable_prefix_caching: !no_prefix_caching,
+                    enable_cuda_graph: !no_cuda_graph,
                     device,
                 };
                 let svc = tokio::task::spawn_blocking(move || {
@@ -166,6 +171,7 @@ async fn main() -> Result<()> {
                     block_size,
                     gpu_memory_utilization,
                     no_prefix_caching,
+                    no_cuda_graph,
                     device,
                     mtp,
                 );

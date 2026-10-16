@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use cudarc::driver::{
-    CudaContext, CudaSlice, CudaStream, DevicePtr, DevicePtrMut, DeviceRepr, ValidAsZeroBits,
+    CudaContext, CudaGraph, CudaSlice, CudaStream, DevicePtr, DevicePtrMut, DeviceRepr, ValidAsZeroBits,
 };
 use std::sync::Arc;
 
@@ -64,6 +64,33 @@ impl Stream {
         Ok(self.inner.clone_htod(&src)?)
     }
 
+    /// 异步 H2D 到已有缓冲的前 `src.len()` 个元素（同流排队；host 侧 Vec 在本调用返回后即可复用，
+    /// 因为 cudarc 对 pageable 内存的 memcpy_htod 在返回前完成拷贝进 staging）。
+    pub fn htod_into<T: DeviceRepr>(&self, src: &[T], dst: &mut CudaSlice<T>) -> Result<()> {
+        anyhow::ensure!(src.len() <= dst.len(), "htod_into: src {} > dst {}", src.len(), dst.len());
+        if src.is_empty() {
+            return Ok(());
+        }
+        let mut d = dst.slice_mut(..src.len());
+        Ok(self.inner.memcpy_htod(src, &mut d)?)
+    }
+
+    /// 开始在本流上捕获 CUDA graph（线程局部模式）。要求：非默认流；期间不得同步 / 分配 / 跨流等待。
+    pub fn begin_capture(&self) -> Result<()> {
+        use cudarc::driver::sys::CUstreamCaptureMode;
+        Ok(self.inner.begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL)?)
+    }
+
+    /// 结束捕获并实例化；返回可重放的图。
+    pub fn end_capture(&self) -> Result<Graph> {
+        use cudarc::driver::sys::CUgraphInstantiate_flags;
+        let g = self
+            .inner
+            .end_capture(CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH)?
+            .ok_or_else(|| anyhow::anyhow!("end_capture: empty graph"))?;
+        Ok(Graph(g))
+    }
+
     pub fn dtoh_sync_copy<T: DeviceRepr>(&self, src: &CudaSlice<T>) -> Result<Vec<T>> {
         Ok(self.inner.clone_dtoh(src)?)
     }
@@ -111,14 +138,37 @@ impl Stream {
         self.inner.clone()
     }
 
-    /// 只读设备指针（以 u64 形式，供 FFI）。
-    pub fn ptr<T: DeviceRepr>(&self, s: &CudaSlice<T>) -> u64 {
+    /// 只读设备指针（以 u64 形式，供 FFI）。接受 `CudaSlice` / `CudaView`。
+    pub fn ptr<T: DeviceRepr, S: DevicePtr<T> + ?Sized>(&self, s: &S) -> u64 {
         let (p, _guard) = s.device_ptr(&self.inner);
         p
     }
 
-    pub fn ptr_mut<T: DeviceRepr>(&self, s: &mut CudaSlice<T>) -> u64 {
+    /// 可写设备指针。接受 `CudaSlice` / `CudaViewMut`。
+    pub fn ptr_mut<T: DeviceRepr, S: DevicePtrMut<T> + ?Sized>(&self, s: &mut S) -> u64 {
         let (p, _guard) = s.device_ptr_mut(&self.inner);
         p
+    }
+
+    /// 所属设备（同一 context）。
+    pub fn device(&self) -> Device {
+        Device { ctx: self.inner.context().clone() }
+    }
+
+    /// D2H 同步拷贝一个视图。
+    pub fn dtoh_sync_copy_view<T: DeviceRepr, S: DevicePtr<T>>(&self, src: &S) -> Result<Vec<T>> {
+        Ok(self.inner.clone_dtoh(src)?)
+    }
+}
+
+/// 可重放的 CUDA graph。`cudarc::CudaGraph` 持裸句柄不是 `Send`；本类型声明 `Send`：图只在创建它的 executor /
+/// 引擎线程上 launch（Runner 随 engine 线程整体 move 一次），不会并发访问。
+pub struct Graph(CudaGraph);
+// SAFETY: 见上。cuGraphLaunch 允许从任意线程调用，前提是同一时刻只有一个使用者；所有权随 executor 单线程移动。
+unsafe impl Send for Graph {}
+impl Graph {
+    /// 在创建它的流上重放。
+    pub fn launch(&self) -> Result<()> {
+        Ok(self.0.launch()?)
     }
 }

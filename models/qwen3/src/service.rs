@@ -32,6 +32,8 @@ pub struct ServeOptions {
     pub gpu_memory_utilization: f32,
     pub enable_chunked_prefill: bool,
     pub enable_prefix_caching: bool,
+    /// 纯 decode 步用 CUDA graph（启动时按 batch 桶捕获；vLLM `cudagraph_mode=FULL_DECODE_ONLY` 对齐）。
+    pub enable_cuda_graph: bool,
     pub device: usize,
 }
 
@@ -48,6 +50,7 @@ impl Default for ServeOptions {
             gpu_memory_utilization: 0.9,
             enable_chunked_prefill: true,
             enable_prefix_caching: true,
+            enable_cuda_graph: true,
             device: 0,
         }
     }
@@ -102,7 +105,8 @@ impl Qwen3Service {
         let num_blocks = model.num_blocks() as u32;
         s.synchronize()?;
         let t_model = t_start.elapsed();
-        let exec = Qwen3Executor::new(s.clone(), gemm, model)?;
+        let exec = Qwen3Executor::with_graphs(s.clone(), gemm, model, opt.enable_cuda_graph)?;
+        let num_graphs = exec.num_graphs();
         let runner = Runner::new(exec, opt.block_size as usize);
         let params = engine::scheduler_params(
             SchedulerConfig {
@@ -138,6 +142,7 @@ impl Qwen3Service {
             num_blocks,
             kv_tokens = num_blocks * opt.block_size,
             prefix_caching = opt.enable_prefix_caching,
+            cuda_graphs = num_graphs,
             "qwen3 engine started"
         );
         // 加载各阶段耗时（用户要求记录，看是否值得优化）：tokenizer+模板 / CUDA 初始化 / 权重+scratch+KV / executor+engine

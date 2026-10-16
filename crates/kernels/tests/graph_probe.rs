@@ -43,14 +43,10 @@ fn capture_gemm_rmsnorm_and_replay() {
     println!("end_capture(gemm only): {:?}", g2.as_ref().err());
     s.synchronize().unwrap();
     // 完整捕获
-    s.inner_arc().begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL).unwrap();
+    s.begin_capture().unwrap();
     g.forward_bf16(&a, &w, None, &mut y, m, n, k).unwrap();
     dinfer_kernels::rmsnorm_bf16_n(&s, &y, &gw, &mut z, m, n, 1e-6).unwrap();
-    let graph = s
-        .inner_arc()
-        .end_capture(CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH)
-        .unwrap()
-        .expect("graph");
+    let graph = s.end_capture().unwrap();
     // 捕获期间不应执行：z 仍为 0
     s.synchronize().unwrap();
     let z0 = s.dtoh_sync_copy(&z).unwrap();

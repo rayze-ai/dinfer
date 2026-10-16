@@ -9,7 +9,7 @@ pub mod gemm;
 pub mod ops;
 
 pub use cudarc;
-pub use device::{Device, Stream};
+pub use device::{Device, Graph, Stream};
 pub use gemm::Gemm;
 pub use half::bf16;
 pub use ops::*;

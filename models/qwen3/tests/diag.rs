@@ -67,6 +67,8 @@ fn qwen3_layer_bisect() {
             max_blocks: 64,
         },
         logits_rows: &rows,
+        t,
+        rows: t,
     };
     model.forward(&s, &gemm, &f, &mut logits).unwrap();
     let caps = model.capture_layers.take().unwrap();

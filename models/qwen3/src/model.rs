@@ -58,6 +58,10 @@ pub struct Forward<'a> {
     pub slot_mapping: &'a Tensor<i64>,
     pub meta: AttnMeta<'a>,
     pub logits_rows: &'a Tensor<i32>,
+    /// 本步 token 数（缓冲可以比它大：CUDA graph 的固定地址缓冲按上限分配）。
+    pub t: usize,
+    /// 本步 logits 行数。
+    pub rows: usize,
 }
 
 /// 调试捕获：(layer_idx, attn_out [t*h] f32, 本层输出 hidden [t*h] f32)。
@@ -438,8 +442,12 @@ impl Qwen3Model {
         f: &Forward<'_>,
         logits: &mut Tensor<f32>,
     ) -> Result<()> {
-        let t = f.input_ids.numel();
-        ensure!(t <= self.max_tokens, "forward: {t} tokens > max {}", self.max_tokens);
+        let t = f.t;
+        ensure!(
+            t <= self.max_tokens && t <= f.input_ids.numel(),
+            "forward: {t} tokens > max {}",
+            self.max_tokens
+        );
         let h = self.cfg.hidden_size as usize;
         let v = self.cfg.vocab_size as usize;
         let eps = self.cfg.rms_norm_eps;
@@ -486,9 +494,9 @@ impl Qwen3Model {
                 cap.push((li, a, hd));
             }
         }
-        let rows = f.logits_rows.numel();
+        let rows = f.rows;
         ensure!(
-            rows <= self.max_logits_rows,
+            rows <= self.max_logits_rows && rows <= f.logits_rows.numel(),
             "{rows} logits rows > max_logits_rows {}",
             self.max_logits_rows
         );
