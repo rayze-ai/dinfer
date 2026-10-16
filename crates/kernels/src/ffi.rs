@@ -195,6 +195,7 @@ extern "C" {
         cu_seqlens_q: *const i32,
         out: *mut c_void,
         num_reqs: i64,
+        max_q_len: i64,
         heads: i64,
         kv_heads: i64,
         head_dim: i64,

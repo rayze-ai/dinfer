@@ -1,6 +1,6 @@
 # loop 规格：Q1 Qwen3-0.6B 模型 crate + 真权重对拍
 
-- 状态：已通过（2026-10-15，`scripts/verify/q1.sh` exit 0；见 `test/2026-10-15/q1-qwen3.md`）
+- 状态：已通过（2026-10-15，`scripts/verify/q1.sh` exit 0；见 `test/qwen3/2026-10-15/q1-qwen3.md`）
 - 创建：2026-10-15
 - 验证脚本：`scripts/verify/q1.sh`
 - 迭代记录：`test/YYYY-MM-DD/q1-qwen3.md`

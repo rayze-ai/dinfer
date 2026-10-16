@@ -216,7 +216,7 @@
 - 根因：nvcc 13.0 生成的 host 侧 kernel stub 用了函数内 static 的线程安全初始化（C++ ABI `__cxa_guard_*`）并带异常 personality，需要 libstdc++；`build.rs` 只链了 `cudart`，12.4 的 stub 恰好不引用这些符号。
 - 解法：`kernels/build.rs` 加 `cargo:rustc-link-lib=dylib=stdc++`（12.4 下多链无害，已验证本机仍过）。
 - 如何避免：nvcc 产物当 C++ 对象看待，始终链 `stdc++`；换 CUDA 大版本后先在最小 bin 上做一次完整链接再跑测试。
-- 相关：`crates/kernels/build.rs`、`test/2026-10-16/remote4090-migration.md`
+- 相关：`crates/kernels/build.rs`、`test/qwen3/2026-10-16/remote4090-migration.md`
 
 ## 2026-10-16 4090 上测试二进制 `error while loading shared libraries: libcudart.so.13`
 

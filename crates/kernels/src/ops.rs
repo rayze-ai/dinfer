@@ -1395,6 +1395,7 @@ pub fn gqa_paged_bf16(
     cu_seqlens_q: &CudaSlice<i32>,
     out: &mut CudaSlice<bf16>,
     num_reqs: usize,
+    max_q_len: usize,
     heads: usize,
     kv_heads: usize,
     head_dim: usize,
@@ -1406,6 +1407,7 @@ pub fn gqa_paged_bf16(
         block_table.len() >= num_reqs * max_blocks && seq_lens.len() >= num_reqs,
         "gqa_paged: table/seq_lens"
     );
+    ensure!(max_q_len > 0, "gqa_paged: max_q_len");
     ensure!(cu_seqlens_q.len() > num_reqs, "gqa_paged: cu_seqlens_q");
     ensure!(heads % kv_heads == 0, "gqa_paged: heads % kv_heads");
     let pq = stream.ptr(q) as *const c_void;
@@ -1425,6 +1427,7 @@ pub fn gqa_paged_bf16(
                 pcu,
                 po,
                 num_reqs as i64,
+                max_q_len as i64,
                 heads as i64,
                 kv_heads as i64,
                 head_dim as i64,

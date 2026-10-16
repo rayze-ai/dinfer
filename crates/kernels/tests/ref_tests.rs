@@ -378,6 +378,7 @@ fn gqa_cache_write_and_paged_ref() {
         &dcu,
         &mut out,
         seq_lens.len(),
+        cu_q.windows(2).map(|w| (w[1] - w[0]) as usize).max().unwrap(),
         h,
         hk,
         d,
@@ -387,6 +388,63 @@ fn gqa_cache_write_and_paged_ref() {
     )
     .unwrap();
     assert_close("gqa_paged", &s.dtoh_sync_copy(&out).unwrap(), &want, 1e-2, 1e-2);
+}
+
+/// D=128 paged（flash tile kernel 读 paged cache）：历史 40/70 + 新 5/1 行，block 16。
+#[test]
+#[ignore]
+fn gqa_paged_d128_flash_ref() {
+    let (_d, s) = dev();
+    let (ks, kh) = load_f32("gqa128p_k_hist");
+    let (_, vh) = load_f32("gqa128p_v_hist");
+    let sh = load_i64("gqa128p_slots_hist");
+    let (qs, q) = load_f32("gqa128p_q");
+    let (_, kn) = load_f32("gqa128p_k_new");
+    let (_, vn) = load_f32("gqa128p_v_new");
+    let sn = load_i64("gqa128p_slots_new");
+    let (bts, bt) = load_i32("gqa128p_bt");
+    let (_, seq_lens) = load_i32("gqa128p_seq_lens");
+    let (_, cu_q) = load_i32("gqa128p_cu_q");
+    let (_, want) = load_f32("gqa128p_out");
+    let (_, meta) = load_i32("gqa128p_meta");
+    let (num_blocks, bs) = (meta[0] as usize, meta[1] as usize);
+    let (hk, d) = (ks[1], ks[2]);
+    let (tq, h) = (qs[0], qs[1]);
+    assert_eq!(d, 128);
+    let mut cache = s.alloc_zeros::<bf16>(num_blocks * bs * hk * 2 * d).unwrap();
+    let dkh = s.htod_copy(to_bf16(&kh)).unwrap();
+    let dvh = s.htod_copy(to_bf16(&vh)).unwrap();
+    let dsh = s.htod_copy(sh.clone()).unwrap();
+    dinfer_kernels::gqa_cache_write_bf16(&s, &dkh, &dvh, &mut cache, &dsh, sh.len(), hk, d, bs).unwrap();
+    let dkn = s.htod_copy(to_bf16(&kn)).unwrap();
+    let dvn = s.htod_copy(to_bf16(&vn)).unwrap();
+    let dsn = s.htod_copy(sn.clone()).unwrap();
+    dinfer_kernels::gqa_cache_write_bf16(&s, &dkn, &dvn, &mut cache, &dsn, sn.len(), hk, d, bs).unwrap();
+    let dq = s.htod_copy(to_bf16(&q)).unwrap();
+    let dbt = s.htod_copy(bt).unwrap();
+    let dseq = s.htod_copy(seq_lens.clone()).unwrap();
+    let dcu = s.htod_copy(cu_q.clone()).unwrap();
+    let mut out = s.alloc_zeros::<bf16>(tq * h * d).unwrap();
+    let max_q = cu_q.windows(2).map(|w| (w[1] - w[0]) as usize).max().unwrap();
+    dinfer_kernels::gqa_paged_bf16(
+        &s,
+        &dq,
+        &cache,
+        &dbt,
+        &dseq,
+        &dcu,
+        &mut out,
+        seq_lens.len(),
+        max_q,
+        h,
+        hk,
+        d,
+        bs,
+        bts[1],
+        (d as f32).powf(-0.5),
+    )
+    .unwrap();
+    assert_close("gqa_paged_d128", &s.dtoh_sync_copy(&out).unwrap(), &want, 1e-2, 1e-2);
 }
 
 // ---- Q2 采样：penalties / temperature / min_p / logprobs ----

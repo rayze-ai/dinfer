@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # dinfer vs vLLM 对比压测（在 4090 上跑）。同一 bench 二进制、同 prompt 集（seed）、同 max_tokens、ignore_eos、思考关。
-#   bash scripts/verify/bench_compare.sh [OUT_DIR]      # 默认 test/$(date +%F)/bench
+#   bash scripts/verify/bench_compare.sh [OUT_DIR]      # 默认 test/qwen3/$(date +%F)/bench
 # 矩阵：并发 1 / 8 / 32 × (prompt 128, out 128)，再加一组长 prompt (1024, out 128) 并发 8。每组先 bench --self-check 一次。
 # 环境变量：DINFER_URL / VLLM_URL（默认 :8012 / :8013）、REQS（每组请求数，默认 = 4×并发，最少 16）。
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-OUT="${1:-test/$(date +%F)/bench}"; mkdir -p "$OUT"
+OUT="${1:-test/qwen3/$(date +%F)/bench}"; mkdir -p "$OUT"
 BENCH=./target/release/bench
 [ -x "$BENCH" ] || cargo build --release -p dinfer-bench
 A="${DINFER_URL:-http://127.0.0.1:8012}"

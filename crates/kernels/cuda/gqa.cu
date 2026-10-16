@@ -9,6 +9,7 @@
 //   gqa_prefill_bf16       无历史的 causal prefill，直接读 k/v [T, Hkv, D]（不走 cache；cache 由 cache_write 另写）
 //                          D=128 走 flash 风格 tile kernel（Q3-a，2026-10-16），其他 D 走旧参考实现
 //   gqa_paged_bf16         从 paged cache 读：decode（每请求 1 行）与带历史 chunked prefill（任意 query 长）统一路径
+//                          D=128 同样走 flash 风格 tile kernel（读 paged cache），其他 D 走旧参考实现
 #include "common.cuh"
 #include "dinfer_kernels.h"
 
@@ -284,6 +285,98 @@ __global__ void gqa_paged_kernel(const bf16* __restrict__ q, const bf16* __restr
   }
 }
 
+
+// paged（decode / 带历史 chunked prefill）的 flash 风格版本（D=128）：grid = (ceil(max_q_len / PF_WARPS), H, num_reqs)，
+// 每 warp 一个 query 行；K/V 从 paged cache 按 PF_TILE 个 key 一片装进 shared memory（经 block_table 定位 slot）。
+// query 行 i 的绝对位置 pos = hist + i，可见 key = [0, pos]。decode 时 q_len = 1 → 每 (req, head) 一个 block、一个活跃 warp，
+// 比旧版（256 线程三遍扫）少两遍扫 + 省掉重复的 QK 点积；真正的 decode 并行度提升（split-K）留 Q3-b。
+__global__ void __launch_bounds__(PF_WARPS * 32) gqa_paged_flash_kernel(
+    const bf16* __restrict__ q, const bf16* __restrict__ cache, const int32_t* __restrict__ block_table,
+    const int32_t* __restrict__ seq_lens, const int32_t* __restrict__ cu_seqlens_q, bf16* __restrict__ out, int H,
+    int Hkv, int block_size, int max_blocks, float scale) {
+  const int b = blockIdx.z, h = blockIdx.y;
+  const int hk = h / (H / Hkv);
+  const int q0 = cu_seqlens_q[b], q1 = cu_seqlens_q[b + 1];
+  const int q_len = q1 - q0;
+  const int q_base = blockIdx.x * PF_WARPS;
+  if (q_base >= q_len) return;
+  const int seq_len = seq_lens[b];
+  const int hist = seq_len - q_len;
+  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+  const int qi = q_base + warp;
+  const bool active = qi < q_len;
+  const int32_t* bt = block_table + (int64_t)b * max_blocks;
+
+  __shared__ float sKT[PF_D][PF_TILE];
+  __shared__ float sV[PF_TILE][PF_D];
+  __shared__ float sQ[PF_WARPS][PF_D];
+
+  if (active) {
+    const bf16* qp = q + ((int64_t)(q0 + qi) * H + h) * PF_D;
+    for (int d = lane; d < PF_D; d += 32) sQ[warp][d] = to_f32(qp[d]) * scale;
+  }
+  float m = -INFINITY, l = 0.f;
+  float acc[PF_DPL];
+#pragma unroll
+  for (int c = 0; c < PF_DPL; ++c) acc[c] = 0.f;
+
+  // 本 block 最大可见 key 位置 = hist + 最后一个活跃 query 行
+  const int block_last = hist + min(q_base + PF_WARPS - 1, q_len - 1);
+  const int n_tiles = block_last / PF_TILE + 1;
+  for (int tile = 0; tile < n_tiles; ++tile) {
+    const int k0 = tile * PF_TILE;
+    const int kn = min(PF_TILE, seq_len - k0);
+    __syncthreads();
+    for (int e = threadIdx.x; e < PF_TILE * PF_D; e += PF_WARPS * 32) {
+      const int j = e / PF_D, d = e % PF_D;
+      float kv_k = 0.f, kv_v = 0.f;
+      if (j < kn) {
+        const int pos = k0 + j;
+        const int64_t blk = bt[pos / block_size];
+        const bf16* base = cache + slot_off(blk * block_size + (pos % block_size), Hkv, PF_D) + (hk * 2) * PF_D;
+        kv_k = to_f32(base[d]);
+        kv_v = to_f32(base[PF_D + d]);
+      }
+      sKT[d][j] = kv_k;
+      sV[j][d] = kv_v;
+    }
+    __syncthreads();
+    if (!active) continue;
+    const int valid = min(kn, hist + qi - k0 + 1);
+    if (valid <= 0) continue;
+    float sc = -INFINITY;
+    if (lane < valid) {
+      float acc_s = 0.f;
+#pragma unroll 8
+      for (int d = 0; d < PF_D; ++d) acc_s += sQ[warp][d] * sKT[d][lane];
+      sc = acc_s;
+    }
+    float tmax = sc;
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) tmax = fmaxf(tmax, __shfl_xor_sync(0xffffffffu, tmax, o));
+    const float m_new = fmaxf(m, tmax);
+    const float alpha = __expf(m - m_new);
+    const float pp = (lane < valid) ? __expf(sc - m_new) : 0.f;
+    float psum = pp;
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) psum += __shfl_xor_sync(0xffffffffu, psum, o);
+    l = l * alpha + psum;
+#pragma unroll
+    for (int c = 0; c < PF_DPL; ++c) acc[c] *= alpha;
+    m = m_new;
+    for (int j = 0; j < valid; ++j) {
+      const float pj = __shfl_sync(0xffffffffu, pp, j);
+#pragma unroll
+      for (int c = 0; c < PF_DPL; ++c) acc[c] += pj * sV[j][lane + 32 * c];
+    }
+  }
+  if (!active) return;
+  const float inv = 1.f / l;
+  bf16* op = out + ((int64_t)(q0 + qi) * H + h) * PF_D;
+#pragma unroll
+  for (int c = 0; c < PF_DPL; ++c) op[lane + 32 * c] = to_bf16(acc[c] * inv);
+}
+
 }  // namespace
 
 extern "C" int gqa_cache_write_bf16(const void* k, const void* v, void* cache, const int64_t* slot_mapping,
@@ -318,16 +411,24 @@ extern "C" int gqa_prefill_bf16(const void* q, const void* k, const void* v, voi
 }
 
 extern "C" int gqa_paged_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens,
-                              const int32_t* cu_seqlens_q, void* out, int64_t num_reqs, int64_t heads, int64_t kv_heads,
-                              int64_t head_dim, int64_t block_size, int64_t max_blocks, float scale,
+                              const int32_t* cu_seqlens_q, void* out, int64_t num_reqs, int64_t max_q_len, int64_t heads,
+                              int64_t kv_heads, int64_t head_dim, int64_t block_size, int64_t max_blocks, float scale,
                               cudaStream_t stream) {
   if (num_reqs <= 0) return 0;
-  if (head_dim <= 0 || head_dim > MAX_D || heads <= 0 || kv_heads <= 0 || heads % kv_heads != 0 || block_size <= 0)
+  if (head_dim <= 0 || head_dim > MAX_D || heads <= 0 || kv_heads <= 0 || heads % kv_heads != 0 || block_size <= 0 ||
+      max_q_len <= 0)
     return err(cudaErrorInvalidValue);
-  dim3 grid((unsigned)num_reqs, (unsigned)heads);
-  gqa_paged_kernel<<<grid, GQ_BLOCK, 0, stream>>>(static_cast<const bf16*>(q), static_cast<const bf16*>(cache),
-                                                  block_table, seq_lens, cu_seqlens_q, static_cast<bf16*>(out),
-                                                  (int)heads, (int)kv_heads, (int)head_dim, (int)block_size,
-                                                  (int)max_blocks, scale);
+  if (head_dim == PF_D) {
+    dim3 grid((unsigned)((max_q_len + PF_WARPS - 1) / PF_WARPS), (unsigned)heads, (unsigned)num_reqs);
+    gqa_paged_flash_kernel<<<grid, PF_WARPS * 32, 0, stream>>>(
+        static_cast<const bf16*>(q), static_cast<const bf16*>(cache), block_table, seq_lens, cu_seqlens_q,
+        static_cast<bf16*>(out), (int)heads, (int)kv_heads, (int)block_size, (int)max_blocks, scale);
+  } else {
+    dim3 grid((unsigned)num_reqs, (unsigned)heads);
+    gqa_paged_kernel<<<grid, GQ_BLOCK, 0, stream>>>(static_cast<const bf16*>(q), static_cast<const bf16*>(cache),
+                                                    block_table, seq_lens, cu_seqlens_q, static_cast<bf16*>(out),
+                                                    (int)heads, (int)kv_heads, (int)head_dim, (int)block_size,
+                                                    (int)max_blocks, scale);
+  }
   return last_err();
 }

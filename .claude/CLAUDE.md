@@ -26,7 +26,7 @@
 | `docs/progress.md` | 进度：顶部交接区 + 按日期日志 |
 | `docs/pitfalls.md` | 踩坑：现象 / 根因 / 解法 / 避免 |
 | `docs/loops/<feature>.md` | 需反复调试功能的环境-观察-停止条件 |
-| `test/YYYY-MM-DD/` | 按日期归档的测试结果 |
+| `test/<model>/YYYY-MM-DD/` | 按模型、按日期归档的测试结果与每轮改进记录（用户 2026-10-16 要求：每一轮验证与改进都要记进去）；GLM 线历史在 `test/2026-10-1x/` |
 | `scripts/verify/` | 验证脚本，exit 0 = 通过 |
 | `scripts/dev/` | 启动环境、造数据、清理等 |
 
@@ -53,7 +53,7 @@ rm -f target/.rustc_info.json                     # cargo 报 "failed to run rus
 ## 收功（每次结束前）
 
 用户说"收功 / 收尾 / 今天到这"，或长会话即将压缩、准备关机迁移时，执行 `/project-skill wrap`：
-更新 `docs/progress.md`（重写交接区 + 追加日志）、`docs/pitfalls.md`、归档 `test/YYYY-MM-DD/`、必要时回写本文件。
+更新 `docs/progress.md`（重写交接区 + 追加日志）、`docs/pitfalls.md`、归档 `test/<model>/YYYY-MM-DD/`、必要时回写本文件。
 
 ## 反复调试类功能
 

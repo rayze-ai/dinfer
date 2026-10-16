@@ -217,6 +217,48 @@ fouts = [sdpa_causal_g(fq[a:b], fk[a:b], fv[a:b], FH, FHK, FD) for a, b in zip(f
 save("gqa128_q", fq); save("gqa128_k", fk); save("gqa128_v", fv); save("gqa128_cu", fcu); save("gqa128_prefill_out", torch.cat(fouts))
 print("gqa128 refs: prefill", tuple(torch.cat(fouts).shape))
 
+# paged D=128：2 个请求，历史 40 / 70，新 query 5 / 1（chunked prefill + decode 混批），block_size 16，走 flash paged kernel。
+PBS = 16
+phist = [40, 70]; pnew = [5, 1]
+pk_h = bf(torch.randn(sum(phist), FHK, FD)); pv_h = bf(torch.randn(sum(phist), FHK, FD))
+pq_n = bf(torch.randn(sum(pnew), FH, FD)); pk_n = bf(torch.randn(sum(pnew), FHK, FD)); pv_n = bf(torch.randn(sum(pnew), FHK, FD))
+pblocks_per = [(h_ + n_ + PBS - 1) // PBS for h_, n_ in zip(phist, pnew)]
+pnum_blocks = sum(pblocks_per) + 1
+pbt = torch.full((2, max(pblocks_per)), -1, dtype=torch.int32)
+nb = 0
+for r in range(2):
+    for j in range(pblocks_per[r]):
+        pbt[r, j] = nb; nb += 1
+pcache = torch.zeros(pnum_blocks, PBS, FHK, 2, FD, dtype=torch.bfloat16)
+pslots_h, pslots_n = [], []
+ch = 0
+for r in range(2):
+    for pos in range(phist[r]):
+        blk = pbt[r, pos // PBS].item(); pslots_h.append(blk * PBS + pos % PBS)
+        pcache[blk, pos % PBS, :, 0] = pk_h[ch]; pcache[blk, pos % PBS, :, 1] = pv_h[ch]; ch += 1
+cn = 0
+for r in range(2):
+    for i in range(pnew[r]):
+        pos = phist[r] + i; blk = pbt[r, pos // PBS].item(); pslots_n.append(blk * PBS + pos % PBS)
+        pcache[blk, pos % PBS, :, 0] = pk_n[cn]; pcache[blk, pos % PBS, :, 1] = pv_n[cn]; cn += 1
+pouts = []
+ch = cn = 0
+for r in range(2):
+    kall = torch.cat([pk_h[ch:ch + phist[r]], pk_n[cn:cn + pnew[r]]]); vall = torch.cat([pv_h[ch:ch + phist[r]], pv_n[cn:cn + pnew[r]]])
+    qq = pq_n[cn:cn + pnew[r]]
+    kk = kall.float().repeat_interleave(FH // FHK, dim=1); vv = vall.float().repeat_interleave(FH // FHK, dim=1)
+    s_ = torch.einsum("qhd,khd->hqk", qq.float(), kk) * FD ** -0.5
+    Tq, Tk = qq.shape[0], kall.shape[0]
+    mask = torch.arange(Tk)[None, :] > (torch.arange(Tq)[:, None] + phist[r])
+    s_ = s_.masked_fill(mask[None], float("-inf"))
+    pouts.append(torch.einsum("hqk,khd->qhd", torch.softmax(s_, -1), vv)); ch += phist[r]; cn += pnew[r]
+save("gqa128p_k_hist", pk_h); save("gqa128p_v_hist", pv_h); save("gqa128p_slots_hist", torch.tensor(pslots_h, dtype=torch.int64))
+save("gqa128p_q", pq_n); save("gqa128p_k_new", pk_n); save("gqa128p_v_new", pv_n); save("gqa128p_slots_new", torch.tensor(pslots_n, dtype=torch.int64))
+save("gqa128p_bt", pbt); save("gqa128p_seq_lens", torch.tensor([phist[0] + pnew[0], phist[1] + pnew[1]], dtype=torch.int32))
+save("gqa128p_cu_q", torch.tensor([0, pnew[0], pnew[0] + pnew[1]], dtype=torch.int32))
+save("gqa128p_out", torch.cat(pouts)); save("gqa128p_meta", torch.tensor([pnum_blocks, PBS], dtype=torch.int32))
+print("gqa128 paged refs:", tuple(torch.cat(pouts).shape))
+
 # ---- Q2 采样：penalties / temperature / min_p / logprobs（vLLM 语义）----
 torch.manual_seed(77)
 SB, SV = 4, 512

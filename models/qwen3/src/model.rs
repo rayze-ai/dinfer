@@ -223,6 +223,7 @@ impl Attention {
                 &meta.cu_seqlens.data,
                 &mut self.attn.data,
                 meta.num_reqs,
+                meta.max_seqlen,
                 h,
                 hk,
                 d,

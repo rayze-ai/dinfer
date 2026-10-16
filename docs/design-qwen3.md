@@ -4,9 +4,9 @@
 
 ## 0. 状态
 
-**Q2 通过（2026-10-16，4090 / CUDA 13.0，`scripts/verify/q2.sh`）**：per-request 采样全链路（penalties / temperature / min_p / top-k/p / Philox seed / logprobs）、stop 字符串、n>1、自动 num_blocks、prefix cache 默认开、`/metrics`、32 并发压测无 5xx。实现口径与已知简化见 `docs/loops/q2-serving.md`、`test/2026-10-16/q2-serving.md`。
+**Q2 通过（2026-10-16，4090 / CUDA 13.0，`scripts/verify/q2.sh`）**：per-request 采样全链路（penalties / temperature / min_p / top-k/p / Philox seed / logprobs）、stop 字符串、n>1、自动 num_blocks、prefix cache 默认开、`/metrics`、32 并发压测无 5xx。实现口径与已知简化见 `docs/loops/q2-serving.md`、`test/qwen3/2026-10-16/q2-serving.md`。
 
-**Q1 通过（2026-10-15）**：真权重（bf16 1.5 GB）在本机 3090 上 prefill logits / greedy 32 / 双请求混批 / 真模型 e2e 全部与 HF 一致（`scripts/verify/q1.sh` exit 0；`test/2026-10-15/q1-qwen3.md`）。
+**Q1 通过（2026-10-15）**：真权重（bf16 1.5 GB）在本机 3090 上 prefill logits / greedy 32 / 双请求混批 / 真模型 e2e 全部与 HF 一致（`scripts/verify/q1.sh` exit 0；`test/qwen3/2026-10-15/q1-qwen3.md`）。
 这是项目第一个真权重模型，**用它验证与模型无关的主流程**（design.md §5b：Q2 采样 → Q3 单卡性能 → Q4 PD 分离 → Q5 多卡）。
 对拍口径：真权重 bf16 下 HF 自己 eager vs sdpa 的 logits 差 0.68、第 27 层 hidden 差 9.0，我们的偏差同量级；验收以 "argmax 在 HF top-2 gap > 1.0 的行一致 + greedy 逐 token 全对" 为准。
 性能快照（参考 kernel，未优化）：加载 17 s、prefill 13 token 7 ms、decode ≈ 7.5 ms/步 —— Q3 的起点。

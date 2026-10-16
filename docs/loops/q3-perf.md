@@ -2,11 +2,11 @@
 
 - 状态：进行中（2026-10-16 开）
 - 验证脚本：`scripts/verify/q3.sh`（待写；先用 `scripts/verify/bench_compare.sh` + kernel ref 测试）
-- 迭代记录：`test/2026-10-16/q3-perf.md`
+- 迭代记录：`test/qwen3/2026-10-16/q3-perf.md`
 
 ## 目标
 
-在同卡、同模型、同配置下，dinfer 的 TTFT / TPOT / 吞吐**不低于** vLLM；先做单卡 mix 实例（无 PD）。基线见 `test/2026-10-16/bench/summary.md`：
+在同卡、同模型、同配置下，dinfer 的 TTFT / TPOT / 吞吐**不低于** vLLM；先做单卡 mix 实例（无 PD）。基线见 `test/qwen3/2026-10-16/bench/summary.md`：
 c1 out 221 vs 447 tok/s、c32 2707 vs 8065、c8 p1024 56 vs 1916；TTFT 84 vs 18 ms（p171）、TPOT 3.9 vs 2.1 ms。
 
 ## 范围（按收益排序，一块一轮验收）
@@ -62,3 +62,4 @@ c1 out 221 vs 447 tok/s、c32 2707 vs 8065、c8 p1024 56 vs 1916；TTFT 84 vs 18
 | 0 | 基线 | `bench/summary.md`；1514 token prefill 6.36 s（prefix 不命中）vs vLLM 0.04 s | `gqa_prefill_kernel` 16 个 block 串行遍历 T 个 query、每 query 三遍扫 key | 块 a 开工 |
 | 1 | a prefill attention | 重写为 flash 风格 tile kernel（grid ceil(T/4)×H×reqs，block 4 warp 各一行 query，K/V 32-key tile 进 smem、K 转置，online softmax，causal 只扫到对角 tile；D=128 专用，其他 D 仍走参考 kernel）；新增 D=128 torch 对拍 `gqa_prefill_d128_flash_ref`（3 请求 70/33/5）。3090：gqa 3 个 ref 测试全过 | 旧 kernel：16 block 串行 T 行、每行三遍扫 key；`cold_shape` 实测 T=1514 单次 224 ms × 28 层 = 6.3 s | 4090 验收中：cold_shape / ref / real_parity / bench |
 | 2 | a 验收（进行中） | 4090 release：`cold_shape` gqa_prefill T=1514 **224 ms → 4.5 ms**（50×），T=1900 353 → 6.9 ms；gqa ref 3/3。real_parity 3 个全 FAIL | FAIL 是 `CUDA_ERROR_OUT_OF_MEMORY`：测试默认 device 0，与常驻 dinfer（0.9 利用率、14.5 GiB KV）同卡 | 测试改默认 GPU 2（脚本 `CUDA_VISIBLE_DEVICES`），重跑；服务重启到新 kernel 后再 bench |
+| 3 | a 验收 | 服务重启到新 prefill kernel：单请求 1515 token 冷 prefill **6.36 s → 0.27 s**；启动 3.1 s（tokenizer 0.4 / CUDA 0.66 / 权重+KV 2.0）。但 bench c8 p1024 组仍 TTFT 9.4 s、c1 TTFT 84 → 43 ms | 并发下 scheduler 把"新 prompt 的 prefill"与"别人的 decode"组成混批 → `BatchMode::Paged` → 走的是旧 `gqa_paged_kernel`（同样每 (req,head) 一 block、逐行三遍扫），prefill kernel 根本没被调到 | 把 paged 路径也换成 flash tile kernel（读 paged cache），加 D=128 paged torch 对拍 |

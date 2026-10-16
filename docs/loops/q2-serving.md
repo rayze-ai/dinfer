@@ -3,7 +3,7 @@
 - 状态：**已通过**（2026-10-16，`scripts/verify/q2.sh` exit 0 on 4090 / CUDA 13.0；共 13 轮，a–f 全部完成）
 - 创建：2026-10-16
 - 验证脚本：`scripts/verify/q2.sh`
-- 迭代记录：`test/2026-10-16/q2-serving.md`
+- 迭代记录：`test/qwen3/2026-10-16/q2-serving.md`
 
 ## 目标
 
