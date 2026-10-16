@@ -20,7 +20,7 @@
 
 ## 结论
 
-1. **GPU 时间 dinfer 已不比 vLLM 多**（2.9 vs ≈3.7 ms/step），但端到端 TPOT 反而慢（3.9 vs 2.7 ms）→ 差距在 **GPU 空闲**：每 step 的 CPU 侧（调度 + 7 次 H2D + D2H 同步等待 + 回填）与 GPU 没有重叠。vLLM 是异步调度（CPU 准备下一步时 GPU 跑当前步）。这是 Q3 下一个最大项：**异步 step 流水 / 双缓冲**（我们现在 `runner.execute` 是同步的：launch → `dtoh_sync_copy` 等结果 → 再调度）。
+1. ~~差距在 CPU/GPU 不重叠~~（首版判断，**错**）。executor 内分段实测（4090，c1，2000 步）：upload 41 µs + launch 29 µs + **GPU 等待 2290 µs** = 2.36 ms/step；engine 侧 schedule 1 µs、update 1 µs。即 CPU 开销每步 ≈ 70 µs，GPU 自己就要 2.3 ms —— **是 GPU-bound**。异步流水最多省 70 µs（3%），不做。nsys 的 2.9 ms/step 是把 8 次 prefill 也摊进去的均值，与 decode 图 2.3 ms 不矛盾。真正的余量在图内：480 个 kernel/step，每个有 1–2 µs 的 GPU 侧调度 + 尾部空泡（见下表），以及 decode attention split kernel 本身（17.6 µs × 25 = 0.44 ms）。
 2. GEMM：小 M 的 gemv 路径经微基准确认**不慢于** tensorop（权重 1.5 GB/step 读一遍是 decode 的带宽下限，M ≤ 16 都在这个底上）；GEMM 这块没有算法层面的余量，只剩减少 kernel 数（qkv 拆分并入、q/k norm 融合）。
 3. attention 已持平；norm 多一倍（3 次 vs 2 次）→ e 阶段融合（q_norm/k_norm 并入 qkv GEMM 后处理，rmsnorm+残差已有 fused 版）。
 4. copy_cols（qkv 拆分）0.15 ms/step 纯浪费 → e 阶段让 attention kernel 直接按 stride 读 qkv_buf。

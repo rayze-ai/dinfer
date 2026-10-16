@@ -27,3 +27,4 @@ dinfer 已快一个量级，主因是没有编译期；但 dinfer 的"权重 0.5
 | 12 | d | stage-compare 完成，见 stage/README.md；结论：GPU 时间已追平，差在 CPU/GPU 串行 | 19:3x |
 | 13 | d | TTFT 43 ms = 5 ms prefill + ~38 ms Nagle 停顿（怀疑，待验证） | 19:4x |
 | 16 | d | bench6：TTFT 43→6.5 ms（Nagle 修复），已优于 vLLM；差距全在 execute | 19:5x |
+| 17 | d | 分段实测 GPU-bound（wait 2.29 ms / 2.36 ms）；异步流水放弃，转 kernel 融合 | 20:0x |
