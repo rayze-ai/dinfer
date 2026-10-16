@@ -40,3 +40,4 @@ dinfer 已快一个量级，主因是没有编译期；但 dinfer 的"权重 0.5
 | 27 | e | prefill v3 tensor core：3090 T=1514 2.6→1.34 ms/层 | 22:3x |
 | 28 | e | bench11 v3：c1 1.10× / c8 1.05× / c32 1.00× / c8-long 0.83×（TTFT 85 vs 41）；见 perf-trend.md | 18:4x |
 | 29 | 口径 | bench12（每轮换 seed）：c1 1.12× / c8 1.06× / c32 1.04× / c8-long 0.91×（TTFT 85 vs 68、TPOT 4.0 vs 3.7）；三组反超，只剩 c8-long | 19:1x |
+| 30 | 分解 | nsys c8-long：paged_tc 794 µs/次（prefill_tc 431）占 11.7%，decode_v2 36.5 µs/层占 25.7%；见 stage/c8long_kern.csv | 19:5x |
