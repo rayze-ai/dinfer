@@ -67,6 +67,9 @@ fn main() {
 
     println!("cargo:rustc-link-search=native={cuda_home}/lib64");
     println!("cargo:rustc-link-lib=dylib=cudart");
+    // nvcc 13.0 的 host 侧 stub 用了函数内 static 的线程安全初始化（__cxa_guard_*）与 __gxx_personality_v0，
+    // 需要 C++ 运行时；12.4 的 stub 不需要但多链一个 libstdc++ 无害。
+    println!("cargo:rustc-link-lib=dylib=stdc++");
 }
 
 fn run(cmd: &mut Command, src: &Path) {
