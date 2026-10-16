@@ -201,3 +201,11 @@
 - 解法：先 greedy 跑 24 步，拿每步原始 logits 在 host 侧套同样 mask，选候选最多的一步（实测 step 23，候选 3），用 `prompt + greedy[..step]` 作采样 prompt。
 - 如何避免：分布 / 随机性测试先用 host 参考确认该位置的候选集 ≥ 2；不要默认首 token 有随机性。顺带：N 个 36-token prompt 要一次 prefill 放下，`max_num_batched_tokens` 与 KV 块数要按 `N × ceil(len/16)` 算（100 × 3 块 → 预算 8192、512 块）。
 - 相关：`crates/qwen3/tests/sampling_parity.rs::mask_and_distribution_match_host_reference`
+
+## 2026-10-16 远端编译 cudarc 报 `E0428: the name CUDA_VERSION is defined multiple times`
+
+- 现象：4090 机器上装了 CUDA 13.0 后，`CUDARC_CUDA_VERSION=13000 cargo build` 在 `Compiling cudarc v0.18.2` 处报 `CUDA_VERSION` 重定义。
+- 根因：Cargo.toml 固定了 feature `cuda-12040`（本机 3090 / CUDA 12.4），cudarc 的 build.rs 发现环境变量时**额外**再 `rustc-cfg=feature="cuda-13000"`，于是两个版本 cfg 同时为真。
+- 解法：feature 改为 `cuda-version-from-build-system`，cudarc 在 build 时跑 `nvcc --version` 自动探测；本机得 12.4、远端得 13.0。不再设 `CUDARC_CUDA_VERSION`。
+- 如何避免：多机器多 CUDA 版本时不要在 Cargo.toml 固定 `cuda-NNNN0`；确保 build 时 `PATH` 里的 `nvcc` 就是 `CUDA_HOME` 那个（`env.sh` 已保证）。
+- 相关：`scripts/dev/README-remote4090.md`、`Cargo.toml` `[workspace.dependencies] cudarc`
