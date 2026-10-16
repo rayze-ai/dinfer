@@ -1,5 +1,7 @@
 # 整体设计与实现计划
 
+> 2026-10-16 拆分：模型相关内容（结构事实、模块表、状态、风险）移到 `design-kimik3.md` / `design-glm53.md` / `design-qwen3.md`，本文件只放整体架构、共性模块、阶段计划、性能分析、决策。
+
 > 依据：vLLM main `de8291e`（2026-10-13，对应 0.31.0）源码，位于 `/data/ref/vllm`；
 > 两模型 HF 仓库文件位于 `/data/ref/models/{kimik3,glm53}`。本文所有行号 / 文件名均指这两处。
 
@@ -75,7 +77,6 @@ CUDA graph 要点：key 是 `BatchDescriptor{num_tokens(padded), num_reqs, unifo
 - **默认 batch 预算**按显存：≥160 GB → 16384 tokens / 1024 seqs；≥70 GB → 8192 / 1024；否则 2048 / 256（`arg_utils.py:2910`）。
 - **capture sizes**：`[1,2,4] + 8..256 step 8 + 256..max step 16`，`max = min(max_num_seqs × (1+k) × 2, 512)`（sm100 为 1024）（`config/vllm.py:2292`）。
 - **tokenizer / renderer / parser 的模式选择**按架构名（`config/model.py:736`）：`KimiK3ForConditionalGeneration → kimi_k3`（HF tokenizer 类 + `KimiK3Renderer` + `KimiK3Parser`）；`GlmMoeDsaForCausalLM` **不在特判列表**，走 `auto/hf`：标准 HF tokenizer + jinja 模板 + 通用 reasoning/tool parser（GLM 的 `<think>` 与 `<tool_call>` 格式）。`deepseek_v32` 模式的 DSML parser 与 GLM 无关。
-- **K3 输出格式**（`reasoning/kimi_k3_reasoning_parser.py`、`tool_parsers/kimi_k3_tool_parser.py`）：思考段 `<|open|>think<|sep|>…<|close|>think<|sep|>`，回复段 `<|open|>response<|sep|>…`，工具调用 `<|open|>tools<|sep|><|open|>call tool="…" index="…"<|sep|><|open|>argument key=… type=…<|sep|>…`；`type="string"` 原文，其他 JSON 解码，属性做 `&quot;`/`&amp;` 反转义。输出可能一开始就在 think 段内。
 - **服务器代码位置**：`entrypoints/openai/api_server.py` 已是废弃转发；真实现在 `entrypoints/launchers/`（路由表 `launchers/api_server/routers.py`，chat 处理 `openai/chat_completion/serving.py`）。
 
 ### 1.5 可以丢掉的东西
@@ -83,52 +84,23 @@ CUDA graph 要点：key 是 `BatchDescriptor{num_tokens(padded), num_reqs, unifo
 LoRA、Pooling/Embedding、Encoder-Decoder、CPU/XPU/ROCm/TPU、Ray、PP、EPLB、KV connector / P-D 分离、sleep mode、plugins、torch.compile、通用 HF 模型加载、PromptAdapter、Diffusion scheduler。
 **保留**：TP（后期）、EP（Kimi 896 专家几乎必须）、chunked prefill、prefix cache、spec decode（MTP）、structured output（可后置）、多模态（仅 Kimi 图像）。
 
-## 2. 两个模型的结构事实
+## 2. 模型
 
-### 2.1 Kimi-K3（`moonshotai/Kimi-K3`，`KimiK3ForConditionalGeneration`）
+每个模型一个 crate、一份设计文档。结构事实、模块表、实现状态、模型特有风险都在各自文件里，本文件只放共性。
 
-| 项 | 值 |
-|---|---|
-| 规模 | 2.8T 总 / 104B 激活；safetensors 1.56 TB（MXFP4 专家 + bf16 其余）；96 shards |
-| 文本主干 | 93 层，hidden 7168，vocab 163840，1M 上下文，bf16，RMSNorm eps 1e-5 |
-| 层类型 | `linear_attn_config.kda_layers` 为 1-based；0-based 第 3,7,11,…,91,92 共 **24 层 MLA**，其余 **69 层 KDA** |
-| 稠密层 | `first_k_dense_replace=1`：第 0 层 MLP（intermediate 33792），其余 92 层 MoE |
-| KDA | 96 头 × 128；`in_proj_qkvgfab` = q,k,v,g（各 7168→12288）+ f_a（→128）+ b（→96）；`f_b_proj` 128→12288；`q/k/v_conv1d` 短卷积核 4；`A_log[96]`、`dt_bias[12288]`；`o_norm`（gated RMSNorm）；`o_proj` 12288→7168；`gate_lower_bound=-5.0`，`use_full_rank_gate` |
-| KDA 状态 | 每层每请求：conv state `[3*12288, 3]` bf16 + 递归状态 `[96,128,128]` fp32 ≈ 6.5 MB |
-| MLA | q_lora 1536，kv_lora 512，nope 128，rope 64，v 128，96 头；**`mla_use_nope=True` → 无 RoPE**；`mla_use_output_gate=True` → sigmoid 门 `g_proj`，与 q_a/kv_a 合并为 `fused_qkv_a_g_proj`；KV 每 token 576 维（512+64）bf16 |
-| MoE | 896 routed / top-16 / 2 shared（shared intermediate 2×3072）；**latent MoE**：`routed_expert_down_proj` 7168→3584 → 专家在 3584 维工作（w1/w3: 3584→3072, w2: 3072→3584）→ `routed_expert_norm` → `routed_expert_up_proj` 3584→7168；路由 sigmoid + `e_score_correction_bias` + noaux_tc，1 组，renormalize，scaling 1.0，fp32 logits |
-| 激活 | `situ`（beta 4.0，linear_beta 25.0）：`SituAndMul`，专家与 shared/dense 均用 |
-| 量化 | compressed-tensors `mxfp4-pack-quantized`，group 32，scale uint8(e8m0)，**仅 routed experts** 的 `w1/w2/w3.weight_packed/weight_scale`；attn、shared、dense MLP、lm_head、vision 均 bf16 |
-| AttnRes | `attn_res_block_size=12` → 8 个块（写入层 0,12,…,84）；每层 `self_attention_res_proj`/`mlp_res_proj`（7168→1）+ 对应 RMSNorm；模型级 `output_attn_res_proj/norm`。融合算子 `models/kimi_k3/nvidia/ops/attn_res.py` 需逐行移植 |
-| 视觉 | MoonViT 27 层，hidden 1024，patch 14，`patchmergerv2` 投影到 7168；占位 token 163605；复用 `kimi_k25_vit.py` |
-| MTP | `KimiK3MTP`：enorm/hnorm/eh_proj(2h→h) + 一个无 AttnRes 的 `KimiDecoderLayer`（MLA）+ shared head |
-| Tokenizer | tiktoken BPE（`tiktoken.model`），自定义 `pat_str`，256 保留特殊 token；chat 为 XTML 格式（`<|open|> <|close|> <|sep|> <|end_of_msg|>`，`encoding_k3.py` 750 行需移植） |
-| 推理参数 | 始终 thinking，`reasoning_effort ∈ {low,high,max}`；多轮必须回传 `reasoning_content` |
+| 模型 | crate | 设计文档 | 状态（2026-10-15） |
+|---|---|---|---|
+| Kimi-K3 | `dinfer-kimik3` | `design-kimik3.md` | ⏸ 挂起（只有 config），等 ≥ 8×H200 |
+| GLM-5.3 | `dinfer-glm53` | `design-glm53.md` | ✅ P3–P6 tiny fixture 全过；真权重挂起 |
+| Qwen3-0.6B | `dinfer-qwen3` | `design-qwen3.md` | ✅ Q1 真权重通过；主流程验证模型（Q2–Q5） |
 
-权重名（层内）：`language_model.model.layers.N.{input_layernorm, post_attention_layernorm, self_attention_res_norm/proj, mlp_res_norm/proj, self_attn.*, block_sparse_moe.{gate.weight, gate.e_score_correction_bias, experts.E.w1/w2/w3.weight_packed/weight_scale, shared_experts.gate_proj/up_proj/down_proj, routed_expert_down_proj/up_proj/norm}}`；
-顶层 `language_model.model.embed_tokens / norm / output_attn_res_norm / output_attn_res_proj`、`language_model.lm_head`、`vision_tower.*`、`mm_projector.*`。
-vLLM 的融合规则（`model.py:1110` `packed_modules_mapping`）：`gate_up_proj=[gate,up]`、`in_proj_qkvgfab=[q,k,v,b,f_a]`、`conv1d=[q,k,v conv]`、`fused_qkv_a_g_proj=[q_a, kv_a_with_mqa, g]`、专家 `w13=[w1,w3]`。
-
-### 2.2 GLM-5.3（`zai-org/GLM-5.3`，`GlmMoeDsaForCausalLM` → vLLM 复用 `deepseek_v32`）
-
-| 项 | 值 |
-|---|---|
-| 规模 | safetensors 755 GB（FP8），141 shards；≈ 740B 总参数 |
-| 主干 | 78 层，hidden 6144，vocab 154880，1M 上下文，bf16 计算 / FP8 权重 |
-| 稠密层 | 0,1,2 层 MLP（intermediate 12288），3–77 MoE |
-| MLA | q_lora 2048，kv_lora 512，64 头，nope 192，rope 64，v 256；`fused_qkv_a_proj` = q_a(6144→2048) ∥ kv_a_with_mqa(6144→576)；`q_a_layernorm`、`kv_a_layernorm`；`q_b_proj` 2048→64×256；`kv_b_proj` 512→64×(192+256)；`o_proj` 64×256→6144；RoPE theta 8e6 default 型，`rope_interleave=True`（非 neox）；KV 每 token 576 维 |
-| DSA 索引器 | 32 头 × 128；`wq_b` 2048→4096，`wk_weights_proj` 6144→(128+32)，`k_norm` LayerNorm fp32；索引 K cache 为 fp8 `128 + 4` 字节/token；`index_topk=2048`；**有索引器的层**：0,1,2 及 6,10,…,74（`skip_topk = max(l-3+1,0)%4 != 0`），其余层 `shared`，复用 `topk_indices_buffer[max_num_batched_tokens, 2048]`；MTP 层总带索引器 |
-| MoE | 256 routed / top-8 / 1 shared（2048）；sigmoid + bias + noaux_tc，1 组，`norm_topk_prob`，`routed_scaling_factor=2.5`，router fp32；SiLU |
-| 量化 | FP8 e4m3，块 128×128 `weight_scale_inv`，激活 per-token-group(1×128) 动态量化；`modules_to_not_convert` 列出若干 norm / bias / `kv_a_layernorm` |
-| MTP | `num_nextn_predict_layers=1`，权重在 `model.layers.78.*` |
-| Tokenizer | HF `tokenizer.json`；chat 模板：`[gMASK]<sop>` 前缀，`<|system|>` 注入 `Reasoning Effort: Low/High/Max`，角色 `<|user|> <|assistant|> <|observation|>`，`<think>…</think>`，工具调用 `<tool_call>name<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>`；eos `[154820,154827,154829]` |
-
-vLLM 的 GLM 特判只有一处：`model_type == "glm_moe_dsa"` 时启用 `glm52_low_latency_gemm`（`deepseek_v32/nvidia/model.py:437`），结构上与 DeepSeek-V3.2 完全一致。
-
-### 2.3 两模型共享的部分
+### 2.1 模型间共享的部分
 
 MLA 投影与吸收（W_UK 吸进 q、W_UV 吸进 o）、paged MLA decode kernel、分块 prefill、sigmoid+bias 分组 top-k 路由、shared expert、MTP 结构（enorm/hnorm/eh_proj）、1M 上下文、`reasoning_effort` 三档。
 差异：KDA（仅 K3）、DSA 索引器（仅 GLM）、MXFP4 vs FP8、latent MoE（仅 K3）、AttnRes（仅 K3）、视觉（仅 K3）、tokenizer 与 chat 格式。
+
+Qwen3 与上面两者的交集更小：只共享 RMSNorm / RoPE（neox）/ SwiGLU / GEMM / scheduler / runner / engine / server / tokenizer / 模板层；
+attention 是标准 GQA（`kernels/cuda/gqa.cu`，`KvCacheSpec::FullAttention`），没有 MLA、MoE、索引器、MTP。
 
 ## 3. Rust 工作区
 
@@ -260,40 +232,11 @@ server/src/
 
 无鉴权，默认只监听 127.0.0.1；对外暴露需反代加鉴权（在 requirements 约束里写明）。
 
-### 4.5 `dinfer-kimik3`
+### 4.5 模型 crate
 
-```
-kimik3/src/
-  config.rs      KimiK3Config{text: KimiLinearConfig, vision}  ← configuration_kimi_k3.py
-  model.rs       KimiK3Model：embed → 93×KimiDecoderLayer(AttnRes 状态 prefix_sum) → output_attn_res → norm → lm_head
-  layer.rs       KimiDecoderLayer{attn: Kda|Mla, mlp: Dense|LatentMoe, attn_res: Option<AttnRes>}
-  kda.rs         KdaAttention：in_proj_qkvgfab 拆分、conv、f_b/beta/gate 计算、chunk prefill / recurrent decode、o_norm、o_proj；KvCacheSpec::Mamba
-  attn_res.rs    块前缀和管理（8 块）、调 kernels::attn_res
-  latent_moe.rs  down_proj → router ∥ → experts(mxfp4, situ) → norm → up_proj(+shared 残差)
-  vision/        MoonViT3d、PatchMergerV2、图像预处理（kimi_k3_vision_processing.py 移植）、token 数公式
-  mtp.rs         KimiK3Mtp（DraftModel）
-  tokenizer.rs   tiktoken BPE + 自定义 pat_str + 256 特殊 token
-  xtml.rs        encoding_k3.py 移植：build_chat_segments → EncodeSegment{text, allow_special}
-  parser.rs      思考段 / 工具调用流式解析（对照 vllm/parser/kimi_k3.py、reasoning/kimi_k3_reasoning_parser.py、tool_parsers/kimi_k3_tool_parser.py；格式见 §1.4b）
-  weights.rs     名字映射与融合规则（见 2.1）；MXFP4 专家权重按 [E, 2*I, H/2] 打包
-```
-
-### 4.6 `dinfer-glm53`
-
-```
-glm53/src/
-  config.rs      GlmMoeDsaConfig ← config.json（含 indexer / rope_parameters / quantization_config）
-  model.rs       embed(+fused 首层 norm) → 78×DecoderLayer → norm → lm_head
-  layer.rs       DecoderLayer{attn: DsaMla, mlp: Dense(0..3)|Fp8Moe}
-  dsa.rs         DsaMlaAttention：fused_qkv_a → q_a_norm/kv_a_norm/rope → (indexer: wq_b, wk_weights_proj, k_norm, fp8 logits, topk→buffer) → 稀疏 MLA；shared 层读 buffer
-  indexer.rs     Indexer 权重与 fp8 索引 K cache（KvCacheSpec::Indexer）
-  moe.rs         FP8 块量化 MoE：router(sigmoid+bias, top8, norm, ×2.5) → grouped fp8 gemm → shared
-  mtp.rs         GlmMtp（DraftModel，layer 78，带索引器）
-  tokenizer.rs   tokenizers::Tokenizer 加载 tokenizer.json；eos 集合
-  chat.rs        minijinja 跑 chat_template.jinja；reasoning_effort、clear_thinking
-  parser.rs      <think>…</think> 与 <tool_call>name<arg_key>k</arg_key><arg_value>v</arg_value></tool_call> 流式解析（vLLM 对 GLM 走通用 hf 模式，无专用 parser；对照 vllm/reasoning、vllm/tool_parsers 中 glm4_moe 系列实现）
-  weights.rs     名字映射：fused_qkv_a=[q_a, kv_a_with_mqa]、gate_up=[gate,up]、wk_weights_proj=[wk, weights_proj]、experts w13/w2 + weight_scale_inv；跳过 layers.78 交给 MTP
-```
+`dinfer-kimik3` / `dinfer-glm53` / `dinfer-qwen3` 的模块表见各自的 `design-<model>.md` §2。
+模型 crate 只做组装（config → layers 组件 → Model/Executor → Service）；可复用的层（MLA、MoE、Indexer、GQA attention、Mlp、RmsNorm、Rope、WeightSource）都在 `dinfer-layers`，
+tokenizer / chat 模板在 `dinfer-text`。
 
 ## 5. 分阶段计划
 
@@ -329,12 +272,8 @@ glm53/src/
 **与模型无关的主流程**：真权重端到端、采样、性能（CUDA graph / 融合 / pinned / 双缓冲）、**PD 分离（prefill-decode disaggregation）**。
 kimik3 / glm53 只是"不同模型的实现"，当前进度记为阶段性成果，等有资源再做 P7–P9 与真权重验收。
 
-**Qwen3-0.6B 结构事实**（`/data/ref/models/qwen3-0.6b/config.json`）：28 层、hidden 1024、16 q 头 / 8 kv 头、head_dim 128、
-q_norm / k_norm（per-head RMSNorm，在 RoPE 之前）、neox RoPE θ=1e6、SwiGLU intermediate 3072、tied embeddings、vocab 151936、
-eos {151645, 151643}、无 sliding window、无 bias。chat 模板：`<|im_start|>role\n…<|im_end|>`，`enable_thinking` 控制 `<think>` 段，
-tool_call 为 JSON `{"name","arguments"}`。
-与现有代码的差异：需要 **GQA paged attention kernel**（prefill / decode / paged，K/V 分开存，`[num_blocks, block_size, kv_heads, head_dim]`）
-与 `KvCacheSpec::FullAttention`；其余（RMSNorm、neox RoPE、SwiGLU、GEMM、scheduler、runner、engine、server、tokenizer、minijinja 模板）全部复用。
+**Qwen3-0.6B 结构事实与模块表**见 `design-qwen3.md`。
+
 
 **新阶段编号用 Q 前缀**（与 P7–P10 并存，P 系列挂起）：
 
@@ -366,16 +305,14 @@ PD 分离的详细设计写进 §10（待补），动代码前先定：KV 传输
 - **sm86 限制**：无 FP8 张量核（sm89+）、无 MXFP4（sm100）；FlashMLA 要 sm90。所以 P3–P9 的本地验证全走参考 kernel，性能阶段 P10 必须在目标机器上做。
 - **4090（sm89）的增量**：只多 FP8 张量核，GLM 的 FP8 块 GEMM / FP8 KV cache / FP8 激活量化可本地真算（`fp8_utils.py:961` Triton 路径、`triton_mla.py:200`）。FlashMLA、DSA 稀疏 attention、索引器 top-k 快路径、原生 KDA decode、MXFP4 原生仍需 sm90/sm100；显存同为 24 GB。值得加，但不改变"参考 kernel 先行"的策略。
 - **开发是否需要常驻 sm90：不需要**。P0–P9 的全部工作（core、server、模型结构、参考 kernel、CUDA graph、算子融合）在 sm8x 上可完成。只有两件事依赖 sm90：第三方快路径库（FlashMLA / DeepGEMM / FlashKDA）的集成验证，以及 P10 性能对比。做法：日常在 3090/4090；在 P3 和 P6 两个节点各租一次单卡 H100（数小时到一天）验证快路径集成；P10 在目标机器。规避"参考版与快路径布局不一致"风险的关键：参考 kernel 的 KV page 布局、fp8 scale 格式（ue8m0、1×128 组）、conv state 维度顺序，从一开始就按快路径库的要求定，接口签名对齐，后期只换实现不换数据结构。
-- **KDA kernel 移植量大**：vLLM 的 KDA 是 Triton（`third_party/flash_linear_attention/ops/kda.py` ~1500 行 + K3 私有 `kda.py` 1372 行 + `kda_metadata.py` 752 行）。两条路：手写 CUDA；或用 Triton AOT 编译成 PTX 嵌入 Rust（保留算法，省掉翻译）。P7 开始前定。
-- **MXFP4 格式**：compressed-tensors 的 `weight_packed`（两 fp4 一字节）+ e8m0 scale（group 32）；vLLM 在非 sm100 上的路径（`quantization/mxfp4.py`）要确认是否有 Marlin 风格回退可参考。
-- **chat 格式正确性**：K3 的 XTML 与 GLM 的 jinja 都要和官方 tokenizer 输出逐 token 一致，否则模型行为偏差难查。需要 golden 测例（可用 HF `apply_chat_template` 生成）。
+- **chat 格式正确性**：每个模型的模板渲染都要和 HF `apply_chat_template(tokenize=False)` 逐字符一致（golden 由 `gen_*_golden.py` 生成，`chat_parity` 验证）；已对 GLM-5.3（15 case）、Qwen3（9 case）做到。
 - **1M 上下文**：block table、索引 top-k 缓冲、KDA 状态都按 `max_model_len` 预留；默认先按 128K 开发，参数可调。
 
 ## 8. vLLM 性能瓶颈分析与本次重构的规避策略
 
 > 目标之一是性能超越 vLLM。本节列出 vLLM 当前架构中的开销来源，标注"源码核实"（有文件:行号）与"经验判断"（社区 profiling 共识，需在 P10 实测确认），并给出 Rust 侧对策。
 
-### 9.1 开销清单
+### 8.1 开销清单
 
 | # | 瓶颈 | 性质 | 证据 | 影响场景 | Rust 对策 |
 |---|---|---|---|---|---|
@@ -396,7 +333,7 @@ PD 分离的详细设计写进 §10（待补），动代码前先定：KV 传输
 | B15 | **内存 profiling 偏保守** | 配置级 | `gpu_memory_utilization` 默认 0.92；profile_run 后再扣 cudagraph 估算（`gpu_worker.py:740`） | KV 容量 = 并发上限 | 精确记账：权重、激活峰值（按 max_num_batched_tokens 解析式算，不靠 dummy run）、图内存（捕获后实测）；默认 utilization 0.95 |
 | B16 | **投机解码的 draft 与 verify 分开 launch，且 draft 结果回 CPU** | 结构性 | `core.py:693 take_draft_token_ids`（非 async 时）；async 时在 worker 内 | MTP 每 step 两次 forward | draft 与 target 共享 CUDA graph（target forward → sampler → MTP forward → draft sample 全部在一张 FULL 图内）；draft token 留在 GPU，CPU 只拿接受数 |
 
-### 9.2 算子融合清单（decode 路径，每层目标 launch 数）
+### 8.2 算子融合清单（decode 路径，每层目标 launch 数）
 
 **GLM-5.3 MoE 层**（现状约 14 launch）→ 目标 5：
 1. `fused_qkv_a_proj` + `wk_weights_proj` 合并为一个 GEMM（vLLM 已部分做：`fused_norm_rope`）
@@ -415,13 +352,13 @@ PD 分离的详细设计写进 §10（待补），动代码前先定：KV 传输
 
 **跨层**：相邻层的"residual add + RMSNorm"全部融进前一个 GEMM 的 epilogue（vLLM 的 `fused_allreduce_rms_norm` 在 TP 下做了同类事）。
 
-### 9.3 与 vLLM 的关系：哪些直接对标，哪些另起
+### 8.3 与 vLLM 的关系：哪些直接对标，哪些另起
 
 - **直接对标**（vLLM V2 已是最优形态，照搬设计）：GPU 常驻 block table + kernel 算 slot mapping；UVA/pinned 请求元数据；async scheduling 的 placeholder 机制；AsyncOutput copy stream；`fused_norm_rope` / `fused_q` 这类模型内融合算子；MegaMoE 的 symm buffer EP。
 - **另起**（Python 架构决定的，Rust 不必背）：进程边界（B2）、GC（B3）、GIL（B4）、解释器开销（B1）、Python 层 tokenizer/模板/detokenize（B11、B12）。
 - **vLLM 也没解决、我们要试的**：breakable cudagraph 的断点（B7）；MoE 路由链融合（B8）；K3 gate+down_proj 合并 GEMM；draft+target 同图（B16）。
 
-### 9.4 性能验收与基准方法
+### 8.4 性能验收与基准方法
 
 - **基线**：同机、同权重、同 `max_num_seqs / max_num_batched_tokens / 量化 / 投机设置` 下跑 vLLM（固定到 `de8291e`），用同一套 benchmark 脚本（`scripts/bench/`，Rust 写，OpenAI 兼容接口打流量）。
 - **指标**：TTFT P50/P99、TPOT P50/P99、单卡 tokens/s（decode）、prefill tokens/s、每 step CPU 时间（引擎内部计时导出到 `/metrics`）、KV 利用率。

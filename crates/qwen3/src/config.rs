@@ -81,7 +81,7 @@ impl Qwen3Config {
 mod tests {
     use super::*;
 
-    /// 真 config.json 的结构事实（design.md §5b）。文件不在仓库里：没有就跳过。
+    /// 真 config.json 的结构事实（docs/design-qwen3.md §1）。文件不在仓库里：没有就跳过。
     #[test]
     fn real_qwen3_0_6b_config() {
         let Ok(s) = std::fs::read_to_string("/data/ref/models/qwen3-0.6b/config.json") else { return };

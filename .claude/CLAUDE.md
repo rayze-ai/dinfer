@@ -13,7 +13,7 @@
 用 Rust 重写 vLLM v1 引擎主干（启动 / 调度 / KV / 执行 / 采样 / HTTP），去掉通用插件层，目标之一是性能超越 vLLM（瓶颈分析见 design.md §8）；
 每个模型一个 crate：Kimi-K3、GLM-5.3、**Qwen3-0.6B**（2026-10-15 起用它做主流程验证：真权重 / 采样 / 性能 / PD 分离，因为暂无高端卡；K3/GLM 真权重挂起，见 design.md §5b）。构建 = `core + server + 一个模型 crate`（cargo feature）。
 分析基线：vLLM main `de8291e`（0.31.0），源码在 `/data/ref/vllm`；模型 HF 文件在 `/data/ref/models/{kimik3,glm53,qwen3-0.6b}`（qwen3 含真权重；均不进仓库）。
-详细模块划分与分阶段计划见 `docs/design.md`。
+详细模块划分与分阶段计划见 `docs/design.md`；各模型的结构事实 / 模块 / 状态见 `docs/design-{kimik3,glm53,qwen3}.md`。
 
 ## 目录约定
 
@@ -21,7 +21,7 @@
 |---|---|
 | `.claude/CLAUDE.md` | 本文件，项目记忆（短、稳定） |
 | `docs/requirements.md` | 需求与验收口径 |
-| `docs/design.md` | 整体设计、关键决策 |
+| `docs/design.md` | 整体设计、关键决策；`design-<model>.md` 每模型一份 |
 | `docs/progress.md` | 进度：顶部交接区 + 按日期日志 |
 | `docs/pitfalls.md` | 踩坑：现象 / 根因 / 解法 / 避免 |
 | `docs/loops/<feature>.md` | 需反复调试功能的环境-观察-停止条件 |

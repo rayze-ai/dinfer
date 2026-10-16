@@ -11,10 +11,11 @@
 - P5 对拍口径（重要，后续 P6+ 沿用）：硬判决（索引器 top-k、MoE 路由）bf16 下不可逐位复现 → ① 注入 HF top-k 逐层隔离比每层自算 top-k；② 行过滤用 **实测 hidden 漂移**（注入后逐层比 hidden > 0.02），不用路由 margin 代理；③ HF 全序列重算在 bf16 下 **不前缀稳定**（5/256 前缀行 top-k 在加 2 个 token 后翻转），fixture 每步导出前缀漂移，命中的 decode 步不断言。详见 pitfalls 2026-10-15 三条、`test/2026-10-15/p5-dsa-parity.md`
 - P5 已知简化（P10 / 真机补）：索引器 K cache bf16（真机 fp8 + scale）；索引分数 kernel 按 head 循环、top-k 单 block K 轮 argmax（真机 DeepGEMM fp8_mqa_logits + radix top-k）；稀疏 attention 仍是参考 kernel 逐 key gather；tiny fixture 用 `wq_b/wk ×6`、`mlp.gate ×8` 放大分差（真模型训练后自然有分辨力）
 - **方向调整（2026-10-15，用户决定）**：暂无高端卡，GLM/K3 真权重验收挂起；先做 **Qwen3-0.6B**（本机 3090 跑真权重）验证主流程：Q1 模型 crate + 真权重对拍 → Q2 采样/请求功能 → Q3 单卡性能 → Q4 PD 分离（design.md §5b）。参考材料已下载到 `/data/ref/models/qwen3-0.6b`（config / tokenizer / 模板 / 1.5 GB 权重）；HF golden 在 `test/qwen3_golden/`（不进 git）
+- 设计文档：`docs/design.md`（整体）+ `docs/design-{kimik3,glm53,qwen3}.md`（每模型：状态 / 结构事实 / 模块 / 风险 / 参考），2026-10-16 拆分
 - 阶段：**Q1 通过**（2026-10-15，`scripts/verify/q1.sh` exit 0）：Qwen3-0.6B **真权重** 在 3090 上 prefill logits / greedy 32 / 双请求混批 / 真模型 e2e 全部与 HF 一致（见 `test/2026-10-15/q1-qwen3.md`）。产出：`crates/text`（模型无关 tokenizer + chat 模板，glm53 已切过去）、`kernels/cuda/gqa.cu` + `KvCacheSpec::FullAttention`、`crates/qwen3`（config/model/executor/parser/service）、`bins/dinfer --features qwen3`、`gen_qwen3_golden.py`、`docs/loops/q1-qwen3.md`（4 轮）。性能快照（参考 kernel）：加载 17 s、prefill 13 tok 6.9 ms、decode ≈ 7.5 ms/步
 - 下一步：**Q2 采样 + 请求功能**（design.md §5b）：接 P2 的 `topk_topp_mask` + Philox `sample` 到 executor（temperature / top_p / top_k / min_p / repetition / seed）、stop 字符串、logprobs、`n>1`、prefix cache 开启、`/metrics`、按显存算 `num_blocks`。开工先 `/project-skill loop q2-sampling` 写规格。诊断工具：`crates/qwen3/tests/diag.rs`（逐层 bisect，需 `/tmp/qwen3_hf` dump）
 - 代码命名规则（用户要求）：代码 / 脚本 / 环境变量不出现 `DINFER` 前缀（已改 `TINY_GLM_DIR / KERNEL_REFS_DIR / CUDA_ARCHS / PY_TF519 / P1_SCHED_US`）；C ABI 符号不带 `dinfer_`
-- P1–P3 产出：见 `docs/design.md` §4 模块表与各阶段 commit（P1 scheduler/KV、P2 参考 kernel + cuBLASLt GEMM、P3 MLA dense 主干 + WeightSource）；P2 约定 **C ABI 符号不带 `dinfer_` 前缀**
+- P1–P3 产出：见 `docs/design.md` §4 模块表（模型 crate 见 `design-<model>.md`）与各阶段 commit（P1 scheduler/KV、P2 参考 kernel + cuBLASLt GEMM、P3 MLA dense 主干 + WeightSource）；P2 约定 **C ABI 符号不带 `dinfer_` 前缀**
 - P4 产出：`kernels/cuda/moe.cu`（gate_f32 / route / bucket / gather / scatter_add / f32_add_to_bf16）、`kernels/cuda/mla.cu::mla_prefill_paged`、`layers/src/moe.rs`、`layers/src/mla.rs::AttnMeta::Paged + absorbed_q/absorbed_o`、`core/src/runner.rs`（ReqState / BatchPlan / BatchMode / ModelExecutor / Runner）、`glm53/src/{model.rs::Glm53Model+FeedForward, executor.rs::Glm53Executor}`、`glm53/tests/{tiny_parity,runner_parity}.rs`、`scripts/verify/p4.sh`、`docs/loops/p4-moe-runner.md`
 - P4 已知简化（P10 / 后续补）：runner 每 step 全量 H2D 输入、argmax 后同步 D2H，无 pinned / 双缓冲 / CUDA graph；MoE 逐专家循环 + 一次 D2H 读 offsets（真机换 grouped GEMM）；Decode/Paged 路径每 head 一次小 GEMM（W_UK/W_UV）；fp8 只做加载期 dequant（sm86 无 fp8 张量核，1×128 激活量化 + 真 FP8 GEMM 留 4090/sm90）；采样只有 greedy；无投机解码；只支持单 KV group
 - 环境：本机 3090（sm86）日常开发；k8s `admin@polaris` 两节点各 8 × RTX 4090（sm_89，驱动 580.178.04），Pod 需 `runtimeClassName: nvidia`，见 `scripts/dev/k8s/README.md`。用户决定：先做 sm8x 能完成的部分，sm90 以后再给
@@ -42,6 +43,13 @@
   - 读 vLLM v1 的 engine/core、scheduler output、kv_cache_interface、cudagraph_dispatcher、gpu_worker、sampler metadata，以及 `vllm/models/kimi_k3`、`vllm/models/deepseek_v32` 的模型/attention/MoE/MTP 实现。
   - 写 `docs/design.md`：vLLM 启动与推理链路分析、两模型结构事实表、6 crate 划分、每 crate 模块清单、kernel 清单、P0–P10 分阶段计划、决策与风险；补 `docs/requirements.md` 的"不做什么 / 验收口径 / 约束"（标注待确认）；回写 CLAUDE.md"项目是什么"。
 - 怎么验证的：结构参数均出自 config.json 与 vLLM 源码，文中带文件:行号；未做运行验证（无代码）。后台"启动路径"分析返回后核实并补进 design.md §1.4b：Model Runner V2 为默认、两模型走 breakable cudagraph 不走 torch.compile、GLM 用通用 hf tokenizer/parser 模式。
+
+### 2026-10-16（文档拆分）
+
+- 做了什么：`docs/design.md` 439 行 → 376 行；模型相关内容拆到 `design-kimik3.md` / `design-glm53.md` / `design-qwen3.md`（每份：§0 状态、§1 结构事实、§2 crate 模块、§3 模型特有风险、§4 参考材料）。design.md §2 改为模型索引表 + 共享部分，§4.5 合并为 "模型 crate" 指针，§5b 的 Qwen3 结构事实移走，§8 下错编号的 9.x 子节改为 8.x。README / CLAUDE.md / progress / qwen3 代码注释里的引用同步改。
+- 怎么验证的：`grep` 无悬空 §2.1/§2.2/§4.5/§4.6 引用；qwen3 crate 编译通过（只改了注释）。
+- 未完成：—
+- 踩坑：—
 
 ### 2026-10-15（方向调整 + Q1 Qwen3-0.6B 真权重，通过）
 
