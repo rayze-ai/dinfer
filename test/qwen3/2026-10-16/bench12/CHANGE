@@ -1,0 +1,1 @@
+口径修正：bench 每次运行换 seed（之前固定 seed 让常驻 vLLM prefix cache 90% 命中、dinfer 冷）；代码与 bench11 相同（prefill v3）
