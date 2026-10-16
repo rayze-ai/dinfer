@@ -249,3 +249,11 @@
 - 解法：`Qwen3Model::load_with_budget` 加 `max_logits_rows`（服务 = max_num_seqs；对拍 = max_tokens），logits / final_normed / executor fp32 logits / 预算预留全部按它算；预留余量 1 GiB → 512 MiB。改后 4090 自动 8491 块 / 14.5 GiB（available 17.5）。剩余差距主要是 per-layer 激活 scratch（qkv/q/k/v/attn/mlp 中间 × 28 层 × max_tokens）约 2.5 GiB，Q3 做激活复用再收。
 - 如何避免：任何按 `vocab` 宽的缓冲，行数只能是 logits 行数上限；自动预算要用真实分配后的 free，不要再手工"预留"一份估算值。
 - 相关：`models/qwen3/src/model.rs::load_with_budget`、`models/qwen3/src/executor.rs`
+
+## 2026-10-16 4090 上测试在"空闲" GPU 2 OOM：`layer 24 mlp` 分配失败
+
+- 现象：`CUDA_VISIBLE_DEVICES=2` 跑 real_parity，模型加载到第 24 层 OOM；`nvidia-smi` 显示 GPU 2 已用 22 GiB。
+- 根因：首次 `vllm_docker.sh run` 时（容器参数后来改过）有一个 `VLLM::EngineCore` 子进程逃出容器生命周期留在宿主上，占着 GPU 2（父进程是 `vllm serve /data/models/Qwen/Qwen3-0.6B`，不属于当前 `vllm-qwen3` 容器）。
+- 解法：`docker top vllm-qwen3` 确认不属于它后 kill；GPU 2 回到 4 MiB，测试通过。
+- 如何避免：跑 GPU 测试前先 `nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory --format=csv`，确认目标卡无人占；`docker rm -f` 后也查一次有没有孤儿 EngineCore。
+- 相关：`scripts/dev/README-remote4090.md` GPU 分配一节
