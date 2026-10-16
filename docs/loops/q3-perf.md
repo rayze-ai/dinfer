@@ -23,6 +23,15 @@ c1 out 221 vs 447 tok/s、c32 2707 vs 8065、c8 p1024 56 vs 1916；TTFT 84 vs 18
 
 不在 Q3：PD 分离（Q4）、fp8、多卡、Triton。
 
+## e 续：decode attention v2 设计（下一轮，写在前面）
+
+现状（`cold_shape`，4090）：split-K decode B=32 seq=2048 1.24 ms、B=64 seq=1024 1.09 ms；c32 TPOT 5.7 ms 里 attention ≈ 28 层 × 40 µs ≈ 1.1 ms。问题：
+1. 每个 key 的 K 行 128 元素由一个 lane 串行读（`for d<128: s_q[d]*k[d]`），bf16 逐元素 load，无向量化；每 key 还查一次 `block_table`。
+2. V 累加时每个 key 一次 `__shfl` 广播 + 4 次 bf16 标量读。
+3. B 小时 grid = B×8×8 个 block，B=1 只 64 个 block（128 SM 半空）。
+改法：① K/V 用 `bf16x2`/`uint4`（8 个 bf16）向量读，一 warp 一次读 4 个 key 的 K（lane 分工：8 lane 一 key，每 lane 16 维，warp 内 shuffle 归约）；② block_table 每 16 key 查一次（block_size 对齐）；③ splits 随 B 自适应：`splits = clamp(256 / (B×Hkv), 1, 16)`。
+验收：`gqa_decode_d128_splitk_ref` 仍过；`cold_shape` B=32 seq=2048 ≤ 0.6 ms；bench c32 TPOT ≤ 4.5 ms。
+
 ## 环境
 
 4090（`scripts/dev/remote4090.sh`），dinfer `--release` 常驻 :8012（tmux `dinfer`），vLLM Docker :8013。改 kernel 后：`push` → 远端 `cargo build --release -p dinfer --features qwen3` → 重启 tmux `dinfer` → `bench_compare.sh`。
