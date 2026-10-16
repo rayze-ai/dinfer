@@ -42,7 +42,10 @@ pub async fn serve(addr: &str, backend: Arc<dyn ChatBackend>) -> anyhow::Result<
     tracing::info!(%addr, "listening");
     // SSE 的首个 role chunk 与首个内容 chunk 都是几十字节的小写入：默认 Nagle + 对端延迟 ACK 会把第二个小段攒
     // ~40 ms，直接体现为 TTFT（bench 实测 43 ms，engine 内只有 5 ms）。uvicorn 默认 TCP_NODELAY，这里对齐。
-    axum::serve(listener, app).tcp_nodelay(true).await?;
+    let listener = axum::serve::ListenerExt::tap_io(listener, |io: &mut tokio::net::TcpStream| {
+        let _ = io.set_nodelay(true);
+    });
+    axum::serve(listener, app).await?;
     Ok(())
 }
 

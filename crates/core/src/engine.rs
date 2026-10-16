@@ -169,6 +169,7 @@ impl<E: ModelExecutor> Engine<E> {
             }
             let t_step = std::time::Instant::now();
             let so = self.sched.schedule();
+            let t_sched = std::time::Instant::now();
             let mro = match self.runner.execute(&so) {
                 Ok(m) => m,
                 Err(e) => {
@@ -181,8 +182,12 @@ impl<E: ModelExecutor> Engine<E> {
                     return Err(e);
                 }
             };
+            let t_exec = std::time::Instant::now();
             let results = self.sched.update_from_output(&so, &mro);
+            self.metrics.step_schedule.observe((t_sched - t_step).as_secs_f64());
+            self.metrics.step_execute.observe((t_exec - t_sched).as_secs_f64());
             self.record_step(&so, &results, t_step);
+            self.metrics.step_update.observe(t_exec.elapsed().as_secs_f64());
             for (i, (rid, toks, finish)) in results.iter().enumerate() {
                 let Some(tx) = self.outs.get(&rid) else { continue };
                 if !toks.is_empty() {
