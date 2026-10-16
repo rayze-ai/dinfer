@@ -71,3 +71,15 @@ bench7,2026-10-16,e kernel 融合：qkv_post（norm+rope+cache write 一个 kern
 bench7,2026-10-16,e kernel 融合：qkv_post（norm+rope+cache write 一个 kernel）、attention 按 stride 读 qkv_buf（去 copy_cols）、MLP 残差并入下一层 norm；17→8 kernel/层,c8-long,out_tok_per_s,644.600,2093.500,0.308,2.3,higher
 bench7,2026-10-16,e kernel 融合：qkv_post（norm+rope+cache write 一个 kernel）、attention 按 stride 读 qkv_buf（去 copy_cols）、MLP 残差并入下一层 norm；17→8 kernel/层,c8-long,ttft_p50_ms,489.300,38.300,12.775,0.6,lower
 bench7,2026-10-16,e kernel 融合：qkv_post（norm+rope+cache write 一个 kernel）、attention 按 stride 读 qkv_buf（去 copy_cols）、MLP 残差并入下一层 norm；17→8 kernel/层,c8-long,tpot_p50_ms,8.600,3.500,2.457,3.2,lower
+bench8,2026-10-16,e 续：decode attention v2（8 lane/key、uint4 向量读 K/V、4 key/warp、两 q head 共享 K 读、splits 自适应）,c1,out_tok_per_s,498.979,456.090,1.094,6.0,higher
+bench8,2026-10-16,e 续：decode attention v2（8 lane/key、uint4 向量读 K/V、4 key/warp、两 q head 共享 K 读、splits 自适应）,c1,ttft_p50_ms,5.871,11.229,0.523,2.2,lower
+bench8,2026-10-16,e 续：decode attention v2（8 lane/key、uint4 向量读 K/V、4 key/warp、两 q head 共享 K 读、splits 自适应）,c1,tpot_p50_ms,1.971,2.119,0.930,6.2,lower
+bench8,2026-10-16,e 续：decode attention v2（8 lane/key、uint4 向量读 K/V、4 key/warp、两 q head 共享 K 读、splits 自适应）,c8,out_tok_per_s,3021.551,2915.741,1.036,9.7,higher
+bench8,2026-10-16,e 续：decode attention v2（8 lane/key、uint4 向量读 K/V、4 key/warp、两 q head 共享 K 读、splits 自适应）,c8,ttft_p50_ms,11.816,28.192,0.419,-2.8,lower
+bench8,2026-10-16,e 续：decode attention v2（8 lane/key、uint4 向量读 K/V、4 key/warp、两 q head 共享 K 读、splits 自适应）,c8,tpot_p50_ms,2.504,2.540,0.986,10.6,lower
+bench8,2026-10-16,e 续：decode attention v2（8 lane/key、uint4 向量读 K/V、4 key/warp、两 q head 共享 K 读、splits 自适应）,c32,out_tok_per_s,7658.720,8506.602,0.900,32.3,higher
+bench8,2026-10-16,e 续：decode attention v2（8 lane/key、uint4 向量读 K/V、4 key/warp、两 q head 共享 K 读、splits 自适应）,c32,ttft_p50_ms,88.557,67.514,1.312,-0.4,lower
+bench8,2026-10-16,e 续：decode attention v2（8 lane/key、uint4 向量读 K/V、4 key/warp、两 q head 共享 K 读、splits 自适应）,c32,tpot_p50_ms,3.684,3.267,1.128,26.3,lower
+bench8,2026-10-16,e 续：decode attention v2（8 lane/key、uint4 向量读 K/V、4 key/warp、两 q head 共享 K 读、splits 自适应）,c8-long,out_tok_per_s,794.665,2101.996,0.378,23.3,higher
+bench8,2026-10-16,e 续：decode attention v2（8 lane/key、uint4 向量读 K/V、4 key/warp、两 q head 共享 K 读、splits 自适应）,c8-long,ttft_p50_ms,488.327,35.423,13.785,0.2,lower
+bench8,2026-10-16,e 续：decode attention v2（8 lane/key、uint4 向量读 K/V、4 key/warp、两 q head 共享 K 读、splits 自适应）,c8-long,tpot_p50_ms,6.251,3.546,1.763,27.3,lower

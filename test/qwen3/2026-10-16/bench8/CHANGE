@@ -1,0 +1,1 @@
+e 续：decode attention v2（8 lane/key、uint4 向量读 K/V、4 key/warp、两 q head 共享 K 读、splits 自适应）
