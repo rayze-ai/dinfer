@@ -22,6 +22,14 @@ impl Device {
         Ok(Self { ctx })
     }
 
+    /// 关闭 cudarc 的自动事件同步（每次取指针时 record / wait 事件）。CUDA graph capture 期间这些事件操作会被
+    /// 驱动拒绝（CUDA_ERROR_STREAM_CAPTURE_ISOLATION），而我们全程单流、按 step 同步，不需要它。
+    /// 安全前提：调用方保证所有工作在同一条流上，或自行用事件同步。
+    pub fn disable_event_tracking(&self) {
+        // SAFETY: 见上；本项目 executor 单流顺序执行，H2D/D2H 用同流的拷贝。
+        unsafe { self.ctx.disable_event_tracking() }
+    }
+
     pub fn default_stream(&self) -> Stream {
         Stream { inner: self.ctx.default_stream() }
     }

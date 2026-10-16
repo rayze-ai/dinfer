@@ -20,3 +20,4 @@ dinfer 已快一个量级，主因是没有编译期；但 dinfer 的"权重 0.5
 | 5 | a | bench3：c8 p1024 TTFT 9.4 s → 0.50 s、吞吐 6.2×；c32 吞吐 +29%；仍是 vLLM 的 0.17–0.54×。见 bench3/summary.md | 17:2x |
 | 6 | b | nsys：decode attention 占 85% GPU 时间 → split-K decode kernel；GPU 2 是用户 k8s pod（qwen3-06b-vllm），测试改 GPU 3 | 17:4x |
 | 7 | b | split-K decode：bench4 vs vLLM c1_p128_o128: tok/s 327/456 = 0.72×, TTFT 43/11 ms, TPOT 2.7/2.1 ms；c8_p128_o128: tok/s 2283/2944 = 0.78×, TTFT 44/25 ms, TPOT 3.2/2.5 ms；c32_p128_o128: tok/s 5048/8536 = 0.59×, TTFT 99/65 ms, TPOT 5.8/3.3 ms；c8_p1024_o128: tok/s 615/2103 = 0.29×, TTFT 497/36 ms, TPOT 9.2/3.5 ms | 18:0x |
+| 8 | c | CUDA graph 可行性探针 PASS（需 disable_event_tracking）；见 crates/kernels/tests/graph_probe.rs | 18:2x |
