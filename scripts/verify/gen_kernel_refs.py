@@ -286,6 +286,41 @@ save("gqa128d_bt", dbt); save("gqa128d_seq_lens", torch.tensor(dlens, dtype=torc
 save("gqa128d_meta", torch.tensor([nb + 1, PBS], dtype=torch.int32))
 print("gqa128 decode refs:", tuple(torch.cat(douts).shape))
 
+# ---- qkv_post 融合（Qwen3 D=128）：T=6 token，H=16/Hkv=8；q/k per-head RMSNorm → neox RoPE（整 D）→ K/V 入 cache；q/k 原地 ----
+QT = 6
+qkv_in = bf(torch.randn(QT, (FH + 2 * FHK) * FD))
+wq_n = bf(torch.rand(FD) + 0.5); wk_n = bf(torch.rand(FD) + 0.5)
+qpos = torch.tensor([0, 3, 7, 15, 31, 100], dtype=torch.int32)
+inv_freq = 1.0 / (1_000_000.0 ** (torch.arange(0, FD, 2).float() / FD))
+ang = qpos.float()[:, None] * inv_freq[None, :]           # [T, 64]
+qcos_sin = torch.cat([ang.cos(), ang.sin()], dim=1)        # [T, 128] 但要按 pos 索引：做成 [max_pos, 128]
+cs_table = torch.zeros(128, FD)
+for i, pp in enumerate(qpos.tolist()):
+    cs_table[pp] = qcos_sin[i]
+def rms_rope(x, w, pos_i):                                   # x [D]
+    xf = x.float(); y = xf * torch.rsqrt((xf * xf).mean() + 1e-6) * w.float()
+    half = FD // 2; a, b = y[:half], y[half:]
+    c, s_ = cs_table[pos_i, :half], cs_table[pos_i, half:]
+    return torch.cat([a * c - b * s_, b * c + a * s_])
+qkv_out = qkv_in.clone().float()
+qslots = torch.tensor([0, 1, 2, 17, 18, -1], dtype=torch.int64)   # 最后一个 token 不写 cache；block_size 16 → slot 17 在 block 1
+qcache = torch.zeros(2 * PBS, FHK, 2, FD)                          # [slots, Hkv, 2, D]（slot 连续编址）
+for t in range(QT):
+    rowv = qkv_in[t].float()
+    for h in range(FH):
+        qkv_out[t, h * FD:(h + 1) * FD] = rms_rope(qkv_in[t, h * FD:(h + 1) * FD], wq_n, qpos[t].item())
+    for hk in range(FHK):
+        o = (FH + hk) * FD
+        kk_ = rms_rope(qkv_in[t, o:o + FD], wk_n, qpos[t].item())
+        qkv_out[t, o:o + FD] = kk_
+        if qslots[t] >= 0:
+            qcache[qslots[t], hk, 0] = bf(kk_).float()
+            qcache[qslots[t], hk, 1] = rowv[(FH + FHK + hk) * FD:(FH + FHK + hk + 1) * FD]
+save("qkvpost_in", qkv_in); save("qkvpost_wq", wq_n); save("qkvpost_wk", wk_n); save("qkvpost_pos", qpos)
+save("qkvpost_cos_sin", cs_table); save("qkvpost_slots", qslots); save("qkvpost_out", qkv_out)
+save("qkvpost_cache", qcache.view(2 * PBS, FHK * 2 * FD)); save("qkvpost_meta", torch.tensor([2, PBS], dtype=torch.int32))
+print("qkv_post refs:", tuple(qkv_out.shape))
+
 # ---- Q2 采样：penalties / temperature / min_p / logprobs（vLLM 语义）----
 torch.manual_seed(77)
 SB, SV = 4, 512

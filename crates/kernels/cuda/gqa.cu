@@ -52,7 +52,7 @@ constexpr int PF_DPL = PF_D / 32;       // 每 lane 持有的维度数
 
 __global__ void __launch_bounds__(PF_WARPS * 32) gqa_prefill_flash_kernel(
     const bf16* __restrict__ q, const bf16* __restrict__ k, const bf16* __restrict__ v, bf16* __restrict__ out,
-    const int32_t* __restrict__ cu_seqlens, int H, int Hkv, float scale) {
+    const int32_t* __restrict__ cu_seqlens, int H, int Hkv, float scale, int q_stride, int kv_stride) {
   const int req = blockIdx.z, h = blockIdx.y;
   const int hk = h / (H / Hkv);
   const int start = cu_seqlens[req], end = cu_seqlens[req + 1];
@@ -69,7 +69,7 @@ __global__ void __launch_bounds__(PF_WARPS * 32) gqa_prefill_flash_kernel(
 
   // q → shared（每 warp 一行）
   if (active) {
-    const bf16* qp = q + ((int64_t)(start + qi) * H + h) * PF_D;
+    const bf16* qp = q + (int64_t)(start + qi) * q_stride + (int64_t)h * PF_D;
     for (int d = lane; d < PF_D; d += 32) sQ[warp][d] = to_f32(qp[d]) * scale;
   }
   float m = -INFINITY, l = 0.f;
@@ -89,7 +89,7 @@ __global__ void __launch_bounds__(PF_WARPS * 32) gqa_prefill_flash_kernel(
       const int j = e / PF_D, d = e % PF_D;
       float kv_k = 0.f, kv_v = 0.f;
       if (j < kn) {
-        const int64_t off = ((int64_t)(start + k0 + j) * Hkv + hk) * PF_D + d;
+        const int64_t off = (int64_t)(start + k0 + j) * kv_stride + (int64_t)hk * PF_D + d;
         kv_k = to_f32(k[off]);
         kv_v = to_f32(v[off]);
       }
@@ -140,7 +140,7 @@ __global__ void __launch_bounds__(PF_WARPS * 32) gqa_prefill_flash_kernel(
 // 通用慢路径（任意 D ≤ MAX_D）：旧参考实现，每 (req, q_head) 一个 block 逐 query 行三遍扫 key。对拍 fixture（D=32）走这里。
 __global__ void gqa_prefill_ref_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k, const bf16* __restrict__ v,
                                        bf16* __restrict__ out, const int32_t* __restrict__ cu_seqlens, int H, int Hkv, int D,
-                                       float scale) {
+                                       float scale, int q_stride, int kv_stride) {
 
   const int req = blockIdx.x, h = blockIdx.y;
   const int hk = h / (H / Hkv);
@@ -151,12 +151,12 @@ __global__ void gqa_prefill_ref_kernel(const bf16* __restrict__ q, const bf16* _
   __shared__ float s_p[GQ_BLOCK];
   __shared__ float s_stat[2];
   for (int i = 0; i < T; ++i) {
-    const bf16* qi = q + ((int64_t)(start + i) * H + h) * D;
+    const bf16* qi = q + (int64_t)(start + i) * q_stride + (int64_t)h * D;
     for (int d = threadIdx.x; d < D; d += GQ_BLOCK) s_q[d] = to_f32(qi[d]);
     __syncthreads();
     const int n = i + 1;
-    auto kptr = [&](int j) { return k + ((int64_t)(start + j) * Hkv + hk) * D; };
-    auto vptr = [&](int j) { return v + ((int64_t)(start + j) * Hkv + hk) * D; };
+    auto kptr = [&](int j) { return k + (int64_t)(start + j) * kv_stride + (int64_t)hk * D; };
+    auto vptr = [&](int j) { return v + (int64_t)(start + j) * kv_stride + (int64_t)hk * D; };
     float lmax = -INFINITY;
     for (int j = threadIdx.x; j < n; j += GQ_BLOCK) {
       const bf16* kj = kptr(j);
@@ -211,7 +211,7 @@ __global__ void gqa_prefill_ref_kernel(const bf16* __restrict__ q, const bf16* _
 __global__ void gqa_paged_kernel(const bf16* __restrict__ q, const bf16* __restrict__ cache,
                                  const int32_t* __restrict__ block_table, const int32_t* __restrict__ seq_lens,
                                  const int32_t* __restrict__ cu_seqlens_q, bf16* __restrict__ out, int H, int Hkv, int D,
-                                 int block_size, int max_blocks, float scale) {
+                                 int block_size, int max_blocks, float scale, int q_stride) {
   const int b = blockIdx.x, h = blockIdx.y;
   const int hk = h / (H / Hkv);
   const int q0 = cu_seqlens_q[b], q1 = cu_seqlens_q[b + 1];
@@ -234,7 +234,7 @@ __global__ void gqa_paged_kernel(const bf16* __restrict__ q, const bf16* __restr
   for (int i = 0; i < q_len; ++i) {
     const int row = q0 + i;
     const int n = hist + i + 1;
-    const bf16* qi = q + ((int64_t)row * H + h) * D;
+    const bf16* qi = q + (int64_t)row * q_stride + (int64_t)h * D;
     for (int d = threadIdx.x; d < D; d += GQ_BLOCK) s_q[d] = to_f32(qi[d]);
     __syncthreads();
     float lmax = -INFINITY;
@@ -294,7 +294,7 @@ __global__ void gqa_paged_kernel(const bf16* __restrict__ q, const bf16* __restr
 __global__ void __launch_bounds__(PF_WARPS * 32) gqa_paged_flash_kernel(
     const bf16* __restrict__ q, const bf16* __restrict__ cache, const int32_t* __restrict__ block_table,
     const int32_t* __restrict__ seq_lens, const int32_t* __restrict__ cu_seqlens_q, bf16* __restrict__ out, int H,
-    int Hkv, int block_size, int max_blocks, float scale) {
+    int Hkv, int block_size, int max_blocks, float scale, int q_stride) {
   const int b = blockIdx.z, h = blockIdx.y;
   const int hk = h / (H / Hkv);
   const int q0 = cu_seqlens_q[b], q1 = cu_seqlens_q[b + 1];
@@ -313,7 +313,7 @@ __global__ void __launch_bounds__(PF_WARPS * 32) gqa_paged_flash_kernel(
   __shared__ float sQ[PF_WARPS][PF_D];
 
   if (active) {
-    const bf16* qp = q + ((int64_t)(q0 + qi) * H + h) * PF_D;
+    const bf16* qp = q + (int64_t)(q0 + qi) * q_stride + (int64_t)h * PF_D;
     for (int d = lane; d < PF_D; d += 32) sQ[warp][d] = to_f32(qp[d]) * scale;
   }
   float m = -INFINITY, l = 0.f;
@@ -391,7 +391,7 @@ constexpr int DC_WARPS = 4;
 __global__ void __launch_bounds__(DC_WARPS * 32) gqa_decode_split_kernel(
     const bf16* __restrict__ q, const bf16* __restrict__ cache, const int32_t* __restrict__ block_table,
     const int32_t* __restrict__ seq_lens, float* __restrict__ scratch, int H, int Hkv, int block_size, int max_blocks,
-    float scale) {
+    float scale, int q_stride) {
   const int b = blockIdx.x, hk = blockIdx.y, split = blockIdx.z;
   const int group = H / Hkv;
   const int n = seq_lens[b];
@@ -407,7 +407,8 @@ __global__ void __launch_bounds__(DC_WARPS * 32) gqa_decode_split_kernel(
     const int h = hk * group + g;
     float* part = scratch + (((int64_t)b * H + h) * DC_SPLITS + split) * (PF_D + 2);
     __syncthreads();
-    for (int d = threadIdx.x; d < PF_D; d += DC_WARPS * 32) s_q[d] = to_f32(q[((int64_t)b * H + h) * PF_D + d]) * scale;
+    for (int d = threadIdx.x; d < PF_D; d += DC_WARPS * 32)
+      s_q[d] = to_f32(q[(int64_t)b * q_stride + (int64_t)h * PF_D + d]) * scale;
     __syncthreads();
     float m = -INFINITY, l = 0.f;
     float acc[PF_DPL];
@@ -521,7 +522,9 @@ extern "C" int gqa_cache_write_bf16(const void* k, const void* v, void* cache, c
 
 extern "C" int gqa_prefill_bf16(const void* q, const void* k, const void* v, void* out, const int32_t* cu_seqlens,
                                 int64_t num_reqs, int64_t max_seqlen, int64_t heads, int64_t kv_heads, int64_t head_dim,
-                                float scale, cudaStream_t stream) {
+                                float scale, int64_t q_stride, int64_t kv_stride, cudaStream_t stream) {
+  if (q_stride <= 0) q_stride = heads * head_dim;
+  if (kv_stride <= 0) kv_stride = kv_heads * head_dim;
   if (num_reqs <= 0) return 0;
   if (heads <= 0 || kv_heads <= 0 || head_dim <= 0 || head_dim > MAX_D || heads % kv_heads != 0 || max_seqlen <= 0)
     return err(cudaErrorInvalidValue);
@@ -529,12 +532,13 @@ extern "C" int gqa_prefill_bf16(const void* q, const void* k, const void* v, voi
     dim3 grid((unsigned)((max_seqlen + PF_WARPS - 1) / PF_WARPS), (unsigned)heads, (unsigned)num_reqs);
     gqa_prefill_flash_kernel<<<grid, PF_WARPS * 32, 0, stream>>>(
         static_cast<const bf16*>(q), static_cast<const bf16*>(k), static_cast<const bf16*>(v), static_cast<bf16*>(out),
-        cu_seqlens, (int)heads, (int)kv_heads, scale);
+        cu_seqlens, (int)heads, (int)kv_heads, scale, (int)q_stride, (int)kv_stride);
   } else {
     dim3 grid((unsigned)num_reqs, (unsigned)heads);
     gqa_prefill_ref_kernel<<<grid, GQ_BLOCK, 0, stream>>>(static_cast<const bf16*>(q), static_cast<const bf16*>(k),
                                                           static_cast<const bf16*>(v), static_cast<bf16*>(out), cu_seqlens,
-                                                          (int)heads, (int)kv_heads, (int)head_dim, scale);
+                                                          (int)heads, (int)kv_heads, (int)head_dim, scale, (int)q_stride,
+                                                          (int)kv_stride);
   }
   return last_err();
 }
@@ -542,7 +546,8 @@ extern "C" int gqa_prefill_bf16(const void* q, const void* k, const void* v, voi
 extern "C" int gqa_paged_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens,
                               const int32_t* cu_seqlens_q, void* out, int64_t num_reqs, int64_t max_q_len, int64_t heads,
                               int64_t kv_heads, int64_t head_dim, int64_t block_size, int64_t max_blocks, float scale,
-                              cudaStream_t stream) {
+                              int64_t q_stride, cudaStream_t stream) {
+  if (q_stride <= 0) q_stride = heads * head_dim;
   if (num_reqs <= 0) return 0;
   if (head_dim <= 0 || head_dim > MAX_D || heads <= 0 || kv_heads <= 0 || heads % kv_heads != 0 || block_size <= 0 ||
       max_q_len <= 0)
@@ -551,13 +556,13 @@ extern "C" int gqa_paged_bf16(const void* q, const void* cache, const int32_t* b
     dim3 grid((unsigned)((max_q_len + PF_WARPS - 1) / PF_WARPS), (unsigned)heads, (unsigned)num_reqs);
     gqa_paged_flash_kernel<<<grid, PF_WARPS * 32, 0, stream>>>(
         static_cast<const bf16*>(q), static_cast<const bf16*>(cache), block_table, seq_lens, cu_seqlens_q,
-        static_cast<bf16*>(out), (int)heads, (int)kv_heads, (int)block_size, (int)max_blocks, scale);
+        static_cast<bf16*>(out), (int)heads, (int)kv_heads, (int)block_size, (int)max_blocks, scale, (int)q_stride);
   } else {
     dim3 grid((unsigned)num_reqs, (unsigned)heads);
     gqa_paged_kernel<<<grid, GQ_BLOCK, 0, stream>>>(static_cast<const bf16*>(q), static_cast<const bf16*>(cache),
                                                     block_table, seq_lens, cu_seqlens_q, static_cast<bf16*>(out),
                                                     (int)heads, (int)kv_heads, (int)head_dim, (int)block_size,
-                                                    (int)max_blocks, scale);
+                                                    (int)max_blocks, scale, (int)q_stride);
   }
   return last_err();
 }
@@ -565,15 +570,16 @@ extern "C" int gqa_paged_bf16(const void* q, const void* cache, const int32_t* b
 // decode 专用（每请求恰 1 行 query，q: [B, H, D]，out 同形）。scratch: ≥ B × H × 8 × (D + 2) 个 f32。D 必须为 128。
 extern "C" int gqa_decode_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens,
                                void* out, float* scratch, int64_t num_reqs, int64_t heads, int64_t kv_heads,
-                               int64_t head_dim, int64_t block_size, int64_t max_blocks, float scale,
+                               int64_t head_dim, int64_t block_size, int64_t max_blocks, float scale, int64_t q_stride,
                                cudaStream_t stream) {
+  if (q_stride <= 0) q_stride = heads * head_dim;
   if (num_reqs <= 0) return 0;
   if (head_dim != PF_D || heads <= 0 || kv_heads <= 0 || heads % kv_heads != 0 || block_size <= 0)
     return err(cudaErrorInvalidValue);
   dim3 grid1((unsigned)num_reqs, (unsigned)kv_heads, (unsigned)DC_SPLITS);
   gqa_decode_split_kernel<<<grid1, DC_WARPS * 32, 0, stream>>>(
       static_cast<const bf16*>(q), static_cast<const bf16*>(cache), block_table, seq_lens, scratch, (int)heads,
-      (int)kv_heads, (int)block_size, (int)max_blocks, scale);
+      (int)kv_heads, (int)block_size, (int)max_blocks, scale, (int)q_stride);
   dim3 grid2((unsigned)num_reqs, (unsigned)heads);
   gqa_decode_merge_kernel<<<grid2, PF_D, 0, stream>>>(scratch, static_cast<bf16*>(out), (int)heads);
   return last_err();

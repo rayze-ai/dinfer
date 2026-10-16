@@ -73,6 +73,7 @@ fn cold_vs_warm_by_shape() {
                     bs,
                     blocks_per,
                     1.0 / (d as f32).sqrt(),
+                    0,
                 )
                 .unwrap()
             };
@@ -94,6 +95,7 @@ fn cold_vs_warm_by_shape() {
                     bs,
                     blocks_per,
                     1.0 / (d as f32).sqrt(),
+                    0,
                 )
                 .unwrap()
             };
@@ -139,6 +141,8 @@ fn cold_vs_warm_by_shape() {
                 hk,
                 d,
                 1.0 / (d as f32).sqrt(),
+                0,
+                0,
             )
             .unwrap()
         };

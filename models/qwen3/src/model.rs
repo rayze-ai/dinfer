@@ -25,11 +25,8 @@ pub struct Attention {
     pub o_proj: Linear,
     pub q_norm: RmsNorm, // over head_dim
     pub k_norm: RmsNorm,
-    // scratch（[max_tokens, ...]）
+    // scratch（[max_tokens, ...]）：qkv GEMM 输出（q/k 经 qkv_post 原地 norm+rope 后直接给 attention 按 stride 读）
     qkv_buf: Tensor<bf16>,
-    q: Tensor<bf16>,
-    kk: Tensor<bf16>,
-    v: Tensor<bf16>,
     attn: Tensor<bf16>,
 }
 
@@ -122,9 +119,6 @@ impl Attention {
             q_norm: RmsNorm::load(stream, src, &format!("{p}.q_norm"), cfg.rms_norm_eps)?,
             k_norm: RmsNorm::load(stream, src, &format!("{p}.k_norm"), cfg.rms_norm_eps)?,
             qkv_buf: Tensor::zeros(stream, &[t, (h + 2 * hk) * d])?,
-            q: Tensor::zeros(stream, &[t, h, d])?,
-            kk: Tensor::zeros(stream, &[t, hk, d])?,
-            v: Tensor::zeros(stream, &[t, hk, d])?,
             attn: Tensor::zeros(stream, &[t, h, d])?,
         })
     }
@@ -150,68 +144,37 @@ impl Attention {
         let hidden = cfg.hidden_size as usize;
         let eps = cfg.rms_norm_eps;
         let qkv_w = (h + 2 * hk) * d;
-        // 1. qkv = x · W^T → 拆成 q [t,H,D] / k [t,Hkv,D] / v [t,Hkv,D]
+        // 1. qkv = x · W^T → [t, (H+2Hkv)·D]（q | k | v）
         gemm.forward_bf16(&x.data, &self.qkv.w.data, None, &mut self.qkv_buf.data, t, qkv_w, hidden)?;
-        k::copy_cols_bf16(stream, &self.qkv_buf.data, &mut self.q.data, t, qkv_w, 0, h * d, 0, h * d)?;
-        k::copy_cols_bf16(stream, &self.qkv_buf.data, &mut self.kk.data, t, qkv_w, h * d, hk * d, 0, hk * d)?;
-        k::copy_cols_bf16(
+        // 2–4. 一个 kernel：q/k per-head RMSNorm + neox RoPE（原地）+ K/V 写 paged cache（Q3-e 融合；D 必须 128）
+        ensure!(d == 128 && rope.rope_dim == d, "qkv_post needs head_dim == rope_dim == 128");
+        k::qkv_post_bf16(
             stream,
-            &self.qkv_buf.data,
-            &mut self.v.data,
-            t,
-            qkv_w,
-            (h + hk) * d,
-            hk * d,
-            0,
-            hk * d,
-        )?;
-        // 2. per-head RMSNorm：把 [t, H, D] 看成 [t·H, D] 行
-        k::rmsnorm_bf16_n(stream, &self.q.data, &self.q_norm.w.data, &mut self.attn.data, t * h, d, eps)?;
-        std::mem::swap(&mut self.q, &mut self.attn);
-        k::rmsnorm_bf16_n(
-            stream,
-            &self.kk.data,
-            &self.k_norm.w.data,
             &mut self.qkv_buf.data,
-            t * hk,
-            d,
-            eps,
-        )?;
-        k::copy_cols_bf16(stream, &self.qkv_buf.data, &mut self.kk.data, t, hk * d, 0, hk * d, 0, hk * d)?;
-        // 3. neox RoPE，整个 head_dim
-        k::rope_bf16_n(
-            stream,
-            &mut self.q.data,
-            Some(&mut self.kk.data),
+            &self.q_norm.w.data,
+            &self.k_norm.w.data,
             &positions.data,
             &rope.cos_sin.data,
+            &mut kv.cache.data,
+            &slot_mapping.data,
             t,
             h,
             hk,
             d,
-            d,
-            RopeStyle::Neox,
-        )?;
-        // 4. 写 cache
-        k::gqa_cache_write_bf16(
-            stream,
-            &self.kk.data,
-            &self.v.data,
-            &mut kv.cache.data,
-            &slot_mapping.data,
-            t,
-            hk,
-            d,
+            eps,
             kv.block_size,
         )?;
-        // 5. attention
+        // 5. attention：q 从 qkv_buf 第 0 列起、k 从 H·D 列起、v 从 (H+Hkv)·D 列起，行跨度 qkv_w
         let scale = (d as f32).powf(-0.5);
+        let q_view = self.qkv_buf.data.slice(..);
+        let k_view = self.qkv_buf.data.slice(h * d..);
+        let v_view = self.qkv_buf.data.slice((h + hk) * d..);
         match meta.mode {
             BatchMode::Prefill => k::gqa_prefill_bf16(
                 stream,
-                &self.q.data,
-                &self.kk.data,
-                &self.v.data,
+                &q_view,
+                &k_view,
+                &v_view,
                 &mut self.attn.data,
                 &meta.cu_seqlens.data,
                 meta.num_reqs,
@@ -220,11 +183,13 @@ impl Attention {
                 hk,
                 d,
                 scale,
+                qkv_w,
+                qkv_w,
             )?,
             // 纯 decode 且 D=128：split-K kernel（reqs × Hkv × 8 块并行）；否则 flash paged kernel
             BatchMode::Decode if d == 128 => k::gqa_decode_bf16(
                 stream,
-                &self.q.data,
+                &q_view,
                 &kv.cache.data,
                 &meta.block_table.data,
                 &meta.seq_lens.data,
@@ -237,10 +202,11 @@ impl Attention {
                 kv.block_size,
                 meta.max_blocks,
                 scale,
+                qkv_w,
             )?,
             BatchMode::Decode | BatchMode::Paged => k::gqa_paged_bf16(
                 stream,
-                &self.q.data,
+                &q_view,
                 &kv.cache.data,
                 &meta.block_table.data,
                 &meta.seq_lens.data,
@@ -254,6 +220,7 @@ impl Attention {
                 kv.block_size,
                 meta.max_blocks,
                 scale,
+                qkv_w,
             )?,
         }
         // 6. o_proj
@@ -452,16 +419,32 @@ impl Qwen3Model {
         let v = self.cfg.vocab_size as usize;
         let eps = self.cfg.rms_norm_eps;
         k::embedding_bf16_n(stream, &f.input_ids.data, &self.embed.table.data, &mut self.hidden.data, t, h)?;
+        // 残差：hidden 是主干；第 l 层 MLP 的输出不单独加回，而是在第 l+1 层的 input_norm 里用 fused_add 一次完成
+        //（最后一层之后再补一次加）。省掉每层一次 add kernel。
+        let mut pending_mlp = false;
         for (li, layer) in self.layers.iter_mut().enumerate() {
-            k::rmsnorm_bf16_n(
-                stream,
-                &self.hidden.data,
-                &layer.input_norm.w.data,
-                &mut self.normed.data,
-                t,
-                h,
-                eps,
-            )?;
+            if pending_mlp {
+                k::fused_add_rmsnorm_bf16_n(
+                    stream,
+                    &self.mlp_out.data,
+                    &mut self.hidden.data,
+                    &layer.input_norm.w.data,
+                    &mut self.normed.data,
+                    t,
+                    h,
+                    eps,
+                )?;
+            } else {
+                k::rmsnorm_bf16_n(
+                    stream,
+                    &self.hidden.data,
+                    &layer.input_norm.w.data,
+                    &mut self.normed.data,
+                    t,
+                    h,
+                    eps,
+                )?;
+            }
             layer.attn.forward(
                 stream,
                 gemm,
@@ -487,12 +470,18 @@ impl Qwen3Model {
                 eps,
             )?;
             layer.mlp.forward(stream, gemm, t, &self.normed, &mut self.mlp_out)?;
-            k::add_inplace_bf16_n(stream, &self.mlp_out.data, &mut self.hidden.data, t * h)?;
+            pending_mlp = true;
             if let Some(cap) = self.capture_layers.as_mut() {
+                // 诊断捕获需要本层完整输出：这里显式加一次（只在捕获模式下）
+                k::add_inplace_bf16_n(stream, &self.mlp_out.data, &mut self.hidden.data, t * h)?;
+                pending_mlp = false;
                 let a = self.attn_out.to_vec_f32(stream)?[..t * h].to_vec();
                 let hd = self.hidden.to_vec_f32(stream)?[..t * h].to_vec();
                 cap.push((li, a, hd));
             }
+        }
+        if pending_mlp {
+            k::add_inplace_bf16_n(stream, &self.mlp_out.data, &mut self.hidden.data, t * h)?;
         }
         let rows = f.rows;
         ensure!(

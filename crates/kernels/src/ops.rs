@@ -1350,11 +1350,15 @@ pub fn gqa_cache_write_bf16(
 
 /// 无历史 causal prefill。q: [T, heads, D]，k/v: [T, kv_heads, D]，out: [T, heads, D]。
 #[allow(clippy::too_many_arguments)]
-pub fn gqa_prefill_bf16(
+pub fn gqa_prefill_bf16<
+    Q: DevicePtr<bf16> + ?Sized,
+    K: DevicePtr<bf16> + ?Sized,
+    V: DevicePtr<bf16> + ?Sized,
+>(
     stream: &Stream,
-    q: &CudaSlice<bf16>,
-    k: &CudaSlice<bf16>,
-    v: &CudaSlice<bf16>,
+    q: &Q,
+    k: &K,
+    v: &V,
     out: &mut CudaSlice<bf16>,
     cu_seqlens: &CudaSlice<i32>,
     num_reqs: usize,
@@ -1363,6 +1367,9 @@ pub fn gqa_prefill_bf16(
     kv_heads: usize,
     head_dim: usize,
     scale: f32,
+    // 每 token 行的元素跨度；0 = 紧凑（heads·D / kv_heads·D）。传 qkv GEMM 输出时为 (H+2Hkv)·D。
+    q_stride: usize,
+    kv_stride: usize,
 ) -> Result<()> {
     ensure!(cu_seqlens.len() > num_reqs, "gqa_prefill: cu_seqlens");
     ensure!(max_seqlen > 0, "gqa_prefill: max_seqlen");
@@ -1387,6 +1394,8 @@ pub fn gqa_prefill_bf16(
                 kv_heads as i64,
                 head_dim as i64,
                 scale,
+                q_stride as i64,
+                kv_stride as i64,
                 stream.raw() as _,
             )
         },
@@ -1396,9 +1405,9 @@ pub fn gqa_prefill_bf16(
 
 /// 从 paged cache 读的 attention：decode（q_len = 1）与带历史 chunked prefill 统一。q: [Tq, heads, D]，out 同形。
 #[allow(clippy::too_many_arguments)]
-pub fn gqa_paged_bf16(
+pub fn gqa_paged_bf16<Q: DevicePtr<bf16> + ?Sized>(
     stream: &Stream,
-    q: &CudaSlice<bf16>,
+    q: &Q,
     cache: &CudaSlice<bf16>,
     block_table: &CudaSlice<i32>,
     seq_lens: &CudaSlice<i32>,
@@ -1412,6 +1421,7 @@ pub fn gqa_paged_bf16(
     block_size: usize,
     max_blocks: usize,
     scale: f32,
+    q_stride: usize,
 ) -> Result<()> {
     ensure!(
         block_table.len() >= num_reqs * max_blocks && seq_lens.len() >= num_reqs,
@@ -1444,6 +1454,7 @@ pub fn gqa_paged_bf16(
                 block_size as i64,
                 max_blocks as i64,
                 scale,
+                q_stride as i64,
                 stream.raw() as _,
             )
         },
@@ -1453,9 +1464,9 @@ pub fn gqa_paged_bf16(
 
 /// 纯 decode（每请求 1 行）split-K attention（D=128）。q: [B, heads, D]，out 同形；`scratch` ≥ `gqa_decode_scratch_len`。
 #[allow(clippy::too_many_arguments)]
-pub fn gqa_decode_bf16(
+pub fn gqa_decode_bf16<Q: DevicePtr<bf16> + ?Sized>(
     stream: &Stream,
-    q: &CudaSlice<bf16>,
+    q: &Q,
     cache: &CudaSlice<bf16>,
     block_table: &CudaSlice<i32>,
     seq_lens: &CudaSlice<i32>,
@@ -1468,6 +1479,7 @@ pub fn gqa_decode_bf16(
     block_size: usize,
     max_blocks: usize,
     scale: f32,
+    q_stride: usize,
 ) -> Result<()> {
     ensure!(head_dim == 128, "gqa_decode: head_dim must be 128");
     ensure!(
@@ -1475,7 +1487,8 @@ pub fn gqa_decode_bf16(
         "gqa_decode: table/seq_lens"
     );
     ensure!(
-        q.len() >= num_reqs * heads * head_dim && out.len() >= num_reqs * heads * head_dim,
+        q.len() >= (num_reqs - 1) * q_stride.max(heads * head_dim) + heads * head_dim
+            && out.len() >= num_reqs * heads * head_dim,
         "gqa_decode: q/out"
     );
     ensure!(scratch.len() >= gqa_decode_scratch_len(num_reqs, heads, head_dim), "gqa_decode: scratch");
@@ -1496,6 +1509,7 @@ pub fn gqa_decode_bf16(
                 block_size as i64,
                 max_blocks as i64,
                 scale,
+                q_stride as i64,
                 stream.raw() as _,
             )
         },
@@ -1506,6 +1520,53 @@ pub fn gqa_decode_bf16(
 /// `gqa_decode_bf16` 的 scratch 元素数：B × heads × 8 split × (D + 2)。
 pub fn gqa_decode_scratch_len(num_reqs: usize, heads: usize, head_dim: usize) -> usize {
     num_reqs * heads * 8 * (head_dim + 2)
+}
+
+/// Qwen3 QKV 后处理融合（D=128）：q/k per-head RMSNorm + neox RoPE 原地写回 `qkv`（[T, (H+2Hkv)·D]），K/V 写 paged cache。
+#[allow(clippy::too_many_arguments)]
+pub fn qkv_post_bf16(
+    stream: &Stream,
+    qkv: &mut CudaSlice<bf16>,
+    wq: &CudaSlice<bf16>,
+    wk: &CudaSlice<bf16>,
+    positions: &CudaSlice<i32>,
+    cos_sin: &CudaSlice<f32>,
+    cache: &mut CudaSlice<bf16>,
+    slot_mapping: &CudaSlice<i64>,
+    tokens: usize,
+    heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    eps: f32,
+    block_size: usize,
+) -> Result<()> {
+    ensure!(head_dim == 128, "qkv_post: head_dim must be 128");
+    ensure!(qkv.len() >= tokens * (heads + 2 * kv_heads) * head_dim, "qkv_post: qkv");
+    ensure!(wq.len() >= head_dim && wk.len() >= head_dim, "qkv_post: norm weights");
+    ensure!(positions.len() >= tokens && slot_mapping.len() >= tokens, "qkv_post: positions/slots");
+    ensure!(cache.len() % (kv_heads * 2 * head_dim) == 0, "qkv_post: cache not a multiple of slot");
+    // SAFETY: 长度已校验；slot 范围由 scheduler 保证；cos_sin 行数 ≥ max position 由 Rope 构造保证。
+    check(
+        unsafe {
+            ffi::qkv_post_bf16(
+                stream.ptr_mut(qkv) as *mut c_void,
+                stream.ptr(wq) as *const c_void,
+                stream.ptr(wk) as *const c_void,
+                stream.ptr(positions) as *const i32,
+                stream.ptr(cos_sin) as *const f32,
+                stream.ptr_mut(cache) as *mut c_void,
+                stream.ptr(slot_mapping) as *const i64,
+                tokens as i64,
+                heads as i64,
+                kv_heads as i64,
+                head_dim as i64,
+                eps,
+                block_size as i64,
+                stream.raw() as _,
+            )
+        },
+        "qkv_post_bf16",
+    )
 }
 
 // ---------------------------------------------------------------------------

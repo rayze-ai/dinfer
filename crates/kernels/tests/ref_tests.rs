@@ -289,6 +289,8 @@ fn gqa_prefill_ref() {
         hk,
         d,
         (d as f32).powf(-0.5),
+        0,
+        0,
     )
     .unwrap();
     assert_close("gqa_prefill", &s.dtoh_sync_copy(&out).unwrap(), &want, 1e-2, 1e-2);
@@ -326,6 +328,8 @@ fn gqa_prefill_d128_flash_ref() {
         hk,
         d,
         (d as f32).powf(-0.5),
+        0,
+        0,
     )
     .unwrap();
     assert_close("gqa_prefill_d128", &s.dtoh_sync_copy(&out).unwrap(), &want, 1e-2, 1e-2);
@@ -385,6 +389,7 @@ fn gqa_cache_write_and_paged_ref() {
         bs,
         bts[1],
         (d as f32).powf(-0.5),
+        0,
     )
     .unwrap();
     assert_close("gqa_paged", &s.dtoh_sync_copy(&out).unwrap(), &want, 1e-2, 1e-2);
@@ -442,6 +447,7 @@ fn gqa_paged_d128_flash_ref() {
         bs,
         bts[1],
         (d as f32).powf(-0.5),
+        0,
     )
     .unwrap();
     assert_close("gqa_paged_d128", &s.dtoh_sync_copy(&out).unwrap(), &want, 1e-2, 1e-2);
@@ -488,9 +494,61 @@ fn gqa_decode_d128_splitk_ref() {
         bs,
         bts[1],
         (d as f32).powf(-0.5),
+        0,
     )
     .unwrap();
     assert_close("gqa_decode_d128", &s.dtoh_sync_copy(&out).unwrap(), &want, 1e-2, 1e-2);
+}
+
+/// Qwen3 QKV 后处理融合 kernel：q/k per-head RMSNorm + neox RoPE 原地 + K/V 写 cache，与 torch 逐步参考比。
+#[test]
+#[ignore]
+fn qkv_post_fused_ref() {
+    let (_d, s) = dev();
+    let (shape, qkv) = load_f32("qkvpost_in");
+    let (_, wq) = load_f32("qkvpost_wq");
+    let (_, wk) = load_f32("qkvpost_wk");
+    let (_, pos) = load_i32("qkvpost_pos");
+    let (_, cs) = load_f32("qkvpost_cos_sin");
+    let slots = load_i64("qkvpost_slots");
+    let (_, want) = load_f32("qkvpost_out");
+    let (_, cache_want) = load_f32("qkvpost_cache");
+    let (_, meta) = load_i32("qkvpost_meta");
+    let (num_blocks, bs) = (meta[0] as usize, meta[1] as usize);
+    let (t, row) = (shape[0], shape[1]);
+    let (h, hk, d) = (16usize, 8usize, 128usize);
+    assert_eq!(row, (h + 2 * hk) * d);
+    let mut dq = s.htod_copy(to_bf16(&qkv)).unwrap();
+    let dwq = s.htod_copy(to_bf16(&wq)).unwrap();
+    let dwk = s.htod_copy(to_bf16(&wk)).unwrap();
+    let dpos = s.htod_copy(pos).unwrap();
+    let dcs = s.htod_copy(cs).unwrap();
+    let dsl = s.htod_copy(slots).unwrap();
+    let mut cache = s.alloc_zeros::<bf16>(num_blocks * bs * hk * 2 * d).unwrap();
+    dinfer_kernels::qkv_post_bf16(
+        &s, &mut dq, &dwq, &dwk, &dpos, &dcs, &mut cache, &dsl, t, h, hk, d, 1e-6, bs,
+    )
+    .unwrap();
+    let got = s.dtoh_sync_copy(&dq).unwrap();
+    // q/k 段比；v 段应原样
+    let qk = (h + hk) * d;
+    for r in 0..t {
+        assert_close(
+            &format!("qkv_post row {r} q|k"),
+            &got[r * row..r * row + qk],
+            &want[r * row..r * row + qk],
+            2e-2,
+            2e-2,
+        );
+        assert_close(
+            &format!("qkv_post row {r} v untouched"),
+            &got[r * row + qk..(r + 1) * row],
+            &qkv[r * row + qk..(r + 1) * row],
+            0.0,
+            0.0,
+        );
+    }
+    assert_close("qkv_post cache", &s.dtoh_sync_copy(&cache).unwrap(), &cache_want, 2e-2, 2e-2);
 }
 
 // ---- Q2 采样：penalties / temperature / min_p / logprobs ----

@@ -185,6 +185,8 @@ extern "C" {
         kv_heads: i64,
         head_dim: i64,
         scale: f32,
+        q_stride: i64,
+        kv_stride: i64,
         stream: cudaStream_t,
     ) -> i32;
     pub fn gqa_paged_bf16(
@@ -202,6 +204,7 @@ extern "C" {
         block_size: i64,
         max_blocks: i64,
         scale: f32,
+        q_stride: i64,
         stream: cudaStream_t,
     ) -> i32;
     pub fn gqa_decode_bf16(
@@ -218,6 +221,23 @@ extern "C" {
         block_size: i64,
         max_blocks: i64,
         scale: f32,
+        q_stride: i64,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn qkv_post_bf16(
+        qkv: *mut c_void,
+        wq: *const c_void,
+        wk: *const c_void,
+        positions: *const i32,
+        cos_sin: *const f32,
+        cache: *mut c_void,
+        slot_mapping: *const i64,
+        tokens: i64,
+        heads: i64,
+        kv_heads: i64,
+        head_dim: i64,
+        eps: f32,
+        block_size: i64,
         stream: cudaStream_t,
     ) -> i32;
     pub fn mla_decode_bf16(
