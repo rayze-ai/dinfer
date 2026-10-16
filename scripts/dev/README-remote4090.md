@@ -23,4 +23,6 @@ scripts/dev/remote4090.sh run 'bash /data/yaochen/infer/dinfer/scripts/dev/boots
 rsync 本机 /data/ref/models/qwen3-0.6b → 远端 /data/yaochen/infer/models/；test/{qwen3_golden,kernel_refs} → 远端 dinfer/test/
 scripts/dev/remote4090.sh run 'source /data/yaochen/infer/env.sh && cd /data/yaochen/infer/dinfer && cargo build --workspace --features qwen3 2>&1 | tail -3'
 ```
-**CUDA toolkit 用 13.0.2**（用户要求；驱动 580.178 支持 13.0，cudarc 0.18.2 有 `cuda-13000`）。注意 `nvidia-smi` 的 `CUDA Version: 13.0` 只是驱动能力，宿主机本身没装 toolkit（containerd 镜像层里的 cuda-13.0 / 12.9 是容器内的）。`.run` 安装器会自建 `/usr/local/cuda` 软链，装完要 `rm -f`（目录约束）。首次误装的 12.4 在 `cuda-12.4/`，13.0 验证通过后删。`CUDA_ARCHS=89` 是 kernels crate 的编译架构变量（见 build.rs）。
+**CUDA toolkit 用 13.0.2**（用户要求；驱动 580.178 支持 13.0，cudarc 0.18.2 有 `cuda-13000`）。注意 `nvidia-smi` 的 `CUDA Version: 13.0` 只是驱动能力，宿主机本身没装 toolkit（containerd 镜像层里的 cuda-13.0 / 12.9 是容器内的）。`.run` 安装器会自建 `/usr/local/cuda` 软链，装完要 `rm -f`（目录约束）。首次误装的 12.4 在 `cuda-12.4/`，13.0 验证通过后删。
+  cudarc 版本：`Cargo.toml` 固定 `cuda-12040`（本机 3090 + CUDA 12.4）；远端 `env.sh` 设 `CUDARC_CUDA_VERSION=13000` 覆盖（cudarc build.rs 环境变量优先于 feature，已核对）。改 feature 为 `cuda-version-from-build-system` 也可行（本机实测自动探到 12.4），但两边同时成立时环境变量最省事。
+  注意：`env.sh` 由 bootstrap 脚本生成，改了脚本要在远端重新生成或手改。`CUDA_ARCHS=89` 是 kernels crate 的编译架构变量（见 build.rs）。

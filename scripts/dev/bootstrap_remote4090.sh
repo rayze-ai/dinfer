@@ -11,7 +11,7 @@ mkdir -p $ROOT/bootstrap $ROOT/models $ROOT/cargo $ROOT/rustup
 cat > $ROOT/env.sh <<ENV
 export RUSTUP_HOME=$ROOT/rustup CARGO_HOME=$ROOT/cargo
 export RUSTUP_DIST_SERVER=https://rsproxy.cn RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
-export CUDA_HOME=$ROOT/cuda-13.0 CUDA_ARCHS=89
+export CUDA_HOME=$ROOT/cuda-13.0 CUDA_ARCHS=89 CUDARC_CUDA_VERSION=13000   # cudarc 固定 cuda-12040（本机 3090），远端用环境变量覆盖成 13.0
 export PATH=\$CARGO_HOME/bin:\$CUDA_HOME/bin:\$PATH
 export TMPDIR=$ROOT/tmp
 ENV
