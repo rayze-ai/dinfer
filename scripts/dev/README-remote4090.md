@@ -55,5 +55,5 @@ scripts/dev/remote4090.sh run 'cd /data/yaochen/infer/dinfer && bash scripts/ver
 
 - `bins/bench`（二进制 `bench`，`cargo build --release -p dinfer-bench`）：OpenAI 流式接口压测，口径与 vLLM `benchmarks/serve.py` 一致（TTFT = 首个带内容 chunk；ITL = 相邻内容 chunk 间隔；TPOT = (latency − TTFT)/(out − 1)；输出 token 数以服务端 `usage` 为准）。闭环并发，prompt 由 seed 决定性生成，`ignore_eos` 让两边输出量一致，思考关。
 - **自检**：`bench --self-check` 起进程内 mock（TTFT 50 ms、每 token 10 ms）验证测量值 ±1–3 ms；`bench_compare.sh` 每次开头先跑它，不过就不出数。
-- 对比：`bash scripts/verify/bench_compare.sh [OUT_DIR]`（默认 `test/<日期>/bench`）：并发 1 / 8 / 32 × (prompt 128, out 128) + (1024, 128)@8，对 :8012 与 :8013 各跑，产出每组 JSON + `summary.md`。
+- 对比：`bash scripts/verify/bench_compare.sh <OUT_DIR> "本轮改动一句话"`（默认 `test/qwen3/<日期>/bench`）：并发 1 / 8 / 32 × (prompt 128, out 128) + (1024, 128)@8，对 :8012 与 :8013 各跑，产出每组 JSON + `summary.md` + `CHANGE`，并重生成 `test/qwen3/perf-trend.{md,svg}`（所有轮次的曲线与相对上一轮的提升）。
 - 单跑：`bench --url http://127.0.0.1:8012 --concurrency 8 --num-requests 64 --prompt-len 256 --max-tokens 128 --label dinfer --out x.json`。
