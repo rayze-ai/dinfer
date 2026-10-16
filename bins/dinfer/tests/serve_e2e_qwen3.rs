@@ -550,3 +550,168 @@ async fn e2e_qwen3_metrics() {
     eprintln!("e2e: metrics PASS");
     drop(srv);
 }
+
+/// splitmix64：测试内随机数，不引 rand。
+fn splitmix(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E3779B97F4A7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    z ^ (z >> 31)
+}
+
+async fn metrics_val(c: &reqwest::Client, base: &str, name: &str) -> f64 {
+    let text = c.get(format!("{base}/metrics")).send().await.unwrap().text().await.unwrap();
+    text.lines()
+        .find(|l| l.starts_with(name) && l[name.len()..].starts_with(' '))
+        .unwrap_or_else(|| panic!("metric {name} missing"))
+        .split(' ')
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+/// 等引擎空闲（running==0 且 kv==0），最多 `secs` 秒。
+async fn wait_idle(c: &reqwest::Client, base: &str, secs: u64) -> (f64, f64) {
+    let t0 = Instant::now();
+    loop {
+        let running = metrics_val(c, base, "dinfer:num_requests_running").await;
+        let kv = metrics_val(c, base, "dinfer:kv_cache_usage_perc").await;
+        if (running == 0.0 && kv == 0.0) || t0.elapsed() > Duration::from_secs(secs) {
+            return (running, kv);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Q2-f：健壮性。① 超 max_model_len 的 prompt → 400；② 非法 JSON → 4xx；③ 流式客户端中途断开 → 引擎 abort，KV 归零；
+/// ④ 32 并发随机（prompt 10–300 token、max_tokens 1–200、随机采样参数、1/8 流式、1/8 n=3）跑 `STRESS_SECS`（默认 60）秒：
+/// 无 5xx、无 panic、结束后 running==0 且 kv==0。
+#[tokio::test]
+#[ignore]
+async fn e2e_qwen3_robustness() {
+    let srv = spawn_server_with(&["--num-blocks", "1024", "--max-num-seqs", "32"]);
+    let c = reqwest::Client::new();
+    let url = format!("{}/v1/chat/completions", srv.base);
+    let nothink = serde_json::json!({"enable_thinking": false});
+
+    // ① 超长 prompt（max_model_len 2048）→ 400
+    let huge = "word ".repeat(2600);
+    let r = c
+        .post(&url)
+        .json(&serde_json::json!({"messages": [{"role":"user","content": huge}], "max_tokens": 1}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400, "oversized prompt must be rejected: {}", r.text().await.unwrap());
+    // ② 非法 JSON / 缺字段
+    let r = c.post(&url).header("content-type", "application/json").body("{not json").send().await.unwrap();
+    assert!(r.status().is_client_error(), "malformed JSON → 4xx, got {}", r.status());
+    let r = c.post(&url).json(&serde_json::json!({"messages": []})).send().await.unwrap();
+    assert_eq!(r.status(), 400);
+
+    // ③ 流式中途断开：收到前 3 个 chunk 就 drop 连接
+    {
+        let body = serde_json::json!({"messages": [{"role":"user","content":"Write a long story about a lighthouse."}],
+            "max_tokens": 300, "temperature": 0.0, "stream": true, "chat_template_kwargs": nothink});
+        let mut resp = c.post(&url).json(&body).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let mut got = 0;
+        while let Some(chunk) = resp.chunk().await.unwrap() {
+            got += chunk.len();
+            if got > 200 {
+                break;
+            }
+        }
+        drop(resp);
+        let (running, kv) = wait_idle(&c, &srv.base, 15).await;
+        eprintln!("e2e: after client disconnect → running={running} kv={kv}");
+        assert_eq!((running, kv), (0.0, 0.0), "disconnect must abort the request and free its KV");
+        assert!(
+            metrics_val(&c, &srv.base, "dinfer:request_success_total{finished_reason=\"abort\"}").await
+                >= 1.0
+        );
+    }
+
+    // ④ 并发随机压测
+    let secs: u64 = env("STRESS_SECS", "60").parse().unwrap();
+    let workers = 32usize;
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    let mut handles = Vec::new();
+    for w in 0..workers {
+        let c = c.clone();
+        let url = url.clone();
+        let nothink = nothink.clone();
+        handles.push(tokio::spawn(async move {
+            let mut rng = 0xC0FFEE_u64 + w as u64 * 7919;
+            let (mut ok, mut client_err, mut server_err, mut toks) = (0u64, 0u64, 0u64, 0u64);
+            while Instant::now() < deadline {
+                let r = splitmix(&mut rng);
+                let words = 2 + (r % 220) as usize; // ≈ 10–300 token
+                let prompt = format!("Topic {}: {}", r % 1000, "the quick brown fox jumps over the lazy dog ".repeat(words / 9 + 1));
+                let max_tokens = 1 + (splitmix(&mut rng) % 200) as u32;
+                let temp = [0.0, 0.7, 1.0, 1.3][(splitmix(&mut rng) % 4) as usize];
+                let top_p = [1.0, 0.95, 0.8][(splitmix(&mut rng) % 3) as usize];
+                let top_k = [-1, 20, 50][(splitmix(&mut rng) % 3) as usize];
+                let stream = splitmix(&mut rng) % 8 == 0;
+                let n = if splitmix(&mut rng) % 8 == 0 { 3 } else { 1 };
+                let body = serde_json::json!({"messages": [{"role":"user","content": prompt}], "max_tokens": max_tokens,
+                    "temperature": temp, "top_p": top_p, "top_k": top_k, "repetition_penalty": 1.1, "n": n,
+                    "stream": stream, "chat_template_kwargs": nothink});
+                let resp = match c.post(&url).json(&body).send().await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("e2e: transport error {e}");
+                        server_err += 1;
+                        continue;
+                    }
+                };
+                let st = resp.status();
+                if st.is_server_error() {
+                    eprintln!("e2e: 5xx {}", resp.text().await.unwrap_or_default());
+                    server_err += 1;
+                    break;
+                }
+                if st.is_client_error() {
+                    client_err += 1;
+                    continue;
+                }
+                if stream {
+                    let t = resp.text().await.unwrap_or_default();
+                    if !t.contains("[DONE]") {
+                        eprintln!("e2e: stream without [DONE]");
+                        server_err += 1;
+                        break;
+                    }
+                } else {
+                    let v: serde_json::Value = resp.json().await.unwrap();
+                    toks += v["usage"]["completion_tokens"].as_u64().unwrap_or(0);
+                }
+                ok += 1;
+            }
+            (ok, client_err, server_err, toks)
+        }));
+    }
+    let (mut ok, mut cerr, mut serr, mut toks) = (0, 0, 0, 0);
+    for h in handles {
+        let (a, b, d, t) = h.await.unwrap();
+        ok += a;
+        cerr += b;
+        serr += d;
+        toks += t;
+    }
+    eprintln!("e2e: stress {secs}s × {workers} workers: ok={ok} client_err={cerr} server_err={serr} completion_tokens={toks}");
+    assert_eq!(serr, 0, "no 5xx / transport errors under load");
+    assert_eq!(cerr, 0, "all generated requests were valid");
+    assert!(ok >= workers as u64, "too few completed requests: {ok}");
+    let (running, kv) = wait_idle(&c, &srv.base, 30).await;
+    let waiting = metrics_val(&c, &srv.base, "dinfer:num_requests_waiting").await;
+    eprintln!("e2e: after stress → running={running} waiting={waiting} kv={kv}");
+    assert_eq!((running, waiting, kv), (0.0, 0.0, 0.0), "engine must drain and release all KV");
+    // 服务仍健康
+    let r = c.post(&url).json(&serde_json::json!({"messages": [{"role":"user","content":"Say ok."}], "max_tokens": 4, "temperature": 0.0})).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    eprintln!("e2e: robustness PASS");
+    drop(srv);
+}
