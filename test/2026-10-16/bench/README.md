@@ -11,12 +11,12 @@
 | c32 p128 | 2707 / 8065（0.34×） | 376 / 69 | 10.0 / 3.4 |
 | c8 p1024 | 56 / 1916（0.03×） | 9369 / 55 | 60.7 / 3.7 |
 
-## 诊断（已确认的事实）
+## 诊断（已确认的事实；首版写成"冷形状停顿"是误判，已改）
 
-1. **每个新 prompt 长度（新的 GEMM M 维）首次出现时有一次性大停顿，且随 M 线性增长**：389 token 0.47 s、639 token 0.87 s、889 token 1.26 s、1139 token 1.64 s；同长度第二次 0.02–0.07 s。vLLM 同 prompt 0.02–0.04 s。c8 p1024 组每个请求的 prompt 长度都不同（1221 ± 几十），于是几乎每个请求都吃一次 1.5–3 s 停顿 → TTFT 9 s、TPOT 60 ms（decode 步被别的请求的冷停顿卡住）。这是 c8 p1024 组 34 倍差距的全部来源，也拉高了 c32 组的 TTFT 尾部。嫌疑在 cuBLASLt 每次调用重新做启发式搜索 / 建描述符（`Gemm::forward_bf16` 无按形状缓存），待下一步定位；修法：按 (M,N,K) 缓存算法或启动时按 M 分桶预热，并把 M 向上对齐到 2 的幂 / 64 的倍数以减少形状数。
-2. **decode TPOT 热态 3.9 ms vs 2.1 ms（c1）**：这是 Q3 真正要啃的部分：参考 kernel（GQA 逐 token 单 block 循环、无 CUDA graph、每 step 多次小 H2D/D2H、采样管线多次 kernel）。vLLM 有 CUDA graph + FlashAttention。
-3. **TTFT 热态 84 ms vs 18 ms（c1 p171）**：prefill 本身也慢 4–5 倍：GQA prefill kernel 是逐 query token 一个 block、对全部 key 两遍扫（softmax 两 pass + PV 累加），无 tiling；GEMM 走 cuBLASLt 应与 vLLM 同级，所以差在 attention 与 kernel 数。
-4. 并发 32 时 dinfer 吞吐只到 c8 的 1.85 倍（vLLM 2.8 倍）：batch 变大 decode 步时间从 4.6 → 10 ms，attention kernel 不随 batch 并行是主因（每请求一个 block 串行扫 key）。
+1. **prefill attention kernel 慢得离谱，且与 T² 成正比**：同一 1514-token prompt，改一个前缀词让 prefix cache 不命中 → 6.36 s；原样重发（整段前缀命中，只算最后一块）→ 0.12 s。此前以为"同形状第二次就快"是 kernel 热身，实际是 prefix cache 命中。vLLM 同 prompt 0.04 s（150 倍）。GPU 全程 100% 利用率、SM 满频，是算力浪费不是停顿：`gqa_prefill_kernel` 的 grid 只有 (num_reqs × heads) = 16 个 block，每个 block 串行遍历该 head 的全部 T 个 query，每个 query 对全部 key 扫三遍（max、sum、PV），纯标量 fp32。T=1514 时每 block 做 3 × T²/2 × D ≈ 4.4 × 10⁸ 次 MAC × 16 block，在 16 个 SM 上跑 → 秒级。c8 p1024 组每个请求 1.2k token 且互不相同（无前缀命中）→ TTFT 9 s，decode 步被别人的 prefill 卡住 → TPOT 60 ms。这是该组 34 倍差距的全部来源，也拉高了 c32 组的 TTFT 尾部（171 token prompt 也要 ~60 ms）。
+2. **decode TPOT 热态 3.9 ms vs 2.1 ms（c1）**：参考 kernel（GQA 逐 token 单 block 循环、无 CUDA graph、每 step 多次小 H2D/D2H、采样管线多次 kernel）。vLLM 有 CUDA graph + FlashAttention。
+3. 并发 32 时 dinfer 吞吐只到 c8 的 1.85 倍（vLLM 2.8 倍）：decode 步时间 4.6 → 10 ms，decode attention kernel 每请求一个 block 串行扫 key，不随 batch 并行。
+4. GEMM 走 cuBLASLt，与 vLLM 同级；`cold_shape` 微基准见 `test/2026-10-16/cold_shape.md`。
 
 ## 下一步（Q3 规格的输入）
-按收益排序：① 冷形状停顿（确定根因后修，预期直接消掉 c8 p1024 的 34×）；② GQA decode kernel 改 split-K / 多 warp 并行 + CUDA graph；③ prefill attention tiling（flash 风格）；④ 采样管线融合、H2D 批量化。
+按收益排序：① **prefill attention 重写**（flash 风格：query 分块 × heads × reqs 的 grid，K/V tile 进 shared memory，online softmax 一遍，warp 级并行；预期 1514 token 从 6.4 s 到 ≤ 50 ms，直接消掉 c8 p1024 的 34× 与 c32 的 TTFT 尾部）；② decode attention 改 split-K / 多 warp + CUDA graph；③ 采样管线融合、H2D 批量化。
