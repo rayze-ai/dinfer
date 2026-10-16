@@ -42,6 +42,66 @@ fn cold_vs_warm_by_shape() {
     let k = s.alloc_zeros::<bf16>(max_m * hk * d).unwrap();
     let v = s.alloc_zeros::<bf16>(max_m * hk * d).unwrap();
     let mut o = s.alloc_zeros::<bf16>(max_m * h * d).unwrap();
+    // decode attention：flash paged（q_len=1 → 每 (req,head) 1 个活跃 warp）vs split-K；B 个请求、每个 seq_len 个 key
+    {
+        let (bs, hk) = (16usize, 8usize);
+        for &(b, n) in &[(1usize, 512usize), (8, 2048), (32, 2048), (64, 1024)] {
+            let blocks_per = n.div_ceil(bs);
+            let cache = s.alloc_zeros::<bf16>(b * blocks_per * bs * hk * 2 * d).unwrap();
+            let bt: Vec<i32> = (0..b * blocks_per).map(|x| x as i32).collect();
+            let dbt = s.htod_copy(bt).unwrap();
+            let seq = s.htod_copy(vec![n as i32; b]).unwrap();
+            let cu: Vec<i32> = (0..=b as i32).collect();
+            let dcu = s.htod_copy(cu).unwrap();
+            let qd = s.alloc_zeros::<bf16>(b * h * d).unwrap();
+            let mut od = s.alloc_zeros::<bf16>(b * h * d).unwrap();
+            let mut scratch = s.alloc_zeros::<f32>(dinfer_kernels::gqa_decode_scratch_len(b, h, d)).unwrap();
+            let mut f_paged = || {
+                dinfer_kernels::gqa_paged_bf16(
+                    &s,
+                    &qd,
+                    &cache,
+                    &dbt,
+                    &seq,
+                    &dcu,
+                    &mut od,
+                    b,
+                    1,
+                    h,
+                    hk,
+                    d,
+                    bs,
+                    blocks_per,
+                    1.0 / (d as f32).sqrt(),
+                )
+                .unwrap()
+            };
+            f_paged();
+            let t_paged = time(&mut f_paged);
+            let mut f_split = || {
+                dinfer_kernels::gqa_decode_bf16(
+                    &s,
+                    &qd,
+                    &cache,
+                    &dbt,
+                    &seq,
+                    &mut od,
+                    &mut scratch,
+                    b,
+                    h,
+                    hk,
+                    d,
+                    bs,
+                    blocks_per,
+                    1.0 / (d as f32).sqrt(),
+                )
+                .unwrap()
+            };
+            f_split();
+            let t_split = time(&mut f_split);
+            println!("decode B={b:<3} seq={n:<5} flash_paged {t_paged:>8.3} ms   splitk {t_split:>8.3} ms   ({:.1}x)", t_paged / t_split.max(1e-6));
+        }
+    }
     println!("n      gqa_prefill cold/warm (ms)");
     for &n in &[389usize, 639, 889, 1139, 1514, 1900] {
         let cu = s.htod_copy(vec![0i32, n as i32]).unwrap();
