@@ -599,7 +599,9 @@ __global__ void __launch_bounds__(D2_WARPS * 32) gqa_decode_v2_kernel(
         float part = 0.f;
 #pragma unroll
         for (int c = 0; c < D2_DPL; ++c) part += qreg[g][c] * kf[c];
-        const float sc = valid ? sum8(part) : -INFINITY;  // 8 lane 归约 → 该 key 的分数（同 key 的 8 lane 都拿到）
+        // 全 warp 都要参与 shuffle（full mask），不能按 valid 分叉；无效 key 的 part 已为 0，归约后再置 -inf
+        const float red = sum8(part);
+        const float sc = valid ? red : -INFINITY;
         // 4 个 key 的 max：跨 kslot 归约（xor 8, 16）
         float kmax = sc;
         kmax = fmaxf(kmax, __shfl_xor_sync(0xffffffffu, kmax, 8));
