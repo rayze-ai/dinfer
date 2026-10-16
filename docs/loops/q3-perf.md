@@ -41,6 +41,13 @@ c1 out 221 vs 447 tok/s、c32 2707 vs 8065、c8 p1024 56 vs 1916；TTFT 84 vs 18
 | 采样 4 kernel + 1 dtod | temperature / min_p / topk_topp / sample 各一 launch + logits 复制 | 一个 `sample_fused` kernel：每行一 block，读原始 logits，依次做温度、min_p、top-k/p、Philox 采样，不写回 work（logprobs 时才复制） | -4 launch/step + 省 1 次 [B,V] fp32 复制 |
 | fused_add_rmsnorm 之前的 o_proj 输出 | o_proj 写 attn_out 再 fused_add 读 | cuBLASLt beta=1 直接累加进 hidden（C = A·B + hidden），再普通 rmsnorm | -0（kernel 数同），省一次读 |
 
+## e 续 3：prefill attention v2 设计（c8-long TTFT 488 ms 的来源）
+
+分解（3090 `cold_shape`，T=1514）：flash prefill **9.6 ms/层**，三个 GEMM 合计 0.8 ms/层 → 28 层 ≈ 270 ms attention + 22 ms GEMM；T=1139 时 5.6 ms/层。即 c8-long 一个 1.2k prompt 的 prefill ≈ 160–270 ms 几乎全是 attention；8 个同时到达、4096 token/step 预算 → 3 个 prompt 一步、其余排队，TTFT p50 488。vLLM（FlashAttention-2）同 T 约 0.3 ms/层。
+现 kernel 的问题：① 每 block 只有 4 个 query 行（PF_WARPS=4）→ K/V tile 从全局内存读进 smem 后只服务 4 行，T=1514 时每 block 读 48 个 tile × 32 key，整体 K/V 重读 T/4 ≈ 380 次；② 装载用 bf16 标量读 + 转置写 smem；③ 分数计算每 lane 串行 128 维 FMA（无 tensor core）。
+v2：① BQ = 64 行/block（16 warp，每 warp 4 行，或 8 warp × 8 行），K/V 重读次数降 16×；② uint4 向量装载；③ 同一 kv head 的两个 q head 共用 K/V tile（grid 按 kv head 而非 q head，再省一半读）；④ 分数/PV 用 `mma.sync` bf16 m16n8k16（tensor core）—— 这是 FA2 的本质，第二步做；先做 ①②③（预期 9.6 → ~1.5 ms/层），再做 ④。
+验收：`gqa_prefill_d128_flash_ref` + `gqa_paged_d128_flash_ref` 过（paged 同样改）；cold_shape T=1514 ≤ 2 ms；bench c8-long TTFT ≤ 150 ms。
+
 ## 环境
 
 4090（`scripts/dev/remote4090.sh`），dinfer `--release` 常驻 :8012（tmux `dinfer`），vLLM Docker :8013。改 kernel 后：`push` → 远端 `cargo build --release -p dinfer --features qwen3` → 重启 tmux `dinfer` → `bench_compare.sh`。
