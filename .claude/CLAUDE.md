@@ -47,6 +47,7 @@ rm -f target/.rustc_info.json                     # cargo 报 "failed to run rus
 - 文档用中文，命令与代码原样。
 - 代码 / 脚本 / 环境变量 / C ABI 符号不带项目名前缀（`DINFER_*`、`dinfer_*`），项目可能改名；新代码前 `grep -rn DINFER crates scripts` 自查。
 - 所有跨会话要记住的事写进文件并进 git，不要只留在对话里。
+- 上下文纪律（已 3 次撞 `Input is too long`）：Bash 输出一律 `grep`/`tail`/`cut -c1-200` 截断，日志 `tee` 到 `/tmp` 只看摘要；读文件只读需要的行段；每完成一个子块就写 loop 记录并 commit；超过约 40 轮工具调用主动 wrap。
 
 ## 收功（每次结束前）
 

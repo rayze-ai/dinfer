@@ -193,3 +193,11 @@
 - 解法：目标固定为 `moonshotai/Kimi-K3` 与 `zai-org/GLM-5.3`；`GLM-5.3-Flash`（`Glm5NextForCausalLM`，结构不同）不在范围。
 - 如何避免：拉文件前先 `curl -s -o /dev/null -w '%{http_code}' https://huggingface.co/api/models/<repo>`。
 - 相关：`/data/ref/models/*/meta.json`
+
+## 2026-10-16 采样分布测试在 chat prompt 首 token 上"全部样本同一 token、L1 = 0"
+
+- 现象：100–200 个不同 seed 的请求在同一 prompt 上采样（temperature 0.7 / top_k 20 / top_p 0.9），全部得到 `151667`（`<think>`），host 侧 mask 后候选集大小 1，测试当成"采样坍缩"失败。
+- 根因：Qwen3 chat 模板后的首 token 几乎确定（logprob ≈ −2e-4），任何 top-p < 1 都只剩一个候选；不是 kernel 问题。
+- 解法：先 greedy 跑 24 步，拿每步原始 logits 在 host 侧套同样 mask，选候选最多的一步（实测 step 23，候选 3），用 `prompt + greedy[..step]` 作采样 prompt。
+- 如何避免：分布 / 随机性测试先用 host 参考确认该位置的候选集 ≥ 2；不要默认首 token 有随机性。顺带：N 个 36-token prompt 要一次 prefill 放下，`max_num_batched_tokens` 与 KV 块数要按 `N × ceil(len/16)` 算（100 × 3 块 → 预算 8192、512 块）。
+- 相关：`crates/qwen3/tests/sampling_parity.rs::mask_and_distribution_match_host_reference`

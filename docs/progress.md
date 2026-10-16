@@ -3,7 +3,7 @@
 <!-- ===== 当前状态（交接区）：每次收功整体重写，保持 ≤ 20 行 ===== -->
 ## 当前状态
 
-- 更新日期：2026-10-15
+- 更新日期：2026-10-16
 - 历史：P0 `cda9aea`，P1 `65a67f1`，P2 `d44e49f`，P3 `17930a5`，P4 `35b54e3`/`69c8478`/`ea415e3`/`3c317d1`（`scripts/verify/p4.sh` exit 0 = p0–p3 + MoE + runner + 双请求 + fp8），P5 WIP `1a774f0` + 本次收尾 commit
 - 阶段：**P6 通过**（2026-10-15，`scripts/verify/p6.sh` exit 0 = p0–p5 回归 + chat_parity 4 测试 + parser 8 单测 + serve_e2e + mtp_parity 3 测试；见 `test/2026-10-15/p6-glm-serve.md`）。P6 产出：`glm53/src/{tokenizer,chat,parser,service,mtp}.rs`、`core/src/engine.rs`、`server/src/{backend,openai,chat}.rs`、`bins/dinfer`（`serve --model --tokenizer --max-model-len --num-blocks --mtp`）+ `tests/serve_e2e.rs`（feature `e2e`）、`glm53/tests/{chat_parity,mtp_parity}.rs`、`scripts/verify/{gen_chat_golden.py,p6.sh}`、`gen_tiny_glm.py --vocab/--mtp`、`docs/loops/p6-glm-serve.md`（8 轮）。P5 产出见日志 2026-10-15。
 - P6 已知简化（后续补）：采样只有 greedy（temperature/top_p 字段接收但不生效）；无 logprobs / n>1 / stop 字符串（只有 stop token id）；`num_blocks` 固定分配（不按显存算）；prefix cache 关；MTP 只 nextn=1、每 step 1 draft，MTP 层 KV 与主干同大小；索引器 K cache bf16；server 无鉴权 / 无 metrics；K3 crate 仍是骨架
@@ -13,7 +13,8 @@
 - **方向调整（2026-10-15，用户决定）**：暂无高端卡，GLM/K3 真权重验收挂起；先做 **Qwen3-0.6B**（本机 3090 跑真权重）验证主流程：Q1 模型 crate + 真权重对拍 → Q2 采样/请求功能 → Q3 单卡性能 → Q4 PD 分离（design.md §5b）。参考材料已下载到 `/data/ref/models/qwen3-0.6b`（config / tokenizer / 模板 / 1.5 GB 权重）；HF golden 在 `test/qwen3_golden/`（不进 git）
 - 设计文档：`docs/design.md`（整体）+ `docs/design-{kimik3,glm53,qwen3}.md`（每模型：状态 / 结构事实 / 模块 / 风险 / 参考），2026-10-16 拆分
 - 阶段：**Q1 通过**（2026-10-15，`scripts/verify/q1.sh` exit 0）：Qwen3-0.6B **真权重** 在 3090 上 prefill logits / greedy 32 / 双请求混批 / 真模型 e2e 全部与 HF 一致（见 `test/2026-10-15/q1-qwen3.md`）。产出：`crates/text`（模型无关 tokenizer + chat 模板，glm53 已切过去）、`kernels/cuda/gqa.cu` + `KvCacheSpec::FullAttention`、`crates/qwen3`（config/model/executor/parser/service）、`bins/dinfer --features qwen3`、`gen_qwen3_golden.py`、`docs/loops/q1-qwen3.md`（4 轮）。性能快照（参考 kernel）：加载 17 s、prefill 13 tok 6.9 ms、decode ≈ 7.5 ms/步
-- 下一步：**Q2 采样 + 请求功能**（design.md §5b）：接 P2 的 `topk_topp_mask` + Philox `sample` 到 executor（temperature / top_p / top_k / min_p / repetition / seed）、stop 字符串、logprobs、`n>1`、prefix cache 开启、`/metrics`、按显存算 `num_blocks`。开工先 `/project-skill loop q2-sampling` 写规格。诊断工具：`crates/qwen3/tests/diag.rs`（逐层 bisect，需 `/tmp/qwen3_hf` dump）
+- 阶段：**Q2-a 完成**（2026-10-16，commit `e7deedd`）：per-request 采样全链路接通（`core::sampler::SampleBatch` → qwen3 executor penalties→temperature→min_p→top-k/p→Philox→logprobs；`EngineEvent::Logprobs`；server 接 min_p/penalties/stop_token_ids/ignore_eos/min_tokens，`validate()` 失败 400）。验证：`crates/qwen3/tests/sampling_parity.rs` 5/5（真权重：seed 确定性+batch 无关、混批 greedy=HF 32 步、penalties 4 组逐步=host 公式、logprobs=host log_softmax、分布 L1 0.097）、`real_parity` 3/3、`serve_e2e_qwen3` 1/1。结果见 `test/2026-10-16/q2-serving.md`
+- 下一步：**Q2-b 请求功能**（规格 `docs/loops/q2-serving.md` 块 b，停止条件 4/5/6）：① server 渲染 logprobs（OpenAI `logprobs.content[]`，需 backend 单 token decode 给 `bytes`/`token`）；② `stop` 字符串（vLLM `check_stop_strings` 语义，放在 OutputStream 原始文本流上，命中后 `EngineHandle::abort`，6 个边界单测）；③ `n>1`（同 prompt 提交 n 个请求、不同 seed、choices index 聚合；流式按 index 交错）。然后 c 自动 num_blocks → d prefix cache → e metrics → f 健壮性，最后写 `scripts/verify/q2.sh`（含 q1.sh 回归 + sampling_parity）
 - 代码命名规则（用户要求）：代码 / 脚本 / 环境变量不出现 `DINFER` 前缀（已改 `TINY_GLM_DIR / KERNEL_REFS_DIR / CUDA_ARCHS / PY_TF519 / P1_SCHED_US`）；C ABI 符号不带 `dinfer_`
 - P1–P3 产出：见 `docs/design.md` §4 模块表（模型 crate 见 `design-<model>.md`）与各阶段 commit（P1 scheduler/KV、P2 参考 kernel + cuBLASLt GEMM、P3 MLA dense 主干 + WeightSource）；P2 约定 **C ABI 符号不带 `dinfer_` 前缀**
 - P4 产出：`kernels/cuda/moe.cu`（gate_f32 / route / bucket / gather / scatter_add / f32_add_to_bf16）、`kernels/cuda/mla.cu::mla_prefill_paged`、`layers/src/moe.rs`、`layers/src/mla.rs::AttnMeta::Paged + absorbed_q/absorbed_o`、`core/src/runner.rs`（ReqState / BatchPlan / BatchMode / ModelExecutor / Runner）、`glm53/src/{model.rs::Glm53Model+FeedForward, executor.rs::Glm53Executor}`、`glm53/tests/{tiny_parity,runner_parity}.rs`、`scripts/verify/p4.sh`、`docs/loops/p4-moe-runner.md`
@@ -22,7 +23,7 @@
 - P1 已知简化（P7 补）：Mamba 组只在 block 对齐边界登记/命中，不做逐级回退与 checkpoint 多块；所有 group 要求同 page 大小；无 priority 调度、无 encoder 预算
 - 阻塞 / 待决策：`docs/design.md` §9（KDA kernel 手写 CUDA 还是 Triton AOT；structured output；性能对比基线配置）
 - 本机工具链：rustc/cargo 1.89.0，nvcc 12.4 在 `/usr/local/cuda/bin`（不在默认 PATH；p0.sh 已自动加）；crates.io 直连可用。**cargo 假失败时 `rm target/.rustc_info.json`**（cron trace 污染，见 pitfalls 2026-10-15）
-- 进行中的 loop 规格：无（p5 / p6 均已通过）
+- 进行中的 loop 规格：`docs/loops/q2-serving.md`（a 完成，3 轮；b–f 未开始；验证脚本 `scripts/verify/q2.sh` 尚未写）
 - 会话注意：本项目会话已 **三次** 因 `API Error: 400 Input is too long` 被迫 /clear（10-14 P4、10-15 P5、10-16 Q2-a）。规则升级：① Bash 输出一律 `grep`/`tail`/`cut -c1-200` 截断，日志 `tee` 到 `/tmp` 只看摘要；② 文件只读需要的行段，不整文件 cat；③ 每完成一个子块（kernel 对拍 / 一组单测）立即写 `docs/loops/*.md` 记录表 + `git commit`，不攒；④ 对话超过约 40 轮工具调用就主动 wrap 一次
 - 参考材料：`/data/ref/vllm`（main de8291e）、`/data/ref/models/{kimik3,glm53}`（config.json、modeling_*.py、tokenizer、chat 模板、safetensors index；无权重）
 
