@@ -13,6 +13,7 @@
 //   gqa_decode_bf16        纯 decode（每请求 1 行）split-K 版（Q3-b）：reqs × Hkv × 8 split 个 block + merge kernel
 #include "common.cuh"
 #include "dinfer_kernels.h"
+#include <mma.h>
 
 using namespace dinfer;
 
@@ -176,6 +177,306 @@ __global__ void __launch_bounds__(PV2_WARPS * 32) gqa_prefill_flash_kernel(
     bf16* op = out + ((int64_t)(start + rows[r]) * H + heads[r]) * PF_D;
 #pragma unroll
     for (int c = 0; c < PF_DPL; ++c) op[lane + 32 * c] = to_bf16(acc[r][c] * inv);
+  }
+}
+
+// prefill v3（Q3-e 续 4）：tensor core。block = (req, kv head, 32 行 query)；S = Q·Kᵀ 与 O += P·V 用 WMMA bf16 16×16×16。
+// smem（动态，56 KB）：Q[2][32][128] bf16（预乘 scale）| K[32][128] bf16 | V[32][128] bf16 | S[2][32][32] f32 | P[2][32][32] bf16 |
+// O[2][32][128] f32。流程每 tile：装 K/V → 8 warp 算 S 的 2 head × 4 片 → 每 warp 8 行(head,row) 做 online softmax（m/l 寄存器）、
+// 写 P（bf16）并把 O 对应行乘 alpha → 8 warp 算 PV 的 2 head × 16 片各 2 片累加进 O。结束按 l 归一化写出。
+using namespace nvcuda;
+constexpr int V3_WARPS = 8;
+constexpr int V3_BQ = 32;
+constexpr int V3_TILE = 32;
+constexpr int V3_G = 2;  // 最多 2 个 q head 共享一个 kv head
+constexpr size_t V3_SMEM =
+    (size_t)V3_G * V3_BQ * PF_D * 2 + 2 * (size_t)V3_TILE * PF_D * 2 + (size_t)V3_G * V3_BQ * V3_TILE * 4 +
+    (size_t)V3_G * V3_BQ * V3_TILE * 2 + (size_t)V3_G * V3_BQ * PF_D * 4;  // 16K+16K+8K+4K+32K = 76 KB
+
+__global__ void __launch_bounds__(V3_WARPS * 32) gqa_prefill_tc_kernel(
+    const bf16* __restrict__ q, const bf16* __restrict__ k, const bf16* __restrict__ v, bf16* __restrict__ out,
+    const int32_t* __restrict__ cu_seqlens, int H, int Hkv, float scale, int q_stride, int kv_stride) {
+  extern __shared__ __align__(128) unsigned char v3_smem[];
+  bf16* sQ = reinterpret_cast<bf16*>(v3_smem);                       // [G][BQ][D]
+  bf16* sK = sQ + V3_G * V3_BQ * PF_D;                               // [TILE][D]
+  bf16* sV = sK + V3_TILE * PF_D;                                    // [TILE][D]
+  float* sS = reinterpret_cast<float*>(sV + V3_TILE * PF_D);         // [G][BQ][TILE]
+  bf16* sP = reinterpret_cast<bf16*>(sS + V3_G * V3_BQ * V3_TILE);   // [G][BQ][TILE]
+  float* sO = reinterpret_cast<float*>(sP + V3_G * V3_BQ * V3_TILE); // [G][BQ][D]
+
+  const int req = blockIdx.z, hk = blockIdx.y;
+  const int group = H / Hkv;
+  const int start = cu_seqlens[req], end = cu_seqlens[req + 1];
+  const int T = end - start;
+  const int q_base = blockIdx.x * V3_BQ;
+  if (q_base >= T) return;
+  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+  const int nrows = min(V3_BQ, T - q_base);
+
+  // Q → smem（bf16，预乘 scale），缺行补 0；O 清零
+  for (int e = threadIdx.x; e < V3_G * V3_BQ * (PF_D / 8); e += V3_WARPS * 32) {
+    const int g = e / (V3_BQ * (PF_D / 8)), rem = e % (V3_BQ * (PF_D / 8));
+    const int r = rem / (PF_D / 8), d8 = (rem % (PF_D / 8)) * 8;
+    uint4 val = make_uint4(0, 0, 0, 0);
+    if (g < group && r < nrows) {
+      const bf16* qp = q + (int64_t)(start + q_base + r) * q_stride + (int64_t)(hk * group + g) * PF_D + d8;
+      uint4 raw = *reinterpret_cast<const uint4*>(qp);
+      __nv_bfloat162* pr = reinterpret_cast<__nv_bfloat162*>(&raw);
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        float2 f = __bfloat1622float2(pr[i]);
+        pr[i] = __floats2bfloat162_rn(f.x * scale, f.y * scale);
+      }
+      val = raw;
+    }
+    *reinterpret_cast<uint4*>(sQ + ((size_t)g * V3_BQ + r) * PF_D + d8) = val;
+  }
+  for (int e = threadIdx.x; e < V3_G * V3_BQ * PF_D; e += V3_WARPS * 32) sO[e] = 0.f;
+
+  // 每 warp 负责 8 个 (g, row) 的 softmax 状态：idx = warp*8 + i → g = idx / 32, row = idx % 32
+  float m_r[8], l_r[8];
+#pragma unroll
+  for (int i = 0; i < 8; ++i) { m_r[i] = -INFINITY; l_r[i] = 0.f; }
+
+  const int block_last = q_base + nrows - 1;
+  const int n_tiles = block_last / V3_TILE + 1;
+  for (int tile = 0; tile < n_tiles; ++tile) {
+    const int k0 = tile * V3_TILE;
+    const int kn = min(V3_TILE, T - k0);
+    __syncthreads();
+    // 装 K/V tile（uint4），缺 key 补 0
+    for (int e = threadIdx.x; e < V3_TILE * (PF_D / 8); e += V3_WARPS * 32) {
+      const int j = e / (PF_D / 8), d8 = (e % (PF_D / 8)) * 8;
+      uint4 kk = make_uint4(0, 0, 0, 0), vv = make_uint4(0, 0, 0, 0);
+      if (j < kn) {
+        const int64_t off = (int64_t)(start + k0 + j) * kv_stride + (int64_t)hk * PF_D + d8;
+        kk = *reinterpret_cast<const uint4*>(k + off);
+        vv = *reinterpret_cast<const uint4*>(v + off);
+      }
+      *reinterpret_cast<uint4*>(sK + j * PF_D + d8) = kk;
+      *reinterpret_cast<uint4*>(sV + j * PF_D + d8) = vv;
+    }
+    __syncthreads();
+    // S = Q·Kᵀ：G×(2×2) 个 16×16 片 = 最多 8 片，一 warp 一片（group=1 时后 4 个 warp 空转）
+    {
+      const int g = warp / 4, tr = (warp % 4) / 2, tc = warp % 2;
+      if (g < group) {
+        wmma::fragment<wmma::accumulator, 16, 16, 16, float> c;
+        wmma::fill_fragment(c, 0.f);
+#pragma unroll
+        for (int kk = 0; kk < PF_D; kk += 16) {
+          wmma::fragment<wmma::matrix_a, 16, 16, 16, bf16, wmma::row_major> a;
+          wmma::fragment<wmma::matrix_b, 16, 16, 16, bf16, wmma::col_major> b;
+          wmma::load_matrix_sync(a, sQ + ((size_t)g * V3_BQ + tr * 16) * PF_D + kk, PF_D);
+          wmma::load_matrix_sync(b, sK + (size_t)(tc * 16) * PF_D + kk, PF_D);  // Kᵀ 的 col_major == K 的 row_major
+          wmma::mma_sync(c, a, b, c);
+        }
+        wmma::store_matrix_sync(sS + ((size_t)g * V3_BQ + tr * 16) * V3_TILE + tc * 16, c, V3_TILE, wmma::mem_row_major);
+      }
+    }
+    __syncthreads();
+    // online softmax：每 warp 8 个 (g,row)；lane = key 列 j
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+      const int idx = warp * 8 + i, g = idx / V3_BQ, row = idx % V3_BQ;
+      bf16* prow = sP + ((size_t)g * V3_BQ + row) * V3_TILE;
+      const bool live = g < group && row < nrows;
+      const int valid = live ? min(kn, q_base + row - k0 + 1) : 0;  // causal
+      float sc = -INFINITY;
+      if (lane < valid) sc = sS[((size_t)g * V3_BQ + row) * V3_TILE + lane];
+      float tmax = sc;
+#pragma unroll
+      for (int o = 16; o > 0; o >>= 1) tmax = fmaxf(tmax, __shfl_xor_sync(0xffffffffu, tmax, o));
+      float p = 0.f, alpha = 1.f;
+      if (tmax != -INFINITY) {
+        const float m_new = fmaxf(m_r[i], tmax);
+        alpha = __expf(m_r[i] - m_new);
+        p = (lane < valid) ? __expf(sc - m_new) : 0.f;
+        float psum = p;
+#pragma unroll
+        for (int o = 16; o > 0; o >>= 1) psum += __shfl_xor_sync(0xffffffffu, psum, o);
+        l_r[i] = l_r[i] * alpha + psum;
+        m_r[i] = m_new;
+      }
+      prow[lane] = to_bf16(p);
+      if (alpha != 1.f) {
+        float* orow = sO + ((size_t)g * V3_BQ + row) * PF_D;
+#pragma unroll
+        for (int c = 0; c < PF_DPL; ++c) orow[lane + 32 * c] *= alpha;
+      }
+    }
+    __syncthreads();
+    // O += P·V：G×(2×8) 片 = 最多 32 片，8 warp 各 4 片（group=1 时各 2 片）
+    for (int f = warp; f < group * 16; f += V3_WARPS) {
+      const int g = f / 16, tr = (f % 16) / 8, tcol = f % 8;
+      wmma::fragment<wmma::accumulator, 16, 16, 16, float> c;
+      float* optr = sO + ((size_t)g * V3_BQ + tr * 16) * PF_D + tcol * 16;
+      wmma::load_matrix_sync(c, optr, PF_D, wmma::mem_row_major);
+#pragma unroll
+      for (int kk = 0; kk < V3_TILE; kk += 16) {
+        wmma::fragment<wmma::matrix_a, 16, 16, 16, bf16, wmma::row_major> a;
+        wmma::fragment<wmma::matrix_b, 16, 16, 16, bf16, wmma::row_major> b;
+        wmma::load_matrix_sync(a, sP + ((size_t)g * V3_BQ + tr * 16) * V3_TILE + kk, V3_TILE);
+        wmma::load_matrix_sync(b, sV + (size_t)kk * PF_D + tcol * 16, PF_D);
+        wmma::mma_sync(c, a, b, c);
+      }
+      wmma::store_matrix_sync(optr, c, PF_D, wmma::mem_row_major);
+    }
+  }
+  __syncthreads();
+  // 归一化写出：每 warp 自己的 8 个 (g,row)
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    const int idx = warp * 8 + i, g = idx / V3_BQ, row = idx % V3_BQ;
+    if (g >= group || row >= nrows) continue;
+    const float inv = l_r[i] > 0.f ? 1.f / l_r[i] : 0.f;
+    const float* orow = sO + ((size_t)g * V3_BQ + row) * PF_D;
+    bf16* op = out + ((int64_t)(start + q_base + row) * H + hk * group + g) * PF_D;
+#pragma unroll
+    for (int c = 0; c < PF_DPL; ++c) op[lane + 32 * c] = to_bf16(orow[lane + 32 * c] * inv);
+  }
+}
+
+// paged v3（tensor core，与 prefill v3 同构）：K/V tile 从 paged cache 经 block_table 装载；可见 key = [0, hist + row]。
+__global__ void __launch_bounds__(V3_WARPS * 32) gqa_paged_tc_kernel(
+    const bf16* __restrict__ q, const bf16* __restrict__ cache, const int32_t* __restrict__ block_table,
+    const int32_t* __restrict__ seq_lens, const int32_t* __restrict__ cu_seqlens_q, bf16* __restrict__ out, int H,
+    int Hkv, int block_size, int max_blocks, float scale, int q_stride) {
+  extern __shared__ __align__(128) unsigned char v3_smem[];
+  bf16* sQ = reinterpret_cast<bf16*>(v3_smem);
+  bf16* sK = sQ + V3_G * V3_BQ * PF_D;
+  bf16* sV = sK + V3_TILE * PF_D;
+  float* sS = reinterpret_cast<float*>(sV + V3_TILE * PF_D);
+  bf16* sP = reinterpret_cast<bf16*>(sS + V3_G * V3_BQ * V3_TILE);
+  float* sO = reinterpret_cast<float*>(sP + V3_G * V3_BQ * V3_TILE);
+
+  const int b = blockIdx.z, hk = blockIdx.y;
+  const int group = H / Hkv;
+  const int q0 = cu_seqlens_q[b], q1 = cu_seqlens_q[b + 1];
+  const int q_len = q1 - q0;
+  const int q_base = blockIdx.x * V3_BQ;
+  if (q_base >= q_len) return;
+  const int seq_len = seq_lens[b];
+  const int hist = seq_len - q_len;
+  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+  const int nrows = min(V3_BQ, q_len - q_base);
+  const int32_t* bt = block_table + (int64_t)b * max_blocks;
+
+  for (int e = threadIdx.x; e < V3_G * V3_BQ * (PF_D / 8); e += V3_WARPS * 32) {
+    const int g = e / (V3_BQ * (PF_D / 8)), rem = e % (V3_BQ * (PF_D / 8));
+    const int r = rem / (PF_D / 8), d8 = (rem % (PF_D / 8)) * 8;
+    uint4 val = make_uint4(0, 0, 0, 0);
+    if (g < group && r < nrows) {
+      const bf16* qp = q + (int64_t)(q0 + q_base + r) * q_stride + (int64_t)(hk * group + g) * PF_D + d8;
+      uint4 raw = *reinterpret_cast<const uint4*>(qp);
+      __nv_bfloat162* pr = reinterpret_cast<__nv_bfloat162*>(&raw);
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        float2 f = __bfloat1622float2(pr[i]);
+        pr[i] = __floats2bfloat162_rn(f.x * scale, f.y * scale);
+      }
+      val = raw;
+    }
+    *reinterpret_cast<uint4*>(sQ + ((size_t)g * V3_BQ + r) * PF_D + d8) = val;
+  }
+  for (int e = threadIdx.x; e < V3_G * V3_BQ * PF_D; e += V3_WARPS * 32) sO[e] = 0.f;
+  float m_r[8], l_r[8];
+#pragma unroll
+  for (int i = 0; i < 8; ++i) { m_r[i] = -INFINITY; l_r[i] = 0.f; }
+
+  const int block_last = hist + q_base + nrows - 1;
+  const int n_tiles = block_last / V3_TILE + 1;
+  for (int tile = 0; tile < n_tiles; ++tile) {
+    const int k0 = tile * V3_TILE;
+    const int kn = min(V3_TILE, seq_len - k0);
+    __syncthreads();
+    for (int e = threadIdx.x; e < V3_TILE * (PF_D / 8); e += V3_WARPS * 32) {
+      const int j = e / (PF_D / 8), d8 = (e % (PF_D / 8)) * 8;
+      uint4 kk = make_uint4(0, 0, 0, 0), vv = make_uint4(0, 0, 0, 0);
+      if (j < kn) {
+        const int pos = k0 + j;
+        const int64_t blk = bt[pos / block_size];
+        const bf16* base = cache + slot_off(blk * block_size + (pos % block_size), Hkv, PF_D) + (hk * 2) * PF_D + d8;
+        kk = *reinterpret_cast<const uint4*>(base);
+        vv = *reinterpret_cast<const uint4*>(base + PF_D);
+      }
+      *reinterpret_cast<uint4*>(sK + j * PF_D + d8) = kk;
+      *reinterpret_cast<uint4*>(sV + j * PF_D + d8) = vv;
+    }
+    __syncthreads();
+    {
+      const int g = warp / 4, tr = (warp % 4) / 2, tc = warp % 2;
+      if (g < group) {
+        wmma::fragment<wmma::accumulator, 16, 16, 16, float> c;
+        wmma::fill_fragment(c, 0.f);
+#pragma unroll
+        for (int kk = 0; kk < PF_D; kk += 16) {
+          wmma::fragment<wmma::matrix_a, 16, 16, 16, bf16, wmma::row_major> a;
+          wmma::fragment<wmma::matrix_b, 16, 16, 16, bf16, wmma::col_major> bfr;
+          wmma::load_matrix_sync(a, sQ + ((size_t)g * V3_BQ + tr * 16) * PF_D + kk, PF_D);
+          wmma::load_matrix_sync(bfr, sK + (size_t)(tc * 16) * PF_D + kk, PF_D);
+          wmma::mma_sync(c, a, bfr, c);
+        }
+        wmma::store_matrix_sync(sS + ((size_t)g * V3_BQ + tr * 16) * V3_TILE + tc * 16, c, V3_TILE, wmma::mem_row_major);
+      }
+    }
+    __syncthreads();
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+      const int idx = warp * 8 + i, g = idx / V3_BQ, row = idx % V3_BQ;
+      bf16* prow = sP + ((size_t)g * V3_BQ + row) * V3_TILE;
+      const bool live = g < group && row < nrows;
+      const int valid = live ? min(kn, hist + q_base + row - k0 + 1) : 0;
+      float sc = -INFINITY;
+      if (lane < valid) sc = sS[((size_t)g * V3_BQ + row) * V3_TILE + lane];
+      float tmax = sc;
+#pragma unroll
+      for (int o = 16; o > 0; o >>= 1) tmax = fmaxf(tmax, __shfl_xor_sync(0xffffffffu, tmax, o));
+      float p = 0.f, alpha = 1.f;
+      if (tmax != -INFINITY) {
+        const float m_new = fmaxf(m_r[i], tmax);
+        alpha = __expf(m_r[i] - m_new);
+        p = (lane < valid) ? __expf(sc - m_new) : 0.f;
+        float psum = p;
+#pragma unroll
+        for (int o = 16; o > 0; o >>= 1) psum += __shfl_xor_sync(0xffffffffu, psum, o);
+        l_r[i] = l_r[i] * alpha + psum;
+        m_r[i] = m_new;
+      }
+      prow[lane] = to_bf16(p);
+      if (alpha != 1.f) {
+        float* orow = sO + ((size_t)g * V3_BQ + row) * PF_D;
+#pragma unroll
+        for (int c = 0; c < PF_DPL; ++c) orow[lane + 32 * c] *= alpha;
+      }
+    }
+    __syncthreads();
+    for (int f = warp; f < group * 16; f += V3_WARPS) {
+      const int g = f / 16, tr = (f % 16) / 8, tcol = f % 8;
+      wmma::fragment<wmma::accumulator, 16, 16, 16, float> c;
+      float* optr = sO + ((size_t)g * V3_BQ + tr * 16) * PF_D + tcol * 16;
+      wmma::load_matrix_sync(c, optr, PF_D, wmma::mem_row_major);
+#pragma unroll
+      for (int kk = 0; kk < V3_TILE; kk += 16) {
+        wmma::fragment<wmma::matrix_a, 16, 16, 16, bf16, wmma::row_major> a;
+        wmma::fragment<wmma::matrix_b, 16, 16, 16, bf16, wmma::row_major> bfr;
+        wmma::load_matrix_sync(a, sP + ((size_t)g * V3_BQ + tr * 16) * V3_TILE + kk, V3_TILE);
+        wmma::load_matrix_sync(bfr, sV + (size_t)kk * PF_D + tcol * 16, PF_D);
+        wmma::mma_sync(c, a, bfr, c);
+      }
+      wmma::store_matrix_sync(optr, c, PF_D, wmma::mem_row_major);
+    }
+  }
+  __syncthreads();
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    const int idx = warp * 8 + i, g = idx / V3_BQ, row = idx % V3_BQ;
+    if (g >= group || row >= nrows) continue;
+    const float inv = l_r[i] > 0.f ? 1.f / l_r[i] : 0.f;
+    const float* orow = sO + ((size_t)g * V3_BQ + row) * PF_D;
+    bf16* op = out + ((int64_t)(q0 + q_base + row) * H + hk * group + g) * PF_D;
+#pragma unroll
+    for (int c = 0; c < PF_DPL; ++c) op[lane + 32 * c] = to_bf16(orow[lane + 32 * c] * inv);
   }
 }
 
@@ -807,19 +1108,24 @@ extern "C" int gqa_prefill_bf16(const void* q, const void* k, const void* v, voi
   if (heads <= 0 || kv_heads <= 0 || head_dim <= 0 || head_dim > MAX_D || heads % kv_heads != 0 || max_seqlen <= 0)
     return err(cudaErrorInvalidValue);
   if (head_dim == PF_D && heads / kv_heads <= 2) {
-    const int64_t group = heads / kv_heads;
-    const int64_t rows_per_block = (PV2_WARPS * PV2_ROWS_PER_WARP) / group;
-    dim3 grid((unsigned)((max_seqlen + rows_per_block - 1) / rows_per_block), (unsigned)kv_heads, (unsigned)num_reqs);
-    gqa_prefill_flash_kernel<<<grid, PV2_WARPS * 32, 0, stream>>>(
+    static bool v3_attr_set = false;
+    if (!v3_attr_set) {
+      if (cudaFuncSetAttribute(gqa_prefill_tc_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)V3_SMEM) !=
+          cudaSuccess)
+        return last_err();
+      v3_attr_set = true;
+    }
+    dim3 grid((unsigned)((max_seqlen + V3_BQ - 1) / V3_BQ), (unsigned)kv_heads, (unsigned)num_reqs);
+    gqa_prefill_tc_kernel<<<grid, V3_WARPS * 32, V3_SMEM, stream>>>(
         static_cast<const bf16*>(q), static_cast<const bf16*>(k), static_cast<const bf16*>(v), static_cast<bf16*>(out),
         cu_seqlens, (int)heads, (int)kv_heads, scale, (int)q_stride, (int)kv_stride);
-  } else {
-    dim3 grid((unsigned)num_reqs, (unsigned)heads);
-    gqa_prefill_ref_kernel<<<grid, GQ_BLOCK, 0, stream>>>(static_cast<const bf16*>(q), static_cast<const bf16*>(k),
-                                                          static_cast<const bf16*>(v), static_cast<bf16*>(out), cu_seqlens,
-                                                          (int)heads, (int)kv_heads, (int)head_dim, scale, (int)q_stride,
-                                                          (int)kv_stride);
+    return last_err();
   }
+  dim3 grid((unsigned)num_reqs, (unsigned)heads);
+  gqa_prefill_ref_kernel<<<grid, GQ_BLOCK, 0, stream>>>(static_cast<const bf16*>(q), static_cast<const bf16*>(k),
+                                                        static_cast<const bf16*>(v), static_cast<bf16*>(out), cu_seqlens,
+                                                        (int)heads, (int)kv_heads, (int)head_dim, scale, (int)q_stride,
+                                                        (int)kv_stride);
   return last_err();
 }
 
@@ -833,6 +1139,20 @@ extern "C" int gqa_paged_bf16(const void* q, const void* cache, const int32_t* b
       max_q_len <= 0)
     return err(cudaErrorInvalidValue);
   if (head_dim == PF_D && heads / kv_heads <= 2) {
+    static bool v3p_attr_set = false;
+    if (!v3p_attr_set) {
+      if (cudaFuncSetAttribute(gqa_paged_tc_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)V3_SMEM) !=
+          cudaSuccess)
+        return last_err();
+      v3p_attr_set = true;
+    }
+    dim3 grid((unsigned)((max_q_len + V3_BQ - 1) / V3_BQ), (unsigned)kv_heads, (unsigned)num_reqs);
+    gqa_paged_tc_kernel<<<grid, V3_WARPS * 32, V3_SMEM, stream>>>(
+        static_cast<const bf16*>(q), static_cast<const bf16*>(cache), block_table, seq_lens, cu_seqlens_q,
+        static_cast<bf16*>(out), (int)heads, (int)kv_heads, (int)block_size, (int)max_blocks, scale, (int)q_stride);
+    return last_err();
+  }
+  if (head_dim == PF_D && heads / kv_heads <= 2 && false) {
     const int64_t group = heads / kv_heads;
     const int64_t rows_per_block = (PV2_WARPS * PV2_ROWS_PER_WARP) / group;
     dim3 grid((unsigned)((max_q_len + rows_per_block - 1) / rows_per_block), (unsigned)kv_heads, (unsigned)num_reqs);
