@@ -8,6 +8,7 @@
 - 首次编译（CUDA 12.4，`CUDA_ARCHS=89`，`--features qwen3`）：**通过**，164 个 crate，含 nvcc 编译的 kernels。crates 走 rsproxy.cn（static.rust-lang.org 只有 ~100 KB/s）。
 - 用户要求改用 CUDA 13.0 → `cuda_13.0.2_580.95.05_linux.run`（4.3 GB，下载 ~0.8 MB/s 直连，约 10 min）安装到 `cuda-13.0/`，进行中。cudarc 0.18.2 支持 `cuda-13000`；Cargo.toml 当前固定 `cuda-12040`，远端需按 13.0 编译（方案见 progress）。
 - 权重 rsync：经跳板机约 0.4 MB/s，1.5 GB 预计 1 h+；`--partial --inplace` 可续传。golden / kernel_refs（76 MB）排在权重之后。
+- **CUDA 13.0.2 编译通过**（13:0x，`BUILD13_EXIT=0`）。两处改动：① cudarc feature 改 `cuda-version-from-build-system`（固定 `cuda-12040` + `CUDARC_CUDA_VERSION=13000` 会 E0428 重定义）；② `kernels/build.rs` 加链 `stdc++`（nvcc 13.0 host stub 引用 `__cxa_guard_*`）。本机 3090 / 12.4 两处改动后仍过。12.4 误装已删。
 - 未跑：kernels ref 测试（等 kernel_refs 到）、real_parity / sampling_parity（等权重 + 13.0 编译）。
 
 ## 原始记录
