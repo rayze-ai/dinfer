@@ -27,3 +27,13 @@ scripts/dev/remote4090.sh run 'source /data/yaochen/infer/env.sh && cd /data/yao
   cudarc 版本：`Cargo.toml` 用 `cuda-version-from-build-system`（cudarc 在 build 时跑 `nvcc --version` 探测）→ 本机 3090 得 12.4、远端得 13.0，一份配置两边用。
   **不要**再加 `CUDARC_CUDA_VERSION`：它与固定 feature 同时生效时 cudarc 会把 `CUDA_VERSION` 定义两次（E0428，2026-10-16 踩过）。
   `env.sh` 由 bootstrap 脚本生成，改了脚本要在远端重新生成或手改。
+
+## 日常
+
+```bash
+scripts/dev/remote4090.sh status || scripts/dev/remote4090.sh up     # 连接
+scripts/dev/remote4090.sh push                                           # 同步代码（不含 target/ 与 golden）
+scripts/dev/remote4090.sh run 'source /data/yaochen/infer/env.sh && cd /data/yaochen/infer/dinfer && cargo build --workspace --features qwen3 2>&1 | tail -2'
+scripts/dev/remote4090.sh run 'cd /data/yaochen/infer/dinfer && bash scripts/verify/remote4090_baseline.sh'   # 迁移基线：kernels + real/sampling parity + 单测 + e2e
+```
+远端 kernel_refs / qwen3_golden 由本机（有 torch 的机器）生成后 rsync；远端没有 Python torch 环境。

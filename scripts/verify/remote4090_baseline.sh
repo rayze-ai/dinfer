@@ -22,5 +22,7 @@ step "qwen3 sampling_parity (Q2-a)"
 run cargo test -p dinfer-qwen3 --features ref-tests --test sampling_parity -- --ignored --test-threads=1
 step "qwen3 unit tests"
 run cargo test -p dinfer-qwen3 -p dinfer-core
+step "qwen3 server e2e (real model)"
+run cargo test -p dinfer --features qwen3,e2e --test serve_e2e_qwen3 -- --ignored --test-threads=1
 [ $fail -eq 0 ] && step "remote4090 baseline PASS" || step "remote4090 baseline FAIL (see $LOG)"
 exit $fail
