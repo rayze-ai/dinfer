@@ -257,3 +257,11 @@
 - 解法：`docker top vllm-qwen3` 确认不属于它后 kill；GPU 2 回到 4 MiB，测试通过。
 - 如何避免：跑 GPU 测试前先 `nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory --format=csv`，确认目标卡无人占；`docker rm -f` 后也查一次有没有孤儿 EngineCore。
 - 相关：`scripts/dev/README-remote4090.md` GPU 分配一节
+
+## 2026-10-16 宿主 `nsys profile docker run …` 抓 vLLM 容器得到 0 个 kernel
+
+- 现象：想给容器里的 vLLM 做 kernel 分解，宿主上 `nsys profile ... docker run ...` 跑完报告里没有任何 CUDA kernel；`nsys --attach-pid` 也抓不到。
+- 根因：`docker run` 只是客户端，容器进程由 dockerd / containerd 启动，不是 nsys 的子进程，nsys 的 CUDA 注入层进不去；vLLM 官方镜像里也没有 nsys。
+- 解法：把宿主的 CUDA 13 toolkit 目录（含 `bin/nsys`）只读挂进容器（`-v $R/cuda-13.0:/opt/cuda13:ro`），`--entrypoint /opt/cuda13/bin/nsys profile … python3 -m vllm.entrypoints.openai.api_server …`，加 `--cap-add=SYS_ADMIN`；结束用 `docker kill -s INT` 让 nsys 正常落盘。实测能抓到 kernel。
+- 如何避免：对容器内进程做 profiling，profiler 必须在容器内启动被测进程；宿主 nsys 版本要与容器内 CUDA 驱动兼容（这里都是 CUDA 13）。
+- 相关：`scripts/verify/stage_profile.sh`
