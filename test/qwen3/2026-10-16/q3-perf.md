@@ -22,3 +22,4 @@ dinfer 已快一个量级，主因是没有编译期；但 dinfer 的"权重 0.5
 | 7 | b | split-K decode：bench4 vs vLLM c1_p128_o128: tok/s 327/456 = 0.72×, TTFT 43/11 ms, TPOT 2.7/2.1 ms；c8_p128_o128: tok/s 2283/2944 = 0.78×, TTFT 44/25 ms, TPOT 3.2/2.5 ms；c32_p128_o128: tok/s 5048/8536 = 0.59×, TTFT 99/65 ms, TPOT 5.8/3.3 ms；c8_p1024_o128: tok/s 615/2103 = 0.29×, TTFT 497/36 ms, TPOT 9.2/3.5 ms | 18:0x |
 | 8 | c | CUDA graph 可行性探针 PASS（需 disable_event_tracking）；见 crates/kernels/tests/graph_probe.rs | 18:2x |
 | 9 | c | CUDA graph + 固定缓冲实现完成，编译中 | 18:5x |
+| 10 | c | 3090 real_parity 3/3 走 CUDA graph，decode ≈3.1 ms/步（原 7.5） | 19:0x |
