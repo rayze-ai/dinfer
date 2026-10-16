@@ -273,3 +273,11 @@
 - 解法：shuffle 无条件执行（所有 lane 都调 `sum8`），再按 `valid` 选结果；无效 lane 的输入已清零不影响和。
 - 如何避免：任何 `*_sync(0xffffffff, …)` 都不能放在 lane 间可能分叉的分支里；分叉只能在 shuffle 之后做选择。写 warp 级归约时先想"这个条件在 32 个 lane 上是否一致"。
 - 相关：`crates/kernels/cuda/gqa.cu::gqa_decode_v2_kernel`
+
+## 2026-10-16 bench7 的 8 个结果 JSON 丢失：`remote4090.sh push` 的 `--delete` 把远端 bench 目录覆盖成了本机的半成品
+
+- 现象：4090 上 `bench7/` 只剩 `CHANGE`，趋势表没有 bench7；本机 `bench7/` 也只有 `CHANGE`（之前 pull 时 rsync 断管只拿到部分）。
+- 根因：`push` 用 `rsync -az --delete` 把本机仓库同步到远端，而 bench 结果是**远端产出、本机只 pull 回来**的；本机那次 pull 不完整 → 再 push 时把远端完整的 bench7 删掉了。方向搞反的目录不能被 `--delete` 覆盖。
+- 解法：`push` 排除 `test/qwen3/*/bench*/`、`stage/`、`perf-trend.*`；bench7 的数值从 `bench_compare7.log` 的 summary 表恢复（JSON 不可恢复，这一轮在趋势里按 summary 手工补）。
+- 如何避免：产出在远端的目录只 pull 不 push；pull 后 `ls` 核对文件数再 commit；双向同步的目录绝不加 `--delete`。
+- 相关：`scripts/dev/remote4090.sh`

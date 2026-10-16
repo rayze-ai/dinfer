@@ -1,0 +1,1 @@
+e kernel 融合：qkv_post（norm+rope+cache write 一个 kernel）、attention 按 stride 读 qkv_buf（去 copy_cols）、MLP 残差并入下一层 norm；17→8 kernel/层
