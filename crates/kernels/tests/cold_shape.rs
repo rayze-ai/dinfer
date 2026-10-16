@@ -102,6 +102,26 @@ fn cold_vs_warm_by_shape() {
             println!("decode B={b:<3} seq={n:<5} flash_paged {t_paged:>8.3} ms   splitk {t_split:>8.3} ms   ({:.1}x)", t_paged / t_split.max(1e-6));
         }
     }
+    // 小 M（decode batch）GEMM：cuBLASLt 对 M ≤ 8 选 gemv 路径；对比把 M pad 到 16 走 tensorop
+    println!("M     qkv(4096x1024)  gateup(6144x1024)  down(1024x3072)   [ms per GEMM, warm, 20 次平均]  | padded-to-16");
+    for &m in &[1usize, 2, 4, 8, 16, 32, 64] {
+        let mut run = |mm: usize| -> (f64, f64, f64) {
+            let mut t = |w: &dinfer_kernels::cudarc::driver::CudaSlice<bf16>, nn: usize, kk: usize| {
+                g.forward_bf16(&a, w, None, &mut out, mm, nn, kk).unwrap();
+                s.synchronize().unwrap();
+                let t0 = Instant::now();
+                for _ in 0..20 {
+                    g.forward_bf16(&a, w, None, &mut out, mm, nn, kk).unwrap();
+                }
+                s.synchronize().unwrap();
+                t0.elapsed().as_secs_f64() * 1e3 / 20.0
+            };
+            (t(&w1, qkv_w, hidden), t(&w2, 2 * inter, hidden), t(&w3, hidden, inter))
+        };
+        let (a1, a2, a3) = run(m);
+        let (p1, p2, p3) = if m < 16 { run(16) } else { (a1, a2, a3) };
+        println!("{m:<5} {a1:>8.4}         {a2:>8.4}           {a3:>8.4}           | {p1:>8.4} {p2:>8.4} {p3:>8.4}");
+    }
     println!("n      gqa_prefill cold/warm (ms)");
     for &n in &[389usize, 639, 889, 1139, 1514, 1900] {
         let cu = s.htod_copy(vec![0i32, n as i32]).unwrap();

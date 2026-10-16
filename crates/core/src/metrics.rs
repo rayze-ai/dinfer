@@ -81,6 +81,10 @@ pub struct Metrics {
     pub time_per_output_token: Histogram,
     pub e2e_request_latency: Histogram,
     pub step_time: Histogram,
+    /// step 内分段：调度（schedule）/ 执行（runner.execute：H2D + GPU + D2H 等待）/ 回填与下发。
+    pub step_schedule: Histogram,
+    pub step_execute: Histogram,
+    pub step_update: Histogram,
 }
 
 impl Default for Histogram {
@@ -96,6 +100,9 @@ impl Metrics {
             time_per_output_token: Histogram::new(TPOT_BUCKETS),
             e2e_request_latency: Histogram::new(E2E_BUCKETS),
             step_time: Histogram::new(STEP_BUCKETS),
+            step_schedule: Histogram::new(STEP_BUCKETS),
+            step_execute: Histogram::new(STEP_BUCKETS),
+            step_update: Histogram::new(STEP_BUCKETS),
             ..Default::default()
         }
     }
@@ -202,6 +209,21 @@ impl Metrics {
             &mut o,
             &format!("{prefix}engine_step_seconds"),
             "Histogram of engine step wall time in seconds.",
+        );
+        self.step_schedule.render(
+            &mut o,
+            &format!("{prefix}engine_step_schedule_seconds"),
+            "Scheduler time per step.",
+        );
+        self.step_execute.render(
+            &mut o,
+            &format!("{prefix}engine_step_execute_seconds"),
+            "Runner execute (H2D + GPU + D2H) time per step.",
+        );
+        self.step_update.render(
+            &mut o,
+            &format!("{prefix}engine_step_update_seconds"),
+            "Output update + dispatch time per step.",
         );
         o
     }
