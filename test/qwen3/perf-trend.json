@@ -218,5 +218,49 @@
    }
   },
   "change": "d TCP_NODELAY（Nagle 导致 TTFT +38 ms）"
+ },
+ {
+  "dir": "test/qwen3/2026-10-16/bench7",
+  "label": "bench7",
+  "date": "2026-10-16",
+  "groups": {
+   "c1_p128_o128": {
+    "tps": 470.7,
+    "vllm_tps": 454.4,
+    "ttft": 6.0,
+    "vllm_ttft": 12.3,
+    "tpot": 2.1,
+    "vllm_tpot": 2.1,
+    "ratio": 1.0358714788732395
+   },
+   "c8_p128_o128": {
+    "tps": 2755.0,
+    "vllm_tps": 2931.1,
+    "ttft": 11.5,
+    "vllm_ttft": 26.6,
+    "tpot": 2.8,
+    "vllm_tpot": 2.5,
+    "ratio": 0.9399201664903961
+   },
+   "c32_p128_o128": {
+    "tps": 5787.9,
+    "vllm_tps": 8529.6,
+    "ttft": 88.2,
+    "vllm_ttft": 62.7,
+    "tpot": 5.0,
+    "vllm_tpot": 3.3,
+    "ratio": 0.6785664040517726
+   },
+   "c8_p1024_o128": {
+    "tps": 644.6,
+    "vllm_tps": 2093.5,
+    "ttft": 489.3,
+    "vllm_ttft": 38.3,
+    "tpot": 8.6,
+    "vllm_tpot": 3.5,
+    "ratio": 0.3079054215428708
+   }
+  },
+  "change": "e kernel 融合：qkv_post（norm+rope+cache write 一个 kernel）、attention 按 stride 读 qkv_buf（去 copy_cols）、MLP 残差并入下一层 norm；17→8 kernel/层"
  }
 ]

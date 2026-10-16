@@ -1,0 +1,48 @@
+{
+ "label": "dinfer",
+ "url": "",
+ "model": "qwen3-0.6b",
+ "concurrency": 8,
+ "num_requests": 32,
+ "completed": 32,
+ "failed": 0,
+ "duration_s": null,
+ "prompt_len_target": 128,
+ "prompt_tokens_mean": null,
+ "output_tokens_mean": 128,
+ "request_throughput_rps": 21.52,
+ "output_token_throughput_tps": 2755.0,
+ "total_token_throughput_tps": null,
+ "ttft_ms": {
+  "mean": null,
+  "p50": 11.5,
+  "p90": null,
+  "p99": 31.2,
+  "max": null
+ },
+ "tpot_ms": {
+  "mean": null,
+  "p50": 2.8,
+  "p90": null,
+  "p99": 3.0,
+  "max": null
+ },
+ "itl_ms": {
+  "mean": null,
+  "p50": 2.8,
+  "p90": null,
+  "p99": null,
+  "max": null
+ },
+ "latency_ms": {
+  "mean": null,
+  "p50": 379.9,
+  "p90": null,
+  "p99": null,
+  "max": null
+ },
+ "args": {
+  "recovered_from": "bench_compare7.log",
+  "note": "原始 JSON 被 rsync --delete 覆盖丢失，按 summary 表恢复 p50/p99/吞吐；其余字段 null"
+ }
+}
