@@ -1,12 +1,14 @@
 # 4090 测试机（2026-10-16 起，编译 / GPU 测试迁到这里）
 
 - 主机 `host-10-121-192-98`（10.121.192.98），经 JumpServer `jump.aicloud.paigod.work:2222` 登录，root。
-- 账号是**临时 token**（用户名 `JMS-…`，有过期时间；首个 token 2026-10-16 11:46 +0800 过期）。过期后向用户要新 token，
-  写到 `~/.ssh/jms_4090_user` / `~/.ssh/jms_4090_pass`（chmod 600），`scripts/dev/remote4090.sh` 即可继续用。
-  实测：`yaochen#root#<asset-id>@jump` 的"指定资产"写法被拒（Permission denied），**token 用户名直连可用**，登录后直接是 root shell。
+- 登录（2026-10-16 12:00 实测可用）：JumpServer 已登记本机公钥 `~/.ssh/id_ed25519_gpu4090.pub`（MD5 `25:e8:5b:83:…:07:20`），
+  用 **token 用户名 + 该私钥** 登录，不再依赖 token 密码（密码登录对第 2–4 个 token 全部 `Permission denied`，原因未查明）。
+  token 用户名仍会过期（`JMS-…`，写在 `~/.ssh/jms_4090_user`）；过期后向用户要新的，只改这个文件。
+  `scripts/dev/remote4090.sh up` 建一条常驻 ControlMaster（keepalive 20 s），之后 `run / push / pull / ssh` 全部复用，不重新鉴权。
+  "指定资产"写法 `yaochen#root#<asset-id>@jump` 被拒。登录后直接是 root shell（`/opt/nexus/login_tip.sh` 缺失的报错无害）。
 - 硬件：8 × RTX 4090 24 GB（sm_89），驱动 580.178.04；128 核 / 503 GB；`/` 1.8 TB（91 GB 已用）、`/data` 7 TB RAID（102 GB 已用）。
 - 软件（2026-10-16 实测）：Ubuntu 22.04.5、Python 3.10.12、git / rsync / gcc 有；**无 nvcc、无 cargo、无 cmake**。
-  网络：`curl -I https://github.com` 200；`https://crates.io` 返回 403（HEAD 被拒还是被墙未验证，cargo 实际拉取要再试；不行就本机 `cargo vendor` 后 rsync）。
+  网络（GET 实测）：index.crates.io / static.crates.io / github.com / sh.rustup.rs / developer.download.nvidia.com 均可达（HEAD crates.io 的 403 是误报）；**huggingface.co 不通** → 模型权重从本机 rsync（`/data/ref/models/qwen3-0.6b` 1.5 GB）。
 
 ## 首次 bootstrap（待新 token 后执行，按序）
 
