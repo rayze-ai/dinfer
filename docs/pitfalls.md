@@ -289,3 +289,11 @@
 - 数值：P = exp(s − m) 存成 bf16 再进 mma（FA2 同样做法），O 累加 fp32；对 HF 的 prefill logits worst-abs 从 0.81 → 0.97（bf16 噪声底 2.0 以内），greedy 32 步仍逐 token一致（一次 near-tie 翻转在允许口径内）。
 - 如何避免：改 attention 精度路径后一定跑 `real_parity`（不是只跑 kernel ref）；ref 的 1e-2 容差对 32×32 小 fixture 不敏感，长序列累积误差要靠真模型对拍看。
 - 相关：`crates/kernels/cuda/gqa.cu::gqa_prefill_tc_kernel / gqa_paged_tc_kernel`
+
+## 2026-10-16 bench 固定 seed → 常驻 vLLM 的 prefix cache 全命中，c8-long TTFT 对比失真
+
+- 现象：bench11 c8-long（8×1024 prompt）dinfer TTFT 85 ms vs vLLM 41 ms；但紧接着用同一 seed 再跑一次，dinfer 17.7 ms、vLLM 37.8 ms。vLLM `/metrics` 显示 `prefix_cache_hits/queries = 90%`，dinfer 48%。
+- 根因：`bench` 的 prompt 由 `--seed`（默认固定）决定，每轮 bench 发的 prompt 完全一样。vLLM 从 Q3 开始一直常驻、KV 181k token，历史轮次的 prompt 全在缓存里，1024 token 的 prefill 实际只算十几个 token；dinfer 每轮改 kernel 后重启，缓存是冷的。因此历史各轮 vLLM 侧 TTFT（尤其 c8-long）被低估，dinfer/vLLM 比值被高估的不是 dinfer 而是对手的"冷"数据不存在。
+- 解法：`bench_compare.sh` 每次运行取新 seed（`SEED=${SEED:-$(date +%s)}`，写进 summary），prompt 不与历史重复；两边都只能命中聊天模板前缀。bench12 起为新口径，与 bench≤11 的 TTFT / c8-long 不可直接比。
+- 如何避免：对比压测时先看两边 `/metrics` 的 prefix cache 命中数；凡"常驻 vs 重启"的对比都要排除缓存状态差异。
+
