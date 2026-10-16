@@ -11,7 +11,7 @@ export QWEN3_DIR=$ROOT/models/qwen3-0.6b QWEN3_GOLDEN="$PWD/test/qwen3_golden" K
 LOG=$ROOT/bootstrap/baseline.log; : > "$LOG"
 fail=0
 step() { printf '\n==> %s\n' "$*" | tee -a "$LOG"; }
-run() { "$@" >> "$LOG" 2>&1; local rc=$?; grep -E '^test |test result|panicked' "$LOG" | tail -n 12; [ $rc -eq 0 ] || { echo "FAILED (rc=$rc): $*"; fail=1; }; }
+run() { local step_log; step_log=$(mktemp); "$@" > "$step_log" 2>&1; local rc=$?; cat "$step_log" >> "$LOG"; grep -E '^test |test result|panicked' "$step_log" | tail -n 12; rm -f "$step_log"; [ $rc -eq 0 ] || { echo "FAILED (rc=$rc): $*"; fail=1; }; }
 
 nvidia-smi -L | head -1 | tee -a "$LOG"
 step "kernels (ref tests, needs test/kernel_refs synced from a torch machine)"

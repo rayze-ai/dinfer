@@ -12,7 +12,7 @@
 - **kernels ref 测试 16/16 PASS**（4090 / sm_89 / CUDA 13.0，2.0 s；含 Q2-a 的 4 个采样 kernel）。踩坑：toolkit 不在 /usr/local 时运行要 `LD_LIBRARY_PATH=$CUDA_HOME/lib64`（已进 env.sh）。
 - 权重（1 503 300 328 B，与本机一致）+ golden（11 文件逐个同大小）rsync 完成 12:36。CPU 单测：core 31 / qwen3 8 / server 9 全过。
 - `remote4090_baseline.sh` 首跑 4 步全 rc=127：脚本没 `source env.sh`（cargo 不在 PATH）→ 已修（开头 source）。重跑结果见下。
-- real_parity / sampling_parity：运行中（见下方追加）。
+- **`remote4090_baseline.sh` PASS（exit 0，13:1x，CUDA 13.0 / sm_89）**：kernels 16/16（2.0 s）、real_parity 3/3（67 s；3090 上 65 s）、sampling_parity 5/5（193 s；3090 上 173 s）、core 31 / qwen3 8 单测。与 3090 / CUDA 12.4 的结果逐项一致 → 迁移基线成立。server e2e 单独补跑，结果在本文件末尾。
 
 ## 原始记录
 
