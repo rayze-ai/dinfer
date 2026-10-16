@@ -34,10 +34,10 @@ fn ensure_rows(stream: &Stream, slot: &mut Option<Tensor<f32>>, rows: usize, v: 
 impl Qwen3Executor {
     pub fn new(stream: Stream, gemm: Gemm, model: Qwen3Model) -> Result<Self> {
         let v = model.cfg.vocab_size as usize;
-        let max_tokens = model.max_tokens;
+        let rows = model.max_logits_rows;
         Ok(Self {
-            logits: Tensor::zeros(&stream, &[max_tokens, v])?,
-            argmax: Tensor::zeros(&stream, &[max_tokens])?,
+            logits: Tensor::zeros(&stream, &[rows, v])?,
+            argmax: Tensor::zeros(&stream, &[rows])?,
             stream,
             gemm,
             model,
@@ -172,6 +172,11 @@ impl ModelExecutor for Qwen3Executor {
             "qwen3 executor: speculative decoding not supported yet"
         );
         let nrows = plan.logits_rows.len();
+        ensure!(
+            nrows <= self.model.max_logits_rows,
+            "{nrows} logits rows > max_logits_rows {}",
+            self.model.max_logits_rows
+        );
         ensure!(
             nrows == n && plan.sample.num_rows() == n,
             "qwen3 executor: rows {nrows} / sample {} vs reqs {n}",

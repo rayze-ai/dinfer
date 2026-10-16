@@ -90,10 +90,11 @@ impl Qwen3Service {
             &src,
             cfg.clone(),
             max_tokens,
+            opt.max_num_seqs as usize, // 每请求只取最后一行 logits（无投机）
             opt.num_blocks.map(|n| n as usize),
             opt.block_size as usize,
             opt.gpu_memory_utilization,
-            1 << 30,
+            512 << 20, // cuBLAS workspace / 临时张量余量
         )?;
         let num_blocks = model.num_blocks() as u32;
         let exec = Qwen3Executor::new(s.clone(), gemm, model)?;

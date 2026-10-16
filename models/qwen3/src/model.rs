@@ -70,6 +70,8 @@ pub struct Qwen3Model {
     pub rope: Rope,
     pub kv: Vec<PagedKv>,
     pub max_tokens: usize,
+    /// 一步最多取多少行 logits（logits / final_normed 缓冲按它分配）。
+    pub max_logits_rows: usize,
     /// 调试：若非空，每层 forward 后记录 (layer, attn_out[:t*h] f32, hidden_after_layer[:t*h] f32)。
     pub capture_layers: Option<Vec<LayerCapture>>,
     hidden: Tensor<bf16>,
@@ -240,7 +242,18 @@ impl Qwen3Model {
         num_blocks: Option<usize>,
         block_size: usize,
     ) -> Result<Self> {
-        Self::load_with_budget(stream, src, cfg, max_tokens, num_blocks, block_size, 0.9, 1 << 30)
+        // 测试 / 对拍：logits 行数上限 = max_tokens（允许取全部位置的 logits）
+        Self::load_with_budget(
+            stream,
+            src,
+            cfg,
+            max_tokens,
+            max_tokens,
+            num_blocks,
+            block_size,
+            0.9,
+            512 << 20,
+        )
     }
 
     /// 每个 KV block 的字节数（全部层）：`layers × block_size × kv_heads × 2(K,V) × head_dim × 2(bf16)`。
@@ -253,15 +266,19 @@ impl Qwen3Model {
             * 2
     }
 
+    /// `max_tokens`：一步最多多少 token（激活 scratch 按它分配）；`max_logits_rows`：一步最多取多少行 logits
+    /// （服务 = max_num_seqs：每请求只要最后一行；对拍 = max_tokens）。logits 按 vocab 151936 宽，不能按 max_tokens 分。
     /// `num_blocks = None` 时按显存算：权重 + 激活 scratch 分配完后读 `free`，
-    /// `budget = min(free, total × gpu_memory_utilization − 已用) − reserve`，`num_blocks = budget / bytes_per_block`。
-    /// KV 最后分配，所以 free 已经扣掉了权重与 scratch（等价 vLLM profile run 的作用，但不用真跑一次 forward）。
+    /// `budget = min(free, total × gpu_memory_utilization − 已用) − reserve − executor 的 fp32 logits 副本`，
+    /// `num_blocks = budget / bytes_per_block`。KV 最后分配，所以 free 已经扣掉了权重与 scratch
+    /// （等价 vLLM profile run 的作用，但不用真跑一次 forward）。
     #[allow(clippy::too_many_arguments)]
     pub fn load_with_budget(
         stream: &Stream,
         src: &WeightSource,
         cfg: Qwen3Config,
         max_tokens: usize,
+        max_logits_rows: usize,
         num_blocks: Option<usize>,
         block_size: usize,
         gpu_memory_utilization: f32,
@@ -302,10 +319,10 @@ impl Qwen3Model {
         let normed = Tensor::zeros(stream, &[max_tokens, hidden])?;
         let attn_out = Tensor::zeros(stream, &[max_tokens, hidden])?;
         let mlp_out = Tensor::zeros(stream, &[max_tokens, hidden])?;
-        let final_normed = Tensor::zeros(stream, &[max_tokens, hidden])?;
-        let logits_bf16 = Tensor::zeros(stream, &[max_tokens, v])?;
-        // executor 还会分配 fp32 logits [max_tokens, vocab] + 采样工作区 ≤ 3 份：这里按 3 份预留
-        let exec_scratch = 3 * max_tokens * v * 4;
+        let final_normed = Tensor::zeros(stream, &[max_logits_rows, hidden])?;
+        let logits_bf16 = Tensor::zeros(stream, &[max_logits_rows, v])?;
+        // executor 还会分配 fp32 logits [max_logits_rows, vocab] + 采样工作区 + logprobs 原始副本（各 ≤ 同大小）
+        let exec_scratch = 3 * max_logits_rows * v * 4;
 
         let per_block = Self::kv_bytes_per_block(&cfg, block_size);
         let num_blocks = match num_blocks {
@@ -362,6 +379,7 @@ impl Qwen3Model {
             rope,
             kv,
             max_tokens,
+            max_logits_rows,
             capture_layers: None,
             hidden: hidden_t,
             normed,
@@ -439,6 +457,11 @@ impl Qwen3Model {
             }
         }
         let rows = f.logits_rows.numel();
+        ensure!(
+            rows <= self.max_logits_rows,
+            "{rows} logits rows > max_logits_rows {}",
+            self.max_logits_rows
+        );
         k::gather_rows_bf16(
             stream,
             &self.hidden.data,

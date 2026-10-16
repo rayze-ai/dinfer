@@ -241,3 +241,11 @@
 - 解法：e2e 对 n>1 只断言形状保证（index 0..n、各有 finish、≥2 不同）；逐字可复现只在单请求同 seed（batch 形状确定）上断言；固定 batch 形状下的逐 token 复现由 `sampling_parity` 覆盖。
 - 如何避免：任何"两次运行逐字相同"的断言必须保证两次的 batch 形状相同（单请求或受控的测试 harness）；服务层只承诺 OpenAI 语义，不承诺跨 batch 位比特一致。
 - 相关：pitfalls 同日 "prefix cache 默认开后…"（同源）
+
+## 2026-10-16 同为 `--gpu-memory-utilization 0.9`，dinfer 自动算出的 KV 只有 6.0 GiB，vLLM 19.4 GiB
+
+- 现象：用户问"0.9 在 dinfer 里为什么没有"。参数有（默认 0.9），但 4090 上 dinfer `kv_cache: auto` 得 3534 块 / 6.0 GiB，`available_gib=16.3`（权重只 1.5 GB，却已用 7.2 GiB），vLLM 同卡同配置 19.4 GiB。
+- 根因：logits 缓冲按 `max_tokens`（一步最多 token 数，4096）× vocab 151936 分配：model 的 bf16 logits 1.2 GiB、final_normed；executor 的 fp32 logits 2.3 GiB；再加预算公式里按 3 份 fp32 logits 预留 7 GiB。但采样只取每个请求最后一行，行数上限是 `max_num_seqs`（64），不是 4096。合计白占约 10 GiB。
+- 解法：`Qwen3Model::load_with_budget` 加 `max_logits_rows`（服务 = max_num_seqs；对拍 = max_tokens），logits / final_normed / executor fp32 logits / 预算预留全部按它算；预留余量 1 GiB → 512 MiB。改后 4090 自动 8491 块 / 14.5 GiB（available 17.5）。剩余差距主要是 per-layer 激活 scratch（qkv/q/k/v/attn/mlp 中间 × 28 层 × max_tokens）约 2.5 GiB，Q3 做激活复用再收。
+- 如何避免：任何按 `vocab` 宽的缓冲，行数只能是 logits 行数上限；自动预算要用真实分配后的 free，不要再手工"预留"一份估算值。
+- 相关：`models/qwen3/src/model.rs::load_with_budget`、`models/qwen3/src/executor.rs`

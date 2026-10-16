@@ -13,6 +13,7 @@ members = [
     "models/kimik3",
     # 可执行
     "bins/dinfer",
+    "bins/bench",
 ]
 
 [workspace.package]
