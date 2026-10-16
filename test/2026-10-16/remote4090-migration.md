@@ -19,3 +19,7 @@
 - 探测：8 × RTX 4090 24 GB，驱动 580.178.04，Ubuntu 22.04.5，128 核 / 503 GB，`/data` 7 TB。
 - 网络 GET（直连）：crates.io 206 / github 206 / rustup 206 / nvidia 301→200 / huggingface 000；代理 `127.0.0.1:1081`：hf 307、github 0.5 MB/s、nvidia 0.8 MB/s。
 - build.log：`BUILD_EXIT=0`，`Compiling` 164 行，无 error。
+
+## 补跑：server e2e（13:2x）
+
+- `serve_e2e_qwen3::e2e_qwen3_real_model_chat` PASS（20.8 s；3090 上 20.3 s）。至此 q1.sh 对应的全部 GPU 项 + Q2-a sampling_parity 在 4090 / CUDA 13.0 上全过。
