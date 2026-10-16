@@ -1,6 +1,6 @@
 # loop 规格：Q2 可生产的 mix 服务（Qwen3-0.6B）
 
-- 状态：进行中（a–e 完成 2026-10-16，共 10 轮；f 健壮性 + q2.sh 未开始）
+- 状态：**已通过**（2026-10-16，`scripts/verify/q2.sh` exit 0 on 4090 / CUDA 13.0；共 13 轮，a–f 全部完成）
 - 创建：2026-10-16
 - 验证脚本：`scripts/verify/q2.sh`
 - 迭代记录：`test/2026-10-16/q2-serving.md`
@@ -109,3 +109,4 @@ cargo run -p dinfer --features qwen3 -- serve --model /data/ref/models/qwen3-0.6
 | 10 | e 验收 + b 补 | 4090：`e2e_qwen3_metrics` PASS（prompt 28 token：queries 27、二次命中 +16、空闲 running=0 / kv=0；TTFT/TPOT/E2E 直方图计数正确）；`request_features` 的 n=3 流式 vs 非流式逐字断言失败 | n=3 两次调用 batch 组成不同 → bf16 漂移翻 near-tie（见 pitfalls） | n>1 只断言形状保证；单请求同 seed 两次逐字相同另断 |
 | 11 | f 健壮性 + q2.sh | `e2e_qwen3_robustness`（超长 400 / 坏 JSON 4xx / 流式断开→abort+KV 归零 / 32 并发随机 STRESS_SECS 无 5xx 后 running=waiting=kv=0）；`scripts/verify/q2.sh`（fmt+clippy、单测、kernel refs、real+sampling+chat parity、全 e2e） | — | 4090 先 20 s 压测试水 |
 | 12 | f 试水 | 4090 `e2e_qwen3_robustness` STRESS_SECS=20 PASS：超长 400、坏 JSON 4xx、流式断开后 running=0 kv=0 且 abort 计数 ≥1、32 并发 20 s：159 请求 / 14 733 token，0 个 5xx，结束 running=waiting=kv=0 | — | 正式 60 s 走 q2.sh |
+| 13 | 验收 | 4090 `scripts/verify/q2.sh` **exit 0**：fmt/clippy；单测 core 33 / qwen3 8 / text 6；kernel refs 16/16；chat_parity 2 / real_parity 3 / sampling_parity 5；e2e 6/6（含 60 s × 32 并发：434 请求 / 40 405 token，0 个 5xx，结束 running=waiting=kv=0） | — | **Q2 通过**；停止条件 1–12 全部达成（12 条里 q1 回归由 real_parity + chat_parity + e2e 覆盖） |

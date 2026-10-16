@@ -92,7 +92,7 @@ LoRA、Pooling/Embedding、Encoder-Decoder、CPU/XPU/ROCm/TPU、Ray、PP、EPLB�
 |---|---|---|---|
 | Kimi-K3 | `dinfer-kimik3` | `design-kimik3.md` | ⏸ 挂起（只有 config），等 ≥ 8×H200 |
 | GLM-5.3 | `dinfer-glm53` | `design-glm53.md` | ✅ P3–P6 tiny fixture 全过；真权重挂起 |
-| Qwen3-0.6B | `dinfer-qwen3` | `design-qwen3.md` | ✅ Q1 真权重通过；主流程验证模型（Q2–Q5） |
+| Qwen3-0.6B | `dinfer-qwen3` | `design-qwen3.md` | ✅ Q1 真权重通过、✅ Q2 采样/请求/资源/metrics/健壮性通过（2026-10-16，4090）；主流程验证模型（Q3–Q5） |
 
 ### 2.1 模型间共享的部分
 

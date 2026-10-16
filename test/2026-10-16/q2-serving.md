@@ -19,3 +19,19 @@
 | 8 | c/d | auto_num_blocks + prefix_cache e2e PASS on 4090（TTFT 899→16 ms） | 2026-10-16 14:3x |
 | 10 | e | serve_e2e_qwen3 5/5 on 4090（metrics / auto_num_blocks / prefix_cache / chat / request_features） | 2026-10-16 14:4x |
 | 12 | f | robustness e2e PASS（20 s 试水：159 req, 0 5xx） | 2026-10-16 14:5x |
+| 13 | 验收 | q2.sh exit 0 on 4090（60 s 压测 434 req / 40k token，0 5xx） | 2026-10-16 15:0x |
+
+## Q2 验收结论（2026-10-16，4090 / CUDA 13.0 / sm_89）
+
+`scripts/verify/q2.sh` exit 0。各步：
+
+| 步 | 结果 |
+|---|---|
+| fmt / clippy（qwen3 全目标） | 干净 |
+| CPU 单测 | core 33、qwen3 8、text 6（server 0） |
+| kernel refs | 16/16（含 Q2-a 四个采样 kernel） |
+| chat_parity / real_parity / sampling_parity | 2 / 3 / 5 全过（67 s / 192 s） |
+| server e2e 6 项 | chat、request_features（stop / logprobs / n）、auto_num_blocks（9838 块）、prefix_cache（TTFT 899→16 ms）、metrics、robustness |
+| robustness 压测 | 60 s × 32 并发随机：434 请求、40 405 completion token、0 个 5xx / 传输错误；结束后 running=waiting=0、kv_cache_usage=0；断开客户端后 abort 计数 +1、KV 归零 |
+
+Q2 已知简化（进 Q3 / 后续）：logprobs 不含 `prompt_logprobs`；`n>1` 不做 KV fork（靠 prefix cache 共享）；`/metrics` 只有服务级（无 per-request `request_*` 直方图族、无 LoRA/多模态项）；glm53 后端未接 `metrics()` 与自动 num_blocks；采样工作区每 step 按 rows 复用但 logprobs 的 raw 副本仍是一次 D2D 拷贝（Q3 融合）；stop 字符串扣住 `max_len-1` 字节导致流式最多延迟这么多字符。
