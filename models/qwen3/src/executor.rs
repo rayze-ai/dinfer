@@ -72,6 +72,10 @@ pub struct Qwen3Executor {
     /// 统计：走图 / 走 eager 的 step 数。
     pub graph_steps: u64,
     pub eager_steps: u64,
+    /// 每 step 分段累计（µs）：H2D 上传 / kernel 入队（launch，不含执行）/ 等待 GPU 并 D2H。每 1000 步打一行 info。
+    pub t_upload_us: u64,
+    pub t_launch_us: u64,
+    pub t_wait_us: u64,
 }
 
 /// CUDA graph 的 batch 桶（vLLM 默认 1,2,4,8 再按 8 递增到上限；这里 2 的幂 + 上限，够用且捕获快）。
@@ -141,6 +145,9 @@ impl Qwen3Executor {
             last_rows: 0,
             graph_steps: 0,
             eager_steps: 0,
+            t_upload_us: 0,
+            t_launch_us: 0,
+            t_wait_us: 0,
         };
         if enable_graphs {
             ex.capture_decode_graphs()?;
@@ -496,11 +503,14 @@ impl ModelExecutor for Qwen3Executor {
             && !sb.any_penalty
             && sb.max_logprobs.is_none()
             && self.graph_for(n).is_some();
+        let t0 = std::time::Instant::now();
+        let t_launch_start;
         if use_graph {
             let nb = self.graph_for(n).unwrap().batch;
             let (tt, nb2) = self.upload_plan(plan, nb)?;
             debug_assert_eq!((tt, nb2), (nb, nb));
             self.upload_sampling(sb, nb)?;
+            t_launch_start = std::time::Instant::now();
             let g = self.graph_for(n).unwrap();
             g.graph.launch().context("launch decode graph")?;
             self.graph_steps += 1;
@@ -508,13 +518,31 @@ impl ModelExecutor for Qwen3Executor {
         } else {
             let (tt, nb) = self.upload_plan(plan, n)?;
             debug_assert_eq!((tt, nb), (t, n));
+            t_launch_start = std::time::Instant::now();
             let max_seqlen = plan.num_tokens.iter().copied().max().unwrap_or(0) as usize;
             self.forward_device(plan.mode, t, n, max_seqlen)?;
             self.sample_eager(sb, n)?;
             self.eager_steps += 1;
         }
         self.last_rows = n;
+        let t_wait_start = std::time::Instant::now();
         let chosen = self.stream.dtoh_sync_copy_view(&self.buf.chosen.data.slice(..n))?;
+        let t_end = std::time::Instant::now();
+        self.t_upload_us += (t_launch_start - t0).as_micros() as u64;
+        self.t_launch_us += (t_wait_start - t_launch_start).as_micros() as u64;
+        self.t_wait_us += (t_end - t_wait_start).as_micros() as u64;
+        let steps = self.graph_steps + self.eager_steps;
+        if steps % 1000 == 0 {
+            tracing::info!(
+                steps,
+                graph = self.graph_steps,
+                eager = self.eager_steps,
+                upload_us_per_step = self.t_upload_us / steps,
+                launch_us_per_step = self.t_launch_us / steps,
+                wait_us_per_step = self.t_wait_us / steps,
+                "executor step breakdown (cumulative avg)"
+            );
+        }
         for &c in chosen.iter() {
             generated.push(vec![c as u32]);
             drafts.push(Vec::new());
