@@ -10,7 +10,9 @@
 - 权重 rsync：经跳板机约 0.4 MB/s，1.5 GB 预计 1 h+；`--partial --inplace` 可续传。golden / kernel_refs（76 MB）排在权重之后。
 - **CUDA 13.0.2 编译通过**（13:0x，`BUILD13_EXIT=0`）。两处改动：① cudarc feature 改 `cuda-version-from-build-system`（固定 `cuda-12040` + `CUDARC_CUDA_VERSION=13000` 会 E0428 重定义）；② `kernels/build.rs` 加链 `stdc++`（nvcc 13.0 host stub 引用 `__cxa_guard_*`）。本机 3090 / 12.4 两处改动后仍过。12.4 误装已删。
 - **kernels ref 测试 16/16 PASS**（4090 / sm_89 / CUDA 13.0，2.0 s；含 Q2-a 的 4 个采样 kernel）。踩坑：toolkit 不在 /usr/local 时运行要 `LD_LIBRARY_PATH=$CUDA_HOME/lib64`（已进 env.sh）。
-- 未跑：real_parity / sampling_parity（等权重 rsync，~0.4 MB/s）。
+- 权重（1 503 300 328 B，与本机一致）+ golden（11 文件逐个同大小）rsync 完成 12:36。CPU 单测：core 31 / qwen3 8 / server 9 全过。
+- `remote4090_baseline.sh` 首跑 4 步全 rc=127：脚本没 `source env.sh`（cargo 不在 PATH）→ 已修（开头 source）。重跑结果见下。
+- real_parity / sampling_parity：运行中（见下方追加）。
 
 ## 原始记录
 
