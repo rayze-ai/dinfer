@@ -35,3 +35,4 @@ dinfer 已快一个量级，主因是没有编译期；但 dinfer 的"权重 0.5
 | 22 | e | merge 跳过（B≥32）；B=32 直写路径 ref 过 | 21:2x |
 | 23 | e | bench8：c1 1.09×、c8 1.04× 反超 vLLM，c32 0.90× | 21:3x |
 | 24 | e | bench9 merge 跳过：持平（预期内）；prefill v2 本机 3.6× | 21:5x |
+| 25 | e | prefill/paged v2：3090 T=1514 2.6 ms/层（v1 9.6）；4090 bench10 进行中 | 22:0x |
