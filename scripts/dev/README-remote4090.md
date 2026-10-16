@@ -10,14 +10,16 @@
 - 软件（2026-10-16 实测）：Ubuntu 22.04.5、Python 3.10.12、git / rsync / gcc 有；**无 nvcc、无 cargo、无 cmake**。
   网络（GET 实测）：index.crates.io / static.crates.io / github.com / sh.rustup.rs / developer.download.nvidia.com 均可达（HEAD crates.io 的 403 是误报）；**huggingface.co 不通** → 模型权重从本机 rsync（`/data/ref/models/qwen3-0.6b` 1.5 GB）。
 
-## 首次 bootstrap（待新 token 后执行，按序）
+- **目录约束（用户，2026-10-16）**：远程一切只放 `/data/yaochen/infer`：`dinfer/` 仓库、`models/` 权重、`rustup/` + `cargo/` 工具链、
+  `cuda-12.4/` toolkit、`bootstrap/` 日志、`env.sh`（每个 shell 先 `source /data/yaochen/infer/env.sh`）。不要往 `/root`、`/data/code`、`/usr/local` 放东西。
+- 镜像：`static.rust-lang.org` 实测 ~100 KB/s，`rsproxy.cn` 14 MB/s → rustup 与 crates registry 都走 rsproxy（`cargo/config.toml` 已写）。
+
+## 首次 bootstrap
 
 ```bash
-R=scripts/dev/remote4090.sh
-$R run 'curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.89.0 && ~/.cargo/bin/cargo --version'
-$R run 'apt-get install -y cmake; wget -q https://developer.download.nvidia.com/compute/cuda/12.4.1/local_installers/cuda_12.4.1_550.54.15_linux.run -O /tmp/cuda.run && sh /tmp/cuda.run --silent --toolkit --no-driver-check && /usr/local/cuda/bin/nvcc --version'
-$R push                                                   # 仓库（不含 target/、golden）
-$R run 'cd /data/code/dinfer && export CUDA_HOME=/usr/local/cuda PATH=/usr/local/cuda/bin:$HOME/.cargo/bin:$PATH CUDA_ARCHS=89 && cargo build --workspace --features qwen3 2>&1 | tail -3'
-# 模型 / golden：rsync 本机 /data/ref/models/qwen3-0.6b（1.5 GB）与 test/qwen3_golden 到远端同路径，或远端直接从 HF 下载
+scripts/dev/remote4090.sh up && scripts/dev/remote4090.sh push          # 仓库 → /data/yaochen/infer/dinfer
+scripts/dev/remote4090.sh run 'bash /data/yaochen/infer/dinfer/scripts/dev/bootstrap_remote4090.sh'   # tmux boot：rustup / cmake / CUDA 12.4
+rsync 本机 /data/ref/models/qwen3-0.6b → 远端 /data/yaochen/infer/models/；test/{qwen3_golden,kernel_refs} → 远端 dinfer/test/
+scripts/dev/remote4090.sh run 'source /data/yaochen/infer/env.sh && cd /data/yaochen/infer/dinfer && cargo build --workspace --features qwen3 2>&1 | tail -3'
 ```
 CUDA 12.4 与驱动 580 兼容；`CUDA_ARCHS=89` 是 kernels crate 的编译架构变量（见 build.rs）。

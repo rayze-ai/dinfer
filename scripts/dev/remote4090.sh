@@ -12,7 +12,8 @@ JUMP_HOST="${JUMP_HOST:-jump.aicloud.paigod.work}"
 JUMP_PORT="${JUMP_PORT:-2222}"
 KEY="${JMS_KEY:-$HOME/.ssh/id_ed25519_gpu4090}"
 CM="$HOME/.ssh/cm_4090"
-REMOTE_DIR="${REMOTE_DIR:-/data/code/dinfer}"
+REMOTE_ROOT="${REMOTE_ROOT:-/data/yaochen/infer}"   # 用户约束：远程只能用这个目录
+REMOTE_DIR="${REMOTE_DIR:-$REMOTE_ROOT/dinfer}"
 cd "$(dirname "$0")/../.."
 USER_AT="$(tr -d '[:space:]' < "$HOME/.ssh/jms_4090_user")@$JUMP_HOST"
 BASE=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=20 -p "$JUMP_PORT")

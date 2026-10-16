@@ -1,19 +1,39 @@
 #!/usr/bin/env bash
-# 4090 测试机首次 bootstrap。在远端 root shell 里跑一次；全部放进 tmux 会话 `boot`，断线不影响。
-#   bash bootstrap_remote4090.sh            # 启动（幂等：已装的步骤会跳过）
-#   tmux attach -t boot                     # 看进度；日志在 /root/bootstrap/*.log
-# 装：rustup 1.89.0、CUDA 12.4.1 toolkit（驱动 580 兼容）、cmake/pkg-config/libssl-dev；探测 crates.io 直连。
-# 仓库 / 权重 / golden 由本机 rsync 推（scripts/dev/remote4090.sh push），或 clone GitHub（见 README-remote4090.md）。
+# 4090 测试机首次 bootstrap。用户约束：远程一切只放 /data/yaochen/infer（$ROOT）。
+#   bash bootstrap_remote4090.sh          # 在远端 root shell 跑一次；全部在 tmux 会话 boot 里，断线不影响（幂等）
+#   tmux attach -t boot                   # 看进度；日志 $ROOT/bootstrap/*.log；完成标志 $ROOT/bootstrap/done.log
+# 布局：$ROOT/dinfer 仓库 | $ROOT/models 权重 | $ROOT/rustup + $ROOT/cargo 工具链 | $ROOT/cuda-12.4 toolkit | $ROOT/bootstrap 日志
+# 用法（之后每个 shell）：source $ROOT/env.sh
+# 网络：static.rust-lang.org 只有 ~100 KB/s → rustup / crates 走 rsproxy.cn；huggingface 不通，权重由本机 rsync。
 set -u
-mkdir -p /root/bootstrap /data/code /data/ref/models
-cd /root/bootstrap
+ROOT=/data/yaochen/infer
+mkdir -p $ROOT/bootstrap $ROOT/models $ROOT/cargo $ROOT/rustup
+cat > $ROOT/env.sh <<ENV
+export RUSTUP_HOME=$ROOT/rustup CARGO_HOME=$ROOT/cargo
+export RUSTUP_DIST_SERVER=https://rsproxy.cn RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
+export CUDA_HOME=$ROOT/cuda-12.4 CUDA_ARCHS=89
+export PATH=\$CARGO_HOME/bin:\$CUDA_HOME/bin:\$PATH
+export TMPDIR=$ROOT/tmp
+ENV
+mkdir -p $ROOT/tmp $ROOT/cargo
+cat > $ROOT/cargo/config.toml <<'CFG'
+[source.crates-io]
+replace-with = 'rsproxy-sparse'
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
+[registries.rsproxy]
+index = "https://rsproxy.cn/crates.io-index"
+[net]
+git-fetch-with-cli = true
+CFG
 command -v tmux >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -q tmux >/dev/null
-tmux has-session -t boot 2>/dev/null && { echo "tmux 会话 boot 已存在：tmux attach -t boot"; exit 0; }
-tmux new-session -d -s boot -n main
-tmux send-keys -t boot:main 'cd /root/bootstrap' C-m
-tmux send-keys -t boot:main '[ -x ~/.cargo/bin/cargo ] || (curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.89.0 --profile minimal) 2>&1 | tee rustup.log | tail -2' C-m
-tmux send-keys -t boot:main 'DEBIAN_FRONTEND=noninteractive apt-get install -y -q cmake pkg-config libssl-dev 2>&1 | tail -1 | tee apt.log' C-m
-tmux send-keys -t boot:main '[ -x /usr/local/cuda/bin/nvcc ] || { [ -s cuda.run ] || wget -q --show-progress https://developer.download.nvidia.com/compute/cuda/12.4.1/local_installers/cuda_12.4.1_550.54.15_linux.run -O cuda.run; sh cuda.run --silent --toolkit --no-drm --no-man-page --override 2>&1 | tee cuda.log | tail -3; }; /usr/local/cuda/bin/nvcc --version | tail -1' C-m
-tmux send-keys -t boot:main 'for u in https://index.crates.io/config.json https://static.crates.io/crates/anyhow/anyhow-1.0.86.crate https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/config.json https://github.com; do printf "%s -> " "$u"; curl -sS -o /dev/null -w "%{http_code}\n" --max-time 15 "$u"; done | tee net.log' C-m
-tmux send-keys -t boot:main 'echo BOOTSTRAP_DONE $(date +%T) | tee -a done.log' C-m
-echo "已在 tmux 会话 boot 中启动；tmux attach -t boot 查看，/root/bootstrap/*.log 看日志"
+tmux kill-session -t boot 2>/dev/null || true
+rm -f $ROOT/bootstrap/done.log
+tmux new-session -d -s boot -n main -c $ROOT/bootstrap
+S() { tmux send-keys -t boot:main "$1" C-m; }
+S "source $ROOT/env.sh"
+S "[ -x \$CARGO_HOME/bin/cargo ] || (curl -sSf https://rsproxy.cn/rustup-init.sh | sh -s -- -y --default-toolchain 1.89.0 --profile minimal --no-modify-path) 2>&1 | tee rustup.log | tail -2; cargo --version | tee -a rustup.log"
+S "DEBIAN_FRONTEND=noninteractive apt-get install -y -q cmake pkg-config libssl-dev 2>&1 | tail -1 | tee apt.log"
+S "[ -x \$CUDA_HOME/bin/nvcc ] || { [ -s cuda.run ] || wget -q https://developer.download.nvidia.com/compute/cuda/12.4.1/local_installers/cuda_12.4.1_550.54.15_linux.run -O cuda.run; sh cuda.run --silent --toolkit --toolkitpath=\$CUDA_HOME --no-drm --no-man-page --override --tmpdir=$ROOT/tmp 2>&1 | tee cuda.log | tail -3; }; nvcc --version | tail -1 | tee -a cuda.log"
+S "echo BOOTSTRAP_DONE \$(date +%T) | tee done.log"
+echo "已在 tmux 会话 boot 中启动；tmux attach -t boot 查看，$ROOT/bootstrap/*.log 看日志"
