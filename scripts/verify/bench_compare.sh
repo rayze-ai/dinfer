@@ -23,7 +23,8 @@ MD="$OUT/summary.md"
   echo "|---|---|---|---|---|---|---|---|---|---|---|"
 } > "$MD"
 run_one() { # conc prompt out
-  local c=$1 p=$2 o=$3 reqs=${REQS:-$(( c * 4 > 16 ? c * 4 : 16 ))}
+  local c=$1 p=$2 o=$3
+  local reqs=${REQS:-$(( c * 4 > 16 ? c * 4 : 16 ))}
   for side in dinfer vllm; do
     local url; [ $side = dinfer ] && url=$A || url=$B
     local f="$OUT/${side}_c${c}_p${p}_o${o}.json"
