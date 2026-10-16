@@ -49,7 +49,7 @@ scripts/dev/remote4090.sh run 'cd /data/yaochen/infer/dinfer && bash scripts/ver
 
 ## GPU 分配（2026-10-16 起）
 
-- GPU 0：dinfer 常驻服务；GPU 1：vLLM 容器；GPU 2：跑测试（`remote4090_baseline.sh` / `q2.sh` 默认 `CUDA_VISIBLE_DEVICES=2`）。测试与常驻服务同卡会 OOM（dinfer 服务按 0.9 利用率吃满 KV）。
+- GPU 0：dinfer 常驻服务；GPU 1：vLLM 容器（我们起的 `vllm-qwen3`）；**GPU 2：用户的 k8s pod `qwen3-06b-vllm`（2026-10-16 16:07 起，k8s.io namespace，不要动）**；GPU 3：跑测试（`remote4090_baseline.sh` / `q2.sh` 默认 `CUDA_VISIBLE_DEVICES=3`）。测试与常驻服务同卡会 OOM（dinfer 服务按 0.9 利用率吃满 KV）。跑前 `nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name --format=csv` 看一眼。
 
 ## 压测工具（2026-10-16 起，后续常用）
 

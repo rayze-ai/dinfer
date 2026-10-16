@@ -259,6 +259,33 @@ save("gqa128p_cu_q", torch.tensor([0, pnew[0], pnew[0] + pnew[1]], dtype=torch.i
 save("gqa128p_out", torch.cat(pouts)); save("gqa128p_meta", torch.tensor([pnum_blocks, PBS], dtype=torch.int32))
 print("gqa128 paged refs:", tuple(torch.cat(pouts).shape))
 
+# decode D=128：3 个请求，长度 300 / 70 / 1（q_len 均 1），block 16 → 覆盖多 split、短段、单 key；走 split-K decode kernel。
+dlens = [300, 70, 1]
+dk = bf(torch.randn(sum(dlens), FHK, FD)); dv = bf(torch.randn(sum(dlens), FHK, FD)); dq = bf(torch.randn(3, FH, FD))
+dblocks_per = [(n_ + PBS - 1) // PBS for n_ in dlens]
+dbt = torch.full((3, max(dblocks_per)), -1, dtype=torch.int32)
+nb = 0
+for r in range(3):
+    for j in range(dblocks_per[r]):
+        dbt[r, j] = nb; nb += 1
+dcache = torch.zeros(nb + 1, PBS, FHK, 2, FD, dtype=torch.bfloat16)
+dslots = []
+cur = 0
+for r in range(3):
+    for pos in range(dlens[r]):
+        blk = dbt[r, pos // PBS].item(); dslots.append(blk * PBS + pos % PBS)
+        dcache[blk, pos % PBS, :, 0] = dk[cur]; dcache[blk, pos % PBS, :, 1] = dv[cur]; cur += 1
+douts = []
+cur = 0
+for r in range(3):
+    kk = dk[cur:cur + dlens[r]].float().repeat_interleave(FH // FHK, dim=1); vv = dv[cur:cur + dlens[r]].float().repeat_interleave(FH // FHK, dim=1)
+    s_ = torch.einsum("hd,khd->hk", dq[r].float(), kk) * FD ** -0.5
+    douts.append(torch.einsum("hk,khd->hd", torch.softmax(s_, -1), vv)[None]); cur += dlens[r]
+save("gqa128d_k", dk); save("gqa128d_v", dv); save("gqa128d_slots", torch.tensor(dslots, dtype=torch.int64)); save("gqa128d_q", dq)
+save("gqa128d_bt", dbt); save("gqa128d_seq_lens", torch.tensor(dlens, dtype=torch.int32)); save("gqa128d_out", torch.cat(douts))
+save("gqa128d_meta", torch.tensor([nb + 1, PBS], dtype=torch.int32))
+print("gqa128 decode refs:", tuple(torch.cat(douts).shape))
+
 # ---- Q2 采样：penalties / temperature / min_p / logprobs（vLLM 语义）----
 torch.manual_seed(77)
 SB, SV = 4, 512

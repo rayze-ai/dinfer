@@ -18,3 +18,4 @@ dinfer 已快一个量级，主因是没有编译期；但 dinfer 的"权重 0.5
 | 3b | a | GPU 2 OOM 根因 = 孤儿 VLLM::EngineCore 占卡（pitfalls）；清掉后 real_parity 3/3 PASS（新 prefill kernel 下 greedy 仍 = HF）；sampling_parity 5 个在模型加载 OOM：测试按 max_tokens=8192 分 logits 行 → 改 `load_with_budget(max_logits_rows=max_seqs)` | 16:5x |
 | 4 | a | paged 路径也换 flash tile kernel（读 paged cache，history+causal）；D=128 paged torch 对拍 `gqa_paged_d128_flash_ref`；3090 gqa 4/4 PASS；4090 验收 + bench3 进行中 | 17:0x |
 | 5 | a | bench3：c8 p1024 TTFT 9.4 s → 0.50 s、吞吐 6.2×；c32 吞吐 +29%；仍是 vLLM 的 0.17–0.54×。见 bench3/summary.md | 17:2x |
+| 6 | b | nsys：decode attention 占 85% GPU 时间 → split-K decode kernel；GPU 2 是用户 k8s pod（qwen3-06b-vllm），测试改 GPU 3 | 17:4x |
