@@ -10,6 +10,7 @@
 //                          D=128 走 flash 风格 tile kernel（Q3-a，2026-10-16），其他 D 走旧参考实现
 //   gqa_paged_bf16         从 paged cache 读：decode（每请求 1 行）与带历史 chunked prefill（任意 query 长）统一路径
 //                          D=128 同样走 flash 风格 tile kernel（读 paged cache），其他 D 走旧参考实现
+//   gqa_decode_bf16        纯 decode（每请求 1 行）split-K 版（Q3-b）：reqs × Hkv × 8 split 个 block + merge kernel
 #include "common.cuh"
 #include "dinfer_kernels.h"
 
@@ -377,6 +378,134 @@ __global__ void __launch_bounds__(PF_WARPS * 32) gqa_paged_flash_kernel(
   for (int c = 0; c < PF_DPL; ++c) op[lane + 32 * c] = to_bf16(acc[c] * inv);
 }
 
+
+// ---- decode（每请求 1 行 query）split-K（D=128）----
+// grid = (num_reqs, Hkv, DC_SPLITS)：一个 block 负责一个 (req, kv_head) 的 1/DC_SPLITS 段 key，对该 kv_head 服务的全部
+// q_head 各算一份 partial（m, l, acc[D]）；block 内 4 个 warp 再把段切 4 份，每 lane 一个 key 直接从 cache 流式读
+//（decode 无 K/V 复用，不走 smem tile），warp 内 online softmax，warp 间在 smem 合并；写 scratch。
+// 第二个 kernel 按 (req, q_head) 把 DC_SPLITS 个 partial 做 log-sum-exp 合并并归一化。
+// 并行度：reqs × Hkv × 8 个 block × 4 warp（旧版 reqs × H 个 block × 1 活跃 warp）；每 key 的 K 只读一次服务 group 个 q_head。
+constexpr int DC_SPLITS = 8;
+constexpr int DC_WARPS = 4;
+
+__global__ void __launch_bounds__(DC_WARPS * 32) gqa_decode_split_kernel(
+    const bf16* __restrict__ q, const bf16* __restrict__ cache, const int32_t* __restrict__ block_table,
+    const int32_t* __restrict__ seq_lens, float* __restrict__ scratch, int H, int Hkv, int block_size, int max_blocks,
+    float scale) {
+  const int b = blockIdx.x, hk = blockIdx.y, split = blockIdx.z;
+  const int group = H / Hkv;
+  const int n = seq_lens[b];
+  const int seg = (n + DC_SPLITS - 1) / DC_SPLITS;
+  const int k_begin = split * seg, k_end = min(n, k_begin + seg);
+  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+  const int32_t* bt = block_table + (int64_t)b * max_blocks;
+  __shared__ float s_m[DC_WARPS], s_l[DC_WARPS];
+  __shared__ float s_acc[DC_WARPS][PF_D];
+  __shared__ float s_q[PF_D];
+
+  for (int g = 0; g < group; ++g) {
+    const int h = hk * group + g;
+    float* part = scratch + (((int64_t)b * H + h) * DC_SPLITS + split) * (PF_D + 2);
+    __syncthreads();
+    for (int d = threadIdx.x; d < PF_D; d += DC_WARPS * 32) s_q[d] = to_f32(q[((int64_t)b * H + h) * PF_D + d]) * scale;
+    __syncthreads();
+    float m = -INFINITY, l = 0.f;
+    float acc[PF_DPL];
+#pragma unroll
+    for (int c = 0; c < PF_DPL; ++c) acc[c] = 0.f;
+    if (k_begin < k_end) {
+      // warp 负责的 key 子段
+      const int wlen = (k_end - k_begin + DC_WARPS - 1) / DC_WARPS;
+      const int w0 = k_begin + warp * wlen, w1 = min(k_end, w0 + wlen);
+      for (int base = w0; base < w1; base += 32) {
+        const int j = base + lane;
+        float sc = -INFINITY;
+        const bf16* kp = nullptr;
+        if (j < w1) {
+          const int64_t blk = bt[j / block_size];
+          kp = cache + slot_off(blk * block_size + (j % block_size), Hkv, PF_D) + (hk * 2) * PF_D;
+          float a = 0.f;
+#pragma unroll 8
+          for (int d = 0; d < PF_D; ++d) a += s_q[d] * to_f32(kp[d]);
+          sc = a;
+        }
+        float tmax = sc;
+#pragma unroll
+        for (int o = 16; o > 0; o >>= 1) tmax = fmaxf(tmax, __shfl_xor_sync(0xffffffffu, tmax, o));
+        const float m_new = fmaxf(m, tmax);
+        const float alpha = __expf(m - m_new);
+        const float pj_mine = (j < w1) ? __expf(sc - m_new) : 0.f;
+        float psum = pj_mine;
+#pragma unroll
+        for (int o = 16; o > 0; o >>= 1) psum += __shfl_xor_sync(0xffffffffu, psum, o);
+        l = l * alpha + psum;
+#pragma unroll
+        for (int c = 0; c < PF_DPL; ++c) acc[c] *= alpha;
+        m = m_new;
+        const int cnt = min(32, w1 - base);
+        for (int jj = 0; jj < cnt; ++jj) {
+          const float pj = __shfl_sync(0xffffffffu, pj_mine, jj);
+          // V 行：由持有该 key 的 lane 的指针推出；每 lane 读自己负责的维度
+          const int key = base + jj;
+          const int64_t blk = bt[key / block_size];
+          const bf16* vp = cache + slot_off(blk * block_size + (key % block_size), Hkv, PF_D) + (hk * 2 + 1) * PF_D;
+#pragma unroll
+          for (int c = 0; c < PF_DPL; ++c) acc[c] += pj * to_f32(vp[lane + 32 * c]);
+        }
+      }
+    }
+    // warp 间合并
+    if (lane == 0) {
+      s_m[warp] = m;
+      s_l[warp] = l;
+    }
+#pragma unroll
+    for (int c = 0; c < PF_DPL; ++c) s_acc[warp][lane + 32 * c] = acc[c];
+    __syncthreads();
+    if (warp == 0) {
+      float M = -INFINITY;
+#pragma unroll
+      for (int w = 0; w < DC_WARPS; ++w) M = fmaxf(M, s_m[w]);
+      float L = 0.f;
+      float o[PF_DPL];
+#pragma unroll
+      for (int c = 0; c < PF_DPL; ++c) o[c] = 0.f;
+#pragma unroll
+      for (int w = 0; w < DC_WARPS; ++w) {
+        const float a = (s_m[w] == -INFINITY) ? 0.f : __expf(s_m[w] - M);
+        L += s_l[w] * a;
+#pragma unroll
+        for (int c = 0; c < PF_DPL; ++c) o[c] += s_acc[w][lane + 32 * c] * a;
+      }
+      if (lane == 0) {
+        part[0] = M;
+        part[1] = L;
+      }
+#pragma unroll
+      for (int c = 0; c < PF_DPL; ++c) part[2 + lane + 32 * c] = o[c];
+    }
+  }
+}
+
+__global__ void gqa_decode_merge_kernel(const float* __restrict__ scratch, bf16* __restrict__ out, int H) {
+  const int b = blockIdx.x, h = blockIdx.y;
+  const float* base = scratch + ((int64_t)b * H + h) * DC_SPLITS * (PF_D + 2);
+  float M = -INFINITY;
+#pragma unroll
+  for (int s = 0; s < DC_SPLITS; ++s) M = fmaxf(M, base[s * (PF_D + 2)]);
+  float L = 0.f;
+  float o = 0.f;
+  const int d = threadIdx.x;  // blockDim = PF_D
+#pragma unroll
+  for (int s = 0; s < DC_SPLITS; ++s) {
+    const float* p = base + s * (PF_D + 2);
+    const float a = (p[0] == -INFINITY) ? 0.f : __expf(p[0] - M);
+    L += p[1] * a;
+    o += p[2 + d] * a;
+  }
+  out[((int64_t)b * H + h) * PF_D + d] = to_bf16(o / L);
+}
+
 }  // namespace
 
 extern "C" int gqa_cache_write_bf16(const void* k, const void* v, void* cache, const int64_t* slot_mapping,
@@ -430,5 +559,22 @@ extern "C" int gqa_paged_bf16(const void* q, const void* cache, const int32_t* b
                                                     (int)heads, (int)kv_heads, (int)head_dim, (int)block_size,
                                                     (int)max_blocks, scale);
   }
+  return last_err();
+}
+
+// decode 专用（每请求恰 1 行 query，q: [B, H, D]，out 同形）。scratch: ≥ B × H × 8 × (D + 2) 个 f32。D 必须为 128。
+extern "C" int gqa_decode_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens,
+                               void* out, float* scratch, int64_t num_reqs, int64_t heads, int64_t kv_heads,
+                               int64_t head_dim, int64_t block_size, int64_t max_blocks, float scale,
+                               cudaStream_t stream) {
+  if (num_reqs <= 0) return 0;
+  if (head_dim != PF_D || heads <= 0 || kv_heads <= 0 || heads % kv_heads != 0 || block_size <= 0)
+    return err(cudaErrorInvalidValue);
+  dim3 grid1((unsigned)num_reqs, (unsigned)kv_heads, (unsigned)DC_SPLITS);
+  gqa_decode_split_kernel<<<grid1, DC_WARPS * 32, 0, stream>>>(
+      static_cast<const bf16*>(q), static_cast<const bf16*>(cache), block_table, seq_lens, scratch, (int)heads,
+      (int)kv_heads, (int)block_size, (int)max_blocks, scale);
+  dim3 grid2((unsigned)num_reqs, (unsigned)heads);
+  gqa_decode_merge_kernel<<<grid2, PF_D, 0, stream>>>(scratch, static_cast<bf16*>(out), (int)heads);
   return last_err();
 }

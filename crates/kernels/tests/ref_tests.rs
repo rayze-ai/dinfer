@@ -447,6 +447,52 @@ fn gqa_paged_d128_flash_ref() {
     assert_close("gqa_paged_d128", &s.dtoh_sync_copy(&out).unwrap(), &want, 1e-2, 1e-2);
 }
 
+/// D=128 纯 decode split-K kernel：3 个请求长度 300 / 70 / 1（多 split、短段、单 key），block 16。
+#[test]
+#[ignore]
+fn gqa_decode_d128_splitk_ref() {
+    let (_d, s) = dev();
+    let (ks, kall) = load_f32("gqa128d_k");
+    let (_, vall) = load_f32("gqa128d_v");
+    let slots = load_i64("gqa128d_slots");
+    let (qs, q) = load_f32("gqa128d_q");
+    let (bts, bt) = load_i32("gqa128d_bt");
+    let (_, seq_lens) = load_i32("gqa128d_seq_lens");
+    let (_, want) = load_f32("gqa128d_out");
+    let (_, meta) = load_i32("gqa128d_meta");
+    let (num_blocks, bs) = (meta[0] as usize, meta[1] as usize);
+    let (hk, d) = (ks[1], ks[2]);
+    let (b, h) = (qs[0], qs[1]);
+    let mut cache = s.alloc_zeros::<bf16>(num_blocks * bs * hk * 2 * d).unwrap();
+    let dk = s.htod_copy(to_bf16(&kall)).unwrap();
+    let dv = s.htod_copy(to_bf16(&vall)).unwrap();
+    let dsl = s.htod_copy(slots.clone()).unwrap();
+    dinfer_kernels::gqa_cache_write_bf16(&s, &dk, &dv, &mut cache, &dsl, slots.len(), hk, d, bs).unwrap();
+    let dq = s.htod_copy(to_bf16(&q)).unwrap();
+    let dbt = s.htod_copy(bt).unwrap();
+    let dseq = s.htod_copy(seq_lens.clone()).unwrap();
+    let mut out = s.alloc_zeros::<bf16>(b * h * d).unwrap();
+    let mut scratch = s.alloc_zeros::<f32>(dinfer_kernels::gqa_decode_scratch_len(b, h, d)).unwrap();
+    dinfer_kernels::gqa_decode_bf16(
+        &s,
+        &dq,
+        &cache,
+        &dbt,
+        &dseq,
+        &mut out,
+        &mut scratch,
+        b,
+        h,
+        hk,
+        d,
+        bs,
+        bts[1],
+        (d as f32).powf(-0.5),
+    )
+    .unwrap();
+    assert_close("gqa_decode_d128", &s.dtoh_sync_copy(&out).unwrap(), &want, 1e-2, 1e-2);
+}
+
 // ---- Q2 采样：penalties / temperature / min_p / logprobs ----
 
 fn assert_f32_close(name: &str, got: &[f32], want: &[f32], atol: f32) {

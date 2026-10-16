@@ -82,6 +82,8 @@ pub struct Qwen3Model {
     mlp_out: Tensor<bf16>,
     final_normed: Tensor<bf16>,
     logits_bf16: Tensor<bf16>,
+    /// decode split-K attention 的 partial 缓冲（全层共享）：[max_logits_rows × H × 8 × (D+2)] f32。
+    decode_scratch: Tensor<f32>,
 }
 
 impl Attention {
@@ -136,6 +138,7 @@ impl Attention {
         slot_mapping: &Tensor<i64>,
         kv: &mut PagedKv,
         meta: &AttnMeta<'_>,
+        decode_scratch: &mut Tensor<f32>,
         out: &mut Tensor<bf16>,
     ) -> Result<()> {
         let (h, hk, d) =
@@ -212,6 +215,23 @@ impl Attention {
                 h,
                 hk,
                 d,
+                scale,
+            )?,
+            // 纯 decode 且 D=128：split-K kernel（reqs × Hkv × 8 块并行）；否则 flash paged kernel
+            BatchMode::Decode if d == 128 => k::gqa_decode_bf16(
+                stream,
+                &self.q.data,
+                &kv.cache.data,
+                &meta.block_table.data,
+                &meta.seq_lens.data,
+                &mut self.attn.data,
+                &mut decode_scratch.data,
+                meta.num_reqs,
+                h,
+                hk,
+                d,
+                kv.block_size,
+                meta.max_blocks,
                 scale,
             )?,
             BatchMode::Decode | BatchMode::Paged => k::gqa_paged_bf16(
@@ -325,6 +345,10 @@ impl Qwen3Model {
         let mlp_out = Tensor::zeros(stream, &[max_tokens, hidden])?;
         let final_normed = Tensor::zeros(stream, &[max_logits_rows, hidden])?;
         let logits_bf16 = Tensor::zeros(stream, &[max_logits_rows, v])?;
+        let decode_scratch = Tensor::zeros(
+            stream,
+            &[k::gqa_decode_scratch_len(max_logits_rows, cfg.num_attention_heads as usize, d)],
+        )?;
         // executor 还会分配 fp32 logits [max_logits_rows, vocab] + 采样工作区 + logprobs 原始副本（各 ≤ 同大小）
         let exec_scratch = 3 * max_logits_rows * v * 4;
 
@@ -391,6 +415,7 @@ impl Qwen3Model {
             mlp_out,
             final_normed,
             logits_bf16,
+            decode_scratch,
             cfg,
         })
     }
@@ -440,6 +465,7 @@ impl Qwen3Model {
                 f.slot_mapping,
                 &mut self.kv[li],
                 &f.meta,
+                &mut self.decode_scratch,
                 &mut self.attn_out,
             )?;
             k::fused_add_rmsnorm_bf16_n(

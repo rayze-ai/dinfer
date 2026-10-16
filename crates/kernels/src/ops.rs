@@ -1441,6 +1441,63 @@ pub fn gqa_paged_bf16(
     )
 }
 
+/// 纯 decode（每请求 1 行）split-K attention（D=128）。q: [B, heads, D]，out 同形；`scratch` ≥ `gqa_decode_scratch_len`。
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_decode_bf16(
+    stream: &Stream,
+    q: &CudaSlice<bf16>,
+    cache: &CudaSlice<bf16>,
+    block_table: &CudaSlice<i32>,
+    seq_lens: &CudaSlice<i32>,
+    out: &mut CudaSlice<bf16>,
+    scratch: &mut CudaSlice<f32>,
+    num_reqs: usize,
+    heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    block_size: usize,
+    max_blocks: usize,
+    scale: f32,
+) -> Result<()> {
+    ensure!(head_dim == 128, "gqa_decode: head_dim must be 128");
+    ensure!(
+        block_table.len() >= num_reqs * max_blocks && seq_lens.len() >= num_reqs,
+        "gqa_decode: table/seq_lens"
+    );
+    ensure!(
+        q.len() >= num_reqs * heads * head_dim && out.len() >= num_reqs * heads * head_dim,
+        "gqa_decode: q/out"
+    );
+    ensure!(scratch.len() >= gqa_decode_scratch_len(num_reqs, heads, head_dim), "gqa_decode: scratch");
+    // SAFETY: 长度已校验；block_table 下标范围由 scheduler 保证。
+    check(
+        unsafe {
+            ffi::gqa_decode_bf16(
+                stream.ptr(q) as *const c_void,
+                stream.ptr(cache) as *const c_void,
+                stream.ptr(block_table) as *const i32,
+                stream.ptr(seq_lens) as *const i32,
+                stream.ptr_mut(out) as *mut c_void,
+                stream.ptr_mut(scratch) as *mut f32,
+                num_reqs as i64,
+                heads as i64,
+                kv_heads as i64,
+                head_dim as i64,
+                block_size as i64,
+                max_blocks as i64,
+                scale,
+                stream.raw() as _,
+            )
+        },
+        "gqa_decode_bf16",
+    )
+}
+
+/// `gqa_decode_bf16` 的 scratch 元素数：B × heads × 8 split × (D + 2)。
+pub fn gqa_decode_scratch_len(num_reqs: usize, heads: usize, head_dim: usize) -> usize {
+    num_reqs * heads * 8 * (head_dim + 2)
+}
+
 // ---------------------------------------------------------------------------
 // 采样（Q2）：penalties / temperature / min_p / logprobs；与 topk_topp_mask_f32 / sample_f32 组成 vLLM 顺序
 // ---------------------------------------------------------------------------

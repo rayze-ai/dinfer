@@ -204,6 +204,22 @@ extern "C" {
         scale: f32,
         stream: cudaStream_t,
     ) -> i32;
+    pub fn gqa_decode_bf16(
+        q: *const c_void,
+        cache: *const c_void,
+        block_table: *const i32,
+        seq_lens: *const i32,
+        out: *mut c_void,
+        scratch: *mut f32,
+        num_reqs: i64,
+        heads: i64,
+        kv_heads: i64,
+        head_dim: i64,
+        block_size: i64,
+        max_blocks: i64,
+        scale: f32,
+        stream: cudaStream_t,
+    ) -> i32;
     pub fn mla_decode_bf16(
         q: *const c_void,
         cache: *const c_void,
