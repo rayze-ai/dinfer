@@ -916,8 +916,10 @@ extern "C" int gqa_decode_bf16(const void* q, const void* cache, const int32_t* 
     return err(cudaErrorInvalidValue);
   const int group = (int)(heads / kv_heads);
   if (group <= D2_MAXG && block_size % 16 == 0) {
-    // splits 自适应：目标 ≥ 256 个 block；上限 8（scratch 按 8 分配）
-    int splits = (int)((256 + num_reqs * kv_heads - 1) / (num_reqs * kv_heads));
+    // splits 自适应（Q3 第 31 轮）：目标 ≥ 1024 个 block（4090 128 SM × 每 SM 多 block 掩盖 KV 读延迟；旧值 256 在
+    // B=8 长序列只有 64 block，一半 SM 空），上限 8（scratch 按 8 分配）。
+    // 只依赖 batch（CUDA graph 按 batch 桶捕获，图内 splits 不能随 seq_len 变）。
+    int splits = (int)((1024 + num_reqs * kv_heads - 1) / (num_reqs * kv_heads));
     splits = splits < 1 ? 1 : (splits > DC_SPLITS ? DC_SPLITS : splits);
     dim3 grid1((unsigned)num_reqs, (unsigned)kv_heads, (unsigned)splits);
     bf16* direct = splits == 1 ? static_cast<bf16*>(out) : nullptr;
