@@ -18,3 +18,4 @@
 | 轮 | 块 | 现象 | 根因 | 处理 |
 |---|---|---|---|---|
 | 1 | 分段 | 3090 热缓存：total 2163 = tokenizer 381 + cuda 99 + **model_load 1529** + engine 153。model_load 内已归：first_tensor 168 + rope 126 + zeros 10 + weights(touch 66 + convert 237 + h2d 105) + kv 32 ≈ **744**；未归 ≈ **785 ms** | 未归段不在 Tensor::zeros / load_bf16 / rope / kv 里 → 在 load_with_budget 的其他语句（Linear::new 校验？Rope 以外的 host 计算？），或 `tracing::info!` 自身 | 加 `wall after <阶段>` 累计墙钟（embed / layers / lm_head / rope / kv）二分 |
+| 2 | 定位 | `wall after layers loop` = 1750 ms，而循环内已计时的 weights（touch 106 + convert 315 + h2d 141）+ zeros 15 + first_tensor 227 ≈ 800 → 差 ~950 ms 在循环里**未经 load_bf16 的路径**：`Attention::load` 把 q/k/v 三个权重用 `load_f32_host`（bf16 → f32 Vec）读出、host 上 concat、再 `Tensor::from_f32`（f32 → bf16 → H2D）。每层 3.1M×4 B 的 f32 往返 ≈ 30 ms × 28 层 ≈ 0.85 s，且不进 LOAD_STATS | 早期为"拼 qkv"图省事走 f32；统计只盯着 load_bf16 所以看不见 | 改为 bf16 直接上传 + 设备上 `memcpy_dtod` 拼接（零 host 计算）|

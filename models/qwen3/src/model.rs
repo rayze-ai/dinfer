@@ -98,18 +98,27 @@ impl Attention {
         let (h, hk, d) =
             (cfg.num_attention_heads as usize, cfg.num_key_value_heads as usize, cfg.head_dim as usize);
         let hidden = cfg.hidden_size as usize;
-        let (qs, q) = src.load_f32_host(&format!("{p}.q_proj.weight"))?;
-        let (ks, kw) = src.load_f32_host(&format!("{p}.k_proj.weight"))?;
-        let (vs, vw) = src.load_f32_host(&format!("{p}.v_proj.weight"))?;
+        // q/k/v 三个权重拼成一个 [(H+2Hkv)·D, hidden] 的 qkv 权重：bf16 直接上传后在设备上拼接
+        // （原先走 f32 host 拷贝再转回 bf16，每层 ~30 ms，28 层占了启动的 ~0.8 s；见 loops/q3-startup.md）
+        let q = src.load_bf16(stream, &format!("{p}.q_proj.weight"))?;
+        let kw = src.load_bf16(stream, &format!("{p}.k_proj.weight"))?;
+        let vw = src.load_bf16(stream, &format!("{p}.v_proj.weight"))?;
         ensure!(
-            qs == vec![h * d, hidden] && ks == vec![hk * d, hidden] && vs == ks,
-            "qkv shapes {qs:?} {ks:?} {vs:?}"
+            q.shape == [h * d, hidden] && kw.shape == [hk * d, hidden] && vw.shape == kw.shape,
+            "qkv shapes {:?} {:?} {:?}",
+            q.shape,
+            kw.shape,
+            vw.shape
         );
-        let mut cat = Vec::with_capacity(q.len() + kw.len() + vw.len());
-        cat.extend_from_slice(&q);
-        cat.extend_from_slice(&kw);
-        cat.extend_from_slice(&vw);
-        let qkv = Linear::new(Tensor::from_f32(stream, &cat, &[(h + 2 * hk) * d, hidden])?, None)?;
+        let mut qkv_w = Tensor::<bf16>::zeros(stream, &[(h + 2 * hk) * d, hidden])?;
+        let mut off = 0;
+        for part in [&q, &kw, &vw] {
+            let n = part.numel();
+            let mut dst = qkv_w.data.slice_mut(off..off + n);
+            stream.inner_arc().memcpy_dtod(&part.data, &mut dst)?;
+            off += n;
+        }
+        let qkv = Linear::new(qkv_w, None)?;
         let o_proj = Linear::load(stream, src, &format!("{p}.o_proj"))?;
         ensure!(o_proj.in_features == h * d && o_proj.out_features == hidden, "o_proj shape");
         let t = max_tokens;
