@@ -307,6 +307,9 @@ impl Stream {
 
 /// 带时间戳的 CUDA event（裸句柄）；`elapsed_ms(a, b)` 先同步 end 再取差。
 pub struct TimingEvent(sys::CUevent);
+// SAFETY: 裸句柄只在 executor 线程的单条流上 record / 读取；跨线程移动不改变其有效性。
+unsafe impl Send for TimingEvent {}
+unsafe impl Sync for TimingEvent {}
 impl TimingEvent {
     pub fn elapsed_ms(start: &TimingEvent, end: &TimingEvent) -> Result<f32> {
         // SAFETY: 两事件都已 record；synchronize 保证完成。
