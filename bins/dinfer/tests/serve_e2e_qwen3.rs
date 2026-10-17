@@ -715,3 +715,64 @@ async fn e2e_qwen3_robustness() {
     eprintln!("e2e: robustness PASS");
     drop(srv);
 }
+
+/// Q3-r：KV host tier。GPU 只有 64 块（1024 token），host tier 1 GiB。
+/// A（长前缀 ~700 token）→ B（另一个长前缀，把 A 挤出 GPU）→ A 再来：应从 host tier 拉回（`host_tier_hits_total` > 0），
+/// 且 greedy 输出与第一次逐字相同。
+#[tokio::test]
+#[ignore]
+async fn e2e_qwen3_host_tier() {
+    let srv = spawn_server_with(&["--num-blocks", "64", "--kv-host-gib", "1", "--max-num-seqs", "4"]);
+    assert!(srv.logs.iter().any(|l| l.contains("kv host tier enabled")), "host tier should be enabled: {:?}", srv.logs.last());
+    let c = reqwest::Client::new();
+    let url = format!("{}/v1/chat/completions", srv.base);
+    let murl = format!("{}/metrics", srv.base);
+    let long_history = |tag: &str| -> Vec<serde_json::Value> {
+        let mut v = vec![serde_json::json!({"role":"system","content":"You are a terse assistant. Answer with one word."})];
+        for i in 0..24 {
+            v.push(serde_json::json!({"role":"user","content": format!("{tag} fact {i}: the {i}th planet of system {tag} is named {tag}{i}. Please remember it.")}));
+            v.push(serde_json::json!({"role":"assistant","content":"OK."}));
+        }
+        v
+    };
+    let ask = |tag: &str, q: &str| {
+        let mut m = long_history(tag);
+        m.push(serde_json::json!({"role":"user","content": q}));
+        serde_json::json!({"messages": m, "max_tokens": 6, "temperature": 0.0, "chat_template_kwargs": {"enable_thinking": false}})
+    };
+    let get = |c: &reqwest::Client, body: serde_json::Value| {
+        let c = c.clone();
+        let url = url.clone();
+        async move {
+            let v: serde_json::Value = c.post(&url).json(&body).send().await.unwrap().json().await.unwrap();
+            (v["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string(), v["usage"]["prompt_tokens"].as_u64().unwrap())
+        }
+    };
+    let metric = |c: &reqwest::Client, name: &str| {
+        let c = c.clone();
+        let murl = murl.clone();
+        let name = name.to_string();
+        async move {
+            let t = c.get(&murl).send().await.unwrap().text().await.unwrap();
+            t.lines().find(|l| l.starts_with(&format!("dinfer:{name} "))).and_then(|l| l.split(' ').nth(1)).and_then(|x| x.parse::<f64>().ok()).unwrap_or(0.0)
+        }
+    };
+    let (a1, pa) = get(&c, ask("Zeta", "What is the name of the 7th planet?")).await;
+    assert!(pa >= 600, "A prompt should be ≥ 600 tokens, got {pa}");
+    let off1 = metric(&c, "host_tier_offload_blocks_total").await;
+    assert!(off1 > 0.0, "A should have been offloaded to host tier (offload={off1})");
+    // B：不同前缀、同样长 → 把 A 的块挤出 GPU（GPU 共 64 块，A 占 ~40）
+    let (_b1, pb) = get(&c, ask("Omega", "What is the name of the 3rd planet?")).await;
+    assert!(pb >= 600);
+    let hits0 = metric(&c, "host_tier_hits_total").await;
+    // A 再来：GPU 前缀缓存应已丢失大部分，host tier 命中
+    let (a2, _) = get(&c, ask("Zeta", "What is the name of the 7th planet?")).await;
+    let hits1 = metric(&c, "host_tier_hits_total").await;
+    let fetched = metric(&c, "host_tier_fetch_blocks_total").await;
+    eprintln!("e2e: host tier offload={off1} hits {hits0}→{hits1} fetched={fetched} a1={a1:?} a2={a2:?}");
+    assert!(hits1 > hits0, "second A should hit host tier ({hits0} → {hits1})");
+    assert!(fetched > 0.0, "blocks should have been fetched from host");
+    assert_eq!(a1, a2, "greedy output must be identical with host-tier-restored KV");
+    eprintln!("e2e: host tier PASS");
+    drop(srv);
+}
