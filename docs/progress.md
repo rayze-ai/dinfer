@@ -6,6 +6,7 @@
 - 更新日期：2026-10-17
 - 阶段：Q1 / Q2 通过；**Q3 通过**（2026-10-17 `scripts/verify/q3.sh` exit 0：c1 1.12× / c8 1.07× / c32 1.02× / c8-long 1.00× vLLM，`test/qwen3/2026-10-17/q3/`）。规格 `docs/loops/q3-perf.md`（44 轮），趋势 `test/qwen3/perf-trend.{csv,md,svg,html}`（bench1–16 每轮带改动说明）。GLM 线 P0–P6 通过，真权重挂起。
 - Q3 关键产出：prefill/paged attention v4/v5（`gqa.cu::gqa_fa_v5_kernel<PAGED,NBUF>`，FA2 结构 mma.sync，4090 T=1514 0.14 ms/层；双缓冲在 sm86/89 更慢，默认 NBUF=1，`GQA_PREFILL_NBUF=2` 开关）；decode v2 split-K + splits 1024；混批分流 `gqa_mixed_bf16`；CUDA graph；qkv_post 融合；bench 口径（每轮换 seed）；服务预算 2048（与 vLLM 对齐）。设计说明 `docs/design-qwen3.md` §5（prefill_tc vs paged_tc 是什么、为何选 paged）。
+- **进行中：Q3-j 跨流 prefill/decode 并行**（规格 `docs/loops/q3-xstream.md`，用户 2026-10-17 指定先做）。用户同时要求考虑 **新算子对接**（kernel 插拔）与 **KV cache 对接第三方**（分层 / 外置 / PD 共用），初步方案已写 `docs/design.md` §10，细化待做。
 - **下一步按 `design-qwen3.md` §6.5 优先级**：① 跨流 prefill/decode 并行（c8-long TPOT 3.9 → ~3.0，Q4 单卡前置）；② 启动 3.0 s → <0.8 s（瓶颈是权重 mmap→Vec 复制 1.9 s，不是 PCIe；tokenizer 545 ms）；③ 采样 4 kernel 融合 + 异步调度；④ 逐层 megakernel（decode 1.4×，独立阶段）。之后 Q4 PD 分离 + "可生产"补齐（鉴权 / 限流 / 优雅停机 / >8k 上下文 / 多卡）。
 - 启动日志已分段（用户要求）：`load timing: weights|activation scratch|kv cache alloc` + `cuda graphs captured` + `startup timing`；运行期 `executor step breakdown`（upload/launch/wait µs）每 1000 步、`/metrics` 的 engine_step_{schedule,execute,update} 直方图。
 - **上下文硬约束**：`.claude/settings.json` `BASH_MAX_OUTPUT_LENGTH=8000` + `.claude/hooks/context_guard.sh`。**每轮改动必须 `bench_compare.sh <OUT> "改动一句话"` 进 CSV 趋势**。本会话 130+ 次调用后收功。

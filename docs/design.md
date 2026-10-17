@@ -377,3 +377,24 @@ PD 分离的详细设计写进 §10（待补），动代码前先定：KV 传输
 4. 是否需要兼容 vLLM 的 `/metrics` 指标名，便于复用现有看板？
 5. 性能对比的基线配置（§8.4）：vLLM 侧是否开 MTP、EP、FP8 KV cache？需要和目标机器一起定，否则对比口径不一致。
 6. 是否接受"decode FULL 图把 attention 也捕获"带来的约束：所有 attention metadata 必须固定形状，`max_model_len` 变化需重新捕获。
+
+## 10. 扩展点设计（用户 2026-10-17 提出，待细化）
+
+### 10.1 对接新算子（kernel 插拔）
+
+现状：`crates/kernels` 的 `.cu` 由 build.rs 编 nvcc 静态链接，Rust 侧 `ffi.rs` 声明 + `ops.rs` 安全封装，模型 crate 直接调 `ops::*`。换 kernel = 改 `.cu` + 重编。
+方案（按侵入度从小到大，先做 A）：
+- **A. 算子 trait + 注册表**：为每类热点算子定义 trait（`AttentionPrefill`、`AttentionDecode`、`Gemm`、`Norm`、`Sampler`），`ops.rs` 现有实现是默认 impl；模型 crate 通过 `OpSet` 结构取 `Box<dyn Trait>`，启动时按配置 / 环境变量（如 `ATTN_IMPL=fa_v5|ref|ext:<so>`）选择。零运行时开销的做法：泛型参数 `M: Qwen3Model<Ops: OpSet>`，默认 `DefaultOps`。
+- **B. 外部 .so 动态加载**：`libloading` 按约定的 C ABI（现有 extern "C" 签名就是 ABI，已约定不带项目前缀）加载第三方 kernel 库（FlashInfer / 自研 CUTLASS / Triton AOT 产物），满足 trait 即可。需要一张"ABI 版本 + 形状约束（D=128、block_size 16 倍数）"的能力表供启动期校验。
+- **C. PTX/cubin 热加载**：cudarc `load_ptx` 运行时装 kernel，用于 Triton AOT。与 B 的区别是不需要 host 侧 C 封装，但要自己处理 launch 参数布局。
+对拍：每个 trait 实现都要能跑 `kernels.sh` 的 ref 测试（测试按 trait 写，不按具体函数写）。
+
+### 10.2 KV cache 对接第三方（分层 / 外置）
+
+现状：`core::kv` 的 `PagedKv` 是 GPU 显存里 `[num_blocks, block_size, Hkv, 2, D]` bf16 单层；prefix cache 块哈希在 scheduler；无 CPU / 远端层。
+目标接口（对齐 vLLM `KVConnectorBase_V1` 的事件点，但不照搬其 Python 结构）：
+- `trait KvStore`：`alloc / free / block_table`（GPU 层，现有）；`trait KvTier`：`offload(block_ids) -> Future`、`fetch(hashes) -> Future<block_ids>`、`lookup(hashes) -> hit_len`。
+- 调度器钩子（三处）：① `schedule()` 新请求入队前 `lookup` 外部命中长度，命中的块异步 `fetch` 到空闲 GPU 块，请求先标 `waiting_for_kv`；② `update_from_output` 后对本 step 完整写满的块触发 `offload`（可按策略：全部 / 只在 GPU 块压力高时）；③ `free` 时若块已 offload 则只释放 GPU 侧。
+- 传输层：先做 **CPU pinned 内存层**（`cudaMemcpyAsync` 走独立 copy stream，与计算流用事件同步；块粒度 16 token × 8 head × 128 × 2 × 2 B = 64 KB，PCIe 4 每秒 ~40 万块），这一层本身就能把 prefix 命中率从显存上限扩到主存上限（4090 24 GB → 主机 256 GB）。再做远端：Mooncake / LMCache / NIXL 任一，接口是 `(hash, bytes)` KV 对象存储 + RDMA get/put；dinfer 侧只需实现 `KvTier` 的异步 fetch/offload，块布局与 bf16/fp8 dtype 写进对象元数据。
+- PD 分离（Q4）复用同一 `KvTier`：prefill 节点 `offload` → decode 节点 `fetch`，加一个"请求迁移"消息（prompt ids + 块哈希列表 + 采样参数）。
+- 风险：块哈希要与 dtype / 模型版本 / block_size 一起哈希；fetch 在飞时该块不能被 GPU 侧回收；fp8 KV 时 scale 随块存。
