@@ -81,7 +81,7 @@ pub struct Engine<E: ModelExecutor> {
     cut_in: bool,
     cut_in_steps: u64,
     /// 已同步完成、等着 update 的一步（异步步之后紧跟的 prefill 步）。
-    sync_done: Option<(crate::sched::output::SchedulerOutput, crate::sched::output::ModelRunnerOutput, std::time::Instant, std::time::Instant)>,
+    sync_done: std::collections::VecDeque<(crate::sched::output::SchedulerOutput, crate::sched::output::ModelRunnerOutput, std::time::Instant, std::time::Instant)>,
     runner: Runner<E>,
     rx: crossbeam_channel::Receiver<Cmd>,
     outs: HashMap<RequestId, tokio::sync::mpsc::UnboundedSender<EngineEvent>>,
@@ -102,7 +102,7 @@ impl<E: ModelExecutor> Engine<E> {
                 cut_in: async_sched && std::env::var("CUT_IN").map(|v| v != "0").unwrap_or(true),
                 cut_in_steps: 0,
                 pending: None,
-                sync_done: None,
+                sync_done: std::collections::VecDeque::new(),
                 runner,
                 rx,
                 outs: HashMap::new(),
@@ -184,7 +184,7 @@ impl<E: ModelExecutor> Engine<E> {
     pub fn run(mut self) -> Result<()> {
         loop {
             // 空闲：阻塞等命令；忙：非阻塞吸收
-            if !self.sched.has_requests() && self.pending.is_none() && self.sync_done.is_none() {
+            if !self.sched.has_requests() && self.pending.is_none() && self.sync_done.is_empty() {
                 match self.rx.recv() {
                     Ok(cmd) => {
                         if !self.handle(cmd) {
@@ -199,7 +199,7 @@ impl<E: ModelExecutor> Engine<E> {
                     return Ok(());
                 }
             }
-            if !self.sched.has_requests() && self.pending.is_none() && self.sync_done.is_none() {
+            if !self.sched.has_requests() && self.pending.is_none() && self.sync_done.is_empty() {
                 continue;
             }
             // 异步调度（Q3-l）：步 n 入队后，不等 GPU 就调度并入队步 n+1，再取 n 的结果。
@@ -208,9 +208,9 @@ impl<E: ModelExecutor> Engine<E> {
                 Some((so_n, pend_n, t_step_n, t_sched_n)) => {
                     // 插队 prefill（Q3-o）：步 n 在飞、有新请求在等 → 立刻调度一次（running 行都有 placeholder，
                     // 产出的 step 只含新请求），同步跑完，结果排进 sync_done。新请求首 token 提前一步。
-                    if self.cut_in && self.sched.num_waiting() > 0 && self.sync_done.is_none() {
+                    if self.cut_in && self.sched.num_waiting() > 0 {
                         let t_step = std::time::Instant::now();
-                        let so_c = self.sched.schedule();
+                        let so_c = self.sched.schedule_waiting_only();
                         let t_sched = std::time::Instant::now();
                         if !so_c.num_scheduled_tokens.is_empty() {
                             let pend_c = match self.runner.begin_cut_in(&so_c) {
@@ -222,11 +222,11 @@ impl<E: ModelExecutor> Engine<E> {
                                 Err(e) => return self.fail_step(e),
                             };
                             self.cut_in_steps += 1;
-                            self.sync_done = Some((so_c, mro_c, t_step, t_sched));
+                            self.sync_done.push_back((so_c, mro_c, t_step, t_sched));
                         }
                     }
                     // 先把 n+1 排进去（若还有请求且 n 是异步的），再等 n
-                    if self.async_sched && self.sched.has_requests() && self.sync_done.is_none() {
+                    if self.async_sched && self.sched.has_requests() {
                         let t_step = std::time::Instant::now();
                         let so_next = self.sched.schedule();
                         let t_sched = std::time::Instant::now();
@@ -242,7 +242,7 @@ impl<E: ModelExecutor> Engine<E> {
                                 Ok(m) => m,
                                 Err(e) => return self.fail_step(e),
                             };
-                            self.sync_done = Some((so_next, mro_next, t_step, t_sched));
+                            self.sync_done.push_back((so_next, mro_next, t_step, t_sched));
                         }
                     }
                     let mro_n = match self.runner.finish(pend_n) {
@@ -251,7 +251,7 @@ impl<E: ModelExecutor> Engine<E> {
                     };
                     (so_n, mro_n, t_step_n, t_sched_n, std::time::Instant::now())
                 }
-                None => match self.sync_done.take() {
+                None => match self.sync_done.pop_front() {
                     Some((so, mro, t_step, t_sched)) => (so, mro, t_step, t_sched, std::time::Instant::now()),
                     None => {
                         let t_step = std::time::Instant::now();

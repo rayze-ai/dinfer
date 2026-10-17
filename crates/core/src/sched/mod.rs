@@ -152,6 +152,16 @@ impl Scheduler {
     // ------------------------------------------------------------------
 
     pub fn schedule(&mut self) -> SchedulerOutput {
+        self.schedule_impl(false)
+    }
+
+    /// 只调度 waiting 里的新请求（跳过 running），预算全给它们；running 行一个都不动。
+    /// 用于插队 prefill（Q3-o）：在飞 decode 步未结束时为新请求单独跑一步。
+    pub fn schedule_waiting_only(&mut self) -> SchedulerOutput {
+        self.schedule_impl(true)
+    }
+
+    fn schedule_impl(&mut self, waiting_only: bool) -> SchedulerOutput {
         let mut out = SchedulerOutput {
             finished_req_ids: std::mem::take(&mut self.finished_req_ids),
             preempted_req_ids: std::mem::take(&mut self.preempted_req_ids),
@@ -177,10 +187,10 @@ impl Scheduler {
 
         let mut any_preempted = false;
 
-        // ---- 1. running ----
+        // ---- 1. running ----（waiting_only 时整段跳过）
         let exempt_decode = self.p.sched.decode_exempt_from_budget;
         let mut i = 0;
-        while i < self.running.len() {
+        while !waiting_only && i < self.running.len() {
             let slot = self.running[i];
             let r = &self.slab[slot].as_ref().unwrap().req;
             // decode 行（算 1 个 token 且已有历史）在 exempt 模式下不占预算；其余行预算用完就停
