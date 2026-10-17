@@ -191,3 +191,15 @@ bench17,2026-10-17,j 跨流并行：混批 step 拆成 decode 批（主流，CUD
 bench17,2026-10-17,j 跨流并行：混批 step 拆成 decode 批（主流，CUDA graph）+ prefill 批（副流，eager），事件同步，两套激活 scratch,c8-long,out_tok_per_s,1911.028,1909.131,1.001,0.2,higher
 bench17,2026-10-17,j 跨流并行：混批 step 拆成 decode 批（主流，CUDA graph）+ prefill 批（副流，eager），事件同步，两套激活 scratch,c8-long,ttft_p50_ms,39.360,55.410,0.710,0.1,lower
 bench17,2026-10-17,j 跨流并行：混批 step 拆成 decode 批（主流，CUDA graph）+ prefill 批（副流，eager），事件同步，两套激活 scratch,c8-long,tpot_p50_ms,3.878,3.757,1.032,0.2,lower
+bench19,2026-10-17,j 续：调度 decode 免预算（每步装下全部 decode 行 + 预算内 prefill）+ 跨流并行（decode 批主流图 / prefill 批副流）,c1,out_tok_per_s,500.839,446.117,1.123,0.2,higher
+bench19,2026-10-17,j 续：调度 decode 免预算（每步装下全部 decode 行 + 预算内 prefill）+ 跨流并行（decode 批主流图 / prefill 批副流）,c1,ttft_p50_ms,3.769,17.458,0.216,4.1,lower
+bench19,2026-10-17,j 续：调度 decode 免预算（每步装下全部 decode 行 + 预算内 prefill）+ 跨流并行（decode 批主流图 / prefill 批副流）,c1,tpot_p50_ms,1.980,2.119,0.935,0.2,lower
+bench19,2026-10-17,j 续：调度 decode 免预算（每步装下全部 decode 行 + 预算内 prefill）+ 跨流并行（decode 批主流图 / prefill 批副流）,c8,out_tok_per_s,3081.584,2890.800,1.066,0.0,higher
+bench19,2026-10-17,j 续：调度 decode 免预算（每步装下全部 decode 行 + 预算内 prefill）+ 跨流并行（decode 批主流图 / prefill 批副流）,c8,ttft_p50_ms,8.460,27.054,0.313,-3.3,lower
+bench19,2026-10-17,j 续：调度 decode 免预算（每步装下全部 decode 行 + 预算内 prefill）+ 跨流并行（decode 批主流图 / prefill 批副流）,c8,tpot_p50_ms,2.527,2.545,0.993,0.2,lower
+bench19,2026-10-17,j 续：调度 decode 免预算（每步装下全部 decode 行 + 预算内 prefill）+ 跨流并行（decode 批主流图 / prefill 批副流）,c32,out_tok_per_s,8360.696,8170.633,1.023,-0.3,higher
+bench19,2026-10-17,j 续：调度 decode 免预算（每步装下全部 decode 行 + 预算内 prefill）+ 跨流并行（decode 批主流图 / prefill 批副流）,c32,ttft_p50_ms,22.834,78.117,0.292,0.5,lower
+bench19,2026-10-17,j 续：调度 decode 免预算（每步装下全部 decode 行 + 预算内 prefill）+ 跨流并行（decode 批主流图 / prefill 批副流）,c32,tpot_p50_ms,3.643,3.346,1.089,-0.0,lower
+bench19,2026-10-17,j 续：调度 decode 免预算（每步装下全部 decode 行 + 预算内 prefill）+ 跨流并行（decode 批主流图 / prefill 批副流）,c8-long,out_tok_per_s,1913.379,1906.366,1.004,0.1,higher
+bench19,2026-10-17,j 续：调度 decode 免预算（每步装下全部 decode 行 + 预算内 prefill）+ 跨流并行（decode 批主流图 / prefill 批副流）,c8-long,ttft_p50_ms,39.349,60.645,0.649,0.0,lower
+bench19,2026-10-17,j 续：调度 decode 免预算（每步装下全部 decode 行 + 预算内 prefill）+ 跨流并行（decode 批主流图 / prefill 批副流）,c8-long,tpot_p50_ms,3.872,3.741,1.035,0.2,lower

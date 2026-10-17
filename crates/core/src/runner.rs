@@ -136,6 +136,11 @@ pub struct Runner<E: ModelExecutor> {
     plan: BatchPlan,
     generated: Vec<Vec<u32>>,
     drafts: Vec<Vec<u32>>,
+    /// 诊断：step 构成计数（每 1000 步打一行日志）。mixed = 同步里既有 decode 行又有 prefill 行。
+    steps_total: u64,
+    steps_mixed: u64,
+    steps_pair: u64,
+    steps_prefill_only: u64,
 }
 
 impl<E: ModelExecutor> Runner<E> {
@@ -147,6 +152,10 @@ impl<E: ModelExecutor> Runner<E> {
             plan: BatchPlan::default(),
             generated: Vec::new(),
             drafts: Vec::new(),
+            steps_total: 0,
+            steps_mixed: 0,
+            steps_pair: 0,
+            steps_prefill_only: 0,
         }
     }
 
@@ -283,9 +292,25 @@ impl<E: ModelExecutor> Runner<E> {
         let decode_mask: Vec<bool> = rows.iter().map(|&(rid, n)| self.is_decode_row(rid, n)).collect();
         let num_decode = decode_mask.iter().filter(|&&d| d).count();
         let mixed = num_decode > 0 && num_decode < rows.len();
-        if !(self.exec.supports_pair() && self.plan.mode == BatchMode::Paged && mixed) {
+        self.steps_total += 1;
+        if mixed {
+            self.steps_mixed += 1;
+        } else if num_decode == 0 {
+            self.steps_prefill_only += 1;
+        }
+        if self.steps_total % 1000 == 0 {
+            tracing::info!(
+                steps = self.steps_total,
+                mixed = self.steps_mixed,
+                pair = self.steps_pair,
+                prefill_only = self.steps_prefill_only,
+                "runner step mix (cumulative)"
+            );
+        }
+        if !(self.exec.supports_pair() && mixed) {
             return Ok(None);
         }
+        self.steps_pair += 1;
 
         // 用同一个 build_plan 分别构造两个子 plan；主 plan 先挪开再放回
         let full = std::mem::take(&mut self.plan);

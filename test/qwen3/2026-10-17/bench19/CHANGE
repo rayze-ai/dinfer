@@ -1,0 +1,1 @@
+j 续：调度 decode 免预算（每步装下全部 decode 行 + 预算内 prefill）+ 跨流并行（decode 批主流图 / prefill 批副流）
