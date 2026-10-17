@@ -347,6 +347,8 @@ pub struct PinnedUploader {
     cap: usize,
     off: usize,
     scatter: Vec<(u64, usize, usize)>, // (dst_dev_ptr, host_off, bytes)
+    /// PINNED_UPLOAD=1 走打包；默认 0 = 每数组一次 pageable `htod_into`（bench21 显示打包版 c8 更慢，待 A/B 定论）。
+    enabled: bool,
 }
 // SAFETY: 裸 host 指针只在 executor 线程使用；跨线程移动不改变有效性。
 unsafe impl Send for PinnedUploader {}
@@ -356,7 +358,8 @@ impl PinnedUploader {
         // SAFETY: pinned 分配，Drop 释放。
         let host = unsafe { result::malloc_host(cap, 0)? as *mut u8 };
         let staging = stream.alloc_uninit::<u8>(cap)?;
-        Ok(Self { host, staging, cap, off: 0, scatter: Vec::with_capacity(32) })
+        let enabled = std::env::var("PINNED_UPLOAD").is_ok_and(|v| v == "1");
+        Ok(Self { host, staging, cap, off: 0, scatter: Vec::with_capacity(32), enabled })
     }
     /// 每 step 开始：host 区回到 0（上一步的 DMA 已随 step 末尾同步完成）。
     pub fn reset_step(&mut self) {
@@ -370,6 +373,9 @@ impl PinnedUploader {
     /// 把 `src` 排进本次上传，目标是 `dst` 的前 src.len() 个元素。
     pub fn push<T: DeviceRepr>(&mut self, stream: &Stream, src: &[T], dst: &mut CudaSlice<T>) -> Result<()> {
         anyhow::ensure!(src.len() <= dst.len(), "PinnedUploader::push: src {} > dst {}", src.len(), dst.len());
+        if !self.enabled {
+            return stream.htod_into(src, dst);
+        }
         let bytes = std::mem::size_of_val(src);
         if bytes == 0 {
             return Ok(());
