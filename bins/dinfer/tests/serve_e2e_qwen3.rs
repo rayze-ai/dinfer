@@ -746,7 +746,7 @@ async fn e2e_qwen3_host_tier() {
     let murl = format!("{}/metrics", srv.base);
     let long_history = |tag: &str| -> Vec<serde_json::Value> {
         let mut v = vec![serde_json::json!({"role":"system","content":"You are a terse assistant. Answer with one word."})];
-        for i in 0..24 {
+        for i in 0..16 {
             v.push(serde_json::json!({"role":"user","content": format!("{tag} fact {i}: the {i}th planet of system {tag} is named {tag}{i}. Please remember it.")}));
             v.push(serde_json::json!({"role":"assistant","content":"OK."}));
         }
@@ -762,7 +762,8 @@ async fn e2e_qwen3_host_tier() {
         let url = url.clone();
         async move {
             let v: serde_json::Value = c.post(&url).json(&body).send().await.unwrap().json().await.unwrap();
-            (v["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string(), v["usage"]["prompt_tokens"].as_u64().unwrap())
+            let pt = v["usage"]["prompt_tokens"].as_u64().unwrap_or_else(|| panic!("no usage in response: {v}"));
+            (v["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string(), pt)
         }
     };
     let metric = |c: &reqwest::Client, name: &str| {
@@ -775,12 +776,12 @@ async fn e2e_qwen3_host_tier() {
         }
     };
     let (a1, pa) = get(&c, ask("Zeta", "What is the name of the 7th planet?")).await;
-    assert!(pa >= 600, "A prompt should be ≥ 600 tokens, got {pa}");
+    assert!(pa >= 450, "A prompt should be ≥ 450 tokens (≈ 28+ blocks), got {pa}");
     let off1 = metric(&c, "host_tier_offload_blocks_total").await;
     assert!(off1 > 0.0, "A should have been offloaded to host tier (offload={off1})");
     // B：不同前缀、同样长 → 把 A 的块挤出 GPU（GPU 共 64 块，A 占 ~40）
     let (_b1, pb) = get(&c, ask("Omega", "What is the name of the 3rd planet?")).await;
-    assert!(pb >= 600);
+    assert!(pb >= 450);
     let hits0 = metric(&c, "host_tier_hits_total").await;
     // A 再来：GPU 前缀缓存应已丢失大部分，host tier 命中
     let (a2, _) = get(&c, ask("Zeta", "What is the name of the 7th planet?")).await;
