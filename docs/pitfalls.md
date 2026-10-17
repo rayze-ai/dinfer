@@ -410,3 +410,9 @@
 - vLLM 对照：靠启动期校验（`max_model_len` 必须能装进 KV）+ 单请求不抢占；没有空步退避（它的 step 本身有 GPU 等待）。
 - 如何避免：所有 "分不到资源 → 重排" 的路径都要问 "重排后一定能前进吗"；压测必须含 "池远小于活跃集合" 的配置。单测 `self_preempt_under_pressure_makes_progress`。
 
+## 2026-10-17 同一张卡上刚停掉的实例显存还没回落，紧接着的 auto num_blocks 测试算出偏小的池 → 误判 FAIL
+
+- 现象：A/B 实例 `ab_serve.sh stop` 后立刻跑 baseline，`e2e_qwen3_auto_num_blocks` 的 80% 估计断言失败；单独重跑 PASS（10698 vs 估计 7848）。
+- 根因：驱动回收 ~20 GiB 需要几秒；`stop` 只等进程退出，没等 `nvidia-smi memory.used` 回落。
+- 如何避免：所有 "在同卡起服务" 的脚本起前等显存 < 2 GB（`restart_dinfer.sh` 已有，`ab_serve.sh`/`remote4090_baseline.sh` 补上）。
+
