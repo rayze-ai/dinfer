@@ -59,6 +59,9 @@ struct Args {
     /// 长短混合 prompt："len:weight,len:weight,..."（覆盖 --prompt-len）
     #[arg(long, default_value = "")]
     prompt_len_mix: String,
+    /// 前缀复用比例 [0,1]：这部分请求共享同一个 `--prompt-len` 词的长前缀，各自只追加 16 个随机词（测 prefix cache / host tier）
+    #[arg(long, default_value_t = 0.0)]
+    prefix_repeat: f64,
     /// 预热请求数（不计入统计）
     #[arg(long, default_value_t = 2)]
     warmup: usize,
@@ -167,6 +170,25 @@ fn parse_len_mix(spec: &str) -> Result<Vec<(usize, f64)>> {
     }
     anyhow::ensure!(!v.is_empty() && v.iter().all(|&(_, w)| w > 0.0), "--prompt-len-mix empty or non-positive weight");
     Ok(v)
+}
+/// 第 idx 个请求是否走 "共享长前缀" 分支（按 seed 决定性抽样，比例 = --prefix-repeat）。
+fn is_prefix_repeat(a: &Args, idx: usize) -> bool {
+    if a.prefix_repeat <= 0.0 {
+        return false;
+    }
+    let mut x = (a.seed ^ 0x7E7E_0000).wrapping_add((idx as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    x ^= x >> 31;
+    x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^= x >> 29;
+    ((x >> 11) as f64 / (1u64 << 53) as f64) < a.prefix_repeat
+}
+/// 共享前缀 + 唯一尾部：前缀由 seed 固定（所有请求同一个），尾部由 idx 变化。
+fn make_prompt_shared_prefix(seed: u64, idx: usize, prefix_words: usize) -> String {
+    let mut p = make_prompt(seed ^ 0x5A5A_5A5A, 0, prefix_words);
+    p.truncate(p.len() - 1); // 去掉句号
+    let tail = make_prompt(seed, idx, 16);
+    let tail = tail.trim_start_matches("Write a story using these words in order: ");
+    format!("{p} {tail}")
 }
 /// 第 idx 个请求的 prompt 长度：固定值，或按 mix 权重用 (seed, idx) 决定性抽样。
 fn prompt_len_for(a: &Args, mix: &[(usize, f64)], idx: usize) -> usize {
@@ -330,7 +352,7 @@ async fn run(a: &Args) -> Result<Summary> {
             if !wait.is_zero() {
                 tokio::time::sleep(wait).await;
             }
-            let p = make_prompt(a.seed, i, prompt_len_for(&a, &mix, i));
+            let p = if is_prefix_repeat(&a, i) { make_prompt_shared_prefix(a.seed, i, a.prompt_len) } else { make_prompt(a.seed, i, prompt_len_for(&a, &mix, i)) };
             let (client, a, model) = (client.clone(), a.clone(), model.clone());
             handles.push(tokio::spawn(async move { vec![one_request(&client, &a.url, &model, &p, &a).await] }));
         }
@@ -346,7 +368,7 @@ async fn run(a: &Args) -> Result<Summary> {
                     if i >= a.num_requests {
                         break;
                     }
-                    let p = make_prompt(a.seed, i, prompt_len_for(&a, &mix, i));
+                    let p = if is_prefix_repeat(&a, i) { make_prompt_shared_prefix(a.seed, i, a.prompt_len) } else { make_prompt(a.seed, i, prompt_len_for(&a, &mix, i)) };
                     out.push(one_request(&client, &a.url, &model, &p, &a).await);
                 }
                 out
@@ -388,7 +410,7 @@ async fn run(a: &Args) -> Result<Summary> {
         tpot_ms: pct(tpots),
         itl_ms: pct(itls),
         latency_ms: pct(ok.iter().map(|r| r.latency_ms).collect()),
-        args: serde_json::json!({"max_tokens": a.max_tokens, "temperature": a.temperature, "ignore_eos": !a.allow_eos, "seed": a.seed, "warmup": a.warmup, "request_rate": a.request_rate, "prompt_len_mix": a.prompt_len_mix}),
+        args: serde_json::json!({"max_tokens": a.max_tokens, "temperature": a.temperature, "ignore_eos": !a.allow_eos, "seed": a.seed, "warmup": a.warmup, "request_rate": a.request_rate, "prompt_len_mix": a.prompt_len_mix, "prefix_repeat": a.prefix_repeat}),
     })
 }
 
@@ -518,6 +540,7 @@ async fn self_check() -> Result<()> {
         seed: 1,
         request_rate: 0.0,
         prompt_len_mix: String::new(),
+        prefix_repeat: 0.0,
         warmup: 1,
         out: None,
         label: "self-check".into(),
