@@ -215,3 +215,27 @@ bench20,2026-10-17,启动 loop 收尾后的回归（懒捕获图 + 权重直传 
 bench20,2026-10-17,启动 loop 收尾后的回归（懒捕获图 + 权重直传 + KV uninit；运行期逻辑同 bench19）,c8-long,out_tok_per_s,1909.679,1901.677,1.004,-0.2,higher
 bench20,2026-10-17,启动 loop 收尾后的回归（懒捕获图 + 权重直传 + KV uninit；运行期逻辑同 bench19）,c8-long,ttft_p50_ms,39.417,67.716,0.582,-0.2,lower
 bench20,2026-10-17,启动 loop 收尾后的回归（懒捕获图 + 权重直传 + KV uninit；运行期逻辑同 bench19）,c8-long,tpot_p50_ms,3.878,3.742,1.036,-0.2,lower
+bench21,2026-10-17,k host 路径：每 step 输入打包进 pinned 缓冲，一次异步 H2D + D2D 散开（原 14 次同步 pageable memcpy ≈ 650 µs/步）,c1,out_tok_per_s,494.921,447.236,1.107,-1.1,higher
+bench21,2026-10-17,k host 路径：每 step 输入打包进 pinned 缓冲，一次异步 H2D + D2D 散开（原 14 次同步 pageable memcpy ≈ 650 µs/步）,c1,ttft_p50_ms,3.910,16.884,0.232,-0.1,lower
+bench21,2026-10-17,k host 路径：每 step 输入打包进 pinned 缓冲，一次异步 H2D + D2D 散开（原 14 次同步 pageable memcpy ≈ 650 µs/步）,c1,tpot_p50_ms,2.005,2.119,0.947,-1.3,lower
+bench21,2026-10-17,k host 路径：每 step 输入打包进 pinned 缓冲，一次异步 H2D + D2D 散开（原 14 次同步 pageable memcpy ≈ 650 µs/步）,c8,out_tok_per_s,2728.090,2887.320,0.945,-10.7,higher
+bench21,2026-10-17,k host 路径：每 step 输入打包进 pinned 缓冲，一次异步 H2D + D2D 散开（原 14 次同步 pageable memcpy ≈ 650 µs/步）,c8,ttft_p50_ms,13.776,34.245,0.402,0.0,lower
+bench21,2026-10-17,k host 路径：每 step 输入打包进 pinned 缓冲，一次异步 H2D + D2D 散开（原 14 次同步 pageable memcpy ≈ 650 µs/步）,c8,tpot_p50_ms,2.843,2.544,1.118,-12.2,lower
+bench21,2026-10-17,k host 路径：每 step 输入打包进 pinned 缓冲，一次异步 H2D + D2D 散开（原 14 次同步 pageable memcpy ≈ 650 µs/步）,c32,out_tok_per_s,8383.450,8355.189,1.003,0.4,higher
+bench21,2026-10-17,k host 路径：每 step 输入打包进 pinned 缓冲，一次异步 H2D + D2D 散开（原 14 次同步 pageable memcpy ≈ 650 µs/步）,c32,ttft_p50_ms,22.234,67.774,0.328,0.9,lower
+bench21,2026-10-17,k host 路径：每 step 输入打包进 pinned 缓冲，一次异步 H2D + D2D 散开（原 14 次同步 pageable memcpy ≈ 650 µs/步）,c32,tpot_p50_ms,3.650,3.327,1.097,-0.4,lower
+bench21,2026-10-17,k host 路径：每 step 输入打包进 pinned 缓冲，一次异步 H2D + D2D 散开（原 14 次同步 pageable memcpy ≈ 650 µs/步）,c8-long,out_tok_per_s,1772.792,1902.823,0.932,-7.2,higher
+bench21,2026-10-17,k host 路径：每 step 输入打包进 pinned 缓冲，一次异步 H2D + D2D 散开（原 14 次同步 pageable memcpy ≈ 650 µs/步）,c8-long,ttft_p50_ms,39.405,67.958,0.580,0.0,lower
+bench21,2026-10-17,k host 路径：每 step 输入打包进 pinned 缓冲，一次异步 H2D + D2D 散开（原 14 次同步 pageable memcpy ≈ 650 µs/步）,c8-long,tpot_p50_ms,4.199,3.760,1.117,-8.3,lower
+bench22,2026-10-17,k host 路径：block_table 缓冲行跨度改为 max_model_len/block_size（原用 KV 池总块数 9972 → 每步 1.3 MB 零填充 + H2D）,c1,out_tok_per_s,498.666,446.789,1.116,0.8,higher
+bench22,2026-10-17,k host 路径：block_table 缓冲行跨度改为 max_model_len/block_size（原用 KV 池总块数 9972 → 每步 1.3 MB 零填充 + H2D）,c1,ttft_p50_ms,4.123,17.224,0.239,-5.4,lower
+bench22,2026-10-17,k host 路径：block_table 缓冲行跨度改为 max_model_len/block_size（原用 KV 池总块数 9972 → 每步 1.3 MB 零填充 + H2D）,c1,tpot_p50_ms,1.987,2.120,0.938,0.9,lower
+bench22,2026-10-17,k host 路径：block_table 缓冲行跨度改为 max_model_len/block_size（原用 KV 池总块数 9972 → 每步 1.3 MB 零填充 + H2D）,c8,out_tok_per_s,2803.586,2884.905,0.972,2.8,higher
+bench22,2026-10-17,k host 路径：block_table 缓冲行跨度改为 max_model_len/block_size（原用 KV 池总块数 9972 → 每步 1.3 MB 零填充 + H2D）,c8,ttft_p50_ms,9.909,35.726,0.277,28.1,lower
+bench22,2026-10-17,k host 路径：block_table 缓冲行跨度改为 max_model_len/block_size（原用 KV 池总块数 9972 → 每步 1.3 MB 零填充 + H2D）,c8,tpot_p50_ms,2.787,2.542,1.096,2.0,lower
+bench22,2026-10-17,k host 路径：block_table 缓冲行跨度改为 max_model_len/block_size（原用 KV 池总块数 9972 → 每步 1.3 MB 零填充 + H2D）,c32,out_tok_per_s,8650.097,8284.707,1.044,3.2,higher
+bench22,2026-10-17,k host 路径：block_table 缓冲行跨度改为 max_model_len/block_size（原用 KV 池总块数 9972 → 每步 1.3 MB 零填充 + H2D）,c32,ttft_p50_ms,21.570,73.790,0.292,3.0,lower
+bench22,2026-10-17,k host 路径：block_table 缓冲行跨度改为 max_model_len/block_size（原用 KV 池总块数 9972 → 每步 1.3 MB 零填充 + H2D）,c32,tpot_p50_ms,3.515,3.308,1.062,3.7,lower
+bench22,2026-10-17,k host 路径：block_table 缓冲行跨度改为 max_model_len/block_size（原用 KV 池总块数 9972 → 每步 1.3 MB 零填充 + H2D）,c8-long,out_tok_per_s,1791.794,1907.034,0.940,1.1,higher
+bench22,2026-10-17,k host 路径：block_table 缓冲行跨度改为 max_model_len/block_size（原用 KV 池总块数 9972 → 每步 1.3 MB 零填充 + H2D）,c8-long,ttft_p50_ms,39.484,61.746,0.639,-0.2,lower
+bench22,2026-10-17,k host 路径：block_table 缓冲行跨度改为 max_model_len/block_size（原用 KV 池总块数 9972 → 每步 1.3 MB 零填充 + H2D）,c8-long,tpot_p50_ms,4.156,3.761,1.105,1.0,lower

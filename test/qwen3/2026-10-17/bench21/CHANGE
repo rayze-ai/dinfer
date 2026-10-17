@@ -1,0 +1,1 @@
+k host 路径：每 step 输入打包进 pinned 缓冲，一次异步 H2D + D2D 散开（原 14 次同步 pageable memcpy ≈ 650 µs/步）

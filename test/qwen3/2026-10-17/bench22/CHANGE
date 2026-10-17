@@ -1,0 +1,1 @@
+k host 路径：block_table 缓冲行跨度改为 max_model_len/block_size（原用 KV 池总块数 9972 → 每步 1.3 MB 零填充 + H2D）
