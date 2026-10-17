@@ -416,3 +416,10 @@
 - 根因：驱动回收 ~20 GiB 需要几秒；`stop` 只等进程退出，没等 `nvidia-smi memory.used` 回落。
 - 如何避免：所有 "在同卡起服务" 的脚本起前等显存 < 2 GB（`restart_dinfer.sh` 已有，`ab_serve.sh`/`remote4090_baseline.sh` 补上）。
 
+## 2026-10-18 把 "KV 命中单元" 的模型相关规则写进了公共 crate（用户指正）
+
+- 现象：`core::kv::KvCacheManager::host_tier_lookup` 只支持单组全注意力、block_size == hash_block_size、group 0；GLM / K3 下直接返回空（不报错、不工作）。
+- 根因：按 Qwen3 的形状写了 "一个命中 = 一个 16-token 块 × 全部层"，没想 K3 的 KDA 状态块（边界检查点，不是 token 区间）和 GLM 的两种缓存。字节布局放对了（模型 crate），策略放错了（core）。
+- 原则：core 的 KV 层只放 **与模型无关的容器与钩子**（块池、哈希链、索引、order 类型、调度钩子）；凡是 "什么算一个命中单元、多组如何合成前缀命中、一个单元多少 token、一个单元多少字节" 都是模型 crate 的事，经 trait 注入。对照：GPU 侧的 `get_computed_blocks` 其实已经按组分别处理（attention 组取最短、Mamba 组边界查），host 侧应复用同一规则而不是另写一套。
+- 如何避免：core 里出现 `groups.len() != 1` / `is_mamba[0]` / 具体 block_size 比较这类条件时，就是信号——该抽 trait 了。
+
