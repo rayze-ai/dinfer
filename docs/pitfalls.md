@@ -353,3 +353,11 @@
 - 如何避免：任何新增 `result::` 调用都放进 `Stream` 的方法里并以 `bind_ctx()` 开头；e2e（多线程）是唯一能抓到的测试，不能只跑 parity。
 - 相关：`crates/kernels/src/device.rs::{PinnedUploader, TimingEvent, StagedUploader}`。
 
+## 2026-10-17 pinned 打包上传：同一 step 内两次 flush 回卷 host 偏移 → 随机 ILLEGAL_ADDRESS
+
+- 现象：`PinnedUploader` 第一版 parity / baseline 全过，c32 压测几百步后 `CUDA_ERROR_ILLEGAL_ADDRESS`。
+- 根因：`cuMemcpyHtoDAsync` 从 pinned host 读是异步的；第二轮 `begin()` 把偏移回卷到 0 后 CPU 立刻 memcpy 新数据进同一区域，第一轮 DMA 还没读完 → 设备收到半新半旧的 ids / block_table / slot_mapping → attention 越界。单请求 / 小 batch 时 DMA 太快碰不到，B=32 时碰到。
+- 解法：host 区按 step 分配（step 开头回卷一次），同一 step 内多轮 flush 各用不同区间；下一 step 开始前 step 末尾的 D2H 同步已保证所有 DMA 完成。
+- 如何避免：任何"host 侧写 + 异步 DMA 读"的缓冲都要么双缓冲 + 事件，要么保证同一同步窗口内不重写；压测必须包含 B≥32 的场景。
+- 相关：`crates/kernels/src/device.rs::PinnedUploader`，`docs/loops/q3-perf.md` 第 50–51 轮。
+
