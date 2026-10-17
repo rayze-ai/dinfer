@@ -218,6 +218,7 @@ impl Mlp {
         &mut self,
         stream: &Stream,
         gemm: &Gemm,
+        act: &impl crate::Act,
         tokens: usize,
         x: &Tensor<bf16>,
         out: &mut Tensor<bf16>,
@@ -234,7 +235,7 @@ impl Mlp {
             2 * self.inter,
             hidden,
         )?;
-        k::silu_and_mul_bf16_n(stream, &self.gate_up_buf.data, &mut self.act_buf.data, tokens, self.inter)?;
+        act.silu_and_mul(stream, &self.gate_up_buf.data, &mut self.act_buf.data, tokens, self.inter)?;
         gemm.forward_bf16(
             &self.act_buf.data,
             &self.down.w.data,

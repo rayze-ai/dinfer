@@ -30,7 +30,7 @@ impl FeedForward {
         out: &mut Tensor<bf16>,
     ) -> Result<()> {
         match self {
-            FeedForward::Dense(m) => m.forward(stream, gemm, t, x, out),
+            FeedForward::Dense(m) => m.forward(stream, gemm, &dinfer_layers::DefaultOps, t, x, out),
             FeedForward::Moe(m) => m.forward(stream, gemm, t, x, out),
         }
     }

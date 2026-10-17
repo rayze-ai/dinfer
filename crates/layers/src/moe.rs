@@ -133,7 +133,7 @@ impl Moe {
         stream.memset_zeros_n(&mut self.acc.data, t * h)?;
         for (eid, start, len) in k::moe_expert_ranges(&self.offsets_host) {
             k::moe_gather_bf16(stream, &x.data, &mut self.xg.data, &self.buckets.sorted_tok, start, len, h)?;
-            self.experts[eid].forward(stream, gemm, len, &self.xg, &mut self.yg)?;
+            self.experts[eid].forward(stream, gemm, &crate::DefaultOps, len, &self.xg, &mut self.yg)?;
             k::moe_scatter_add_f32(
                 stream,
                 &self.yg.data,
@@ -149,7 +149,7 @@ impl Moe {
         }
         // 4. shared experts → out；out = bf16(acc) + out
         if let Some(sh) = &mut self.shared {
-            sh.forward(stream, gemm, t, x, out)?;
+            sh.forward(stream, gemm, &crate::DefaultOps, t, x, out)?;
         } else {
             stream.memset_zeros_n(&mut out.data, t * h)?;
         }

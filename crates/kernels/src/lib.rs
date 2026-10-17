@@ -7,9 +7,11 @@ pub mod device;
 pub mod ffi;
 pub mod gemm;
 pub mod ops;
+pub mod opset;
 
 pub use cudarc;
 pub use device::{Device, Graph, Stream, Event, TimingEvent, PinnedUploader, PinnedSlot};
 pub use gemm::Gemm;
+pub use opset::{Act, Attention, DefaultOps, Norm, OpSet, QkvPost};
 pub use half::bf16;
 pub use ops::*;

@@ -86,6 +86,10 @@ impl Qwen3Service {
         let defaults = read_generation_defaults(tok_dir);
         let cfg = Qwen3Config::from_json(&std::fs::read_to_string(model_dir.join("config.json"))?)?;
         let t_tok = t_start.elapsed(); // 此处只剩 config / 模板默认值读取；tokenizer 耗时见 "tokenizer thread join"
+        // 算子实现选择（design §10.1）：目前只有 default；未知名字直接报错
+        let ops_name = dinfer_layers::OpSet::name(&dinfer_layers::DefaultOps);
+        let want = dinfer_kernels::opset::selected_ops_name();
+        anyhow::ensure!(want == ops_name, "unknown OPS={want:?}; available: {ops_name}");
         let dev = Device::new(opt.device)?;
         let s = dev.default_stream();
         let t_cuda = t_start.elapsed();

@@ -10,8 +10,10 @@ use anyhow::{ensure, Context, Result};
 use dinfer_core::runner::BatchMode;
 use dinfer_kernels as k;
 use dinfer_layers::{
-    bf16, Embedding, Gemm, Linear, Mlp, RmsNorm, Rope, RopeStyle, Stream, Tensor, WeightSource,
+    bf16, Embedding, Gemm, Linear, Mlp, RmsNorm, Rope, RopeStyle, Stream, Tensor, WeightSource, DefaultOps, OpSet,
 };
+// 算子 trait 方法要在作用域内才能通过 `self.ops.norm().xxx()` 调用；匿名引入避免与本文件的 Attention 结构体重名
+use dinfer_layers::{Act as _, Attention as _, Norm as _, QkvPost as _};
 
 /// 一层的 paged K/V cache：[num_blocks, block_size, kv_heads, 2, head_dim] bf16。
 pub struct PagedKv {
@@ -64,7 +66,9 @@ pub struct Forward<'a> {
 /// 调试捕获：(layer_idx, attn_out [t*h] f32, 本层输出 hidden [t*h] f32)。
 pub type LayerCapture = (usize, Vec<f32>, Vec<f32>);
 
-pub struct Qwen3Model {
+pub struct Qwen3Model<O: OpSet = DefaultOps> {
+    /// 算子实现（design §10.1）；默认 `DefaultOps`，启动期选择。
+    pub ops: O,
     pub cfg: Qwen3Config,
     pub embed: Embedding,
     pub layers: Vec<DecoderLayer>,
@@ -165,10 +169,12 @@ impl Attention {
         std::mem::swap(&mut self.qkv_buf, qkv_buf);
         std::mem::swap(&mut self.attn, attn);
     }
-    fn forward(
+    #[allow(clippy::too_many_arguments)]
+    fn forward<O: OpSet>(
         &mut self,
         stream: &Stream,
         gemm: &Gemm,
+        ops: &O,
         cfg: &Qwen3Config,
         rope: &Rope,
         t: usize,
@@ -189,7 +195,7 @@ impl Attention {
         gemm.forward_bf16(&x.data, &self.qkv.w.data, None, &mut self.qkv_buf.data, t, qkv_w, hidden)?;
         // 2–4. 一个 kernel：q/k per-head RMSNorm + neox RoPE（原地）+ K/V 写 paged cache（Q3-e 融合；D 必须 128）
         ensure!(d == 128 && rope.rope_dim == d, "qkv_post needs head_dim == rope_dim == 128");
-        k::qkv_post_bf16(
+        ops.qkv_post().apply(
             stream,
             &mut self.qkv_buf.data,
             &self.q_norm.w.data,
@@ -211,7 +217,7 @@ impl Attention {
         let k_view = self.qkv_buf.data.slice(h * d..);
         let v_view = self.qkv_buf.data.slice((h + hk) * d..);
         match meta.mode {
-            BatchMode::Prefill => k::gqa_prefill_bf16(
+            BatchMode::Prefill => ops.attn().prefill(
                 stream,
                 &q_view,
                 &k_view,
@@ -228,7 +234,7 @@ impl Attention {
                 qkv_w,
             )?,
             // 纯 decode 且 D=128：split-K kernel（reqs × Hkv × 8 块并行）；否则 flash paged kernel
-            BatchMode::Decode if d == 128 => k::gqa_decode_bf16(
+            BatchMode::Decode if d == 128 => ops.attn().decode(
                 stream,
                 &q_view,
                 &kv.cache.data,
@@ -247,7 +253,7 @@ impl Attention {
                 None,
             )?,
             // 混批（prefill 行 + decode 行）且 D=128：decode 行走 split-K kernel，其余走 paged tensor-core kernel（Q3 第 34 轮）
-            BatchMode::Paged if d == 128 => k::gqa_mixed_bf16(
+            BatchMode::Paged if d == 128 => ops.attn().mixed(
                 stream,
                 &q_view,
                 &kv.cache.data,
@@ -266,7 +272,7 @@ impl Attention {
                 scale,
                 qkv_w,
             )?,
-            BatchMode::Decode | BatchMode::Paged => k::gqa_paged_bf16(
+            BatchMode::Decode | BatchMode::Paged => ops.attn().paged(
                 stream,
                 &q_view,
                 &kv.cache.data,
@@ -309,7 +315,7 @@ pub struct ModelScratch {
     pub layers: Vec<LayerScratch>,
 }
 
-impl Qwen3Model {
+impl<O: OpSet> Qwen3Model<O> {
     pub fn load(
         stream: &Stream,
         src: &WeightSource,
@@ -317,7 +323,10 @@ impl Qwen3Model {
         max_tokens: usize,
         num_blocks: Option<usize>,
         block_size: usize,
-    ) -> Result<Self> {
+    ) -> Result<Self>
+    where
+        O: Default,
+    {
         // 测试 / 对拍：logits 行数上限 = max_tokens（允许取全部位置的 logits）
         Self::load_with_budget(
             stream,
@@ -359,7 +368,10 @@ impl Qwen3Model {
         block_size: usize,
         gpu_memory_utilization: f32,
         reserve_bytes: usize,
-    ) -> Result<Self> {
+    ) -> Result<Self>
+    where
+        O: Default,
+    {
         let hidden = cfg.hidden_size as usize;
         let (hk, d) = (cfg.num_key_value_heads as usize, cfg.head_dim as usize);
         let t_load0 = std::time::Instant::now();
@@ -524,6 +536,7 @@ impl Qwen3Model {
         tracing::info!(kv_ms = t_kv.elapsed().as_millis() as u64, "load timing: kv cache alloc");
         wall("kv (end of load_with_budget)");
         Ok(Self {
+            ops: O::default(),
             embed,
             layers,
             norm,
@@ -618,7 +631,7 @@ impl Qwen3Model {
         let mut pending_mlp = false;
         for (li, layer) in self.layers.iter_mut().enumerate() {
             if pending_mlp {
-                k::fused_add_rmsnorm_bf16_n(
+                self.ops.norm().fused_add_rmsnorm(
                     stream,
                     &self.mlp_out.data,
                     &mut self.hidden.data,
@@ -629,7 +642,7 @@ impl Qwen3Model {
                     eps,
                 )?;
             } else {
-                k::rmsnorm_bf16_n(
+                self.ops.norm().rmsnorm(
                     stream,
                     &self.hidden.data,
                     &layer.input_norm.w.data,
@@ -642,6 +655,7 @@ impl Qwen3Model {
             layer.attn.forward(
                 stream,
                 gemm,
+                &self.ops,
                 &self.cfg,
                 &self.rope,
                 t,
@@ -653,7 +667,7 @@ impl Qwen3Model {
                 &mut self.decode_scratch,
                 &mut self.attn_out,
             )?;
-            k::fused_add_rmsnorm_bf16_n(
+            self.ops.norm().fused_add_rmsnorm(
                 stream,
                 &self.attn_out.data,
                 &mut self.hidden.data,
@@ -663,11 +677,11 @@ impl Qwen3Model {
                 h,
                 eps,
             )?;
-            layer.mlp.forward(stream, gemm, t, &self.normed, &mut self.mlp_out)?;
+            layer.mlp.forward(stream, gemm, self.ops.act(), t, &self.normed, &mut self.mlp_out)?;
             pending_mlp = true;
             if let Some(cap) = self.capture_layers.as_mut() {
                 // 诊断捕获需要本层完整输出：这里显式加一次（只在捕获模式下）
-                k::add_inplace_bf16_n(stream, &self.mlp_out.data, &mut self.hidden.data, t * h)?;
+                self.ops.norm().add_inplace(stream, &self.mlp_out.data, &mut self.hidden.data, t * h)?;
                 pending_mlp = false;
                 let a = self.attn_out.to_vec_f32(stream)?[..t * h].to_vec();
                 let hd = self.hidden.to_vec_f32(stream)?[..t * h].to_vec();
@@ -675,7 +689,7 @@ impl Qwen3Model {
             }
         }
         if pending_mlp {
-            k::add_inplace_bf16_n(stream, &self.mlp_out.data, &mut self.hidden.data, t * h)?;
+            self.ops.norm().add_inplace(stream, &self.mlp_out.data, &mut self.hidden.data, t * h)?;
         }
         let rows = f.rows;
         ensure!(
@@ -684,7 +698,7 @@ impl Qwen3Model {
             self.max_logits_rows
         );
         // 取每请求最后一行 + 末层 RMSNorm 一个 kernel（原 gather_rows + rmsnorm 两次）
-        k::gather_rmsnorm_bf16(
+        self.ops.norm().gather_rmsnorm(
             stream,
             &self.hidden.data,
             &f.logits_rows.data,
