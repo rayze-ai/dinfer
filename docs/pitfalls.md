@@ -2,7 +2,15 @@
 
 > 一条一个坑，标题写**现象**（搜索时按现象搜），正文讲根因与解法。新条目加在最上面。
 >
-> 条目格式（标题用 `## YYYY-MM-DD 现象一句话`，正文五项：现象 / 根因 / 解法 / 如何避免 / 相关）：
+> 条目格式（标题用 `## 2026-10-18 第 5 次 `400 Input is too long`：一条 Bash 四段拼接，每段都"截断"了，合计 11 KB
+
+- 现象：会话开场 `git status --short && git diff --stat && git diff X | head -c 6000 && tail -n 30 loop.md | cut -c1-300` 一条命令，context_guard 放行（有截断管道），输出 11.3 KB 被 harness 存盘只给 2 KB 预览，再加后续几条 7–8 KB 的 grep 输出，上下文很快打满。
+- 根因：钩子只判"有没有截断管道"，不判截断量；`head -c 6000` + `tail -n 30 | cut -c1-300`（最多 9 KB）本身就超过 `BASH_MAX_OUTPUT_LENGTH=8000`。多段 `&&` 拼接时每段合规、合计超限。
+- 解法：`context_guard.sh` 按 `;`/`&&`/`||` 拆段逐段检查；`head -c` 上限 3000、`head/tail -n` 上限 60 行（超过须配 `cut -c`）；每段 cat/diff 都要各自带截断。
+- 如何避免：一条 Bash 只看一件事；想看 diff 先 `--stat`，再按文件 `git diff -- path | head -c 3000`；长日志只 `grep -E` 关键行。开场复述现状只需要 `git status --short` + loop 表最后 2 行。
+- 影响：本次丢了半小时上下文，重新 /clear 恢复。
+
+## YYYY-MM-DD 现象一句话`，正文五项：现象 / 根因 / 解法 / 如何避免 / 相关）：
 >
 >     ## 2026-01-01 启动时报 8080 端口被占用
 >     - 现象：

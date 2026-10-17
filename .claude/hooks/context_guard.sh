@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 上下文纪律硬约束（PreToolUse）。本项目已 4 次撞 `API Error: 400 Input is too long`。
+# 上下文纪律硬约束（PreToolUse）。本项目已 5 次撞 `API Error: 400 Input is too long`（第 5 次 2026-10-18：多段拼接各自合规、合计超限）。
 # 1. 每个会话计工具调用次数：≥ 40 次起每 10 次注入提醒 → 写 progress / 提交 / 建议 /clear。
 # 2. 拒绝明显会打爆上下文的调用：Read 大文件不带 limit；Bash 里 cat/git diff/git show/git log -p 不带截断管道。
 set -u
@@ -18,10 +18,21 @@ case "$TOOL" in
   Bash)
     CMD=$(j "['tool_input']['command']")
     # 整文件 cat / 不截断的 diff、show、log -p
-    if printf '%s' "$CMD" | grep -qE '(^|[;&|] *)(cat|git (diff|show)|git log -p)( |$)' \
-       && ! printf '%s' "$CMD" | grep -qE '\|\s*(head|tail|grep|cut|wc|sed -n|awk|tee)|--stat|--name-only|--name-status|--oneline|<<'; then
-      deny "上下文约束：cat / git diff / git show 必须经 head/tail/grep/cut 截断（或用 --stat/--name-only）。"
-    fi ;;
+    # 按 ; && || 拆段逐段检查：2026-10-18 第 5 次撞 400 就是 "status; diff --stat; diff | head -c 6000; tail -30" 四段各自合规、合计 11 KB。
+    printf '%s' "$CMD" | sed -E 's/<<[^\n]*//; s/(&&|\|\||;)/\n/g' | while IFS= read -r SEG; do
+      if printf '%s' "$SEG" | grep -qE '(^|[|] *)\s*(cat|git (diff|show)|git log -p)( |$)' \
+         && ! printf '%s' "$SEG" | grep -qE '\|\s*(head|tail|grep|cut|wc|sed -n|awk|tee)|--stat|--name-only|--name-status|--oneline|<<'; then
+        echo "DENY1"
+      fi
+      # 截断量硬上限：head -c > 3000、head/tail -n > 60（无 cut -c 时）都算没截断
+      C=$(printf '%s' "$SEG" | grep -oE 'head +-c *[0-9]+' | grep -oE '[0-9]+' | sort -n | tail -1)
+      [ -n "${C:-}" ] && [ "$C" -gt 3000 ] && echo "DENY2"
+      L=$(printf '%s' "$SEG" | grep -oE '(head|tail) +-?n? *-?[0-9]+' | grep -oE '[0-9]+$' | sort -n | tail -1)
+      [ -n "${L:-}" ] && [ "$L" -gt 60 ] && ! printf '%s' "$SEG" | grep -qE 'cut -c' && echo "DENY2"
+    done > /tmp/claude_ctx_guard_${SID:-none}.seg
+    grep -q DENY1 /tmp/claude_ctx_guard_${SID:-none}.seg && deny "上下文约束：cat / git diff / git show 每一段都必须经 head/tail/grep/cut 截断（或用 --stat/--name-only）。"
+    grep -q DENY2 /tmp/claude_ctx_guard_${SID:-none}.seg && deny "上下文约束：单条命令截断上限 head -c 3000 / head|tail -n 60（超 60 行需配 cut -c）。多段拼接时每段都算，合计别超 8 KB；要看大文件分多次调用。"
+    ;;
 esac
 if [ "$N" -ge 40 ] && [ $(( N % 10 )) -eq 0 ]; then
   MSG="【上下文纪律】本会话已 $N 次工具调用。立即：把当前进展写进 docs/loops 或 docs/progress.md 并 commit；若正等待长任务，用 run_in_background；超过 60 次应向用户建议 /clear 后按交接区恢复。"
