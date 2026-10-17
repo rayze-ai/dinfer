@@ -381,3 +381,10 @@
 - 根因：并发时两边的 batch 组成不同（异步版新请求晚一步进 batch），bf16 下 near-tie token 翻转（pitfalls 2026-10-16 已记）。串行单请求 5/5 逐字相同。
 - 如何避免：所有 "改调度 / 改 batch 组成" 的等价性测试用 batch=1 串行；并发只断言形状与完成。
 
+## 2026-10-17 "异步下 running 行都被 placeholder 挡住" 不成立：刚完成 prefill 的请求会被再次调度
+
+- 现象：插队 prefill 用普通 `schedule()`，断言 "step 只含新请求" 在 4090 压测里触发 `cut-in step contains an in-flight decode row` 引擎退出（3090 e2e 没碰到：请求到达节奏不同）。
+- 根因：`schedule()` 跳过 running 行的条件是 "placeholder 已覆盖到 max_tokens"，不是 "有 token 在飞"。一个请求的 prefill 步（同步）刚完成、首个 decode 还没被调度，它在 running 里且没有 placeholder → 会被排进来，而它的首 token 恰好是在飞的（来自上一步的采样）。
+- 解法：`Scheduler::schedule_waiting_only()`——跳过整个 running 循环；插队步永远只有新请求。
+- 如何避免：任何 "我以为 scheduler 不会排 X" 的假设都写成 scheduler 的显式 API，不靠隐含条件；对调度路径的改动要在 4090 压测（请求到达密集）下跑过，e2e 的节奏太稀。
+
