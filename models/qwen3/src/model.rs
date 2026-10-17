@@ -87,6 +87,27 @@ pub struct Qwen3Model {
     decode_scratch: Tensor<f32>,
 }
 
+
+/// 启动分段（线程局部累计 µs）：Attention::load / Mlp::load 内各阶段，28 层求和后打一行日志。
+mod load_phase {
+    use std::cell::RefCell;
+    thread_local! { static ACC: RefCell<[u64; 8]> = const { RefCell::new([0; 8]) }; }
+    pub const QKV_LOAD: usize = 0;
+    pub const QKV_CONCAT: usize = 1;
+    pub const O_PROJ: usize = 2;
+    pub const NORMS: usize = 3;
+    pub const ATTN_ZEROS: usize = 4;
+    pub const MLP: usize = 5;
+    pub const LAYER_NORMS: usize = 6;
+    pub const LAYER_TOTAL: usize = 7;
+    pub fn add(i: usize, t: std::time::Instant) {
+        ACC.with(|a| a.borrow_mut()[i] += t.elapsed().as_micros() as u64);
+    }
+    pub fn take() -> [u64; 8] {
+        ACC.with(|a| std::mem::take(&mut *a.borrow_mut()))
+    }
+}
+
 impl Attention {
     fn load(
         stream: &Stream,
@@ -100,6 +121,7 @@ impl Attention {
         let hidden = cfg.hidden_size as usize;
         // q/k/v 三个权重拼成一个 [(H+2Hkv)·D, hidden] 的 qkv 权重：bf16 直接上传后在设备上拼接
         // （原先走 f32 host 拷贝再转回 bf16，每层 ~30 ms，28 层占了启动的 ~0.8 s；见 loops/q3-startup.md）
+        let t = std::time::Instant::now();
         let q = src.load_bf16(stream, &format!("{p}.q_proj.weight"))?;
         let kw = src.load_bf16(stream, &format!("{p}.k_proj.weight"))?;
         let vw = src.load_bf16(stream, &format!("{p}.v_proj.weight"))?;
@@ -110,6 +132,8 @@ impl Attention {
             kw.shape,
             vw.shape
         );
+        load_phase::add(load_phase::QKV_LOAD, t);
+        let t = std::time::Instant::now();
         let mut qkv_w = Tensor::<bf16>::zeros(stream, &[(h + 2 * hk) * d, hidden])?;
         let mut off = 0;
         for part in [&q, &kw, &vw] {
@@ -119,17 +143,21 @@ impl Attention {
             off += n;
         }
         let qkv = Linear::new(qkv_w, None)?;
+        load_phase::add(load_phase::QKV_CONCAT, t);
+        let t = std::time::Instant::now();
         let o_proj = Linear::load(stream, src, &format!("{p}.o_proj"))?;
+        load_phase::add(load_phase::O_PROJ, t);
         ensure!(o_proj.in_features == h * d && o_proj.out_features == hidden, "o_proj shape");
+        let tn = std::time::Instant::now();
+        let q_norm = RmsNorm::load(stream, src, &format!("{p}.q_norm"), cfg.rms_norm_eps)?;
+        let k_norm = RmsNorm::load(stream, src, &format!("{p}.k_norm"), cfg.rms_norm_eps)?;
+        load_phase::add(load_phase::NORMS, tn);
+        let tz = std::time::Instant::now();
         let t = max_tokens;
-        Ok(Self {
-            qkv,
-            o_proj,
-            q_norm: RmsNorm::load(stream, src, &format!("{p}.q_norm"), cfg.rms_norm_eps)?,
-            k_norm: RmsNorm::load(stream, src, &format!("{p}.k_norm"), cfg.rms_norm_eps)?,
-            qkv_buf: Tensor::zeros(stream, &[t, (h + 2 * hk) * d])?,
-            attn: Tensor::zeros(stream, &[t, h, d])?,
-        })
+        let qkv_buf = Tensor::zeros(stream, &[t, (h + 2 * hk) * d])?;
+        let attn = Tensor::zeros(stream, &[t, h, d])?;
+        load_phase::add(load_phase::ATTN_ZEROS, tz);
+        Ok(Self { qkv, o_proj, q_norm, k_norm, qkv_buf, attn })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -344,6 +372,7 @@ impl Qwen3Model {
         );
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers as usize);
         for l in 0..cfg.num_hidden_layers {
+            let tl = std::time::Instant::now();
             let p = format!("model.layers.{l}");
             layers.push(DecoderLayer {
                 input_norm: RmsNorm::load(stream, src, &format!("{p}.input_layernorm"), cfg.rms_norm_eps)?,
@@ -355,11 +384,31 @@ impl Qwen3Model {
                     &format!("{p}.post_attention_layernorm"),
                     cfg.rms_norm_eps,
                 )?,
-                mlp: Mlp::load(stream, src, &format!("{p}.mlp"), max_tokens)
-                    .with_context(|| format!("layer {l} mlp"))?,
+                mlp: {
+                    let tm = std::time::Instant::now();
+                    let m = Mlp::load(stream, src, &format!("{p}.mlp"), max_tokens)
+                        .with_context(|| format!("layer {l} mlp"))?;
+                    load_phase::add(load_phase::MLP, tm);
+                    m
+                },
             });
+            load_phase::add(load_phase::LAYER_TOTAL, tl);
         }
         wall("layers loop");
+        {
+            let a = load_phase::take();
+            let ms = |i: usize| a[i] / 1000;
+            tracing::info!(
+                qkv_load_ms = ms(load_phase::QKV_LOAD),
+                qkv_concat_ms = ms(load_phase::QKV_CONCAT),
+                o_proj_ms = ms(load_phase::O_PROJ),
+                qk_norm_ms = ms(load_phase::NORMS),
+                attn_zeros_ms = ms(load_phase::ATTN_ZEROS),
+                mlp_ms = ms(load_phase::MLP),
+                layer_total_ms = ms(load_phase::LAYER_TOTAL),
+                "load timing: per-layer phases (sum over layers)"
+            );
+        }
         let norm = RmsNorm::load(stream, src, "model.norm", cfg.rms_norm_eps)?;
         let lm_head = if src.contains("lm_head.weight") {
             Linear::load(stream, src, "lm_head")?
