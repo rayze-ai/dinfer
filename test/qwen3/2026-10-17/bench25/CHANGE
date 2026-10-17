@@ -1,0 +1,1 @@
+m 采样融合：temperature/min_p/topk-topp/sample 四 kernel → 一个（共用 row_* 原语，逐位同语义）；图内 -3 节点

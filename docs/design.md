@@ -411,7 +411,7 @@ PD 分离的详细设计写进 §10（待补），动代码前先定：KV 传输
 | 异步调度 | placeholder 机制、stop 检查晚一步、下一步在上一步结果回来前调度 | 下一步的 input_ids 在**设备上**从上一步 `chosen` gather（图内 `row_gather_i32`，不经 host 往返）；D2H 用 pinned 双槽 + 事件；engine 单线程双步流水（pending/sync_done 两槽），不需要 vLLM 的多进程 | bench24：c32 1.05 → 1.08×、c8 1.06 → 1.08×；代价 TTFT +1 步（c8-long 39 → 54 ms） |
 | attention | FA2 的算法结构（online softmax、P 片直接当 PV 的 A 片） | 自写 mma.sync 版 v4/v5（Ampere/Ada 无 FA3），paged/prefill 同一模板，混批 decode 行分流到 split-K | 4090 T=1514 0.14 ms/层，TTFT 领先 vLLM 2× |
 | decode attention | split-K | v2：8 lane/key、两 q head 共享 K 读、splits 按 batch 自适应 | 与 FA2 decode 持平 |
-| 采样 | top-k/top-p/min-p/penalties 语义、Philox | kernel 待融合（4 → 1） | 待做 |
+| 采样 | top-k/top-p/min-p/penalties 语义、Philox | 四 kernel 融一个（`sample_fused_f32`，共用 row_* 原语，逐位同语义）；vLLM 走 PyTorch 多个 op | bench25：c1 TPOT 2.0 → 1.9，图内 -3 节点 |
 | 权重加载 | safetensors mmap | bf16 直传不经 Vec、设备拼接 qkv/gate_up、并行填页、tokenizer 独立线程 | 2.9 → 0.6 s |
 | bench 口径 | `benchmarks/serve.py` 的 TTFT/TPOT/ITL 定义、ignore_eos | 每轮换 seed（避免常驻侧 prefix cache 全命中）；开环泊松 + 长短混合 | 发现并修正了 bench11 之前的口径偏差 |
 | 进程结构 | — | 单进程（API + engine 同进程不同线程），无 ZMQ / 多进程 IPC | TTFT 低一半的主要来源之一 |

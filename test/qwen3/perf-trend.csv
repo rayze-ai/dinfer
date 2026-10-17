@@ -263,3 +263,15 @@ bench24,2026-10-17,l 异步调度：步 n 入队后不等 GPU 先调度并入队
 bench24,2026-10-17,l 异步调度：步 n 入队后不等 GPU 先调度并入队 n+1（设备侧 gather 上一步 chosen 作 input_ids，pinned 双槽异步 D2H）；host 开销藏进 GPU 时间,c8-long,out_tok_per_s,1937.967,1909.502,1.015,0.8,higher
 bench24,2026-10-17,l 异步调度：步 n 入队后不等 GPU 先调度并入队 n+1（设备侧 gather 上一步 chosen 作 input_ids，pinned 双槽异步 D2H）；host 开销藏进 GPU 时间,c8-long,ttft_p50_ms,53.785,54.363,0.989,-36.3,lower
 bench24,2026-10-17,l 异步调度：步 n 入队后不等 GPU 先调度并入队 n+1（设备侧 gather 上一步 chosen 作 input_ids，pinned 双槽异步 D2H）；host 开销藏进 GPU 时间,c8-long,tpot_p50_ms,3.751,3.755,0.999,2.2,lower
+bench25,2026-10-17,m 采样融合：temperature/min_p/topk-topp/sample 四 kernel → 一个（共用 row_* 原语，逐位同语义）；图内 -3 节点,c1,out_tok_per_s,508.593,446.398,1.139,0.3,higher
+bench25,2026-10-17,m 采样融合：temperature/min_p/topk-topp/sample 四 kernel → 一个（共用 row_* 原语，逐位同语义）；图内 -3 节点,c1,ttft_p50_ms,4.071,17.482,0.233,-4.9,lower
+bench25,2026-10-17,m 采样融合：temperature/min_p/topk-topp/sample 四 kernel → 一个（共用 row_* 原语，逐位同语义）；图内 -3 节点,c1,tpot_p50_ms,1.947,2.119,0.919,0.2,lower
+bench25,2026-10-17,m 采样融合：temperature/min_p/topk-topp/sample 四 kernel → 一个（共用 row_* 原语，逐位同语义）；图内 -3 节点,c8,out_tok_per_s,3143.076,2917.858,1.077,0.9,higher
+bench25,2026-10-17,m 采样融合：temperature/min_p/topk-topp/sample 四 kernel → 一个（共用 row_* 原语，逐位同语义）；图内 -3 节点,c8,ttft_p50_ms,13.544,29.091,0.466,4.9,lower
+bench25,2026-10-17,m 采样融合：temperature/min_p/topk-topp/sample 四 kernel → 一个（共用 row_* 原语，逐位同语义）；图内 -3 节点,c8,tpot_p50_ms,2.457,2.541,0.967,0.4,lower
+bench25,2026-10-17,m 采样融合：temperature/min_p/topk-topp/sample 四 kernel → 一个（共用 row_* 原语，逐位同语义）；图内 -3 节点,c32,out_tok_per_s,8818.189,8147.445,1.082,-0.3,higher
+bench25,2026-10-17,m 采样融合：temperature/min_p/topk-topp/sample 四 kernel → 一个（共用 row_* 原语，逐位同语义）；图内 -3 节点,c32,ttft_p50_ms,22.914,62.796,0.365,-0.9,lower
+bench25,2026-10-17,m 采样融合：temperature/min_p/topk-topp/sample 四 kernel → 一个（共用 row_* 原语，逐位同语义）；图内 -3 节点,c32,tpot_p50_ms,3.417,3.453,0.990,0.3,lower
+bench25,2026-10-17,m 采样融合：temperature/min_p/topk-topp/sample 四 kernel → 一个（共用 row_* 原语，逐位同语义）；图内 -3 节点,c8-long,out_tok_per_s,1945.950,1904.246,1.022,0.4,higher
+bench25,2026-10-17,m 采样融合：temperature/min_p/topk-topp/sample 四 kernel → 一个（共用 row_* 原语，逐位同语义）；图内 -3 节点,c8-long,ttft_p50_ms,51.479,60.924,0.845,4.3,lower
+bench25,2026-10-17,m 采样融合：temperature/min_p/topk-topp/sample 四 kernel → 一个（共用 row_* 原语，逐位同语义）；图内 -3 节点,c8-long,tpot_p50_ms,3.733,3.754,0.994,0.5,lower
