@@ -130,7 +130,7 @@ pub struct Qwen3Executor {
     pub t_launch_us: u64,
     pub t_wait_us: u64,
     /// GPU 忙时（主流上 launch 前 / 后两个事件的差，step 结束后读）累计 µs。
-    pub t_gpu_us: u64,
+    pub t_gpu_ms: f32,
     ev_gpu: Option<(TimingEvent, TimingEvent)>,
 }
 
@@ -182,7 +182,7 @@ impl Qwen3Executor {
             t_upload_us: 0,
             t_launch_us: 0,
             t_wait_us: 0,
-            t_gpu_us: 0,
+            t_gpu_ms: 0.0,
             ev_gpu: None,
         };
         // decode 图默认 **按桶懒捕获**（首次用到某个 batch 桶时捕获，~30 ms/桶），启动少 ~210 ms；
@@ -554,6 +554,17 @@ impl Qwen3Executor {
         self.alt_active = !self.alt_active;
     }
 
+    /// GPU 忙时测量：主流上 step 工作入队前 / 后各记一个带时间戳的事件；collect 同步后读差值。
+    fn mark_gpu_start(&mut self) -> Result<()> {
+        if self.ev_gpu.is_none() {
+            self.ev_gpu = Some((self.stream.new_timing_event()?, self.stream.new_timing_event()?));
+        }
+        self.stream.record_timing(&self.ev_gpu.as_ref().unwrap().0)
+    }
+    fn mark_gpu_end(&mut self) -> Result<()> {
+        self.stream.record_timing(&self.ev_gpu.as_ref().unwrap().1)
+    }
+
     /// 在副套上执行 `f`（进入前换入副套，结束后无论成败都换回主套）。
     fn on_alt<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         self.swap_alt();
@@ -590,12 +601,6 @@ impl Qwen3Executor {
         let use_graph = graph_eligible
             && !self.alt_active // 图是在主流上捕获的，副套不走图
             && self.graph_for(n).is_some();
-        if !self.alt_active {
-            if self.ev_gpu.is_none() {
-                self.ev_gpu = Some((self.stream.new_timing_event()?, self.stream.new_timing_event()?));
-            }
-            self.stream.record_timing(&self.ev_gpu.as_ref().unwrap().0)?;
-        }
         let t_launch;
         if use_graph {
             let nb = self.graph_for(n).unwrap().batch;
@@ -616,9 +621,6 @@ impl Qwen3Executor {
             self.sample_eager(sb, n)?;
             self.eager_steps += 1;
         }
-        if !self.alt_active {
-            self.stream.record_timing(&self.ev_gpu.as_ref().unwrap().1)?;
-        }
         self.last_rows = n;
         Ok((n, t_launch))
     }
@@ -633,7 +635,7 @@ impl Qwen3Executor {
         if let Some((a, b)) = &self.ev_gpu {
             // collect() 已同步主流，两事件都完成；失败（如副套路径未记录）忽略
             if let Ok(ms) = TimingEvent::elapsed_ms(a, b) {
-                self.t_gpu_us += (ms * 1000.0) as u64;
+                self.t_gpu_ms += ms;
             }
         }
         self.t_upload_us += (t_launch - t0).as_micros() as u64;
@@ -649,7 +651,7 @@ impl Qwen3Executor {
                 upload_us_per_step = self.t_upload_us / steps,
                 launch_us_per_step = self.t_launch_us / steps,
                 wait_us_per_step = self.t_wait_us / steps,
-                gpu_busy_us_per_step = self.t_gpu_us / steps,
+                gpu_busy_us_per_step = (self.t_gpu_ms * 1000.0 / steps as f32) as u64,
                 "executor step breakdown (cumulative avg)"
             );
         }
@@ -676,7 +678,9 @@ impl ModelExecutor for Qwen3Executor {
         drafts: &mut Vec<Vec<u32>>,
     ) -> Result<()> {
         let t0 = std::time::Instant::now();
+        self.mark_gpu_start()?;
         let (n, t_launch) = self.enqueue(plan)?;
+        self.mark_gpu_end()?;
         let t_wait = std::time::Instant::now();
         let chosen = self.collect(n)?;
         self.main_done = Some(self.stream.record_event()?);
