@@ -1,0 +1,1 @@
+n 小 kernel 融合：lm_head 前 gather_rows + 末层 rmsnorm → 一个 kernel（-1 launch/步）

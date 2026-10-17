@@ -275,3 +275,15 @@ bench25,2026-10-17,m 采样融合：temperature/min_p/topk-topp/sample 四 kerne
 bench25,2026-10-17,m 采样融合：temperature/min_p/topk-topp/sample 四 kernel → 一个（共用 row_* 原语，逐位同语义）；图内 -3 节点,c8-long,out_tok_per_s,1945.950,1904.246,1.022,0.4,higher
 bench25,2026-10-17,m 采样融合：temperature/min_p/topk-topp/sample 四 kernel → 一个（共用 row_* 原语，逐位同语义）；图内 -3 节点,c8-long,ttft_p50_ms,51.479,60.924,0.845,4.3,lower
 bench25,2026-10-17,m 采样融合：temperature/min_p/topk-topp/sample 四 kernel → 一个（共用 row_* 原语，逐位同语义）；图内 -3 节点,c8-long,tpot_p50_ms,3.733,3.754,0.994,0.5,lower
+bench26,2026-10-17,n 小 kernel 融合：lm_head 前 gather_rows + 末层 rmsnorm → 一个 kernel（-1 launch/步）,c1,out_tok_per_s,508.761,446.408,1.140,0.0,higher
+bench26,2026-10-17,n 小 kernel 融合：lm_head 前 gather_rows + 末层 rmsnorm → 一个 kernel（-1 launch/步）,c1,ttft_p50_ms,4.048,17.260,0.235,0.6,lower
+bench26,2026-10-17,n 小 kernel 融合：lm_head 前 gather_rows + 末层 rmsnorm → 一个 kernel（-1 launch/步）,c1,tpot_p50_ms,1.947,2.119,0.919,-0.0,lower
+bench26,2026-10-17,n 小 kernel 融合：lm_head 前 gather_rows + 末层 rmsnorm → 一个 kernel（-1 launch/步）,c8,out_tok_per_s,3100.043,2889.241,1.073,-1.4,higher
+bench26,2026-10-17,n 小 kernel 融合：lm_head 前 gather_rows + 末层 rmsnorm → 一个 kernel（-1 launch/步）,c8,ttft_p50_ms,13.999,34.335,0.408,-3.4,lower
+bench26,2026-10-17,n 小 kernel 融合：lm_head 前 gather_rows + 末层 rmsnorm → 一个 kernel（-1 launch/步）,c8,tpot_p50_ms,2.465,2.545,0.969,-0.4,lower
+bench26,2026-10-17,n 小 kernel 融合：lm_head 前 gather_rows + 末层 rmsnorm → 一个 kernel（-1 launch/步）,c32,out_tok_per_s,8830.455,8228.246,1.073,0.1,higher
+bench26,2026-10-17,n 小 kernel 融合：lm_head 前 gather_rows + 末层 rmsnorm → 一个 kernel（-1 launch/步）,c32,ttft_p50_ms,22.906,76.144,0.301,0.0,lower
+bench26,2026-10-17,n 小 kernel 融合：lm_head 前 gather_rows + 末层 rmsnorm → 一个 kernel（-1 launch/步）,c32,tpot_p50_ms,3.413,3.338,1.022,0.1,lower
+bench26,2026-10-17,n 小 kernel 融合：lm_head 前 gather_rows + 末层 rmsnorm → 一个 kernel（-1 launch/步）,c8-long,out_tok_per_s,1941.834,1916.352,1.013,-0.2,higher
+bench26,2026-10-17,n 小 kernel 融合：lm_head 前 gather_rows + 末层 rmsnorm → 一个 kernel（-1 launch/步）,c8-long,ttft_p50_ms,54.294,54.052,1.004,-5.5,lower
+bench26,2026-10-17,n 小 kernel 融合：lm_head 前 gather_rows + 末层 rmsnorm → 一个 kernel（-1 launch/步）,c8-long,tpot_p50_ms,3.728,3.758,0.992,0.1,lower
