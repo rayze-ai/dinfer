@@ -424,6 +424,9 @@ impl Qwen3Model {
         let v = cfg.vocab_size as usize;
         wall("rope");
         // 激活 scratch 先分配，KV 最后：这样 free 已含权重 + scratch 的占用
+        let t_sync = std::time::Instant::now();
+        stream.synchronize()?; // 权重 H2D 全部入队后同步一次（load_bf16 不再逐张量同步）
+        let weights_sync_ms = t_sync.elapsed().as_millis() as u64;
         let ls = dinfer_layers::take_load_stats();
         let (z_us, z_bytes, z_n) = dinfer_layers::take_zeros_stats();
         tracing::info!(
@@ -437,7 +440,8 @@ impl Qwen3Model {
             mib = ls.bytes / (1 << 20),
             mmap_touch_ms = ls.touch_us / 1000,
             host_convert_ms = ls.host_us / 1000,
-            h2d_ms = ls.h2d_us / 1000,
+            h2d_enqueue_ms = ls.h2d_us / 1000,
+            final_sync_ms = weights_sync_ms,
             h2d_gib_s = if ls.h2d_us > 0 { ls.bytes as f64 / (1u64 << 30) as f64 / (ls.h2d_us as f64 * 1e-6) } else { 0.0 },
             "load timing: weights (mmap→host Vec → H2D)"
         );

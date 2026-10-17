@@ -176,9 +176,10 @@ impl WeightSource {
                 if cfg!(target_endian = "little") {
                     if let Ok(words) = bytemuck::try_cast_slice::<u8, bf16>(raw) {
                         let t1 = std::time::Instant::now();
-                        let mut t = Tensor::<bf16>::zeros(stream, &info.shape)?;
+                        // 不清零 + 不逐张量同步：pageable memcpy 在返回前已复制进驻留 staging，mmap 切片随后
+                        // 释放也安全；调用方在全部权重入队后同步一次（Qwen3Model::load_with_budget）。
+                        let mut t = Tensor::<bf16>::uninit(stream, &info.shape)?;
                         stream.htod_into(words, &mut t.data)?;
-                        stream.synchronize()?;
                         LOAD_STATS.with(|c| {
                             let mut c = c.borrow_mut();
                             c.touch_us += (t_touch - t0).as_micros() as u64;
