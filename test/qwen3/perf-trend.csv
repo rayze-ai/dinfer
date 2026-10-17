@@ -251,3 +251,15 @@ bench23,2026-10-17,干净重启（restart_dinfer.sh；之前 :8012 是 20 h 前�
 bench23,2026-10-17,干净重启（restart_dinfer.sh；之前 :8012 是 20 h 前的孤儿旧进程）后的全量回归 = 新基线；代码含 block_table 跨度修复,c8-long,out_tok_per_s,1922.439,1902.869,1.010,7.3,higher
 bench23,2026-10-17,干净重启（restart_dinfer.sh；之前 :8012 是 20 h 前的孤儿旧进程）后的全量回归 = 新基线；代码含 block_table 跨度修复,c8-long,ttft_p50_ms,39.446,60.123,0.656,0.1,lower
 bench23,2026-10-17,干净重启（restart_dinfer.sh；之前 :8012 是 20 h 前的孤儿旧进程）后的全量回归 = 新基线；代码含 block_table 跨度修复,c8-long,tpot_p50_ms,3.834,3.761,1.019,7.7,lower
+bench24,2026-10-17,l 异步调度：步 n 入队后不等 GPU 先调度并入队 n+1（设备侧 gather 上一步 chosen 作 input_ids，pinned 双槽异步 D2H）；host 开销藏进 GPU 时间,c1,out_tok_per_s,507.170,447.027,1.135,1.2,higher
+bench24,2026-10-17,l 异步调度：步 n 入队后不等 GPU 先调度并入队 n+1（设备侧 gather 上一步 chosen 作 input_ids，pinned 双槽异步 D2H）；host 开销藏进 GPU 时间,c1,ttft_p50_ms,3.880,17.258,0.225,1.6,lower
+bench24,2026-10-17,l 异步调度：步 n 入队后不等 GPU 先调度并入队 n+1（设备侧 gather 上一步 chosen 作 input_ids，pinned 双槽异步 D2H）；host 开销藏进 GPU 时间,c1,tpot_p50_ms,1.952,2.118,0.921,1.4,lower
+bench24,2026-10-17,l 异步调度：步 n 入队后不等 GPU 先调度并入队 n+1（设备侧 gather 上一步 chosen 作 input_ids，pinned 双槽异步 D2H）；host 开销藏进 GPU 时间,c8,out_tok_per_s,3114.721,2888.755,1.078,1.2,higher
+bench24,2026-10-17,l 异步调度：步 n 入队后不等 GPU 先调度并入队 n+1（设备侧 gather 上一步 chosen 作 input_ids，pinned 双槽异步 D2H）；host 开销藏进 GPU 时间,c8,ttft_p50_ms,14.243,35.109,0.406,-3.4,lower
+bench24,2026-10-17,l 异步调度：步 n 入队后不等 GPU 先调度并入队 n+1（设备侧 gather 上一步 chosen 作 input_ids，pinned 双槽异步 D2H）；host 开销藏进 GPU 时间,c8,tpot_p50_ms,2.466,2.541,0.970,1.6,lower
+bench24,2026-10-17,l 异步调度：步 n 入队后不等 GPU 先调度并入队 n+1（设备侧 gather 上一步 chosen 作 input_ids，pinned 双槽异步 D2H）；host 开销藏进 GPU 时间,c32,out_tok_per_s,8843.841,8219.892,1.076,1.8,higher
+bench24,2026-10-17,l 异步调度：步 n 入队后不等 GPU 先调度并入队 n+1（设备侧 gather 上一步 chosen 作 input_ids，pinned 双槽异步 D2H）；host 开销藏进 GPU 时间,c32,ttft_p50_ms,22.700,77.836,0.292,-1.8,lower
+bench24,2026-10-17,l 异步调度：步 n 入队后不等 GPU 先调度并入队 n+1（设备侧 gather 上一步 chosen 作 input_ids，pinned 双槽异步 D2H）；host 开销藏进 GPU 时间,c32,tpot_p50_ms,3.428,3.327,1.030,2.2,lower
+bench24,2026-10-17,l 异步调度：步 n 入队后不等 GPU 先调度并入队 n+1（设备侧 gather 上一步 chosen 作 input_ids，pinned 双槽异步 D2H）；host 开销藏进 GPU 时间,c8-long,out_tok_per_s,1937.967,1909.502,1.015,0.8,higher
+bench24,2026-10-17,l 异步调度：步 n 入队后不等 GPU 先调度并入队 n+1（设备侧 gather 上一步 chosen 作 input_ids，pinned 双槽异步 D2H）；host 开销藏进 GPU 时间,c8-long,ttft_p50_ms,53.785,54.363,0.989,-36.3,lower
+bench24,2026-10-17,l 异步调度：步 n 入队后不等 GPU 先调度并入队 n+1（设备侧 gather 上一步 chosen 作 input_ids，pinned 双槽异步 D2H）；host 开销藏进 GPU 时间,c8-long,tpot_p50_ms,3.751,3.755,0.999,2.2,lower

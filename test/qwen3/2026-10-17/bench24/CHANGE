@@ -1,0 +1,1 @@
+l 异步调度：步 n 入队后不等 GPU 先调度并入队 n+1（设备侧 gather 上一步 chosen 作 input_ids，pinned 双槽异步 D2H）；host 开销藏进 GPU 时间
