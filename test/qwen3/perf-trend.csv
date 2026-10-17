@@ -377,3 +377,8 @@ poisson1:dinfer_xs0,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req
 poisson1:dinfer_xs0,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r24,ttft_p99_ms,22.197,27.155,0.817,,lower
 poisson1:dinfer_xs0,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r24,tpot_p50_ms,4.860,4.593,1.058,,lower
 poisson1:dinfer_xs0,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r24,failed,0.000,0.000,,,lower
+ab_hosttier:tier16,2026-10-17,"host tier A/B（真挤出：num_blocks 512, c16 × 1024 前缀 repeat 0.5, out 128）：tier00 = 关，tier16 = 16 GiB pinned；含 tail≠sole 修复",c16_p1024_rep50_o128,out_tok_per_s,2240.421,2355.689,0.951,,higher
+ab_hosttier:tier16,2026-10-17,"host tier A/B（真挤出：num_blocks 512, c16 × 1024 前缀 repeat 0.5, out 128）：tier00 = 关，tier16 = 16 GiB pinned；含 tail≠sole 修复",c16_p1024_rep50_o128,ttft_p50_ms,294.309,247.745,1.188,,lower
+ab_hosttier:tier16,2026-10-17,"host tier A/B（真挤出：num_blocks 512, c16 × 1024 前缀 repeat 0.5, out 128）：tier00 = 关，tier16 = 16 GiB pinned；含 tail≠sole 修复",c16_p1024_rep50_o128,ttft_p99_ms,578.718,639.924,0.904,,lower
+ab_hosttier:tier16,2026-10-17,"host tier A/B（真挤出：num_blocks 512, c16 × 1024 前缀 repeat 0.5, out 128）：tier00 = 关，tier16 = 16 GiB pinned；含 tail≠sole 修复",c16_p1024_rep50_o128,tpot_p50_ms,3.954,3.775,1.047,,lower
+ab_hosttier:tier16,2026-10-17,"host tier A/B（真挤出：num_blocks 512, c16 × 1024 前缀 repeat 0.5, out 128）：tier00 = 关，tier16 = 16 GiB pinned；含 tail≠sole 修复",c16_p1024_rep50_o128,failed,0.000,0.000,,,lower

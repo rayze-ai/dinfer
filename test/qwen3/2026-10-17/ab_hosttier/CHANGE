@@ -1,0 +1,1 @@
+host tier A/B（真挤出：num_blocks 512, c16 × 1024 前缀 repeat 0.5, out 128）：tier00 = 关，tier16 = 16 GiB pinned；含 tail≠sole 修复

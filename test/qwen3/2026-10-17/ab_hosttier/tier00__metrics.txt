@@ -1,0 +1,5 @@
+dinfer:num_preemptions_total 16
+dinfer:prefix_cache_hits_total 826416
+dinfer:host_tier_hits_total 0
+dinfer:host_tier_fetch_blocks_total 0
+dinfer:host_tier_offload_blocks_total 0
