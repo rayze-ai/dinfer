@@ -19,7 +19,7 @@ use dinfer_core::runner::{BatchMode, BatchPlan, ModelExecutor, PairLogprobs};
 use dinfer_core::sampler::{SampleBatch, TokenLogprobs};
 use dinfer_kernels as k;
 use dinfer_kernels::Graph;
-use dinfer_layers::{Gemm, Stream, Tensor, Event, TimingEvent};
+use dinfer_layers::{Gemm, Stream, Tensor, Event, TimingEvent, PinnedUploader};
 
 /// 固定地址的每 step 输入缓冲。
 struct StepBuffers {
@@ -49,6 +49,8 @@ struct StepBuffers {
     lp_ids: Tensor<i32>,          // [max_rows * 33]
     lp_val: Tensor<f32>,
     lp_rank: Tensor<i32>,
+    /// 每 step 小输入的打包上传器（pinned 一次 H2D + D2D 散开）。
+    up: PinnedUploader,
 }
 
 struct DecodeGraph {
@@ -86,6 +88,7 @@ impl StepBuffers {
             lp_ids: z32(rows * 33)?,
             lp_val: zf(rows * 33)?,
             lp_rank: z32(rows)?,
+            up: PinnedUploader::new(s, (mt * 16 + rows * (8 * 4 + 2 * 8) + rows * max_blocks * 4 + (1 << 20)).max(1 << 20))?,
         })
     }
 }
@@ -234,6 +237,7 @@ impl Qwen3Executor {
     /// 把 plan 的输入写进固定缓冲（batch 维可按 `pad_to` 补到桶大小：padding 行 slot=-1、seq_len=1、block 0）。
     fn upload_plan(&mut self, plan: &BatchPlan, pad_to: usize) -> Result<(usize, usize)> {
         let s = &self.stream;
+        self.buf.up.begin();
         let n = plan.num_reqs();
         let t = plan.total_tokens();
         let nb = pad_to.max(n);
@@ -246,23 +250,23 @@ impl Qwen3Executor {
         ids.resize(tt, 0);
         pos.resize(tt, 0);
         slots.resize(tt, -1);
-        s.htod_into(&ids, &mut self.buf.ids.data)?;
-        s.htod_into(&pos, &mut self.buf.pos.data)?;
-        s.htod_into(&slots, &mut self.buf.slots.data)?;
+        self.buf.up.push(s, &ids, &mut self.buf.ids.data)?;
+        self.buf.up.push(s, &pos, &mut self.buf.pos.data)?;
+        self.buf.up.push(s, &slots, &mut self.buf.slots.data)?;
         // 行维
         let mut rows = plan.logits_rows.clone();
         for i in n..nb {
             rows.push((t + (i - n)) as i32);
         }
-        s.htod_into(&rows, &mut self.buf.rows.data)?;
+        self.buf.up.push(s, &rows, &mut self.buf.rows.data)?;
         let mut cu = plan.cu_seqlens.clone();
         for i in n..nb {
             cu.push(cu[i] + 1);
         }
-        s.htod_into(&cu, &mut self.buf.cu.data)?;
+        self.buf.up.push(s, &cu, &mut self.buf.cu.data)?;
         let mut seq = plan.seq_lens.clone();
         seq.resize(nb, 1);
-        s.htod_into(&seq, &mut self.buf.seq.data)?;
+        self.buf.up.push(s, &seq, &mut self.buf.seq.data)?;
         // block_table：图里 max_blocks 固定为缓冲宽度（按每行 stride = buf.max_blocks 布局）
         ensure!(plan.max_blocks <= self.buf.max_blocks, "block_table wider than buffer");
         let mb = self.buf.max_blocks;
@@ -272,45 +276,47 @@ impl Qwen3Executor {
                 bt[r * mb + j] = plan.block_table[r * plan.max_blocks + j];
             }
         }
-        s.htod_into(&bt, &mut self.buf.bt.data)?;
+        self.buf.up.push(s, &bt, &mut self.buf.bt.data)?;
+        self.buf.up.flush(s)?;
         Ok((tt, nb))
     }
 
     fn upload_sampling(&mut self, sb: &SampleBatch, nb: usize) -> Result<()> {
         let s = &self.stream;
+        self.buf.up.begin();
         let n = sb.num_rows();
         let padf = |v: &Vec<f32>, fill: f32| {
             let mut x = v.clone();
             x.resize(nb, fill);
             x
         };
-        s.htod_into(&padf(&sb.temperature, 0.0), &mut self.buf.temperature.data)?;
+        self.buf.up.push(s, &padf(&sb.temperature, 0.0), &mut self.buf.temperature.data)?;
         let t01: Vec<f32> =
             (0..nb).map(|i| if i < n && sb.temperature[i] > 1e-5 { 1.0 } else { 0.0 }).collect();
-        s.htod_into(&t01, &mut self.buf.temp01.data)?;
+        self.buf.up.push(s, &t01, &mut self.buf.temp01.data)?;
         let mut tk = sb.top_k.clone();
         tk.resize(nb, -1);
-        s.htod_into(&tk, &mut self.buf.top_k.data)?;
-        s.htod_into(&padf(&sb.top_p, 1.0), &mut self.buf.top_p.data)?;
-        s.htod_into(&padf(&sb.min_p, 0.0), &mut self.buf.min_p.data)?;
+        self.buf.up.push(s, &tk, &mut self.buf.top_k.data)?;
+        self.buf.up.push(s, &padf(&sb.top_p, 1.0), &mut self.buf.top_p.data)?;
+        self.buf.up.push(s, &padf(&sb.min_p, 0.0), &mut self.buf.min_p.data)?;
         let mut seeds = sb.seed.clone();
         seeds.resize(nb, 0);
-        s.htod_into(&seeds, &mut self.buf.seeds.data)?;
+        self.buf.up.push(s, &seeds, &mut self.buf.seeds.data)?;
         let mut offs = sb.offset.clone();
         offs.resize(nb, 0);
-        s.htod_into(&offs, &mut self.buf.offsets.data)?;
+        self.buf.up.push(s, &offs, &mut self.buf.offsets.data)?;
         if sb.any_penalty {
-            s.htod_into(&padf(&sb.repetition_penalty, 1.0), &mut self.buf.rep.data)?;
-            s.htod_into(&padf(&sb.frequency_penalty, 0.0), &mut self.buf.freq.data)?;
-            s.htod_into(&padf(&sb.presence_penalty, 0.0), &mut self.buf.pres.data)?;
+            self.buf.up.push(s, &padf(&sb.repetition_penalty, 1.0), &mut self.buf.rep.data)?;
+            self.buf.up.push(s, &padf(&sb.frequency_penalty, 0.0), &mut self.buf.freq.data)?;
+            self.buf.up.push(s, &padf(&sb.presence_penalty, 0.0), &mut self.buf.pres.data)?;
             let mut ho = sb.hist_offsets.clone();
             while ho.len() < nb + 1 {
                 ho.push(*ho.last().unwrap());
             }
-            s.htod_into(&ho, &mut self.buf.hist_offsets.data)?;
+            self.buf.up.push(s, &ho, &mut self.buf.hist_offsets.data)?;
             let mut hp = sb.hist_prompt_len.clone();
             hp.resize(nb, 0);
-            s.htod_into(&hp, &mut self.buf.hist_prompt_len.data)?;
+            self.buf.up.push(s, &hp, &mut self.buf.hist_prompt_len.data)?;
             if self.buf.hist_ids.numel() < sb.hist_ids.len().max(1) {
                 self.buf.hist_ids = Tensor::<i32>::zeros(s, &[sb.hist_ids.len().next_power_of_two()])?;
             }
@@ -318,6 +324,7 @@ impl Qwen3Executor {
                 s.htod_into(&sb.hist_ids, &mut self.buf.hist_ids.data)?;
             }
         }
+        self.buf.up.flush(s)?;
         Ok(())
     }
 

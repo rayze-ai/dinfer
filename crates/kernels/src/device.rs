@@ -325,3 +325,68 @@ impl Drop for TimingEvent {
         unsafe { let _ = result::event::destroy(self.0); }
     }
 }
+
+// ---------------------------------------------------------------- PinnedUploader（Q3 第 50 轮）
+/// 每 step 的小输入（ids / positions / block_table / 采样参数……十几个数组）打包进**一块 pinned host 缓冲**，
+/// 一次异步 H2D 到设备 staging，再按记录的目标地址 D2D 异步散开。替代原先每数组一次同步 pageable
+/// `cuMemcpyHtoD`（B=32 时 14 次 ≈ 600–750 µs/步，是 decode 步 host 开销的主项）。
+/// 用法：`begin()` → 多次 `push(src, dst)` → `flush()`（同一流上入队，返回即可复用 host 侧 Vec）。
+/// 安全前提：下一次 `begin()` 前本流上一次 flush 的 H2D 已完成（executor 每步末尾 D2H 同步满足）。
+pub struct PinnedUploader {
+    host: *mut u8,
+    staging: CudaSlice<u8>,
+    cap: usize,
+    off: usize,
+    scatter: Vec<(u64, usize, usize)>, // (dst_dev_ptr, host_off, bytes)
+}
+// SAFETY: 裸 host 指针只在 executor 线程使用；跨线程移动不改变有效性。
+unsafe impl Send for PinnedUploader {}
+impl PinnedUploader {
+    pub fn new(stream: &Stream, cap: usize) -> Result<Self> {
+        // SAFETY: pinned 分配，Drop 释放。
+        let host = unsafe { result::malloc_host(cap, 0)? as *mut u8 };
+        let staging = stream.alloc_uninit::<u8>(cap)?;
+        Ok(Self { host, staging, cap, off: 0, scatter: Vec::with_capacity(32) })
+    }
+    pub fn begin(&mut self) {
+        self.off = 0;
+        self.scatter.clear();
+    }
+    /// 把 `src` 排进本次上传，目标是 `dst` 的前 src.len() 个元素。
+    pub fn push<T: DeviceRepr>(&mut self, stream: &Stream, src: &[T], dst: &mut CudaSlice<T>) -> Result<()> {
+        anyhow::ensure!(src.len() <= dst.len(), "PinnedUploader::push: src {} > dst {}", src.len(), dst.len());
+        let bytes = std::mem::size_of_val(src);
+        if bytes == 0 {
+            return Ok(());
+        }
+        let start = (self.off + 15) & !15;
+        anyhow::ensure!(start + bytes <= self.cap, "PinnedUploader: staging {} B too small", self.cap);
+        // SAFETY: 范围已校验；T 是 POD。
+        unsafe { std::ptr::copy_nonoverlapping(src.as_ptr() as *const u8, self.host.add(start), bytes) };
+        self.scatter.push((stream.ptr_mut(dst), start, bytes));
+        self.off = start + bytes;
+        Ok(())
+    }
+    /// 一次 H2D（pinned → staging，异步）+ 逐目标 D2D（异步），都在 `stream` 上。
+    pub fn flush(&mut self, stream: &Stream) -> Result<()> {
+        if self.off == 0 {
+            return Ok(());
+        }
+        let base = stream.ptr_mut(&mut self.staging);
+        // SAFETY: host 是 pinned；staging / 目标都是有效设备地址；同流顺序保证 D2D 在 H2D 之后。
+        unsafe {
+            let host = std::slice::from_raw_parts(self.host, self.off);
+            result::memcpy_htod_async(base, host, stream.raw())?;
+            for &(dst, hoff, bytes) in &self.scatter {
+                result::memcpy_dtod_async(dst, base + hoff as u64, bytes, stream.raw())?;
+            }
+        }
+        Ok(())
+    }
+}
+impl Drop for PinnedUploader {
+    fn drop(&mut self) {
+        // SAFETY: 独占。
+        unsafe { let _ = result::free_host(self.host as *mut std::ffi::c_void); }
+    }
+}
