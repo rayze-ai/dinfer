@@ -117,12 +117,12 @@ tests/
   3. 预算 2048 下 chunked prefill 把 1024 prompt 切 2 片时的首 token 延迟：若 1 项做了，预算可回 4096 又不伤 TPOT。
 - **不做**：attention 再快 1.3×（128-key tile）端到端 <3%。
 
-### 6.3 启动（4090：3.0 s → 1.05 s，2026-10-17；目标 <0.6 s）
+### 6.3 启动（4090：3.0 s → 0.61–0.68 s，2026-10-17，loop `docs/loops/q3-startup.md` 10 轮）
 
-- **分段**（4090，页缓存热，`load timing: *` / `startup timing`，loop `docs/loops/q3-startup.md`）：现在 total 1.05–1.11 s = cuda_init 260（`Device::new` + cuBLASLt 句柄）+ model_load 490–590（first_tensor 55–76 lazy module load / rope 表 122 host 算 / 权重 1433 MiB：mmap 缺页 164–207 + H2D 122–182 @ 7–11 GiB/s / KV 60）+ engine 260–290（graph 捕获 210 + 跨流副套 ~10）；tokenizer 400 ms 已在独立线程、被完全掩盖（join 等 40–60 ms）。
-- **已修的两大项**：① qkv / gate_up 拼接原走 f32 host 往返（~1 s / 28 层，且不在任何计时里，靠 `wall after` 累计墙钟二分找到）→ bf16 直传 + 设备 `memcpy_dtod` 拼接；② 权重 Vec 中转（0.4 s）→ mmap 切片直接 H2D；③ tokenizer 并行。
-- **下限**：1.4 GB 走 PCIe 4 ×16 pinned ≈ 60 ms；页缓存热时文件读 ≈ 0。
-- **还能做**：rope 表 GPU 算（122 → ~1）；graph 捕获与权重加载并行（不同流，-200）；cuBLASLt 句柄延后到首次 GEMM 或与权重并行（-100~200）；mmap 用 `MAP_POPULATE` / 多线程 touch 把缺页并行化（-100）；pinned staging + 多流 H2D（-80）。合计可到 ~0.5 s。
+- **现分段**（4090，页缓存热）：cuda_init 240–255（`CudaContext::new`：驾驭初始化 + primary context，**不可压**，除非常驻进程复用）+ model_load 305–393（open 110：mmap 后 8 线程并行填页 / layers 115：alloc + 设备拼接 / **h2d 180**：1.4 GB pageable `cuMemcpyHtoD` 7.8 GiB/s / kv 60：cuMemAlloc 17 GiB）+ engine 45（跨流副套 + 懒捕获不含图）。tokenizer 400 ms 在独立线程被完全掩盖。
+- **做了的**：① qkv / gate_up 的 f32 host 拼接（~1 s）→ bf16 直传 + 设备拼接；② 权重不经 Vec，mmap 切片直接 H2D；③ tokenizer 并行；④ rope 表多线程（122 → 21）；⑤ mmap 并行填页（190 → 110）；⑥ decode 图按桶懒捕获（启动 -210，首次用到桶时 5–140 ms 一次性；`GRAPH_CAPTURE=eager` 恢复）；⑦ KV `alloc_uninit`；⑧ 去逐张量 synchronize。
+- **试过无效（已回退，留记录）**：open 与 Device::new 并行（争内存带宽/页表锁，cuda_init 变 430，总时长不变）；自建 pinned 双缓冲 staging（mmap→pinned 的 host memcpy 成瓶颈，6.0 GiB/s 比驱动 pageable 还慢）。
+- **再往下**：KV 28 层合一次 cuMemAlloc（-45）；多线程 memcpy 进 pinned + 多流 DMA（-60，复杂）；常驻进程 / 多模型共享 context（-250）；GDS 直读（权重冷读场景）。单进程冷启动的实际下限 ≈ 0.5 s。
 
 ### 6.4 吞吐上限（c32 及以上）
 

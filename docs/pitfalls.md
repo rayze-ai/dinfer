@@ -331,3 +331,10 @@
 - 如何避免：定位启动耗时先放"累计墙钟"（`wall after <阶段>`）二分，再在最大段内按子阶段累加；任何 `load_f32_host` / `from_f32` 在加载路径上出现都要问一句"为什么不是 bf16 直传"。
 - 相关：`models/qwen3/src/model.rs::Attention::load`、`crates/layers/src/nn.rs::Mlp::load`、`docs/loops/q3-startup.md`。
 
+## 2026-10-17 启动优化里两个"理论上应该快、实测更慢"的坑
+
+- ① mmap populate / 页表填充与 `CudaContext::new` 并行：两者都重度占内核态内存操作（页表、驱动映射），并行后 cuda_init 250 → 430 ms，总时长不变。串行即可；真正并行有效的是 tokenizer（纯用户态 CPU）。
+- ② 自建 pinned 双缓冲 H2D（64 MiB × 2 + 异步 DMA + 事件轮转）比驱动的 pageable `cuMemcpyHtoD` 慢（6.0 vs 7.8 GiB/s）：pageable 路径驱动内部已经是 staging 流水且用多个 copy engine；自建版的瓶颈变成单线程 `memcpy` mmap → pinned。要超过它必须多线程 memcpy + 多流，收益 <60 ms，不值。
+- 如何避免：启动类优化每轮只改一项、4090 跑 3 次取中位；"并行"先问两件事是否争同一硬件资源。
+- 相关：`docs/loops/q3-startup.md` 第 7、10 轮；`crates/kernels/src/device.rs::htod_into_staged`（保留未用）。
+
