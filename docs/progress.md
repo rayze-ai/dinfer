@@ -35,6 +35,7 @@
 - 09:40–11:00 Q3-o 插队 prefill 6 轮：scheduler `schedule_waiting_only`、engine `publish_step` 提前回填、`CUT_IN_MAX_ROWS` 门槛；两次翻车（隐含假设、首 token 丢失）进 pitfalls；bench28 TTFT c8 14 → 8、c8-long 54 → 35。
 - 11:00–11:30 design §10 细化完成（算子插拔 OpSet 三方案；KV 分层 KvTier + 4 个调度接入点 + PinnedHostTier → Remote → PD）。盘点：26 个 k:: 入口 + 1 Gemm（26 个 k:: 入口 + 1 个 Gemm）与 KV 管理器钩子（get_computed_blocks / allocate_slots / cache_blocks / free），再写成可落地的 trait 与接入点。
 - 11:30–12:30 Q3-q OpSet 方案 A：opset.rs 四组 trait + DefaultOps，模型泛型化，moe/glm53 调用点同步；bench29 零差异。
+- 12:30– Q3-r PinnedHostTier 开工（规格 `docs/loops/q3-hosttier.md`）：scheduler 侧 host 索引 + fetch/offload order，executor 侧 copy stream + pinned 竞技场，`--kv-host-gib`。
 
 ## 2026-10-16
 
