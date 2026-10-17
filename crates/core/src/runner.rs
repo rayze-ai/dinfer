@@ -454,6 +454,7 @@ mod tests {
                 max_num_batched_tokens: budget,
                 enable_chunked_prefill: false,
                 long_prefill_token_threshold: 0,
+            decode_exempt_from_budget: false,
             },
             cache: CacheConfig { enable_prefix_caching: false, ..Default::default() },
             max_model_len: 256,

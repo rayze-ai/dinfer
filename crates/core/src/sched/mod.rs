@@ -178,10 +178,18 @@ impl Scheduler {
         let mut any_preempted = false;
 
         // ---- 1. running ----
+        let exempt_decode = self.p.sched.decode_exempt_from_budget;
         let mut i = 0;
-        while i < self.running.len() && token_budget > 0 {
+        while i < self.running.len() {
             let slot = self.running[i];
             let r = &self.slab[slot].as_ref().unwrap().req;
+            // decode 行（算 1 个 token 且已有历史）在 exempt 模式下不占预算；其余行预算用完就停
+            let is_decode = r.num_tokens_with_spec() + r.num_output_placeholders - r.num_computed_tokens == 1
+                && r.num_computed_tokens > 0;
+            let charge_budget = !(exempt_decode && is_decode);
+            if charge_budget && token_budget == 0 {
+                break;
+            }
 
             // 异步调度：上一步已到 max_tokens，不再多调度一步。
             if r.num_output_placeholders > 0
@@ -196,7 +204,9 @@ impl Scheduler {
             if long_prefill_threshold > 0 && num_new > long_prefill_threshold {
                 num_new = long_prefill_threshold;
             }
-            num_new = num_new.min(token_budget);
+            if charge_budget {
+                num_new = num_new.min(token_budget);
+            }
             // 不超过 max_model_len（留出本 step 要采样的 1 个 token）。
             num_new = num_new.min(max_model_len.saturating_sub(r.num_computed_tokens + 1));
             if num_new == 0 {
@@ -224,7 +234,9 @@ impl Scheduler {
             let rid = r.id;
             out.num_scheduled_tokens.push((rid, num_new));
             self.sched_slots.push(slot);
-            token_budget -= num_new;
+            if charge_budget {
+                token_budget -= num_new;
+            }
             if !r.spec_ids.is_empty() {
                 // 这一步覆盖到的 spec 数 = num_new + computed - num_tokens - placeholders
                 let n_spec = (num_new + r.num_computed_tokens)
@@ -489,6 +501,7 @@ mod tests {
                 max_num_batched_tokens: budget,
                 enable_chunked_prefill: true,
                 long_prefill_token_threshold: 0,
+                decode_exempt_from_budget: false,
             },
             cache: CacheConfig { block_size: 16, hash_block_size: 16, ..Default::default() },
             max_model_len: 4096,
@@ -742,5 +755,20 @@ mod tests {
         let (_, r) = step(&mut s, &[(1, vec![5, 2, 9])]);
         assert_eq!(r.tokens_of(0), &[5, 2], "tokens after eos dropped");
         assert_eq!(r.items[0].finish, Some(FinishReason::Stop));
+    }
+
+    /// decode 免预算：预算 8。r1 已在 decode，r2 新来 20 token 的 prompt → 同一步 r1 1 token + r2 拿满 8
+    /// （不免预算时 r1 先占 1，r2 只剩 7，见上面 fcfs 用例的分配方式）。
+    #[test]
+    fn decode_exempt_from_budget_coschedules_decode_and_prefill() {
+        let (mut p, g, b) = params(4, 8, 64);
+        p.sched.decode_exempt_from_budget = true;
+        let mut s = Scheduler::new(p, g, b);
+        s.add_request(req(1, 4, 16));
+        let (o, _) = step(&mut s, &[(1, vec![1])]); // r1 prefill 4 → 第 1 个 token
+        assert_eq!(o.num_scheduled_tokens, vec![(1, 4)]);
+        s.add_request(req(2, 20, 16));
+        let (o, _) = step(&mut s, &[(1, vec![1]), (2, vec![])]);
+        assert_eq!(o.num_scheduled_tokens, vec![(1, 1), (2, 8)], "decode 行免预算，prefill 拿到完整 8");
     }
 }

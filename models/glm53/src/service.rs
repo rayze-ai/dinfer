@@ -123,6 +123,7 @@ impl Glm53Service {
                 max_num_batched_tokens: opt.max_num_batched_tokens,
                 enable_chunked_prefill: opt.enable_chunked_prefill,
                 long_prefill_token_threshold: 0,
+            decode_exempt_from_budget: false,
             },
             CacheConfig { block_size: opt.block_size, enable_prefix_caching: false, ..Default::default() },
             opt.max_model_len,

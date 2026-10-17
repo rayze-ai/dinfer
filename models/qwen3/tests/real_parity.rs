@@ -155,6 +155,7 @@ fn run_engine(e: Env, prompts: &[Vec<i32>], gen: u32, budget: u32) -> Vec<Vec<u3
             max_num_batched_tokens: budget,
             enable_chunked_prefill: true,
             long_prefill_token_threshold: 0,
+        decode_exempt_from_budget: false,
         },
         cache: CacheConfig { block_size: BLOCK as u32, enable_prefix_caching: false, ..Default::default() },
         max_model_len: 1024,

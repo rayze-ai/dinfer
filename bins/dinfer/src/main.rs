@@ -50,6 +50,9 @@ enum Cmd {
         /// 关闭 prefix cache（默认开）
         #[arg(long, default_value_t = false)]
         no_prefix_caching: bool,
+        /// 关闭 "decode 行不占 token 预算"（默认开：每步装下全部 decode + 预算内 prefill，使跨流并行生效）
+        #[arg(long, default_value_t = false)]
+        no_decode_exempt: bool,
         /// 关闭 decode CUDA graph（默认开；qwen3）
         #[arg(long, default_value_t = false)]
         no_cuda_graph: bool,
@@ -105,6 +108,8 @@ async fn main() -> Result<()> {
             block_size,
             gpu_memory_utilization,
             no_prefix_caching,
+
+            no_decode_exempt,
             no_cuda_graph,
             device,
             mtp,
@@ -148,6 +153,7 @@ async fn main() -> Result<()> {
                     gpu_memory_utilization,
                     enable_chunked_prefill: true,
                     enable_prefix_caching: !no_prefix_caching,
+                    decode_exempt_from_budget: !no_decode_exempt,
                     enable_cuda_graph: !no_cuda_graph,
                     device,
                 };

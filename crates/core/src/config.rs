@@ -38,6 +38,11 @@ pub struct SchedulerConfig {
     pub enable_chunked_prefill: bool,
     /// 单请求单 step 的 prefill token 上限；0 表示不限（受 max_num_batched_tokens 约束）。
     pub long_prefill_token_threshold: u32,
+    /// decode 行（本步 1 token、已有历史）不占 `max_num_batched_tokens`：预算只约束 prefill token。
+    /// 这样每步都能同时装下全部 decode 行 + 预算内的 prefill，跨流并行（Q3-j）才有机会；
+    /// 代价：一步的总 token 数上限 = 预算 + max_num_seqs（executor 的 max_tokens 按此分配）。
+    #[serde(default)]
+    pub decode_exempt_from_budget: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +76,7 @@ impl Default for SchedulerConfig {
             max_num_batched_tokens: 8192,
             enable_chunked_prefill: true,
             long_prefill_token_threshold: 0,
+            decode_exempt_from_budget: false,
         }
     }
 }

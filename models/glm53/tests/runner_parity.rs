@@ -92,6 +92,7 @@ fn run(budget: u32, chunked: bool, _unused: u32, expect_steps: usize) {
             max_num_batched_tokens: budget,
             enable_chunked_prefill: chunked,
             long_prefill_token_threshold: 0,
+        decode_exempt_from_budget: false,
         },
         cache: CacheConfig { block_size: BLOCK as u32, enable_prefix_caching: false, ..Default::default() },
         max_model_len: 256,

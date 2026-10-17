@@ -32,6 +32,8 @@ pub struct ServeOptions {
     pub gpu_memory_utilization: f32,
     pub enable_chunked_prefill: bool,
     pub enable_prefix_caching: bool,
+    /// decode 行不占 token 预算（见 SchedulerConfig）。默认开。
+    pub decode_exempt_from_budget: bool,
     /// 纯 decode 步用 CUDA graph（启动时按 batch 桶捕获；vLLM `cudagraph_mode=FULL_DECODE_ONLY` 对齐）。
     pub enable_cuda_graph: bool,
     pub device: usize,
@@ -50,6 +52,7 @@ impl Default for ServeOptions {
             gpu_memory_utilization: 0.9,
             enable_chunked_prefill: true,
             enable_prefix_caching: true,
+            decode_exempt_from_budget: true,
             enable_cuda_graph: true,
             device: 0,
         }
@@ -92,7 +95,12 @@ impl Qwen3Service {
         let t_open = std::time::Instant::now();
         let src = WeightSource::open_dir(model_dir)?;
         tracing::info!(open_ms = t_open.elapsed().as_millis() as u64, "load timing: safetensors open (mmap + header)");
-        let max_tokens = opt.max_num_batched_tokens.max(opt.max_num_seqs) as usize;
+        // 一步最多 token 数：exempt 模式下 decode 行不占预算，上限 = 预算 + max_num_seqs
+        let max_tokens = if opt.decode_exempt_from_budget {
+            (opt.max_num_batched_tokens + opt.max_num_seqs) as usize
+        } else {
+            opt.max_num_batched_tokens.max(opt.max_num_seqs) as usize
+        };
         let model = Qwen3Model::load_with_budget(
             &s,
             &src,
@@ -116,6 +124,7 @@ impl Qwen3Service {
                 max_num_batched_tokens: opt.max_num_batched_tokens,
                 enable_chunked_prefill: opt.enable_chunked_prefill,
                 long_prefill_token_threshold: 0,
+                decode_exempt_from_budget: opt.decode_exempt_from_budget,
             },
             CacheConfig {
                 block_size: opt.block_size,
