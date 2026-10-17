@@ -55,8 +55,23 @@ pub struct WeightSource {
 #[allow(unsafe_code)]
 fn map_readonly(file: &File) -> Result<Mmap> {
     // SAFETY: 见上。
-    // populate：映射时就把页表填好（页缓存热时省掉 1433 MiB / 4 KB ≈ 37 万次缺页，~150 ms）
-    Ok(unsafe { memmap2::MmapOptions::new().populate().map(file)? })
+    let m = unsafe { Mmap::map(file)? };
+    // 多线程把页表填好：单线程 populate 要 ~190 ms（1433 MiB / 4 KB ≈ 37 万次缺页串行）；
+    // 8 线程分段各读每页 1 字节，缺页并行处理 → ~30 ms（启动 loop 第 8 轮）。
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8);
+    let chunk = m.len().div_ceil(threads).max(4096);
+    std::thread::scope(|sc| {
+        for part in m.chunks(chunk) {
+            sc.spawn(move || {
+                let mut acc = 0u64;
+                for pg in part.chunks(4096) {
+                    acc = acc.wrapping_add(pg[0] as u64);
+                }
+                std::hint::black_box(acc);
+            });
+        }
+    });
+    Ok(m)
 }
 
 impl WeightSource {
@@ -147,13 +162,7 @@ impl WeightSource {
     pub fn load_bf16(&self, stream: &Stream, name: &str) -> Result<Tensor<bf16>> {
         let t0 = std::time::Instant::now();
         let (info, raw) = self.bytes(name)?;
-        // 先顺序摸一遍 mmap 页（每 4 KB 读 1 字节）：把 "缺页 / 磁盘读" 的时间与 "转 Vec" 分开计
-        let mut touch: u64 = 0;
-        for c in raw.chunks(4096) {
-            touch = touch.wrapping_add(c[0] as u64);
-        }
-        std::hint::black_box(touch);
-        let t_touch = std::time::Instant::now();
+        let t_touch = t0; // 页已在 open 时并行填好；touch_us 保留字段但为 0
         let n: usize = info.shape.iter().product();
         let v: Vec<bf16> = match info.dtype.as_str() {
             "F8_E4M3" => {
