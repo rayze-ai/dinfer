@@ -131,6 +131,7 @@ pub struct Qwen3Executor {
     pub t_wait_us: u64,
     /// GPU 忙时（主流上 launch 前 / 后两个事件的差，step 结束后读）累计 µs。
     pub t_gpu_ms: f32,
+    t_gpu_err: u64,
     ev_gpu: Option<(TimingEvent, TimingEvent)>,
 }
 
@@ -183,6 +184,7 @@ impl Qwen3Executor {
             t_launch_us: 0,
             t_wait_us: 0,
             t_gpu_ms: 0.0,
+            t_gpu_err: 0,
             ev_gpu: None,
         };
         // decode 图默认 **按桶懒捕获**（首次用到某个 batch 桶时捕获，~30 ms/桶），启动少 ~210 ms；
@@ -634,8 +636,14 @@ impl Qwen3Executor {
         let t_end = std::time::Instant::now();
         if let Some((a, b)) = &self.ev_gpu {
             // collect() 已同步主流，两事件都完成；失败（如副套路径未记录）忽略
-            if let Ok(ms) = TimingEvent::elapsed_ms(a, b) {
-                self.t_gpu_ms += ms;
+            match TimingEvent::elapsed_ms(a, b) {
+                Ok(ms) => self.t_gpu_ms += ms,
+                Err(e) => {
+                    if self.t_gpu_err == 0 {
+                        tracing::warn!(err = %e, "gpu busy timing: elapsed_ms failed (reported once)");
+                    }
+                    self.t_gpu_err += 1;
+                }
             }
         }
         self.t_upload_us += (t_launch - t0).as_micros() as u64;
@@ -652,6 +660,7 @@ impl Qwen3Executor {
                 launch_us_per_step = self.t_launch_us / steps,
                 wait_us_per_step = self.t_wait_us / steps,
                 gpu_busy_us_per_step = (self.t_gpu_ms * 1000.0 / steps as f32) as u64,
+                gpu_timing_errors = self.t_gpu_err,
                 "executor step breakdown (cumulative avg)"
             );
         }
