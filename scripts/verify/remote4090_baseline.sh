@@ -9,6 +9,8 @@ cd "$(dirname "$0")/../.."
 source $ROOT/env.sh   # PATH / LD_LIBRARY_PATH（libcudart.so.13）/ CUDA_HOME / CUDA_ARCHS
 # 共享机器：GPU 0 / 1 常驻 dinfer / vLLM 服务，测试默认用 GPU 3（可用 CUDA_VISIBLE_DEVICES 覆盖）
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-3}"
+# 同卡刚停的实例显存要几秒才回落；不等的话 auto num_blocks 类测试会算出偏小的池（pitfalls 2026-10-17）
+for _ in $(seq 1 60); do used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i "$CUDA_VISIBLE_DEVICES" 2>/dev/null || echo 0); [ "${used:-0}" -lt 2000 ] && break; sleep 0.5; done
 export QWEN3_DIR=$ROOT/models/qwen3-0.6b QWEN3_GOLDEN="$PWD/test/qwen3_golden" KERNEL_REFS_DIR="$PWD/test/kernel_refs"
 LOG=$ROOT/bootstrap/baseline.log; : > "$LOG"
 fail=0

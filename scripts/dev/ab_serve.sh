@@ -13,11 +13,16 @@ kill_port() {
   pgrep -f "dinfer serve .*--port $port" >/dev/null && { pkill -KILL -f "dinfer serve .*--port $port"; sleep 2; }
   for _ in $(seq 1 20); do curl -s -m 1 "http://127.0.0.1:$port/v1/models" >/dev/null 2>&1 || break; sleep 0.5; done
 }
+wait_gpu_free() { # $1 = gpu index；等显存回落（刚退出的实例要几秒才释放）
+  for _ in $(seq 1 60); do used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i "$1" 2>/dev/null || echo 0); [ "${used:-0}" -lt 2000 ] && return 0; sleep 0.5; done
+  echo "WARNING: GPU $1 still has ${used} MiB used"
+}
 case "$cmd" in
   stop) kill_port; echo "port $port free"; exit 0 ;;
   start)
     gpu=$3; shift 3
     kill_port
+    wait_gpu_free "$gpu"
     log=/tmp/ab_serve_$port.log
     ( RUST_LOG=info CUDA_VISIBLE_DEVICES=$gpu ./target/release/dinfer serve --model $R/models/qwen3-0.6b --port "$port" "$@" > "$log" 2>&1 & )
     for _ in $(seq 1 120); do sleep 0.5; curl -s -m 2 "http://127.0.0.1:$port/v1/models" >/dev/null 2>&1 && break; done
