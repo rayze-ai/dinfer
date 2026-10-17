@@ -172,6 +172,9 @@ impl<E: ModelExecutor> Runner<E> {
         self.drafts.clear();
         // 跨流并行（Q3-j）：混批且 executor 支持 → decode 批 / prefill 批分别执行，结果按原顺序散回
         let lps_override = self.try_execute_pair(so)?;
+        if lps_override.is_none() {
+            self.exec.forward_sample(&self.plan, &mut self.generated, &mut self.drafts)?;
+        }
         ensure!(
             self.generated.len() == self.plan.num_reqs() && self.drafts.len() == self.plan.num_reqs(),
             "executor returned {}/{} entries for {} requests",
