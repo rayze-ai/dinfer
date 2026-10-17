@@ -74,20 +74,18 @@ impl Qwen3Service {
         let t_start = std::time::Instant::now();
         let model_dir = Path::new(&opt.model_dir);
         let tok_dir = opt.tokenizer_dir.as_deref().map(Path::new).unwrap_or(model_dir);
-        let tok = Arc::new(
-            HfTokenizer::from_dir(tok_dir).with_context(|| format!("tokenizer in {}", tok_dir.display()))?,
-        );
-        let tmpl = ChatTemplate::from_dir(tok_dir)
-            .with_context(|| format!("chat template in {}", tok_dir.display()))?;
+        // tokenizer（BPE 合并表 ~0.4 s）与 CUDA 初始化 / 权重加载无依赖 → 另起线程并行（启动 loop 第 5 轮）
+        let tok_dir_owned = tok_dir.to_path_buf();
+        let tok_thread = std::thread::spawn(move || -> Result<(HfTokenizer, ChatTemplate)> {
+            let tok = HfTokenizer::from_dir(&tok_dir_owned)
+                .with_context(|| format!("tokenizer in {}", tok_dir_owned.display()))?;
+            let tmpl = ChatTemplate::from_dir(&tok_dir_owned)
+                .with_context(|| format!("chat template in {}", tok_dir_owned.display()))?;
+            Ok((tok, tmpl))
+        });
         let defaults = read_generation_defaults(tok_dir);
         let cfg = Qwen3Config::from_json(&std::fs::read_to_string(model_dir.join("config.json"))?)?;
-        anyhow::ensure!(
-            cfg.vocab_size as usize >= tok.vocab_size(),
-            "model vocab {} < tokenizer {}",
-            cfg.vocab_size,
-            tok.vocab_size()
-        );
-        let t_tok = t_start.elapsed();
+        let t_tok = t_start.elapsed(); // 此处只剩 config / 模板默认值读取；tokenizer 耗时见 "tokenizer thread join"
         let dev = Device::new(opt.device)?;
         let s = dev.default_stream();
         let gemm = Gemm::new(&s)?;
@@ -118,6 +116,19 @@ impl Qwen3Service {
         let exec = Qwen3Executor::with_graphs(s.clone(), gemm, model, opt.enable_cuda_graph)?;
         let num_graphs = exec.num_graphs();
         let runner = Runner::new(exec, opt.block_size as usize);
+        let t_join = std::time::Instant::now();
+        let (tok, tmpl) = tok_thread.join().map_err(|_| anyhow::anyhow!("tokenizer thread panicked"))??;
+        let tok = Arc::new(tok);
+        anyhow::ensure!(
+            cfg.vocab_size as usize >= tok.vocab_size(),
+            "model vocab {} < tokenizer {}",
+            cfg.vocab_size,
+            tok.vocab_size()
+        );
+        tracing::info!(
+            wait_ms = t_join.elapsed().as_millis() as u64,
+            "load timing: tokenizer thread join (0 = 完全被 CUDA/权重加载掩盖)"
+        );
         let params = engine::scheduler_params(
             SchedulerConfig {
                 max_num_seqs: opt.max_num_seqs,

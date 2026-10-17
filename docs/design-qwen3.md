@@ -117,11 +117,12 @@ tests/
   3. 预算 2048 下 chunked prefill 把 1024 prompt 切 2 片时的首 token 延迟：若 1 项做了，预算可回 4096 又不伤 TPOT。
 - **不做**：attention 再快 1.3×（128-key tile）端到端 <3%。
 
-### 6.3 启动（权重加载 2.1 s）
+### 6.3 启动（4090：3.0 s → 1.05 s，2026-10-17；目标 <0.6 s）
 
-- **分段**（本机 3090，新日志）：tokenizer 545 ms、CUDA init 129 ms、**权重 host 侧 mmap→Vec 约 1.9 s / H2D 约 0.1 s**（见 `load timing: weights` 行 host_ms / h2d_ms / h2d_gib_s）、scratch ~10 ms、KV 1 ms、graph 捕获 177 ms。
-- **下限**：1.5 GB 走 PCIe 4 ×16 ≈ 60 ms；NVMe 顺序读 ≈ 0.3–0.5 s（冷）/ 0 s（页缓存热）。
-- **做什么**：① 去掉 host 侧 `Vec<bf16>` 复制：bf16 张量直接 `cudaMemcpy` mmap 指针（页缓存热时 1.5 GB memcpy ≈ 0.15 s）或 `cudaHostRegister` 后异步 H2D 多流并行；② tokenizer 545 ms 是 `tokenizers` crate 建 BPE 合并表，可缓存序列化结果或换 fast path；③ graph 捕获与权重加载并行（不同流）。预期 total 3.0 → **<0.8 s**。
+- **分段**（4090，页缓存热，`load timing: *` / `startup timing`，loop `docs/loops/q3-startup.md`）：现在 total 1.05–1.11 s = cuda_init 260（`Device::new` + cuBLASLt 句柄）+ model_load 490–590（first_tensor 55–76 lazy module load / rope 表 122 host 算 / 权重 1433 MiB：mmap 缺页 164–207 + H2D 122–182 @ 7–11 GiB/s / KV 60）+ engine 260–290（graph 捕获 210 + 跨流副套 ~10）；tokenizer 400 ms 已在独立线程、被完全掩盖（join 等 40–60 ms）。
+- **已修的两大项**：① qkv / gate_up 拼接原走 f32 host 往返（~1 s / 28 层，且不在任何计时里，靠 `wall after` 累计墙钟二分找到）→ bf16 直传 + 设备 `memcpy_dtod` 拼接；② 权重 Vec 中转（0.4 s）→ mmap 切片直接 H2D；③ tokenizer 并行。
+- **下限**：1.4 GB 走 PCIe 4 ×16 pinned ≈ 60 ms；页缓存热时文件读 ≈ 0。
+- **还能做**：rope 表 GPU 算（122 → ~1）；graph 捕获与权重加载并行（不同流，-200）；cuBLASLt 句柄延后到首次 GEMM 或与权重并行（-100~200）；mmap 用 `MAP_POPULATE` / 多线程 touch 把缺页并行化（-100）；pinned staging + 多流 H2D（-80）。合计可到 ~0.5 s。
 
 ### 6.4 吞吐上限（c32 及以上）
 

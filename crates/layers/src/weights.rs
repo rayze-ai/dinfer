@@ -161,15 +161,26 @@ impl WeightSource {
             }
             "BF16" => {
                 ensure!(raw.len() == n * 2, "{name}: size mismatch");
-                // mmap 切片按 u16 批量拷（小端机器上 bf16 位模式 == u16），比逐元素 collect 快一个量级
-                let mut v: Vec<bf16> = Vec::with_capacity(n);
-                let words: &[u16] = bytemuck::try_cast_slice(raw).unwrap_or(&[]);
-                if words.len() == n {
-                    v.extend(words.iter().map(|&w| bf16::from_bits(u16::from_le(w))));
-                } else {
-                    v.extend(raw.chunks_exact(2).map(|c| bf16::from_bits(u16::from_le_bytes([c[0], c[1]]))));
+                // 快路径：小端机器上 bf16 位模式 == u16；mmap 切片 2 字节对齐时直接从 mmap 内存 H2D，不经 Vec 中转
+                // （启动 loop 第 5 轮：省掉 host 侧拷贝）。不对齐时退回逐元素转换。
+                if cfg!(target_endian = "little") {
+                    if let Ok(words) = bytemuck::try_cast_slice::<u8, bf16>(raw) {
+                        let t1 = std::time::Instant::now();
+                        let mut t = Tensor::<bf16>::zeros(stream, &info.shape)?;
+                        stream.htod_into(words, &mut t.data)?;
+                        stream.synchronize()?;
+                        LOAD_STATS.with(|c| {
+                            let mut c = c.borrow_mut();
+                            c.touch_us += (t_touch - t0).as_micros() as u64;
+                            c.host_us += (t1 - t_touch).as_micros() as u64;
+                            c.h2d_us += t1.elapsed().as_micros() as u64;
+                            c.bytes += raw.len() as u64;
+                            c.tensors += 1;
+                        });
+                        return Ok(t);
+                    }
                 }
-                v
+                raw.chunks_exact(2).map(|c| bf16::from_bits(u16::from_le_bytes([c[0], c[1]]))).collect()
             }
             "F32" => {
                 ensure!(raw.len() == n * 4, "{name}: size mismatch");
