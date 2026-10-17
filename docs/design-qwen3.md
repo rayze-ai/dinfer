@@ -51,3 +51,43 @@ tests/
 - `/data/ref/models/qwen3-0.6b/`：config.json、generation_config.json、tokenizer.json、tokenizer_config.json（含 chat_template）、vocab.json、merges.txt、model.safetensors（1.5 GB）
 - HF：transformers 5.19 `Qwen3ForCausalLM`（`/data/ref/venv-tf519`）；golden：`scripts/verify/gen_qwen3_golden.py` → `test/qwen3_golden/`
 - vLLM：`vllm/model_executor/models/qwen3.py`
+
+## 5. Attention kernel：prefill_tc 与 paged_tc 是什么、为什么服务路径选 paged
+
+### 5.1 两个 kernel 分别是什么
+
+| | `gqa_prefill_bf16` → `gqa_fa_v5_kernel<PAGED=false>`（代码里叫 prefill_tc） | `gqa_paged_bf16` → `gqa_fa_v5_kernel<PAGED=true>`（paged_tc） |
+|---|---|---|
+| K/V 从哪读 | 本 step qkv GEMM 的输出缓冲（连续内存，按 `kv_stride` 跨行读） | **paged KV cache**：按 `block_table[b][pos / block_size]` 找到物理块，再按 `pos % block_size` 定位（间接寻址） |
+| 能看到的 key | 只有本 step 的 token（`[0, row]`，纯 causal） | 历史 + 本 step：`[0, hist + row]`，hist = `seq_len − q_len` |
+| 适用的 step | 纯 prefill 步：所有请求都是新 prompt、都没有历史（`BatchMode::Prefill`） | 有历史的任何 step：prefix cache 命中后的续算、chunked prefill 的第 2 片起、prefill 与 decode 混批（`BatchMode::Paged`） |
+| 额外参数 | — | `seq_lens`、`block_table`、`block_size`、`max_blocks`、`skip_single`（混批时跳过 q_len==1 行，交给 decode kernel） |
+
+两者共用同一份 kernel 模板（`gqa.cu` 的 `gqa_fa_v5_kernel<PAGED, NBUF>`），计算部分完全相同：FA2 结构，block = 4 warp = (请求, q head, 64 行 query)，每 warp 16 行；Q 片、S（16×64）、O（16×128）全在寄存器，softmax 用 4-lane shuffle 归约，P 的 mma C 片直接 pack 成 PV 的 A 片；K/V 以 64 key 为一个 tile 经 cp.async 进 smem（行跨 136 个 bf16 避开 ldmatrix bank 冲突）。唯一差别就是 `load_tile` 里 K/V 的地址怎么算，以及 mask 的上界多了 hist。
+
+"tc" 后缀 = tensor core（v3 起用 WMMA / mma.sync 做 QKᵀ 与 PV），区别于 v1/v2 的 CUDA core flash 版本。
+
+### 5.2 对比数据（round 33 / 38，`cold_shape` 微基准，q head 16 / kv head 8 / D 128，warm）
+
+| 形状 | v3（WMMA，smem 往返） | v4/v5（mma.sync，寄存器驻留） |
+|---|---|---|
+| prefill_tc，1 请求 q=1024 | 0.672 ms | **0.144 ms**（3090）/ 0.09 ms（4090） |
+| paged_tc A：q=1024 hist=0（与上行同工作量） | 0.698 ms | 0.189 ms |
+| paged_tc B：q=1024 hist=1024（历史 tile 翻倍） | 1.825 ms | 0.447 ms |
+| paged_tc C：q=1024 + 7×decode(hist 1100)（c8-long 真实混批） | 0.867 ms | 0.305 ms；分流后 0.250 ms |
+| T=1514 单请求 prefill（4090） | 0.66 ms | **0.14 ms** |
+
+结论：同工作量下 paged 比 prefill 只慢 3–30%（间接寻址 + 多一次 `block_table` 读 + 零填充分支），**不是**早先 nsys 看到的 1.8×；那 1.8× 是形状差异（paged 承担了带历史、混批的更重工作），不是 kernel 质量差异。
+
+### 5.3 为什么服务路径选 paged（而不是把 K/V 先拷成连续再用 prefill 版）
+
+1. **历史 KV 本来就在 paged cache 里**。prefix cache 命中、chunked prefill 的后续片、decode 混批，这三种情况都要读历史 key；读 paged cache 是零拷贝，而"先 gather 成连续缓冲再算"要多一次 O(hist × Hkv × D) 的读写，对 c8-long 每层 ≈ 1100 × 8 × 128 × 2 B × 2（K、V）≈ 4.5 MB，28 层就是 126 MB/step，比 attention 本身的读量还大。
+2. **调度器不需要分开三条路**。vLLM v1 的调度没有 prefill/decode 之分，只有 `num_computed_tokens` 追赶 `num_tokens`；dinfer 照搬这个设计。只要 step 里任何请求带历史，就统一走 paged；纯 prefill 步（所有请求 hist=0）才走 prefill 版省掉间接寻址。实测纯 prefill 步在压测里只占 3/32 个 prompt（其余都与别人的 decode 混批），所以 paged 是主路径，prefill 版是特例优化。
+3. **代价已经很小**。A 形状 0.189 vs 0.144 ms 的差距（0.045 ms/层 × 28 = 1.3 ms / 1024-token step）相对 20 ms 的 prefill step 不到 7%；比起多一次 gather 拷贝划算。
+4. **混批里 decode 行不该走 paged**（round 34）：q_len=1 的行若走 paged_tc，一个 block 只用 1/64 的行却要串行扫全部历史 tile（smem 占着 SM）。所以 `BatchMode::Paged` 下 `gqa_mixed_bf16` 先用 split-K decode kernel 算所有 q_len=1 行（按 `cu_seqlens_q` 定位行），再让 paged_tc `skip_single` 只算 prefill 行。
+
+### 5.4 还能怎么快（分析，未做）
+
+- **纯 prefill 步合并到 paged 版**：若把 qkv 输出的 K/V 直接写进 paged cache 后统一读 cache（现在 `qkv_post` 已经写 cache 了），prefill 版就可以删掉，少一份代码；代价是纯 prefill 步多 3–30% attention 时间。等 c8-long 稳定 >1.0× 后再评估。
+- **双缓冲（v5 NBUF=2）在 sm86/sm89 不划算**：68 KB 动态 smem → 每 SM 1 block，丢掉的 block 间重叠比 tile 内 cp.async 重叠更多（3090 T=1900 0.38 → 0.44 ms）。保留 `GQA_PREFILL_NBUF=2` 开关，H100（228 KB smem）上可能反转。
+- **真正的上限**：T=1514 单层 9.4 GFLOP，0.14 ms = 67 TFLOPS ≈ 4090 bf16 dense（fp32 累加 165 TFLOPS）的 40%。FA2 在 A100 上约 50–60%，再优化空间约 1.3×：128-key tile（减半 softmax 归约次数）、PV 用 fp16 累加（精度风险）、Q 片 ldmatrix 预取。按 prefill step 里 attention 只占 ~15%（v4 后，GEMM 占大头）来算，端到端收益 < 5%，暂不做。
