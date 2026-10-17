@@ -30,3 +30,4 @@
 | 轮 | 块 | 现象 | 根因 | 处理 |
 |---|---|---|---|---|
 | 0 | 规格 | 2026-10-17 | — | 开工 |
+| 1 | 设计定稿 | runner 拆 `begin(so)`（update_states → build_plan，占位 token 记 `plan.prev_row[row] = 上一步同请求的行号`，state.num_computed 在 begin 就推进）/ `finish()`（取结果、追加 token、产出 MRO）；executor 新 `begin`（upload prev_row → 图内 `row_gather(prev_chosen → ids)` → forward → sample → `chosen → prev_chosen` D2D → D2H 到 pinned 双槽 + 事件）/ `finish`（等事件读 pinned）；只对 "Decode 且无 penalties/logprobs" 的 plan 异步，否则 begin 内同步跑完。engine：`so_n=schedule; begin; if eligible { so_{n+1}=schedule; begin } ; finish_n; update; publish`。scheduler `async_scheduling` 由 `ASYNC_SCHED`（默认开）控制 | — | 写代码 |
