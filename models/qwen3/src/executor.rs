@@ -652,7 +652,25 @@ impl Qwen3Executor {
         }
         let copy = self.stream.device().new_stream()?;
         let arena = HostArena::new(&self.stream, num_slots, per_block_all)?;
-        self.host_tier = Some(HostTierStore { arena, bytes_per_layer_block: per_layer, copy, offload_done: None });
+        let ptrs: Vec<u64> = self.model.kv.iter().map(|kv| self.stream.ptr(&kv.cache.data)).collect();
+        let layer_ptrs = Tensor::from_vec(&self.stream, ptrs, &[layers])?;
+        let blocks_buf = Tensor::<i32>::zeros(&self.stream, &[HOST_TIER_CHUNK])?;
+        let blocks_off = Tensor::<i32>::zeros(&self.stream, &[HOST_TIER_CHUNK])?;
+        let staging = Tensor::<u8>::uninit(&self.stream, &[HOST_TIER_CHUNK * per_block_all])?;
+        let staging_off = Tensor::<u8>::uninit(&self.stream, &[HOST_TIER_CHUNK * per_block_all])?;
+        self.stream.synchronize()?;
+        self.host_tier = Some(HostTierStore {
+            arena,
+            bytes_per_layer_block: per_layer,
+            copy,
+            offload_done: None,
+            layer_ptrs,
+            blocks_buf,
+            staging,
+            chunk: HOST_TIER_CHUNK,
+            staging_off,
+            blocks_off,
+        });
         tracing::info!(num_slots, per_block_kib = per_block_all / 1024, host_gib, "kv host tier enabled");
         Ok(num_slots)
     }
@@ -771,7 +789,17 @@ struct HostTierStore {
     copy: Stream,
     /// copy stream 上最近一次 offload 结束的事件；fetch 前主流等它（host 槽可能刚被写）。
     offload_done: Option<Event>,
+    /// 每层 cache 基址表（设备常量）、块号表、设备 staging（最多 CHUNK 块 × 全层）；
+    /// 搬运 = 1 个 pack/unpack kernel + 每块 1 次 H2D/D2H（原来每块 28 次）。
+    layer_ptrs: Tensor<u64>,
+    blocks_buf: Tensor<i32>,
+    staging: Tensor<u8>,
+    chunk: usize,
+    /// 主流上 "staging 已用完" 的事件：fetch 用主流 staging，offload 用 copy stream staging，两者分开避免互踩。
+    staging_off: Tensor<u8>,
+    blocks_off: Tensor<i32>,
 }
+const HOST_TIER_CHUNK: usize = 64;
 
 /// 每个请求本步 1 个采样 token、无 draft。
 fn push_tokens(generated: &mut Vec<Vec<u32>>, drafts: &mut Vec<Vec<u32>>, chosen: &[i32]) {
@@ -796,12 +824,18 @@ impl ModelExecutor for Qwen3Executor {
         if let Some(ev) = &ht.offload_done {
             self.stream.wait_event(ev)?; // 槽位可能刚被 offload 写入（copy stream）
         }
+        let layers = self.model.kv.len();
         let per = ht.bytes_per_layer_block;
-        for &(block, slot) in orders {
-            for (layer, kv) in self.model.kv.iter_mut().enumerate() {
-                let dst = self.stream.ptr_mut(&mut kv.cache.data) + (block as u64) * per as u64;
-                self.stream.htod_from_arena(&ht.arena, slot as usize, layer * per, dst, per)?;
+        let per_all = per * layers;
+        let ht = self.host_tier.as_mut().unwrap();
+        for chunk in orders.chunks(ht.chunk) {
+            let base = self.stream.ptr_mut(&mut ht.staging.data);
+            for (i, &(_, slot)) in chunk.iter().enumerate() {
+                self.stream.htod_from_arena(&ht.arena, slot as usize, 0, base + (i * per_all) as u64, per_all)?;
             }
+            let ids: Vec<i32> = chunk.iter().map(|&(b, _)| b as i32).collect();
+            self.stream.htod_into(&ids, &mut ht.blocks_buf.data)?;
+            k::kv_unpack(&self.stream, &ht.layer_ptrs.data, &ht.blocks_buf.data, &ht.staging.data, chunk.len(), layers, per)?;
         }
         Ok(())
     }
@@ -811,11 +845,17 @@ impl ModelExecutor for Qwen3Executor {
         let Some(ht) = self.host_tier.as_mut() else { return Ok(()) };
         let main_ev = self.stream.record_event()?;
         ht.copy.wait_event(&main_ev)?;
+        let layers = self.model.kv.len();
         let per = ht.bytes_per_layer_block;
-        for &(block, slot) in orders {
-            for (layer, kv) in self.model.kv.iter().enumerate() {
-                let src = self.stream.ptr(&kv.cache.data) + (block as u64) * per as u64;
-                ht.copy.dtoh_to_arena(&ht.arena, slot as usize, layer * per, src, per)?;
+        let per_all = per * layers;
+        for chunk in orders.chunks(ht.chunk) {
+            // 上一轮 offload 的 staging_off 可能还在 D2H：copy stream 顺序执行，同流内自然有序
+            let ids: Vec<i32> = chunk.iter().map(|&(b, _)| b as i32).collect();
+            ht.copy.htod_into(&ids, &mut ht.blocks_off.data)?;
+            k::kv_pack(&ht.copy, &ht.layer_ptrs.data, &ht.blocks_off.data, &mut ht.staging_off.data, chunk.len(), layers, per)?;
+            let base = ht.copy.ptr(&ht.staging_off.data);
+            for (i, &(_, slot)) in chunk.iter().enumerate() {
+                ht.copy.dtoh_to_arena(&ht.arena, slot as usize, 0, base + (i * per_all) as u64, per_all)?;
             }
         }
         ht.offload_done = Some(ht.copy.record_event()?);

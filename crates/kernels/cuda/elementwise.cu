@@ -6,6 +6,28 @@ using namespace dinfer;
 
 namespace {
 
+// KV host tier（Q3-r 第 8 轮）：把 n 个块的全部层打包成连续 staging（每块 [layer][per_layer_bytes]），一次 D2H；
+// 反向 unpack 一次 H2D 后散回各层。layer_ptrs[L] 是每层 cache 的设备基址；blocks[n] 是块号。
+// grid = (n, L)，block = 256 线程，按 16 B 向量搬。
+__global__ void kv_pack_kernel(const uint8_t* const* __restrict__ layer_ptrs, const int32_t* __restrict__ blocks,
+                               uint8_t* __restrict__ staging, int64_t per_layer_bytes, int num_layers) {
+  const int b = blockIdx.x, l = blockIdx.y;
+  const uint8_t* src = layer_ptrs[l] + (int64_t)blocks[b] * per_layer_bytes;
+  uint8_t* dst = staging + ((int64_t)b * num_layers + l) * per_layer_bytes;
+  const int64_t n16 = per_layer_bytes / 16;
+  for (int64_t i = threadIdx.x; i < n16; i += blockDim.x)
+    reinterpret_cast<uint4*>(dst)[i] = reinterpret_cast<const uint4*>(src)[i];
+}
+__global__ void kv_unpack_kernel(uint8_t* const* __restrict__ layer_ptrs, const int32_t* __restrict__ blocks,
+                                 const uint8_t* __restrict__ staging, int64_t per_layer_bytes, int num_layers) {
+  const int b = blockIdx.x, l = blockIdx.y;
+  uint8_t* dst = layer_ptrs[l] + (int64_t)blocks[b] * per_layer_bytes;
+  const uint8_t* src = staging + ((int64_t)b * num_layers + l) * per_layer_bytes;
+  const int64_t n16 = per_layer_bytes / 16;
+  for (int64_t i = threadIdx.x; i < n16; i += blockDim.x)
+    reinterpret_cast<uint4*>(dst)[i] = reinterpret_cast<const uint4*>(src)[i];
+}
+
 __global__ void add_inplace_kernel(const bf16* __restrict__ x, bf16* __restrict__ y, int64_t n) {
   int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
   const int64_t stride = (int64_t)gridDim.x * blockDim.x;
@@ -81,5 +103,24 @@ extern "C" int zero_rows_where_pos0_bf16(void* x, const int32_t* pos, int64_t to
   if (tokens <= 0) return 0;
   if (cols <= 0) return err(cudaErrorInvalidValue);
   zero_rows_pos0_kernel<<<(unsigned)tokens, 256, 0, stream>>>(static_cast<bf16*>(x), pos, cols);
+  return last_err();
+}
+
+extern "C" int kv_pack(const void* const* layer_ptrs, const int32_t* blocks, void* staging, int64_t n_blocks,
+                       int64_t num_layers, int64_t per_layer_bytes, cudaStream_t stream) {
+  if (n_blocks <= 0) return 0;
+  if (per_layer_bytes % 16 != 0 || num_layers <= 0) return err(cudaErrorInvalidValue);
+  kv_pack_kernel<<<dim3((unsigned)n_blocks, (unsigned)num_layers), 256, 0, stream>>>(
+      reinterpret_cast<const uint8_t* const*>(layer_ptrs), blocks, static_cast<uint8_t*>(staging), per_layer_bytes,
+      (int)num_layers);
+  return last_err();
+}
+extern "C" int kv_unpack(void* const* layer_ptrs, const int32_t* blocks, const void* staging, int64_t n_blocks,
+                         int64_t num_layers, int64_t per_layer_bytes, cudaStream_t stream) {
+  if (n_blocks <= 0) return 0;
+  if (per_layer_bytes % 16 != 0 || num_layers <= 0) return err(cudaErrorInvalidValue);
+  kv_unpack_kernel<<<dim3((unsigned)n_blocks, (unsigned)num_layers), 256, 0, stream>>>(
+      reinterpret_cast<uint8_t* const*>(layer_ptrs), blocks, static_cast<const uint8_t*>(staging), per_layer_bytes,
+      (int)num_layers);
   return last_err();
 }

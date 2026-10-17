@@ -347,6 +347,8 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
     pub fn add_inplace_bf16(x: *const c_void, y: *mut c_void, n: i64, stream: cudaStream_t) -> i32;
+    pub fn kv_pack(layer_ptrs: *const *const c_void, blocks: *const i32, staging: *mut c_void, n_blocks: i64, num_layers: i64, per_layer_bytes: i64, stream: cudaStream_t) -> i32;
+    pub fn kv_unpack(layer_ptrs: *const *mut c_void, blocks: *const i32, staging: *const c_void, n_blocks: i64, num_layers: i64, per_layer_bytes: i64, stream: cudaStream_t) -> i32;
     pub fn gather_rows_bf16(
         src: *const c_void,
         dst: *mut c_void,

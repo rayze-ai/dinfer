@@ -516,6 +516,48 @@ pub fn sample_fused_f32<W: DevicePtrMut<f32> + ?Sized, O: DevicePtrMut<i32> + ?S
     )
 }
 
+/// KV host tier：把 `blocks[..n]` 的全部层打包进 `staging`（设备，[n][L][per_layer_bytes]）。
+/// `layer_ptrs`：设备数组，每层 cache 的基址（u64）。
+pub fn kv_pack(
+    stream: &Stream,
+    layer_ptrs: &CudaSlice<u64>,
+    blocks: &CudaSlice<i32>,
+    staging: &mut CudaSlice<u8>,
+    n_blocks: usize,
+    num_layers: usize,
+    per_layer_bytes: usize,
+) -> Result<()> {
+    ensure!(
+        layer_ptrs.len() >= num_layers && blocks.len() >= n_blocks && staging.len() >= n_blocks * num_layers * per_layer_bytes,
+        "kv_pack: shape"
+    );
+    let lp = stream.ptr(layer_ptrs) as *const *const c_void;
+    let pb = stream.ptr(blocks) as *const i32;
+    let ps = stream.ptr_mut(staging) as *mut c_void;
+    // SAFETY: 容量已校验；layer_ptrs 内容是有效设备地址（由 executor 填）。
+    check(unsafe { ffi::kv_pack(lp, pb, ps, n_blocks as i64, num_layers as i64, per_layer_bytes as i64, stream.raw() as _) }, "kv_pack")
+}
+/// 反向：staging → 各层 cache 的 `blocks[..n]`。
+pub fn kv_unpack(
+    stream: &Stream,
+    layer_ptrs: &CudaSlice<u64>,
+    blocks: &CudaSlice<i32>,
+    staging: &CudaSlice<u8>,
+    n_blocks: usize,
+    num_layers: usize,
+    per_layer_bytes: usize,
+) -> Result<()> {
+    ensure!(
+        layer_ptrs.len() >= num_layers && blocks.len() >= n_blocks && staging.len() >= n_blocks * num_layers * per_layer_bytes,
+        "kv_unpack: shape"
+    );
+    let lp = stream.ptr(layer_ptrs) as *const *mut c_void;
+    let pb = stream.ptr(blocks) as *const i32;
+    let ps = stream.ptr(staging) as *const c_void;
+    // SAFETY: 同上。
+    check(unsafe { ffi::kv_unpack(lp, pb, ps, n_blocks as i64, num_layers as i64, per_layer_bytes as i64, stream.raw() as _) }, "kv_unpack")
+}
+
 /// 异步调度：`ids[i] = prev[gather_idx[i]]`（gather_idx[i] < 0 的行保持 host 上传的值）。可进 CUDA graph。
 pub fn row_gather_i32(
     stream: &Stream,
