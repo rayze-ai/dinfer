@@ -338,3 +338,10 @@
 - 如何避免：启动类优化每轮只改一项、4090 跑 3 次取中位；"并行"先问两件事是否争同一硬件资源。
 - 相关：`docs/loops/q3-startup.md` 第 7、10 轮；`crates/kernels/src/device.rs::htod_into_staged`（保留未用）。
 
+## 2026-10-17 `stage_profile.sh` 的 "ms/step" 不是实测每步时长
+
+- 现象：c32 对比表给出 dinfer 0.97 vs vLLM 1.39 ms/step，看起来 GPU 已快 0.4 ms，但端到端 TPOT 3.6 vs 3.3 反过来。
+- 根因：`nsys_stage_compare.py --steps` 的步数是 "完成 token 数 / 并发" 估的，两边 prefill 混批、抢占、warmup 都没算；而且 vLLM 侧 nsys 没开 `--cuda-graph-trace=node`，图内 kernel 不展开，"copy/misc 30%" 很可能是图节点被归错类。
+- 如何避免：比 decode 每步时长用各自引擎的 step 直方图（dinfer `/metrics` `engine_step_execute_seconds`）或固定 batch 的离线微基准；nsys 只用来看 kernel 构成比例，不用来算 ms/step。
+- 相关：`docs/loops/q3-perf.md` 第 46–47 轮。
+
