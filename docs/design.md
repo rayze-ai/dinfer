@@ -416,5 +416,6 @@ PD 分离的详细设计写进 §10（待补），动代码前先定：KV 传输
 | bench 口径 | `benchmarks/serve.py` 的 TTFT/TPOT/ITL 定义、ignore_eos | 每轮换 seed（避免常驻侧 prefix cache 全命中）；开环泊松 + 长短混合 | 发现并修正了 bench11 之前的口径偏差 |
 | 进程结构 | — | 单进程（API + engine 同进程不同线程），无 ZMQ / 多进程 IPC | TTFT 低一半的主要来源之一 |
 | 小 kernel 融合 | vLLM 有 fused_add_rms_norm、silu_and_mul（CUDA op） | 我们多了 qkv_post（norm+rope+cache write 一个 kernel）、gather+末层 norm、采样四合一；silu·mul 进 GEMM epilogue 与 lm_head f32 直出留给 megakernel 阶段 | decode 步 kernel 数 17 → 7/层 + 4 尾部 |
+| 插队 prefill | 无（vLLM 异步调度下新请求固定多等一步） | 在飞 decode 步未完成时，对 waiting 单独 `schedule_waiting_only` 并同步跑 prefill，结果立刻回填再调度下一步；负载门槛（在飞 ≤ 8 行） | bench28：c8 TTFT 14 → 8 ms、c8-long 54 → 35 ms；代价 c8-long TPOT +0.2 |
 | 跨流 prefill/decode 并行 | 无（vLLM 单流） | 实现并证实真并行（nsys 39% 重叠） | 闭环 bench 下混批步 <5%，TPOT 无感；留给 prefill 比例高的负载 |
 

@@ -1,0 +1,1 @@
+o 插队 prefill：在飞 decode 步未完成时，新请求立刻 schedule_waiting_only 并同步跑 prefill（不写 prev_chosen），首 token 提前一步

@@ -287,3 +287,27 @@ bench26,2026-10-17,n 小 kernel 融合：lm_head 前 gather_rows + 末层 rmsnor
 bench26,2026-10-17,n 小 kernel 融合：lm_head 前 gather_rows + 末层 rmsnorm → 一个 kernel（-1 launch/步）,c8-long,out_tok_per_s,1941.834,1916.352,1.013,-0.2,higher
 bench26,2026-10-17,n 小 kernel 融合：lm_head 前 gather_rows + 末层 rmsnorm → 一个 kernel（-1 launch/步）,c8-long,ttft_p50_ms,54.294,54.052,1.004,-5.5,lower
 bench26,2026-10-17,n 小 kernel 融合：lm_head 前 gather_rows + 末层 rmsnorm → 一个 kernel（-1 launch/步）,c8-long,tpot_p50_ms,3.728,3.758,0.992,0.1,lower
+bench27,2026-10-17,o 插队 prefill：在飞 decode 步未完成时，新请求立刻 schedule_waiting_only 并同步跑 prefill（不写 prev_chosen），首 token 提前一步,c1,out_tok_per_s,509.773,446.917,1.141,0.2,higher
+bench27,2026-10-17,o 插队 prefill：在飞 decode 步未完成时，新请求立刻 schedule_waiting_only 并同步跑 prefill（不写 prev_chosen），首 token 提前一步,c1,ttft_p50_ms,3.872,17.504,0.221,4.3,lower
+bench27,2026-10-17,o 插队 prefill：在飞 decode 步未完成时，新请求立刻 schedule_waiting_only 并同步跑 prefill（不写 prev_chosen），首 token 提前一步,c1,tpot_p50_ms,1.945,2.119,0.918,0.1,lower
+bench27,2026-10-17,o 插队 prefill：在飞 decode 步未完成时，新请求立刻 schedule_waiting_only 并同步跑 prefill（不写 prev_chosen），首 token 提前一步,c8,out_tok_per_s,3103.529,2898.562,1.071,0.1,higher
+bench27,2026-10-17,o 插队 prefill：在飞 decode 步未完成时，新请求立刻 schedule_waiting_only 并同步跑 prefill（不写 prev_chosen），首 token 提前一步,c8,ttft_p50_ms,13.967,34.033,0.410,0.2,lower
+bench27,2026-10-17,o 插队 prefill：在飞 decode 步未完成时，新请求立刻 schedule_waiting_only 并同步跑 prefill（不写 prev_chosen），首 token 提前一步,c8,tpot_p50_ms,2.463,2.537,0.971,0.1,lower
+bench27,2026-10-17,o 插队 prefill：在飞 decode 步未完成时，新请求立刻 schedule_waiting_only 并同步跑 prefill（不写 prev_chosen），首 token 提前一步,c32,out_tok_per_s,8795.422,8290.648,1.061,-0.4,higher
+bench27,2026-10-17,o 插队 prefill：在飞 decode 步未完成时，新请求立刻 schedule_waiting_only 并同步跑 prefill（不写 prev_chosen），首 token 提前一步,c32,ttft_p50_ms,36.229,73.561,0.492,-58.2,lower
+bench27,2026-10-17,o 插队 prefill：在飞 decode 步未完成时，新请求立刻 schedule_waiting_only 并同步跑 prefill（不写 prev_chosen），首 token 提前一步,c32,tpot_p50_ms,3.411,3.320,1.027,0.1,lower
+bench27,2026-10-17,o 插队 prefill：在飞 decode 步未完成时，新请求立刻 schedule_waiting_only 并同步跑 prefill（不写 prev_chosen），首 token 提前一步,c8-long,out_tok_per_s,1911.867,1905.153,1.004,-1.5,higher
+bench27,2026-10-17,o 插队 prefill：在飞 decode 步未完成时，新请求立刻 schedule_waiting_only 并同步跑 prefill（不写 prev_chosen），首 token 提前一步,c8-long,ttft_p50_ms,42.927,61.448,0.699,20.9,lower
+bench27,2026-10-17,o 插队 prefill：在飞 decode 步未完成时，新请求立刻 schedule_waiting_only 并同步跑 prefill（不写 prev_chosen），首 token 提前一步,c8-long,tpot_p50_ms,3.865,3.750,1.031,-3.7,lower
+bench28,2026-10-17,o 插队 prefill 修正：结果立刻回填再调度 n+1（修首 token 丢失）；负载门槛在飞 ≤8 行才插队,c1,out_tok_per_s,508.431,445.725,1.141,-0.3,higher
+bench28,2026-10-17,o 插队 prefill 修正：结果立刻回填再调度 n+1（修首 token 丢失）；负载门槛在飞 ≤8 行才插队,c1,ttft_p50_ms,4.076,17.610,0.231,-5.3,lower
+bench28,2026-10-17,o 插队 prefill 修正：结果立刻回填再调度 n+1（修首 token 丢失）；负载门槛在飞 ≤8 行才插队,c1,tpot_p50_ms,1.948,2.119,0.919,-0.1,lower
+bench28,2026-10-17,o 插队 prefill 修正：结果立刻回填再调度 n+1（修首 token 丢失）；负载门槛在飞 ≤8 行才插队,c8,out_tok_per_s,3149.882,2899.452,1.086,1.5,higher
+bench28,2026-10-17,o 插队 prefill 修正：结果立刻回填再调度 n+1（修首 token 丢失）；负载门槛在飞 ≤8 行才插队,c8,ttft_p50_ms,8.146,35.231,0.231,41.7,lower
+bench28,2026-10-17,o 插队 prefill 修正：结果立刻回填再调度 n+1（修首 token 丢失）；负载门槛在飞 ≤8 行才插队,c8,tpot_p50_ms,2.464,2.537,0.971,-0.0,lower
+bench28,2026-10-17,o 插队 prefill 修正：结果立刻回填再调度 n+1（修首 token 丢失）；负载门槛在飞 ≤8 行才插队,c32,out_tok_per_s,8799.908,8260.882,1.065,0.1,higher
+bench28,2026-10-17,o 插队 prefill 修正：结果立刻回填再调度 n+1（修首 token 丢失）；负载门槛在飞 ≤8 行才插队,c32,ttft_p50_ms,23.231,73.197,0.317,35.9,lower
+bench28,2026-10-17,o 插队 prefill 修正：结果立刻回填再调度 n+1（修首 token 丢失）；负载门槛在飞 ≤8 行才插队,c32,tpot_p50_ms,3.427,3.324,1.031,-0.5,lower
+bench28,2026-10-17,o 插队 prefill 修正：结果立刻回填再调度 n+1（修首 token 丢失）；负载门槛在飞 ≤8 行才插队,c8-long,out_tok_per_s,1907.647,1902.870,1.003,-0.2,higher
+bench28,2026-10-17,o 插队 prefill 修正：结果立刻回填再调度 n+1（修首 token 丢失）；负载门槛在飞 ≤8 行才插队,c8-long,ttft_p50_ms,34.615,68.254,0.507,19.4,lower
+bench28,2026-10-17,o 插队 prefill 修正：结果立刻回填再调度 n+1（修首 token 丢失）；负载门槛在飞 ≤8 行才插队,c8-long,tpot_p50_ms,3.937,3.752,1.049,-1.9,lower
