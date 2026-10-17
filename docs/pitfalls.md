@@ -402,3 +402,11 @@
 - 解法：`scripts/dev/ab_serve.sh start <port> <gpu> [args]`：起前 pkill + 等 pgrep 为空 + 等端口不响应，起后等 ready 并打印 **pid / 真实进程数 / num_blocks**；`stop <port>` 同样等退干净。所有 A/B 都用它。
 - 如何避免：任何 "起服务 → 测 → 换参数再起" 的脚本，每轮打印被测进程的 pid 与关键启动参数并与预期核对；吞吐离谱（<1 req/s）先怀疑连错进程。
 
+## 2026-10-17 显存压力下最后一个请求 "抢占自己" → 引擎 2M 空步/秒 livelock
+
+- 现象：host tier A/B（`--num-blocks 512`，c16 × 1024 prompt）跑到剩 1 个请求时 bench 卡住；`engine_steps_total` 每秒涨 200 万、`generation_tokens` 不动、GPU 0%、CPU 一核满。
+- 根因：running 循环分不到块时抢占末尾 running；末尾就是自己 → `preempt(self)` 释放块、回 waiting、本步空；下一步从 waiting 重排需要全部块，还是不够（prefix cache 里 ref_cnt=0 的块占位 / 池本来就小）→ waiting 循环 break → 空步 → 下一步再来。engine 对 "有请求但空步" 没有退避，满转。
+- 解法（三层）：① scheduler 不自抢占：victim == self 时以 `Length` 结束该请求（`force_finished` 队列，engine 推 Finished）；② engine 空步 200 µs 退避 + 每 1000 次 warn（running/waiting/free_blocks）；③ 启动期校验 `max_model_len/block_size ≤ 0.9 × num_blocks`。
+- vLLM 对照：靠启动期校验（`max_model_len` 必须能装进 KV）+ 单请求不抢占；没有空步退避（它的 step 本身有 GPU 等待）。
+- 如何避免：所有 "分不到资源 → 重排" 的路径都要问 "重排后一定能前进吗"；压测必须含 "池远小于活跃集合" 的配置。单测 `self_preempt_under_pressure_makes_progress`。
+
