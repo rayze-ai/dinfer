@@ -5,7 +5,12 @@
 //! - 输出 token 数以服务端 `usage.completion_tokens`（`stream_options.include_usage`）为准，拿不到才退化为 chunk 数；
 //! - 吞吐 = 完成请求数 / 总墙钟、输出 token 总数 / 总墙钟、(prompt+输出) / 总墙钟。
 //!
-//! 负载：闭环并发（`--concurrency` 个 worker，各自串行发请求，直到总数 `--num-requests` 发完）。
+//! 负载两种：
+//! - 闭环并发（默认）：`--concurrency` 个 worker，各自串行发请求，直到总数 `--num-requests` 发完；
+//! - 开环泊松到达：`--request-rate R`（req/s）> 0 时，按指数分布间隔发请求、不等上一个完成（并发不设上限，
+//!   `--concurrency` 忽略）。这是线上流量的形态：prefill 与 decode 会在同一 step 里重叠，闭环固定并发做不到
+//!   （见 docs/loops/q3-xstream.md 第 7–9 轮）。
+//! prompt 长度：`--prompt-len` 固定，或 `--prompt-len-mix 128:0.5,1024:0.3,4096:0.2`（长度:权重，按 seed 抽样）。。
 //!
 //! prompt 由 `--seed` 决定性生成（同参数两次运行发同样的 prompt），长度以**服务端 `usage.prompt_tokens`** 回报为准。
 //!
@@ -48,6 +53,12 @@ struct Args {
     allow_eos: bool,
     #[arg(long, default_value_t = 42)]
     seed: u64,
+    /// 开环泊松到达速率（req/s）；0 = 闭环并发模式
+    #[arg(long, default_value_t = 0.0)]
+    request_rate: f64,
+    /// 长短混合 prompt："len:weight,len:weight,..."（覆盖 --prompt-len）
+    #[arg(long, default_value = "")]
+    prompt_len_mix: String,
     /// 预热请求数（不计入统计）
     #[arg(long, default_value_t = 2)]
     warmup: usize,
@@ -145,6 +156,46 @@ fn make_prompt(seed: u64, idx: usize, words: usize) -> String {
     }
     out.push('.');
     out
+}
+
+/// 解析 "128:0.5,1024:0.3" → [(128, 0.5), (1024, 0.3)]
+fn parse_len_mix(spec: &str) -> Result<Vec<(usize, f64)>> {
+    let mut v = Vec::new();
+    for part in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let (l, w) = part.split_once(':').with_context(|| format!("bad --prompt-len-mix item {part:?}"))?;
+        v.push((l.trim().parse()?, w.trim().parse()?));
+    }
+    anyhow::ensure!(!v.is_empty() && v.iter().all(|&(_, w)| w > 0.0), "--prompt-len-mix empty or non-positive weight");
+    Ok(v)
+}
+/// 第 idx 个请求的 prompt 长度：固定值，或按 mix 权重用 (seed, idx) 决定性抽样。
+fn prompt_len_for(a: &Args, mix: &[(usize, f64)], idx: usize) -> usize {
+    if mix.is_empty() {
+        return a.prompt_len;
+    }
+    let total: f64 = mix.iter().map(|m| m.1).sum();
+    let mut x = (a.seed ^ 0xA5A5_0000).wrapping_add((idx as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    x ^= x >> 29;
+    x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x ^= x >> 32;
+    let u = (x >> 11) as f64 / (1u64 << 53) as f64 * total;
+    let mut acc = 0.0;
+    for &(l, w) in mix {
+        acc += w;
+        if u < acc {
+            return l;
+        }
+    }
+    mix.last().unwrap().0
+}
+/// 指数分布间隔（均值 1/rate 秒），决定性：由 (seed, idx) 生成。
+fn exp_interval_s(seed: u64, idx: usize, rate: f64) -> f64 {
+    let mut x = (seed ^ 0x5EED_1234).wrapping_add((idx as u64).wrapping_mul(0xD1B5_4A32_D192_ED03));
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+    x ^= x >> 33;
+    let u = ((x >> 11) as f64 + 0.5) / (1u64 << 53) as f64; // (0,1)
+    -u.ln() / rate
 }
 
 async fn one_request(client: &reqwest::Client, url: &str, model: &str, prompt: &str, a: &Args) -> ReqResult {
@@ -267,23 +318,40 @@ async fn run(a: &Args) -> Result<Summary> {
             bail!("warmup request failed: {:?}", r.error);
         }
     }
-    let next = Arc::new(AtomicUsize::new(0));
+    let mix = if a.prompt_len_mix.is_empty() { Vec::new() } else { parse_len_mix(&a.prompt_len_mix)? };
     let t0 = Instant::now();
-    let mut handles = Vec::with_capacity(a.concurrency);
-    for _ in 0..a.concurrency {
-        let (client, a, model, next) = (client.clone(), a.clone(), model.clone(), next.clone());
-        handles.push(tokio::spawn(async move {
-            let mut out = Vec::new();
-            loop {
-                let i = next.fetch_add(1, Ordering::Relaxed);
-                if i >= a.num_requests {
-                    break;
-                }
-                let p = make_prompt(a.seed, i, a.prompt_len);
-                out.push(one_request(&client, &a.url, &model, &p, &a).await);
+    let mut handles = Vec::with_capacity(a.concurrency.max(a.num_requests.min(4096)));
+    if a.request_rate > 0.0 {
+        // 开环：按泊松过程到达，每个请求独立任务，不等前一个完成
+        let mut t_next = 0.0f64;
+        for i in 0..a.num_requests {
+            t_next += exp_interval_s(a.seed, i, a.request_rate);
+            let wait = Duration::from_secs_f64(t_next).saturating_sub(t0.elapsed());
+            if !wait.is_zero() {
+                tokio::time::sleep(wait).await;
             }
-            out
-        }));
+            let p = make_prompt(a.seed, i, prompt_len_for(&a, &mix, i));
+            let (client, a, model) = (client.clone(), a.clone(), model.clone());
+            handles.push(tokio::spawn(async move { vec![one_request(&client, &a.url, &model, &p, &a).await] }));
+        }
+    } else {
+        // 闭环固定并发
+        let next = Arc::new(AtomicUsize::new(0));
+        for _ in 0..a.concurrency {
+            let (client, a, model, next, mix) = (client.clone(), a.clone(), model.clone(), next.clone(), mix.clone());
+            handles.push(tokio::spawn(async move {
+                let mut out = Vec::new();
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= a.num_requests {
+                        break;
+                    }
+                    let p = make_prompt(a.seed, i, prompt_len_for(&a, &mix, i));
+                    out.push(one_request(&client, &a.url, &model, &p, &a).await);
+                }
+                out
+            }));
+        }
     }
     let mut results = Vec::with_capacity(a.num_requests);
     for h in handles {
@@ -320,7 +388,7 @@ async fn run(a: &Args) -> Result<Summary> {
         tpot_ms: pct(tpots),
         itl_ms: pct(itls),
         latency_ms: pct(ok.iter().map(|r| r.latency_ms).collect()),
-        args: serde_json::json!({"max_tokens": a.max_tokens, "temperature": a.temperature, "ignore_eos": !a.allow_eos, "seed": a.seed, "warmup": a.warmup}),
+        args: serde_json::json!({"max_tokens": a.max_tokens, "temperature": a.temperature, "ignore_eos": !a.allow_eos, "seed": a.seed, "warmup": a.warmup, "request_rate": a.request_rate, "prompt_len_mix": a.prompt_len_mix}),
     })
 }
 

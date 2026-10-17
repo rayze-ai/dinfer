@@ -19,7 +19,8 @@ restart_dinfer() { # $1 = XSTREAM value
   echo "dinfer did not come up"; exit 1
 }
 run() { # side url rate
-  local side=$1 url=$2 rate=$3 f="$OUT/${side}_r${rate}.json"
+  local side=$1 url=$2 rate=$3
+  local f="$OUT/${side}_r${rate}.json"
   "$BENCH" --url "$url" --label "$side" --request-rate "$rate" --num-requests "$REQS" --prompt-len-mix "$MIX" --max-tokens "$OUT_TOK" --seed "$SEED" --warmup 4 --out "$f" > "$OUT/${side}_r${rate}.log" 2>&1 \
     || { echo "bench $side rate=$rate failed:"; tail -3 "$OUT/${side}_r${rate}.log"; exit 1; }
 }
