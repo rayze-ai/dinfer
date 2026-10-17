@@ -258,12 +258,18 @@ impl Scheduler {
                 }
                 let victim = *self.running.last().unwrap();
                 if victim == slot {
+                    // 末尾就是自己。若还有别的 running（排在前面、本步已拿到块），本步跳过我、不抢占：
+                    // 下一步别人释放 / 完成后再试（vLLM 同样 "不自抢占"）。
+                    if self.running.len() > 1 {
+                        break None;
+                    }
+                    // 真正只剩我一个且仍分不到块：池装不下这个请求，只能以 Length 结束（不然就是 livelock）
                     let rid = r.id;
                     tracing::warn!(
                         req = rid,
                         tokens = r.num_tokens(),
                         free_blocks = self.kv.num_free_blocks(),
-                        "request cannot get a KV block and nobody else to preempt: finishing with Length"
+                        "sole running request cannot get a KV block: finishing with Length"
                     );
                     self.req_mut(slot).status = RequestStatus::Finished(FinishReason::Length);
                     self.finish_slot(slot);
@@ -873,5 +879,26 @@ mod tests {
         assert!(s.request(1).is_none(), "sole request that cannot grow must be finished, not spun");
         assert_eq!(forced, vec![(1, FinishReason::Length)]);
         assert_eq!(s.kv_usage(), 0.0, "its blocks must be freed");
+    }
+
+    /// 多个 running 时末尾请求分不到块：不得被 Length 结束、不得抢占自己；本步跳过，下一步前面的请求释放后再分到。
+    #[test]
+    fn tail_request_with_others_present_is_skipped_not_finished() {
+        // 池 6 块 = 96 token。r1 48 token（3 块）、r2 48 token（3 块）→ 池满。
+        let mut s = mk(8, 1000, 6);
+        s.add_request(req(1, 48, 2));
+        s.add_request(req(2, 48, 100));
+        let (o, _) = step(&mut s, &[(1, vec![1]), (2, vec![1])]);
+        assert_eq!(o.num_scheduled_tokens.len(), 2);
+        // 两者都要第 4 块：r1 先分（抢占末尾 r2 → r2 被抢占）。r1 还剩 1 个 token 到 max_tokens。
+        let (o, _) = step(&mut s, &[(1, vec![1])]);
+        assert_eq!(o.num_scheduled_tokens, vec![(1, 1)]);
+        assert_eq!(s.request(2).unwrap().status, RequestStatus::Preempted);
+        assert!(s.take_force_finished().is_empty(), "r2 was preempted, not force-finished");
+        // r1 完成 → 释放；r2 从 waiting 回来重算
+        let o = s.schedule();
+        assert!(s.request(1).is_none());
+        assert_eq!(o.num_scheduled_tokens.first().map(|x| x.0), Some(2));
+        assert!(s.take_force_finished().is_empty());
     }
 }
