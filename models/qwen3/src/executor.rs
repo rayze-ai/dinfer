@@ -128,7 +128,8 @@ pub struct Qwen3Executor {
     /// 异步调度：两个 pinned 槽轮转（步 n 的 D2H 在槽 n%2；finish n 必在 begin n+2 之前）。
     async_slots: [PinnedSlot; 2],
     async_slot_idx: usize,
-    async_inflight: Option<(usize, std::time::Instant, std::time::Instant, std::time::Instant)>, // (n, t0, t_launch, t_wait)
+    /// 在飞的异步步（最多 2 个：engine 先 begin n+1 再 finish n）：(槽, 行数, t0, t_launch, t_wait)。
+    async_inflight: std::collections::VecDeque<(usize, usize, std::time::Instant, std::time::Instant, std::time::Instant)>,
     /// 当前主字段是否是副套（swap_alt 后为 true）；副套上不走图。
     alt_active: bool,
     pub pair_steps: u64,
@@ -206,7 +207,7 @@ impl Qwen3Executor {
             last_rows: 0,
             async_slots,
             async_slot_idx: 0,
-            async_inflight: None,
+            async_inflight: std::collections::VecDeque::with_capacity(2),
             alt: None,
             alt_active: false,
             pair_steps: 0,
@@ -759,21 +760,20 @@ impl ModelExecutor for Qwen3Executor {
 
     /// 异步第一段：入队 + 异步 D2H（不等 GPU）。runner 只对 `async_eligible` 的 plan 调用（纯 decode）。
     fn begin(&mut self, plan: &BatchPlan) -> Result<()> {
-        ensure!(self.async_inflight.is_none(), "executor begin: previous async step not finished");
+        ensure!(self.async_inflight.len() < 2, "executor begin: two async steps already in flight");
         let t0 = std::time::Instant::now();
         let (n, t_launch) = self.enqueue(plan)?;
         let t_wait = std::time::Instant::now();
         let slot = self.async_slot_idx;
         self.async_slots[slot].enqueue_d2h(&self.stream, &self.buf.chosen.data, n)?;
         self.async_slot_idx ^= 1;
-        self.async_inflight = Some((n, t0, t_launch, t_wait));
+        self.async_inflight.push_back((slot, n, t0, t_launch, t_wait));
         Ok(())
     }
 
     fn finish(&mut self, generated: &mut Vec<Vec<u32>>, drafts: &mut Vec<Vec<u32>>) -> Result<()> {
-        let (n, t0, t_launch, t_wait) =
-            self.async_inflight.take().context("executor finish without begin")?;
-        let slot = self.async_slot_idx ^ 1; // begin 之后 idx 已翻转
+        let (slot, n, t0, t_launch, t_wait) =
+            self.async_inflight.pop_front().context("executor finish without begin")?;
         let chosen = self.async_slots[slot].wait_read()?;
         ensure!(chosen.len() == n, "async finish: {} values for {n} rows", chosen.len());
         self.main_done = Some(self.stream.record_event()?);
