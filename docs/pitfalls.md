@@ -323,3 +323,11 @@
 - ① 3090 本机：`QWEN3_GOLDEN` 相对路径（`test/qwen3_golden`）在 `cargo test -p dinfer` 的 cwd（`bins/dinfer`）下找不到 → 永远传绝对路径（`$PWD/test/qwen3_golden`）。
 - ② 4090 baseline：`remote4090_baseline.sh` 的 `run()` 只 grep `^test |test result|panicked`，e2e 子进程起服务失败（显存被上一步 parity 进程短暂占着）时 panic 行不含这些词，日志里只剩 `FAILED (rc=101)`。单独重跑 6/6 过。改进：baseline 失败时把该步全量日志 tail 出来；e2e 前 `sleep 3` 等显存释放。
 
+## 2026-10-17 启动慢 1 s 的真凶：qkv / gate_up 拼接走了 f32 host 往返，而且不在任何计时里
+
+- 现象：`model_load_ms` 2.0 s，但 `load_bf16` 统计（mmap touch + 转 Vec + H2D）只有 0.7 s；逐段加 `wall after` 累计墙钟才看出 layers 循环 1.6 s；再按 Attention/Mlp::load 内部分段，`Mlp::load` 1234 ms / 28 层。
+- 根因：`Attention::load`（q|k|v）和 `Mlp::load`（gate|up）为了拼接，用 `load_f32_host` 把 bf16 读成 f32 Vec、host 上 concat、再 `Tensor::from_f32` 转回 bf16 上传：每层 ~3–4 千万元素 × 2 次 dtype 转换 + 3 次 memcpy。这条路不经 `load_bf16`，所以 LOAD_STATS 看不见。
+- 解法：bf16 直接 `load_bf16` 上传，设备上 `memcpy_dtod` 拼进一个大 Tensor（零 host 计算）。4090 total 2.93 → 1.88 s。
+- 如何避免：定位启动耗时先放"累计墙钟"（`wall after <阶段>`）二分，再在最大段内按子阶段累加；任何 `load_f32_host` / `from_f32` 在加载路径上出现都要问一句"为什么不是 bf16 直传"。
+- 相关：`models/qwen3/src/model.rs::Attention::load`、`crates/layers/src/nn.rs::Mlp::load`、`docs/loops/q3-startup.md`。
+

@@ -173,14 +173,20 @@ pub struct Mlp {
 impl Mlp {
     /// 从 HF 的 gate_proj / up_proj / down_proj 装载并把 gate|up 纵向拼接。
     pub fn load(stream: &Stream, src: &WeightSource, prefix: &str, max_tokens: usize) -> Result<Self> {
-        let (gs, g) = src.load_f32_host(&format!("{prefix}.gate_proj.weight"))?;
-        let (us, u) = src.load_f32_host(&format!("{prefix}.up_proj.weight"))?;
-        ensure!(gs == us && gs.len() == 2, "gate/up shape mismatch {gs:?} {us:?}");
-        let (inter, hidden) = (gs[0], gs[1]);
-        let mut cat = Vec::with_capacity(g.len() + u.len());
-        cat.extend_from_slice(&g);
-        cat.extend_from_slice(&u);
-        let gate_up = Linear::new(Tensor::from_f32(stream, &cat, &[2 * inter, hidden])?, None)?;
+        // gate / up 以 bf16 直接上传，再在设备上拼成 [2·inter, hidden]（原先 f32 host 往返，28 层 ~1.2 s 启动时间）
+        let g = src.load_bf16(stream, &format!("{prefix}.gate_proj.weight"))?;
+        let u = src.load_bf16(stream, &format!("{prefix}.up_proj.weight"))?;
+        ensure!(g.shape == u.shape && g.shape.len() == 2, "gate/up shape mismatch {:?} {:?}", g.shape, u.shape);
+        let (inter, hidden) = (g.shape[0], g.shape[1]);
+        let mut cat = Tensor::<bf16>::zeros(stream, &[2 * inter, hidden])?;
+        {
+            let n = g.numel();
+            let mut top = cat.data.slice_mut(..n);
+            stream.inner_arc().memcpy_dtod(&g.data, &mut top)?;
+            let mut bottom = cat.data.slice_mut(n..2 * n);
+            stream.inner_arc().memcpy_dtod(&u.data, &mut bottom)?;
+        }
+        let gate_up = Linear::new(cat, None)?;
         let down = Linear::load(stream, src, &format!("{prefix}.down_proj"))?;
         Ok(Self {
             gate_up,
