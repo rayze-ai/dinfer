@@ -445,6 +445,22 @@ pub fn argmax_f32_n<L: DevicePtr<f32> + ?Sized, O: DevicePtrMut<i32> + ?Sized>(
     check(unsafe { ffi::argmax_f32(pl, po, batch as i64, vocab as i64, stream.raw() as _) }, "argmax_f32")
 }
 
+/// 异步调度：`ids[i] = prev[gather_idx[i]]`（gather_idx[i] < 0 的行保持 host 上传的值）。可进 CUDA graph。
+pub fn row_gather_i32(
+    stream: &Stream,
+    prev: &CudaSlice<i32>,
+    gather_idx: &CudaSlice<i32>,
+    ids: &mut CudaSlice<i32>,
+    n: usize,
+) -> Result<()> {
+    ensure!(gather_idx.len() >= n && ids.len() >= n, "row_gather_i32: shape");
+    let pp = stream.ptr(prev) as *const i32;
+    let pg = stream.ptr(gather_idx) as *const i32;
+    let pi = stream.ptr_mut(ids) as *mut i32;
+    // SAFETY: 容量已校验；prev 下标范围由 runner 保证（< 上一步行数）。
+    check(unsafe { ffi::row_gather_i32(pp, pg, pi, n as i64, stream.raw() as _) }, "row_gather_i32")
+}
+
 // ---------------------------------------------------------------------------
 // MLA
 // ---------------------------------------------------------------------------

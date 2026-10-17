@@ -73,6 +73,12 @@ struct Timing {
 
 pub struct Engine<E: ModelExecutor> {
     sched: Scheduler,
+    /// 异步调度开关（ASYNC_SCHED=0 关；scheduler 的 async_scheduling 必须同步设置）。
+    async_sched: bool,
+    /// 在飞的一步：(SchedulerOutput, runner Pending, t_step, t_sched)。
+    pending: Option<(crate::sched::output::SchedulerOutput, crate::runner::Pending, std::time::Instant, std::time::Instant)>,
+    /// 已同步完成、等着 update 的一步（异步步之后紧跟的 prefill 步）。
+    sync_done: Option<(crate::sched::output::SchedulerOutput, crate::sched::output::ModelRunnerOutput, std::time::Instant, std::time::Instant)>,
     runner: Runner<E>,
     rx: crossbeam_channel::Receiver<Cmd>,
     outs: HashMap<RequestId, tokio::sync::mpsc::UnboundedSender<EngineEvent>>,
@@ -85,10 +91,34 @@ impl<E: ModelExecutor> Engine<E> {
         let (tx, rx) = crossbeam_channel::unbounded();
         let metrics = Arc::new(Metrics::new());
         let h = EngineHandle { tx, next_id: Arc::new(AtomicU64::new(1)), metrics: metrics.clone() };
-        (Self { sched, runner, rx, outs: HashMap::new(), timing: HashMap::new(), metrics }, h)
+        let async_sched = std::env::var("ASYNC_SCHED").map(|v| v != "0").unwrap_or(true);
+        (
+            Self {
+                sched,
+                async_sched,
+                pending: None,
+                sync_done: None,
+                runner,
+                rx,
+                outs: HashMap::new(),
+                timing: HashMap::new(),
+                metrics,
+            },
+            h,
+        )
     }
 
     /// 一个 step 结束后的指标回填。
+    /// 执行失败：所有在跑的请求报错并清掉（GPU 状态不可信），返回 Err 结束引擎线程。
+    fn fail_step(&mut self, e: anyhow::Error) -> Result<()> {
+        let msg = format!("{e:#}");
+        tracing::error!("engine step failed: {msg}");
+        for (_, tx) in self.outs.drain() {
+            let _ = tx.send(EngineEvent::Error(msg.clone()));
+        }
+        Err(e)
+    }
+
     fn record_step(
         &mut self,
         so: &crate::sched::SchedulerOutput,
@@ -149,7 +179,7 @@ impl<E: ModelExecutor> Engine<E> {
     pub fn run(mut self) -> Result<()> {
         loop {
             // 空闲：阻塞等命令；忙：非阻塞吸收
-            if !self.sched.has_requests() {
+            if !self.sched.has_requests() && self.pending.is_none() && self.sync_done.is_none() {
                 match self.rx.recv() {
                     Ok(cmd) => {
                         if !self.handle(cmd) {
@@ -164,25 +194,61 @@ impl<E: ModelExecutor> Engine<E> {
                     return Ok(());
                 }
             }
-            if !self.sched.has_requests() {
+            if !self.sched.has_requests() && self.pending.is_none() && self.sync_done.is_none() {
                 continue;
             }
-            let t_step = std::time::Instant::now();
-            let so = self.sched.schedule();
-            let t_sched = std::time::Instant::now();
-            let mro = match self.runner.execute(&so) {
-                Ok(m) => m,
-                Err(e) => {
-                    // 执行失败：所有在跑的请求报错并清掉（GPU 状态不可信）
-                    let msg = format!("{e:#}");
-                    tracing::error!("engine step failed: {msg}");
-                    for (_, tx) in self.outs.drain() {
-                        let _ = tx.send(EngineEvent::Error(msg.clone()));
+            // 异步调度（Q3-l）：步 n 入队后，不等 GPU 就调度并入队步 n+1，再取 n 的结果。
+            // pending 最多 1 个：(so, Pending, t_step, t_sched)。
+            let (so, mro, t_step, t_sched, t_exec) = match self.pending.take() {
+                Some((so_n, pend_n, t_step_n, t_sched_n)) => {
+                    // 先把 n+1 排进去（若还有请求且 n 是异步的），再等 n
+                    if self.async_sched && self.sched.has_requests() {
+                        let t_step = std::time::Instant::now();
+                        let so_next = self.sched.schedule();
+                        let t_sched = std::time::Instant::now();
+                        let pend_next = match self.runner.begin(&so_next) {
+                            Ok(p) => p,
+                            Err(e) => return self.fail_step(e),
+                        };
+                        if self.runner.last_begin_was_async() {
+                            self.pending = Some((so_next, pend_next, t_step, t_sched));
+                        } else {
+                            // n+1 是同步步（prefill 等）：begin 已经跑完，直接 finish 排队到 pending 位
+                            let mro_next = match self.runner.finish(pend_next) {
+                                Ok(m) => m,
+                                Err(e) => return self.fail_step(e),
+                            };
+                            self.sync_done = Some((so_next, mro_next, t_step, t_sched));
+                        }
                     }
-                    return Err(e);
+                    let mro_n = match self.runner.finish(pend_n) {
+                        Ok(m) => m,
+                        Err(e) => return self.fail_step(e),
+                    };
+                    (so_n, mro_n, t_step_n, t_sched_n, std::time::Instant::now())
                 }
+                None => match self.sync_done.take() {
+                    Some((so, mro, t_step, t_sched)) => (so, mro, t_step, t_sched, std::time::Instant::now()),
+                    None => {
+                        let t_step = std::time::Instant::now();
+                        let so = self.sched.schedule();
+                        let t_sched = std::time::Instant::now();
+                        let pend = match self.runner.begin(&so) {
+                            Ok(p) => p,
+                            Err(e) => return self.fail_step(e),
+                        };
+                        if self.async_sched && self.runner.last_begin_was_async() {
+                            self.pending = Some((so, pend, t_step, t_sched));
+                            continue; // 下一轮循环：先排 n+1 再等 n
+                        }
+                        let mro = match self.runner.finish(pend) {
+                            Ok(m) => m,
+                            Err(e) => return self.fail_step(e),
+                        };
+                        (so, mro, t_step, t_sched, std::time::Instant::now())
+                    }
+                },
             };
-            let t_exec = std::time::Instant::now();
             let results = self.sched.update_from_output(&so, &mro);
             self.metrics.step_schedule.observe((t_sched - t_step).as_secs_f64());
             self.metrics.step_execute.observe((t_exec - t_sched).as_secs_f64());
@@ -273,5 +339,6 @@ pub fn scheduler_params(
     eos_token_ids: Vec<u32>,
     num_spec_tokens: u32,
 ) -> SchedulerParams {
-    SchedulerParams { sched, cache, max_model_len, num_spec_tokens, async_scheduling: false, eos_token_ids }
+    let async_scheduling = std::env::var("ASYNC_SCHED").map(|v| v != "0").unwrap_or(true);
+    SchedulerParams { sched, cache, max_model_len, num_spec_tokens, async_scheduling, eos_token_ids }
 }

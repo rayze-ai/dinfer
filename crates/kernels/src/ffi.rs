@@ -102,6 +102,7 @@ extern "C" {
     ) -> i32;
     pub fn argmax_f32(logits: *const f32, out: *mut i32, batch: i64, vocab: i64, stream: cudaStream_t)
         -> i32;
+    pub fn row_gather_i32(prev: *const i32, gather_idx: *const i32, ids: *mut i32, n: i64, stream: cudaStream_t) -> i32;
     pub fn topk_topp_mask_f32(
         logits: *mut f32,
         top_k: *const i32,

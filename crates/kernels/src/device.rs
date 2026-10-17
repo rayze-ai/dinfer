@@ -412,3 +412,56 @@ impl Drop for PinnedUploader {
         unsafe { let _ = result::free_host(self.host as *mut std::ffi::c_void); }
     }
 }
+
+// ---------------------------------------------------------------- 异步 D2H（Q3-l）
+/// 一块 pinned host 缓冲 + 一个事件：`enqueue_d2h` 在流上排一次异步 D2H 并记事件；`wait_read` 等事件后读。
+pub struct PinnedSlot {
+    host: *mut i32,
+    cap: usize,
+    event: sys::CUevent,
+    pending: usize,
+}
+// SAFETY: 只在 executor 线程使用。
+unsafe impl Send for PinnedSlot {}
+impl PinnedSlot {
+    pub fn new(stream: &Stream, cap: usize) -> Result<Self> {
+        stream.bind_ctx()?;
+        // SAFETY: pinned 分配 + 事件创建；Drop 释放。
+        unsafe {
+            let host = result::malloc_host(cap * 4, 0)? as *mut i32;
+            let event = result::event::create(sys::CUevent_flags::CU_EVENT_DISABLE_TIMING)?;
+            Ok(Self { host, cap, event, pending: 0 })
+        }
+    }
+    /// 把 `src[..n]` 异步拷到本槽并记事件（调用方保证上次 `wait_read` 已完成）。
+    pub fn enqueue_d2h(&mut self, stream: &Stream, src: &CudaSlice<i32>, n: usize) -> Result<()> {
+        anyhow::ensure!(n <= self.cap && n <= src.len(), "PinnedSlot: n {n} > cap {}", self.cap);
+        stream.bind_ctx()?;
+        // SAFETY: 目标 pinned、长度已校验；流序保证读到此刻 src 的值。
+        unsafe {
+            let dst = std::slice::from_raw_parts_mut(self.host, n);
+            result::memcpy_dtoh_async(dst, stream.ptr(src), stream.raw())?;
+            result::event::record(self.event, stream.raw())?;
+        }
+        self.pending = n;
+        Ok(())
+    }
+    /// 等事件完成，返回上次 enqueue 的 n 个值。
+    pub fn wait_read(&mut self) -> Result<Vec<i32>> {
+        // SAFETY: 事件已 record。
+        unsafe { result::event::synchronize(self.event)? };
+        let n = self.pending;
+        self.pending = 0;
+        // SAFETY: 范围内。
+        Ok(unsafe { std::slice::from_raw_parts(self.host, n) }.to_vec())
+    }
+}
+impl Drop for PinnedSlot {
+    fn drop(&mut self) {
+        // SAFETY: 独占。
+        unsafe {
+            let _ = result::free_host(self.host as *mut std::ffi::c_void);
+            let _ = result::event::destroy(self.event);
+        }
+    }
+}

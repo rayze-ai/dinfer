@@ -375,6 +375,14 @@ __global__ void logprobs_kernel(const float* __restrict__ logits, const int32_t*
   }
 }
 
+// 异步调度：把上一步采样结果 prev[gather_idx[i]] 写进本步 ids[i]（gather_idx[i] < 0 的行不动）。
+__global__ void row_gather_i32_kernel(const int32_t* __restrict__ prev, const int32_t* __restrict__ gather_idx,
+                                      int32_t* __restrict__ ids, int n) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  const int g = gather_idx[i];
+  if (g >= 0) ids[i] = prev[g];
+}
 }  // namespace
 
 extern "C" int penalties_f32(float* logits, const int32_t* ids, const int32_t* offsets, const int32_t* prompt_len,
@@ -423,5 +431,12 @@ extern "C" int sample_f32(const float* logits, const float* temperature, const u
   if (batch <= 0) return 0;
   if (vocab <= 0) return err(cudaErrorInvalidValue);
   sample_kernel<<<(unsigned)batch, BLOCK, 0, stream>>>(logits, temperature, seeds, offsets, out, (int)vocab);
+  return last_err();
+}
+
+extern "C" int row_gather_i32(const int32_t* prev, const int32_t* gather_idx, int32_t* ids, int64_t n,
+                              cudaStream_t stream) {
+  if (n <= 0) return 0;
+  row_gather_i32_kernel<<<(unsigned)((n + 255) / 256), 256, 0, stream>>>(prev, gather_idx, ids, (int)n);
   return last_err();
 }

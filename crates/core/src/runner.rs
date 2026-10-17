@@ -32,6 +32,8 @@ pub struct ReqState {
     pub seed: u64,
     /// 已在 KV 中算好的 token 数（本 step 开始时）。
     pub num_computed: usize,
+    /// 异步调度：该请求在上一步 plan 里的行号（上一步采样结果在 prev_chosen 的这一行），无则 None。
+    pub last_row: Option<u32>,
     /// 全量 block 表（单 group）。
     pub block_ids: Vec<BlockId>,
 }
@@ -66,6 +68,10 @@ pub struct BatchPlan {
     pub mode: BatchMode,
     /// 每请求一行的采样参数（与 req_ids 平行）。
     pub sample: SampleBatch,
+    /// 异步调度：按 token 行，`>= 0` 表示该行的 input_id 还在飞（上一步采样），值 = 上一步 plan 里的行号，
+    /// executor 在设备上用上一步的 chosen 填；`-1` = 用 `input_ids` 里的值。全 -1 时可忽略。
+    pub gather_idx: Vec<i32>,
+    pub any_gather: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -82,6 +88,13 @@ pub enum BatchMode {
 impl BatchPlan {
     pub fn num_reqs(&self) -> usize {
         self.req_ids.len()
+    }
+    /// 能否异步执行（结果回来前就调度下一步）：全 decode、无 draft、无惩罚 / logprobs（这些要 host 看 token）。
+    pub fn async_eligible(&self) -> bool {
+        self.mode == BatchMode::Decode
+            && self.spec_tokens.iter().all(|d| d.is_empty())
+            && !self.sample.any_penalty
+            && self.sample.max_logprobs.is_none()
     }
     pub fn total_tokens(&self) -> usize {
         self.input_ids.len()
@@ -123,14 +136,53 @@ pub trait ModelExecutor {
         Ok((lp_d, lp_p))
     }
 
+    /// 异步两段式：`begin` 上传 + 入队 + 异步 D2H（不等 GPU），`finish` 等结果。只在 `supports_async()` 且
+    /// plan 满足 `BatchPlan::async_eligible()` 时被 runner 调用；默认实现 = 同步 forward_sample 后缓存结果。
+    fn supports_async(&self) -> bool {
+        false
+    }
+    fn begin(&mut self, plan: &BatchPlan) -> Result<()> {
+        let (mut g, mut d) = (Vec::new(), Vec::new());
+        self.forward_sample(plan, &mut g, &mut d)?;
+        self.stash_sync_result(g, d);
+        Ok(())
+    }
+    fn finish(&mut self, generated: &mut Vec<Vec<u32>>, drafts: &mut Vec<Vec<u32>>) -> Result<()> {
+        let (g, d) = self.take_sync_result();
+        *generated = g;
+        *drafts = d;
+        Ok(())
+    }
+    /// 默认 begin/finish 的暂存（不支持异步的 executor 可不实现：默认 begin 直接走 forward_sample 并暂存）。
+    fn stash_sync_result(&mut self, _g: Vec<Vec<u32>>, _d: Vec<Vec<u32>>) {}
+    fn take_sync_result(&mut self) -> (Vec<Vec<u32>>, Vec<Vec<u32>>) {
+        (Vec::new(), Vec::new())
+    }
+
     /// 上一次 `forward_sample` 的 logprobs（与 req_ids 平行；不要 logprobs 的请求为空 Vec）。默认：不支持 → 全空。
     fn take_logprobs(&mut self, num_reqs: usize) -> Vec<Vec<TokenLogprobs>> {
         vec![Vec::new(); num_reqs]
     }
 }
 
+/// `Runner::begin` 的返回：finish 需要的每行信息。
+#[derive(Default)]
+pub struct Pending {
+    rows: Vec<PendingRow>,
+    req_ids: Vec<RequestId>,
+    is_async: bool,
+    lps_override: Option<Vec<Vec<TokenLogprobs>>>,
+}
+struct PendingRow {
+    rid: RequestId,
+    n: usize,
+    num_draft: usize,
+    end_of_seq: bool,
+}
+
 pub struct Runner<E: ModelExecutor> {
     pub exec: E,
+    last_async: bool,
     pub block_size: usize,
     states: IdHashMap<ReqState>,
     plan: BatchPlan,
@@ -147,6 +199,7 @@ impl<E: ModelExecutor> Runner<E> {
     pub fn new(exec: E, block_size: usize) -> Self {
         Self {
             exec,
+            last_async: false,
             block_size,
             states: id_hash_map(64),
             plan: BatchPlan::default(),
@@ -171,62 +224,116 @@ impl<E: ModelExecutor> Runner<E> {
     }
 
     /// 执行一个 step：更新状态 → 组 batch → forward+sample → 回填状态。
+    /// 同步执行一步（= begin + finish）。
     pub fn execute(&mut self, so: &SchedulerOutput) -> Result<ModelRunnerOutput> {
+        let pending = self.begin(so)?;
+        self.finish(pending)
+    }
+
+    /// 本步是否会走异步路径（engine 据此决定要不要在 finish 前先调度下一步）。只有 begin 之后才准确。
+    pub fn last_begin_was_async(&self) -> bool {
+        self.last_async
+    }
+
+    /// 第一段：更新状态、建 plan、入队。异步合格时不等 GPU；返回的 `Pending` 交给 `finish`。
+    /// 状态里的 `num_computed` 在这里就推进（下一步 build_plan 需要），token_ids 在 finish 时补。
+    pub fn begin(&mut self, so: &SchedulerOutput) -> Result<Pending> {
         self.update_states(so)?;
         if so.num_scheduled_tokens.is_empty() {
-            return Ok(ModelRunnerOutput::default());
+            self.last_async = false;
+            return Ok(Pending::default());
         }
         self.build_plan(so)?;
         self.generated.clear();
         self.drafts.clear();
-        // 跨流并行（Q3-j）：混批且 executor 支持 → decode 批 / prefill 批分别执行，结果按原顺序散回
-        let lps_override = self.try_execute_pair(so)?;
-        if lps_override.is_none() {
-            self.exec.forward_sample(&self.plan, &mut self.generated, &mut self.drafts)?;
+        let use_async = self.exec.supports_async() && self.plan.async_eligible();
+        self.last_async = use_async;
+        let mut lps_override = None;
+        if use_async {
+            self.exec.begin(&self.plan)?;
+        } else {
+            // 跨流并行（Q3-j）：混批且 executor 支持 → decode 批 / prefill 批分别执行，结果按原顺序散回
+            lps_override = self.try_execute_pair(so)?;
+            if lps_override.is_none() {
+                self.exec.forward_sample(&self.plan, &mut self.generated, &mut self.drafts)?;
+            }
         }
-        ensure!(
-            self.generated.len() == self.plan.num_reqs() && self.drafts.len() == self.plan.num_reqs(),
-            "executor returned {}/{} entries for {} requests",
-            self.generated.len(),
-            self.drafts.len(),
-            self.plan.num_reqs()
-        );
-        // 回填：computed 推进；只有 "本步算到了序列末尾"（prefill 末块 / decode）的采样才是真 token，
-        // prefill 中间 chunk 的采样无意义：不追加、也不上报（scheduler 侧同样忽略，见 vLLM `_prepare_inputs`）。
-        // 投机：本步 n = base + 草稿数；executor 返回 1 + 接受数个 token；被拒绝的 draft 行从 computed 回退。
-        let mut out = ModelRunnerOutput {
-            req_ids: self.plan.req_ids.clone(),
-            sampled: Vec::with_capacity(self.plan.num_reqs()),
-            drafts: Vec::with_capacity(self.plan.num_reqs()),
-            logprobs: Vec::with_capacity(self.plan.num_reqs()),
-        };
-        let mut lps = match lps_override {
-            Some(l) => l,
-            None => self.exec.take_logprobs(self.plan.num_reqs()),
-        };
-        ensure!(lps.len() == self.plan.num_reqs(), "executor returned {} logprob entries", lps.len());
+        // 记录每行的 (rid, n, num_draft, end_of_seq, row)，并推进 num_computed（token 值稍后补）
+        let mut rows = Vec::with_capacity(self.plan.num_reqs());
         for (i, &rid) in self.plan.req_ids.iter().enumerate() {
             let st = self.states.get_mut(&rid).unwrap();
             let n = self.plan.num_tokens[i] as usize;
             let num_draft = self.plan.spec_tokens[i].len();
             let base = n - num_draft;
-            let end_of_seq = st.num_computed + base == st.token_ids.len();
-            if end_of_seq {
+            let end_of_seq = st.num_computed + base >= st.token_ids.len();
+            // 异步合格的 plan 全是 decode（n=1，无 draft），这里可以提前推进；非异步时 finish 会用同一 rows 回填
+            if use_async {
+                st.num_computed += base; // accepted=0（无 draft）
+                st.last_row = Some(i as u32);
+            }
+            rows.push(PendingRow { rid, n, num_draft, end_of_seq });
+        }
+        Ok(Pending { rows, req_ids: self.plan.req_ids.clone(), is_async: use_async, lps_override })
+    }
+
+    /// 第二段：取结果、补 token、产出 ModelRunnerOutput。
+    pub fn finish(&mut self, pending: Pending) -> Result<ModelRunnerOutput> {
+        if pending.req_ids.is_empty() {
+            return Ok(ModelRunnerOutput::default());
+        }
+        if pending.is_async {
+            self.generated.clear();
+            self.drafts.clear();
+            self.exec.finish(&mut self.generated, &mut self.drafts)?;
+        }
+        ensure!(
+            self.generated.len() == pending.req_ids.len() && self.drafts.len() == pending.req_ids.len(),
+            "executor returned {}/{} entries for {} requests",
+            self.generated.len(),
+            self.drafts.len(),
+            pending.req_ids.len()
+        );
+        let mut out = ModelRunnerOutput {
+            req_ids: pending.req_ids.clone(),
+            sampled: Vec::with_capacity(pending.req_ids.len()),
+            drafts: Vec::with_capacity(pending.req_ids.len()),
+            logprobs: Vec::with_capacity(pending.req_ids.len()),
+        };
+        let mut lps = match pending.lps_override {
+            Some(l) => l,
+            None => self.exec.take_logprobs(pending.req_ids.len()),
+        };
+        ensure!(lps.len() == pending.req_ids.len(), "executor returned {} logprob entries", lps.len());
+        for (i, row) in pending.rows.iter().enumerate() {
+            let Some(st) = self.states.get_mut(&row.rid) else {
+                // 请求在飞行期间已结束并被清理（异步下一步已算了它一行）：丢弃
+                out.sampled.push(Vec::new());
+                out.drafts.push(Vec::new());
+                out.logprobs.push(Vec::new());
+                continue;
+            };
+            let base = row.n - row.num_draft;
+            if row.end_of_seq {
                 let gen = &self.generated[i];
                 ensure!(
-                    !gen.is_empty() && gen.len() <= 1 + num_draft,
-                    "req {rid}: executor returned {} tokens",
+                    !gen.is_empty() && gen.len() <= 1 + row.num_draft,
+                    "req {}: executor returned {} tokens",
+                    row.rid,
                     gen.len()
                 );
                 let accepted = gen.len() - 1;
-                st.num_computed += base + accepted;
+                if !pending.is_async {
+                    st.num_computed += base + accepted;
+                }
                 st.token_ids.extend_from_slice(gen);
                 out.sampled.push(gen.clone());
                 out.drafts.push(self.drafts[i].clone());
                 out.logprobs.push(std::mem::take(&mut lps[i]));
             } else {
-                ensure!(num_draft == 0, "req {rid}: draft on a mid-prefill chunk");
-                st.num_computed += n;
+                ensure!(row.num_draft == 0, "req {}: draft on a mid-prefill chunk", row.rid);
+                if !pending.is_async {
+                    st.num_computed += row.n;
+                }
                 out.sampled.push(Vec::new());
                 out.drafts.push(Vec::new());
                 out.logprobs.push(Vec::new());
@@ -248,6 +355,7 @@ impl<E: ModelExecutor> Runner<E> {
                 seed: n.sampling.seed.unwrap_or_else(|| crate::sampler::random_seed(n.req_id)),
                 sampling: n.sampling.clone(),
                 num_computed: n.num_computed_tokens as usize,
+                last_row: None,
                 block_ids: n.block_ids.group(0).to_vec(),
             };
             self.states.insert(n.req_id, st);
@@ -363,6 +471,8 @@ impl<E: ModelExecutor> Runner<E> {
         p.spec_tokens.clear();
         p.next_known.clear();
         p.sample.clear();
+        p.gather_idx.clear();
+        p.any_gather = false;
         p.cu_seqlens.push(0);
         p.logits_row_start.push(0);
 
@@ -383,7 +493,15 @@ impl<E: ModelExecutor> Runner<E> {
             let base = n
                 .checked_sub(spec.len())
                 .with_context(|| format!("req {rid}: {n} tokens < {} drafts", spec.len()))?;
-            ensure!(start + base <= st.token_ids.len(), "req {rid}: scheduled {base} tokens past end");
+            // 异步调度：最后 1 个 token 可能还在飞（上一步采样未回）：允许 start + base == token_ids.len() + 1，
+            // 该行 input_id 由设备从上一步 chosen gather（st.last_row）。
+            let in_flight = start + base == st.token_ids.len() + 1;
+            ensure!(
+                start + base <= st.token_ids.len() + 1,
+                "req {rid}: scheduled {base} tokens past end (have {}, start {start})",
+                st.token_ids.len()
+            );
+            ensure!(!in_flight || (base == 1 && st.last_row.is_some()), "req {rid}: in-flight token without last_row");
             if start == 0 {
                 any_prefill = true;
             } else if n == 1 {
@@ -395,8 +513,17 @@ impl<E: ModelExecutor> Runner<E> {
             p.num_tokens.push(n as u32);
             let row0 = p.input_ids.len();
             for (k, pos) in (start..start + n).enumerate() {
-                let tok = if k < base { st.token_ids[pos] } else { spec[k - base] };
+                let (tok, gather) = if k < base {
+                    match st.token_ids.get(pos) {
+                        Some(&t) => (t, -1),
+                        None => (0, st.last_row.unwrap() as i32), // 在飞：设备上 gather
+                    }
+                } else {
+                    (spec[k - base], -1)
+                };
                 p.input_ids.push(tok as i32);
+                p.gather_idx.push(gather);
+                p.any_gather |= gather >= 0;
                 p.positions.push(pos as i32);
                 let b = st
                     .block_ids

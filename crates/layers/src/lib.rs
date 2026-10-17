@@ -14,7 +14,7 @@ pub mod tensor;
 pub mod weights;
 pub mod weights_fp8;
 
-pub use dinfer_kernels::{bf16, Device, Gemm, RopeStyle, Stream, Event, TimingEvent, PinnedUploader};
+pub use dinfer_kernels::{bf16, Device, Gemm, RopeStyle, Stream, Event, TimingEvent, PinnedUploader, PinnedSlot};
 pub use indexer::{Indexer, IndexerConfig, IndexerKv, IndexerMeta};
 pub use mla::{MlaAttention, MlaConfig, PagedKv};
 pub use moe::{Moe, MoeConfig};

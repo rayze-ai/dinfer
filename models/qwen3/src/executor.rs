@@ -19,7 +19,7 @@ use dinfer_core::runner::{BatchMode, BatchPlan, ModelExecutor, PairLogprobs};
 use dinfer_core::sampler::{SampleBatch, TokenLogprobs};
 use dinfer_kernels as k;
 use dinfer_kernels::Graph;
-use dinfer_layers::{Gemm, Stream, Tensor, Event, TimingEvent, PinnedUploader};
+use dinfer_layers::{Gemm, Stream, Tensor, Event, TimingEvent, PinnedUploader, PinnedSlot};
 
 /// 固定地址的每 step 输入缓冲。
 struct StepBuffers {
@@ -46,6 +46,9 @@ struct StepBuffers {
     hist_prompt_len: Tensor<i32>, // [max_rows]
     hist_ids: Tensor<i32>,        // 可增长（惩罚历史，eager 路径）
     chosen: Tensor<i32>,          // [max_rows]
+    /// 异步调度：本步每 token 行从上一步 chosen 取 id 的行号（-1 = 用 ids 里的值）；上一步 chosen 的副本。
+    gather_idx: Tensor<i32>,      // [max_tokens]
+    prev_chosen: Tensor<i32>,     // [max_rows]
     lp_ids: Tensor<i32>,          // [max_rows * 33]
     lp_val: Tensor<f32>,
     lp_rank: Tensor<i32>,
@@ -85,6 +88,8 @@ impl StepBuffers {
             hist_prompt_len: z32(rows)?,
             hist_ids: z32(1024)?,
             chosen: z32(rows)?,
+            gather_idx: Tensor::<i32>::from_vec(s, vec![-1; mt.max(1)], &[mt.max(1)])?,
+            prev_chosen: z32(rows)?,
             lp_ids: z32(rows * 33)?,
             lp_val: zf(rows * 33)?,
             lp_rank: z32(rows)?,
@@ -120,6 +125,10 @@ pub struct Qwen3Executor {
     last_logprobs: Vec<Vec<TokenLogprobs>>,
     last_rows: usize,
     alt: Option<AltSet>,
+    /// 异步调度：两个 pinned 槽轮转（步 n 的 D2H 在槽 n%2；finish n 必在 begin n+2 之前）。
+    async_slots: [PinnedSlot; 2],
+    async_slot_idx: usize,
+    async_inflight: Option<(usize, std::time::Instant, std::time::Instant, std::time::Instant)>, // (n, t0, t_launch, t_wait)
     /// 当前主字段是否是副套（swap_alt 后为 true）；副套上不走图。
     alt_active: bool,
     pub pair_steps: u64,
@@ -182,6 +191,7 @@ impl Qwen3Executor {
         let mt = model.max_tokens;
         let max_blocks = max_blocks_per_seq.max(1);
         let buf = StepBuffers::alloc(&s, mt, rows, max_blocks)?;
+        let async_slots = [PinnedSlot::new(&s, rows)?, PinnedSlot::new(&s, rows)?];
         let mut ex = Self {
             logits: Tensor::zeros(&s, &[rows, v])?,
             work: Tensor::zeros(&s, &[rows, v])?,
@@ -194,6 +204,9 @@ impl Qwen3Executor {
             graphs_enabled: false,
             last_logprobs: Vec::new(),
             last_rows: 0,
+            async_slots,
+            async_slot_idx: 0,
+            async_inflight: None,
             alt: None,
             alt_active: false,
             pair_steps: 0,
@@ -267,6 +280,10 @@ impl Qwen3Executor {
         pos.resize(tt, 0);
         slots.resize(tt, -1);
         self.buf.up.push(s, &ids, &mut self.buf.ids.data)?;
+        // 异步调度：在飞行的 token 行由设备 gather；非异步 plan 的 gather_idx 全 -1（图内 kernel 不改 ids）
+        let mut gidx = plan.gather_idx.clone();
+        gidx.resize(tt, -1);
+        self.buf.up.push(s, &gidx, &mut self.buf.gather_idx.data)?;
         self.buf.up.push(s, &pos, &mut self.buf.pos.data)?;
         self.buf.up.push(s, &slots, &mut self.buf.slots.data)?;
         // 行维
@@ -353,6 +370,8 @@ impl Qwen3Executor {
 
     /// forward（固定缓冲，显式 t / rows / batch）。
     fn forward_device(&mut self, mode: BatchMode, t: usize, nb: usize, max_seqlen: usize) -> Result<()> {
+        // 异步调度：ids[i] = prev_chosen[gather_idx[i]]（gather_idx<0 的行不动）。进图；非异步步全 -1 等于空操作。
+        k::row_gather_i32(&self.stream, &self.buf.prev_chosen.data, &self.buf.gather_idx.data, &mut self.buf.ids.data, t)?;
         let meta = AttnMeta {
             mode,
             cu_seqlens: &self.buf.cu,
@@ -397,6 +416,11 @@ impl Qwen3Executor {
             &mut ch,
             v,
         )?;
+        // 异步调度：保存本步采样给下一步 gather（图内；非异步时无害）
+        {
+            let StepBuffers { chosen, prev_chosen, .. } = &mut self.buf;
+            self.stream.dtod_copy_n(&chosen.data, &mut prev_chosen.data, nb)?;
+        }
         Ok(())
     }
 
@@ -483,6 +507,8 @@ impl Qwen3Executor {
             let mut ch = self.buf.chosen.data.slice_mut(..nrows);
             k::argmax_f32_n(s, &lg, &mut ch, nrows, v)?;
             self.last_logprobs = vec![Vec::new(); nrows];
+            let StepBuffers { chosen, prev_chosen, .. } = &mut self.buf;
+            self.stream.dtod_copy_n(&chosen.data, &mut prev_chosen.data, nrows)?;
             return Ok(());
         }
         self.upload_sampling(sb, nrows)?;
@@ -568,6 +594,10 @@ impl Qwen3Executor {
                     top,
                 }];
             }
+        }
+        {
+            let StepBuffers { chosen, prev_chosen, .. } = &mut self.buf;
+            self.stream.dtod_copy_n(&chosen.data, &mut prev_chosen.data, nrows)?;
         }
         Ok(())
     }
@@ -721,6 +751,35 @@ fn push_tokens(generated: &mut Vec<Vec<u32>>, drafts: &mut Vec<Vec<u32>>, chosen
 impl ModelExecutor for Qwen3Executor {
     fn supports_pair(&self) -> bool {
         self.alt.is_some()
+    }
+
+    fn supports_async(&self) -> bool {
+        std::env::var("ASYNC_SCHED").map(|v| v != "0").unwrap_or(true)
+    }
+
+    /// 异步第一段：入队 + 异步 D2H（不等 GPU）。runner 只对 `async_eligible` 的 plan 调用（纯 decode）。
+    fn begin(&mut self, plan: &BatchPlan) -> Result<()> {
+        ensure!(self.async_inflight.is_none(), "executor begin: previous async step not finished");
+        let t0 = std::time::Instant::now();
+        let (n, t_launch) = self.enqueue(plan)?;
+        let t_wait = std::time::Instant::now();
+        let slot = self.async_slot_idx;
+        self.async_slots[slot].enqueue_d2h(&self.stream, &self.buf.chosen.data, n)?;
+        self.async_slot_idx ^= 1;
+        self.async_inflight = Some((n, t0, t_launch, t_wait));
+        Ok(())
+    }
+
+    fn finish(&mut self, generated: &mut Vec<Vec<u32>>, drafts: &mut Vec<Vec<u32>>) -> Result<()> {
+        let (n, t0, t_launch, t_wait) =
+            self.async_inflight.take().context("executor finish without begin")?;
+        let slot = self.async_slot_idx ^ 1; // begin 之后 idx 已翻转
+        let chosen = self.async_slots[slot].wait_read()?;
+        ensure!(chosen.len() == n, "async finish: {} values for {n} rows", chosen.len());
+        self.main_done = Some(self.stream.record_event()?);
+        self.account(t0, t_launch, t_wait);
+        push_tokens(generated, drafts, &chosen);
+        Ok(())
     }
 
     fn forward_sample(

@@ -46,6 +46,7 @@ int temperature_f32(float* logits, const float* temperature, int64_t batch, int6
 int logprobs_f32(const float* logits, const int32_t* chosen, int64_t k, int32_t* out_ids, float* out_lp, int32_t* rank,
                  int64_t batch, int64_t vocab, cudaStream_t stream);
 int argmax_f32(const float* logits, int32_t* out, int64_t batch, int64_t vocab, cudaStream_t stream);
+int row_gather_i32(const int32_t* prev, const int32_t* gather_idx, int32_t* ids, int64_t n, cudaStream_t stream);
 // 对每行做 top-k / top-p 掩码（不满足的置 -inf）。top_k<=0 表示不限；top_p>=1 表示不限。
 int topk_topp_mask_f32(float* logits, const int32_t* top_k, const float* top_p, int64_t batch, int64_t vocab,
                        cudaStream_t stream);
