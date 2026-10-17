@@ -18,3 +18,4 @@
 | 轮 | 块 | 现象 | 根因 | 处理 |
 |---|---|---|---|---|
 | 1 | 实现 | 2026-10-17 | — | engine pending 分支 + runner `begin_cut_in` + executor skip flag |
+| 2 | 本机验收 | core 34/34、real_parity 3/3、serve_e2e 6/6（ASYNC=1 + CUT_IN=1）。实现细节：插队步结果占用 `sync_done` 槽后，本轮不再预排 n+1（否则要两个 sync_done）；即插队那一步之后 decode 流水有一次"空档"（n finish → publish 插队结果 → 再 schedule n+1）。代价 ≈ 一次 host 往返（~0.3 ms）只在有新请求到达的步发生，换新请求 TTFT -1 步（3–4 ms） | — | 4090 bench27 + 等价性 |
