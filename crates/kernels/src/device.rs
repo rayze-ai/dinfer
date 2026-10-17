@@ -56,6 +56,12 @@ impl Device {
 }
 
 impl Stream {
+    /// 不清零的显存分配（省一次 memset；17 GiB KV ≈ 60 ms）。
+    /// 安全前提：调用方保证每个元素在被读之前都已被写（KV cache：块只在 slot_mapping 写入后才进 block_table）。
+    pub fn alloc_uninit<T: DeviceRepr>(&self, len: usize) -> Result<CudaSlice<T>> {
+        // SAFETY: 见上；返回的内存内容未定义，调用方负责先写后读。
+        Ok(unsafe { self.inner.alloc::<T>(len)? })
+    }
     pub fn alloc_zeros<T: DeviceRepr + ValidAsZeroBits>(&self, len: usize) -> Result<CudaSlice<T>> {
         Ok(self.inner.alloc_zeros::<T>(len)?)
     }

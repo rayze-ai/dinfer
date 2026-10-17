@@ -89,9 +89,11 @@ impl Qwen3Service {
         let dev = Device::new(opt.device)?;
         let s = dev.default_stream();
         let t_cuda = t_start.elapsed();
+        // 注：曾试过把 open（mmap populate）放线程与 Device::new 并行，结果 cuda_init 250 → 430 ms、总时长不变：
+        // 两者都在争内存带宽 / 页表锁，并行无收益（启动 loop 第 7 轮），保持串行。
         let t_open = std::time::Instant::now();
         let src = WeightSource::open_dir(model_dir)?;
-        tracing::info!(open_ms = t_open.elapsed().as_millis() as u64, "load timing: safetensors open (mmap + header)");
+        tracing::info!(open_ms = t_open.elapsed().as_millis() as u64, "load timing: safetensors open (mmap populate + header)");
         // 一步最多 token 数：exempt 模式下 decode 行不占预算，上限 = 预算 + max_num_seqs
         let max_tokens = if opt.decode_exempt_from_budget {
             (opt.max_num_batched_tokens + opt.max_num_seqs) as usize

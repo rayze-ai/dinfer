@@ -509,7 +509,8 @@ impl Qwen3Model {
         let mut kv = Vec::with_capacity(cfg.num_hidden_layers as usize);
         for _ in 0..cfg.num_hidden_layers {
             kv.push(PagedKv {
-                cache: Tensor::zeros(stream, &[num_blocks, block_size, hk, 2, d])?,
+                // 不清零：块在写入（qkv_post / cache_write）之前不会被任何 block_table 引用
+                cache: Tensor::uninit(stream, &[num_blocks, block_size, hk, 2, d])?,
                 num_blocks,
                 block_size,
             });

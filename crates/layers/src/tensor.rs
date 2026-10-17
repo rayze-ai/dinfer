@@ -10,6 +10,14 @@ pub struct Tensor<T> {
     pub shape: Vec<usize>,
 }
 
+impl<T: DeviceRepr> Tensor<T> {
+    /// 不清零分配（见 `Stream::alloc_uninit` 的安全前提）。
+    pub fn uninit(stream: &Stream, shape: &[usize]) -> Result<Self> {
+        let n: usize = shape.iter().product();
+        Ok(Self { data: stream.alloc_uninit::<T>(n)?, shape: shape.to_vec() })
+    }
+}
+
 impl<T: DeviceRepr + ValidAsZeroBits> Tensor<T> {
     pub fn zeros(stream: &Stream, shape: &[usize]) -> Result<Self> {
         let n: usize = shape.iter().product();
