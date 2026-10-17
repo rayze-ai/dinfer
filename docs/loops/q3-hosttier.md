@@ -25,3 +25,4 @@
 | 轮 | 块 | 现象 | 根因 | 处理 |
 |---|---|---|---|---|
 | 1 | 实现 | 2026-10-17 | — | 索引 + scheduler 两处接入 + executor 拷贝 + runner 接线 + CLI + 指标 |
+| 2 | core 侧 | `kv/host_tier.rs` 索引（HashMap + 线性 LRU，单测）；manager：`host_tier_lookup / register_fetched_blocks / pending_offload`，`cache_blocks_inner` 登记时顺带 insert → offload；scheduler 首次调度：GPU 命中之后查 host 命中 → 多分配 host_tokens 的块、发 `kv_fetch`、num_computed 推进；`SchedulerOutput.kv_fetch/kv_offload`；runner 在 enqueue 前 `kv_fetch`、后 `kv_offload`；metrics 三个计数 | — | executor 侧（copy stream + pinned 竞技场）→ CLI → e2e |
