@@ -19,3 +19,4 @@
 |---|---|---|---|---|
 | 1 | 实现 | 2026-10-17 | — | engine pending 分支 + runner `begin_cut_in` + executor skip flag |
 | 2 | 本机验收 | core 34/34、real_parity 3/3、serve_e2e 6/6（ASYNC=1 + CUT_IN=1）。实现细节：插队步结果占用 `sync_done` 槽后，本轮不再预排 n+1（否则要两个 sync_done）；即插队那一步之后 decode 流水有一次"空档"（n finish → publish 插队结果 → 再 schedule n+1）。代价 ≈ 一次 host 往返（~0.3 ms）只在有新请求到达的步发生，换新请求 TTFT -1 步（3–4 ms） | — | 4090 bench27 + 等价性 |
+| 3 | 4090 翻车 | baseline PASS、c8-long 单测 TTFT p50 33.6（bench26 54）说明方向对；但 bench_compare 中 engine 报 `cut-in step contains an in-flight decode row` 退出 | `schedule()` 只对 "token 在飞" 的 decode 行跳过（placeholder 条件），**刚完成 prefill、首个 decode 还没调度过**的 running 行仍会被排进来，与新请求混批 → begin_cut_in 的 any_gather 断言不成立的另一种情况：它有 gather（上一步是它的 prefill，首 token 在飞） | scheduler 加 `schedule_waiting_only()`（跳过 running 循环，只接 waiting，预算全给新请求）；engine 的 sync_done 改队列（插队步 + 预排的 n+1 都能放下，不留空档）|
