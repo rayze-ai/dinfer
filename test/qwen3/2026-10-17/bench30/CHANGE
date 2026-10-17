@@ -1,0 +1,1 @@
+r host tier 实现（默认关，常驻未开）+ OpSet；回归基线应与 bench29 持平

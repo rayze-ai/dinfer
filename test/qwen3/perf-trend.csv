@@ -323,3 +323,15 @@ bench29,2026-10-17,q OpSet：四组热路径算子进 trait（DefaultOps 零成�
 bench29,2026-10-17,q OpSet：四组热路径算子进 trait（DefaultOps 零成本包装），模型泛型化；应与 bench28 零差异,c8-long,out_tok_per_s,1910.900,1912.211,0.999,0.2,higher
 bench29,2026-10-17,q OpSet：四组热路径算子进 trait（DefaultOps 零成本包装），模型泛型化；应与 bench28 零差异,c8-long,ttft_p50_ms,34.332,54.155,0.634,0.8,lower
 bench29,2026-10-17,q OpSet：四组热路径算子进 trait（DefaultOps 零成本包装），模型泛型化；应与 bench28 零差异,c8-long,tpot_p50_ms,3.934,3.752,1.049,0.1,lower
+bench30,2026-10-17,r host tier 实现（默认关，常驻未开）+ OpSet；回归基线应与 bench29 持平,c1,out_tok_per_s,509.027,446.886,1.139,0.0,higher
+bench30,2026-10-17,r host tier 实现（默认关，常驻未开）+ OpSet；回归基线应与 bench29 持平,c1,ttft_p50_ms,3.993,17.291,0.231,3.2,lower
+bench30,2026-10-17,r host tier 实现（默认关，常驻未开）+ OpSet；回归基线应与 bench29 持平,c1,tpot_p50_ms,1.947,2.119,0.919,-0.1,lower
+bench30,2026-10-17,r host tier 实现（默认关，常驻未开）+ OpSet；回归基线应与 bench29 持平,c8,out_tok_per_s,3104.922,2913.926,1.066,-0.0,higher
+bench30,2026-10-17,r host tier 实现（默认关，常驻未开）+ OpSet；回归基线应与 bench29 持平,c8,ttft_p50_ms,13.969,30.357,0.460,0.7,lower
+bench30,2026-10-17,r host tier 实现（默认关，常驻未开）+ OpSet；回归基线应与 bench29 持平,c8,tpot_p50_ms,2.461,2.538,0.970,0.1,lower
+bench30,2026-10-17,r host tier 实现（默认关，常驻未开）+ OpSet；回归基线应与 bench29 持平,c32,out_tok_per_s,8826.006,8213.142,1.075,0.1,higher
+bench30,2026-10-17,r host tier 实现（默认关，常驻未开）+ OpSet；回归基线应与 bench29 持平,c32,ttft_p50_ms,22.494,77.896,0.289,2.8,lower
+bench30,2026-10-17,r host tier 实现（默认关，常驻未开）+ OpSet；回归基线应与 bench29 持平,c32,tpot_p50_ms,3.414,3.334,1.024,0.2,lower
+bench30,2026-10-17,r host tier 实现（默认关，常驻未开）+ OpSet；回归基线应与 bench29 持平,c8-long,out_tok_per_s,1911.995,1907.532,1.002,0.1,higher
+bench30,2026-10-17,r host tier 实现（默认关，常驻未开）+ OpSet；回归基线应与 bench29 持平,c8-long,ttft_p50_ms,35.049,56.881,0.616,-2.1,lower
+bench30,2026-10-17,r host tier 实现（默认关，常驻未开）+ OpSet；回归基线应与 bench29 持平,c8-long,tpot_p50_ms,3.923,3.757,1.044,0.3,lower
