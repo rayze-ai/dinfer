@@ -24,6 +24,22 @@ pub struct TensorInfo {
     pub file: usize,
 }
 
+
+/// 权重加载分段耗时（线程局部累计）：host = mmap 页读入 + 转 Vec<bf16>（含 fp8/f32 转换）；h2d = htod_copy + 同步。
+/// `take_load_stats()` 读出并清零；用于启动日志（用户要求每个环节的耗时可见）。
+#[derive(Default, Clone, Copy, Debug)]
+pub struct LoadStats {
+    pub host_us: u64,
+    pub h2d_us: u64,
+    pub bytes: u64,
+    pub tensors: u64,
+}
+thread_local! {
+    static LOAD_STATS: std::cell::RefCell<LoadStats> = std::cell::RefCell::new(LoadStats::default());
+}
+pub fn take_load_stats() -> LoadStats {
+    LOAD_STATS.with(|c| std::mem::take(&mut *c.borrow_mut()))
+}
 pub struct WeightSource {
     maps: Vec<Mmap>,
     data_base: Vec<usize>,
@@ -125,6 +141,7 @@ impl WeightSource {
 
     /// 读为 bf16（支持 BF16 直读、F32/F16 转换、F8_E4M3 块量化解码）。
     pub fn load_bf16(&self, stream: &Stream, name: &str) -> Result<Tensor<bf16>> {
+        let t0 = std::time::Instant::now();
         let (info, raw) = self.bytes(name)?;
         let n: usize = info.shape.iter().product();
         let v: Vec<bf16> = match info.dtype.as_str() {
@@ -158,7 +175,19 @@ impl WeightSource {
             }
             other => bail!("{name}: unsupported dtype {other} for bf16 load"),
         };
-        Tensor::from_vec(stream, v, &info.shape)
+        {
+            let t1 = std::time::Instant::now();
+            let t = Tensor::from_vec(stream, v, &info.shape);
+            stream.synchronize()?;
+            LOAD_STATS.with(|c| {
+                let mut c = c.borrow_mut();
+                c.host_us += (t1 - t0).as_micros() as u64;
+                c.h2d_us += t1.elapsed().as_micros() as u64;
+                c.bytes += (raw.len()) as u64;
+                c.tensors += 1;
+            });
+            t
+        }
     }
 
     /// 读为 host f32（用于 CPU 侧预处理，如 W_UK / W_UV 拆分）。fp8 块量化权重先解量化。

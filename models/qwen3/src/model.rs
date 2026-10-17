@@ -332,6 +332,16 @@ impl Qwen3Model {
             Rope::new(stream, d, cfg.max_position_embeddings as usize, cfg.rope_theta, RopeStyle::Neox)?;
         let v = cfg.vocab_size as usize;
         // 激活 scratch 先分配，KV 最后：这样 free 已含权重 + scratch 的占用
+        let ls = dinfer_layers::take_load_stats();
+        tracing::info!(
+            tensors = ls.tensors,
+            mib = ls.bytes / (1 << 20),
+            host_ms = ls.host_us / 1000,
+            h2d_ms = ls.h2d_us / 1000,
+            h2d_gib_s = if ls.h2d_us > 0 { ls.bytes as f64 / (1u64 << 30) as f64 / (ls.h2d_us as f64 * 1e-6) } else { 0.0 },
+            "load timing: weights (mmap→host Vec → H2D)"
+        );
+        let t_scratch = std::time::Instant::now();
         let hidden_t = Tensor::zeros(stream, &[max_tokens, hidden])?;
         let normed = Tensor::zeros(stream, &[max_tokens, hidden])?;
         let attn_out = Tensor::zeros(stream, &[max_tokens, hidden])?;
@@ -345,6 +355,9 @@ impl Qwen3Model {
         // executor 还会分配 fp32 logits [max_logits_rows, vocab] + 采样工作区 + logprobs 原始副本（各 ≤ 同大小）
         let exec_scratch = 3 * max_logits_rows * v * 4;
 
+        stream.synchronize()?;
+        tracing::info!(scratch_ms = t_scratch.elapsed().as_millis() as u64, "load timing: activation scratch");
+        let t_kv = std::time::Instant::now();
         let per_block = Self::kv_bytes_per_block(&cfg, block_size);
         let num_blocks = match num_blocks {
             Some(n) => {
@@ -392,6 +405,8 @@ impl Qwen3Model {
                 block_size,
             });
         }
+        stream.synchronize()?;
+        tracing::info!(kv_ms = t_kv.elapsed().as_millis() as u64, "load timing: kv cache alloc");
         Ok(Self {
             embed,
             layers,

@@ -21,3 +21,5 @@ pub use moe::{Moe, MoeConfig};
 pub use nn::{Embedding, Linear, Mlp, RmsNorm, Rope};
 pub use tensor::Tensor;
 pub use weights::WeightSource;
+
+pub use weights::{take_load_stats, LoadStats};
