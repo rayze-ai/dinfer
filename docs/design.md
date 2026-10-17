@@ -398,3 +398,22 @@ PD 分离的详细设计写进 §10（待补），动代码前先定：KV 传输
 - 传输层：先做 **CPU pinned 内存层**（`cudaMemcpyAsync` 走独立 copy stream，与计算流用事件同步；块粒度 16 token × 8 head × 128 × 2 × 2 B = 64 KB，PCIe 4 每秒 ~40 万块），这一层本身就能把 prefix 命中率从显存上限扩到主存上限（4090 24 GB → 主机 256 GB）。再做远端：Mooncake / LMCache / NIXL 任一，接口是 `(hash, bytes)` KV 对象存储 + RDMA get/put；dinfer 侧只需实现 `KvTier` 的异步 fetch/offload，块布局与 bf16/fp8 dtype 写进对象元数据。
 - PD 分离（Q4）复用同一 `KvTier`：prefill 节点 `offload` → decode 节点 `fetch`，加一个"请求迁移"消息（prompt ids + 块哈希列表 + 采样参数）。
 - 风险：块哈希要与 dtype / 模型版本 / block_size 一起哈希；fetch 在飞时该块不能被 GPU 侧回收；fp8 KV 时 scale 随块存。
+
+## 11. 采用 / 改进台账（对 vLLM）
+
+目标是性能超越，不是重写。vLLM 做得对的直接用，能改进的改进；每项记一行，便于回看哪些是"借来的"、哪些是我们的。
+
+| 项 | 采用 vLLM 的 | 我们改进的 | 收益 / 状态 |
+|---|---|---|---|
+| 调度模型 | v1 的 "无 prefill/decode 之分，只有 num_computed 追赶 num_tokens"、chunked prefill、FCFS + 抢占末尾 | `decode_exempt_from_budget`（decode 行不占 token 预算，每步装下全部 decode + 预算内 prefill） | 调度结构零成本沿用；免预算让混批可能，但闭环 bench 下看不出（q3-xstream） |
+| KV 分页 + prefix cache | 块哈希、按块命中、`block_size=16` | 无 | 一致 |
+| CUDA graph | decode-only 按 batch 桶捕获（FULL_DECODE_ONLY） | 按桶**懒捕获**（启动 -210 ms；`GRAPH_CAPTURE=eager` 恢复） | 启动 2.9 → 0.6 s 的一部分 |
+| 异步调度 | placeholder 机制、stop 检查晚一步、下一步在上一步结果回来前调度 | 下一步的 input_ids 在**设备上**从上一步 `chosen` gather（不经 host 往返）；D2H 用 pinned 双缓冲异步 | 进行中（q3-async） |
+| attention | FA2 的算法结构（online softmax、P 片直接当 PV 的 A 片） | 自写 mma.sync 版 v4/v5（Ampere/Ada 无 FA3），paged/prefill 同一模板，混批 decode 行分流到 split-K | 4090 T=1514 0.14 ms/层，TTFT 领先 vLLM 2× |
+| decode attention | split-K | v2：8 lane/key、两 q head 共享 K 读、splits 按 batch 自适应 | 与 FA2 decode 持平 |
+| 采样 | top-k/top-p/min-p/penalties 语义、Philox | kernel 待融合（4 → 1） | 待做 |
+| 权重加载 | safetensors mmap | bf16 直传不经 Vec、设备拼接 qkv/gate_up、并行填页、tokenizer 独立线程 | 2.9 → 0.6 s |
+| bench 口径 | `benchmarks/serve.py` 的 TTFT/TPOT/ITL 定义、ignore_eos | 每轮换 seed（避免常驻侧 prefix cache 全命中）；开环泊松 + 长短混合 | 发现并修正了 bench11 之前的口径偏差 |
+| 进程结构 | — | 单进程（API + engine 同进程不同线程），无 ZMQ / 多进程 IPC | TTFT 低一半的主要来源之一 |
+| 跨流 prefill/decode 并行 | 无（vLLM 单流） | 实现并证实真并行（nsys 39% 重叠） | 闭环 bench 下混批步 <5%，TPOT 无感；留给 prefill 比例高的负载 |
+

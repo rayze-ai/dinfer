@@ -48,6 +48,7 @@ rm -f target/.rustc_info.json                     # cargo 报 "failed to run rus
 - 文档用中文，命令与代码原样。
 - 代码 / 脚本 / 环境变量 / C ABI 符号不带项目名前缀（`DINFER_*`、`dinfer_*`），项目可能改名；新代码前 `grep -rn DINFER crates scripts` 自查。
 - 所有跨会话要记住的事写进文件并进 git，不要只留在对话里。
+- **目标是超越，不是重写**（用户 2026-10-17）：vLLM 做得对的直接采用，能改进的改进，两种情况都要在 `docs/design.md` §11 "采用 / 改进台账" 记一行（采用了什么、为什么、我们改了哪里、收益）。不为"不一样"而不一样。
 - **每轮性能改动必须进 CSV 趋势**（用户 2026-10-16 两次强调）：改动 → 4090 `bench_compare.sh test/qwen3/<日期>/benchN "改动一句话"`（写 `CHANGE`）→ 自动重生成 `test/qwen3/perf-trend.{csv,md,svg,html}`（每组 tok/s ×vLLM、TTFT、TPOT、相对上一轮 %）→ `pull` 回本机 commit。没有 bench 记录的改动视为未完成。
 - 上下文纪律（已 **4 次** 撞 `Input is too long`，2026-10-16 起机器强制）：`.claude/settings.json` 设 `BASH_MAX_OUTPUT_LENGTH=8000`；`.claude/hooks/context_guard.sh`（PreToolUse）拒绝 Read >200 行不带 limit、拒绝不截断的 `cat`/`git diff`/`git show`，并在第 40 次工具调用起每 10 次提醒写记录 + commit。自律部分：Bash 输出一律 `grep`/`tail`/`cut -c1-200`，长任务日志 `tee /tmp` 只看摘要；每完成一个子块就写 loop 记录并 commit；**超过 60 次调用主动收功并建议 /clear**。
 
