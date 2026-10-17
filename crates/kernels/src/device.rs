@@ -135,12 +135,15 @@ impl Stream {
     pub fn wait_event(&self, ev: &Event) -> Result<()> {
         Ok(self.inner.wait(&ev.0)?)
     }
-    /// 带时间戳的事件（量 GPU 忙时用；跨流同步请用 `record_event`）。
+    /// 带时间戳的事件（量 GPU 忙时用；跨流同步请用 `record_event`）。走裸驱动 API：cudarc 的 safe event
+    /// 在 disable_event_tracking 后 elapsed 报 INVALID_HANDLE。
     pub fn new_timing_event(&self) -> Result<TimingEvent> {
-        Ok(TimingEvent(self.inner.context().new_event(None)?))
+        // SAFETY: 默认 flags（带 timing）；Drop 时 destroy。
+        Ok(TimingEvent(result::event::create(sys::CUevent_flags::CU_EVENT_DEFAULT)?))
     }
     pub fn record_timing(&self, ev: &TimingEvent) -> Result<()> {
-        Ok(ev.0.record(&self.inner)?)
+        // SAFETY: event / stream 都有效。
+        Ok(unsafe { result::event::record(ev.0, self.raw())? })
     }
     pub fn synchronize(&self) -> Result<()> {
         Ok(self.inner.synchronize()?)
@@ -302,10 +305,20 @@ impl Stream {
     }
 }
 
-/// 带时间戳的 CUDA event；`elapsed_ms(a, b)` 要求两者都已在流上记录且已完成（调用方先同步）。
-pub struct TimingEvent(CudaEvent);
+/// 带时间戳的 CUDA event（裸句柄）；`elapsed_ms(a, b)` 先同步 end 再取差。
+pub struct TimingEvent(sys::CUevent);
 impl TimingEvent {
     pub fn elapsed_ms(start: &TimingEvent, end: &TimingEvent) -> Result<f32> {
-        Ok(start.0.elapsed_ms(&end.0)?)
+        // SAFETY: 两事件都已 record；synchronize 保证完成。
+        unsafe {
+            result::event::synchronize(end.0)?;
+            Ok(result::event::elapsed(start.0, end.0)?)
+        }
+    }
+}
+impl Drop for TimingEvent {
+    fn drop(&mut self) {
+        // SAFETY: 独占句柄。
+        unsafe { let _ = result::event::destroy(self.0); }
     }
 }

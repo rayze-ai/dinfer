@@ -131,6 +131,8 @@ pub struct Qwen3Executor {
     pub t_wait_us: u64,
     /// GPU 忙时（主流上 launch 前 / 后两个事件的差，step 结束后读）累计 µs。
     pub t_gpu_ms: f32,
+    pub t_upload_sampling_us: u64,
+    pub t_graph_launch_us: u64,
     t_gpu_err: u64,
     ev_gpu: Option<(TimingEvent, TimingEvent)>,
 }
@@ -184,6 +186,8 @@ impl Qwen3Executor {
             t_launch_us: 0,
             t_wait_us: 0,
             t_gpu_ms: 0.0,
+            t_upload_sampling_us: 0,
+            t_graph_launch_us: 0,
             t_gpu_err: 0,
             ev_gpu: None,
         };
@@ -608,10 +612,13 @@ impl Qwen3Executor {
             let nb = self.graph_for(n).unwrap().batch;
             let (tt, nb2) = self.upload_plan(plan, nb)?;
             debug_assert_eq!((tt, nb2), (nb, nb));
+            let t_us = std::time::Instant::now();
             self.upload_sampling(sb, nb)?;
+            self.t_upload_sampling_us += t_us.elapsed().as_micros() as u64;
             t_launch = std::time::Instant::now();
             let g = self.graph_for(n).unwrap();
             g.graph.launch().context("launch decode graph")?;
+            self.t_graph_launch_us += t_launch.elapsed().as_micros() as u64;
             self.graph_steps += 1;
             self.last_logprobs = vec![Vec::new(); n];
         } else {
@@ -660,6 +667,8 @@ impl Qwen3Executor {
                 launch_us_per_step = self.t_launch_us / steps,
                 wait_us_per_step = self.t_wait_us / steps,
                 gpu_busy_us_per_step = (self.t_gpu_ms * 1000.0 / steps as f32) as u64,
+                upload_sampling_us_per_graph_step = self.t_upload_sampling_us / self.graph_steps.max(1),
+                graph_launch_us_per_graph_step = self.t_graph_launch_us / self.graph_steps.max(1),
                 gpu_timing_errors = self.t_gpu_err,
                 "executor step breakdown (cumulative avg)"
             );
