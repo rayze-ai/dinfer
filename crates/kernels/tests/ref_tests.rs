@@ -805,3 +805,33 @@ fn sample_fused_matches_chain() {
     let ndiff = m1.iter().zip(&m2).filter(|(p, q)| p.to_bits() != q.to_bits()).count();
     assert_eq!(ndiff, 0, "masked logits differ at {ndiff} positions");
 }
+
+/// gather + rmsnorm 融合 == gather_rows 然后 rmsnorm（逐位）。
+#[test]
+#[ignore]
+fn gather_rmsnorm_matches_two_step() {
+    let (_d, s) = dev();
+    let (t, h, nr) = (37usize, 1024usize, 9usize);
+    let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut rnd = || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        (x >> 11) as f32 / (1u64 << 53) as f32 * 2.0 - 1.0
+    };
+    let xs: Vec<bf16> = (0..t * h).map(|_| bf16::from_f32(rnd())).collect();
+    let ws: Vec<bf16> = (0..h).map(|_| bf16::from_f32(rnd() + 1.0)).collect();
+    let rows: Vec<i32> = (0..nr).map(|i| ((i * 7 + 3) % t) as i32).collect();
+    let dx = s.htod_copy(xs).unwrap();
+    let dw = s.htod_copy(ws).unwrap();
+    let dr = s.htod_copy(rows).unwrap();
+    let mut g = s.alloc_zeros::<bf16>(nr * h).unwrap();
+    let mut o1 = s.alloc_zeros::<bf16>(nr * h).unwrap();
+    dinfer_kernels::gather_rows_bf16(&s, &dx, &mut g, &dr, nr, h).unwrap();
+    dinfer_kernels::rmsnorm_bf16_n(&s, &g, &dw, &mut o1, nr, h, 1e-6).unwrap();
+    let mut o2 = s.alloc_zeros::<bf16>(nr * h).unwrap();
+    dinfer_kernels::gather_rmsnorm_bf16(&s, &dx, &dr, &dw, &mut o2, nr, h, 1e-6).unwrap();
+    let (a, b) = (s.dtoh_sync_copy(&o1).unwrap(), s.dtoh_sync_copy(&o2).unwrap());
+    let ndiff = a.iter().zip(&b).filter(|(p, q)| p.to_bits() != q.to_bits()).count();
+    assert_eq!(ndiff, 0, "gather_rmsnorm differs at {ndiff} positions");
+}

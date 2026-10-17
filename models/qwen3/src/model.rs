@@ -683,17 +683,11 @@ impl Qwen3Model {
             "{rows} logits rows > max_logits_rows {}",
             self.max_logits_rows
         );
-        k::gather_rows_bf16(
+        // 取每请求最后一行 + 末层 RMSNorm 一个 kernel（原 gather_rows + rmsnorm 两次）
+        k::gather_rmsnorm_bf16(
             stream,
             &self.hidden.data,
-            &mut self.attn_out.data,
             &f.logits_rows.data,
-            rows,
-            h,
-        )?;
-        k::rmsnorm_bf16_n(
-            stream,
-            &self.attn_out.data,
             &self.norm.w.data,
             &mut self.final_normed.data,
             rows,

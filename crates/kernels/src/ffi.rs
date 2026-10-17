@@ -20,6 +20,16 @@ extern "C" {
         eps: f32,
         stream: cudaStream_t,
     ) -> i32;
+    pub fn gather_rmsnorm_bf16(
+        x: *const c_void,
+        rows: *const i32,
+        w: *const c_void,
+        out: *mut c_void,
+        num_rows: i64,
+        hidden: i64,
+        eps: f32,
+        stream: cudaStream_t,
+    ) -> i32;
     pub fn fused_add_rmsnorm_bf16(
         x: *const c_void,
         res: *mut c_void,

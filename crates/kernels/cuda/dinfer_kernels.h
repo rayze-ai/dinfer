@@ -14,6 +14,8 @@ int add_f32(const float* a, const float* b, float* out, int64_t n, cudaStream_t 
 
 // ---- 归一化 ----
 // out[t,:] = x[t,:] * rsqrt(mean(x^2) + eps) * w   （bf16 in/out，fp32 累加）
+int gather_rmsnorm_bf16(const void* x, const int32_t* rows, const void* w, void* out, int64_t num_rows,
+                        int64_t hidden, float eps, cudaStream_t stream);
 int rmsnorm_bf16(const void* x, const void* w, void* out, int64_t tokens, int64_t hidden, float eps,
                  cudaStream_t stream);
 // residual 融合：res[t,:] += x[t,:]; out[t,:] = rmsnorm(res[t,:])。res 原位更新。

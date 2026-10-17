@@ -5,11 +5,13 @@ using namespace dinfer;
 
 namespace {
 
+// rows：非空时输出第 r 行取 x 的第 rows[r] 行（gather + rmsnorm 融合，Q3 第 59 轮：lm_head 前只取每请求最后一行）。
 template <int BLOCK, bool FUSED_ADD>
 __global__ void rmsnorm_kernel(const bf16* __restrict__ x, bf16* __restrict__ res, const bf16* __restrict__ w,
-                               bf16* __restrict__ out, int hidden, float eps) {
+                               bf16* __restrict__ out, const int32_t* __restrict__ rows, int hidden, float eps) {
   const int64_t row = blockIdx.x;
-  const bf16* xr = x + row * hidden;
+  const int64_t src_row = rows ? rows[row] : row;
+  const bf16* xr = x + src_row * hidden;
   bf16* rr = FUSED_ADD ? res + row * hidden : nullptr;
   bf16* orow = out + row * hidden;
 
@@ -34,8 +36,8 @@ __global__ void rmsnorm_kernel(const bf16* __restrict__ x, bf16* __restrict__ re
 }
 
 template <bool FUSED_ADD>
-int launch(const void* x, void* res, const void* w, void* out, int64_t tokens, int64_t hidden, float eps,
-           cudaStream_t s) {
+int launch(const void* x, void* res, const void* w, void* out, const int32_t* rows, int64_t tokens, int64_t hidden,
+           float eps, cudaStream_t s) {
   if (tokens <= 0) return 0;
   if (hidden <= 0 || hidden > (1 << 20)) return err(cudaErrorInvalidValue);
   const dim3 grid((unsigned)tokens);
@@ -44,9 +46,9 @@ int launch(const void* x, void* res, const void* w, void* out, int64_t tokens, i
   auto wp = static_cast<const bf16*>(w);
   auto op = static_cast<bf16*>(out);
   if (hidden <= 1024) {
-    rmsnorm_kernel<256, FUSED_ADD><<<grid, 256, 0, s>>>(xp, rp, wp, op, (int)hidden, eps);
+    rmsnorm_kernel<256, FUSED_ADD><<<grid, 256, 0, s>>>(xp, rp, wp, op, rows, (int)hidden, eps);
   } else {
-    rmsnorm_kernel<1024, FUSED_ADD><<<grid, 1024, 0, s>>>(xp, rp, wp, op, (int)hidden, eps);
+    rmsnorm_kernel<1024, FUSED_ADD><<<grid, 1024, 0, s>>>(xp, rp, wp, op, rows, (int)hidden, eps);
   }
   return last_err();
 }
@@ -55,10 +57,16 @@ int launch(const void* x, void* res, const void* w, void* out, int64_t tokens, i
 
 extern "C" int rmsnorm_bf16(const void* x, const void* w, void* out, int64_t tokens, int64_t hidden, float eps,
                             cudaStream_t stream) {
-  return launch<false>(x, nullptr, w, out, tokens, hidden, eps, stream);
+  return launch<false>(x, nullptr, w, out, nullptr, tokens, hidden, eps, stream);
+}
+
+// out[r] = rmsnorm(x[rows[r]]) · w，r < num_rows（替代 gather_rows + rmsnorm 两次 launch）
+extern "C" int gather_rmsnorm_bf16(const void* x, const int32_t* rows, const void* w, void* out, int64_t num_rows,
+                                   int64_t hidden, float eps, cudaStream_t stream) {
+  return launch<false>(x, nullptr, w, out, rows, num_rows, hidden, eps, stream);
 }
 
 extern "C" int fused_add_rmsnorm_bf16(const void* x, void* res, const void* w, void* out, int64_t tokens,
                                       int64_t hidden, float eps, cudaStream_t stream) {
-  return launch<true>(x, res, w, out, tokens, hidden, eps, stream);
+  return launch<true>(x, res, w, out, nullptr, tokens, hidden, eps, stream);
 }

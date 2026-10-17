@@ -312,6 +312,28 @@ pub fn rmsnorm_bf16_n(
     )
 }
 
+/// out[r] = rmsnorm(x[rows[r]]) · w（gather + rmsnorm 融合）。
+pub fn gather_rmsnorm_bf16(
+    stream: &Stream,
+    x: &CudaSlice<bf16>,
+    rows: &CudaSlice<i32>,
+    w: &CudaSlice<bf16>,
+    out: &mut CudaSlice<bf16>,
+    num_rows: usize,
+    hidden: usize,
+    eps: f32,
+) -> Result<()> {
+    ensure!(rows.len() >= num_rows && out.len() >= num_rows * hidden && w.len() == hidden, "gather_rmsnorm: shape");
+    let (px, pw) = (stream.ptr(x) as *const c_void, stream.ptr(w) as *const c_void);
+    let pr = stream.ptr(rows) as *const i32;
+    let po = stream.ptr_mut(out) as *mut c_void;
+    // SAFETY: 容量已校验；rows 下标范围（< x 行数）由 runner 保证。
+    check(
+        unsafe { ffi::gather_rmsnorm_bf16(px, pr, pw, po, num_rows as i64, hidden as i64, eps, stream.raw() as _) },
+        "gather_rmsnorm_bf16",
+    )
+}
+
 /// fused_add_rmsnorm 前 `tokens` 行。
 #[allow(clippy::too_many_arguments)]
 pub fn fused_add_rmsnorm_bf16_n(
