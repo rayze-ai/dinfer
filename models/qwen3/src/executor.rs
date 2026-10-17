@@ -237,7 +237,7 @@ impl Qwen3Executor {
     /// 把 plan 的输入写进固定缓冲（batch 维可按 `pad_to` 补到桶大小：padding 行 slot=-1、seq_len=1、block 0）。
     fn upload_plan(&mut self, plan: &BatchPlan, pad_to: usize) -> Result<(usize, usize)> {
         let s = &self.stream;
-        self.buf.up.begin();
+        self.buf.up.reset_step(); // 每 step 的第一次打包：host 区回卷
         let n = plan.num_reqs();
         let t = plan.total_tokens();
         let nb = pad_to.max(n);

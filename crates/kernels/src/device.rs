@@ -337,8 +337,10 @@ impl Drop for TimingEvent {
 /// 每 step 的小输入（ids / positions / block_table / 采样参数……十几个数组）打包进**一块 pinned host 缓冲**，
 /// 一次异步 H2D 到设备 staging，再按记录的目标地址 D2D 异步散开。替代原先每数组一次同步 pageable
 /// `cuMemcpyHtoD`（B=32 时 14 次 ≈ 600–750 µs/步，是 decode 步 host 开销的主项）。
-/// 用法：`begin()` → 多次 `push(src, dst)` → `flush()`（同一流上入队，返回即可复用 host 侧 Vec）。
-/// 安全前提：下一次 `begin()` 前本流上一次 flush 的 H2D 已完成（executor 每步末尾 D2H 同步满足）。
+/// 用法：每 step 开始 `reset_step()`（host 区回到 0）；之后可多轮 `push(..)*` → `flush()`，每轮 flush 只重置
+/// 散开表、**不回卷 host 偏移**：同一 step 内多次 flush 用的是 pinned 缓冲的不同区域，前一轮的异步 H2D 还在
+/// 读时不会被后一轮的 host memcpy 覆盖（第一版在每轮 begin 回卷到 0，B=32 压测下随机 ILLEGAL_ADDRESS）。
+/// 安全前提：下一次 `reset_step()` 前本流上一步的 H2D 已完成（executor 每步末尾 D2H 同步满足）。
 pub struct PinnedUploader {
     host: *mut u8,
     staging: CudaSlice<u8>,
@@ -356,8 +358,13 @@ impl PinnedUploader {
         let staging = stream.alloc_uninit::<u8>(cap)?;
         Ok(Self { host, staging, cap, off: 0, scatter: Vec::with_capacity(32) })
     }
-    pub fn begin(&mut self) {
+    /// 每 step 开始：host 区回到 0（上一步的 DMA 已随 step 末尾同步完成）。
+    pub fn reset_step(&mut self) {
         self.off = 0;
+        self.scatter.clear();
+    }
+    /// 一轮打包开始：只清散开表，host 偏移继续往后走。
+    pub fn begin(&mut self) {
         self.scatter.clear();
     }
     /// 把 `src` 排进本次上传，目标是 `dst` 的前 src.len() 个元素。
@@ -377,19 +384,19 @@ impl PinnedUploader {
     }
     /// 一次 H2D（pinned → staging，异步）+ 逐目标 D2D（异步），都在 `stream` 上。
     pub fn flush(&mut self, stream: &Stream) -> Result<()> {
-        if self.off == 0 {
-            return Ok(());
-        }
+        let Some(&(_, first_off, _)) = self.scatter.first() else { return Ok(()) };
         stream.bind_ctx()?;
         let base = stream.ptr_mut(&mut self.staging);
+        // 只传本轮新增的区间 [first_off, off)
         // SAFETY: host 是 pinned；staging / 目标都是有效设备地址；同流顺序保证 D2D 在 H2D 之后。
         unsafe {
-            let host = std::slice::from_raw_parts(self.host, self.off);
-            result::memcpy_htod_async(base, host, stream.raw())?;
+            let host = std::slice::from_raw_parts(self.host.add(first_off), self.off - first_off);
+            result::memcpy_htod_async(base + first_off as u64, host, stream.raw())?;
             for &(dst, hoff, bytes) in &self.scatter {
                 result::memcpy_dtod_async(dst, base + hoff as u64, bytes, stream.raw())?;
             }
         }
+        self.scatter.clear();
         Ok(())
     }
 }
