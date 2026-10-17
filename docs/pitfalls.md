@@ -369,3 +369,9 @@
 - 解法：`scripts/dev/restart_dinfer.sh`：按 `--port` 模式 `pkill -INT`，等进程退、等显存回落，再起；结束打印 serve 进程数（必须是 1）。bench 脚本一律调它。
 - 如何避免：任何"重启服务后测"的脚本都要在起新之前确认旧 pid 没了、端口空了、显存回落了；性能数字异常先 `ps -o etimes` 看进程年龄。
 
+## 2026-10-17 用 Python 按 "起点 index … 下一个锚点 index" 切片替换函数体时把相邻函数一起删了
+
+- 现象：重写 `Runner::execute` 为 begin/finish 时，切片终点选了 `/// 一行是否是 "纯 decode"` 的注释行，中间夹着的 `update_states` 整个被删，编译才发现。
+- 如何避免：替换函数体时终点锚点用**该函数自己的结束**（下一个 `\n    pub fn ` / `\n    fn ` 行），或先 `grep -n '^    fn \|^    pub fn '` 列出函数边界再切；切完 `grep -c 'fn <name>'` 核对一次。
+- 相关：`docs/loops/q3-async.md` 第 3 轮。
+
