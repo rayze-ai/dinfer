@@ -2,6 +2,7 @@
 
 pub mod block_pool;
 pub mod hash;
+pub mod host_tier;
 pub mod manager;
 pub mod spec;
 

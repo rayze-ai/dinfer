@@ -38,6 +38,10 @@ pub struct SchedulerOutput {
     pub preempted_req_ids: Vec<RequestId>,
     /// 新分配、需要清零的块（Mamba 状态）。
     pub blocks_to_zero: Vec<BlockId>,
+    /// KV 分层（host tier）：本步 forward 前要从 host 槽拉进 GPU 块的 (block, host_slot)；
+    /// 本步结束后要从 GPU 块推到 host 槽的 (block, host_slot)。
+    pub kv_fetch: Vec<(BlockId, u32)>,
+    pub kv_offload: Vec<(BlockId, u32)>,
 }
 
 impl SchedulerOutput {
