@@ -6,7 +6,7 @@
 
 use xxhash_rust::xxh3::xxh3_128_with_seed;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct BlockHash(pub u128);
 
 const ROOT: u128 = 0x6d69_6e66_6572_2d72_6f6f_742d_6861_7368; // "dinfer-root-hash"

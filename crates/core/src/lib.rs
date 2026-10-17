@@ -7,6 +7,7 @@ pub mod config;
 pub mod engine;
 pub mod kv;
 pub mod metrics;
+pub mod pd;
 pub mod request;
 pub mod runner;
 pub mod sample;

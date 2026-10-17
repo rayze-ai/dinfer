@@ -18,3 +18,4 @@
 ## 记录
 | 轮 | 块 | 现象 | 根因 | 处理 |
 |---|---|---|---|---|
+| 1 | core::pd 骨架（2026-10-18） | `crates/core/src/pd.rs`：线协议 `magic|hlen|header(JSON)|payload`（`MigrationHeader{request_id, model_tag, prompt_ids, sampling, first_token, units:(gid,BlockHash), unit_bytes}`）、`KvTransport` trait + `TcpTransport`、D 侧 `IncomingKv`（put/take/gc/stats）+ `spawn_receiver` 线程（model_tag 不符拒收）。`SamplingParams` / `BlockHash` 加 serde derive | — | 3 单测过（roundtrip / TCP 收发+拒收 / gc）；workspace 编译过。下一轮：scheduler 接 `IncomingKv`（带 request_id 的新请求 → `register_fetched` 路径 + `WaitingForKv`），executor `kv_import(payload) / kv_export(blocks) -> payload` 复用 pack/unpack + arena |

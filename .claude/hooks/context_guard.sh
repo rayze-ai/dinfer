@@ -19,9 +19,15 @@ case "$TOOL" in
     CMD=$(j "['tool_input']['command']")
     # 整文件 cat / 不截断的 diff、show、log -p
     # 按 ; && || 拆段逐段检查：2026-10-18 第 5 次撞 400 就是 "status; diff --stat; diff | head -c 6000; tail -30" 四段各自合规、合计 11 KB。
-    printf '%s' "$CMD" | sed -E 's/<<[^\n]*//; s/(&&|\|\||;)/\n/g' | while IFS= read -r SEG; do
+    # 先剥掉 heredoc 正文（<<TAG ... TAG），正文是数据不是命令；再按 ; && || 拆段
+    printf '%s' "$CMD" | python3 -I -c '
+import sys,re
+c=sys.stdin.read()
+c=re.sub(r"<<-?\s*[\x27\"]?(\w+)[\x27\"]?[^\n]*\n.*?\n\1[ \t]*(\n|$)", "<<HEREDOC\n", c, flags=re.S)
+print(re.sub(r"(&&|\|\||;)", "\n", c))' | while IFS= read -r SEG || [ -n "$SEG" ]; do
+      # cat > / >> 文件（含 heredoc）是写文件不是输出，放行
       if printf '%s' "$SEG" | grep -qE '(^|[|] *)\s*(cat|git (diff|show)|git log -p)( |$)' \
-         && ! printf '%s' "$SEG" | grep -qE '\|\s*(head|tail|grep|cut|wc|sed -n|awk|tee)|--stat|--name-only|--name-status|--oneline|<<'; then
+         && ! printf '%s' "$SEG" | grep -qE 'cat\s*>|\|\s*(head|tail|grep|cut|wc|sed -n|awk|tee)|--stat|--name-only|--name-status|--oneline|<<'; then
         echo "DENY1"
       fi
       # 截断量硬上限：head -c > 3000、head/tail -n > 60（无 cut -c 时）都算没截断

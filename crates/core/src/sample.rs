@@ -1,6 +1,6 @@
 //! 采样参数。对应 vLLM `SamplingParams` 的子集（OpenAI chat 能映射到的部分）。
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SamplingParams {
     pub max_tokens: u32,
     /// 生成至少这么多 token 后才允许 eos / stop 生效（vLLM `min_tokens`）。
