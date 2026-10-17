@@ -125,6 +125,8 @@ pub struct Qwen3Executor {
     last_logprobs: Vec<Vec<TokenLogprobs>>,
     last_rows: usize,
     alt: Option<AltSet>,
+    /// 当前 plan 是否是插队 prefill（采样后不写 prev_chosen）。enqueue 时从 plan 读入。
+    skip_prev_chosen: bool,
     /// 异步调度：两个 pinned 槽轮转（步 n 的 D2H 在槽 n%2；finish n 必在 begin n+2 之前）。
     async_slots: [PinnedSlot; 2],
     async_slot_idx: usize,
@@ -209,6 +211,7 @@ impl Qwen3Executor {
             async_slot_idx: 0,
             async_inflight: std::collections::VecDeque::with_capacity(2),
             alt: None,
+            skip_prev_chosen: false,
             alt_active: false,
             pair_steps: 0,
             main_done: None,
@@ -499,8 +502,7 @@ impl Qwen3Executor {
             let mut ch = self.buf.chosen.data.slice_mut(..nrows);
             k::argmax_f32_n(s, &lg, &mut ch, nrows, v)?;
             self.last_logprobs = vec![Vec::new(); nrows];
-            let StepBuffers { chosen, prev_chosen, .. } = &mut self.buf;
-            self.stream.dtod_copy_n(&chosen.data, &mut prev_chosen.data, nrows)?;
+            self.save_prev_chosen(nrows)?;
             return Ok(());
         }
         self.upload_sampling(sb, nrows)?;
@@ -587,10 +589,7 @@ impl Qwen3Executor {
                 }];
             }
         }
-        {
-            let StepBuffers { chosen, prev_chosen, .. } = &mut self.buf;
-            self.stream.dtod_copy_n(&chosen.data, &mut prev_chosen.data, nrows)?;
-        }
+        self.save_prev_chosen(nrows)?;
         Ok(())
     }
 }
@@ -608,6 +607,16 @@ impl Qwen3Executor {
         self.model.swap_scratch(&mut a.scratch);
         self.alt = Some(a);
         self.alt_active = !self.alt_active;
+    }
+
+    /// 采样后把 chosen 存到 prev_chosen 供下一步 gather；插队 prefill 步（skip_prev_chosen）不写，
+    /// 以免覆盖在飞 decode 步的结果。
+    fn save_prev_chosen(&mut self, nrows: usize) -> Result<()> {
+        if self.skip_prev_chosen {
+            return Ok(());
+        }
+        let StepBuffers { chosen, prev_chosen, .. } = &mut self.buf;
+        self.stream.dtod_copy_n(&chosen.data, &mut prev_chosen.data, nrows)
     }
 
     /// GPU 忙时测量：主流上 step 工作入队前 / 后各记一个带时间戳的事件；collect 同步后读差值。
@@ -637,6 +646,7 @@ impl Qwen3Executor {
 
     /// 上传 + 入队（forward + 采样），不等结果。返回 (请求数, 入队开始时刻)。
     fn enqueue(&mut self, plan: &BatchPlan) -> Result<(usize, std::time::Instant)> {
+        self.skip_prev_chosen = plan.skip_prev_chosen;
         let n = plan.num_reqs();
         let t = plan.total_tokens();
         ensure!(t <= self.model.max_tokens, "batch of {t} tokens > max_tokens {}", self.model.max_tokens);

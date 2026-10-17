@@ -77,6 +77,9 @@ pub struct Engine<E: ModelExecutor> {
     async_sched: bool,
     /// 在飞的一步：(SchedulerOutput, runner Pending, t_step, t_sched)。
     pending: Option<(crate::sched::output::SchedulerOutput, crate::runner::Pending, std::time::Instant, std::time::Instant)>,
+    /// 插队 prefill 开关（CUT_IN=0 关）与计数。
+    cut_in: bool,
+    cut_in_steps: u64,
     /// 已同步完成、等着 update 的一步（异步步之后紧跟的 prefill 步）。
     sync_done: Option<(crate::sched::output::SchedulerOutput, crate::sched::output::ModelRunnerOutput, std::time::Instant, std::time::Instant)>,
     runner: Runner<E>,
@@ -96,6 +99,8 @@ impl<E: ModelExecutor> Engine<E> {
             Self {
                 sched,
                 async_sched,
+                cut_in: async_sched && std::env::var("CUT_IN").map(|v| v != "0").unwrap_or(true),
+                cut_in_steps: 0,
                 pending: None,
                 sync_done: None,
                 runner,
@@ -201,8 +206,27 @@ impl<E: ModelExecutor> Engine<E> {
             // pending 最多 1 个：(so, Pending, t_step, t_sched)。
             let (so, mro, t_step, t_sched, t_exec) = match self.pending.take() {
                 Some((so_n, pend_n, t_step_n, t_sched_n)) => {
+                    // 插队 prefill（Q3-o）：步 n 在飞、有新请求在等 → 立刻调度一次（running 行都有 placeholder，
+                    // 产出的 step 只含新请求），同步跑完，结果排进 sync_done。新请求首 token 提前一步。
+                    if self.cut_in && self.sched.num_waiting() > 0 && self.sync_done.is_none() {
+                        let t_step = std::time::Instant::now();
+                        let so_c = self.sched.schedule();
+                        let t_sched = std::time::Instant::now();
+                        if !so_c.num_scheduled_tokens.is_empty() {
+                            let pend_c = match self.runner.begin_cut_in(&so_c) {
+                                Ok(p) => p,
+                                Err(e) => return self.fail_step(e),
+                            };
+                            let mro_c = match self.runner.finish(pend_c) {
+                                Ok(m) => m,
+                                Err(e) => return self.fail_step(e),
+                            };
+                            self.cut_in_steps += 1;
+                            self.sync_done = Some((so_c, mro_c, t_step, t_sched));
+                        }
+                    }
                     // 先把 n+1 排进去（若还有请求且 n 是异步的），再等 n
-                    if self.async_sched && self.sched.has_requests() {
+                    if self.async_sched && self.sched.has_requests() && self.sync_done.is_none() {
                         let t_step = std::time::Instant::now();
                         let so_next = self.sched.schedule();
                         let t_sched = std::time::Instant::now();

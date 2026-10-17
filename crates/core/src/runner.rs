@@ -72,6 +72,9 @@ pub struct BatchPlan {
     /// executor 在设备上用上一步的 chosen 填；`-1` = 用 `input_ids` 里的值。全 -1 时可忽略。
     pub gather_idx: Vec<i32>,
     pub any_gather: bool,
+    /// 插队 prefill 步（Q3-o）：在飞的 decode 步 n 还没 finish 时同步跑的、只含新请求的步。
+    /// 它的采样结果**不能**覆盖 `prev_chosen`（n+1 要从那里 gather 步 n 的结果）。
+    pub skip_prev_chosen: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -276,6 +279,36 @@ impl<E: ModelExecutor> Runner<E> {
         Ok(Pending { rows, req_ids: self.plan.req_ids.clone(), is_async: use_async, lps_override })
     }
 
+    /// 插队 prefill（Q3-o）：在飞 decode 步未 finish 时，同步执行一个只含新请求的步。
+    /// 与 `begin` 的区别：强制同步、plan 标记 `skip_prev_chosen`、要求 so 里没有 decode 行（running 行都被
+    /// placeholder 挡住，scheduler 保证）。返回 Pending 直接交给 `finish`。
+    pub fn begin_cut_in(&mut self, so: &SchedulerOutput) -> Result<Pending> {
+        self.update_states(so)?;
+        if so.num_scheduled_tokens.is_empty() {
+            self.last_async = false;
+            return Ok(Pending::default());
+        }
+        self.build_plan(so)?;
+        ensure!(
+            !self.plan.any_gather,
+            "cut-in step contains an in-flight decode row (scheduler should have held it back)"
+        );
+        self.plan.skip_prev_chosen = true;
+        self.last_async = false;
+        self.generated.clear();
+        self.drafts.clear();
+        self.exec.forward_sample(&self.plan, &mut self.generated, &mut self.drafts)?;
+        let mut rows = Vec::with_capacity(self.plan.num_reqs());
+        for (i, &rid) in self.plan.req_ids.iter().enumerate() {
+            let st = self.states.get(&rid).unwrap();
+            let n = self.plan.num_tokens[i] as usize;
+            let num_draft = self.plan.spec_tokens[i].len();
+            let base = n - num_draft;
+            rows.push(PendingRow { rid, n, num_draft, end_of_seq: st.num_computed + base >= st.token_ids.len() });
+        }
+        Ok(Pending { rows, req_ids: self.plan.req_ids.clone(), is_async: false, lps_override: None })
+    }
+
     /// 第二段：取结果、补 token、产出 ModelRunnerOutput。
     pub fn finish(&mut self, pending: Pending) -> Result<ModelRunnerOutput> {
         if pending.req_ids.is_empty() {
@@ -473,6 +506,7 @@ impl<E: ModelExecutor> Runner<E> {
         p.sample.clear();
         p.gather_idx.clear();
         p.any_gather = false;
+        p.skip_prev_chosen = false;
         p.cu_seqlens.push(0);
         p.logits_row_start.push(0);
 
