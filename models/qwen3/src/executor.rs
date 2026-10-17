@@ -138,6 +138,8 @@ pub struct Qwen3Executor {
     pub t_graph_launch_us: u64,
     t_gpu_err: u64,
     ev_gpu: Option<(TimingEvent, TimingEvent)>,
+    /// GPU_TIMING=1 才每步记两个带时间戳的事件（怀疑 cuEventRecord 本身有 host 开销，默认关）。
+    gpu_timing: bool,
 }
 
 /// CUDA graph 的 batch 桶（vLLM 默认 1,2,4,8 再按 8 递增到上限；这里 2 的幂 + 上限，够用且捕获快）。
@@ -206,6 +208,7 @@ impl Qwen3Executor {
             t_graph_launch_us: 0,
             t_gpu_err: 0,
             ev_gpu: None,
+            gpu_timing: std::env::var("GPU_TIMING").is_ok_and(|v| v == "1"),
         };
         // decode 图默认 **按桶懒捕获**（首次用到某个 batch 桶时捕获，~30 ms/桶），启动少 ~210 ms；
         // GRAPH_CAPTURE=eager 恢复启动时全部捕获（对拍 / 压测 TTFT 口径不想含首捕获时用）。
@@ -587,12 +590,18 @@ impl Qwen3Executor {
 
     /// GPU 忙时测量：主流上 step 工作入队前 / 后各记一个带时间戳的事件；collect 同步后读差值。
     fn mark_gpu_start(&mut self) -> Result<()> {
+        if !self.gpu_timing {
+            return Ok(());
+        }
         if self.ev_gpu.is_none() {
             self.ev_gpu = Some((self.stream.new_timing_event()?, self.stream.new_timing_event()?));
         }
         self.stream.record_timing(&self.ev_gpu.as_ref().unwrap().0)
     }
     fn mark_gpu_end(&mut self) -> Result<()> {
+        if !self.gpu_timing {
+            return Ok(());
+        }
         self.stream.record_timing(&self.ev_gpu.as_ref().unwrap().1)
     }
 
