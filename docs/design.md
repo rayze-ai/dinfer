@@ -504,5 +504,7 @@ pub struct DeviceBlockRef { pub layer: u8, pub block: BlockId, pub ptr: u64, pub
 | 进程结构 | — | 单进程（API + engine 同进程不同线程），无 ZMQ / 多进程 IPC | TTFT 低一半的主要来源之一 |
 | 小 kernel 融合 | vLLM 有 fused_add_rms_norm、silu_and_mul（CUDA op） | 我们多了 qkv_post（norm+rope+cache write 一个 kernel）、gather+末层 norm、采样四合一；silu·mul 进 GEMM epilogue 与 lm_head f32 直出留给 megakernel 阶段 | decode 步 kernel 数 17 → 7/层 + 4 尾部 |
 | 插队 prefill | 无（vLLM 异步调度下新请求固定多等一步） | 在飞 decode 步未完成时，对 waiting 单独 `schedule_waiting_only` 并同步跑 prefill，结果立刻回填再调度下一步；负载门槛（在飞 ≤ 8 行） | bench28：c8 TTFT 14 → 8 ms、c8-long 54 → 35 ms；代价 c8-long TPOT +0.2 |
+| 算子插拔 | vLLM：PyTorch custom op + `@register_oot` / attention backend 枚举（运行期 Python 分派） | `OpSet` trait 泛型单态化（零运行期开销）+ 启动期选择 + 能力校验 + 泛型 ref 测试；`.so` 按 C ABI 加载并带 capture 探针 | 设计完成（§10.1），待实现 |
+| KV 分层 / 外置 | `KVConnectorBase_V1` 的事件点（scheduler 侧 get_num_new_matched_tokens / update_state_after_alloc；worker 侧 start_load / wait_for_save） | `KvTier` 四方法 + `BlockKey` 含 model/dtype/block_size；先 pinned host 层（显存 17 GiB → 主存），copy stream + 事件；PD 分离复用同一接口 | 设计完成（§10.2），待实现 |
 | 跨流 prefill/decode 并行 | 无（vLLM 单流） | 实现并证实真并行（nsys 39% 重叠） | 闭环 bench 下混批步 <5%，TPOT 无感；留给 prefill 比例高的负载 |
 
