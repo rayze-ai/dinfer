@@ -103,17 +103,29 @@ impl Rope {
     ) -> Result<Self> {
         ensure!(rope_dim % 2 == 0, "rope_dim must be even");
         let half = rope_dim / 2;
+        // 注：HF 在 bf16 模型里把 cos/sin cast 到 bf16 再逐项乘加；这里存 fp32 表、fp32 旋转。
+        // 实测对 logits 的影响 ≤ 1 ULP（P3/P4/P5 对拍均用此表），不改。
+        // 40960 × 128 的 cos/sin 在 host 单线程要 ~120 ms → 按位置分片多线程算（启动 loop 第 6 轮）。
+        let inv_freq: Vec<f64> = (0..half).map(|i| 1.0 / theta.powf(2.0 * i as f64 / rope_dim as f64)).collect();
         let mut table = vec![0f32; max_pos * rope_dim];
-        for p in 0..max_pos {
-            for i in 0..half {
-                let inv = 1.0 / theta.powf(2.0 * i as f64 / rope_dim as f64);
-                let f = p as f64 * inv;
-                // 注：HF 在 bf16 模型里把 cos/sin cast 到 bf16 再逐项乘加；这里存 fp32 表、fp32 旋转后一次舍入。
-                // 实测对 logits 的影响 ≤ 1 ULP（P3/P4/P5 对拍均用此表），不改。
-                table[p * rope_dim + i] = f.cos() as f32;
-                table[p * rope_dim + half + i] = f.sin() as f32;
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 16);
+        let rows_per = max_pos.div_ceil(threads).max(1);
+        std::thread::scope(|sc| {
+            for (chunk_idx, chunk) in table.chunks_mut(rows_per * rope_dim).enumerate() {
+                let inv_freq = &inv_freq;
+                sc.spawn(move || {
+                    let p0 = chunk_idx * rows_per;
+                    for (r, row) in chunk.chunks_mut(rope_dim).enumerate() {
+                        let p = (p0 + r) as f64;
+                        for i in 0..half {
+                            let f = p * inv_freq[i];
+                            row[i] = f.cos() as f32;
+                            row[half + i] = f.sin() as f32;
+                        }
+                    }
+                });
             }
-        }
+        });
         Ok(Self { cos_sin: Tensor::from_vec(stream, table, &[max_pos, rope_dim])?, rope_dim, style })
     }
     /// 就地旋转 q[tokens, q_heads, head_dim] 与可选 k[tokens, k_heads, head_dim] 的前 rope_dim 维。

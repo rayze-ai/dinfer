@@ -13,7 +13,7 @@ use dinfer_core::request::RequestId;
 use dinfer_core::runner::Runner;
 use dinfer_core::sample::SamplingParams;
 use dinfer_core::sched::Scheduler;
-use dinfer_layers::{Device, Gemm, WeightSource};
+use dinfer_layers::{Device, WeightSource};
 use dinfer_server::backend::{ChatBackend, OutDelta, OutputStream, Prompt, RenderRequest};
 use dinfer_text::{ChatTemplate, HfTokenizer, RenderParams};
 use std::path::Path;
@@ -88,7 +88,6 @@ impl Qwen3Service {
         let t_tok = t_start.elapsed(); // 此处只剩 config / 模板默认值读取；tokenizer 耗时见 "tokenizer thread join"
         let dev = Device::new(opt.device)?;
         let s = dev.default_stream();
-        let gemm = Gemm::new(&s)?;
         let t_cuda = t_start.elapsed();
         let t_open = std::time::Instant::now();
         let src = WeightSource::open_dir(model_dir)?;
@@ -113,7 +112,7 @@ impl Qwen3Service {
         let num_blocks = model.num_blocks() as u32;
         s.synchronize()?;
         let t_model = t_start.elapsed();
-        let exec = Qwen3Executor::with_graphs(s.clone(), gemm, model, opt.enable_cuda_graph)?;
+        let exec = Qwen3Executor::with_graphs(s.clone(), model, opt.enable_cuda_graph)?;
         let num_graphs = exec.num_graphs();
         let runner = Runner::new(exec, opt.block_size as usize);
         let t_join = std::time::Instant::now();

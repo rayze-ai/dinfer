@@ -112,6 +112,8 @@ pub struct Qwen3Executor {
     raw: Tensor<f32>,
     buf: StepBuffers,
     graphs: Vec<DecodeGraph>,
+    /// 是否启用 decode 图（懒捕获：graph_for 未命中时按桶捕获）。
+    graphs_enabled: bool,
     last_logprobs: Vec<Vec<TokenLogprobs>>,
     last_rows: usize,
     alt: Option<AltSet>,
@@ -140,10 +142,11 @@ pub fn graph_buckets(max_rows: usize) -> Vec<usize> {
 impl Qwen3Executor {
     /// `enable_graphs`：是否在构造时为每个 batch 桶捕获 decode 图。
     pub fn new(stream: Stream, gemm: Gemm, model: Qwen3Model) -> Result<Self> {
-        Self::with_graphs(stream, gemm, model, true)
+        let _ = gemm;
+        Self::with_graphs(stream, model, true)
     }
 
-    pub fn with_graphs(stream: Stream, _gemm: Gemm, model: Qwen3Model, enable_graphs: bool) -> Result<Self> {
+    pub fn with_graphs(stream: Stream, model: Qwen3Model, enable_graphs: bool) -> Result<Self> {
         // capture 要求非默认流；cuBLASLt 句柄绑流，所以在新流上重建。权重 / scratch 在旧流上分配完并已同步。
         stream.synchronize()?;
         let dev = stream.device();
@@ -164,6 +167,7 @@ impl Qwen3Executor {
             model,
             buf,
             graphs: Vec::new(),
+            graphs_enabled: false,
             last_logprobs: Vec::new(),
             last_rows: 0,
             alt: None,
@@ -176,7 +180,10 @@ impl Qwen3Executor {
             t_launch_us: 0,
             t_wait_us: 0,
         };
-        if enable_graphs {
+        // decode 图默认 **按桶懒捕获**（首次用到某个 batch 桶时捕获，~30 ms/桶），启动少 ~210 ms；
+        // GRAPH_CAPTURE=eager 恢复启动时全部捕获（对拍 / 压测 TTFT 口径不想含首捕获时用）。
+        ex.graphs_enabled = enable_graphs;
+        if enable_graphs && std::env::var("GRAPH_CAPTURE").is_ok_and(|v| v == "eager") {
             ex.capture_decode_graphs()?;
         }
         // 跨流 prefill/decode 并行（Q3-j）：XSTREAM=0 关。副流一套资源在图捕获之后分配。
@@ -356,61 +363,70 @@ impl Qwen3Executor {
 
     // ---------------------------------------------------------------- CUDA graph
 
+    /// 捕获用的假 decode plan（slot=-1 不写 cache、seq_len=1、温度 0）。
+    #[allow(clippy::field_reassign_with_default)]
+    fn capture_plan(nb: usize) -> BatchPlan {
+        let mut p = BatchPlan::default();
+        p.req_ids = (0..nb as u64).collect();
+        p.num_tokens = vec![1; nb];
+        p.input_ids = vec![0; nb];
+        p.positions = vec![0; nb];
+        p.slot_mapping = vec![-1; nb];
+        p.cu_seqlens = (0..=nb as i32).collect();
+        p.seq_lens = vec![1; nb];
+        p.block_table = vec![0; nb];
+        p.max_blocks = 1;
+        p.logits_rows = (0..nb as i32).collect();
+        p.logits_row_start = (0..=nb).collect();
+        p.spec_tokens = vec![Vec::new(); nb];
+        p.next_known = vec![-1; nb];
+        p.mode = BatchMode::Decode;
+        p.sample.clear();
+        for _ in 0..nb {
+            p.sample.push(&dinfer_core::sample::SamplingParams { temperature: 0.0, ..Default::default() }, 0, &[0], 1);
+        }
+        p
+    }
+
+    /// 捕获一个 batch 桶的 decode 图：先 eager 跑一次预热（cuBLASLt 启发式、模块加载在 capture 外完成），再捕获。
+    fn capture_bucket(&mut self, nb: usize) -> Result<()> {
+        let t0 = std::time::Instant::now();
+        let p = Self::capture_plan(nb);
+        self.upload_plan(&p, nb)?;
+        self.upload_sampling(&p.sample, nb)?;
+        self.forward_device(BatchMode::Decode, nb, nb, 1)?;
+        self.sample_device_fixed(nb)?;
+        self.stream.synchronize()?;
+        self.stream.begin_capture()?;
+        let r = self.forward_device(BatchMode::Decode, nb, nb, 1).and_then(|_| self.sample_device_fixed(nb));
+        let g = self.stream.end_capture();
+        r?;
+        let graph = g.with_context(|| format!("capture decode graph for batch {nb}"))?;
+        self.graphs.push(DecodeGraph { batch: nb, graph });
+        self.graphs.sort_by_key(|g| g.batch);
+        self.stream.synchronize()?;
+        tracing::info!(bucket = nb, elapsed_ms = t0.elapsed().as_millis() as u64, "cuda graph captured (decode)");
+        Ok(())
+    }
+
+    /// 启动时一次捕获全部桶（GRAPH_CAPTURE=eager）。
     fn capture_decode_graphs(&mut self) -> Result<()> {
         let t0 = std::time::Instant::now();
         let buckets = graph_buckets(self.model.max_logits_rows);
-        // 预热：每个桶 eager 跑一次（cuBLASLt 启发式、kernel 模块加载都在 capture 外完成）
-        #[allow(clippy::field_reassign_with_default)]
-        let plan = |nb: usize| -> BatchPlan {
-            let mut p = BatchPlan::default();
-            p.req_ids = (0..nb as u64).collect();
-            p.num_tokens = vec![1; nb];
-            p.input_ids = vec![0; nb];
-            p.positions = vec![0; nb];
-            p.slot_mapping = vec![-1; nb];
-            p.cu_seqlens = (0..=nb as i32).collect();
-            p.seq_lens = vec![1; nb];
-            p.block_table = vec![0; nb];
-            p.max_blocks = 1;
-            p.logits_rows = (0..nb as i32).collect();
-            p.logits_row_start = (0..=nb).collect();
-            p.spec_tokens = vec![Vec::new(); nb];
-            p.next_known = vec![-1; nb];
-            p.mode = BatchMode::Decode;
-            p.sample.clear();
-            for _ in 0..nb {
-                p.sample.push(
-                    &dinfer_core::sample::SamplingParams { temperature: 0.0, ..Default::default() },
-                    0,
-                    &[0],
-                    1,
-                );
-            }
-            p
-        };
         for &nb in &buckets {
-            let p = plan(nb);
-            self.upload_plan(&p, nb)?;
-            self.upload_sampling(&p.sample, nb)?;
-            self.forward_device(BatchMode::Decode, nb, nb, 1)?;
-            self.sample_device_fixed(nb)?;
-            self.stream.synchronize()?;
-            // 捕获
-            self.stream.begin_capture()?;
-            let r =
-                self.forward_device(BatchMode::Decode, nb, nb, 1).and_then(|_| self.sample_device_fixed(nb));
-            let g = self.stream.end_capture();
-            r?;
-            let graph = g.with_context(|| format!("capture decode graph for batch {nb}"))?;
-            self.graphs.push(DecodeGraph { batch: nb, graph });
+            self.capture_bucket(nb)?;
         }
-        self.stream.synchronize()?;
-        tracing::info!(
-            buckets = ?buckets,
-            elapsed_ms = t0.elapsed().as_millis() as u64,
-            "cuda graphs captured for decode"
-        );
+        tracing::info!(buckets = ?buckets, elapsed_ms = t0.elapsed().as_millis() as u64, "cuda graphs captured for decode");
         Ok(())
+    }
+
+    /// 懒捕获：n 行 decode 需要的桶若还没有图，现在捕获（只在主套、图启用时）。
+    fn ensure_graph(&mut self, n: usize) -> Result<()> {
+        if !self.graphs_enabled || self.alt_active || self.graph_for(n).is_some() {
+            return Ok(());
+        }
+        let Some(&nb) = graph_buckets(self.model.max_logits_rows).iter().find(|&&b| b >= n) else { return Ok(()) };
+        self.capture_bucket(nb)
     }
 
     fn graph_for(&self, n: usize) -> Option<&DecodeGraph> {
@@ -562,9 +578,11 @@ impl Qwen3Executor {
             plan.sample.num_rows()
         );
         let sb = &plan.sample;
-        let use_graph = plan.mode == BatchMode::Decode
-            && !sb.any_penalty
-            && sb.max_logprobs.is_none()
+        let graph_eligible = plan.mode == BatchMode::Decode && !sb.any_penalty && sb.max_logprobs.is_none();
+        if graph_eligible {
+            self.ensure_graph(n)?;
+        }
+        let use_graph = graph_eligible
             && !self.alt_active // 图是在主流上捕获的，副套不走图
             && self.graph_for(n).is_some();
         let t_launch;

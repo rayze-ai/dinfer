@@ -55,7 +55,8 @@ pub struct WeightSource {
 #[allow(unsafe_code)]
 fn map_readonly(file: &File) -> Result<Mmap> {
     // SAFETY: 见上。
-    Ok(unsafe { Mmap::map(file)? })
+    // populate：映射时就把页表填好（页缓存热时省掉 1433 MiB / 4 KB ≈ 37 万次缺页，~150 ms）
+    Ok(unsafe { memmap2::MmapOptions::new().populate().map(file)? })
 }
 
 impl WeightSource {
