@@ -6,11 +6,11 @@
 - 更新日期：2026-10-17
 - 阶段：Q1 / Q2 通过；**Q3 通过**（2026-10-17 `scripts/verify/q3.sh` exit 0：c1 1.12× / c8 1.07× / c32 1.02× / c8-long 1.00× vLLM，`test/qwen3/2026-10-17/q3/`）。规格 `docs/loops/q3-perf.md`（44 轮），趋势 `test/qwen3/perf-trend.{csv,md,svg,html}`（bench1–16 每轮带改动说明）。GLM 线 P0–P6 通过，真权重挂起。
 - Q3 关键产出：prefill/paged attention v4/v5（`gqa.cu::gqa_fa_v5_kernel<PAGED,NBUF>`，FA2 结构 mma.sync，4090 T=1514 0.14 ms/层；双缓冲在 sm86/89 更慢，默认 NBUF=1，`GQA_PREFILL_NBUF=2` 开关）；decode v2 split-K + splits 1024；混批分流 `gqa_mixed_bf16`；CUDA graph；qkv_post 融合；bench 口径（每轮换 seed）；服务预算 2048（与 vLLM 对齐）。设计说明 `docs/design-qwen3.md` §5（prefill_tc vs paged_tc 是什么、为何选 paged）。
-- **进行中：Q3-j 跨流 prefill/decode 并行**（规格 `docs/loops/q3-xstream.md` 第 6 轮）。已完成：executor 双套资源 + `forward_sample_pair`（事件同步）、runner 混批拆分/散回、scheduler `decode_exempt_from_budget`（默认开）。bench17（仅 executor 侧）c8-long 持平，因 pair 只命中 16/4000 步 → 第 6 轮加调度侧免预算。**待做：4090 bench19 验证免预算 + 跨流的联合效果**（看 `step breakdown` 的 pair 计数和 c8-long TPOT）。回退：`XSTREAM=0` / `--no-decode-exempt`。用户要求：代码可读性（已做一轮：runner/executor helper 拆分、删 v3 死代码）。用户同时要求考虑 **新算子对接**（kernel 插拔）与 **KV cache 对接第三方**（分层 / 外置 / PD 共用），初步方案已写 `docs/design.md` §10，细化待做。
+- **Q3-j 跨流 prefill/decode 并行：实现完成，默认开，闭环 bench 下无可见收益**（`docs/loops/q3-xstream.md` 9 轮）。executor 双套资源 + `forward_sample_pair`（事件同步）、runner 混批拆分/散回（`try_execute_pair`）、scheduler `decode_exempt_from_budget`（默认开）。parity / e2e / core 34 单测全过；bench17/19 四组与 bench16 持平（c8-long 1.00×）。原因：闭环固定并发下 prefill 与 decode 天然错开（4000 步只 18 步混批），收益上限 ~0.15 ms TPOT（pitfalls）。回退 `XSTREAM=0` / `--no-decode-exempt`。**下一步**：① `bench` 加开环泊松到达 + 长短混合 prompt 模式，在那种负载下再评估跨流；② c8-long TPOT 3.9 vs 3.7 转去对比 decode step 本身（nsys decode-only）；③ 启动 <0.6 s（§6.3，先定位 0.8 s 未归段）；④ 采样融合；⑤ `design.md` §10 的算子插拔 / KV 分层细化。用户要求：代码可读性（本轮已做 helper 拆分、删 v3 死代码 302 行、clippy 干净）。
 - **下一步按 `design-qwen3.md` §6.5 优先级**：① 跨流 prefill/decode 并行（c8-long TPOT 3.9 → ~3.0，Q4 单卡前置）；② 启动 3.0 s → <0.8 s（瓶颈是权重 mmap→Vec 复制 1.9 s，不是 PCIe；tokenizer 545 ms）；③ 采样 4 kernel 融合 + 异步调度；④ 逐层 megakernel（decode 1.4×，独立阶段）。之后 Q4 PD 分离 + "可生产"补齐（鉴权 / 限流 / 优雅停机 / >8k 上下文 / 多卡）。
 - 启动日志已分段（用户要求）：`load timing: weights|activation scratch|kv cache alloc` + `cuda graphs captured` + `startup timing`；运行期 `executor step breakdown`（upload/launch/wait µs）每 1000 步、`/metrics` 的 engine_step_{schedule,execute,update} 直方图。
 - **上下文硬约束**：`.claude/settings.json` `BASH_MAX_OUTPUT_LENGTH=8000` + `.claude/hooks/context_guard.sh`。**每轮改动必须 `bench_compare.sh <OUT> "改动一句话"` 进 CSV 趋势**。本会话 130+ 次调用后收功。
-- 4090 常驻：dinfer tmux `dinfer` GPU 0 :8012（release，`--max-num-batched-tokens 2048`）；vLLM Docker `vllm-qwen3` GPU 1 :8013；测试 GPU 3；趋势面板 :8090。远端无 torch → refs/golden 本机生成后 `push`；`push` 带 `--delete`，远端 bench 先 `pull`。
+- 4090 常驻：dinfer tmux `dinfer` GPU 0 :8012（release，`--max-num-batched-tokens 2048`，decode 免预算 + 跨流默认开，commit 148b758+）；vLLM Docker `vllm-qwen3` GPU 1 :8013；测试 GPU 3；趋势面板 :8090。远端无 torch → refs/golden 本机生成后 `push`；`push` 带 `--delete`，远端 bench 先 `pull`。
 - 验证入口：`scripts/verify/remote4090_baseline.sh`（refs 22 + parity 8 + 单测 8 + e2e 6）；`scripts/verify/q3.sh`；本机 `scripts/verify/kernels.sh`；`cold_shape`（prefill / paged 四形状 / decode 微基准）。
 - 环境：本机 3090 nvcc 12.4；**cargo 假失败 `rm target/.rustc_info.json`**；远程 `git@github.com:rayze-ai/dinfer.git` 分支 `dev`。
 - 历史阶段 / 已知简化 / 对拍口径：git log、`docs/design.md` §4、`test/<model>/<日期>/*.md`、pitfalls。
@@ -21,6 +21,7 @@
 ## 2026-10-17
 
 - 00:00–00:30 `q3.sh` 重跑 exit 0 → **Q3 正式通过**。prefill v5（cp.async + NBUF 环形缓冲）：3090 双缓冲更慢，默认单缓冲。启动日志分段（weights host/h2d、scratch、kv）。`design-qwen3.md` 新增 §5（prefill_tc vs paged_tc：同工作量只差 3–30%，1.8× 是形状差异；服务选 paged 因历史 KV 零拷贝 + 调度统一）与 §6（优化空间：megakernel、跨流并行、启动、KV fp8、优先级）。commit 见 git log。
+- 00:30–01:30 Q3-j 跨流并行 9 轮：Event API、ModelScratch 整套换入换出、executor AltSet + `forward_sample_pair`、runner 拆分散回、scheduler decode 免预算；bench17/19 持平，step 计数证明闭环 bench 下混批步极少（18/4000）；收益上限分析进 pitfalls。可读性整理一轮（helper 拆分、删 v3 302 行）。design.md §10 新增算子插拔 / 第三方 KV 方案（用户新需求）。
 
 ## 2026-10-16
 

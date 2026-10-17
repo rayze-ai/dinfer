@@ -311,3 +311,15 @@
 - 根因：两处优化的绝对量（每层几十 µs × 28 层 ≈ 1–3 ms）相对 c8-long 当时 85–100 ms 的 TTFT 不可见；真正的大头是 prefill attention（每 1024-token prefill step ~11 ms attention）。
 - 如何避免：改 kernel 前先用 nsys 总时间 × 占比估算"最多能省多少 ms / 请求"，低于端到端指标的 5% 不做；优先攻占比最大的 kernel。
 
+## 2026-10-17 "微基准 / 结构性优化在闭环 bench 下看不到"：跨流 prefill/decode 并行
+
+- 现象：executor 双流 + 调度免预算都实现正确，bench c8-long TPOT 3.9 ms 不变；step 计数显示 4000 步里只有 18 步同时含 decode 与 prefill 行。
+- 根因：bench 是**闭环固定并发**（8 个 worker 串行发），1024 prompt 在预算 2048 下一步算完，一次压测只有 32 个 prefill step，其余 ~4600 步纯 decode；而且新请求到达时常常正好别的请求也在等——两类行天然错开。能藏的上限 = 32 × 20 ms / (32 × 128 token) ≈ 0.15 ms/TPOT。
+- 如何避免：做结构性优化前先用 `runner step mix` 日志（mixed / pair / prefill_only 计数）确认目标形态在负载里真的出现；评估这类优化要用开环到达（泊松）+ 长短混合 prompt 的 bench。
+- 相关：`docs/loops/q3-xstream.md` 第 7–9 轮；`crates/core/src/runner.rs::try_execute_pair`；`XSTREAM=0` / `--no-decode-exempt` 回退。
+
+## 2026-10-17 serve_e2e 失败两种假阳性
+
+- ① 3090 本机：`QWEN3_GOLDEN` 相对路径（`test/qwen3_golden`）在 `cargo test -p dinfer` 的 cwd（`bins/dinfer`）下找不到 → 永远传绝对路径（`$PWD/test/qwen3_golden`）。
+- ② 4090 baseline：`remote4090_baseline.sh` 的 `run()` 只 grep `^test |test result|panicked`，e2e 子进程起服务失败（显存被上一步 parity 进程短暂占着）时 panic 行不含这些词，日志里只剩 `FAILED (rc=101)`。单独重跑 6/6 过。改进：baseline 失败时把该步全量日志 tail 出来；e2e 前 `sleep 3` 等显存释放。
+
