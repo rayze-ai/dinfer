@@ -33,6 +33,7 @@
 - 08:30–09:10 Q3-m 采样四 kernel 融合（row_* 原语共用，逐位同语义 ref），bench25 1.14/1.08/1.08/1.02×。
 - 09:10–09:40 Q3-n gather+rmsnorm 融合（逐位 ref），bench26 持平；剩余两项并入 megakernel 阶段。
 - 09:40–11:00 Q3-o 插队 prefill 6 轮：scheduler `schedule_waiting_only`、engine `publish_step` 提前回填、`CUT_IN_MAX_ROWS` 门槛；两次翻车（隐含假设、首 token 丢失）进 pitfalls；bench28 TTFT c8 14 → 8、c8-long 54 → 35。
+- 11:00– design §10 细化（算子插拔 / KV 分层）：先盘现有算子调用面（26 个 k:: 入口 + 1 个 Gemm）与 KV 管理器钩子（get_computed_blocks / allocate_slots / cache_blocks / free），再写成可落地的 trait 与接入点。
 
 ## 2026-10-16
 
