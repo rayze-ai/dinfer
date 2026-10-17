@@ -445,6 +445,55 @@ pub fn argmax_f32_n<L: DevicePtr<f32> + ?Sized, O: DevicePtrMut<i32> + ?Sized>(
     check(unsafe { ffi::argmax_f32(pl, po, batch as i64, vocab as i64, stream.raw() as _) }, "argmax_f32")
 }
 
+/// 融合采样：在 `work`（[batch, vocab] fp32，原地改）上依次 temperature → min_p → top-k/top-p → sample，
+/// 一次 launch，语义 = `temperature_f32 → min_p_mask_f32 → topk_topp_mask_f32 → sample_f32(temp01)` 串行。
+#[allow(clippy::too_many_arguments)]
+pub fn sample_fused_f32<W: DevicePtrMut<f32> + ?Sized, O: DevicePtrMut<i32> + ?Sized>(
+    stream: &Stream,
+    work: &mut W,
+    temperature: &CudaSlice<f32>,
+    min_p: &CudaSlice<f32>,
+    top_k: &CudaSlice<i32>,
+    top_p: &CudaSlice<f32>,
+    temp01: &CudaSlice<f32>,
+    seeds: &CudaSlice<u64>,
+    offsets: &CudaSlice<u64>,
+    out: &mut O,
+    batch: usize,
+    vocab: usize,
+) -> Result<()> {
+    ensure!(vocab > 0 && work.len() >= batch * vocab && out.len() >= batch, "sample_fused: shape");
+    ensure!(
+        [temperature.len(), min_p.len(), top_p.len(), temp01.len()].iter().all(|&l| l >= batch)
+            && top_k.len() >= batch
+            && seeds.len() >= batch
+            && offsets.len() >= batch,
+        "sample_fused: param shape"
+    );
+    let pw = stream.ptr_mut(work) as *mut f32;
+    let po = stream.ptr_mut(out) as *mut i32;
+    // SAFETY: 容量已校验。
+    check(
+        unsafe {
+            ffi::sample_fused_f32(
+                pw,
+                stream.ptr(temperature) as *const f32,
+                stream.ptr(min_p) as *const f32,
+                stream.ptr(top_k) as *const i32,
+                stream.ptr(top_p) as *const f32,
+                stream.ptr(temp01) as *const f32,
+                stream.ptr(seeds) as *const u64,
+                stream.ptr(offsets) as *const u64,
+                po,
+                batch as i64,
+                vocab as i64,
+                stream.raw() as _,
+            )
+        },
+        "sample_fused_f32",
+    )
+}
+
 /// 异步调度：`ids[i] = prev[gather_idx[i]]`（gather_idx[i] < 0 的行保持 host 上传的值）。可进 CUDA graph。
 pub fn row_gather_i32(
     stream: &Stream,

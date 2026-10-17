@@ -82,11 +82,7 @@ __device__ float prob_mass_ge(const float* row, int vocab, float t, float m, flo
 
 // 语义与 vLLM `apply_top_k_top_p_pytorch` 一致：先 top-k 置 -inf，再在剩余分布上做 top-p，
 // 保留"按概率降序累计到 p 为止（含跨过 p 的那个）"。
-__global__ void topk_topp_mask_kernel(float* __restrict__ logits, const int32_t* __restrict__ top_k,
-                                      const float* __restrict__ top_p, int vocab) {
-  float* row = logits + (int64_t)blockIdx.x * vocab;
-  const int k = top_k[blockIdx.x];
-  const float p = top_p[blockIdx.x];
+__device__ void row_topk_topp(float* row, int k, float p, int vocab) {
   const bool do_k = k > 0 && k < vocab;
   const bool do_p = p < 1.f && p > 0.f;
   if (!do_k && !do_p) return;
@@ -131,6 +127,10 @@ __global__ void topk_topp_mask_kernel(float* __restrict__ logits, const int32_t*
     if (row[i] < thresh) row[i] = -INFINITY;
   }
 }
+__global__ void topk_topp_mask_kernel(float* __restrict__ logits, const int32_t* __restrict__ top_k,
+                                      const float* __restrict__ top_p, int vocab) {
+  row_topk_topp(logits + (int64_t)blockIdx.x * vocab, top_k[blockIdx.x], top_p[blockIdx.x], vocab);
+}
 
 // ---- 温度 + softmax + 多项式采样 ----
 // Philox4x32-10 单次调用产一个 [0,1) 随机数。
@@ -156,12 +156,7 @@ __device__ float philox_uniform(uint64_t seed, uint64_t offset) {
   return (c0 >> 8) * (1.f / 16777216.f);  // 24-bit mantissa → [0,1)
 }
 
-__global__ void sample_kernel(const float* __restrict__ logits, const float* __restrict__ temperature,
-                              const uint64_t* __restrict__ seeds, const uint64_t* __restrict__ offsets,
-                              int32_t* __restrict__ out, int vocab) {
-  const int b = blockIdx.x;
-  const float* row = logits + (int64_t)b * vocab;
-  const float temp = temperature[b];
+__device__ void row_sample(const float* row, float temp, uint64_t seed, uint64_t offset, int32_t* out_b, int vocab) {
   __shared__ float s_target;
   __shared__ int s_choice;
 
@@ -193,7 +188,7 @@ __global__ void sample_kernel(const float* __restrict__ logits, const float* __r
         const int oi = __shfl_xor_sync(0xffffffffu, besti, o);
         if (ov > best || (ov == best && oi < besti)) { best = ov; besti = oi; }
       }
-      if (lane == 0) out[b] = besti;
+      if (lane == 0) *out_b = besti;
     }
     return;
   }
@@ -211,7 +206,7 @@ __global__ void sample_kernel(const float* __restrict__ logits, const float* __r
   }
   const float denom = block_reduce_sum<BLOCK>(d);
   if (threadIdx.x == 0) {
-    s_target = philox_uniform(seeds[b], offsets[b]) * denom;
+    s_target = philox_uniform(seed, offset) * denom;
     s_choice = 0x7fffffff;  // INT_MAX：atomicMin 取最小命中下标
   }
   __syncthreads();
@@ -257,8 +252,34 @@ __global__ void sample_kernel(const float* __restrict__ logits, const float* __r
       }
       if (c < 0) c = 0;
     }
-    out[b] = c;
+    *out_b = c;
   }
+}
+__global__ void sample_kernel(const float* __restrict__ logits, const float* __restrict__ temperature,
+                              const uint64_t* __restrict__ seeds, const uint64_t* __restrict__ offsets,
+                              int32_t* __restrict__ out, int vocab) {
+  const int b = blockIdx.x;
+  row_sample(logits + (int64_t)b * vocab, temperature[b], seeds[b], offsets[b], out + b, vocab);
+}
+__device__ void row_temperature(float* row, float t, int vocab);
+__device__ void row_min_p(float* row, float mp, int vocab);
+// ---- 融合（Q3 第 58 轮）：一个 block 一行，顺序 = temperature → min_p → top-k/top-p → sample，
+// 语义与四个独立 kernel 串行完全相同（同一份 row 原语），省 3 次 launch + 1 次 D2D（直接在 work 上原地）。
+// temp01：sample 阶段的温度（1.0 = 已缩放过的分布；0 = greedy argmax），与独立路径的 sample_f32 传法一致。
+__global__ void sample_fused_kernel(float* __restrict__ work, const float* __restrict__ temperature,
+                                    const float* __restrict__ min_p, const int32_t* __restrict__ top_k,
+                                    const float* __restrict__ top_p, const float* __restrict__ temp01,
+                                    const uint64_t* __restrict__ seeds, const uint64_t* __restrict__ offsets,
+                                    int32_t* __restrict__ out, int vocab) {
+  const int b = blockIdx.x;
+  float* row = work + (int64_t)b * vocab;
+  row_temperature(row, temperature[b], vocab);
+  __syncthreads();
+  row_min_p(row, min_p[b], vocab);
+  __syncthreads();
+  row_topk_topp(row, top_k[b], top_p[b], vocab);
+  __syncthreads();
+  row_sample(row, temp01[b], seeds[b], offsets[b], out + b, vocab);
 }
 
 
@@ -296,11 +317,8 @@ __global__ void penalties_kernel(float* __restrict__ logits, const int32_t* __re
 }
 
 // ---- min_p（vLLM apply_min_p）：p_i < min_p · max_i p_i 的置 -inf；在 temperature 之后、top_k/p 之前 ----
-__global__ void min_p_mask_kernel(float* __restrict__ logits, const float* __restrict__ min_p, int vocab) {
-  const int b = blockIdx.x;
-  const float mp = min_p[b];
+__device__ void row_min_p(float* row, float mp, int vocab) {
   if (mp <= 0.f) return;
-  float* row = logits + (int64_t)b * vocab;
   const float m = row_max(row, vocab);
   float d = 0.f;
   for (int i = threadIdx.x; i < vocab; i += BLOCK) { const float v = row[i]; if (v > -INFINITY) d += __expf(v - m); }
@@ -312,15 +330,19 @@ __global__ void min_p_mask_kernel(float* __restrict__ logits, const float* __res
     if (v > -INFINITY && __expf(v - m) / denom < thresh) row[i] = -INFINITY;
   }
 }
+__global__ void min_p_mask_kernel(float* __restrict__ logits, const float* __restrict__ min_p, int vocab) {
+  row_min_p(logits + (int64_t)blockIdx.x * vocab, min_p[blockIdx.x], vocab);
+}
 
 // ---- 温度缩放（原地）----
-__global__ void temperature_kernel(float* __restrict__ logits, const float* __restrict__ temperature, int vocab) {
-  const int b = blockIdx.x;
-  const float t = temperature[b];
+// 行级原语（被独立 kernel 与融合 kernel共用；每个都以 block 为单位处理一行，内部含 __syncthreads）
+__device__ void row_temperature(float* row, float t, int vocab) {
   if (t <= 1e-5f || t == 1.f) return;
-  float* row = logits + (int64_t)b * vocab;
   const float inv = 1.f / t;
   for (int i = threadIdx.x; i < vocab; i += BLOCK) row[i] *= inv;
+}
+__global__ void temperature_kernel(float* __restrict__ logits, const float* __restrict__ temperature, int vocab) {
+  row_temperature(logits + (int64_t)blockIdx.x * vocab, temperature[blockIdx.x], vocab);
 }
 
 // ---- logprobs：对原始 logits 的 log_softmax，取 top-k（k ≤ 32）+ 指定 token 的 logprob 与 rank ----
@@ -438,5 +460,16 @@ extern "C" int row_gather_i32(const int32_t* prev, const int32_t* gather_idx, in
                               cudaStream_t stream) {
   if (n <= 0) return 0;
   row_gather_i32_kernel<<<(unsigned)((n + 255) / 256), 256, 0, stream>>>(prev, gather_idx, ids, (int)n);
+  return last_err();
+}
+
+extern "C" int sample_fused_f32(float* work, const float* temperature, const float* min_p, const int32_t* top_k,
+                                const float* top_p, const float* temp01, const uint64_t* seeds,
+                                const uint64_t* offsets, int32_t* out, int64_t batch, int64_t vocab,
+                                cudaStream_t stream) {
+  if (batch <= 0) return 0;
+  if (vocab <= 0) return err(cudaErrorInvalidValue);
+  sample_fused_kernel<<<(unsigned)batch, BLOCK, 0, stream>>>(work, temperature, min_p, top_k, top_p, temp01, seeds,
+                                                            offsets, out, (int)vocab);
   return last_err();
 }

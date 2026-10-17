@@ -53,6 +53,9 @@ int topk_topp_mask_f32(float* logits, const int32_t* top_k, const float* top_p, 
 // 温度缩放 + softmax + 多项式采样（Philox，seed/offset 每行）。temperature<=0 的行走 argmax。
 int sample_f32(const float* logits, const float* temperature, const uint64_t* seeds, const uint64_t* offsets,
                int32_t* out, int64_t batch, int64_t vocab, cudaStream_t stream);
+int sample_fused_f32(float* work, const float* temperature, const float* min_p, const int32_t* top_k,
+                     const float* top_p, const float* temp01, const uint64_t* seeds, const uint64_t* offsets,
+                     int32_t* out, int64_t batch, int64_t vocab, cudaStream_t stream);
 
 
 // ---- MLA（参考版，见 mla.cu）----

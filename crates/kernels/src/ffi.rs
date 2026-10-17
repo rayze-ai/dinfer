@@ -121,6 +121,20 @@ extern "C" {
         vocab: i64,
         stream: cudaStream_t,
     ) -> i32;
+    pub fn sample_fused_f32(
+        work: *mut f32,
+        temperature: *const f32,
+        min_p: *const f32,
+        top_k: *const i32,
+        top_p: *const f32,
+        temp01: *const f32,
+        seeds: *const u64,
+        offsets: *const u64,
+        out: *mut i32,
+        batch: i64,
+        vocab: i64,
+        stream: cudaStream_t,
+    ) -> i32;
     pub fn mla_cache_write_bf16(
         latent: *const c_void,
         cache: *mut c_void,

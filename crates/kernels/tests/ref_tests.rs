@@ -756,3 +756,52 @@ fn logprobs_ref() {
     assert_f32_close("logprobs vals", &s.dtoh_sync_copy(&out_lp).unwrap(), &want_vals, 1e-4);
     assert_eq!(s.dtoh_sync_copy(&rank).unwrap(), want_rank, "logprobs rank");
 }
+
+/// 融合采样 kernel 与四 kernel 串行在同一输入上逐行同选（random 行用同 seed/offset；greedy 行 argmax）。
+#[test]
+#[ignore]
+fn sample_fused_matches_chain() {
+    let (_d, s) = dev();
+    let (b, v) = (24usize, 4096usize);
+    let mut x: u64 = 0x1234_5678_9abc_def0;
+    let mut rnd = || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        (x >> 11) as f32 / (1u64 << 53) as f32
+    };
+    let logits: Vec<f32> = (0..b * v).map(|_| rnd() * 12.0 - 6.0).collect();
+    let temperature: Vec<f32> = (0..b).map(|i| [0.0, 0.7, 1.0, 1.3][i % 4]).collect();
+    let temp01: Vec<f32> = temperature.iter().map(|&t| if t > 1e-5 { 1.0 } else { 0.0 }).collect();
+    let min_p: Vec<f32> = (0..b).map(|i| [0.0, 0.05, 0.0, 0.1][i % 4]).collect();
+    let top_k: Vec<i32> = (0..b).map(|i| [-1, 40, 0, 5][(i / 4) % 4]).collect();
+    let top_p: Vec<f32> = (0..b).map(|i| [1.0, 0.9, 0.5, 1.0][(i / 2) % 4]).collect();
+    let seeds: Vec<u64> = (0..b as u64).map(|i| 1000 + i).collect();
+    let offs: Vec<u64> = (0..b as u64).map(|i| 7 * i).collect();
+    let dt = s.htod_copy(temperature).unwrap();
+    let dt01 = s.htod_copy(temp01).unwrap();
+    let dmp = s.htod_copy(min_p).unwrap();
+    let dk = s.htod_copy(top_k).unwrap();
+    let dp = s.htod_copy(top_p).unwrap();
+    let ds = s.htod_copy(seeds).unwrap();
+    let dof = s.htod_copy(offs).unwrap();
+    // chain
+    let mut w1 = s.htod_copy(logits.clone()).unwrap();
+    let mut o1 = s.alloc_zeros::<i32>(b).unwrap();
+    {
+        let mut wv = w1.slice_mut(..);
+        dinfer_kernels::temperature_f32(&s, &mut wv, &dt.slice(..), v).unwrap();
+        dinfer_kernels::min_p_mask_f32(&s, &mut wv, &dmp.slice(..), v).unwrap();
+        dinfer_kernels::topk_topp_mask_f32(&s, &mut wv, &dk.slice(..), &dp.slice(..), v).unwrap();
+    }
+    dinfer_kernels::sample_f32(&s, &w1, &dt01, &ds, &dof, &mut o1, v).unwrap();
+    // fused
+    let mut w2 = s.htod_copy(logits).unwrap();
+    let mut o2 = s.alloc_zeros::<i32>(b).unwrap();
+    dinfer_kernels::sample_fused_f32(&s, &mut w2, &dt, &dmp, &dk, &dp, &dt01, &ds, &dof, &mut o2, b, v).unwrap();
+    let (a, c) = (s.dtoh_sync_copy(&o1).unwrap(), s.dtoh_sync_copy(&o2).unwrap());
+    assert_eq!(a, c, "fused sampling differs from 4-kernel chain");
+    let (m1, m2) = (s.dtoh_sync_copy(&w1).unwrap(), s.dtoh_sync_copy(&w2).unwrap());
+    let ndiff = m1.iter().zip(&m2).filter(|(p, q)| p.to_bits() != q.to_bits()).count();
+    assert_eq!(ndiff, 0, "masked logits differ at {ndiff} positions");
+}

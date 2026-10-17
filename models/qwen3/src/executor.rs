@@ -399,23 +399,14 @@ impl Qwen3Executor {
     fn sample_device_fixed(&mut self, nb: usize) -> Result<()> {
         let s = &self.stream;
         let v = self.model.cfg.vocab_size as usize;
+        // logits → work（采样原地改 work，保留 logits 给 logprobs / 对拍）；之后一个融合 kernel 做完四步
         s.dtod_copy_n(&self.logits.data, &mut self.work.data, nb * v)?;
-        let b = &self.buf;
+        let StepBuffers { chosen, temperature, min_p, top_k, top_p, temp01, seeds, offsets, .. } = &mut self.buf;
         let mut wv = self.work.data.slice_mut(..nb * v);
-        k::temperature_f32(s, &mut wv, &b.temperature.data.slice(..nb), v)?;
-        k::min_p_mask_f32(s, &mut wv, &b.min_p.data.slice(..nb), v)?;
-        k::topk_topp_mask_f32(s, &mut wv, &b.top_k.data.slice(..nb), &b.top_p.data.slice(..nb), v)?;
-        let wv_ro = self.work.data.slice(..nb * v);
-        let StepBuffers { chosen, temp01, seeds, offsets, .. } = &mut self.buf;
         let mut ch = chosen.data.slice_mut(..nb);
-        k::sample_f32(
-            s,
-            &wv_ro,
-            &temp01.data.slice(..nb),
-            &seeds.data.slice(..nb),
-            &offsets.data.slice(..nb),
-            &mut ch,
-            v,
+        k::sample_fused_f32(
+            s, &mut wv, &temperature.data, &min_p.data, &top_k.data, &top_p.data, &temp01.data, &seeds.data,
+            &offsets.data, &mut ch, nb, v,
         )?;
         // 异步调度：保存本步采样给下一步 gather（图内；非异步时无害）
         {
