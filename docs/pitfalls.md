@@ -361,3 +361,11 @@
 - 如何避免：任何"host 侧写 + 异步 DMA 读"的缓冲都要么双缓冲 + 事件，要么保证同一同步窗口内不重写；压测必须包含 B≥32 的场景。
 - 相关：`crates/kernels/src/device.rs::PinnedUploader`，`docs/loops/q3-perf.md` 第 50–51 轮。
 
+## 2026-10-17 `tmux kill-session` 杀不死 `cmd | tee log` 里的 serve 进程：常驻 :8012 跑的是 20 小时前的旧二进制
+
+- 现象：修了 block_table 跨度后 GPU 3 单测 c8 TPOT 2.53，GPU 0 "常驻服务" 2.78 且怎么改都不动；`ps` 看到 serve 进程 uptime 72381 s、参数还是早上的 `--max-num-batched-tokens 4096`，机器上有 3 个 `tee serve.log`。
+- 根因：tmux 会话里跑的是 `bash -c "source env; dinfer serve ... | tee log"`，kill-session 只杀 bash，管道两端的 serve / tee 成孤儿继续跑并占着端口；新起的实例要么绑端口失败退出，要么起来了但 bench 连的还是旧的（同端口竞争）。tee 覆盖同一个日志文件，看日志像是新进程在跑。
+- 影响：bench16–22 里对 GPU 0 dinfer 的数字不保证是当轮代码；c1/c32/c8-long 那几轮的结论要用 bench23 重新对照。
+- 解法：`scripts/dev/restart_dinfer.sh`：按 `--port` 模式 `pkill -INT`，等进程退、等显存回落，再起；结束打印 serve 进程数（必须是 1）。bench 脚本一律调它。
+- 如何避免：任何"重启服务后测"的脚本都要在起新之前确认旧 pid 没了、端口空了、显存回落了；性能数字异常先 `ps -o etimes` 看进程年龄。
+
