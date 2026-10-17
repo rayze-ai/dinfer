@@ -91,3 +91,47 @@ tests/
 - **纯 prefill 步合并到 paged 版**：若把 qkv 输出的 K/V 直接写进 paged cache 后统一读 cache（现在 `qkv_post` 已经写 cache 了），prefill 版就可以删掉，少一份代码；代价是纯 prefill 步多 3–30% attention 时间。等 c8-long 稳定 >1.0× 后再评估。
 - **双缓冲（v5 NBUF=2）在 sm86/sm89 不划算**：68 KB 动态 smem → 每 SM 1 block，丢掉的 block 间重叠比 tile 内 cp.async 重叠更多（3090 T=1900 0.38 → 0.44 ms）。保留 `GQA_PREFILL_NBUF=2` 开关，H100（228 KB smem）上可能反转。
 - **真正的上限**：T=1514 单层 9.4 GFLOP，0.14 ms = 67 TFLOPS ≈ 4090 bf16 dense（fp32 累加 165 TFLOPS）的 40%。FA2 在 A100 上约 50–60%，再优化空间约 1.3×：128-key tile（减半 softmax 归约次数）、PV 用 fp16 累加（精度风险）、Q 片 ldmatrix 预取。按 prefill step 里 attention 只占 ~15%（v4 后，GEMM 占大头）来算，端到端收益 < 5%，暂不做。
+
+## 6. 进一步优化空间分析（2026-10-17，仅分析；不受 vLLM 思路约束）
+
+当前（bench16 / q3.sh 2026-10-17）：c1 1.12× / c8 1.07× / c32 1.02× / c8-long 1.00× vLLM。每一项按"理论下限 → 现状 → 差距在哪 → 要做什么 → 预期收益"写。
+
+### 6.1 decode 步（TPOT 的全部）
+
+- **下限**：B=1 一步要搬全部权重 1.2 GB（bf16，含 lm_head）+ KV；4090 1 TB/s → **≥1.2 ms**。现状 2.0 ms（c1 TPOT）。B=8 现状 2.5 ms，B=32 3.6 ms。
+- **差距**：28 层 × 8 kernel + 采样 4 kernel ≈ 230 次 launch 在一张 CUDA graph 里；每个 kernel 1–3 µs 的尾部 + 依赖等待，launch-bound 占 ~0.6 ms。另 D2H 等结果 + CPU 调度 ≈ 0.1 ms/步串行。
+- **做什么**（按收益排）：
+  1. **逐层 megakernel**（persistent kernel，一个 block 组做完 norm → qkv GEMM → attention → o_proj → norm → MLP，grid 级同步用 cooperative groups 或 flag）：launch 230 → 1，B≤8 时 TPOT 2.0 → ~1.4 ms（**1.4×**）。这是 vLLM 结构上做不到的（它的 kernel 来自 PyTorch / Triton 独立编译）。工作量大（2–3 天），sm86/89 可做。
+  2. 采样 4 kernel → 1（penalties / temperature / min_p / top-k-p 融合）：-3 launch，B=1 约 -10 µs，小但零风险，顺手做。
+  3. **异步调度**：runner 不等本步结果就调度下一步（vLLM 的 async scheduling 也是这个），把 0.1 ms CPU 串行藏掉；dinfer 的 placeholder 机制已在 scheduler 里预留（`num_output_placeholders`），只差 executor 双缓冲。
+  4. KV fp8（E4M3 + per-block scale）：decode attention 读量减半，c8-long 36 → ~20 µs/层，B=8 长序列 TPOT -0.4 ms（**~10%**）；精度需对拍。
+- **不做**：GEMM 小 M 已在带宽下限（round 14 微基准）。
+
+### 6.2 prefill 步（TTFT 与 c8-long 的 TPOT 抖动）
+
+- **下限**：1024-token step ≈ 0.9 TFLOP（非 embedding 参数 0.44B × 2 × 1024）/ 165 TFLOPS ≈ **5.5 ms**；现状 15 ms（单发 TTFT，含 HTTP / tokenize ~1 ms）。
+- **差距**：GEMM 占 ~9 ms（cuBLASLt 对 M=1024 选的 kernel 实测 ~125 TFLOPS，已 76% 峰值）；attention v4 ≈ 1.5 ms（28 × 0.05）；其他小 kernel（norm / rope / silu / cache write）≈ 1.5 ms；lm_head 只算最后一行可忽略。
+- **做什么**：
+  1. **GEMM 融合**：gate_up 与 silu·mul 融合（epilogue）、qkv 与 qkv_post 融合，省 2 次 M×N 的读写 ≈ 1 ms/step。cuBLASLt epilogue 只支持 bias/relu/gelu，要自己写 CUTLASS/裸 mma GEMM（有 v4 attention 的经验，可做）。
+  2. **prefill 与 decode 跨流并行**（dinfer 独有机会）：decode 是带宽型、prefill 是算力型，同一张 GPU 上两条 stream 可以重叠。把 step 拆成"decode 批（graph）"与"prefill 批"两条流，prefill 的 20 ms 不再打断 decode（c8-long TPOT 3.9 → ~3.0，**+30%**；TTFT 不变）。vLLM 是单流单批，做不到。前提：KV 写与读的块不相交（prefill 写新块，decode 读旧块，天然成立）；激活 scratch 两套。这是 Q4 PD 分离的单卡版，值得先做。
+  3. 预算 2048 下 chunked prefill 把 1024 prompt 切 2 片时的首 token 延迟：若 1 项做了，预算可回 4096 又不伤 TPOT。
+- **不做**：attention 再快 1.3×（128-key tile）端到端 <3%。
+
+### 6.3 启动（权重加载 2.1 s）
+
+- **分段**（本机 3090，新日志）：tokenizer 545 ms、CUDA init 129 ms、**权重 host 侧 mmap→Vec 约 1.9 s / H2D 约 0.1 s**（见 `load timing: weights` 行 host_ms / h2d_ms / h2d_gib_s）、scratch ~10 ms、KV 1 ms、graph 捕获 177 ms。
+- **下限**：1.5 GB 走 PCIe 4 ×16 ≈ 60 ms；NVMe 顺序读 ≈ 0.3–0.5 s（冷）/ 0 s（页缓存热）。
+- **做什么**：① 去掉 host 侧 `Vec<bf16>` 复制：bf16 张量直接 `cudaMemcpy` mmap 指针（页缓存热时 1.5 GB memcpy ≈ 0.15 s）或 `cudaHostRegister` 后异步 H2D 多流并行；② tokenizer 545 ms 是 `tokenizers` crate 建 BPE 合并表，可缓存序列化结果或换 fast path；③ graph 捕获与权重加载并行（不同流）。预期 total 3.0 → **<0.8 s**。
+
+### 6.4 吞吐上限（c32 及以上）
+
+- B=32 一步 3.6 ms：GEMM M=32 仍是权重带宽主导（1.2 ms）+ attention 0.3 + 小 kernel；vLLM 3.3。差 0.3 ms 在 decode attention（splits 后仍 2.7× 慢于 B=1 的每请求成本）和 norm/silu 小 kernel 数。
+- 继续涨 B（64 / 128）dinfer 的 GEMM 进入 tensorop 区间，per-token 成本下降更快；bench 没测 c64，建议加一组。
+
+### 6.5 优先级建议
+
+1. 跨流 prefill/decode 并行（6.2-2）：c8-long 直接超越，兼做 Q4 前置。
+2. 启动 <0.8 s（6.3）：工程量小，用户可感。
+3. 采样融合 + 异步调度（6.1-2/3）。
+4. 逐层 megakernel（6.1-1）：最大单项，但工作量最大，放 Q3 之后独立阶段。
+

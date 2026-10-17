@@ -3,20 +3,23 @@
 <!-- ===== 当前状态（交接区）：每次收功整体重写，保持 ≤ 20 行 ===== -->
 ## 当前状态
 
-- 更新日期：2026-10-16（深夜）
-- 阶段：Q1 / Q2 通过；**Q3 单卡性能：bench15 四组首次全部 ≥ vLLM**（c1 1.12× / c8 1.07× / c32 1.02× / c8-long 1.00×；`scripts/verify/q3.sh` 正式验收结果见日志末行与 `test/qwen3/2026-10-16/q3/`）。规格 `docs/loops/q3-perf.md`（第 39 轮），记录 `test/qwen3/2026-10-16/q3-perf.md`，每轮 bench `test/qwen3/2026-10-16/bench*/` + `CHANGE`，趋势 `test/qwen3/perf-trend.{csv,md,svg,html}`。GLM 线 P0–P6 通过，真权重挂起。
-- 本轮关键产出：**prefill/paged attention v4**（`gqa.cu::gqa_fa_v4_kernel<PAGED>`：FA2 结构，裸 `mma.sync m16n8k16` + `ldmatrix`，S/P/O 全寄存器，64-key tile，34 KB smem）4090 T=1514 0.66 → 0.14 ms/层；单发 1024 TTFT 25 → 15 ms（vLLM 21）。混批分流 `ops::gqa_mixed_bf16`（decode 行走 decode_v2 + `cu_seqlens_q` 行映射，paged 跳过 q_len==1）。decode splits 目标 1024。
-- **口径修正（重要）**：bench 原固定 seed → 常驻 vLLM prefix cache 90% 命中。`bench_compare.sh` 现每次换 seed（写 summary）；**bench≤11 的 TTFT / c8-long 不可与 bench12+ 直接比**。vLLM 4090 实际 `max_num_batched_tokens=2048`（dinfer 4096）。
-- c8-long 1.005×（bench16，预算 2048）：TTFT 39 vs 68 已大幅领先，TPOT 3.9 vs 3.7 略慢。剩余想法：① prefill step 独占 / chunk 预算与 TTFT-TPOT 权衡（我们一步 4 个 1024 prompt ≈ 50 ms 打断 decode，vLLM 2048 预算每步 2 个）；② 采样 4 kernel 融一个；③ K/V tile cp.async 双缓冲（v5）；④ 权重加载 2.1 s → <1 s。
-- 下一阶段 **Q4 PD 分离**（design.md §5b）与"可生产"补齐：logprobs/n>1 已有；缺鉴权、限流、优雅停机、metrics 完整度、长上下文 >8k 验证、多卡；GLM/K3 真权重需 ≥8×H200。
-- **上下文硬约束（第 4 次 Input too long 后）**：`.claude/settings.json` `BASH_MAX_OUTPUT_LENGTH=8000` + `.claude/hooks/context_guard.sh`（拒绝无 limit 大文件 Read、不截断 cat/diff；40 次起每 10 次提醒）。**每轮必须 `bench_compare.sh <OUT> "改动一句话"` 进 CSV 趋势**（用户两次强调）。本会话 110+ 次调用后收功。
-- 4090 常驻：dinfer tmux `dinfer` GPU 0 :8012（release）；vLLM Docker `vllm-qwen3` GPU 1 :8013；测试 GPU 3；趋势面板 tmux `trend` :8090。远端无 torch/numpy → refs/golden 本机生成后 `push`；`push` 带 `--delete`，远端 bench 先 `pull`。
-- 验证入口：`scripts/verify/remote4090_baseline.sh`（refs 22 + parity 8 + 单测 8 + e2e 6）；`scripts/verify/q3.sh`；本机 `scripts/verify/kernels.sh`；`cargo test --release -p dinfer-kernels --test cold_shape -- --ignored --nocapture`（prefill / paged 四形状 / decode 微基准）。
-- 环境：本机 3090 nvcc 12.4 `/usr/local/cuda/bin`；**cargo 假失败 `rm target/.rustc_info.json`**；远程 `git@github.com:rayze-ai/dinfer.git` 分支 `dev`。
-- 历史阶段 / 已知简化 / 对拍口径：git log、`docs/design.md` §4、`test/<model>/<日期>/*.md`、pitfalls 2026-10-15/16。
+- 更新日期：2026-10-17
+- 阶段：Q1 / Q2 通过；**Q3 通过**（2026-10-17 `scripts/verify/q3.sh` exit 0：c1 1.12× / c8 1.07× / c32 1.02× / c8-long 1.00× vLLM，`test/qwen3/2026-10-17/q3/`）。规格 `docs/loops/q3-perf.md`（44 轮），趋势 `test/qwen3/perf-trend.{csv,md,svg,html}`（bench1–16 每轮带改动说明）。GLM 线 P0–P6 通过，真权重挂起。
+- Q3 关键产出：prefill/paged attention v4/v5（`gqa.cu::gqa_fa_v5_kernel<PAGED,NBUF>`，FA2 结构 mma.sync，4090 T=1514 0.14 ms/层；双缓冲在 sm86/89 更慢，默认 NBUF=1，`GQA_PREFILL_NBUF=2` 开关）；decode v2 split-K + splits 1024；混批分流 `gqa_mixed_bf16`；CUDA graph；qkv_post 融合；bench 口径（每轮换 seed）；服务预算 2048（与 vLLM 对齐）。设计说明 `docs/design-qwen3.md` §5（prefill_tc vs paged_tc 是什么、为何选 paged）。
+- **下一步按 `design-qwen3.md` §6.5 优先级**：① 跨流 prefill/decode 并行（c8-long TPOT 3.9 → ~3.0，Q4 单卡前置）；② 启动 3.0 s → <0.8 s（瓶颈是权重 mmap→Vec 复制 1.9 s，不是 PCIe；tokenizer 545 ms）；③ 采样 4 kernel 融合 + 异步调度；④ 逐层 megakernel（decode 1.4×，独立阶段）。之后 Q4 PD 分离 + "可生产"补齐（鉴权 / 限流 / 优雅停机 / >8k 上下文 / 多卡）。
+- 启动日志已分段（用户要求）：`load timing: weights|activation scratch|kv cache alloc` + `cuda graphs captured` + `startup timing`；运行期 `executor step breakdown`（upload/launch/wait µs）每 1000 步、`/metrics` 的 engine_step_{schedule,execute,update} 直方图。
+- **上下文硬约束**：`.claude/settings.json` `BASH_MAX_OUTPUT_LENGTH=8000` + `.claude/hooks/context_guard.sh`。**每轮改动必须 `bench_compare.sh <OUT> "改动一句话"` 进 CSV 趋势**。本会话 130+ 次调用后收功。
+- 4090 常驻：dinfer tmux `dinfer` GPU 0 :8012（release，`--max-num-batched-tokens 2048`）；vLLM Docker `vllm-qwen3` GPU 1 :8013；测试 GPU 3；趋势面板 :8090。远端无 torch → refs/golden 本机生成后 `push`；`push` 带 `--delete`，远端 bench 先 `pull`。
+- 验证入口：`scripts/verify/remote4090_baseline.sh`（refs 22 + parity 8 + 单测 8 + e2e 6）；`scripts/verify/q3.sh`；本机 `scripts/verify/kernels.sh`；`cold_shape`（prefill / paged 四形状 / decode 微基准）。
+- 环境：本机 3090 nvcc 12.4；**cargo 假失败 `rm target/.rustc_info.json`**；远程 `git@github.com:rayze-ai/dinfer.git` 分支 `dev`。
+- 历史阶段 / 已知简化 / 对拍口径：git log、`docs/design.md` §4、`test/<model>/<日期>/*.md`、pitfalls。
 - 阻塞 / 待决策：`docs/design.md` §9。
 
 <!-- ===== 日志：按日期追加，不改旧条目 ===== -->
+
+## 2026-10-17
+
+- 00:00–00:30 `q3.sh` 重跑 exit 0 → **Q3 正式通过**。prefill v5（cp.async + NBUF 环形缓冲）：3090 双缓冲更慢，默认单缓冲。启动日志分段（weights host/h2d、scratch、kv）。`design-qwen3.md` 新增 §5（prefill_tc vs paged_tc：同工作量只差 3–30%，1.8× 是形状差异；服务选 paged 因历史 KV 零拷贝 + 调度统一）与 §6（优化空间：megakernel、跨流并行、启动、KV fp8、优先级）。commit 见 git log。
 
 ## 2026-10-16
 
