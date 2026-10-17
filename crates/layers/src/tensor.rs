@@ -13,7 +13,15 @@ pub struct Tensor<T> {
 impl<T: DeviceRepr + ValidAsZeroBits> Tensor<T> {
     pub fn zeros(stream: &Stream, shape: &[usize]) -> Result<Self> {
         let n: usize = shape.iter().product();
-        Ok(Self { data: stream.alloc_zeros::<T>(n)?, shape: shape.to_vec() })
+        let t0 = std::time::Instant::now();
+        let data = stream.alloc_zeros::<T>(n)?;
+        ZEROS_STATS.with(|c| {
+            let mut c = c.borrow_mut();
+            c.0 += t0.elapsed().as_micros() as u64;
+            c.1 += (n * std::mem::size_of::<T>()) as u64;
+            c.2 += 1;
+        });
+        Ok(Self { data, shape: shape.to_vec() })
     }
 }
 
@@ -49,4 +57,13 @@ impl Tensor<bf16> {
     pub fn to_vec_f32(&self, stream: &Stream) -> Result<Vec<f32>> {
         Ok(self.to_vec(stream)?.into_iter().map(|x| x.to_f32()).collect())
     }
+}
+
+thread_local! {
+    /// (累计 µs, 累计字节, 次数)：`Tensor::zeros` 的显存分配 + 清零耗时（启动分段日志用）。
+    static ZEROS_STATS: std::cell::RefCell<(u64, u64, u64)> = const { std::cell::RefCell::new((0, 0, 0)) };
+}
+/// 读出并清零 `Tensor::zeros` 的累计统计：(µs, bytes, count)。
+pub fn take_zeros_stats() -> (u64, u64, u64) {
+    ZEROS_STATS.with(|c| std::mem::take(&mut *c.borrow_mut()))
 }

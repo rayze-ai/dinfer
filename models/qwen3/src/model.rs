@@ -325,6 +325,8 @@ impl Qwen3Model {
     ) -> Result<Self> {
         let hidden = cfg.hidden_size as usize;
         let (hk, d) = (cfg.num_key_value_heads as usize, cfg.head_dim as usize);
+        let t_load0 = std::time::Instant::now();
+        let wall = |what: &str| tracing::info!(at_ms = t_load0.elapsed().as_millis() as u64, "load timing: wall after {what}");
         let t_first = std::time::Instant::now();
         let embed = Embedding::load(stream, src, "model.embed_tokens")?;
         tracing::info!(
@@ -348,6 +350,7 @@ impl Qwen3Model {
                     .with_context(|| format!("layer {l} mlp"))?,
             });
         }
+        wall("layers loop");
         let norm = RmsNorm::load(stream, src, "model.norm", cfg.rms_norm_eps)?;
         let lm_head = if src.contains("lm_head.weight") {
             Linear::load(stream, src, "lm_head")?
@@ -355,17 +358,27 @@ impl Qwen3Model {
             ensure!(cfg.tie_word_embeddings, "no lm_head.weight and not tied");
             Linear::load(stream, src, "model.embed_tokens")?
         };
+        wall("norm + lm_head");
         let t_rope = std::time::Instant::now();
         let rope =
             Rope::new(stream, d, cfg.max_position_embeddings as usize, cfg.rope_theta, RopeStyle::Neox)?;
         tracing::info!(rope_ms = t_rope.elapsed().as_millis() as u64, max_pos = cfg.max_position_embeddings, "load timing: rope cos/sin table");
         let v = cfg.vocab_size as usize;
+        wall("rope");
         // 激活 scratch 先分配，KV 最后：这样 free 已含权重 + scratch 的占用
         let ls = dinfer_layers::take_load_stats();
+        let (z_us, z_bytes, z_n) = dinfer_layers::take_zeros_stats();
+        tracing::info!(
+            zeros_n = z_n,
+            zeros_mib = z_bytes / (1 << 20),
+            zeros_ms = z_us / 1000,
+            "load timing: per-layer activation buffers (Tensor::zeros inside Attention/Mlp::load)"
+        );
         tracing::info!(
             tensors = ls.tensors,
             mib = ls.bytes / (1 << 20),
-            host_ms = ls.host_us / 1000,
+            mmap_touch_ms = ls.touch_us / 1000,
+            host_convert_ms = ls.host_us / 1000,
             h2d_ms = ls.h2d_us / 1000,
             h2d_gib_s = if ls.h2d_us > 0 { ls.bytes as f64 / (1u64 << 30) as f64 / (ls.h2d_us as f64 * 1e-6) } else { 0.0 },
             "load timing: weights (mmap→host Vec → H2D)"
@@ -385,7 +398,14 @@ impl Qwen3Model {
         let exec_scratch = 3 * max_logits_rows * v * 4;
 
         stream.synchronize()?;
-        tracing::info!(scratch_ms = t_scratch.elapsed().as_millis() as u64, "load timing: activation scratch");
+        let (z_us, z_bytes, z_n) = dinfer_layers::take_zeros_stats();
+        tracing::info!(
+            scratch_ms = t_scratch.elapsed().as_millis() as u64,
+            zeros_n = z_n,
+            zeros_mib = z_bytes / (1 << 20),
+            zeros_ms = z_us / 1000,
+            "load timing: activation scratch"
+        );
         let t_kv = std::time::Instant::now();
         let per_block = Self::kv_bytes_per_block(&cfg, block_size);
         let num_blocks = match num_blocks {
@@ -400,8 +420,10 @@ impl Qwen3Model {
                 n
             }
             None => {
+                let t_mi = std::time::Instant::now();
                 stream.synchronize()?;
                 let (free, total) = stream.mem_info()?;
+                tracing::info!(mem_info_ms = t_mi.elapsed().as_millis() as u64, "load timing: kv budget mem_info");
                 let used = total.saturating_sub(free);
                 let cap = (total as f64 * gpu_memory_utilization as f64) as usize;
                 let budget = free.min(cap.saturating_sub(used)).saturating_sub(reserve_bytes + exec_scratch);
@@ -436,6 +458,7 @@ impl Qwen3Model {
         }
         stream.synchronize()?;
         tracing::info!(kv_ms = t_kv.elapsed().as_millis() as u64, "load timing: kv cache alloc");
+        wall("kv (end of load_with_budget)");
         Ok(Self {
             embed,
             layers,

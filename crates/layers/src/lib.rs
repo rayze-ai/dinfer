@@ -23,3 +23,5 @@ pub use tensor::Tensor;
 pub use weights::WeightSource;
 
 pub use weights::{take_load_stats, LoadStats};
+
+pub use tensor::take_zeros_stats;

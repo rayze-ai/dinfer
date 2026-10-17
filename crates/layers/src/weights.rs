@@ -29,6 +29,9 @@ pub struct TensorInfo {
 /// `take_load_stats()` 读出并清零；用于启动日志（用户要求每个环节的耗时可见）。
 #[derive(Default, Clone, Copy, Debug)]
 pub struct LoadStats {
+    /// mmap 页首次访问（缺页 + 页缓存/磁盘读）
+    pub touch_us: u64,
+    /// 转 Vec<bf16>（内存拷贝 / dtype 转换）
     pub host_us: u64,
     pub h2d_us: u64,
     pub bytes: u64,
@@ -143,6 +146,13 @@ impl WeightSource {
     pub fn load_bf16(&self, stream: &Stream, name: &str) -> Result<Tensor<bf16>> {
         let t0 = std::time::Instant::now();
         let (info, raw) = self.bytes(name)?;
+        // 先顺序摸一遍 mmap 页（每 4 KB 读 1 字节）：把 "缺页 / 磁盘读" 的时间与 "转 Vec" 分开计
+        let mut touch: u64 = 0;
+        for c in raw.chunks(4096) {
+            touch = touch.wrapping_add(c[0] as u64);
+        }
+        std::hint::black_box(touch);
+        let t_touch = std::time::Instant::now();
         let n: usize = info.shape.iter().product();
         let v: Vec<bf16> = match info.dtype.as_str() {
             "F8_E4M3" => {
@@ -181,7 +191,8 @@ impl WeightSource {
             stream.synchronize()?;
             LOAD_STATS.with(|c| {
                 let mut c = c.borrow_mut();
-                c.host_us += (t1 - t0).as_micros() as u64;
+                c.touch_us += (t_touch - t0).as_micros() as u64;
+                c.host_us += (t1 - t_touch).as_micros() as u64;
                 c.h2d_us += t1.elapsed().as_micros() as u64;
                 c.bytes += (raw.len()) as u64;
                 c.tensors += 1;
