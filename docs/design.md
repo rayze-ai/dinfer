@@ -378,26 +378,113 @@ PD 分离的详细设计写进 §10（待补），动代码前先定：KV 传输
 5. 性能对比的基线配置（§8.4）：vLLM 侧是否开 MTP、EP、FP8 KV cache？需要和目标机器一起定，否则对比口径不一致。
 6. 是否接受"decode FULL 图把 attention 也捕获"带来的约束：所有 attention metadata 必须固定形状，`max_model_len` 变化需重新捕获。
 
-## 10. 扩展点设计（用户 2026-10-17 提出，待细化）
+## 10. 扩展点设计：算子插拔与 KV cache 分层（2026-10-17 细化）
 
-### 10.1 对接新算子（kernel 插拔）
+两个扩展点都遵守同一条原则：**默认路径零开销**（泛型单态化或一次性查表，不在热路径上做动态分派），扩展实现与默认实现跑**同一套 ref 测试**。
 
-现状：`crates/kernels` 的 `.cu` 由 build.rs 编 nvcc 静态链接，Rust 侧 `ffi.rs` 声明 + `ops.rs` 安全封装，模型 crate 直接调 `ops::*`。换 kernel = 改 `.cu` + 重编。
-方案（按侵入度从小到大，先做 A）：
-- **A. 算子 trait + 注册表**：为每类热点算子定义 trait（`AttentionPrefill`、`AttentionDecode`、`Gemm`、`Norm`、`Sampler`），`ops.rs` 现有实现是默认 impl；模型 crate 通过 `OpSet` 结构取 `Box<dyn Trait>`，启动时按配置 / 环境变量（如 `ATTN_IMPL=fa_v5|ref|ext:<so>`）选择。零运行时开销的做法：泛型参数 `M: Qwen3Model<Ops: OpSet>`，默认 `DefaultOps`。
-- **B. 外部 .so 动态加载**：`libloading` 按约定的 C ABI（现有 extern "C" 签名就是 ABI，已约定不带项目前缀）加载第三方 kernel 库（FlashInfer / 自研 CUTLASS / Triton AOT 产物），满足 trait 即可。需要一张"ABI 版本 + 形状约束（D=128、block_size 16 倍数）"的能力表供启动期校验。
-- **C. PTX/cubin 热加载**：cudarc `load_ptx` 运行时装 kernel，用于 Triton AOT。与 B 的区别是不需要 host 侧 C 封装，但要自己处理 launch 参数布局。
-对拍：每个 trait 实现都要能跑 `kernels.sh` 的 ref 测试（测试按 trait 写，不按具体函数写）。
+### 10.1 算子插拔
 
-### 10.2 KV cache 对接第三方（分层 / 外置）
+#### 现状（调用面盘点）
+模型 crate 与 `layers` 直接调 `dinfer_kernels::ops::*` 共 26 个入口 + `Gemm::forward_bf16`。按类归并为 7 组：
 
-现状：`core::kv` 的 `PagedKv` 是 GPU 显存里 `[num_blocks, block_size, Hkv, 2, D]` bf16 单层；prefix cache 块哈希在 scheduler；无 CPU / 远端层。
-目标接口（对齐 vLLM `KVConnectorBase_V1` 的事件点，但不照搬其 Python 结构）：
-- `trait KvStore`：`alloc / free / block_table`（GPU 层，现有）；`trait KvTier`：`offload(block_ids) -> Future`、`fetch(hashes) -> Future<block_ids>`、`lookup(hashes) -> hit_len`。
-- 调度器钩子（三处）：① `schedule()` 新请求入队前 `lookup` 外部命中长度，命中的块异步 `fetch` 到空闲 GPU 块，请求先标 `waiting_for_kv`；② `update_from_output` 后对本 step 完整写满的块触发 `offload`（可按策略：全部 / 只在 GPU 块压力高时）；③ `free` 时若块已 offload 则只释放 GPU 侧。
-- 传输层：先做 **CPU pinned 内存层**（`cudaMemcpyAsync` 走独立 copy stream，与计算流用事件同步；块粒度 16 token × 8 head × 128 × 2 × 2 B = 64 KB，PCIe 4 每秒 ~40 万块），这一层本身就能把 prefix 命中率从显存上限扩到主存上限（4090 24 GB → 主机 256 GB）。再做远端：Mooncake / LMCache / NIXL 任一，接口是 `(hash, bytes)` KV 对象存储 + RDMA get/put；dinfer 侧只需实现 `KvTier` 的异步 fetch/offload，块布局与 bf16/fp8 dtype 写进对象元数据。
-- PD 分离（Q4）复用同一 `KvTier`：prefill 节点 `offload` → decode 节点 `fetch`，加一个"请求迁移"消息（prompt ids + 块哈希列表 + 采样参数）。
-- 风险：块哈希要与 dtype / 模型版本 / block_size 一起哈希；fetch 在飞时该块不能被 GPU 侧回收；fp8 KV 时 scale 随块存。
+| 组 | 现有入口（`ops.rs`） | 热路径 |
+|---|---|---|
+| GEMM | `Gemm::forward_bf16`（cuBLASLt） | 每层 4 次 |
+| Attention | `gqa_prefill_bf16` / `gqa_paged_bf16` / `gqa_decode_bf16` / `gqa_mixed_bf16`、`gqa_decode_scratch_len` | 每层 1 次 |
+| QKV 后处理 | `qkv_post_bf16`（norm + rope + cache write）、`rope_bf16`（独立版，GLM 用） | 每层 1 次 |
+| Norm / 残差 | `rmsnorm_bf16(_n)` / `fused_add_rmsnorm_bf16(_n)` / `gather_rmsnorm_bf16` / `add_inplace_bf16_n` | 每层 2 次 + 尾部 1 |
+| 激活 | `silu_and_mul_bf16_n` | 每层 1 次 |
+| 嵌入 / 杂项 | `embedding_bf16(_n)`、`bf16_to_f32_n`、`row_gather_i32` | 每步 1 次 |
+| 采样 | `sample_fused_f32`（图路径）、`penalties_f32` / `temperature_f32` / `min_p_mask_f32` / `topk_topp_mask_f32` / `sample_f32` / `argmax_f32_n` / `logprobs_f32`（eager 路径） | 每步 1–6 次 |
+
+MLA / MoE / DSA（GLM、K3 线）另成一组，接口形态相同，本节以 Qwen3 的 7 组为准。
+
+#### 方案 A（先做）：`OpSet` trait + 编译期单态化 + 启动期选择
+```rust
+// crates/kernels/src/opset.rs
+pub trait Attention {
+    fn prefill(&self, s: &Stream, q: &CudaSlice<bf16>, k: .., v: .., out: .., cu_seqlens: .., num_reqs, max_seqlen, h, hk, d, scale, q_stride, kv_stride) -> Result<()>;
+    fn paged(&self, ...) -> Result<()>;
+    fn decode(&self, ...) -> Result<()>;
+    fn mixed(&self, ...) -> Result<()>;          // 默认实现 = decode(rows==1) + paged(skip_single)
+    fn decode_scratch_len(&self, b, h, d) -> usize;
+    fn supports(&self, head_dim: usize, group: usize, block_size: usize) -> bool;   // 启动期校验
+}
+pub trait Gemm { fn forward_bf16(&self, a, w, bias, out, m, n, k) -> Result<()>; /* 后续：forward_bf16_f32out、epilogue(silu_mul) */ }
+pub trait Norm { fn rmsnorm(..); fn fused_add_rmsnorm(..); fn gather_rmsnorm(..); }
+pub trait QkvPost { fn apply(..); }
+pub trait Act { fn silu_and_mul(..); }
+pub trait Sampler { fn fused(..); fn penalties(..); /* eager 分步同现有签名 */ }
+pub trait OpSet { type Attn: Attention; type Gemm: Gemm; type Norm: Norm; type QkvPost: QkvPost; type Act: Act; type Sampler: Sampler;
+                  fn attn(&self) -> &Self::Attn; /* ... */ }
+pub struct DefaultOps { .. }   // 现有 ops.rs 函数的薄包装；impl OpSet
+```
+- 模型 crate 改为 `Qwen3Model<O: OpSet = DefaultOps>`，`forward` 里 `k::xxx(...)` → `self.ops.attn().decode(...)`。泛型单态化后与现在的直调零差别（可用 `cargo asm` 核对一次）。
+- **启动期选择**：`--ops <name>` / 环境变量 `OPS=default|flashinfer|...`，在 `service.rs` 里 `match` 到具体类型构造 `Qwen3Executor<O>`（枚举分派只在启动期发生一次）。
+- **能力校验**：`OpSet::check(cfg) -> Result<()>` 在加载后调一次：head_dim / group / block_size / dtype 不支持直接报错退出，不进运行期。
+- **对拍**：`kernels/tests/ref_tests.rs` 改成 `fn attention_refs<A: Attention>(a: &A)` 这样的泛型函数，`DefaultOps` 与任何新实现都调同一组；`kernels.sh` 加 `OPS=...` 循环。
+
+落地步骤（约 1 天）：① 加 `opset.rs` 与 `DefaultOps`（纯搬运，不改 kernel）；② `layers::nn` 与 `qwen3::model` 换成泛型；③ ref 测试泛型化；④ bench 对比 `DefaultOps` 与直调（预期 0 差异）。GLM/K3 线暂不动（它们直调的 MLA/MoE 入口另起 trait）。
+
+#### 方案 B：外部 `.so`（第三方 kernel 库）
+- 约定 C ABI = 现有 `dinfer_kernels.h` 的 extern "C" 签名（已约定不带项目前缀），**加一个 `abi_version()` 与 `capabilities()`**（返回支持的 head_dim 列表、block_size 约束、dtype）。
+- `ExternOps` 实现 `OpSet`：`libloading::Library::new(path)`，按符号名取函数指针，缺的符号回落到 `DefaultOps`（逐组回落，不是整库）。
+- 典型用途：FlashInfer 的 decode attention（它的 paged layout 与我们一致：`[num_blocks, block_size, Hkv, 2, D]` 需确认 K/V 交错方式，不一致则 `.so` 侧做一次 layout 适配）；自研 CUTLASS GEMM（epilogue 融合）。
+- 风险：`.so` 内部用的 CUDA runtime / 流语义必须接受我们传入的 `cudaStream_t`；不能有自己的全局流或隐式同步。校验：在 `check()` 里跑一次 capture 探针（begin_capture → 调一次 → end_capture），不能 capture 的实现只允许用在 eager 路径（标记 `graph_safe=false`，执行器据此关掉该算子所在步的图）。
+
+#### 方案 C：PTX / cubin 热加载（Triton AOT）
+- cudarc `CudaContext::load_ptx` + `get_func`，`TritonOps` 按 kernel 名 + 签名表 launch。参数布局由 Triton AOT 的 C 头生成；grid 计算在 Rust 侧按 Triton 的 `num_warps/num_stages` 元数据。
+- 只在 B 不可行（没有 host 侧 C 封装）时用；优先级最低。
+
+#### 不做的
+- 运行期按形状动态选 kernel（autotune）：先不做；需要时在 `OpSet::check` 阶段对本机形状跑一次微基准选实现，结果缓存到磁盘。
+
+### 10.2 KV cache 分层 / 外置
+
+#### 现状（钩子点盘点）
+- GPU 层：`core::kv::KvCacheManager`（`block_pool.rs` LRU 空闲链 + `(group, hash) → block` 缓存表；`hash.rs` 链式 xxh3-128，salt 只混第一块）。
+- scheduler 调用点：`get_computed_blocks(req)`（新请求首次调度，查 prefix 命中）、`allocate_slots`（分新块，失败则抢占末尾）、`cache_blocks`（update_from_output 后，对新凑满的块登记哈希）、`free`（完成 / 抢占）。
+- 设备层：`qwen3::model::PagedKv { cache: Tensor<bf16> [num_blocks, block_size, Hkv, 2, D] }` 每层一块。
+
+#### 接口
+```rust
+// crates/core/src/kv/tier.rs
+pub struct BlockKey { pub model_id: u64, pub layer_group: u8, pub hash: BlockHash, pub dtype: KvDtype, pub block_size: u16 }
+pub trait KvTier: Send {
+    /// 这些块在外层有吗？返回命中的前缀长度（块数）——只认连续前缀。
+    fn lookup(&self, keys: &[BlockKey]) -> usize;
+    /// 把 GPU 块 `src` 的内容拉到外层（异步）；完成后 `poll_done` 可见。调用方保证 src 在完成前不被回收。
+    fn offload(&mut self, keys: &[BlockKey], src: &[DeviceBlockRef]) -> Result<TransferId>;
+    /// 把外层内容装进已分配好的 GPU 块 `dst`（异步）。
+    fn fetch(&mut self, keys: &[BlockKey], dst: &[DeviceBlockRef]) -> Result<TransferId>;
+    fn poll_done(&mut self) -> Vec<TransferId>;
+    fn stats(&self) -> TierStats;   // 命中 / 字节 / 在飞
+}
+pub struct DeviceBlockRef { pub layer: u8, pub block: BlockId, pub ptr: u64, pub bytes: usize }
+```
+`KvCacheManager` 持 `Option<Box<dyn KvTier>>`（这里允许 dyn：每 step 最多调几次，不在 kernel 热路径）。
+
+#### 调度器接入（4 处，都在 `sched/mod.rs`）
+1. **首次调度查命中**：`get_computed_blocks` 之后，若 GPU 命中长度 `h_gpu < num_tokens-1` 且有 tier，`tier.lookup(keys[h_gpu/bs..])` 得外层命中 `h_ext`。若 `h_ext > 0`：按 `h_gpu + h_ext` 分配块（`allocate_slots` 的 `new_computed` 参数扩展成 "GPU 命中块 + 待填块"），对待填块发 `fetch`，请求状态置 `WaitingForKv(transfer_id)`、**不进本步**。
+2. **到达检查**：每次 `schedule()` 开头 `poll_done()`，把对应请求从 `WaitingForKv` 放回 waiting 队头（它们的 `num_computed_tokens` 已含外层命中，下一步只算剩余 prompt）。
+3. **卸载**：`cache_blocks` 登记哈希的同时，若策略允许（默认：全部新凑满的块；可选：只在 `pool.num_free < 低水位` 时），对这些块发 `offload`。GPU 侧照常保留；块被 LRU 淘汰时若 offload 还在飞 → 该块暂不淘汰（`BlockPool::free` 跳过 `in_flight` 标记的块）。
+4. **释放**：`free` 不变；外层由自己的容量策略淘汰。
+
+#### 设备层
+- `fetch/offload` 的拷贝走**独立 copy stream**；与计算流的依赖用事件：fetch 完成事件 → 计算流在该请求首次 prefill 前 `wait_event`；offload 读块前等计算流上 "该块写完" 的事件（= 该 step 结束事件，已有 `main_done`）。
+- 每块 bytes = `block_size × Hkv × 2 × D × 2 B`（Qwen3-0.6B：16×8×2×128×2 = 64 KB/层，28 层 1.75 MB/块-全层）。一个请求 1024 token = 64 块 = 112 MB；PCIe 4 ×16 实测 ~11 GiB/s（pageable）/ ~24（pinned）→ 5–10 ms，与一次 1024 prefill（~20 ms）同量级，**fetch 比重算快 2–4×**，值。
+- 块内 layout 与设备一致（直接 memcpy，不转置）；fp8 KV（将来）每块附 scale 向量，`BlockKey.dtype` 区分。
+
+#### 分层实现顺序
+1. **`PinnedHostTier`**（先做，1–2 天）：一块大 pinned host 内存（容量 `--kv-host-gib`，如 64 GiB），`HashMap<BlockKey, HostSlot>` + LRU；`offload/fetch` = `cuMemcpyDtoHAsync / HtoDAsync` 在 copy stream 上 + 事件。单机把 prefix 命中容量从显存 17 GiB 扩到主存。验收：`serve_e2e` 加 "超过 GPU 容量的多轮对话前缀复用" 用例；bench 加 "prompt 前缀重复率 50% 的开环负载" 看 TTFT。
+2. **`RemoteTier`**：对象存储语义 `(BlockKey → bytes)`，Mooncake / LMCache / NIXL 任一后端；先经 host pinned 中转（复用 1 的路径），再做 GPUDirect RDMA。
+3. **PD 分离（Q4）**：prefill 节点算完 → `offload` 到 RemoteTier → 发 "迁移消息"（prompt ids、块 keys、采样参数、已采样的首 token）到 decode 节点 → decode 节点 `fetch` 后直接进 running。调度器只多一种请求来源，`KvTier` 接口不变。
+
+#### 风险与对策
+- `BlockKey` 必须含 model_id（权重版本哈希）、dtype、block_size、layer_group：不同模型 / 量化的块绝不能互相命中。
+- fetch 在飞时该请求可能被 abort：`free` 时若有在飞 transfer，等它完成再放块（否则 DMA 写入已被复用的块）。
+- 外层命中但 GPU 块不够：按现有抢占逻辑处理，fetch 推迟。
+- 与异步调度的交互：`WaitingForKv` 的请求不会进任何步，插队 prefill 也看不到它，无冲突。
 
 ## 11. 采用 / 改进台账（对 vLLM）
 
