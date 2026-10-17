@@ -15,7 +15,7 @@
 
 use crate::model::{AttnMeta, Forward, Qwen3Model, ModelScratch};
 use anyhow::{ensure, Context, Result};
-use dinfer_core::runner::{BatchMode, BatchPlan, ModelExecutor};
+use dinfer_core::runner::{BatchMode, BatchPlan, ModelExecutor, PairLogprobs};
 use dinfer_core::sampler::{SampleBatch, TokenLogprobs};
 use dinfer_kernels as k;
 use dinfer_kernels::Graph;
@@ -533,6 +533,14 @@ impl Qwen3Executor {
         self.alt_active = !self.alt_active;
     }
 
+    /// 在副套上执行 `f`（进入前换入副套，结束后无论成败都换回主套）。
+    fn on_alt<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        self.swap_alt();
+        let r = f(self);
+        self.swap_alt();
+        r
+    }
+
     /// 上传 + 入队（forward + 采样），不等结果。返回 (请求数, 入队开始时刻)。
     fn enqueue(&mut self, plan: &BatchPlan) -> Result<(usize, std::time::Instant)> {
         let n = plan.num_reqs();
@@ -557,7 +565,7 @@ impl Qwen3Executor {
         let use_graph = plan.mode == BatchMode::Decode
             && !sb.any_penalty
             && sb.max_logprobs.is_none()
-            && self.alt_active == false
+            && !self.alt_active // 图是在主流上捕获的，副套不走图
             && self.graph_for(n).is_some();
         let t_launch;
         if use_graph {
@@ -609,6 +617,14 @@ impl Qwen3Executor {
     }
 }
 
+/// 每个请求本步 1 个采样 token、无 draft。
+fn push_tokens(generated: &mut Vec<Vec<u32>>, drafts: &mut Vec<Vec<u32>>, chosen: &[i32]) {
+    for &c in chosen {
+        generated.push(vec![c as u32]);
+        drafts.push(Vec::new());
+    }
+}
+
 impl ModelExecutor for Qwen3Executor {
     fn supports_pair(&self) -> bool {
         self.alt.is_some()
@@ -626,14 +642,13 @@ impl ModelExecutor for Qwen3Executor {
         let chosen = self.collect(n)?;
         self.main_done = Some(self.stream.record_event()?);
         self.account(t0, t_launch, t_wait);
-        for &c in &chosen {
-            generated.push(vec![c as u32]);
-            drafts.push(Vec::new());
-        }
+        push_tokens(generated, drafts, &chosen);
         Ok(())
     }
 
-    /// decode 批（主流，走图）与 prefill 批（副流，eager）并行；两边各自 D2H。返回 (lp_decode, lp_prefill)。
+    /// decode 批（主流，走 CUDA graph）与 prefill 批（副流，eager）并行执行，两边各自 D2H。
+    /// 同步关系：副流先等上一步主流结束（历史 KV 完整）；主流下一步前等副流（本步 prefill 写的 KV 可见）。
+    /// 返回 (decode 的 logprobs, prefill 的 logprobs)。
     fn forward_sample_pair(
         &mut self,
         decode: &BatchPlan,
@@ -642,39 +657,36 @@ impl ModelExecutor for Qwen3Executor {
         dr_d: &mut Vec<Vec<u32>>,
         gen_p: &mut Vec<Vec<u32>>,
         dr_p: &mut Vec<Vec<u32>>,
-    ) -> Result<(Vec<Vec<TokenLogprobs>>, Vec<Vec<TokenLogprobs>>)> {
+    ) -> Result<PairLogprobs> {
         ensure!(self.alt.is_some(), "forward_sample_pair without alt set");
         let t0 = std::time::Instant::now();
-        // 1. 主流：decode 入队
-        let (nd, t_launch) = self.enqueue(decode)?;
-        let lp_d = std::mem::take(&mut self.last_logprobs);
-        // 2. 副流：等上一步主流结束（历史 KV 完整），然后 prefill 入队
-        if let Some(ev) = &self.main_done {
-            self.alt.as_ref().unwrap().stream.wait_event(ev)?;
+
+        // 1. 主流：decode 入队（不等结果）
+        let (num_decode, t_launch) = self.enqueue(decode)?;
+        let lp_decode = std::mem::take(&mut self.last_logprobs);
+
+        // 2. 副流：等上一步主流 → prefill 入队 → 记录完成事件 → 取回结果
+        if let Some(prev_main) = &self.main_done {
+            self.alt.as_ref().unwrap().stream.wait_event(prev_main)?;
         }
-        self.swap_alt();
-        let r = self.enqueue(prefill);
-        let lp_p = std::mem::take(&mut self.last_logprobs);
-        let ev_p = self.stream.record_event();
+        let (chosen_prefill, lp_prefill, prefill_done) = self.on_alt(|ex| {
+            let (num_prefill, _) = ex.enqueue(prefill)?;
+            let lp = std::mem::take(&mut ex.last_logprobs);
+            let done = ex.stream.record_event()?;
+            Ok((ex.collect(num_prefill)?, lp, done))
+        })?;
         let t_wait = std::time::Instant::now();
-        let chosen_p = r.and_then(|(np, _)| self.collect(np));
-        self.swap_alt();
-        let chosen_p = chosen_p?;
-        // 3. 主流在下一步前等副流（prefill 写的 KV 对后续 decode 可见）
-        self.stream.wait_event(&ev_p?)?;
-        let chosen_d = self.collect(nd)?;
+
+        // 3. 主流：等副流（prefill 写的 KV 对后续 decode 可见）→ 取回 decode 结果 → 记录本步结束
+        self.stream.wait_event(&prefill_done)?;
+        let chosen_decode = self.collect(num_decode)?;
         self.main_done = Some(self.stream.record_event()?);
         self.pair_steps += 1;
         self.account(t0, t_launch, t_wait);
-        for &c in &chosen_d {
-            gen_d.push(vec![c as u32]);
-            dr_d.push(Vec::new());
-        }
-        for &c in &chosen_p {
-            gen_p.push(vec![c as u32]);
-            dr_p.push(Vec::new());
-        }
-        Ok((lp_d, lp_p))
+
+        push_tokens(gen_d, dr_d, &chosen_decode);
+        push_tokens(gen_p, dr_p, &chosen_prefill);
+        Ok((lp_decode, lp_prefill))
     }
 
     fn take_logprobs(&mut self, num_reqs: usize) -> Vec<Vec<TokenLogprobs>> {
