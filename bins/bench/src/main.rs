@@ -516,6 +516,8 @@ async fn self_check() -> Result<()> {
         temperature: 0.0,
         allow_eos: false,
         seed: 1,
+        request_rate: 0.0,
+        prompt_len_mix: String::new(),
         warmup: 1,
         out: None,
         label: "self-check".into(),
