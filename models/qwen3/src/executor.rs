@@ -19,7 +19,7 @@ use dinfer_core::runner::{BatchMode, BatchPlan, ModelExecutor, PairLogprobs};
 use dinfer_core::sampler::{SampleBatch, TokenLogprobs};
 use dinfer_kernels as k;
 use dinfer_kernels::Graph;
-use dinfer_layers::{Gemm, Stream, Tensor, Event};
+use dinfer_layers::{Gemm, Stream, Tensor, Event, TimingEvent};
 
 /// 固定地址的每 step 输入缓冲。
 struct StepBuffers {
@@ -129,6 +129,9 @@ pub struct Qwen3Executor {
     pub t_upload_us: u64,
     pub t_launch_us: u64,
     pub t_wait_us: u64,
+    /// GPU 忙时（主流上 launch 前 / 后两个事件的差，step 结束后读）累计 µs。
+    pub t_gpu_us: u64,
+    ev_gpu: Option<(TimingEvent, TimingEvent)>,
 }
 
 /// CUDA graph 的 batch 桶（vLLM 默认 1,2,4,8 再按 8 递增到上限；这里 2 的幂 + 上限，够用且捕获快）。
@@ -179,6 +182,8 @@ impl Qwen3Executor {
             t_upload_us: 0,
             t_launch_us: 0,
             t_wait_us: 0,
+            t_gpu_us: 0,
+            ev_gpu: None,
         };
         // decode 图默认 **按桶懒捕获**（首次用到某个 batch 桶时捕获，~30 ms/桶），启动少 ~210 ms；
         // GRAPH_CAPTURE=eager 恢复启动时全部捕获（对拍 / 压测 TTFT 口径不想含首捕获时用）。
@@ -585,6 +590,12 @@ impl Qwen3Executor {
         let use_graph = graph_eligible
             && !self.alt_active // 图是在主流上捕获的，副套不走图
             && self.graph_for(n).is_some();
+        if !self.alt_active {
+            if self.ev_gpu.is_none() {
+                self.ev_gpu = Some((self.stream.new_timing_event()?, self.stream.new_timing_event()?));
+            }
+            self.stream.record_timing(&self.ev_gpu.as_ref().unwrap().0)?;
+        }
         let t_launch;
         if use_graph {
             let nb = self.graph_for(n).unwrap().batch;
@@ -605,6 +616,9 @@ impl Qwen3Executor {
             self.sample_eager(sb, n)?;
             self.eager_steps += 1;
         }
+        if !self.alt_active {
+            self.stream.record_timing(&self.ev_gpu.as_ref().unwrap().1)?;
+        }
         self.last_rows = n;
         Ok((n, t_launch))
     }
@@ -616,6 +630,12 @@ impl Qwen3Executor {
 
     fn account(&mut self, t0: std::time::Instant, t_launch: std::time::Instant, t_wait: std::time::Instant) {
         let t_end = std::time::Instant::now();
+        if let Some((a, b)) = &self.ev_gpu {
+            // collect() 已同步主流，两事件都完成；失败（如副套路径未记录）忽略
+            if let Ok(ms) = TimingEvent::elapsed_ms(a, b) {
+                self.t_gpu_us += (ms * 1000.0) as u64;
+            }
+        }
         self.t_upload_us += (t_launch - t0).as_micros() as u64;
         self.t_launch_us += (t_wait - t_launch).as_micros() as u64;
         self.t_wait_us += (t_end - t_wait).as_micros() as u64;
@@ -629,6 +649,7 @@ impl Qwen3Executor {
                 upload_us_per_step = self.t_upload_us / steps,
                 launch_us_per_step = self.t_launch_us / steps,
                 wait_us_per_step = self.t_wait_us / steps,
+                gpu_busy_us_per_step = self.t_gpu_us / steps,
                 "executor step breakdown (cumulative avg)"
             );
         }

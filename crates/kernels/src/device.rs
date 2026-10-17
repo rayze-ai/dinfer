@@ -135,6 +135,13 @@ impl Stream {
     pub fn wait_event(&self, ev: &Event) -> Result<()> {
         Ok(self.inner.wait(&ev.0)?)
     }
+    /// 带时间戳的事件（量 GPU 忙时用；跨流同步请用 `record_event`）。
+    pub fn new_timing_event(&self) -> Result<TimingEvent> {
+        Ok(TimingEvent(self.inner.context().new_event(None)?))
+    }
+    pub fn record_timing(&self, ev: &TimingEvent) -> Result<()> {
+        Ok(ev.0.record(&self.inner)?)
+    }
     pub fn synchronize(&self) -> Result<()> {
         Ok(self.inner.synchronize()?)
     }
@@ -292,5 +299,13 @@ impl Stream {
             }
             Ok(())
         })
+    }
+}
+
+/// 带时间戳的 CUDA event；`elapsed_ms(a, b)` 要求两者都已在流上记录且已完成（调用方先同步）。
+pub struct TimingEvent(CudaEvent);
+impl TimingEvent {
+    pub fn elapsed_ms(start: &TimingEvent, end: &TimingEvent) -> Result<f32> {
+        Ok(start.0.elapsed_ms(&end.0)?)
     }
 }
