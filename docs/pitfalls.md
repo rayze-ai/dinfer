@@ -345,3 +345,11 @@
 - 如何避免：比 decode 每步时长用各自引擎的 step 直方图（dinfer `/metrics` `engine_step_execute_seconds`）或固定 batch 的离线微基准；nsys 只用来看 kernel 构成比例，不用来算 ms/step。
 - 相关：`docs/loops/q3-perf.md` 第 46–47 轮。
 
+## 2026-10-17 裸 `cudarc::driver::result::*` 调用在 engine 线程报 CUDA_ERROR_INVALID_CONTEXT / INVALID_HANDLE
+
+- 现象：`PinnedUploader::flush`（裸 `memcpy_htod_async`）在 parity 测试里全过，一进服务就 `engine step failed: INVALID_CONTEXT`；`TimingEvent::elapsed_ms` 同样报 INVALID_HANDLE。
+- 根因：cudarc 的 safe 封装（`CudaStream::memcpy_*`、`CudaEvent::*`）每次调用前都 `ctx.bind_to_thread()`；直接用 `result::*` 不会。测试在创建 context 的线程上跑所以没事，服务的 engine 是另一个线程。
+- 解法：`Stream::bind_ctx()`（= `context().bind_to_thread()`），所有裸驱动调用前先调；代价一次 `cuCtxSetCurrent` 几百 ns。
+- 如何避免：任何新增 `result::` 调用都放进 `Stream` 的方法里并以 `bind_ctx()` 开头；e2e（多线程）是唯一能抓到的测试，不能只跑 parity。
+- 相关：`crates/kernels/src/device.rs::{PinnedUploader, TimingEvent, StagedUploader}`。
+
