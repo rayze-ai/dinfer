@@ -215,3 +215,71 @@ open(os.path.join(ROOT, "perf-trend.html"), "w").write(html)
 
 print(f"{len(rounds)} rounds → {ROOT}/perf-trend.{{md,json,csv,svg,html}}")
 print("\n".join(lines[4:4 + 2 + len(rounds)]))
+
+# ---------------------------------------------------------------------------
+# 附加实验进 CSV（不进 md/svg 的四组曲线）：
+#   poisson*/  开环泊松：组 = r<rate>，端 dinfer_xs1 / dinfer_xs0 / vllm（dinfer 比 vllm，xs0 比 xs1 另给 ratio 列）
+#   ab_*/      A/B：目录名 ab_<name>，文件 <variant>_<group>.json；第一个 variant（字典序）作基线，其余与它比
+# 用户要求（2026-10-17）：所有结果都要能在 CSV / 曲线上看到，不能只留 JSON。
+# ---------------------------------------------------------------------------
+def _m(j):
+    return {"out_tok_per_s": j["output_token_throughput_tps"], "ttft_p50_ms": j["ttft_ms"]["p50"],
+            "ttft_p99_ms": j["ttft_ms"]["p99"], "tpot_p50_ms": j["tpot_ms"]["p50"], "failed": j.get("failed", 0)}
+BETTER = {"out_tok_per_s": "higher", "ttft_p50_ms": "lower", "ttft_p99_ms": "lower", "tpot_p50_ms": "lower", "failed": "lower"}
+
+def extra_rows():
+    rows = []
+    for d in sorted(glob.glob(os.path.join(ROOT, "*", "poisson*"))):
+        if not os.path.isdir(d):
+            continue
+        rnd, date, chg = os.path.basename(d), os.path.basename(os.path.dirname(d)), read_change(d)
+        rates = sorted({re.sub(r".*_r(\d+)\.json$", r"\1", f) for f in glob.glob(os.path.join(d, "vllm_r*.json"))}, key=int)
+        for rate in rates:
+            v = json.load(open(os.path.join(d, f"vllm_r{rate}.json")))
+            for side in ("dinfer_xs1", "dinfer_xs0"):
+                f = os.path.join(d, f"{side}_r{rate}.json")
+                if not os.path.exists(f):
+                    continue
+                a = json.load(open(f))
+                for k, av in _m(a).items():
+                    bv = _m(v)[k]
+                    rows.append([f"{rnd}:{side}", date, chg, f"r{rate}", k, f"{av:.3f}", f"{bv:.3f}",
+                                 f"{(av / bv):.3f}" if bv else "", "", BETTER[k]])
+    for d in sorted(glob.glob(os.path.join(ROOT, "*", "ab_*"))):
+        if not os.path.isdir(d):
+            continue
+        rnd, date, chg = os.path.basename(d), os.path.basename(os.path.dirname(d)), read_change(d)
+        files = glob.glob(os.path.join(d, "*.json"))
+        variants = sorted({os.path.basename(f).split("__")[0] for f in files if "__" in os.path.basename(f)})
+        if len(variants) < 2:
+            continue
+        base = variants[0]
+        groups = sorted({os.path.basename(f).split("__")[1][:-5] for f in files if "__" in os.path.basename(f)})
+        for g in groups:
+            fb = os.path.join(d, f"{base}__{g}.json")
+            if not os.path.exists(fb):
+                continue
+            b = _m(json.load(open(fb)))
+            for var in variants[1:]:
+                fa = os.path.join(d, f"{var}__{g}.json")
+                if not os.path.exists(fa):
+                    continue
+                a = _m(json.load(open(fa)))
+                for k in a:
+                    rows.append([f"{rnd}:{var}", date, chg, g, k, f"{a[k]:.3f}", f"{b[k]:.3f}",
+                                 f"{(a[k] / b[k]):.3f}" if b[k] else "", "", BETTER[k]])
+    return rows
+
+def read_change(d):
+    c = os.path.join(d, "CHANGE")
+    return open(c).read().strip().replace("\n", " ") if os.path.exists(c) else os.path.basename(d)
+
+_extra = extra_rows()
+if _extra:
+    with open(os.path.join(ROOT, "perf-trend.csv"), "a", newline="") as f:
+        import csv as _csv
+        w = _csv.writer(f)
+        for r in _extra:
+            w.writerow(r)
+    print(f"extra rows appended: {len(_extra)} (poisson / ab)", file=sys.stderr)
+

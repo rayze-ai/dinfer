@@ -347,3 +347,33 @@ bench31,2026-10-17,r 续：livelock 修复（不自抢占 + 空步退避 + 启�
 bench31,2026-10-17,r 续：livelock 修复（不自抢占 + 空步退避 + 启动校验）+ host tier（默认关）；回归基线,c8-long,out_tok_per_s,1917.288,1901.740,1.008,0.3,higher
 bench31,2026-10-17,r 续：livelock 修复（不自抢占 + 空步退避 + 启动校验）+ host tier（默认关）；回归基线,c8-long,ttft_p50_ms,39.511,68.550,0.576,-12.7,lower
 bench31,2026-10-17,r 续：livelock 修复（不自抢占 + 空步退避 + 启动校验）+ host tier（默认关）；回归基线,c8-long,tpot_p50_ms,3.868,3.754,1.030,1.4,lower
+poisson1:dinfer_xs1,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r8,out_tok_per_s,1065.027,1066.343,0.999,,higher
+poisson1:dinfer_xs1,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r8,ttft_p50_ms,15.182,22.622,0.671,,lower
+poisson1:dinfer_xs1,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r8,ttft_p99_ms,38.981,49.074,0.794,,lower
+poisson1:dinfer_xs1,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r8,tpot_p50_ms,3.123,3.212,0.972,,lower
+poisson1:dinfer_xs1,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r8,failed,0.000,0.000,,,lower
+poisson1:dinfer_xs0,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r8,out_tok_per_s,1064.758,1066.343,0.999,,higher
+poisson1:dinfer_xs0,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r8,ttft_p50_ms,15.108,22.622,0.668,,lower
+poisson1:dinfer_xs0,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r8,ttft_p99_ms,41.482,49.074,0.845,,lower
+poisson1:dinfer_xs0,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r8,tpot_p50_ms,3.174,3.212,0.988,,lower
+poisson1:dinfer_xs0,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r8,failed,0.000,0.000,,,lower
+poisson1:dinfer_xs1,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r16,out_tok_per_s,2031.306,2034.102,0.999,,higher
+poisson1:dinfer_xs1,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r16,ttft_p50_ms,8.826,16.973,0.520,,lower
+poisson1:dinfer_xs1,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r16,ttft_p99_ms,21.251,26.711,0.796,,lower
+poisson1:dinfer_xs1,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r16,tpot_p50_ms,3.933,3.985,0.987,,lower
+poisson1:dinfer_xs1,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r16,failed,0.000,0.000,,,lower
+poisson1:dinfer_xs0,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r16,out_tok_per_s,2031.195,2034.102,0.999,,higher
+poisson1:dinfer_xs0,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r16,ttft_p50_ms,8.602,16.973,0.507,,lower
+poisson1:dinfer_xs0,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r16,ttft_p99_ms,16.674,26.711,0.624,,lower
+poisson1:dinfer_xs0,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r16,tpot_p50_ms,3.890,3.985,0.976,,lower
+poisson1:dinfer_xs0,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r16,failed,0.000,0.000,,,lower
+poisson1:dinfer_xs1,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r24,out_tok_per_s,2876.410,2883.354,0.998,,higher
+poisson1:dinfer_xs1,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r24,ttft_p50_ms,10.141,19.310,0.525,,lower
+poisson1:dinfer_xs1,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r24,ttft_p99_ms,17.847,27.155,0.657,,lower
+poisson1:dinfer_xs1,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r24,tpot_p50_ms,4.852,4.593,1.056,,lower
+poisson1:dinfer_xs1,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r24,failed,0.000,0.000,,,lower
+poisson1:dinfer_xs0,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r24,out_tok_per_s,2876.406,2883.354,0.998,,higher
+poisson1:dinfer_xs0,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r24,ttft_p50_ms,10.276,19.310,0.532,,lower
+poisson1:dinfer_xs0,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r24,ttft_p99_ms,22.197,27.155,0.817,,lower
+poisson1:dinfer_xs0,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r24,tpot_p50_ms,4.860,4.593,1.058,,lower
+poisson1:dinfer_xs0,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r24,failed,0.000,0.000,,,lower
