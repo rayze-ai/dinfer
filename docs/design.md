@@ -464,6 +464,11 @@ pub struct DeviceBlockRef { pub layer: u8, pub block: BlockId, pub ptr: u64, pub
 ```
 `KvCacheManager` 持 `Option<Box<dyn KvTier>>`（这里允许 dyn：每 step 最多调几次，不在 kernel 热路径）。
 
+#### 分层边界：core 放容器，模型放"命中单元"（2026-10-18 用户指正后补）
+- **core**：`HostTierIndex`（(group, hash) → 槽，LRU）、`kv_fetch/kv_offload` order 类型、调度钩子、`HostArena`/copy stream/pack 搬运。这些与模型无关。
+- **模型 crate 注入 `HostTierPolicy`**：① 什么算一个单元、多组如何合成前缀命中（attention 组取最短前缀；Mamba/KDA 状态块只在块边界有效，与 GPU 侧 `get_computed_blocks` 同一规则）；② 一个单元覆盖多少 token；③ 拉回时填哪些 GPU 块、登记哪些哈希；④ 一个单元多少字节（竞技场切槽）。Qwen3 = `FullAttentionPolicy`（一块 × 全层）；GLM（MLA 潜变量 + 索引器 K 两组）、K3（KDA 状态 + 全注意力）各自实现，未写。
+- 判据：core 里出现 `groups.len() != 1` / `is_mamba[0]` / 具体 block_size 比较，就是策略泄漏，该抽到 trait。
+
 #### 调度器接入（4 处，都在 `sched/mod.rs`）
 1. **首次调度查命中**：`get_computed_blocks` 之后，若 GPU 命中长度 `h_gpu < num_tokens-1` 且有 tier，`tier.lookup(keys[h_gpu/bs..])` 得外层命中 `h_ext`。若 `h_ext > 0`：按 `h_gpu + h_ext` 分配块（`allocate_slots` 的 `new_computed` 参数扩展成 "GPU 命中块 + 待填块"），对待填块发 `fetch`，请求状态置 `WaitingForKv(transfer_id)`、**不进本步**。
 2. **到达检查**：每次 `schedule()` 开头 `poll_done()`，把对应请求从 `WaitingForKv` 放回 waiting 队头（它们的 `num_computed_tokens` 已含外层命中，下一步只算剩余 prompt）。
