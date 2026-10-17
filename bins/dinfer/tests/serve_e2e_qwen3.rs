@@ -722,7 +722,8 @@ async fn e2e_qwen3_robustness() {
 #[tokio::test]
 #[ignore]
 async fn e2e_qwen3_host_tier() {
-    let srv = spawn_server_with(&["--num-blocks", "64", "--kv-host-gib", "1", "--max-num-seqs", "4"]);
+    // 64 块 = 1024 token；启动校验要求 max_model_len ≤ 90% 池 → 配 --max-model-len 896（A 的 ~700 前缀 + 6 输出装得下）
+    let srv = spawn_server_with(&["--num-blocks", "64", "--max-model-len", "896", "--kv-host-gib", "1", "--max-num-seqs", "4"]);
     assert!(srv.logs.iter().any(|l| l.contains("kv host tier enabled")), "host tier should be enabled: {:?}", srv.logs.last());
     let c = reqwest::Client::new();
     let url = format!("{}/v1/chat/completions", srv.base);
