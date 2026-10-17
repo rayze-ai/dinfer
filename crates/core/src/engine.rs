@@ -366,13 +366,23 @@ impl<E: ModelExecutor> Engine<E> {
         loop {
             // 空闲：阻塞等命令；忙：非阻塞吸收
             if !self.sched.has_requests() && self.pending.is_none() && self.sync_done.is_empty() {
-                match self.rx.recv() {
-                    Ok(cmd) => {
-                        if !self.handle(cmd) {
-                            return Ok(());
-                        }
+                // PD：D 侧有等 KV 的提交时不能死等命令，要定期醒来查到达 / 超时回退。
+                let pd_wait = self.pd.as_ref().filter(|p| !p.pending.is_empty()).map(|_| std::time::Duration::from_millis(5));
+                let cmd = match pd_wait {
+                    Some(d) => match self.rx.recv_timeout(d) {
+                        Ok(c) => Some(c),
+                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => None,
+                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return Ok(()),
+                    },
+                    None => match self.rx.recv() {
+                        Ok(c) => Some(c),
+                        Err(_) => return Ok(()),
+                    },
+                };
+                if let Some(cmd) = cmd {
+                    if !self.handle(cmd) {
+                        return Ok(());
                     }
-                    Err(_) => return Ok(()),
                 }
             }
             while let Ok(cmd) = self.rx.try_recv() {
@@ -563,6 +573,20 @@ pub fn spawn<E: ModelExecutor + Send + 'static>(
         .expect("spawn engine");
     (h, jh)
 }
+/// 带 PD 状态启动（design §10.3）。
+pub fn spawn_with_pd<E: ModelExecutor + Send + 'static>(
+    sched: Scheduler,
+    runner: Runner<E>,
+    pd: PdState,
+) -> (EngineHandle, std::thread::JoinHandle<Result<()>>) {
+    let (mut eng, h) = Engine::new(sched, runner);
+    eng.set_pd(pd);
+    let jh = std::thread::Builder::new()
+        .name("dinfer-engine".into())
+        .spawn(move || eng.run())
+        .expect("spawn engine");
+    (h, jh)
+}
 
 /// 服务端需要的、与模型无关的 scheduler 参数构造。
 pub fn scheduler_params(
@@ -574,4 +598,156 @@ pub fn scheduler_params(
 ) -> SchedulerParams {
     let async_scheduling = std::env::var("ASYNC_SCHED").map(|v| v != "0").unwrap_or(true);
     SchedulerParams { sched, cache, max_model_len, num_spec_tokens, async_scheduling, eos_token_ids }
+}
+
+#[cfg(test)]
+mod pd_tests {
+    use super::*;
+    use crate::config::{CacheConfig, SchedulerConfig};
+    use crate::kv::{GroupInfo, KvBlocks, KvCacheSpec};
+    use crate::pd::{IncomingKv, TcpTransport};
+    use crate::runner::BatchPlan;
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    const UNIT: usize = 8;
+    /// 假 executor：KV = 每块 8 字节的 host 影子存储；forward 输出 = 2000 + seq_len。
+    struct PdEcho {
+        kv: Arc<Mutex<HashMap<u32, [u8; UNIT]>>>,
+    }
+    impl ModelExecutor for PdEcho {
+        fn forward_sample(&mut self, plan: &BatchPlan, generated: &mut Vec<Vec<u32>>, drafts: &mut Vec<Vec<u32>>) -> Result<()> {
+            for &s in &plan.seq_lens {
+                generated.push(vec![2000 + s as u32]);
+                drafts.push(Vec::new());
+            }
+            Ok(())
+        }
+        fn kv_unit_bytes(&self) -> usize {
+            UNIT
+        }
+        fn kv_export(&mut self, blocks: &KvBlocks) -> Result<Vec<u8>> {
+            let kv = self.kv.lock().unwrap();
+            let mut out = Vec::new();
+            for &b in blocks.group(0) {
+                out.extend_from_slice(&kv.get(&b).copied().unwrap_or([b as u8; UNIT]));
+            }
+            Ok(out)
+        }
+        fn kv_import(&mut self, blocks: &KvBlocks, payload: &[u8]) -> Result<()> {
+            let mut kv = self.kv.lock().unwrap();
+            for (i, &b) in blocks.group(0).iter().enumerate() {
+                let mut u = [0u8; UNIT];
+                u.copy_from_slice(&payload[i * UNIT..(i + 1) * UNIT]);
+                kv.insert(b, u);
+            }
+            Ok(())
+        }
+    }
+    fn sched() -> Scheduler {
+        let p = SchedulerParams {
+            sched: SchedulerConfig { max_num_seqs: 8, max_num_batched_tokens: 1024, enable_chunked_prefill: true, long_prefill_token_threshold: 0, decode_exempt_from_budget: false },
+            cache: CacheConfig { block_size: 16, hash_block_size: 16, ..Default::default() },
+            max_model_len: 256,
+            num_spec_tokens: 0,
+            async_scheduling: false,
+            eos_token_ids: vec![],
+        };
+        let g = vec![GroupInfo { spec: KvCacheSpec::Mla { block_size: 16, head_size: 64, dtype_bytes: 2 }, block_size: 16 }];
+        Scheduler::new(p, g, 64)
+    }
+    fn collect(rx: &mut tokio::sync::mpsc::UnboundedReceiver<EngineEvent>) -> (Vec<u32>, Option<FinishReason>) {
+        let (mut toks, mut fin) = (Vec::new(), None);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while fin.is_none() && std::time::Instant::now() < deadline {
+            match rx.try_recv() {
+                Ok(EngineEvent::Tokens(t)) => toks.extend(t),
+                Ok(EngineEvent::Finished(f)) => fin = Some(f),
+                Ok(EngineEvent::Error(e)) => panic!("engine error: {e}"),
+                Ok(_) => {}
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                Err(_) => std::thread::sleep(Duration::from_millis(2)),
+            }
+        }
+        (toks, fin)
+    }
+
+    /// 基线：PdEcho + 普通提交能正常结束（排除 mock/engine 装配问题）。
+    #[test]
+    fn plain_submit_on_pdecho_finishes() {
+        std::env::set_var("ASYNC_SCHED", "0");
+        let (h, _j) = spawn(sched(), Runner::new(PdEcho { kv: Arc::new(Mutex::new(HashMap::new())) }, 16));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        h.submit(Submission { prompt_ids: (0..40).collect(), sampling: SamplingParams { max_tokens: 2, ..Default::default() }, tx, pd: None });
+        let (toks, fin) = collect(&mut rx);
+        assert_eq!(fin, Some(FinishReason::Length), "toks={toks:?}");
+        assert_eq!(toks, vec![2040, 2041]);
+        h.shutdown();
+    }
+
+    /// P（Export, max_tokens=1）→ TCP → D（Import）：D 从首 token 续 decode；D 的 KV 影子等于 P 导出的字节；超时回退计数。
+    #[test]
+    fn prefill_export_then_decode_import_over_tcp() {
+        std::env::set_var("ASYNC_SCHED", "0");
+        let d_kv = Arc::new(Mutex::new(HashMap::new()));
+        let d_incoming = Arc::new(IncomingKv::default());
+        let d_port = crate::pd::spawn_receiver("127.0.0.1:0", "t".into(), d_incoming.clone()).unwrap();
+        let (dh, _dj) = spawn_with_pd(
+            sched(),
+            Runner::new(PdEcho { kv: d_kv.clone() }, 16),
+            PdState::new(d_incoming.clone(), None, "t".into(), Duration::from_millis(300)),
+        );
+        let p_kv = Arc::new(Mutex::new(HashMap::new()));
+        let (ph, _pj) = spawn_with_pd(
+            sched(),
+            Runner::new(PdEcho { kv: p_kv.clone() }, 16),
+            PdState::new(
+                Arc::new(IncomingKv::default()),
+                Some(Arc::new(TcpTransport { addr: format!("127.0.0.1:{d_port}"), connect_timeout: Duration::from_secs(2) })),
+                "t".into(),
+                Duration::from_secs(1),
+            ),
+        );
+        let prompt: Vec<u32> = (0..40).collect(); // 3 块（含尾块）
+        // 1. P：max_tokens=1 Export
+        let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel();
+        let pid = ph.submit(Submission { prompt_ids: prompt.clone(), sampling: SamplingParams { max_tokens: 1, ..Default::default() }, tx: ptx, pd: Some(PdSubmit::Export) });
+        let (ptoks, pfin) = collect(&mut prx);
+        assert_eq!(ptoks.len(), 1);
+        assert_eq!(pfin, Some(FinishReason::Length));
+        // P 的下一次 schedule 才导出 → 再提交一个普通请求驱动一步
+        let (xtx, mut xrx) = tokio::sync::mpsc::unbounded_channel();
+        ph.submit(Submission { prompt_ids: vec![9, 9, 9], sampling: SamplingParams { max_tokens: 1, ..Default::default() }, tx: xtx, pd: None });
+        let _ = collect(&mut xrx);
+        let t0 = std::time::Instant::now();
+        while ph.metrics().pd_export_total.load(Ordering::Relaxed) == 0 && t0.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(ph.metrics().pd_export_total.load(Ordering::Relaxed), 1);
+        while !d_incoming.contains(pid) && t0.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(d_incoming.contains(pid), "migration must reach D");
+        // 2. D：Import，续 3 token
+        let (dtx, mut drx) = tokio::sync::mpsc::unbounded_channel();
+        dh.submit(Submission { prompt_ids: prompt.clone(), sampling: SamplingParams { max_tokens: 4, ..Default::default() }, tx: dtx, pd: Some(PdSubmit::Import { remote_id: pid }) });
+        let (dtoks, dfin) = collect(&mut drx);
+        assert_eq!(dfin, Some(FinishReason::Length));
+        // 首 token 由 P 出（不重复推送），D 再出 3 个：seq_len 41, 42, 43
+        assert_eq!(dtoks, vec![2041, 2042, 2043], "D must continue from prompt+first_token");
+        assert_eq!(dh.metrics().pd_import_total.load(Ordering::Relaxed), 1);
+        assert_eq!(dh.metrics().pd_fallback_total.load(Ordering::Relaxed), 0);
+        // D 的 KV 影子 = P 导出的 3 块字节（P 侧没写过 → 默认 [block_id; 8]）
+        let got = d_kv.lock().unwrap().len();
+        assert_eq!(got, 3, "3 blocks imported into D");
+        // 3. 回退：没有对应迁移的 Import，300 ms 后本地重算
+        let (ftx, mut frx) = tokio::sync::mpsc::unbounded_channel();
+        dh.submit(Submission { prompt_ids: (100..120).collect(), sampling: SamplingParams { max_tokens: 2, ..Default::default() }, tx: ftx, pd: Some(PdSubmit::Import { remote_id: 999_999 }) });
+        let (ftoks, ffin) = collect(&mut frx);
+        assert_eq!(ffin, Some(FinishReason::Length));
+        assert_eq!(ftoks.len(), 2);
+        assert_eq!(dh.metrics().pd_fallback_total.load(Ordering::Relaxed), 1);
+        ph.shutdown();
+        dh.shutdown();
+    }
 }
