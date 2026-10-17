@@ -395,3 +395,10 @@
 - 解法：`schedule()` 之前必须把所有已完成步的 `update_from_output` 做掉；插队步 finish 后立刻 update + 推送，不排队。
 - 如何避免：engine 里 "调度" 和 "回填" 之间的不变式写成注释并断言：`schedule()` 调用点上 sync_done 必须为空。
 
+## 2026-10-17 A/B 脚本在同一端口连起两个实例时，bench 打在了残留的旧实例上
+
+- 现象：host tier A/B（:8096，gib=0 / 16 两组）第一组吞吐 0.11 req/s、第二组日志里的 `num_blocks` 与本组参数不符。
+- 根因：`( serve & ); … pkill -INT -f "port 8096"; sleep 3` ——没等旧进程真正退出、端口释放，新实例起不来或起来后 bench 连到旧的；与同日 "tmux 孤儿进程" 是同一类问题。
+- 解法：`scripts/dev/ab_serve.sh start <port> <gpu> [args]`：起前 pkill + 等 pgrep 为空 + 等端口不响应，起后等 ready 并打印 **pid / 真实进程数 / num_blocks**；`stop <port>` 同样等退干净。所有 A/B 都用它。
+- 如何避免：任何 "起服务 → 测 → 换参数再起" 的脚本，每轮打印被测进程的 pid 与关键启动参数并与预期核对；吞吐离谱（<1 req/s）先怀疑连错进程。
+
