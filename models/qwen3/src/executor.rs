@@ -156,6 +156,19 @@ impl Qwen3Executor {
     }
 
     pub fn with_graphs(stream: Stream, model: Qwen3Model, enable_graphs: bool) -> Result<Self> {
+        let n = model.kv.first().map_or(1, |kv| kv.num_blocks).max(1);
+        Self::with_graphs_and_blocks(stream, model, enable_graphs, n)
+    }
+
+    /// `max_blocks_per_seq`：单请求 block_table 的最大长度（= max_model_len / block_size）。它决定 StepBuffers
+    /// 里 block_table 的行跨度与每步上传量；之前误用 KV 池总块数（4090 上 9972 → 每步 1.3 MB 零填充 + H2D，
+    /// 占 decode 步 host 时间的大头，Q3 第 53 轮）。
+    pub fn with_graphs_and_blocks(
+        stream: Stream,
+        model: Qwen3Model,
+        enable_graphs: bool,
+        max_blocks_per_seq: usize,
+    ) -> Result<Self> {
         // capture 要求非默认流；cuBLASLt 句柄绑流，所以在新流上重建。权重 / scratch 在旧流上分配完并已同步。
         stream.synchronize()?;
         let dev = stream.device();
@@ -165,7 +178,7 @@ impl Qwen3Executor {
         let v = model.cfg.vocab_size as usize;
         let rows = model.max_logits_rows;
         let mt = model.max_tokens;
-        let max_blocks = model.kv.first().map_or(1, |kv| kv.num_blocks).max(1);
+        let max_blocks = max_blocks_per_seq.max(1);
         let buf = StepBuffers::alloc(&s, mt, rows, max_blocks)?;
         let mut ex = Self {
             logits: Tensor::zeros(&s, &[rows, v])?,
@@ -268,7 +281,12 @@ impl Qwen3Executor {
         seq.resize(nb, 1);
         self.buf.up.push(s, &seq, &mut self.buf.seq.data)?;
         // block_table：图里 max_blocks 固定为缓冲宽度（按每行 stride = buf.max_blocks 布局）
-        ensure!(plan.max_blocks <= self.buf.max_blocks, "block_table wider than buffer");
+        ensure!(
+            plan.max_blocks <= self.buf.max_blocks,
+            "block_table wider than buffer: {} > {} (max_model_len / block_size)",
+            plan.max_blocks,
+            self.buf.max_blocks
+        );
         let mb = self.buf.max_blocks;
         let mut bt = vec![0i32; nb * mb];
         for r in 0..n {

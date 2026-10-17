@@ -114,7 +114,8 @@ impl Qwen3Service {
         let num_blocks = model.num_blocks() as u32;
         s.synchronize()?;
         let t_model = t_start.elapsed();
-        let exec = Qwen3Executor::with_graphs(s.clone(), model, opt.enable_cuda_graph)?;
+        let max_blocks_per_seq = (opt.max_model_len as usize).div_ceil(opt.block_size as usize);
+        let exec = Qwen3Executor::with_graphs_and_blocks(s.clone(), model, opt.enable_cuda_graph, max_blocks_per_seq)?;
         let num_graphs = exec.num_graphs();
         let runner = Runner::new(exec, opt.block_size as usize);
         let t_join = std::time::Instant::now();
