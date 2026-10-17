@@ -49,6 +49,22 @@ fn spawn_server_with(extra: &[&str]) -> Server {
     .iter()
     .map(|s| s.to_string())
     .collect();
+    // extra 里出现的 flag 覆盖默认值（clap 不允许同一 flag 重复）
+    let overridden: Vec<&str> = extra.iter().copied().filter(|s| s.starts_with("--")).collect();
+    let mut filtered = Vec::with_capacity(args.len());
+    let mut skip_next = false;
+    for a in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if a.starts_with("--") && overridden.contains(&a.as_str()) {
+            skip_next = true; // 跳过它的值
+            continue;
+        }
+        filtered.push(a);
+    }
+    let mut args = filtered;
     args.extend(extra.iter().map(|s| s.to_string()));
     let mut child = Command::new(env!("CARGO_BIN_EXE_dinfer"))
         .args(&args)
