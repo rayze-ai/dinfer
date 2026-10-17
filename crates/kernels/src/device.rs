@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use cudarc::driver::{
-    CudaContext, CudaGraph, CudaSlice, CudaStream, DevicePtr, DevicePtrMut, DeviceRepr, ValidAsZeroBits,
+    CudaContext, CudaEvent, CudaGraph, CudaSlice, CudaStream, DevicePtr, DevicePtrMut, DeviceRepr, ValidAsZeroBits,
 };
 use std::sync::Arc;
 
@@ -119,6 +119,15 @@ impl Stream {
         Ok(self.inner.memcpy_dtod(&s, &mut d)?)
     }
 
+    /// 在本流上记录一个事件（跨流依赖用；禁用 timing 以免影响并发）。
+    pub fn record_event(&self) -> Result<Event> {
+        use cudarc::driver::sys::CUevent_flags;
+        Ok(Event(self.inner.record_event(Some(CUevent_flags::CU_EVENT_DISABLE_TIMING))?))
+    }
+    /// 本流后续工作等待 `ev`（设备侧等待，不阻塞 host）。
+    pub fn wait_event(&self, ev: &Event) -> Result<()> {
+        Ok(self.inner.wait(&ev.0)?)
+    }
     pub fn synchronize(&self) -> Result<()> {
         Ok(self.inner.synchronize()?)
     }
@@ -172,3 +181,6 @@ impl Graph {
         Ok(self.0.launch()?)
     }
 }
+
+/// CUDA event（跨流同步）。
+pub struct Event(CudaEvent);

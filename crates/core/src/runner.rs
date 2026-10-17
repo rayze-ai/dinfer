@@ -99,6 +99,27 @@ pub trait ModelExecutor {
         drafts: &mut Vec<Vec<u32>>,
     ) -> Result<()>;
 
+    /// 是否支持 decode 批与 prefill 批并行执行（跨流）。默认否 → runner 不拆 plan。
+    fn supports_pair(&self) -> bool {
+        false
+    }
+    /// decode 批 + prefill 批并行执行；返回两边的 logprobs。默认实现：顺序执行。
+    fn forward_sample_pair(
+        &mut self,
+        decode: &BatchPlan,
+        prefill: &BatchPlan,
+        gen_d: &mut Vec<Vec<u32>>,
+        dr_d: &mut Vec<Vec<u32>>,
+        gen_p: &mut Vec<Vec<u32>>,
+        dr_p: &mut Vec<Vec<u32>>,
+    ) -> Result<(Vec<Vec<TokenLogprobs>>, Vec<Vec<TokenLogprobs>>)> {
+        self.forward_sample(decode, gen_d, dr_d)?;
+        let lp_d = self.take_logprobs(decode.num_reqs());
+        self.forward_sample(prefill, gen_p, dr_p)?;
+        let lp_p = self.take_logprobs(prefill.num_reqs());
+        Ok((lp_d, lp_p))
+    }
+
     /// 上一次 `forward_sample` 的 logprobs（与 req_ids 平行；不要 logprobs 的请求为空 Vec）。默认：不支持 → 全空。
     fn take_logprobs(&mut self, num_reqs: usize) -> Vec<Vec<TokenLogprobs>> {
         vec![Vec::new(); num_reqs]
@@ -146,7 +167,60 @@ impl<E: ModelExecutor> Runner<E> {
         self.build_plan(so)?;
         self.generated.clear();
         self.drafts.clear();
-        self.exec.forward_sample(&self.plan, &mut self.generated, &mut self.drafts)?;
+        // 跨流并行（Q3-j）：混批（decode 行 + 带/不带历史的 prefill 行）且 executor 支持 → 拆成两个 plan 并行
+        let mut lps_override: Option<Vec<Vec<TokenLogprobs>>> = None;
+        let is_decode_row: Vec<bool> = so
+            .num_scheduled_tokens
+            .iter()
+            .map(|&(rid, n)| n == 1 && self.states.get(&rid).map_or(false, |st| st.num_computed > 0))
+            .collect();
+        let nd = is_decode_row.iter().filter(|&&b| b).count();
+        if self.exec.supports_pair() && self.plan.mode == BatchMode::Paged && nd > 0 && nd < is_decode_row.len() {
+            let full = std::mem::take(&mut self.plan);
+            let mut so_d = so.clone();
+            let mut so_p = so.clone();
+            so_d.num_scheduled_tokens =
+                so.num_scheduled_tokens.iter().zip(&is_decode_row).filter(|(_, &d)| d).map(|(x, _)| *x).collect();
+            so_p.num_scheduled_tokens =
+                so.num_scheduled_tokens.iter().zip(&is_decode_row).filter(|(_, &d)| !d).map(|(x, _)| *x).collect();
+            self.build_plan(&so_d)?;
+            let plan_d = std::mem::take(&mut self.plan);
+            self.build_plan(&so_p)?;
+            let plan_p = std::mem::take(&mut self.plan);
+            self.plan = full;
+            let (mut gd, mut dd, mut gp, mut dp) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            let (lp_d, lp_p) =
+                self.exec.forward_sample_pair(&plan_d, &plan_p, &mut gd, &mut dd, &mut gp, &mut dp)?;
+            ensure!(
+                gd.len() == plan_d.num_reqs() && gp.len() == plan_p.num_reqs(),
+                "pair executor returned {}/{} entries for {}/{} requests",
+                gd.len(),
+                gp.len(),
+                plan_d.num_reqs(),
+                plan_p.num_reqs()
+            );
+            let (mut lp_d, mut lp_p) = (lp_d, lp_p);
+            lp_d.resize(plan_d.num_reqs(), Vec::new());
+            lp_p.resize(plan_p.num_reqs(), Vec::new());
+            // 按原顺序散回
+            let (mut gd, mut dd, mut gp, mut dp) = (gd.into_iter(), dd.into_iter(), gp.into_iter(), dp.into_iter());
+            let (mut ld, mut lp) = (lp_d.into_iter(), lp_p.into_iter());
+            let mut lps = Vec::with_capacity(is_decode_row.len());
+            for &d in &is_decode_row {
+                if d {
+                    self.generated.push(gd.next().unwrap());
+                    self.drafts.push(dd.next().unwrap());
+                    lps.push(ld.next().unwrap());
+                } else {
+                    self.generated.push(gp.next().unwrap());
+                    self.drafts.push(dp.next().unwrap());
+                    lps.push(lp.next().unwrap());
+                }
+            }
+            lps_override = Some(lps);
+        } else {
+            self.exec.forward_sample(&self.plan, &mut self.generated, &mut self.drafts)?;
+        }
         ensure!(
             self.generated.len() == self.plan.num_reqs() && self.drafts.len() == self.plan.num_reqs(),
             "executor returned {}/{} entries for {} requests",
@@ -163,7 +237,10 @@ impl<E: ModelExecutor> Runner<E> {
             drafts: Vec::with_capacity(self.plan.num_reqs()),
             logprobs: Vec::with_capacity(self.plan.num_reqs()),
         };
-        let mut lps = self.exec.take_logprobs(self.plan.num_reqs());
+        let mut lps = match lps_override {
+            Some(l) => l,
+            None => self.exec.take_logprobs(self.plan.num_reqs()),
+        };
         ensure!(lps.len() == self.plan.num_reqs(), "executor returned {} logprob entries", lps.len());
         for (i, &rid) in self.plan.req_ids.iter().enumerate() {
             let st = self.states.get_mut(&rid).unwrap();

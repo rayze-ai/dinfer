@@ -13,13 +13,13 @@
 //! - executor 自己建一条非默认流（capture 要求）并在其上建 cuBLASLt 句柄；cudarc 的自动事件跟踪关闭
 //!   （见 `Device::disable_event_tracking`）：全程单流顺序执行。
 
-use crate::model::{AttnMeta, Forward, Qwen3Model};
+use crate::model::{AttnMeta, Forward, Qwen3Model, ModelScratch};
 use anyhow::{ensure, Context, Result};
 use dinfer_core::runner::{BatchMode, BatchPlan, ModelExecutor};
 use dinfer_core::sampler::{SampleBatch, TokenLogprobs};
 use dinfer_kernels as k;
 use dinfer_kernels::Graph;
-use dinfer_layers::{Gemm, Stream, Tensor};
+use dinfer_layers::{Gemm, Stream, Tensor, Event};
 
 /// 固定地址的每 step 输入缓冲。
 struct StepBuffers {
@@ -56,6 +56,51 @@ struct DecodeGraph {
     graph: Graph,
 }
 
+impl StepBuffers {
+    fn alloc(s: &Stream, mt: usize, rows: usize, max_blocks: usize) -> Result<Self> {
+        let z32 = |n: usize| Tensor::<i32>::zeros(s, &[n.max(1)]);
+        let zf = |n: usize| Tensor::<f32>::zeros(s, &[n.max(1)]);
+        Ok(StepBuffers {
+            ids: z32(mt)?,
+            pos: z32(mt)?,
+            slots: Tensor::<i64>::zeros(s, &[mt])?,
+            rows: z32(rows)?,
+            cu: z32(rows + 1)?,
+            seq: z32(rows)?,
+            bt: z32(rows * max_blocks)?,
+            max_blocks,
+            temperature: zf(rows)?,
+            temp01: zf(rows)?,
+            top_k: z32(rows)?,
+            top_p: zf(rows)?,
+            min_p: zf(rows)?,
+            rep: zf(rows)?,
+            freq: zf(rows)?,
+            pres: zf(rows)?,
+            seeds: Tensor::<u64>::zeros(s, &[rows])?,
+            offsets: Tensor::<u64>::zeros(s, &[rows])?,
+            hist_offsets: z32(rows + 1)?,
+            hist_prompt_len: z32(rows)?,
+            hist_ids: z32(1024)?,
+            chosen: z32(rows)?,
+            lp_ids: z32(rows * 33)?,
+            lp_val: zf(rows * 33)?,
+            lp_rank: z32(rows)?,
+        })
+    }
+}
+
+/// 跨流并行的第二套执行资源（副流 + cuBLASLt + 输入缓冲 + logits 工作区 + 模型激活 scratch）。
+struct AltSet {
+    stream: Stream,
+    gemm: Gemm,
+    buf: StepBuffers,
+    logits: Tensor<f32>,
+    work: Tensor<f32>,
+    raw: Tensor<f32>,
+    scratch: ModelScratch,
+}
+
 pub struct Qwen3Executor {
     pub stream: Stream,
     pub gemm: Gemm,
@@ -69,6 +114,12 @@ pub struct Qwen3Executor {
     graphs: Vec<DecodeGraph>,
     last_logprobs: Vec<Vec<TokenLogprobs>>,
     last_rows: usize,
+    alt: Option<AltSet>,
+    /// 当前主字段是否是副套（swap_alt 后为 true）；副套上不走图。
+    alt_active: bool,
+    pub pair_steps: u64,
+    /// 主流每 step 末尾记录；副流下一步开工前等它（KV 一致）。
+    main_done: Option<Event>,
     /// 统计：走图 / 走 eager 的 step 数。
     pub graph_steps: u64,
     pub eager_steps: u64,
@@ -103,35 +154,7 @@ impl Qwen3Executor {
         let rows = model.max_logits_rows;
         let mt = model.max_tokens;
         let max_blocks = model.kv.first().map_or(1, |kv| kv.num_blocks).max(1);
-        let z32 = |n: usize| Tensor::<i32>::zeros(&s, &[n.max(1)]);
-        let zf = |n: usize| Tensor::<f32>::zeros(&s, &[n.max(1)]);
-        let buf = StepBuffers {
-            ids: z32(mt)?,
-            pos: z32(mt)?,
-            slots: Tensor::<i64>::zeros(&s, &[mt])?,
-            rows: z32(rows)?,
-            cu: z32(rows + 1)?,
-            seq: z32(rows)?,
-            bt: z32(rows * max_blocks)?,
-            max_blocks,
-            temperature: zf(rows)?,
-            temp01: zf(rows)?,
-            top_k: z32(rows)?,
-            top_p: zf(rows)?,
-            min_p: zf(rows)?,
-            rep: zf(rows)?,
-            freq: zf(rows)?,
-            pres: zf(rows)?,
-            seeds: Tensor::<u64>::zeros(&s, &[rows])?,
-            offsets: Tensor::<u64>::zeros(&s, &[rows])?,
-            hist_offsets: z32(rows + 1)?,
-            hist_prompt_len: z32(rows)?,
-            hist_ids: z32(1024)?,
-            chosen: z32(rows)?,
-            lp_ids: z32(rows * 33)?,
-            lp_val: zf(rows * 33)?,
-            lp_rank: z32(rows)?,
-        };
+        let buf = StepBuffers::alloc(&s, mt, rows, max_blocks)?;
         let mut ex = Self {
             logits: Tensor::zeros(&s, &[rows, v])?,
             work: Tensor::zeros(&s, &[rows, v])?,
@@ -143,6 +166,10 @@ impl Qwen3Executor {
             graphs: Vec::new(),
             last_logprobs: Vec::new(),
             last_rows: 0,
+            alt: None,
+            alt_active: false,
+            pair_steps: 0,
+            main_done: None,
             graph_steps: 0,
             eager_steps: 0,
             t_upload_us: 0,
@@ -151,6 +178,24 @@ impl Qwen3Executor {
         };
         if enable_graphs {
             ex.capture_decode_graphs()?;
+        }
+        // 跨流 prefill/decode 并行（Q3-j）：XSTREAM=0 关。副流一套资源在图捕获之后分配。
+        if std::env::var("XSTREAM").map(|v| v != "0").unwrap_or(true) {
+            let t0 = std::time::Instant::now();
+            let s2 = dev.new_stream()?;
+            let gemm2 = Gemm::new(&s2).context("cublasLt on alt stream")?;
+            let buf2 = StepBuffers::alloc(&s2, mt, rows, max_blocks)?;
+            let scratch = ex.model.alloc_scratch(&s2)?;
+            ex.alt = Some(AltSet {
+                logits: Tensor::zeros(&s2, &[rows, v])?,
+                work: Tensor::zeros(&s2, &[rows, v])?,
+                raw: Tensor::zeros(&s2, &[rows, v])?,
+                stream: s2,
+                gemm: gemm2,
+                buf: buf2,
+                scratch,
+            });
+            tracing::info!(alloc_ms = t0.elapsed().as_millis() as u64, "xstream: alt stream + scratch ready");
         }
         Ok(ex)
     }
@@ -473,13 +518,23 @@ impl Qwen3Executor {
     }
 }
 
-impl ModelExecutor for Qwen3Executor {
-    fn forward_sample(
-        &mut self,
-        plan: &BatchPlan,
-        generated: &mut Vec<Vec<u32>>,
-        drafts: &mut Vec<Vec<u32>>,
-    ) -> Result<()> {
+impl Qwen3Executor {
+    /// 主套 ↔ 副套整体互换（流、GEMM、输入缓冲、logits 工作区、模型激活 scratch）。
+    fn swap_alt(&mut self) {
+        let mut a = self.alt.take().expect("alt set");
+        std::mem::swap(&mut self.stream, &mut a.stream);
+        std::mem::swap(&mut self.gemm, &mut a.gemm);
+        std::mem::swap(&mut self.buf, &mut a.buf);
+        std::mem::swap(&mut self.logits, &mut a.logits);
+        std::mem::swap(&mut self.work, &mut a.work);
+        std::mem::swap(&mut self.raw, &mut a.raw);
+        self.model.swap_scratch(&mut a.scratch);
+        self.alt = Some(a);
+        self.alt_active = !self.alt_active;
+    }
+
+    /// 上传 + 入队（forward + 采样），不等结果。返回 (请求数, 入队开始时刻)。
+    fn enqueue(&mut self, plan: &BatchPlan) -> Result<(usize, std::time::Instant)> {
         let n = plan.num_reqs();
         let t = plan.total_tokens();
         ensure!(t <= self.model.max_tokens, "batch of {t} tokens > max_tokens {}", self.model.max_tokens);
@@ -502,15 +557,15 @@ impl ModelExecutor for Qwen3Executor {
         let use_graph = plan.mode == BatchMode::Decode
             && !sb.any_penalty
             && sb.max_logprobs.is_none()
+            && self.alt_active == false
             && self.graph_for(n).is_some();
-        let t0 = std::time::Instant::now();
-        let t_launch_start;
+        let t_launch;
         if use_graph {
             let nb = self.graph_for(n).unwrap().batch;
             let (tt, nb2) = self.upload_plan(plan, nb)?;
             debug_assert_eq!((tt, nb2), (nb, nb));
             self.upload_sampling(sb, nb)?;
-            t_launch_start = std::time::Instant::now();
+            t_launch = std::time::Instant::now();
             let g = self.graph_for(n).unwrap();
             g.graph.launch().context("launch decode graph")?;
             self.graph_steps += 1;
@@ -518,36 +573,108 @@ impl ModelExecutor for Qwen3Executor {
         } else {
             let (tt, nb) = self.upload_plan(plan, n)?;
             debug_assert_eq!((tt, nb), (t, n));
-            t_launch_start = std::time::Instant::now();
+            t_launch = std::time::Instant::now();
             let max_seqlen = plan.num_tokens.iter().copied().max().unwrap_or(0) as usize;
             self.forward_device(plan.mode, t, n, max_seqlen)?;
             self.sample_eager(sb, n)?;
             self.eager_steps += 1;
         }
         self.last_rows = n;
-        let t_wait_start = std::time::Instant::now();
-        let chosen = self.stream.dtoh_sync_copy_view(&self.buf.chosen.data.slice(..n))?;
+        Ok((n, t_launch))
+    }
+
+    /// 等本流完成并取回采样结果。
+    fn collect(&mut self, n: usize) -> Result<Vec<i32>> {
+        self.stream.dtoh_sync_copy_view(&self.buf.chosen.data.slice(..n))
+    }
+
+    fn account(&mut self, t0: std::time::Instant, t_launch: std::time::Instant, t_wait: std::time::Instant) {
         let t_end = std::time::Instant::now();
-        self.t_upload_us += (t_launch_start - t0).as_micros() as u64;
-        self.t_launch_us += (t_wait_start - t_launch_start).as_micros() as u64;
-        self.t_wait_us += (t_end - t_wait_start).as_micros() as u64;
+        self.t_upload_us += (t_launch - t0).as_micros() as u64;
+        self.t_launch_us += (t_wait - t_launch).as_micros() as u64;
+        self.t_wait_us += (t_end - t_wait).as_micros() as u64;
         let steps = self.graph_steps + self.eager_steps;
         if steps % 1000 == 0 {
             tracing::info!(
                 steps,
                 graph = self.graph_steps,
                 eager = self.eager_steps,
+                pair = self.pair_steps,
                 upload_us_per_step = self.t_upload_us / steps,
                 launch_us_per_step = self.t_launch_us / steps,
                 wait_us_per_step = self.t_wait_us / steps,
                 "executor step breakdown (cumulative avg)"
             );
         }
-        for &c in chosen.iter() {
+    }
+}
+
+impl ModelExecutor for Qwen3Executor {
+    fn supports_pair(&self) -> bool {
+        self.alt.is_some()
+    }
+
+    fn forward_sample(
+        &mut self,
+        plan: &BatchPlan,
+        generated: &mut Vec<Vec<u32>>,
+        drafts: &mut Vec<Vec<u32>>,
+    ) -> Result<()> {
+        let t0 = std::time::Instant::now();
+        let (n, t_launch) = self.enqueue(plan)?;
+        let t_wait = std::time::Instant::now();
+        let chosen = self.collect(n)?;
+        self.main_done = Some(self.stream.record_event()?);
+        self.account(t0, t_launch, t_wait);
+        for &c in &chosen {
             generated.push(vec![c as u32]);
             drafts.push(Vec::new());
         }
         Ok(())
+    }
+
+    /// decode 批（主流，走图）与 prefill 批（副流，eager）并行；两边各自 D2H。返回 (lp_decode, lp_prefill)。
+    fn forward_sample_pair(
+        &mut self,
+        decode: &BatchPlan,
+        prefill: &BatchPlan,
+        gen_d: &mut Vec<Vec<u32>>,
+        dr_d: &mut Vec<Vec<u32>>,
+        gen_p: &mut Vec<Vec<u32>>,
+        dr_p: &mut Vec<Vec<u32>>,
+    ) -> Result<(Vec<Vec<TokenLogprobs>>, Vec<Vec<TokenLogprobs>>)> {
+        ensure!(self.alt.is_some(), "forward_sample_pair without alt set");
+        let t0 = std::time::Instant::now();
+        // 1. 主流：decode 入队
+        let (nd, t_launch) = self.enqueue(decode)?;
+        let lp_d = std::mem::take(&mut self.last_logprobs);
+        // 2. 副流：等上一步主流结束（历史 KV 完整），然后 prefill 入队
+        if let Some(ev) = &self.main_done {
+            self.alt.as_ref().unwrap().stream.wait_event(ev)?;
+        }
+        self.swap_alt();
+        let r = self.enqueue(prefill);
+        let lp_p = std::mem::take(&mut self.last_logprobs);
+        let ev_p = self.stream.record_event();
+        let t_wait = std::time::Instant::now();
+        let chosen_p = r.and_then(|(np, _)| self.collect(np));
+        self.swap_alt();
+        let chosen_p = chosen_p?;
+        // 3. 主流在下一步前等副流（prefill 写的 KV 对后续 decode 可见）
+        self.stream.wait_event(&ev_p?)?;
+        let chosen_d = self.collect(nd)?;
+        self.main_done = Some(self.stream.record_event()?);
+        self.pair_steps += 1;
+        self.account(t0, t_launch, t_wait);
+        for &c in &chosen_d {
+            gen_d.push(vec![c as u32]);
+            dr_d.push(Vec::new());
+        }
+        for &c in &chosen_p {
+            gen_p.push(vec![c as u32]);
+            dr_p.push(Vec::new());
+        }
+        Ok((lp_d, lp_p))
     }
 
     fn take_logprobs(&mut self, num_reqs: usize) -> Vec<Vec<TokenLogprobs>> {

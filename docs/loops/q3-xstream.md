@@ -46,3 +46,4 @@
 | 轮 | 块 | 现象 | 根因 | 处理 |
 |---|---|---|---|---|
 | 0 | 规格 | 2026-10-17 写规格 | — | 开工：model Scratch 抽取 |
+| 1 | 实现 | `Stream::record_event/wait_event`（kernels device.rs）；`Mlp::swap_bufs` / `Attention::swap_bufs` / `Qwen3Model::{alloc_scratch,swap_scratch}`（ModelScratch 整套激活缓冲）；executor `AltSet`（副流 + Gemm + StepBuffers + logits/work/raw + scratch）、`enqueue/collect/account` 拆分、`forward_sample_pair`（主流 decode 图 → 副流等 main_done 事件 → prefill eager → 主流等副流事件 → 各自 D2H）；runner `supports_pair` + Paged 混批拆 so → 两个 plan → 结果按原顺序散回；`XSTREAM=0` 关。release 编译过 | — | core 单测 + real_parity(两种 XSTREAM) → 4090 |

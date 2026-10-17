@@ -191,6 +191,11 @@ impl Mlp {
         })
     }
     /// `tokens`：本步实际 token 数；x / out 缓冲只用前 tokens 行。
+    /// 跨流并行：把本层的两块激活缓冲与外部一套互换（副流用自己的 scratch）。形状必须一致。
+    pub fn swap_bufs(&mut self, gate_up: &mut Tensor<bf16>, act: &mut Tensor<bf16>) {
+        std::mem::swap(&mut self.gate_up_buf, gate_up);
+        std::mem::swap(&mut self.act_buf, act);
+    }
     pub fn forward(
         &mut self,
         stream: &Stream,

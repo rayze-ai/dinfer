@@ -124,6 +124,10 @@ impl Attention {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn swap_bufs(&mut self, qkv_buf: &mut Tensor<bf16>, attn: &mut Tensor<bf16>) {
+        std::mem::swap(&mut self.qkv_buf, qkv_buf);
+        std::mem::swap(&mut self.attn, attn);
+    }
     fn forward(
         &mut self,
         stream: &Stream,
@@ -248,6 +252,24 @@ impl Attention {
         // 6. o_proj
         gemm.forward_bf16(&self.attn.data, &self.o_proj.w.data, None, &mut out.data, t, hidden, h * d)
     }
+}
+
+/// 一套完整的 per-step 激活缓冲（跨流并行时副流用；`Qwen3Model::swap_scratch` 整体换入 / 换出）。
+pub struct LayerScratch {
+    pub qkv_buf: Tensor<bf16>,
+    pub attn: Tensor<bf16>,
+    pub gate_up: Tensor<bf16>,
+    pub act: Tensor<bf16>,
+}
+pub struct ModelScratch {
+    pub hidden: Tensor<bf16>,
+    pub normed: Tensor<bf16>,
+    pub attn_out: Tensor<bf16>,
+    pub mlp_out: Tensor<bf16>,
+    pub final_normed: Tensor<bf16>,
+    pub logits_bf16: Tensor<bf16>,
+    pub decode_scratch: Tensor<f32>,
+    pub layers: Vec<LayerScratch>,
 }
 
 impl Qwen3Model {
@@ -446,6 +468,47 @@ impl Qwen3Model {
     }
 
     /// 返回 logits（fp32，[num_logits_rows, vocab]）。
+    /// 分配第二套激活缓冲（形状同主套：max_tokens / max_logits_rows）。
+    pub fn alloc_scratch(&self, stream: &Stream) -> Result<ModelScratch> {
+        let cfg = &self.cfg;
+        let (h, hk, d) = (cfg.num_attention_heads as usize, cfg.num_key_value_heads as usize, cfg.head_dim as usize);
+        let hidden = cfg.hidden_size as usize;
+        let (t, rows, v) = (self.max_tokens, self.max_logits_rows, cfg.vocab_size as usize);
+        let mut layers = Vec::with_capacity(self.layers.len());
+        for l in &self.layers {
+            let inter = l.mlp.inter;
+            layers.push(LayerScratch {
+                qkv_buf: Tensor::zeros(stream, &[t, (h + 2 * hk) * d])?,
+                attn: Tensor::zeros(stream, &[t, h, d])?,
+                gate_up: Tensor::zeros(stream, &[t, 2 * inter])?,
+                act: Tensor::zeros(stream, &[t, inter])?,
+            });
+        }
+        Ok(ModelScratch {
+            hidden: Tensor::zeros(stream, &[t, hidden])?,
+            normed: Tensor::zeros(stream, &[t, hidden])?,
+            attn_out: Tensor::zeros(stream, &[t, hidden])?,
+            mlp_out: Tensor::zeros(stream, &[t, hidden])?,
+            final_normed: Tensor::zeros(stream, &[rows, hidden])?,
+            logits_bf16: Tensor::zeros(stream, &[rows, v])?,
+            decode_scratch: Tensor::zeros(stream, &[k::gqa_decode_scratch_len(rows, h, d)])?,
+            layers,
+        })
+    }
+    /// 整体互换当前激活缓冲与 `s`（O(层数) 次指针交换，无拷贝）。
+    pub fn swap_scratch(&mut self, s: &mut ModelScratch) {
+        std::mem::swap(&mut self.hidden, &mut s.hidden);
+        std::mem::swap(&mut self.normed, &mut s.normed);
+        std::mem::swap(&mut self.attn_out, &mut s.attn_out);
+        std::mem::swap(&mut self.mlp_out, &mut s.mlp_out);
+        std::mem::swap(&mut self.final_normed, &mut s.final_normed);
+        std::mem::swap(&mut self.logits_bf16, &mut s.logits_bf16);
+        std::mem::swap(&mut self.decode_scratch, &mut s.decode_scratch);
+        for (l, ls) in self.layers.iter_mut().zip(s.layers.iter_mut()) {
+            l.attn.swap_bufs(&mut ls.qkv_buf, &mut ls.attn);
+            l.mlp.swap_bufs(&mut ls.gate_up, &mut ls.act);
+        }
+    }
     pub fn forward(
         &mut self,
         stream: &Stream,
