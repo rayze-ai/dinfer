@@ -138,12 +138,19 @@ impl Stream {
     /// 带时间戳的事件（量 GPU 忙时用；跨流同步请用 `record_event`）。走裸驱动 API：cudarc 的 safe event
     /// 在 disable_event_tracking 后 elapsed 报 INVALID_HANDLE。
     pub fn new_timing_event(&self) -> Result<TimingEvent> {
+        self.bind_ctx()?;
         // SAFETY: 默认 flags（带 timing）；Drop 时 destroy。
         Ok(TimingEvent(result::event::create(sys::CUevent_flags::CU_EVENT_DEFAULT)?))
     }
     pub fn record_timing(&self, ev: &TimingEvent) -> Result<()> {
+        self.bind_ctx()?;
         // SAFETY: event / stream 都有效。
         Ok(unsafe { result::event::record(ev.0, self.raw())? })
+    }
+    /// 把本流的 CUDA context 绑到当前线程（裸驱动调用前必须；cudarc 的 safe 封装内部会做，裸 `result::*` 不会）。
+    /// engine 线程不是创建 context 的线程，不绑会得到 CUDA_ERROR_INVALID_CONTEXT / INVALID_HANDLE。
+    pub fn bind_ctx(&self) -> Result<()> {
+        Ok(self.inner.context().bind_to_thread()?)
     }
     pub fn synchronize(&self) -> Result<()> {
         Ok(self.inner.synchronize()?)
@@ -343,6 +350,7 @@ pub struct PinnedUploader {
 unsafe impl Send for PinnedUploader {}
 impl PinnedUploader {
     pub fn new(stream: &Stream, cap: usize) -> Result<Self> {
+        stream.bind_ctx()?;
         // SAFETY: pinned 分配，Drop 释放。
         let host = unsafe { result::malloc_host(cap, 0)? as *mut u8 };
         let staging = stream.alloc_uninit::<u8>(cap)?;
@@ -372,6 +380,7 @@ impl PinnedUploader {
         if self.off == 0 {
             return Ok(());
         }
+        stream.bind_ctx()?;
         let base = stream.ptr_mut(&mut self.staging);
         // SAFETY: host 是 pinned；staging / 目标都是有效设备地址；同流顺序保证 D2D 在 H2D 之后。
         unsafe {
