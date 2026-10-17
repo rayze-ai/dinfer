@@ -9,7 +9,7 @@ use crate::request::{FinishReason, Request, RequestId};
 use crate::runner::{ModelExecutor, Runner};
 use crate::sample::SamplingParams;
 use crate::sched::{Scheduler, SchedulerParams};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -30,6 +30,15 @@ pub struct Submission {
     pub prompt_ids: Vec<u32>,
     pub sampling: SamplingParams,
     pub tx: tokio::sync::mpsc::UnboundedSender<EngineEvent>,
+    /// PD 分离（design §10.3）：`None` 普通；`Some(PdSubmit::Export)` P 侧；
+    /// `Some(PdSubmit::Import { remote_id })` D 侧，`remote_id` = P 侧 request id，用来在 `IncomingKv` 里配对 payload。
+    pub pd: Option<PdSubmit>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PdSubmit {
+    Export,
+    Import { remote_id: RequestId },
 }
 
 enum Cmd {
@@ -90,6 +99,31 @@ pub struct Engine<E: ModelExecutor> {
     outs: HashMap<RequestId, tokio::sync::mpsc::UnboundedSender<EngineEvent>>,
     timing: HashMap<RequestId, Timing>,
     metrics: Arc<Metrics>,
+    /// PD 分离状态（design §10.3）；`None` = 单机。
+    pd: Option<PdState>,
+}
+
+/// engine 侧 PD 状态。
+pub struct PdState {
+    /// D 侧：接收线程写入的迁移（P 的 request_id → payload）。P 侧为空表。
+    pub incoming: Arc<crate::pd::IncomingKv>,
+    /// P 侧：导出后往哪发。D 侧 None。
+    pub transport: Option<Arc<dyn crate::pd::KvTransport>>,
+    pub model_tag: String,
+    /// D 侧：等 KV 最长多久，超时转普通请求（本地重算 prefill）。
+    pub wait_timeout: std::time::Duration,
+    /// D 侧：已配对但尚未 begin 的 payload（本地 id → payload）。
+    payloads: HashMap<RequestId, Vec<u8>>,
+    /// D 侧：KV 未到的 Import 提交（本地 id, 提交, 到达时刻）。
+    pending: Vec<(RequestId, Vec<u32>, SamplingParams, RequestId, std::time::Instant)>,
+    /// P 侧：Export 请求的头信息（导出时需要 prompt / sampling / 首 token）。
+    export_meta: HashMap<RequestId, (Vec<u32>, SamplingParams, Option<u32>)>,
+}
+
+impl PdState {
+    pub fn new(incoming: Arc<crate::pd::IncomingKv>, transport: Option<Arc<dyn crate::pd::KvTransport>>, model_tag: String, wait_timeout: std::time::Duration) -> Self {
+        Self { incoming, transport, model_tag, wait_timeout, payloads: HashMap::new(), pending: Vec::new(), export_meta: HashMap::new() }
+    }
 }
 
 impl<E: ModelExecutor> Engine<E> {
@@ -113,6 +147,7 @@ impl<E: ModelExecutor> Engine<E> {
                 outs: HashMap::new(),
                 timing: HashMap::new(),
                 metrics,
+                pd: None,
             },
             h,
         )
@@ -121,6 +156,94 @@ impl<E: ModelExecutor> Engine<E> {
     /// 一个 step 结束后的指标回填。
     /// 一步的回填 + 指标 + 推送（schedule() 之前必须对所有已完成的步调用过它——否则 scheduler 不知道该请求已有新
     /// token，会把它再排一次；见 pitfalls 2026-10-17 "插队步结果排队晚发"）。
+    /// 启用 PD（在 `run` 之前调用一次）。
+    pub fn set_pd(&mut self, st: PdState) {
+        self.pd = Some(st);
+    }
+    /// Import 提交：KV 已到 → 立即登记为 Import 请求；未到 → 挂 pending。
+    fn pd_submit_import(&mut self, id: RequestId, prompt_ids: Vec<u32>, sampling: SamplingParams, remote_id: RequestId, now_ns: u64) {
+        let Some(pd) = self.pd.as_mut() else { return self.add_plain(id, prompt_ids, sampling, now_ns) };
+        match pd.incoming.take(remote_id) {
+            Some(m) => {
+                if m.header.prompt_ids.len() != prompt_ids.len() {
+                    tracing::warn!(id, remote_id, "pd: prompt length mismatch, falling back to local prefill");
+                    self.metrics.pd_fallback_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return self.add_plain(id, prompt_ids, sampling, now_ns);
+                }
+                pd.payloads.insert(id, m.payload);
+                let mut r = Request::new(id, prompt_ids, sampling, now_ns);
+                r.pd = Some(crate::request::PdRole::Import { first_token: m.header.first_token });
+                self.sched.add_request(r);
+            }
+            None => pd.pending.push((id, prompt_ids, sampling, remote_id, std::time::Instant::now())),
+        }
+    }
+    fn add_plain(&mut self, id: RequestId, prompt_ids: Vec<u32>, sampling: SamplingParams, now_ns: u64) {
+        self.sched.add_request(Request::new(id, prompt_ids, sampling, now_ns));
+    }
+    /// 每步开头：pending 里 KV 到了的转 Import，超时的转普通（fallback）。
+    fn pd_poll_pending(&mut self) {
+        let Some(pd) = self.pd.as_mut() else { return };
+        if pd.pending.is_empty() {
+            return;
+        }
+        let timeout = pd.wait_timeout;
+        let items = std::mem::take(&mut pd.pending);
+        let now_ns = unix_ns();
+        for (id, prompt_ids, sampling, remote, t0) in items {
+            if self.pd.as_ref().unwrap().incoming.contains(remote) {
+                self.pd_submit_import(id, prompt_ids, sampling, remote, now_ns);
+            } else if t0.elapsed() >= timeout {
+                tracing::warn!(id, remote, "pd: KV wait timeout, falling back to local prefill");
+                self.metrics.pd_fallback_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.add_plain(id, prompt_ids, sampling, now_ns);
+            } else {
+                self.pd.as_mut().unwrap().pending.push((id, prompt_ids, sampling, remote, t0));
+            }
+        }
+        self.pd.as_mut().unwrap().incoming.gc(timeout * 4);
+    }
+    /// begin 之前、任何 GPU 写之前：先导出（P），再导入（D）。
+    fn pd_pre_begin(&mut self, so: &crate::sched::output::SchedulerOutput) -> Result<()> {
+        if so.kv_export.is_empty() && so.kv_import.is_empty() {
+            return Ok(());
+        }
+        let Some(pd) = self.pd.as_mut() else {
+            anyhow::bail!("pd: kv_export/kv_import scheduled but PD not enabled");
+        };
+        let unit_bytes = self.runner.exec.kv_unit_bytes();
+        anyhow::ensure!(unit_bytes > 0, "pd: executor does not support kv export/import");
+        for (rid, blocks) in &so.kv_export {
+            let payload = self.runner.exec.kv_export(blocks)?;
+            let (prompt_ids, sampling, first) = pd.export_meta.remove(rid).with_context(|| format!("pd: export meta for {rid}"))?;
+            let first_token = first.with_context(|| format!("pd: req {rid} exported without a first token"))?;
+            let header = crate::pd::MigrationHeader {
+                request_id: *rid,
+                model_tag: pd.model_tag.clone(),
+                prompt_ids,
+                sampling,
+                first_token,
+                num_units: blocks.groups.first().map_or(0, |g| g.len()) as u32,
+                unit_bytes: unit_bytes as u32,
+            };
+            self.metrics.pd_export_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if let Some(t) = pd.transport.clone() {
+                std::thread::Builder::new().name("pd-send".into()).spawn(move || {
+                    if let Err(e) = t.send(&header, &payload) {
+                        tracing::warn!(id = header.request_id, error = %e, "pd: send failed");
+                    }
+                })?;
+            }
+        }
+        for (rid, blocks) in &so.kv_import {
+            let payload = pd.payloads.remove(rid).with_context(|| format!("pd: payload for {rid}"))?;
+            let want = blocks.groups.first().map_or(0, |g| g.len()) * unit_bytes;
+            anyhow::ensure!(payload.len() == want, "pd: payload {} != {} blocks × {unit_bytes}", payload.len(), blocks.groups[0].len());
+            self.runner.exec.kv_import(blocks, &payload)?;
+            self.metrics.pd_import_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(())
+    }
     fn publish_step(
         &mut self,
         so: &crate::sched::SchedulerOutput,
@@ -144,6 +267,11 @@ impl<E: ModelExecutor> Engine<E> {
             let Some(tx) = self.outs.get(&rid) else { continue };
             if !toks.is_empty() {
                 let _ = tx.send(EngineEvent::Tokens(toks.to_vec()));
+                if let Some(pd) = self.pd.as_mut() {
+                    if let Some(m) = pd.export_meta.get_mut(&rid) {
+                        m.2.get_or_insert(toks[0]);
+                    }
+                }
                 let lps = results.logprobs_of(i);
                 if !lps.is_empty() {
                     let _ = tx.send(EngineEvent::Logprobs(lps.iter().flatten().cloned().collect()));
@@ -252,6 +380,7 @@ impl<E: ModelExecutor> Engine<E> {
                     return Ok(());
                 }
             }
+            self.pd_poll_pending();
             if !self.sched.has_requests() && self.pending.is_none() && self.sync_done.is_empty() {
                 continue;
             }
@@ -273,6 +402,10 @@ impl<E: ModelExecutor> Engine<E> {
                         let so_c = self.sched.schedule_waiting_only();
                         let t_sched = std::time::Instant::now();
                         if !so_c.num_scheduled_tokens.is_empty() {
+                            if let Err(e) = self.pd_pre_begin(&so_c) {
+                                self.fail_step(e)?;
+                                continue;
+                            }
                             let pend_c = match self.runner.begin_cut_in(&so_c) {
                                 Ok(p) => p,
                                 Err(e) => return self.fail_step(e),
@@ -291,6 +424,10 @@ impl<E: ModelExecutor> Engine<E> {
                         let t_step = std::time::Instant::now();
                         let so_next = self.sched.schedule();
                         let t_sched = std::time::Instant::now();
+                        if let Err(e) = self.pd_pre_begin(&so_next) {
+                            self.fail_step(e)?;
+                            continue;
+                        }
                         let pend_next = match self.runner.begin(&so_next) {
                             Ok(p) => p,
                             Err(e) => return self.fail_step(e),
@@ -318,6 +455,10 @@ impl<E: ModelExecutor> Engine<E> {
                         let t_step = std::time::Instant::now();
                         let so = self.sched.schedule();
                         let t_sched = std::time::Instant::now();
+                        if let Err(e) = self.pd_pre_begin(&so) {
+                            self.fail_step(e)?;
+                            continue;
+                        }
                         let pend = match self.runner.begin(&so) {
                             Ok(p) => p,
                             Err(e) => return self.fail_step(e),
@@ -373,7 +514,19 @@ impl<E: ModelExecutor> Engine<E> {
                         last_token: inst,
                     },
                 );
-                self.sched.add_request(Request::new(id, sub.prompt_ids, sub.sampling, now));
+                let Submission { prompt_ids, sampling, pd: pd_kind, .. } = sub;
+                match pd_kind {
+                    None => self.add_plain(id, prompt_ids, sampling, now),
+                    Some(PdSubmit::Export) => {
+                        if let Some(pd) = self.pd.as_mut() {
+                            pd.export_meta.insert(id, (prompt_ids.clone(), sampling.clone(), None));
+                        }
+                        let mut r = Request::new(id, prompt_ids, sampling, now);
+                        r.pd = Some(crate::request::PdRole::Export);
+                        self.sched.add_request(r);
+                    }
+                    Some(PdSubmit::Import { remote_id }) => self.pd_submit_import(id, prompt_ids, sampling, remote_id, now),
+                }
                 self.refresh_gauges();
                 true
             }
@@ -395,6 +548,10 @@ impl<E: ModelExecutor> Engine<E> {
 }
 
 /// 便捷：在新线程上跑引擎，返回句柄与 join handle。
+fn unix_ns() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0)
+}
+
 pub fn spawn<E: ModelExecutor + Send + 'static>(
     sched: Scheduler,
     runner: Runner<E>,

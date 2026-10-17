@@ -147,6 +147,18 @@ pub trait ModelExecutor {
     fn kv_offload(&mut self, _orders: &[(crate::kv::BlockId, u32)]) -> Result<()> {
         Ok(())
     }
+    /// PD 分离（design §10.3）：按位置把 `blocks` 的全部层 KV 拷成一段连续 host 字节（P 侧，同步，主流）。
+    /// 布局 = `kv_pack` 的 `[block][layer][...]`，每块 `unit_bytes`；`kv_import` 反向。默认：不支持。
+    fn kv_export(&mut self, _blocks: &crate::kv::KvBlocks) -> Result<Vec<u8>> {
+        anyhow::bail!("kv_export: executor does not support PD")
+    }
+    fn kv_import(&mut self, _blocks: &crate::kv::KvBlocks, _payload: &[u8]) -> Result<()> {
+        anyhow::bail!("kv_import: executor does not support PD")
+    }
+    /// 一个块（全层）导出后占多少字节；0 = 不支持 PD。
+    fn kv_unit_bytes(&self) -> usize {
+        0
+    }
 
     /// 异步两段式：`begin` 上传 + 入队 + 异步 D2H（不等 GPU），`finish` 等结果。只在 `supports_async()` 且
     /// plan 满足 `BatchPlan::async_eligible()` 时被 runner 调用；默认实现 = 同步 forward_sample 后缓存结果。
@@ -405,7 +417,7 @@ impl<E: ModelExecutor> Runner<E> {
             let st = ReqState {
                 req_id: n.req_id,
                 num_prompt: n.prompt_ids.len(),
-                token_ids: n.prompt_ids.clone(),
+                token_ids: n.prompt_ids.iter().copied().chain(n.known_output.iter().copied()).collect(),
                 seed: n.sampling.seed.unwrap_or_else(|| crate::sampler::random_seed(n.req_id)),
                 sampling: n.sampling.clone(),
                 num_computed: n.num_computed_tokens as usize,

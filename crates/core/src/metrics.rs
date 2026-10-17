@@ -75,6 +75,9 @@ pub struct Metrics {
     pub host_tier_hits_total: AtomicU64,
     pub host_tier_fetch_blocks_total: AtomicU64,
     pub host_tier_offload_blocks_total: AtomicU64,
+    pub pd_export_total: AtomicU64,
+    pub pd_import_total: AtomicU64,
+    pub pd_fallback_total: AtomicU64,
     pub request_success_stop: AtomicU64,
     pub request_success_length: AtomicU64,
     pub request_abort: AtomicU64,
@@ -181,6 +184,9 @@ impl Metrics {
         c(&mut o, "host_tier_hits_total", "KV host tier prefix hits, in blocks.", self.host_tier_hits_total.load(Relaxed));
         c(&mut o, "host_tier_fetch_blocks_total", "Blocks fetched host->GPU.", self.host_tier_fetch_blocks_total.load(Relaxed));
         c(&mut o, "host_tier_offload_blocks_total", "Blocks offloaded GPU->host.", self.host_tier_offload_blocks_total.load(Relaxed));
+        c(&mut o, "pd_export_total", "PD: requests whose KV was exported (prefill side).", self.pd_export_total.load(Relaxed));
+        c(&mut o, "pd_import_total", "PD: requests whose KV was imported (decode side).", self.pd_import_total.load(Relaxed));
+        c(&mut o, "pd_fallback_total", "PD: decode-side requests that fell back to local prefill.", self.pd_fallback_total.load(Relaxed));
         c(
             &mut o,
             "engine_steps_total",

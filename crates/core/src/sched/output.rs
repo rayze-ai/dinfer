@@ -12,6 +12,9 @@ pub struct NewRequestData {
     pub sampling: SamplingParams,
     pub block_ids: KvBlocks,
     pub num_computed_tokens: u32,
+    /// PD Import：首次登记时已知的输出 token（P 采样的首 token）。runner 直接追加进 token_ids，
+    /// 下一步 decode 以它为输入。普通请求为空。
+    pub known_output: Vec<u32>,
 }
 
 /// 老请求：只传增量。
@@ -42,6 +45,11 @@ pub struct SchedulerOutput {
     /// 本步结束后要从 GPU 块推到 host 槽的 (block, host_slot)。
     pub kv_fetch: Vec<(BlockId, u32)>,
     pub kv_offload: Vec<(BlockId, u32)>,
+    /// PD（design §10.3）：P 侧刚 finish 的 Export 请求，按位置导出全部块（含未满尾块）。
+    /// 块已 free 但尚未被复用：runner 在 `begin` 最前面、任何 GPU 写之前同步导出。
+    pub kv_export: Vec<(RequestId, super::super::kv::KvBlocks)>,
+    /// PD：D 侧 Import 请求本步新分配的块，按位置填入 payload（engine 持 payload，forward 前导入）。
+    pub kv_import: Vec<(RequestId, super::super::kv::KvBlocks)>,
 }
 
 impl SchedulerOutput {

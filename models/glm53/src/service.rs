@@ -269,7 +269,7 @@ impl ChatBackend for Glm53Service {
         sampling: SamplingParams,
     ) -> (RequestId, tokio::sync::mpsc::UnboundedReceiver<EngineEvent>) {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let id = self.handle.submit(Submission { prompt_ids, sampling, tx });
+        let id = self.handle.submit(Submission { prompt_ids, sampling, tx, pd: None });
         (id, rx)
     }
     fn abort(&self, id: RequestId) {

@@ -4,7 +4,6 @@
 //!
 //! 线协议（小端）：`magic u32 | header_len u32 | header(JSON) | payload`，payload = `units.len() × unit_bytes` 连续字节。
 //! 不引入 NIXL / side channel；介质可替换：`KvTransport` trait，v2 同机 CUDA IPC，v3 RDMA。
-use crate::kv::BlockHash;
 use crate::request::RequestId;
 use crate::sample::SamplingParams;
 use anyhow::{bail, Context, Result};
@@ -30,14 +29,14 @@ pub struct MigrationHeader {
     pub sampling: SamplingParams,
     /// P 采样出的首 token（已含在 P 的流式首 chunk 里；D 从它继续）。
     pub first_token: u32,
-    /// 单元 = (kv group, 块哈希)，顺序 = 前缀顺序；payload 按此顺序排列。
-    pub units: Vec<(u8, BlockHash)>,
+    /// 单元数 = 该请求的块数（按位置，含未满尾块）；payload = `num_units × unit_bytes`，布局与 executor `kv_export` 一致。
+    pub num_units: u32,
     pub unit_bytes: u32,
 }
 
 impl MigrationHeader {
     pub fn payload_len(&self) -> usize {
-        self.units.len() * self.unit_bytes as usize
+        self.num_units as usize * self.unit_bytes as usize
     }
 }
 
@@ -160,7 +159,7 @@ pub fn spawn_receiver(bind: &str, model_tag: String, table: Arc<IncomingKv>) -> 
             let _ = s.set_nodelay(true);
             match decode(&mut s) {
                 Ok((header, payload)) if header.model_tag == model_tag => {
-                    tracing::debug!(id = header.request_id, units = header.units.len(), "pd: migration received");
+                    tracing::debug!(id = header.request_id, units = header.num_units, "pd: migration received");
                     table.put(Migration { header, payload, received_at: Instant::now() });
                 }
                 Ok((header, _)) => {
@@ -188,7 +187,7 @@ mod tests {
             prompt_ids: vec![1, 2, 3, 4],
             sampling: SamplingParams::default(),
             first_token: 42,
-            units: vec![(0, BlockHash(7)), (0, BlockHash(8))],
+            num_units: 2,
             unit_bytes: 4,
         }
     }

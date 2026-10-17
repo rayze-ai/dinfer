@@ -43,6 +43,18 @@ pub struct Request {
     /// prefix cache 用的链式块哈希。
     pub block_hashes: BlockHasher,
     pub num_preemptions: u32,
+    /// PD 分离角色（design §10.3）。`None` = 普通单机请求。
+    pub pd: Option<PdRole>,
+}
+
+/// PD 分离里请求的角色。
+#[derive(Debug, Clone, PartialEq)]
+pub enum PdRole {
+    /// prefill 实例：首 token 采样后把该请求全部 KV 块导出（finish 时推 `kv_export`，先导出再 free）。
+    Export,
+    /// decode 实例：KV 已由 P 算好；首次调度只分块 + `kv_import`，不进 forward，
+    /// `num_computed = prompt_len`，`first_token` 直接作为第一个输出。
+    Import { first_token: u32 },
 }
 
 impl Request {
@@ -61,6 +73,7 @@ impl Request {
             spec_ids: Vec::new(),
             block_hashes: BlockHasher::default(),
             num_preemptions: 0,
+            pd: None,
         }
     }
 

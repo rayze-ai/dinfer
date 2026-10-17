@@ -22,7 +22,7 @@ pub use output::{
 
 use crate::config::{CacheConfig, SchedulerConfig};
 use crate::kv::{GroupInfo, KvBlocks, KvCacheManager};
-use crate::request::{FinishReason, Request, RequestId, RequestStatus};
+use crate::request::{FinishReason, PdRole, Request, RequestId, RequestStatus};
 use crate::util::{id_hash_map, IdHashMap};
 use std::collections::VecDeque;
 
@@ -66,6 +66,8 @@ pub struct Scheduler {
     host_tier_fetched: u64,
     /// scheduler 自行结束的请求（分不到块且无人可抢占）：engine 每步取走并推 Finished 事件。
     force_finished: Vec<(RequestId, FinishReason)>,
+    /// PD：Export 请求 finish 时先推这里，下一次 `schedule()` 搬进 `out.kv_export`（runner 在 begin 最前面导出）。
+    pd_pending_export: Vec<(RequestId, KvBlocks)>,
 }
 
 impl Scheduler {
@@ -87,6 +89,7 @@ impl Scheduler {
             prefix_cache_hits: 0,
             host_tier_fetched: 0,
             force_finished: Vec::new(),
+            pd_pending_export: Vec::new(),
         }
     }
 
@@ -318,6 +321,37 @@ impl Scheduler {
                     break;
                 }
                 let r = &self.slab[slot].as_ref().unwrap().req;
+                // PD Import（design §10.3）：KV 由 P 算好，首次调度只分块 + 导入，不进 forward、不占 token 预算。
+                if let (Some(PdRole::Import { first_token }), 0) = (&r.pd, r.num_computed_tokens) {
+                    let first_token = *first_token;
+                    let prompt_len = r.num_tokens();
+                    let Some(new_blocks) = self.kv.allocate_slots(slot, r, prompt_len, 0, None, 0) else {
+                        break; // 块不够：等下一 step
+                    };
+                    self.waiting.pop_front();
+                    let s = self.slab[slot].as_mut().unwrap();
+                    let r = &mut s.req;
+                    let rid = r.id;
+                    r.status = RequestStatus::Running;
+                    r.num_computed_tokens = prompt_len;
+                    r.append_output(first_token);
+                    self.running.push(slot);
+                    out.kv_import.push((rid, new_blocks.clone()));
+                    // 满块登记哈希：后续同前缀请求可 GPU 命中（与单机 prefill 后的 cache_blocks 等价）
+                    let r_ro: &Request = r;
+                    self.kv.cache_blocks(slot, r_ro, prompt_len);
+                    debug_assert!(!s.seen_by_worker);
+                    s.seen_by_worker = true;
+                    out.new_reqs.push(NewRequestData {
+                        req_id: rid,
+                        prompt_ids: r_ro.prompt_ids().to_vec(),
+                        sampling: r_ro.sampling.clone(),
+                        block_ids: new_blocks,
+                        num_computed_tokens: prompt_len,
+                        known_output: vec![first_token],
+                    });
+                    continue;
+                }
 
                 // prefix cache（只在首次调度，即 num_computed_tokens == 0 时查）。
                 let (computed, num_new_computed) = self.kv.get_computed_blocks(r);
@@ -398,6 +432,7 @@ impl Scheduler {
                         sampling: r.sampling.clone(),
                         block_ids: all,
                         num_computed_tokens: num_computed,
+                        known_output: Vec::new(),
                     });
                 }
             }
@@ -406,6 +441,7 @@ impl Scheduler {
         out.total_num_scheduled_tokens = out.num_scheduled_tokens.iter().map(|(_, n)| n).sum();
         out.blocks_to_zero = self.kv.take_blocks_to_zero();
         out.kv_offload = self.kv.take_pending_offload();
+        out.kv_export = std::mem::take(&mut self.pd_pending_export);
 
         // ---- 3. 调度后推进（异步调度）----
         self.update_after_schedule(&out);
@@ -522,8 +558,15 @@ impl Scheduler {
     }
 
     fn finish_slot(&mut self, slot: usize) {
-        self.kv.free(slot);
         let rid = self.req(slot).id;
+        // PD Export：先把块按位置记下（含未满尾块），再 free。块在下一步 begin 的导出之前不会被复用
+        // （allocate 只发生在 schedule 里，而 schedule 把 pending 搬进 out.kv_export 后 runner 才 begin）。
+        if matches!(self.req(slot).pd, Some(PdRole::Export)) {
+            if let Some(b) = self.kv.get_blocks(slot) {
+                self.pd_pending_export.push((rid, b));
+            }
+        }
+        self.kv.free(slot);
         if let Some(pos) = self.running.iter().position(|&s| s == slot) {
             self.running.remove(pos); // 保持 FCFS 顺序
         }
@@ -894,5 +937,53 @@ mod tests {
         assert!(s.request(1).is_none());
         assert_eq!(o.num_scheduled_tokens.first().map(|x| x.0), Some(2));
         assert!(s.take_force_finished().is_empty());
+    }
+
+    /// PD Import（design §10.3）：首次调度只分块 + kv_import，不进 forward；第二步正常 decode 1 token。
+    #[test]
+    fn pd_import_first_step_skips_forward_then_decodes() {
+        let mut s = mk(8, 64, 32);
+        let mut r = req(1, 40, 100); // 40 token = 2 满块 + 8 尾
+        r.pd = Some(PdRole::Import { first_token: 777 });
+        s.add_request(r);
+        let o = s.schedule();
+        assert!(o.num_scheduled_tokens.is_empty(), "import step must not forward");
+        assert_eq!(o.kv_import.len(), 1);
+        assert_eq!(o.kv_import[0].0, 1);
+        assert_eq!(o.kv_import[0].1.groups[0].len(), 3, "40 tokens → 3 blocks incl. partial tail");
+        assert_eq!(o.new_reqs.len(), 1);
+        assert_eq!(o.new_reqs[0].num_computed_tokens, 40);
+        assert_eq!(o.new_reqs[0].known_output, vec![777]);
+        assert_eq!(s.num_running(), 1);
+        // 没有 forward 行，update 不需要调；第二步应为 1 token 的 decode
+        let (o2, _) = step(&mut s, &[(1, vec![9])]);
+        assert_eq!(o2.num_scheduled_tokens, vec![(1, 1)]);
+        assert!(o2.kv_import.is_empty());
+        // 导入后前缀登记：同 prompt 的新请求应 GPU 命中 2 个满块
+        let mut r2 = req(1, 40, 100);
+        r2.id = 2;
+        s.add_request(r2);
+        let (o3, _) = step(&mut s, &[(1, vec![10]), (2, vec![11])]);
+        let nr = o3.new_reqs.iter().find(|n| n.req_id == 2).unwrap();
+        assert_eq!(nr.num_computed_tokens, 32, "2 full blocks hit from imported KV");
+    }
+
+    /// PD Export：max_tokens=1 的请求 finish 时，kv_export 带全部块（含尾块），且在下一次 schedule 的输出里。
+    #[test]
+    fn pd_export_emits_all_blocks_on_finish() {
+        let mut s = mk(8, 64, 32);
+        let mut r = req(1, 40, 1);
+        r.pd = Some(PdRole::Export);
+        s.add_request(r);
+        let (o, _) = step(&mut s, &[(1, vec![5])]); // prefill 40 → 首 token → Length finish
+        assert_eq!(o.num_scheduled_tokens, vec![(1, 40)]);
+        assert!(o.kv_export.is_empty(), "export is emitted on the NEXT schedule, before any begin");
+        let free_before = s.num_free_blocks();
+        let o2 = s.schedule();
+        assert_eq!(o2.kv_export.len(), 1);
+        assert_eq!(o2.kv_export[0].0, 1);
+        assert_eq!(o2.kv_export[0].1.groups[0].len(), 3);
+        assert_eq!(s.num_free_blocks(), free_before, "blocks freed, none reallocated yet");
+        assert_eq!(s.num_running(), 0);
     }
 }
