@@ -3,7 +3,59 @@
 //! scheduler 通过 `SchedulerOutput::{kv_fetch, kv_offload}` 下发搬运指令。
 //! 语义：`(group, BlockHash) → HostSlot`，LRU 淘汰；命中只认连续前缀（与 GPU prefix cache 一致）。
 use super::hash::BlockHash;
+use super::BlockId;
+use super::manager::GroupInfo;
+use crate::request::Request;
 use std::collections::HashMap;
+
+/// 命中单元策略（**模型相关**，由模型 crate 注入；core 只放容器）：
+/// 什么算 host 层的一个单元、多组如何合成前缀命中、一个单元覆盖多少 token、拉回的块如何登记。
+/// Qwen3：一个单元 = 一个 16-token 块 × 全部层（`FullAttentionPolicy`）。
+/// GLM（MLA 潜变量 + 索引器 K 两组）/ K3（KDA 状态块只在边界有效 + 全注意力）要各自实现——
+/// 规则应与 GPU 侧 `KvCacheManager::get_computed_blocks` 的多组合成一致（attention 组取最短前缀、Mamba 组边界找状态块）。
+pub trait HostTierPolicy: Send + std::fmt::Debug {
+    /// 请求首次调度：GPU 已命中 `gpu_hit_blocks[gid]` 块后，在 host 索引里还能连续命中哪些单元。
+    /// 返回 (命中的 host 槽位序列, 这些单元覆盖的 token 数)。
+    fn lookup(&self, idx: &mut HostTierIndex, groups: &[GroupInfo], req: &Request, gpu_hit_blocks: &[usize]) -> (Vec<HostSlot>, u32);
+    /// 为命中的单元挑出要填的 GPU 块：`new_blocks[gid]` 是本步新分配的块（含将被 fetch 填充的部分）。
+    /// 返回 (块, 槽) 对，顺序 = 槽序列顺序；以及要登记哈希的 (gid, block, hash) 列表。
+    fn fetch_targets(&self, groups: &[GroupInfo], req: &Request, gpu_hit_blocks: &[usize], new_blocks: &[Vec<BlockId>], slots: &[HostSlot]) -> (Vec<(BlockId, HostSlot)>, Vec<(u8, BlockId, BlockHash)>);
+}
+
+/// 默认策略：单个全注意力组，block_size == hash_block_size，一个单元 = 一块 × 全层。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct FullAttentionPolicy;
+
+impl HostTierPolicy for FullAttentionPolicy {
+    fn lookup(&self, idx: &mut HostTierIndex, groups: &[GroupInfo], req: &Request, gpu_hit_blocks: &[usize]) -> (Vec<HostSlot>, u32) {
+        if groups.len() != 1 || !matches!(groups[0].spec, super::spec::KvCacheSpec::FullAttention { .. }) {
+            return (Vec::new(), 0);
+        }
+        let hbs = req.block_hashes_block_size();
+        let bs = groups[0].block_size;
+        if hbs == 0 || bs != hbs {
+            return (Vec::new(), 0);
+        }
+        let max_blocks = (req.num_tokens().saturating_sub(1) / bs) as usize;
+        let n = req.block_hashes.hashes.len().min(max_blocks);
+        let hits = idx.lookup_prefix(0, &req.block_hashes.hashes[..n], gpu_hit_blocks.first().copied().unwrap_or(0));
+        let tokens = hits.len() as u32 * bs;
+        (hits, tokens)
+    }
+    fn fetch_targets(&self, _groups: &[GroupInfo], req: &Request, gpu_hit_blocks: &[usize], new_blocks: &[Vec<BlockId>], slots: &[HostSlot]) -> (Vec<(BlockId, HostSlot)>, Vec<(u8, BlockId, BlockHash)>) {
+        let g0 = &new_blocks[0];
+        let first = gpu_hit_blocks.first().copied().unwrap_or(0);
+        let mut orders = Vec::with_capacity(slots.len());
+        let mut regs = Vec::with_capacity(slots.len());
+        for (i, &s) in slots.iter().enumerate() {
+            orders.push((g0[i], s));
+            if let Some(&h) = req.block_hashes.hashes.get(first + i) {
+                regs.push((0u8, g0[i], h));
+            }
+        }
+        (orders, regs)
+    }
+}
 
 pub type HostSlot = u32;
 

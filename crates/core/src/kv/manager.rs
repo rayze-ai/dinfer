@@ -70,7 +70,8 @@ pub struct KvCacheManager {
     /// 新分配、需要清零的块（Mamba 状态块必须清零）。每 step 由 runner 取走。
     blocks_to_zero: Vec<BlockId>,
     /// KV 分层：host 索引（None = 关）；本步产生的推出指令（scheduler 每步取走）。
-    host_tier: Option<super::host_tier::HostTierIndex>,
+    /// (槽索引, 命中单元策略)。策略由模型 crate 注入（见 host_tier.rs / design §10.2）。
+    host_tier: Option<(super::host_tier::HostTierIndex, Box<dyn super::host_tier::HostTierPolicy>)>,
     pending_offload: Vec<(BlockId, u32)>,
 }
 
@@ -312,7 +313,7 @@ impl KvCacheManager {
                     self.pool.cache_block(state.blocks[gid][b], gid as u8, h);
                     state.num_cached[gid] = (b + 1) as u32;
                     // host tier：新凑满的块推到主机（executor 在本步结束后异步做）
-                    if let Some(t) = self.host_tier.as_mut() {
+                    if let Some((t, _)) = self.host_tier.as_mut() {
                         if let Some(slot_h) = t.insert(gid as u8, h) {
                             t.stats.offload_blocks += 1;
                             self.pending_offload.push((state.blocks[gid][b], slot_h));
@@ -342,50 +343,52 @@ impl KvCacheManager {
         std::mem::take(&mut self.blocks_to_zero)
     }
     /// 启用 host tier（槽位数 = host_gib / bytes_per_block_all_layers）。
-    pub fn enable_host_tier(&mut self, num_slots: usize) {
+    pub fn enable_host_tier(&mut self, num_slots: usize, policy: Box<dyn super::host_tier::HostTierPolicy>) {
         if num_slots > 0 {
-            self.host_tier = Some(super::host_tier::HostTierIndex::new(num_slots));
+            self.host_tier = Some((super::host_tier::HostTierIndex::new(num_slots), policy));
         }
     }
     pub fn host_tier_enabled(&self) -> bool {
         self.host_tier.is_some()
     }
     pub fn host_tier_stats(&self) -> super::host_tier::HostTierStats {
-        self.host_tier.as_ref().map_or_else(Default::default, |t| t.stats)
+        self.host_tier.as_ref().map_or_else(Default::default, |(t, _)| t.stats)
     }
     pub fn take_pending_offload(&mut self) -> Vec<(BlockId, u32)> {
         std::mem::take(&mut self.pending_offload)
     }
-    /// host tier 命中：GPU 命中 `gpu_hit_blocks` 块之后，hashes 还能连续命中多少块（只看 attention 组 0）。
-    /// 返回命中的 host 槽位列表（顺序 = 块顺序）。本轮要求单组、block_size == hash_block_size。
-    pub fn host_tier_lookup(&mut self, req: &Request, gpu_hit_blocks: usize) -> Vec<u32> {
-        let Some(t) = self.host_tier.as_mut() else { return Vec::new() };
-        if self.groups.len() != 1 || self.is_mamba[0] {
-            return Vec::new();
-        }
-        let hbs = req.block_hashes_block_size();
-        let bs = self.groups[0].block_size;
-        if hbs == 0 || bs != hbs {
-            return Vec::new();
-        }
-        let max_blocks = (req.num_tokens().saturating_sub(1) / bs) as usize;
-        let n = req.block_hashes.hashes.len().min(max_blocks);
-        t.lookup_prefix(0, &req.block_hashes.hashes[..n], gpu_hit_blocks)
+    /// host tier 命中：GPU 已命中 `gpu_hit_blocks[gid]` 块之后，策略决定还能在 host 索引里连续命中哪些单元。
+    /// 返回 (host 槽位序列, 这些单元覆盖的 token 数)。
+    pub fn host_tier_lookup(&mut self, req: &Request, gpu_hit_blocks: &[usize]) -> (Vec<super::host_tier::HostSlot>, u32) {
+        let Some((idx, policy)) = self.host_tier.as_mut() else { return (Vec::new(), 0) };
+        policy.lookup(idx, &self.groups, req, gpu_hit_blocks)
     }
-    /// host tier 拉回的块：登记哈希（forward 前会被填好，之后与普通缓存块无差别）。
-    /// `first_hash_idx` = 这些块在请求 hash 列表里的起始下标（= GPU 命中块数）。
-    pub fn register_fetched_blocks(&mut self, slot: usize, req: &Request, blocks: &[BlockId], first_hash_idx: usize) {
-        let hashes = &req.block_hashes.hashes;
-        for (i, &b) in blocks.iter().enumerate() {
-            if let Some(&h) = hashes.get(first_hash_idx + i) {
-                self.pool.cache_block(b, 0, h);
-            }
+    /// host 命中单元 → 本步新分配块里要被 fetch 填充的那些：由策略挑块、给出要登记的哈希；
+    /// 这里登记进 pool 并推进 `num_cached`（forward 前 executor 会填好，之后与普通缓存块无差别）。
+    /// 返回 (GPU 块, host 槽) 搬运指令，顺序 = 槽序列顺序。
+    pub fn register_fetched(
+        &mut self,
+        slot: usize,
+        req: &Request,
+        gpu_hit_blocks: &[usize],
+        new_blocks: &KvBlocks,
+        slots: &[super::host_tier::HostSlot],
+    ) -> Vec<(BlockId, super::host_tier::HostSlot)> {
+        let Some((_, policy)) = self.host_tier.as_ref() else { return Vec::new() };
+        let (orders, regs) = policy.fetch_targets(&self.groups, req, gpu_hit_blocks, &new_blocks.groups, slots);
+        let mut max_cached = [0u32; MAX_GROUPS];
+        for &(gid, b, h) in &regs {
+            self.pool.cache_block(b, gid, h);
+            max_cached[gid as usize] += 1;
         }
         if let Some(state) = self.reqs.get_mut(slot).filter(|s| s.active) {
-            let n = (first_hash_idx + blocks.len()) as u32;
-            state.num_cached[0] = state.num_cached[0].max(n);
-            state.cached_hash_blocks = state.cached_hash_blocks.max(n);
+            for gid in 0..self.groups.len() {
+                let n = (gpu_hit_blocks.get(gid).copied().unwrap_or(0) as u32) + max_cached[gid];
+                state.num_cached[gid] = state.num_cached[gid].max(n);
+                state.cached_hash_blocks = state.cached_hash_blocks.max(n);
+            }
         }
+        orders
     }
 
     pub fn reset_prefix_cache(&mut self) -> bool {

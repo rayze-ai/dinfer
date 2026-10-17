@@ -179,7 +179,7 @@ impl Qwen3Service {
         }];
         let mut sched = Scheduler::new(params, groups, num_blocks);
         if host_slots > 0 {
-            sched.enable_host_tier(host_slots);
+            sched.enable_host_tier(host_slots, Box::new(dinfer_core::kv::host_tier::FullAttentionPolicy));
         }
         let (handle, jh) = engine::spawn(sched, runner);
         tracing::info!(

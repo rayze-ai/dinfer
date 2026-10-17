@@ -466,7 +466,7 @@ pub struct DeviceBlockRef { pub layer: u8, pub block: BlockId, pub ptr: u64, pub
 
 #### 分层边界：core 放容器，模型放"命中单元"（2026-10-18 用户指正后补）
 - **core**：`HostTierIndex`（(group, hash) → 槽，LRU）、`kv_fetch/kv_offload` order 类型、调度钩子、`HostArena`/copy stream/pack 搬运。这些与模型无关。
-- **模型 crate 注入 `HostTierPolicy`**：① 什么算一个单元、多组如何合成前缀命中（attention 组取最短前缀；Mamba/KDA 状态块只在块边界有效，与 GPU 侧 `get_computed_blocks` 同一规则）；② 一个单元覆盖多少 token；③ 拉回时填哪些 GPU 块、登记哪些哈希；④ 一个单元多少字节（竞技场切槽）。Qwen3 = `FullAttentionPolicy`（一块 × 全层）；GLM（MLA 潜变量 + 索引器 K 两组）、K3（KDA 状态 + 全注意力）各自实现，未写。
+- **模型 crate 注入 `HostTierPolicy`**：① 什么算一个单元、多组如何合成前缀命中（attention 组取最短前缀；Mamba/KDA 状态块只在块边界有效，与 GPU 侧 `get_computed_blocks` 同一规则）；② 一个单元覆盖多少 token；③ 拉回时填哪些 GPU 块、登记哪些哈希。单元的字节布局 / 竞技场切槽留在模型 executor（`enable_host_tier` 已在那里算 `per_block_all`），trait 不重复暴露。Qwen3 = `FullAttentionPolicy`（一块 × 全层）；GLM（MLA 潜变量 + 索引器 K 两组）、K3（KDA 状态 + 全注意力）各自实现，未写。
 - 判据：core 里出现 `groups.len() != 1` / `is_mamba[0]` / 具体 block_size 比较，就是策略泄漏，该抽到 trait。
 
 #### 调度器接入（4 处，都在 `sched/mod.rs`）

@@ -96,8 +96,8 @@ impl Scheduler {
     }
 
     /// 启用 KV host tier（槽位数由调用方按 host_gib / bytes_per_block 算）。
-    pub fn enable_host_tier(&mut self, num_slots: usize) {
-        self.kv.enable_host_tier(num_slots);
+    pub fn enable_host_tier(&mut self, num_slots: usize, policy: Box<dyn crate::kv::host_tier::HostTierPolicy>) {
+        self.kv.enable_host_tier(num_slots, policy);
     }
     /// (host 命中块数累计, 拉回块数, 推出块数, 淘汰数)
     pub fn host_tier_stats(&self) -> (u64, u64, u64, u64) {
@@ -328,14 +328,12 @@ impl Scheduler {
                 // host tier（KV 分层）：GPU 未命中的前缀再到主机索引里找；命中的块当作本步要算的 token 来分配
                 // GPU 块（走正常 allocate_slots），但不进 token 预算、不进 forward——executor 在 forward 前
                 // 从 host 槽拉进这些块，num_computed 直接推进到命中末尾。
-                let host_hits: Vec<u32> = if r.num_computed_tokens == 0 && self.kv.host_tier_enabled() {
-                    let gpu_blocks = computed.groups.first().map_or(0, |g| g.len());
-                    self.kv.host_tier_lookup(r, gpu_blocks)
+                let gpu_hit_blocks: Vec<usize> = computed.groups.iter().map(|g| g.len()).collect();
+                let (host_hits, host_tokens) = if r.num_computed_tokens == 0 && self.kv.host_tier_enabled() {
+                    self.kv.host_tier_lookup(r, &gpu_hit_blocks)
                 } else {
-                    Vec::new()
+                    (Vec::new(), 0)
                 };
-                let bs = self.p.cache.block_size;
-                let host_tokens = host_hits.len() as u32 * bs;
                 let num_computed = r.num_computed_tokens + num_new_computed;
                 let mut num_new = r.num_tokens() - num_computed - host_tokens;
                 if long_prefill_threshold > 0 && num_new > long_prefill_threshold {
@@ -358,13 +356,9 @@ impl Scheduler {
                 };
                 // host 命中的块 = 新分配块里的前 host_hits.len() 个（紧接 GPU 命中块之后）
                 if !host_hits.is_empty() {
-                    let g0 = &new_blocks.groups[0];
-                    for (i, &hs) in host_hits.iter().enumerate() {
-                        out.kv_fetch.push((g0[i], hs));
-                    }
-                    let first = num_new_computed as usize / bs as usize;
-                    self.kv.register_fetched_blocks(slot, r, &g0[..host_hits.len()], first);
-                    self.host_tier_fetched += host_hits.len() as u64;
+                    let orders = self.kv.register_fetched(slot, r, &gpu_hit_blocks, &new_blocks, &host_hits);
+                    self.host_tier_fetched += orders.len() as u64;
+                    out.kv_fetch.extend(orders);
                 }
                 let num_computed = num_computed + host_tokens;
 
