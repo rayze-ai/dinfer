@@ -179,6 +179,8 @@ impl WeightSource {
                         // 不清零 + 不逐张量同步：pageable memcpy 在返回前已复制进驻留 staging，mmap 切片随后
                         // 释放也安全；调用方在全部权重入队后同步一次（Qwen3Model::load_with_budget）。
                         let mut t = Tensor::<bf16>::uninit(stream, &info.shape)?;
+                        // 注：试过 pinned 双缓冲 staging（`htod_into_staged`）反而更慢（6 vs 7.8 GiB/s，启动 loop 第 10 轮），
+                        // mmap→pinned 的 host memcpy 成了串行瓶颈；驱动的 pageable 路径已内部流水。保持 htod_into。
                         stream.htod_into(words, &mut t.data)?;
                         LOAD_STATS.with(|c| {
                             let mut c = c.borrow_mut();

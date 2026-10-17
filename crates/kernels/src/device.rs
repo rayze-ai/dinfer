@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use cudarc::driver::{
     CudaContext, CudaEvent, CudaGraph, CudaSlice, CudaStream, DevicePtr, DevicePtrMut, DeviceRepr, ValidAsZeroBits,
 };
+use cudarc::driver::{result, sys};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -190,3 +191,106 @@ impl Graph {
 
 /// CUDA event（跨流同步）。
 pub struct Event(CudaEvent);
+
+// ---------------------------------------------------------------- staged H2D（启动 loop 第 10 轮）
+/// pinned 双缓冲 H2D：host 侧 memcpy 进 pinned 块 A 的同时，上一块 B 在异步 DMA 到设备。
+/// 对比驱动的 pageable `cuMemcpyHtoD`（内部 staging + DMA 串行，4090 实测 ~8 GiB/s），
+/// 可接近 PCIe 4 ×16 的 ~24 GiB/s。只用于一次性大批量上传（权重加载），线程局部、按需创建。
+struct StagedUploader {
+    bufs: [*mut u8; 2],
+    events: [sys::CUevent; 2],
+    chunk: usize,
+    next: usize,
+    inflight: [bool; 2],
+}
+const STAGE_CHUNK: usize = 64 << 20;
+impl StagedUploader {
+    fn new() -> Result<Self> {
+        // SAFETY: 分配 pinned host 内存与事件；在 Drop 释放。flags=0（不用 WRITECOMBINED，memcpy 写入更快）。
+        unsafe {
+            let a = result::malloc_host(STAGE_CHUNK, 0)? as *mut u8;
+            let b = result::malloc_host(STAGE_CHUNK, 0)? as *mut u8;
+            let ea = result::event::create(sys::CUevent_flags::CU_EVENT_DISABLE_TIMING)?;
+            let eb = result::event::create(sys::CUevent_flags::CU_EVENT_DISABLE_TIMING)?;
+            Ok(Self { bufs: [a, b], events: [ea, eb], chunk: STAGE_CHUNK, next: 0, inflight: [false; 2] })
+        }
+    }
+    /// 把 `src` 拷到设备地址 `dst`（按 chunk 轮转两块 pinned 缓冲）。
+    fn upload(&mut self, stream: sys::CUstream, dst: u64, src: &[u8]) -> Result<()> {
+        let mut off = 0usize;
+        while off < src.len() {
+            let n = (src.len() - off).min(self.chunk);
+            let i = self.next;
+            // SAFETY: 等该缓冲上一次 DMA 完成后再覆盖；memcpy 不越界；DMA 源是 pinned 内存，异步合法。
+            unsafe {
+                if self.inflight[i] {
+                    result::event::synchronize(self.events[i])?;
+                }
+                std::ptr::copy_nonoverlapping(src.as_ptr().add(off), self.bufs[i], n);
+                let host = std::slice::from_raw_parts(self.bufs[i], n);
+                result::memcpy_htod_async(dst + off as u64, host, stream)?;
+                result::event::record(self.events[i], stream)?;
+            }
+            self.inflight[i] = true;
+            self.next = i ^ 1;
+            off += n;
+        }
+        Ok(())
+    }
+    fn finish(&mut self) -> Result<()> {
+        for i in 0..2 {
+            if self.inflight[i] {
+                // SAFETY: 事件有效。
+                unsafe { result::event::synchronize(self.events[i])? };
+                self.inflight[i] = false;
+            }
+        }
+        Ok(())
+    }
+}
+impl Drop for StagedUploader {
+    fn drop(&mut self) {
+        let _ = self.finish();
+        // SAFETY: 本结构独占这些资源。
+        unsafe {
+            for b in self.bufs {
+                let _ = result::free_host(b as *mut std::ffi::c_void);
+            }
+            for e in self.events {
+                let _ = result::event::destroy(e);
+            }
+        }
+    }
+}
+thread_local! {
+    static STAGER: std::cell::RefCell<Option<StagedUploader>> = const { std::cell::RefCell::new(None) };
+}
+impl Stream {
+    /// 大批量 H2D（见 `StagedUploader`）：异步入队，返回后 `src` 可释放（已复制进 pinned）。
+    /// 用完整批后调 `staged_finish()` 等 DMA 全部落地。
+    pub fn htod_into_staged<T: DeviceRepr>(&self, src: &[T], dst: &mut CudaSlice<T>) -> Result<()> {
+        anyhow::ensure!(src.len() <= dst.len(), "htod_into_staged: src {} > dst {}", src.len(), dst.len());
+        if src.is_empty() {
+            return Ok(());
+        }
+        let dst_ptr = self.ptr_mut(dst);
+        // SAFETY: T: DeviceRepr 是 POD，按字节视图拷贝。
+        let bytes = unsafe { std::slice::from_raw_parts(src.as_ptr() as *const u8, std::mem::size_of_val(src)) };
+        STAGER.with(|c| -> Result<()> {
+            let mut c = c.borrow_mut();
+            if c.is_none() {
+                *c = Some(StagedUploader::new()?);
+            }
+            c.as_mut().unwrap().upload(self.raw(), dst_ptr, bytes)
+        })
+    }
+    /// 等待本线程所有 staged H2D 完成并释放 pinned 缓冲。
+    pub fn staged_finish(&self) -> Result<()> {
+        STAGER.with(|c| -> Result<()> {
+            if let Some(mut u) = c.borrow_mut().take() {
+                u.finish()?;
+            }
+            Ok(())
+        })
+    }
+}
