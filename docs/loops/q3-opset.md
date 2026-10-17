@@ -12,3 +12,4 @@
 | 轮 | 块 | 现象 | 根因 | 处理 |
 |---|---|---|---|---|
 | 1 | 实现 | 2026-10-17 | — | opset.rs + model/nn 泛型化 + 启动期选择 |
+| 2 | 本机验收 | `crates/kernels/src/opset.rs`（4 trait + OpSet + DefaultOps，全 `#[inline]` 转发）；`Qwen3Model<O: OpSet = DefaultOps>`、`Attention::forward<O>`、`Mlp::forward(.., act: &impl Act, ..)`；model.rs 四组 k:: 直调清零（剩 `gqa_decode_scratch_len` 两处分配期调用，非热路径）；glm53 / moe 调用点传 `&DefaultOps`。core 34/34、real_parity 3/3、sampling 5/5；`OPS=bogus` 启动即报错 | — | 4090 baseline + bench29 |
