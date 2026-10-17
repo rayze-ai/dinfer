@@ -53,6 +53,9 @@ enum Cmd {
         /// 关闭 "decode 行不占 token 预算"（默认开：每步装下全部 decode + 预算内 prefill，使跨流并行生效）
         #[arg(long, default_value_t = false)]
         no_decode_exempt: bool,
+        /// KV host tier：用这么多 GiB 的 pinned 主机内存做 prefix cache 的第二层（0 = 关）
+        #[arg(long, default_value_t = 0.0)]
+        kv_host_gib: f64,
         /// 关闭 decode CUDA graph（默认开；qwen3）
         #[arg(long, default_value_t = false)]
         no_cuda_graph: bool,
@@ -110,6 +113,9 @@ async fn main() -> Result<()> {
             no_prefix_caching,
 
             no_decode_exempt,
+
+
+            kv_host_gib,
             no_cuda_graph,
             device,
             mtp,
@@ -154,6 +160,7 @@ async fn main() -> Result<()> {
                     enable_chunked_prefill: true,
                     enable_prefix_caching: !no_prefix_caching,
                     decode_exempt_from_budget: !no_decode_exempt,
+                    kv_host_gib,
                     enable_cuda_graph: !no_cuda_graph,
                     device,
                 };

@@ -139,6 +139,15 @@ pub trait ModelExecutor {
         Ok((lp_d, lp_p))
     }
 
+    /// KV host tier（design §10.2）：forward 前把 host 槽拉进 GPU 块（主流，同步排在前面）；
+    /// step 入队后把 GPU 块推到 host 槽（copy stream，异步）。默认：不支持（忽略）。
+    fn kv_fetch(&mut self, _orders: &[(crate::kv::BlockId, u32)]) -> Result<()> {
+        Ok(())
+    }
+    fn kv_offload(&mut self, _orders: &[(crate::kv::BlockId, u32)]) -> Result<()> {
+        Ok(())
+    }
+
     /// 异步两段式：`begin` 上传 + 入队 + 异步 D2H（不等 GPU），`finish` 等结果。只在 `supports_async()` 且
     /// plan 满足 `BatchPlan::async_eligible()` 时被 runner 调用；默认实现 = 同步 forward_sample 后缓存结果。
     fn supports_async(&self) -> bool {
@@ -249,6 +258,9 @@ impl<E: ModelExecutor> Runner<E> {
         self.build_plan(so)?;
         self.generated.clear();
         self.drafts.clear();
+        if !so.kv_fetch.is_empty() {
+            self.exec.kv_fetch(&so.kv_fetch)?;
+        }
         let use_async = self.exec.supports_async() && self.plan.async_eligible();
         self.last_async = use_async;
         let mut lps_override = None;
@@ -276,6 +288,9 @@ impl<E: ModelExecutor> Runner<E> {
             }
             rows.push(PendingRow { rid, n, num_draft, end_of_seq });
         }
+        if !so.kv_offload.is_empty() {
+            self.exec.kv_offload(&so.kv_offload)?;
+        }
         Ok(Pending { rows, req_ids: self.plan.req_ids.clone(), is_async: use_async, lps_override })
     }
 
@@ -297,7 +312,13 @@ impl<E: ModelExecutor> Runner<E> {
         self.last_async = false;
         self.generated.clear();
         self.drafts.clear();
+        if !so.kv_fetch.is_empty() {
+            self.exec.kv_fetch(&so.kv_fetch)?;
+        }
         self.exec.forward_sample(&self.plan, &mut self.generated, &mut self.drafts)?;
+        if !so.kv_offload.is_empty() {
+            self.exec.kv_offload(&so.kv_offload)?;
+        }
         let mut rows = Vec::with_capacity(self.plan.num_reqs());
         for (i, &rid) in self.plan.req_ids.iter().enumerate() {
             let st = self.states.get(&rid).unwrap();

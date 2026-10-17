@@ -62,6 +62,8 @@ pub struct Scheduler {
     /// prefix cache 统计（token 数，vLLM 口径）：首次调度时查询 `num_tokens-1`，命中 `num_new_computed`。
     prefix_cache_queries: u64,
     prefix_cache_hits: u64,
+    /// host tier 拉回的块数（指标）。
+    host_tier_fetched: u64,
 }
 
 impl Scheduler {
@@ -81,7 +83,18 @@ impl Scheduler {
             preempted_req_ids: Vec::new(),
             prefix_cache_queries: 0,
             prefix_cache_hits: 0,
+            host_tier_fetched: 0,
         }
+    }
+
+    /// 启用 KV host tier（槽位数由调用方按 host_gib / bytes_per_block 算）。
+    pub fn enable_host_tier(&mut self, num_slots: usize) {
+        self.kv.enable_host_tier(num_slots);
+    }
+    /// (host 命中块数累计, 拉回块数, 推出块数, 淘汰数)
+    pub fn host_tier_stats(&self) -> (u64, u64, u64, u64) {
+        let s = self.kv.host_tier_stats();
+        (s.hits_blocks, self.host_tier_fetched, s.offload_blocks, s.evictions)
     }
 
     pub fn add_request(&mut self, mut req: Request) {
@@ -283,9 +296,19 @@ impl Scheduler {
                     self.prefix_cache_queries += r.num_tokens().saturating_sub(1) as u64;
                     self.prefix_cache_hits += num_new_computed as u64;
                 }
+                // host tier（KV 分层）：GPU 未命中的前缀再到主机索引里找；命中的块当作本步要算的 token 来分配
+                // GPU 块（走正常 allocate_slots），但不进 token 预算、不进 forward——executor 在 forward 前
+                // 从 host 槽拉进这些块，num_computed 直接推进到命中末尾。
+                let host_hits: Vec<u32> = if r.num_computed_tokens == 0 && self.kv.host_tier_enabled() {
+                    let gpu_blocks = computed.groups.first().map_or(0, |g| g.len());
+                    self.kv.host_tier_lookup(r, gpu_blocks)
+                } else {
+                    Vec::new()
+                };
+                let bs = self.p.cache.block_size;
+                let host_tokens = host_hits.len() as u32 * bs;
                 let num_computed = r.num_computed_tokens + num_new_computed;
-
-                let mut num_new = r.num_tokens() - num_computed;
+                let mut num_new = r.num_tokens() - num_computed - host_tokens;
                 if long_prefill_threshold > 0 && num_new > long_prefill_threshold {
                     num_new = long_prefill_threshold;
                 }
@@ -294,11 +317,27 @@ impl Scheduler {
                     break;
                 }
                 let computed_opt = if computed.is_empty() { None } else { Some(&computed) };
-                let Some(new_blocks) =
-                    self.kv.allocate_slots(slot, r, num_new, num_new_computed, computed_opt, num_lookahead)
-                else {
+                let Some(new_blocks) = self.kv.allocate_slots(
+                    slot,
+                    r,
+                    num_new + host_tokens,
+                    num_new_computed,
+                    computed_opt,
+                    num_lookahead,
+                ) else {
                     break; // 块不够：等下一 step
                 };
+                // host 命中的块 = 新分配块里的前 host_hits.len() 个（紧接 GPU 命中块之后）
+                if !host_hits.is_empty() {
+                    let g0 = &new_blocks.groups[0];
+                    for (i, &hs) in host_hits.iter().enumerate() {
+                        out.kv_fetch.push((g0[i], hs));
+                    }
+                    let first = num_new_computed as usize / bs as usize;
+                    self.kv.register_fetched_blocks(slot, r, &g0[..host_hits.len()], first);
+                    self.host_tier_fetched += host_hits.len() as u64;
+                }
+                let num_computed = num_computed + host_tokens;
 
                 self.waiting.pop_front();
                 let s = self.slab[slot].as_mut().unwrap();
@@ -343,6 +382,7 @@ impl Scheduler {
 
         out.total_num_scheduled_tokens = out.num_scheduled_tokens.iter().map(|(_, n)| n).sum();
         out.blocks_to_zero = self.kv.take_blocks_to_zero();
+        out.kv_offload = self.kv.take_pending_offload();
 
         // ---- 3. 调度后推进（异步调度）----
         self.update_after_schedule(&out);

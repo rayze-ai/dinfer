@@ -34,6 +34,8 @@ pub struct ServeOptions {
     pub enable_prefix_caching: bool,
     /// decode 行不占 token 预算（见 SchedulerConfig）。默认开。
     pub decode_exempt_from_budget: bool,
+    /// KV host tier 容量（GiB pinned 内存）；0 = 关。
+    pub kv_host_gib: f64,
     /// 纯 decode 步用 CUDA graph（启动时按 batch 桶捕获；vLLM `cudagraph_mode=FULL_DECODE_ONLY` 对齐）。
     pub enable_cuda_graph: bool,
     pub device: usize,
@@ -53,6 +55,7 @@ impl Default for ServeOptions {
             enable_chunked_prefill: true,
             enable_prefix_caching: true,
             decode_exempt_from_budget: true,
+            kv_host_gib: 0.0,
             enable_cuda_graph: true,
             device: 0,
         }
@@ -121,6 +124,8 @@ impl Qwen3Service {
         let max_blocks_per_seq = (opt.max_model_len as usize).div_ceil(opt.block_size as usize);
         let exec = Qwen3Executor::with_graphs_and_blocks(s.clone(), model, opt.enable_cuda_graph, max_blocks_per_seq)?;
         let num_graphs = exec.num_graphs();
+        let mut exec = exec;
+        let host_slots = if opt.kv_host_gib > 0.0 { exec.enable_host_tier(opt.kv_host_gib)? } else { 0 };
         let runner = Runner::new(exec, opt.block_size as usize);
         let t_join = std::time::Instant::now();
         let (tok, tmpl) = tok_thread.join().map_err(|_| anyhow::anyhow!("tokenizer thread panicked"))??;
@@ -162,7 +167,10 @@ impl Qwen3Service {
             },
             block_size: opt.block_size,
         }];
-        let sched = Scheduler::new(params, groups, num_blocks);
+        let mut sched = Scheduler::new(params, groups, num_blocks);
+        if host_slots > 0 {
+            sched.enable_host_tier(host_slots);
+        }
         let (handle, jh) = engine::spawn(sched, runner);
         tracing::info!(
             model = %served_name,

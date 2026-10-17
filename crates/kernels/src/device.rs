@@ -465,3 +465,58 @@ impl Drop for PinnedSlot {
         }
     }
 }
+
+// ---------------------------------------------------------------- HostArena（KV host tier 的 pinned 竞技场）
+/// 一大块 pinned host 内存，按固定大小的槽切分；槽内再按层偏移。所有 unsafe 都在这里，调用方只拿 (slot, layer) 句柄。
+pub struct HostArena {
+    base: *mut u8,
+    slot_bytes: usize,
+    num_slots: usize,
+}
+// SAFETY: 裸指针只被同一线程的 Stream 方法使用；跨线程移动不改变有效性。
+unsafe impl Send for HostArena {}
+impl HostArena {
+    pub fn new(stream: &Stream, num_slots: usize, slot_bytes: usize) -> Result<Self> {
+        stream.bind_ctx()?;
+        anyhow::ensure!(num_slots > 0 && slot_bytes > 0, "HostArena: empty");
+        // SAFETY: pinned 分配；Drop 释放。
+        let base = unsafe { result::malloc_host(num_slots * slot_bytes, 0)? as *mut u8 };
+        Ok(Self { base, slot_bytes, num_slots })
+    }
+    pub fn num_slots(&self) -> usize {
+        self.num_slots
+    }
+    fn addr(&self, slot: usize, off: usize, len: usize) -> Result<*mut u8> {
+        anyhow::ensure!(slot < self.num_slots && off + len <= self.slot_bytes, "HostArena: out of range");
+        // SAFETY: 范围已校验。
+        Ok(unsafe { self.base.add(slot * self.slot_bytes + off) })
+    }
+}
+impl Drop for HostArena {
+    fn drop(&mut self) {
+        // SAFETY: 独占。
+        unsafe { let _ = result::free_host(self.base as *mut std::ffi::c_void); }
+    }
+}
+impl Stream {
+    /// 设备地址 `dst` ← 竞技场 (slot, off) 的 `len` 字节，异步（本流）。
+    pub fn htod_from_arena(&self, arena: &HostArena, slot: usize, off: usize, dst: u64, len: usize) -> Result<()> {
+        let p = arena.addr(slot, off, len)?;
+        self.bind_ctx()?;
+        // SAFETY: 源 pinned、范围已校验；dst 由调用方保证是有效设备地址且 ≥ len 字节。
+        unsafe {
+            let src = std::slice::from_raw_parts(p, len);
+            Ok(result::memcpy_htod_async(dst, src, self.raw())?)
+        }
+    }
+    /// 竞技场 (slot, off) ← 设备地址 `src` 的 `len` 字节，异步（本流）。
+    pub fn dtoh_to_arena(&self, arena: &HostArena, slot: usize, off: usize, src: u64, len: usize) -> Result<()> {
+        let p = arena.addr(slot, off, len)?;
+        self.bind_ctx()?;
+        // SAFETY: 同上。
+        unsafe {
+            let dst = std::slice::from_raw_parts_mut(p, len);
+            Ok(result::memcpy_dtoh_async(dst, src, self.raw())?)
+        }
+    }
+}

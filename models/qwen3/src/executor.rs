@@ -19,7 +19,7 @@ use dinfer_core::runner::{BatchMode, BatchPlan, ModelExecutor, PairLogprobs};
 use dinfer_core::sampler::{SampleBatch, TokenLogprobs};
 use dinfer_kernels as k;
 use dinfer_kernels::Graph;
-use dinfer_layers::{Gemm, Stream, Tensor, Event, TimingEvent, PinnedUploader, PinnedSlot};
+use dinfer_layers::{Gemm, Stream, Tensor, Event, TimingEvent, PinnedUploader, PinnedSlot, HostArena};
 
 /// 固定地址的每 step 输入缓冲。
 struct StepBuffers {
@@ -127,6 +127,8 @@ pub struct Qwen3Executor {
     alt: Option<AltSet>,
     /// 当前 plan 是否是插队 prefill（采样后不写 prev_chosen）。enqueue 时从 plan 读入。
     skip_prev_chosen: bool,
+    /// KV host tier（design §10.2）：pinned 竞技场 + copy stream；None = 关。
+    host_tier: Option<HostTierStore>,
     /// 异步调度：两个 pinned 槽轮转（步 n 的 D2H 在槽 n%2；finish n 必在 begin n+2 之前）。
     async_slots: [PinnedSlot; 2],
     async_slot_idx: usize,
@@ -212,6 +214,7 @@ impl Qwen3Executor {
             async_inflight: std::collections::VecDeque::with_capacity(2),
             alt: None,
             skip_prev_chosen: false,
+            host_tier: None,
             alt_active: false,
             pair_steps: 0,
             main_done: None,
@@ -636,6 +639,24 @@ impl Qwen3Executor {
         self.stream.record_timing(&self.ev_gpu.as_ref().unwrap().1)
     }
 
+    /// 启用 KV host tier：`host_gib` 的 pinned 内存，按全层块大小切槽。返回槽位数（scheduler 索引容量）。
+    pub fn enable_host_tier(&mut self, host_gib: f64) -> Result<usize> {
+        let cfg = &self.model.cfg;
+        let bs = self.model.kv.first().map(|k| k.block_size).unwrap_or(16);
+        let per_layer = bs * cfg.num_key_value_heads as usize * 2 * cfg.head_dim as usize * 2;
+        let layers = self.model.kv.len();
+        let per_block_all = per_layer * layers;
+        let num_slots = ((host_gib * (1u64 << 30) as f64) as usize) / per_block_all;
+        if num_slots == 0 {
+            return Ok(0);
+        }
+        let copy = self.stream.device().new_stream()?;
+        let arena = HostArena::new(&self.stream, num_slots, per_block_all)?;
+        self.host_tier = Some(HostTierStore { arena, bytes_per_layer_block: per_layer, copy, offload_done: None });
+        tracing::info!(num_slots, per_block_kib = per_block_all / 1024, host_gib, "kv host tier enabled");
+        Ok(num_slots)
+    }
+
     /// 在副套上执行 `f`（进入前换入副套，结束后无论成败都换回主套）。
     fn on_alt<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         self.swap_alt();
@@ -742,6 +763,16 @@ impl Qwen3Executor {
     }
 }
 
+/// KV host tier 的设备侧：pinned 竞技场（`num_slots × 全层块字节`，槽内 `[layer][一层一块]`）+ 独立 copy stream。
+/// 与设备 `kv[layer].cache[block]` 布局一致，直接按字节搬。unsafe 全在 `dinfer_kernels::HostArena` / `Stream` 里。
+struct HostTierStore {
+    arena: HostArena,
+    bytes_per_layer_block: usize,
+    copy: Stream,
+    /// copy stream 上最近一次 offload 结束的事件；fetch 前主流等它（host 槽可能刚被写）。
+    offload_done: Option<Event>,
+}
+
 /// 每个请求本步 1 个采样 token、无 draft。
 fn push_tokens(generated: &mut Vec<Vec<u32>>, drafts: &mut Vec<Vec<u32>>, chosen: &[i32]) {
     for &c in chosen {
@@ -757,6 +788,38 @@ impl ModelExecutor for Qwen3Executor {
 
     fn supports_async(&self) -> bool {
         std::env::var("ASYNC_SCHED").map(|v| v != "0").unwrap_or(true)
+    }
+
+    /// host → GPU：主流上同步排在本步 forward 之前（同流顺序即保证可见）。
+    fn kv_fetch(&mut self, orders: &[(dinfer_core::kv::BlockId, u32)]) -> Result<()> {
+        let Some(ht) = self.host_tier.as_ref() else { return Ok(()) };
+        if let Some(ev) = &ht.offload_done {
+            self.stream.wait_event(ev)?; // 槽位可能刚被 offload 写入（copy stream）
+        }
+        let per = ht.bytes_per_layer_block;
+        for &(block, slot) in orders {
+            for (layer, kv) in self.model.kv.iter_mut().enumerate() {
+                let dst = self.stream.ptr_mut(&mut kv.cache.data) + (block as u64) * per as u64;
+                self.stream.htod_from_arena(&ht.arena, slot as usize, layer * per, dst, per)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// GPU → host：copy stream 等主流（本步 KV 写完）后异步 D2H；记录完成事件供下次 fetch 等待。
+    fn kv_offload(&mut self, orders: &[(dinfer_core::kv::BlockId, u32)]) -> Result<()> {
+        let Some(ht) = self.host_tier.as_mut() else { return Ok(()) };
+        let main_ev = self.stream.record_event()?;
+        ht.copy.wait_event(&main_ev)?;
+        let per = ht.bytes_per_layer_block;
+        for &(block, slot) in orders {
+            for (layer, kv) in self.model.kv.iter().enumerate() {
+                let src = self.stream.ptr(&kv.cache.data) + (block as u64) * per as u64;
+                ht.copy.dtoh_to_arena(&ht.arena, slot as usize, layer * per, src, per)?;
+            }
+        }
+        ht.offload_done = Some(ht.copy.record_event()?);
+        Ok(())
     }
 
     /// 异步第一段：入队 + 异步 D2H（不等 GPU）。runner 只对 `async_eligible` 的 plan 调用（纯 decode）。

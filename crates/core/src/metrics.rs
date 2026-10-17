@@ -72,6 +72,9 @@ pub struct Metrics {
     pub num_preemptions_total: AtomicU64,
     pub prefix_cache_queries_total: AtomicU64,
     pub prefix_cache_hits_total: AtomicU64,
+    pub host_tier_hits_total: AtomicU64,
+    pub host_tier_fetch_blocks_total: AtomicU64,
+    pub host_tier_offload_blocks_total: AtomicU64,
     pub request_success_stop: AtomicU64,
     pub request_success_length: AtomicU64,
     pub request_abort: AtomicU64,
@@ -175,6 +178,9 @@ impl Metrics {
             "Prefix cache hits, in terms of number of cached tokens.",
             self.prefix_cache_hits_total.load(Relaxed),
         );
+        c(&mut o, "host_tier_hits_total", "KV host tier prefix hits, in blocks.", self.host_tier_hits_total.load(Relaxed));
+        c(&mut o, "host_tier_fetch_blocks_total", "Blocks fetched host->GPU.", self.host_tier_fetch_blocks_total.load(Relaxed));
+        c(&mut o, "host_tier_offload_blocks_total", "Blocks offloaded GPU->host.", self.host_tier_offload_blocks_total.load(Relaxed));
         c(
             &mut o,
             "engine_steps_total",

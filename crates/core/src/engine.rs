@@ -218,6 +218,10 @@ impl<E: ModelExecutor> Engine<E> {
         let (q, h) = self.sched.prefix_cache_stats();
         m.prefix_cache_queries_total.store(q, Relaxed);
         m.prefix_cache_hits_total.store(h, Relaxed);
+        let (hh, hf, ho, _) = self.sched.host_tier_stats();
+        m.host_tier_hits_total.store(hh, Relaxed);
+        m.host_tier_fetch_blocks_total.store(hf, Relaxed);
+        m.host_tier_offload_blocks_total.store(ho, Relaxed);
     }
 
     /// 阻塞运行直到 `Shutdown`。每轮：吸收所有待处理命令（空闲时阻塞等第一条）→ schedule → execute → 分发。

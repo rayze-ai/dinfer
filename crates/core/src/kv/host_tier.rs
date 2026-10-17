@@ -15,6 +15,7 @@ pub struct HostTierStats {
     pub evictions: u64,
 }
 
+#[derive(Debug)]
 pub struct HostTierIndex {
     map: HashMap<(u8, BlockHash), HostSlot>,
     key_of: Vec<Option<(u8, BlockHash)>>,
@@ -31,7 +32,7 @@ impl HostTierIndex {
             map: HashMap::with_capacity(num_slots),
             key_of: vec![None; num_slots],
             last_use: vec![0; num_slots],
-            free: (0..num_slots as u32).rev().collect(),
+            free: (0..num_slots as u32).rev().collect(), // pop 得到 0,1,2,…
             tick: 0,
             stats: HostTierStats::default(),
         }
@@ -95,14 +96,14 @@ mod tests {
     #[test]
     fn prefix_hit_and_lru_eviction() {
         let mut t = HostTierIndex::new(3);
-        assert_eq!(t.insert(0, h(1)), Some(2));
+        assert_eq!(t.insert(0, h(1)), Some(0));
         assert_eq!(t.insert(0, h(2)), Some(1));
-        assert_eq!(t.insert(0, h(3)), Some(0));
+        assert_eq!(t.insert(0, h(3)), Some(2));
         assert_eq!(t.insert(0, h(2)), None, "already present");
-        // 连续前缀命中：1,2 命中，4 不在 → 停
-        assert_eq!(t.lookup_prefix(0, &[h(1), h(2), h(4)], 0), vec![2, 1]);
-        // 容量满：插 h(5) 淘汰最久未用的 h(3)（slot 0）
-        assert_eq!(t.insert(0, h(5)), Some(0));
+        // 连续前缀命中：1,2 命中（touch），4 不在 → 停
+        assert_eq!(t.lookup_prefix(0, &[h(1), h(2), h(4)], 0), vec![0, 1]);
+        // 容量满：插 h(5) 淘汰最久未用的 h(3)（slot 2）
+        assert_eq!(t.insert(0, h(5)), Some(2));
         assert!(!t.contains(0, h(3)) && t.contains(0, h(5)));
         assert_eq!(t.stats.evictions, 1);
     }
