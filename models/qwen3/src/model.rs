@@ -303,7 +303,12 @@ impl Qwen3Model {
     ) -> Result<Self> {
         let hidden = cfg.hidden_size as usize;
         let (hk, d) = (cfg.num_key_value_heads as usize, cfg.head_dim as usize);
+        let t_first = std::time::Instant::now();
         let embed = Embedding::load(stream, src, "model.embed_tokens")?;
+        tracing::info!(
+            first_tensor_ms = t_first.elapsed().as_millis() as u64,
+            "load timing: first tensor (includes lazy CUDA context / module load)"
+        );
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers as usize);
         for l in 0..cfg.num_hidden_layers {
             let p = format!("model.layers.{l}");
@@ -328,8 +333,10 @@ impl Qwen3Model {
             ensure!(cfg.tie_word_embeddings, "no lm_head.weight and not tied");
             Linear::load(stream, src, "model.embed_tokens")?
         };
+        let t_rope = std::time::Instant::now();
         let rope =
             Rope::new(stream, d, cfg.max_position_embeddings as usize, cfg.rope_theta, RopeStyle::Neox)?;
+        tracing::info!(rope_ms = t_rope.elapsed().as_millis() as u64, max_pos = cfg.max_position_embeddings, "load timing: rope cos/sin table");
         let v = cfg.vocab_size as usize;
         // 激活 scratch 先分配，KV 最后：这样 free 已含权重 + scratch 的占用
         let ls = dinfer_layers::take_load_stats();

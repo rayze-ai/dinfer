@@ -89,7 +89,9 @@ impl Qwen3Service {
         let s = dev.default_stream();
         let gemm = Gemm::new(&s)?;
         let t_cuda = t_start.elapsed();
+        let t_open = std::time::Instant::now();
         let src = WeightSource::open_dir(model_dir)?;
+        tracing::info!(open_ms = t_open.elapsed().as_millis() as u64, "load timing: safetensors open (mmap + header)");
         let max_tokens = opt.max_num_batched_tokens.max(opt.max_num_seqs) as usize;
         let model = Qwen3Model::load_with_budget(
             &s,
