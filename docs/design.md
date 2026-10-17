@@ -491,6 +491,29 @@ pub struct DeviceBlockRef { pub layer: u8, pub block: BlockId, pub ptr: u64, pub
 - 外层命中但 GPU 块不够：按现有抢占逻辑处理，fetch 推迟。
 - 与异步调度的交互：`WaitingForKv` 的请求不会进任何步，插队 prefill 也看不到它，无冲突。
 
+### 10.3 PD 分离（Q4，2026-10-18 定稿，动代码前的四个决策）
+
+**目标**：prefill 实例 P 与 decode 实例 D 分进程 / 分卡；proxy 一个入口；输出与单机逐字一致；TTFT 不劣于单机、D 的 TPOT 不受 prefill 干扰。Qwen3-0.6B 只验流程，参数与协议按生产模型（GLM / K3，多卡、跨机）可演进来定。
+
+**对照 vLLM**（`kv_connector/v1/nixl/{push,pull}_*`、`examples/disaggregated/disaggregated_serving/disagg_proxy_pushconnector_demo.py`）：vLLM 有 pull（D 用 `remote_block_ids` 经 NIXL READ 拉）和 push（P 算完直接写进 D 事先分好的块）两种；proxy 先打 P（`max_tokens=1` + `kv_transfer_params`），拿回 `remote_*` 元数据再打 D。我们**采用**这个"P 先出首 token、D 接力"的请求流和 `kv_transfer_params` 的信息集合；**改进**：不引入 NIXL / side channel，v1 用自己的流式协议，块搬运复用 host tier 的 pack / pinned 路径。
+
+| 决策 | 选择（v1） | 为什么 | 留的接口 |
+|---|---|---|---|
+| ① 传输介质 | **P 侧 `kv_pack` → pinned HostArena 槽 → TCP 流 → D 侧 pinned 槽 → `kv_unpack`**。P、D 各起一个 `kv-port` 监听 | 复用 Q3-r 已验证的 pack / arena / copy stream 全套；跨机天然可用；4090 测试机 GPU 0/3 两进程即可验 | `trait KvTransport { send(slots, to) / recv(into slots) }`，v2 同机换 CUDA IPC（`cuIpcGetMemHandle` 直接 D2D），v3 跨机 RDMA（UCX / NIXL 后端） |
+| ② 块粒度 | **一个单元 = 一块（16 token）× 全部层**，哈希 = 现有 `BlockHash`（含 model_id / dtype / block_size） | 与 HostTierPolicy 单元一致，D 侧登记直接走 `register_fetched`；逐层流式（vLLM `save_kv_layer`）对 28 层 0.6B 没意义，大模型 TP 下再按层组拆 | 迁移消息里 `units: Vec<(group, hash)>`，层组拆分只改 policy |
+| ③ 谁持 block table | **各自持有，不共享**。P 算完即 offload 到自己的 arena 槽并释放 GPU 块；D 收到消息后自己 `allocate_slots` + `register_fetched`（与 host tier 命中同一条路） | scheduler 不需要知道对端；P 的 GPU 块周转快（prefill 实例 KV 常驻没意义） | push 模式（P 直写 D 的块）需要 D 先分块再告知 P，留给 v2 CUDA IPC |
+| ④ 失败回退 | **D 等 KV 超时（默认 2 s）或校验失败 → D 本地重算 prefill**（请求已带完整 prompt ids，只丢 TTFT）；P 宕 → proxy 直接把请求发 D 单机跑；D 宕 → proxy 返回 503，不重试到别的 D（KV 已丢） | 任何一方挂都退化成单机，不丢请求、不产生错误输出 | 指标 `pd_fallback_total{reason}`；多 D 时 proxy 按 `running` 最少路由 |
+
+**请求流（v1）**
+1. proxy 收 `/v1/chat/completions` → 转发 P，附 `max_tokens=1`、`kv_transfer: {decode_addr}`；P 正常 prefill + 采样首 token，**不释放**该请求 KV，`kv_pack` → arena 槽，开 TCP 推到 D 的 `kv-port`（消息头：request_id、units、首 token、采样参数、prompt ids；体：每单元 `unit_bytes`）。
+2. P 向 proxy 返回首 token（流式第一 chunk）+ `request_id`；proxy 把原请求 + 首 token + request_id 发 D。
+3. D 的 `kv-port` 线程把块收进 arena 槽，登记 `IncomingKv { request_id → slots }`；D 的 scheduler 对带 `request_id` 的新请求：若 KV 已到 → 当作 host 命中走 `register_fetched` + `kv_fetch`，`num_computed = prompt_len`，直接 decode；未到 → `WaitingForKv`，到达后放回 waiting 队头；超时 → 普通 prefill。
+4. D 流式返回后续 token；P 在 D 确认收齐后释放槽（或超时释放）。
+
+**不做（v1）**：P 侧 prefix cache 跨实例共享；D→P 回传（多轮续写走 D 本地 prefix cache）；TP 下的分片传输（Q5）。
+
+**验收**：`scripts/verify/q4.sh` exit 0 = ① 两进程（GPU 0 P / GPU 3 D）+ proxy，greedy 输出与单机逐字一致（e2e 用例 `e2e_qwen3_pd`）；② 杀 P / 杀 D / 掐断 kv-port 三种故障各一次，请求全部正常返回（走回退）；③ bench c8 (1024,128) 经 proxy：TTFT ≤ 单机 1.3×（多一跳 + 传输），TPOT ≤ 单机（D 无 prefill 干扰），进 CSV（`pd1`）。
+
 ## 11. 采用 / 改进台账（对 vLLM）
 
 目标是性能超越，不是重写。vLLM 做得对的直接用，能改进的改进；每项记一行，便于回看哪些是"借来的"、哪些是我们的。
