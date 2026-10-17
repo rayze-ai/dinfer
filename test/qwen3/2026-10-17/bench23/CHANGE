@@ -1,0 +1,1 @@
+干净重启（restart_dinfer.sh；之前 :8012 是 20 h 前的孤儿旧进程）后的全量回归 = 新基线；代码含 block_table 跨度修复

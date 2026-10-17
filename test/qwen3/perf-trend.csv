@@ -239,3 +239,15 @@ bench22,2026-10-17,k host 路径：block_table 缓冲行跨度改为 max_model_l
 bench22,2026-10-17,k host 路径：block_table 缓冲行跨度改为 max_model_len/block_size（原用 KV 池总块数 9972 → 每步 1.3 MB 零填充 + H2D）,c8-long,out_tok_per_s,1791.794,1907.034,0.940,1.1,higher
 bench22,2026-10-17,k host 路径：block_table 缓冲行跨度改为 max_model_len/block_size（原用 KV 池总块数 9972 → 每步 1.3 MB 零填充 + H2D）,c8-long,ttft_p50_ms,39.484,61.746,0.639,-0.2,lower
 bench22,2026-10-17,k host 路径：block_table 缓冲行跨度改为 max_model_len/block_size（原用 KV 池总块数 9972 → 每步 1.3 MB 零填充 + H2D）,c8-long,tpot_p50_ms,4.156,3.761,1.105,1.0,lower
+bench23,2026-10-17,干净重启（restart_dinfer.sh；之前 :8012 是 20 h 前的孤儿旧进程）后的全量回归 = 新基线；代码含 block_table 跨度修复,c1,out_tok_per_s,501.053,447.377,1.120,0.5,higher
+bench23,2026-10-17,干净重启（restart_dinfer.sh；之前 :8012 是 20 h 前的孤儿旧进程）后的全量回归 = 新基线；代码含 block_table 跨度修复,c1,ttft_p50_ms,3.942,16.796,0.235,4.4,lower
+bench23,2026-10-17,干净重启（restart_dinfer.sh；之前 :8012 是 20 h 前的孤儿旧进程）后的全量回归 = 新基线；代码含 block_table 跨度修复,c1,tpot_p50_ms,1.980,2.119,0.935,0.3,lower
+bench23,2026-10-17,干净重启（restart_dinfer.sh；之前 :8012 是 20 h 前的孤儿旧进程）后的全量回归 = 新基线；代码含 block_table 跨度修复,c8,out_tok_per_s,3077.772,2900.700,1.061,9.8,higher
+bench23,2026-10-17,干净重启（restart_dinfer.sh；之前 :8012 是 20 h 前的孤儿旧进程）后的全量回归 = 新基线；代码含 block_table 跨度修复,c8,ttft_p50_ms,13.775,33.911,0.406,-39.0,lower
+bench23,2026-10-17,干净重启（restart_dinfer.sh；之前 :8012 是 20 h 前的孤儿旧进程）后的全量回归 = 新基线；代码含 block_table 跨度修复,c8,tpot_p50_ms,2.506,2.542,0.986,10.1,lower
+bench23,2026-10-17,干净重启（restart_dinfer.sh；之前 :8012 是 20 h 前的孤儿旧进程）后的全量回归 = 新基线；代码含 block_table 跨度修复,c32,out_tok_per_s,8690.478,8281.867,1.049,0.5,higher
+bench23,2026-10-17,干净重启（restart_dinfer.sh；之前 :8012 是 20 h 前的孤儿旧进程）后的全量回归 = 新基线；代码含 block_table 跨度修复,c32,ttft_p50_ms,22.290,74.369,0.300,-3.3,lower
+bench23,2026-10-17,干净重启（restart_dinfer.sh；之前 :8012 是 20 h 前的孤儿旧进程）后的全量回归 = 新基线；代码含 block_table 跨度修复,c32,tpot_p50_ms,3.504,3.311,1.058,0.3,lower
+bench23,2026-10-17,干净重启（restart_dinfer.sh；之前 :8012 是 20 h 前的孤儿旧进程）后的全量回归 = 新基线；代码含 block_table 跨度修复,c8-long,out_tok_per_s,1922.439,1902.869,1.010,7.3,higher
+bench23,2026-10-17,干净重启（restart_dinfer.sh；之前 :8012 是 20 h 前的孤儿旧进程）后的全量回归 = 新基线；代码含 block_table 跨度修复,c8-long,ttft_p50_ms,39.446,60.123,0.656,0.1,lower
+bench23,2026-10-17,干净重启（restart_dinfer.sh；之前 :8012 是 20 h 前的孤儿旧进程）后的全量回归 = 新基线；代码含 block_table 跨度修复,c8-long,tpot_p50_ms,3.834,3.761,1.019,7.7,lower
