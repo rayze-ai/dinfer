@@ -311,3 +311,15 @@ bench28,2026-10-17,o 插队 prefill 修正：结果立刻回填再调度 n+1（�
 bench28,2026-10-17,o 插队 prefill 修正：结果立刻回填再调度 n+1（修首 token 丢失）；负载门槛在飞 ≤8 行才插队,c8-long,out_tok_per_s,1907.647,1902.870,1.003,-0.2,higher
 bench28,2026-10-17,o 插队 prefill 修正：结果立刻回填再调度 n+1（修首 token 丢失）；负载门槛在飞 ≤8 行才插队,c8-long,ttft_p50_ms,34.615,68.254,0.507,19.4,lower
 bench28,2026-10-17,o 插队 prefill 修正：结果立刻回填再调度 n+1（修首 token 丢失）；负载门槛在飞 ≤8 行才插队,c8-long,tpot_p50_ms,3.937,3.752,1.049,-1.9,lower
+bench29,2026-10-17,q OpSet：四组热路径算子进 trait（DefaultOps 零成本包装），模型泛型化；应与 bench28 零差异,c1,out_tok_per_s,508.857,447.568,1.137,0.1,higher
+bench29,2026-10-17,q OpSet：四组热路径算子进 trait（DefaultOps 零成本包装），模型泛型化；应与 bench28 零差异,c1,ttft_p50_ms,4.124,16.847,0.245,-1.2,lower
+bench29,2026-10-17,q OpSet：四组热路径算子进 trait（DefaultOps 零成本包装），模型泛型化；应与 bench28 零差异,c1,tpot_p50_ms,1.945,2.119,0.918,0.1,lower
+bench29,2026-10-17,q OpSet：四组热路径算子进 trait（DefaultOps 零成本包装），模型泛型化；应与 bench28 零差异,c8,out_tok_per_s,3105.902,2904.932,1.069,-1.4,higher
+bench29,2026-10-17,q OpSet：四组热路径算子进 trait（DefaultOps 零成本包装），模型泛型化；应与 bench28 零差异,c8,ttft_p50_ms,14.074,27.372,0.514,-72.8,lower
+bench29,2026-10-17,q OpSet：四组热路径算子进 trait（DefaultOps 零成本包装），模型泛型化；应与 bench28 零差异,c8,tpot_p50_ms,2.464,2.538,0.971,0.0,lower
+bench29,2026-10-17,q OpSet：四组热路径算子进 trait（DefaultOps 零成本包装），模型泛型化；应与 bench28 零差异,c32,out_tok_per_s,8815.009,8209.539,1.074,0.2,higher
+bench29,2026-10-17,q OpSet：四组热路径算子进 trait（DefaultOps 零成本包装），模型泛型化；应与 bench28 零差异,c32,ttft_p50_ms,23.142,77.036,0.300,0.4,lower
+bench29,2026-10-17,q OpSet：四组热路径算子进 trait（DefaultOps 零成本包装），模型泛型化；应与 bench28 零差异,c32,tpot_p50_ms,3.423,3.322,1.030,0.1,lower
+bench29,2026-10-17,q OpSet：四组热路径算子进 trait（DefaultOps 零成本包装），模型泛型化；应与 bench28 零差异,c8-long,out_tok_per_s,1910.900,1912.211,0.999,0.2,higher
+bench29,2026-10-17,q OpSet：四组热路径算子进 trait（DefaultOps 零成本包装），模型泛型化；应与 bench28 零差异,c8-long,ttft_p50_ms,34.332,54.155,0.634,0.8,lower
+bench29,2026-10-17,q OpSet：四组热路径算子进 trait（DefaultOps 零成本包装），模型泛型化；应与 bench28 零差异,c8-long,tpot_p50_ms,3.934,3.752,1.049,0.1,lower

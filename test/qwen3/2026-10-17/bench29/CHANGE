@@ -1,0 +1,1 @@
+q OpSet：四组热路径算子进 trait（DefaultOps 零成本包装），模型泛型化；应与 bench28 零差异
