@@ -15,5 +15,8 @@ for _ in $(seq 1 40); do used=$(nvidia-smi --query-gpu=memory.used --format=csv,
 tmux new-session -d -s dinfer -c "$PWD" "source $R/env.sh; RUST_LOG=info ./target/release/dinfer serve --model $R/models/qwen3-0.6b --host 0.0.0.0 --port $PORT --max-model-len 8192 --max-num-seqs 64 --max-num-batched-tokens $BUDGET --gpu-memory-utilization $UTIL --device $DEV $* 2>&1 | tee $R/bootstrap/serve.log"
 for _ in $(seq 1 120); do sleep 0.5; curl -s -m 2 "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1 && break; done
 curl -s -m 2 "http://127.0.0.1:$PORT/v1/models" >/dev/null || { echo "dinfer did not come up"; tail -5 $R/bootstrap/serve.log; exit 1; }
-echo "dinfer :$PORT ready (pid $(pgrep -f "dinfer serve .*--port $PORT" | head -1)); $(pgrep -fc "dinfer serve .*--port $PORT") serve process(es)"
+# 只数真正的二进制进程（排除 tmux / bash -c / tee 等包含同样字符串的包装进程）
+n_real=$(ps -eo args | grep -cE "^\./target/release/dinfer serve .*--port $PORT")
+echo "dinfer :$PORT ready; $n_real real serve process(es) (must be 1)"
+[ "$n_real" = 1 ] || { echo "WARNING: unexpected serve process count"; ps -eo pid,etimes,args | grep -E "^ *[0-9]+ +[0-9]+ +\./target/release/dinfer serve" | cut -c1-120; }
 sed "s/\x1b\[[0-9;]*m//g" $R/bootstrap/serve.log | grep -E "startup timing|num_blocks=" | sed -E "s/^.*INFO [a-z_0-9:]+ //" | cut -c1-160
