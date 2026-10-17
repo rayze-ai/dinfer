@@ -388,3 +388,10 @@
 - 解法：`Scheduler::schedule_waiting_only()`——跳过整个 running 循环；插队步永远只有新请求。
 - 如何避免：任何 "我以为 scheduler 不会排 X" 的假设都写成 scheduler 的显式 API，不靠隐含条件；对调度路径的改动要在 4090 压测（请求到达密集）下跑过，e2e 的节奏太稀。
 
+## 2026-10-17 插队步结果排队晚发 → scheduler 在不知道首 token 的情况下调度下一步，首 token 丢失
+
+- 现象：e2e `request_features` 的 stop-string 用例输出 `", 2, 3, …"`，首 token "1" 不见了；只在 CUT_IN=1 出现。
+- 根因：engine 把插队步的 MRO 放进 `sync_done` 队列等 n 结束后统一发布，但在那之前已经 `schedule()` 了 n+1。scheduler 的 `update_from_output(so_c)` 没跑，请求状态还是 "prefill 完、0 输出"，n+1 把它再排一次；之后两次 update 的 append 顺序与实际采样顺序不一致。
+- 解法：`schedule()` 之前必须把所有已完成步的 `update_from_output` 做掉；插队步 finish 后立刻 update + 推送，不排队。
+- 如何避免：engine 里 "调度" 和 "回填" 之间的不变式写成注释并断言：`schedule()` 调用点上 sync_done 必须为空。
+
