@@ -64,6 +64,8 @@ pub struct Scheduler {
     prefix_cache_hits: u64,
     /// host tier 拉回的块数（指标）。
     host_tier_fetched: u64,
+    /// scheduler 自行结束的请求（分不到块且无人可抢占）：engine 每步取走并推 Finished 事件。
+    force_finished: Vec<(RequestId, FinishReason)>,
 }
 
 impl Scheduler {
@@ -84,7 +86,13 @@ impl Scheduler {
             prefix_cache_queries: 0,
             prefix_cache_hits: 0,
             host_tier_fetched: 0,
+            force_finished: Vec::new(),
         }
+    }
+
+    /// 取走本步 scheduler 自行结束的请求（见 running 循环的不自抢占分支）。
+    pub fn take_force_finished(&mut self) -> Vec<(RequestId, FinishReason)> {
+        std::mem::take(&mut self.force_finished)
     }
 
     /// 启用 KV host tier（槽位数由调用方按 host_gib / bytes_per_block 算）。
@@ -135,6 +143,9 @@ impl Scheduler {
     }
     pub fn num_waiting(&self) -> usize {
         self.waiting.len()
+    }
+    pub fn num_free_blocks(&self) -> u32 {
+        self.kv.num_free_blocks()
     }
     pub fn kv_usage(&self) -> f32 {
         self.kv.usage()
@@ -237,19 +248,31 @@ impl Scheduler {
                 continue;
             }
 
-            // 分配；失败则抢占末尾 running。
+            // 分配；失败则抢占末尾 running。**不抢占自己**：若末尾就是本请求（它是唯一 / 最后一个 running）
+            // 且仍分不到块，说明池里没有别人能让 → 以 Length 结束它（否则它会被抢占→重排→再分不到→空步，
+            // 2026-10-17 host tier A/B 撞到的 livelock；vLLM 靠启动期 max_model_len ≤ 池容量校验避免，我们两个都做）。
             let new_blocks = loop {
                 let r = &self.slab[slot].as_ref().unwrap().req;
                 if let Some(b) = self.kv.allocate_slots(slot, r, num_new, 0, None, num_lookahead) {
                     break Some(b);
                 }
                 let victim = *self.running.last().unwrap();
+                if victim == slot {
+                    let rid = r.id;
+                    tracing::warn!(
+                        req = rid,
+                        tokens = r.num_tokens(),
+                        free_blocks = self.kv.num_free_blocks(),
+                        "request cannot get a KV block and nobody else to preempt: finishing with Length"
+                    );
+                    self.req_mut(slot).status = RequestStatus::Finished(FinishReason::Length);
+                    self.finish_slot(slot);
+                    self.force_finished.push((rid, FinishReason::Length));
+                    break None;
+                }
                 self.running.pop();
                 self.preempt(victim);
                 any_preempted = true;
-                if victim == slot {
-                    break None;
-                }
             };
             let Some(new_blocks) = new_blocks else { break };
 
@@ -820,5 +843,35 @@ mod tests {
         s.add_request(req(2, 20, 16));
         let (o, _) = step(&mut s, &[(1, vec![1]), (2, vec![])]);
         assert_eq!(o.num_scheduled_tokens, vec![(1, 1), (2, 8)], "decode 行免预算，prefill 拿到完整 8");
+    }
+
+    /// 显存压力下最后一个 running 请求分不到块时会抢占自己 → 本步空；下一步它从 waiting 重新 prefill。
+    /// 回归 2026-10-17 host tier A/B 撞到的 livelock：空步必须能推进（下一步 num_scheduled 非空），
+    /// 且被抢占请求的块真的回到了池里。
+    #[test]
+    fn self_preempt_under_pressure_makes_progress() {
+        // 池 4 块 × 16 = 64 token；一个 48-token prompt + 长输出：decode 到 65 token 时需要第 5 块
+        let mut s = mk(8, 1000, 4);
+        s.add_request(req(1, 48, 100));
+        let (o, _) = step(&mut s, &[(1, vec![1])]);
+        assert_eq!(o.num_scheduled_tokens, vec![(1, 48)]);
+        let mut empty_steps = 0;
+        let mut forced = Vec::new();
+        for _ in 0..40 {
+            let (o, _) = step(&mut s, &[(1, vec![1])]);
+            forced.extend(s.take_force_finished());
+            if o.num_scheduled_tokens.is_empty() {
+                empty_steps += 1;
+                assert!(empty_steps <= 1, "scheduler emits empty steps repeatedly (livelock)");
+            } else {
+                empty_steps = 0;
+            }
+            if s.request(1).is_none() {
+                break;
+            }
+        }
+        assert!(s.request(1).is_none(), "sole request that cannot grow must be finished, not spun");
+        assert_eq!(forced, vec![(1, FinishReason::Length)]);
+        assert_eq!(s.kv_usage(), 0.0, "its blocks must be freed");
     }
 }

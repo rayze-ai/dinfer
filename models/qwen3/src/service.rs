@@ -119,6 +119,16 @@ impl Qwen3Service {
             512 << 20, // cuBLAS workspace / 临时张量余量
         )?;
         let num_blocks = model.num_blocks() as u32;
+        // 单个请求最长要 max_model_len / block_size 块；池至少要装下 1 个最长请求 + 10% 余量，否则单请求会分不到块
+        // （vLLM 同样在启动期校验）。
+        let need = (opt.max_model_len as usize).div_ceil(opt.block_size as usize);
+        anyhow::ensure!(
+            need as f64 <= num_blocks as f64 * 0.9,
+            "KV pool too small: max_model_len {} needs {} blocks, pool has {} (need ≤ 90%); lower --max-model-len or raise --num-blocks / --gpu-memory-utilization",
+            opt.max_model_len,
+            need,
+            num_blocks
+        );
         s.synchronize()?;
         let t_model = t_start.elapsed();
         let max_blocks_per_seq = (opt.max_model_len as usize).div_ceil(opt.block_size as usize);

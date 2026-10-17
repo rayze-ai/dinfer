@@ -81,6 +81,8 @@ pub struct Engine<E: ModelExecutor> {
     cut_in: bool,
     cut_in_max_rows: usize,
     cut_in_steps: u64,
+    /// 连续空步计数（退避 + 诊断）。
+    empty_steps: u64,
     /// 已同步完成、等着 update 的一步（异步步之后紧跟的 prefill 步）。
     sync_done: std::collections::VecDeque<(crate::sched::output::SchedulerOutput, crate::sched::output::ModelRunnerOutput, std::time::Instant, std::time::Instant)>,
     runner: Runner<E>,
@@ -103,6 +105,7 @@ impl<E: ModelExecutor> Engine<E> {
                 cut_in: async_sched && std::env::var("CUT_IN").map(|v| v != "0").unwrap_or(true),
                 cut_in_max_rows: std::env::var("CUT_IN_MAX_ROWS").ok().and_then(|v| v.parse().ok()).unwrap_or(8),
                 cut_in_steps: 0,
+                empty_steps: 0,
                 pending: None,
                 sync_done: std::collections::VecDeque::new(),
                 runner,
@@ -127,6 +130,12 @@ impl<E: ModelExecutor> Engine<E> {
         t_exec: std::time::Instant,
     ) {
         let results = self.sched.update_from_output(so, mro);
+        // scheduler 自行结束的请求（分不到块且无人可抢占）：推 Finished 并清理
+        for (rid, f) in self.sched.take_force_finished() {
+            if let Some(tx) = self.outs.remove(&rid) {
+                let _ = tx.send(EngineEvent::Finished(f));
+            }
+        }
         self.metrics.step_schedule.observe((t_sched - t_step).as_secs_f64());
         self.metrics.step_execute.observe((t_exec - t_sched).as_secs_f64());
         self.record_step(so, &results, t_step);
@@ -254,7 +263,12 @@ impl<E: ModelExecutor> Engine<E> {
                     // 产出的 step 只含新请求），同步跑完，结果排进 sync_done。新请求首 token 提前一步。
                     // 负载门槛：在飞步行数 ≤ CUT_IN_MAX_ROWS（默认 8）才插队——大 batch 下把 prefill 打散成多个独占步
                     // 反而伤 c32 TTFT / 长序列 TPOT（bench27）；小 batch（低负载）时省一步最值
-                    if self.cut_in && self.sched.num_waiting() > 0 && so_n.num_scheduled_tokens.len() <= self.cut_in_max_rows {
+                    // 池里没空闲块时不插队（分不到块的 schedule 只会产出空步；livelock 2026-10-17）
+                    if self.cut_in
+                        && self.sched.num_waiting() > 0
+                        && self.sched.num_free_blocks() > 0
+                        && so_n.num_scheduled_tokens.len() <= self.cut_in_max_rows
+                    {
                         let t_step = std::time::Instant::now();
                         let so_c = self.sched.schedule_waiting_only();
                         let t_sched = std::time::Instant::now();
@@ -321,6 +335,22 @@ impl<E: ModelExecutor> Engine<E> {
                 },
             };
             self.publish_step(&so, &mro, t_step, t_sched, t_exec);
+            // 空步退避：有请求却一个都排不进（块不够、全部在飞）时不要满转 CPU；短暂让出等 GPU / 释放
+            if so.num_scheduled_tokens.is_empty() && self.sched.has_requests() {
+                self.empty_steps += 1;
+                if self.empty_steps % 1000 == 1 {
+                    tracing::warn!(
+                        empty_steps = self.empty_steps,
+                        running = self.sched.num_running(),
+                        waiting = self.sched.num_waiting(),
+                        free_blocks = self.sched.num_free_blocks(),
+                        "engine: empty step with requests present (backing off 200 µs)"
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_micros(200));
+            } else {
+                self.empty_steps = 0;
+            }
         }
     }
 
