@@ -425,6 +425,7 @@ impl Qwen3Model {
         wall("rope");
         // 激活 scratch 先分配，KV 最后：这样 free 已含权重 + scratch 的占用
         let t_sync = std::time::Instant::now();
+        stream.staged_finish()?; // pinned staging 的 DMA 全部落地
         stream.synchronize()?; // 权重 H2D 全部入队后同步一次（load_bf16 不再逐张量同步）
         let weights_sync_ms = t_sync.elapsed().as_millis() as u64;
         let ls = dinfer_layers::take_load_stats();
