@@ -9,7 +9,9 @@ cd "$(dirname "$0")/../.."
 R=/data/yaochen/infer
 OUT="${1:-test/qwen3/$(date +%F)/stage}"; mkdir -p "$OUT"
 GPU="${STAGE_GPU:-3}"
-LOAD=(--concurrency 8 --num-requests 24 --prompt-len 256 --max-tokens 64 --warmup 2)
+# 负载可用 STAGE_LOAD 覆盖，如 STAGE_LOAD="--concurrency 32 --num-requests 128 --prompt-len 128 --max-tokens 128 --warmup 2"
+# shellcheck disable=SC2206
+LOAD=(${STAGE_LOAD:---concurrency 8 --num-requests 24 --prompt-len 256 --max-tokens 64 --warmup 2})
 BENCH=./target/release/bench; [ -x $BENCH ] || cargo build --release -p dinfer-bench
 source $R/env.sh
 
