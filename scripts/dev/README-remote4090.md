@@ -41,7 +41,7 @@ scripts/dev/remote4090.sh run 'cd /data/yaochen/infer/dinfer && bash scripts/ver
 ## 常驻服务（2026-10-16 起）
 
 - dinfer Qwen3-0.6B：tmux 会话 `dinfer`，GPU 0，`0.0.0.0:8012`，日志 `/data/yaochen/infer/bootstrap/serve.log`。启动命令见 tmux 窗口（`--max-model-len 8192 --max-num-seqs 64 --max-num-batched-tokens 2048`（2026-10-16 起与 vLLM 对齐，bench16），num_blocks 自动）。
-  重启：`tmux kill-session -t dinfer` 后按同样命令再起；代码更新后先 `remote4090.sh push` + 远端 `cargo build --features qwen3`。
+  重启：**只用 `bash scripts/dev/restart_dinfer.sh`**（`tmux kill-session` 杀不到 tee 管道里的 serve 子进程，2026-10-17 发现 :8012 上跑了 20 小时的旧进程；脚本按端口 pkill + 等显存释放 + 起新 + 等 ready）。代码更新后先 `remote4090.sh push` + 远端 `cargo build --release --features qwen3`。
 - **JumpServer 不放行任何端口转发**（2026-10-16 实测：`-L` 本地监听建立但连接被对端 reset，`-D` SOCKS 同样，`-W` 直接 `Session open refused by peer`）。所以本机不能直接 curl 到 8012；访问方式只有两种：① 在 4090 上 `scripts/dev/chat.sh`（或任何能到 10.121.192.98 内网的机器）；② `remote4090.sh run 'curl …'`。
 - 机器内网地址 10.121.192.98；端口 8012 是否对内网开放取决于机房策略（未验证）。服务**无鉴权**，不要暴露到公网。
 - vLLM 对照（Q3 基线，用户要求 Docker + 最新版）：`docker.m.daocloud.io/vllm/vllm-openai:v0.31.0`（PyPI / Docker Hub 最新 release，与 `/data/ref/vllm` `de8291e` 同版本；Docker Hub 直连不通、经代理 6 KB/s，daocloud 镜像站直连可拉，首次一次 502 重试即好；镜像 9 GB 落在 `/var/lib/docker`，docker 不支持按镜像指定目录），容器 `vllm-qwen3`，GPU 1，端口 8013，`--max-model-len 8192 --gpu-memory-utilization 0.9 --enable-prefix-caching`，模型目录只读挂 `/models`，`HF_HUB_OFFLINE=1`。启动 ~40 s，KV 181k token。脚本 `scripts/dev/vllm_docker.sh {pull,run,logs,smoke,stop}`。

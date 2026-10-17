@@ -13,10 +13,7 @@ BENCH=./target/release/bench; [ -x "$BENCH" ] || cargo build --release -p dinfer
 R=/data/yaochen/infer
 V="${VLLM_URL:-http://127.0.0.1:8013}"
 restart_dinfer() { # $1 = XSTREAM value
-  tmux kill-session -t dinfer 2>/dev/null || true; sleep 2
-  tmux new-session -d -s dinfer -c "$PWD" "source $R/env.sh; XSTREAM=$1 RUST_LOG=info ./target/release/dinfer serve --model $R/models/qwen3-0.6b --host 0.0.0.0 --port 8012 --max-model-len 8192 --max-num-seqs 64 --max-num-batched-tokens 2048 --gpu-memory-utilization 0.9 --device 0 2>&1 | tee $R/bootstrap/serve.log"
-  for _ in $(seq 1 120); do sleep 0.5; curl -s -m 2 http://127.0.0.1:8012/v1/models >/dev/null 2>&1 && return 0; done
-  echo "dinfer did not come up"; exit 1
+  XSTREAM=$1 bash scripts/dev/restart_dinfer.sh >/dev/null
 }
 run() { # side url rate
   local side=$1 url=$2 rate=$3
