@@ -56,3 +56,40 @@ fn kv_pack_heads_roundtrip() {
     assert!(back0[1 * per_layer..2 * per_layer].iter().all(|&x| x == 0));
     host.clear();
 }
+
+/// `Stream::copy2d`（PD 异构 tp 的 rank 列拷贝）：两个"rank"各把紧凑行写进 pinned canonical（pitch = 2 × 行宽）的自己列，
+/// 再各自读回，逐字节相同；且 host 侧 pitch 行的两列互不覆盖。
+#[test]
+#[ignore]
+fn copy2d_pinned_rank_columns() {
+    use dinfer_kernels::PinnedPool;
+    let dev = Device::new(0).unwrap();
+    let s = dev.default_stream();
+    let (width, height, world) = (4096usize, 9usize, 2usize);
+    let pitch = width * world;
+    let pool = PinnedPool::new(&s, 1, pitch * height).unwrap();
+    let mut buf = pool.take().unwrap();
+    buf.as_mut_cap().fill(0xEE);
+    let base = buf.ptr() as u64;
+    let srcs: Vec<Vec<u8>> = (0..world).map(|r| (0..width * height).map(|i| ((i + r * 97) % 253) as u8).collect()).collect();
+    let dsrcs: Vec<_> = srcs.iter().map(|v| s.htod_copy(v.clone()).unwrap()).collect();
+    for r in 0..world {
+        s.copy2d(base + (r * width) as u64, true, pitch, s.ptr(&dsrcs[r]), false, width, width, height).unwrap();
+    }
+    s.synchronize().unwrap();
+    let host = &buf.as_mut_cap()[..pitch * height];
+    for row in 0..height {
+        for r in 0..world {
+            let got = &host[row * pitch + r * width..row * pitch + (r + 1) * width];
+            assert_eq!(got, &srcs[r][row * width..(row + 1) * width], "row {row} rank {r}");
+        }
+    }
+    // 读回：每 rank 只读自己列到紧凑设备缓冲
+    for r in 0..world {
+        let mut d = s.alloc_zeros::<u8>(width * height).unwrap();
+        s.copy2d(s.ptr(&d), false, width, base + (r * width) as u64, true, pitch, width, height).unwrap();
+        let _ = &mut d;
+        let back = s.dtoh_sync_copy(&d).unwrap();
+        assert_eq!(back, srcs[r], "readback rank {r}");
+    }
+}

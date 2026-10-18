@@ -84,7 +84,7 @@ AB="$(dirname "$OUT")/${Q4_AB:-ab_pd1}"; mkdir -p "$AB"
 B=./target/release/bench
 $B --url http://127.0.0.1:8012 --concurrency 8 --num-requests 64 --prompt-len 1024 --max-tokens 128 --out "$AB/single__c8_p1024_o128.json" > "$AB/single.log" 2>&1 || { tail -3 "$AB/single.log"; exit 1; }
 $B --url http://127.0.0.1:8100 --concurrency 8 --num-requests 64 --prompt-len 1024 --max-tokens 128 --out "$AB/pd__c8_p1024_o128.json" > "$AB/pd.log" 2>&1 || { tail -3 "$AB/pd.log"; exit 1; }
-echo "PD ${Q4_VARIANT:-v2 (c) 首 token 先发} ${TRANSPORT} tp$TP：pd = proxy(:8100 → P GPU$GPU_P + D GPU$GPU_D) vs single = 单机 :8012，c8 (1024,128)" > "$AB/CHANGE"
+echo "PD ${Q4_VARIANT:-v2 (c) 首 token 先发} ${TRANSPORT} tpP$TP_P/tpD$TP_D：pd = proxy(:8100 → P GPU$GPU_P + D GPU$GPU_D) vs single = 单机 :8012，c8 (1024,128)" > "$AB/CHANGE"
 python3 - "$AB" <<'PY'
 import json, sys, os
 d = sys.argv[1]
