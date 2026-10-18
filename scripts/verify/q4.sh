@@ -8,6 +8,9 @@ cd "$(dirname "$0")/../.."
 OUT="${1:-test/qwen3/$(date +%F)/q4}"; mkdir -p "$OUT"
 step() { rm -f target/.rustc_info.json; printf '\n==> %s\n' "$*"; }
 MODEL="${QWEN3_DIR:-/data/ref/models/qwen3-0.6b}"
+# 共享机：GPU 0/1 常驻服务，测试一律钉在 Q4_GPU（默认 3）；本机单卡设 Q4_GPU=0
+GPU="${Q4_GPU:-3}"
+export CUDA_VISIBLE_DEVICES="$GPU"
 step "e2e_qwen3_pd (single + prefill + decode + proxy, same GPU)"
 QWEN3_DIR="$MODEL" QWEN3_GOLDEN="$(realpath -m test/qwen3_golden)" cargo test -p dinfer --features qwen3,e2e --test serve_e2e_qwen3 -- --ignored --test-threads=1 e2e_qwen3_pd </dev/null 2>&1 | tee "$OUT/e2e.log" | grep -E '^test |test result|panicked'
 grep -qE 'test result: ok\. 1 passed' "$OUT/e2e.log"
@@ -15,8 +18,7 @@ grep -qE 'test result: ok\. 1 passed' "$OUT/e2e.log"
 
 # ---------------- 4090 部分 ----------------
 BIN=./target/release/dinfer
-GPU="${Q4_GPU:-3}"
-COMMON=(--model "$MODEL" --host 0.0.0.0 --max-model-len 4096 --max-num-seqs 32 --max-num-batched-tokens 2048 --device 0)
+COMMON=(--model "$MODEL" --host 0.0.0.0 --max-model-len 4096 --max-num-seqs 32 --max-num-batched-tokens 2048 --device 0) # device 0 = CUDA_VISIBLE_DEVICES 里的第一张
 start_d() { CUDA_VISIBLE_DEVICES=$GPU RUST_LOG=info nohup $BIN serve "${COMMON[@]}" --port 8102 --role decode --kv-port 9102 > "$OUT/d.log" 2>&1 & echo $! > "$OUT/d.pid"; }
 start_p() { CUDA_VISIBLE_DEVICES=$GPU RUST_LOG=info nohup $BIN serve "${COMMON[@]}" --port 8101 --role prefill --peer 127.0.0.1:9102 > "$OUT/p.log" 2>&1 & echo $! > "$OUT/p.pid"; }
 start_x() { RUST_LOG=info nohup $BIN proxy --host 0.0.0.0 --port 8100 --prefill http://127.0.0.1:8101 --decode http://127.0.0.1:8102 > "$OUT/proxy.log" 2>&1 & echo $! > "$OUT/x.pid"; }
