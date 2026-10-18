@@ -15,7 +15,7 @@
 - 验证入口：`scripts/verify/remote4090_baseline.sh`（refs 22 + parity 8 + 单测 8 + e2e 6）；`scripts/verify/q3.sh`；本机 `scripts/verify/kernels.sh`；`cold_shape`（prefill / paged 四形状 / decode 微基准）。
 - 环境：本机 3090 nvcc 12.4；**cargo 假失败 `rm target/.rustc_info.json`**；远程 `git@github.com:rayze-ai/dinfer.git` 分支 `dev`。
 - 历史阶段 / 已知简化 / 对拍口径：git log、`docs/design.md` §4、`test/<model>/<日期>/*.md`、pitfalls。
-- 阻塞 / 待决策：`docs/design.md` §9。
+- 阻塞 / 待决策：`docs/design.md` §9；**整体功能待办路线图 `docs/design.md` §12**（2026-10-18 盘点，7 个模块）。
 
 <!-- ===== 日志：按日期追加，不改旧条目 ===== -->
 

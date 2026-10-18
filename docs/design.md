@@ -540,3 +540,19 @@ pub struct DeviceBlockRef { pub layer: u8, pub block: BlockId, pub ptr: u64, pub
 | KV 分层 / 外置 | `KVConnectorBase_V1` 的事件点（scheduler 侧 get_num_new_matched_tokens / update_state_after_alloc；worker 侧 start_load / wait_for_save） | scheduler 直接下发 `kv_fetch/kv_offload` order（无 connector 对象层）；host 索引 LRU；executor pinned 竞技场 + copy stream；**搬运用 pack/unpack kernel + 每块一次拷贝**（第一版每块 28 次小拷贝 TPOT +0.5 ms）；PD / Remote 复用同一 order 形态 | host 层已实现（`--kv-host-gib`，默认关），e2e 过；真挤出 A/B：命中 8840 块、抢占 -50%，但吞吐 -5%（fetch 同步 + offload 占 GPU 抵消了 5% 的额外命中）；留 低水位 offload / 异步 fetch 两项优化 |
 | 跨流 prefill/decode 并行 | 无（vLLM 单流） | 实现并证实真并行（nsys 39% 重叠） | 闭环 bench 下混批步 <5%，TPOT 无感；留给 prefill 比例高的负载 |
 
+
+## 12. 整体功能待办路线图（2026-10-18 盘点，不分模型）
+
+> 用户 2026-10-18 要求从整体功能角度总结剩余工作（不考虑 Kimi-K3 / GLM-5.3 的模型实现）。按模块列，状态以本文件与 `docs/progress.md` 为准；完成一项就在这里打勾。
+
+| # | 模块 | 待办 | 状态 / 依赖 |
+|---|---|---|---|
+| 1 | PD 分离（Q4，§10.3） | d. 跨卡重测（P GPU 3 / D GPU 2，q4.sh 加分卡参数）；b. NIXL / CUDA IPC 传输后端替代 TCP + host 中转；D 侧 unpack 移到 copy stream；多 P / 多 D 路由与健康探测 | v1 + v2 (a)(c) 完成；d 进行中 |
+| 2 | KV 分层 / 外置（§10.2） | PinnedHostTier 默认开（需 offload 低水位 + 异步 fetch 把 -5% 吞吐收回）；RemoteTier（Mooncake / LMCache / NIXL） | HostTier 已实现默认关；Remote 未开始 |
+| 3 | 算子插拔（§10.1） | 方案 B 外部 `.so`（FlashInfer 等）；方案 C PTX | 方案 A 泛型 OpSet 已完成 |
+| 4 | 服务可生产 | 优雅停机（SIGTERM 排空在飞请求）；API key 鉴权；限流 / 并发上限；多卡 TP（当前 `--device` 单卡，无 NCCL）；>8k 长上下文验证（服务预算 2048、bench 最长 1024）；`/metrics` 指标名是否对齐 vLLM（§9-4） | 全部未开始；多卡依赖 §9-1 目标机器 |
+| 5 | API 完整度 | `/v1/completions`、`/v1/embeddings`；structured output（`response_format` / JSON schema / grammar，§9-3 待决策）；`tool_choice` 强制；`logit_bias`；投机解码（MTP / n-gram）从 GLM 线抽到通用层；量化（fp8 KV / int8 / AWQ） | 仅 `/v1/chat/completions`（流式 / 非流式 / reasoning / tool_calls / logprobs / n / stop）|
+| 6 | 单卡性能（Q3 已收口） | 逐层 megakernel（用户 2026-10-18 决定暂不做）；lm_head f32 直出 / silu·mul epilogue（依赖自写 GEMM）；开环 24 req/s TPOT 落后 vLLM 7% | 四组吞吐 ≥ vLLM、TTFT 领先 2–4×、启动 0.6 s |
+| 7 | 待用户决策（§9） | 目标生产机器（卡型 / 卡数 / 单机多机）；structured output 是否在范围；对比基线配置（vLLM 开 MTP / EP / FP8 KV？） | 阻塞 #4 多卡与 #5 部分项 |
+
+建议顺序：① #1 d → b 收口 PD；② #4 可生产四件（停机 / 鉴权 / 限流最小，多卡 TP 最大）；③ #5 API 补齐（completions、structured output）；④ #2 RemoteTier；⑤ 量化 / megakernel 等到生产级模型再做。
