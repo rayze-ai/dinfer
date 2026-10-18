@@ -629,7 +629,7 @@ pub struct DeviceBlockRef { pub layer: u8, pub block: BlockId, pub ptr: u64, pub
 - **约束**：P 与 D 的 tp **可以不同**（`model_tag` = `qwen3:L{层}:bs{块}:kvh{全局头}:hd{D}:bf16`，不含 tp；两侧 canonical 单元字节相等即可）；**cuda-ipc 不可用**（区是 rank 0 那张卡的设备内存，其它 rank 无 P2P 读不到；service 启动时拒绝，`pd_map_region` 兜底再拒一次）；非 0 rank `enable_pd(0, world)` 只建 staging + copy stream，不建 pinned 池。
 - **调用序**：PD 调用走与 `Step` 同一条 rank 消息队列（`Msg::Call` 闭包），所以每 rank 上导出排在上一步 forward 之后、下一步之前，与 rank 0 的流序一致；槽 / 缓冲由 `Arc` 保活到最后一个 rank 的 copy stream 读完（`pd_push_inflight` 各 rank 一份 clone）。
 - **4090 实测（2026-10-18 晚，loop q5 第 4–5 轮）**：P GPU 3,4 / D GPU 5,6 各 `--tp 2`，tcp 与 shm 两轮 e2e + 三故障 + 流式全 PASS，输出与单机逐字同；c8 (1024,128) TPOT **3.30 / 2.75 ms（单机 3.53）**，TTFT **616 / 795 ms**（单卡 PD 58）。TTFT 退化全在 P 自身：TP prefill 每步 56 次 all-reduce × 4 MB 走 NCCL SHM ≈ 11 ms/步（plain tp2 无 PD 的 c8-long TTFT 同样 231 vs 39），不是 PD 开销。**部署口径：无 P2P 机器上 P 不要开 TP（P 单卡 / D 多卡要异构 tp，见下）；有 NVLink 的机器再评。**
-- 异构 tp（P tp1 → D tp2，无 P2P 机器上 P 不开 TP 保 TTFT、D 开 TP 降 TPOT 的实际需求）：上面 canonical 布局已覆盖，q4.sh `Q4_TP_P / Q4_TP_D`；4090 验证见 loop q5 第 6 轮。DCP 留 T4。
+- 异构 tp（P tp1 → D tp2，无 P2P 机器上 P 不开 TP 保 TTFT、D 开 TP 降 TPOT 的实际需求）：上面 canonical 布局已覆盖，q4.sh `Q4_TP_P / Q4_TP_D`；**4090 实测（loop q5 第 6 轮）P GPU 3 tp1 → D GPU 5,6 tp2：tcp / shm e2e + 三故障全 PASS，TTFT 60 / 59 ms（同 tp2/tp2 时 616 / 795），TPOT 3.54 / 3.17（单机 3.56 / 3.52）** ⇒ 无 P2P 机器上 PD 推荐 P 单卡 + D TP。DCP 留 T4（head-major wire 布局可直接复用）。
 
 ### 13.6 分阶段
 

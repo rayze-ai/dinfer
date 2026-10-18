@@ -455,6 +455,16 @@ ab_pd1_tp2_shm:single,2026-10-18,"PD tp2 (P 3,4 / D 5,6) shm tp2：pd = proxy(:8
 ab_pd1_tp2_shm:single,2026-10-18,"PD tp2 (P 3,4 / D 5,6) shm tp2：pd = proxy(:8100 → P GPU3,4 + D GPU5,6) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,ttft_p99_ms,15.942,1038.553,0.015,,lower
 ab_pd1_tp2_shm:single,2026-10-18,"PD tp2 (P 3,4 / D 5,6) shm tp2：pd = proxy(:8100 → P GPU3,4 + D GPU5,6) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,tpot_p50_ms,3.528,2.752,1.282,,lower
 ab_pd1_tp2_shm:single,2026-10-18,"PD tp2 (P 3,4 / D 5,6) shm tp2：pd = proxy(:8100 → P GPU3,4 + D GPU5,6) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,failed,0.000,0.000,,,lower
+ab_pd1_tpP1D2:single,2026-10-18,"PD v2 (c) 首 token 先发 tcp tpP1/tpD2：pd = proxy(:8100 → P GPU3 + D GPU5,6) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,out_tok_per_s,2199.473,1937.708,1.135,,higher
+ab_pd1_tpP1D2:single,2026-10-18,"PD v2 (c) 首 token 先发 tcp tpP1/tpD2：pd = proxy(:8100 → P GPU3 + D GPU5,6) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,ttft_p50_ms,13.875,60.252,0.230,,lower
+ab_pd1_tpP1D2:single,2026-10-18,"PD v2 (c) 首 token 先发 tcp tpP1/tpD2：pd = proxy(:8100 → P GPU3 + D GPU5,6) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,ttft_p99_ms,21.128,117.251,0.180,,lower
+ab_pd1_tpP1D2:single,2026-10-18,"PD v2 (c) 首 token 先发 tcp tpP1/tpD2：pd = proxy(:8100 → P GPU3 + D GPU5,6) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,tpot_p50_ms,3.556,3.538,1.005,,lower
+ab_pd1_tpP1D2:single,2026-10-18,"PD v2 (c) 首 token 先发 tcp tpP1/tpD2：pd = proxy(:8100 → P GPU3 + D GPU5,6) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,failed,0.000,0.000,,,lower
+ab_pd1_tpP1D2_shm:single,2026-10-18,"PD v2 (c) 首 token 先发 shm tpP1/tpD2：pd = proxy(:8100 → P GPU3 + D GPU5,6) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,out_tok_per_s,2225.566,2150.408,1.035,,higher
+ab_pd1_tpP1D2_shm:single,2026-10-18,"PD v2 (c) 首 token 先发 shm tpP1/tpD2：pd = proxy(:8100 → P GPU3 + D GPU5,6) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,ttft_p50_ms,13.279,59.412,0.224,,lower
+ab_pd1_tpP1D2_shm:single,2026-10-18,"PD v2 (c) 首 token 先发 shm tpP1/tpD2：pd = proxy(:8100 → P GPU3 + D GPU5,6) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,ttft_p99_ms,19.162,117.106,0.164,,lower
+ab_pd1_tpP1D2_shm:single,2026-10-18,"PD v2 (c) 首 token 先发 shm tpP1/tpD2：pd = proxy(:8100 → P GPU3 + D GPU5,6) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,tpot_p50_ms,3.521,3.166,1.112,,lower
+ab_pd1_tpP1D2_shm:single,2026-10-18,"PD v2 (c) 首 token 先发 shm tpP1/tpD2：pd = proxy(:8100 → P GPU3 + D GPU5,6) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,failed,0.000,0.000,,,lower
 ab_pd1_v1:single,2026-10-18,"PD v1 TCP（同步导出/导入）：pd = proxy(:8100 → P GPU3 + D GPU3) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,out_tok_per_s,2206.867,1000.335,2.206,,higher
 ab_pd1_v1:single,2026-10-18,"PD v1 TCP（同步导出/导入）：pd = proxy(:8100 → P GPU3 + D GPU3) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,ttft_p50_ms,13.719,256.385,0.054,,lower
 ab_pd1_v1:single,2026-10-18,"PD v1 TCP（同步导出/导入）：pd = proxy(:8100 → P GPU3 + D GPU3) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,ttft_p99_ms,20.412,850.022,0.024,,lower
