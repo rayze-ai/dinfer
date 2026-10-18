@@ -394,13 +394,18 @@ ab_hosttier:tier16,2026-10-17,"host tier A/B（真挤出：num_blocks 512, c16 �
 ab_hosttier:tier16,2026-10-17,"host tier A/B（真挤出：num_blocks 512, c16 × 1024 前缀 repeat 0.5, out 128）：tier00 = 关，tier16 = 16 GiB pinned；含 tail≠sole 修复",c16_p1024_rep50_o128,ttft_p99_ms,578.718,639.924,0.904,,lower
 ab_hosttier:tier16,2026-10-17,"host tier A/B（真挤出：num_blocks 512, c16 × 1024 前缀 repeat 0.5, out 128）：tier00 = 关，tier16 = 16 GiB pinned；含 tail≠sole 修复",c16_p1024_rep50_o128,tpot_p50_ms,3.954,3.775,1.047,,lower
 ab_hosttier:tier16,2026-10-17,"host tier A/B（真挤出：num_blocks 512, c16 × 1024 前缀 repeat 0.5, out 128）：tier00 = 关，tier16 = 16 GiB pinned；含 tail≠sole 修复",c16_p1024_rep50_o128,failed,0.000,0.000,,,lower
-ab_pd1:single,2026-10-18,"PD v1 TCP：pd = proxy(:8100 → P GPU3 + D GPU3) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,out_tok_per_s,2225.995,1479.560,1.504,,higher
-ab_pd1:single,2026-10-18,"PD v1 TCP：pd = proxy(:8100 → P GPU3 + D GPU3) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,ttft_p50_ms,13.248,96.700,0.137,,lower
-ab_pd1:single,2026-10-18,"PD v1 TCP：pd = proxy(:8100 → P GPU3 + D GPU3) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,ttft_p99_ms,18.704,422.816,0.044,,lower
-ab_pd1:single,2026-10-18,"PD v1 TCP：pd = proxy(:8100 → P GPU3 + D GPU3) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,tpot_p50_ms,3.510,4.428,0.793,,lower
-ab_pd1:single,2026-10-18,"PD v1 TCP：pd = proxy(:8100 → P GPU3 + D GPU3) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,failed,0.000,0.000,,,lower
-ab_pd1_v1:single,2026-10-18,"PD v1 TCP：pd = proxy(:8100 → P GPU3 + D GPU3) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,out_tok_per_s,2206.867,1000.335,2.206,,higher
-ab_pd1_v1:single,2026-10-18,"PD v1 TCP：pd = proxy(:8100 → P GPU3 + D GPU3) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,ttft_p50_ms,13.719,256.385,0.054,,lower
-ab_pd1_v1:single,2026-10-18,"PD v1 TCP：pd = proxy(:8100 → P GPU3 + D GPU3) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,ttft_p99_ms,20.412,850.022,0.024,,lower
-ab_pd1_v1:single,2026-10-18,"PD v1 TCP：pd = proxy(:8100 → P GPU3 + D GPU3) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,tpot_p50_ms,3.554,5.474,0.649,,lower
-ab_pd1_v1:single,2026-10-18,"PD v1 TCP：pd = proxy(:8100 → P GPU3 + D GPU3) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,failed,0.000,0.000,,,lower
+ab_pd1:single,2026-10-18,"PD v2 (c) proxy 先发 P 首 chunk、D 在飞 + first_token 回退续写：pd = proxy(:8100 → P GPU3 + D GPU3) vs single :8012，c8 (1024,128)",c8_p1024_o128,out_tok_per_s,2221.912,1463.745,1.518,,higher
+ab_pd1:single,2026-10-18,"PD v2 (c) proxy 先发 P 首 chunk、D 在飞 + first_token 回退续写：pd = proxy(:8100 → P GPU3 + D GPU3) vs single :8012，c8 (1024,128)",c8_p1024_o128,ttft_p50_ms,13.156,67.251,0.196,,lower
+ab_pd1:single,2026-10-18,"PD v2 (c) proxy 先发 P 首 chunk、D 在飞 + first_token 回退续写：pd = proxy(:8100 → P GPU3 + D GPU3) vs single :8012，c8 (1024,128)",c8_p1024_o128,ttft_p99_ms,18.635,140.166,0.133,,lower
+ab_pd1:single,2026-10-18,"PD v2 (c) proxy 先发 P 首 chunk、D 在飞 + first_token 回退续写：pd = proxy(:8100 → P GPU3 + D GPU3) vs single :8012，c8 (1024,128)",c8_p1024_o128,tpot_p50_ms,3.527,4.724,0.747,,lower
+ab_pd1:single,2026-10-18,"PD v2 (c) proxy 先发 P 首 chunk、D 在飞 + first_token 回退续写：pd = proxy(:8100 → P GPU3 + D GPU3) vs single :8012，c8 (1024,128)",c8_p1024_o128,failed,0.000,0.000,,,lower
+ab_pd1_v1:single,2026-10-18,"PD v1 TCP（同步导出/导入）：pd = proxy(:8100 → P GPU3 + D GPU3) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,out_tok_per_s,2206.867,1000.335,2.206,,higher
+ab_pd1_v1:single,2026-10-18,"PD v1 TCP（同步导出/导入）：pd = proxy(:8100 → P GPU3 + D GPU3) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,ttft_p50_ms,13.719,256.385,0.054,,lower
+ab_pd1_v1:single,2026-10-18,"PD v1 TCP（同步导出/导入）：pd = proxy(:8100 → P GPU3 + D GPU3) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,ttft_p99_ms,20.412,850.022,0.024,,lower
+ab_pd1_v1:single,2026-10-18,"PD v1 TCP（同步导出/导入）：pd = proxy(:8100 → P GPU3 + D GPU3) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,tpot_p50_ms,3.554,5.474,0.649,,lower
+ab_pd1_v1:single,2026-10-18,"PD v1 TCP（同步导出/导入）：pd = proxy(:8100 → P GPU3 + D GPU3) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,failed,0.000,0.000,,,lower
+ab_pd1_v2a:single,2026-10-18,"PD v2 (a) 异步导出/导入（copy stream + pinned 池）：pd = proxy(:8100 → P GPU3 + D GPU3) vs single :8012，c8 (1024,128)",c8_p1024_o128,out_tok_per_s,2225.995,1479.560,1.504,,higher
+ab_pd1_v2a:single,2026-10-18,"PD v2 (a) 异步导出/导入（copy stream + pinned 池）：pd = proxy(:8100 → P GPU3 + D GPU3) vs single :8012，c8 (1024,128)",c8_p1024_o128,ttft_p50_ms,13.248,96.700,0.137,,lower
+ab_pd1_v2a:single,2026-10-18,"PD v2 (a) 异步导出/导入（copy stream + pinned 池）：pd = proxy(:8100 → P GPU3 + D GPU3) vs single :8012，c8 (1024,128)",c8_p1024_o128,ttft_p99_ms,18.704,422.816,0.044,,lower
+ab_pd1_v2a:single,2026-10-18,"PD v2 (a) 异步导出/导入（copy stream + pinned 池）：pd = proxy(:8100 → P GPU3 + D GPU3) vs single :8012，c8 (1024,128)",c8_p1024_o128,tpot_p50_ms,3.510,4.428,0.793,,lower
+ab_pd1_v2a:single,2026-10-18,"PD v2 (a) 异步导出/导入（copy stream + pinned 池）：pd = proxy(:8100 → P GPU3 + D GPU3) vs single :8012，c8 (1024,128)",c8_p1024_o128,failed,0.000,0.000,,,lower

@@ -1,0 +1,1 @@
+PD v2 (c) proxy 先发 P 首 chunk、D 在飞 + first_token 回退续写：pd = proxy(:8100 → P GPU3 + D GPU3) vs single :8012，c8 (1024,128)
