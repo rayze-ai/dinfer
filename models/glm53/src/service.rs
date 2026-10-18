@@ -267,9 +267,10 @@ impl ChatBackend for Glm53Service {
         &self,
         prompt_ids: Vec<u32>,
         sampling: SamplingParams,
+        pd: Option<dinfer_core::engine::PdSubmit>,
     ) -> (RequestId, tokio::sync::mpsc::UnboundedReceiver<EngineEvent>) {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let id = self.handle.submit(Submission { prompt_ids, sampling, tx, pd: None });
+        let id = self.handle.submit(Submission { prompt_ids, sampling, tx, pd });
         (id, rx)
     }
     fn abort(&self, id: RequestId) {

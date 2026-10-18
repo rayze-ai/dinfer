@@ -491,6 +491,25 @@ impl HostArena {
         // SAFETY: 范围已校验。
         Ok(unsafe { self.base.add(slot * self.slot_bytes + off) })
     }
+    pub fn slot_bytes(&self) -> usize {
+        self.slot_bytes
+    }
+    /// 只读访问一个槽（CPU 侧拷出 / 发网络）。调用方保证该槽上没有在飞的异步 D2H（先 synchronize）。
+    pub fn slot(&self, slot: usize) -> Result<&[u8]> {
+        let p = self.addr(slot, 0, self.slot_bytes)?;
+        // SAFETY: 范围已校验；&self 排除 slot_mut 并发。
+        Ok(unsafe { std::slice::from_raw_parts(p, self.slot_bytes) })
+    }
+    /// 可写访问一个槽（CPU 侧填入后再 H2D）。调用方保证该槽上没有在飞的异步拷贝。
+    pub fn slot_mut(&mut self, slot: usize) -> Result<&mut [u8]> {
+        let p = self.addr(slot, 0, self.slot_bytes)?;
+        // SAFETY: 范围已校验；&mut self 独占。
+        Ok(unsafe { std::slice::from_raw_parts_mut(p, self.slot_bytes) })
+    }
+    /// 整块 pinned 区 (基址, 字节数)：NIXL / RDMA 后端 `register_mem` 用，一次注册、按槽偏移发描述符。
+    pub fn region(&self) -> (*mut u8, usize) {
+        (self.base, self.slot_bytes * self.num_slots)
+    }
 }
 impl Drop for HostArena {
     fn drop(&mut self) {

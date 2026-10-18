@@ -14,7 +14,7 @@ use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use dinfer_core::engine::EngineEvent;
+use dinfer_core::engine::{EngineEvent, PdSubmit};
 use dinfer_core::request::RequestId;
 use dinfer_core::sample::SamplingParams;
 use dinfer_core::sampler::TokenLogprobs;
@@ -143,6 +143,7 @@ fn submit_choices(
     prompt_ids: &[u32],
     sp: &SamplingParams,
     n: u32,
+    pd: Option<PdSubmit>,
 ) -> (Merged, Vec<ChoiceState>, AbortGuard) {
     let (mtx, merged) = tokio::sync::mpsc::unbounded_channel::<(u32, EngineEvent)>();
     let mut states = Vec::with_capacity(n as usize);
@@ -152,7 +153,7 @@ fn submit_choices(
         if let Some(seed) = sp.seed {
             spi.seed = Some(seed.wrapping_add(i as u64)); // n 个 choice 不同种子；无 seed 时引擎各自随机
         }
-        let (rid, mut rx) = be.submit(prompt_ids.to_vec(), spi);
+        let (rid, mut rx) = be.submit(prompt_ids.to_vec(), spi, pd.clone());
         let mtx = mtx.clone();
         tokio::spawn(async move {
             while let Some(ev) = rx.recv().await {
@@ -283,7 +284,25 @@ pub async fn chat_completions(State(be): State<Backend>, Json(req): Json<ChatCom
     let created = now_secs();
     let return_ids = req.return_token_ids.unwrap_or(false);
     let want_lp = sp.logprobs.is_some();
-    let (mut merged, mut states, mut guard) = submit_choices(&be, &prompt.ids, &sp, n);
+    // PD 分离：P 侧强制 max_tokens=1（只出首 token）且 n=1；D 侧按 remote id 配对。
+    let pd = match req.kv_transfer_params.as_ref() {
+        Some(k) if k.do_remote_decode => Some(PdSubmit::Export),
+        Some(k) if k.do_remote_prefill => match k.remote_request_id {
+            Some(r) => Some(PdSubmit::Import { remote_id: r }),
+            None => return err(StatusCode::BAD_REQUEST, "kv_transfer_params.remote_request_id required for do_remote_prefill"),
+        },
+        _ => None,
+    };
+    let mut sp = sp;
+    if matches!(pd, Some(PdSubmit::Export)) {
+        if n != 1 {
+            return err(StatusCode::BAD_REQUEST, "PD prefill side requires n=1");
+        }
+        sp.max_tokens = 1;
+    }
+    let (mut merged, mut states, mut guard) = submit_choices(&be, &prompt.ids, &sp, n, pd);
+    // P 侧把引擎 request id 回给 proxy（响应头），proxy 再发 D
+    let pd_rid: Option<RequestId> = states.first().map(|s| s.rid);
 
     if req.stream {
         let include_usage = req.stream_options.as_ref().is_some_and(|o| o.include_usage);
@@ -327,7 +346,9 @@ pub async fn chat_completions(State(be): State<Backend>, Json(req): Json<ChatCom
             let _ = tx.send(Event::default().data("[DONE]"));
             // guard 在这里 drop：未完成的 choice（客户端断开）全部 abort
         });
-        return Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
+        let mut resp = Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
+        pd_header(&mut resp, pd_rid);
+        return resp;
     }
 
     // 非流式：聚合
@@ -379,7 +400,18 @@ pub async fn chat_completions(State(be): State<Backend>, Json(req): Json<ChatCom
         prompt_token_ids: return_ids.then_some(prompt.ids),
         token_ids,
     };
-    Json(resp).into_response()
+    let mut r = Json(resp).into_response();
+    pd_header(&mut r, pd_rid);
+    r
+}
+
+/// P 侧：把引擎 request id 放进 `x-pd-request-id`，proxy 读它转给 D。
+fn pd_header(resp: &mut Response, rid: Option<RequestId>) {
+    if let Some(r) = rid {
+        if let Ok(v) = axum::http::HeaderValue::from_str(&r.to_string()) {
+            resp.headers_mut().insert("x-pd-request-id", v);
+        }
+    }
 }
 
 #[derive(Default)]

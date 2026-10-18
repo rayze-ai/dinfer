@@ -61,6 +61,7 @@ pub trait ChatBackend: Send + Sync + 'static {
         &self,
         prompt_ids: Vec<u32>,
         sampling: SamplingParams,
+        pd: Option<dinfer_core::engine::PdSubmit>,
     ) -> (RequestId, tokio::sync::mpsc::UnboundedReceiver<EngineEvent>);
     /// 取消请求（stop 字符串命中 / 客户端断开）：引擎释放 KV 并回 `Finished(Abort)`。
     fn abort(&self, id: RequestId);

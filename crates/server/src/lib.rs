@@ -8,6 +8,7 @@
 pub mod backend;
 pub mod chat;
 pub mod openai;
+pub mod proxy;
 
 use axum::extract::State;
 use axum::routing::{get, post};

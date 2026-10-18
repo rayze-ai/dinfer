@@ -68,6 +68,11 @@ pub struct ChatCompletionRequest {
     /// 返回 token id 列表（调试）。
     #[serde(default)]
     pub return_token_ids: Option<bool>,
+    /// PD 分离（design §10.3，字段名对齐 vLLM disagg proxy）：proxy 内部使用，普通客户端不传。
+    /// `{"do_remote_decode": true}` → 本实例是 P：只出首 token、导出 KV；响应头 `x-pd-request-id` 回传 P 侧 id。
+    /// `{"do_remote_prefill": true, "remote_request_id": N}` → 本实例是 D：按 N 配对已到的 KV 接力。
+    #[serde(default)]
+    pub kv_transfer_params: Option<KvTransferParams>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -226,4 +231,14 @@ pub fn new_id(prefix: &str) -> String {
     static N: AtomicU64 = AtomicU64::new(1);
     let n = N.fetch_add(1, Ordering::Relaxed);
     format!("{prefix}-{:x}{:04x}", now_secs(), n & 0xffff)
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct KvTransferParams {
+    #[serde(default)]
+    pub do_remote_decode: bool,
+    #[serde(default)]
+    pub do_remote_prefill: bool,
+    #[serde(default)]
+    pub remote_request_id: Option<u64>,
 }

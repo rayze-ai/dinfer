@@ -229,8 +229,14 @@ impl<E: ModelExecutor> Engine<E> {
             self.metrics.pd_export_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if let Some(t) = pd.transport.clone() {
                 std::thread::Builder::new().name("pd-send".into()).spawn(move || {
-                    if let Err(e) = t.send(&header, &payload) {
-                        tracing::warn!(id = header.request_id, error = %e, "pd: send failed");
+                    // payload 归本线程所有，发完才 drop；NIXL 后端 poll 到 Done 为止。
+                    match t.send(&header, crate::pd::MemDesc::of(&payload)) {
+                        Ok(mut x) => {
+                            while matches!(x.poll(), Ok(crate::pd::TransferState::InFlight)) {
+                                std::thread::sleep(std::time::Duration::from_micros(50));
+                            }
+                        }
+                        Err(e) => tracing::warn!(id = header.request_id, error = %e, "pd: send failed"),
                     }
                 })?;
             }

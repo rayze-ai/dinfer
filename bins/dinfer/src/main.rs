@@ -56,6 +56,18 @@ enum Cmd {
         /// KV host tier：用这么多 GiB 的 pinned 主机内存做 prefix cache 的第二层（0 = 关）
         #[arg(long, default_value_t = 0.0)]
         kv_host_gib: f64,
+        /// PD 分离角色：single（默认）| prefill | decode
+        #[arg(long, default_value = "single")]
+        role: String,
+        /// PD：本实例收 KV 的端口（decode 必填；0 = 不监听）
+        #[arg(long, default_value_t = 0)]
+        kv_port: u16,
+        /// PD prefill 侧：对端 decode 的 host:kv_port
+        #[arg(long)]
+        peer: Option<String>,
+        /// PD decode 侧：等 KV 超时（ms），超时本地重算 prefill
+        #[arg(long, default_value_t = 2000)]
+        pd_wait_ms: u64,
         /// 关闭 decode CUDA graph（默认开；qwen3）
         #[arg(long, default_value_t = false)]
         no_cuda_graph: bool,
@@ -64,6 +76,20 @@ enum Cmd {
         /// 开启 MTP 投机解码（nextn=1）
         #[arg(long, default_value_t = false)]
         mtp: bool,
+    },
+    /// PD 分离入口（design §10.3）：收 OpenAI 请求 → 打 prefill 实例出首 token + 导出 KV → 打 decode 实例接力。
+    /// 任一侧失败退化为 decode 实例单机跑（不丢请求）。无鉴权。
+    Proxy {
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        #[arg(long, default_value_t = 8100)]
+        port: u16,
+        /// prefill 实例 base URL，如 http://127.0.0.1:8101
+        #[arg(long)]
+        prefill: String,
+        /// decode 实例 base URL，如 http://127.0.0.1:8102
+        #[arg(long)]
+        decode: String,
     },
     /// 打印 CUDA 设备信息
     DeviceInfo {
@@ -116,6 +142,10 @@ async fn main() -> Result<()> {
 
 
             kv_host_gib,
+            role,
+            kv_port,
+            peer,
+            pd_wait_ms,
             no_cuda_graph,
             device,
             mtp,
@@ -147,7 +177,7 @@ async fn main() -> Result<()> {
             }
             #[cfg(feature = "qwen3")]
             {
-                let _ = mtp;
+                let _ = (mtp, &role, kv_port, &peer, pd_wait_ms);
                 let opt = dinfer_qwen3::service::ServeOptions {
                     model_dir: model,
                     tokenizer_dir: tokenizer,
@@ -161,6 +191,10 @@ async fn main() -> Result<()> {
                     enable_prefix_caching: !no_prefix_caching,
                     decode_exempt_from_budget: !no_decode_exempt,
                     kv_host_gib,
+                    role: role.parse().map_err(anyhow::Error::msg)?,
+                    kv_port,
+                    peer,
+                    pd_wait_ms,
                     enable_cuda_graph: !no_cuda_graph,
                     device,
                 };
@@ -192,6 +226,11 @@ async fn main() -> Result<()> {
                     "serve for model `{name}` is not implemented yet (build with --features glm53 or qwen3)"
                 );
             }
+        }
+        Cmd::Proxy { host, port, prefill, decode } => {
+            let addr = format!("{host}:{port}");
+            tracing::info!(%addr, %prefill, %decode, "dinfer PD proxy (no auth)");
+            dinfer_server::proxy::serve(&addr, prefill, decode).await?;
         }
         Cmd::DeviceInfo { ordinal } => {
             let dev = dinfer_layers::Device::new(ordinal)?;

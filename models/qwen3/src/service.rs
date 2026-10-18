@@ -7,6 +7,7 @@ use crate::model::Qwen3Model;
 use crate::parser::OutputParser;
 use anyhow::{Context, Result};
 use dinfer_core::config::{CacheConfig, SchedulerConfig};
+use dinfer_core::pd::KvTransport as _;
 use dinfer_core::engine::{self, EngineEvent, EngineHandle, Submission};
 use dinfer_core::kv::{GroupInfo, KvCacheSpec};
 use dinfer_core::request::RequestId;
@@ -18,6 +19,25 @@ use dinfer_server::backend::{ChatBackend, OutDelta, OutputStream, Prompt, Render
 use dinfer_text::{ChatTemplate, HfTokenizer, RenderParams};
 use std::path::Path;
 use std::sync::Arc;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PdRoleOpt {
+    #[default]
+    Single,
+    Prefill,
+    Decode,
+}
+impl std::str::FromStr for PdRoleOpt {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "single" => Ok(Self::Single),
+            "prefill" | "p" => Ok(Self::Prefill),
+            "decode" | "d" => Ok(Self::Decode),
+            o => Err(format!("role must be single|prefill|decode, got {o}")),
+        }
+    }
+}
 
 pub struct ServeOptions {
     pub model_dir: String,
@@ -36,6 +56,14 @@ pub struct ServeOptions {
     pub decode_exempt_from_budget: bool,
     /// KV host tier 容量（GiB pinned 内存）；0 = 关。
     pub kv_host_gib: f64,
+    /// PD 分离角色（design §10.3）：single / prefill / decode。
+    pub role: PdRoleOpt,
+    /// prefill / decode 都监听这个端口收 KV（decode 用；prefill 侧预留给 v2 回传）。0 = 不监听。
+    pub kv_port: u16,
+    /// prefill 侧：对端 decode 的 `host:kv_port`。
+    pub peer: Option<String>,
+    /// decode 侧：等 KV 最长多少 ms，超时本地重算。
+    pub pd_wait_ms: u64,
     /// 纯 decode 步用 CUDA graph（启动时按 batch 桶捕获；vLLM `cudagraph_mode=FULL_DECODE_ONLY` 对齐）。
     pub enable_cuda_graph: bool,
     pub device: usize,
@@ -56,6 +84,10 @@ impl Default for ServeOptions {
             enable_prefix_caching: true,
             decode_exempt_from_budget: true,
             kv_host_gib: 0.0,
+            role: PdRoleOpt::Single,
+            kv_port: 0,
+            peer: None,
+            pd_wait_ms: 2000,
             enable_cuda_graph: true,
             device: 0,
         }
@@ -136,6 +168,29 @@ impl Qwen3Service {
         let num_graphs = exec.num_graphs();
         let mut exec = exec;
         let host_slots = if opt.kv_host_gib > 0.0 { exec.enable_host_tier(opt.kv_host_gib)? } else { 0 };
+        // PD（design §10.3）：P/D 都需要 pack/unpack staging + pinned 中转槽；传输后端 v1 TCP（NIXL 后端换 transport 即可）。
+        let pd_state = if opt.role != PdRoleOpt::Single {
+            let (base, len) = exec.enable_pd()?;
+            let model_tag = format!("qwen3:{}:bs{}:bf16", cfg.num_hidden_layers, opt.block_size);
+            let incoming = Arc::new(dinfer_core::pd::IncomingKv::default());
+            if opt.kv_port > 0 {
+                let port = dinfer_core::pd::spawn_receiver(&format!("0.0.0.0:{}", opt.kv_port), model_tag.clone(), incoming.clone())?;
+                tracing::info!(port, role = ?opt.role, "pd: kv receiver listening");
+            }
+            let transport: Option<Arc<dyn dinfer_core::pd::KvTransport>> = match (opt.role, &opt.peer) {
+                (PdRoleOpt::Prefill, Some(peer)) => {
+                    let t = Arc::new(dinfer_core::pd::TcpTransport { addr: peer.clone(), connect_timeout: std::time::Duration::from_secs(2) });
+                    t.register(dinfer_core::pd::MemDesc { ptr: base, len })?;
+                    tracing::info!(peer = %peer, transport = t.name(), "pd: prefill side will push KV to peer");
+                    Some(t)
+                }
+                (PdRoleOpt::Prefill, None) => anyhow::bail!("--role prefill requires --peer host:kv_port"),
+                _ => None,
+            };
+            Some(dinfer_core::engine::PdState::new(incoming, transport, model_tag, std::time::Duration::from_millis(opt.pd_wait_ms)))
+        } else {
+            None
+        };
         let runner = Runner::new(exec, opt.block_size as usize);
         let t_join = std::time::Instant::now();
         let (tok, tmpl) = tok_thread.join().map_err(|_| anyhow::anyhow!("tokenizer thread panicked"))??;
@@ -181,7 +236,10 @@ impl Qwen3Service {
         if host_slots > 0 {
             sched.enable_host_tier(host_slots, Box::new(dinfer_core::kv::host_tier::FullAttentionPolicy));
         }
-        let (handle, jh) = engine::spawn(sched, runner);
+        let (handle, jh) = match pd_state {
+            Some(st) => engine::spawn_with_pd(sched, runner, st),
+            None => engine::spawn(sched, runner),
+        };
         tracing::info!(
             model = %served_name,
             max_model_len = opt.max_model_len,
@@ -325,9 +383,10 @@ impl ChatBackend for Qwen3Service {
         &self,
         prompt_ids: Vec<u32>,
         sampling: SamplingParams,
+        pd: Option<dinfer_core::engine::PdSubmit>,
     ) -> (RequestId, tokio::sync::mpsc::UnboundedReceiver<EngineEvent>) {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let id = self.handle.submit(Submission { prompt_ids, sampling, tx, pd: None });
+        let id = self.handle.submit(Submission { prompt_ids, sampling, tx, pd });
         (id, rx)
     }
     fn abort(&self, id: RequestId) {

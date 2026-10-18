@@ -640,16 +640,37 @@ impl Qwen3Executor {
     }
 
     /// 启用 KV host tier：`host_gib` 的 pinned 内存，按全层块大小切槽。返回槽位数（scheduler 索引容量）。
-    pub fn enable_host_tier(&mut self, host_gib: f64) -> Result<usize> {
+    /// 一个块（全部层）在 host 侧的字节数（host tier 槽大小 = PD 导出单元大小）。
+    pub fn kv_block_bytes_all_layers(&self) -> (usize, usize) {
         let cfg = &self.model.cfg;
         let bs = self.model.kv.first().map(|k| k.block_size).unwrap_or(16);
         let per_layer = bs * cfg.num_key_value_heads as usize * 2 * cfg.head_dim as usize * 2;
-        let layers = self.model.kv.len();
-        let per_block_all = per_layer * layers;
+        (per_layer, per_layer * self.model.kv.len())
+    }
+    /// PD 分离：保证有一套 pack/unpack staging + pinned 槽（`--role prefill/decode` 时即使 host tier 关也要）。
+    /// 已开 host tier 则直接复用其 arena；否则建 `HOST_TIER_CHUNK` 槽的小 arena（只做中转，不做 LRU 索引）。
+    /// 返回 pinned 区 (基址, 字节) 供 `KvTransport::register`。
+    pub fn enable_pd(&mut self) -> Result<(*mut u8, usize)> {
+        if self.host_tier.is_none() {
+            let (_, per_block_all) = self.kv_block_bytes_all_layers();
+            self.build_host_tier(HOST_TIER_CHUNK, per_block_all)?;
+            tracing::info!(slots = HOST_TIER_CHUNK, per_block_kib = per_block_all / 1024, "pd: staging arena built (host tier off)");
+        }
+        Ok(self.host_tier.as_ref().unwrap().arena.region())
+    }
+    pub fn enable_host_tier(&mut self, host_gib: f64) -> Result<usize> {
+        let (_, per_block_all) = self.kv_block_bytes_all_layers();
         let num_slots = ((host_gib * (1u64 << 30) as f64) as usize) / per_block_all;
         if num_slots == 0 {
             return Ok(0);
         }
+        self.build_host_tier(num_slots, per_block_all)?;
+        tracing::info!(num_slots, per_block_kib = per_block_all / 1024, host_gib, "kv host tier enabled");
+        Ok(num_slots)
+    }
+    fn build_host_tier(&mut self, num_slots: usize, per_block_all: usize) -> Result<()> {
+        let (per_layer, _) = self.kv_block_bytes_all_layers();
+        let layers = self.model.kv.len();
         let copy = self.stream.device().new_stream()?;
         let arena = HostArena::new(&self.stream, num_slots, per_block_all)?;
         let ptrs: Vec<u64> = self.model.kv.iter().map(|kv| self.stream.ptr(&kv.cache.data)).collect();
@@ -671,8 +692,7 @@ impl Qwen3Executor {
             staging_off,
             blocks_off,
         });
-        tracing::info!(num_slots, per_block_kib = per_block_all / 1024, host_gib, "kv host tier enabled");
-        Ok(num_slots)
+        Ok(())
     }
 
     /// 在副套上执行 `f`（进入前换入副套，结束后无论成败都换回主套）。
@@ -859,6 +879,71 @@ impl ModelExecutor for Qwen3Executor {
             }
         }
         ht.offload_done = Some(ht.copy.record_event()?);
+        Ok(())
+    }
+
+    // ---- PD 分离（design §10.3）：按位置导出 / 导入全部层 KV。复用 host tier 的 pack/unpack + staging + pinned 槽。
+    fn kv_unit_bytes(&self) -> usize {
+        if self.host_tier.is_none() {
+            return 0;
+        }
+        self.kv_block_bytes_all_layers().1
+    }
+    /// P 侧：主流同步。块已被 scheduler free 但未复用（engine 保证在任何 GPU 写之前调用）。
+    /// pack 到 staging → 每块 D2H 进 pinned 槽 i（i < chunk）→ synchronize → 从槽拷进 Vec。
+    /// v2（NIXL）：直接把 pinned 槽地址发出去（`HostArena::region` 已注册），不拷 Vec。
+    fn kv_export(&mut self, blocks: &dinfer_core::kv::KvBlocks) -> Result<Vec<u8>> {
+        let ht = self.host_tier.as_ref().context("pd: kv_export without staging (call enable_pd)")?;
+        if let Some(ev) = &ht.offload_done {
+            self.stream.wait_event(ev)?; // 槽可能正被 host tier offload 写
+        }
+        let layers = self.model.kv.len();
+        let per = ht.bytes_per_layer_block;
+        let per_all = per * layers;
+        let ids = blocks.group(0);
+        let mut out = Vec::with_capacity(ids.len() * per_all);
+        let ht = self.host_tier.as_mut().unwrap();
+        for chunk in ids.chunks(ht.chunk) {
+            let bids: Vec<i32> = chunk.iter().map(|&b| b as i32).collect();
+            self.stream.htod_into(&bids, &mut ht.blocks_buf.data)?;
+            k::kv_pack(&self.stream, &ht.layer_ptrs.data, &ht.blocks_buf.data, &mut ht.staging.data, chunk.len(), layers, per)?;
+            let base = self.stream.ptr(&ht.staging.data);
+            for i in 0..chunk.len() {
+                self.stream.dtoh_to_arena(&ht.arena, i, 0, base + (i * per_all) as u64, per_all)?;
+            }
+            self.stream.synchronize()?;
+            for i in 0..chunk.len() {
+                out.extend_from_slice(&ht.arena.slot(i)?[..per_all]);
+            }
+        }
+        Ok(out)
+    }
+    /// D 侧：payload 按位置填进 `blocks`（forward 前，主流同步）。槽 i 中转 → H2D 进 staging → unpack 散回各层。
+    fn kv_import(&mut self, blocks: &dinfer_core::kv::KvBlocks, payload: &[u8]) -> Result<()> {
+        let ht = self.host_tier.as_ref().context("pd: kv_import without staging (call enable_pd)")?;
+        if let Some(ev) = &ht.offload_done {
+            self.stream.wait_event(ev)?;
+        }
+        let layers = self.model.kv.len();
+        let per = ht.bytes_per_layer_block;
+        let per_all = per * layers;
+        let ids = blocks.group(0);
+        ensure!(payload.len() == ids.len() * per_all, "pd: payload {} != {} blocks × {per_all}", payload.len(), ids.len());
+        let ht = self.host_tier.as_mut().unwrap();
+        for (ci, chunk) in ids.chunks(ht.chunk).enumerate() {
+            let off0 = ci * ht.chunk * per_all;
+            for i in 0..chunk.len() {
+                ht.arena.slot_mut(i)?[..per_all].copy_from_slice(&payload[off0 + i * per_all..off0 + (i + 1) * per_all]);
+            }
+            let base = self.stream.ptr_mut(&mut ht.staging.data);
+            for i in 0..chunk.len() {
+                self.stream.htod_from_arena(&ht.arena, i, 0, base + (i * per_all) as u64, per_all)?;
+            }
+            let bids: Vec<i32> = chunk.iter().map(|&b| b as i32).collect();
+            self.stream.htod_into(&bids, &mut ht.blocks_buf.data)?;
+            k::kv_unpack(&self.stream, &ht.layer_ptrs.data, &ht.blocks_buf.data, &ht.staging.data, chunk.len(), layers, per)?;
+            self.stream.synchronize()?; // 槽随后被下一 chunk 复用
+        }
         Ok(())
     }
 
