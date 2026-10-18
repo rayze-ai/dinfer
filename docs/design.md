@@ -549,7 +549,7 @@ pub struct DeviceBlockRef { pub layer: u8, pub block: BlockId, pub ptr: u64, pub
 | KV 分层 / 外置 | `KVConnectorBase_V1` 的事件点（scheduler 侧 get_num_new_matched_tokens / update_state_after_alloc；worker 侧 start_load / wait_for_save） | scheduler 直接下发 `kv_fetch/kv_offload` order（无 connector 对象层）；host 索引 LRU；executor pinned 竞技场 + copy stream；**搬运用 pack/unpack kernel + 每块一次拷贝**（第一版每块 28 次小拷贝 TPOT +0.5 ms）；PD / Remote 复用同一 order 形态 | host 层已实现（`--kv-host-gib`，默认关），e2e 过；真挤出 A/B：命中 8840 块、抢占 -50%，但吞吐 -5%（fetch 同步 + offload 占 GPU 抵消了 5% 的额外命中）；留 低水位 offload / 异步 fetch 两项优化 |
 | 跨流 prefill/decode 并行 | 无（vLLM 单流） | 实现并证实真并行（nsys 39% 重叠） | 闭环 bench 下混批步 <5%，TPOT 无感；留给 prefill 比例高的负载 |
 | 2026-10-18 | 改进 | vLLM PD 用 NIXL（UCX / RDMA）搬 KV，同机也经 UCX；我们按机器事实分档：同卡 cuda-ipc D2D、跨卡无 P2P 走 shm pinned 共享区，P 直写 D 的槽 + credit 环，TCP 只传 header+槽号 | design §10.3 后端 b；不引入 NIXL C++ 依赖，接口形状保留 |
-
+| PD 异构 tp（2026-10-18） | vLLM NixlConnector / Mooncake 的"按 KV 头切片、P 与 D tp 可不同"思路 | 不走 connector 插件，wire 固定为 head-major canonical `[block][layer][kv_head][slot][K/V][D]`，pack kernel 顺手转置，各 rank `cuMemcpy2DAsync` 一次列拷贝即完成分片 / 重排，没有额外 gather kernel 与元数据协商 | 4090 P tp1 → D tp2：TTFT 616 → 60 ms，TPOT 3.17 < 单机；DCP 可复用同一布局 |
 
 ## 12. 整体功能待办路线图（2026-10-18 盘点，不分模型）
 
@@ -638,6 +638,7 @@ pub struct DeviceBlockRef { pub layer: u8, pub block: BlockId, pub ptr: u64, pub
 | ✅ T1（2026-10-18） | NCCL 封装 `kernels::comm`、权重分片 `load_bf16_shard`、Qwen3 TP（qkv/gate_up 行切、o_proj/down 列切、2 all-reduce/层）、`TpExecutor` 多线程 lockstep、`--tp` | 4090 `--tp 2` 与单卡 greedy 输出逐 token 一致；bench 记 CSV（预期慢于单卡，记原因） |
 | ✅ T2（2026-10-18） | `--dp N` + `DpBackend` 路由 | `--dp 2` c32 10001 tok/s ≈ 1.9× 单卡 |
 | ✅ T2b（2026-10-18 晚） | TP + PD：§13.7，`q4.sh Q4_TP=2 Q4_GPU_P=3,4 Q4_GPU_D=5,6` | e2e + 三故障 PASS（tcp / shm），CSV `ab_pd1_tp2*`：TPOT 2.75–3.30 < 单机，TTFT 受无 P2P TP prefill 拖累（非 PD） |
+| ✅ T2c（2026-10-18 深夜） | 异构 tp：wire 布局 canonical 按头 + `copy2d` 按 rank 列读写，`model_tag` 不含 tp；`q4.sh Q4_TP_P=1 Q4_TP_D=2` | P 单卡 → D tp2 tcp / shm 全 PASS，TTFT 60 ms（tp2/tp2 616），TPOT 3.17 < 单机 3.52 |
 | T3 | TP 下 CUDA graph 含 all-reduce；`fused_allreduce_rmsnorm`；lm_head 列切开关 | TPOT 开销 ≤ 单卡 + 56 × all-reduce |
 | T4 | DCP（Qwen3 先做，复用 split-K 归并） | 单请求 context 超单卡 KV 仍可跑 |
 | T5 | EP（GLM/K3 真权重到位后） + DP 波次同步 | 功能 |
