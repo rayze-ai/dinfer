@@ -1,0 +1,54 @@
+{
+  "label": "vllm",
+  "url": "http://127.0.0.1:8013",
+  "model": "qwen3-0.6b",
+  "concurrency": 8,
+  "num_requests": 32,
+  "completed": 32,
+  "failed": 0,
+  "duration_s": 2.159923306,
+  "prompt_len_target": 1024,
+  "prompt_tokens_mean": 1221.0,
+  "output_tokens_mean": 128.0,
+  "request_throughput_rps": 14.81534085544054,
+  "output_token_throughput_tps": 1896.3636294963892,
+  "total_token_throughput_tps": 19985.89481398929,
+  "ttft_ms": {
+    "mean": 65.378438875,
+    "p50": 67.934168,
+    "p90": 89.844745,
+    "p99": 94.61829300000001,
+    "max": 94.61829300000001
+  },
+  "tpot_ms": {
+    "mean": 3.7273213412893695,
+    "p50": 3.754268023622047,
+    "p90": 3.8939935354330713,
+    "p99": 3.917014125984252,
+    "max": 3.917014125984252
+  },
+  "itl_ms": {
+    "mean": 3.7260173501476364,
+    "p50": 3.590135,
+    "p90": 3.784593,
+    "p99": 13.264388,
+    "max": 17.342377
+  },
+  "latency_ms": {
+    "mean": 538.7482492187501,
+    "p50": 535.189841,
+    "p90": 544.9435040000001,
+    "p99": 560.261031,
+    "max": 560.261031
+  },
+  "args": {
+    "max_tokens": 128,
+    "temperature": 0.0,
+    "ignore_eos": true,
+    "seed": 1792309402,
+    "warmup": 2,
+    "request_rate": 0.0,
+    "prompt_len_mix": "",
+    "prefix_repeat": 0.0
+  }
+}

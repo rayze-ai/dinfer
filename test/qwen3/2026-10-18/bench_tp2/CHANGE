@@ -1,0 +1,1 @@
+Q5 T1: --tp 2 (GPU 5,6, 无 P2P → NCCL SHM, 每层 2 all-reduce) vs vLLM 单卡

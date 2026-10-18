@@ -597,6 +597,8 @@ pub struct DeviceBlockRef { pub layer: u8, pub block: BlockId, pub ptr: u64, pub
 
 每层 2 次 all-reduce（`t × hidden` bf16），与 vLLM 一致；vLLM 的 `fused_allreduce_rms_norm`（all-reduce + 残差 + RMSNorm 融合，Hopper custom allreduce）是后续改进项。实现：`Qwen3Model.comm: Option<Comm>`，`forward` 在 o_proj / down 之后原地 all-reduce；`TpShard{rank,world}` 传给 `Attention::load` / `Mlp::load_tp`；本地 `cfg` 的 `num_attention_heads / num_key_value_heads / intermediate_size` 除以 tp，`vocab / hidden` 不变。
 
+**实测（2026-10-18，4090 GPU 5/6，loop q5 第 3 轮）**：tp2 vs vLLM 单卡 c1 1.14× / c8 0.92× / c32 0.64× / c8-long 0.68×；dp2 c32 1.20× / c8-long 1.31×（≈1.9× 单卡 dinfer）。
+
 **小模型 TP 的预期**：Qwen3-0.6B 单卡 decode 一步 ~3.5 ms；无 P2P 时 NCCL SHM all-reduce 单次 ≥ 30–50 µs，56 次/步 ≈ 2–3 ms，**TP=2 吞吐大概率低于单卡**。TP 在这台机器上是功能正确性验证（输出与单卡一致），性能结论要等 NVLink / P2P 机器（design §9-1）。
 
 ### 13.3 DP
@@ -624,8 +626,8 @@ pub struct DeviceBlockRef { pub layer: u8, pub block: BlockId, pub ptr: u64, pub
 
 | 步 | 内容 | 验收 |
 |---|---|---|
-| T1（本轮） | NCCL 封装 `kernels::comm`、权重分片 `load_bf16_shard`、Qwen3 TP（qkv/gate_up 行切、o_proj/down 列切、2 all-reduce/层）、`TpExecutor` 多线程 lockstep、`--tp` | 4090 `--tp 2` 与单卡 greedy 输出逐 token 一致；bench 记 CSV（预期慢于单卡，记原因） |
-| T2 | `--dp N` + `DpBackend` 路由 | `--dp 2` 吞吐 ≈ 2× 单卡（c32）|
+| ✅ T1（2026-10-18） | NCCL 封装 `kernels::comm`、权重分片 `load_bf16_shard`、Qwen3 TP（qkv/gate_up 行切、o_proj/down 列切、2 all-reduce/层）、`TpExecutor` 多线程 lockstep、`--tp` | 4090 `--tp 2` 与单卡 greedy 输出逐 token 一致；bench 记 CSV（预期慢于单卡，记原因） |
+| ✅ T2（2026-10-18） | `--dp N` + `DpBackend` 路由 | `--dp 2` c32 10001 tok/s ≈ 1.9× 单卡 |
 | T3 | TP 下 CUDA graph 含 all-reduce；`fused_allreduce_rmsnorm`；lm_head 列切开关 | TPOT 开销 ≤ 单卡 + 56 × all-reduce |
 | T4 | DCP（Qwen3 先做，复用 split-K 归并） | 单请求 context 超单卡 KV 仍可跑 |
 | T5 | EP（GLM/K3 真权重到位后） + DP 波次同步 | 功能 |

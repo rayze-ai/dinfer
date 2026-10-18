@@ -30,8 +30,12 @@ def load_round(d):
     return r
 
 def round_key(d):
-    m = re.search(r"bench(\d*)$", os.path.basename(d))
-    return (os.path.basename(os.path.dirname(d)), int(m.group(1) or 0))
+    # benchN（数字轮次）或 bench_<tag>（如 bench_tp2 / bench_dp2，多卡轮次）；带 tag 的排在同日数字轮之后
+    b = os.path.basename(d)
+    m = re.search(r"bench(\d*)$", b)
+    if m:
+        return (os.path.basename(os.path.dirname(d)), 0, int(m.group(1) or 0), "")
+    return (os.path.basename(os.path.dirname(d)), 1, 0, b)
 
 dirs = sorted((d for d in glob.glob(os.path.join(ROOT, "*", "bench*")) if os.path.isdir(d)), key=round_key)
 rounds = [r for r in (load_round(d) for d in dirs) if r]
