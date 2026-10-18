@@ -8,5 +8,6 @@ pub mod executor;
 pub mod model;
 pub mod parser;
 pub mod service;
+pub mod tp;
 
 pub const MODEL_NAME: &str = "qwen3-0.6b";

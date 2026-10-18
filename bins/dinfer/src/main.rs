@@ -82,6 +82,12 @@ enum Cmd {
         no_cuda_graph: bool,
         #[arg(long, default_value_t = 0)]
         device: usize,
+        /// 张量并行组大小（qwen3；design §13）：用卡 device..device+tp
+        #[arg(long, default_value_t = 1)]
+        tp: usize,
+        /// 数据并行副本数（qwen3）：副本 i 用卡 device+i*tp..；同进程按在飞数路由
+        #[arg(long, default_value_t = 1)]
+        dp: usize,
         /// 开启 MTP 投机解码（nextn=1）
         #[arg(long, default_value_t = false)]
         mtp: bool,
@@ -160,6 +166,8 @@ async fn main() -> Result<()> {
             kv_slots,
             no_cuda_graph,
             device,
+            tp,
+            dp,
             mtp,
         } => {
             let name = served_model_name.unwrap_or_else(|| model_name().to_string());
@@ -212,13 +220,27 @@ async fn main() -> Result<()> {
                     kv_slots,
                     enable_cuda_graph: !no_cuda_graph,
                     device,
+                    tp: tp.max(1),
                 };
-                let svc = tokio::task::spawn_blocking(move || {
-                    dinfer_qwen3::service::Qwen3Service::start(opt, name)
-                })
-                .await??;
-                tracing::info!(%addr, "dinfer serving (no auth; bind to localhost unless fronted by a gateway)");
-                dinfer_server::serve(&addr, std::sync::Arc::new(svc)).await?;
+                let dp = dp.max(1);
+                // DP（design §13.3）：N 个独立副本并行装载，副本 i 用卡 device + i·tp
+                let mut joins = Vec::with_capacity(dp);
+                for i in 0..dp {
+                    let mut o = opt.clone();
+                    o.device = device + i * opt.tp;
+                    let name = name.clone();
+                    joins.push(tokio::task::spawn_blocking(move || dinfer_qwen3::service::Qwen3Service::start(o, name)));
+                }
+                let mut shards: Vec<std::sync::Arc<dyn dinfer_server::backend::ChatBackend>> = Vec::with_capacity(dp);
+                for j in joins {
+                    shards.push(std::sync::Arc::new(j.await??));
+                }
+                tracing::info!(%addr, dp, tp = opt.tp, "dinfer serving (no auth; bind to localhost unless fronted by a gateway)");
+                if shards.len() == 1 {
+                    dinfer_server::serve(&addr, shards.pop().unwrap()).await?;
+                } else {
+                    dinfer_server::serve(&addr, std::sync::Arc::new(dinfer_server::dp::DpBackend::new(shards))).await?;
+                }
             }
             #[cfg(not(any(feature = "glm53", feature = "qwen3")))]
             {

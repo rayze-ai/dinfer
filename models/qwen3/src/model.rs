@@ -81,6 +81,10 @@ pub struct Qwen3Model<O: OpSet = DefaultOps> {
     pub max_logits_rows: usize,
     /// 调试：若非空，每层 forward 后记录 (layer, attn_out[:t*h] f32, hidden_after_layer[:t*h] f32)。
     pub capture_layers: Option<Vec<LayerCapture>>,
+    /// TP 组通信器（tp > 1 时由 executor 在自己的流上 init 后挂上）；o_proj / down 之后原地 all-reduce。
+    pub comm: Option<k::comm::Comm>,
+    /// (rank, world)；单卡 (0, 1)。
+    pub tp: (usize, usize),
     hidden: Tensor<bf16>,
     normed: Tensor<bf16>,
     attn_out: Tensor<bf16>,
@@ -119,16 +123,18 @@ impl Attention {
         p: &str,
         cfg: &Qwen3Config,
         max_tokens: usize,
+        (rank, world): (usize, usize),
     ) -> Result<Self> {
+        // TP（design §13.2）：cfg 已是本 rank 的本地配置（头数 / tp）；q/k/v 按头行切，o_proj 按输入列切。
         let (h, hk, d) =
             (cfg.num_attention_heads as usize, cfg.num_key_value_heads as usize, cfg.head_dim as usize);
         let hidden = cfg.hidden_size as usize;
         // q/k/v 三个权重拼成一个 [(H+2Hkv)·D, hidden] 的 qkv 权重：bf16 直接上传后在设备上拼接
         // （原先走 f32 host 拷贝再转回 bf16，每层 ~30 ms，28 层占了启动的 ~0.8 s；见 loops/q3-startup.md）
         let t = std::time::Instant::now();
-        let q = src.load_bf16(stream, &format!("{p}.q_proj.weight"))?;
-        let kw = src.load_bf16(stream, &format!("{p}.k_proj.weight"))?;
-        let vw = src.load_bf16(stream, &format!("{p}.v_proj.weight"))?;
+        let q = src.load_bf16_shard(stream, &format!("{p}.q_proj.weight"), 0, rank, world)?;
+        let kw = src.load_bf16_shard(stream, &format!("{p}.k_proj.weight"), 0, rank, world)?;
+        let vw = src.load_bf16_shard(stream, &format!("{p}.v_proj.weight"), 0, rank, world)?;
         ensure!(
             q.shape == [h * d, hidden] && kw.shape == [hk * d, hidden] && vw.shape == kw.shape,
             "qkv shapes {:?} {:?} {:?}",
@@ -149,7 +155,7 @@ impl Attention {
         let qkv = Linear::new(qkv_w, None)?;
         load_phase::add(load_phase::QKV_CONCAT, t);
         let t = std::time::Instant::now();
-        let o_proj = Linear::load(stream, src, &format!("{p}.o_proj"))?;
+        let o_proj = Linear::load_shard(stream, src, &format!("{p}.o_proj"), 1, rank, world)?;
         load_phase::add(load_phase::O_PROJ, t);
         ensure!(o_proj.in_features == h * d && o_proj.out_features == hidden, "o_proj shape");
         let tn = std::time::Instant::now();
@@ -372,6 +378,39 @@ impl<O: OpSet> Qwen3Model<O> {
     where
         O: Default,
     {
+        Self::load_with_budget_tp(stream, src, cfg, max_tokens, max_logits_rows, num_blocks, block_size, gpu_memory_utilization, reserve_bytes, (0, 1))
+    }
+
+    /// TP 版：`tp = (rank, world)`。本地 cfg 的 `num_attention_heads / num_key_value_heads / intermediate_size`
+    /// 除以 world；embed / norm / lm_head 复制（design §13.2）。KV 池只存本 rank 的 kv 头。
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_with_budget_tp(
+        stream: &Stream,
+        src: &WeightSource,
+        cfg: Qwen3Config,
+        max_tokens: usize,
+        max_logits_rows: usize,
+        num_blocks: Option<usize>,
+        block_size: usize,
+        gpu_memory_utilization: f32,
+        reserve_bytes: usize,
+        tp: (usize, usize),
+    ) -> Result<Self>
+    where
+        O: Default,
+    {
+        let (rank, world) = tp;
+        ensure!(world >= 1 && rank < world, "bad tp shard {rank}/{world}");
+        let mut cfg = cfg;
+        if world > 1 {
+            ensure!(cfg.num_attention_heads as usize % world == 0, "num_attention_heads {} % tp {world} != 0", cfg.num_attention_heads);
+            ensure!(cfg.num_key_value_heads as usize % world == 0, "num_key_value_heads {} % tp {world} != 0 (kv-head replication unsupported)", cfg.num_key_value_heads);
+            ensure!(cfg.intermediate_size as usize % world == 0, "intermediate_size {} % tp {world} != 0", cfg.intermediate_size);
+            cfg.num_attention_heads /= world as u32;
+            cfg.num_key_value_heads /= world as u32;
+            cfg.intermediate_size /= world as u32;
+            tracing::info!(rank, world, heads = cfg.num_attention_heads, kv_heads = cfg.num_key_value_heads, inter = cfg.intermediate_size, "tp: local shard config");
+        }
         let hidden = cfg.hidden_size as usize;
         let (hk, d) = (cfg.num_key_value_heads as usize, cfg.head_dim as usize);
         let t_load0 = std::time::Instant::now();
@@ -388,7 +427,7 @@ impl<O: OpSet> Qwen3Model<O> {
             let p = format!("model.layers.{l}");
             layers.push(DecoderLayer {
                 input_norm: RmsNorm::load(stream, src, &format!("{p}.input_layernorm"), cfg.rms_norm_eps)?,
-                attn: Attention::load(stream, src, &format!("{p}.self_attn"), &cfg, max_tokens)
+                attn: Attention::load(stream, src, &format!("{p}.self_attn"), &cfg, max_tokens, tp)
                     .with_context(|| format!("layer {l} attn"))?,
                 post_norm: RmsNorm::load(
                     stream,
@@ -398,7 +437,7 @@ impl<O: OpSet> Qwen3Model<O> {
                 )?,
                 mlp: {
                     let tm = std::time::Instant::now();
-                    let m = Mlp::load(stream, src, &format!("{p}.mlp"), max_tokens)
+                    let m = Mlp::load_tp(stream, src, &format!("{p}.mlp"), max_tokens, rank, world)
                         .with_context(|| format!("layer {l} mlp"))?;
                     load_phase::add(load_phase::MLP, tm);
                     m
@@ -536,6 +575,8 @@ impl<O: OpSet> Qwen3Model<O> {
         tracing::info!(kv_ms = t_kv.elapsed().as_millis() as u64, "load timing: kv cache alloc");
         wall("kv (end of load_with_budget)");
         Ok(Self {
+            comm: None,
+            tp,
             ops: O::default(),
             embed,
             layers,
@@ -629,6 +670,7 @@ impl<O: OpSet> Qwen3Model<O> {
         // 残差：hidden 是主干；第 l 层 MLP 的输出不单独加回，而是在第 l+1 层的 input_norm 里用 fused_add 一次完成
         //（最后一层之后再补一次加）。省掉每层一次 add kernel。
         let mut pending_mlp = false;
+        let comm = self.comm.as_ref();
         for (li, layer) in self.layers.iter_mut().enumerate() {
             if pending_mlp {
                 self.ops.norm().fused_add_rmsnorm(
@@ -667,6 +709,9 @@ impl<O: OpSet> Qwen3Model<O> {
                 &mut self.decode_scratch,
                 &mut self.attn_out,
             )?;
+            if let Some(c) = comm {
+                k::comm::all_reduce_bf16(c, &mut self.attn_out.data, t * h)?; // TP all-reduce ①（o_proj 部分和）
+            }
             self.ops.norm().fused_add_rmsnorm(
                 stream,
                 &self.attn_out.data,
@@ -678,6 +723,9 @@ impl<O: OpSet> Qwen3Model<O> {
                 eps,
             )?;
             layer.mlp.forward(stream, gemm, self.ops.act(), t, &self.normed, &mut self.mlp_out)?;
+            if let Some(c) = comm {
+                k::comm::all_reduce_bf16(c, &mut self.mlp_out.data, t * h)?; // TP all-reduce ②（down 部分和）
+            }
             pending_mlp = true;
             if let Some(cap) = self.capture_layers.as_mut() {
                 // 诊断捕获需要本层完整输出：这里显式加一次（只在捕获模式下）

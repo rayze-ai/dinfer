@@ -47,11 +47,11 @@ impl Comm {
     /// 原地 sum all-reduce，前 `n` 个元素。
     pub fn all_reduce_sum<T: NcclType, B: DevicePtrMut<T>>(&self, buf: &mut B, n: usize) -> Result<()> {
         let _ = n; // cudarc 用 buf.len()；调用方传入已 slice 的视图
-        self.inner.all_reduce_in_place(buf, &ReduceOp::Sum).map_err(|e| anyhow::anyhow!("ncclAllReduce: {e:?}"))
+        self.inner.all_reduce_in_place(buf, &ReduceOp::Sum).map(|_| ()).map_err(|e| anyhow::anyhow!("ncclAllReduce: {e:?}"))
     }
     /// all-gather：每 rank 的 `send` 拼成 `recv`（按 rank 顺序）。
     pub fn all_gather<T: NcclType, S: DevicePtr<T>, R: DevicePtrMut<T>>(&self, send: &S, recv: &mut R) -> Result<()> {
-        self.inner.all_gather(send, recv).map_err(|e| anyhow::anyhow!("ncclAllGather: {e:?}"))
+        self.inner.all_gather(send, recv).map(|_| ()).map_err(|e| anyhow::anyhow!("ncclAllGather: {e:?}"))
     }
 }
 

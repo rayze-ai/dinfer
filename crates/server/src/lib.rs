@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod dp;
 pub mod backend;
 pub mod chat;
 pub mod openai;

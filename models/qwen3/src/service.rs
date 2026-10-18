@@ -39,6 +39,7 @@ impl std::str::FromStr for PdRoleOpt {
     }
 }
 
+#[derive(Clone)]
 pub struct ServeOptions {
     pub model_dir: String,
     pub tokenizer_dir: Option<String>,
@@ -73,6 +74,8 @@ pub struct ServeOptions {
     /// 纯 decode 步用 CUDA graph（启动时按 batch 桶捕获；vLLM `cudagraph_mode=FULL_DECODE_ONLY` 对齐）。
     pub enable_cuda_graph: bool,
     pub device: usize,
+    /// TP 组大小（design §13）：用卡 `device .. device+tp`；1 = 单卡。
+    pub tp: usize,
 }
 
 impl Default for ServeOptions {
@@ -99,6 +102,7 @@ impl Default for ServeOptions {
             kv_slots: 0,
             enable_cuda_graph: true,
             device: 0,
+            tp: 1,
         }
     }
 }
@@ -136,34 +140,75 @@ impl Qwen3Service {
         let ops_name = dinfer_layers::OpSet::name(&dinfer_layers::DefaultOps);
         let want = dinfer_kernels::opset::selected_ops_name();
         anyhow::ensure!(want == ops_name, "unknown OPS={want:?}; available: {ops_name}");
-        let dev = Device::new(opt.device)?;
-        let s = dev.default_stream();
-        let t_cuda = t_start.elapsed();
-        // 注：曾试过把 open（mmap populate）放线程与 Device::new 并行，结果 cuda_init 250 → 430 ms、总时长不变：
-        // 两者都在争内存带宽 / 页表锁，并行无收益（启动 loop 第 7 轮），保持串行。
-        let t_open = std::time::Instant::now();
-        let src = WeightSource::open_dir(model_dir)?;
-        tracing::info!(open_ms = t_open.elapsed().as_millis() as u64, "load timing: safetensors open (mmap populate + header)");
-        // 一步最多 token 数：exempt 模式下 decode 行不占预算，上限 = 预算 + max_num_seqs
+        let tp_world = opt.tp.max(1);
+        anyhow::ensure!(tp_world == 1 || opt.role == PdRoleOpt::Single, "--tp > 1 与 PD 角色暂不兼容（design §13.6 T1）");
+        anyhow::ensure!(tp_world == 1 || opt.kv_host_gib == 0.0, "--tp > 1 与 host tier 暂不兼容");
+        if tp_world > 1 {
+            // 副流上没有 comm，TP 下关闭跨流 prefill/decode 并行（design §13）
+            std::env::set_var("XSTREAM", "0");
+        }
+        let src = Arc::new({
+            let t_open = std::time::Instant::now();
+            let src = WeightSource::open_dir(model_dir)?;
+            tracing::info!(open_ms = t_open.elapsed().as_millis() as u64, "load timing: safetensors open (mmap populate + header)");
+            src
+        });
         let max_tokens = if opt.decode_exempt_from_budget {
             (opt.max_num_batched_tokens + opt.max_num_seqs) as usize
         } else {
             opt.max_num_batched_tokens.max(opt.max_num_seqs) as usize
         };
-        let model = Qwen3Model::load_with_budget(
-            &s,
-            &src,
-            cfg.clone(),
-            max_tokens,
-            opt.max_num_seqs as usize, // 每请求只取最后一行 logits（无投机）
-            opt.num_blocks.map(|n| n as usize),
-            opt.block_size as usize,
-            opt.gpu_memory_utilization,
-            512 << 20, // cuBLAS workspace / 临时张量余量
-        )?;
-        let num_blocks = model.num_blocks() as u32;
-        // 单个请求最长要 max_model_len / block_size 块；池至少要装下 1 个最长请求 + 10% 余量，否则单请求会分不到块
-        // （vLLM 同样在启动期校验）。
+        let max_blocks_per_seq = (opt.max_model_len as usize).div_ceil(opt.block_size as usize);
+        let comm_id = if tp_world > 1 { Some(dinfer_kernels::comm::CommId::new()?) } else { None };
+        // 每个 rank 一张卡：Device + 模型分片 + executor（+ NCCL comm）。rank 0 在本线程，其余各起一线程并行装载。
+        let build_rank = {
+            let cfg = cfg.clone();
+            let opt_dev = opt.device;
+            let (num_blocks_opt, block_size, gmu, graphs) =
+                (opt.num_blocks.map(|n| n as usize), opt.block_size as usize, opt.gpu_memory_utilization, opt.enable_cuda_graph);
+            let max_num_seqs = opt.max_num_seqs as usize;
+            move |rank: usize, src: Arc<WeightSource>| -> Result<(Qwen3Executor, usize, std::time::Duration)> {
+                let t0 = std::time::Instant::now();
+                let dev = Device::new(opt_dev + rank)?;
+                let s = dev.default_stream();
+                let t_cuda = t0.elapsed();
+                let model = Qwen3Model::load_with_budget_tp(
+                    &s,
+                    &src,
+                    cfg.clone(),
+                    max_tokens,
+                    max_num_seqs, // 每请求只取最后一行 logits（无投机）
+                    num_blocks_opt,
+                    block_size,
+                    gmu,
+                    512 << 20, // cuBLAS workspace / 临时张量余量
+                    (rank, tp_world),
+                )?;
+                let nb = model.num_blocks();
+                s.synchronize()?;
+                let mut exec = Qwen3Executor::with_graphs_and_blocks(s.clone(), model, graphs, max_blocks_per_seq)?;
+                if let Some(id) = comm_id {
+                    exec.init_tp(rank, tp_world, id)?;
+                }
+                Ok((exec, nb, t_cuda))
+            }
+        };
+        let other_ranks: Vec<_> = (1..tp_world)
+            .map(|r| {
+                let b = build_rank.clone();
+                let src = src.clone();
+                std::thread::Builder::new().name(format!("tp-load{r}")).spawn(move || b(r, src)).expect("spawn tp load")
+            })
+            .collect();
+        let (exec, num_blocks, t_cuda_d) = build_rank(0, src.clone())?;
+        let t_cuda = t_tok + t_cuda_d;
+        let mut others = Vec::with_capacity(other_ranks.len());
+        for jh in other_ranks {
+            let (ex, nb, _) = jh.join().map_err(|_| anyhow::anyhow!("tp load thread panicked"))??;
+            anyhow::ensure!(nb == num_blocks, "tp ranks disagree on num_blocks ({nb} vs {num_blocks}); pass --num-blocks");
+            others.push(ex);
+        }
+        let num_blocks = num_blocks as u32;
         let need = (opt.max_model_len as usize).div_ceil(opt.block_size as usize);
         anyhow::ensure!(
             need as f64 <= num_blocks as f64 * 0.9,
@@ -172,10 +217,7 @@ impl Qwen3Service {
             need,
             num_blocks
         );
-        s.synchronize()?;
         let t_model = t_start.elapsed();
-        let max_blocks_per_seq = (opt.max_model_len as usize).div_ceil(opt.block_size as usize);
-        let exec = Qwen3Executor::with_graphs_and_blocks(s.clone(), model, opt.enable_cuda_graph, max_blocks_per_seq)?;
         let num_graphs = exec.num_graphs();
         let mut exec = exec;
         let host_slots = if opt.kv_host_gib > 0.0 { exec.enable_host_tier(opt.kv_host_gib)? } else { 0 };
@@ -221,7 +263,11 @@ impl Qwen3Service {
         } else {
             None
         };
-        let runner = Runner::new(exec, opt.block_size as usize);
+        enum ExecKind {
+            Single(Qwen3Executor),
+            Tp(crate::tp::TpExecutor),
+        }
+        let exec_kind = if others.is_empty() { ExecKind::Single(exec) } else { ExecKind::Tp(crate::tp::TpExecutor::new(exec, others)) };
         let t_join = std::time::Instant::now();
         let (tok, tmpl) = tok_thread.join().map_err(|_| anyhow::anyhow!("tokenizer thread panicked"))??;
         let tok = Arc::new(tok);
@@ -266,9 +312,12 @@ impl Qwen3Service {
         if host_slots > 0 {
             sched.enable_host_tier(host_slots, Box::new(dinfer_core::kv::host_tier::FullAttentionPolicy));
         }
-        let (handle, jh) = match pd_state {
-            Some(st) => engine::spawn_with_pd(sched, runner, st),
-            None => engine::spawn(sched, runner),
+        let bs = opt.block_size as usize;
+        let (handle, jh) = match (exec_kind, pd_state) {
+            (ExecKind::Tp(tpx), None) => engine::spawn(sched, Runner::new(tpx, bs)),
+            (ExecKind::Tp(_), Some(_)) => anyhow::bail!("tp + pd unsupported"),
+            (ExecKind::Single(ex), Some(st)) => engine::spawn_with_pd(sched, Runner::new(ex, bs), st),
+            (ExecKind::Single(ex), None) => engine::spawn(sched, Runner::new(ex, bs)),
         };
         tracing::info!(
             model = %served_name,

@@ -261,6 +261,17 @@ impl Qwen3Executor {
     }
 
     /// 上一 step 的 **原始** logits（fp32，[num_rows, vocab]）；对拍用。
+    /// TP（design §13）：在 executor 自己的流上建 NCCL 通信器并挂到模型。必须在任何 CUDA graph 捕获之前调用
+    /// （懒捕获默认满足；`GRAPH_CAPTURE=eager` 与 TP 不兼容），且所有 rank 并发调用（ncclCommInitRank 等全组到齐）。
+    pub fn init_tp(&mut self, rank: usize, world: usize, id: k::comm::CommId) -> Result<()> {
+        anyhow::ensure!(self.alt.is_none(), "tp: XSTREAM must be off (alt stream has no comm)");
+        anyhow::ensure!(self.num_graphs() == 0, "tp: init_tp must run before graph capture");
+        let comm = k::comm::Comm::init(&self.stream, rank, world, id)?;
+        self.model.comm = Some(comm);
+        self.model.tp = (rank, world);
+        Ok(())
+    }
+
     pub fn last_logits(&self, num_rows: usize) -> Result<Vec<f32>> {
         let v = self.model.cfg.vocab_size as usize;
         let all = self.logits.to_vec(&self.stream)?;
