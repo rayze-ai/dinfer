@@ -56,6 +56,14 @@ pub trait ChatBackend: Send + Sync + 'static {
     /// 默认采样（来自 generation_config.json），请求未指定的字段用它。
     fn default_sampling(&self) -> SamplingParams;
     fn render(&self, req: &RenderRequest<'_>) -> Result<Prompt>;
+    /// 纯文本编码（`/v1/completions` 的字符串 prompt、`/tokenize`），等价 HF `encode(add_special_tokens=False)`。
+    fn encode(&self, text: &str) -> Result<Vec<u32>>;
+    /// 整段 decode（`/detokenize`、completions `echo`）。
+    fn decode(&self, ids: &[u32]) -> Result<String>;
+    /// 每个 id 的词表原始片段（vLLM `convert_ids_to_tokens` 口径，`/tokenize?return_token_strs`）；None = 后端不支持。
+    fn token_strs(&self, _ids: &[u32]) -> Option<Vec<String>> {
+        None
+    }
     /// 提交到引擎；返回 (请求 id, 事件接收端)。
     fn submit(
         &self,

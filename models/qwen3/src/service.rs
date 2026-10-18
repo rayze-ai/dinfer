@@ -7,9 +7,9 @@ use crate::model::Qwen3Model;
 use crate::parser::OutputParser;
 use anyhow::{Context, Result};
 use dinfer_core::config::{CacheConfig, SchedulerConfig};
-use dinfer_core::pd::KvTransport as _;
 use dinfer_core::engine::{self, EngineEvent, EngineHandle, Submission};
 use dinfer_core::kv::{GroupInfo, KvCacheSpec};
+use dinfer_core::pd::KvTransport as _;
 use dinfer_core::request::RequestId;
 use dinfer_core::runner::Runner;
 use dinfer_core::sample::SamplingParams;
@@ -136,7 +136,7 @@ impl Qwen3Service {
         let defaults = read_generation_defaults(tok_dir);
         let cfg = Qwen3Config::from_json(&std::fs::read_to_string(model_dir.join("config.json"))?)?;
         let t_tok = t_start.elapsed(); // 此处只剩 config / 模板默认值读取；tokenizer 耗时见 "tokenizer thread join"
-        // 算子实现选择（design §10.1）：目前只有 default；未知名字直接报错
+                                       // 算子实现选择（design §10.1）：目前只有 default；未知名字直接报错
         let ops_name = dinfer_layers::OpSet::name(&dinfer_layers::DefaultOps);
         let want = dinfer_kernels::opset::selected_ops_name();
         anyhow::ensure!(want == ops_name, "unknown OPS={want:?}; available: {ops_name}");
@@ -154,7 +154,10 @@ impl Qwen3Service {
         let src = Arc::new({
             let t_open = std::time::Instant::now();
             let src = WeightSource::open_dir(model_dir)?;
-            tracing::info!(open_ms = t_open.elapsed().as_millis() as u64, "load timing: safetensors open (mmap populate + header)");
+            tracing::info!(
+                open_ms = t_open.elapsed().as_millis() as u64,
+                "load timing: safetensors open (mmap populate + header)"
+            );
             src
         });
         let max_tokens = if opt.decode_exempt_from_budget {
@@ -168,11 +171,17 @@ impl Qwen3Service {
         let build_rank = {
             let cfg = cfg.clone();
             let opt_dev = opt.device;
-            let (num_blocks_opt, block_size, gmu, graphs) =
-                (opt.num_blocks.map(|n| n as usize), opt.block_size as usize, opt.gpu_memory_utilization, opt.enable_cuda_graph);
+            let (num_blocks_opt, block_size, gmu, graphs) = (
+                opt.num_blocks.map(|n| n as usize),
+                opt.block_size as usize,
+                opt.gpu_memory_utilization,
+                opt.enable_cuda_graph,
+            );
             let max_num_seqs = opt.max_num_seqs as usize;
             let pd_role = opt.role != PdRoleOpt::Single;
-            move |rank: usize, src: Arc<WeightSource>| -> Result<(Qwen3Executor, usize, std::time::Duration)> {
+            move |rank: usize,
+                  src: Arc<WeightSource>|
+                  -> Result<(Qwen3Executor, usize, std::time::Duration)> {
                 let t0 = std::time::Instant::now();
                 let dev = Device::new(opt_dev + rank)?;
                 let s = dev.default_stream();
@@ -191,7 +200,8 @@ impl Qwen3Service {
                 )?;
                 let nb = model.num_blocks();
                 s.synchronize()?;
-                let mut exec = Qwen3Executor::with_graphs_and_blocks(s.clone(), model, graphs, max_blocks_per_seq)?;
+                let mut exec =
+                    Qwen3Executor::with_graphs_and_blocks(s.clone(), model, graphs, max_blocks_per_seq)?;
                 if let Some(id) = comm_id {
                     exec.init_tp(rank, tp_world, id)?;
                 }
@@ -206,7 +216,10 @@ impl Qwen3Service {
             .map(|r| {
                 let b = build_rank.clone();
                 let src = src.clone();
-                std::thread::Builder::new().name(format!("tp-load{r}")).spawn(move || b(r, src)).expect("spawn tp load")
+                std::thread::Builder::new()
+                    .name(format!("tp-load{r}"))
+                    .spawn(move || b(r, src))
+                    .expect("spawn tp load")
             })
             .collect();
         let (exec, num_blocks, t_cuda_d) = build_rank(0, src.clone())?;
@@ -214,7 +227,10 @@ impl Qwen3Service {
         let mut others = Vec::with_capacity(other_ranks.len());
         for jh in other_ranks {
             let (ex, nb, _) = jh.join().map_err(|_| anyhow::anyhow!("tp load thread panicked"))??;
-            anyhow::ensure!(nb == num_blocks, "tp ranks disagree on num_blocks ({nb} vs {num_blocks}); pass --num-blocks");
+            anyhow::ensure!(
+                nb == num_blocks,
+                "tp ranks disagree on num_blocks ({nb} vs {num_blocks}); pass --num-blocks"
+            );
             others.push(ex);
         }
         let num_blocks = num_blocks as u32;
@@ -246,17 +262,32 @@ impl Qwen3Service {
             // 共享槽区后端（design §10.3 b）：D 侧建区（shm / cuda-ipc），握手时发给 P；P 侧跟随对端的区类型，不看本地 kv_transport。
             let region_kind = match opt.kv_transport.as_str() {
                 "tcp" => None,
-                k => Some(dinfer_kernels::RegionKind::parse(k).with_context(|| format!("unknown --kv-transport {k} (tcp | shm | cuda-ipc)"))?),
+                k => Some(
+                    dinfer_kernels::RegionKind::parse(k)
+                        .with_context(|| format!("unknown --kv-transport {k} (tcp | shm | cuda-ipc)"))?,
+                ),
             };
             let local_region = match (opt.role, region_kind) {
                 (PdRoleOpt::Decode, Some(kind)) => {
-                    let slots = if opt.kv_slots > 0 { opt.kv_slots } else if kind == dinfer_kernels::RegionKind::Shm { 4 } else { 2 };
+                    let slots = if opt.kv_slots > 0 {
+                        opt.kv_slots
+                    } else if kind == dinfer_kernels::RegionKind::Shm {
+                        4
+                    } else {
+                        2
+                    };
                     Some(Arc::new(exec.enable_pd_region(kind, slots, tp_world)?))
                 }
                 _ => None,
             };
             if opt.kv_port > 0 {
-                let port = dinfer_core::pd::spawn_receiver_shared(&format!("0.0.0.0:{}", opt.kv_port), model_tag.clone(), incoming.clone(), pool.clone(), local_region)?;
+                let port = dinfer_core::pd::spawn_receiver_shared(
+                    &format!("0.0.0.0:{}", opt.kv_port),
+                    model_tag.clone(),
+                    incoming.clone(),
+                    pool.clone(),
+                    local_region,
+                )?;
                 tracing::info!(port, role = ?opt.role, transport = %opt.kv_transport, "pd: kv receiver listening");
             }
             let transport: Option<Arc<dyn dinfer_core::pd::KvTransport>> = match (opt.role, &opt.peer) {
@@ -264,7 +295,10 @@ impl Qwen3Service {
                     let t: Arc<dyn dinfer_core::pd::KvTransport> = if region_kind.is_some() {
                         dinfer_core::pd::SharedTransport::new(peer.clone(), std::time::Duration::from_secs(2))
                     } else {
-                        Arc::new(dinfer_core::pd::TcpTransport { addr: peer.clone(), connect_timeout: std::time::Duration::from_secs(2) })
+                        Arc::new(dinfer_core::pd::TcpTransport {
+                            addr: peer.clone(),
+                            connect_timeout: std::time::Duration::from_secs(2),
+                        })
                     };
                     t.register(dinfer_core::pd::MemDesc { ptr: base, len })?;
                     tracing::info!(peer = %peer, transport = t.name(), "pd: prefill side will push KV to peer");
@@ -273,7 +307,12 @@ impl Qwen3Service {
                 (PdRoleOpt::Prefill, None) => anyhow::bail!("--role prefill requires --peer host:kv_port"),
                 _ => None,
             };
-            Some(dinfer_core::engine::PdState::new(incoming, transport, model_tag, std::time::Duration::from_millis(opt.pd_wait_ms)))
+            Some(dinfer_core::engine::PdState::new(
+                incoming,
+                transport,
+                model_tag,
+                std::time::Duration::from_millis(opt.pd_wait_ms),
+            ))
         } else {
             None
         };
@@ -481,6 +520,15 @@ impl ChatBackend for Qwen3Service {
         })?;
         let ids = self.tok.encode(&text)?;
         Ok(Prompt { text, ids })
+    }
+    fn encode(&self, text: &str) -> Result<Vec<u32>> {
+        self.tok.encode(text)
+    }
+    fn decode(&self, ids: &[u32]) -> Result<String> {
+        self.tok.decode(ids)
+    }
+    fn token_strs(&self, ids: &[u32]) -> Option<Vec<String>> {
+        ids.iter().map(|&id| self.tok.id_to_token(id)).collect()
     }
     fn submit(
         &self,

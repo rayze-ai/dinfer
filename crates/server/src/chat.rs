@@ -24,17 +24,40 @@ use std::sync::Arc;
 
 pub type Backend = Arc<dyn ChatBackend>;
 
-fn err(status: StatusCode, msg: impl Into<String>) -> Response {
-    let kind = if status.is_client_error() { "invalid_request_error" } else { "server_error" };
-    (status, Json(ErrorResponse { error: ErrorBody { message: msg.into(), kind, code: status.as_u16() } }))
+/// vLLM 形状的错误：`{"error":{"message","type","param":null,"code"}}`；404 的 type 是 `NotFoundError`。
+pub(crate) fn err(status: StatusCode, msg: impl Into<String>) -> Response {
+    let kind = match status {
+        StatusCode::NOT_FOUND => "NotFoundError",
+        s if s.is_client_error() => "invalid_request_error",
+        _ => "server_error",
+    };
+    (
+        status,
+        Json(ErrorResponse {
+            error: ErrorBody { message: msg.into(), kind, param: None, code: status.as_u16() },
+        }),
+    )
         .into_response()
 }
 
-fn sampling_from(
-    req: &ChatCompletionRequest,
+/// 请求给了 `model` 且与服务的模型名不同 → Some(404 响应)（vLLM 行为）。
+pub(crate) fn check_model(be: &dyn ChatBackend, model: Option<&str>) -> Option<Response> {
+    match model {
+        Some(m) if m != be.model_name() => {
+            Some(err(StatusCode::NOT_FOUND, format!("The model `{m}` does not exist.")))
+        }
+        _ => None,
+    }
+}
+
+/// 请求采样字段 → `SamplingParams`。`max_tokens`：None = 填满剩余上下文；`logprobs`：Some(k) = 每 token 带 k 个 top。
+pub(crate) fn sampling_from(
+    req: &SamplingFields,
     defaults: SamplingParams,
     max_model_len: u32,
     prompt_len: u32,
+    max_tokens: Option<u32>,
+    logprobs: Option<u32>,
 ) -> Result<SamplingParams, String> {
     let mut sp = defaults;
     if let Some(t) = req.temperature {
@@ -88,40 +111,36 @@ fn sampling_from(
         }
         Some(_) => return Err("stop must be a string or an array of strings".into()),
     };
-    if req.logprobs == Some(true) {
-        sp.logprobs = Some(req.top_logprobs.unwrap_or(0));
-    } else if req.top_logprobs.is_some() {
-        return Err("top_logprobs requires logprobs=true".into());
-    }
+    sp.logprobs = logprobs;
     let room = max_model_len.saturating_sub(prompt_len);
     if room == 0 {
         return Err(format!("prompt has {prompt_len} tokens, max_model_len is {max_model_len}"));
     }
-    sp.max_tokens = req.max_completion_tokens.or(req.max_tokens).unwrap_or(room).min(room);
+    sp.max_tokens = max_tokens.unwrap_or(room).min(room);
     sp.validate()?;
     Ok(sp)
 }
 
-const MAX_N: u32 = 8;
+pub(crate) const MAX_N: u32 = 8;
 
 /// 一个 choice 的流式状态。
-struct ChoiceState {
+pub(crate) struct ChoiceState {
     rid: RequestId,
     out: Box<dyn OutputStream>,
     stop: StopChecker,
     /// 本 choice 已收到但尚未随 delta 下发的 logprobs（流式）/ 累计（非流式由 Aggregate 收）。
     pending_lp: Vec<ChatLogprobContent>,
-    completion: u32,
-    finish: Option<&'static str>,
+    pub(crate) completion: u32,
+    pub(crate) finish: Option<&'static str>,
     /// 产出 token id（`return_token_ids` 用；只在非流式收集）。
     ids: Vec<u32>,
 }
 
 /// 多个 choice 的事件汇到一个 channel：(choice index, event)。
-type Merged = tokio::sync::mpsc::UnboundedReceiver<(u32, EngineEvent)>;
+pub(crate) type Merged = tokio::sync::mpsc::UnboundedReceiver<(u32, EngineEvent)>;
 
 /// handler / SSE 任务结束（含客户端断开）时取消所有未完成的引擎请求。
-struct AbortGuard {
+pub(crate) struct AbortGuard {
     be: Backend,
     live: Vec<Option<RequestId>>,
 }
@@ -138,45 +157,50 @@ impl Drop for AbortGuard {
     }
 }
 
-fn submit_choices(
+/// 每个 prompt 起 `n` 个引擎请求；choice index = prompt_idx × n + i（vLLM completions 口径；chat 只有一个 prompt）。
+pub(crate) fn submit_choices(
     be: &Backend,
-    prompt_ids: &[u32],
+    prompts: &[&[u32]],
     sp: &SamplingParams,
     n: u32,
     pd: Option<PdSubmit>,
 ) -> (Merged, Vec<ChoiceState>, AbortGuard) {
     let (mtx, merged) = tokio::sync::mpsc::unbounded_channel::<(u32, EngineEvent)>();
-    let mut states = Vec::with_capacity(n as usize);
-    let mut live = Vec::with_capacity(n as usize);
-    for i in 0..n {
-        let mut spi = sp.clone();
-        if let Some(seed) = sp.seed {
-            spi.seed = Some(seed.wrapping_add(i as u64)); // n 个 choice 不同种子；无 seed 时引擎各自随机
-        }
-        let (rid, mut rx) = be.submit(prompt_ids.to_vec(), spi, pd.clone());
-        let mtx = mtx.clone();
-        tokio::spawn(async move {
-            while let Some(ev) = rx.recv().await {
-                if mtx.send((i, ev)).is_err() {
-                    break;
-                }
+    let total = prompts.len() * n as usize;
+    let mut states = Vec::with_capacity(total);
+    let mut live = Vec::with_capacity(total);
+    for (pi, prompt_ids) in prompts.iter().enumerate() {
+        for ci in 0..n {
+            let i = pi as u32 * n + ci;
+            let mut spi = sp.clone();
+            if let Some(seed) = sp.seed {
+                spi.seed = Some(seed.wrapping_add(ci as u64)); // n 个 choice 不同种子；无 seed 时引擎各自随机
             }
-        });
-        states.push(ChoiceState {
-            rid,
-            out: be.new_output_stream(),
-            stop: StopChecker::new(&sp.stop, sp.include_stop_str_in_output),
-            pending_lp: Vec::new(),
-            completion: 0,
-            finish: None,
-            ids: Vec::new(),
-        });
-        live.push(Some(rid));
+            let (rid, mut rx) = be.submit(prompt_ids.to_vec(), spi, pd.clone());
+            let mtx = mtx.clone();
+            tokio::spawn(async move {
+                while let Some(ev) = rx.recv().await {
+                    if mtx.send((i, ev)).is_err() {
+                        break;
+                    }
+                }
+            });
+            states.push(ChoiceState {
+                rid,
+                out: be.new_output_stream(),
+                stop: StopChecker::new(&sp.stop, sp.include_stop_str_in_output),
+                pending_lp: Vec::new(),
+                completion: 0,
+                finish: None,
+                ids: Vec::new(),
+            });
+            live.push(Some(rid));
+        }
     }
     (merged, states, AbortGuard { be: be.clone(), live })
 }
 
-fn lp_entry(out: &dyn OutputStream, lp: &TokenLogprobs) -> ChatLogprobContent {
+pub(crate) fn lp_entry(out: &dyn OutputStream, lp: &TokenLogprobs) -> ChatLogprobContent {
     let text = |id: u32| out.token_text(id).unwrap_or_else(|| format!("token_id:{id}"));
     let t = text(lp.token_id);
     ChatLogprobContent {
@@ -196,10 +220,12 @@ fn lp_entry(out: &dyn OutputStream, lp: &TokenLogprobs) -> ChatLogprobContent {
 
 /// 驱动所有 choice 到结束。`emit(i, delta, logprobs)` 下发增量（返回 false = 客户端已断开，停止）；
 /// `finish(i, reason)` 在 choice 结束时调一次。返回 Err(msg) = 引擎错误。
-async fn consume(
+/// `raw = true`（completions）：不过思考 / tool_call 解析器，detokenize 的原始文本直接进 `delta.content`。
+pub(crate) async fn consume(
     merged: &mut Merged,
     states: &mut [ChoiceState],
     guard: &mut AbortGuard,
+    raw: bool,
     mut emit: impl FnMut(u32, &OutDelta, Vec<ChatLogprobContent>) -> bool,
     mut finish: impl FnMut(u32, &'static str) -> bool,
 ) -> Result<(), String> {
@@ -217,7 +243,8 @@ async fn consume(
                 st.ids.extend_from_slice(&t);
                 let text = st.out.push_text(&t).map_err(|e| format!("detokenize: {e:#}"))?;
                 let (text, hit) = st.stop.push(&text);
-                let d = st.out.parse(&text);
+                let d =
+                    if raw { OutDelta { content: text, ..Default::default() } } else { st.out.parse(&text) };
                 if !d.is_empty() && !emit(i, &d, std::mem::take(&mut st.pending_lp)) {
                     return Ok(());
                 }
@@ -234,11 +261,14 @@ async fn consume(
         }
         if let Some(reason) = end {
             let tail = st.stop.finish();
-            let mut d = st.out.parse(&tail);
-            if let Ok(fd) = st.out.finish() {
-                d.reasoning.push_str(&fd.reasoning);
-                d.content.push_str(&fd.content);
-                d.tool_calls.extend(fd.tool_calls);
+            let mut d =
+                if raw { OutDelta { content: tail, ..Default::default() } } else { st.out.parse(&tail) };
+            if !raw {
+                if let Ok(fd) = st.out.finish() {
+                    d.reasoning.push_str(&fd.reasoning);
+                    d.content.push_str(&fd.content);
+                    d.tool_calls.extend(fd.tool_calls);
+                }
             }
             let lps = std::mem::take(&mut st.pending_lp);
             if (!d.is_empty() || !lps.is_empty()) && !emit(i, &d, lps) {
@@ -256,6 +286,9 @@ async fn consume(
 }
 
 pub async fn chat_completions(State(be): State<Backend>, Json(req): Json<ChatCompletionRequest>) -> Response {
+    if let Some(r) = check_model(be.as_ref(), req.model.as_deref()) {
+        return r;
+    }
     if req.messages.is_empty() {
         return err(StatusCode::BAD_REQUEST, "messages must not be empty");
     }
@@ -275,7 +308,23 @@ pub async fn chat_completions(State(be): State<Backend>, Json(req): Json<ChatCom
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("chat template: {e:#}")),
     };
     let prompt_len = prompt.ids.len() as u32;
-    let sp = match sampling_from(&req, be.default_sampling(), be.max_model_len(), prompt_len) {
+    // OpenAI chat：`logprobs: bool` + `top_logprobs: 0..=20`
+    let logprobs = if req.logprobs == Some(true) {
+        Some(req.top_logprobs.unwrap_or(0))
+    } else if req.top_logprobs.is_some() {
+        return err(StatusCode::BAD_REQUEST, "top_logprobs requires logprobs=true");
+    } else {
+        None
+    };
+    let max_tokens = req.max_completion_tokens.or(req.max_tokens);
+    let sp = match sampling_from(
+        &req.sampling,
+        be.default_sampling(),
+        be.max_model_len(),
+        prompt_len,
+        max_tokens,
+        logprobs,
+    ) {
         Ok(s) => s,
         Err(m) => return err(StatusCode::BAD_REQUEST, m),
     };
@@ -289,7 +338,12 @@ pub async fn chat_completions(State(be): State<Backend>, Json(req): Json<ChatCom
         Some(k) if k.do_remote_decode => Some(PdSubmit::Export),
         Some(k) if k.do_remote_prefill => match k.remote_request_id {
             Some(r) => Some(PdSubmit::Import { remote_id: r }),
-            None => return err(StatusCode::BAD_REQUEST, "kv_transfer_params.remote_request_id required for do_remote_prefill"),
+            None => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "kv_transfer_params.remote_request_id required for do_remote_prefill",
+                )
+            }
         },
         _ => None,
     };
@@ -299,7 +353,11 @@ pub async fn chat_completions(State(be): State<Backend>, Json(req): Json<ChatCom
     let mut pd_imported = None;
     if let Some(PdSubmit::Import { remote_id }) = pd {
         let be2 = be.clone();
-        let ok = tokio::task::spawn_blocking(move || be2.pd_wait_for(remote_id, std::time::Duration::from_secs(10))).await.unwrap_or(false);
+        let ok = tokio::task::spawn_blocking(move || {
+            be2.pd_wait_for(remote_id, std::time::Duration::from_secs(10))
+        })
+        .await
+        .unwrap_or(false);
         pd_imported = Some(ok);
         if !ok {
             tracing::warn!(remote_id, "pd: KV did not arrive in time, serving as local prefill");
@@ -320,7 +378,7 @@ pub async fn chat_completions(State(be): State<Backend>, Json(req): Json<ChatCom
         }
         sp.max_tokens = 1;
     }
-    let (mut merged, mut states, mut guard) = submit_choices(&be, &prompt.ids, &sp, n, pd);
+    let (mut merged, mut states, mut guard) = submit_choices(&be, &[&prompt.ids], &sp, n, pd);
     // P 侧把引擎 request id 回给 proxy（响应头），proxy 再发 D
     let pd_rid: Option<RequestId> = states.first().map(|s| s.rid);
 
@@ -341,6 +399,7 @@ pub async fn chat_completions(State(be): State<Backend>, Json(req): Json<ChatCom
                 &mut merged,
                 &mut states,
                 &mut guard,
+                false,
                 |i, d, lps| {
                     let lp = want_lp.then_some(ChatLogprobs { content: lps });
                     send(&chunk(&id, created, &model, i, delta_from(d), None, lp))
@@ -377,6 +436,7 @@ pub async fn chat_completions(State(be): State<Backend>, Json(req): Json<ChatCom
         &mut merged,
         &mut states,
         &mut guard,
+        false,
         |i, d, lps| {
             let a = &mut aggs[i as usize];
             a.push(d);
@@ -434,7 +494,8 @@ fn pd_header(resp: &mut Response, rid: Option<RequestId>, imported: Option<bool>
     }
     // D 侧：1 = 接力了 P 的 KV（首 token 已由 P 出，本响应不含它）；0 = 本地重算（本响应含首 token）
     if let Some(ok) = imported {
-        resp.headers_mut().insert("x-pd-imported", axum::http::HeaderValue::from_static(if ok { "1" } else { "0" }));
+        resp.headers_mut()
+            .insert("x-pd-imported", axum::http::HeaderValue::from_static(if ok { "1" } else { "0" }));
     }
 }
 
@@ -519,7 +580,9 @@ fn delta_from(d: &OutDelta) -> Delta {
 }
 
 /// 用一个 unbounded channel + spawn 把 async 生产者变成 Stream（避免引入 async-stream 宏 crate）。
-fn async_stream_lite<F, Fut>(f: F) -> impl futures_core::Stream<Item = Result<Event, Infallible>> + Send
+pub(crate) fn async_stream_lite<F, Fut>(
+    f: F,
+) -> impl futures_core::Stream<Item = Result<Event, Infallible>> + Send
 where
     F: FnOnce(tokio::sync::mpsc::UnboundedSender<Event>) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,

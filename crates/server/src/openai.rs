@@ -19,6 +19,39 @@ pub struct ChatCompletionRequest {
     pub max_tokens: Option<u32>,
     #[serde(default)]
     pub max_completion_tokens: Option<u32>,
+    /// 与 `/v1/completions` 共用的采样字段（flatten：JSON 里仍是顶层字段）。
+    #[serde(flatten)]
+    pub sampling: SamplingFields,
+    /// OpenAI `logprobs`（bool）+ `top_logprobs`（0..=20）。
+    #[serde(default)]
+    pub logprobs: Option<bool>,
+    #[serde(default)]
+    pub top_logprobs: Option<u32>,
+    /// 1..=8：n 个独立采样（引擎侧 n 个请求，seed 依次 +1）。
+    #[serde(default)]
+    pub n: Option<u32>,
+    /// `low` / `high` / `max`（GLM 模板只认 low/high，其余按 max）。
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    /// GLM 扩展：多轮时丢弃早轮思考内容。
+    #[serde(default)]
+    pub clear_thinking: Option<bool>,
+    /// vLLM 风格透传给模板的额外变量。
+    #[serde(default)]
+    pub chat_template_kwargs: Option<serde_json::Map<String, serde_json::Value>>,
+    /// 返回 token id 列表（调试）。
+    #[serde(default)]
+    pub return_token_ids: Option<bool>,
+    /// PD 分离（design §10.3，字段名对齐 vLLM disagg proxy）：proxy 内部使用，普通客户端不传。
+    /// `{"do_remote_decode": true}` → 本实例是 P：只出首 token、导出 KV；响应头 `x-pd-request-id` 回传 P 侧 id。
+    /// `{"do_remote_prefill": true, "remote_request_id": N}` → 本实例是 D：按 N 配对已到的 KV 接力。
+    #[serde(default)]
+    pub kv_transfer_params: Option<KvTransferParams>,
+}
+
+/// chat 与 completions 共用的采样字段（JSON 顶层，`#[serde(flatten)]` 进各请求）。
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SamplingFields {
     #[serde(default)]
     pub temperature: Option<f32>,
     #[serde(default)]
@@ -48,31 +81,6 @@ pub struct ChatCompletionRequest {
     /// vLLM 扩展：命中的 stop 字符串是否留在输出里（默认 false）。
     #[serde(default)]
     pub include_stop_str_in_output: Option<bool>,
-    /// OpenAI `logprobs`（bool）+ `top_logprobs`（0..=20）。
-    #[serde(default)]
-    pub logprobs: Option<bool>,
-    #[serde(default)]
-    pub top_logprobs: Option<u32>,
-    /// 1..=8：n 个独立采样（引擎侧 n 个请求，seed 依次 +1）。
-    #[serde(default)]
-    pub n: Option<u32>,
-    /// `low` / `high` / `max`（GLM 模板只认 low/high，其余按 max）。
-    #[serde(default)]
-    pub reasoning_effort: Option<String>,
-    /// GLM 扩展：多轮时丢弃早轮思考内容。
-    #[serde(default)]
-    pub clear_thinking: Option<bool>,
-    /// vLLM 风格透传给模板的额外变量。
-    #[serde(default)]
-    pub chat_template_kwargs: Option<serde_json::Map<String, serde_json::Value>>,
-    /// 返回 token id 列表（调试）。
-    #[serde(default)]
-    pub return_token_ids: Option<bool>,
-    /// PD 分离（design §10.3，字段名对齐 vLLM disagg proxy）：proxy 内部使用，普通客户端不传。
-    /// `{"do_remote_decode": true}` → 本实例是 P：只出首 token、导出 KV；响应头 `x-pd-request-id` 回传 P 侧 id。
-    /// `{"do_remote_prefill": true, "remote_request_id": N}` → 本实例是 D：按 N 配对已到的 KV 接力。
-    #[serde(default)]
-    pub kv_transfer_params: Option<KvTransferParams>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -213,6 +221,8 @@ pub struct ErrorBody {
     pub message: String,
     #[serde(rename = "type")]
     pub kind: &'static str,
+    /// vLLM 固定输出 `param: null`。
+    pub param: Option<String>,
     pub code: u16,
 }
 
@@ -245,4 +255,102 @@ pub struct KvTransferParams {
     /// 使回退与接力两种路径的输出都不含首 token（proxy 已把首 token 发给客户端）。
     #[serde(default)]
     pub first_token: Option<u32>,
+}
+
+// ---- /v1/completions ----
+
+/// vLLM `CompletionRequest` 子集。`prompt`：字符串 / 字符串数组 / token id 数组 / 其数组（见 completions.rs）。
+#[derive(Debug, Clone, Deserialize)]
+pub struct CompletionRequest {
+    pub model: Option<String>,
+    pub prompt: serde_json::Value,
+    #[serde(default)]
+    pub stream: bool,
+    #[serde(default)]
+    pub stream_options: Option<StreamOptions>,
+    /// vLLM 默认 16。
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    /// 整数 = 每个 token 附带的 top_logprobs 个数（0 也返回 chosen token 的 logprob）。
+    #[serde(default)]
+    pub logprobs: Option<u32>,
+    #[serde(default)]
+    pub echo: Option<bool>,
+    /// 不支持：给了就 400。
+    #[serde(default)]
+    pub suffix: Option<String>,
+    #[serde(default)]
+    pub n: Option<u32>,
+    #[serde(flatten)]
+    pub sampling: SamplingFields,
+}
+
+/// vLLM `CompletionLogProbs`：按 token 的四列（`top_logprobs[i]` 为 `{token: logprob}` 映射）。
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct CompletionLogProbs {
+    pub text_offset: Vec<usize>,
+    pub token_logprobs: Vec<f32>,
+    pub tokens: Vec<String>,
+    pub top_logprobs: Vec<serde_json::Map<String, serde_json::Value>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CompletionChoice {
+    pub index: u32,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logprobs: Option<CompletionLogProbs>,
+    pub finish_reason: Option<&'static str>,
+}
+
+/// 非流式与流式同形（`object = "text_completion"`）；流式 chunk 的 `usage` 只在最后一个 chunk 出现。
+#[derive(Debug, Clone, Serialize)]
+pub struct CompletionResponse {
+    pub id: String,
+    pub object: &'static str,
+    pub created: u64,
+    pub model: String,
+    pub choices: Vec<CompletionChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+}
+
+// ---- /tokenize /detokenize ----
+
+/// vLLM `TokenizeCompletionRequest | TokenizeChatRequest`：`prompt` 与 `messages` 二选一。
+#[derive(Debug, Clone, Deserialize)]
+pub struct TokenizeRequest {
+    pub model: Option<String>,
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub messages: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    pub tools: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    pub add_generation_prompt: Option<bool>,
+    #[serde(default)]
+    pub chat_template_kwargs: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(default)]
+    pub return_token_strs: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TokenizeResponse {
+    pub count: usize,
+    pub max_model_len: u32,
+    pub tokens: Vec<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_strs: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DetokenizeRequest {
+    pub model: Option<String>,
+    pub tokens: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DetokenizeResponse {
+    pub prompt: String,
 }

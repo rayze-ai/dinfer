@@ -62,6 +62,15 @@ impl ChatBackend for DpBackend {
     fn render(&self, req: &RenderRequest<'_>) -> Result<Prompt> {
         self.shards[0].render(req)
     }
+    fn encode(&self, text: &str) -> Result<Vec<u32>> {
+        self.shards[0].encode(text)
+    }
+    fn decode(&self, ids: &[u32]) -> Result<String> {
+        self.shards[0].decode(ids)
+    }
+    fn token_strs(&self, ids: &[u32]) -> Option<Vec<String>> {
+        self.shards[0].token_strs(ids)
+    }
     fn submit(
         &self,
         prompt_ids: Vec<u32>,

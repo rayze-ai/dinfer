@@ -123,7 +123,7 @@ impl Glm53Service {
                 max_num_batched_tokens: opt.max_num_batched_tokens,
                 enable_chunked_prefill: opt.enable_chunked_prefill,
                 long_prefill_token_threshold: 0,
-            decode_exempt_from_budget: false,
+                decode_exempt_from_budget: false,
             },
             CacheConfig { block_size: opt.block_size, enable_prefix_caching: false, ..Default::default() },
             opt.max_model_len,
@@ -262,6 +262,15 @@ impl ChatBackend for Glm53Service {
         let text = render(&self.tmpl, &p)?;
         let ids = self.tok.encode(&text)?;
         Ok(Prompt { text, ids })
+    }
+    fn encode(&self, text: &str) -> Result<Vec<u32>> {
+        self.tok.encode(text)
+    }
+    fn decode(&self, ids: &[u32]) -> Result<String> {
+        self.tok.decode(ids)
+    }
+    fn token_strs(&self, ids: &[u32]) -> Option<Vec<String>> {
+        ids.iter().map(|&id| self.tok.id_to_token(id)).collect()
     }
     fn submit(
         &self,

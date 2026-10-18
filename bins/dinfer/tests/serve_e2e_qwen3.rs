@@ -900,3 +900,320 @@ async fn e2e_qwen3_pd() {
     drop(d);
     drop(single);
 }
+
+/// completions 流式：按 choice index 拼 `text`、记 finish_reason、统计 logprobs token 数、看到 [DONE]。
+fn parse_cmpl_sse(text: &str, n: usize) -> (Vec<String>, Vec<Option<String>>, Vec<usize>, bool, Option<serde_json::Value>) {
+    let mut out = vec![String::new(); n];
+    let mut finish = vec![None; n];
+    let mut lps = vec![0usize; n];
+    let mut done = false;
+    let mut usage = None;
+    for line in text.lines() {
+        let Some(d) = line.strip_prefix("data: ") else { continue };
+        if d.trim() == "[DONE]" {
+            done = true;
+            continue;
+        }
+        let j: serde_json::Value = serde_json::from_str(d).unwrap();
+        assert_eq!(j["object"], "text_completion", "chunk object: {d}");
+        if j["usage"].is_object() {
+            usage = Some(j["usage"].clone());
+        }
+        for ch in j["choices"].as_array().into_iter().flatten() {
+            let i = ch["index"].as_u64().unwrap() as usize;
+            out[i].push_str(ch["text"].as_str().unwrap_or(""));
+            if let Some(f) = ch["finish_reason"].as_str() {
+                finish[i] = Some(f.to_string());
+            }
+            if let Some(a) = ch["logprobs"]["tokens"].as_array() {
+                lps[i] += a.len();
+            }
+        }
+    }
+    (out, finish, lps, done, usage)
+}
+
+/// API 补全 e2e（docs/loops/api-complete.md）：每个新端点正例 + 错例；completions 流式 == 非流式（greedy）；
+/// echo 前缀；tokenize/detokenize 往返；tokenize(messages).count == chat usage.prompt_tokens；logprobs 形状；501 列表。
+#[tokio::test]
+#[ignore]
+async fn e2e_qwen3_openai_surface() {
+    let srv = spawn_server();
+    let c = reqwest::Client::new();
+    let b = &srv.base;
+    let model: serde_json::Value = c.get(format!("{b}/v1/models")).send().await.unwrap().json().await.unwrap();
+    let card = &model["data"][0];
+    let name = card["id"].as_str().unwrap().to_string();
+    for k in ["created", "root", "parent", "permission", "max_model_len", "owned_by"] {
+        assert!(card.get(k).is_some(), "/v1/models card missing {k}: {card}");
+    }
+    assert!(card["created"].as_u64().unwrap() > 1_600_000_000);
+    assert!(card["parent"].is_null() && card["permission"].as_array().unwrap().is_empty());
+
+    // /v1/models/{id}
+    let r = c.get(format!("{b}/v1/models/{name}")).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let one: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(one["id"], name);
+    let r = c.get(format!("{b}/v1/models/nope")).send().await.unwrap();
+    assert_eq!(r.status(), 404);
+    let e: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(e["error"]["type"], "NotFoundError");
+    assert!(e["error"].get("param").is_some() && e["error"]["param"].is_null(), "{e}");
+    assert_eq!(e["error"]["code"], 404);
+
+    // /version /ping
+    let v: serde_json::Value = c.get(format!("{b}/version")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(v["version"].as_str().unwrap(), env!("CARGO_PKG_VERSION"));
+    assert_eq!(c.get(format!("{b}/ping")).send().await.unwrap().status(), 200);
+    assert_eq!(c.post(format!("{b}/ping")).send().await.unwrap().status(), 200);
+
+    // chat 的 model 不匹配 → 404
+    let r = c
+        .post(format!("{b}/v1/chat/completions"))
+        .json(&serde_json::json!({"model":"nope","messages":[{"role":"user","content":"hi"}],"max_tokens":1}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404);
+
+    // 501 列表
+    for p in [
+        "/v1/embeddings",
+        "/pooling",
+        "/score",
+        "/rerank",
+        "/v1/rerank",
+        "/v2/rerank",
+        "/classify",
+        "/v1/audio/transcriptions",
+        "/v1/audio/translations",
+        "/v1/responses",
+    ] {
+        let r = c.post(format!("{b}{p}")).json(&serde_json::json!({})).send().await.unwrap();
+        assert_eq!(r.status(), 501, "{p}");
+        let e: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(e["error"]["type"], "not_implemented", "{p}: {e}");
+        assert_eq!(e["error"]["code"], 501);
+    }
+
+    // tokenize / detokenize
+    let text = "The quick brown fox jumps over the lazy dog.";
+    let t: serde_json::Value = c
+        .post(format!("{b}/tokenize"))
+        .json(&serde_json::json!({"prompt": text, "return_token_strs": true}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let toks = t["tokens"].as_array().unwrap().clone();
+    assert_eq!(t["count"].as_u64().unwrap() as usize, toks.len());
+    assert_eq!(t["max_model_len"], 2048);
+    assert_eq!(t["token_strs"].as_array().unwrap().len(), toks.len());
+    let d: serde_json::Value = c
+        .post(format!("{b}/detokenize"))
+        .json(&serde_json::json!({"tokens": toks}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(d["prompt"].as_str().unwrap(), text, "tokenize→detokenize roundtrip");
+    // 错例：prompt 与 messages 都没给 / 都给 → 400；model 不匹配 → 404
+    let r = c.post(format!("{b}/tokenize")).json(&serde_json::json!({})).send().await.unwrap();
+    assert_eq!(r.status(), 400);
+    let r = c
+        .post(format!("{b}/tokenize"))
+        .json(&serde_json::json!({"prompt":"a","messages":[{"role":"user","content":"a"}]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400);
+    let r = c.post(format!("{b}/detokenize")).json(&serde_json::json!({"model":"nope","tokens":[1]})).send().await.unwrap();
+    assert_eq!(r.status(), 404);
+    let r = c.post(format!("{b}/detokenize")).json(&serde_json::json!({"tokens":"x"})).send().await.unwrap();
+    assert!(r.status().is_client_error(), "detokenize bad body: {}", r.status());
+
+    // tokenize(messages).count == chat usage.prompt_tokens（同 chat_template_kwargs）
+    let msgs = serde_json::json!([{"role":"user","content":"Say hello."}]);
+    let kw = serde_json::json!({"enable_thinking": false});
+    let t: serde_json::Value = c
+        .post(format!("{b}/tokenize"))
+        .json(&serde_json::json!({"messages": msgs, "chat_template_kwargs": kw}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let chat: serde_json::Value = c
+        .post(format!("{b}/v1/chat/completions"))
+        .json(&serde_json::json!({"messages": msgs, "chat_template_kwargs": kw, "max_tokens": 1}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(t["count"], chat["usage"]["prompt_tokens"], "tokenize(messages) vs chat prompt_tokens");
+
+    // /v1/completions：非流式 greedy
+    let url = format!("{b}/v1/completions");
+    let prompt = "The capital of France is";
+    let base = serde_json::json!({"prompt": prompt, "max_tokens": 12, "temperature": 0.0});
+    let r = c.post(&url).json(&base).send().await.unwrap();
+    assert_eq!(r.status(), 200, "{}", r.text().await.unwrap());
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(v["object"], "text_completion");
+    assert_eq!(v["model"], name);
+    let full = v["choices"][0]["text"].as_str().unwrap().to_string();
+    eprintln!("e2e: completion = {full:?}");
+    assert!(!full.is_empty());
+    assert_eq!(v["choices"][0]["index"], 0);
+    assert!(v["choices"][0]["finish_reason"].is_string());
+    assert!(v["choices"][0].get("logprobs").is_none() || v["choices"][0]["logprobs"].is_null());
+    let pt = v["usage"]["prompt_tokens"].as_u64().unwrap();
+    let ct = v["usage"]["completion_tokens"].as_u64().unwrap();
+    assert!(pt > 0 && ct > 0 && ct <= 12);
+    assert_eq!(v["usage"]["total_tokens"].as_u64().unwrap(), pt + ct);
+    // prompt_tokens == tokenize(prompt).count
+    let t: serde_json::Value =
+        c.post(format!("{b}/tokenize")).json(&serde_json::json!({"prompt": prompt})).send().await.unwrap().json().await.unwrap();
+    assert_eq!(t["count"].as_u64().unwrap(), pt);
+
+    // 默认 max_tokens = 16
+    let mut b16 = base.clone();
+    b16.as_object_mut().unwrap().remove("max_tokens");
+    b16["ignore_eos"] = serde_json::json!(true);
+    let v16: serde_json::Value = c.post(&url).json(&b16).send().await.unwrap().json().await.unwrap();
+    assert_eq!(v16["usage"]["completion_tokens"], 16, "default max_tokens should be 16");
+    assert_eq!(v16["choices"][0]["finish_reason"], "length");
+
+    // 流式 == 非流式（greedy），含 usage chunk
+    let mut bs = base.clone();
+    bs["stream"] = serde_json::json!(true);
+    bs["stream_options"] = serde_json::json!({"include_usage": true});
+    let r = c.post(&url).json(&bs).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(r.headers()["content-type"].to_str().unwrap().starts_with("text/event-stream"));
+    let (texts, fin, _, done, usage) = parse_cmpl_sse(&r.text().await.unwrap(), 1);
+    assert!(done, "no [DONE]");
+    assert_eq!(texts[0], full, "stream vs non-stream text differ");
+    assert_eq!(fin[0].as_deref(), v["choices"][0]["finish_reason"].as_str());
+    assert_eq!(usage.unwrap()["completion_tokens"].as_u64().unwrap(), ct);
+
+    // echo=true：text 以 prompt 开头，其后 == 不 echo 的输出（非流式 + 流式）
+    let mut be = base.clone();
+    be["echo"] = serde_json::json!(true);
+    let ve: serde_json::Value = c.post(&url).json(&be).send().await.unwrap().json().await.unwrap();
+    let et = ve["choices"][0]["text"].as_str().unwrap();
+    assert!(et.starts_with(prompt), "echo text {et:?} should start with prompt");
+    assert_eq!(&et[prompt.len()..], full);
+    be["stream"] = serde_json::json!(true);
+    let (texts, _, _, done, _) = parse_cmpl_sse(&c.post(&url).json(&be).send().await.unwrap().text().await.unwrap(), 1);
+    assert!(done);
+    assert_eq!(texts[0], et, "echo stream vs non-stream");
+
+    // token id prompt == 字符串 prompt（同一组 ids）
+    let mut bi = base.clone();
+    bi["prompt"] = t["tokens"].clone();
+    let vi: serde_json::Value = c.post(&url).json(&bi).send().await.unwrap().json().await.unwrap();
+    assert_eq!(vi["choices"][0]["text"].as_str().unwrap(), full, "token-id prompt vs string prompt");
+
+    // 多 prompt × n=2：choice index = prompt_idx*n + i，共 4 个
+    let bm = serde_json::json!({"prompt": [prompt, "Hello, my name is"], "max_tokens": 4, "n": 2, "temperature": 0.0, "seed": 1});
+    let vm: serde_json::Value = c.post(&url).json(&bm).send().await.unwrap().json().await.unwrap();
+    let ch = vm["choices"].as_array().unwrap();
+    assert_eq!(ch.len(), 4);
+    let idx: Vec<u64> = ch.iter().map(|x| x["index"].as_u64().unwrap()).collect();
+    assert_eq!(idx, vec![0, 1, 2, 3]);
+    assert_eq!(vm["usage"]["prompt_tokens"].as_u64().unwrap(), pt + {
+        let t2: serde_json::Value = c
+            .post(format!("{b}/tokenize"))
+            .json(&serde_json::json!({"prompt": "Hello, my name is"}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        t2["count"].as_u64().unwrap()
+    });
+    // 流式多 prompt：4 个 index 都收到 finish
+    let mut bms = bm.clone();
+    bms["stream"] = serde_json::json!(true);
+    let (_, fin, _, done, _) = parse_cmpl_sse(&c.post(&url).json(&bms).send().await.unwrap().text().await.unwrap(), 4);
+    assert!(done && fin.iter().all(|f| f.is_some()), "{fin:?}");
+
+    // stop 字符串：非流式截断 + finish=stop
+    let mut bst = serde_json::json!({"prompt": "1, 2, 3, 4, 5, 6,", "max_tokens": 32, "temperature": 0.0});
+    let vst0: serde_json::Value = c.post(&url).json(&bst).send().await.unwrap().json().await.unwrap();
+    let s0 = vst0["choices"][0]["text"].as_str().unwrap().to_string();
+    eprintln!("e2e: counting = {s0:?}");
+    if s0.contains("9") {
+        bst["stop"] = serde_json::json!(["9"]);
+        let vst: serde_json::Value = c.post(&url).json(&bst).send().await.unwrap().json().await.unwrap();
+        let s1 = vst["choices"][0]["text"].as_str().unwrap();
+        assert!(!s1.contains("9") && s0.starts_with(s1), "stop: {s1:?} vs {s0:?}");
+        assert_eq!(vst["choices"][0]["finish_reason"], "stop");
+    }
+
+    // logprobs=2：四列等长 == completion_tokens；每个 top_logprobs 2..=3 项且含 chosen token；text_offset 单调
+    let mut bl = base.clone();
+    bl["logprobs"] = serde_json::json!(2);
+    bl["max_tokens"] = serde_json::json!(6);
+    let vl: serde_json::Value = c.post(&url).json(&bl).send().await.unwrap().json().await.unwrap();
+    let lp = &vl["choices"][0]["logprobs"];
+    let nt = vl["usage"]["completion_tokens"].as_u64().unwrap() as usize;
+    for k in ["tokens", "token_logprobs", "top_logprobs", "text_offset"] {
+        assert_eq!(lp[k].as_array().unwrap().len(), nt, "logprobs.{k} len");
+    }
+    let toks = lp["tokens"].as_array().unwrap();
+    for (i, top) in lp["top_logprobs"].as_array().unwrap().iter().enumerate() {
+        let m = top.as_object().unwrap();
+        assert!((1..=3).contains(&m.len()), "top_logprobs[{i}] len {}", m.len());
+        assert!(m.len() <= 2 + 1);
+        assert!(m.contains_key(toks[i].as_str().unwrap()), "top_logprobs[{i}] missing chosen {}", toks[i]);
+    }
+    let offs: Vec<u64> = lp["text_offset"].as_array().unwrap().iter().map(|x| x.as_u64().unwrap()).collect();
+    assert_eq!(offs[0], 0);
+    assert!(offs.windows(2).all(|w| w[0] <= w[1]));
+    assert_eq!(lp["tokens"].as_array().unwrap().iter().map(|t| t.as_str().unwrap()).collect::<String>(), vl["choices"][0]["text"]);
+    // logprobs=0：仍有 chosen token 的 logprob，top_logprobs 每项恰 1
+    bl["logprobs"] = serde_json::json!(0);
+    let vl0: serde_json::Value = c.post(&url).json(&bl).send().await.unwrap().json().await.unwrap();
+    let lp0 = &vl0["choices"][0]["logprobs"];
+    assert!(!lp0["token_logprobs"].as_array().unwrap().is_empty());
+    assert!(lp0["top_logprobs"].as_array().unwrap().iter().all(|t| t.as_object().unwrap().len() == 1));
+    // 流式 logprobs：每个 chunk 带 tokens，总数 == completion_tokens
+    bl["logprobs"] = serde_json::json!(2);
+    bl["stream"] = serde_json::json!(true);
+    let (_, _, lpn, done, _) = parse_cmpl_sse(&c.post(&url).json(&bl).send().await.unwrap().text().await.unwrap(), 1);
+    assert!(done);
+    assert_eq!(lpn[0], nt, "stream logprobs token count");
+
+    // 错例：suffix 400 / 空 prompt 400 / 混合数组 400 / logprobs 21 400 / model 不匹配 404 / n=9 400
+    for (body, st) in [
+        (serde_json::json!({"prompt":"a","suffix":"b"}), 400),
+        (serde_json::json!({"prompt":""}), 400),
+        (serde_json::json!({"prompt":[]}), 400),
+        (serde_json::json!({"prompt":["a", 1]}), 400),
+        (serde_json::json!({"prompt":[[1,2],"a"]}), 400),
+        (serde_json::json!({"prompt":"a","logprobs":21}), 400),
+        (serde_json::json!({"prompt":"a","model":"nope"}), 404),
+        (serde_json::json!({"prompt":"a","n":9}), 400),
+        (serde_json::json!({"prompt":"a","temperature":-1.0}), 400),
+    ] {
+        let r = c.post(&url).json(&body).send().await.unwrap();
+        assert_eq!(r.status(), st, "{body}: {}", r.text().await.unwrap());
+    }
+    let r = c.post(&url).json(&serde_json::json!({"prompt":"a","model":"nope"})).send().await.unwrap();
+    let e: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(e["error"]["type"], "NotFoundError");
+    assert_eq!(e["error"]["code"], 404);
+    assert!(e["error"]["param"].is_null());
+    let _ = srv.logs.len();
+}
