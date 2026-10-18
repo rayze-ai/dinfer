@@ -417,7 +417,9 @@ impl<E: ModelExecutor> Engine<E> {
                         let t_step = std::time::Instant::now();
                         let so_c = self.sched.schedule_waiting_only();
                         let t_sched = std::time::Instant::now();
-                        if !so_c.num_scheduled_tokens.is_empty() {
+                        // PD Import 首步没有 token 要算（首 token 已由 P 出），但 new_reqs / kv_import 必须走到
+                        // runner（登记 ReqState、导入 KV），否则下一步 decode 报 "cached req unknown"。
+                        if !so_c.num_scheduled_tokens.is_empty() || !so_c.new_reqs.is_empty() || !so_c.kv_import.is_empty() {
                             if let Err(e) = self.pd_pre_begin(&so_c) {
                                 self.fail_step(e)?;
                                 continue;
@@ -694,7 +696,16 @@ mod pd_tests {
     /// P（Export, max_tokens=1）→ TCP → D（Import）：D 从首 token 续 decode；D 的 KV 影子等于 P 导出的字节；超时回退计数。
     #[test]
     fn prefill_export_then_decode_import_over_tcp() {
-        std::env::set_var("ASYNC_SCHED", "0");
+        pd_roundtrip(false);
+    }
+    /// 异步调度 + 插队 prefill 开（4090 默认配置）：D 的 Import 首步走 cut-in 路径（q4 第 10 轮抓到的 "cached req unknown"）。
+    #[test]
+    fn prefill_export_then_decode_import_over_tcp_async_cut_in() {
+        pd_roundtrip(true);
+    }
+    fn pd_roundtrip(async_sched: bool) {
+        std::env::set_var("ASYNC_SCHED", if async_sched { "1" } else { "0" });
+        std::env::set_var("CUT_IN", if async_sched { "1" } else { "0" });
         let d_kv = Arc::new(Mutex::new(HashMap::new()));
         let d_incoming = Arc::new(IncomingKv::default());
         let d_port = crate::pd::spawn_receiver("127.0.0.1:0", "t".into(), d_incoming.clone()).unwrap();
