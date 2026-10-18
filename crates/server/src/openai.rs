@@ -241,4 +241,8 @@ pub struct KvTransferParams {
     pub do_remote_prefill: bool,
     #[serde(default)]
     pub remote_request_id: Option<u64>,
+    /// D 侧：P 已出的首 token id（proxy 从 P 的 `token_ids` 取）。KV 没到而本地重算时，把它拼进 prompt 续写，
+    /// 使回退与接力两种路径的输出都不含首 token（proxy 已把首 token 发给客户端）。
+    #[serde(default)]
+    pub first_token: Option<u32>,
 }

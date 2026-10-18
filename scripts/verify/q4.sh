@@ -32,6 +32,19 @@ trap stop_all EXIT
 ask() { curl -s -m 60 "http://127.0.0.1:$1/v1/chat/completions" -H 'content-type: application/json' \
   -d '{"messages":[{"role":"user","content":"List three primary colors, comma separated, then stop."}],"max_tokens":24,"temperature":0,"chat_template_kwargs":{"enable_thinking":false}}' \
   | python3 -c 'import sys,json; v=json.load(sys.stdin); print(v["choices"][0]["message"]["content"])'; }
+# 流式同问题，拼接 delta.content（v2 (c)：proxy 先发 P 的首 chunk，再接 D；回退时 D 从 prompt+首 token 续写）
+ask_stream() { curl -s -N -m 60 "http://127.0.0.1:$1/v1/chat/completions" -H 'content-type: application/json' \
+  -d '{"messages":[{"role":"user","content":"List three primary colors, comma separated, then stop."}],"max_tokens":24,"temperature":0,"stream":true,"chat_template_kwargs":{"enable_thinking":false}}' \
+  | python3 -c '
+import sys,json
+out=""
+for line in sys.stdin:
+    if not line.startswith("data: "): continue
+    d=line[6:].strip()
+    if d=="[DONE]": break
+    c=json.loads(d)["choices"][0]["delta"].get("content")
+    if c: out+=c
+print(out)'; }
 metric() { curl -s "http://127.0.0.1:$1/metrics" | awk -v n="dinfer:$2" '$1==n{print $2}'; }
 
 step "start D, P, proxy on GPU $GPU"
@@ -39,6 +52,7 @@ pgrep -af "dinfer (serve|proxy)" | grep -E "810[0-2]" && { echo "stale PD proces
 stop_all; start_d; wait_up 8102; start_p; wait_up 8101; start_x; wait_up 8100
 WANT="$(ask 8012)"; echo "single : $WANT"
 GOT="$(ask 8100)";  echo "pd     : $GOT"; [ "$GOT" = "$WANT" ]
+GOT="$(ask_stream 8100)"; [ "$GOT" = "$WANT" ] || { echo "pd stream mismatch: [$GOT] vs [$WANT]"; exit 1; }
 [ "$(metric 8101 pd_export_total)" -ge 1 ] && [ "$(metric 8102 pd_import_total)" -ge 1 ] && [ "$(metric 8102 pd_fallback_total)" = 0 ]
 
 step "fault 1: kill P → proxy falls back to D-only"
@@ -52,6 +66,7 @@ step "fault 3: P cannot reach kv-port → D times out, serves local prefill, out
 kill "$(cat "$OUT/p.pid")"; sleep 1
 CUDA_VISIBLE_DEVICES=$GPU RUST_LOG=info nohup $BIN serve "${COMMON[@]}" --port 8101 --role prefill --peer 127.0.0.1:1 --num-blocks $P_BLOCKS > "$OUT/p_badpeer.log" 2>&1 & echo $! > "$OUT/p.pid"; wait_up 8101
 GOT="$(ask 8100)"; [ "$GOT" = "$WANT" ]; [ "$(metric 8102 pd_fallback_total)" -ge 1 ]
+GOT="$(ask_stream 8100)"; [ "$GOT" = "$WANT" ] || { echo "stream fallback mismatch: [$GOT] vs [$WANT]"; exit 1; }
 kill "$(cat "$OUT/p.pid")"; sleep 1; start_p; wait_up 8101
 
 step "bench c8 (1024,128): proxy :8100 vs single :8012 → $OUT/../ab_pd1 (CSV: variant single 基线 vs pd)"

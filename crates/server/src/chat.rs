@@ -270,7 +270,7 @@ pub async fn chat_completions(State(be): State<Backend>, Json(req): Json<ChatCom
         clear_thinking: req.clear_thinking.unwrap_or(false),
         extra: req.chat_template_kwargs.as_ref(),
     };
-    let prompt = match be.render(&rr) {
+    let mut prompt = match be.render(&rr) {
         Ok(p) => p,
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("chat template: {e:#}")),
     };
@@ -307,6 +307,11 @@ pub async fn chat_completions(State(be): State<Backend>, Json(req): Json<ChatCom
                 m.pd_fallback_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             pd = None;
+            // proxy 已把 P 的首 token 发给客户端：本地重算从 prompt+首 token 续写，输出口径与接力路径一致（不含首 token）
+            if let Some(ft) = req.kv_transfer_params.as_ref().and_then(|k| k.first_token) {
+                prompt.ids.push(ft);
+                sp.max_tokens = sp.max_tokens.saturating_sub(1).max(1);
+            }
         }
     }
     if matches!(pd, Some(PdSubmit::Export)) {
