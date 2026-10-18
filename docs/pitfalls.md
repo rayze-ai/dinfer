@@ -9,6 +9,14 @@
 - 解法：同卡多实例一律 `--num-blocks N` 固定块数（`kv_cache: fixed` 路径不看 utilization）。q4.sh：P 512 / D 2048。
 - 如何避免：脚本里起第二个进程前先想 "预算公式里 used 包含谁"；`wait_up` 失败要打子进程日志尾，否则只看到 "port did not come up"。
 
+## 2026-10-18 4090 跑 `Q4_REMOTE=1 q4.sh` 两次空跑：bench 包名、模型路径都是本机口径
+
+- 现象：第一次 `cargo build -p bench` 报 "package ID specification `bench` did not match"；第二次 e2e 0.16 s 失败，`[serve:err] Error: No such file or directory`。
+- 根因：bench crate 的 package 名是 `dinfer-bench`（bin 名才是 `bench`）；`q4.sh` 的 `QWEN3_DIR` 默认 `/data/ref/models/qwen3-0.6b` 是本机路径，4090 上权重在 `/data/yaochen/infer/models/qwen3-0.6b`。
+- 解法：`cargo build --release -p dinfer -p dinfer-bench --features qwen3`；`QWEN3_DIR=/data/yaochen/infer/models/qwen3-0.6b Q4_REMOTE=1 bash scripts/verify/q4.sh test/qwen3/<日期>/<名>`。远端非交互 ssh 还要先 `source /data/yaochen/infer/env.sh`（cargo 不在 PATH，BUILD_RC=127）。
+- 如何避免：远端命令统一从 `scripts/dev/README-remote4090.md` 的模板抄；q4.sh 若 `$MODEL` 不存在应直接报错退出而不是让 serve 去撞。
+- 相关：loop q4-pd 第 14–15 轮。
+
 ## 2026-10-18 PD 分离 e2e：D 等 KV 超时回退 + 首 token 重复（"redred"）
 
 - 现象：`e2e_qwen3_pd` 经 proxy 的输出比单机多一个重复的首 token；D 日志 `pd: KV wait timeout, falling back to local prefill`。

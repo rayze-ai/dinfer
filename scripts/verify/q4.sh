@@ -8,6 +8,7 @@ cd "$(dirname "$0")/../.."
 OUT="${1:-test/qwen3/$(date +%F)/q4}"; mkdir -p "$OUT"
 step() { rm -f target/.rustc_info.json; printf '\n==> %s\n' "$*"; }
 MODEL="${QWEN3_DIR:-/data/ref/models/qwen3-0.6b}"
+[ -d "$MODEL" ] || { echo "model dir not found: $MODEL (set QWEN3_DIR; 4090: /data/yaochen/infer/models/qwen3-0.6b)"; exit 1; }
 # 共享机：GPU 0/1 常驻服务，测试一律钉在 Q4_GPU（默认 3）；本机单卡设 Q4_GPU=0
 GPU="${Q4_GPU:-3}"
 export CUDA_VISIBLE_DEVICES="$GPU"
