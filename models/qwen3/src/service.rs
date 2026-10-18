@@ -66,6 +66,10 @@ pub struct ServeOptions {
     pub pd_wait_ms: u64,
     /// PD：pinned 缓冲个数（每块 = max_model_len 的全层 KV；导出 / 导入在飞上限）。
     pub pd_pool_bufs: usize,
+    /// PD KV 传输后端：tcp | shm | cuda-ipc（design §10.3 b；D 侧建区，P 侧跟随握手）。
+    pub kv_transport: String,
+    /// 共享槽区槽数；0 = 自动。
+    pub kv_slots: usize,
     /// 纯 decode 步用 CUDA graph（启动时按 batch 桶捕获；vLLM `cudagraph_mode=FULL_DECODE_ONLY` 对齐）。
     pub enable_cuda_graph: bool,
     pub device: usize,
@@ -91,6 +95,8 @@ impl Default for ServeOptions {
             peer: None,
             pd_wait_ms: 2000,
             pd_pool_bufs: 8,
+            kv_transport: "tcp".into(),
+            kv_slots: 0,
             enable_cuda_graph: true,
             device: 0,
         }
@@ -181,13 +187,29 @@ impl Qwen3Service {
             let model_tag = format!("qwen3:{}:bs{}:bf16", cfg.num_hidden_layers, opt.block_size);
             let incoming = Arc::new(dinfer_core::pd::IncomingKv::default());
             pd_incoming_keep = Some(incoming.clone());
+            // 共享槽区后端（design §10.3 b）：D 侧建区（shm / cuda-ipc），握手时发给 P；P 侧跟随对端的区类型，不看本地 kv_transport。
+            let region_kind = match opt.kv_transport.as_str() {
+                "tcp" => None,
+                k => Some(dinfer_kernels::RegionKind::parse(k).with_context(|| format!("unknown --kv-transport {k} (tcp | shm | cuda-ipc)"))?),
+            };
+            let local_region = match (opt.role, region_kind) {
+                (PdRoleOpt::Decode, Some(kind)) => {
+                    let slots = if opt.kv_slots > 0 { opt.kv_slots } else if kind == dinfer_kernels::RegionKind::Shm { 4 } else { 2 };
+                    Some(Arc::new(exec.enable_pd_region(kind, slots)?))
+                }
+                _ => None,
+            };
             if opt.kv_port > 0 {
-                let port = dinfer_core::pd::spawn_receiver_with_pool(&format!("0.0.0.0:{}", opt.kv_port), model_tag.clone(), incoming.clone(), pool.clone())?;
-                tracing::info!(port, role = ?opt.role, "pd: kv receiver listening");
+                let port = dinfer_core::pd::spawn_receiver_shared(&format!("0.0.0.0:{}", opt.kv_port), model_tag.clone(), incoming.clone(), pool.clone(), local_region)?;
+                tracing::info!(port, role = ?opt.role, transport = %opt.kv_transport, "pd: kv receiver listening");
             }
             let transport: Option<Arc<dyn dinfer_core::pd::KvTransport>> = match (opt.role, &opt.peer) {
                 (PdRoleOpt::Prefill, Some(peer)) => {
-                    let t = Arc::new(dinfer_core::pd::TcpTransport { addr: peer.clone(), connect_timeout: std::time::Duration::from_secs(2) });
+                    let t: Arc<dyn dinfer_core::pd::KvTransport> = if region_kind.is_some() {
+                        dinfer_core::pd::SharedTransport::new(peer.clone(), std::time::Duration::from_secs(2))
+                    } else {
+                        Arc::new(dinfer_core::pd::TcpTransport { addr: peer.clone(), connect_timeout: std::time::Duration::from_secs(2) })
+                    };
                     t.register(dinfer_core::pd::MemDesc { ptr: base, len })?;
                     tracing::info!(peer = %peer, transport = t.name(), "pd: prefill side will push KV to peer");
                     Some(t)

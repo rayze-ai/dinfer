@@ -36,6 +36,7 @@ dinfer-text = { path = "crates/text" }
 
 # 第三方：固定版本（见 docs/design.md §3.1）
 anyhow = "=1.0.98"
+libc = "=0.2.190"
 thiserror = "=2.0.12"
 serde = { version = "=1.0.219", features = ["derive"] }
 serde_json = { version = "=1.0.140", features = ["preserve_order"] }  # chat 模板 tojson 要保持 key 插入序（Python dict 语义）

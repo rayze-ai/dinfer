@@ -159,6 +159,16 @@ pub trait ModelExecutor {
     fn kv_import(&mut self, _blocks: &crate::kv::KvBlocks, _payload: Box<dyn crate::pd::HostBuf>) -> Result<()> {
         anyhow::bail!("kv_import: executor does not support PD")
     }
+    /// 共享槽区后端（design §10.3 b）P 侧：映射对端区（shm mmap+register / cuda-ipc open）。失败 → 调用方退回 payload 路径。
+    fn pd_map_region(&mut self, _info: &crate::pd::RegionInfo) -> Result<()> {
+        anyhow::bail!("pd_map_region: executor does not support shared regions")
+    }
+    /// P 侧：把 `blocks` 的全层 KV 直接写进已映射对端区的槽 `slot`（D2H 到 shm / D2D 到 IPC 区）；`wait()` 后数据已落。
+    fn kv_export_slot(&mut self, _blocks: &crate::kv::KvBlocks, _slot: u32) -> Result<Box<dyn crate::pd::KvExportHandle>> {
+        anyhow::bail!("kv_export_slot: executor does not support shared regions")
+    }
+    /// 每步调一次：回收已完成在飞导入的缓冲 / 槽（槽 drop = credit 回 P）。默认空。
+    fn pd_poll(&mut self) {}
     /// 接收线程落 payload 用的 pinned 池；None = 用普通内存（导入时多一次 memcpy）。
     fn kv_host_pool(&self) -> Option<std::sync::Arc<dyn crate::pd::HostBufPool>> {
         None

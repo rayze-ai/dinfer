@@ -39,13 +39,31 @@ pub struct MigrationHeader {
     /// 单元数 = 该请求的块数（按位置，含未满尾块）；payload = `num_units × unit_bytes`，布局与 executor `kv_export` 一致。
     pub num_units: u32,
     pub unit_bytes: u32,
+    /// 共享槽区后端（design §10.3 b）：数据已由 P 直接写进 D 的槽 `slot`，TCP 上不带 payload。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot: Option<u32>,
 }
 
 impl MigrationHeader {
+    /// TCP 上跟在 header 后面的字节数（槽模式 = 0）。
     pub fn payload_len(&self) -> usize {
+        if self.slot.is_some() { 0 } else { self.data_len() }
+    }
+    /// KV 数据总字节（`num_units × unit_bytes`），与 payload 走哪条路无关。
+    pub fn data_len(&self) -> usize {
         self.num_units as usize * self.unit_bytes as usize
     }
 }
+
+/// 连接被对端正常关闭（持久连接读到 EOF）。
+#[derive(Debug)]
+pub struct Eof;
+impl std::fmt::Display for Eof {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("pd: connection closed")
+    }
+}
+impl std::error::Error for Eof {}
 
 /// 一次完整的迁移：头 + 连续 payload（D 侧收完后交给 executor `kv_import`）。
 pub struct Migration {
@@ -79,7 +97,12 @@ pub fn decode(r: &mut impl Read) -> Result<(MigrationHeader, Vec<u8>)> {
 /// 头解析后向 `pool` 要落点直接读 payload（pinned 时零拷贝进 DMA 源）；池给不出就退化 Vec。
 pub fn decode_into(r: &mut impl Read, pool: &dyn HostBufPool) -> Result<(MigrationHeader, Box<dyn HostBuf>)> {
     let mut u = [0u8; 4];
-    r.read_exact(&mut u).context("pd: read magic")?;
+    if let Err(e) = r.read_exact(&mut u) {
+        if e.kind() == std::io::ErrorKind::UnexpectedEof {
+            return Err(Eof.into());
+        }
+        return Err(e).context("pd: read magic");
+    }
     if u32::from_le_bytes(u) != MAGIC {
         bail!("pd: bad magic {:#x}", u32::from_le_bytes(u));
     }
@@ -90,6 +113,9 @@ pub fn decode_into(r: &mut impl Read, pool: &dyn HostBufPool) -> Result<(Migrati
     r.read_exact(&mut h)?;
     let header: MigrationHeader = serde_json::from_slice(&h).context("pd: header json")?;
     let n = header.payload_len();
+    if n == 0 {
+        return Ok((header, Box::new(Vec::new())));
+    }
     let mut buf: Box<dyn HostBuf> = pool.take(n).unwrap_or_else(|| Box::new(vec![0u8; n]));
     r.read_exact(&mut buf.as_mut_cap()[..n]).context("pd: read payload")?;
     buf.set_len(n)?;
@@ -110,6 +136,14 @@ pub trait HostBuf: Send + Sync {
     }
     /// 下转回具体类型（executor 认回自己池里的 pinned 缓冲，零拷贝 H2D）。
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send + Sync>;
+    /// 有效数据字节数（槽模式下 `as_slice()` 可能为空：数据在设备侧槽里）。
+    fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+    /// 数据在接收方共享槽区的哪个槽；None = 普通 host 字节。
+    fn slot(&self) -> Option<u32> {
+        None
+    }
 }
 impl HostBuf for Vec<u8> {
     fn as_slice(&self) -> &[u8] {
@@ -201,6 +235,192 @@ pub trait KvTransport: Send + Sync {
     }
     /// 发一次迁移：header 控制面 + payload 数据面。payload 可以是已注册区的切片。
     fn send(&self, header: &MigrationHeader, payload: MemDesc) -> Result<Box<dyn Transfer>>;
+    /// 共享槽区后端：对端已握手到的区描述与连接代数（代数变了 = 对端重启，调用方重新映射）。TCP 后端 None。
+    fn region(&self) -> Option<(RegionInfo, u64)> {
+        None
+    }
+    /// 拿一个空闲槽（credit）；None = 没有空闲 / 未连接 → 调用方走 payload 路径。
+    fn acquire_slot(&self) -> Option<u32> {
+        None
+    }
+    /// 本地放弃一个刚拿到但没用的槽。
+    fn release_slot(&self, _slot: u32) {}
+}
+
+// ---------------------------------------------------------------- 共享槽区后端（design §10.3 b：shm / cuda-ipc）
+/// D 侧区描述，握手时发给 P。`kind` = "shm" | "cuda-ipc"。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RegionInfo {
+    pub kind: String,
+    pub slots: u32,
+    pub slot_bytes: u64,
+    pub shm_name: Option<String>,
+    pub ipc_handle: Option<Vec<u8>>,
+    pub device_uuid: Vec<u8>,
+}
+const MAGIC_HELLO: u32 = 0x5044_4849; // "PDHI"
+
+/// D 侧本地区（core 只认 host 基址；设备区基址为 null，unpack 时由 executor 按槽号取地址）。
+pub struct LocalRegion {
+    pub info: RegionInfo,
+    pub host_base: *const u8,
+}
+unsafe impl Send for LocalRegion {}
+unsafe impl Sync for LocalRegion {}
+
+/// 落在共享槽里的 payload：drop 时把槽号作为 credit 回给 P（经该连接的写线程）。
+pub struct SlotPayload {
+    slot: u32,
+    len: usize,
+    host: *const u8,
+    credit: crossbeam_channel::Sender<u32>,
+}
+unsafe impl Send for SlotPayload {}
+unsafe impl Sync for SlotPayload {}
+impl HostBuf for SlotPayload {
+    fn as_slice(&self) -> &[u8] {
+        // SAFETY: host 非空时指向 D 本地 shm 槽，长度 len 在槽内（接收时已校验）。
+        if self.host.is_null() { &[] } else { unsafe { std::slice::from_raw_parts(self.host, self.len) } }
+    }
+    fn as_mut_cap(&mut self) -> &mut [u8] {
+        &mut []
+    }
+    fn set_len(&mut self, len: usize) -> Result<()> {
+        anyhow::ensure!(len == self.len, "SlotPayload: fixed len");
+        Ok(())
+    }
+    fn capacity(&self) -> usize {
+        self.len
+    }
+    fn is_pinned(&self) -> bool {
+        true
+    }
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send + Sync> {
+        self
+    }
+    fn len(&self) -> usize {
+        self.len
+    }
+    fn slot(&self) -> Option<u32> {
+        Some(self.slot)
+    }
+}
+impl Drop for SlotPayload {
+    fn drop(&mut self) {
+        let _ = self.credit.send(self.slot);
+    }
+}
+
+struct SharedConn {
+    conn: Option<TcpStream>,
+    region: Option<RegionInfo>,
+    credits: Vec<u32>,
+    gen: u64,
+    last_attempt: Option<Instant>,
+}
+/// P 侧：一条到 D 的持久连接。连上先收 D 的 `RegionInfo`（hello），之后：槽模式 header（无 payload）走这条连接，
+/// D 用完槽后在同一连接上回 4 字节槽号作为 credit；无槽 / 未连上时退回一次性 TCP（`TcpTransport` 路径）。
+pub struct SharedTransport {
+    addr: String,
+    connect_timeout: Duration,
+    inner: Arc<Mutex<SharedConn>>,
+}
+impl SharedTransport {
+    pub fn new(addr: String, connect_timeout: Duration) -> Arc<Self> {
+        let t = Arc::new(Self {
+            addr,
+            connect_timeout,
+            inner: Arc::new(Mutex::new(SharedConn { conn: None, region: None, credits: Vec::new(), gen: 0, last_attempt: None })),
+        });
+        t.try_connect();
+        t
+    }
+    fn try_connect(&self) {
+        let mut g = self.inner.lock();
+        if g.conn.is_some() || g.last_attempt.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
+            return;
+        }
+        g.last_attempt = Some(Instant::now());
+        let r = (|| -> Result<(TcpStream, RegionInfo)> {
+            let addr = self.addr.to_socket_addrs()?.next().context("pd: resolve")?;
+            let mut s = TcpStream::connect_timeout(&addr, self.connect_timeout)?;
+            s.set_nodelay(true)?;
+            s.set_read_timeout(Some(Duration::from_secs(2)))?;
+            let mut u = [0u8; 4];
+            s.read_exact(&mut u)?;
+            anyhow::ensure!(u32::from_le_bytes(u) == MAGIC_HELLO, "pd: peer did not send region hello (peer runs tcp backend?)");
+            s.read_exact(&mut u)?;
+            let n = u32::from_le_bytes(u);
+            anyhow::ensure!(n <= 1 << 20, "pd: hello too large");
+            let mut b = vec![0u8; n as usize];
+            s.read_exact(&mut b)?;
+            let info: RegionInfo = serde_json::from_slice(&b)?;
+            s.set_read_timeout(None)?;
+            Ok((s, info))
+        })();
+        match r {
+            Ok((s, info)) => {
+                g.gen += 1;
+                let gen = g.gen;
+                g.credits = (0..info.slots).rev().collect();
+                tracing::info!(peer = %self.addr, kind = %info.kind, slots = info.slots, slot_mib = info.slot_bytes >> 20, "pd: shared region handshake");
+                let mut rd = s.try_clone().expect("tcp try_clone");
+                g.conn = Some(s);
+                g.region = Some(info);
+                let inner = self.inner.clone();
+                std::thread::Builder::new()
+                    .name("pd-credit".into())
+                    .spawn(move || {
+                        let mut u = [0u8; 4];
+                        while rd.read_exact(&mut u).is_ok() {
+                            let mut g = inner.lock();
+                            if g.gen == gen {
+                                g.credits.push(u32::from_le_bytes(u));
+                            }
+                        }
+                        let mut g = inner.lock();
+                        if g.gen == gen {
+                            tracing::warn!("pd: shared connection closed by peer");
+                            g.conn = None;
+                            g.region = None;
+                            g.credits.clear();
+                        }
+                    })
+                    .expect("spawn pd-credit");
+            }
+            Err(e) => tracing::warn!(peer = %self.addr, error = %e, "pd: shared handshake failed, will retry / fall back to tcp"),
+        }
+    }
+}
+impl KvTransport for SharedTransport {
+    fn name(&self) -> &'static str {
+        "shared"
+    }
+    fn send(&self, header: &MigrationHeader, payload: MemDesc) -> Result<Box<dyn Transfer>> {
+        if header.slot.is_some() {
+            let mut g = self.inner.lock();
+            let s = g.conn.as_mut().context("pd: shared connection down")?;
+            if let Err(e) = encode(header, &[], s) {
+                g.conn = None;
+                g.region = None;
+                g.credits.clear();
+                return Err(e);
+            }
+            return Ok(Box::new(DoneTransfer));
+        }
+        TcpTransport { addr: self.addr.clone(), connect_timeout: self.connect_timeout }.send(header, payload)
+    }
+    fn region(&self) -> Option<(RegionInfo, u64)> {
+        self.try_connect();
+        let g = self.inner.lock();
+        g.region.clone().map(|r| (r, g.gen))
+    }
+    fn acquire_slot(&self) -> Option<u32> {
+        self.inner.lock().credits.pop()
+    }
+    fn release_slot(&self, slot: u32) {
+        self.inner.lock().credits.push(slot);
+    }
 }
 
 pub struct TcpTransport {
@@ -278,29 +498,90 @@ pub fn spawn_receiver(bind: &str, model_tag: String, table: Arc<IncomingKv>) -> 
 }
 /// 同上，payload 落进 `pool`（executor 的 pinned 池 → D 侧零拷贝 H2D）。
 pub fn spawn_receiver_with_pool(bind: &str, model_tag: String, table: Arc<IncomingKv>, pool: Arc<dyn HostBufPool>) -> Result<u16> {
+    spawn_receiver_shared(bind, model_tag, table, pool, None)
+}
+/// 同上，并可带本地共享槽区：每条连接先发 hello(RegionInfo)，之后循环收消息（持久连接）；槽模式消息不带 payload，
+/// 构造 `SlotPayload` 指向槽；payload drop → 槽号经本连接的写线程回给 P。
+pub fn spawn_receiver_shared(
+    bind: &str,
+    model_tag: String,
+    table: Arc<IncomingKv>,
+    pool: Arc<dyn HostBufPool>,
+    region: Option<Arc<LocalRegion>>,
+) -> Result<u16> {
     let l = TcpListener::bind(bind).with_context(|| format!("pd: bind {bind}"))?;
     let port = l.local_addr()?.port();
     std::thread::Builder::new().name("pd-recv".into()).spawn(move || {
         for conn in l.incoming() {
-            let Ok(mut s) = conn else { continue };
+            let Ok(s) = conn else { continue };
             let _ = s.set_nodelay(true);
-            match decode_into(&mut s, pool.as_ref()) {
-                Ok((header, payload)) if header.model_tag == model_tag => {
-                    tracing::debug!(id = header.request_id, units = header.num_units, "pd: migration received");
-                    table.put(Migration { header, payload, received_at: Instant::now() });
-                }
-                Ok((header, _)) => {
-                    tracing::warn!(id = header.request_id, got = %header.model_tag, want = %model_tag, "pd: model_tag mismatch, dropped");
-                    table.reject();
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "pd: bad migration");
-                    table.reject();
-                }
-            }
+            let (model_tag, table, pool, region) = (model_tag.clone(), table.clone(), pool.clone(), region.clone());
+            let _ = std::thread::Builder::new().name("pd-conn".into()).spawn(move || serve_conn(s, model_tag, table, pool, region));
         }
     })?;
     Ok(port)
+}
+fn serve_conn(mut s: TcpStream, model_tag: String, table: Arc<IncomingKv>, pool: Arc<dyn HostBufPool>, region: Option<Arc<LocalRegion>>) {
+    let (ctx, crx) = crossbeam_channel::unbounded::<u32>();
+    if let Some(r) = &region {
+        let hello = serde_json::to_vec(&r.info).unwrap();
+        let mut w = Vec::with_capacity(8 + hello.len());
+        w.extend_from_slice(&MAGIC_HELLO.to_le_bytes());
+        w.extend_from_slice(&(hello.len() as u32).to_le_bytes());
+        w.extend_from_slice(&hello);
+        if s.write_all(&w).is_err() {
+            return;
+        }
+        if let Ok(mut wr) = s.try_clone() {
+            std::thread::Builder::new()
+                .name("pd-credit-w".into())
+                .spawn(move || {
+                    for slot in crx {
+                        if wr.write_all(&slot.to_le_bytes()).is_err() {
+                            break;
+                        }
+                    }
+                })
+                .ok();
+        }
+    }
+    loop {
+        match decode_into(&mut s, pool.as_ref()) {
+            Ok((header, payload)) if header.model_tag == model_tag => {
+                let payload: Box<dyn HostBuf> = match header.slot {
+                    None => payload,
+                    Some(slot) => {
+                        let Some(r) = region.as_ref() else {
+                            tracing::warn!(id = header.request_id, "pd: slot message but no local region, dropped");
+                            table.reject();
+                            continue;
+                        };
+                        let len = header.data_len();
+                        if slot as u64 >= r.info.slots as u64 || len as u64 > r.info.slot_bytes {
+                            tracing::warn!(id = header.request_id, slot, len, "pd: slot out of range, dropped");
+                            table.reject();
+                            continue;
+                        }
+                        // SAFETY: slot 已校验在区内。
+                        let host = if r.host_base.is_null() { std::ptr::null() } else { unsafe { r.host_base.add(slot as usize * r.info.slot_bytes as usize) } };
+                        Box::new(SlotPayload { slot, len, host, credit: ctx.clone() })
+                    }
+                };
+                tracing::debug!(id = header.request_id, units = header.num_units, slot = ?header.slot, "pd: migration received");
+                table.put(Migration { header, payload, received_at: Instant::now() });
+            }
+            Ok((header, _)) => {
+                tracing::warn!(id = header.request_id, got = %header.model_tag, want = %model_tag, "pd: model_tag mismatch, dropped");
+                table.reject();
+            }
+            Err(e) if e.is::<Eof>() => break,
+            Err(e) => {
+                tracing::warn!(error = %e, "pd: bad migration");
+                table.reject();
+                break;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -316,7 +597,49 @@ mod tests {
             first_token: 42,
             num_units: 2,
             unit_bytes: 4,
+            slot: None,
         }
+    }
+    /// 共享槽区握手 + 槽模式消息 + credit 回传（host_base 用一段普通内存模拟 shm）+ 无槽退回 TCP payload。
+    #[test]
+    fn shared_transport_slot_roundtrip_and_credit() {
+        let table = Arc::new(IncomingKv::default());
+        let mem = vec![7u8; 64];
+        let region = Arc::new(LocalRegion {
+            info: RegionInfo { kind: "shm".into(), slots: 2, slot_bytes: 32, shm_name: Some("x".into()), ipc_handle: None, device_uuid: vec![1; 16] },
+            host_base: mem.as_ptr(),
+        });
+        let port = spawn_receiver_shared("127.0.0.1:0", "qwen3".into(), table.clone(), Arc::new(VecPool), Some(region)).unwrap();
+        let t = SharedTransport::new(format!("127.0.0.1:{port}"), Duration::from_secs(2));
+        let (info, gen) = t.region().expect("handshake");
+        assert_eq!((info.slots, info.slot_bytes, gen), (2, 32, 1));
+        let s0 = t.acquire_slot().unwrap();
+        let s1 = t.acquire_slot().unwrap();
+        assert!(t.acquire_slot().is_none(), "2 credits only");
+        let mut h = hdr(1, "qwen3");
+        h.slot = Some(s1);
+        assert_eq!(h.payload_len(), 0);
+        t.send(&h, MemDesc::of(&[])).unwrap();
+        let wait = |f: &dyn Fn() -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline && !f() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        wait(&|| table.contains(1));
+        let m = table.take(1).unwrap();
+        assert_eq!((m.payload.slot(), m.payload.len()), (Some(s1), 8));
+        assert_eq!(m.payload.as_slice(), &mem[s1 as usize * 32..s1 as usize * 32 + 8]);
+        drop(m); // → credit 回到 P
+        let mut got = None;
+        wait(&|| { got = t.acquire_slot(); got.is_some() });
+        assert_eq!(got, Some(s1));
+        t.release_slot(s0);
+        assert!(t.acquire_slot().is_some());
+        let z = [0u8; 8];
+        t.send(&hdr(2, "qwen3"), MemDesc::of(&z)).unwrap();
+        wait(&|| table.contains(2));
+        assert_eq!(table.take(2).unwrap().payload.len(), 8);
     }
 
     #[test]

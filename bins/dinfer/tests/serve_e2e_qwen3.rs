@@ -830,13 +830,15 @@ async fn e2e_qwen3_pd() {
     let common = ["--num-blocks", "128", "--max-model-len", "1024", "--max-num-seqs", "4"];
     let single = spawn_server_with(&common);
     let kv_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port().to_string();
+    // PD_TRANSPORT=tcp|shm|cuda-ipc（design §10.3 b）：D 建区、P 跟随；默认 tcp。
+    let transport = std::env::var("PD_TRANSPORT").unwrap_or_else(|_| "tcp".into());
     let mut d_args = common.to_vec();
-    d_args.extend(["--role", "decode", "--kv-port", &kv_port, "--pd-wait-ms", "3000"]);
+    d_args.extend(["--role", "decode", "--kv-port", &kv_port, "--pd-wait-ms", "3000", "--kv-transport", &transport]);
     let d = spawn_server_with(&d_args);
     assert!(d.logs.iter().any(|l| l.contains("pd: kv receiver listening")), "D must listen: {:?}", d.logs.last());
     let peer = format!("127.0.0.1:{kv_port}");
     let mut p_args = common.to_vec();
-    p_args.extend(["--role", "prefill", "--peer", &peer]);
+    p_args.extend(["--role", "prefill", "--peer", &peer, "--kv-transport", &transport]);
     let p = spawn_server_with(&p_args);
     assert!(p.logs.iter().any(|l| l.contains("pd: prefill side will push KV")), "P must have peer: {:?}", p.logs.last());
     let proxy = spawn_proxy(&p.base, &d.base);

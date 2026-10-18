@@ -71,6 +71,12 @@ enum Cmd {
         /// PD：pinned 缓冲个数（每块 = max_model_len 全层 KV，Qwen3 4k ≈ 448 MB；= 导出 / 导入在飞上限）
         #[arg(long, default_value_t = 8)]
         pd_pool_bufs: usize,
+        /// PD KV 传输后端：tcp（默认，payload 走 TCP）| shm（D 建 /dev/shm 槽区，P 直接 D2H 写入，跨卡可用）| cuda-ipc（同卡 D2D）
+        #[arg(long, default_value = "tcp")]
+        kv_transport: String,
+        /// PD 共享槽区槽数（0 = 自动：shm 4 / cuda-ipc 2；每槽 = max_model_len 全层 KV）
+        #[arg(long, default_value_t = 0)]
+        kv_slots: usize,
         /// 关闭 decode CUDA graph（默认开；qwen3）
         #[arg(long, default_value_t = false)]
         no_cuda_graph: bool,
@@ -150,6 +156,8 @@ async fn main() -> Result<()> {
             peer,
             pd_wait_ms,
             pd_pool_bufs,
+            kv_transport,
+            kv_slots,
             no_cuda_graph,
             device,
             mtp,
@@ -181,7 +189,7 @@ async fn main() -> Result<()> {
             }
             #[cfg(feature = "qwen3")]
             {
-                let _ = (mtp, &role, kv_port, &peer, pd_wait_ms, pd_pool_bufs);
+                let _ = (mtp, &role, kv_port, &peer, pd_wait_ms, pd_pool_bufs, &kv_transport, kv_slots);
                 let opt = dinfer_qwen3::service::ServeOptions {
                     model_dir: model,
                     tokenizer_dir: tokenizer,
@@ -200,6 +208,8 @@ async fn main() -> Result<()> {
                     peer,
                     pd_wait_ms,
                     pd_pool_bufs,
+                    kv_transport,
+                    kv_slots,
                     enable_cuda_graph: !no_cuda_graph,
                     device,
                 };

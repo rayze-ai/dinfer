@@ -16,6 +16,7 @@ ref-tests = ["dep:npyz"]
 
 [dependencies]
 anyhow.workspace = true
+libc.workspace = true
 thiserror.workspace = true
 cudarc.workspace = true
 half.workspace = true

@@ -686,8 +686,28 @@ impl Qwen3Executor {
             staging_free: [None, None],
             pool,
             inflight_imports: Vec::new(),
+            region: None,
         });
         Ok(region)
+    }
+    /// D 侧：建共享槽区（每槽 = max_blocks × 全层块字节 = 一个最长请求），返回给接收线程握手用。需先 `enable_pd`。
+    pub fn enable_pd_region(&mut self, kind: k::RegionKind, slots: usize) -> Result<dinfer_core::pd::LocalRegion> {
+        let (_, per_block_all) = self.kv_block_bytes_all_layers();
+        let slot_bytes = self.buf.max_blocks * per_block_all;
+        let pd = self.pd.as_mut().context("enable_pd_region before enable_pd")?;
+        let r = std::sync::Arc::new(k::SharedRegion::create(&self.stream, kind, slots, slot_bytes)?);
+        tracing::info!(kind = kind.as_str(), slots, slot_mib = slot_bytes >> 20, "pd: shared slot region created");
+        let info = dinfer_core::pd::RegionInfo {
+            kind: kind.as_str().into(),
+            slots: slots as u32,
+            slot_bytes: slot_bytes as u64,
+            shm_name: r.shm_name().map(str::to_string),
+            ipc_handle: r.ipc_handle().map(|h| h.to_vec()),
+            device_uuid: r.uuid().to_vec(),
+        };
+        let host_base = if r.is_host() { r.slot_addr(0)? as *const u8 } else { std::ptr::null() };
+        pd.region = Some(r);
+        Ok(dinfer_core::pd::LocalRegion { info, host_base })
     }
     pub fn enable_host_tier(&mut self, host_gib: f64) -> Result<usize> {
         let (_, per_block_all) = self.kv_block_bytes_all_layers();
@@ -864,8 +884,10 @@ struct PdStore {
     /// staging[i] 上一次被 "消费方" 用完的事件（导出 = copy stream D2H 完；导入 = 主流 unpack 完）；生产方写之前等它。
     staging_free: [Option<Event>; 2],
     pool: PinnedPool,
-    /// 导入在飞：(copy stream 上 H2D 全部完成的事件, 缓冲)。事件完成即可归还缓冲；每次 kv_import 开头清一遍。
-    inflight_imports: Vec<(Event, PinnedBuf)>,
+    /// 导入在飞：(copy stream 上 H2D / D2D 全部完成的事件, 缓冲或槽 payload)。事件完成即 drop（槽 drop = credit 回 P）。
+    inflight_imports: Vec<(Event, Box<dyn std::any::Any + Send + Sync>)>,
+    /// 共享槽区（design §10.3 b）：D 侧 = 自己建的本地区；P 侧 = 映射的对端区。
+    region: Option<std::sync::Arc<k::SharedRegion>>,
 }
 const PD_CHUNK: usize = 64;
 
@@ -914,6 +936,18 @@ impl dinfer_core::pd::KvExportHandle for PdExport {
     }
 }
 
+/// 槽导出句柄：等 copy stream 写完对端槽；无 host 字节（header 只带槽号）。
+struct PdSlotExport {
+    done: Event,
+    _region: std::sync::Arc<k::SharedRegion>,
+}
+impl dinfer_core::pd::KvExportHandle for PdSlotExport {
+    fn wait(&mut self) -> Result<&dyn dinfer_core::pd::HostBuf> {
+        self.done.synchronize()?;
+        Ok(&EMPTY)
+    }
+}
+static EMPTY: Vec<u8> = Vec::new();
 /// 每个请求本步 1 个采样 token、无 draft。
 fn push_tokens(generated: &mut Vec<Vec<u32>>, drafts: &mut Vec<Vec<u32>>, chosen: &[i32]) {
     for &c in chosen {
@@ -1030,7 +1064,36 @@ impl ModelExecutor for Qwen3Executor {
         let per_all = per * layers;
         let ids = blocks.group(0);
         let total = ids.len() * per_all;
-        ensure!(payload.as_slice().len() == total, "pd: payload {} != {} blocks × {per_all}", payload.as_slice().len(), ids.len());
+        ensure!(payload.len() == total, "pd: payload {} != {} blocks × {per_all}", payload.len(), ids.len());
+        // 共享槽区：数据已在本地区的槽里（shm = pinned host；cuda-ipc = 本卡设备区），copy stream 直接搬进 staging → unpack。
+        if let Some(slot) = payload.slot() {
+            let r = pd.region.as_ref().context("pd: slot payload but no local region")?;
+            let src_addr = r.slot_addr(slot as usize)?;
+            ensure!(total <= r.slot_bytes(), "pd: import {total} B > slot {}", r.slot_bytes());
+            for (ci, chunk) in ids.chunks(PD_CHUNK).enumerate() {
+                let i = ci & 1;
+                if let Some(ev) = pd.staging_free[i].take() {
+                    pd.copy.wait_event(&ev)?;
+                }
+                let dst = pd.copy.ptr(&pd.staging[i].data);
+                let off = (ci * PD_CHUNK * per_all) as u64;
+                let n = chunk.len() * per_all;
+                if r.is_host() {
+                    pd.copy.htod_from_ptr(dst, src_addr + off, n)?;
+                } else {
+                    pd.copy.dtod(dst, src_addr + off, n)?;
+                }
+                let h2d = pd.copy.record_event()?;
+                self.stream.wait_event(&h2d)?;
+                let bids: Vec<i32> = chunk.iter().map(|&b| b as i32).collect();
+                self.stream.htod_into(&bids, &mut pd.blocks[i].data)?;
+                k::kv_unpack(&self.stream, &pd.layer_ptrs.data, &pd.blocks[i].data, &pd.staging[i].data, chunk.len(), layers, per)?;
+                pd.staging_free[i] = Some(self.stream.record_event()?);
+            }
+            let all = pd.copy.record_event()?;
+            pd.inflight_imports.push((all, payload.into_any()));
+            return Ok(());
+        }
         // 拿到 pinned 源：payload 本身是我们池里的 PinnedBuf（接收线程用 kv_host_pool 落的）就直接用；否则 memcpy 进池
         let src: PinnedBuf = if payload.is_pinned() {
             match payload.into_any().downcast::<PdBuf>() {
@@ -1060,8 +1123,73 @@ impl ModelExecutor for Qwen3Executor {
             pd.staging_free[i] = Some(self.stream.record_event()?);
         }
         let all_h2d = pd.copy.record_event()?;
-        pd.inflight_imports.push((all_h2d, src));
+        pd.inflight_imports.push((all_h2d, Box::new(src)));
         Ok(())
+    }
+    fn pd_poll(&mut self) {
+        let Some(pd) = self.pd.as_mut() else { return };
+        if pd.inflight_imports.is_empty() {
+            return;
+        }
+        let mut keep = Vec::with_capacity(pd.inflight_imports.len());
+        for (ev, b) in pd.inflight_imports.drain(..) {
+            if ev.is_done().unwrap_or(true) { drop(b) } else { keep.push((ev, b)) }
+        }
+        pd.inflight_imports = keep;
+    }
+    /// P 侧：映射对端共享区。cuda-ipc 要求同卡（uuid 相等）；shm 任意卡。
+    fn pd_map_region(&mut self, info: &dinfer_core::pd::RegionInfo) -> Result<()> {
+        let pd = self.pd.as_mut().context("pd_map_region without enable_pd")?;
+        let kind = k::RegionKind::parse(&info.kind).with_context(|| format!("pd: unknown region kind {}", info.kind))?;
+        let (_, per_block_all) = (0, pd.bytes_per_layer_block * self.model.kv.len());
+        ensure!(info.slot_bytes as usize >= per_block_all, "pd: peer slot {} B < one block {per_block_all}", info.slot_bytes);
+        pd.region = None; // 先释放旧代数的映射
+        let r = k::SharedRegion::open_remote(
+            &self.stream,
+            kind,
+            info.slots as usize,
+            info.slot_bytes as usize,
+            info.shm_name.as_deref(),
+            info.ipc_handle.as_deref(),
+            &info.device_uuid,
+        )?;
+        pd.region = Some(std::sync::Arc::new(r));
+        Ok(())
+    }
+    /// P 侧：pack → staging（主流）→ copy stream 写进对端槽（shm：D2H 到 pinned 映射；cuda-ipc：D2D）。
+    fn kv_export_slot(&mut self, blocks: &dinfer_core::kv::KvBlocks, slot: u32) -> Result<Box<dyn dinfer_core::pd::KvExportHandle>> {
+        let pd = self.pd.as_mut().context("pd: kv_export_slot without resources")?;
+        let r = pd.region.clone().context("pd: kv_export_slot without mapped region")?;
+        let layers = self.model.kv.len();
+        let per = pd.bytes_per_layer_block;
+        let per_all = per * layers;
+        let ids = blocks.group(0);
+        let total = ids.len() * per_all;
+        ensure!(total <= r.slot_bytes(), "pd: export {total} B > slot {}", r.slot_bytes());
+        let dst_addr = r.slot_addr(slot as usize)?;
+        for (ci, chunk) in ids.chunks(PD_CHUNK).enumerate() {
+            let i = ci & 1;
+            if let Some(ev) = pd.staging_free[i].take() {
+                self.stream.wait_event(&ev)?;
+            }
+            let bids: Vec<i32> = chunk.iter().map(|&b| b as i32).collect();
+            self.stream.htod_into(&bids, &mut pd.blocks[i].data)?;
+            k::kv_pack(&self.stream, &pd.layer_ptrs.data, &pd.blocks[i].data, &mut pd.staging[i].data, chunk.len(), layers, per)?;
+            let packed = self.stream.record_event()?;
+            pd.copy.wait_event(&packed)?;
+            let src = pd.copy.ptr(&pd.staging[i].data);
+            let off = (ci * PD_CHUNK * per_all) as u64;
+            let n = chunk.len() * per_all;
+            // 对端区已映射（pinned host / IPC 设备地址），范围已校验，region Arc 在句柄里保活。
+            if r.is_host() {
+                pd.copy.dtoh_to_ptr(dst_addr + off, src, n)?;
+            } else {
+                pd.copy.dtod(dst_addr + off, src, n)?;
+            }
+            pd.staging_free[i] = Some(pd.copy.record_event()?);
+        }
+        let done = pd.copy.record_event()?;
+        Ok(Box::new(PdSlotExport { done, _region: r }))
     }
     /// 异步第一段：入队 + 异步 D2H（不等 GPU）。runner 只对 `async_eligible` 的 plan 调用（纯 decode）。
     fn begin(&mut self, plan: &BatchPlan) -> Result<()> {

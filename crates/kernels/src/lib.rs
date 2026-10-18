@@ -4,6 +4,8 @@
 //! 每个 kernel 一个 `extern "C"` 入口（见 `cuda/dinfer_kernels.h`），这里做类型安全的包装。
 
 pub mod device;
+pub mod shared;
+pub use shared::{RegionKind, SharedRegion};
 pub mod ffi;
 pub mod gemm;
 pub mod ops;

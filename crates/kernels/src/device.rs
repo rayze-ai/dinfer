@@ -54,6 +54,9 @@ impl Device {
     pub fn ordinal(&self) -> usize {
         self.ctx.ordinal()
     }
+    pub fn cu_device(&self) -> sys::CUdevice {
+        self.ctx.cu_device()
+    }
 }
 
 impl Stream {
@@ -644,6 +647,29 @@ impl Stream {
             let s = std::slice::from_raw_parts(src.ptr().add(off), len);
             Ok(result::memcpy_htod_async(dst, s, self.raw())?)
         }
+    }
+    /// 裸地址拷贝（PD 共享槽区，design §10.3 后端 b）。地址来自 `SharedRegion::slot_addr`（host 侧已 cuMemHostRegister，
+    /// 设备侧为本进程 cuMemAlloc / IPC 打开的地址），范围由 SharedRegion 校验；模型 crate 禁 unsafe，所以在这里收口。
+    pub fn dtoh_to_ptr(&self, dst: u64, src: u64, len: usize) -> Result<()> {
+        self.bind_ctx()?;
+        // SAFETY: 见上；dst 为已注册 host 地址，len 在槽内。
+        unsafe {
+            let d = std::slice::from_raw_parts_mut(dst as *mut u8, len);
+            Ok(result::memcpy_dtoh_async(d, src, self.raw())?)
+        }
+    }
+    pub fn htod_from_ptr(&self, dst: u64, src: u64, len: usize) -> Result<()> {
+        self.bind_ctx()?;
+        // SAFETY: 见上；src 为已注册 host 地址。
+        unsafe {
+            let s = std::slice::from_raw_parts(src as *const u8, len);
+            Ok(result::memcpy_htod_async(dst, s, self.raw())?)
+        }
+    }
+    pub fn dtod(&self, dst: u64, src: u64, len: usize) -> Result<()> {
+        self.bind_ctx()?;
+        // SAFETY: 两端都是本 ctx 可见的设备地址（本地分配或 IPC 打开）。
+        unsafe { Ok(result::memcpy_dtod_async(dst, src, len, self.raw())?) }
     }
     /// pinned host `dst`（`PinnedBuf` 容量内）← 设备地址 `src`，异步（本流）。
     pub fn dtoh_to_pinned(&self, dst: &mut PinnedBuf, off: usize, src: u64, len: usize) -> Result<()> {

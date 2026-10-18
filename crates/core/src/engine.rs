@@ -118,11 +118,13 @@ pub struct PdState {
     pending: Vec<(RequestId, Vec<u32>, SamplingParams, RequestId, std::time::Instant)>,
     /// P 侧：Export 请求的头信息（导出时需要 prompt / sampling / 首 token）。
     export_meta: HashMap<RequestId, (Vec<u32>, SamplingParams, Option<u32>)>,
+    /// P 侧共享槽区（design §10.3 b）：已映射到 executor 的对端区代数；`Some(Err)` = 该代数映射失败（走 TCP，不再重试）。
+    region_gen: Option<(u64, bool)>,
 }
 
 impl PdState {
     pub fn new(incoming: Arc<crate::pd::IncomingKv>, transport: Option<Arc<dyn crate::pd::KvTransport>>, model_tag: String, wait_timeout: std::time::Duration) -> Self {
-        Self { incoming, transport, model_tag, wait_timeout, payloads: HashMap::new(), pending: Vec::new(), export_meta: HashMap::new() }
+        Self { incoming, transport, model_tag, wait_timeout, payloads: HashMap::new(), pending: Vec::new(), export_meta: HashMap::new(), region_gen: None }
     }
 }
 
@@ -213,8 +215,42 @@ impl<E: ModelExecutor> Engine<E> {
         };
         let unit_bytes = self.runner.exec.kv_unit_bytes();
         anyhow::ensure!(unit_bytes > 0, "pd: executor does not support kv export/import");
+        // 共享槽区：对端握手到新代数的区 → 映射到 executor（一次）；失败记下，该代数内走 TCP payload。
+        let mut slots_ok = false;
+        if let Some(t) = pd.transport.as_ref() {
+            if let Some((info, gen)) = t.region() {
+                if pd.region_gen.map_or(true, |(g, _)| g != gen) {
+                    let ok = match self.runner.exec.pd_map_region(&info) {
+                        Ok(()) => {
+                            tracing::info!(kind = %info.kind, slots = info.slots, gen, "pd: peer shared region mapped; exports go through slots");
+                            true
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, gen, "pd: cannot map peer shared region, exports fall back to tcp payload");
+                            false
+                        }
+                    };
+                    pd.region_gen = Some((gen, ok));
+                }
+                slots_ok = pd.region_gen.is_some_and(|(g, ok)| g == gen && ok);
+            }
+        }
         for (rid, blocks) in &so.kv_export {
-            let mut handle = self.runner.exec.kv_export(blocks)?;
+            let mut slot = if slots_ok { pd.transport.as_ref().and_then(|t| t.acquire_slot()) } else { None };
+            let mut handle = match slot {
+                Some(sl) => match self.runner.exec.kv_export_slot(blocks, sl) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        tracing::warn!(id = rid, slot = sl, error = %e, "pd: slot export failed, using tcp payload");
+                        if let Some(t) = pd.transport.as_ref() {
+                            t.release_slot(sl);
+                        }
+                        slot = None;
+                        self.runner.exec.kv_export(blocks)?
+                    }
+                },
+                None => self.runner.exec.kv_export(blocks)?,
+            };
             let (prompt_ids, sampling, first) = pd.export_meta.remove(rid).with_context(|| format!("pd: export meta for {rid}"))?;
             let first_token = first.with_context(|| format!("pd: req {rid} exported without a first token"))?;
             let header = crate::pd::MigrationHeader {
@@ -225,6 +261,7 @@ impl<E: ModelExecutor> Engine<E> {
                 first_token,
                 num_units: blocks.groups.first().map_or(0, |g| g.len()) as u32,
                 unit_bytes: unit_bytes as u32,
+                slot,
             };
             self.metrics.pd_export_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if let Some(t) = pd.transport.clone() {
@@ -251,7 +288,7 @@ impl<E: ModelExecutor> Engine<E> {
         for (rid, blocks) in &so.kv_import {
             let payload = pd.payloads.remove(rid).with_context(|| format!("pd: payload for {rid}"))?;
             let want = blocks.groups.first().map_or(0, |g| g.len()) * unit_bytes;
-            anyhow::ensure!(payload.as_slice().len() == want, "pd: payload {} != {} blocks × {unit_bytes}", payload.as_slice().len(), blocks.groups[0].len());
+            anyhow::ensure!(payload.len() == want, "pd: payload {} != {} blocks × {unit_bytes}", payload.len(), blocks.groups[0].len());
             self.runner.exec.kv_import(blocks, payload)?;
             self.metrics.pd_import_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
@@ -404,6 +441,9 @@ impl<E: ModelExecutor> Engine<E> {
                 }
             }
             self.pd_poll_pending();
+            if self.pd.is_some() {
+                self.runner.exec.pd_poll();
+            }
             if !self.sched.has_requests() && !self.sched.has_pending_export() && self.pending.is_none() && self.sync_done.is_empty() {
                 continue;
             }
