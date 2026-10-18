@@ -468,3 +468,9 @@
 - 根因：消费卡（GeForce）驱动禁 PCIe P2P；且 GPU0–3 / GPU4–7 分属两个 NUMA（`topo -m` SYS）。
 - 解法：PD 跨卡 KV 搬运走 host：shm pinned 共享区（design §10.3 后端 b），P D2H 写、D H2D 读；同卡才用 cuda-ipc D2D。NIXL 在这台机器上也只能走 UCX host 路径，不引入。探针：`scripts/dev/probe_ipc.cu`（`probe_ipc A B`）。
 - 避免：换机器先跑探针；有 NVLink / 数据中心卡时 cuda-ipc 跨卡才有意义。
+
+## cudarc nccl：集合通信返回 `NcclStatus`，不是 `()`
+
+- 现象：`Comm::all_reduce_in_place(..)` 返回 `Result<NcclStatus, NcclError>`，直接 `map_err` 后类型不匹配。
+- 解法：`.map(|_| ())`（`NcclStatus::InProgress` 只在非阻塞 comm 下出现，我们用阻塞 comm 可忽略）。
+- 另：开 `nccl` feature 后 cudarc build.rs 链接 `-lnccl`（dynamic-linking 下运行期 dlopen `libnccl.so.2`）；无 NCCL 的机器需 `--features no-nvcc` 以外再想办法（当前 `no-nvcc` 不去掉 nccl）。
