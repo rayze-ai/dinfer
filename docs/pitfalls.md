@@ -2,7 +2,15 @@
 
 > 一条一个坑，标题写**现象**（搜索时按现象搜），正文讲根因与解法。新条目加在最上面。
 >
-> 条目格式（标题用 `## 2026-10-18 第 5 次 `400 Input is too long`：一条 Bash 四段拼接，每段都"截断"了，合计 11 KB
+> 条目格式（标题用 `## 2026-10-18 PD 分离 e2e：D 等 KV 超时回退 + 首 token 重复（"redred"）
+
+- 现象：`e2e_qwen3_pd` 经 proxy 的输出比单机多一个重复的首 token；D 日志 `pd: KV wait timeout, falling back to local prefill`。
+- 根因 1：P 侧 "finish 时记块、下一次 schedule 导出" 的设计依赖 engine 再跑一步；P 空闲（只有这一个请求）时 engine 进 `rx.recv()` 死等，导出永远不发生。core 单测里紧跟着提交了别的请求所以没暴露。
+- 根因 2：D 回退本地重算后自己出了首 token，proxy 不知情仍拼上 P 的首 token。
+- 解法：`Scheduler::has_pending_export()` 进 engine 空闲判定；D 侧 chat.rs 先在 HTTP 线程等迁移到达（`ChatBackend::pd_wait_for`），回退时响应头 `x-pd-imported: 0`，proxy 据此决定拼不拼。
+- 如何避免："事件发生在下一步" 的设计要同时问 "谁保证有下一步"；跨进程协议里任何一侧的回退都要在响应里显式告知对端，不能靠默认假设。
+
+## 2026-10-18 第 5 次 `400 Input is too long`：一条 Bash 四段拼接，每段都"截断"了，合计 11 KB
 
 - 现象：会话开场 `git status --short && git diff --stat && git diff X | head -c 6000 && tail -n 30 loop.md | cut -c1-300` 一条命令，context_guard 放行（有截断管道），输出 11.3 KB 被 harness 存盘只给 2 KB 预览，再加后续几条 7–8 KB 的 grep 输出，上下文很快打满。
 - 根因：钩子只判"有没有截断管道"，不判截断量；`head -c 6000` + `tail -n 30 | cut -c1-300`（最多 9 KB）本身就超过 `BASH_MAX_OUTPUT_LENGTH=8000`。多段 `&&` 拼接时每段合规、合计超限。
