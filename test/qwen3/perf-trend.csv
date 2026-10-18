@@ -409,3 +409,8 @@ ab_pd1_v2a:single,2026-10-18,"PD v2 (a) 异步导出/导入（copy stream + pinn
 ab_pd1_v2a:single,2026-10-18,"PD v2 (a) 异步导出/导入（copy stream + pinned 池）：pd = proxy(:8100 → P GPU3 + D GPU3) vs single :8012，c8 (1024,128)",c8_p1024_o128,ttft_p99_ms,18.704,422.816,0.044,,lower
 ab_pd1_v2a:single,2026-10-18,"PD v2 (a) 异步导出/导入（copy stream + pinned 池）：pd = proxy(:8100 → P GPU3 + D GPU3) vs single :8012，c8 (1024,128)",c8_p1024_o128,tpot_p50_ms,3.510,4.428,0.793,,lower
 ab_pd1_v2a:single,2026-10-18,"PD v2 (a) 异步导出/导入（copy stream + pinned 池）：pd = proxy(:8100 → P GPU3 + D GPU3) vs single :8012，c8 (1024,128)",c8_p1024_o128,failed,0.000,0.000,,,lower
+ab_pd1_xgpu:single,2026-10-18,"PD v2 (d) 跨卡 P GPU3 / D GPU4 TCP：pd = proxy(:8100 → P GPU3 + D GPU4) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,out_tok_per_s,2221.712,1785.790,1.244,,higher
+ab_pd1_xgpu:single,2026-10-18,"PD v2 (d) 跨卡 P GPU3 / D GPU4 TCP：pd = proxy(:8100 → P GPU3 + D GPU4) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,ttft_p50_ms,13.316,57.667,0.231,,lower
+ab_pd1_xgpu:single,2026-10-18,"PD v2 (d) 跨卡 P GPU3 / D GPU4 TCP：pd = proxy(:8100 → P GPU3 + D GPU4) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,ttft_p99_ms,18.527,136.335,0.136,,lower
+ab_pd1_xgpu:single,2026-10-18,"PD v2 (d) 跨卡 P GPU3 / D GPU4 TCP：pd = proxy(:8100 → P GPU3 + D GPU4) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,tpot_p50_ms,3.526,3.746,0.941,,lower
+ab_pd1_xgpu:single,2026-10-18,"PD v2 (d) 跨卡 P GPU3 / D GPU4 TCP：pd = proxy(:8100 → P GPU3 + D GPU4) vs single = 单机 :8012，c8 (1024,128)",c8_p1024_o128,failed,0.000,0.000,,,lower
