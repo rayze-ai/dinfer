@@ -47,22 +47,24 @@ CUDA_VISIBLE_DEVICES=$GPU RUST_LOG=info nohup $BIN serve "${COMMON[@]}" --port 8
 GOT="$(ask 8100)"; [ "$GOT" = "$WANT" ]; [ "$(metric 8102 pd_fallback_total)" -ge 1 ]
 kill "$(cat "$OUT/p.pid")"; sleep 1; start_p; wait_up 8101
 
-step "bench c8 (1024,128): proxy :8100 vs single :8012 → $OUT/pd1 (CSV)"
+step "bench c8 (1024,128): proxy :8100 vs single :8012 → $OUT/../ab_pd1 (CSV: variant single 基线 vs pd)"
+AB="$(dirname "$OUT")/ab_pd1"; mkdir -p "$AB"
 B=./target/release/bench
-mkdir -p "$OUT/pd1"; $B --url http://127.0.0.1:8100 --concurrency 8 --num-requests 64 --prompt-len 1024 --max-tokens 128 --out "$OUT/pd1/pd_c8_p1024_o128.json" > "$OUT/pd1/pd.log" 2>&1 || { tail -3 "$OUT/pd1/pd.log"; exit 1; }
-$B --url http://127.0.0.1:8012 --concurrency 8 --num-requests 64 --prompt-len 1024 --max-tokens 128 --out "$OUT/pd1/single_c8_p1024_o128.json" > "$OUT/pd1/single.log" 2>&1
-echo "PD v1 TCP：proxy(P GPU$GPU + D GPU$GPU) vs 单机 :8012，c8 (1024,128)" > "$OUT/pd1/CHANGE"
-python3 - "$OUT/pd1" <<'PY'
+$B --url http://127.0.0.1:8012 --concurrency 8 --num-requests 64 --prompt-len 1024 --max-tokens 128 --out "$AB/single__c8_p1024_o128.json" > "$AB/single.log" 2>&1 || { tail -3 "$AB/single.log"; exit 1; }
+$B --url http://127.0.0.1:8100 --concurrency 8 --num-requests 64 --prompt-len 1024 --max-tokens 128 --out "$AB/pd__c8_p1024_o128.json" > "$AB/pd.log" 2>&1 || { tail -3 "$AB/pd.log"; exit 1; }
+echo "PD v1 TCP：pd = proxy(:8100 → P GPU$GPU + D GPU$GPU) vs single = 单机 :8012，c8 (1024,128)" > "$AB/CHANGE"
+python3 - "$AB" <<'PY'
 import json, sys, os
 d = sys.argv[1]
-a = json.load(open(os.path.join(d, "pd_c8_p1024_o128.json"))); b = json.load(open(os.path.join(d, "single_c8_p1024_o128.json")))
-def g(j, k): return j.get(k) or j.get("summary", {}).get(k)
-for k in ("ttft_p50_ms", "tpot_p50_ms", "output_tok_s"):
-    print(f"{k:14s} pd {g(a,k)}  single {g(b,k)}")
-ttft_ok = (g(a,"ttft_p50_ms") or 1e9) <= 1.3 * (g(b,"ttft_p50_ms") or 0)
-tpot_ok = (g(a,"tpot_p50_ms") or 1e9) <= 1.0 * (g(b,"tpot_p50_ms") or 0) + 0.05
-print("ttft<=1.3x:", ttft_ok, " tpot<=1.0x:", tpot_ok)
-sys.exit(0 if (ttft_ok and tpot_ok) else 1)
+a = json.load(open(os.path.join(d, "pd__c8_p1024_o128.json"))); b = json.load(open(os.path.join(d, "single__c8_p1024_o128.json")))
+rows = [("ttft_p50_ms", a["ttft_ms"]["p50"], b["ttft_ms"]["p50"]), ("tpot_p50_ms", a["tpot_ms"]["p50"], b["tpot_ms"]["p50"]),
+        ("out_tok/s", a["output_token_throughput_tps"], b["output_token_throughput_tps"]), ("failed", a.get("failed", 0), b.get("failed", 0))]
+for k, x, y in rows:
+    print(f"{k:12s} pd {x:9.2f}  single {y:9.2f}")
+ttft_ok = a["ttft_ms"]["p50"] <= 1.3 * b["ttft_ms"]["p50"]
+tpot_ok = a["tpot_ms"]["p50"] <= b["tpot_ms"]["p50"] + 0.05
+print("ttft<=1.3x:", ttft_ok, " tpot<=1.0x(+0.05ms):", tpot_ok, " failed:", a.get("failed", 0))
+sys.exit(0 if (ttft_ok and tpot_ok and a.get("failed", 0) == 0) else 1)
 PY
 python3 scripts/dev/bench_trend.py >/dev/null 2>&1 || true
 echo "==> Q4 PASS"
