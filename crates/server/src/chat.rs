@@ -303,6 +303,9 @@ pub async fn chat_completions(State(be): State<Backend>, Json(req): Json<ChatCom
         pd_imported = Some(ok);
         if !ok {
             tracing::warn!(remote_id, "pd: KV did not arrive in time, serving as local prefill");
+            if let Some(m) = be.metrics() {
+                m.pd_fallback_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             pd = None;
         }
     }
