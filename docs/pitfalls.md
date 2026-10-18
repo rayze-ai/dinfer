@@ -2,7 +2,14 @@
 
 > 一条一个坑，标题写**现象**（搜索时按现象搜），正文讲根因与解法。新条目加在最上面。
 >
-> 条目格式（标题用 `## 2026-10-18 PD 分离 e2e：D 等 KV 超时回退 + 首 token 重复（"redred"）
+> 条目格式（标题用 `## 2026-10-18 同一张卡起第二个 dinfer 实例：`not enough GPU memory for KV cache: free 5.5 GiB, cap 30%`
+
+- 现象：PD 验收在 GPU 3 上先起 D（默认 utilization 0.9）再起 P（0.3），P 报 KV 预算不足；free 明明还有 5.5 GiB。
+- 根因：自动预算 = `min(free, total × u − used) − reserve`。`used` 是**整卡已用**（含别的进程），`u` 是**整卡占比上限**，不是本进程配额。第二个进程看到 `used ≈ 17 GiB > cap 7 GiB`，预算 0。这和 vLLM 的 `gpu_memory_utilization` 语义一致，不是 bug，但同卡多实例就不能靠它分配。
+- 解法：同卡多实例一律 `--num-blocks N` 固定块数（`kv_cache: fixed` 路径不看 utilization）。q4.sh：P 512 / D 2048。
+- 如何避免：脚本里起第二个进程前先想 "预算公式里 used 包含谁"；`wait_up` 失败要打子进程日志尾，否则只看到 "port did not come up"。
+
+## 2026-10-18 PD 分离 e2e：D 等 KV 超时回退 + 首 token 重复（"redred"）
 
 - 现象：`e2e_qwen3_pd` 经 proxy 的输出比单机多一个重复的首 token；D 日志 `pd: KV wait timeout, falling back to local prefill`。
 - 根因 1：P 侧 "finish 时记块、下一次 schedule 导出" 的设计依赖 engine 再跑一步；P 空闲（只有这一个请求）时 engine 进 `rx.recv()` 死等，导出永远不发生。core 单测里紧跟着提交了别的请求所以没暴露。
