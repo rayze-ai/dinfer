@@ -622,12 +622,21 @@ pub struct DeviceBlockRef { pub layer: u8, pub block: BlockId, pub ptr: u64, pub
 - **PCP（prefill context parallel）**：长 prompt 按 token 切到 pcp 组各 rank（zigzag / ring attention），每 rank 算自己的 Q 块对全部 K/V（ring 传 KV 或 all-gather KV）。4090 无 P2P 下 ring 代价大；**优先用 chunked prefill + DCP 代替 PCP**（vLLM 也只在 FlashAttn/FlashInfer MLA 支持 PCP）。
 - 共同前提：attention metadata 加 `cp_rank / cp_world / context_len_local`；`KvCacheSpec.dcp_sharded` 对应我们的 group spec 加字段。
 
+### 13.7 TP + PD（2026-10-18 晚，用户建议"P / D 只是角色不同，一套实现"）
+
+- **一套方法**：`TpExecutor` 实现 `kv_export / kv_export_slot / kv_import / pd_map_region / pd_poll`，P 用前两个、D 用后面的，engine 不区分 TP 与否（`spawn_with_pd` 照用）。
+- **分片布局**：每 rank 只持自己的 KV 头分片；payload 单元 = `world × 单 rank 单元`，布局 `[rank][block][layer]`。导出 / 导入时各 rank 对**同一段**目标（rank 0 的 pinned 缓冲，或对端 / 本地 shm 槽）按 `rank × stride` 偏移各写 / 各读自己那份（`Qwen3Executor::pd_export_addr / pd_import_addr`，单 rank 原语，单卡路径也改用它们）。pinned 与 shm 都是 PORTABLE 注册，其它 ctx 直接异步 D2H / H2D，不经 rank 0 中转。
+- **约束**：P 与 D 同 tp（`model_tag` 带 `:tpN`，不等拒收）；**cuda-ipc 不可用**（区是 rank 0 那张卡的设备内存，其它 rank 无 P2P 读不到；service 启动时拒绝，`pd_map_region` 兜底再拒一次）；非 0 rank `enable_pd(0, world)` 只建 staging + copy stream，不建 pinned 池。
+- **调用序**：PD 调用走与 `Step` 同一条 rank 消息队列（`Msg::Call` 闭包），所以每 rank 上导出排在上一步 forward 之后、下一步之前，与 rank 0 的流序一致；槽 / 缓冲由 `Arc` 保活到最后一个 rank 的 copy stream 读完（`pd_push_inflight` 各 rank 一份 clone）。
+- 异构 tp（P tp2 → D tp1 之类）需要按头重排，未做；DCP 同理留 T4。
+
 ### 13.6 分阶段
 
 | 步 | 内容 | 验收 |
 |---|---|---|
 | ✅ T1（2026-10-18） | NCCL 封装 `kernels::comm`、权重分片 `load_bf16_shard`、Qwen3 TP（qkv/gate_up 行切、o_proj/down 列切、2 all-reduce/层）、`TpExecutor` 多线程 lockstep、`--tp` | 4090 `--tp 2` 与单卡 greedy 输出逐 token 一致；bench 记 CSV（预期慢于单卡，记原因） |
 | ✅ T2（2026-10-18） | `--dp N` + `DpBackend` 路由 | `--dp 2` c32 10001 tok/s ≈ 1.9× 单卡 |
+| T2b（2026-10-18 晚，代码完成，4090 验证中） | TP + PD：§13.7，`q4.sh Q4_TP=2 Q4_GPU_P=3,4 Q4_GPU_D=5,6` | e2e + 三故障 PASS（tcp / shm），bench 进 CSV `ab_pd1_tp2*` |
 | T3 | TP 下 CUDA graph 含 all-reduce；`fused_allreduce_rmsnorm`；lm_head 列切开关 | TPOT 开销 ≤ 单卡 + 56 × all-reduce |
 | T4 | DCP（Qwen3 先做，复用 split-K 归并） | 单请求 context 超单卡 KV 仍可跑 |
 | T5 | EP（GLM/K3 真权重到位后） + DP 波次同步 | 功能 |

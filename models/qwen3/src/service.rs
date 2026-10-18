@@ -141,7 +141,11 @@ impl Qwen3Service {
         let want = dinfer_kernels::opset::selected_ops_name();
         anyhow::ensure!(want == ops_name, "unknown OPS={want:?}; available: {ops_name}");
         let tp_world = opt.tp.max(1);
-        anyhow::ensure!(tp_world == 1 || opt.role == PdRoleOpt::Single, "--tp > 1 与 PD 角色暂不兼容（design §13.6 T1）");
+        // TP + PD（design §13.7）：各 rank 分片导出 / 导入，P 与 D 同 tp。cuda-ipc 区是 rank 0 那张卡的设备内存，其它 rank 读不到。
+        anyhow::ensure!(
+            tp_world == 1 || opt.role == PdRoleOpt::Single || opt.kv_transport != "cuda-ipc",
+            "--tp > 1 与 --kv-transport cuda-ipc 不兼容（其它 rank 无 P2P 读不到 rank 0 的设备区）；用 shm 或 tcp"
+        );
         anyhow::ensure!(tp_world == 1 || opt.kv_host_gib == 0.0, "--tp > 1 与 host tier 暂不兼容");
         if tp_world > 1 {
             // 副流上没有 comm，TP 下关闭跨流 prefill/decode 并行（design §13）
@@ -167,6 +171,7 @@ impl Qwen3Service {
             let (num_blocks_opt, block_size, gmu, graphs) =
                 (opt.num_blocks.map(|n| n as usize), opt.block_size as usize, opt.gpu_memory_utilization, opt.enable_cuda_graph);
             let max_num_seqs = opt.max_num_seqs as usize;
+            let pd_role = opt.role != PdRoleOpt::Single;
             move |rank: usize, src: Arc<WeightSource>| -> Result<(Qwen3Executor, usize, std::time::Duration)> {
                 let t0 = std::time::Instant::now();
                 let dev = Device::new(opt_dev + rank)?;
@@ -189,6 +194,10 @@ impl Qwen3Service {
                 let mut exec = Qwen3Executor::with_graphs_and_blocks(s.clone(), model, graphs, max_blocks_per_seq)?;
                 if let Some(id) = comm_id {
                     exec.init_tp(rank, tp_world, id)?;
+                }
+                if pd_role && rank > 0 {
+                    // 非 0 rank：只要 pack/unpack staging + copy stream，不要自己的 pinned 池（用 rank 0 的缓冲 / 槽按偏移读写）
+                    exec.enable_pd(0, tp_world)?;
                 }
                 Ok((exec, nb, t_cuda))
             }
@@ -224,9 +233,10 @@ impl Qwen3Service {
         // PD（design §10.3）：P/D 都需要 pack/unpack staging + pinned 中转槽；传输后端 v1 TCP（NIXL 后端换 transport 即可）。
         let mut pd_incoming_keep: Option<Arc<dinfer_core::pd::IncomingKv>> = None;
         let pd_state = if opt.role != PdRoleOpt::Single {
-            let (base, len) = exec.enable_pd(opt.pd_pool_bufs)?;
+            let (base, len) = exec.enable_pd(opt.pd_pool_bufs, tp_world)?;
             let pool = dinfer_core::runner::ModelExecutor::kv_host_pool(&exec).context("pd pool")?;
-            let model_tag = format!("qwen3:{}:bs{}:bf16", cfg.num_hidden_layers, opt.block_size);
+            // tp 进 tag：payload 布局 `[rank][block][layer]` 依赖 world，P / D 不同 tp 直接拒收
+            let model_tag = format!("qwen3:{}:bs{}:bf16:tp{tp_world}", cfg.num_hidden_layers, opt.block_size);
             let incoming = Arc::new(dinfer_core::pd::IncomingKv::default());
             pd_incoming_keep = Some(incoming.clone());
             // 共享槽区后端（design §10.3 b）：D 侧建区（shm / cuda-ipc），握手时发给 P；P 侧跟随对端的区类型，不看本地 kv_transport。
@@ -237,7 +247,7 @@ impl Qwen3Service {
             let local_region = match (opt.role, region_kind) {
                 (PdRoleOpt::Decode, Some(kind)) => {
                     let slots = if opt.kv_slots > 0 { opt.kv_slots } else if kind == dinfer_kernels::RegionKind::Shm { 4 } else { 2 };
-                    Some(Arc::new(exec.enable_pd_region(kind, slots)?))
+                    Some(Arc::new(exec.enable_pd_region(kind, slots, tp_world)?))
                 }
                 _ => None,
             };
@@ -267,7 +277,15 @@ impl Qwen3Service {
             Single(Qwen3Executor),
             Tp(crate::tp::TpExecutor),
         }
-        let exec_kind = if others.is_empty() { ExecKind::Single(exec) } else { ExecKind::Tp(crate::tp::TpExecutor::new(exec, others)) };
+        let exec_kind = if others.is_empty() {
+            ExecKind::Single(exec)
+        } else {
+            let tpx = crate::tp::TpExecutor::new(exec, others);
+            if pd_state.is_some() {
+                tpx.share_region()?; // D 侧：rank 0 建的 shm 区交给其它 rank（tcp 下为 None，no-op）
+            }
+            ExecKind::Tp(tpx)
+        };
         let t_join = std::time::Instant::now();
         let (tok, tmpl) = tok_thread.join().map_err(|_| anyhow::anyhow!("tokenizer thread panicked"))??;
         let tok = Arc::new(tok);
@@ -315,7 +333,7 @@ impl Qwen3Service {
         let bs = opt.block_size as usize;
         let (handle, jh) = match (exec_kind, pd_state) {
             (ExecKind::Tp(tpx), None) => engine::spawn(sched, Runner::new(tpx, bs)),
-            (ExecKind::Tp(_), Some(_)) => anyhow::bail!("tp + pd unsupported"),
+            (ExecKind::Tp(tpx), Some(st)) => engine::spawn_with_pd(sched, Runner::new(tpx, bs), st),
             (ExecKind::Single(ex), Some(st)) => engine::spawn_with_pd(sched, Runner::new(ex, bs), st),
             (ExecKind::Single(ex), None) => engine::spawn(sched, Runner::new(ex, bs)),
         };
