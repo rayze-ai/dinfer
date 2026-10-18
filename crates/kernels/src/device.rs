@@ -206,8 +206,115 @@ impl Graph {
     }
 }
 
-/// CUDA event（跨流同步）。
+/// CUDA event（跨流同步）。`Send + Sync`（cudarc 保证），可以交给别的线程 `synchronize`。
 pub struct Event(CudaEvent);
+impl Event {
+    /// host 阻塞到事件完成（只阻塞调用线程；engine 线程不要调这个，交给发送线程）。
+    pub fn synchronize(&self) -> Result<()> {
+        Ok(self.0.synchronize()?)
+    }
+    /// 非阻塞查询。
+    pub fn is_done(&self) -> Result<bool> {
+        use cudarc::driver::sys::cudaError_enum as E;
+        // SAFETY: 事件句柄有效（由 self 持有）。
+        match unsafe { result::event::query(self.0.cu_event()) } {
+            Ok(()) => Ok(true),
+            Err(e) if e.0 == E::CUDA_ERROR_NOT_READY => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+// ---------------------------------------------------------------- pinned 缓冲池（PD 异步导出 / 导入）
+/// 固定容量 pinned 缓冲（`cuMemAllocHost`）。导出：D2H 落点；导入：TCP / NIXL 落点 → H2D 源。
+/// 池回收：`Drop` 时若 `pool` 还在就放回，否则释放。
+pub struct PinnedBuf {
+    ptr: *mut u8,
+    cap: usize,
+    len: usize,
+    pool: std::sync::Weak<PinnedPoolInner>,
+}
+unsafe impl Send for PinnedBuf {}
+unsafe impl Sync for PinnedBuf {}
+impl PinnedBuf {
+    pub fn capacity(&self) -> usize {
+        self.cap
+    }
+    pub fn len(&self) -> usize {
+        self.len
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+    /// 设定有效长度（≤ cap）。
+    pub fn set_len(&mut self, len: usize) -> Result<()> {
+        anyhow::ensure!(len <= self.cap, "PinnedBuf: len {len} > cap {}", self.cap);
+        self.len = len;
+        Ok(())
+    }
+    pub fn as_slice(&self) -> &[u8] {
+        // SAFETY: [0, len) 已初始化（写入方负责），ptr 有效。
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+    /// 整个容量的可写视图（接收方往里读；读完 `set_len`）。
+    pub fn as_mut_cap(&mut self) -> &mut [u8] {
+        // SAFETY: 容量范围内，&mut self 独占。
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.cap) }
+    }
+    pub fn ptr(&self) -> *const u8 {
+        self.ptr
+    }
+}
+impl Drop for PinnedBuf {
+    fn drop(&mut self) {
+        if let Some(pool) = self.pool.upgrade() {
+            pool.free.lock().unwrap().push((self.ptr, self.cap));
+        } else {
+            // SAFETY: 独占；池已不在，直接释放。
+            unsafe { let _ = result::free_host(self.ptr as *mut std::ffi::c_void); }
+        }
+    }
+}
+struct PinnedPoolInner {
+    free: std::sync::Mutex<Vec<(*mut u8, usize)>>,
+    all: std::sync::Mutex<Vec<(*mut u8, usize)>>,
+}
+unsafe impl Send for PinnedPoolInner {}
+unsafe impl Sync for PinnedPoolInner {}
+impl Drop for PinnedPoolInner {
+    fn drop(&mut self) {
+        // 池销毁时释放还在池里的；借出去的由 PinnedBuf::drop（upgrade 失败分支）释放。
+        for (p, _) in self.free.lock().unwrap().drain(..) {
+            // SAFETY: 这些块已归还、无人持有。
+            unsafe { let _ = result::free_host(p as *mut std::ffi::c_void); }
+        }
+    }
+}
+/// 固定数量 × 固定容量的 pinned 缓冲池。`take()` 空了返回 None（调用方退化到普通内存）。
+#[derive(Clone)]
+pub struct PinnedPool(std::sync::Arc<PinnedPoolInner>);
+impl PinnedPool {
+    pub fn new(stream: &Stream, count: usize, cap: usize) -> Result<Self> {
+        stream.bind_ctx()?;
+        let mut v = Vec::with_capacity(count);
+        for _ in 0..count {
+            // SAFETY: pinned 分配；Drop 释放。
+            let p = unsafe { result::malloc_host(cap, 0)? as *mut u8 };
+            v.push((p, cap));
+        }
+        Ok(Self(std::sync::Arc::new(PinnedPoolInner { all: std::sync::Mutex::new(v.clone()), free: std::sync::Mutex::new(v) })))
+    }
+    pub fn take(&self) -> Option<PinnedBuf> {
+        let (ptr, cap) = self.0.free.lock().unwrap().pop()?;
+        Some(PinnedBuf { ptr, cap, len: 0, pool: std::sync::Arc::downgrade(&self.0) })
+    }
+    pub fn capacity(&self) -> usize {
+        self.0.all.lock().unwrap().first().map_or(0, |x| x.1)
+    }
+    pub fn available(&self) -> usize {
+        self.0.free.lock().unwrap().len()
+    }
+}
 
 // ---------------------------------------------------------------- staged H2D（启动 loop 第 10 轮）
 /// pinned 双缓冲 H2D：host 侧 memcpy 进 pinned 块 A 的同时，上一块 B 在异步 DMA 到设备。

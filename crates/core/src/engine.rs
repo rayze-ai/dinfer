@@ -113,7 +113,7 @@ pub struct PdState {
     /// D 侧：等 KV 最长多久，超时转普通请求（本地重算 prefill）。
     pub wait_timeout: std::time::Duration,
     /// D 侧：已配对但尚未 begin 的 payload（本地 id → payload）。
-    payloads: HashMap<RequestId, Vec<u8>>,
+    payloads: HashMap<RequestId, Box<dyn crate::pd::HostBuf>>,
     /// D 侧：KV 未到的 Import 提交（本地 id, 提交, 到达时刻）。
     pending: Vec<(RequestId, Vec<u32>, SamplingParams, RequestId, std::time::Instant)>,
     /// P 侧：Export 请求的头信息（导出时需要 prompt / sampling / 首 token）。
@@ -214,7 +214,7 @@ impl<E: ModelExecutor> Engine<E> {
         let unit_bytes = self.runner.exec.kv_unit_bytes();
         anyhow::ensure!(unit_bytes > 0, "pd: executor does not support kv export/import");
         for (rid, blocks) in &so.kv_export {
-            let payload = self.runner.exec.kv_export(blocks)?;
+            let mut handle = self.runner.exec.kv_export(blocks)?;
             let (prompt_ids, sampling, first) = pd.export_meta.remove(rid).with_context(|| format!("pd: export meta for {rid}"))?;
             let first_token = first.with_context(|| format!("pd: req {rid} exported without a first token"))?;
             let header = crate::pd::MigrationHeader {
@@ -229,8 +229,15 @@ impl<E: ModelExecutor> Engine<E> {
             self.metrics.pd_export_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if let Some(t) = pd.transport.clone() {
                 std::thread::Builder::new().name("pd-send".into()).spawn(move || {
-                    // payload 归本线程所有，发完才 drop；NIXL 后端 poll 到 Done 为止。
-                    match t.send(&header, crate::pd::MemDesc::of(&payload)) {
+                    // 只阻塞本线程：等 GPU→host 拷贝完成，再发；句柄 drop 归还缓冲。NIXL 后端 poll 到 Done 为止。
+                    let buf = match handle.wait() {
+                        Ok(b) => b,
+                        Err(e) => {
+                            tracing::warn!(id = header.request_id, error = %e, "pd: export wait failed");
+                            return;
+                        }
+                    };
+                    match t.send(&header, buf.desc()) {
                         Ok(mut x) => {
                             while matches!(x.poll(), Ok(crate::pd::TransferState::InFlight)) {
                                 std::thread::sleep(std::time::Duration::from_micros(50));
@@ -244,8 +251,8 @@ impl<E: ModelExecutor> Engine<E> {
         for (rid, blocks) in &so.kv_import {
             let payload = pd.payloads.remove(rid).with_context(|| format!("pd: payload for {rid}"))?;
             let want = blocks.groups.first().map_or(0, |g| g.len()) * unit_bytes;
-            anyhow::ensure!(payload.len() == want, "pd: payload {} != {} blocks × {unit_bytes}", payload.len(), blocks.groups[0].len());
-            self.runner.exec.kv_import(blocks, &payload)?;
+            anyhow::ensure!(payload.as_slice().len() == want, "pd: payload {} != {} blocks × {unit_bytes}", payload.as_slice().len(), blocks.groups[0].len());
+            self.runner.exec.kv_import(blocks, payload)?;
             self.metrics.pd_import_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         Ok(())
@@ -634,15 +641,16 @@ mod pd_tests {
         fn kv_unit_bytes(&self) -> usize {
             UNIT
         }
-        fn kv_export(&mut self, blocks: &KvBlocks) -> Result<Vec<u8>> {
+        fn kv_export(&mut self, blocks: &KvBlocks) -> Result<Box<dyn crate::pd::KvExportHandle>> {
             let kv = self.kv.lock().unwrap();
             let mut out = Vec::new();
             for &b in blocks.group(0) {
                 out.extend_from_slice(&kv.get(&b).copied().unwrap_or([b as u8; UNIT]));
             }
-            Ok(out)
+            Ok(Box::new(crate::pd::ReadyExport(Box::new(out))))
         }
-        fn kv_import(&mut self, blocks: &KvBlocks, payload: &[u8]) -> Result<()> {
+        fn kv_import(&mut self, blocks: &KvBlocks, payload: Box<dyn crate::pd::HostBuf>) -> Result<()> {
+            let payload = payload.as_slice();
             let mut kv = self.kv.lock().unwrap();
             for (i, &b) in blocks.group(0).iter().enumerate() {
                 let mut u = [0u8; UNIT];

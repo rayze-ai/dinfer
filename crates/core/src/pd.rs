@@ -48,10 +48,9 @@ impl MigrationHeader {
 }
 
 /// 一次完整的迁移：头 + 连续 payload（D 侧收完后交给 executor `kv_import`）。
-#[derive(Debug)]
 pub struct Migration {
     pub header: MigrationHeader,
-    pub payload: Vec<u8>,
+    pub payload: Box<dyn HostBuf>,
     pub received_at: Instant,
 }
 
@@ -72,6 +71,13 @@ pub fn encode(header: &MigrationHeader, payload: &[u8], w: &mut impl Write) -> R
 }
 
 pub fn decode(r: &mut impl Read) -> Result<(MigrationHeader, Vec<u8>)> {
+    let (h, b) = decode_into(r, &VecPool)?;
+    let mut v = vec![0u8; b.as_slice().len()];
+    v.copy_from_slice(b.as_slice());
+    Ok((h, v))
+}
+/// 头解析后向 `pool` 要落点直接读 payload（pinned 时零拷贝进 DMA 源）；池给不出就退化 Vec。
+pub fn decode_into(r: &mut impl Read, pool: &dyn HostBufPool) -> Result<(MigrationHeader, Box<dyn HostBuf>)> {
     let mut u = [0u8; 4];
     r.read_exact(&mut u).context("pd: read magic")?;
     if u32::from_le_bytes(u) != MAGIC {
@@ -83,9 +89,68 @@ pub fn decode(r: &mut impl Read) -> Result<(MigrationHeader, Vec<u8>)> {
     let mut h = vec![0u8; hl as usize];
     r.read_exact(&mut h)?;
     let header: MigrationHeader = serde_json::from_slice(&h).context("pd: header json")?;
-    let mut payload = vec![0u8; header.payload_len()];
-    r.read_exact(&mut payload).context("pd: read payload")?;
-    Ok((header, payload))
+    let n = header.payload_len();
+    let mut buf: Box<dyn HostBuf> = pool.take(n).unwrap_or_else(|| Box::new(vec![0u8; n]));
+    r.read_exact(&mut buf.as_mut_cap()[..n]).context("pd: read payload")?;
+    buf.set_len(n)?;
+    Ok((header, buf))
+}
+
+/// 一块 host 字节缓冲（payload 落点）。pinned（executor 提供，可直接 DMA）或普通 `Vec<u8>`（退化路径）。
+pub trait HostBuf: Send + Sync {
+    fn as_slice(&self) -> &[u8];
+    /// 整个容量的可写视图（接收方往里读满后 `set_len`）。
+    fn as_mut_cap(&mut self) -> &mut [u8];
+    fn set_len(&mut self, len: usize) -> Result<()>;
+    fn capacity(&self) -> usize;
+    /// true = pinned，executor 可直接异步 H2D；false = 需要先拷进 pinned 中转。
+    fn is_pinned(&self) -> bool;
+    fn desc(&self) -> MemDesc {
+        MemDesc::of(self.as_slice())
+    }
+}
+impl HostBuf for Vec<u8> {
+    fn as_slice(&self) -> &[u8] {
+        self
+    }
+    fn as_mut_cap(&mut self) -> &mut [u8] {
+        self.as_mut_slice()
+    }
+    fn set_len(&mut self, len: usize) -> Result<()> {
+        anyhow::ensure!(len <= self.len(), "Vec payload: len {len} > cap {}", self.len());
+        self.truncate(len);
+        Ok(())
+    }
+    fn capacity(&self) -> usize {
+        self.len()
+    }
+    fn is_pinned(&self) -> bool {
+        false
+    }
+}
+/// 缓冲池：接收线程 / 导出路径找它要落点。executor 实现为 pinned 池；没有池时用 `VecPool`。
+pub trait HostBufPool: Send + Sync {
+    /// 拿一块容量 ≥ `min_bytes` 的缓冲；池空 / 太小返回 None（调用方退化到 Vec）。
+    fn take(&self, min_bytes: usize) -> Option<Box<dyn HostBuf>>;
+}
+#[derive(Default)]
+pub struct VecPool;
+impl HostBufPool for VecPool {
+    fn take(&self, min_bytes: usize) -> Option<Box<dyn HostBuf>> {
+        Some(Box::new(vec![0u8; min_bytes]))
+    }
+}
+/// 一次异步导出的句柄（executor 返回）：GPU → host 拷贝可能还在飞；`wait()` 只阻塞调用线程（发送线程），
+/// 返回 payload 字节。drop 归还缓冲。
+pub trait KvExportHandle: Send {
+    fn wait(&mut self) -> Result<&dyn HostBuf>;
+}
+/// 同步已就绪的导出（mock / 退化路径）。
+pub struct ReadyExport(pub Box<dyn HostBuf>);
+impl KvExportHandle for ReadyExport {
+    fn wait(&mut self) -> Result<&dyn HostBuf> {
+        Ok(self.0.as_ref())
+    }
 }
 
 /// 一段 host 内存（NIXL 的 memory descriptor 形状）。`Send`：调用方保证指向的内存在 transfer 完成前有效。
@@ -204,13 +269,17 @@ impl IncomingKv {
 /// D 侧 TCP 接收线程：每条连接一次迁移。`model_tag` 不匹配直接丢（计 rejected）。返回实际绑定端口（测试用 0）。
 /// NIXL 后端的接收方是 agent 回调 + notif，不走这里；但落点同样是 `IncomingKv::put`。
 pub fn spawn_receiver(bind: &str, model_tag: String, table: Arc<IncomingKv>) -> Result<u16> {
+    spawn_receiver_with_pool(bind, model_tag, table, Arc::new(VecPool))
+}
+/// 同上，payload 落进 `pool`（executor 的 pinned 池 → D 侧零拷贝 H2D）。
+pub fn spawn_receiver_with_pool(bind: &str, model_tag: String, table: Arc<IncomingKv>, pool: Arc<dyn HostBufPool>) -> Result<u16> {
     let l = TcpListener::bind(bind).with_context(|| format!("pd: bind {bind}"))?;
     let port = l.local_addr()?.port();
     std::thread::Builder::new().name("pd-recv".into()).spawn(move || {
         for conn in l.incoming() {
             let Ok(mut s) = conn else { continue };
             let _ = s.set_nodelay(true);
-            match decode(&mut s) {
+            match decode_into(&mut s, pool.as_ref()) {
                 Ok((header, payload)) if header.model_tag == model_tag => {
                     tracing::debug!(id = header.request_id, units = header.num_units, "pd: migration received");
                     table.put(Migration { header, payload, received_at: Instant::now() });
@@ -283,7 +352,7 @@ mod tests {
     #[test]
     fn gc_drops_stale() {
         let table = IncomingKv::default();
-        let mut m = Migration { header: hdr(5, "q"), payload: vec![0; 8], received_at: Instant::now() };
+        let mut m = Migration { header: hdr(5, "q"), payload: Box::new(vec![0u8; 8]), received_at: Instant::now() };
         m.received_at -= Duration::from_secs(10);
         table.put(m);
         assert_eq!(table.gc(Duration::from_secs(2)), 1);

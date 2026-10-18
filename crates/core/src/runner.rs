@@ -149,11 +149,19 @@ pub trait ModelExecutor {
     }
     /// PD 分离（design §10.3）：按位置把 `blocks` 的全部层 KV 拷成一段连续 host 字节（P 侧，同步，主流）。
     /// 布局 = `kv_pack` 的 `[block][layer][...]`，每块 `unit_bytes`；`kv_import` 反向。默认：不支持。
-    fn kv_export(&mut self, _blocks: &crate::kv::KvBlocks) -> Result<Vec<u8>> {
+    /// 异步：入队 pack + D2H 后立即返回句柄；GPU 侧用事件保证下一步 forward 不会在 pack 之前复用这些块。
+    /// 发送线程 `handle.wait()` 拿字节。
+    fn kv_export(&mut self, _blocks: &crate::kv::KvBlocks) -> Result<Box<dyn crate::pd::KvExportHandle>> {
         anyhow::bail!("kv_export: executor does not support PD")
     }
-    fn kv_import(&mut self, _blocks: &crate::kv::KvBlocks, _payload: &[u8]) -> Result<()> {
+    /// 异步：payload（最好是本 executor `kv_host_pool` 给的 pinned 缓冲）H2D + unpack 入队，主流事件保证 forward 前完成；
+    /// 缓冲由 executor 持有到 H2D 结束后归还。
+    fn kv_import(&mut self, _blocks: &crate::kv::KvBlocks, _payload: Box<dyn crate::pd::HostBuf>) -> Result<()> {
         anyhow::bail!("kv_import: executor does not support PD")
+    }
+    /// 接收线程落 payload 用的 pinned 池；None = 用普通内存（导入时多一次 memcpy）。
+    fn kv_host_pool(&self) -> Option<std::sync::Arc<dyn crate::pd::HostBufPool>> {
+        None
     }
     /// 一个块（全层）导出后占多少字节；0 = 不支持 PD。
     fn kv_unit_bytes(&self) -> usize {
