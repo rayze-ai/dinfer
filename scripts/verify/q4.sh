@@ -49,8 +49,8 @@ kill "$(cat "$OUT/p.pid")"; sleep 1; start_p; wait_up 8101
 
 step "bench c8 (1024,128): proxy :8100 vs single :8012 → $OUT/pd1 (CSV)"
 B=./target/release/bench
-$B --base http://127.0.0.1:8100 --concurrency 8 --num-requests 64 --prompt-len 1024 --max-tokens 128 --json "$OUT/pd1/pd_c8_p1024_o128.json" > "$OUT/pd1/pd.log" 2>&1 || { tail -3 "$OUT/pd1/pd.log"; exit 1; }
-$B --base http://127.0.0.1:8012 --concurrency 8 --num-requests 64 --prompt-len 1024 --max-tokens 128 --json "$OUT/pd1/single_c8_p1024_o128.json" > "$OUT/pd1/single.log" 2>&1
+mkdir -p "$OUT/pd1"; $B --url http://127.0.0.1:8100 --concurrency 8 --num-requests 64 --prompt-len 1024 --max-tokens 128 --out "$OUT/pd1/pd_c8_p1024_o128.json" > "$OUT/pd1/pd.log" 2>&1 || { tail -3 "$OUT/pd1/pd.log"; exit 1; }
+$B --url http://127.0.0.1:8012 --concurrency 8 --num-requests 64 --prompt-len 1024 --max-tokens 128 --out "$OUT/pd1/single_c8_p1024_o128.json" > "$OUT/pd1/single.log" 2>&1
 echo "PD v1 TCP：proxy(P GPU$GPU + D GPU$GPU) vs 单机 :8012，c8 (1024,128)" > "$OUT/pd1/CHANGE"
 python3 - "$OUT/pd1" <<'PY'
 import json, sys, os

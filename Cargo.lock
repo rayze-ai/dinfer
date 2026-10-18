@@ -660,6 +660,7 @@ dependencies = [
  "dinfer-core",
  "dinfer-text",
  "futures-core",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
