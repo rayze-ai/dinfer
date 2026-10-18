@@ -462,3 +462,9 @@
 - 原则：core 的 KV 层只放 **与模型无关的容器与钩子**（块池、哈希链、索引、order 类型、调度钩子）；凡是 "什么算一个命中单元、多组如何合成前缀命中、一个单元多少 token、一个单元多少字节" 都是模型 crate 的事，经 trait 注入。对照：GPU 侧的 `get_computed_blocks` 其实已经按组分别处理（attention 组取最短、Mamba 组边界查），host 侧应复用同一规则而不是另写一套。
 - 如何避免：core 里出现 `groups.len() != 1` / `is_mamba[0]` / 具体 block_size 比较这类条件时，就是信号——该抽 trait 了。
 
+
+## 4090 之间没有 PCIe P2P：CUDA IPC 跨卡 open 直接失败（2026-10-18）
+- 现象：`cudaIpcOpenMemHandle` 在另一张 4090 上报 `peer access is not supported between these two devices`；`cudaDeviceCanAccessPeer` 全 0；`nvidia-smi topo -p2p r` 全 CNS。同卡 open 正常，64 MB D2D 0.15 ms（446 GB/s）。
+- 根因：消费卡（GeForce）驱动禁 PCIe P2P；且 GPU0–3 / GPU4–7 分属两个 NUMA（`topo -m` SYS）。
+- 解法：PD 跨卡 KV 搬运走 host：shm pinned 共享区（design §10.3 后端 b），P D2H 写、D H2D 读；同卡才用 cuda-ipc D2D。NIXL 在这台机器上也只能走 UCX host 路径，不引入。探针：`scripts/dev/probe_ipc.cu`（`probe_ipc A B`）。
+- 避免：换机器先跑探针；有 NVLink / 数据中心卡时 cuda-ipc 跨卡才有意义。
