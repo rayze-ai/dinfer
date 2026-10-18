@@ -510,6 +510,8 @@ pub struct DeviceBlockRef { pub layer: u8, pub block: BlockId, pub ptr: u64, pub
 3. D 的 `kv-port` 线程把块收进 arena 槽，登记 `IncomingKv { request_id → slots }`；D 的 scheduler 对带 `request_id` 的新请求：若 KV 已到 → 当作 host 命中走 `register_fetched` + `kv_fetch`，`num_computed = prompt_len`，直接 decode；未到 → `WaitingForKv`，到达后放回 waiting 队头；超时 → 普通 prefill。
 4. D 流式返回后续 token；P 在 D 确认收齐后释放槽（或超时释放）。
 
+**接口形状（2026-10-18 实现，为 NIXL 预留）**：`core::pd::KvTransport { name(); register(MemDesc) /*= NIXL registerMem，一次注册 HostArena::region*/; send(&MigrationHeader, MemDesc) -> Box<dyn Transfer> /*= xfer handle*/ }`，`Transfer::poll() -> InFlight | Done`。控制面（header）始终 TCP 小消息，数据面（payload）由后端决定：TCP 后端 write 同一条连接；NIXL 后端发 WRITE 描述符到 D 已注册的槽、header 走 notif 或本 TCP 通道。executor 只认 `kv_export -> Vec<u8>` / `kv_import(&[u8])`，v2 改为导出到已注册槽后把 `MemDesc` 直接交给 transport（省一次 host 拷贝）。
+
 **不做（v1）**：P 侧 prefix cache 跨实例共享；D→P 回传（多轮续写走 D 本地 prefix cache）；TP 下的分片传输（Q5）。
 
 **验收**：`scripts/verify/q4.sh` exit 0 = ① 两进程（GPU 0 P / GPU 3 D）+ proxy，greedy 输出与单机逐字一致（e2e 用例 `e2e_qwen3_pd`）；② 杀 P / 杀 D / 掐断 kv-port 三种故障各一次，请求全部正常返回（走回退）；③ bench c8 (1024,128) 经 proxy：TTFT ≤ 单机 1.3×（多一跳 + 传输），TPOT ≤ 单机（D 无 prefill 干扰），进 CSV（`pd1`）。
