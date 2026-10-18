@@ -518,6 +518,8 @@ pub struct DeviceBlockRef { pub layer: u8, pub block: BlockId, pub ptr: u64, pub
 
 **验收**：`scripts/verify/q4.sh` exit 0 = ① 两进程（GPU 0 P / GPU 3 D）+ proxy，greedy 输出与单机逐字一致（e2e 用例 `e2e_qwen3_pd`）；② 杀 P / 杀 D / 掐断 kv-port 三种故障各一次，请求全部正常返回（走回退）；③ bench c8 (1024,128) 经 proxy：TTFT ≤ 单机 1.3×（多一跳 + 传输），TPOT ≤ 单机（D 无 prefill 干扰），进 CSV（`pd1`）。
 
+**PD bench 口径（用户 2026-10-18 确认）**：同机 Qwen3-0.6B 下 PD 经 proxy 的 TTFT 高于单机是预期内（prefill 本身 15 ms，任何中转都比它贵），不再纠结、不作为门槛；PD 线以功能正确 + 故障回退 + 跨卡 TPOT 接近单机（4090：3.75 vs 3.53）为收口标准。真正的收益评估等生产级模型 + 跨机。
+
 ## 11. 采用 / 改进台账（对 vLLM）
 
 目标是性能超越，不是重写。vLLM 做得对的直接用，能改进的改进；每项记一行，便于回看哪些是"借来的"、哪些是我们的。
