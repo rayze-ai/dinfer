@@ -108,6 +108,8 @@ pub trait HostBuf: Send + Sync {
     fn desc(&self) -> MemDesc {
         MemDesc::of(self.as_slice())
     }
+    /// 下转回具体类型（executor 认回自己池里的 pinned 缓冲，零拷贝 H2D）。
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send + Sync>;
 }
 impl HostBuf for Vec<u8> {
     fn as_slice(&self) -> &[u8] {
@@ -126,6 +128,9 @@ impl HostBuf for Vec<u8> {
     }
     fn is_pinned(&self) -> bool {
         false
+    }
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send + Sync> {
+        self
     }
 }
 /// 缓冲池：接收线程 / 导出路径找它要落点。executor 实现为 pinned 池；没有池时用 `VecPool`。

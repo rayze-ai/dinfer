@@ -635,6 +635,26 @@ impl Stream {
             Ok(result::memcpy_htod_async(dst, src, self.raw())?)
         }
     }
+    /// 设备地址 `dst` ← pinned host `src`（`PinnedBuf` 内），异步（本流）。
+    pub fn htod_from_pinned(&self, src: &PinnedBuf, off: usize, dst: u64, len: usize) -> Result<()> {
+        anyhow::ensure!(off + len <= src.len(), "htod_from_pinned: range {off}+{len} > len {}", src.len());
+        self.bind_ctx()?;
+        // SAFETY: src pinned、范围已校验；dst 由调用方保证有效。
+        unsafe {
+            let s = std::slice::from_raw_parts(src.ptr().add(off), len);
+            Ok(result::memcpy_htod_async(dst, s, self.raw())?)
+        }
+    }
+    /// pinned host `dst`（`PinnedBuf` 容量内）← 设备地址 `src`，异步（本流）。
+    pub fn dtoh_to_pinned(&self, dst: &mut PinnedBuf, off: usize, src: u64, len: usize) -> Result<()> {
+        anyhow::ensure!(off + len <= dst.capacity(), "dtoh_to_pinned: range {off}+{len} > cap {}", dst.capacity());
+        self.bind_ctx()?;
+        // SAFETY: dst pinned、范围已校验；src 由调用方保证有效。
+        unsafe {
+            let d = std::slice::from_raw_parts_mut(dst.as_mut_cap().as_mut_ptr().add(off), len);
+            Ok(result::memcpy_dtoh_async(d, src, self.raw())?)
+        }
+    }
     /// 竞技场 (slot, off) ← 设备地址 `src` 的 `len` 字节，异步（本流）。
     pub fn dtoh_to_arena(&self, arena: &HostArena, slot: usize, off: usize, src: u64, len: usize) -> Result<()> {
         let p = arena.addr(slot, off, len)?;

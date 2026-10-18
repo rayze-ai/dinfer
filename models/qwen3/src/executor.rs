@@ -19,7 +19,7 @@ use dinfer_core::runner::{BatchMode, BatchPlan, ModelExecutor, PairLogprobs};
 use dinfer_core::sampler::{SampleBatch, TokenLogprobs};
 use dinfer_kernels as k;
 use dinfer_kernels::Graph;
-use dinfer_layers::{Gemm, Stream, Tensor, Event, TimingEvent, PinnedUploader, PinnedSlot, HostArena};
+use dinfer_layers::{Gemm, Stream, Tensor, Event, TimingEvent, PinnedUploader, PinnedSlot, HostArena, PinnedPool, PinnedBuf};
 
 /// 固定地址的每 step 输入缓冲。
 struct StepBuffers {
@@ -129,6 +129,8 @@ pub struct Qwen3Executor {
     skip_prev_chosen: bool,
     /// KV host tier（design §10.2）：pinned 竞技场 + copy stream；None = 关。
     host_tier: Option<HostTierStore>,
+    /// PD 分离（design §10.3 v2）：异步导出 / 导入资源。`enable_pd` 建。
+    pd: Option<PdStore>,
     /// 异步调度：两个 pinned 槽轮转（步 n 的 D2H 在槽 n%2；finish n 必在 begin n+2 之前）。
     async_slots: [PinnedSlot; 2],
     async_slot_idx: usize,
@@ -215,6 +217,7 @@ impl Qwen3Executor {
             alt: None,
             skip_prev_chosen: false,
             host_tier: None,
+            pd: None,
             alt_active: false,
             pair_steps: 0,
             main_done: None,
@@ -650,13 +653,41 @@ impl Qwen3Executor {
     /// PD 分离：保证有一套 pack/unpack staging + pinned 槽（`--role prefill/decode` 时即使 host tier 关也要）。
     /// 已开 host tier 则直接复用其 arena；否则建 `HOST_TIER_CHUNK` 槽的小 arena（只做中转，不做 LRU 索引）。
     /// 返回 pinned 区 (基址, 字节) 供 `KvTransport::register`。
-    pub fn enable_pd(&mut self) -> Result<(*mut u8, usize)> {
-        if self.host_tier.is_none() {
-            let (_, per_block_all) = self.kv_block_bytes_all_layers();
-            self.build_host_tier(HOST_TIER_CHUNK, per_block_all)?;
-            tracing::info!(slots = HOST_TIER_CHUNK, per_block_kib = per_block_all / 1024, "pd: staging arena built (host tier off)");
-        }
-        Ok(self.host_tier.as_ref().unwrap().arena.region())
+    /// PD 分离 v2：建异步导出 / 导入资源（copy stream、设备 staging ×2、pinned 池），返回 pinned 池总区（NIXL 注册用：
+    /// 池是多块独立 cuMemAllocHost，v2 TCP 不需要整块注册，这里返回第一块的 (ptr, 总字节) 仅作容量提示）。
+    /// `pool_bufs`：pinned 缓冲个数（每块 = max_blocks × 单元字节，Qwen3 4k 上下文 ≈ 448 MB）。
+    pub fn enable_pd(&mut self, pool_bufs: usize) -> Result<(*mut u8, usize)> {
+        let (per_layer, per_block_all) = self.kv_block_bytes_all_layers();
+        let layers = self.model.kv.len();
+        let cap = self.buf.max_blocks * per_block_all;
+        let copy = self.stream.device().new_stream()?;
+        let ptrs: Vec<u64> = self.model.kv.iter().map(|kv| self.stream.ptr(&kv.cache.data)).collect();
+        let layer_ptrs = Tensor::from_vec(&self.stream, ptrs, &[layers])?;
+        let mk = |st: &Stream| -> Result<(Tensor<i32>, Tensor<u8>)> {
+            Ok((Tensor::<i32>::zeros(st, &[PD_CHUNK])?, Tensor::<u8>::uninit(st, &[PD_CHUNK * per_block_all])?))
+        };
+        let (b0, s0) = mk(&self.stream)?;
+        let (b1, s1) = mk(&self.stream)?;
+        let pool = PinnedPool::new(&self.stream, pool_bufs.max(1), cap)?;
+        self.stream.synchronize()?;
+        tracing::info!(
+            pool_bufs = pool_bufs.max(1),
+            buf_mib = cap >> 20,
+            chunk = PD_CHUNK,
+            "pd: async export/import resources built (copy stream + 2 staging + pinned pool)"
+        );
+        let region = (std::ptr::null_mut(), cap * pool_bufs.max(1));
+        self.pd = Some(PdStore {
+            copy,
+            layer_ptrs,
+            bytes_per_layer_block: per_layer,
+            staging: [s0, s1],
+            blocks: [b0, b1],
+            staging_free: [None, None],
+            pool,
+            inflight_imports: Vec::new(),
+        });
+        Ok(region)
     }
     pub fn enable_host_tier(&mut self, host_gib: f64) -> Result<usize> {
         let (_, per_block_all) = self.kv_block_bytes_all_layers();
@@ -821,6 +852,68 @@ struct HostTierStore {
 }
 const HOST_TIER_CHUNK: usize = 64;
 
+/// PD 分离 v2 资源。导出：主流 pack → staging[i]（事件 packed_i）→ copy stream 等事件后 D2H → pinned buf（事件 done）。
+/// 导入：copy stream H2D pinned → staging[i]（事件 h2d_i）→ 主流等事件后 unpack（事件 unpacked_i，copy stream 复用 staging 前等它）。
+/// 两套 staging 交替，pack / D2H 可以跨 chunk 重叠；engine 线程从不等 GPU。
+struct PdStore {
+    copy: Stream,
+    layer_ptrs: Tensor<u64>,
+    bytes_per_layer_block: usize,
+    staging: [Tensor<u8>; 2],
+    blocks: [Tensor<i32>; 2],
+    /// staging[i] 上一次被 "消费方" 用完的事件（导出 = copy stream D2H 完；导入 = 主流 unpack 完）；生产方写之前等它。
+    staging_free: [Option<Event>; 2],
+    pool: PinnedPool,
+    /// 导入在飞：(copy stream 上 H2D 全部完成的事件, 缓冲)。事件完成即可归还缓冲；每次 kv_import 开头清一遍。
+    inflight_imports: Vec<(Event, PinnedBuf)>,
+}
+const PD_CHUNK: usize = 64;
+
+/// 本 crate 的 newtype（孤儿规则：core 的 trait × kernels 的类型只能在这里接）。
+pub struct PdBuf(pub PinnedBuf);
+#[derive(Clone)]
+pub struct PdPool(pub PinnedPool);
+impl dinfer_core::pd::HostBuf for PdBuf {
+    fn as_slice(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+    fn as_mut_cap(&mut self) -> &mut [u8] {
+        self.0.as_mut_cap()
+    }
+    fn set_len(&mut self, len: usize) -> Result<()> {
+        self.0.set_len(len)
+    }
+    fn capacity(&self) -> usize {
+        self.0.capacity()
+    }
+    fn is_pinned(&self) -> bool {
+        true
+    }
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send + Sync> {
+        self
+    }
+}
+impl dinfer_core::pd::HostBufPool for PdPool {
+    fn take(&self, min_bytes: usize) -> Option<Box<dyn dinfer_core::pd::HostBuf>> {
+        if self.0.capacity() < min_bytes {
+            return None;
+        }
+        self.0.take().map(|b| Box::new(PdBuf(b)) as Box<dyn dinfer_core::pd::HostBuf>)
+    }
+}
+
+/// 导出句柄：发送线程 `wait()` 等 copy stream 的 done 事件，然后读 pinned 缓冲。
+struct PdExport {
+    done: Event,
+    buf: PdBuf,
+}
+impl dinfer_core::pd::KvExportHandle for PdExport {
+    fn wait(&mut self) -> Result<&dyn dinfer_core::pd::HostBuf> {
+        self.done.synchronize()?;
+        Ok(&self.buf)
+    }
+}
+
 /// 每个请求本步 1 个采样 token、无 draft。
 fn push_tokens(generated: &mut Vec<Vec<u32>>, drafts: &mut Vec<Vec<u32>>, chosen: &[i32]) {
     for &c in chosen {
@@ -882,71 +975,94 @@ impl ModelExecutor for Qwen3Executor {
         Ok(())
     }
 
-    // ---- PD 分离（design §10.3）：按位置导出 / 导入全部层 KV。复用 host tier 的 pack/unpack + staging + pinned 槽。
+    // ---- PD 分离（design §10.3 v2，异步）：按位置导出 / 导入全部层 KV。engine 线程不等 GPU。
     fn kv_unit_bytes(&self) -> usize {
-        if self.host_tier.is_none() {
+        if self.pd.is_none() {
             return 0;
         }
         self.kv_block_bytes_all_layers().1
     }
-    /// P 侧：主流同步。块已被 scheduler free 但未复用（engine 保证在任何 GPU 写之前调用）。
-    /// pack 到 staging → 每块 D2H 进 pinned 槽 i（i < chunk）→ synchronize → 从槽拷进 Vec。
-    /// v2（NIXL）：直接把 pinned 槽地址发出去（`HostArena::region` 已注册），不拷 Vec。
-    fn kv_export(&mut self, blocks: &dinfer_core::kv::KvBlocks) -> Result<Vec<u8>> {
-        let ht = self.host_tier.as_ref().context("pd: kv_export without staging (call enable_pd)")?;
-        if let Some(ev) = &ht.offload_done {
-            self.stream.wait_event(ev)?; // 槽可能正被 host tier offload 写
-        }
-        let layers = self.model.kv.len();
-        let per = ht.bytes_per_layer_block;
-        let per_all = per * layers;
-        let ids = blocks.group(0);
-        let mut out = Vec::with_capacity(ids.len() * per_all);
-        let ht = self.host_tier.as_mut().unwrap();
-        for chunk in ids.chunks(ht.chunk) {
-            let bids: Vec<i32> = chunk.iter().map(|&b| b as i32).collect();
-            self.stream.htod_into(&bids, &mut ht.blocks_buf.data)?;
-            k::kv_pack(&self.stream, &ht.layer_ptrs.data, &ht.blocks_buf.data, &mut ht.staging.data, chunk.len(), layers, per)?;
-            let base = self.stream.ptr(&ht.staging.data);
-            for i in 0..chunk.len() {
-                self.stream.dtoh_to_arena(&ht.arena, i, 0, base + (i * per_all) as u64, per_all)?;
-            }
-            self.stream.synchronize()?;
-            for i in 0..chunk.len() {
-                out.extend_from_slice(&ht.arena.slot(i)?[..per_all]);
-            }
-        }
-        Ok(out)
+    fn kv_host_pool(&self) -> Option<std::sync::Arc<dyn dinfer_core::pd::HostBufPool>> {
+        self.pd.as_ref().map(|p| std::sync::Arc::new(PdPool(p.pool.clone())) as std::sync::Arc<dyn dinfer_core::pd::HostBufPool>)
     }
-    /// D 侧：payload 按位置填进 `blocks`（forward 前，主流同步）。槽 i 中转 → H2D 进 staging → unpack 散回各层。
-    fn kv_import(&mut self, blocks: &dinfer_core::kv::KvBlocks, payload: &[u8]) -> Result<()> {
-        let ht = self.host_tier.as_ref().context("pd: kv_import without staging (call enable_pd)")?;
-        if let Some(ev) = &ht.offload_done {
-            self.stream.wait_event(ev)?;
-        }
+    /// P 侧。块已被 scheduler free 但未复用。主流：pack chunk → 记事件；copy stream：等事件 → D2H 进 pinned。
+    /// 主流的后续 forward 排在 pack 之后，所以块复用安全；D2H 与 forward 重叠。返回句柄，发送线程等 `done`。
+    fn kv_export(&mut self, blocks: &dinfer_core::kv::KvBlocks) -> Result<Box<dyn dinfer_core::pd::KvExportHandle>> {
+        let pd = self.pd.as_mut().context("pd: kv_export without resources (call enable_pd)")?;
         let layers = self.model.kv.len();
-        let per = ht.bytes_per_layer_block;
+        let per = pd.bytes_per_layer_block;
         let per_all = per * layers;
         let ids = blocks.group(0);
-        ensure!(payload.len() == ids.len() * per_all, "pd: payload {} != {} blocks × {per_all}", payload.len(), ids.len());
-        let ht = self.host_tier.as_mut().unwrap();
-        for (ci, chunk) in ids.chunks(ht.chunk).enumerate() {
-            let off0 = ci * ht.chunk * per_all;
-            for i in 0..chunk.len() {
-                ht.arena.slot_mut(i)?[..per_all].copy_from_slice(&payload[off0 + i * per_all..off0 + (i + 1) * per_all]);
-            }
-            let base = self.stream.ptr_mut(&mut ht.staging.data);
-            for i in 0..chunk.len() {
-                self.stream.htod_from_arena(&ht.arena, i, 0, base + (i * per_all) as u64, per_all)?;
+        let total = ids.len() * per_all;
+        let mut buf = pd.pool.take().context("pd: pinned pool exhausted (raise pool_bufs or slow down exports)")?;
+        ensure!(buf.capacity() >= total, "pd: export {total} B > pinned buf {}", buf.capacity());
+        for (ci, chunk) in ids.chunks(PD_CHUNK).enumerate() {
+            let i = ci & 1;
+            // 生产方（主流 pack）写 staging[i] 前，等上一次消费方（copy D2H）用完
+            if let Some(ev) = pd.staging_free[i].take() {
+                self.stream.wait_event(&ev)?;
             }
             let bids: Vec<i32> = chunk.iter().map(|&b| b as i32).collect();
-            self.stream.htod_into(&bids, &mut ht.blocks_buf.data)?;
-            k::kv_unpack(&self.stream, &ht.layer_ptrs.data, &ht.blocks_buf.data, &ht.staging.data, chunk.len(), layers, per)?;
-            self.stream.synchronize()?; // 槽随后被下一 chunk 复用
+            self.stream.htod_into(&bids, &mut pd.blocks[i].data)?;
+            k::kv_pack(&self.stream, &pd.layer_ptrs.data, &pd.blocks[i].data, &mut pd.staging[i].data, chunk.len(), layers, per)?;
+            let packed = self.stream.record_event()?;
+            pd.copy.wait_event(&packed)?;
+            let base = pd.copy.ptr(&pd.staging[i].data);
+            pd.copy.dtoh_to_pinned(&mut buf, ci * PD_CHUNK * per_all, base, chunk.len() * per_all)?;
+            pd.staging_free[i] = Some(pd.copy.record_event()?);
         }
+        buf.set_len(total)?;
+        let done = pd.copy.record_event()?;
+        Ok(Box::new(PdExport { done, buf: PdBuf(buf) }))
+    }
+    /// D 侧。payload pinned 则 copy stream 直接 H2D；否则先拷进池里一块 pinned。主流等 H2D 事件后 unpack；
+    /// 缓冲挂 inflight 直到 H2D 完成事件过了再归还。
+    fn kv_import(&mut self, blocks: &dinfer_core::kv::KvBlocks, payload: Box<dyn dinfer_core::pd::HostBuf>) -> Result<()> {
+        let pd = self.pd.as_mut().context("pd: kv_import without resources (call enable_pd)")?;
+        // 回收已完成的在飞导入缓冲
+        let mut keep = Vec::with_capacity(pd.inflight_imports.len());
+        for (ev, b) in pd.inflight_imports.drain(..) {
+            if ev.is_done()? { drop(b) } else { keep.push((ev, b)) }
+        }
+        pd.inflight_imports = keep;
+        let layers = self.model.kv.len();
+        let per = pd.bytes_per_layer_block;
+        let per_all = per * layers;
+        let ids = blocks.group(0);
+        let total = ids.len() * per_all;
+        ensure!(payload.as_slice().len() == total, "pd: payload {} != {} blocks × {per_all}", payload.as_slice().len(), ids.len());
+        // 拿到 pinned 源：payload 本身是我们池里的 PinnedBuf（接收线程用 kv_host_pool 落的）就直接用；否则 memcpy 进池
+        let src: PinnedBuf = if payload.is_pinned() {
+            match payload.into_any().downcast::<PdBuf>() {
+                Ok(b) => b.0,
+                Err(_) => anyhow::bail!("pd: pinned payload is not this executor's PinnedBuf"),
+            }
+        } else {
+            let mut b = pd.pool.take().context("pd: pinned pool exhausted for import staging")?;
+            ensure!(b.capacity() >= total, "pd: import {total} B > pinned buf {}", b.capacity());
+            b.as_mut_cap()[..total].copy_from_slice(payload.as_slice());
+            b.set_len(total)?;
+            b
+        };
+        for (ci, chunk) in ids.chunks(PD_CHUNK).enumerate() {
+            let i = ci & 1;
+            // 生产方（copy H2D）写 staging[i] 前，等上一次消费方（主流 unpack）用完
+            if let Some(ev) = pd.staging_free[i].take() {
+                pd.copy.wait_event(&ev)?;
+            }
+            let base = pd.copy.ptr(&pd.staging[i].data);
+            pd.copy.htod_from_pinned(&src, ci * PD_CHUNK * per_all, base, chunk.len() * per_all)?;
+            let h2d = pd.copy.record_event()?;
+            self.stream.wait_event(&h2d)?;
+            let bids: Vec<i32> = chunk.iter().map(|&b| b as i32).collect();
+            self.stream.htod_into(&bids, &mut pd.blocks[i].data)?;
+            k::kv_unpack(&self.stream, &pd.layer_ptrs.data, &pd.blocks[i].data, &pd.staging[i].data, chunk.len(), layers, per)?;
+            pd.staging_free[i] = Some(self.stream.record_event()?);
+        }
+        let all_h2d = pd.copy.record_event()?;
+        pd.inflight_imports.push((all_h2d, src));
         Ok(())
     }
-
     /// 异步第一段：入队 + 异步 D2H（不等 GPU）。runner 只对 `async_eligible` 的 plan 调用（纯 decode）。
     fn begin(&mut self, plan: &BatchPlan) -> Result<()> {
         ensure!(self.async_inflight.len() < 2, "executor begin: two async steps already in flight");

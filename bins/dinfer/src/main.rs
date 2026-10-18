@@ -68,6 +68,9 @@ enum Cmd {
         /// PD decode 侧：等 KV 超时（ms），超时本地重算 prefill
         #[arg(long, default_value_t = 2000)]
         pd_wait_ms: u64,
+        /// PD：pinned 缓冲个数（每块 = max_model_len 全层 KV，Qwen3 4k ≈ 448 MB；= 导出 / 导入在飞上限）
+        #[arg(long, default_value_t = 8)]
+        pd_pool_bufs: usize,
         /// 关闭 decode CUDA graph（默认开；qwen3）
         #[arg(long, default_value_t = false)]
         no_cuda_graph: bool,
@@ -146,6 +149,7 @@ async fn main() -> Result<()> {
             kv_port,
             peer,
             pd_wait_ms,
+            pd_pool_bufs,
             no_cuda_graph,
             device,
             mtp,
@@ -177,7 +181,7 @@ async fn main() -> Result<()> {
             }
             #[cfg(feature = "qwen3")]
             {
-                let _ = (mtp, &role, kv_port, &peer, pd_wait_ms);
+                let _ = (mtp, &role, kv_port, &peer, pd_wait_ms, pd_pool_bufs);
                 let opt = dinfer_qwen3::service::ServeOptions {
                     model_dir: model,
                     tokenizer_dir: tokenizer,
@@ -195,6 +199,7 @@ async fn main() -> Result<()> {
                     kv_port,
                     peer,
                     pd_wait_ms,
+                    pd_pool_bufs,
                     enable_cuda_graph: !no_cuda_graph,
                     device,
                 };

@@ -64,6 +64,8 @@ pub struct ServeOptions {
     pub peer: Option<String>,
     /// decode 侧：等 KV 最长多少 ms，超时本地重算。
     pub pd_wait_ms: u64,
+    /// PD：pinned 缓冲个数（每块 = max_model_len 的全层 KV；导出 / 导入在飞上限）。
+    pub pd_pool_bufs: usize,
     /// 纯 decode 步用 CUDA graph（启动时按 batch 桶捕获；vLLM `cudagraph_mode=FULL_DECODE_ONLY` 对齐）。
     pub enable_cuda_graph: bool,
     pub device: usize,
@@ -88,6 +90,7 @@ impl Default for ServeOptions {
             kv_port: 0,
             peer: None,
             pd_wait_ms: 2000,
+            pd_pool_bufs: 8,
             enable_cuda_graph: true,
             device: 0,
         }
@@ -173,12 +176,13 @@ impl Qwen3Service {
         // PD（design §10.3）：P/D 都需要 pack/unpack staging + pinned 中转槽；传输后端 v1 TCP（NIXL 后端换 transport 即可）。
         let mut pd_incoming_keep: Option<Arc<dinfer_core::pd::IncomingKv>> = None;
         let pd_state = if opt.role != PdRoleOpt::Single {
-            let (base, len) = exec.enable_pd()?;
+            let (base, len) = exec.enable_pd(opt.pd_pool_bufs)?;
+            let pool = dinfer_core::runner::ModelExecutor::kv_host_pool(&exec).context("pd pool")?;
             let model_tag = format!("qwen3:{}:bs{}:bf16", cfg.num_hidden_layers, opt.block_size);
             let incoming = Arc::new(dinfer_core::pd::IncomingKv::default());
             pd_incoming_keep = Some(incoming.clone());
             if opt.kv_port > 0 {
-                let port = dinfer_core::pd::spawn_receiver(&format!("0.0.0.0:{}", opt.kv_port), model_tag.clone(), incoming.clone())?;
+                let port = dinfer_core::pd::spawn_receiver_with_pool(&format!("0.0.0.0:{}", opt.kv_port), model_tag.clone(), incoming.clone(), pool.clone())?;
                 tracing::info!(port, role = ?opt.role, "pd: kv receiver listening");
             }
             let transport: Option<Arc<dyn dinfer_core::pd::KvTransport>> = match (opt.role, &opt.peer) {
