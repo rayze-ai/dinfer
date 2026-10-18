@@ -474,3 +474,9 @@
 - 现象：`Comm::all_reduce_in_place(..)` 返回 `Result<NcclStatus, NcclError>`，直接 `map_err` 后类型不匹配。
 - 解法：`.map(|_| ())`（`NcclStatus::InProgress` 只在非阻塞 comm 下出现，我们用阻塞 comm 可忽略）。
 - 另：开 `nccl` feature 后 cudarc build.rs 链接 `-lnccl`（dynamic-linking 下运行期 dlopen `libnccl.so.2`）；无 NCCL 的机器需 `--features no-nvcc` 以外再想办法（当前 `no-nvcc` 不去掉 nccl）。
+
+## TP 多卡：各 rank 自动 KV 预算不一致 / 单卡进程未退干净
+
+- 现象：`--tp 2` 首跑一 rank 算出 10392 块、另一 rank 报 "not enough GPU memory"：前一个单卡 serve 刚 `pkill -INT`，显存还没释放，rank 0 所在卡 free 只剩 8 GiB。
+- 解法：测试脚本等 `pgrep` 消失再起下一进程；TP 下传固定 `--num-blocks`（service 已校验各 rank 块数一致，不一致直接报错并提示传 `--num-blocks`）。
+- 相关：4090 Pod GPU 0–2 长期被 vLLM 基线 / 旧 dinfer 占着（23 GB），多卡测试用 3–7。Pod 镜像无 NCCL，见 loops/q5-tp-dp.md 环境节。

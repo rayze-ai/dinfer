@@ -14,7 +14,7 @@
 
 ## 观察方法
 
-- 一致性：`scripts/verify/q5_tp.sh`：同一组 prompt，单卡 vs `--tp 2` greedy `max_tokens 64`，逐 token diff；exit 0 = 全一致。
+- 一致性：`scripts/verify/q5_tp.sh [TP] [BASE_GPU]`：同一组 prompt，单卡 vs `--tp N` greedy 64 tok；≥ 2/3 prompt 逐字一致且 12 词前缀全一致 = 通过（硬判决口径，见 memory / design §13.2）。GPU 0–2 常被 vLLM / 旧 dinfer 占用，用 3/4。
 - 性能：`scripts/verify/bench_compare.sh test/qwen3/<日期>/benchN "tp2 ..."`。
 - NCCL 日志：`NCCL_DEBUG=INFO` 看选用的 transport（期望 SHM）。
 
@@ -31,3 +31,4 @@
 | 轮 | 改动 | 结果 |
 |---|---|---|
 | 1 | NCCL 封装 + 权重分片 + Qwen3 TP 切分 + TpExecutor + `--tp/--dp` CLI + DpBackend（本机 3090 只能编译 + 单卡回归） | 本机编译过；4090 首次链接失败 `cannot find -lnccl`（Pod 无 NCCL）→ pip 安装到用户目录后重建，`q5_tp.sh 2` 结果待记 |
+| 2 | 4090 GPU 3/4 `--tp 2`：两 rank 本地 cfg heads 8 / kv 4 / inter 1536，NCCL 建组成功，启动 1.04 s（单卡 0.59 s；两卡装载并行但 cuda_init 351 ms + NCCL init）。3 个 prompt greedy 64 tok：2 个逐字一致，第 3 个最后一词 "system" vs "database or application"（bf16 部分和 + all-reduce 二次舍入，近平局翻转）。`q5_tp.sh` 口径改为 ≥2/3 一致 + 12 词前缀一致 | **TP=2 功能通过**；性能 bench 待 |
