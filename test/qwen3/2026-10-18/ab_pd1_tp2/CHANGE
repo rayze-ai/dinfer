@@ -1,0 +1,1 @@
+PD tp2 (P 3,4 / D 5,6) tcp tp2：pd = proxy(:8100 → P GPU3,4 + D GPU5,6) vs single = 单机 :8012，c8 (1024,128)
