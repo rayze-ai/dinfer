@@ -794,3 +794,107 @@ async fn e2e_qwen3_host_tier() {
     eprintln!("e2e: host tier PASS");
     drop(srv);
 }
+
+/// 起 PD proxy 进程（`dinfer proxy`），等 /health。
+fn spawn_proxy(prefill: &str, decode: &str) -> Server {
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dinfer"))
+        .args(["proxy", "--port", &port.to_string(), "--prefill", prefill, "--decode", decode])
+        .env("RUST_LOG", "info")
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("spawn dinfer proxy");
+    let base = format!("http://127.0.0.1:{port}");
+    let t0 = Instant::now();
+    loop {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            break;
+        }
+        if let Ok(Some(st)) = child.try_wait() {
+            panic!("proxy exited early: {st}");
+        }
+        assert!(t0.elapsed() < Duration::from_secs(30), "proxy did not start");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Server { child, base, logs: Vec::new() }
+}
+
+/// PD 分离（design §10.3）：同卡三进程 P（--role prefill）+ D（--role decode）+ proxy。
+/// 断言：① 经 proxy 的 greedy 输出与单机实例逐字相同（流式 + 非流式）；② D 侧 `pd_import_total ≥ 1`、
+/// `pd_fallback_total == 0`，P 侧 `pd_export_total ≥ 1`；③ 杀掉 P 后再请求，proxy 回退 D 单机，输出仍与单机相同，
+/// D 侧 fallback 不增（proxy 侧回退不经 D 的 Import 路径）。
+#[tokio::test]
+#[ignore]
+async fn e2e_qwen3_pd() {
+    let common = ["--num-blocks", "128", "--max-model-len", "1024", "--max-num-seqs", "4"];
+    let single = spawn_server_with(&common);
+    let kv_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port().to_string();
+    let mut d_args = common.to_vec();
+    d_args.extend(["--role", "decode", "--kv-port", &kv_port, "--pd-wait-ms", "3000"]);
+    let d = spawn_server_with(&d_args);
+    assert!(d.logs.iter().any(|l| l.contains("pd: kv receiver listening")), "D must listen: {:?}", d.logs.last());
+    let peer = format!("127.0.0.1:{kv_port}");
+    let mut p_args = common.to_vec();
+    p_args.extend(["--role", "prefill", "--peer", &peer]);
+    let p = spawn_server_with(&p_args);
+    assert!(p.logs.iter().any(|l| l.contains("pd: prefill side will push KV")), "P must have peer: {:?}", p.logs.last());
+    let proxy = spawn_proxy(&p.base, &d.base);
+    let c = reqwest::Client::new();
+    let body = |stream: bool| {
+        serde_json::json!({
+            "messages": [{"role":"user","content":"List three primary colors, comma separated, then stop."}],
+            "max_tokens": 24, "temperature": 0.0, "stream": stream,
+            "chat_template_kwargs": {"enable_thinking": false}
+        })
+    };
+    let text_of = |c: &reqwest::Client, base: &str, stream: bool| {
+        let c = c.clone();
+        let url = format!("{base}/v1/chat/completions");
+        let b = body(stream);
+        async move {
+            let r = c.post(&url).json(&b).send().await.unwrap();
+            assert!(r.status().is_success(), "{url}: {}", r.status());
+            if !stream {
+                let v: serde_json::Value = r.json().await.unwrap();
+                return v["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string();
+            }
+            let t = r.text().await.unwrap();
+            let mut out = String::new();
+            for line in t.lines() {
+                let Some(d) = line.strip_prefix("data: ") else { continue };
+                if d == "[DONE]" {
+                    break;
+                }
+                let v: serde_json::Value = serde_json::from_str(d).unwrap_or_else(|e| panic!("bad sse chunk {d}: {e}"));
+                if let Some(s) = v["choices"][0]["delta"]["content"].as_str() {
+                    out.push_str(s);
+                }
+            }
+            out
+        }
+    };
+    let want = text_of(&c, &single.base, false).await;
+    assert!(!want.trim().is_empty(), "single produced nothing");
+    let got_ns = text_of(&c, &proxy.base, false).await;
+    assert_eq!(got_ns, want, "PD non-stream must equal single-instance greedy");
+    let got_s = text_of(&c, &proxy.base, true).await;
+    assert_eq!(got_s, want, "PD stream must equal single-instance greedy");
+    let m = |base: &str, name: &str| {
+        let c = c.clone();
+        let base = base.to_string();
+        let name = name.to_string();
+        async move { metrics_val(&c, &base, &name).await }
+    };
+    assert!(m(&p.base, "dinfer:pd_export_total").await >= 2.0, "P exported");
+    assert!(m(&d.base, "dinfer:pd_import_total").await >= 2.0, "D imported");
+    assert_eq!(m(&d.base, "dinfer:pd_fallback_total").await, 0.0, "no D-side fallback on the happy path");
+    // 故障：杀 P → proxy 回退到 D 单机
+    drop(p);
+    let got_fb = text_of(&c, &proxy.base, false).await;
+    assert_eq!(got_fb, want, "with P dead, proxy must fall back to D-only and still match");
+    assert_eq!(m(&d.base, "dinfer:pd_fallback_total").await, 0.0, "proxy-side fallback does not go through D Import");
+    drop(proxy);
+    drop(d);
+    drop(single);
+}

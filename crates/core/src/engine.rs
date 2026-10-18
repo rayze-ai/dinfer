@@ -371,7 +371,7 @@ impl<E: ModelExecutor> Engine<E> {
     pub fn run(mut self) -> Result<()> {
         loop {
             // 空闲：阻塞等命令；忙：非阻塞吸收
-            if !self.sched.has_requests() && self.pending.is_none() && self.sync_done.is_empty() {
+            if !self.sched.has_requests() && !self.sched.has_pending_export() && self.pending.is_none() && self.sync_done.is_empty() {
                 // PD：D 侧有等 KV 的提交时不能死等命令，要定期醒来查到达 / 超时回退。
                 let pd_wait = self.pd.as_ref().filter(|p| !p.pending.is_empty()).map(|_| std::time::Duration::from_millis(5));
                 let cmd = match pd_wait {
@@ -397,7 +397,7 @@ impl<E: ModelExecutor> Engine<E> {
                 }
             }
             self.pd_poll_pending();
-            if !self.sched.has_requests() && self.pending.is_none() && self.sync_done.is_empty() {
+            if !self.sched.has_requests() && !self.sched.has_pending_export() && self.pending.is_none() && self.sync_done.is_empty() {
                 continue;
             }
             // 异步调度（Q3-l）：步 n 入队后，不等 GPU 就调度并入队步 n+1，再取 n 的结果。

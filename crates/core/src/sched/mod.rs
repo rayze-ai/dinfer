@@ -141,6 +141,10 @@ impl Scheduler {
     pub fn has_requests(&self) -> bool {
         !self.waiting.is_empty() || !self.running.is_empty()
     }
+    /// PD：有 Export 请求刚 finish、块还没导出。engine 据此不能进空闲等待（导出发生在下一次 schedule）。
+    pub fn has_pending_export(&self) -> bool {
+        !self.pd_pending_export.is_empty()
+    }
     pub fn num_running(&self) -> usize {
         self.running.len()
     }

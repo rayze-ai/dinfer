@@ -106,7 +106,14 @@ async fn chat(State(st): State<Arc<ProxyState>>, Json(mut req): Json<Value>) -> 
     if !d.status().is_success() {
         return passthrough(d).await;
     }
-    let Some(first) = first else { return passthrough(d).await };
+    let imported = d.headers().get("x-pd-imported").and_then(|v| v.to_str().ok()) == Some("1");
+    let had_first = first.is_some();
+    let Some(first) = first.filter(|_| imported) else {
+        if had_first {
+            tracing::warn!("pd proxy: decode did not import KV (timeout?), serving decode-only output");
+        }
+        return passthrough(d).await;
+    };
     // ---- 3. 合并
     if stream {
         // 首 chunk：P 的首 token 以 SSE delta 形式先发，然后 D 的 SSE 原样透传

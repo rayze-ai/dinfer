@@ -67,6 +67,11 @@ pub trait ChatBackend: Send + Sync + 'static {
     fn abort(&self, id: RequestId);
     fn new_output_stream(&self) -> Box<dyn OutputStream>;
     /// 引擎指标（`/metrics`）；None = 后端未接。
+    /// PD decode 侧：等 P 推来的 KV（`remote_id`）到达，最多 `timeout`。到 = true；超时 = false（提交后引擎走本地重算）。
+    /// 在 HTTP 线程里等，不占 engine；默认实现（非 PD 实例）立即 false。
+    fn pd_wait_for(&self, _remote_id: RequestId, _timeout: std::time::Duration) -> bool {
+        false
+    }
     fn metrics(&self) -> Option<std::sync::Arc<dinfer_core::metrics::Metrics>> {
         None
     }

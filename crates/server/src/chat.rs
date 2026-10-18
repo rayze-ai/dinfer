@@ -294,6 +294,18 @@ pub async fn chat_completions(State(be): State<Backend>, Json(req): Json<ChatCom
         _ => None,
     };
     let mut sp = sp;
+    // D 侧：在 HTTP 线程里等 KV 到达（最多 pd_wait），没到就按普通请求提交（本地重算），并告诉 proxy 首 token 要自己出。
+    let mut pd = pd;
+    let mut pd_imported = None;
+    if let Some(PdSubmit::Import { remote_id }) = pd {
+        let be2 = be.clone();
+        let ok = tokio::task::spawn_blocking(move || be2.pd_wait_for(remote_id, std::time::Duration::from_secs(10))).await.unwrap_or(false);
+        pd_imported = Some(ok);
+        if !ok {
+            tracing::warn!(remote_id, "pd: KV did not arrive in time, serving as local prefill");
+            pd = None;
+        }
+    }
     if matches!(pd, Some(PdSubmit::Export)) {
         if n != 1 {
             return err(StatusCode::BAD_REQUEST, "PD prefill side requires n=1");
@@ -347,7 +359,7 @@ pub async fn chat_completions(State(be): State<Backend>, Json(req): Json<ChatCom
             // guard 在这里 drop：未完成的 choice（客户端断开）全部 abort
         });
         let mut resp = Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
-        pd_header(&mut resp, pd_rid);
+        pd_header(&mut resp, pd_rid, pd_imported);
         return resp;
     }
 
@@ -401,16 +413,20 @@ pub async fn chat_completions(State(be): State<Backend>, Json(req): Json<ChatCom
         token_ids,
     };
     let mut r = Json(resp).into_response();
-    pd_header(&mut r, pd_rid);
+    pd_header(&mut r, pd_rid, pd_imported);
     r
 }
 
 /// P 侧：把引擎 request id 放进 `x-pd-request-id`，proxy 读它转给 D。
-fn pd_header(resp: &mut Response, rid: Option<RequestId>) {
+fn pd_header(resp: &mut Response, rid: Option<RequestId>, imported: Option<bool>) {
     if let Some(r) = rid {
         if let Ok(v) = axum::http::HeaderValue::from_str(&r.to_string()) {
             resp.headers_mut().insert("x-pd-request-id", v);
         }
+    }
+    // D 侧：1 = 接力了 P 的 KV（首 token 已由 P 出，本响应不含它）；0 = 本地重算（本响应含首 token）
+    if let Some(ok) = imported {
+        resp.headers_mut().insert("x-pd-imported", axum::http::HeaderValue::from_static(if ok { "1" } else { "0" }));
     }
 }
 

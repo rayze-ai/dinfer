@@ -101,6 +101,8 @@ pub struct Qwen3Service {
     name: String,
     max_model_len: u32,
     defaults: SamplingParams,
+    pd_incoming: Option<Arc<dinfer_core::pd::IncomingKv>>,
+    pd_wait: std::time::Duration,
     _engine: std::thread::JoinHandle<Result<()>>,
 }
 
@@ -169,10 +171,12 @@ impl Qwen3Service {
         let mut exec = exec;
         let host_slots = if opt.kv_host_gib > 0.0 { exec.enable_host_tier(opt.kv_host_gib)? } else { 0 };
         // PD（design §10.3）：P/D 都需要 pack/unpack staging + pinned 中转槽；传输后端 v1 TCP（NIXL 后端换 transport 即可）。
+        let mut pd_incoming_keep: Option<Arc<dinfer_core::pd::IncomingKv>> = None;
         let pd_state = if opt.role != PdRoleOpt::Single {
             let (base, len) = exec.enable_pd()?;
             let model_tag = format!("qwen3:{}:bs{}:bf16", cfg.num_hidden_layers, opt.block_size);
             let incoming = Arc::new(dinfer_core::pd::IncomingKv::default());
+            pd_incoming_keep = Some(incoming.clone());
             if opt.kv_port > 0 {
                 let port = dinfer_core::pd::spawn_receiver(&format!("0.0.0.0:{}", opt.kv_port), model_tag.clone(), incoming.clone())?;
                 tracing::info!(port, role = ?opt.role, "pd: kv receiver listening");
@@ -265,6 +269,8 @@ impl Qwen3Service {
             name: served_name,
             max_model_len: opt.max_model_len,
             defaults,
+            pd_incoming: pd_incoming_keep,
+            pd_wait: std::time::Duration::from_millis(opt.pd_wait_ms),
             _engine: jh,
         })
     }
@@ -391,6 +397,18 @@ impl ChatBackend for Qwen3Service {
     }
     fn abort(&self, id: RequestId) {
         self.handle.abort(id);
+    }
+    fn pd_wait_for(&self, remote_id: RequestId, timeout: std::time::Duration) -> bool {
+        let Some(inc) = self.pd_incoming.as_ref() else { return false };
+        let timeout = timeout.min(self.pd_wait);
+        let t0 = std::time::Instant::now();
+        while !inc.contains(remote_id) {
+            if t0.elapsed() >= timeout {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        true
     }
     fn metrics(&self) -> Option<Arc<dinfer_core::metrics::Metrics>> {
         Some(self.handle.metrics())
