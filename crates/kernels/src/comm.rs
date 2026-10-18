@@ -62,6 +62,11 @@ impl std::fmt::Debug for Comm {
 }
 
 /// 把 `n` 个连续元素的 all-reduce 包一层，便于模型层调用（slice_mut 视图）。
+// TODO(T3, 需 NVLink / P2P 机器才有意义，2026-10-18 用户决定暂不做)：
+//   1) `fused_allreduce_rmsnorm`：all-reduce + residual add + RMSNorm 一个 kernel（vLLM 同名算子），省一次 hidden 读写；
+//   2) 小消息（decode t×hidden ≤ 几十 KB）走自定义 one-shot all-reduce（vLLM `custom_all_reduce`），不走 NCCL ring；
+//   3) 这两条都依赖 P2P；无 P2P 机器上 NCCL 走 SHM，上面任何优化都被 SHM 拷贝掩盖，不值得做。
+//   接口保持 `all_reduce_bf16(comm, buf, n)` 不变，届时在这里按 n 分流。
 pub fn all_reduce_bf16(comm: &Comm, buf: &mut cudarc::driver::CudaSlice<half::bf16>, n: usize) -> Result<()> {
     let mut v = buf.slice_mut(..n);
     comm.all_reduce_sum(&mut v, n).context("all_reduce_bf16")

@@ -461,6 +461,8 @@ impl<O: OpSet> Qwen3Model<O> {
             );
         }
         let norm = RmsNorm::load(stream, src, "model.norm", cfg.rms_norm_eps)?;
+        // TODO(T3)：lm_head 列切（vocab ÷ world，各 rank 算自己那段 logits 后 all-gather / 只在 rank 0 采样）可省 world-1 份
+        // lm_head 权重与 logits GEMM；需 P2P 机器再评估（design §13.6 T3），现在复制。
         let lm_head = if src.contains("lm_head.weight") {
             Linear::load(stream, src, "lm_head")?
         } else {
