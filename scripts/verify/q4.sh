@@ -12,6 +12,8 @@ MODEL="${QWEN3_DIR:-/data/ref/models/qwen3-0.6b}"
 # 共享机：GPU 0/1 常驻服务，测试一律钉在 Q4_GPU（默认 3）；本机单卡设 Q4_GPU=0
 GPU="${Q4_GPU:-3}"
 export CUDA_VISIBLE_DEVICES="$GPU"
+# 跨卡（v2 (d)）：P / D 可各钉一张卡，默认都用 $GPU（同卡）
+GPU_P="${Q4_GPU_P:-$GPU}"; GPU_D="${Q4_GPU_D:-$GPU}"
 step "e2e_qwen3_pd (single + prefill + decode + proxy, same GPU)"
 QWEN3_DIR="$MODEL" QWEN3_GOLDEN="$(realpath -m test/qwen3_golden)" cargo test -p dinfer --features qwen3,e2e --test serve_e2e_qwen3 -- --ignored --test-threads=1 e2e_qwen3_pd </dev/null 2>&1 | tee "$OUT/e2e.log" | grep -E '^test |test result|panicked'
 grep -qE 'test result: ok\. 1 passed' "$OUT/e2e.log"
@@ -24,8 +26,8 @@ COMMON=(--model "$MODEL" --host 0.0.0.0 --max-model-len 4096 --max-num-seqs 32 -
 # 用固定块数而不是 utilization：自动预算 = min(free, total×u − used)，同卡第二个进程时 used 已含第一个进程，
 # u=0.3 → cap−used ≈ 0 → "not enough GPU memory"。P 只持在飞请求的 KV（512 块 = 8k token），D 大池（2048 块 = 32k token）。
 P_BLOCKS="${Q4_P_BLOCKS:-512}"; D_BLOCKS="${Q4_D_BLOCKS:-2048}"
-start_d() { CUDA_VISIBLE_DEVICES=$GPU RUST_LOG=info nohup $BIN serve "${COMMON[@]}" --port 8102 --role decode --kv-port 9102 --num-blocks $D_BLOCKS > "$OUT/d.log" 2>&1 & echo $! > "$OUT/d.pid"; }
-start_p() { CUDA_VISIBLE_DEVICES=$GPU RUST_LOG=info nohup $BIN serve "${COMMON[@]}" --port 8101 --role prefill --peer 127.0.0.1:9102 --num-blocks $P_BLOCKS > "$OUT/p.log" 2>&1 & echo $! > "$OUT/p.pid"; }
+start_d() { CUDA_VISIBLE_DEVICES=$GPU_D RUST_LOG=info nohup $BIN serve "${COMMON[@]}" --port 8102 --role decode --kv-port 9102 --num-blocks $D_BLOCKS > "$OUT/d.log" 2>&1 & echo $! > "$OUT/d.pid"; }
+start_p() { CUDA_VISIBLE_DEVICES=$GPU_P RUST_LOG=info nohup $BIN serve "${COMMON[@]}" --port 8101 --role prefill --peer 127.0.0.1:9102 --num-blocks $P_BLOCKS > "$OUT/p.log" 2>&1 & echo $! > "$OUT/p.pid"; }
 start_x() { RUST_LOG=info nohup $BIN proxy --host 0.0.0.0 --port 8100 --prefill http://127.0.0.1:8101 --decode http://127.0.0.1:8102 > "$OUT/proxy.log" 2>&1 & echo $! > "$OUT/x.pid"; }
 wait_up() { for _ in $(seq 1 240); do curl -s -m 2 "http://127.0.0.1:$1/health" >/dev/null && return 0; sleep 0.5; done; echo "port $1 did not come up"; for f in d p proxy p_badpeer; do [ -f "$OUT/$f.log" ] && { echo "--- $f.log tail"; grep -vE " INFO " "$OUT/$f.log" | tail -n 4; }; done; return 1; }
 stop_all() { for f in x p d; do [ -f "$OUT/$f.pid" ] && kill "$(cat "$OUT/$f.pid")" 2>/dev/null || true; done; sleep 2; }
@@ -48,7 +50,7 @@ for line in sys.stdin:
 print(out)'; }
 metric() { curl -s "http://127.0.0.1:$1/metrics" | awk -v n="dinfer:$2" '$1==n{print $2}'; }
 
-step "start D, P, proxy on GPU $GPU"
+step "start D (GPU $GPU_D), P (GPU $GPU_P), proxy"
 pgrep -af "dinfer (serve|proxy)" | grep -E "810[0-2]" && { echo "stale PD processes on 810x; kill them first"; exit 1; }
 stop_all; start_d; wait_up 8102; start_p; wait_up 8101; start_x; wait_up 8100
 WANT="$(ask 8012)"; echo "single : $WANT"
@@ -65,17 +67,17 @@ echo "with D dead: http $code"; [ "$code" -ge 500 ]
 start_d; wait_up 8102
 step "fault 3: P cannot reach kv-port → D times out, serves local prefill, output still equal"
 kill "$(cat "$OUT/p.pid")"; sleep 1
-CUDA_VISIBLE_DEVICES=$GPU RUST_LOG=info nohup $BIN serve "${COMMON[@]}" --port 8101 --role prefill --peer 127.0.0.1:1 --num-blocks $P_BLOCKS > "$OUT/p_badpeer.log" 2>&1 & echo $! > "$OUT/p.pid"; wait_up 8101
+CUDA_VISIBLE_DEVICES=$GPU_P RUST_LOG=info nohup $BIN serve "${COMMON[@]}" --port 8101 --role prefill --peer 127.0.0.1:1 --num-blocks $P_BLOCKS > "$OUT/p_badpeer.log" 2>&1 & echo $! > "$OUT/p.pid"; wait_up 8101
 GOT="$(ask 8100)"; [ "$GOT" = "$WANT" ]; [ "$(metric 8102 pd_fallback_total)" -ge 1 ]
 GOT="$(ask_stream 8100)"; [ "$GOT" = "$WANT" ] || { echo "stream fallback mismatch: [$GOT] vs [$WANT]"; exit 1; }
 kill "$(cat "$OUT/p.pid")"; sleep 1; start_p; wait_up 8101
 
 step "bench c8 (1024,128): proxy :8100 vs single :8012 → $OUT/../ab_pd1 (CSV: variant single 基线 vs pd)"
-AB="$(dirname "$OUT")/ab_pd1"; mkdir -p "$AB"
+AB="$(dirname "$OUT")/${Q4_AB:-ab_pd1}"; mkdir -p "$AB"
 B=./target/release/bench
 $B --url http://127.0.0.1:8012 --concurrency 8 --num-requests 64 --prompt-len 1024 --max-tokens 128 --out "$AB/single__c8_p1024_o128.json" > "$AB/single.log" 2>&1 || { tail -3 "$AB/single.log"; exit 1; }
 $B --url http://127.0.0.1:8100 --concurrency 8 --num-requests 64 --prompt-len 1024 --max-tokens 128 --out "$AB/pd__c8_p1024_o128.json" > "$AB/pd.log" 2>&1 || { tail -3 "$AB/pd.log"; exit 1; }
-echo "PD ${Q4_VARIANT:-v2 (c) 首 token 先发} TCP：pd = proxy(:8100 → P GPU$GPU + D GPU$GPU) vs single = 单机 :8012，c8 (1024,128)" > "$AB/CHANGE"
+echo "PD ${Q4_VARIANT:-v2 (c) 首 token 先发} TCP：pd = proxy(:8100 → P GPU$GPU_P + D GPU$GPU_D) vs single = 单机 :8012，c8 (1024,128)" > "$AB/CHANGE"
 python3 - "$AB" <<'PY'
 import json, sys, os
 d = sys.argv[1]
