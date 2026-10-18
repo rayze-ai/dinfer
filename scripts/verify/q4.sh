@@ -18,11 +18,13 @@ grep -qE 'test result: ok\. 1 passed' "$OUT/e2e.log"
 
 # ---------------- 4090 部分 ----------------
 BIN=./target/release/dinfer
+# 同一张卡跑 P + D：显存预算要分开给（默认 0.9 会让第二个进程 OOM）。P 只持在飞请求的 KV，D 要大池。
 COMMON=(--model "$MODEL" --host 0.0.0.0 --max-model-len 4096 --max-num-seqs 32 --max-num-batched-tokens 2048 --device 0) # device 0 = CUDA_VISIBLE_DEVICES 里的第一张
-start_d() { CUDA_VISIBLE_DEVICES=$GPU RUST_LOG=info nohup $BIN serve "${COMMON[@]}" --port 8102 --role decode --kv-port 9102 > "$OUT/d.log" 2>&1 & echo $! > "$OUT/d.pid"; }
-start_p() { CUDA_VISIBLE_DEVICES=$GPU RUST_LOG=info nohup $BIN serve "${COMMON[@]}" --port 8101 --role prefill --peer 127.0.0.1:9102 > "$OUT/p.log" 2>&1 & echo $! > "$OUT/p.pid"; }
+P_MEM="${Q4_P_MEM:-0.30}"; D_MEM="${Q4_D_MEM:-0.55}"
+start_d() { CUDA_VISIBLE_DEVICES=$GPU RUST_LOG=info nohup $BIN serve "${COMMON[@]}" --port 8102 --role decode --kv-port 9102 --gpu-memory-utilization $D_MEM > "$OUT/d.log" 2>&1 & echo $! > "$OUT/d.pid"; }
+start_p() { CUDA_VISIBLE_DEVICES=$GPU RUST_LOG=info nohup $BIN serve "${COMMON[@]}" --port 8101 --role prefill --peer 127.0.0.1:9102 --gpu-memory-utilization $P_MEM > "$OUT/p.log" 2>&1 & echo $! > "$OUT/p.pid"; }
 start_x() { RUST_LOG=info nohup $BIN proxy --host 0.0.0.0 --port 8100 --prefill http://127.0.0.1:8101 --decode http://127.0.0.1:8102 > "$OUT/proxy.log" 2>&1 & echo $! > "$OUT/x.pid"; }
-wait_up() { for _ in $(seq 1 240); do curl -s -m 2 "http://127.0.0.1:$1/health" >/dev/null && return 0; sleep 0.5; done; echo "port $1 did not come up"; return 1; }
+wait_up() { for _ in $(seq 1 240); do curl -s -m 2 "http://127.0.0.1:$1/health" >/dev/null && return 0; sleep 0.5; done; echo "port $1 did not come up"; for f in d p proxy p_badpeer; do [ -f "$OUT/$f.log" ] && { echo "--- $f.log tail"; grep -vE " INFO " "$OUT/$f.log" | tail -n 4; }; done; return 1; }
 stop_all() { for f in x p d; do [ -f "$OUT/$f.pid" ] && kill "$(cat "$OUT/$f.pid")" 2>/dev/null || true; done; sleep 2; }
 trap stop_all EXIT
 ask() { curl -s -m 60 "http://127.0.0.1:$1/v1/chat/completions" -H 'content-type: application/json' \
@@ -31,6 +33,7 @@ ask() { curl -s -m 60 "http://127.0.0.1:$1/v1/chat/completions" -H 'content-type
 metric() { curl -s "http://127.0.0.1:$1/metrics" | awk -v n="dinfer:$2" '$1==n{print $2}'; }
 
 step "start D, P, proxy on GPU $GPU"
+pgrep -af "dinfer (serve|proxy)" | grep -E "810[0-2]" && { echo "stale PD processes on 810x; kill them first"; exit 1; }
 stop_all; start_d; wait_up 8102; start_p; wait_up 8101; start_x; wait_up 8100
 WANT="$(ask 8012)"; echo "single : $WANT"
 GOT="$(ask 8100)";  echo "pd     : $GOT"; [ "$GOT" = "$WANT" ]
@@ -45,7 +48,7 @@ echo "with D dead: http $code"; [ "$code" -ge 500 ]
 start_d; wait_up 8102
 step "fault 3: P cannot reach kv-port → D times out, serves local prefill, output still equal"
 kill "$(cat "$OUT/p.pid")"; sleep 1
-CUDA_VISIBLE_DEVICES=$GPU RUST_LOG=info nohup $BIN serve "${COMMON[@]}" --port 8101 --role prefill --peer 127.0.0.1:1 > "$OUT/p_badpeer.log" 2>&1 & echo $! > "$OUT/p.pid"; wait_up 8101
+CUDA_VISIBLE_DEVICES=$GPU RUST_LOG=info nohup $BIN serve "${COMMON[@]}" --port 8101 --role prefill --peer 127.0.0.1:1 --gpu-memory-utilization $P_MEM > "$OUT/p_badpeer.log" 2>&1 & echo $! > "$OUT/p.pid"; wait_up 8101
 GOT="$(ask 8100)"; [ "$GOT" = "$WANT" ]; [ "$(metric 8102 pd_fallback_total)" -ge 1 ]
 kill "$(cat "$OUT/p.pid")"; sleep 1; start_p; wait_up 8101
 
