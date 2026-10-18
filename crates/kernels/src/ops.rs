@@ -516,8 +516,9 @@ pub fn sample_fused_f32<W: DevicePtrMut<f32> + ?Sized, O: DevicePtrMut<i32> + ?S
     )
 }
 
-/// KV host tier：把 `blocks[..n]` 的全部层打包进 `staging`（设备，[n][L][per_layer_bytes]）。
-/// `layer_ptrs`：设备数组，每层 cache 的基址（u64）。
+/// KV 打包（host tier / PD）：把 `blocks[..n]` 的全部层打包进 `staging`（设备，[n][L][per_layer_bytes]），
+/// 每层内转成 **head-major** `[kv_head][slot][K/V][D]`（cache 是 `[slot][kv_head][2][D]`），TP 分片按头连续（design §13.7）。
+/// `layer_ptrs`：设备数组，每层 cache 的基址（u64）。`per_layer_bytes = block_size × kv_heads × 2 × D × 2`。
 pub fn kv_pack(
     stream: &Stream,
     layer_ptrs: &CudaSlice<u64>,
@@ -526,16 +527,19 @@ pub fn kv_pack(
     n_blocks: usize,
     num_layers: usize,
     per_layer_bytes: usize,
+    block_size: usize,
+    kv_heads: usize,
 ) -> Result<()> {
     ensure!(
         layer_ptrs.len() >= num_layers && blocks.len() >= n_blocks && staging.len() >= n_blocks * num_layers * per_layer_bytes,
         "kv_pack: shape"
     );
+    ensure!(block_size > 0 && kv_heads > 0 && per_layer_bytes % (block_size * kv_heads) == 0, "kv_pack: per_layer_bytes vs bs×hk");
     let lp = stream.ptr(layer_ptrs) as *const *const c_void;
     let pb = stream.ptr(blocks) as *const i32;
     let ps = stream.ptr_mut(staging) as *mut c_void;
     // SAFETY: 容量已校验；layer_ptrs 内容是有效设备地址（由 executor 填）。
-    check(unsafe { ffi::kv_pack(lp, pb, ps, n_blocks as i64, num_layers as i64, per_layer_bytes as i64, stream.raw() as _) }, "kv_pack")
+    check(unsafe { ffi::kv_pack(lp, pb, ps, n_blocks as i64, num_layers as i64, per_layer_bytes as i64, block_size as i64, kv_heads as i64, stream.raw() as _) }, "kv_pack")
 }
 /// 反向：staging → 各层 cache 的 `blocks[..n]`。
 pub fn kv_unpack(
@@ -546,16 +550,19 @@ pub fn kv_unpack(
     n_blocks: usize,
     num_layers: usize,
     per_layer_bytes: usize,
+    block_size: usize,
+    kv_heads: usize,
 ) -> Result<()> {
     ensure!(
         layer_ptrs.len() >= num_layers && blocks.len() >= n_blocks && staging.len() >= n_blocks * num_layers * per_layer_bytes,
         "kv_unpack: shape"
     );
+    ensure!(block_size > 0 && kv_heads > 0 && per_layer_bytes % (block_size * kv_heads) == 0, "kv_unpack: per_layer_bytes vs bs×hk");
     let lp = stream.ptr(layer_ptrs) as *const *mut c_void;
     let pb = stream.ptr(blocks) as *const i32;
     let ps = stream.ptr(staging) as *const c_void;
     // SAFETY: 同上。
-    check(unsafe { ffi::kv_unpack(lp, pb, ps, n_blocks as i64, num_layers as i64, per_layer_bytes as i64, stream.raw() as _) }, "kv_unpack")
+    check(unsafe { ffi::kv_unpack(lp, pb, ps, n_blocks as i64, num_layers as i64, per_layer_bytes as i64, block_size as i64, kv_heads as i64, stream.raw() as _) }, "kv_unpack")
 }
 
 /// 异步调度：`ids[i] = prev[gather_idx[i]]`（gather_idx[i] < 0 的行保持 host 上传的值）。可进 CUDA graph。

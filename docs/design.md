@@ -625,11 +625,11 @@ pub struct DeviceBlockRef { pub layer: u8, pub block: BlockId, pub ptr: u64, pub
 ### 13.7 TP + PD（2026-10-18 晚，用户建议"P / D 只是角色不同，一套实现"）
 
 - **一套方法**：`TpExecutor` 实现 `kv_export / kv_export_slot / kv_import / pd_map_region / pd_poll`，P 用前两个、D 用后面的，engine 不区分 TP 与否（`spawn_with_pd` 照用）。
-- **分片布局**：每 rank 只持自己的 KV 头分片；payload 单元 = `world × 单 rank 单元`，布局 `[rank][block][layer]`。导出 / 导入时各 rank 对**同一段**目标（rank 0 的 pinned 缓冲，或对端 / 本地 shm 槽）按 `rank × stride` 偏移各写 / 各读自己那份（`Qwen3Executor::pd_export_addr / pd_import_addr`，单 rank 原语，单卡路径也改用它们）。pinned 与 shm 都是 PORTABLE 注册，其它 ctx 直接异步 D2H / H2D，不经 rank 0 中转。
-- **约束**：P 与 D 同 tp（`model_tag` 带 `:tpN`，不等拒收）；**cuda-ipc 不可用**（区是 rank 0 那张卡的设备内存，其它 rank 无 P2P 读不到；service 启动时拒绝，`pd_map_region` 兜底再拒一次）；非 0 rank `enable_pd(0, world)` 只建 staging + copy stream，不建 pinned 池。
+- **分片布局（2026-10-18 深夜改为 canonical，支持异构 tp）**：每 rank 只持自己的 KV 头分片；wire 上每块单元 = **全部 KV 头**的 canonical 布局 `[block][layer][全局 kv_head][slot][K/V][D]`（`kv_pack / kv_unpack` kernel 把 cache 的 `[slot][head]` 转成 head-major，TP 分片就成了每层里连续一段）。导出 / 导入时各 rank 对**同一基址**用 `cuMemcpy2DAsync`（源行距 = 本地层字节，目标行距 = 全局层字节，列偏移 = rank × 本地层字节）只写 / 读自己头段（`Qwen3Executor::pd_export_addr / pd_import_addr` 内部按 `model.tp` 算，`TpExecutor` 不再算偏移；单卡 = world 1 退化为线性拷贝）。
+- **约束**：P 与 D 的 tp **可以不同**（`model_tag` = `qwen3:L{层}:bs{块}:kvh{全局头}:hd{D}:bf16`，不含 tp；两侧 canonical 单元字节相等即可）；**cuda-ipc 不可用**（区是 rank 0 那张卡的设备内存，其它 rank 无 P2P 读不到；service 启动时拒绝，`pd_map_region` 兜底再拒一次）；非 0 rank `enable_pd(0, world)` 只建 staging + copy stream，不建 pinned 池。
 - **调用序**：PD 调用走与 `Step` 同一条 rank 消息队列（`Msg::Call` 闭包），所以每 rank 上导出排在上一步 forward 之后、下一步之前，与 rank 0 的流序一致；槽 / 缓冲由 `Arc` 保活到最后一个 rank 的 copy stream 读完（`pd_push_inflight` 各 rank 一份 clone）。
 - **4090 实测（2026-10-18 晚，loop q5 第 4–5 轮）**：P GPU 3,4 / D GPU 5,6 各 `--tp 2`，tcp 与 shm 两轮 e2e + 三故障 + 流式全 PASS，输出与单机逐字同；c8 (1024,128) TPOT **3.30 / 2.75 ms（单机 3.53）**，TTFT **616 / 795 ms**（单卡 PD 58）。TTFT 退化全在 P 自身：TP prefill 每步 56 次 all-reduce × 4 MB 走 NCCL SHM ≈ 11 ms/步（plain tp2 无 PD 的 c8-long TTFT 同样 231 vs 39），不是 PD 开销。**部署口径：无 P2P 机器上 P 不要开 TP（P 单卡 / D 多卡要异构 tp，见下）；有 NVLink 的机器再评。**
-- 异构 tp（P tp1 → D tp2 之类，无 P2P 机器上的实际需求）需要 D 侧按 KV 头把 `[rank][block][layer]` 重排成 world_D 份，未做；DCP 同理留 T4。
+- 异构 tp（P tp1 → D tp2，无 P2P 机器上 P 不开 TP 保 TTFT、D 开 TP 降 TPOT 的实际需求）：上面 canonical 布局已覆盖，q4.sh `Q4_TP_P / Q4_TP_D`；4090 验证见 loop q5 第 6 轮。DCP 留 T4。
 
 ### 13.6 分阶段
 

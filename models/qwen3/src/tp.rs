@@ -5,8 +5,9 @@
 //! （NCCL ring all-reduce 逐位一致 + Philox 同 seed ⇒ 同 token），只采用 rank 0 的结果。
 //!
 //! PD（design §13.7）：P / D 两个角色用的是同一套方法——每 rank 只持自己 KV 头分片，导出 / 导入时各 rank 对同一段
-//! host 缓冲（rank 0 的 pinned 池）或同一个对端槽按 `[rank][block][layer]` 偏移各写 / 各读自己那份；payload 单元
-//! = world × 单 rank 单元，P 与 D 必须同 tp（model_tag 带 tp，不等直接拒收）。cuda-ipc 区是 rank 0 那张卡的设备内存，
+//! host 缓冲（rank 0 的 pinned 池）或同一个对端槽的 **canonical** 布局 `[block][layer][全局 kv_head][slot][K/V][D]`
+//! 各写 / 各读自己的头段（`pd_export_addr / pd_import_addr` 内部按 rank 做 2D 拷贝）；payload 单元 = 全部 KV 头，
+//! 与 tp 无关 ⇒ **P 与 D 的 tp 可不同（异构 tp）**。cuda-ipc 区是 rank 0 那张卡的设备内存，
 //! 其它 rank 无 P2P 读不到 → TP 下只支持 tcp / shm。
 //! 不支持：host tier / 跨流 pair。
 
@@ -200,56 +201,56 @@ impl ModelExecutor for TpExecutor {
     }
 
     // ---------------------------------------------------------------- PD（P / D 同一套，按 rank 分片）
-    /// 一个块（全层、全 rank）= world × 单 rank 单元；0 = 未 enable_pd。
+    /// 一个块（全层、全部 KV 头）的 canonical 单元（= world × 单 rank 单元，与对端 tp 无关）；0 = 未 enable_pd。
     fn kv_unit_bytes(&self) -> usize {
         if !self.rank0.pd_enabled() {
             return 0;
         }
-        self.rank0.pd_unit_bytes_local() * self.world()
+        self.rank0.pd_unit_bytes_canonical()
     }
     fn kv_host_pool(&self) -> Option<Arc<dyn dinfer_core::pd::HostBufPool>> {
         ModelExecutor::kv_host_pool(&self.rank0)
     }
-    /// P 侧：rank r 把自己的分片写到 rank 0 pinned 缓冲的 `r × stride` 处（pinned 是 PORTABLE 的，别的 ctx 也能异步 D2H）。
+    /// P 侧：各 rank 把自己的头段写进 rank 0 pinned 缓冲的 canonical 布局（pinned 是 PORTABLE 的，别的 ctx 也能异步 D2H）；
+    /// 偏移在 `pd_export_addr` 内按 rank 算，这里所有 rank 收同一基址。
     fn kv_export(&mut self, blocks: &KvBlocks) -> Result<Box<dyn dinfer_core::pd::KvExportHandle>> {
         let ids: Arc<Vec<BlockId>> = Arc::new(blocks.group(0).to_vec());
-        let stride = ids.len() * self.rank0.pd_unit_bytes_local();
-        let total = stride * self.world();
+        let total = ids.len() * self.rank0.pd_unit_bytes_canonical();
         let mut buf = self.rank0.pd_take_buf().context("pd: no pinned buffer (enable_pd not called, or pool exhausted → raise --pd-pool-bufs)")?;
         anyhow::ensure!(buf.capacity() >= total, "pd: export {total} B > pinned buf {}", buf.capacity());
         let base = buf.ptr() as u64;
         let ids2 = ids.clone();
-        let rxs = self.dispatch(move |rank, ex| ex.pd_export_addr(&ids2, base + (rank * stride) as u64, true))?;
+        let rxs = self.dispatch(move |_rank, ex| ex.pd_export_addr(&ids2, base, true))?;
         let e0 = self.rank0.pd_export_addr(&ids, base, true)?;
         let mut events = vec![e0];
         events.extend(Self::collect(rxs)?);
         buf.set_len(total)?;
         Ok(Box::new(TpExport { events, buf: Some(PdBuf(buf)), _region: None }))
     }
-    /// P 侧槽路径：各 rank 写对端槽的 `r × stride` 处（shm：host 地址对所有 ctx 可见）。
+    /// P 侧槽路径：各 rank 写对端槽 canonical 布局里自己的头段（shm：host 地址对所有 ctx 可见）。
     fn kv_export_slot(&mut self, blocks: &KvBlocks, slot: u32) -> Result<Box<dyn dinfer_core::pd::KvExportHandle>> {
         let r = self.rank0.pd_region().context("pd: kv_export_slot without mapped region")?;
         let ids: Arc<Vec<BlockId>> = Arc::new(blocks.group(0).to_vec());
-        let stride = ids.len() * self.rank0.pd_unit_bytes_local();
-        let total = stride * self.world();
+        let total = ids.len() * self.rank0.pd_unit_bytes_canonical();
         anyhow::ensure!(total <= r.slot_bytes(), "pd: export {total} B > slot {}", r.slot_bytes());
         let dst = r.slot_addr(slot as usize)?;
         let is_host = r.is_host();
         let ids2 = ids.clone();
-        let rxs = self.dispatch(move |rank, ex| ex.pd_export_addr(&ids2, dst + (rank * stride) as u64, is_host))?;
+        let rxs = self.dispatch(move |_rank, ex| ex.pd_export_addr(&ids2, dst, is_host))?;
         let e0 = self.rank0.pd_export_addr(&ids, dst, is_host)?;
         let mut events = vec![e0];
         events.extend(Self::collect(rxs)?);
         Ok(Box::new(TpExport { events, buf: None, _region: Some(r) }))
     }
-    /// D 侧：payload（pinned 缓冲 / 本地 shm 槽）按 rank 切片，各 rank 读自己那份；源由 Arc 保活到最后一个 rank 读完。
+    /// D 侧：payload（pinned 缓冲 / 本地 shm 槽）是 canonical 布局，各 rank 读自己的头段（P 的 tp 任意）；
+    /// 源由 Arc 保活到最后一个 rank 读完。
     fn kv_import(&mut self, blocks: &KvBlocks, payload: Box<dyn dinfer_core::pd::HostBuf>) -> Result<()> {
         anyhow::ensure!(self.rank0.pd_enabled(), "pd: kv_import without resources (call enable_pd)");
         self.rank0.pd_gc_inflight();
         let ids: Arc<Vec<BlockId>> = Arc::new(blocks.group(0).to_vec());
-        let stride = ids.len() * self.rank0.pd_unit_bytes_local();
-        let total = stride * self.world();
-        anyhow::ensure!(payload.len() == total, "pd: payload {} != {} blocks × {} ranks × {}", payload.len(), ids.len(), self.world(), stride / ids.len().max(1));
+        let unit = self.rank0.pd_unit_bytes_canonical();
+        let total = ids.len() * unit;
+        anyhow::ensure!(payload.len() == total, "pd: payload {} != {} blocks × {unit} (canonical unit)", payload.len(), ids.len());
         let (src, is_host, keep): (u64, bool, Arc<dyn std::any::Any + Send + Sync>) = if let Some(slot) = payload.slot() {
             let r = self.rank0.pd_region().context("pd: slot payload but no local region")?;
             anyhow::ensure!(total <= r.slot_bytes(), "pd: import {total} B > slot {}", r.slot_bytes());
@@ -270,9 +271,9 @@ impl ModelExecutor for TpExecutor {
             (pb.ptr() as u64, true, Arc::new(pb) as Arc<dyn std::any::Any + Send + Sync>)
         };
         let (ids2, keep2) = (ids.clone(), keep.clone());
-        let rxs = self.dispatch(move |rank, ex| {
+        let rxs = self.dispatch(move |_rank, ex| {
             ex.pd_gc_inflight();
-            let ev = ex.pd_import_addr(&ids2, src + (rank * stride) as u64, is_host)?;
+            let ev = ex.pd_import_addr(&ids2, src, is_host)?;
             ex.pd_push_inflight(ev, Box::new(keep2.clone()));
             Ok(())
         })?;

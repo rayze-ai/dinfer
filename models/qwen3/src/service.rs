@@ -235,8 +235,12 @@ impl Qwen3Service {
         let pd_state = if opt.role != PdRoleOpt::Single {
             let (base, len) = exec.enable_pd(opt.pd_pool_bufs, tp_world)?;
             let pool = dinfer_core::runner::ModelExecutor::kv_host_pool(&exec).context("pd pool")?;
-            // tp 进 tag：payload 布局 `[rank][block][layer]` 依赖 world，P / D 不同 tp 直接拒收
-            let model_tag = format!("qwen3:{}:bs{}:bf16:tp{tp_world}", cfg.num_hidden_layers, opt.block_size);
+            // tag 只含 wire 布局相关量（层数 / block_size / 全局 kv 头数 / head_dim / dtype）；payload 是 canonical 按头布局，
+            // 与 tp 无关 ⇒ P / D 可异构 tp（design §13.7）。cfg 是全局配置（TP 切分在 load_with_budget_tp 内部做）。
+            let model_tag = format!(
+                "qwen3:L{}:bs{}:kvh{}:hd{}:bf16",
+                cfg.num_hidden_layers, opt.block_size, cfg.num_key_value_heads, cfg.head_dim
+            );
             let incoming = Arc::new(dinfer_core::pd::IncomingKv::default());
             pd_incoming_keep = Some(incoming.clone());
             // 共享槽区后端（design §10.3 b）：D 侧建区（shm / cuda-ipc），握手时发给 P；P 侧跟随对端的区类型，不看本地 kv_transport。

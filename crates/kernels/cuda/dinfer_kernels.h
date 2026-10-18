@@ -118,9 +118,9 @@ int scatter_head_bf16(const void* src, void* dst, int64_t tokens, int64_t heads,
 int zero_rows_where_pos0_bf16(void* x, const int32_t* pos, int64_t tokens, int64_t cols, cudaStream_t stream);
 int add_inplace_bf16(const void* x, void* y, int64_t n, cudaStream_t stream);  // y += x
 int kv_pack(const void* const* layer_ptrs, const int32_t* blocks, void* staging, int64_t n_blocks, int64_t num_layers,
-            int64_t per_layer_bytes, cudaStream_t stream);
-int kv_unpack(void* const* layer_ptrs, const int32_t* blocks, const void* staging, int64_t n_blocks,
-              int64_t num_layers, int64_t per_layer_bytes, cudaStream_t stream);
+            int64_t per_layer_bytes, int64_t block_size, int64_t kv_heads, cudaStream_t stream);
+int kv_unpack(void* const* layer_ptrs, const int32_t* blocks, const void* staging, int64_t n_blocks, int64_t num_layers,
+              int64_t per_layer_bytes, int64_t block_size, int64_t kv_heads, cudaStream_t stream);
 int gather_rows_bf16(const void* src, void* dst, const int32_t* rows, int64_t num_rows, int64_t width,
                      cudaStream_t stream);  // dst[r] = src[rows[r]]
 int bf16_to_f32(const void* x, float* y, int64_t n, cudaStream_t stream);

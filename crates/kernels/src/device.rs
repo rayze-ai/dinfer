@@ -671,6 +671,49 @@ impl Stream {
         // SAFETY: 两端都是本 ctx 可见的设备地址（本地分配或 IPC 打开）。
         unsafe { Ok(result::memcpy_dtod_async(dst, src, len, self.raw())?) }
     }
+    /// 2D 带 pitch 的异步拷贝（`cuMemcpy2DAsync`）：`height` 行，每行 `width` 字节，源 / 目标行距各自给。
+    /// PD 异构 tp（design §13.7）用它把本 rank 紧凑 staging（行距 = 本地层字节）写进 / 读出 canonical 布局
+    /// （行距 = 全局层字节，列偏移 = rank × 本地层字节）。host 端须是已注册 pinned / shm；`*_is_host=false` 为设备地址。
+    /// 要求 pitch ≥ width；width == pitch 两端相等时退化为一次线性拷贝。
+    #[allow(clippy::too_many_arguments)]
+    pub fn copy2d(&self, dst: u64, dst_is_host: bool, dst_pitch: usize, src: u64, src_is_host: bool, src_pitch: usize, width: usize, height: usize) -> Result<()> {
+        anyhow::ensure!(dst_pitch >= width && src_pitch >= width, "copy2d: pitch {dst_pitch}/{src_pitch} < width {width}");
+        if height == 0 || width == 0 {
+            return Ok(());
+        }
+        if dst_pitch == width && src_pitch == width {
+            let len = width * height;
+            return match (dst_is_host, src_is_host) {
+                (true, false) => self.dtoh_to_ptr(dst, src, len),
+                (false, true) => self.htod_from_ptr(dst, src, len),
+                (false, false) => self.dtod(dst, src, len),
+                (true, true) => anyhow::bail!("copy2d: host→host not supported"),
+            };
+        }
+        self.bind_ctx()?;
+        use sys::CUmemorytype_enum as M;
+        let ty = |h: bool| if h { M::CU_MEMORYTYPE_HOST } else { M::CU_MEMORYTYPE_DEVICE };
+        let desc = sys::CUDA_MEMCPY2D {
+            srcXInBytes: 0,
+            srcY: 0,
+            srcMemoryType: ty(src_is_host),
+            srcHost: if src_is_host { src as *const _ } else { std::ptr::null() },
+            srcDevice: if src_is_host { 0 } else { src },
+            srcArray: std::ptr::null_mut(),
+            srcPitch: src_pitch,
+            dstXInBytes: 0,
+            dstY: 0,
+            dstMemoryType: ty(dst_is_host),
+            dstHost: if dst_is_host { dst as *mut _ } else { std::ptr::null_mut() },
+            dstDevice: if dst_is_host { 0 } else { dst },
+            dstArray: std::ptr::null_mut(),
+            dstPitch: dst_pitch,
+            WidthInBytes: width,
+            Height: height,
+        };
+        // SAFETY: 地址 / 范围由调用方保证（pinned 池 / shm 槽 / 本 ctx 设备内存）；desc 按驱动 ABI 填齐。
+        unsafe { sys::cuMemcpy2DAsync_v2(&desc, self.raw()).result().context("cuMemcpy2DAsync") }
+    }
     /// pinned host `dst`（`PinnedBuf` 容量内）← 设备地址 `src`，异步（本流）。
     pub fn dtoh_to_pinned(&self, dst: &mut PinnedBuf, off: usize, src: u64, len: usize) -> Result<()> {
         anyhow::ensure!(off + len <= dst.capacity(), "dtoh_to_pinned: range {off}+{len} > cap {}", dst.capacity());

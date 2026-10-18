@@ -17,7 +17,10 @@ GPU_P="${Q4_GPU_P:-$GPU}"; GPU_D="${Q4_GPU_D:-$GPU}"
 # KV 传输后端（design §10.3 b）：tcp | shm | cuda-ipc（同卡才可）。D 建区，P 跟随。
 TRANSPORT="${Q4_TRANSPORT:-tcp}"
 # TP + PD（design §13.7）：Q4_TP=2 时 P / D 各开 --tp 2，Q4_GPU_P / Q4_GPU_D 给逗号卡表（如 3,4 / 5,6）；cuda-ipc 不可用。
-TP="${Q4_TP:-1}"; TPARGS=(); [ "$TP" -gt 1 ] && TPARGS=(--tp "$TP")
+# 异构 tp：Q4_TP_P / Q4_TP_D 分别给 P / D 的 tp（如 P tp1 → D tp2），缺省都取 Q4_TP。
+TP="${Q4_TP:-1}"; TP_P="${Q4_TP_P:-$TP}"; TP_D="${Q4_TP_D:-$TP}"
+TPARGS_P=(); [ "$TP_P" -gt 1 ] && TPARGS_P=(--tp "$TP_P")
+TPARGS_D=(); [ "$TP_D" -gt 1 ] && TPARGS_D=(--tp "$TP_D")
 step "e2e_qwen3_pd (single + prefill + decode + proxy, same GPU)"
 QWEN3_DIR="$MODEL" QWEN3_GOLDEN="$(realpath -m test/qwen3_golden)" cargo test -p dinfer --features qwen3,e2e --test serve_e2e_qwen3 -- --ignored --test-threads=1 e2e_qwen3_pd </dev/null 2>&1 | tee "$OUT/e2e.log" | grep -E '^test |test result|panicked'
 grep -qE 'test result: ok\. 1 passed' "$OUT/e2e.log"
@@ -30,8 +33,8 @@ COMMON=(--model "$MODEL" --host 0.0.0.0 --max-model-len 4096 --max-num-seqs 32 -
 # 用固定块数而不是 utilization：自动预算 = min(free, total×u − used)，同卡第二个进程时 used 已含第一个进程，
 # u=0.3 → cap−used ≈ 0 → "not enough GPU memory"。P 只持在飞请求的 KV（512 块 = 8k token），D 大池（2048 块 = 32k token）。
 P_BLOCKS="${Q4_P_BLOCKS:-512}"; D_BLOCKS="${Q4_D_BLOCKS:-2048}"
-start_d() { CUDA_VISIBLE_DEVICES=$GPU_D RUST_LOG=info nohup $BIN serve "${COMMON[@]}" --port 8102 --role decode --kv-port 9102 --kv-transport "$TRANSPORT" --num-blocks $D_BLOCKS ${TPARGS[@]+"${TPARGS[@]}"} > "$OUT/d.log" 2>&1 & echo $! > "$OUT/d.pid"; }
-start_p() { CUDA_VISIBLE_DEVICES=$GPU_P RUST_LOG=info nohup $BIN serve "${COMMON[@]}" --port 8101 --role prefill --peer 127.0.0.1:9102 --kv-transport "$TRANSPORT" --num-blocks $P_BLOCKS ${TPARGS[@]+"${TPARGS[@]}"} > "$OUT/p.log" 2>&1 & echo $! > "$OUT/p.pid"; }
+start_d() { CUDA_VISIBLE_DEVICES=$GPU_D RUST_LOG=info nohup $BIN serve "${COMMON[@]}" --port 8102 --role decode --kv-port 9102 --kv-transport "$TRANSPORT" --num-blocks $D_BLOCKS ${TPARGS_D[@]+"${TPARGS_D[@]}"} > "$OUT/d.log" 2>&1 & echo $! > "$OUT/d.pid"; }
+start_p() { CUDA_VISIBLE_DEVICES=$GPU_P RUST_LOG=info nohup $BIN serve "${COMMON[@]}" --port 8101 --role prefill --peer 127.0.0.1:9102 --kv-transport "$TRANSPORT" --num-blocks $P_BLOCKS ${TPARGS_P[@]+"${TPARGS_P[@]}"} > "$OUT/p.log" 2>&1 & echo $! > "$OUT/p.pid"; }
 start_x() { RUST_LOG=info nohup $BIN proxy --host 0.0.0.0 --port 8100 --prefill http://127.0.0.1:8101 --decode http://127.0.0.1:8102 > "$OUT/proxy.log" 2>&1 & echo $! > "$OUT/x.pid"; }
 wait_up() { for _ in $(seq 1 240); do curl -s -m 2 "http://127.0.0.1:$1/health" >/dev/null && return 0; sleep 0.5; done; echo "port $1 did not come up"; for f in d p proxy p_badpeer; do [ -f "$OUT/$f.log" ] && { echo "--- $f.log tail"; grep -vE " INFO " "$OUT/$f.log" | tail -n 4; }; done; return 1; }
 stop_all() { for f in x p d; do [ -f "$OUT/$f.pid" ] && kill "$(cat "$OUT/$f.pid")" 2>/dev/null || true; done; sleep 2; }
@@ -71,7 +74,7 @@ echo "with D dead: http $code"; [ "$code" -ge 500 ]
 start_d; wait_up 8102
 step "fault 3: P cannot reach kv-port → D times out, serves local prefill, output still equal"
 kill "$(cat "$OUT/p.pid")"; sleep 1
-CUDA_VISIBLE_DEVICES=$GPU_P RUST_LOG=info nohup $BIN serve "${COMMON[@]}" --port 8101 --role prefill --peer 127.0.0.1:1 --kv-transport "$TRANSPORT" --num-blocks $P_BLOCKS ${TPARGS[@]+"${TPARGS[@]}"} > "$OUT/p_badpeer.log" 2>&1 & echo $! > "$OUT/p.pid"; wait_up 8101
+CUDA_VISIBLE_DEVICES=$GPU_P RUST_LOG=info nohup $BIN serve "${COMMON[@]}" --port 8101 --role prefill --peer 127.0.0.1:1 --kv-transport "$TRANSPORT" --num-blocks $P_BLOCKS ${TPARGS_P[@]+"${TPARGS_P[@]}"} > "$OUT/p_badpeer.log" 2>&1 & echo $! > "$OUT/p.pid"; wait_up 8101
 GOT="$(ask 8100)"; [ "$GOT" = "$WANT" ]; [ "$(metric 8102 pd_fallback_total)" -ge 1 ]
 GOT="$(ask_stream 8100)"; [ "$GOT" = "$WANT" ] || { echo "stream fallback mismatch: [$GOT] vs [$WANT]"; exit 1; }
 kill "$(cat "$OUT/p.pid")"; sleep 1; start_p; wait_up 8101

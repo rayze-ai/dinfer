@@ -729,6 +729,16 @@ impl Qwen3Executor {
     pub fn pd_unit_bytes_local(&self) -> usize {
         self.kv_block_bytes_all_layers().1
     }
+    /// 一个块（全层、**全部 KV 头**）在 wire 上的 canonical 字节 = 本地 × world，与 tp 无关（design §13.7 异构 tp：
+    /// 布局 `[block][layer][全局 kv_head][slot][K/V][D]`，P 与 D 的 tp 可不同，各 rank 只读写自己头段）。
+    pub fn pd_unit_bytes_canonical(&self) -> usize {
+        self.pd_unit_bytes_local() * self.model.tp.1.max(1)
+    }
+    /// pack / unpack kernel 的形状参数：(block_size, 本地 kv_heads)。
+    fn kv_pack_dims(&self) -> (usize, usize) {
+        let bs = self.model.kv.first().map(|k| k.block_size).unwrap_or(16);
+        (bs, self.model.cfg.num_key_value_heads as usize)
+    }
     pub fn pd_enabled(&self) -> bool {
         self.pd.is_some()
     }
@@ -762,13 +772,19 @@ impl Qwen3Executor {
         }
         pd.inflight_imports = keep;
     }
-    /// 把 `ids` 的全层 KV（本 rank 分片）按 `[block][layer]` 连续写到地址 `dst`（host：已注册 pinned / shm；设备：本 ctx 可见）。
-    /// 主流 pack → staging（双缓冲）→ copy stream 搬走；返回 copy stream 上"全部写完"的事件。调用方保证 `dst` 容量 ≥ ids.len() × 单元。
+    /// 把 `ids` 的全层 KV（本 rank 分片）写进地址 `dst` 起的 **canonical** 布局 `[block][layer][全局 kv_head][slot][K/V][D]`
+    /// （host：已注册 pinned / shm；设备：本 ctx 可见）。本 rank 只写每层里自己头段那一列（2D 拷贝：源行距 = 本地层字节，
+    /// 目标行距 = 全局层字节，列偏移 = rank × 本地层字节），所以任意 tp 的各 rank 写同一个 `dst` 互不重叠，D 侧任意 tp 可读。
+    /// 主流 pack → staging（双缓冲）→ copy stream 搬走；返回 copy stream 上"全部写完"的事件。调用方保证 `dst` 容量 ≥ ids.len() × canonical 单元。
     pub fn pd_export_addr(&mut self, ids: &[dinfer_core::kv::BlockId], dst: u64, dst_is_host: bool) -> Result<Event> {
+        let (bs, hk) = self.kv_pack_dims();
+        let (rank, world) = self.model.tp;
         let pd = self.pd.as_mut().context("pd: export without resources (call enable_pd)")?;
         let layers = self.model.kv.len();
         let per = pd.bytes_per_layer_block;
-        let per_all = per * layers;
+        let gper = per * world.max(1); // canonical 每层字节
+        let gper_all = gper * layers;
+        let col = (rank * per) as u64;
         for (ci, chunk) in ids.chunks(PD_CHUNK).enumerate() {
             let i = ci & 1;
             // 生产方（主流 pack）写 staging[i] 前，等上一次消费方（copy stream 读走）用完
@@ -777,17 +793,13 @@ impl Qwen3Executor {
             }
             let bids: Vec<i32> = chunk.iter().map(|&b| b as i32).collect();
             self.stream.htod_into(&bids, &mut pd.blocks[i].data)?;
-            k::kv_pack(&self.stream, &pd.layer_ptrs.data, &pd.blocks[i].data, &mut pd.staging[i].data, chunk.len(), layers, per)?;
+            k::kv_pack(&self.stream, &pd.layer_ptrs.data, &pd.blocks[i].data, &mut pd.staging[i].data, chunk.len(), layers, per, bs, hk)?;
             let packed = self.stream.record_event()?;
             pd.copy.wait_event(&packed)?;
             let src = pd.copy.ptr(&pd.staging[i].data);
-            let off = (ci * PD_CHUNK * per_all) as u64;
-            let n = chunk.len() * per_all;
-            if dst_is_host {
-                pd.copy.dtoh_to_ptr(dst + off, src, n)?;
-            } else {
-                pd.copy.dtod(dst + off, src, n)?;
-            }
+            let off = (ci * PD_CHUNK * gper_all) as u64;
+            // 行 = (块, 层)，每行写本地 per 字节到 canonical 行的 rank 列
+            pd.copy.copy2d(dst + off + col, dst_is_host, gper, src, false, per, per, chunk.len() * layers)?;
             pd.staging_free[i] = Some(pd.copy.record_event()?);
         }
         pd.copy.record_event()
@@ -795,10 +807,14 @@ impl Qwen3Executor {
     /// `pd_export_addr` 的反向：从地址 `src`（同布局）读回 `ids` 的全层 KV 分片。copy stream 搬进 staging → 主流 unpack；
     /// 返回 copy stream 上"源已全部读完"的事件（之后源缓冲 / 槽才可释放）。主流后续 forward 自然排在 unpack 之后。
     pub fn pd_import_addr(&mut self, ids: &[dinfer_core::kv::BlockId], src: u64, src_is_host: bool) -> Result<Event> {
+        let (bs, hk) = self.kv_pack_dims();
+        let (rank, world) = self.model.tp;
         let pd = self.pd.as_mut().context("pd: import without resources (call enable_pd)")?;
         let layers = self.model.kv.len();
         let per = pd.bytes_per_layer_block;
-        let per_all = per * layers;
+        let gper = per * world.max(1);
+        let gper_all = gper * layers;
+        let col = (rank * per) as u64;
         for (ci, chunk) in ids.chunks(PD_CHUNK).enumerate() {
             let i = ci & 1;
             // 生产方（copy 写 staging）前，等上一次消费方（主流 unpack）用完
@@ -806,18 +822,14 @@ impl Qwen3Executor {
                 pd.copy.wait_event(&ev)?;
             }
             let dst = pd.copy.ptr(&pd.staging[i].data);
-            let off = (ci * PD_CHUNK * per_all) as u64;
-            let n = chunk.len() * per_all;
-            if src_is_host {
-                pd.copy.htod_from_ptr(dst, src + off, n)?;
-            } else {
-                pd.copy.dtod(dst, src + off, n)?;
-            }
+            let off = (ci * PD_CHUNK * gper_all) as u64;
+            // 只读 canonical 每行里本 rank 的头段到紧凑 staging
+            pd.copy.copy2d(dst, false, per, src + off + col, src_is_host, gper, per, chunk.len() * layers)?;
             let h2d = pd.copy.record_event()?;
             self.stream.wait_event(&h2d)?;
             let bids: Vec<i32> = chunk.iter().map(|&b| b as i32).collect();
             self.stream.htod_into(&bids, &mut pd.blocks[i].data)?;
-            k::kv_unpack(&self.stream, &pd.layer_ptrs.data, &pd.blocks[i].data, &pd.staging[i].data, chunk.len(), layers, per)?;
+            k::kv_unpack(&self.stream, &pd.layer_ptrs.data, &pd.blocks[i].data, &pd.staging[i].data, chunk.len(), layers, per, bs, hk)?;
             pd.staging_free[i] = Some(self.stream.record_event()?);
         }
         pd.copy.record_event()
@@ -1087,6 +1099,7 @@ impl ModelExecutor for Qwen3Executor {
         let layers = self.model.kv.len();
         let per = ht.bytes_per_layer_block;
         let per_all = per * layers;
+        let (bs, hk) = self.kv_pack_dims();
         let ht = self.host_tier.as_mut().unwrap();
         for chunk in orders.chunks(ht.chunk) {
             let base = self.stream.ptr_mut(&mut ht.staging.data);
@@ -1095,13 +1108,14 @@ impl ModelExecutor for Qwen3Executor {
             }
             let ids: Vec<i32> = chunk.iter().map(|&(b, _)| b as i32).collect();
             self.stream.htod_into(&ids, &mut ht.blocks_buf.data)?;
-            k::kv_unpack(&self.stream, &ht.layer_ptrs.data, &ht.blocks_buf.data, &ht.staging.data, chunk.len(), layers, per)?;
+            k::kv_unpack(&self.stream, &ht.layer_ptrs.data, &ht.blocks_buf.data, &ht.staging.data, chunk.len(), layers, per, bs, hk)?;
         }
         Ok(())
     }
 
     /// GPU → host：copy stream 等主流（本步 KV 写完）后异步 D2H；记录完成事件供下次 fetch 等待。
     fn kv_offload(&mut self, orders: &[(dinfer_core::kv::BlockId, u32)]) -> Result<()> {
+        let (bs, hk) = self.kv_pack_dims();
         let Some(ht) = self.host_tier.as_mut() else { return Ok(()) };
         let main_ev = self.stream.record_event()?;
         ht.copy.wait_event(&main_ev)?;
@@ -1112,7 +1126,7 @@ impl ModelExecutor for Qwen3Executor {
             // 上一轮 offload 的 staging_off 可能还在 D2H：copy stream 顺序执行，同流内自然有序
             let ids: Vec<i32> = chunk.iter().map(|&(b, _)| b as i32).collect();
             ht.copy.htod_into(&ids, &mut ht.blocks_off.data)?;
-            k::kv_pack(&ht.copy, &ht.layer_ptrs.data, &ht.blocks_off.data, &mut ht.staging_off.data, chunk.len(), layers, per)?;
+            k::kv_pack(&ht.copy, &ht.layer_ptrs.data, &ht.blocks_off.data, &mut ht.staging_off.data, chunk.len(), layers, per, bs, hk)?;
             let base = ht.copy.ptr(&ht.staging_off.data);
             for (i, &(_, slot)) in chunk.iter().enumerate() {
                 ht.copy.dtoh_to_arena(&ht.arena, slot as usize, 0, base + (i * per_all) as u64, per_all)?;
@@ -1127,7 +1141,7 @@ impl ModelExecutor for Qwen3Executor {
         if self.pd.is_none() {
             return 0;
         }
-        self.kv_block_bytes_all_layers().1
+        self.pd_unit_bytes_canonical()
     }
     fn kv_host_pool(&self) -> Option<std::sync::Arc<dyn dinfer_core::pd::HostBufPool>> {
         self.pd.as_ref().map(|p| std::sync::Arc::new(PdPool(p.pool.clone())) as std::sync::Arc<dyn dinfer_core::pd::HostBufPool>)
@@ -1136,7 +1150,7 @@ impl ModelExecutor for Qwen3Executor {
     /// 主流的后续 forward 排在 pack 之后，所以块复用安全；D2H 与 forward 重叠。返回句柄，发送线程等 `done`。
     fn kv_export(&mut self, blocks: &dinfer_core::kv::KvBlocks) -> Result<Box<dyn dinfer_core::pd::KvExportHandle>> {
         let ids = blocks.group(0);
-        let total = ids.len() * self.pd_unit_bytes_local();
+        let total = ids.len() * self.pd_unit_bytes_canonical();
         let mut buf = self.pd_take_buf().context("pd: no pinned buffer (enable_pd not called, or pool exhausted → raise --pd-pool-bufs)")?;
         ensure!(buf.capacity() >= total, "pd: export {total} B > pinned buf {}", buf.capacity());
         let done = self.pd_export_addr(ids, buf.ptr() as u64, true)?;
@@ -1149,7 +1163,7 @@ impl ModelExecutor for Qwen3Executor {
         ensure!(self.pd.is_some(), "pd: kv_import without resources (call enable_pd)");
         self.pd_gc_inflight();
         let ids = blocks.group(0);
-        let per_all = self.pd_unit_bytes_local();
+        let per_all = self.pd_unit_bytes_canonical();
         let total = ids.len() * per_all;
         ensure!(payload.len() == total, "pd: payload {} != {} blocks × {per_all}", payload.len(), ids.len());
         // 共享槽区：数据已在本地区的槽里（shm = pinned host；cuda-ipc = 本卡设备区），copy stream 直接搬进 staging → unpack。
@@ -1183,7 +1197,7 @@ impl ModelExecutor for Qwen3Executor {
     }
     /// P 侧：映射对端共享区。cuda-ipc 要求同卡（uuid 相等）；shm 任意卡。
     fn pd_map_region(&mut self, info: &dinfer_core::pd::RegionInfo) -> Result<()> {
-        let per_block_all = self.pd_unit_bytes_local();
+        let per_block_all = self.pd_unit_bytes_canonical();
         let pd = self.pd.as_mut().context("pd_map_region without enable_pd")?;
         let kind = k::RegionKind::parse(&info.kind).with_context(|| format!("pd: unknown region kind {}", info.kind))?;
         ensure!(info.slot_bytes as usize >= per_block_all, "pd: peer slot {} B < one block {per_block_all}", info.slot_bytes);
@@ -1204,7 +1218,7 @@ impl ModelExecutor for Qwen3Executor {
     fn kv_export_slot(&mut self, blocks: &dinfer_core::kv::KvBlocks, slot: u32) -> Result<Box<dyn dinfer_core::pd::KvExportHandle>> {
         let r = self.pd_region().context("pd: kv_export_slot without mapped region")?;
         let ids = blocks.group(0);
-        let total = ids.len() * self.pd_unit_bytes_local();
+        let total = ids.len() * self.pd_unit_bytes_canonical();
         ensure!(total <= r.slot_bytes(), "pd: export {total} B > slot {}", r.slot_bytes());
         let dst = r.slot_addr(slot as usize)?;
         let done = self.pd_export_addr(ids, dst, r.is_host())?;
