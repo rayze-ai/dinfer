@@ -512,6 +512,8 @@ pub struct DeviceBlockRef { pub layer: u8, pub block: BlockId, pub ptr: u64, pub
 
 **接口形状（2026-10-18 实现，为 NIXL 预留）**：`core::pd::KvTransport { name(); register(MemDesc) /*= NIXL registerMem，一次注册 HostArena::region*/; send(&MigrationHeader, MemDesc) -> Box<dyn Transfer> /*= xfer handle*/ }`，`Transfer::poll() -> InFlight | Done`。控制面（header）始终 TCP 小消息，数据面（payload）由后端决定：TCP 后端 write 同一条连接；NIXL 后端发 WRITE 描述符到 D 已注册的槽、header 走 notif 或本 TCP 通道。executor 只认 `kv_export -> Vec<u8>` / `kv_import(&[u8])`，v2 改为导出到已注册槽后把 `MemDesc` 直接交给 transport（省一次 host 拷贝）。
 
+**v1 实测（2026-10-18，4090 GPU 3 同卡 P+D，c8 (1024,128)）**：功能全过（输出逐字 = 单机，三故障回退正确），性能 TTFT 256 vs 13.7 ms、TPOT 5.5 vs 3.6 ms。代价来自同步导出 / 导入（135 MB/请求走主流 + host 中转）、回环 TCP、proxy 两跳；0.6B 同卡本来就不是 PD 的收益场景。v2 顺序：导出 / 导入异步化 → NIXL / CUDA IPC 去 host 中转 → P 流式首 token → 跨卡重测。
+
 **不做（v1）**：P 侧 prefix cache 跨实例共享；D→P 回传（多轮续写走 D 本地 prefix cache）；TP 下的分片传输（Q5）。
 
 **验收**：`scripts/verify/q4.sh` exit 0 = ① 两进程（GPU 0 P / GPU 3 D）+ proxy，greedy 输出与单机逐字一致（e2e 用例 `e2e_qwen3_pd`）；② 杀 P / 杀 D / 掐断 kv-port 三种故障各一次，请求全部正常返回（走回退）；③ bench c8 (1024,128) 经 proxy：TTFT ≤ 单机 1.3×（多一跳 + 传输），TPOT ≤ 单机（D 无 prefill 干扰），进 CSV（`pd1`）。

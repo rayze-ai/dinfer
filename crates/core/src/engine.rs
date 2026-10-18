@@ -495,7 +495,7 @@ impl<E: ModelExecutor> Engine<E> {
             };
             self.publish_step(&so, &mro, t_step, t_sched, t_exec);
             // 空步退避：有请求却一个都排不进（块不够、全部在飞）时不要满转 CPU；短暂让出等 GPU / 释放
-            if so.num_scheduled_tokens.is_empty() && self.sched.has_requests() {
+            if so.num_scheduled_tokens.is_empty() && so.kv_import.is_empty() && so.kv_export.is_empty() && self.sched.has_requests() {
                 self.empty_steps += 1;
                 if self.empty_steps % 1000 == 1 {
                     tracing::warn!(
