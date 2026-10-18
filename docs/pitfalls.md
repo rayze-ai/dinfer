@@ -480,3 +480,10 @@
 - 现象：`--tp 2` 首跑一 rank 算出 10392 块、另一 rank 报 "not enough GPU memory"：前一个单卡 serve 刚 `pkill -INT`，显存还没释放，rank 0 所在卡 free 只剩 8 GiB。
 - 解法：测试脚本等 `pgrep` 消失再起下一进程；TP 下传固定 `--num-blocks`（service 已校验各 rank 块数一致，不一致直接报错并提示传 `--num-blocks`）。
 - 相关：4090 Pod GPU 0–2 长期被 vLLM 基线 / 旧 dinfer 占着（23 GB），多卡测试用 3–7。Pod 镜像无 NCCL，见 loops/q5-tp-dp.md 环境节。
+
+## 远端 `until ! pgrep -f "<pattern>"` 等待永不结束（2026-10-18 晚）
+
+- 现象：4090 上 `until ! pgrep -f "cargo build --release -p dinfer"; do sleep 5; done` 等了 25 分钟，build 其实 40 s 就完了。
+- 根因：`ssh host 'bash -c "...pgrep -f cargo build..."'` 的 bash 自身命令行就含该模式，pgrep 匹配到自己（和同时挂着的另一条 ssh 等待命令）。另外 `nohup ... &` 在 ssh 非交互会话退出时被一起收掉，脚本根本没起来。
+- 解法：等编译改用 `cargo build` 的退出码 / 日志里的 `Finished`，不用 pgrep；远端长任务用 `setsid nohup ... < /dev/null & disown`（或 tmux），起完 `ps` 确认进程在。
+- 避免：pgrep 模式里排除自己：`pgrep -f "[c]argo build"`（方括号技巧）。
