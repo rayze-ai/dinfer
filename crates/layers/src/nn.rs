@@ -32,6 +32,19 @@ impl Linear {
         };
         Self::new(w, b)
     }
+    /// TP 分片装载：`dim` 0 = 按输出行切（列并行，如 qkv / gate_up），1 = 按输入列切（行并行，如 o_proj / down）。
+    /// bias 只在 dim 0 时切；dim 1 的 bias 需在 all-reduce 后只加一次，这里不支持（Qwen3 / GLM 无 bias）。
+    pub fn load_shard(stream: &Stream, src: &WeightSource, prefix: &str, dim: usize, rank: usize, world: usize) -> Result<Self> {
+        let w = src.load_bf16_shard(stream, &format!("{prefix}.weight"), dim, rank, world)?;
+        let bname = format!("{prefix}.bias");
+        let b = if src.contains(&bname) {
+            ensure!(dim == 0 || world == 1, "{prefix}: bias with input-dim shard unsupported");
+            Some(src.load_bf16_shard(stream, &bname, 0, rank, world)?)
+        } else {
+            None
+        };
+        Self::new(w, b)
+    }
     /// x: [tokens, in] → out: [tokens, out]
     pub fn forward(&self, gemm: &Gemm, x: &Tensor<bf16>, out: &mut Tensor<bf16>) -> Result<()> {
         let tokens = x.numel() / self.in_features;
@@ -185,9 +198,13 @@ pub struct Mlp {
 impl Mlp {
     /// 从 HF 的 gate_proj / up_proj / down_proj 装载并把 gate|up 纵向拼接。
     pub fn load(stream: &Stream, src: &WeightSource, prefix: &str, max_tokens: usize) -> Result<Self> {
+        Self::load_tp(stream, src, prefix, max_tokens, 0, 1)
+    }
+    /// TP：gate/up 按 inter 行切（列并行），down 按 inter 列切（行并行）；down 的输出是部分和，调用方 all-reduce。
+    pub fn load_tp(stream: &Stream, src: &WeightSource, prefix: &str, max_tokens: usize, rank: usize, world: usize) -> Result<Self> {
         // gate / up 以 bf16 直接上传，再在设备上拼成 [2·inter, hidden]（原先 f32 host 往返，28 层 ~1.2 s 启动时间）
-        let g = src.load_bf16(stream, &format!("{prefix}.gate_proj.weight"))?;
-        let u = src.load_bf16(stream, &format!("{prefix}.up_proj.weight"))?;
+        let g = src.load_bf16_shard(stream, &format!("{prefix}.gate_proj.weight"), 0, rank, world)?;
+        let u = src.load_bf16_shard(stream, &format!("{prefix}.up_proj.weight"), 0, rank, world)?;
         ensure!(g.shape == u.shape && g.shape.len() == 2, "gate/up shape mismatch {:?} {:?}", g.shape, u.shape);
         let (inter, hidden) = (g.shape[0], g.shape[1]);
         let mut cat = Tensor::<bf16>::zeros(stream, &[2 * inter, hidden])?;
@@ -199,7 +216,7 @@ impl Mlp {
             stream.inner_arc().memcpy_dtod(&u.data, &mut bottom)?;
         }
         let gate_up = Linear::new(cat, None)?;
-        let down = Linear::load(stream, src, &format!("{prefix}.down_proj"))?;
+        let down = Linear::load_shard(stream, src, &format!("{prefix}.down_proj"), 1, rank, world)?;
         Ok(Self {
             gate_up,
             down,

@@ -532,6 +532,9 @@ pub struct DeviceBlockRef { pub layer: u8, pub block: BlockId, pub ptr: u64, pub
 |---|---|---|---|
 | 调度模型 | v1 的 "无 prefill/decode 之分，只有 num_computed 追赶 num_tokens"、chunked prefill、FCFS + 抢占末尾 | `decode_exempt_from_budget`（decode 行不占 token 预算，每步装下全部 decode + 预算内 prefill） | 调度结构零成本沿用；免预算让混批可能，但闭环 bench 下看不出（q3-xstream） |
 | KV 分页 + prefix cache | 块哈希、按块命中、`block_size=16` | 无 | 一致 |
+| TP 切分与通信点 | GQA 按头切 qkv、o_proj/down 行并行、每层 2 all-reduce、每 rank 都采样 | 一进程多线程 lockstep（`BatchPlan` clone 直传，无 shm 队列 / 序列化）；lm_head 复制省 all-gather | T1 功能完成，4090 无 P2P 性能待 NVLink 机器 |
+| DP 路由 | 前端按在飞 / 队长选 rank；MoE 波次同步 | 同进程原子计数，无 coordinator 进程；dense 不同步 | T2 |
+| DCP | block 交错分卡 + lse 归并 | 复用 split-K decode 的 partial/lse 归并，kernel 不改 | 设计 §13.5 |
 | CUDA graph | decode-only 按 batch 桶捕获（FULL_DECODE_ONLY） | 按桶**懒捕获**（启动 -210 ms；`GRAPH_CAPTURE=eager` 恢复） | 启动 2.9 → 0.6 s 的一部分 |
 | 异步调度 | placeholder 机制、stop 检查晚一步、下一步在上一步结果回来前调度 | 下一步的 input_ids 在**设备上**从上一步 `chosen` gather（图内 `row_gather_i32`，不经 host 往返）；D2H 用 pinned 双槽 + 事件；engine 单线程双步流水（pending/sync_done 两槽），不需要 vLLM 的多进程 | bench24：c32 1.05 → 1.08×、c8 1.06 → 1.08×；代价 TTFT +1 步（c8-long 39 → 54 ms） |
 | attention | FA2 的算法结构（online softmax、P 片直接当 PV 的 A 片） | 自写 mma.sync 版 v4/v5（Ampere/Ada 无 FA3），paged/prefill 同一模板，混批 decode 行分流到 split-K | 4090 T=1514 0.14 ms/层，TTFT 领先 vLLM 2× |
@@ -563,3 +566,66 @@ pub struct DeviceBlockRef { pub layer: u8, pub block: BlockId, pub ptr: u64, pub
 | 7 | 待用户决策（§9） | 目标生产机器（卡型 / 卡数 / 单机多机）；structured output 是否在范围；对比基线配置（vLLM 开 MTP / EP / FP8 KV？） | 阻塞 #4 多卡与 #5 部分项 |
 
 建议顺序：① #1 d → b 收口 PD；② #4 可生产四件（停机 / 鉴权 / 限流最小，多卡 TP 最大）；③ #5 API 补齐（completions、structured output）；④ #2 RemoteTier；⑤ 量化 / megakernel 等到生产级模型再做。
+
+## 13. 多卡并行设计：TP / DP / EP(MoE) / DCP / PCP（2026-10-18）
+
+目标机器：4090 Pod 8 卡（两 NUMA 各 4 卡，**无 PCIe P2P**，`nvidia-smi topo` 全 NODE/SYS），NCCL 2.27+ 走 SHM；生产卡型未定（§9-1）。
+原则同 §11：vLLM 的并行语义直接采用（切分方式 / 通信点 / DP 波次），进程模型与调度改进。
+
+### 13.1 进程模型（与 vLLM 的主要差别）
+
+| | vLLM | dinfer |
+|---|---|---|
+| TP 的 rank | 每 rank 一个进程（`MultiprocExecutor` + shm 消息队列广播 `SchedulerOutput`） | **一进程多线程**：每 rank 一个线程 + 自己的 `Device`/`Stream`/`Comm`；rank 0 线程就是 engine 线程，`BatchPlan` 通过 `mpsc` 直接 clone 给其它 rank（无序列化、无 shm 队列） |
+| 采样 | 每 rank 都算 lm_head + 采样，driver 出结果 | 同（NCCL ring 保证各 rank 的 all-reduce 结果逐位一致，Philox 采样同 seed → 同 token；省掉 broadcast）。lm_head / embedding **复制不切**（Qwen3 词表 151k × 1024 = 300 MB，切了要 all-gather logits；K3/GLM 可改列切 + all-gather，留开关） |
+| DP | 每 DP rank 一个 EngineCore 进程 + 独立 `DPCoordinator` 进程 + 前端按负载选 rank | 每 DP 副本一个 `Qwen3Service`（含自己的 engine 线程与 TP 组），`server::dp::DpBackend` 在同进程按在飞数路由；RequestId 高 8 位编码副本号；**dense 模型 DP 副本完全独立，无波次同步** |
+| CUDA graph | 每 rank 独立捕获，集合通信入图 | 同；因各 rank 执行同一 `BatchPlan` 序列，懒捕获在同一步触发，`ncclAllReduce` 入图（要求 NCCL ≥ 2.9） |
+
+多机：TP 组跨机不做；DP 跨机 = 每机一个进程 + 外部 LB（proxy 已有骨架 `server/proxy.rs`），MoE 的 EP 跨机需要 NCCL 跨机 id 分发（后续用 TCP store）。
+
+### 13.2 TP：权重切分与通信点（Qwen3，GQA）
+
+| 权重 | 切分 | 说明 |
+|---|---|---|
+| q_proj / k_proj / v_proj（拼成 qkv） | 行切（dim 0，按头） | 每 rank `H/tp` 个 q 头、`Hkv/tp` 个 kv 头；要求 `Hkv % tp == 0`（Qwen3-0.6B Hkv=8 → tp ≤ 8；vLLM 的 kv 头复制 `Hkv < tp` 情况暂不做）|
+| q_norm / k_norm | 复制 | 每头 D 维，与切头无关 |
+| o_proj | 列切（dim 1） | 输入 `H·D/tp`，输出部分和 → **all-reduce ①** |
+| gate_proj / up_proj | 行切（dim 0） | `I/tp` |
+| down_proj | 列切（dim 1） | 部分和 → **all-reduce ②** |
+| embed / norm / lm_head | 复制 | 见 13.1 |
+| KV cache | 每 rank 只存自己的 kv 头 | `kv_bytes_per_block` 用本地 Hkv；block 数由 rank 0 决定并广播，各 rank 一致 |
+
+每层 2 次 all-reduce（`t × hidden` bf16），与 vLLM 一致；vLLM 的 `fused_allreduce_rms_norm`（all-reduce + 残差 + RMSNorm 融合，Hopper custom allreduce）是后续改进项。实现：`Qwen3Model.comm: Option<Comm>`，`forward` 在 o_proj / down 之后原地 all-reduce；`TpShard{rank,world}` 传给 `Attention::load` / `Mlp::load_tp`；本地 `cfg` 的 `num_attention_heads / num_key_value_heads / intermediate_size` 除以 tp，`vocab / hidden` 不变。
+
+**小模型 TP 的预期**：Qwen3-0.6B 单卡 decode 一步 ~3.5 ms；无 P2P 时 NCCL SHM all-reduce 单次 ≥ 30–50 µs，56 次/步 ≈ 2–3 ms，**TP=2 吞吐大概率低于单卡**。TP 在这台机器上是功能正确性验证（输出与单卡一致），性能结论要等 NVLink / P2P 机器（design §9-1）。
+
+### 13.3 DP
+
+- `--dp N --tp M`：副本 i 用卡 `device + i·M .. device + (i+1)·M`。每副本独立 `Qwen3Service`（独立 scheduler / KV / prefix cache）。
+- 路由：`DpBackend` 选在飞请求最少的副本（vLLM 前端同策略，但 vLLM 需 coordinator 进程广播队长；我们同进程原子计数）。prefix cache 亲和（同前缀打同副本）留作改进：按 prompt 前 N token 哈希选副本，再按负载兜底。
+- **MoE + DP 的波次同步**（vLLM `DPEngineCoreProc._has_global_unfinished_reqs`）：EP 下 all-to-all 要求所有 DP rank 每步都参与，空闲 rank 要跑 dummy step。dense 模型不需要；K3/GLM 上线 EP 时在 `Engine::run` 的 step 循环前加 `dp_group.all_reduce(has_work)`，并复用 vLLM 的"wave"语义（一个 engine 有请求即唤醒全组）。
+
+### 13.4 EP（MoE，K3 / GLM-5.3，设计，未实现）
+
+- 切分：路由专家按 `num_experts / ep` 分卡（每 rank 一组完整专家），shared expert 复制或 TP 切；attention 部分走 TP（MLA 的 kv_b/o_proj 按头切，§design-glm53）。
+- 通信：dispatch / combine 两次 all-to-all（NCCL `ncclSend/Recv` 组或 DeepEP 风格 IBGDA；4090 无 P2P/IB，只能 NCCL SHM，吞吐差，仅验功能）。
+- 负载均衡：vLLM EPLB（专家副本 + 周期重排）作为改进项；先做静态切分 + 每层专家命中直方图指标（`moe_expert_hits`）。
+- 与 DP：EP 组 = DP × TP 全体 rank（vLLM 默认），所以需要 13.3 的波次同步。
+
+### 13.5 DCP / PCP（长上下文 KV 切分，设计，未实现）
+
+- **DCP（decode context parallel，vLLM `decode_context_parallel_size`）**：KV cache 按 **block 交错**（`cp_kv_cache_interleave_size`，默认 1 block）分到 dcp 组各 rank；decode 时每 rank 对自己持有的 KV 做局部 attention 出 `(out, lse)`，再 `all_gather` lse / out 做 log-sum-exp 归并（vLLM `dcp_a2a_lse_reduce`）。Q 头在 dcp 组内复制（每 rank 算全部头 → 显存换 KV 容量）。适用：单请求 KV 超单卡、或 Hkv 小切不动 TP（GQA Hkv=8 时 tp>8 就靠 DCP）。
+  - 我们的 kernel 已有 split-K decode（`gqa_decode v2`，每 split 出 partial + lse 再归并），DCP 只是把 split 维度放到卡间：**局部 kernel 不改**，加一个 `merge_lse` 跨卡步骤。
+  - block 分配：scheduler 分 block 不变，`BlockId → (rank, local_block)` 由交错函数静态决定；slot_mapping 每 rank 过滤自己的块。
+- **PCP（prefill context parallel）**：长 prompt 按 token 切到 pcp 组各 rank（zigzag / ring attention），每 rank 算自己的 Q 块对全部 K/V（ring 传 KV 或 all-gather KV）。4090 无 P2P 下 ring 代价大；**优先用 chunked prefill + DCP 代替 PCP**（vLLM 也只在 FlashAttn/FlashInfer MLA 支持 PCP）。
+- 共同前提：attention metadata 加 `cp_rank / cp_world / context_len_local`；`KvCacheSpec.dcp_sharded` 对应我们的 group spec 加字段。
+
+### 13.6 分阶段
+
+| 步 | 内容 | 验收 |
+|---|---|---|
+| T1（本轮） | NCCL 封装 `kernels::comm`、权重分片 `load_bf16_shard`、Qwen3 TP（qkv/gate_up 行切、o_proj/down 列切、2 all-reduce/层）、`TpExecutor` 多线程 lockstep、`--tp` | 4090 `--tp 2` 与单卡 greedy 输出逐 token 一致；bench 记 CSV（预期慢于单卡，记原因） |
+| T2 | `--dp N` + `DpBackend` 路由 | `--dp 2` 吞吐 ≈ 2× 单卡（c32）|
+| T3 | TP 下 CUDA graph 含 all-reduce；`fused_allreduce_rmsnorm`；lm_head 列切开关 | TPOT 开销 ≤ 单卡 + 56 × all-reduce |
+| T4 | DCP（Qwen3 先做，复用 split-K 归并） | 单请求 context 超单卡 KV 仍可跑 |
+| T5 | EP（GLM/K3 真权重到位后） + DP 波次同步 | 功能 |

@@ -226,6 +226,47 @@ impl WeightSource {
     }
 
     /// 读为 host f32（用于 CPU 侧预处理，如 W_UK / W_UV 拆分）。fp8 块量化权重先解量化。
+    /// 按 `dim`（0 = 行 / 1 = 列）取第 `rank`/`world` 份切片上传为 bf16（TP 权重分片，design §13）。
+    /// dim 0 是连续字节段直接切；dim 1 在 host 上按行 gather 后上传。只支持 2D BF16 / F32 / F16 权重。
+    pub fn load_bf16_shard(&self, stream: &Stream, name: &str, dim: usize, rank: usize, world: usize) -> Result<Tensor<bf16>> {
+        if world <= 1 {
+            return self.load_bf16(stream, name);
+        }
+        let (info, raw) = self.bytes(name)?;
+        ensure!(info.shape.len() == 2 && dim < 2, "{name}: shard needs 2D weight, got {:?}", info.shape);
+        let (r, c) = (info.shape[0], info.shape[1]);
+        let full = info.shape[dim];
+        ensure!(full % world == 0, "{name}: dim {dim} size {full} not divisible by tp {world}");
+        let part = full / world;
+        let to_bf16 = |b: &[u8]| -> Result<Vec<bf16>> {
+            Ok(match info.dtype.as_str() {
+                "BF16" => b.chunks_exact(2).map(|c| bf16::from_bits(u16::from_le_bytes([c[0], c[1]]))).collect(),
+                "F32" => b.chunks_exact(4).map(|c| bf16::from_f32(f32::from_le_bytes([c[0], c[1], c[2], c[3]]))).collect(),
+                "F16" => b
+                    .chunks_exact(2)
+                    .map(|c| bf16::from_f32(half::f16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32()))
+                    .collect(),
+                other => bail!("{name}: unsupported dtype {other} for sharded load"),
+            })
+        };
+        let esz = raw.len() / (r * c);
+        let (v, shape) = if dim == 0 {
+            let lo = rank * part * c * esz;
+            let hi = lo + part * c * esz;
+            (to_bf16(&raw[lo..hi])?, vec![part, c])
+        } else {
+            let mut out = Vec::with_capacity(r * part);
+            for row in 0..r {
+                let lo = (row * c + rank * part) * esz;
+                out.extend(to_bf16(&raw[lo..lo + part * esz])?);
+            }
+            (out, vec![r, part])
+        };
+        let t = Tensor::from_vec(stream, v, &shape);
+        stream.synchronize()?;
+        t
+    }
+
     pub fn load_f32_host(&self, name: &str) -> Result<(Vec<usize>, Vec<f32>)> {
         let (info, raw) = self.bytes(name)?;
         let v: Vec<f32> = match info.dtype.as_str() {
