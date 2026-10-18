@@ -487,3 +487,9 @@
 - 根因：`ssh host 'bash -c "...pgrep -f cargo build..."'` 的 bash 自身命令行就含该模式，pgrep 匹配到自己（和同时挂着的另一条 ssh 等待命令）。另外 `nohup ... &` 在 ssh 非交互会话退出时被一起收掉，脚本根本没起来。
 - 解法：等编译改用 `cargo build` 的退出码 / 日志里的 `Finished`，不用 pgrep；远端长任务用 `setsid nohup ... < /dev/null & disown`（或 tmux），起完 `ps` 确认进程在。
 - 避免：pgrep 模式里排除自己：`pgrep -f "[c]argo build"`（方括号技巧）。
+
+## 2026-10-18 远端一条命令里 `pkill -f "<pattern> --role"` 把承载它的 `bash -c` 自己杀了
+- 现象：`remote4090.sh run '... pkill -9 -f "target/release/dinfer serve.*--role"; ...; q4.sh ...'` 返回 exit 0 但 0 行输出、日志文件不存在、q4 没跑。
+- 根因：`ssh host "bash -c '<整条命令>'"` 的 bash 进程命令行里含同样的文本，`pkill -f` 按整行匹配 → 先杀了自己（与此前 `pgrep -f` 匹配到自己同源）。
+- 解法 / 避免：远端不要在同一条命令里用 `pkill -f` 清理；用 `kill $(cat *.pid)`、`pgrep -x` 或把 pattern 写成 `[d]infer` 这类不自匹配的形式；q4.sh 自己会清理上一轮进程，不需要预先 pkill。
+
