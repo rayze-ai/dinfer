@@ -1,0 +1,10 @@
+P:
+dinfer:pd_export_total 66
+dinfer:pd_export_slot_total 66
+dinfer:pd_import_total 0
+dinfer:pd_fallback_total 0
+D:
+dinfer:pd_export_total 0
+dinfer:pd_export_slot_total 0
+dinfer:pd_import_total 66
+dinfer:pd_fallback_total 2

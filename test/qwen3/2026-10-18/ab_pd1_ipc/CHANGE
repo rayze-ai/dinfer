@@ -1,0 +1,1 @@
+PD 后端 b cuda-ipc 同卡 cuda-ipc：pd = proxy(:8100 → P GPU3 + D GPU3) vs single = 单机 :8012，c8 (1024,128)
