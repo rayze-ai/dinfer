@@ -9,6 +9,14 @@
 - 解法：同卡多实例一律 `--num-blocks N` 固定块数（`kv_cache: fixed` 路径不看 utilization）。q4.sh：P 512 / D 2048。
 - 如何避免：脚本里起第二个进程前先想 "预算公式里 used 包含谁"；`wait_up` 失败要打子进程日志尾，否则只看到 "port did not come up"。
 
+## 2026-10-18 4090 GPU 2 起 D 报 "layer 21 attn" OOM：GPU 2 被别人的 vLLM 占着
+
+- 现象：`Q4_GPU_D=2` 起 D，`port 8102 did not come up`，d.log 末尾 `Error: layer 21 attn`（权重加载到第 21 层显存不够）。
+- 根因：GPU 2 上有 root 2026-10-16 起的 `vllm serve Qwen3-0.6B --port 8000`（非 docker，`--gpu-memory-utilization 0.9`，占 21 GB），不是我们的 `vllm-qwen3` 容器（那个在 GPU 1 :8013）。
+- 解法：不动别人的进程；跨卡测试改用 GPU 3（P）+ GPU 4（D）。
+- 如何避免：起任何测试进程前先 `nvidia-smi --query-gpu=index,memory.used --format=csv,noheader`，空卡（4 MiB）才用；共享机 GPU 0/1/2 都有常驻。
+- 相关：loop q4-pd 第 16 轮。
+
 ## 2026-10-18 4090 跑 `Q4_REMOTE=1 q4.sh` 两次空跑：bench 包名、模型路径都是本机口径
 
 - 现象：第一次 `cargo build -p bench` 报 "package ID specification `bench` did not match"；第二次 e2e 0.16 s 失败，`[serve:err] Error: No such file or directory`。
