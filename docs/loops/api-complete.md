@@ -17,6 +17,8 @@ server 现有 `/health /metrics /v1/models /v1/chat/completions`。补齐 vLLM `
 | `POST /v1/embeddings` `/pooling` `/score` `/rerank` `/v1/rerank` `/v2/rerank` `/classify` `/v1/audio/*` | 501 `{"error":{"message":"not supported by decoder-only model / not implemented","type":"not_implemented"}}`，代码处 `TODO`（embedding 模型不在本项目范围） | 待做 |
 | `/v1/chat/completions` | 已有；补 `model` 不匹配时 404（vLLM 行为），`/v1/models` 卡加 `created / root / permission` 字段 | 待做 |
 
+第 2 批（本轮不做，下一 loop）：chat 请求字段缺口 `response_format`（json_object / json_schema → 受限解码）、`tool_choice`（none / auto / required / 指定函数）、`parallel_tool_calls`、`logit_bias`、`prompt_logprobs`、`skip_special_tokens` / `spaces_between_special_tokens`、`truncate_prompt_tokens`、`continue_final_message` / `add_generation_prompt`、`user`。受限解码是其中最大的一块，单开 `docs/loops/guided-decoding.md`。
+
 不做：`/v1/responses`（vLLM 的有状态会话，范围外，留 TODO）、`/invocations`、`/v1/load_lora_adapter`。
 
 ## 环境
