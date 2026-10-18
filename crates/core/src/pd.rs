@@ -631,9 +631,13 @@ mod tests {
         assert_eq!((m.payload.slot(), m.payload.len()), (Some(s1), 8));
         assert_eq!(m.payload.as_slice(), &mem[s1 as usize * 32..s1 as usize * 32 + 8]);
         drop(m); // → credit 回到 P
+        let deadline = Instant::now() + Duration::from_secs(3);
         let mut got = None;
-        wait(&|| { got = t.acquire_slot(); got.is_some() });
-        assert_eq!(got, Some(s1));
+        while Instant::now() < deadline && got.is_none() {
+            got = t.acquire_slot();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(got, Some(s1), "credit must come back after payload drop");
         t.release_slot(s0);
         assert!(t.acquire_slot().is_some());
         let z = [0u8; 8];

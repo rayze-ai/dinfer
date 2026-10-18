@@ -514,6 +514,9 @@ pub struct DeviceBlockRef { pub layer: u8, pub block: BlockId, pub ptr: u64, pub
 
 **v1 实测（2026-10-18，4090 GPU 3 同卡 P+D，c8 (1024,128)）**：功能全过（输出逐字 = 单机，三故障回退正确），性能 TTFT 256 vs 13.7 ms、TPOT 5.5 vs 3.6 ms。代价来自同步导出 / 导入（135 MB/请求走主流 + host 中转）、回环 TCP、proxy 两跳；0.6B 同卡本来就不是 PD 的收益场景。v2 顺序：导出 / 导入异步化 → NIXL / CUDA IPC 去 host 中转 → P 流式首 token → 跨卡重测。**v2 (a) 异步化已做（2026-10-18）：TTFT 256 → 97 ms、TPOT 5.5 → 4.4 ms、吞吐 1000 → 1480 tok/s。** 机制：导出 = 主流 pack → 事件 → copy stream D2H 进 pinned 池 → 发送线程等 done 事件；导入 = 接收线程零拷贝读进 pinned 池 → copy stream H2D → 事件 → 主流 unpack；engine 线程不等 GPU。
 
+**后端 b：共享槽区 shm / cuda-ipc（2026-10-18 实现，loop 第 17 轮）**。先用探针（`scripts/dev/probe_ipc.cu`）在 4090 上定事实：同卡 `cudaIpcOpenMemHandle` 可用、64 MB D2D 0.15 ms（446 GB/s）；**跨卡 open 报 `peer access is not supported`**（`nvidia-smi topo -p2p r` 全 CNS：消费卡无 PCIe P2P，GPU3↔4 还跨 NUMA）。结论：这台机器上 NIXL 也只能走 UCX 的 host 路径，引入 C++ 依赖换不到带宽，**不接 NIXL**；自己做两档共享槽区，接口形状仍按 NIXL（register / xfer handle）留着，真有 RDMA 网卡时只换 `KvTransport` 实现。
+机制：D 启动建区（`--kv-transport shm|cuda-ipc --kv-slots N`，每槽 = max_model_len 全层 KV ≈ 448 MB@4k；shm = `/dev/shm/kv-slots-<pid>` mmap + `cuMemHostRegister`，cuda-ipc = `cuMemAlloc` + `cuIpcGetMemHandle`）；P 连上持久 TCP 先收 hello(`RegionInfo`)，映射对端区（shm：mmap + register；cuda-ipc：open，要求 uuid 同卡）；之后每次导出 `acquire_slot` 拿 credit → **P 的 copy stream 直接写 D 的槽**（shm D2H / ipc D2D）→ 等 done 事件 → TCP 发 header{slot}（无 payload）；D 接收线程构造 `SlotPayload`，executor 从槽 H2D / D2D 进 staging → unpack，H2D 完成事件过后 drop payload → 槽号作 credit 回 P（同一连接，4 B）。与 v2(a) 比省掉：P 侧 TCP write 的内核拷贝、D 侧 read 进 pinned 的拷贝、loopback 协议栈；c8 (1024,128) 每请求 ≈ 115 MB。回退链完整：握手失败 / 映射失败（跨卡 ipc）/ 无 credit / 槽导出失败 → 原 TCP payload 路径；D 超时本地重算不变。P 跟随 D 的区类型，两边 `--kv-transport` 不一致也能工作（P 端只决定用 `SharedTransport` 还是 `TcpTransport`）。
+
 **不做（v1）**：P 侧 prefix cache 跨实例共享；D→P 回传（多轮续写走 D 本地 prefix cache）；TP 下的分片传输（Q5）。
 
 **验收**：`scripts/verify/q4.sh` exit 0 = ① 两进程（GPU 0 P / GPU 3 D）+ proxy，greedy 输出与单机逐字一致（e2e 用例 `e2e_qwen3_pd`）；② 杀 P / 杀 D / 掐断 kv-port 三种故障各一次，请求全部正常返回（走回退）；③ bench c8 (1024,128) 经 proxy：TTFT ≤ 单机 1.3×（多一跳 + 传输），TPOT ≤ 单机（D 无 prefill 干扰），进 CSV（`pd1`）。
@@ -541,6 +544,7 @@ pub struct DeviceBlockRef { pub layer: u8, pub block: BlockId, pub ptr: u64, pub
 | 算子插拔 | vLLM：PyTorch custom op + `@register_oot` / attention backend 枚举（运行期 Python 分派） | `OpSet` trait 泛型单态化（零运行期开销）+ 启动期 `OPS=` 选择（未知名字 fail-fast）；`.so` 按 C ABI 加载并带 capture 探针（待做）；泛型 ref 测试（待做） | 方案 A 已实现（`kernels/src/opset.rs`，Attention/Norm/QkvPost/Act 四组）；Gemm/Sampler 待并入 |
 | KV 分层 / 外置 | `KVConnectorBase_V1` 的事件点（scheduler 侧 get_num_new_matched_tokens / update_state_after_alloc；worker 侧 start_load / wait_for_save） | scheduler 直接下发 `kv_fetch/kv_offload` order（无 connector 对象层）；host 索引 LRU；executor pinned 竞技场 + copy stream；**搬运用 pack/unpack kernel + 每块一次拷贝**（第一版每块 28 次小拷贝 TPOT +0.5 ms）；PD / Remote 复用同一 order 形态 | host 层已实现（`--kv-host-gib`，默认关），e2e 过；真挤出 A/B：命中 8840 块、抢占 -50%，但吞吐 -5%（fetch 同步 + offload 占 GPU 抵消了 5% 的额外命中）；留 低水位 offload / 异步 fetch 两项优化 |
 | 跨流 prefill/decode 并行 | 无（vLLM 单流） | 实现并证实真并行（nsys 39% 重叠） | 闭环 bench 下混批步 <5%，TPOT 无感；留给 prefill 比例高的负载 |
+| 2026-10-18 | 改进 | vLLM PD 用 NIXL（UCX / RDMA）搬 KV，同机也经 UCX；我们按机器事实分档：同卡 cuda-ipc D2D、跨卡无 P2P 走 shm pinned 共享区，P 直写 D 的槽 + credit 环，TCP 只传 header+槽号 | design §10.3 后端 b；不引入 NIXL C++ 依赖，接口形状保留 |
 
 
 ## 12. 整体功能待办路线图（2026-10-18 盘点，不分模型）
