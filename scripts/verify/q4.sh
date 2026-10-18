@@ -97,4 +97,7 @@ print("bench gate:", "enforced" if gate else "record-only", "→", "PASS" if ok 
 sys.exit(0 if (ok or not gate) else 1)
 PY
 python3 scripts/dev/bench_trend.py >/dev/null 2>&1 || true
+# 槽路径证据（后端 b）：P 的 pd_export_slot_total 应 ≈ pd_export_total；tcp 后端为 0
+{ echo "P:"; curl -s http://127.0.0.1:8101/metrics | grep -E "^dinfer:pd_"; echo "D:"; curl -s http://127.0.0.1:8102/metrics | grep -E "^dinfer:pd_"; } > "$OUT/pd_metrics.txt" 2>/dev/null || true
+echo "pd metrics: $(tr '\n' ' ' < "$OUT/pd_metrics.txt" | cut -c1-300)"
 echo "==> Q4 PASS"

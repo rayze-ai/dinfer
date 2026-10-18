@@ -264,6 +264,9 @@ impl<E: ModelExecutor> Engine<E> {
                 slot,
             };
             self.metrics.pd_export_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if slot.is_some() {
+                self.metrics.pd_export_slot_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             if let Some(t) = pd.transport.clone() {
                 std::thread::Builder::new().name("pd-send".into()).spawn(move || {
                     // 只阻塞本线程：等 GPU→host 拷贝完成，再发；句柄 drop 归还缓冲。NIXL 后端 poll 到 Done 为止。
