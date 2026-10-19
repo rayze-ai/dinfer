@@ -119,3 +119,15 @@ bench_b300_10,2026-10-19,GEMM 自调优表展开非幂 M（借桶 + AlgoCheck）
 bench_b300_10,2026-10-19,GEMM 自调优表展开非幂 M（借桶 + AlgoCheck）+ 默认 algo 缓存（之前每次 forward 查启发式）,c8-long,out_tok_per_s,500.977,556.827,0.900,36.2,higher,main,B300,vllm,dinfer,qwen35
 bench_b300_10,2026-10-19,GEMM 自调优表展开非幂 M（借桶 + AlgoCheck）+ 默认 algo 缓存（之前每次 forward 查启发式）,c8-long,ttft_p50_ms,214.188,411.262,0.521,52.1,lower,main,B300,vllm,dinfer,qwen35
 bench_b300_10,2026-10-19,GEMM 自调优表展开非幂 M（借桶 + AlgoCheck）+ 默认 algo 缓存（之前每次 forward 查启发式）,c8-long,tpot_p50_ms,14.272,11.241,1.270,20.8,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_11,2026-10-19,GDN prefill 三段 mma 化：ho/wy 走 mma.sync bf16，conv1d prefill 按 T 分块（ArchProfile 选 BV / rows）,c1,out_tok_per_s,92.356,94.449,0.978,0.1,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_11,2026-10-19,GDN prefill 三段 mma 化：ho/wy 走 mma.sync bf16，conv1d prefill 按 T 分块（ArchProfile 选 BV / rows）,c1,ttft_p50_ms,22.373,47.338,0.473,-1.1,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_11,2026-10-19,GDN prefill 三段 mma 化：ho/wy 走 mma.sync bf16，conv1d prefill 按 T 分块（ArchProfile 选 BV / rows）,c1,tpot_p50_ms,10.733,10.295,1.043,0.1,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_11,2026-10-19,GDN prefill 三段 mma 化：ho/wy 走 mma.sync bf16，conv1d prefill 按 T 分块（ArchProfile 选 BV / rows）,c8,out_tok_per_s,652.036,672.412,0.970,0.0,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_11,2026-10-19,GDN prefill 三段 mma 化：ho/wy 走 mma.sync bf16，conv1d prefill 按 T 分块（ArchProfile 选 BV / rows）,c8,ttft_p50_ms,87.382,99.448,0.879,-1.7,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_11,2026-10-19,GDN prefill 三段 mma 化：ho/wy 走 mma.sync bf16，conv1d prefill 按 T 分块（ArchProfile 选 BV / rows）,c8,tpot_p50_ms,11.663,11.196,1.042,0.2,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_11,2026-10-19,GDN prefill 三段 mma 化：ho/wy 走 mma.sync bf16，conv1d prefill 按 T 分块（ArchProfile 选 BV / rows）,c32,out_tok_per_s,1936.545,2147.832,0.902,-0.1,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_11,2026-10-19,GDN prefill 三段 mma 化：ho/wy 走 mma.sync bf16，conv1d prefill 按 T 分块（ArchProfile 选 BV / rows）,c32,ttft_p50_ms,200.084,263.201,0.760,0.8,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_11,2026-10-19,GDN prefill 三段 mma 化：ho/wy 走 mma.sync bf16，conv1d prefill 按 T 分块（ArchProfile 选 BV / rows）,c32,tpot_p50_ms,15.031,12.909,1.164,0.1,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_11,2026-10-19,GDN prefill 三段 mma 化：ho/wy 走 mma.sync bf16，conv1d prefill 按 T 分块（ArchProfile 选 BV / rows）,c8-long,out_tok_per_s,502.292,556.907,0.902,0.3,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_11,2026-10-19,GDN prefill 三段 mma 化：ho/wy 走 mma.sync bf16，conv1d prefill 按 T 分块（ArchProfile 选 BV / rows）,c8-long,ttft_p50_ms,212.087,406.018,0.522,1.0,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_11,2026-10-19,GDN prefill 三段 mma 化：ho/wy 走 mma.sync bf16，conv1d prefill 按 T 分块（ArchProfile 选 BV / rows）,c8-long,tpot_p50_ms,14.256,11.245,1.268,0.1,lower,main,B300,vllm,dinfer,qwen35

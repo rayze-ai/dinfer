@@ -1,0 +1,1 @@
+GDN prefill 三段 mma 化：ho/wy 走 mma.sync bf16，conv1d prefill 按 T 分块（ArchProfile 选 BV / rows）
