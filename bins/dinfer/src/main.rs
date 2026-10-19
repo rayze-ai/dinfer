@@ -272,7 +272,7 @@ async fn main() -> Result<()> {
             #[cfg(feature = "qwen35")]
             {
                 let _ = (
-                    &role, kv_port, &peer, pd_wait_ms, pd_pool_bufs, &kv_transport, kv_slots, tp, dp, mtp, no_cuda_graph,
+                    &role, kv_port, &peer, pd_wait_ms, pd_pool_bufs, &kv_transport, kv_slots, tp, dp, mtp,
                     &speculative, num_speculative_tokens, ngram_min, ngram_max, kv_host_gib,
                 );
                 let opt = dinfer_qwen35::service::ServeOptions {
@@ -288,6 +288,7 @@ async fn main() -> Result<()> {
                     enable_prefix_caching: !no_prefix_caching,
                     decode_exempt_from_budget: !no_decode_exempt,
                     device,
+                    enable_cuda_graph: !no_cuda_graph,
                 };
                 let name = name.clone();
                 let svc = tokio::task::spawn_blocking(move || {

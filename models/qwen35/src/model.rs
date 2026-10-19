@@ -69,6 +69,8 @@ pub struct Qwen35Model<O: OpSet = dinfer_layers::DefaultOps> {
     final_normed: Tensor<bf16>,
     logits_bf16: Tensor<bf16>,
     decode_scratch: Tensor<f32>,
+    /// `QWEN35_TRACE`：逐层 D2H 打范数（启动时读一次；executor 在 CUDA graph 捕获期间临时关掉，捕获期不能 D2H）。
+    pub trace: bool,
 }
 
 impl<O: OpSet> Qwen35Model<O> {
@@ -254,6 +256,7 @@ impl<O: OpSet> Qwen35Model<O> {
             final_normed,
             logits_bf16,
             decode_scratch,
+            trace: std::env::var("QWEN35_TRACE").is_ok(),
         })
     }
 
@@ -342,7 +345,7 @@ impl<O: OpSet> Qwen35Model<O> {
         // 每层：input_norm → attn → (res += attn_out) + post_norm → mlp → 下一层开头 res += mlp_out
         //（最后一层循环后补一次 add）。与 Qwen3 的 `pending_mlp` 写法一致。
         let mut pending_mlp = false;
-        let trace = std::env::var("QWEN35_TRACE").is_ok();
+        let trace = self.trace;
         if trace {
             let n = trace_norm(stream, &self.hidden, &self.hidden, t, h)?;
             tracing::info!(norm = n.0, "qwen35 trace embed");

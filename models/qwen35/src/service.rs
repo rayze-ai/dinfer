@@ -37,6 +37,8 @@ pub struct ServeOptions {
     pub enable_prefix_caching: bool,
     pub decode_exempt_from_budget: bool,
     pub device: usize,
+    /// decode 步走 CUDA graph 重放（`--no-cuda-graph` 关；`NO_GRAPH` 环境变量也关）。
+    pub enable_cuda_graph: bool,
 }
 
 impl Default for ServeOptions {
@@ -54,6 +56,7 @@ impl Default for ServeOptions {
             enable_prefix_caching: true,
             decode_exempt_from_budget: true,
             device: 0,
+            enable_cuda_graph: true,
         }
     }
 }
@@ -82,13 +85,13 @@ impl Qwen35Service {
             Ok((tok, tmpl))
         });
         let defaults = read_generation_defaults(tok_dir);
-        // 里程碑 4 的 executor 是 eager 单流：前缀缓存能命中（scheduler 侧），但没有 decode CUDA graph，
-        // 也没有跨流 / host tier / PD / 投机。这些在 `bin/dinfer` 里被忽略——启动时明确打一行，不静默。
+        // 单流 executor：decode 步按 batch 桶懒捕获 CUDA graph（里程碑 6 第 2 轮）；跨流 / host tier / PD / 投机
+        // 仍没有。这些在 `bin/dinfer` 里被忽略——启动时明确打一行，不静默。
         tracing::info!(
-            cuda_graphs = 0,
+            cuda_graphs = opt.enable_cuda_graph,
             chunked_prefill = opt.enable_chunked_prefill,
             prefix_caching = opt.enable_prefix_caching,
-            "qwen35: eager single-stream executor (no CUDA graph / xstream / host tier / PD / speculative yet)"
+            "qwen35: single-stream executor (decode CUDA graph lazy per bucket; no xstream / host tier / PD / speculative yet)"
         );
         let cfg = Qwen35Config::from_json(&std::fs::read_to_string(model_dir.join("config.json"))?)?;
         let src = Arc::new(WeightSource::open_dir(model_dir)?);
@@ -122,7 +125,7 @@ impl Qwen35Service {
         )?;
         s.synchronize()?;
         let num_blocks = model.num_blocks();
-        let exec = Qwen35Executor::new(s.clone(), gemm, model, max_blocks_per_seq)?;
+        let exec = Qwen35Executor::with_graphs(s.clone(), gemm, model, max_blocks_per_seq, opt.enable_cuda_graph)?;
         let need = max_blocks_per_seq;
         anyhow::ensure!(
             need as f64 <= num_blocks as f64 * 0.9,

@@ -147,8 +147,10 @@ impl GdnLayer {
 
         let st = cfg.linear_conv_kernel_dim as usize - 1;
         let state = GdnState {
-            conv: Tensor::zeros(stream, &[num_slots, conv_dim, st])?,
-            rec: Tensor::zeros(stream, &[num_slots, hv, vd, kd])?,
+            // 多留 1 个 slot（下标 num_slots）作 CUDA graph 捕获 / padding 行的废纸篓：decode kernel 总是读写
+            // 状态，捕获与 padding 行都指到它，才不会碰活请求的 slot（见 executor `scratch_slot`）。
+            conv: Tensor::zeros(stream, &[num_slots + 1, conv_dim, st])?,
+            rec: Tensor::zeros(stream, &[num_slots + 1, hv, vd, kd])?,
         };
         let (tt, vv) = (max_tokens, hv * vd);
         Ok(Self {
@@ -260,18 +262,20 @@ impl GdnLayer {
             )?;
         }
 
-        // 3. gate / beta
-        k::gdn_gate(
-            stream,
-            &self.a_buf.data,
-            &self.b_buf.data,
-            &self.a_log.data,
-            &self.dt_bias.data,
-            &mut self.g_buf.data,
-            &mut self.beta_buf.data,
-            t,
-            hv,
-        )?;
+        // 3. gate / beta（decode 走 recurrent kernel 内 fused-gate 现算，省一个 launch；prefill 预算好给 chunk 用）
+        if !single {
+            k::gdn_gate(
+                stream,
+                &self.a_buf.data,
+                &self.b_buf.data,
+                &self.a_log.data,
+                &self.dt_bias.data,
+                &mut self.g_buf.data,
+                &mut self.beta_buf.data,
+                t,
+                hv,
+            )?;
+        }
 
         // 4. delta rule 核心（q/k 的 l2norm 与 q 的 scale 在 kernel 内）：
         //    prefill 走 chunk 三段（prep → wy → ho），decode / 回退走逐 token 递归。两者数值等价（gdn_parity chunk case）。
@@ -301,13 +305,18 @@ impl GdnLayer {
                 vd,
             )?;
         } else {
+            let (g, beta, a_raw, b_raw) = if single {
+                (None, None, Some(&self.a_buf.data), Some(&self.b_buf.data))
+            } else {
+                (Some(&self.g_buf.data), Some(&self.beta_buf.data), None, None)
+            };
             k::gdn_recurrent(
                 stream,
                 &self.conv_buf.data,
-                Some(&self.g_buf.data),
-                Some(&self.beta_buf.data),
-                None,
-                None,
+                g,
+                beta,
+                a_raw,
+                b_raw,
                 &self.a_log.data,
                 &self.dt_bias.data,
                 &mut self.o_buf.data,

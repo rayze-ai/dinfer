@@ -216,7 +216,14 @@ fn run_engine(e: Env, prompts: &[Vec<i32>], gen: u32, budget: u32) -> Vec<Vec<u3
         steps += 1;
         assert!(steps < 10 * gen as usize + 20, "runaway");
     }
-    eprintln!("qwen35: engine {steps} steps for {} prompts × {gen}", prompts.len());
+    let (g, e) = (runner.exec.graph_steps, runner.exec.eager_steps);
+    eprintln!("qwen35: engine {steps} steps for {} prompts × {gen}; graph steps {g}, eager steps {e}", prompts.len());
+    // decode 步必须真走了图重放（NO_GRAPH 时全 eager）；两条路径 golden 都要过
+    if std::env::var("NO_GRAPH").is_ok() {
+        assert_eq!(g, 0, "NO_GRAPH set but graph steps > 0");
+    } else {
+        assert!(g > 0, "no decode step went through the cuda graph");
+    }
     out
 }
 
