@@ -46,6 +46,7 @@ rm -f target/.rustc_info.json                     # cargo 报 "failed to run rus
 
 <!-- 不能动什么、必须兼容什么、安全/合规约束 -->
 - 文档用中文，命令与代码原样。
+- **多卡型实现（用户 2026-10-19）**：一套接口多套实现，按 arch **分文件**（`*_sm8x.cu` / `*_sm100.cu`），Rust 侧按 `ArchProfile` 选；**kernel 体内禁止 `#if __CUDA_ARCH__`**，共享头的分叉只在 `arch.cuh` 用有名字的能力常量（`kHasTma`），不写裸数字；性能改动必须过两卡门禁（`scripts/verify/bench_gate.sh`，任一卡退化 > 3% 不合入）。规格 `docs/loops/arch-profile.md`。
 - `crates/` 只放模型无关代码：模型名 / token id / 模板变量名 / 模型路径出现在 `crates/` 即为错误，走 `ChatBackend` 钩子由 `models/<m>` 提供；模型相关测试放 `models/<m>/tests/`（用户 2026-10-19）。
 - 代码 / 脚本 / 环境变量 / C ABI 符号不带项目名前缀（`DINFER_*`、`dinfer_*`），项目可能改名；新代码前 `grep -rn DINFER crates scripts` 自查。
 - 所有跨会话要记住的事写进文件并进 git，不要只留在对话里。
