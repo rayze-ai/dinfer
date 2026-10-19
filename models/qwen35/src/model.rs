@@ -136,7 +136,7 @@ impl<O: OpSet> Qwen35Model<O> {
             cfg.num_key_value_heads as usize,
             cfg.head_dim as usize,
         );
-        let embed = Embedding::load(stream, src, table.name("embed_tokens.weight")?)?;
+        let embed = table.embedding(stream, src, "embed_tokens.weight")?;
         let n = cfg.num_hidden_layers as usize;
         ensure!(cfg.layer_types.len() == n, "layer_types {} != num_hidden_layers {n}", cfg.layer_types.len());
         let mut layers = Vec::with_capacity(n);
@@ -147,7 +147,7 @@ impl<O: OpSet> Qwen35Model<O> {
             );
         }
         tracing::info!(layers = n, ms = t_load0.elapsed().as_millis() as u64, "load timing: decoder layers");
-        let norm = RmsNorm::load(stream, src, table.name("norm.weight")?, cfg.rms_norm_eps)?;
+        let norm = table.rmsnorm(stream, src, "norm.weight", cfg.rms_norm_eps)?;
         let lm_head = Linear::new(table.load_bf16(stream, src, "lm_head.weight")?, None)?;
         ensure!(
             lm_head.out_features == cfg.vocab_size as usize && lm_head.in_features == hidden,

@@ -90,10 +90,10 @@ impl DecoderLayer {
             LayerType::LinearAttention => Attn::Gdn(GdnLayer::load(stream, src, t, l, cfg, max_tokens, num_slots)?),
         };
         Ok(Self {
-            input_norm: RmsNorm::load(stream, src, &format!("{p}.input_layernorm"), cfg.rms_norm_eps)?,
+            input_norm: t.rmsnorm(stream, src, &format!("{p}.input_layernorm.weight"), cfg.rms_norm_eps)?,
             attn,
-            post_norm: RmsNorm::load(stream, src, &format!("{p}.post_attention_layernorm"), cfg.rms_norm_eps)?,
-            mlp: Mlp::load_tp(stream, src, &format!("{p}.mlp"), max_tokens, rank, world)?,
+            post_norm: t.rmsnorm(stream, src, &format!("{p}.post_attention_layernorm.weight"), cfg.rms_norm_eps)?,
+            mlp: Mlp::load_tp(stream, src, &t.prefix_of(&format!("{p}.mlp")), max_tokens, rank, world)?,
         })
     }
 

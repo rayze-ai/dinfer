@@ -138,6 +138,9 @@ impl Qwen35Executor {
         ensure!(plan.max_blocks <= self.buf.max_blocks, "block_table {} > buffer {}", plan.max_blocks, self.buf.max_blocks);
         ensure!(!plan.sample.any_mask, "qwen35 executor: guided decoding 未接（里程碑 4 不做）");
 
+        if std::env::var("QWEN35_TRACE").is_ok() {
+            tracing::info!(?plan.mode, ?plan.req_ids, ?plan.num_tokens, ?plan.cu_seqlens, ?plan.positions, ?plan.seq_lens, ?plan.logits_rows, "qwen35 plan");
+        }
         // GDN slot：分配 + 判定"从头开始"的请求
         let req_ids: Vec<u64> = plan.req_ids.clone();
         let fresh_slots = self.slots.begin_step(&req_ids)?;

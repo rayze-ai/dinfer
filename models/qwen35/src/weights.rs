@@ -117,6 +117,32 @@ impl Table {
         src.load_bf16_shard(stream, &name, dim, rank, world).with_context(|| format!("load {name}"))
     }
 
+    /// 给 `Mlp::load_tp` 这类"按前缀拼 `.gate_proj.weight`"的装载器用：返回文件里对应的前缀
+    /// （如 `layers.0.mlp` → `model.language_model.layers.0.mlp`）。表里没有就退回 key 本身。
+    pub fn prefix_of(&self, key: &str) -> String {
+        match self.names.get(&format!("{key}.down_proj.weight")) {
+            Some(n) => n.trim_end_matches(".down_proj.weight").to_string(),
+            None => key.to_string(),
+        }
+    }
+
+    /// embedding 表（`dinfer_layers::Embedding::load` 签名要的是不带 `.weight` 的前缀）。
+    pub fn embedding(&self, stream: &Stream, src: &WeightSource, key: &str) -> Result<dinfer_layers::Embedding> {
+        let name = self.name(key)?;
+        let table = src.load_bf16(stream, name).with_context(|| format!("load {name}"))?;
+        Ok(dinfer_layers::Embedding {
+            vocab: table.shape[0],
+            hidden: table.shape[1],
+            table,
+        })
+    }
+
+    /// RMSNorm（同 `RmsNorm::load` 的前缀约定）。
+    pub fn rmsnorm(&self, stream: &Stream, src: &WeightSource, key: &str, eps: f32) -> Result<dinfer_layers::RmsNorm> {
+        let w = self.load_bf16(stream, src, key)?;
+        Ok(dinfer_layers::RmsNorm { hidden: w.numel(), w, eps })
+    }
+
     /// f32 张量（`A_log` / `dt_bias`，真权重是 f32）。
     pub fn load_f32(&self, stream: &Stream, src: &WeightSource, key: &str) -> Result<Tensor<f32>> {
         let name = self.name(key)?.to_string();
