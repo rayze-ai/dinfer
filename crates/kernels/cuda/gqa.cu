@@ -872,6 +872,20 @@ extern "C" int gqa_decode_bf16(const void* q, const void* cache, const int32_t* 
     }
     dim3 grid1((unsigned)num_reqs, (unsigned)kv_heads, (unsigned)splits);
     bf16* direct = splits == 1 ? static_cast<bf16*>(out) : nullptr;
+    // B4 第 4 轮：GQA_DECODE_V3=1 走 gqa_decode_v3.cu（对拍 / bench 开关，收口后由 ArchProfile 选）
+    static int use_v3 = -1;
+    if (use_v3 < 0) { const char* e = getenv("GQA_DECODE_V3"); use_v3 = (e && atoi(e) == 1) ? 1 : 0; }
+    if (use_v3 && (group == 1 || group == 2 || group == 4)) {
+      int rc = gqa_decode_v3_bf16(q, cache, block_table, seq_lens, cu_seqlens_q, scratch, direct, num_reqs, heads, kv_heads,
+                                  block_size, max_blocks, scale, q_stride, splits, keys_per_split, stream);
+      if (rc) return rc;
+      if (splits > 1) {
+        dim3 grid2((unsigned)num_reqs, (unsigned)heads);
+        gqa_decode_merge_v2_kernel<<<grid2, PF_D, 0, stream>>>(scratch, cu_seqlens_q, seq_lens, static_cast<bf16*>(out),
+                                                               (int)heads, splits, keys_per_split);
+      }
+      return last_err();
+    }
     gqa_decode_v2_kernel<<<grid1, D2_WARPS * 32, 0, stream>>>(
         static_cast<const bf16*>(q), static_cast<const bf16*>(cache), block_table, seq_lens, cu_seqlens_q, scratch, direct,
         (int)heads, (int)kv_heads, (int)block_size, (int)max_blocks, scale, (int)q_stride, splits, keys_per_split);

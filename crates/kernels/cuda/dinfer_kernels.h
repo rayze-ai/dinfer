@@ -112,6 +112,11 @@ int gqa_paged_bf16(const void* q, const void* cache, const int32_t* block_table,
 int gqa_decode_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens, void* out,
                     float* scratch, int64_t num_reqs, int64_t heads, int64_t kv_heads, int64_t head_dim,
                     int64_t block_size, int64_t max_blocks, float scale, int64_t q_stride, const int32_t* cu_seqlens_q, cudaStream_t stream);
+// decode v3（gqa_decode_v3.cu）：同 v2 的 partial 布局；splits==1 时 out_direct 非空直接写输出。GQA_DECODE_V3=1 时由 gqa_decode_bf16 转发。
+int gqa_decode_v3_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens,
+                       const int32_t* cu_seqlens_q, float* scratch, void* out_direct, int64_t num_reqs, int64_t heads,
+                       int64_t kv_heads, int64_t block_size, int64_t max_blocks, float scale, int64_t q_stride,
+                       int64_t splits, int64_t keys_per_split, cudaStream_t stream);
 // Qwen3 QKV 后处理融合：q/k per-head RMSNorm + neox RoPE（原地）+ K/V 写 paged cache。D 必须 == 128。
 int qkv_post_bf16(void* qkv, const void* wq, const void* wk, const int32_t* positions, const float* cos_sin, void* cache,
                   const int64_t* slot_mapping, int64_t tokens, int64_t heads, int64_t kv_heads, int64_t head_dim, float eps,
