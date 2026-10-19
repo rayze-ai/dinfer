@@ -524,6 +524,20 @@ pub struct DeviceBlockRef { pub layer: u8, pub block: BlockId, pub ptr: u64, pub
 
 **PD bench 口径（用户 2026-10-18 确认）**：同机 Qwen3-0.6B 下 PD 经 proxy 的 TTFT 高于单机是预期内（prefill 本身 15 ms，任何中转都比它贵），不再纠结、不作为门槛；PD 线以功能正确 + 故障回退 + 跨卡 TPOT 接近单机（4090：3.75 vs 3.53）为收口标准。真正的收益评估等生产级模型 + 跨机。
 
+
+### 待办（用户 2026-10-20 要求记录）：executor 公共件抽取——"调度相关的东西不应该每个模型实现一遍"
+
+现状：runner / engine 侧的异步流水（`ModelExecutor::{supports_async, begin, finish, stash_sync_result}`）与 pinned 槽原语（`PinnedSlot`）已是公共的，但把它们接起来的胶水在 `models/qwen3/src/executor.rs` 内联，qwen35 / kimik3 要么复制要么没接（qwen35 因此走同步路径，每步 GPU 空闲 0.6–0.9 ms，是 c1 / c8 剩余差距的全部）。同类复制还有三处。要抽到 `crates/core`（或 `crates/layers`）：
+
+| 公共件 | 现在在哪 | 依赖 | 接口 |
+|---|---|---|---|
+| `AsyncResultRing` | qwen3 executor（`async_slots` / `async_inflight`） | 流、已选 token 设备缓冲、行数 | `enqueue(stream, chosen, n) -> Token`、`wait(Token) -> Vec<i32>`，2 槽 + 事件 |
+| `DecodeGraphs<F>` | qwen3 / qwen35 executor 各一份（`DecodeGraph` / `graph_buckets` / `capture_bucket` / `ensure_graph` / `capture_plan`） | `FnMut(nb) -> Result<()>` 跑 forward+sample | `ensure(n)` / `launch(n)` / `capture_all()`，桶表来自 `graph_buckets(max_rows)` |
+| `StateSlotTable` | qwen35 `gdn.rs::SlotTable`，kimik3 复制了一份 | 请求 id | `begin_step(req_ids) -> fresh` / `indices` / `release(finished)`（LRU 兜底） |
+| `PlanUpload` | 三个 executor 各一份 `upload_plan`（pad 到桶 + 固定缓冲） | `BatchPlan`、`UploadArena` | `upload(plan, pad_to) -> (n, t, rows)` |
+
+顺序：先抽 + qwen3 接回（4090 `bench_compare.sh` 门禁不退化），再 qwen35 接 `AsyncResultRing`（= Qwen3.5 性能 loop 第 8 轮，预期 c1 / c8 追平 vLLM）、kimik3 接 `StateSlotTable` / `DecodeGraphs`。
+
 ## 11. 采用 / 改进台账（对 vLLM）
 
 目标是性能超越，不是重写。vLLM 做得对的直接用，能改进的改进；每项记一行，便于回看哪些是"借来的"、哪些是我们的。

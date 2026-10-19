@@ -36,6 +36,8 @@
 4. GDN 状态按块缓存（vLLM `mamba_cache_mode=align`）重开 prefix cache → c8 / c8-long TTFT 回命中档。
 5. B4 的 sm100 小算子（rmsnorm / silu 向量化）已共享；再看 GDN decode kernel 的带宽利用。
 
+6. **第 8 轮（用户 2026-10-20 定）：executor 公共件抽取 + async scheduling**：把 qwen3 内联的异步 D2H 两槽胶水、CUDA graph 桶捕获、状态槽表、plan 上传抽到 `crates/core`（规格见 `docs/design.md` "待办：executor 公共件抽取"），qwen3 接回不退化（4090 门禁），qwen35 接 `AsyncResultRing` → 每步 GPU 空闲 0.6–0.9 ms 消失，预期 c1 / c8 ≥ 1.0×。
+
 ## 记录
 
 | 轮 | 改动 | 结果 |
