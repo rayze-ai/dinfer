@@ -224,7 +224,8 @@ int gdn_recurrent(const void* mixed_qkv, const float* g, const float* beta, cons
                   const void* b_raw, const float* a_log, const float* dt_bias, void* out,
                   void* state, const int* cu_seqlens, const int* state_indices, int64_t num_seqs,
                   int64_t H, int64_t HV, int64_t K, int64_t V, int64_t group, float scale,
-                  int64_t state_stride_tok, int fused_gate, int64_t vsplit, cudaStream_t stream);
+                  int64_t state_stride_tok, int fused_gate, int64_t vsplit, int64_t decode_bv,
+                  int decode_variant, int64_t decode_grid, cudaStream_t stream);
 // 输出门 + RMSNorm：y[t,hv,d] = rmsnorm(o[t,hv,:], w, eps) · act(z[t,hv,d])，w 为 [head_dim]。
 int gdn_gated_rmsnorm(const void* x, const void* w, const void* z, void* out, int64_t rows,
                       int64_t head_dim, float eps, int act);

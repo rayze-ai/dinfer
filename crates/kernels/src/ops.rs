@@ -2884,7 +2884,7 @@ pub fn gdn_recurrent(
 }
 
 /// `gdn_recurrent` 的显式版：`decode_bv = Some(0)` 强制老 kernel，`Some(n)` 强制寄存器版 BV=n，`None` 自动
-///（对拍 / 计时用，模型侧用 `gdn_recurrent`）。
+/// （变体 / 持久 grid 走 `ArchProfile` 默认 + 环境变量）。
 #[allow(clippy::too_many_arguments)]
 pub fn gdn_recurrent_with(
     stream: &Stream,
@@ -2907,6 +2907,39 @@ pub fn gdn_recurrent_with(
     v_dim: usize,
     scale: f32,
     decode_bv: Option<usize>,
+) -> Result<()> {
+    gdn_recurrent_variant(
+        stream, mixed_qkv, g, beta, a_raw, b_raw, a_log, dt_bias, out, state, cu_seqlens, state_indices, tokens,
+        num_seqs, heads_k, heads_v, k_dim, v_dim, scale, decode_bv, None, None,
+    )
+}
+
+/// 最显式的版本：`decode_variant`（`None` = `ArchProfile::gdn_decode_variant` / `GDN_DECODE_VARIANT=`），
+/// `decode_grid`（pipe 变体的持久 block 数，`None` = occupancy × SM / `GDN_DECODE_GRID=`）。对拍 / 计时用。
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_recurrent_variant(
+    stream: &Stream,
+    mixed_qkv: &CudaSlice<bf16>,
+    g: Option<&CudaSlice<f32>>,
+    beta: Option<&CudaSlice<f32>>,
+    a_raw: Option<&CudaSlice<bf16>>,
+    b_raw: Option<&CudaSlice<bf16>>,
+    a_log: &CudaSlice<f32>,
+    dt_bias: &CudaSlice<f32>,
+    out: &mut CudaSlice<bf16>,
+    state: &mut CudaSlice<f32>,
+    cu_seqlens: &CudaSlice<i32>,
+    state_indices: Option<&CudaSlice<i32>>,
+    num_seqs: usize,
+    tokens: usize,
+    heads_k: usize,
+    heads_v: usize,
+    k_dim: usize,
+    v_dim: usize,
+    scale: f32,
+    decode_bv: Option<usize>,
+    decode_variant: Option<crate::arch::GdnDecodeVariant>,
+    decode_grid: Option<usize>,
 ) -> Result<()> {
     ensure!(heads_k > 0 && heads_v % heads_k == 0, "gdn_recurrent: heads_v {heads_v} 不能被 heads_k {heads_k} 整除");
     ensure!(cu_seqlens.len() >= num_seqs + 1, "gdn_recurrent: cu_seqlens");
@@ -2940,6 +2973,11 @@ pub fn gdn_recurrent_with(
         ensure!(beta.is_some(), "gdn_recurrent: 非 fused 路径需要 beta");
         ensure!(g.unwrap().len() >= tokens * heads_v && beta.unwrap().len() >= tokens * heads_v, "gdn_recurrent: g/beta");
     }
+    let (variant, grid) = if decode_bv > 0 {
+        (decode_variant.unwrap_or_else(|| gdn_decode_variant(stream)), decode_grid.unwrap_or_else(gdn_decode_grid))
+    } else {
+        (crate::arch::GdnDecodeVariant::Base, 0)
+    };
     let null_bf16 = std::ptr::null::<c_void>();
     let pg = g.map_or(std::ptr::null(), |s| stream.ptr(s) as *const f32);
     let pb = beta.map_or(std::ptr::null(), |s| stream.ptr(s) as *const f32);
@@ -2972,6 +3010,8 @@ pub fn gdn_recurrent_with(
                 i32::from(fused),
                 vsplit as i64,
                 decode_bv as i64,
+                variant.code(),
+                grid as i64,
                 stream.raw() as ffi::cudaStream_t,
             )
         },
@@ -3003,6 +3043,38 @@ fn gdn_decode_bv(stream: &Stream, base_blocks: usize, k_dim: usize, v_dim: usize
     }
     let sm = *SM.get_or_init(|| stream.device().sm_count().unwrap_or(1));
     crate::arch::ArchProfile::gdn_decode_bv(sm, base_blocks, k_dim, v_dim)
+}
+
+/// decode 寄存器版 kernel 的变体：默认 `ArchProfile::gdn_decode_variant(arch)`；`GDN_DECODE_VARIANT=base|tr|pipe|pipe_base` 覆盖。
+fn gdn_decode_variant(stream: &Stream) -> crate::arch::GdnDecodeVariant {
+    use crate::arch::{ArchProfile, GdnDecodeVariant};
+    use std::sync::OnceLock;
+    static V: OnceLock<GdnDecodeVariant> = OnceLock::new();
+    *V.get_or_init(|| {
+        if let Ok(s) = std::env::var("GDN_DECODE_VARIANT") {
+            if let Some(v) = GdnDecodeVariant::parse(&s) {
+                tracing::info!(variant = s, "gdn decode 变体由环境变量覆盖");
+                return v;
+            }
+            tracing::warn!(variant = s, "GDN_DECODE_VARIANT 不识别，用 ArchProfile 默认");
+        }
+        let cc = stream.device().compute_capability().unwrap_or((8, 0));
+        let sm = stream.device().sm_count().unwrap_or(1);
+        ArchProfile::for_cc(cc, sm).gdn_decode_variant()
+    })
+}
+
+/// pipe 变体的持久 block 数：0 = kernel 侧按 occupancy × SM 数算；`GDN_DECODE_GRID=<n>` 覆盖（B300 对比用）。
+fn gdn_decode_grid() -> usize {
+    use std::sync::OnceLock;
+    static G: OnceLock<usize> = OnceLock::new();
+    *G.get_or_init(|| {
+        let g = std::env::var("GDN_DECODE_GRID").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+        if g > 0 {
+            tracing::info!(grid = g, "gdn decode pipe grid 由环境变量覆盖");
+        }
+        g
+    })
 }
 
 /// chunk prefill `ho` 的 V 分片 BV：默认 `ArchProfile::gdn_chunk_ho_bv`；`GDN_CHUNK_HO=legacy` 回老 fp32 kernel（返回 0）；

@@ -16,6 +16,85 @@ pub enum Arch {
     Sm100,
 }
 
+/// `gdn_recurrent` decode 寄存器版 kernel 的变体（`gdn.cu` 模板开关；C ABI 编码见 `code()`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GdnDecodeVariant {
+    /// 第 4 轮 kernel：每行两次 warp_sum（p、o），两遍 FMA。
+    Base,
+    /// 转置归约：ROWS 行的 {S·k, S·q} 一次多值 warp 归约，一遍 FMA。
+    Tr,
+    /// 持久 block + cp.async 预取下一 tile 的状态（含 Tr）。
+    Pipe,
+    /// 持久 block + cp.async，但用 Base 的归约（隔离流水本身的收益）。
+    PipeBase,
+}
+
+impl GdnDecodeVariant {
+    pub fn code(self) -> i32 {
+        match self {
+            Self::Base => 0,
+            Self::Tr => 1,
+            Self::Pipe => 2,
+            Self::PipeBase => 3,
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "base" => Some(Self::Base),
+            "tr" => Some(Self::Tr),
+            "pipe" => Some(Self::Pipe),
+            "pipe_base" | "pipebase" => Some(Self::PipeBase),
+            _ => None,
+        }
+    }
+    pub const ALL: [Self; 4] = [Self::Base, Self::Tr, Self::Pipe, Self::PipeBase];
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Base => "base",
+            Self::Tr => "tr",
+            Self::Pipe => "pipe",
+            Self::PipeBase => "pipe_base",
+        }
+    }
+}
+
+/// `rmsnorm` / `fused_add_rmsnorm` 的线程布局（`norm.cu` 的 `layout` 参数）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RmsnormLayout {
+    /// 一 block（256 线程 × VPT 向量）一行（B4 第 1 轮版）。
+    Block256,
+    /// 一 warp 一行、4 warp/block：block 数 = ceil(行/4)，每 lane 顺序持 hidden/256 个 16 B 向量。
+    WarpPerRow,
+    /// 一 block 1024 线程一行：hidden ≤ 8192 时每线程 ≤ 1 向量，归约两级。
+    Block1024,
+}
+
+impl RmsnormLayout {
+    pub fn code(self) -> i32 {
+        match self {
+            Self::Block256 => 0,
+            Self::WarpPerRow => 1,
+            Self::Block1024 => 2,
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "block256" | "block" => Some(Self::Block256),
+            "warp" | "warp_per_row" => Some(Self::WarpPerRow),
+            "block1024" | "big" => Some(Self::Block1024),
+            _ => None,
+        }
+    }
+    pub const ALL: [Self; 3] = [Self::Block256, Self::WarpPerRow, Self::Block1024];
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Block256 => "block256",
+            Self::WarpPerRow => "warp",
+            Self::Block1024 => "block1024",
+        }
+    }
+}
+
 /// decode 小 M GEMM 的自调优参数。全部是"怎么搜"的数值，不是某个 kernel 的最终配置。
 #[derive(Clone, Debug)]
 pub struct GemmTuneParams {
@@ -70,6 +149,27 @@ impl ArchProfile {
             split_workspace_max_bytes: 64 << 20,
         };
         Self { arch, cc, sm_count, cublaslt_workspace_bytes, gemm_tune }
+    }
+
+    /// `gdn_recurrent` decode 寄存器版 kernel 的默认变体（第 7 轮）。3090 实测见 `docs/loops/qwen35-perf.md` 第 7 行；
+    /// Sm100 的默认待 B300 实测后定（先与 Sm8x 一致，`GDN_DECODE_VARIANT=` 覆盖对比）。
+    pub fn gdn_decode_variant(&self) -> GdnDecodeVariant {
+        match self.arch {
+            Arch::Sm8x | Arch::Sm90 | Arch::Sm100 => GdnDecodeVariant::Tr,
+        }
+    }
+
+    /// `rmsnorm` / `fused_add_rmsnorm` 的线程布局：按 (行数, hidden) 选。规则由 3090 `rmsnorm_bench` 定
+    /// （`docs/loops/qwen35-perf.md` 第 7 行），B300 待实测后按 arch 分叉。
+    /// hidden > 8192 或非 8 的倍数时 kernel 侧回标量版，这里的返回值无效。
+    pub fn rmsnorm_layout(&self, rows: usize, hidden: usize) -> RmsnormLayout {
+        const RMSNORM_WARP_MAX_HIDDEN: usize = 4096;
+        let _ = rows;
+        if hidden <= RMSNORM_WARP_MAX_HIDDEN {
+            RmsnormLayout::Block256
+        } else {
+            RmsnormLayout::Block256
+        }
     }
 
     /// `gdn_recurrent` decode 的 V 维切分：(seq, v 头) 共 `base_blocks` 个 block，不足 SM 数时按 V 切 2/4 份补齐；

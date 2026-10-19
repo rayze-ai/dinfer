@@ -7,6 +7,7 @@
 //! f32 递归状态 2e-3（状态是累乘结果，比单步输出敏感）。
 #![cfg(feature = "ref-tests")]
 
+use dinfer_kernels::arch::GdnDecodeVariant;
 use dinfer_kernels::{bf16, ops, ops::GdnAct, Device, Stream};
 use std::path::PathBuf;
 
@@ -692,18 +693,26 @@ fn gdn_recurrent_decode_b32_qwen_shape() {
     let scale = (k as f32).powf(-0.5);
     let init = proc_state(b, hv, v, k);
 
-    // 新 kernel 的三个 BV 档 + 老 kernel（decode_bv=0），每个都对参考；再拿老 vs 新全量状态逐元素对。
+    // 新 kernel 的三个 BV 档 × 四个变体（第 7 轮：base / tr / pipe / pipe_base）+ 老 kernel（decode_bv=0），
+    // 每个都对参考；再拿老 vs 新全量状态逐元素对（tr 变体改了求和结合顺序，容差 1e-5 相对仍应过）。
     let mut legacy_state: Option<Vec<f32>> = None;
-    for bv in [0usize, 16, 32, 64] {
+    let mut combos: Vec<(usize, Option<GdnDecodeVariant>)> = vec![(0, None)];
+    for bv in [16usize, 32, 64] {
+        for var in GdnDecodeVariant::ALL {
+            combos.push((bv, Some(var)));
+        }
+    }
+    for (bv, var) in combos {
         let mut dstate = st.htod_copy(init.clone()).unwrap();
         let mut dout = st.alloc_uninit::<bf16>(b * hv * v).unwrap();
-        ops::gdn_recurrent_with(
+        ops::gdn_recurrent_variant(
             &st, &dm, None, None, Some(&da), Some(&db), &dal, &ddb, &mut dout, &mut dstate, &dcu, Some(&dsi), b, b, h,
-            hv, k, v, scale, Some(bv),
+            hv, k, v, scale, Some(bv), var, None,
         )
         .unwrap();
         st.synchronize().unwrap();
-        let tag = format!("recurrent_qwen_decode_b32/bv{bv}");
+        let vname = var.map_or("legacy", |v| v.name());
+        let tag = format!("recurrent_qwen_decode_b32/bv{bv}_{vname}");
         assert_close(&format!("{tag}/out"), &st.dtoh_sync_copy(&dout).unwrap(), &want, 1e-2, 0.999);
         let got_st: Vec<f32> = st.dtoh_sync_copy(&dstate).unwrap();
         let (sk, sv) = state_sums(&got_st, b, hv, v, k);
@@ -716,8 +725,8 @@ fn gdn_recurrent_decode_b32_qwen_shape() {
     }
 }
 
-/// decode kernel 计时：老 shared 版 vs 寄存器版（自动 BV 与三档），B ∈ {1, 8, 32, 64}，27B 形状，fused gate。
-/// 数字写进 `docs/loops/qwen35-perf.md` 第 4 行；只断言 B=32 新版不慢于老版。
+/// decode kernel 计时：老 shared 版 vs 寄存器版四个变体（自动 BV）+ tr 的三档 BV，B ∈ {1, 8, 32, 64}，27B 形状，fused gate。
+/// 数字写进 `docs/loops/qwen35-perf.md` 第 4 / 7 行；只断言 B=32 默认变体不慢于老版。
 #[test]
 #[ignore]
 fn gdn_decode_bench() {
@@ -731,6 +740,14 @@ fn gdn_decode_bench() {
     let ddb = st.htod_copy(vec![0.1f32; hv]).unwrap();
     let iters = 20;
     let mut worst_ratio = 0f64;
+    let mut cases: Vec<(String, Option<usize>, Option<GdnDecodeVariant>)> = vec![("legacy".into(), Some(0), None)];
+    for var in GdnDecodeVariant::ALL {
+        cases.push((var.name().into(), None, Some(var)));
+    }
+    for bv in [16usize, 32] {
+        cases.push((format!("tr/bv{bv}"), Some(bv), Some(GdnDecodeVariant::Tr)));
+        cases.push((format!("pipe/bv{bv}"), Some(bv), Some(GdnDecodeVariant::Pipe)));
+    }
     for b in [1usize, 8, 32, 64] {
         let mixed: Vec<f32> = (0..b * row).map(|i| (((i * 7919) % 1000) as f32 / 1000.0 - 0.5) * 0.5).collect();
         let a: Vec<f32> = (0..b * hv).map(|i| ((i % 23) as f32 - 11.0) / 4.0).collect();
@@ -744,11 +761,11 @@ fn gdn_decode_bench() {
         let mut dout = st.alloc_uninit::<bf16>(b * hv * v).unwrap();
         let mut line = format!("  B={b:>2}:");
         let mut us_legacy = 0f64;
-        for (name, bv) in [("legacy", Some(0usize)), ("auto", None), ("bv16", Some(16)), ("bv32", Some(32)), ("bv64", Some(64))] {
+        for (name, bv, var) in &cases {
             let once = |st: &Stream, dstate: &mut _, dout: &mut _| {
-                ops::gdn_recurrent_with(
+                ops::gdn_recurrent_variant(
                     st, &dm, None, None, Some(&da), Some(&db), &dal, &ddb, dout, dstate, &dcu, None, b, b, h, hv, k, v,
-                    scale, bv,
+                    scale, *bv, *var, None,
                 )
                 .unwrap();
             };
@@ -762,12 +779,12 @@ fn gdn_decode_bench() {
             let us = t0.elapsed().as_secs_f64() * 1e6 / iters as f64;
             if name == "legacy" {
                 us_legacy = us;
-            } else if name == "auto" && b == 32 {
+            } else if name == "tr" && b == 32 {
                 worst_ratio = us / us_legacy;
             }
-            line.push_str(&format!(" {name} {us:7.1} µs"));
+            line.push_str(&format!(" {name} {us:6.1}"));
         }
-        println!("{line}");
+        println!("{line}  (µs)");
     }
     assert!(worst_ratio <= 1.0, "B=32 新 decode kernel 慢于老版（{worst_ratio:.2}x）");
 }
