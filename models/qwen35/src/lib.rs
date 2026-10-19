@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 pub mod config;
 pub mod full_attn;
+pub mod executor;
 pub mod layer;
 pub mod model;
 pub mod gdn;
