@@ -1,6 +1,6 @@
 # Loop: Qwen3.5 全注意力算子（D=256 / GROUP 6 / partial RoPE / 输出门）
 
-> 状态：进行中（2026-10-19，里程碑 3）。方法论 `docs/model-onboarding.md` §3。前置：`docs/loops/qwen35-gdn.md`（GDN 已过三卡）。
+> 状态：**里程碑 3 通过**（2026-10-19，3090 sm86 + 4090 GPU 7 sm89；3090 89/89 v3 开/关，4090 65/65 + v3 关 17/17）。方法论 `docs/model-onboarding.md` §3。前置：`docs/loops/qwen35-gdn.md`（GDN 已过三卡）。
 
 ## 环境
 
@@ -62,7 +62,7 @@
 | 3 | 2026-10-19 | 定位间歇 NaN：同进程先跑 D=256 后，D=128 混批 `h4_hk2` 用例出随机 NaN（2–16 个元素，位置每次不同） | 根因：v3 对越界 key **不发** cp.async，smem 残留 inf/NaN 与 `p=0` 相乘得 NaN。改为 `cp16z` 零填充后 5 轮连跑全 0 NaN。**这是既有隐患**，D=256 实例化后 smem 布局变化才稳定暴露 |
 | 4 | 2026-10-19 | 3090 全量 `ops_parity.sh`（v3 开 / 关各一次） | **均 89/89 PASS**（ref_tests 24 + 新老 dump 65） |
 | 5 | 2026-10-19 | 4090 GPU 7：`CUDA_VISIBLE_DEVICES=7` 直接 dump（21/21），`.npy` 拉回本机 torch 比对 | **65/65 行 PASS**（含 D=256 × GROUP 6 全部新 case） |
-| 6 | 2026-10-19 | 4090 GPU 7：`GQA_DECODE_V3=0` 只跑 gqa 组 | 见下 |
+| 6 | 2026-10-19 | 4090 GPU 7：`GQA_DECODE_V3=0` 只跑 gqa 组 | **17/17 PASS**（D=256 走 v3 不受影响，D=128 回退 v2 正确） |
 
 ## 环境备注（踩过的坑）
 
