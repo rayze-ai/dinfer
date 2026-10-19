@@ -6,11 +6,15 @@
 set -euo pipefail
 JUMP_HOST="${JUMP_HOST:-111.48.159.177}"
 JUMP_PORT="${JUMP_PORT:-2222}"
-CM="$HOME/.ssh/cm_b300"
-REMOTE_ROOT="${REMOTE_ROOT:-/data/yaochen/infer}"   # 用户约束（2026-10-19）：远程只能用这个目录
+# 多台 B300：B300_TAG=50 → 凭据 ~/.ssh/jms_b300_50_{user,pass}、socket cm_b300_50（2026-10-19 第二台 ppio-5 172.16.3.50）
+TAG="${B300_TAG:+_$B300_TAG}"
+CM="$HOME/.ssh/cm_b300$TAG"
+# 用户约束（2026-10-19）：远程只能用 /data/yaochen/infer。B300-50（B300_TAG=50）上 /data 对 jumpserver 不可写（2026-10-19 核实），
+# 临时用 $HOME/infer（/ 分区 1.4 T 空闲）；用户给 /data 权限后把 REMOTE_ROOT 改回去并 mv。
+if [ "${B300_TAG:-}" = "50" ]; then REMOTE_ROOT="${REMOTE_ROOT:-/home/jumpserver/infer}"; else REMOTE_ROOT="${REMOTE_ROOT:-/data/yaochen/infer}"; fi
 REMOTE_DIR="${REMOTE_DIR:-$REMOTE_ROOT/dinfer}"
 cd "$(dirname "$0")/../.."
-USER_AT="$(tr -d '[:space:]' < "$HOME/.ssh/jms_b300_user")@$JUMP_HOST"
+USER_AT="$(tr -d '[:space:]' < "$HOME/.ssh/jms_b300${TAG}_user")@$JUMP_HOST"
 BASE=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=25 -p "$JUMP_PORT")
 MUX=(-o ControlPath="$CM")
 
@@ -18,12 +22,12 @@ alive() { ssh "${MUX[@]}" -O check "$USER_AT" >/dev/null 2>&1; }
 up() {
   alive && { echo "master alive"; return 0; }
   rm -f "$CM"
-  SSHPASS="$(cat "$HOME/.ssh/jms_b300_pass")"; export SSHPASS
+  SSHPASS="$(cat "$HOME/.ssh/jms_b300${TAG}_pass")"; export SSHPASS
   setsid nohup sshpass -e ssh "${BASE[@]}" -o PreferredAuthentications=password -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 \
     -o ControlMaster=yes -o ControlPath="$CM" -o ControlPersist=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=30 \
-    -N "$USER_AT" > /tmp/cm_b300.log 2>&1 < /dev/null &
+    -N "$USER_AT" > /tmp/cm_b300$TAG.log 2>&1 < /dev/null &
   for _ in $(seq 1 30); do sleep 1; alive && { echo "master up"; return 0; }; done
-  echo "master FAILED (token 过期 / 已用过？向用户要新 token 写入 ~/.ssh/jms_b300_user 与 jms_b300_pass):"; cat /tmp/cm_b300.log; return 1
+  echo "master FAILED (token 过期 / 已用过？向用户要新 token 写入 ~/.ssh/jms_b300_user 与 jms_b300_pass):"; cat /tmp/cm_b300$TAG.log; return 1
 }
 
 case "${1:-}" in
