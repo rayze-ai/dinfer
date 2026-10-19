@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="824" font-family="sans-serif">
+<rect width="980" height="824" fill="white"/>
+<text x="48" y="20" font-size="18" font-weight="bold">B300</text>
+<text x="128" y="20" font-size="11" fill="#555">single：主线 benchN，dinfer vs vLLM 单卡（下方 pd / tp / dp / other 各一行，基线见各节）</text>
+<text x="48" y="46" font-size="14" font-weight="bold">out tok/s ÷ vLLM（越高越好；虚线 = 1.0）</text>
+<line x1="48" y1="240.0" x2="932" y2="240.0" stroke="#888"/>
+<line x1="48" y1="76" x2="48" y2="240.0" stroke="#888"/>
+<text x="42" y="80" font-size="10" text-anchor="end">0.44</text>
+<text x="42" y="244.0" font-size="10" text-anchor="end">0</text>
+<line x1="48" y1="-132.40916728166462" x2="932" y2="-132.40916728166462" stroke="#444" stroke-dasharray="4 3"/>
+<text x="936" y="-128.40916728166462" font-size="10">vLLM = 1.0</text>
+<polyline points="48.0,91.0 490.0,91.1 932.0,90.9" fill="none" stroke="#1f77b4" stroke-width="2"/>
+<circle cx="48.0" cy="91.0" r="3" fill="#1f77b4"/>
+<circle cx="490.0" cy="91.1" r="3" fill="#1f77b4"/>
+<circle cx="932.0" cy="90.9" r="3" fill="#1f77b4"/>
+<text x="936" y="94.9090909090909" font-size="10" fill="#1f77b4">c1</text>
+<polyline points="48.0,105.8 490.0,106.1 932.0,122.2" fill="none" stroke="#ff7f0e" stroke-width="2"/>
+<circle cx="48.0" cy="105.8" r="3" fill="#ff7f0e"/>
+<circle cx="490.0" cy="106.1" r="3" fill="#ff7f0e"/>
+<circle cx="932.0" cy="122.2" r="3" fill="#ff7f0e"/>
+<text x="936" y="126.15988787963599" font-size="10" fill="#ff7f0e">c8</text>
+<polyline points="48.0,161.0 490.0,161.8 932.0,169.8" fill="none" stroke="#2ca02c" stroke-width="2"/>
+<circle cx="48.0" cy="161.0" r="3" fill="#2ca02c"/>
+<circle cx="490.0" cy="161.8" r="3" fill="#2ca02c"/>
+<circle cx="932.0" cy="169.8" r="3" fill="#2ca02c"/>
+<text x="936" y="173.79496848521921" font-size="10" fill="#2ca02c">c32</text>
+<polyline points="48.0,209.9 490.0,210.0 932.0,215.4" fill="none" stroke="#d62728" stroke-width="2"/>
+<circle cx="48.0" cy="209.9" r="3" fill="#d62728"/>
+<circle cx="490.0" cy="210.0" r="3" fill="#d62728"/>
+<circle cx="932.0" cy="215.4" r="3" fill="#d62728"/>
+<text x="936" y="219.40398638937563" font-size="10" fill="#d62728">c8-long</text>
+<text x="48.0" y="254.0" font-size="9" text-anchor="middle">bench_b300_1</text>
+<text x="490.0" y="254.0" font-size="9" text-anchor="middle">bench_b300_2</text>
+<text x="932.0" y="254.0" font-size="9" text-anchor="middle">bench_b300_3</text>
+<text x="48" y="306" font-size="14" font-weight="bold">TTFT p50 ms（实线 dinfer，虚线 vLLM；越低越好）</text>
+<line x1="48" y1="500.0" x2="932" y2="500.0" stroke="#888"/>
+<line x1="48" y1="336" x2="48" y2="500.0" stroke="#888"/>
+<text x="42" y="340" font-size="10" text-anchor="end">8951.63</text>
+<text x="42" y="504.0" font-size="10" text-anchor="end">0</text>
+<polyline points="48.0,494.1 490.0,494.2 932.0,494.2" fill="none" stroke="#1f77b4" stroke-width="2"/>
+<circle cx="48.0" cy="494.1" r="3" fill="#1f77b4"/>
+<circle cx="490.0" cy="494.2" r="3" fill="#1f77b4"/>
+<circle cx="932.0" cy="494.2" r="3" fill="#1f77b4"/>
+<polyline points="48.0,499.1 490.0,499.2 932.0,499.1" fill="none" stroke="#1f77b4" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<text x="936" y="498.15306016053466" font-size="10" fill="#1f77b4">c1</text>
+<polyline points="48.0,493.6 490.0,493.6 932.0,477.7" fill="none" stroke="#ff7f0e" stroke-width="2"/>
+<circle cx="48.0" cy="493.6" r="3" fill="#ff7f0e"/>
+<circle cx="490.0" cy="493.6" r="3" fill="#ff7f0e"/>
+<circle cx="932.0" cy="477.7" r="3" fill="#ff7f0e"/>
+<polyline points="48.0,498.1 490.0,498.2 932.0,498.1" fill="none" stroke="#ff7f0e" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<text x="936" y="481.6850563517066" font-size="10" fill="#ff7f0e">c8</text>
+<polyline points="48.0,459.7 490.0,457.3 932.0,453.3" fill="none" stroke="#2ca02c" stroke-width="2"/>
+<circle cx="48.0" cy="459.7" r="3" fill="#2ca02c"/>
+<circle cx="490.0" cy="457.3" r="3" fill="#2ca02c"/>
+<circle cx="932.0" cy="453.3" r="3" fill="#2ca02c"/>
+<polyline points="48.0,495.2 490.0,495.1 932.0,495.2" fill="none" stroke="#2ca02c" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<text x="936" y="457.33294662921963" font-size="10" fill="#2ca02c">c32</text>
+<polyline points="48.0,369.1 490.0,369.4 932.0,350.9" fill="none" stroke="#d62728" stroke-width="2"/>
+<circle cx="48.0" cy="369.1" r="3" fill="#d62728"/>
+<circle cx="490.0" cy="369.4" r="3" fill="#d62728"/>
+<circle cx="932.0" cy="350.9" r="3" fill="#d62728"/>
+<polyline points="48.0,492.5 490.0,492.5 932.0,492.5" fill="none" stroke="#d62728" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<text x="936" y="354.90909090909093" font-size="10" fill="#d62728">c8-long</text>
+<text x="48.0" y="514.0" font-size="9" text-anchor="middle">bench_b300_1</text>
+<text x="490.0" y="514.0" font-size="9" text-anchor="middle">bench_b300_2</text>
+<text x="932.0" y="514.0" font-size="9" text-anchor="middle">bench_b300_3</text>
+<text x="48" y="566" font-size="14" font-weight="bold">TPOT p50 ms（实线 dinfer，虚线 vLLM；越低越好）</text>
+<line x1="48" y1="760.0" x2="932" y2="760.0" stroke="#888"/>
+<line x1="48" y1="596" x2="48" y2="760.0" stroke="#888"/>
+<text x="42" y="600" font-size="10" text-anchor="end">173.22</text>
+<text x="42" y="764.0" font-size="10" text-anchor="end">0</text>
+<polyline points="48.0,737.1 490.0,737.1 932.0,737.1" fill="none" stroke="#1f77b4" stroke-width="2"/>
+<circle cx="48.0" cy="737.1" r="3" fill="#1f77b4"/>
+<circle cx="490.0" cy="737.1" r="3" fill="#1f77b4"/>
+<circle cx="932.0" cy="737.1" r="3" fill="#1f77b4"/>
+<polyline points="48.0,750.3 490.0,750.3 932.0,750.3" fill="none" stroke="#1f77b4" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<text x="936" y="741.149426229936" font-size="10" fill="#1f77b4">c1</text>
+<polyline points="48.0,733.1 490.0,733.2 932.0,733.2" fill="none" stroke="#ff7f0e" stroke-width="2"/>
+<circle cx="48.0" cy="733.1" r="3" fill="#ff7f0e"/>
+<circle cx="490.0" cy="733.2" r="3" fill="#ff7f0e"/>
+<circle cx="932.0" cy="733.2" r="3" fill="#ff7f0e"/>
+<polyline points="48.0,749.4 490.0,749.4 932.0,749.4" fill="none" stroke="#ff7f0e" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<text x="936" y="737.1894269955682" font-size="10" fill="#ff7f0e">c8</text>
+<polyline points="48.0,708.1 490.0,708.2 932.0,703.5" fill="none" stroke="#2ca02c" stroke-width="2"/>
+<circle cx="48.0" cy="708.1" r="3" fill="#2ca02c"/>
+<circle cx="490.0" cy="708.2" r="3" fill="#2ca02c"/>
+<circle cx="932.0" cy="703.5" r="3" fill="#2ca02c"/>
+<polyline points="48.0,747.8 490.0,747.8 932.0,747.8" fill="none" stroke="#2ca02c" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<text x="936" y="707.486549839859" font-size="10" fill="#2ca02c">c32</text>
+<polyline points="48.0,647.3 490.0,647.2 932.0,610.9" fill="none" stroke="#d62728" stroke-width="2"/>
+<circle cx="48.0" cy="647.3" r="3" fill="#d62728"/>
+<circle cx="490.0" cy="647.2" r="3" fill="#d62728"/>
+<circle cx="932.0" cy="610.9" r="3" fill="#d62728"/>
+<polyline points="48.0,749.4 490.0,749.4 932.0,749.4" fill="none" stroke="#d62728" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<text x="936" y="614.909090909091" font-size="10" fill="#d62728">c8-long</text>
+<text x="48.0" y="774.0" font-size="9" text-anchor="middle">bench_b300_1</text>
+<text x="490.0" y="774.0" font-size="9" text-anchor="middle">bench_b300_2</text>
+<text x="932.0" y="774.0" font-size="9" text-anchor="middle">bench_b300_3</text>
+</svg>
