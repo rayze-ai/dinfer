@@ -1,0 +1,1 @@
+GEMM 自调优表展开非幂 M（借桶 + AlgoCheck）+ 默认 algo 缓存（之前每次 forward 查启发式）

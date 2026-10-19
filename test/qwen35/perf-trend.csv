@@ -107,3 +107,15 @@ bench_b300_9,2026-10-19,gdn_recurrent 显式 tokens → decode 真正走寄存�
 bench_b300_9,2026-10-19,gdn_recurrent 显式 tokens → decode 真正走寄存器 kernel（第 4 轮生效）,c8-long,out_tok_per_s,367.890,556.347,0.661,20.4,higher,main,B300,vllm,dinfer,qwen35
 bench_b300_9,2026-10-19,gdn_recurrent 显式 tokens → decode 真正走寄存器 kernel（第 4 轮生效）,c8-long,ttft_p50_ms,447.452,409.453,1.093,0.5,lower,main,B300,vllm,dinfer,qwen35
 bench_b300_9,2026-10-19,gdn_recurrent 显式 tokens → decode 真正走寄存器 kernel（第 4 轮生效）,c8-long,tpot_p50_ms,18.019,11.246,1.602,19.8,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_10,2026-10-19,GEMM 自调优表展开非幂 M（借桶 + AlgoCheck）+ 默认 algo 缓存（之前每次 forward 查启发式）,c1,out_tok_per_s,92.292,94.513,0.976,0.9,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_10,2026-10-19,GEMM 自调优表展开非幂 M（借桶 + AlgoCheck）+ 默认 algo 缓存（之前每次 forward 查启发式）,c1,ttft_p50_ms,22.121,46.994,0.471,37.2,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_10,2026-10-19,GEMM 自调优表展开非幂 M（借桶 + AlgoCheck）+ 默认 algo 缓存（之前每次 forward 查启发式）,c1,tpot_p50_ms,10.745,10.294,1.044,-0.0,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_10,2026-10-19,GEMM 自调优表展开非幂 M（借桶 + AlgoCheck）+ 默认 algo 缓存（之前每次 forward 查启发式）,c8,out_tok_per_s,651.796,671.321,0.971,4.1,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_10,2026-10-19,GEMM 自调优表展开非幂 M（借桶 + AlgoCheck）+ 默认 algo 缓存（之前每次 forward 查启发式）,c8,ttft_p50_ms,85.898,104.240,0.824,43.8,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_10,2026-10-19,GEMM 自调优表展开非幂 M（借桶 + AlgoCheck）+ 默认 algo 缓存（之前每次 forward 查启发式）,c8,tpot_p50_ms,11.683,11.199,1.043,-0.3,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_10,2026-10-19,GEMM 自调优表展开非幂 M（借桶 + AlgoCheck）+ 默认 algo 缓存（之前每次 forward 查启发式）,c32,out_tok_per_s,1938.424,2148.939,0.902,12.8,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_10,2026-10-19,GEMM 自调优表展开非幂 M（借桶 + AlgoCheck）+ 默认 algo 缓存（之前每次 forward 查启发式）,c32,ttft_p50_ms,201.652,263.664,0.765,45.1,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_10,2026-10-19,GEMM 自调优表展开非幂 M（借桶 + AlgoCheck）+ 默认 algo 缓存（之前每次 forward 查启发式）,c32,tpot_p50_ms,15.047,12.910,1.165,5.3,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_10,2026-10-19,GEMM 自调优表展开非幂 M（借桶 + AlgoCheck）+ 默认 algo 缓存（之前每次 forward 查启发式）,c8-long,out_tok_per_s,500.977,556.827,0.900,36.2,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_10,2026-10-19,GEMM 自调优表展开非幂 M（借桶 + AlgoCheck）+ 默认 algo 缓存（之前每次 forward 查启发式）,c8-long,ttft_p50_ms,214.188,411.262,0.521,52.1,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_10,2026-10-19,GEMM 自调优表展开非幂 M（借桶 + AlgoCheck）+ 默认 algo 缓存（之前每次 forward 查启发式）,c8-long,tpot_p50_ms,14.272,11.241,1.270,20.8,lower,main,B300,vllm,dinfer,qwen35
