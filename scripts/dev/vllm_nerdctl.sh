@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # B300 上的 vLLM 对照服务（docs/loops/b-nvlink.md）：机器无 docker、无外网，但 containerd 的 k8s.io 命名空间里已缓存
+# 容器内同时挂 /data/models:ro：$ROOT/models/<name> 若是指向 /data/models/... 的软链接也能解析（2026-10-19 Qwen3.5 基线踩坑：只挂 /models 时软链悬空 → HFValidationError）。
 # `docker.io/vllm/vllm-openai:nightly`（vllm 0.29.1rc1.dev573 / torch 2.13 cu130，sm_103 可跑）。用 nerdctl 起，`--net host`
 # （无 CNI bridge 插件，桥接网络起不来），GPU 用 `--gpus device=N`。**用完必须 `stop`**（用户 2026-10-19：用完记得清理）；
 # `stop` 删容器；镜像是机器原有的，不删。
@@ -20,7 +21,7 @@ case "${1:-}" in
     N rm -f "$NAME" >/dev/null 2>&1 || true
     mkdir -p $ROOT/vllm/hf-cache
     N run -d --name "$NAME" --net host --gpus "device=$GPU" --ipc host --shm-size 16g \
-      -v $ROOT/models:/models:ro -v $ROOT/vllm/hf-cache:/root/.cache/huggingface \
+      -v $ROOT/models:/models:ro -v /data/models:/data/models:ro -v $ROOT/vllm/hf-cache:/root/.cache/huggingface \
       -e HF_HUB_OFFLINE=1 -e VLLM_LOGGING_LEVEL=INFO \
       "$IMG" --model "/models/$MODEL" --served-model-name "$MODEL" --tensor-parallel-size "$TP" \
       --max-model-len "$MAX_LEN" --gpu-memory-utilization 0.9 --max-num-seqs 64 \
