@@ -39,5 +39,6 @@ case "${1:-}" in
             --exclude target/ --exclude .git/ --exclude 'test/qwen3_golden/' --exclude 'test/*fixture*' --exclude 'test/**/bench*/' --exclude 'test/**/ab_*/' --exclude 'test/**/stage*/' \
             ./ "$USER_AT:$REMOTE_DIR/" ;;
   pull)   shift; up >/dev/null; exec rsync -az -e "ssh ${BASE[*]} ${MUX[*]}" "$USER_AT:$1" "$2" ;;
-  *) echo "usage: $0 up|status|ssh|run '<cmd>'|push|pull <remote> <local>"; exit 2 ;;
+  put)    shift; up >/dev/null; exec rsync -az -e "ssh ${BASE[*]} ${MUX[*]}" "$1" "$USER_AT:$2" ;;   # 任意本地路径 → 远端（工具链 / 权重中转）
+  *) echo "usage: [B300_TAG=50] $0 up|status|ssh|run '<cmd>'|push|pull <remote> <local>|put <local> <remote>"; exit 2 ;;
 esac
