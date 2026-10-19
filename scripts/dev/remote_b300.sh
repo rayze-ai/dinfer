@@ -9,9 +9,7 @@ JUMP_PORT="${JUMP_PORT:-2222}"
 # 多台 B300：B300_TAG=50 → 凭据 ~/.ssh/jms_b300_50_{user,pass}、socket cm_b300_50（2026-10-19 第二台 ppio-5 172.16.3.50）
 TAG="${B300_TAG:+_$B300_TAG}"
 CM="$HOME/.ssh/cm_b300$TAG"
-# 用户约束（2026-10-19）：远程只能用 /data/yaochen/infer。B300-50（B300_TAG=50）上 /data 对 jumpserver 不可写（2026-10-19 核实），
-# 临时用 $HOME/infer（/ 分区 1.4 T 空闲）；用户给 /data 权限后把 REMOTE_ROOT 改回去并 mv。
-if [ "${B300_TAG:-}" = "50" ]; then REMOTE_ROOT="${REMOTE_ROOT:-/home/jumpserver/infer}"; else REMOTE_ROOT="${REMOTE_ROOT:-/data/yaochen/infer}"; fi
+REMOTE_ROOT="${REMOTE_ROOT:-/data/yaochen/infer}"   # 用户约束（2026-10-19）：远程只能用这个目录（B300-50 上先 sudo mkdir+chown）
 REMOTE_DIR="${REMOTE_DIR:-$REMOTE_ROOT/dinfer}"
 cd "$(dirname "$0")/../.."
 USER_AT="$(tr -d '[:space:]' < "$HOME/.ssh/jms_b300${TAG}_user")@$JUMP_HOST"

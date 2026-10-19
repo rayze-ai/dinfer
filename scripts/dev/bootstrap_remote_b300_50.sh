@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# B300-50（host-172-16-3-50）首次 bootstrap。与第一台的差别：/data 对 jumpserver 只读 → ROOT=$HOME/infer；
+# B300-50（host-172-16-3-50）首次 bootstrap。与第一台的差别：/data/yaochen/infer 需先 `sudo mkdir && chown`（用户有 sudo）；
 # 无直连外网，用户给的代理 172.16.1.35:7890 只通国内镜像 → rustup / crates 走 TUNA，权重走 hf-mirror。
 # 不装 CUDA / NCCL / Python 包（系统已有 /usr/local/cuda-13.1 与 libnccl，用户 2026-10-19 明确要求不要装）。
 #   bash scripts/dev/bootstrap_remote_b300_50.sh     # 远端跑；在 tmux 会话 boot 里，幂等；完成标志 $ROOT/bootstrap/done.log
 set -euo pipefail
-ROOT=/home/jumpserver/infer
+ROOT=/data/yaochen/infer
 mkdir -p $ROOT/bootstrap $ROOT/models $ROOT/cargo $ROOT/rustup
 cat > $ROOT/env.sh <<ENV
 export http_proxy=http://172.16.1.35:7890 https_proxy=http://172.16.1.35:7890 no_proxy=localhost,127.0.0.1,172.16.0.0/16
 export RUSTUP_HOME=$ROOT/rustup CARGO_HOME=$ROOT/cargo
-export RUSTUP_DIST_SERVER=https://mirrors.tuna.tsinghua.edu.cn/rustup RUSTUP_UPDATE_ROOT=https://mirrors.tuna.tsinghua.edu.cn/rustup/rustup
+# 固定版本 1.89.0：TUNA 只镜像 stable 频道（2026-10-19 实测 channel-rust-1.89.0.toml 404），USTC 有完整 dist
+export RUSTUP_DIST_SERVER=https://mirrors.ustc.edu.cn/rust-static RUSTUP_UPDATE_ROOT=https://mirrors.ustc.edu.cn/rust-static/rustup
 export RUSTUP_TOOLCHAIN=1.89.0-x86_64-unknown-linux-gnu
 export CUDA_HOME=/usr/local/cuda-13.1 CUDA_ARCHS=103
 export PATH=$ROOT/cargo/bin:$ROOT/rustup/toolchains/1.89.0-x86_64-unknown-linux-gnu/bin:/usr/local/cuda-13.1/bin:\$PATH
