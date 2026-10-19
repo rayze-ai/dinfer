@@ -579,6 +579,7 @@ dependencies = [
  "dinfer-kimik3",
  "dinfer-layers",
  "dinfer-qwen3",
+ "dinfer-qwen35",
  "dinfer-server",
  "jsonschema",
  "reqwest",
@@ -692,6 +693,26 @@ dependencies = [
 
 [[package]]
 name = "dinfer-qwen3"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dinfer-core",
+ "dinfer-guided",
+ "dinfer-kernels",
+ "dinfer-layers",
+ "dinfer-server",
+ "dinfer-text",
+ "minijinja",
+ "npyz",
+ "serde",
+ "serde_json",
+ "tokenizers",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "dinfer-qwen35"
 version = "0.1.0"
 dependencies = [
  "anyhow",

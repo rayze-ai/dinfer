@@ -15,7 +15,8 @@ default = []
 kimik3 = ["dep:dinfer-kimik3"]
 glm53 = ["dep:dinfer-glm53"]
 qwen3 = ["dep:dinfer-qwen3"]
-no-nvcc = ["dinfer-layers/no-nvcc", "dinfer-kimik3?/no-nvcc", "dinfer-glm53?/no-nvcc", "dinfer-qwen3?/no-nvcc"]
+qwen35 = ["dep:dinfer-qwen35"]
+no-nvcc = ["dinfer-layers/no-nvcc", "dinfer-kimik3?/no-nvcc", "dinfer-glm53?/no-nvcc", "dinfer-qwen3?/no-nvcc", "dinfer-qwen35?/no-nvcc"]
 # e2e：tests/serve_e2e.rs 起真实进程打 HTTP（需要 reqwest）
 e2e = ["dep:reqwest", "dep:serde_json", "dep:jsonschema"]
 
@@ -26,6 +27,7 @@ dinfer-server.workspace = true
 dinfer-kimik3 = { workspace = true, optional = true }
 dinfer-glm53 = { workspace = true, optional = true }
 dinfer-qwen3 = { workspace = true, optional = true }
+dinfer-qwen35 = { workspace = true, optional = true }
 anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true

@@ -1,0 +1,28 @@
+[package]
+name = "dinfer-qwen35"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Qwen35（Qwen3.5-27B，`Qwen3_5ForConditionalGeneration` 文本部分）模型 crate：48 层 Gated DeltaNet + 16 层全注意力（D=256、GROUP 6、partial RoPE、输出门）、SwiGLU、独立 lm_head"
+
+[features]
+default = []
+no-nvcc = ["dinfer-layers/no-nvcc"]
+ref-tests = ["dep:npyz"]
+
+[dependencies]
+dinfer-core.workspace = true
+dinfer-layers.workspace = true
+dinfer-kernels.workspace = true
+dinfer-server.workspace = true
+dinfer-text.workspace = true
+dinfer-guided.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokenizers.workspace = true
+minijinja.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+npyz = { version = "=0.8.3", optional = true }
