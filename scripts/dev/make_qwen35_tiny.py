@@ -27,6 +27,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("out")
 ap.add_argument("--gen", type=int, default=16)
 ap.add_argument("--seed", type=int, default=20261019)
+ap.add_argument("--vocab", type=int, default=512, help="词表大小；serve 真 tokenizer 时要 ≥ 248077（如 248320）")
 args = ap.parse_args()
 OUT = args.out
 os.makedirs(OUT, exist_ok=True)
@@ -36,7 +37,7 @@ os.makedirs(MODEL, exist_ok=True)
 torch.manual_seed(args.seed)
 g = torch.Generator().manual_seed(args.seed)
 
-H, V, INTER = 256, 512, 512
+H, V, INTER = 256, args.vocab, 512
 NH, NKV, D = 2, 1, 256
 ROPE_DIM, THETA = 64, 10000.0
 HV, HK, KD, VD, W = 4, 2, 128, 128, 4

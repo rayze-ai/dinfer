@@ -173,3 +173,9 @@
 - 设计 `design.md` §13：与 vLLM 差异 = 一进程多线程（无 shm 队列 / 序列化 / coordinator 进程）；TP 切分与通信点照搬 vLLM（每层 2 all-reduce、每 rank 都采样、lm_head 复制）；DP 同进程原子计数路由；EP / DCP / PCP 设计 + 分阶段 T1–T5；§11 台账加 3 行。
 - 代码：见交接区。编译通过（`cargo build -p dinfer --features qwen3`），`cargo test -p dinfer-core -p dinfer-server` 49 过。
 - 4090：Pod 无 NCCL（pip 装）；`q5_tp.sh 2` GPU 3/4 通过；bench tp2 / dp2 进 CSV（数字见交接区 / loop 第 3 轮）。bench_trend.py 支持 `bench_<tag>` 目录名。NCCL：Pod 内 `/usr/lib/x86_64-linux-gnu/libnccl.so.2.30`，8 卡无 P2P（topo 全 NODE/SYS）。
+
+## 2026-10-20（Qwen3.5 perf 第 5 轮 B 线，子代理）
+
+- decode 非桶 M GEMM：自调优表展开 1..=最大桶 的每个 m（借幂桶 plan + `cublasLtMatmulAlgoCheck`），默认 algo 按形状缓存；3090 真形状 M=7/8 `gdn.in_proj_a` 默认 31 µs → 8 µs，其它形状 4–17%。候选数 8→32 无收益（不改）。
+- 新指标 `engine_step_execute_{prefill,decode,mixed}_seconds`：tiny 全词表模型 c32 混批步 4.6%、每步 2.6× decode；结论 pair 跨流不优先。详见 `docs/loops/qwen35-perf.md` 5B 行。
+- 验证：golden 4/4（含 `GEMM_TUNE=off`）、ops_parity 95/95、core 55 单测、workspace check qwen3 / qwen35。**待 B300**：bench_b300_10 看 `borrowed=` 日志 + 三个 mode 直方图 + c32 / c8-long TPOT。

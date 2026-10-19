@@ -655,3 +655,15 @@
   被删的 inode，写入全丢（容器里看不到错误直到下一次 open）。
 - 解法：**本地先建目录 + `.gitkeep` 并 commit**，再 push / 起容器；参考生成完 `pull` 回本地后再做下一次 push（与 k3-kda.md 踩坑 0 同根）。
 - 避免：所有会写远端生成物的脚本，REFS 目录都先在仓库里占位。多子代理共用一台远端机时，push 前 `pull` 一次对方可能生成的目录。
+
+## 自调优表只键精确 M → 非 2 的幂 batch 全部掉回 cuBLASLt 默认，且默认路径每次 forward 都查启发式（2026-10-20）
+
+- 现象：B300 nsys c8-long decode 步里 M=8 的 GEMM（`nvjet 64x8_64x16` 60 µs）比 M=1 自调优后的 16 µs 慢 4×；3090 真形状复现：默认启发式在 M=7/8 对 `gdn.in_proj_a`（N=48）选 31 µs 的 algo，最优 8 µs。
+- 根因：① `Gemm::plan_for` 只精确命中 {1,2,4,8,16,32,64} 桶，Lt algo 不借；eager 混批 / 请求交错完成时 decode 批常是 7 / 9 / 31 → `run_lt_default`；② `run_lt_default` 每次调用都 `cublasLtMatmulAlgoGetHeuristic`，host 侧 µs 级 × 每步 ~400 次 GEMM，CPU 开销与 GPU 时间同量级。
+- 解法：autotune 末尾把 1..=最大桶 的非桶 m 展开进表（借上一个 2 的幂桶的 plan，Lt algo 过 `cublasLtMatmulAlgoCheck`，日志 `borrowed=… rejected=…`）；默认 algo 按 Key 缓存。
+- 避免：任何"按形状查表"的加速路径都要想清楚**运行时形状是否真的落在表键上**（CUDA graph 捕获桶是幂，eager 不是）；启动日志只打桶的 µs 对不上 nsys 时，先核对 nsys 里该 kernel 的 grid / M。`/metrics` 的 `engine_step_execute_{prefill,decode,mixed}_seconds` 可直接看混批步比例。
+
+## tiny 模型 `serve` 要全词表：`model vocab 512 < tokenizer 248077` 直接拒绝启动（2026-10-20）
+
+- 现象：用 `test/qwen35/golden/tiny`（vocab 512）跑 `dinfer serve --tokenizer test/qwen35/tokenizer` 启动即报 `model vocab 512 < tokenizer 248077`。
+- 解法：`scripts/dev/make_qwen35_tiny.py <out> --vocab 248320 --gen 2` 另生成一份全词表 tiny（lm_head 2.5 GB bf16，放 /tmp 不进仓库），只用来量调度 / 混批 / metrics，不做数值对拍（golden 仍用 vocab 512 那份）。
