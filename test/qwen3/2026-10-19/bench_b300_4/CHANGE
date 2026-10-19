@@ -1,0 +1,1 @@
+B4 第 4 轮：decode v3（FlashInfer 结构：16 lane/key、组内共享 K/V、2 级 cp.async、循环外合并）默认开，keys_per_split 32

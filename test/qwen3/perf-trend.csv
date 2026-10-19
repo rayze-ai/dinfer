@@ -35,6 +35,18 @@ bench_b300_3,2026-10-19,B4 第 3 轮：decode 有效 splits 按 seq_len 自适�
 bench_b300_3,2026-10-19,B4 第 3 轮：decode 有效 splits 按 seq_len 自适应（keys_per_split=128）,c8-long,out_tok_per_s,4144.802,4876.016,0.850,15.5,higher,main,B300,vllm,dinfer
 bench_b300_3,2026-10-19,B4 第 3 轮：decode 有效 splits 按 seq_len 自适应（keys_per_split=128）,c8-long,ttft_p50_ms,15.967,40.246,0.397,-24.1,lower,main,B300,vllm,dinfer
 bench_b300_3,2026-10-19,B4 第 3 轮：decode 有效 splits 按 seq_len 自适应（keys_per_split=128）,c8-long,tpot_p50_ms,1.818,1.331,1.366,14.5,lower,main,B300,vllm,dinfer
+bench_b300_4,2026-10-19,B4 第 4 轮：decode v3（FlashInfer 结构：16 lane/key、组内共享 K/V、2 级 cp.async、循环外合并）默认开，keys_per_split 32,c1,out_tok_per_s,896.891,759.909,1.180,11.0,higher,main,B300,vllm,dinfer
+bench_b300_4,2026-10-19,B4 第 4 轮：decode v3（FlashInfer 结构：16 lane/key、组内共享 K/V、2 级 cp.async、循环外合并）默认开，keys_per_split 32,c1,ttft_p50_ms,2.040,11.673,0.175,-0.5,lower,main,B300,vllm,dinfer
+bench_b300_4,2026-10-19,B4 第 4 轮：decode v3（FlashInfer 结构：16 lane/key、组内共享 K/V、2 级 cp.async、循环外合并）默认开，keys_per_split 32,c1,tpot_p50_ms,1.108,1.235,0.897,10.0,lower,main,B300,vllm,dinfer
+bench_b300_4,2026-10-19,B4 第 4 轮：decode v3（FlashInfer 结构：16 lane/key、组内共享 K/V、2 级 cp.async、循环外合并）默认开，keys_per_split 32,c8,out_tok_per_s,6448.952,5328.052,1.210,9.1,higher,main,B300,vllm,dinfer
+bench_b300_4,2026-10-19,B4 第 4 轮：decode v3（FlashInfer 结构：16 lane/key、组内共享 K/V、2 级 cp.async、循环外合并）默认开，keys_per_split 32,c8,ttft_p50_ms,5.361,25.570,0.210,-6.8,lower,main,B300,vllm,dinfer
+bench_b300_4,2026-10-19,B4 第 4 轮：decode v3（FlashInfer 结构：16 lane/key、组内共享 K/V、2 级 cp.async、循环外合并）默认开，keys_per_split 32,c8,tpot_p50_ms,1.173,1.323,0.887,9.2,lower,main,B300,vllm,dinfer
+bench_b300_4,2026-10-19,B4 第 4 轮：decode v3（FlashInfer 结构：16 lane/key、组内共享 K/V、2 级 cp.async、循环外合并）默认开，keys_per_split 32,c32,out_tok_per_s,20310.615,14518.210,1.399,10.6,higher,main,B300,vllm,dinfer
+bench_b300_4,2026-10-19,B4 第 4 轮：decode v3（FlashInfer 结构：16 lane/key、组内共享 K/V、2 级 cp.async、循环外合并）默认开，keys_per_split 32,c32,ttft_p50_ms,8.905,53.381,0.167,25.0,lower,main,B300,vllm,dinfer
+bench_b300_4,2026-10-19,B4 第 4 轮：decode v3（FlashInfer 结构：16 lane/key、组内共享 K/V、2 级 cp.async、循环外合并）默认开，keys_per_split 32,c32,tpot_p50_ms,1.477,1.683,0.878,11.2,lower,main,B300,vllm,dinfer
+bench_b300_4,2026-10-19,B4 第 4 轮：decode v3（FlashInfer 结构：16 lane/key、组内共享 K/V、2 级 cp.async、循环外合并）默认开，keys_per_split 32,c8-long,out_tok_per_s,4589.199,4844.767,0.947,10.7,higher,main,B300,vllm,dinfer
+bench_b300_4,2026-10-19,B4 第 4 轮：decode v3（FlashInfer 结构：16 lane/key、组内共享 K/V、2 级 cp.async、循环外合并）默认开，keys_per_split 32,c8-long,ttft_p50_ms,15.776,38.698,0.408,1.2,lower,main,B300,vllm,dinfer
+bench_b300_4,2026-10-19,B4 第 4 轮：decode v3（FlashInfer 结构：16 lane/key、组内共享 K/V、2 级 cp.async、循环外合并）默认开，keys_per_split 32,c8-long,tpot_p50_ms,1.625,1.350,1.203,10.6,lower,main,B300,vllm,dinfer
 poisson1,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r8,out_tok_per_s,1065.027,1066.343,0.999,,higher,other,4090,vllm,dinfer_xs1
 poisson1,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r8,ttft_p50_ms,15.182,22.622,0.671,,lower,other,4090,vllm,dinfer_xs1
 poisson1,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r8,ttft_p99_ms,38.981,49.074,0.794,,lower,other,4090,vllm,dinfer_xs1
