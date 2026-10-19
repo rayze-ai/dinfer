@@ -22,6 +22,18 @@ int rmsnorm_bf16(const void* x, const void* w, void* out, int64_t tokens, int64_
 int fused_add_rmsnorm_bf16(const void* x, void* res, const void* w, void* out, int64_t tokens, int64_t hidden,
                            float eps, cudaStream_t stream);
 
+// ---- 小消息 one-shot all-reduce（allreduce.cu，对齐 vLLM custom_all_reduce；需 cuda-ipc / P2P）----
+// Signal / RankData 的字节数（Rust 侧按此分配 ipc 区头部 / 设备 RankData）。
+int64_t ar_signal_bytes(void);
+int64_t ar_rank_data_bytes(void);
+// out[0..n) = Σ_r mirror_r[0..n)（固定 rank 顺序累加，逐位一致）。rank_data：设备 RankData（ptrs[r] = rank r 镜像区）；
+// signals[r]：rank r 的 Signal 设备地址（host 数组，长 world）。n 为 8 的倍数，world ∈ {2,4,8}。
+int ar_oneshot_bf16(void* rank_data, const void* const* signals, void* out, int rank, int world, int64_t n,
+                    cudaStream_t stream);
+// res[t,:] += Σ_r mirror_r[t,:]; normed[t,:] = rmsnorm(res[t,:]) · w（all-reduce + 残差 + RMSNorm 一个 kernel）。
+int ar_oneshot_add_rmsnorm_bf16(void* rank_data, const void* const* signals, void* res, const void* w, void* normed,
+                                int rank, int world, int64_t tokens, int64_t hidden, float eps, cudaStream_t stream);
+
 // ---- RoPE ----
 // q: [tokens, q_heads, head_dim]，k: [tokens, k_heads, head_dim]，只对前 rope_dim 维做旋转。
 // cos_sin: [max_pos, rope_dim] fp32，前半 cos 后半 sin（按 rope_dim/2 对）。
@@ -129,6 +141,8 @@ int kv_unpack(void* const* layer_ptrs, const int32_t* blocks, const void* stagin
 int gather_rows_bf16(const void* src, void* dst, const int32_t* rows, int64_t num_rows, int64_t width,
                      cudaStream_t stream);  // dst[r] = src[rows[r]]
 int bf16_to_f32(const void* x, float* y, int64_t n, cudaStream_t stream);
+// [nb][rows][cols] bf16 → [rows][nb*cols] f32（all-gather 块布局 → 行布局 + 升精度，一趟）
+int gather_blocks_bf16_to_f32(const void* x, float* y, int64_t nb, int64_t rows, int64_t cols, cudaStream_t stream);
 int scale_f32(float* x, int64_t n, float a, cudaStream_t stream);  // x[:n] *= a
 
 // ---- MoE 参考（moe.cu）----

@@ -57,6 +57,24 @@ __global__ void bf16_to_f32_kernel(const bf16* __restrict__ x, float* __restrict
   for (; i < n; i += stride) y[i] = to_f32(x[i]);
 }
 
+
+// [nb][rows][cols] bf16 → [rows][nb*cols] f32：块 b 的列段落到输出列 [b*cols, (b+1)*cols)。
+// 用途：TP 下按输出维切分的 GEMM（如 lm_head 列切）各 rank 局部结果经 all-gather 后是按 rank 连续的块布局，
+// 这里一次 kernel 既修正布局又升 f32，省掉"先转置再转换"两趟读写。
+__global__ void gather_blocks_bf16_to_f32_kernel(const bf16* __restrict__ x, float* __restrict__ y, int64_t nb,
+                                                 int64_t rows, int64_t cols) {
+  const int64_t n = nb * rows * cols;
+  const int64_t stride = (int64_t)gridDim.x * blockDim.x;
+  for (int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x; i < n; i += stride) {
+    // 按输出线性序遍历（写合并）：i = r * (nb*cols) + b*cols + c
+    const int64_t r = i / (nb * cols);
+    const int64_t rem = i - r * (nb * cols);
+    const int64_t b = rem / cols;
+    const int64_t c = rem - b * cols;
+    y[i] = to_f32(x[(b * rows + r) * cols + c]);
+  }
+}
+
 inline int grid_for(int64_t n) {
   const int64_t want = (n + 255) / 256;
   return (int)(want > 4096 ? 4096 : want);
@@ -95,6 +113,14 @@ extern "C" int scale_f32(float* x, int64_t n, float a, cudaStream_t stream) {
 extern "C" int bf16_to_f32(const void* x, float* y, int64_t n, cudaStream_t stream) {
   if (n <= 0) return 0;
   bf16_to_f32_kernel<<<grid_for(n), 256, 0, stream>>>(static_cast<const bf16*>(x), y, n);
+  return last_err();
+}
+
+extern "C" int gather_blocks_bf16_to_f32(const void* x, float* y, int64_t nb, int64_t rows, int64_t cols,
+                                         cudaStream_t stream) {
+  const int64_t n = nb * rows * cols;
+  if (n <= 0) return 0;
+  gather_blocks_bf16_to_f32_kernel<<<grid_for(n), 256, 0, stream>>>(static_cast<const bf16*>(x), y, nb, rows, cols);
   return last_err();
 }
 

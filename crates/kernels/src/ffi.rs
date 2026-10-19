@@ -370,6 +370,7 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
     pub fn bf16_to_f32(x: *const c_void, y: *mut f32, n: i64, stream: cudaStream_t) -> i32;
+    pub fn gather_blocks_bf16_to_f32(x: *const c_void, y: *mut f32, nb: i64, rows: i64, cols: i64, stream: cudaStream_t) -> i32;
     pub fn scale_f32(x: *mut f32, n: i64, a: f32, stream: cudaStream_t) -> i32;
 
     // ---- DSA ----
@@ -471,6 +472,32 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
     pub fn f32_add_to_bf16(acc: *const f32, out: *mut c_void, n: i64, stream: cudaStream_t) -> i32;
+
+    // one-shot all-reduce（allreduce.cu）
+    pub fn ar_signal_bytes() -> i64;
+    pub fn ar_rank_data_bytes() -> i64;
+    pub fn ar_oneshot_bf16(
+        rank_data: *mut c_void,
+        signals: *const *const c_void,
+        out: *mut c_void,
+        rank: i32,
+        world: i32,
+        n: i64,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn ar_oneshot_add_rmsnorm_bf16(
+        rank_data: *mut c_void,
+        signals: *const *const c_void,
+        res: *mut c_void,
+        w: *const c_void,
+        normed: *mut c_void,
+        rank: i32,
+        world: i32,
+        tokens: i64,
+        hidden: i64,
+        eps: f32,
+        stream: cudaStream_t,
+    ) -> i32;
 }
 
 #[cfg(dinfer_no_nvcc)]
@@ -512,10 +539,21 @@ mod stubs {
     stub!(moe_gather_bf16(x: *const c_void, xg: *mut c_void, st: *const i32, n: i64, h: i64, s: cudaStream_t));
     stub!(moe_scatter_add_f32(y: *const c_void, a: *mut f32, st: *const i32, sk: *const i32, tw: *const f32, n: i64, k: i64, h: i64, s: cudaStream_t));
     stub!(f32_add_to_bf16(a: *const f32, o: *mut c_void, n: i64, s: cudaStream_t));
+    stub!(gather_blocks_bf16_to_f32(x: *const c_void, y: *mut f32, nb: i64, r: i64, c: i64, s: cudaStream_t));
     stub!(add_inplace_bf16(x: *const c_void, y: *mut c_void, n: i64, s: cudaStream_t));
     stub!(gather_rows_bf16(a: *const c_void, b: *mut c_void, r: *const i32, n: i64, w: i64, s: cudaStream_t));
     stub!(bf16_to_f32(x: *const c_void, y: *mut f32, n: i64, s: cudaStream_t));
     stub!(scale_f32(x: *mut f32, n: i64, a: f32, s: cudaStream_t));
+    stub!(ar_oneshot_bf16(rd: *mut c_void, sg: *const *const c_void, o: *mut c_void, r: i32, w: i32, n: i64, s: cudaStream_t));
+    stub!(ar_oneshot_add_rmsnorm_bf16(rd: *mut c_void, sg: *const *const c_void, res: *mut c_void, w: *const c_void, o: *mut c_void, r: i32, wd: i32, t: i64, h: i64, e: f32, s: cudaStream_t));
+    #[allow(clippy::missing_safety_doc)]
+    pub unsafe fn ar_signal_bytes() -> i64 {
+        0
+    }
+    #[allow(clippy::missing_safety_doc)]
+    pub unsafe fn ar_rank_data_bytes() -> i64 {
+        0
+    }
 }
 #[cfg(dinfer_no_nvcc)]
 pub use stubs::*;

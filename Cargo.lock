@@ -662,6 +662,7 @@ dependencies = [
  "npyz",
  "thiserror",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

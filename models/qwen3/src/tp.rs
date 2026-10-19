@@ -18,6 +18,7 @@ use dinfer_layers::{Event, PinnedBuf};
 use std::sync::{mpsc, Arc};
 
 use crate::executor::{PdBuf, Qwen3Executor};
+use dinfer_kernels as k;
 
 struct Step {
     plan: BatchPlan,
@@ -136,6 +137,51 @@ impl TpExecutor {
             let rank = i + 1;
             let _ = w.tx.send(Msg::Call(Box::new(move |ex| f(rank, ex))));
         }
+    }
+
+    /// 自定义 one-shot all-reduce（design §13.6 T3）：各 rank 建 cuda-ipc 区 → 进程内交换 `(device, handle)` →
+    /// 各 rank 打开 peer 区。任一 rank 不参与 / 打开失败 → **所有 rank** disable（必须一致，否则 kernel 自旋死锁）。
+    /// 必须在任何 CUDA graph 捕获之前（紧跟 `TpExecutor::new`）。失败不报错，只回退 NCCL（info 日志）。
+    pub fn setup_custom_ar(&mut self) -> Result<()> {
+        let world = self.world();
+        let rxs = self.dispatch(|_, ex| ex.custom_ar_begin())?;
+        let mine = self.rank0.custom_ar_begin()?;
+        let others = Self::collect(rxs)?;
+        let mut infos: Vec<k::comm::ArPeerInfo> = Vec::with_capacity(world);
+        let mut all = true;
+        for i in std::iter::once(mine).chain(others) {
+            match i {
+                Some(v) => infos.push(v),
+                None => all = false,
+            }
+        }
+        if !all {
+            self.rank0.custom_ar_disable();
+            let rxs = self.dispatch(|_, ex| {
+                ex.custom_ar_disable();
+                Ok(())
+            })?;
+            Self::collect(rxs)?;
+            tracing::info!(world, "custom all-reduce: not enabled (some rank opted out), NCCL only");
+            return Ok(());
+        }
+        let infos = Arc::new(infos);
+        let infos2 = infos.clone();
+        let rxs = self.dispatch(move |_, ex| ex.custom_ar_finish(&infos2))?;
+        let ok0 = self.rank0.custom_ar_finish(&infos)?;
+        let oks = Self::collect(rxs)?;
+        if ok0 && oks.iter().all(|&b| b) {
+            tracing::info!(world, "custom all-reduce: enabled on all ranks");
+            return Ok(());
+        }
+        self.rank0.custom_ar_disable();
+        let rxs = self.dispatch(|_, ex| {
+            ex.custom_ar_disable();
+            Ok(())
+        })?;
+        Self::collect(rxs)?;
+        tracing::info!(world, "custom all-reduce: disabled on all ranks (a peer failed to open ipc / no P2P), NCCL only");
+        Ok(())
     }
 
     /// PD：把 rank 0 当前的区（D 侧自己建的 / P 侧映射的对端区）交给其它 rank 共用。service 在 D 侧建区后调一次；

@@ -561,3 +561,43 @@ ab_tp_b300,2026-10-19,B300 ×8 NVLink：single vs tp2/tp4/tp8（NCCL NVLink，�
 ab_tp_b300,2026-10-19,B300 ×8 NVLink：single vs tp2/tp4/tp8（NCCL NVLink，无 vLLM 基线）,c8,ttft_p99_ms,13.546,11.498,1.178,,lower,tp,B300,single,tp8
 ab_tp_b300,2026-10-19,B300 ×8 NVLink：single vs tp2/tp4/tp8（NCCL NVLink，无 vLLM 基线）,c8,tpot_p50_ms,2.831,1.647,1.719,,lower,tp,B300,single,tp8
 ab_tp_b300,2026-10-19,B300 ×8 NVLink：single vs tp2/tp4/tp8（NCCL NVLink，无 vLLM 基线）,c8,failed,0.000,0.000,,,lower,tp,B300,single,tp8
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c1,out_tok_per_s,633.285,644.455,0.983,,higher,tp,B300,single,tp2
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c1,ttft_p50_ms,3.107,2.457,1.265,,lower,tp,B300,single,tp2
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c1,ttft_p99_ms,4.658,4.011,1.161,,lower,tp,B300,single,tp2
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c1,tpot_p50_ms,1.566,1.545,1.014,,lower,tp,B300,single,tp2
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c1,failed,0.000,0.000,,,lower,tp,B300,single,tp2
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c1,out_tok_per_s,655.349,644.455,1.017,,higher,tp,B300,single,tp4
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c1,ttft_p50_ms,3.130,2.457,1.274,,lower,tp,B300,single,tp4
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c1,ttft_p99_ms,6.149,4.011,1.533,,lower,tp,B300,single,tp4
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c1,tpot_p50_ms,1.505,1.545,0.974,,lower,tp,B300,single,tp4
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c1,failed,0.000,0.000,,,lower,tp,B300,single,tp4
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c32,out_tok_per_s,13700.424,14412.649,0.951,,higher,tp,B300,single,tp2
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c32,ttft_p50_ms,13.303,9.787,1.359,,lower,tp,B300,single,tp2
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c32,ttft_p99_ms,29.141,36.382,0.801,,lower,tp,B300,single,tp2
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c32,tpot_p50_ms,2.238,2.101,1.065,,lower,tp,B300,single,tp2
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c32,failed,0.000,0.000,,,lower,tp,B300,single,tp2
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c32,out_tok_per_s,15763.997,14412.649,1.094,,higher,tp,B300,single,tp4
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c32,ttft_p50_ms,11.009,9.787,1.125,,lower,tp,B300,single,tp4
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c32,ttft_p99_ms,27.985,36.382,0.769,,lower,tp,B300,single,tp4
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c32,tpot_p50_ms,1.938,2.101,0.922,,lower,tp,B300,single,tp4
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c32,failed,0.000,0.000,,,lower,tp,B300,single,tp4
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c8-long,out_tok_per_s,3117.798,3401.206,0.917,,higher,tp,B300,single,tp2
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c8-long,ttft_p50_ms,14.512,13.235,1.096,,lower,tp,B300,single,tp2
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c8-long,ttft_p99_ms,37.654,36.031,1.045,,lower,tp,B300,single,tp2
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c8-long,tpot_p50_ms,2.435,2.242,1.086,,lower,tp,B300,single,tp2
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c8-long,failed,0.000,0.000,,,lower,tp,B300,single,tp2
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c8-long,out_tok_per_s,3384.845,3401.206,0.995,,higher,tp,B300,single,tp4
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c8-long,ttft_p50_ms,14.312,13.235,1.081,,lower,tp,B300,single,tp4
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c8-long,ttft_p99_ms,36.175,36.031,1.004,,lower,tp,B300,single,tp4
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c8-long,tpot_p50_ms,2.238,2.242,0.998,,lower,tp,B300,single,tp4
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c8-long,failed,0.000,0.000,,,lower,tp,B300,single,tp4
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c8,out_tok_per_s,4112.288,4614.765,0.891,,higher,tp,B300,single,tp2
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c8,ttft_p50_ms,8.607,8.216,1.048,,lower,tp,B300,single,tp2
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c8,ttft_p99_ms,55.086,15.365,3.585,,lower,tp,B300,single,tp2
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c8,tpot_p50_ms,1.877,1.655,1.134,,lower,tp,B300,single,tp2
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c8,failed,0.000,0.000,,,lower,tp,B300,single,tp2
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c8,out_tok_per_s,4343.227,4614.765,0.941,,higher,tp,B300,single,tp4
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c8,ttft_p50_ms,8.681,8.216,1.057,,lower,tp,B300,single,tp4
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c8,ttft_p99_ms,84.860,15.365,5.523,,lower,tp,B300,single,tp4
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c8,tpot_p50_ms,1.712,1.655,1.034,,lower,tp,B300,single,tp4
+ab_tp_b300_car_fused,2026-10-19,"B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)",c8,failed,0.000,0.000,,,lower,tp,B300,single,tp4

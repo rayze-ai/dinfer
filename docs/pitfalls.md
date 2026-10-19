@@ -510,3 +510,10 @@
 - 根因：8 卡可见时 `nvidia-smi` 输出 8 行，`head -1` 读完一行关管道，`nvidia-smi` 收 SIGPIPE 退出码 141，`set -o pipefail` 下整条命令失败 → `set -e` 退出。4090 Pod 只可见 1 张卡从未触发。第一次猜是 `docker inspect`（没先 `bash -x`）——猜错一轮。
 - 解法：`nvidia-smi -i 0 --query-gpu=name`（只查一张卡，不再 `| head`）；`docker inspect` 那行顺带加了 `/version` 回退。
 - 避免：`pipefail` 脚本里 `<多行命令> | head -N` 一律改成让生产者只产 N 行，或 `|| true`；新机器首次跑 verify 脚本**先 `bash -x`**，不要猜。
+
+## 2026-10-19 同进程内 `cuIpcOpenMemHandle` 自己导出的 handle 失败
+
+- 现象：B300 上自定义 one-shot all-reduce 建立时每个 rank `cuIpcOpenMemHandle(对端 handle)` 都报错（`custom_ar_finish -> false`），而 PD 的 cuda-ipc 槽区（P / D 两个进程）同一段代码正常。
+- 根因：CUDA 限制——IPC handle 不能在导出它的**同一进程**里打开（文档：`cuIpcOpenMemHandle` "cannot be used to open a handle created in the same process"）。TP 是一进程多线程，每个 rank 一个主 ctx，不是多进程。vLLM `custom_all_reduce` 是多进程（一 rank 一进程）所以能用 IPC。
+- 解法：一进程多线程下直接交换 `cuMemAlloc` 的裸指针（UVA 下进程内全局唯一）+ `cuCtxEnablePeerAccess(cuDevicePrimaryCtxRetain(对端设备))`（`CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED` 当成功），kernel 直接读对端地址。`comm.rs::enable_peer_access`；handle 仍导出随 `ArPeerInfo` 传递，留给将来跨进程。
+- 避免：凡"同进程多 ctx 共享设备内存"都走 peer access，不走 IPC；IPC 只给跨进程（PD）。

@@ -362,7 +362,8 @@ impl Qwen3Service {
         let exec_kind = if others.is_empty() {
             ExecKind::Single(exec)
         } else {
-            let tpx = crate::tp::TpExecutor::new(exec, others);
+            let mut tpx = crate::tp::TpExecutor::new(exec, others);
+            tpx.setup_custom_ar()?; // one-shot all-reduce（NVLink / P2P 下启用；否则静默回退 NCCL）；必须在图捕获前
             if pd_state.is_some() {
                 tpx.share_region()?; // D 侧：rank 0 建的 shm 区交给其它 rank（tcp 下为 None，no-op）
             }

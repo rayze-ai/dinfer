@@ -168,5 +168,17 @@
 | | | | c8 | single | tp2 | 3435 (-26%) | 9.5 (+3%) | 2.24 (-36%) |
 | | | | c8 | single | tp4 | 3345 (-28%) | 9.3 (+5%) | 2.31 (-40%) |
 | | | | c8 | single | tp8 | 2706 (-42%) | 11.9 (-21%) | 2.83 (-72%) |
+| ab_tp_b300_car_fused | 2026-10-19 | B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access) | c1 | single | single（基线） | 644 | 2.5 | 1.54 |
+| | | | c1 | single | tp2 | 633 (-2%) | 3.1 (-26%) | 1.57 (-1%) |
+| | | | c1 | single | tp4 | 655 (+2%) | 3.1 (-27%) | 1.51 (+3%) |
+| ab_tp_b300_car_fused | 2026-10-19 | B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access) | c32 | single | single（基线） | 14413 | 9.8 | 2.10 |
+| | | | c32 | single | tp2 | 13700 (-5%) | 13.3 (-36%) | 2.24 (-7%) |
+| | | | c32 | single | tp4 | 15764 (+9%) | 11.0 (-12%) | 1.94 (+8%) |
+| ab_tp_b300_car_fused | 2026-10-19 | B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access) | c8-long | single | single（基线） | 3401 | 13.2 | 2.24 |
+| | | | c8-long | single | tp2 | 3118 (-8%) | 14.5 (-10%) | 2.44 (-9%) |
+| | | | c8-long | single | tp4 | 3385 (-0%) | 14.3 (-8%) | 2.24 (+0%) |
+| ab_tp_b300_car_fused | 2026-10-19 | B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access) | c8 | single | single（基线） | 4615 | 8.2 | 1.66 |
+| | | | c8 | single | tp2 | 4112 (-11%) | 8.6 (-5%) | 1.88 (-13%) |
+| | | | c8 | single | tp4 | 4343 (-6%) | 8.7 (-6%) | 1.71 (-3%) |
 
 ![trend](perf-trend.svg)

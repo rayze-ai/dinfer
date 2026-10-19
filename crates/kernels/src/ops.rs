@@ -1073,6 +1073,20 @@ pub fn bf16_to_f32_n(stream: &Stream, x: &CudaSlice<bf16>, y: &mut CudaSlice<f32
     check(unsafe { ffi::bf16_to_f32(px, py, n as i64, stream.raw() as _) }, "bf16_to_f32")
 }
 
+/// y[rows, nb*cols] (f32) = 拼接 x 的 nb 个 [rows, cols] bf16 块（块 b 落到列段 [b*cols, (b+1)*cols)）。
+/// 用于 TP 按输出维切分的 GEMM 结果经 `all_gather` 后的 `[world][rows][cols]` 块布局：一趟修正布局 + 升 f32。
+pub fn gather_blocks_bf16_to_f32(stream: &Stream, x: &CudaSlice<bf16>, y: &mut CudaSlice<f32>, nb: usize, rows: usize, cols: usize) -> Result<()> {
+    let n = nb * rows * cols;
+    ensure!(x.len() >= n && y.len() >= n, "gather_blocks_bf16_to_f32: buffer ({} / {} < {n})", x.len(), y.len());
+    let px = stream.ptr(x) as *const c_void;
+    let py = stream.ptr_mut(y) as *mut f32;
+    // SAFETY: 容量已校验。
+    check(
+        unsafe { ffi::gather_blocks_bf16_to_f32(px, py, nb as i64, rows as i64, cols as i64, stream.raw() as _) },
+        "gather_blocks_bf16_to_f32",
+    )
+}
+
 /// dst[:n] = src[:n]（i32，设备内拷贝）。
 pub fn copy_i32_n(stream: &Stream, src: &CudaSlice<i32>, dst: &mut CudaSlice<i32>, n: usize) -> Result<()> {
     stream.dtod_copy_n(src, dst, n)

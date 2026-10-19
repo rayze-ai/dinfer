@@ -85,12 +85,19 @@ pub struct Qwen3Model<O: OpSet = DefaultOps> {
     pub comm: Option<k::comm::Comm>,
     /// (rank, world)；单卡 (0, 1)。
     pub tp: (usize, usize),
+    /// lm_head 按 vocab（输出维）切分（`LMHEAD_COLSPLIT=1`，world > 1 且文件有独立 `lm_head.weight` 时生效）：
+    /// 本 rank 只算 `vocab_local` 列 logits，采样前 all_gather 成全 vocab（见 `lm_head_logits`）。默认关，复制。
+    pub lm_head_colsplit: bool,
+    /// 本 rank 的 lm_head 输出列数（列切 = vocab / world；否则 = vocab）。
+    pub vocab_local: usize,
     hidden: Tensor<bf16>,
     normed: Tensor<bf16>,
     attn_out: Tensor<bf16>,
     mlp_out: Tensor<bf16>,
     final_normed: Tensor<bf16>,
     logits_bf16: Tensor<bf16>,
+    /// 列切时本 rank 局部 logits [max_logits_rows, vocab_local] bf16（all_gather 的 send 端）；非列切时 1 个元素占位。
+    logits_local: Tensor<bf16>,
     /// decode split-K attention 的 partial 缓冲（全层共享）：[max_logits_rows × H × 8 × (D+2)] f32。
     decode_scratch: Tensor<f32>,
 }
@@ -317,6 +324,7 @@ pub struct ModelScratch {
     pub mlp_out: Tensor<bf16>,
     pub final_normed: Tensor<bf16>,
     pub logits_bf16: Tensor<bf16>,
+    pub logits_local: Tensor<bf16>,
     pub decode_scratch: Tensor<f32>,
     pub layers: Vec<LayerScratch>,
 }
@@ -461,20 +469,43 @@ impl<O: OpSet> Qwen3Model<O> {
             );
         }
         let norm = RmsNorm::load(stream, src, "model.norm", cfg.rms_norm_eps)?;
-        // TODO(T3)：lm_head 列切（vocab ÷ world，各 rank 算自己那段 logits 后 all-gather / 只在 rank 0 采样）可省 world-1 份
-        // lm_head 权重与 logits GEMM；需 P2P 机器再评估（design §13.6 T3），现在复制。
-        let lm_head = if src.contains("lm_head.weight") {
-            Linear::load(stream, src, "lm_head")?
+        // lm_head：默认复制（design §13.2）。开关 `LMHEAD_COLSPLIT=1`（loop b-nvlink B2）：world > 1 且文件里有独立
+        // `lm_head.weight` 时按 vocab（输出维，dim 0）切，各 rank 只算自己那段 logits，采样前 all_gather（`lm_head_logits`）。
+        // 文件无 lm_head.weight（纯 tied）时不切：embed 表要整份做 gather，再切一份 lm_head 等于多占 1/world 的 embed
+        // 显存，先不做，打 info 说明。Qwen3-0.6B 虽 tie_word_embeddings=true 但文件带 lm_head.weight，列切可生效。
+        let v = cfg.vocab_size as usize;
+        let want_colsplit = std::env::var("LMHEAD_COLSPLIT").is_ok_and(|x| x == "1");
+        let has_lm_head = src.contains("lm_head.weight");
+        let lm_head_colsplit = want_colsplit && world > 1 && has_lm_head && v % world == 0;
+        if want_colsplit && !lm_head_colsplit {
+            let reason = if world <= 1 {
+                "world == 1"
+            } else if !has_lm_head {
+                "no standalone lm_head.weight (tied to embed)"
+            } else {
+                "vocab % world != 0"
+            };
+            tracing::info!(rank, world, vocab = v, reason, "lm_head colsplit requested but NOT enabled");
+        }
+        let lm_head = if has_lm_head {
+            if lm_head_colsplit {
+                Linear::load_shard(stream, src, "lm_head", 0, rank, world)?
+            } else {
+                Linear::load(stream, src, "lm_head")?
+            }
         } else {
             ensure!(cfg.tie_word_embeddings, "no lm_head.weight and not tied");
             Linear::load(stream, src, "model.embed_tokens")?
         };
+        let vocab_local = lm_head.out_features;
+        if lm_head_colsplit {
+            tracing::info!(rank, world, vocab = v, vocab_local, "lm_head colsplit enabled (LMHEAD_COLSPLIT=1)");
+        }
         wall("norm + lm_head");
         let t_rope = std::time::Instant::now();
         let rope =
             Rope::new(stream, d, cfg.max_position_embeddings as usize, cfg.rope_theta, RopeStyle::Neox)?;
         tracing::info!(rope_ms = t_rope.elapsed().as_millis() as u64, max_pos = cfg.max_position_embeddings, "load timing: rope cos/sin table");
-        let v = cfg.vocab_size as usize;
         wall("rope");
         // 激活 scratch 先分配，KV 最后：这样 free 已含权重 + scratch 的占用
         let t_sync = std::time::Instant::now();
@@ -506,6 +537,7 @@ impl<O: OpSet> Qwen3Model<O> {
         let mlp_out = Tensor::zeros(stream, &[max_tokens, hidden])?;
         let final_normed = Tensor::zeros(stream, &[max_logits_rows, hidden])?;
         let logits_bf16 = Tensor::zeros(stream, &[max_logits_rows, v])?;
+        let logits_local = Tensor::zeros(stream, &[if lm_head_colsplit { max_logits_rows * vocab_local } else { 1 }])?;
         let decode_scratch = Tensor::zeros(
             stream,
             &[k::gqa_decode_scratch_len(max_logits_rows, cfg.num_attention_heads as usize, d)],
@@ -579,6 +611,8 @@ impl<O: OpSet> Qwen3Model<O> {
         Ok(Self {
             comm: None,
             tp,
+            lm_head_colsplit,
+            vocab_local,
             ops: O::default(),
             embed,
             layers,
@@ -595,6 +629,7 @@ impl<O: OpSet> Qwen3Model<O> {
             mlp_out,
             final_normed,
             logits_bf16,
+            logits_local,
             decode_scratch,
             cfg,
         })
@@ -634,6 +669,7 @@ impl<O: OpSet> Qwen3Model<O> {
             mlp_out: Tensor::zeros(stream, &[t, hidden])?,
             final_normed: Tensor::zeros(stream, &[rows, hidden])?,
             logits_bf16: Tensor::zeros(stream, &[rows, v])?,
+            logits_local: Tensor::zeros(stream, &[if self.lm_head_colsplit { rows * self.vocab_local } else { 1 }])?,
             decode_scratch: Tensor::zeros(stream, &[k::gqa_decode_scratch_len(rows, h, d)])?,
             layers,
         })
@@ -646,6 +682,7 @@ impl<O: OpSet> Qwen3Model<O> {
         std::mem::swap(&mut self.mlp_out, &mut s.mlp_out);
         std::mem::swap(&mut self.final_normed, &mut s.final_normed);
         std::mem::swap(&mut self.logits_bf16, &mut s.logits_bf16);
+        std::mem::swap(&mut self.logits_local, &mut s.logits_local);
         std::mem::swap(&mut self.decode_scratch, &mut s.decode_scratch);
         for (l, ls) in self.layers.iter_mut().zip(s.layers.iter_mut()) {
             l.attn.swap_bufs(&mut ls.qkv_buf, &mut ls.attn);
@@ -666,25 +703,41 @@ impl<O: OpSet> Qwen3Model<O> {
             self.max_tokens
         );
         let h = self.cfg.hidden_size as usize;
-        let v = self.cfg.vocab_size as usize;
         let eps = self.cfg.rms_norm_eps;
         k::embedding_bf16_n(stream, &f.input_ids.data, &self.embed.table.data, &mut self.hidden.data, t, h)?;
         // 残差：hidden 是主干；第 l 层 MLP 的输出不单独加回，而是在第 l+1 层的 input_norm 里用 fused_add 一次完成
         //（最后一层之后再补一次加）。省掉每层一次 add kernel。
+        // TP（design §13.6 T3）：两处 all-reduce 都与紧随的 fused_add_rmsnorm 合成一个 kernel
+        //（`all_reduce_add_rmsnorm_bf16`：小消息 one-shot 直接读 peer 镜像区求和，和不落回 attn_out / mlp_out；
+        // 大消息或无 P2P 时内部退化为 NCCL + fused_add_rmsnorm）。pending_mlp 在 TP 下表示 "上一层 mlp_out 还是
+        // **本 rank 的部分和**"，在下一层开头的融合 kernel 里一并 all-reduce。
         let mut pending_mlp = false;
         let comm = self.comm.as_ref();
         for (li, layer) in self.layers.iter_mut().enumerate() {
             if pending_mlp {
-                self.ops.norm().fused_add_rmsnorm(
-                    stream,
-                    &self.mlp_out.data,
-                    &mut self.hidden.data,
-                    &layer.input_norm.w.data,
-                    &mut self.normed.data,
-                    t,
-                    h,
-                    eps,
-                )?;
+                if let Some(c) = comm {
+                    k::comm::all_reduce_add_rmsnorm_bf16(
+                        c,
+                        &mut self.mlp_out.data,
+                        &mut self.hidden.data,
+                        &layer.input_norm.w.data,
+                        &mut self.normed.data,
+                        t,
+                        h,
+                        eps,
+                    )?; // TP all-reduce ②（上一层 down 部分和）+ 残差 + input_norm
+                } else {
+                    self.ops.norm().fused_add_rmsnorm(
+                        stream,
+                        &self.mlp_out.data,
+                        &mut self.hidden.data,
+                        &layer.input_norm.w.data,
+                        &mut self.normed.data,
+                        t,
+                        h,
+                        eps,
+                    )?;
+                }
             } else {
                 self.ops.norm().rmsnorm(
                     stream,
@@ -712,25 +765,36 @@ impl<O: OpSet> Qwen3Model<O> {
                 &mut self.attn_out,
             )?;
             if let Some(c) = comm {
-                k::comm::all_reduce_bf16(c, &mut self.attn_out.data, t * h)?; // TP all-reduce ①（o_proj 部分和）
+                k::comm::all_reduce_add_rmsnorm_bf16(
+                    c,
+                    &mut self.attn_out.data,
+                    &mut self.hidden.data,
+                    &layer.post_norm.w.data,
+                    &mut self.normed.data,
+                    t,
+                    h,
+                    eps,
+                )?; // TP all-reduce ①（o_proj 部分和）+ 残差 + post_norm
+            } else {
+                self.ops.norm().fused_add_rmsnorm(
+                    stream,
+                    &self.attn_out.data,
+                    &mut self.hidden.data,
+                    &layer.post_norm.w.data,
+                    &mut self.normed.data,
+                    t,
+                    h,
+                    eps,
+                )?;
             }
-            self.ops.norm().fused_add_rmsnorm(
-                stream,
-                &self.attn_out.data,
-                &mut self.hidden.data,
-                &layer.post_norm.w.data,
-                &mut self.normed.data,
-                t,
-                h,
-                eps,
-            )?;
             layer.mlp.forward(stream, gemm, self.ops.act(), t, &self.normed, &mut self.mlp_out)?;
-            if let Some(c) = comm {
-                k::comm::all_reduce_bf16(c, &mut self.mlp_out.data, t * h)?; // TP all-reduce ②（down 部分和）
-            }
+            // TP all-reduce ②（down 部分和）推迟到下一层开头 / 循环后的补加里与 fused_add 合成
             pending_mlp = true;
             if let Some(cap) = self.capture_layers.as_mut() {
-                // 诊断捕获需要本层完整输出：这里显式加一次（只在捕获模式下）
+                // 诊断捕获需要本层完整输出：这里显式 all-reduce + 加一次（只在捕获模式下，保留旧行为）
+                if let Some(c) = comm {
+                    k::comm::all_reduce_bf16(c, &mut self.mlp_out.data, t * h)?;
+                }
                 self.ops.norm().add_inplace(stream, &self.mlp_out.data, &mut self.hidden.data, t * h)?;
                 pending_mlp = false;
                 let a = self.attn_out.to_vec_f32(stream)?[..t * h].to_vec();
@@ -739,6 +803,9 @@ impl<O: OpSet> Qwen3Model<O> {
             }
         }
         if pending_mlp {
+            if let Some(c) = comm {
+                k::comm::all_reduce_bf16(c, &mut self.mlp_out.data, t * h)?; // 最后一层的 all-reduce ②（one-shot / NCCL）
+            }
             self.ops.norm().add_inplace(stream, &self.mlp_out.data, &mut self.hidden.data, t * h)?;
         }
         let rows = f.rows;
@@ -758,17 +825,37 @@ impl<O: OpSet> Qwen3Model<O> {
             h,
             eps,
         )?;
-        gemm.forward_bf16(
-            &self.final_normed.data,
-            &self.lm_head.w.data,
-            None,
-            &mut self.logits_bf16.data,
-            rows,
-            v,
-            h,
-        )?;
-        k::bf16_to_f32_n(stream, &self.logits_bf16.data, &mut logits.data, rows * v)?;
-        Ok(())
+        self.lm_head_logits(stream, gemm, rows, &mut logits.data)
+    }
+
+    /// `final_normed[..rows] · lm_head^T` → fp32 `logits[..rows*vocab]`。
+    /// 列切（`lm_head_colsplit`）：GEMM 只算本 rank 的 `vocab_local` 列到 `logits_local`，再 bf16 all_gather 进 `logits_bf16`
+    ///（NCCL 出来是 `[world][rows][vocab_local]` 块布局），最后 `gather_blocks_bf16_to_f32` 一趟修正布局 + 升 f32。
+    /// 选这条而不是"GEMM 直接写转置布局"（要改 GEMM 的 ldc / 子矩阵接口）或"gather 后 transpose + bf16_to_f32 两趟"
+    ///（多一次 rows×vocab 读写）；传 bf16 而非 f32 让 NVLink 字节减半（decode t=32：9.7 MB vs 19 MB）。
+    /// 非列切路径与原来逐位相同（GEMM 全 vocab + bf16_to_f32）。都在 CUDA graph 内（NCCL 可捕获）。
+    /// TODO(B2 方案 B)：各 rank 局部 top-k / argmax 后归并，免传全 vocab logits；需改采样流水，bench 说话再做。
+    fn lm_head_logits(
+        &mut self,
+        stream: &Stream,
+        gemm: &Gemm,
+        rows: usize,
+        logits: &mut k::cudarc::driver::CudaSlice<f32>,
+    ) -> Result<()> {
+        let h = self.cfg.hidden_size as usize;
+        let v = self.cfg.vocab_size as usize;
+        ensure!(logits.len() >= rows * v, "lm_head_logits: logits buffer {} < {}", logits.len(), rows * v);
+        if !self.lm_head_colsplit {
+            gemm.forward_bf16(&self.final_normed.data, &self.lm_head.w.data, None, &mut self.logits_bf16.data, rows, v, h)?;
+            return k::bf16_to_f32_n(stream, &self.logits_bf16.data, logits, rows * v);
+        }
+        let comm = self.comm.as_ref().ok_or_else(|| anyhow::anyhow!("lm_head colsplit: comm not set (init_tp before forward)"))?;
+        let world = self.tp.1;
+        let vl = self.vocab_local;
+        ensure!(comm.world() == world && vl * world == v, "lm_head colsplit: comm world {} / tp {world} / vocab_local {vl} × world != {v}", comm.world());
+        gemm.forward_bf16(&self.final_normed.data, &self.lm_head.w.data, None, &mut self.logits_local.data, rows, vl, h)?;
+        k::comm::all_gather_bf16(comm, &self.logits_local.data, &mut self.logits_bf16.data, rows * vl)?;
+        k::gather_blocks_bf16_to_f32(stream, &self.logits_bf16.data, logits, world, rows, vl)
     }
 
     /// `prompt_logprobs` 用：对上一次 `forward` 留在 `hidden` 里的任意 `rows[..n]` 行（n ≤ max_logits_rows）再做一次
@@ -796,7 +883,6 @@ impl<O: OpSet> Qwen3Model<O> {
             h,
             self.cfg.rms_norm_eps,
         )?;
-        gemm.forward_bf16(&self.final_normed.data, &self.lm_head.w.data, None, &mut self.logits_bf16.data, n, v, h)?;
-        k::bf16_to_f32_n(stream, &self.logits_bf16.data, logits, n * v)
+        self.lm_head_logits(stream, gemm, n, logits)
     }
 }

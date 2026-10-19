@@ -1,0 +1,1 @@
+B2: one-shot all-reduce + fused add-rmsnorm (custom_all_reduce 协议, 进程内 peer access)

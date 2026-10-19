@@ -302,6 +302,31 @@ impl Qwen3Executor {
         Ok(())
     }
 
+    // ---- 自定义 one-shot all-reduce（design §13.6 T3）三步握手，由 `TpExecutor::setup_custom_ar` 在进程内编排 ----
+    /// 第 1 步：建本 rank 的 cuda-ipc 区，返回公布信息（None = 本 rank 不参与 → 全组 disable）。
+    pub fn custom_ar_begin(&mut self) -> Result<Option<k::comm::ArPeerInfo>> {
+        anyhow::ensure!(self.num_graphs() == 0, "tp: custom_ar_begin must run before graph capture");
+        match self.model.comm.as_mut() {
+            Some(c) => c.custom_ar_begin(),
+            None => Ok(None),
+        }
+    }
+    /// 第 2 步：拿到全部 rank 的信息后打开 peer 区。false = 本 rank 失败 → 全组 disable。
+    pub fn custom_ar_finish(&mut self, peers: &[k::comm::ArPeerInfo]) -> Result<bool> {
+        match self.model.comm.as_mut() {
+            Some(c) => c.custom_ar_finish(peers),
+            None => Ok(false),
+        }
+    }
+    pub fn custom_ar_disable(&mut self) {
+        if let Some(c) = self.model.comm.as_mut() {
+            c.custom_ar_disable();
+        }
+    }
+    pub fn custom_ar_ready(&self) -> bool {
+        self.model.comm.as_ref().is_some_and(|c| c.custom_ar_ready())
+    }
+
     pub fn last_logits(&self, num_rows: usize) -> Result<Vec<f32>> {
         let v = self.model.cfg.vocab_size as usize;
         let all = self.logits.to_vec(&self.stream)?;
