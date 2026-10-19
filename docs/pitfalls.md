@@ -682,9 +682,9 @@
   并让它额外接管 [bos, bos+W-1) 几行，后续 block 从 max(r0, bos+W-1) 起、halo 全在 x 内。前提 rows_per_block ≥ W-1（host 保证）。
 - 避免：任何"按 T 分块 + 块间状态传递"的 kernel，先列出每个状态槽的读者 / 写者 block，读写不在同一 block 就要重新切分职责，不要靠启动顺序。
 
-## B300-50：`CUDA_VISIBLE_DEVICES=4` 报 "free 34.6 GiB" 而 nvidia-smi 说 GPU 4 是 0 MiB（2026-10-20）
+## B300-50：nsys 起服务报 "not enough GPU memory … free 34.6 GiB"，而卡是空的（2026-10-20）
 
-- 现象：nsys 起 dinfer 到 GPU 4 两次失败 `not enough GPU memory for KV cache: free 34.59 GiB`，nvidia-smi 4 号卡空，0/1 号卡各 246 GB 被占。
-- 根因：CUDA runtime 默认按"性能最快"排序设备编号，与 nvidia-smi 的 PCI 顺序不一致；多卡机上 `CUDA_VISIBLE_DEVICES=4` 可能落到正在跑服务的那张卡。
-- 解法：所有多卡脚本一律 `export CUDA_DEVICE_ORDER=PCI_BUS_ID`（已加进 `scripts/dev/b300_nsys_decode.sh` 与 `env.sh` 建议），或用 UUID。
-- 避免：起服务后用 `nvidia-smi --query-compute-apps=pid,gpu_uuid,used_memory` 核一次落在哪张卡。
+- 现象：`--max-num-batched-tokens 16384 --gpu-memory-utilization 0.6` 下 dinfer qwen35 在空卡上报 KV 预算不足；先误判为 CUDA 设备编号与 nvidia-smi 不一致（换卡 / `CUDA_DEVICE_ORDER=PCI_BUS_ID` 后依旧）。
+- 根因：qwen35 的激活缓冲按 `max_tokens`（≈ 预算 + max_num_seqs）预分配，每层 GDN / 全注意力各有多块 `[max_tokens, 10240/6144/8192…]` bf16，预算从 2048 到 16384 时这部分从 ~几 GB 涨到 ~180 GB（free 从 ~200 GiB 掉到 34.6）；再叠加 `gpu_memory_utilization 0.6` 的预算公式 `min(free, cap − used)`，cap 160 GiB < used → 0。
+- 解法：① bench 用 0.9（与 vLLM 一致），nsys 也用 0.9；② 激活缓冲应全模型共享一套（qwen3 是这样），不是每层一份——性能 loop 待办；③ 启动日志打印激活缓冲总字节数。
+- 避免：改预算 / max_tokens 后看一眼启动日志的 free / 激活字节；"free 很小但卡空"先怀疑自己分配了什么。`CUDA_DEVICE_ORDER=PCI_BUS_ID` 仍建议加（无害，编号稳定）。
