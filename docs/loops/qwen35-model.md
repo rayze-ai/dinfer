@@ -28,6 +28,7 @@
 | 5 | layer.rs + model.rs（异构层循环、独立 lm_head、gather_rmsnorm + logits） | 编译过；commit 35127d4 |
 | 6 | executor.rs（eager 单流、plan 上传、GDN slot 分配 + "位置0 清零"、采样流水） | 编译过；commit 869b1c5 |
 | 7 | service.rs + parser.rs + bins/dinfer `--features qwen35` | `cargo build -p dinfer --features qwen35` 过；commit 5766cdc / 8c3e01a |
+| 9 | 收口：KV 块数改为按剩余显存自动估算（去掉硬编码 54 GiB）、TP（world > 1）明确报错而不是静默少算、GDN slot 复用给带历史请求时清零并告警、GDN 状态显存进启动日志 | golden 仍 4/4；commit 29276b1 / 74e81d3 / 58dccd5 / 3083226 |
 | 8 | tiny golden（`scripts/dev/make_qwen35_tiny.py`）+ `golden_parity.rs` + `qwen35_golden.sh`。**踩坑**：① 参考侧 `rmsnorm` 写成"f32 归一化 × f32 权重再落 bf16"，与 kernel 的"乘权重**后**落 bf16"差一个舍入点 → prefill 差 0.2 且 greedy 第 1 步偏；改成 `qb(norm*w)` 后 prefill max abs 0.20 → 一致。② 参考 `step_logits[i]` 最初是"喂了第 i 个 token 之后"的 logits，对拍口径要"预测第 i 个 token"的那一行 → 索引整体错一位（表现为教师强制步 0 差 4.0）。③ tiny 随机权重下 greedy 有大量平局（ref top-2 gap 最低 0.03），我们的 logits 与参考差 ~0.2 → 平局步 argmax 断言无意义，改成"只有 ref gap > 0.15 的行断言 argmax"，并把 chunked 用例改成教师强制（喂 golden token）。 | **4/4 通过**（prefill 28 行 max abs 0.2031 / argmax 全对；greedy 16 全对；chunked 4/4/1 + 15 步教师强制；双请求混批各 16 全对）；commit b8162b1 |
 | 轮 | 改动 | 结果 |
 |---|---|---|
