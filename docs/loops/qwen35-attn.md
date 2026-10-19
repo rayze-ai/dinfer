@@ -58,3 +58,6 @@
 | # | 日期 | 改动 | 结果 |
 |---|---|---|---|
 | 1 | 2026-10-19 | 建规格：钉死 gate 语义（attention 后置）、zero-centered norm、partial rope 的 pair 口径，列拓扑改动表 | 规格完成 |
+| 2 | 2026-10-19 | v5 模板化 D（128/256；D=256 tile 32 key 保 smem ~34 KB）、merge_v2 运行时 head_dim、v3 模板化 D + GROUP 6、qkv_post 扩展入口（partial RoPE / norm_beta / gate 行布局）、`mul_sigmoid_bf16`、新对拍 case（prefill/paged/decode/mixed D=256 × GROUP 6、qkv_post_ext × 3、mul_sigmoid × 3） | 首次跑：18/21 新行过；v5 的 smem 行跨度误写成 `TILE+8`（应为 `D+8`）→ gqa 全红，改后全过 |
+| 3 | 2026-10-19 | 定位间歇 NaN：同进程先跑 D=256 后，D=128 混批 `h4_hk2` 用例出随机 NaN（2–16 个元素，位置每次不同） | 根因：v3 对越界 key **不发** cp.async，smem 残留 inf/NaN 与 `p=0` 相乘得 NaN。改为 `cp16z` 零填充后 5 轮连跑全 0 NaN。**这是既有隐患**，D=256 实例化后 smem 布局变化才稳定暴露 |
+| 4 | 2026-10-19 | 3090 全量 `ops_parity.sh`（v3 开 / 关各一次） | 见下（待填） |

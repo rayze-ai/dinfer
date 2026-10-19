@@ -447,13 +447,13 @@ fn parity_gqa_prefill() {
 }
 
 /// paged / decode / mixed 共用：hist + new 全部写 cache，q 只有 new 行（紧凑 [tq, h, D]）。
-fn paged_case(s: &Stream, op: &str, seed: u64, h: usize, hk: usize, hist: &[usize], new: &[usize], mode: &str) {
+fn paged_case(s: &Stream, op: &str, seed: u64, h: usize, hk: usize, d: usize, hist: &[usize], new: &[usize], mode: &str) {
     let name = if hist.len() > 8 {
         // 大 batch：只写 B 与 hist 范围，避免目录名过长
-        format!("h{h}_hk{hk}_b{}_hist{}-{}_new1", hist.len(), hist.iter().min().unwrap(), hist.iter().max().unwrap())
+        format!("h{h}_hk{hk}_d{d}_b{}_hist{}-{}_new1", hist.len(), hist.iter().min().unwrap(), hist.iter().max().unwrap())
     } else {
         format!(
-            "h{h}_hk{hk}_hist{}_new{}",
+            "h{h}_hk{hk}_d{d}_hist{}_new{}",
             hist.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("-"),
             new.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("-")
         )
@@ -465,16 +465,16 @@ fn paged_case(s: &Stream, op: &str, seed: u64, h: usize, hk: usize, hist: &[usiz
     let (bt, total_blocks, max_blocks) = alloc_blocks(&mut r, &lens, BS);
     let tq: usize = new.iter().sum();
     let tk: usize = lens.iter().sum();
-    // 全部 k/v（hist+new）按请求顺序平铺 [tk, hk, D]，slot 由 block_table 决定
-    let k = r.normals_bf16(tk * hk * D, 1.0);
-    let v = r.normals_bf16(tk * hk * D, 1.0);
+    // 全部 k/v（hist+new）按请求顺序平铺 [tk, hk, d]，slot 由 block_table 决定
+    let k = r.normals_bf16(tk * hk * d, 1.0);
+    let v = r.normals_bf16(tk * hk * d, 1.0);
     let mut slots = Vec::with_capacity(tk);
     for (i, &l) in lens.iter().enumerate() {
         for p in 0..l {
             slots.push(bt[i][p / BS] as i64 * BS as i64 + (p % BS) as i64);
         }
     }
-    let q = r.normals_bf16(tq * h * D, 1.0);
+    let q = r.normals_bf16(tq * h * d, 1.0);
     let mut cu_q = vec![0i32];
     for &l in new {
         cu_q.push(cu_q.last().unwrap() + l as i32);
@@ -482,39 +482,39 @@ fn paged_case(s: &Stream, op: &str, seed: u64, h: usize, hk: usize, hist: &[usiz
     let seq_lens: Vec<i32> = lens.iter().map(|&l| l as i32).collect();
     let btf = flat_bt(&bt, max_blocks);
 
-    let mut cache = s.alloc_zeros::<bf16>(total_blocks * BS * hk * 2 * D).unwrap();
+    let mut cache = s.alloc_zeros::<bf16>(total_blocks * BS * hk * 2 * d).unwrap();
     let dk = s.htod_copy(k).unwrap();
     let dv = s.htod_copy(v).unwrap();
     let dsl = s.htod_copy(slots.clone()).unwrap();
-    dinfer_kernels::gqa_cache_write_bf16(s, &dk, &dv, &mut cache, &dsl, tk, hk, D, BS).unwrap();
+    dinfer_kernels::gqa_cache_write_bf16(s, &dk, &dv, &mut cache, &dsl, tk, hk, d, BS).unwrap();
     let dq = s.htod_copy(q.clone()).unwrap();
     let dbt = s.htod_copy(btf.clone()).unwrap();
     let dseq = s.htod_copy(seq_lens.clone()).unwrap();
     let dcu = s.htod_copy(cu_q.clone()).unwrap();
-    let mut out = s.alloc_zeros::<bf16>(tq * h * D).unwrap();
-    let scale = (D as f32).powf(-0.5);
+    let mut out = s.alloc_zeros::<bf16>(tq * h * d).unwrap();
+    let scale = (d as f32).powf(-0.5);
     let max_q = *new.iter().max().unwrap();
     match mode {
-        "paged" => dinfer_kernels::gqa_paged_bf16(s, &dq, &cache, &dbt, &dseq, &dcu, &mut out, n, max_q, h, hk, D, BS, max_blocks, scale, 0, false).unwrap(),
+        "paged" => dinfer_kernels::gqa_paged_bf16(s, &dq, &cache, &dbt, &dseq, &dcu, &mut out, n, max_q, h, hk, d, BS, max_blocks, scale, 0, false).unwrap(),
         "decode" => {
-            let mut scratch = s.alloc_zeros::<f32>(dinfer_kernels::gqa_decode_scratch_len(n, h, D)).unwrap();
-            dinfer_kernels::gqa_decode_bf16(s, &dq, &cache, &dbt, &dseq, &mut out, &mut scratch, n, h, hk, D, BS, max_blocks, scale, 0, None).unwrap()
+            let mut scratch = s.alloc_zeros::<f32>(dinfer_kernels::gqa_decode_scratch_len(n, h, d)).unwrap();
+            dinfer_kernels::gqa_decode_bf16(s, &dq, &cache, &dbt, &dseq, &mut out, &mut scratch, n, h, hk, d, BS, max_blocks, scale, 0, None).unwrap()
         }
         "mixed" => {
-            let mut scratch = s.alloc_zeros::<f32>(dinfer_kernels::gqa_decode_scratch_len(n, h, D)).unwrap();
-            dinfer_kernels::gqa_mixed_bf16(s, &dq, &cache, &dbt, &dseq, &dcu, &mut out, &mut scratch, n, max_q, h, hk, D, BS, max_blocks, scale, 0).unwrap()
+            let mut scratch = s.alloc_zeros::<f32>(dinfer_kernels::gqa_decode_scratch_len(n, h, d)).unwrap();
+            dinfer_kernels::gqa_mixed_bf16(s, &dq, &cache, &dbt, &dseq, &dcu, &mut out, &mut scratch, n, max_q, h, hk, d, BS, max_blocks, scale, 0).unwrap()
         }
         _ => unreachable!(),
     }
-    c.bf16("cache", &[total_blocks * BS, hk, 2, D], &s.dtoh_sync_copy(&cache).unwrap());
-    c.bf16("q", &[tq, h, D], &q);
+    c.bf16("cache", &[total_blocks * BS, hk, 2, d], &s.dtoh_sync_copy(&cache).unwrap());
+    c.bf16("q", &[tq, h, d], &q);
     c.i32("block_table", &[n, max_blocks], &btf);
     c.i32("seq_lens", &[n], &seq_lens);
     c.i32("cu_seqlens_q", &[n + 1], &cu_q);
-    c.bf16("out", &[tq, h, D], &s.dtoh_sync_copy(&out).unwrap());
+    c.bf16("out", &[tq, h, d], &s.dtoh_sync_copy(&out).unwrap());
     c.meta("heads", h);
     c.meta("kv_heads", hk);
-    c.meta("head_dim", D);
+    c.meta("head_dim", d);
     c.meta("block_size", BS);
     c.meta("scale", scale);
     c.finish();
@@ -524,27 +524,171 @@ fn paged_case(s: &Stream, op: &str, seed: u64, h: usize, hk: usize, hist: &[usiz
 #[ignore]
 fn parity_gqa_paged() {
     let (_d, s) = dev();
-    paged_case(&s, "gqa_paged", 1000, 4, 2, &[11, 6], &[3, 1], "paged");
-    paged_case(&s, "gqa_paged", 1001, H, HK, &[40, 70, 0, 130], &[5, 1, 33, 64], "paged");
+    paged_case(&s, "gqa_paged", 1000, 4, 2, D, &[11, 6], &[3, 1], "paged");
+    paged_case(&s, "gqa_paged", 1001, H, HK, D, &[40, 70, 0, 130], &[5, 1, 33, 64], "paged");
 }
 
 #[test]
 #[ignore]
 fn parity_gqa_decode() {
     let (_d, s) = dev();
-    paged_case(&s, "gqa_decode", 1100, 4, 2, &[7, 20], &[1, 1], "decode");
+    paged_case(&s, "gqa_decode", 1100, 4, 2, D, &[7, 20], &[1, 1], "decode");
     // B=32（Hkv=8 → B×Hkv=256 → splits=1 直接写出路径）与 B=4（split-K 多段）
     let hist32: Vec<usize> = (0..32).map(|i| 1 + (i * 37) % 400).collect();
-    paged_case(&s, "gqa_decode", 1101, H, HK, &hist32, &vec![1; 32], "decode");
-    paged_case(&s, "gqa_decode", 1102, H, HK, &[300, 15, 1023, 64], &[1, 1, 1, 1], "decode");
+    paged_case(&s, "gqa_decode", 1101, H, HK, D, &hist32, &vec![1; 32], "decode");
+    paged_case(&s, "gqa_decode", 1102, H, HK, D, &[300, 15, 1023, 64], &[1, 1, 1, 1], "decode");
 }
 
 #[test]
 #[ignore]
 fn parity_gqa_mixed() {
     let (_d, s) = dev();
-    paged_case(&s, "gqa_mixed", 1200, 4, 2, &[9, 5, 12], &[1, 4, 1], "mixed");
-    paged_case(&s, "gqa_mixed", 1201, H, HK, &[100, 0, 250, 30, 7], &[1, 48, 1, 17, 1], "mixed");
+    paged_case(&s, "gqa_mixed", 1200, 4, 2, D, &[9, 5, 12], &[1, 4, 1], "mixed");
+    paged_case(&s, "gqa_mixed", 1201, H, HK, D, &[100, 0, 250, 30, 7], &[1, 48, 1, 17, 1], "mixed");
+}
+
+// ------------------------------------------------------------------ Qwen3.5（D=256 / GROUP 6 / partial RoPE / 输出门）
+
+/// Qwen3.5 全注意力层形状：24 q 头 / 4 kv 头（group 6）、head_dim 256。
+const H35: usize = 24;
+const HK35: usize = 4;
+const D35: usize = 256;
+
+#[test]
+#[ignore]
+fn parity_gqa_prefill_qwen35() {
+    let (_d, s) = dev();
+    let shapes: [(usize, usize, usize, Vec<usize>); 2] =
+        [(H35, HK35, D35, vec![1, 37, 200]), (H35, HK35, D35, vec![512])];
+    for (ci, (h, hk, d, lens)) in shapes.iter().enumerate() {
+        let (h, hk, d) = (*h, *hk, *d);
+        let mut c = Case::new("gqa_prefill", &format!("h{h}_hk{hk}_d{d}_lens{}", lens.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("-")));
+        let mut r = Rng::new(1900 + ci as u64);
+        let t: usize = lens.iter().sum();
+        let w = (h + 2 * hk) * d;
+        let qkv = r.normals_bf16(t * w, 1.0);
+        let mut cu = vec![0i32];
+        for &l in lens {
+            cu.push(cu.last().unwrap() + l as i32);
+        }
+        let dqkv = s.htod_copy(qkv.clone()).unwrap();
+        let dcu = s.htod_copy(cu.clone()).unwrap();
+        let mut out = s.alloc_zeros::<bf16>(t * h * d).unwrap();
+        let qv = dqkv.slice(..);
+        let kv = dqkv.slice(h * d..);
+        let vv = dqkv.slice((h + hk) * d..);
+        let scale = (d as f32).powf(-0.5);
+        dinfer_kernels::gqa_prefill_bf16(&s, &qv, &kv, &vv, &mut out, &dcu, lens.len(), *lens.iter().max().unwrap(), h, hk, d, scale, w, w)
+            .unwrap();
+        c.bf16("qkv", &[t, w], &qkv);
+        c.i32("cu_seqlens", &[cu.len()], &cu);
+        c.bf16("out", &[t, h, d], &s.dtoh_sync_copy(&out).unwrap());
+        c.meta("heads", h);
+        c.meta("kv_heads", hk);
+        c.meta("head_dim", d);
+        c.meta("scale", scale);
+        c.finish();
+    }
+}
+
+#[test]
+#[ignore]
+fn parity_gqa_paged_qwen35() {
+    let (_d, s) = dev();
+    paged_case(&s, "gqa_paged", 1910, H35, HK35, D35, &[11, 6], &[3, 1], "paged");
+    paged_case(&s, "gqa_paged", 1911, H35, HK35, D35, &[40, 70, 0, 130], &[5, 1, 33, 64], "paged");
+}
+
+#[test]
+#[ignore]
+fn parity_gqa_decode_qwen35() {
+    let (_d, s) = dev();
+    // 小 batch（splits > 1，走 partial + merge）与 B=32（Hkv=4 → B×Hkv=128 → splits > 1 也可能成立）
+    paged_case(&s, "gqa_decode", 1920, H35, HK35, D35, &[7, 20], &[1, 1], "decode");
+    paged_case(&s, "gqa_decode", 1921, H35, HK35, D35, &[300, 15, 1023, 64], &[1, 1, 1, 1], "decode");
+    let hist32: Vec<usize> = (0..32).map(|i| 1 + (i * 37) % 400).collect();
+    paged_case(&s, "gqa_decode", 1922, H35, HK35, D35, &hist32, &vec![1; 32], "decode");
+}
+
+#[test]
+#[ignore]
+fn parity_gqa_mixed_qwen35() {
+    let (_d, s) = dev();
+    paged_case(&s, "gqa_mixed", 1930, H35, HK35, D35, &[100, 0, 250, 30, 7], &[1, 48, 1, 17, 1], "mixed");
+}
+
+/// Qwen3.5 qkv_post：D=256、partial RoPE（rope_dim=64）、zero-centered norm（beta=1）、输出门行布局。
+/// 另加一个 D=128 的 partial RoPE 独立 case（Qwen3 整头路径仍由 parity_qkv_post 覆盖）。
+#[test]
+#[ignore]
+fn parity_qkv_post_qwen35() {
+    let (_d, s) = dev();
+    // (t, h, hk, d, rope_dim, beta, qmul)
+    let cases: [(usize, usize, usize, usize, usize, f32, usize); 3] =
+        [(6, H35, HK35, D35, 64, 1.0, 2), (45, H35, HK35, D35, 64, 1.0, 2), (17, H, HK, D, 64, 1.0, 1)];
+    for (ci, &(t, h, hk, d, rd, beta, qmul)) in cases.iter().enumerate() {
+        let mut c = Case::new("qkv_post_ext", &format!("t{t}_h{h}_hk{hk}_d{d}_rd{rd}_qm{qmul}"));
+        let mut r = Rng::new(1950 + ci as u64);
+        let w = (h * qmul + 2 * hk) * d;
+        let qkv = r.normals_bf16(t * w, 1.0);
+        let wq: Vec<bf16> = (0..d).map(|_| bf16::from_f32(r.uniform() + 0.5)).collect();
+        let wk: Vec<bf16> = (0..d).map(|_| bf16::from_f32(r.uniform() + 0.5)).collect();
+        let max_pos = 4096;
+        let pos: Vec<i32> = (0..t).map(|_| r.below(max_pos) as i32).collect();
+        let cs = cos_sin_table(max_pos, rd, 1e6);
+        let nblocks = (t + BS - 1) / BS + 1;
+        let perm = r.perm(nblocks * BS);
+        let mut slots: Vec<i64> = perm[..t].iter().map(|&x| x as i64).collect();
+        slots[t / 2] = -1; // 一行不写 cache
+        let mut dqkv = s.htod_copy(qkv.clone()).unwrap();
+        let dwq = s.htod_copy(wq.clone()).unwrap();
+        let dwk = s.htod_copy(wk.clone()).unwrap();
+        let dpos = s.htod_copy(pos.clone()).unwrap();
+        let dcs = s.htod_copy(cs.clone()).unwrap();
+        let mut cache = s.alloc_zeros::<bf16>(nblocks * BS * hk * 2 * d).unwrap();
+        let dslots = s.htod_copy(slots.clone()).unwrap();
+        dinfer_kernels::qkv_post_ext_bf16(
+            &s, &mut dqkv, &dwq, &dwk, &dpos, &dcs, &mut cache, &dslots, t, h, hk, d, rd, EPS, beta, qmul, BS,
+        )
+        .unwrap();
+        c.bf16("qkv_in", &[t, w], &qkv);
+        c.bf16("wq", &[d], &wq);
+        c.bf16("wk", &[d], &wk);
+        c.i32("pos", &[t], &pos);
+        c.f32("cos_sin", &[max_pos, rd], &cs);
+        c.i64("slots", &[t], &slots);
+        c.bf16("qkv_out", &[t, w], &s.dtoh_sync_copy(&dqkv).unwrap());
+        c.bf16("cache", &[nblocks * BS, hk, 2, d], &s.dtoh_sync_copy(&cache).unwrap());
+        c.meta("heads", h);
+        c.meta("kv_heads", hk);
+        c.meta("head_dim", d);
+        c.meta("rope_dim", rd);
+        c.meta("eps", EPS);
+        c.meta("norm_beta", beta);
+        c.meta("qmul", qmul);
+        c.meta("block_size", BS);
+        c.finish();
+    }
+}
+
+/// 输出门：out = x * sigmoid(gate)（原地）。
+#[test]
+#[ignore]
+fn parity_mul_sigmoid() {
+    let (_d, s) = dev();
+    for (ci, &(t, n)) in [(1usize, 6144usize), (37, 12288), (5, 256)].iter().enumerate() {
+        let mut c = Case::new("mul_sigmoid", &format!("t{t}_n{n}"));
+        let mut r = Rng::new(1980 + ci as u64);
+        let x = r.normals_bf16(t * n, 1.0);
+        let g = r.normals_bf16(t * n, 2.0);
+        let mut dx = s.htod_copy(x.clone()).unwrap();
+        let dg = s.htod_copy(g.clone()).unwrap();
+        dinfer_kernels::mul_sigmoid_bf16(&s, &mut dx, &dg, t * n).unwrap();
+        c.bf16("x_in", &[t, n], &x);
+        c.bf16("gate", &[t, n], &g);
+        c.bf16("out", &[t, n], &s.dtoh_sync_copy(&dx).unwrap());
+        c.finish();
+    }
 }
 
 // ------------------------------------------------------------------ kv_pack / kv_unpack（PD / host tier）

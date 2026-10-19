@@ -143,6 +143,59 @@ def chk_qkv_post(t, m, case):
     rec("qkv_post", case, max(e1, e2), b1 + b2 == 0, f"qkv {b1} bad / cache {b2} bad (atol 2e-2)")
 
 
+def chk_qkv_post_ext(t, m, case):
+    """Qwen3.5：partial RoPE（只旋前 rope_dim，pair (i, i+rope_dim/2)）、zero-centered norm（w + beta）、
+    输出门行布局 [q | gate | k | v]（gate 段原样不动）。"""
+    h, hk, d = int(m["heads"]), int(m["kv_heads"]), int(m["head_dim"])
+    rd, eps, beta = int(m["rope_dim"]), m["eps"], m["norm_beta"]
+    qmul = int(m.get("qmul", 1))
+    x = t["qkv_in"].float()
+    T = x.shape[0]
+    cs = t["cos_sin"][t["pos"].long()]  # [T, rd]
+    half = rd // 2
+    c, s = cs[:, :half], cs[:, half:]
+
+    def head_norm(v, w):
+        n = v * torch.rsqrt(v.pow(2).mean(-1, keepdim=True) + eps)
+        return n * (w.float() + beta)
+
+    def rope_partial(v):
+        # v [T, heads, d]：前 rd 维旋转，其余维不变
+        r, tail = v[..., :rd], v[..., rd:]
+        a, b = r[..., :half], r[..., half:]
+        rot = torch.cat([a * c[:, None, :] - b * s[:, None, :], b * c[:, None, :] + a * s[:, None, :]], -1)
+        return torch.cat([rot, tail], -1) if tail.shape[-1] else rot
+
+    q_off = h * d
+    qraw = x[:, : q_off].reshape(T, h, d)
+    kraw = x[:, (h * qmul) * d : (h * qmul + hk) * d].reshape(T, hk, d)
+    vraw = x[:, (h * qmul + hk) * d :].reshape(T, hk, d)
+    qn = bf(rope_partial(head_norm(qraw, t["wq"])))
+    kn = bf(rope_partial(head_norm(kraw, t["wk"])))
+    parts = [qn.reshape(T, -1)]
+    if qmul == 2:
+        gate = x[:, q_off : h * qmul * d].reshape(T, h * d)
+        parts.append(gate)
+    parts += [kn.reshape(T, -1), vraw.reshape(T, -1)]
+    want = bf(torch.cat(parts, 1))
+    e1, b1 = close(t["qkv_out"], want, 2e-2, 2e-2)
+    cache = torch.zeros_like(t["cache"])
+    kb = bf(kn)
+    for i in range(T):
+        sl = int(t["slots"][i])
+        if sl >= 0:
+            cache[sl, :, 0] = kb[i]
+            cache[sl, :, 1] = vraw[i]
+    e2, b2 = close(t["cache"], cache, 2e-2, 2e-2)
+    rec("qkv_post_ext", case, max(e1, e2), b1 + b2 == 0, f"qkv {b1} bad / cache {b2} bad (atol 2e-2)")
+
+
+def chk_mul_sigmoid(t, m, case):
+    want = bf(t["x_in"] * torch.sigmoid(t["gate"].float()))
+    e, bad = close(t["out"], want, 2e-2, 2e-2)
+    rec("mul_sigmoid", case, e, bad == 0, f"{bad} bad (atol 2e-2)")
+
+
 def attn_ref(q, k, v, hist, scale):
     """q [tq, H, D]，k/v [tk, HK, D]（tk = hist + tq），causal：第 i 行看 k[: hist+i+1]。返回 [tq, H, D] f32。"""
     tq, H, D = q.shape
@@ -342,7 +395,8 @@ def chk_sampler(t, m, case):
 CHECKS = {
     "rmsnorm": chk_rmsnorm, "fused_add_rmsnorm": chk_fused_add_rmsnorm, "gather_rmsnorm": chk_gather_rmsnorm,
     "silu_mul": chk_silu_mul, "embedding": chk_embedding, "add_inplace": chk_add_inplace, "bf16_to_f32": chk_bf16_to_f32,
-    "gemm": chk_gemm, "qkv_post": chk_qkv_post, "gqa_prefill": chk_gqa_prefill,
+    "gemm": chk_gemm, "qkv_post": chk_qkv_post, "qkv_post_ext": chk_qkv_post_ext,
+    "mul_sigmoid": chk_mul_sigmoid, "gqa_prefill": chk_gqa_prefill,
     "gqa_paged": lambda t, m, c: chk_paged_like("gqa_paged", t, m, c),
     "gqa_decode": lambda t, m, c: chk_paged_like("gqa_decode", t, m, c),
     "gqa_mixed": lambda t, m, c: chk_paged_like("gqa_mixed", t, m, c),

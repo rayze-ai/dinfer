@@ -279,6 +279,27 @@ extern "C" {
         block_size: i64,
         stream: cudaStream_t,
     ) -> i32;
+    #[allow(clippy::too_many_arguments)]
+    pub fn qkv_post_ext_bf16(
+        qkv: *mut c_void,
+        wq: *const c_void,
+        wk: *const c_void,
+        positions: *const i32,
+        cos_sin: *const f32,
+        cache: *mut c_void,
+        slot_mapping: *const i64,
+        tokens: i64,
+        heads: i64,
+        kv_heads: i64,
+        head_dim: i64,
+        rope_dim: i64,
+        eps: f32,
+        norm_beta: f32,
+        qmul: i64,
+        block_size: i64,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn mul_sigmoid_bf16(x: *mut c_void, gate: *const c_void, n: i64, stream: cudaStream_t) -> i32;
     pub fn mla_decode_bf16(
         q: *const c_void,
         cache: *const c_void,
@@ -667,6 +688,8 @@ mod stubs {
     stub!(fused_add_rmsnorm_bf16(x: *const c_void, r: *mut c_void, w: *const c_void, o: *mut c_void, t: i64, h: i64, e: f32, s: cudaStream_t));
     stub!(rope_bf16(q: *mut c_void, k: *mut c_void, p: *const i32, cs: *const f32, t: i64, qh: i64, kh: i64, hd: i64, rd: i64, n: i32, s: cudaStream_t));
     stub!(silu_and_mul_bf16(x: *const c_void, o: *mut c_void, t: i64, i: i64, s: cudaStream_t));
+    stub!(mul_sigmoid_bf16(x: *mut c_void, g: *const c_void, n: i64, s: cudaStream_t));
+    stub!(qkv_post_ext_bf16(q: *mut c_void, wq: *const c_void, wk: *const c_void, p: *const i32, cs: *const f32, c: *mut c_void, sm: *const i64, t: i64, h: i64, hk: i64, hd: i64, rd: i64, e: f32, nb: f32, qm: i64, bs: i64, s: cudaStream_t));
     stub!(embedding_bf16(ids: *const i32, tb: *const c_void, o: *mut c_void, t: i64, h: i64, v: i64, s: cudaStream_t));
     stub!(argmax_f32(l: *const f32, o: *mut i32, b: i64, v: i64, s: cudaStream_t));
     stub!(topk_topp_mask_f32(l: *mut f32, k: *const i32, p: *const f32, b: i64, v: i64, s: cudaStream_t));

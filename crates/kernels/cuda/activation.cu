@@ -40,6 +40,26 @@ __global__ void __launch_bounds__(SM_THREADS) silu_and_mul_vec_kernel(const bf16
   o[i] = ob;
 }
 
+// 输出门（Qwen3.5 attn_output_gate）：x *= sigmoid(gate)，逐元素。grid = ceil(n/8/256)，每线程 8 个元素一次 16 B。
+__global__ void __launch_bounds__(SM_THREADS) mul_sigmoid_vec_kernel(bf16* __restrict__ x, const bf16* __restrict__ gate,
+                                                                   int64_t nvec) {
+  const int64_t i = (int64_t)blockIdx.x * SM_THREADS + threadIdx.x;
+  if (i >= nvec) return;
+  uint4* xp = reinterpret_cast<uint4*>(x);
+  const uint4 ga = reinterpret_cast<const uint4*>(gate)[i];
+  uint4 xa = xp[i];
+  const __nv_bfloat162* gp = reinterpret_cast<const __nv_bfloat162*>(&ga);
+  __nv_bfloat162* xh = reinterpret_cast<__nv_bfloat162*>(&xa);
+#pragma unroll
+  for (int c = 0; c < 4; ++c) {
+    const float2 g = __bfloat1622float2(gp[c]);
+    const float2 v = __bfloat1622float2(xh[c]);
+    const float s0 = 1.f / (1.f + __expf(-g.x)), s1 = 1.f / (1.f + __expf(-g.y));
+    xh[c] = __floats2bfloat162_rn(v.x * s0, v.y * s1);
+  }
+  xp[i] = xa;
+}
+
 __global__ void embedding_kernel(const int32_t* __restrict__ ids, const bf16* __restrict__ table,
                                  bf16* __restrict__ out, int hidden, int vocab) {
   const int64_t t = blockIdx.x;
@@ -77,5 +97,15 @@ extern "C" int embedding_bf16(const int32_t* ids, const void* table, void* out, 
   const int threads = hidden >= 256 ? 256 : (int)(((hidden + 31) / 32) * 32);
   embedding_kernel<<<(unsigned)tokens, threads, 0, stream>>>(ids, static_cast<const bf16*>(table),
                                                              static_cast<bf16*>(out), (int)hidden, (int)vocab);
+  return last_err();
+}
+
+// 输出门：x *= sigmoid(gate)（原地），n 为元素数；n 必须是 8 的倍数且两个指针 16 B 对齐（调用方保证）。
+extern "C" int mul_sigmoid_bf16(void* x, const void* gate, int64_t n, cudaStream_t stream) {
+  if (n <= 0) return 0;
+  if (n % 8 != 0) return err(cudaErrorInvalidValue);
+  const int64_t nvec = n / 8;
+  const unsigned grid = (unsigned)((nvec + SM_THREADS - 1) / SM_THREADS);
+  mul_sigmoid_vec_kernel<<<grid, SM_THREADS, 0, stream>>>(static_cast<bf16*>(x), static_cast<const bf16*>(gate), nvec);
   return last_err();
 }

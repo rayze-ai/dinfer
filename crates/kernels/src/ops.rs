@@ -1660,7 +1660,7 @@ pub fn gqa_paged_bf16<Q: DevicePtr<bf16> + ?Sized>(
     )
 }
 
-/// 纯 decode（每请求 1 行）split-K attention（D=128）。q: [B, heads, D]，out 同形；`scratch` ≥ `gqa_decode_scratch_len`。
+/// 纯 decode（每请求 1 行）split-K attention（D ∈ {128, 256}）。q: [B, heads, D]，out 同形；`scratch` ≥ `gqa_decode_scratch_len`。
 #[allow(clippy::too_many_arguments)]
 pub fn gqa_decode_bf16<Q: DevicePtr<bf16> + ?Sized>(
     stream: &Stream,
@@ -1681,7 +1681,7 @@ pub fn gqa_decode_bf16<Q: DevicePtr<bf16> + ?Sized>(
     // 混批：Some 时只算 q_len==1 的请求，q/out 行号取 cu_seqlens_q[b]。
     cu_seqlens_q: Option<&CudaSlice<i32>>,
 ) -> Result<()> {
-    ensure!(head_dim == 128, "gqa_decode: head_dim must be 128");
+    ensure!(head_dim == 128 || head_dim == 256, "gqa_decode: head_dim must be 128 or 256");
     ensure!(
         block_table.len() >= num_reqs * max_blocks && seq_lens.len() >= num_reqs,
         "gqa_decode: table/seq_lens"
@@ -1719,8 +1719,8 @@ pub fn gqa_decode_bf16<Q: DevicePtr<bf16> + ?Sized>(
     )
 }
 
-/// 混批（prefill 行 + decode 行同一步）attention：q_len==1 的请求走 split-K decode kernel（按 cu_seqlens_q 定位行），
-/// 其余请求走 paged tensor-core kernel（跳过 q_len==1）。两个 kernel 同流串行，各自只写自己的行。仅 D=128。
+/// 混批（prefill 行 + decode 行同一步）attention（D ∈ {128, 256}）：q_len==1 的请求走 split-K decode kernel（按 cu_seqlens_q 定位行），
+/// 其余请求走 paged tensor-core kernel（跳过 q_len==1）。两个 kernel 同流串行，各自只写自己的行。
 #[allow(clippy::too_many_arguments)]
 pub fn gqa_mixed_bf16<Q: DevicePtr<bf16> + ?Sized>(
     stream: &Stream,
@@ -1741,7 +1741,7 @@ pub fn gqa_mixed_bf16<Q: DevicePtr<bf16> + ?Sized>(
     scale: f32,
     q_stride: usize,
 ) -> Result<()> {
-    ensure!(head_dim == 128, "gqa_mixed: head_dim must be 128");
+    ensure!(head_dim == 128 || head_dim == 256, "gqa_mixed: head_dim must be 128 or 256");
     gqa_decode_bf16(
         stream, q, cache, block_table, seq_lens, out, scratch, num_reqs, heads, kv_heads, head_dim, block_size,
         max_blocks, scale, q_stride, Some(cu_seqlens_q),
@@ -1802,6 +1802,78 @@ pub fn qkv_post_bf16(
             )
         },
         "qkv_post_bf16",
+    )
+}
+
+/// QKV 后处理（扩展）：per-head RMSNorm（权重加 `norm_beta`）+ 只旋前 `rope_dim` 维的 neox RoPE（原地）
+/// + K/V 写 paged cache。行布局 `[q(H·D) | gate(H·D)? | k | v]`（`qmul = 2` 时带输出门段，本算子不碰它）。
+#[allow(clippy::too_many_arguments)]
+pub fn qkv_post_ext_bf16(
+    stream: &Stream,
+    qkv: &mut CudaSlice<bf16>,
+    wq: &CudaSlice<bf16>,
+    wk: &CudaSlice<bf16>,
+    positions: &CudaSlice<i32>,
+    cos_sin: &CudaSlice<f32>,
+    cache: &mut CudaSlice<bf16>,
+    slot_mapping: &CudaSlice<i64>,
+    tokens: usize,
+    heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    rope_dim: usize,
+    eps: f32,
+    norm_beta: f32,
+    qmul: usize,
+    block_size: usize,
+) -> Result<()> {
+    ensure!(head_dim == 128 || head_dim == 256, "qkv_post_ext: head_dim must be 128 or 256");
+    ensure!(
+        rope_dim > 0 && rope_dim <= head_dim && rope_dim % 64 == 0,
+        "qkv_post_ext: rope_dim must be a multiple of 64 and <= head_dim"
+    );
+    ensure!(qmul == 1 || qmul == 2, "qkv_post_ext: qmul must be 1 or 2");
+    ensure!(qkv.len() >= tokens * (heads * qmul + 2 * kv_heads) * head_dim, "qkv_post_ext: qkv");
+    ensure!(wq.len() >= head_dim && wk.len() >= head_dim, "qkv_post_ext: norm weights");
+    ensure!(positions.len() >= tokens && slot_mapping.len() >= tokens, "qkv_post_ext: positions/slots");
+    ensure!(cache.len() % (kv_heads * 2 * head_dim) == 0, "qkv_post_ext: cache not a multiple of slot");
+    // SAFETY: 长度已校验；slot 范围由 scheduler 保证；cos_sin 行数 ≥ max position 由 Rope 构造保证。
+    check(
+        unsafe {
+            ffi::qkv_post_ext_bf16(
+                stream.ptr_mut(qkv) as *mut c_void,
+                stream.ptr(wq) as *const c_void,
+                stream.ptr(wk) as *const c_void,
+                stream.ptr(positions) as *const i32,
+                stream.ptr(cos_sin) as *const f32,
+                stream.ptr_mut(cache) as *mut c_void,
+                stream.ptr(slot_mapping) as *const i64,
+                tokens as i64,
+                heads as i64,
+                kv_heads as i64,
+                head_dim as i64,
+                rope_dim as i64,
+                eps,
+                norm_beta,
+                qmul as i64,
+                block_size as i64,
+                stream.raw() as _,
+            )
+        },
+        "qkv_post_ext_bf16",
+    )
+}
+
+/// 输出门（原地）：`x *= sigmoid(gate)`，`n` 元素；`n` 必须是 8 的倍数。
+pub fn mul_sigmoid_bf16(stream: &Stream, x: &mut CudaSlice<bf16>, gate: &CudaSlice<bf16>, n: usize) -> Result<()> {
+    ensure!(x.len() >= n && gate.len() >= n, "mul_sigmoid: buffer too small");
+    ensure!(n % 8 == 0, "mul_sigmoid: n must be a multiple of 8");
+    check(
+        unsafe {
+            ffi::mul_sigmoid_bf16(stream.ptr_mut(x) as *mut c_void, stream.ptr(gate) as *const c_void, n as i64,
+                                  stream.raw() as _)
+        },
+        "mul_sigmoid_bf16",
     )
 }
 
