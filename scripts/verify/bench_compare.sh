@@ -23,7 +23,9 @@ MD="$OUT/summary.md"
 {
   echo "# dinfer vs vLLM（$(date '+%F %T')，$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)）"
   echo
-  echo "dinfer: $A（$(curl -s $A/v1/models | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"][0]["id"])')）；vLLM: $B（$(docker inspect vllm-qwen3 --format '{{.Config.Image}}' 2>/dev/null || echo ?)）。"
+  # vLLM 版本：有 docker 取镜像 tag；否则（B300 containerd）用 /version；都失败写 unknown。不能让这行把脚本打死（set -e）。
+  vtag=$( { docker inspect vllm-qwen3 --format '{{.Config.Image}}' 2>/dev/null || curl -s -m 3 "$B/version" 2>/dev/null | python3 -c 'import sys,json;print("vllm-"+json.load(sys.stdin)["version"])' 2>/dev/null || echo unknown; } | head -1 )
+  echo "dinfer: $A（$(curl -s $A/v1/models | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"][0]["id"])')）；vLLM: $B（${vtag:-unknown}）"
   echo "seed：$SEED（每次运行不同，prompt 不与历史轮次重复；两边 prefix cache 只命中模板前缀）"
   echo
   echo "口径：流式；TTFT = 首个带内容 chunk；TPOT = (latency − TTFT)/(out−1)；ignore_eos=true；temperature 0；enable_thinking=false；每组前 2 个预热请求不计。"
