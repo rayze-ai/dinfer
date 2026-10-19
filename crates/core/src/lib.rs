@@ -13,6 +13,7 @@ pub mod runner;
 pub mod sample;
 pub mod sampler;
 pub mod sched;
+pub mod spec;
 pub mod util;
 
 pub use config::EngineConfig;

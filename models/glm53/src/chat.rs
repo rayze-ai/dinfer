@@ -29,6 +29,7 @@ pub fn render(t: &ChatTemplate, p: &RenderParams<'_>) -> Result<String> {
         messages: p.messages,
         tools: p.tools,
         add_generation_prompt: p.add_generation_prompt,
+        continue_final_message: false,
         extra: &extra,
     })
 }

@@ -468,6 +468,51 @@ pub fn argmax_f32_n<L: DevicePtr<f32> + ?Sized, O: DevicePtrMut<i32> + ?Sized>(
 }
 
 /// 融合采样：在 `work`（[batch, vocab] fp32，原地改）上依次 temperature → min_p → top-k/top-p → sample，
+/// 受限解码 mask + logit_bias（原地，penalties 之前；vLLM 顺序）。`mask_row[b] < 0` = 该行无 mask，否则读
+/// `mask_bits[mask_row[b] * mask_words ..]`，bit=0 的列置 -inf；bias 为 CSR（`bias_offsets` 长 batch+1），None = 无 bias。
+/// 无约束行 kernel 立即返回，整批无约束时只剩一次 launch 的固定开销（CUDA graph 内常驻）。
+#[allow(clippy::too_many_arguments)]
+pub fn logits_mask_f32<W: DevicePtrMut<f32> + ?Sized>(
+    stream: &Stream,
+    logits: &mut W,
+    mask_row: &CudaSlice<i32>,
+    mask_bits: &CudaSlice<u32>,
+    mask_words: usize,
+    bias: Option<(&CudaSlice<i32>, &CudaSlice<i32>, &CudaSlice<f32>)>,
+    batch: usize,
+    vocab: usize,
+) -> Result<()> {
+    ensure!(vocab > 0 && logits.len() >= batch * vocab, "logits_mask: shape");
+    ensure!(mask_row.len() >= batch, "logits_mask: mask_row");
+    ensure!(mask_words == 0 || mask_bits.len() >= mask_words, "logits_mask: mask_bits");
+    let (po, pi, pv) = match bias {
+        Some((o, i, v)) => {
+            ensure!(o.len() >= batch + 1 && i.len() == v.len(), "logits_mask: bias csr");
+            (stream.ptr(o) as *const i32, stream.ptr(i) as *const i32, stream.ptr(v) as *const f32)
+        }
+        None => (std::ptr::null(), std::ptr::null(), std::ptr::null()),
+    };
+    let pl = stream.ptr_mut(logits) as *mut f32;
+    // SAFETY: 长度已校验；mask_row 的值由 host 侧保证 < mask_bits.len() / mask_words。
+    check(
+        unsafe {
+            ffi::logits_mask_f32(
+                pl,
+                stream.ptr(mask_row) as *const i32,
+                stream.ptr(mask_bits) as *const u32,
+                mask_words as i64,
+                po,
+                pi,
+                pv,
+                batch as i64,
+                vocab as i64,
+                stream.raw() as _,
+            )
+        },
+        "logits_mask_f32",
+    )
+}
+
 /// 一次 launch，语义 = `temperature_f32 → min_p_mask_f32 → topk_topp_mask_f32 → sample_f32(temp01)` 串行。
 #[allow(clippy::too_many_arguments)]
 pub fn sample_fused_f32<W: DevicePtrMut<f32> + ?Sized, O: DevicePtrMut<i32> + ?Sized>(

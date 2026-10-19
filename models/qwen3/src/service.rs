@@ -76,6 +76,31 @@ pub struct ServeOptions {
     pub device: usize,
     /// TP 组大小（design §13）：用卡 `device .. device+tp`；1 = 单卡。
     pub tp: usize,
+    /// 投机解码方法：`none`（默认）| `ngram`（A4，docs/loops/ngram-spec.md）。
+    pub speculative: String,
+    /// 每步 draft 数 K（speculative != none 时生效）。
+    pub num_speculative_tokens: usize,
+    /// n-gram 匹配长度范围 [min, max]。
+    pub ngram_min: usize,
+    pub ngram_max: usize,
+}
+
+impl ServeOptions {
+    /// 启用的 n-gram 提案器（None = 不投机）。
+    pub fn ngram(&self) -> Result<Option<dinfer_core::spec::NgramProposer>> {
+        match self.speculative.as_str() {
+            "none" | "" => Ok(None),
+            "ngram" => {
+                anyhow::ensure!(self.num_speculative_tokens >= 1, "--num-speculative-tokens must be >= 1");
+                anyhow::ensure!(
+                    1 <= self.ngram_min && self.ngram_min <= self.ngram_max,
+                    "--ngram-min / --ngram-max must satisfy 1 <= min <= max"
+                );
+                Ok(Some(dinfer_core::spec::NgramProposer::new(self.ngram_min, self.ngram_max, self.num_speculative_tokens)))
+            }
+            other => anyhow::bail!("unknown --speculative {other:?} (expected none | ngram)"),
+        }
+    }
 }
 
 impl Default for ServeOptions {
@@ -103,6 +128,10 @@ impl Default for ServeOptions {
             enable_cuda_graph: true,
             device: 0,
             tp: 1,
+            speculative: "none".into(),
+            num_speculative_tokens: 3,
+            ngram_min: 2,
+            ngram_max: 4,
         }
     }
 }
@@ -110,6 +139,8 @@ impl Default for ServeOptions {
 pub struct Qwen3Service {
     tok: Arc<HfTokenizer>,
     tmpl: ChatTemplate,
+    /// 受限解码（docs/loops/guided-decoding.md）：llguidance toktrie，启动时建一次。
+    grammar: dinfer_guided::SharedGrammarFactory,
     handle: EngineHandle,
     name: String,
     max_model_len: u32,
@@ -160,11 +191,20 @@ impl Qwen3Service {
             );
             src
         });
+        // 投机解码（A4）：每请求一步最多 1 + K 个 token / logits 行；draft 验证走同步 eager 路径，所以关掉异步调度
+        // （异步下 scheduler 用 0 占位当 draft、runner 建 plan 时真 draft 还没出 → 全被拒，白算）。
+        let ngram = opt.ngram()?;
+        let num_spec = ngram.as_ref().map_or(0, |p| p.k);
+        if ngram.is_some() {
+            std::env::set_var("ASYNC_SCHED", "0");
+            tracing::info!(k = num_spec, min = opt.ngram_min, max = opt.ngram_max, "speculative decoding: ngram (async scheduling off)");
+        }
         let max_tokens = if opt.decode_exempt_from_budget {
             (opt.max_num_batched_tokens + opt.max_num_seqs) as usize
         } else {
             opt.max_num_batched_tokens.max(opt.max_num_seqs) as usize
-        };
+        } + opt.max_num_seqs as usize * num_spec;
+        let max_logits_rows = opt.max_num_seqs as usize * (1 + num_spec);
         let max_blocks_per_seq = (opt.max_model_len as usize).div_ceil(opt.block_size as usize);
         let comm_id = if tp_world > 1 { Some(dinfer_kernels::comm::CommId::new()?) } else { None };
         // 每个 rank 一张卡：Device + 模型分片 + executor（+ NCCL comm）。rank 0 在本线程，其余各起一线程并行装载。
@@ -177,7 +217,6 @@ impl Qwen3Service {
                 opt.gpu_memory_utilization,
                 opt.enable_cuda_graph,
             );
-            let max_num_seqs = opt.max_num_seqs as usize;
             let pd_role = opt.role != PdRoleOpt::Single;
             move |rank: usize,
                   src: Arc<WeightSource>|
@@ -191,7 +230,7 @@ impl Qwen3Service {
                     &src,
                     cfg.clone(),
                     max_tokens,
-                    max_num_seqs, // 每请求只取最后一行 logits（无投机）
+                    max_logits_rows, // 每请求 1 + K 行 logits（无投机时 K = 0：只取最后一行）
                     num_blocks_opt,
                     block_size,
                     gmu,
@@ -358,7 +397,7 @@ impl Qwen3Service {
             },
             opt.max_model_len,
             tok.eos_ids().to_vec(),
-            0,
+            num_spec as u32,
         );
         let groups = vec![GroupInfo {
             spec: KvCacheSpec::FullAttention {
@@ -374,11 +413,18 @@ impl Qwen3Service {
             sched.enable_host_tier(host_slots, Box::new(dinfer_core::kv::host_tier::FullAttentionPolicy));
         }
         let bs = opt.block_size as usize;
+        fn runner<E: dinfer_core::runner::ModelExecutor>(ex: E, bs: usize, ng: &Option<dinfer_core::spec::NgramProposer>) -> Runner<E> {
+            let r = Runner::new(ex, bs);
+            match ng {
+                Some(p) => r.with_ngram(p.clone()),
+                None => r,
+            }
+        }
         let (handle, jh) = match (exec_kind, pd_state) {
-            (ExecKind::Tp(tpx), None) => engine::spawn(sched, Runner::new(tpx, bs)),
-            (ExecKind::Tp(tpx), Some(st)) => engine::spawn_with_pd(sched, Runner::new(tpx, bs), st),
-            (ExecKind::Single(ex), Some(st)) => engine::spawn_with_pd(sched, Runner::new(ex, bs), st),
-            (ExecKind::Single(ex), None) => engine::spawn(sched, Runner::new(ex, bs)),
+            (ExecKind::Tp(tpx), None) => engine::spawn(sched, runner(tpx, bs, &ngram)),
+            (ExecKind::Tp(tpx), Some(st)) => engine::spawn_with_pd(sched, runner(tpx, bs, &ngram), st),
+            (ExecKind::Single(ex), Some(st)) => engine::spawn_with_pd(sched, runner(ex, bs, &ngram), st),
+            (ExecKind::Single(ex), None) => engine::spawn(sched, runner(ex, bs, &ngram)),
         };
         tracing::info!(
             model = %served_name,
@@ -398,9 +444,14 @@ impl Qwen3Service {
             total_ms = t_start.elapsed().as_millis() as u64,
             "startup timing"
         );
+        let grammar = Arc::new(
+            dinfer_guided::GrammarFactory::new(tok.inner(), tok.eos_ids(), cfg.vocab_size as usize)
+                .context("guided: grammar factory")?,
+        );
         Ok(Self {
             tok,
             tmpl,
+            grammar,
             handle,
             name: served_name,
             max_model_len: opt.max_model_len,
@@ -440,11 +491,12 @@ struct Qwen3OutputStream {
     ids: Vec<u32>,
     prefix_len: usize,
     emitted: String,
+    skip_special: bool,
 }
 
 impl Qwen3OutputStream {
     fn decode_new(&mut self) -> Result<String> {
-        let text = self.tok.decode(&self.ids[self.prefix_len..])?;
+        let text = self.tok.decode_with(&self.ids[self.prefix_len..], self.skip_special)?;
         if text.ends_with('\u{fffd}') {
             return Ok(String::new());
         }
@@ -496,6 +548,9 @@ impl OutputStream for Qwen3OutputStream {
     fn token_text(&self, id: u32) -> Option<String> {
         self.tok.token_text(id)
     }
+    fn set_skip_special_tokens(&mut self, skip: bool) {
+        self.skip_special = skip;
+    }
 }
 
 impl ChatBackend for Qwen3Service {
@@ -515,7 +570,8 @@ impl ChatBackend for Qwen3Service {
         let text = self.tmpl.render(&RenderParams {
             messages: req.messages,
             tools: req.tools,
-            add_generation_prompt: true,
+            add_generation_prompt: req.add_generation_prompt,
+            continue_final_message: req.continue_final_message,
             extra: &extra,
         })?;
         let ids = self.tok.encode(&text)?;
@@ -565,6 +621,20 @@ impl ChatBackend for Qwen3Service {
             ids: Vec::new(),
             prefix_len: 0,
             emitted: String::new(),
+            skip_special: true,
         })
+    }
+    fn grammar_factory(&self) -> Option<dinfer_guided::SharedGrammarFactory> {
+        Some(self.grammar.clone())
+    }
+    fn tool_call_tags(&self) -> Option<dinfer_server::backend::ToolCallTags> {
+        // 与 parser.rs / chat 模板一致：`<tool_call>\n{...}\n</tool_call>`
+        Some(dinfer_server::backend::ToolCallTags { open: "<tool_call>\n", close: "\n</tool_call>" })
+    }
+    /// 带约束时关思考：否则 `<think>` 段会被文法挡住（guided-decoding loop TODO：思考段不约束）。
+    fn grammar_render_extra(&self) -> serde_json::Map<String, serde_json::Value> {
+        let mut m = serde_json::Map::new();
+        m.insert("enable_thinking".into(), serde_json::Value::Bool(false));
+        m
     }
 }

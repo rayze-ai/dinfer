@@ -112,6 +112,22 @@ pub(crate) fn sampling_from(
         Some(_) => return Err("stop must be a string or an array of strings".into()),
     };
     sp.logprobs = logprobs;
+    sp.prompt_logprobs = req.prompt_logprobs;
+    if let Some(x) = req.skip_special_tokens {
+        sp.skip_special_tokens = x;
+    }
+    if let Some(x) = req.spaces_between_special_tokens {
+        sp.spaces_between_special_tokens = x;
+    }
+    if let Some(lb) = &req.logit_bias {
+        let mut v = Vec::with_capacity(lb.len());
+        for (k, b) in lb {
+            let id: u32 = k.parse().map_err(|_| format!("logit_bias key {k:?} is not a token id"))?;
+            let b = b.as_f64().ok_or_else(|| format!("logit_bias[{k}] must be a number"))? as f32;
+            v.push((id, b));
+        }
+        sp.logit_bias = v;
+    }
     let room = max_model_len.saturating_sub(prompt_len);
     if room == 0 {
         return Err(format!("prompt has {prompt_len} tokens, max_model_len is {max_model_len}"));
@@ -119,6 +135,117 @@ pub(crate) fn sampling_from(
     sp.max_tokens = max_tokens.unwrap_or(room).min(room);
     sp.validate()?;
     Ok(sp)
+}
+
+/// vLLM `truncate_prompt_tokens`：左截断到最后 N 个 token（N=0 非法）。
+pub(crate) fn truncate_prompt(ids: &mut Vec<u32>, n: Option<u32>) -> Result<(), String> {
+    if let Some(n) = n {
+        if n == 0 {
+            return Err("truncate_prompt_tokens must be >= 1".into());
+        }
+        let n = n as usize;
+        if ids.len() > n {
+            ids.drain(..ids.len() - n);
+        }
+    }
+    Ok(())
+}
+
+/// `tool_choice` 解析结果。
+#[derive(Debug, PartialEq)]
+pub(crate) enum ToolChoice {
+    None,
+    Auto,
+    Required,
+    Named(String),
+}
+
+pub(crate) fn parse_tool_choice(v: Option<&serde_json::Value>, has_tools: bool) -> Result<ToolChoice, String> {
+    Ok(match v {
+        None | Some(serde_json::Value::Null) => {
+            if has_tools {
+                ToolChoice::Auto
+            } else {
+                ToolChoice::None
+            }
+        }
+        Some(serde_json::Value::String(s)) => match s.as_str() {
+            "none" => ToolChoice::None,
+            "auto" => ToolChoice::Auto,
+            "required" => ToolChoice::Required,
+            other => return Err(format!("tool_choice must be none|auto|required or an object, got {other:?}")),
+        },
+        Some(serde_json::Value::Object(o)) => {
+            if o.get("type").and_then(|t| t.as_str()) != Some("function") {
+                return Err("tool_choice object must have type=function".into());
+            }
+            match o.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()) {
+                Some(n) => ToolChoice::Named(n.to_string()),
+                None => return Err("tool_choice.function.name is required".into()),
+            }
+        }
+        Some(_) => return Err("tool_choice must be a string or an object".into()),
+    })
+}
+
+/// 从 OpenAI `tools` 抽 (name, parameters)。
+pub(crate) fn tool_fns(tools: &[serde_json::Value]) -> Vec<dinfer_guided::ToolFn<'_>> {
+    tools
+        .iter()
+        .filter(|t| t.get("type").and_then(|x| x.as_str()).unwrap_or("function") == "function")
+        .filter_map(|t| {
+            let f = t.get("function")?;
+            Some(dinfer_guided::ToolFn { name: f.get("name")?.as_str()?, parameters: f.get("parameters") })
+        })
+        .collect()
+}
+
+/// 把 `response_format` / `tool_choice` 编成文法；None = 不约束。错误文本直接 400。
+pub(crate) fn build_grammar(
+    be: &dyn ChatBackend,
+    response_format: Option<&crate::openai::ResponseFormat>,
+    tool_choice: &ToolChoice,
+    tools: Option<&[serde_json::Value]>,
+    parallel: bool,
+) -> Result<Option<dinfer_core::sample::GrammarHandle>, String> {
+    use dinfer_guided::GrammarSpec;
+    let mut spec: Option<GrammarSpec> = None;
+    if let Some(rf) = response_format {
+        spec = match rf.kind.as_str() {
+            "text" => None,
+            "json_object" => Some(GrammarSpec::JsonObject),
+            "json_schema" => {
+                let js = rf.json_schema.as_ref().ok_or("response_format.json_schema is required for type=json_schema")?;
+                // OpenAI：{"name","schema",...}；vLLM 也接受直接给 schema
+                let schema = js.get("schema").cloned().unwrap_or_else(|| js.clone());
+                if !schema.is_object() {
+                    return Err("response_format.json_schema.schema must be an object".into());
+                }
+                Some(GrammarSpec::JsonSchema(schema))
+            }
+            other => return Err(format!("response_format.type must be text|json_object|json_schema, got {other:?}")),
+        };
+    }
+    match tool_choice {
+        ToolChoice::Required | ToolChoice::Named(_) => {
+            if spec.is_some() {
+                return Err("response_format and a constrained tool_choice cannot be combined".into());
+            }
+            let tools = tools.filter(|t| !t.is_empty()).ok_or("tool_choice requires non-empty `tools`")?;
+            let tags = be.tool_call_tags().ok_or("constrained tool_choice is not supported by this model backend")?;
+            let only = match tool_choice {
+                ToolChoice::Named(n) => Some(n.as_str()),
+                _ => None,
+            };
+            let lark = dinfer_guided::tool_call_lark(&tool_fns(tools), tags.open, tags.close, parallel, only)
+                .map_err(|e| format!("tool_choice: {e:#}"))?;
+            spec = Some(GrammarSpec::Lark(lark));
+        }
+        _ => {}
+    }
+    let Some(spec) = spec else { return Ok(None) };
+    let f = be.grammar_factory().ok_or("structured output (response_format / tool_choice) is not supported by this backend")?;
+    f.compile(&spec).map(Some).map_err(|e| format!("{e:#}"))
 }
 
 pub(crate) const MAX_N: u32 = 8;
@@ -134,6 +261,10 @@ pub(crate) struct ChoiceState {
     pub(crate) finish: Option<&'static str>,
     /// 产出 token id（`return_token_ids` 用；只在非流式收集）。
     ids: Vec<u32>,
+    /// `prompt_logprobs`：(prompt 位置, 原始 logprobs)，consume 从 Logprobs 事件里按 `prompt_pos` 分流出来。
+    pub(crate) prompt_lp: Vec<(u32, TokenLogprobs)>,
+    /// 该 choice 已产出 tool_call → finish_reason 报 "tool_calls"（OpenAI / vLLM 口径）。
+    saw_tool_call: bool,
 }
 
 /// 多个 choice 的事件汇到一个 channel：(choice index, event)。
@@ -143,6 +274,11 @@ pub(crate) type Merged = tokio::sync::mpsc::UnboundedReceiver<(u32, EngineEvent)
 pub(crate) struct AbortGuard {
     be: Backend,
     live: Vec<Option<RequestId>>,
+}
+impl ChoiceState {
+    pub(crate) fn prompt_logprobs_json(&self, prompt_len: usize) -> crate::openai::PromptLogprobs {
+        prompt_logprobs_json(self.out.as_ref(), prompt_len, &self.prompt_lp)
+    }
 }
 impl AbortGuard {
     fn done(&mut self, i: u32) {
@@ -161,7 +297,7 @@ impl Drop for AbortGuard {
 pub(crate) fn submit_choices(
     be: &Backend,
     prompts: &[&[u32]],
-    sp: &SamplingParams,
+    sps: &[SamplingParams],
     n: u32,
     pd: Option<PdSubmit>,
 ) -> (Merged, Vec<ChoiceState>, AbortGuard) {
@@ -169,7 +305,9 @@ pub(crate) fn submit_choices(
     let total = prompts.len() * n as usize;
     let mut states = Vec::with_capacity(total);
     let mut live = Vec::with_capacity(total);
+    assert!(sps.len() == 1 || sps.len() == prompts.len(), "submit_choices: sampling per prompt");
     for (pi, prompt_ids) in prompts.iter().enumerate() {
+        let sp = &sps[if sps.len() == 1 { 0 } else { pi }];
         for ci in 0..n {
             let i = pi as u32 * n + ci;
             let mut spi = sp.clone();
@@ -193,7 +331,12 @@ pub(crate) fn submit_choices(
                 completion: 0,
                 finish: None,
                 ids: Vec::new(),
+                prompt_lp: Vec::new(),
+                saw_tool_call: false,
             });
+            if !sp.skip_special_tokens {
+                states.last_mut().unwrap().out.set_skip_special_tokens(false);
+            }
             live.push(Some(rid));
         }
     }
@@ -216,6 +359,30 @@ pub(crate) fn lp_entry(out: &dyn OutputStream, lp: &TokenLogprobs) -> ChatLogpro
             })
             .collect(),
     }
+}
+
+/// vLLM `prompt_logprobs` 形状：长度 = prompt_len，第 0 项 null，其余 `{"<tok_id>": {logprob, rank, decoded_token}}`
+///（含 chosen 与 top-k）。缺的位置（chunked prefill 中间 chunk / prefix cache 命中）为 null。
+pub(crate) fn prompt_logprobs_json(
+    out: &dyn OutputStream,
+    prompt_len: usize,
+    raw: &[(u32, TokenLogprobs)],
+) -> crate::openai::PromptLogprobs {
+    let mut v: crate::openai::PromptLogprobs = vec![None; prompt_len];
+    for (p, lp) in raw {
+        let Some(slot) = v.get_mut(*p as usize) else { continue };
+        let mut m = serde_json::Map::new();
+        let text = |id: u32| out.token_text(id).unwrap_or_else(|| format!("token_id:{id}"));
+        let ent = |lpv: f32, rank: u32, id: u32| {
+            serde_json::json!({"logprob": lpv, "rank": rank, "decoded_token": text(id)})
+        };
+        for (r, (id, lpv)) in lp.top.iter().enumerate() {
+            m.insert(id.to_string(), ent(*lpv, r as u32 + 1, *id));
+        }
+        m.entry(lp.token_id.to_string()).or_insert_with(|| ent(lp.logprob, lp.rank + 1, lp.token_id));
+        *slot = Some(m);
+    }
+    v
 }
 
 /// 驱动所有 choice 到结束。`emit(i, delta, logprobs)` 下发增量（返回 false = 客户端已断开，停止）；
@@ -245,6 +412,7 @@ pub(crate) async fn consume(
                 let (text, hit) = st.stop.push(&text);
                 let d =
                     if raw { OutDelta { content: text, ..Default::default() } } else { st.out.parse(&text) };
+                st.saw_tool_call |= !d.tool_calls.is_empty();
                 if !d.is_empty() && !emit(i, &d, std::mem::take(&mut st.pending_lp)) {
                     return Ok(());
                 }
@@ -254,7 +422,16 @@ pub(crate) async fn consume(
                 }
             }
             EngineEvent::Logprobs(lps) => {
-                st.pending_lp.extend(lps.iter().map(|lp| lp_entry(st.out.as_ref(), lp)));
+                for mut lp in lps {
+                    for p in std::mem::take(&mut lp.prompt) {
+                        if let Some(pos) = p.prompt_pos {
+                            st.prompt_lp.push((pos, p));
+                        }
+                    }
+                    if !lp.is_placeholder() {
+                        st.pending_lp.push(lp_entry(st.out.as_ref(), &lp));
+                    }
+                }
             }
             EngineEvent::Finished(f) => end = Some(finish_reason_str(f)),
             EngineEvent::Error(m) => return Err(m),
@@ -270,10 +447,13 @@ pub(crate) async fn consume(
                     d.tool_calls.extend(fd.tool_calls);
                 }
             }
+            st.saw_tool_call |= !d.tool_calls.is_empty();
             let lps = std::mem::take(&mut st.pending_lp);
             if (!d.is_empty() || !lps.is_empty()) && !emit(i, &d, lps) {
                 return Ok(());
             }
+            // OpenAI / vLLM：有 tool_calls 且不是被截断时 finish_reason = "tool_calls"
+            let reason = if st.saw_tool_call && reason == "stop" { "tool_calls" } else { reason };
             st.finish = Some(reason);
             guard.done(i);
             remaining -= 1;
@@ -296,17 +476,55 @@ pub async fn chat_completions(State(be): State<Backend>, Json(req): Json<ChatCom
     if !(1..=MAX_N).contains(&n) {
         return err(StatusCode::BAD_REQUEST, format!("n must be in 1..={MAX_N}, got {n}"));
     }
+    // tool_choice / response_format → 文法（编译失败 400）；tool_choice=none 时渲染不带 tools
+    let tool_choice = match parse_tool_choice(req.tool_choice.as_ref(), req.tools.as_ref().is_some_and(|t| !t.is_empty())) {
+        Ok(t) => t,
+        Err(m) => return err(StatusCode::BAD_REQUEST, m),
+    };
+    let tools_for_render = if tool_choice == ToolChoice::None { None } else { req.tools.as_deref() };
+    let grammar = match build_grammar(
+        be.as_ref(),
+        req.response_format.as_ref(),
+        &tool_choice,
+        req.tools.as_deref(),
+        req.parallel_tool_calls.unwrap_or(true),
+    ) {
+        Ok(g) => g,
+        Err(m) => return err(StatusCode::BAD_REQUEST, m),
+    };
+    let continue_final = req.continue_final_message.unwrap_or(false);
+    let add_gen = req.add_generation_prompt.unwrap_or(!continue_final);
+    if continue_final && add_gen {
+        return err(StatusCode::BAD_REQUEST, "continue_final_message and add_generation_prompt cannot both be true");
+    }
+    // 文法从第一个生成 token 起生效：带约束时按后端给的模板变量关思考段（模型相关，server 不认识具体变量名）。
+    // TODO(api)：vLLM 的 reasoning-aware 结构化输出（思考段不约束）需要 parser 状态回传引擎。
+    let mut extra = req.chat_template_kwargs.clone();
+    if grammar.is_some() {
+        let add = be.grammar_render_extra();
+        if !add.is_empty() {
+            let e = extra.get_or_insert_with(Default::default);
+            for (k, v) in add {
+                e.entry(k).or_insert(v);
+            }
+        }
+    }
     let rr = RenderRequest {
         messages: &req.messages,
-        tools: req.tools.as_deref(),
+        tools: tools_for_render,
         reasoning_effort: req.reasoning_effort.as_deref(),
         clear_thinking: req.clear_thinking.unwrap_or(false),
-        extra: req.chat_template_kwargs.as_ref(),
+        extra: extra.as_ref(),
+        add_generation_prompt: add_gen,
+        continue_final_message: continue_final,
     };
     let mut prompt = match be.render(&rr) {
         Ok(p) => p,
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("chat template: {e:#}")),
     };
+    if let Err(m) = truncate_prompt(&mut prompt.ids, req.sampling.truncate_prompt_tokens) {
+        return err(StatusCode::BAD_REQUEST, m);
+    }
     let prompt_len = prompt.ids.len() as u32;
     // OpenAI chat：`logprobs: bool` + `top_logprobs: 0..=20`
     let logprobs = if req.logprobs == Some(true) {
@@ -325,7 +543,10 @@ pub async fn chat_completions(State(be): State<Backend>, Json(req): Json<ChatCom
         max_tokens,
         logprobs,
     ) {
-        Ok(s) => s,
+        Ok(mut s) => {
+            s.grammar = grammar;
+            s
+        }
         Err(m) => return err(StatusCode::BAD_REQUEST, m),
     };
     let model = req.model.clone().unwrap_or_else(|| be.model_name().to_string());
@@ -378,7 +599,7 @@ pub async fn chat_completions(State(be): State<Backend>, Json(req): Json<ChatCom
         }
         sp.max_tokens = 1;
     }
-    let (mut merged, mut states, mut guard) = submit_choices(&be, &[&prompt.ids], &sp, n, pd);
+    let (mut merged, mut states, mut guard) = submit_choices(&be, &[&prompt.ids], std::slice::from_ref(&sp), n, pd);
     // P 侧把引擎 request id 回给 proxy（响应头），proxy 再发 D
     let pd_rid: Option<RequestId> = states.first().map(|s| s.rid);
 
@@ -466,6 +687,8 @@ pub async fn chat_completions(State(be): State<Backend>, Json(req): Json<ChatCom
         .collect();
     // 单 choice 时沿用 Q1 的 token_ids 字段；多 choice 没有单一序列
     let token_ids = (return_ids && n == 1).then(|| std::mem::take(&mut states[0].ids));
+    // prompt_logprobs：n 个 choice 同一 prompt，取第一个 choice 的（vLLM 同样只有一份）。流式不返回（vLLM 亦然）。
+    let prompt_logprobs = sp.prompt_logprobs.map(|_| states[0].prompt_logprobs_json(prompt_len as usize));
     let resp = ChatCompletionResponse {
         id,
         object: "chat.completion",
@@ -479,6 +702,7 @@ pub async fn chat_completions(State(be): State<Backend>, Json(req): Json<ChatCom
         },
         prompt_token_ids: return_ids.then_some(prompt.ids),
         token_ids,
+        prompt_logprobs,
     };
     let mut r = Json(resp).into_response();
     pd_header(&mut r, pd_rid, pd_imported);

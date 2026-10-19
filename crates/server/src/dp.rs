@@ -62,6 +62,15 @@ impl ChatBackend for DpBackend {
     fn render(&self, req: &RenderRequest<'_>) -> Result<Prompt> {
         self.shards[0].render(req)
     }
+    fn grammar_factory(&self) -> Option<dinfer_guided::SharedGrammarFactory> {
+        self.shards[0].grammar_factory()
+    }
+    fn tool_call_tags(&self) -> Option<crate::backend::ToolCallTags> {
+        self.shards[0].tool_call_tags()
+    }
+    fn grammar_render_extra(&self) -> serde_json::Map<String, serde_json::Value> {
+        self.shards[0].grammar_render_extra()
+    }
     fn encode(&self, text: &str) -> Result<Vec<u32>> {
         self.shards[0].encode(text)
     }

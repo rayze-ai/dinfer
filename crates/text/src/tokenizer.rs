@@ -49,6 +49,14 @@ impl HfTokenizer {
         Ok(Self { inner, eos_ids, pad_id })
     }
 
+    /// 底层 `tokenizers::Tokenizer`（受限解码用它建 toktrie）。
+    pub fn inner(&self) -> &Inner {
+        &self.inner
+    }
+    /// `decode(ids, skip_special_tokens)`（HF 口径；`spaces_between_special_tokens` 由 `tokenizers` 的 decoder 决定，不单独支持）。
+    pub fn decode_with(&self, ids: &[u32], skip_special_tokens: bool) -> Result<String> {
+        self.inner.decode(ids, skip_special_tokens).map_err(|e| anyhow!("decode: {e}"))
+    }
     pub fn eos_ids(&self) -> &[u32] {
         &self.eos_ids
     }

@@ -80,6 +80,9 @@ pub struct Metrics {
     pub pd_export_slot_total: AtomicU64,
     pub pd_import_total: AtomicU64,
     pub pd_fallback_total: AtomicU64,
+    /// 投机解码：提案的 draft token 总数 / 被接受的 draft token 总数（接受率 = accepted / draft）。
+    pub spec_draft_total: AtomicU64,
+    pub spec_accepted_total: AtomicU64,
     pub request_success_stop: AtomicU64,
     pub request_success_length: AtomicU64,
     pub request_abort: AtomicU64,
@@ -190,6 +193,8 @@ impl Metrics {
         c(&mut o, "pd_export_slot_total", "PD: exports written directly into the peer shared slot region (shm / cuda-ipc).", self.pd_export_slot_total.load(Relaxed));
         c(&mut o, "pd_import_total", "PD: requests whose KV was imported (decode side).", self.pd_import_total.load(Relaxed));
         c(&mut o, "pd_fallback_total", "PD: decode-side requests that fell back to local prefill.", self.pd_fallback_total.load(Relaxed));
+        c(&mut o, "spec_draft_total", "Speculative decoding: draft tokens proposed.", self.spec_draft_total.load(Relaxed));
+        c(&mut o, "spec_accepted_total", "Speculative decoding: draft tokens accepted.", self.spec_accepted_total.load(Relaxed));
         c(
             &mut o,
             "engine_steps_total",

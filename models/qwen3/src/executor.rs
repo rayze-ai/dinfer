@@ -1,4 +1,7 @@
-//! `Qwen3Model` 的 `ModelExecutor`：上传 BatchPlan → forward → 采样 → D2H。无投机解码（drafts 为空）。
+//! `Qwen3Model` 的 `ModelExecutor`：上传 BatchPlan → forward → 采样 → D2H。
+//! 投机解码（A4，n-gram）：draft 由 runner 在 host 侧提案（`drafts` 这里永远为空）；带 draft 的请求本步输入
+//! `[base, draft…]`，logits / 采样取 `1 + 草稿数` 行（eager 路径），`verify_rows` 在 host 逐行比对：行 j 的 argmax 等于
+//! draft[j] 则接受，首个不匹配行（或全接受时最后一行）的采样值为 bonus；只对 greedy 请求提案所以逐位相等即 vLLM 口径。
 //!
 //! 采样（Q2-a）与 vLLM `Sampler.forward` 同序：penalties（prompt+output 历史）→ temperature → min_p → top_k/top_p →
 //! Philox 多项式采样（greedy 行 argmax）；logprobs 用 forward 的 **原始** logits（惩罚 / 温度之前）做 log_softmax。
@@ -52,6 +55,20 @@ struct StepBuffers {
     lp_ids: Tensor<i32>,          // [max_rows * 33]
     lp_val: Tensor<f32>,
     lp_rank: Tensor<i32>,
+    /// 受限解码 / logit_bias（docs/loops/guided-decoding.md）：图内常驻的 `logits_mask_f32` 读它们。
+    /// `mask_row[b] < 0` 无 mask；`mask_bits` 每行 `mask_words` 个 u32；bias 为 CSR（容量 max_rows × 300）。
+    mask_row: Tensor<i32>,    // [max_rows]
+    mask_bits: Tensor<u32>,   // [max_rows * mask_words]
+    mask_words: usize,
+    bias_offsets: Tensor<i32>, // [max_rows + 1]
+    bias_ids: Tensor<i32>,     // [max_rows * 300]
+    bias_vals: Tensor<f32>,
+    /// 上一步是否写过非空 mask / bias：true 时下一步若无约束要把 mask_row / bias_offsets 清回 -1 / 0（图内 kernel 常读）；
+    /// 连续无约束的步不发任何额外 H2D。
+    mask_dirty: bool,
+    /// prompt_logprobs：本步要再算 logits 的 hidden 行号与目标 token（[max_tokens]）。
+    plp_rows: Tensor<i32>,
+    plp_targets: Tensor<i32>,
     /// 每 step 小输入的打包上传器（pinned 一次 H2D + D2D 散开）。
     up: PinnedUploader,
 }
@@ -62,9 +79,10 @@ struct DecodeGraph {
 }
 
 impl StepBuffers {
-    fn alloc(s: &Stream, mt: usize, rows: usize, max_blocks: usize) -> Result<Self> {
+    fn alloc(s: &Stream, mt: usize, rows: usize, max_blocks: usize, vocab: usize) -> Result<Self> {
         let z32 = |n: usize| Tensor::<i32>::zeros(s, &[n.max(1)]);
         let zf = |n: usize| Tensor::<f32>::zeros(s, &[n.max(1)]);
+        let mask_words = vocab.div_ceil(32);
         Ok(StepBuffers {
             ids: z32(mt)?,
             pos: z32(mt)?,
@@ -93,7 +111,16 @@ impl StepBuffers {
             lp_ids: z32(rows * 33)?,
             lp_val: zf(rows * 33)?,
             lp_rank: z32(rows)?,
-            up: PinnedUploader::new(s, (mt * 16 + rows * (8 * 4 + 2 * 8) + rows * max_blocks * 4 + (1 << 20)).max(1 << 20))?,
+            mask_row: Tensor::<i32>::from_vec(s, vec![-1; rows.max(1)], &[rows.max(1)])?,
+            mask_bits: Tensor::<u32>::zeros(s, &[(rows * mask_words).max(1)])?,
+            mask_words,
+            bias_offsets: z32(rows + 1)?,
+            bias_ids: z32(rows * 300)?,
+            bias_vals: zf(rows * 300)?,
+            mask_dirty: false,
+            plp_rows: z32(mt)?,
+            plp_targets: z32(mt)?,
+            up: PinnedUploader::new(s, (mt * 16 + rows * (10 * 4 + 2 * 8) + rows * max_blocks * 4 + (1 << 20)).max(1 << 20))?,
         })
     }
 }
@@ -123,6 +150,8 @@ pub struct Qwen3Executor {
     /// 是否启用 decode 图（懒捕获：graph_for 未命中时按桶捕获）。
     graphs_enabled: bool,
     last_logprobs: Vec<Vec<TokenLogprobs>>,
+    /// prompt_logprobs（本步）：(采样行号, hidden 行号, 目标 token, prompt 位置)，upload_plan 收集、sample_eager 消费。
+    plp_pending: Vec<(usize, i32, i32, u32)>,
     last_rows: usize,
     alt: Option<AltSet>,
     /// 当前 plan 是否是插队 prefill（采样后不写 prev_chosen）。enqueue 时从 plan 读入。
@@ -197,7 +226,7 @@ impl Qwen3Executor {
         let rows = model.max_logits_rows;
         let mt = model.max_tokens;
         let max_blocks = max_blocks_per_seq.max(1);
-        let buf = StepBuffers::alloc(&s, mt, rows, max_blocks)?;
+        let buf = StepBuffers::alloc(&s, mt, rows, max_blocks, v)?;
         let async_slots = [PinnedSlot::new(&s, rows)?, PinnedSlot::new(&s, rows)?];
         let mut ex = Self {
             logits: Tensor::zeros(&s, &[rows, v])?,
@@ -210,6 +239,7 @@ impl Qwen3Executor {
             graphs: Vec::new(),
             graphs_enabled: false,
             last_logprobs: Vec::new(),
+            plp_pending: Vec::new(),
             last_rows: 0,
             async_slots,
             async_slot_idx: 0,
@@ -244,7 +274,7 @@ impl Qwen3Executor {
             let t0 = std::time::Instant::now();
             let s2 = dev.new_stream()?;
             let gemm2 = Gemm::new(&s2).context("cublasLt on alt stream")?;
-            let buf2 = StepBuffers::alloc(&s2, mt, rows, max_blocks)?;
+            let buf2 = StepBuffers::alloc(&s2, mt, rows, max_blocks, v)?;
             let scratch = ex.model.alloc_scratch(&s2)?;
             ex.alt = Some(AltSet {
                 logits: Tensor::zeros(&s2, &[rows, v])?,
@@ -285,7 +315,8 @@ impl Qwen3Executor {
     // ---------------------------------------------------------------- 上传
 
     /// 把 plan 的输入写进固定缓冲（batch 维可按 `pad_to` 补到桶大小：padding 行 slot=-1、seq_len=1、block 0）。
-    fn upload_plan(&mut self, plan: &BatchPlan, pad_to: usize) -> Result<(usize, usize)> {
+    /// 返回 (token 数含 padding, 请求数含 padding, logits 行数含 padding)。
+    fn upload_plan(&mut self, plan: &BatchPlan, pad_to: usize) -> Result<(usize, usize, usize)> {
         let s = &self.stream;
         self.buf.up.reset_step(); // 每 step 的第一次打包：host 区回卷
         let n = plan.num_reqs();
@@ -307,11 +338,12 @@ impl Qwen3Executor {
         self.buf.up.push(s, &gidx, &mut self.buf.gather_idx.data)?;
         self.buf.up.push(s, &pos, &mut self.buf.pos.data)?;
         self.buf.up.push(s, &slots, &mut self.buf.slots.data)?;
-        // 行维
+        // logits 行维（带 draft 的请求多于 1 行；padding 请求各 1 行）
         let mut rows = plan.logits_rows.clone();
         for i in n..nb {
             rows.push((t + (i - n)) as i32);
         }
+        let nrows = rows.len();
         self.buf.up.push(s, &rows, &mut self.buf.rows.data)?;
         let mut cu = plan.cu_seqlens.clone();
         for i in n..nb {
@@ -337,7 +369,38 @@ impl Qwen3Executor {
         }
         self.buf.up.push(s, &bt, &mut self.buf.bt.data)?;
         self.buf.up.flush(s)?;
-        Ok((tt, nb))
+        // prompt_logprobs：记下本步哪些 token 行是 prompt 位置（其 "下一个 token" 仍在 prompt 内），sample_eager 再算
+        self.plp_pending.clear();
+        if plan.sample.max_prompt_logprobs.is_some() {
+            for i in 0..n {
+                // sample 列按 logits 行（带 draft 的请求 1+K 行）；prefill 行无 draft → 该请求的行 = logits_row_start[i]
+                let srow = plan.logits_row_start[i];
+                if plan.sample.prompt_logprobs.get(srow).copied().flatten().is_none() {
+                    continue;
+                }
+                let np = plan.sample.num_prompt[srow] as i32;
+                let (r0, r1) = (plan.cu_seqlens[i] as usize, plan.cu_seqlens[i + 1] as usize);
+                for r in r0..r1 {
+                    let p = plan.positions[r];
+                    if p + 1 >= np {
+                        break; // 该行预测的是第一个生成 token（不属于 prompt_logprobs）
+                    }
+                    let target = if r + 1 < r1 {
+                        if plan.gather_idx.get(r + 1).is_some_and(|&g| g >= 0) {
+                            continue; // 在飞 token（设备侧 gather）：host 不知道目标，跳过
+                        }
+                        plan.input_ids[r + 1]
+                    } else {
+                        plan.next_known[i] // chunk 末行：下一个 token 在下一 chunk（runner 已给）
+                    };
+                    if target < 0 {
+                        continue;
+                    }
+                    self.plp_pending.push((srow, r as i32, target, (p + 1) as u32));
+                }
+            }
+        }
+        Ok((tt, nb, nrows))
     }
 
     fn upload_sampling(&mut self, sb: &SampleBatch, nb: usize) -> Result<()> {
@@ -383,6 +446,43 @@ impl Qwen3Executor {
                 s.htod_into(&sb.hist_ids, &mut self.buf.hist_ids.data)?;
             }
         }
+        // 受限解码 mask / logit_bias：有约束才上传；上一步有、这一步没有 → 清回无约束态（图内 kernel 每步都读）
+        if sb.any_mask {
+            let mut mr = sb.mask_row.clone();
+            mr.resize(nb, -1);
+            self.buf.up.push(s, &mr, &mut self.buf.mask_row.data)?;
+            let mut bo = sb.bias_offsets.clone();
+            while bo.len() < nb + 1 {
+                bo.push(*bo.last().unwrap());
+            }
+            self.buf.up.push(s, &bo, &mut self.buf.bias_offsets.data)?;
+            if !sb.bias_ids.is_empty() {
+                if self.buf.bias_ids.numel() < sb.bias_ids.len() {
+                    // 超过 max_rows × 300 的容量（每请求 ≤ 300 已在 validate 限制，这里只防御）
+                    self.buf.bias_ids = Tensor::<i32>::zeros(s, &[sb.bias_ids.len().next_power_of_two()])?;
+                    self.buf.bias_vals = Tensor::<f32>::zeros(s, &[sb.bias_ids.len().next_power_of_two()])?;
+                }
+                self.buf.up.push(s, &sb.bias_ids, &mut self.buf.bias_ids.data)?;
+                self.buf.up.push(s, &sb.bias_vals, &mut self.buf.bias_vals.data)?;
+            }
+            if !sb.mask_bits.is_empty() {
+                ensure!(
+                    sb.mask_words == self.buf.mask_words,
+                    "grammar mask words {} != executor {} (tokenizer vocab vs model vocab)",
+                    sb.mask_words,
+                    self.buf.mask_words
+                );
+                ensure!(sb.mask_bits.len() <= self.buf.mask_bits.numel(), "grammar mask rows > max_rows");
+                s.htod_into(&sb.mask_bits, &mut self.buf.mask_bits.data)?;
+            }
+            self.buf.mask_dirty = true;
+        } else if self.buf.mask_dirty {
+            let cap = self.buf.mask_row.numel();
+            self.buf.up.push(s, &vec![-1i32; cap], &mut self.buf.mask_row.data)?;
+            let cap = self.buf.bias_offsets.numel();
+            self.buf.up.push(s, &vec![0i32; cap], &mut self.buf.bias_offsets.data)?;
+            self.buf.mask_dirty = false;
+        }
         self.buf.up.flush(s)?;
         Ok(())
     }
@@ -390,7 +490,7 @@ impl Qwen3Executor {
     // ---------------------------------------------------------------- 设备侧流水（可被 capture）
 
     /// forward（固定缓冲，显式 t / rows / batch）。
-    fn forward_device(&mut self, mode: BatchMode, t: usize, nb: usize, max_seqlen: usize) -> Result<()> {
+    fn forward_device(&mut self, mode: BatchMode, t: usize, nb: usize, rows: usize, max_seqlen: usize) -> Result<()> {
         // 异步调度：ids[i] = prev_chosen[gather_idx[i]]（gather_idx<0 的行不动）。进图；非异步步全 -1 等于空操作。
         k::row_gather_i32(&self.stream, &self.buf.prev_chosen.data, &self.buf.gather_idx.data, &mut self.buf.ids.data, t)?;
         let meta = AttnMeta {
@@ -409,7 +509,7 @@ impl Qwen3Executor {
             meta,
             logits_rows: &self.buf.rows,
             t,
-            rows: nb,
+            rows,
         };
         self.model.forward(&self.stream, &self.gemm, &f, &mut self.logits)
     }
@@ -421,8 +521,16 @@ impl Qwen3Executor {
         let v = self.model.cfg.vocab_size as usize;
         // logits → work（采样原地改 work，保留 logits 给 logprobs / 对拍）；之后一个融合 kernel 做完四步
         s.dtod_copy_n(&self.logits.data, &mut self.work.data, nb * v)?;
-        let StepBuffers { chosen, temperature, min_p, top_k, top_p, temp01, seeds, offsets, .. } = &mut self.buf;
+        let StepBuffers {
+            chosen, temperature, min_p, top_k, top_p, temp01, seeds, offsets, mask_row, mask_bits, mask_words,
+            bias_offsets, bias_ids, bias_vals, ..
+        } = &mut self.buf;
         let mut wv = self.work.data.slice_mut(..nb * v);
+        // 受限解码 mask + logit_bias：图内常驻；无约束行 kernel 立即返回（每步固定 ~几 µs）
+        k::logits_mask_f32(
+            s, &mut wv, &mask_row.data, &mask_bits.data, *mask_words,
+            Some((&bias_offsets.data, &bias_ids.data, &bias_vals.data)), nb, v,
+        )?;
         let mut ch = chosen.data.slice_mut(..nb);
         k::sample_fused_f32(
             s, &mut wv, &temperature.data, &min_p.data, &top_k.data, &top_p.data, &temp01.data, &seeds.data,
@@ -469,11 +577,11 @@ impl Qwen3Executor {
         let p = Self::capture_plan(nb);
         self.upload_plan(&p, nb)?;
         self.upload_sampling(&p.sample, nb)?;
-        self.forward_device(BatchMode::Decode, nb, nb, 1)?;
+        self.forward_device(BatchMode::Decode, nb, nb, nb, 1)?;
         self.sample_device_fixed(nb)?;
         self.stream.synchronize()?;
         self.stream.begin_capture()?;
-        let r = self.forward_device(BatchMode::Decode, nb, nb, 1).and_then(|_| self.sample_device_fixed(nb));
+        let r = self.forward_device(BatchMode::Decode, nb, nb, nb, 1).and_then(|_| self.sample_device_fixed(nb));
         let g = self.stream.end_capture();
         r?;
         let graph = g.with_context(|| format!("capture decode graph for batch {nb}"))?;
@@ -512,7 +620,7 @@ impl Qwen3Executor {
 
     fn sample_eager(&mut self, sb: &SampleBatch, nrows: usize) -> Result<()> {
         let v = self.model.cfg.vocab_size as usize;
-        let fast = !sb.any_random && !sb.any_penalty && sb.max_logprobs.is_none();
+        let fast = !sb.any_random && !sb.any_penalty && sb.max_logprobs.is_none() && !sb.any_mask;
         if fast {
             let s = &self.stream;
             let lg = self.logits.data.slice(..nrows * v);
@@ -531,6 +639,10 @@ impl Qwen3Executor {
         {
             let b = &self.buf;
             let mut wv = self.work.data.slice_mut(..nrows * v);
+            if sb.any_mask {
+                let bias = (!sb.bias_ids.is_empty()).then(|| (&b.bias_offsets.data, &b.bias_ids.data, &b.bias_vals.data));
+                k::logits_mask_f32(s, &mut wv, &b.mask_row.data, &b.mask_bits.data, b.mask_words, bias, nrows, v)?;
+            }
             if sb.any_penalty {
                 k::penalties_f32(
                     s,
@@ -603,10 +715,79 @@ impl Qwen3Executor {
                     logprob: lp_v[base],
                     rank: rank_v[r] as u32,
                     top,
+                    prompt_pos: None,
+                    prompt: Vec::new(),
                 }];
             }
         }
+        if let Some(kmax) = sb.max_prompt_logprobs {
+            self.prompt_logprobs(sb, kmax as usize)?;
+        }
         self.save_prev_chosen(nrows)?;
+        Ok(())
+    }
+
+    /// `prompt_logprobs`：对 `upload_plan` 收集的 prompt 行（hidden 仍在 model 里）按 max_logits_rows 分块再算
+    /// 末层 norm + lm_head → logprobs(目标 = 下一个 prompt token)，结果以 `prompt_pos = Some(p)` 挂在该行 logprobs 前面。
+    /// 只在请求显式要了 prompt_logprobs 的 prefill 步发生；其余请求零开销。
+    /// TODO(api): chunked prefill 的中间 chunk 行 runner 不回传 logprobs（只有 end_of_seq 行回传）→ 只有整段 prompt
+    /// 在一个 chunk 内（≤ max_num_batched_tokens）时 prompt_logprobs 才完整；prefix cache 命中的前缀也没有 hidden。
+    fn prompt_logprobs(&mut self, sb: &SampleBatch, kmax: usize) -> Result<()> {
+        if self.plp_pending.is_empty() {
+            return Ok(());
+        }
+        let v = self.model.cfg.vocab_size as usize;
+        let chunk = self.model.max_logits_rows.min(self.buf.plp_rows.numel()).max(1);
+        let pending = std::mem::take(&mut self.plp_pending);
+        for part in pending.chunks(chunk) {
+            let n = part.len();
+            let rows: Vec<i32> = part.iter().map(|x| x.1).collect();
+            let targets: Vec<i32> = part.iter().map(|x| x.2).collect();
+            let s = &self.stream;
+            s.htod_into(&rows, &mut self.buf.plp_rows.data)?;
+            s.htod_into(&targets, &mut self.buf.plp_targets.data)?;
+            // raw 在 chosen 的 logprobs 之后已无用，借作 logits 工作区
+            self.model.logits_for_rows(s, &self.gemm, &self.buf.plp_rows.data, n, &mut self.raw.data)?;
+            let (ids_v, lp_v, rank_v) = {
+                let raw = self.raw.data.slice(..n * v);
+                let tg = self.buf.plp_targets.data.slice(..n);
+                let mut ids = self.buf.lp_ids.data.slice_mut(..n * (kmax + 1));
+                let mut lp = self.buf.lp_val.data.slice_mut(..n * (kmax + 1));
+                let mut rank = self.buf.lp_rank.data.slice_mut(..n);
+                k::logprobs_f32(s, &raw, &tg, kmax, &mut ids, &mut lp, &mut rank, v)?;
+                (
+                    s.dtoh_sync_copy_view(&self.buf.lp_ids.data.slice(..n * (kmax + 1)))?,
+                    s.dtoh_sync_copy_view(&self.buf.lp_val.data.slice(..n * (kmax + 1)))?,
+                    s.dtoh_sync_copy_view(&self.buf.lp_rank.data.slice(..n))?,
+                )
+            };
+            for (j, &(row, _, _, pos)) in part.iter().enumerate() {
+                let Some(kk) = sb.prompt_logprobs.get(row).copied().flatten() else { continue };
+                let base = j * (kmax + 1);
+                let top = (1..=kk as usize).map(|t| (ids_v[base + t] as u32, lp_v[base + t])).collect();
+                let e = TokenLogprobs {
+                    token_id: ids_v[base] as u32,
+                    logprob: lp_v[base],
+                    rank: rank_v[j] as u32,
+                    top,
+                    prompt_pos: Some(pos),
+                    prompt: Vec::new(),
+                };
+                // 挂在该行生成 token 的条目下（没要生成 logprobs 时放一个占位条目）
+                let lp = &mut self.last_logprobs[row];
+                if lp.is_empty() {
+                    lp.push(TokenLogprobs {
+                        token_id: TokenLogprobs::PLACEHOLDER,
+                        logprob: 0.0,
+                        rank: 0,
+                        top: Vec::new(),
+                        prompt_pos: None,
+                        prompt: Vec::new(),
+                    });
+                }
+                lp[0].prompt.push(e);
+            }
+        }
         Ok(())
     }
 }
@@ -885,10 +1066,6 @@ impl Qwen3Executor {
         let n = plan.num_reqs();
         let t = plan.total_tokens();
         ensure!(t <= self.model.max_tokens, "batch of {t} tokens > max_tokens {}", self.model.max_tokens);
-        ensure!(
-            plan.spec_tokens.iter().all(|d| d.is_empty()),
-            "qwen3 executor: speculative decoding not supported yet"
-        );
         let nrows = plan.logits_rows.len();
         ensure!(
             nrows <= self.model.max_logits_rows,
@@ -896,11 +1073,12 @@ impl Qwen3Executor {
             self.model.max_logits_rows
         );
         ensure!(
-            nrows == n && plan.sample.num_rows() == n,
+            nrows >= n && plan.sample.num_rows() == nrows,
             "qwen3 executor: rows {nrows} / sample {} vs reqs {n}",
             plan.sample.num_rows()
         );
         let sb = &plan.sample;
+        // Decode 模式 ⇒ 每请求 1 行（带 draft 的请求是 Paged）→ 图路径下 nrows == n
         let graph_eligible = plan.mode == BatchMode::Decode && !sb.any_penalty && sb.max_logprobs.is_none();
         if graph_eligible {
             self.ensure_graph(n)?;
@@ -911,8 +1089,8 @@ impl Qwen3Executor {
         let t_launch;
         if use_graph {
             let nb = self.graph_for(n).unwrap().batch;
-            let (tt, nb2) = self.upload_plan(plan, nb)?;
-            debug_assert_eq!((tt, nb2), (nb, nb));
+            let (tt, nb2, nr) = self.upload_plan(plan, nb)?;
+            debug_assert_eq!((tt, nb2, nr), (nb, nb, nb));
             let t_us = std::time::Instant::now();
             self.upload_sampling(sb, nb)?;
             self.t_upload_sampling_us += t_us.elapsed().as_micros() as u64;
@@ -923,16 +1101,16 @@ impl Qwen3Executor {
             self.graph_steps += 1;
             self.last_logprobs = vec![Vec::new(); n];
         } else {
-            let (tt, nb) = self.upload_plan(plan, n)?;
-            debug_assert_eq!((tt, nb), (t, n));
+            let (tt, nb, nr) = self.upload_plan(plan, n)?;
+            debug_assert_eq!((tt, nb, nr), (t, n, nrows));
             t_launch = std::time::Instant::now();
             let max_seqlen = plan.num_tokens.iter().copied().max().unwrap_or(0) as usize;
-            self.forward_device(plan.mode, t, n, max_seqlen)?;
-            self.sample_eager(sb, n)?;
+            self.forward_device(plan.mode, t, n, nrows, max_seqlen)?;
+            self.sample_eager(sb, nrows)?;
             self.eager_steps += 1;
         }
-        self.last_rows = n;
-        Ok((n, t_launch))
+        self.last_rows = nrows;
+        Ok((nrows, t_launch))
     }
 
     /// 等本流完成并取回采样结果。
@@ -1074,11 +1252,54 @@ impl dinfer_core::pd::KvExportHandle for PdSlotExport {
 }
 static EMPTY: Vec<u8> = Vec::new();
 /// 每个请求本步 1 个采样 token、无 draft。
+/// 无 draft 的 plan（异步 finish 路径）：每行一个 token。
 fn push_tokens(generated: &mut Vec<Vec<u32>>, drafts: &mut Vec<Vec<u32>>, chosen: &[i32]) {
     for &c in chosen {
         generated.push(vec![c as u32]);
         drafts.push(Vec::new());
     }
+}
+
+/// 按 plan 把逐行采样结果折成每请求的 `generated`（无 draft：1 个；有 draft：接受的前缀 + bonus，GLM MTP 同口径），
+/// 并把逐行 logprobs 折成每请求一条（接受的行 + bonus 行按序拼接）。drafts 这里不产（n-gram 在 runner 侧）。
+fn verify_rows(
+    plan: &BatchPlan,
+    chosen: &[i32],
+    lps: Vec<Vec<TokenLogprobs>>,
+    generated: &mut Vec<Vec<u32>>,
+    drafts: &mut Vec<Vec<u32>>,
+) -> Vec<Vec<TokenLogprobs>> {
+    let n = plan.num_reqs();
+    let mut out_lps = Vec::with_capacity(n);
+    let mut lps = lps.into_iter();
+    for i in 0..n {
+        let (r0, r1) = (plan.logits_row_start[i], plan.logits_row_start[i + 1]);
+        let spec = &plan.spec_tokens[i];
+        let mut gen = Vec::with_capacity(spec.len() + 1);
+        let mut last_row = r0;
+        for (j, &d) in spec.iter().enumerate() {
+            if chosen[r0 + j] as u32 == d {
+                gen.push(d);
+                last_row = r0 + j + 1;
+            } else {
+                break;
+            }
+        }
+        debug_assert!(last_row < r1);
+        gen.push(chosen[last_row] as u32);
+        generated.push(gen);
+        drafts.push(Vec::new());
+        // logprobs：行 r0..=last_row 各一条（无 logprobs 的请求全空 → 折成空）
+        let mut lp = Vec::new();
+        for r in r0..r1 {
+            let row = lps.next().unwrap_or_default();
+            if r <= last_row {
+                lp.extend(row);
+            }
+        }
+        out_lps.push(lp);
+    }
+    out_lps
 }
 
 impl ModelExecutor for Qwen3Executor {
@@ -1262,7 +1483,8 @@ impl ModelExecutor for Qwen3Executor {
         let chosen = self.collect(n)?;
         self.main_done = Some(self.stream.record_event()?);
         self.account(t0, t_launch, t_wait);
-        push_tokens(generated, drafts, &chosen);
+        let lps = std::mem::take(&mut self.last_logprobs);
+        self.last_logprobs = verify_rows(plan, &chosen, lps, generated, drafts);
         Ok(())
     }
 
@@ -1304,8 +1526,8 @@ impl ModelExecutor for Qwen3Executor {
         self.pair_steps += 1;
         self.account(t0, t_launch, t_wait);
 
-        push_tokens(gen_d, dr_d, &chosen_decode);
-        push_tokens(gen_p, dr_p, &chosen_prefill);
+        let lp_decode = verify_rows(decode, &chosen_decode, lp_decode, gen_d, dr_d);
+        let lp_prefill = verify_rows(prefill, &chosen_prefill, lp_prefill, gen_p, dr_p);
         Ok((lp_decode, lp_prefill))
     }
 

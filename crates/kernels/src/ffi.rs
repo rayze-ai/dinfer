@@ -131,6 +131,18 @@ extern "C" {
         vocab: i64,
         stream: cudaStream_t,
     ) -> i32;
+    pub fn logits_mask_f32(
+        logits: *mut f32,
+        mask_row: *const i32,
+        mask_bits: *const u32,
+        mask_words: i64,
+        bias_offsets: *const i32,
+        bias_ids: *const i32,
+        bias_vals: *const f32,
+        batch: i64,
+        vocab: i64,
+        stream: cudaStream_t,
+    ) -> i32;
     pub fn sample_fused_f32(
         work: *mut f32,
         temperature: *const f32,

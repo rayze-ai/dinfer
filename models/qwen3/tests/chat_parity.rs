@@ -82,6 +82,7 @@ fn qwen3_chat_template_matches_hf() {
             messages: &messages,
             tools: tools.as_deref(),
             add_generation_prompt: inp["add_generation_prompt"].as_bool().unwrap_or(true),
+            continue_final_message: false,
             extra: &extra,
         };
         let want = c["text"].as_str().unwrap();

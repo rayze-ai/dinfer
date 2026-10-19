@@ -42,6 +42,20 @@ pub struct ChatCompletionRequest {
     /// 返回 token id 列表（调试）。
     #[serde(default)]
     pub return_token_ids: Option<bool>,
+    /// OpenAI `response_format`：`{"type":"text"}` / `{"type":"json_object"}` / `{"type":"json_schema","json_schema":{"schema":{...}}}`。
+    #[serde(default)]
+    pub response_format: Option<ResponseFormat>,
+    /// OpenAI `tool_choice`：`"none"` / `"auto"` / `"required"` / `{"type":"function","function":{"name":X}}`。
+    #[serde(default)]
+    pub tool_choice: Option<serde_json::Value>,
+    /// OpenAI `parallel_tool_calls`（默认 true）；只在受限 `tool_choice`（required / 指定函数）下生效。
+    #[serde(default)]
+    pub parallel_tool_calls: Option<bool>,
+    /// vLLM `continue_final_message` / `add_generation_prompt`（渲染层）。
+    #[serde(default)]
+    pub continue_final_message: Option<bool>,
+    #[serde(default)]
+    pub add_generation_prompt: Option<bool>,
     /// PD 分离（design §10.3，字段名对齐 vLLM disagg proxy）：proxy 内部使用，普通客户端不传。
     /// `{"do_remote_decode": true}` → 本实例是 P：只出首 token、导出 KV；响应头 `x-pd-request-id` 回传 P 侧 id。
     /// `{"do_remote_prefill": true, "remote_request_id": N}` → 本实例是 D：按 N 配对已到的 KV 接力。
@@ -81,7 +95,36 @@ pub struct SamplingFields {
     /// vLLM 扩展：命中的 stop 字符串是否留在输出里（默认 false）。
     #[serde(default)]
     pub include_stop_str_in_output: Option<bool>,
+    /// OpenAI `logit_bias`：`{"<token_id>": bias}`（-100..100，≤ 300 项）。
+    #[serde(default)]
+    pub logit_bias: Option<serde_json::Map<String, serde_json::Value>>,
+    /// vLLM `prompt_logprobs`：Some(k) → 响应带 `prompt_logprobs`（prompt 每个位置的 logprob + top-k）。
+    #[serde(default)]
+    pub prompt_logprobs: Option<u32>,
+    #[serde(default)]
+    pub skip_special_tokens: Option<bool>,
+    #[serde(default)]
+    pub spaces_between_special_tokens: Option<bool>,
+    /// vLLM `truncate_prompt_tokens`：只保留 prompt 最后 N 个 token（左截断）。
+    #[serde(default)]
+    pub truncate_prompt_tokens: Option<u32>,
+    /// OpenAI `user`：接受并忽略。
+    #[serde(default)]
+    pub user: Option<String>,
 }
+
+/// OpenAI `response_format`。
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResponseFormat {
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// `json_schema` 时：`{"name":..., "schema": {...}, "strict": ...}`（OpenAI）或直接给 schema（vLLM 也接受）。
+    #[serde(default)]
+    pub json_schema: Option<serde_json::Value>,
+}
+
+/// vLLM `prompt_logprobs` 响应形状：`[null, {"<tok>": {"logprob","rank","decoded_token"}}, ...]`，长度 = prompt_tokens。
+pub type PromptLogprobs = Vec<Option<serde_json::Map<String, serde_json::Value>>>;
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct StreamOptions {
@@ -162,6 +205,9 @@ pub struct ChatCompletionResponse {
     pub prompt_token_ids: Option<Vec<u32>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_ids: Option<Vec<u32>>,
+    /// vLLM 扩展（请求给了 `prompt_logprobs` 时）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_logprobs: Option<PromptLogprobs>,
 }
 
 // ---- streaming ----
@@ -289,9 +335,10 @@ pub struct CompletionRequest {
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct CompletionLogProbs {
     pub text_offset: Vec<usize>,
-    pub token_logprobs: Vec<f32>,
+    /// echo 时 prompt 第 0 个 token 没有 logprob → null（vLLM 同形）。
+    pub token_logprobs: Vec<Option<f32>>,
     pub tokens: Vec<String>,
-    pub top_logprobs: Vec<serde_json::Map<String, serde_json::Value>>,
+    pub top_logprobs: Vec<Option<serde_json::Map<String, serde_json::Value>>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -301,6 +348,8 @@ pub struct CompletionChoice {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logprobs: Option<CompletionLogProbs>,
     pub finish_reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_logprobs: Option<PromptLogprobs>,
 }
 
 /// 非流式与流式同形（`object = "text_completion"`）；流式 chunk 的 `usage` 只在最后一个 chunk 出现。

@@ -36,7 +36,7 @@
 export CUDA_HOME=/usr/local/cuda PATH=/usr/local/cuda/bin:$PATH   # nvcc 不在默认 PATH
 cargo build --workspace --features glm53          # 或 --features kimik3 / qwen3；无 nvcc 加 --features no-nvcc
 cargo test --workspace --features glm53           # CPU 单测；GPU 测试：cargo test -p dinfer-kernels -- --ignored
-scripts/verify/p6.sh                              # GLM 线验收（含 p0–p5）；Qwen3 线：scripts/verify/q1.sh；OpenAI 服务面：scripts/verify/api_surface.sh
+scripts/verify/p6.sh                              # GLM 线验收（含 p0–p5）；Qwen3 线：scripts/verify/q1.sh；OpenAI 服务面：scripts/verify/{api_surface,guided,sdk_smoke}.sh；投机：ngram.sh；算子对拍：ops_parity.sh
 cargo run -p dinfer --features glm53 -- serve --model test/tiny_glm_dsa_fullvocab --tokenizer /data/ref/models/glm53 --port 8011 [--mtp]
 kubectl apply -f scripts/dev/k8s/dev-pod.yaml     # 4090 开发 Pod（runtimeClassName: nvidia 必带）
 rm -f target/.rustc_info.json                     # cargo 报 "failed to run rustc to learn about target" 时（见 pitfalls）
@@ -46,6 +46,7 @@ rm -f target/.rustc_info.json                     # cargo 报 "failed to run rus
 
 <!-- 不能动什么、必须兼容什么、安全/合规约束 -->
 - 文档用中文，命令与代码原样。
+- `crates/` 只放模型无关代码：模型名 / token id / 模板变量名 / 模型路径出现在 `crates/` 即为错误，走 `ChatBackend` 钩子由 `models/<m>` 提供；模型相关测试放 `models/<m>/tests/`（用户 2026-10-19）。
 - 代码 / 脚本 / 环境变量 / C ABI 符号不带项目名前缀（`DINFER_*`、`dinfer_*`），项目可能改名；新代码前 `grep -rn DINFER crates scripts` 自查。
 - 所有跨会话要记住的事写进文件并进 git，不要只留在对话里。
 - **目标是超越，不是重写**（用户 2026-10-17）：vLLM 做得对的直接采用，能改进的改进，两种情况都要在 `docs/design.md` §11 "采用 / 改进台账" 记一行（采用了什么、为什么、我们改了哪里、收益）。不为"不一样"而不一样。

@@ -609,14 +609,14 @@ mod tests {
             info: RegionInfo { kind: "shm".into(), slots: 2, slot_bytes: 32, shm_name: Some("x".into()), ipc_handle: None, device_uuid: vec![1; 16] },
             host_base: mem.as_ptr(),
         });
-        let port = spawn_receiver_shared("127.0.0.1:0", "qwen3".into(), table.clone(), Arc::new(VecPool), Some(region)).unwrap();
+        let port = spawn_receiver_shared("127.0.0.1:0", "m".into(), table.clone(), Arc::new(VecPool), Some(region)).unwrap();
         let t = SharedTransport::new(format!("127.0.0.1:{port}"), Duration::from_secs(2));
         let (info, gen) = t.region().expect("handshake");
         assert_eq!((info.slots, info.slot_bytes, gen), (2, 32, 1));
         let s0 = t.acquire_slot().unwrap();
         let s1 = t.acquire_slot().unwrap();
         assert!(t.acquire_slot().is_none(), "2 credits only");
-        let mut h = hdr(1, "qwen3");
+        let mut h = hdr(1, "m");
         h.slot = Some(s1);
         assert_eq!(h.payload_len(), 0);
         t.send(&h, MemDesc::of(&[])).unwrap();
@@ -641,14 +641,14 @@ mod tests {
         t.release_slot(s0);
         assert!(t.acquire_slot().is_some());
         let z = [0u8; 8];
-        t.send(&hdr(2, "qwen3"), MemDesc::of(&z)).unwrap();
+        t.send(&hdr(2, "m"), MemDesc::of(&z)).unwrap();
         wait(&|| table.contains(2));
         assert_eq!(table.take(2).unwrap().payload.len(), 8);
     }
 
     #[test]
     fn roundtrip_encode_decode() {
-        let h = hdr(9, "qwen3");
+        let h = hdr(9, "m");
         let payload: Vec<u8> = (0..8).collect();
         let mut buf = Vec::new();
         encode(&h, &payload, &mut buf).unwrap();
@@ -662,10 +662,10 @@ mod tests {
     #[test]
     fn tcp_receiver_accepts_matching_tag_and_rejects_other() {
         let table = Arc::new(IncomingKv::default());
-        let port = spawn_receiver("127.0.0.1:0", "qwen3".into(), table.clone()).unwrap();
+        let port = spawn_receiver("127.0.0.1:0", "m".into(), table.clone()).unwrap();
         let t = TcpTransport { addr: format!("127.0.0.1:{port}"), connect_timeout: Duration::from_secs(2) };
         let z = [0u8; 8];
-        let mut x = t.send(&hdr(1, "qwen3"), MemDesc::of(&z)).unwrap();
+        let mut x = t.send(&hdr(1, "m"), MemDesc::of(&z)).unwrap();
         assert_eq!(x.poll().unwrap(), TransferState::Done);
         t.send(&hdr(2, "glm53"), MemDesc::of(&z)).unwrap();
         let deadline = Instant::now() + Duration::from_secs(3);

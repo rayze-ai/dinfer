@@ -6,7 +6,7 @@
 //! 流式 chunk `object = "text_completion"`，`stream_options.include_usage` 时最后补一个只有 `usage` 的 chunk。
 
 use crate::backend::ChatBackend;
-use crate::chat::{async_stream_lite, check_model, consume, err, sampling_from, submit_choices, MAX_N};
+use crate::chat::{async_stream_lite, check_model, consume, err, sampling_from, submit_choices, truncate_prompt, MAX_N};
 use crate::openai::*;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -66,7 +66,7 @@ fn to_completion_lp(lps: &[ChatLogprobContent], offset: &mut usize) -> Completio
     for lp in lps {
         out.text_offset.push(*offset);
         *offset += lp.token.len();
-        out.token_logprobs.push(lp.logprob);
+        out.token_logprobs.push(Some(lp.logprob));
         out.tokens.push(lp.token.clone());
         let mut top = serde_json::Map::new();
         for t in &lp.top_logprobs {
@@ -74,7 +74,41 @@ fn to_completion_lp(lps: &[ChatLogprobContent], offset: &mut usize) -> Completio
         }
         // vLLM：chosen token 不在 top-k 时也放进去（所以长度可能 = k + 1）
         top.entry(lp.token.clone()).or_insert(serde_json::json!(lp.logprob));
-        out.top_logprobs.push(top);
+        out.top_logprobs.push(Some(top));
+    }
+    out
+}
+
+/// echo + logprobs 的 prompt 段（vLLM：第 0 个 token `null`，其余来自 prompt_logprobs；缺的位置也 null）。
+/// `offset` 走完 prompt 文本。
+fn prompt_segment_lp(
+    be: &dyn ChatBackend,
+    prompt: &[u32],
+    plp: &crate::openai::PromptLogprobs,
+    offset: &mut usize,
+) -> CompletionLogProbs {
+    let mut out = CompletionLogProbs::default();
+    for (i, &id) in prompt.iter().enumerate() {
+        let tok = be.decode(&[id]).unwrap_or_else(|_| format!("token_id:{id}"));
+        out.text_offset.push(*offset);
+        *offset += tok.len();
+        match plp.get(i).and_then(|x| x.as_ref()) {
+            Some(m) => {
+                let mine = m.get(&id.to_string()).and_then(|e| e["logprob"].as_f64()).map(|x| x as f32);
+                out.token_logprobs.push(mine);
+                let mut top = serde_json::Map::new();
+                for (k, e) in m {
+                    let t = k.parse::<u32>().ok().and_then(|t| be.decode(&[t]).ok()).unwrap_or_else(|| k.clone());
+                    top.insert(t, e["logprob"].clone());
+                }
+                out.top_logprobs.push(Some(top));
+            }
+            None => {
+                out.token_logprobs.push(None);
+                out.top_logprobs.push(None);
+            }
+        }
+        out.tokens.push(tok);
     }
     out
 }
@@ -97,30 +131,35 @@ pub async fn completions(State(be): State<Backend>, Json(req): Json<CompletionRe
     if !(1..=MAX_N).contains(&n) {
         return err(StatusCode::BAD_REQUEST, format!("n must be in 1..={MAX_N}, got {n}"));
     }
-    let prompts = match parse_prompts(be.as_ref(), &req.prompt) {
+    let mut prompts = match parse_prompts(be.as_ref(), &req.prompt) {
         Ok(p) => p,
         Err(m) => return err(StatusCode::BAD_REQUEST, m),
     };
     if prompts.iter().any(|p| p.is_empty()) {
         return err(StatusCode::BAD_REQUEST, "prompt must not be empty");
     }
-    // 多 prompt 共用一份 SamplingParams：max_tokens 的上下文余量按最长 prompt 算（vLLM 按每个 prompt 各算；
-    // TODO(api): 若要逐 prompt 的 room，需要 submit_choices 接受 per-prompt 采样）
-    let longest = prompts.iter().map(|p| p.len()).max().unwrap_or(0) as u32;
-    let max_tokens = Some(req.max_tokens.unwrap_or(16));
-    let sp = match sampling_from(
-        &req.sampling,
-        be.default_sampling(),
-        be.max_model_len(),
-        longest,
-        max_tokens,
-        req.logprobs,
-    ) {
-        Ok(s) => s,
-        Err(m) => return err(StatusCode::BAD_REQUEST, m),
-    };
+    for p in &mut prompts {
+        if let Err(m) = truncate_prompt(p, req.sampling.truncate_prompt_tokens) {
+            return err(StatusCode::BAD_REQUEST, m);
+        }
+    }
     let echo = req.echo.unwrap_or(false);
-    // TODO(api): vLLM echo + logprobs 时还会把 prompt 的 logprobs 列进来（需要 prompt_logprobs）；这里只有生成段
+    // 逐 prompt 一份 SamplingParams：max_tokens 的上下文余量按各自 prompt 算（vLLM 口径）。
+    // echo + logprobs：vLLM 会把 prompt 段的 logprobs 列进来 → 用 prompt_logprobs（请求没给就按 logprobs 的 k）。
+    let max_tokens = Some(req.max_tokens.unwrap_or(16));
+    let mut sps = Vec::with_capacity(prompts.len());
+    for p in &prompts {
+        match sampling_from(&req.sampling, be.default_sampling(), be.max_model_len(), p.len() as u32, max_tokens, req.logprobs) {
+            Ok(mut s) => {
+                if echo && s.logprobs.is_some() && s.prompt_logprobs.is_none() {
+                    s.prompt_logprobs = s.logprobs;
+                }
+                sps.push(s)
+            }
+            Err(m) => return err(StatusCode::BAD_REQUEST, m),
+        }
+    }
+    let sp = sps[0].clone();
     // echo：每个 choice 前缀 = 其 prompt 的 decode（字符串 prompt 时等于原文）
     let echo_text: Vec<String> = if echo {
         let mut v = Vec::with_capacity(prompts.len());
@@ -140,7 +179,7 @@ pub async fn completions(State(be): State<Backend>, Json(req): Json<CompletionRe
     let want_lp = sp.logprobs.is_some();
     let prompt_tokens: u32 = prompts.iter().map(|p| p.len() as u32).sum();
     let prompt_refs: Vec<&[u32]> = prompts.iter().map(|p| p.as_slice()).collect();
-    let (mut merged, mut states, mut guard) = submit_choices(&be, &prompt_refs, &sp, n, None);
+    let (mut merged, mut states, mut guard) = submit_choices(&be, &prompt_refs, &sps, n, None);
     let total = states.len();
     // 每个 choice 的 echo 前缀（未下发时 Some）与 logprobs 文本游标
     // Mutex（流式 future 需 Send）：emit / finish 两个闭包都要 take 它
@@ -161,7 +200,7 @@ pub async fn completions(State(be): State<Backend>, Json(req): Json<CompletionRe
                     object: "text_completion",
                     created,
                     model: model.clone(),
-                    choices: vec![CompletionChoice { index: i, text, logprobs: lp, finish_reason: finish }],
+                    choices: vec![CompletionChoice { index: i, text, logprobs: lp, finish_reason: finish, prompt_logprobs: None }],
                     usage: None,
                 }
             };
@@ -232,11 +271,26 @@ pub async fn completions(State(be): State<Backend>, Json(req): Json<CompletionRe
         .zip(lps)
         .zip(states.iter())
         .enumerate()
-        .map(|(i, ((text, lp), st))| CompletionChoice {
-            index: i as u32,
-            text,
-            logprobs: want_lp.then_some(lp),
-            finish_reason: Some(st.finish.unwrap_or("stop")),
+        .map(|(i, ((text, lp), st))| {
+            let pi = i / n as usize;
+            let plp = sps[pi].prompt_logprobs.map(|_| st.prompt_logprobs_json(prompts[pi].len()));
+            let lp = want_lp.then(|| match (&plp, echo) {
+                (Some(p), true) => {
+                    let mut off = 0usize;
+                    let mut seg = prompt_segment_lp(be.as_ref(), &prompts[pi], p, &mut off);
+                    merge_lp(&mut seg, lp);
+                    seg
+                }
+                _ => lp,
+            });
+            CompletionChoice {
+                index: i as u32,
+                text,
+                logprobs: lp,
+                finish_reason: Some(st.finish.unwrap_or("stop")),
+                // vLLM：请求显式给了 prompt_logprobs 才单列（echo 隐式开的只进 logprobs 四列）
+                prompt_logprobs: req.sampling.prompt_logprobs.and(plp),
+            }
         })
         .collect();
     Json(CompletionResponse {

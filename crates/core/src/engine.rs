@@ -306,6 +306,28 @@ impl<E: ModelExecutor> Engine<E> {
         t_exec: std::time::Instant,
     ) {
         let results = self.sched.update_from_output(so, mro);
+        // 投机解码：接受率计数 + 把下一步的 draft 交还 scheduler（MTP / n-gram 都走这里）。
+        if !so.scheduled_spec_tokens.is_empty() {
+            let (mut nd, mut na) = (0u64, 0u64);
+            for (rid, spec) in &so.scheduled_spec_tokens {
+                if let Some(i) = mro.req_ids.iter().position(|r| r == rid) {
+                    nd += spec.len() as u64;
+                    na += mro.sampled[i].len().saturating_sub(1) as u64;
+                }
+            }
+            self.metrics.spec_draft_total.fetch_add(nd, std::sync::atomic::Ordering::Relaxed);
+            self.metrics.spec_accepted_total.fetch_add(na, std::sync::atomic::Ordering::Relaxed);
+        }
+        if mro.drafts.iter().any(|d| !d.is_empty()) {
+            let dr: Vec<(RequestId, Vec<u32>)> = mro
+                .req_ids
+                .iter()
+                .zip(mro.drafts.iter())
+                .filter(|(_, d)| !d.is_empty())
+                .map(|(r, d)| (*r, d.clone()))
+                .collect();
+            self.sched.update_draft_tokens(&dr);
+        }
         // scheduler 自行结束的请求（分不到块且无人可抢占）：推 Finished 并清理
         for (rid, f) in self.sched.take_force_finished() {
             if let Some(tx) = self.outs.remove(&rid) {

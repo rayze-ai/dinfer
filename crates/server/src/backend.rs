@@ -40,6 +40,8 @@ pub trait OutputStream: Send {
     fn token_text(&self, _id: u32) -> Option<String> {
         None
     }
+    /// `skip_special_tokens=false`：特殊 token 以字面进文本（默认 true = HF/vLLM 默认）。默认实现忽略。
+    fn set_skip_special_tokens(&mut self, _skip: bool) {}
 }
 
 pub struct RenderRequest<'a> {
@@ -48,6 +50,30 @@ pub struct RenderRequest<'a> {
     pub reasoning_effort: Option<&'a str>,
     pub clear_thinking: bool,
     pub extra: Option<&'a serde_json::Map<String, serde_json::Value>>,
+    /// HF `add_generation_prompt`（chat 默认 true；`/tokenize` 可 false）。
+    pub add_generation_prompt: bool,
+    /// vLLM `continue_final_message`：最后一条 assistant 消息不闭合（续写），与 add_generation_prompt 互斥。
+    pub continue_final_message: bool,
+}
+
+impl<'a> RenderRequest<'a> {
+    pub fn new(messages: &'a [serde_json::Value], tools: Option<&'a [serde_json::Value]>) -> Self {
+        Self {
+            messages,
+            tools,
+            reasoning_effort: None,
+            clear_thinking: false,
+            extra: None,
+            add_generation_prompt: true,
+            continue_final_message: false,
+        }
+    }
+}
+
+/// 模型 chat 模板里 tool_call 的包裹文本（受限解码 `tool_choice` 用；与模型的输出解析器一致）。
+pub struct ToolCallTags {
+    pub open: &'static str,
+    pub close: &'static str,
 }
 
 pub trait ChatBackend: Send + Sync + 'static {
@@ -82,6 +108,19 @@ pub trait ChatBackend: Send + Sync + 'static {
     }
     fn metrics(&self) -> Option<std::sync::Arc<dinfer_core::metrics::Metrics>> {
         None
+    }
+    /// 受限解码文法工厂（`response_format` / `tool_choice`）；None = 后端不支持 → 相关字段 400。
+    fn grammar_factory(&self) -> Option<dinfer_guided::SharedGrammarFactory> {
+        None
+    }
+    /// 模型的 tool_call 文本包裹（受限 `tool_choice` 的文法要生成解析器认的格式）；None = 不支持约束 tool_choice。
+    fn tool_call_tags(&self) -> Option<ToolCallTags> {
+        None
+    }
+    /// 带文法约束时要并进渲染上下文的模板变量（请求没给的才补）。文法从首个生成 token 起生效，模型若有思考段
+    /// 要在这里关掉（Qwen3：`enable_thinking=false`；GLM：`clear_thinking` 之类）。默认不加。
+    fn grammar_render_extra(&self) -> serde_json::Map<String, serde_json::Value> {
+        serde_json::Map::new()
     }
 }
 

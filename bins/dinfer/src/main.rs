@@ -91,6 +91,18 @@ enum Cmd {
         /// 开启 MTP 投机解码（nextn=1）
         #[arg(long, default_value_t = false)]
         mtp: bool,
+        /// 投机解码方法（qwen3）：none（默认）| ngram（无需额外权重，docs/loops/ngram-spec.md）
+        #[arg(long, default_value = "none")]
+        speculative: String,
+        /// 投机解码每步 draft 数 K
+        #[arg(long, default_value_t = 3)]
+        num_speculative_tokens: usize,
+        /// n-gram 最短匹配长度
+        #[arg(long, default_value_t = 2)]
+        ngram_min: usize,
+        /// n-gram 最长匹配长度
+        #[arg(long, default_value_t = 4)]
+        ngram_max: usize,
     },
     /// PD 分离入口（design §10.3）：收 OpenAI 请求 → 打 prefill 实例出首 token + 导出 KV → 打 decode 实例接力。
     /// 任一侧失败退化为 decode 实例单机跑（不丢请求）。无鉴权。
@@ -169,12 +181,16 @@ async fn main() -> Result<()> {
             tp,
             dp,
             mtp,
+            speculative,
+            num_speculative_tokens,
+            ngram_min,
+            ngram_max,
         } => {
             let name = served_model_name.unwrap_or_else(|| model_name().to_string());
             let addr = format!("{host}:{port}");
             #[cfg(feature = "glm53")]
             {
-                let _ = (gpu_memory_utilization, no_prefix_caching, no_cuda_graph); // glm53：固定 num_blocks，prefix cache / graph 待接
+                let _ = (gpu_memory_utilization, no_prefix_caching, no_cuda_graph, &speculative, num_speculative_tokens, ngram_min, ngram_max); // glm53：固定 num_blocks，prefix cache / graph 待接
                 let opt = dinfer_glm53::service::ServeOptions {
                     model_dir: model,
                     tokenizer_dir: tokenizer,
@@ -221,6 +237,10 @@ async fn main() -> Result<()> {
                     enable_cuda_graph: !no_cuda_graph,
                     device,
                     tp: tp.max(1),
+                    speculative,
+                    num_speculative_tokens,
+                    ngram_min,
+                    ngram_max,
                 };
                 let dp = dp.max(1);
                 // DP（design §13.3）：N 个独立副本并行装载，副本 i 用卡 device + i·tp
@@ -258,6 +278,10 @@ async fn main() -> Result<()> {
                     no_cuda_graph,
                     device,
                     mtp,
+                    &speculative,
+                    num_speculative_tokens,
+                    ngram_min,
+                    ngram_max,
                 );
                 anyhow::bail!(
                     "serve for model `{name}` is not implemented yet (build with --features glm53 or qwen3)"

@@ -257,7 +257,7 @@ impl ChatBackend for Glm53Service {
             tools: req.tools,
             reasoning_effort: req.reasoning_effort,
             clear_thinking: req.clear_thinking,
-            add_generation_prompt: true,
+            add_generation_prompt: req.add_generation_prompt,
         };
         let text = render(&self.tmpl, &p)?;
         let ids = self.tok.encode(&text)?;

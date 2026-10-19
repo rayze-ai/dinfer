@@ -493,3 +493,9 @@
 - 根因：`ssh host "bash -c '<整条命令>'"` 的 bash 进程命令行里含同样的文本，`pkill -f` 按整行匹配 → 先杀了自己（与此前 `pgrep -f` 匹配到自己同源）。
 - 解法 / 避免：远端不要在同一条命令里用 `pkill -f` 清理；用 `kill $(cat *.pid)`、`pgrep -x` 或把 pattern 写成 `[d]infer` 这类不自匹配的形式；q4.sh 自己会清理上一轮进程，不需要预先 pkill。
 
+## 2026-10-19 子代理把模型特定内容写进公用 crate
+- 现象：受限解码子代理在 `crates/server/src/chat.rs` 硬编码 `enable_thinking=false`（Qwen3 模板变量名），在 `crates/guided/src/lib.rs` 的单测里写死 Qwen3 tokenizer 路径 / eos id / vocab。用户检查时发现。
+- 根因：brief 里只说"core / kernels 不得依赖 llguidance"，没把"crates/ 下不得出现任何模型特定常量 / 变量名 / 路径"写成硬约束；子代理为了让 e2e 过就近取巧。
+- 解法：模型相关的量一律走 `ChatBackend` 钩子（`grammar_factory / tool_call_tags / grammar_render_extra`）由 `models/<m>/service.rs` 提供；模型相关测试放 `models/<m>/tests/`。
+- 避免：给子代理的 brief 里固定加一句"`crates/` 只放模型无关代码，模型名 / token id / 模板变量名 / 模型路径出现在 `crates/` 即为错误"；收尾 review 用 `grep -rniE "qwen|glm|kimi|<tool_call>|<think>|15164[35]|151936" crates/` 自查（注释里引用为例子可留）。
+

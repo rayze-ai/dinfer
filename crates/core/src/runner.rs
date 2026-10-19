@@ -11,12 +11,15 @@
 //! 投机解码（P6-d）：scheduler 给每请求的 draft（`scheduled_spec_tokens`）追加到该请求本步的 token 之后；executor 对
 //! 每请求返回 `generated = [新采样…]`（长度 1 + 接受数）与下一步的 `draft`。本模块把 `num_computed` 回退被拒绝的
 //! draft 数，并把 draft 通过 `ModelRunnerOutput::drafts` 交还 scheduler（`update_draft_tokens`）。
+//! A4：n-gram 提案（`spec`）在 `finish` 里对 executor 没给 draft 的 greedy 请求用 host 侧 token_ids 提案（CPU）。
+//! 带 draft 的请求在 `plan.sample` 里占 `1 + 草稿数` 行（与 `logits_rows` 平行），executor 逐行采样后在 host 侧验证。
 
 use crate::kv::BlockId;
 use crate::request::RequestId;
 use crate::sample::SamplingParams;
 use crate::sampler::{SampleBatch, TokenLogprobs};
 use crate::sched::{ModelRunnerOutput, SchedulerOutput};
+use crate::spec::NgramProposer;
 use crate::util::{id_hash_map, IdHashMap};
 use anyhow::{ensure, Context, Result};
 
@@ -66,7 +69,7 @@ pub struct BatchPlan {
     /// MTP 用它做中间 chunk 行的输入。
     pub next_known: Vec<i32>,
     pub mode: BatchMode,
-    /// 每请求一行的采样参数（与 req_ids 平行）。
+    /// 每 logits 行一行的采样参数（与 `logits_rows` 平行；无 draft 时 = 每请求一行）。
     pub sample: SampleBatch,
     /// 异步调度：按 token 行，`>= 0` 表示该行的 input_id 还在飞（上一步采样），值 = 上一步 plan 里的行号，
     /// executor 在设备上用上一步的 chosen 填；`-1` = 用 `input_ids` 里的值。全 -1 时可忽略。
@@ -97,6 +100,7 @@ impl BatchPlan {
         self.mode == BatchMode::Decode
             && self.spec_tokens.iter().all(|d| d.is_empty())
             && !self.sample.any_penalty
+            && !self.sample.any_mask // 受限解码：mask 要看 host 侧完整输出序列（guided-decoding loop）
             && self.sample.max_logprobs.is_none()
     }
     pub fn total_tokens(&self) -> usize {
@@ -230,6 +234,8 @@ pub struct Runner<E: ModelExecutor> {
     plan: BatchPlan,
     generated: Vec<Vec<u32>>,
     drafts: Vec<Vec<u32>>,
+    /// n-gram 提案器（None = 不做 n-gram 投机；executor 自带的 draft（MTP）不受影响）。
+    spec: Option<NgramProposer>,
     /// 诊断：step 构成计数（每 1000 步打一行日志）。mixed = 同步里既有 decode 行又有 prefill 行。
     steps_total: u64,
     steps_mixed: u64,
@@ -247,11 +253,21 @@ impl<E: ModelExecutor> Runner<E> {
             plan: BatchPlan::default(),
             generated: Vec::new(),
             drafts: Vec::new(),
+            spec: None,
             steps_total: 0,
             steps_mixed: 0,
             steps_pair: 0,
             steps_prefill_only: 0,
         }
+    }
+
+    /// 启用 n-gram 提案（`--speculative ngram`）。
+    pub fn with_ngram(mut self, p: NgramProposer) -> Self {
+        self.spec = Some(p);
+        self
+    }
+    pub fn ngram(&self) -> Option<&NgramProposer> {
+        self.spec.as_ref()
     }
 
     pub fn num_states(&self) -> usize {
@@ -411,7 +427,22 @@ impl<E: ModelExecutor> Runner<E> {
                 }
                 st.token_ids.extend_from_slice(gen);
                 out.sampled.push(gen.clone());
-                out.drafts.push(self.drafts[i].clone());
+                let mut draft = std::mem::take(&mut self.drafts[i]);
+                // n-gram 提案：executor 没给 draft、同步步、greedy 且无惩罚（惩罚要逐 token 的历史，draft 行给不了，
+                // 随机采样的拒绝采样未做 → 这些请求不提案，退化为普通 decode；TODO 随机采样按 vLLM rejection_sampler）
+                if draft.is_empty() && !pending.is_async {
+                    if let Some(ng) = &self.spec {
+                        // 受限解码（grammar）也不提案：draft 行的 mask 要文法逐 token 前进 / 回退（vLLM 的
+                        // accept/rollback），guided-decoding loop 未做 → 这些请求走普通 decode
+                        if st.sampling.is_greedy() && !st.sampling.has_penalties() && st.sampling.grammar.is_none() {
+                            // 还能产出的 token 数（含本步之后的 bonus）：多于它的 draft 一定被 max_tokens 截掉
+                            let budget = (st.num_prompt + st.sampling.max_tokens as usize)
+                                .saturating_sub(st.token_ids.len() + 1);
+                            draft = ng.propose(&st.token_ids, budget);
+                        }
+                    }
+                }
+                out.drafts.push(draft);
                 out.logprobs.push(std::mem::take(&mut lps[i]));
             } else {
                 ensure!(row.num_draft == 0, "req {}: draft on a mid-prefill chunk", row.rid);
@@ -631,12 +662,15 @@ impl<E: ModelExecutor> Runner<E> {
                 if start + base < st.token_ids.len() { st.token_ids[start + base] as i32 } else { -1 };
             p.next_known.push(next_known);
             // 采样行：历史 = 到本步末尾为止的 prompt + 已产出（中间 chunk 的行不会被采样，参数无意义但保持平行）
-            p.sample.push(
-                &st.sampling,
-                st.seed,
-                &st.token_ids[..(start + base).min(st.token_ids.len())],
-                st.num_prompt,
-            );
+            // 带 draft 的请求每个 logits 行一行采样参数（历史同为 base 末尾；draft 行只用于 greedy 验证）
+            for _ in 0..(1 + spec.len()) {
+                p.sample.push(
+                    &st.sampling,
+                    st.seed,
+                    &st.token_ids[..(start + base).min(st.token_ids.len())],
+                    st.num_prompt,
+                );
+            }
             max_blocks = max_blocks.max(st.block_ids.len());
         }
         p.mode = match (any_prefill, any_decode, any_paged) {
@@ -682,6 +716,99 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    /// 假执行器（投机）：无 draft 的行返回 7；带 draft 的请求接受前 `accept` 个 draft，bonus = 7。
+    struct Verify {
+        accept: usize,
+        plans: Vec<BatchPlan>,
+    }
+    impl ModelExecutor for Verify {
+        fn forward_sample(
+            &mut self,
+            plan: &BatchPlan,
+            generated: &mut Vec<Vec<u32>>,
+            drafts: &mut Vec<Vec<u32>>,
+        ) -> Result<()> {
+            self.plans.push(plan.clone());
+            for spec in &plan.spec_tokens {
+                let mut g: Vec<u32> = spec.iter().take(self.accept).copied().collect();
+                g.push(7);
+                generated.push(g);
+                drafts.push(Vec::new());
+            }
+            Ok(())
+        }
+    }
+
+    /// n-gram 提案 → 下一步 plan 带 1+K 个 token / logits 行 / 采样行 → 接受 1 拒 2 → num_computed 回退。
+    #[test]
+    fn ngram_drafts_flow_through_plan_and_rollback() {
+        let mut s = sched_spec(1000, 3);
+        let sp = SamplingParams { max_tokens: 20, temperature: 0.0, ..Default::default() };
+        // prompt 尾部 [1,2] 在前面出现过，其后 [3,4,5]
+        s.add_request(Request::new(1, vec![1, 2, 3, 4, 5, 9, 1, 2], sp, 0));
+        let mut r = Runner::new(Verify { accept: 1, plans: vec![] }, 16).with_ngram(NgramProposer::new(2, 4, 3));
+
+        // step 1：prefill，输出 7；finish 里提案（序列 [..,1,2,7]：尾部 [2,7] 无匹配 → 无 draft）
+        let so = s.schedule();
+        let mro = r.execute(&so).unwrap();
+        assert_eq!(mro.sampled[0], vec![7]);
+        assert!(mro.drafts[0].is_empty());
+        s.update_from_output(&so, &mro);
+        s.update_draft_tokens(&[]);
+
+        // 用执行器固定输出 7 造出重复：step 2 → 序列 [1,2,3,4,5,9,1,2,7,7]（尾部 [7,7] 无更早匹配）；
+        // step 3 → [..,7,7,7]，尾部 [7,7] 在 idx 8 匹配 → 后继 [7]（截断到序列末尾）→ draft [7]
+        for _ in 0..2 {
+            let so = s.schedule();
+            let mro = r.execute(&so).unwrap();
+            s.update_from_output(&so, &mro);
+            if !mro.drafts[0].is_empty() {
+                s.update_draft_tokens(&[(1, mro.drafts[0].clone())]);
+            }
+        }
+        assert_eq!(r.state(1).unwrap().token_ids.len(), 11);
+        assert_eq!(s.request(1).unwrap().spec_ids, vec![7], "runner must propose [7] via ngram");
+
+        // step 4：带 1 个 draft → plan 2 token / 2 logits 行 / 2 采样行；Verify accept=1 → 全接受 + bonus
+        let so = s.schedule();
+        assert_eq!(so.num_scheduled_tokens, vec![(1, 2)]);
+        let mro = r.execute(&so).unwrap();
+        let p = r.exec.plans.last().unwrap();
+        assert_eq!(p.mode, BatchMode::Paged);
+        assert_eq!(p.num_tokens, vec![2]);
+        assert_eq!(p.spec_tokens, vec![vec![7]]);
+        assert_eq!(p.logits_rows, vec![0, 1]);
+        assert_eq!(p.logits_row_start, vec![0, 2]);
+        assert_eq!(p.sample.num_rows(), 2, "one sample row per logits row");
+        assert_eq!(mro.sampled[0], vec![7, 7]);
+        s.update_from_output(&so, &mro);
+        // 本步算了 base(1) + 接受(1) = 2 个位置：10 → 12；序列 11 → 13（最后一个 token 下一步才算）
+        assert_eq!(r.state(1).unwrap().num_computed, 12);
+        assert_eq!(s.request(1).unwrap().num_computed_tokens, 12);
+        assert_eq!(r.state(1).unwrap().token_ids.len(), 13);
+        // 序列 [..,7,7,7,7,7]：尾部 4-gram [7,7,7,7] 最近一次匹配在倒数第 5 起 → 后继只剩尾部最后 1 个 → draft [7]
+        // （vLLM 同口径：最长 n-gram、最近位置、尾部不够 k 个截断）
+        assert_eq!(mro.drafts[0], vec![7]);
+        s.update_draft_tokens(&[(1, mro.drafts[0].clone())]);
+
+        // step 5：1 个 draft（2 token），执行器拒绝它（accept=0）→ generated [7]，num_computed = 12 + 1 + 0 = 13（不是 14）
+        r.exec.accept = 0;
+        let so = s.schedule();
+        assert_eq!(so.num_scheduled_tokens, vec![(1, 2)]);
+        let mro = r.execute(&so).unwrap();
+        assert_eq!(mro.sampled[0], vec![7]);
+        s.update_from_output(&so, &mro);
+        assert_eq!(r.state(1).unwrap().num_computed, 13);
+        assert_eq!(s.request(1).unwrap().num_computed_tokens, 13);
+        assert_eq!(r.state(1).unwrap().token_ids.len(), 14);
+    }
+
+    fn sched_spec(budget: u32, num_spec: u32) -> Scheduler {
+        let mut s = sched(budget);
+        s.set_num_spec_tokens_for_test(num_spec);
+        s
     }
 
     fn sched(budget: u32) -> Scheduler {

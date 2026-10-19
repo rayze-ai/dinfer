@@ -29,7 +29,7 @@ qwen3/src/
   model.rs       Qwen3Model：embed → 28×(RMSNorm → Attention → +res → RMSNorm → Mlp → +res) → norm → lm_head（tied：文件里有 lm_head.weight 就读，否则用 embed）
                  Attention：融合 qkv GEMM → 拆 q/k/v → per-head q_norm/k_norm（RMSNorm over head_dim，RoPE 之前）→ neox RoPE（整个 head_dim）→
                  gqa_cache_write → gqa_prefill（无历史）| gqa_paged（decode / 带历史）→ o_proj；PagedKv [num_blocks, block_size, kv_heads, 2, D]
-  executor.rs    Qwen3Executor（ModelExecutor）：上传 BatchPlan → forward → 采样管线（Q2：penalties→temperature→min_p→top-k/p→sample→logprobs；全 greedy 走 argmax 快路径）（无投机）
+  executor.rs    Qwen3Executor（ModelExecutor）：上传 BatchPlan → forward → 采样管线（Q2：penalties→temperature→min_p→top-k/p→sample→logprobs；全 greedy 走 argmax 快路径）（A4：带 draft 的请求取 1+K 行 logits，`verify_rows` host 侧逐行比对接受）
   parser.rs      <think>…</think> → reasoning；<tool_call>\n{"name","arguments"}\n</tool_call> → tool_calls（JSON，vLLM hermes 风格）；
                  初始态 Content（生成提示不以 <think> 结尾）；标签前缀与 </think> 前的 \n 都做流式保留
   service.rs     Qwen3Service（ChatBackend）：dinfer-text 的 HfTokenizer + ChatTemplate（模板在 tokenizer_config.json 的 chat_template 字段）；
@@ -43,7 +43,7 @@ tests/
 
 ## 3. 模型特有的风险 / 待定
 
-- ~~采样只有 greedy（Q2）~~ Q2 已完成；无投机解码（Qwen3 无 MTP 层；若要做可用 EAGLE/独立 draft，不在计划内）。
+- ~~采样只有 greedy（Q2）~~ Q2 已完成；~~无投机解码~~ A4 已做 **n-gram 投机**（`--speculative ngram --num-speculative-tokens K --ngram-min N --ngram-max M`，无需额外权重；提案在 `crates/core/src/spec/ngram.rs`，验证走 runner/executor 既有 `spec_tokens`/`drafts` 通道，只对 greedy 无惩罚请求提案，开启时异步调度关闭；见 `docs/loops/ngram-spec.md`）。Qwen3 无 MTP 层，EAGLE 不在计划内。
 - 权重加载 17 s 里大部分是 safetensors mmap 首次缺页 + 逐张量 H2D（Q3 并行 / pinned）。
 - `max_position_embeddings` 40960：rope 表按它预留；YaRN 等 rope_scaling 未实现（config 为 null）。
 ## 4. 参考材料

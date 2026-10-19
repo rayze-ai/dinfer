@@ -165,6 +165,12 @@ impl Scheduler {
         self.id_to_slot.get(&id).map(|&s| self.req(s))
     }
 
+    /// 测试用：改每步 draft 数（lookahead）。
+    #[doc(hidden)]
+    pub fn set_num_spec_tokens_for_test(&mut self, n: u32) {
+        self.p.num_spec_tokens = n;
+    }
+
     /// 设置下一步的 draft token（由 worker 的 drafter 产出）。
     pub fn update_draft_tokens(&mut self, drafts: &[(RequestId, Vec<u32>)]) {
         for (id, d) in drafts {

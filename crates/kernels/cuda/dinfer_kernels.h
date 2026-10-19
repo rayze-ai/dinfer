@@ -55,6 +55,11 @@ int topk_topp_mask_f32(float* logits, const int32_t* top_k, const float* top_p, 
 // 温度缩放 + softmax + 多项式采样（Philox，seed/offset 每行）。temperature<=0 的行走 argmax。
 int sample_f32(const float* logits, const float* temperature, const uint64_t* seeds, const uint64_t* offsets,
                int32_t* out, int64_t batch, int64_t vocab, cudaStream_t stream);
+// 受限解码 mask + logit_bias（原地）：mask_row[b]<0 无 mask，否则 mask_bits[mask_row[b]*mask_words..] bit=0 置 -inf；
+// bias 为 CSR（offsets 长 batch+1；可全为 NULL = 无 bias）。无约束行零工作量。
+int logits_mask_f32(float* logits, const int32_t* mask_row, const uint32_t* mask_bits, int64_t mask_words,
+                    const int32_t* bias_offsets, const int32_t* bias_ids, const float* bias_vals, int64_t batch,
+                    int64_t vocab, cudaStream_t stream);
 int sample_fused_f32(float* work, const float* temperature, const float* min_p, const int32_t* top_k,
                      const float* top_p, const float* temp01, const uint64_t* seeds, const uint64_t* offsets,
                      int32_t* out, int64_t batch, int64_t vocab, cudaStream_t stream);

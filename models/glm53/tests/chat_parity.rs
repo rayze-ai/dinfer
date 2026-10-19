@@ -113,6 +113,7 @@ fn chat_template_matches_hf() {
             reasoning_effort: inp["reasoning_effort"].as_str(),
             clear_thinking: inp["clear_thinking"].as_bool().unwrap_or(false),
             add_generation_prompt: inp["add_generation_prompt"].as_bool().unwrap_or(true),
+            continue_final_message: false,
         };
         let want_text = c["text"].as_str().unwrap();
         let want_ids: Vec<u32> =

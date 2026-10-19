@@ -95,16 +95,14 @@ pub async fn tokenize(State(be): State<Backend>, Json(req): Json<TokenizeRequest
             if msgs.is_empty() {
                 return err(StatusCode::BAD_REQUEST, "messages must not be empty");
             }
-            // TODO(api): 渲染器固定 add_generation_prompt=true；=false 需要模板层支持
-            if req.add_generation_prompt == Some(false) {
-                return err(StatusCode::BAD_REQUEST, "add_generation_prompt=false is not supported");
-            }
             let rr = RenderRequest {
                 messages: msgs,
                 tools: req.tools.as_deref(),
                 reasoning_effort: None,
                 clear_thinking: false,
                 extra: req.chat_template_kwargs.as_ref(),
+                add_generation_prompt: req.add_generation_prompt.unwrap_or(true),
+                continue_final_message: false,
             };
             match be.render(&rr) {
                 Ok(p) => p.ids,

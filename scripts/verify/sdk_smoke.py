@@ -116,8 +116,7 @@ def main(base_url: str) -> int:
             tc = msg.tool_calls[0]
             assert tc.type == "function" and tc.function.name, f"tool_call 形状不对: {tc}"
             assert tc.id, "tool_call 无 id"
-            # TODO(api): vLLM 有 tool_calls 时 finish_reason 为 "tool_calls"；server 目前原样给引擎的 "stop"，先两者都接受
-            assert r.choices[0].finish_reason in ("tool_calls", "stop"), r.choices[0].finish_reason
+            assert r.choices[0].finish_reason == "tool_calls", r.choices[0].finish_reason
         else:
             assert msg.content, "既无 tool_calls 也无 content"
 

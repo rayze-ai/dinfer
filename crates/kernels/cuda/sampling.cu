@@ -283,6 +283,38 @@ __global__ void sample_fused_kernel(float* __restrict__ work, const float* __res
 }
 
 
+// ---- 受限解码 mask + logit_bias（vLLM 顺序：structured-output bitmask / logit_bias 在 penalties 之前）----
+// mask_row[b] < 0 → 该行无 mask；否则读 mask_bits[mask_row[b] * mask_words .. +mask_words]，bit=0 的列置 -inf
+//（列 ≥ mask_words*32 视为不允许）。bias CSR：bias_ids[bias_offsets[b]..bias_offsets[b+1]] 对应 bias_vals 加到该列。
+// 两者都为空的行立即返回，整批无约束时只有一个 kernel launch 的固定开销（图内常驻）。
+__global__ void logits_mask_kernel(float* __restrict__ logits, const int32_t* __restrict__ mask_row,
+                                   const uint32_t* __restrict__ mask_bits, int mask_words,
+                                   const int32_t* __restrict__ bias_offsets, const int32_t* __restrict__ bias_ids,
+                                   const float* __restrict__ bias_vals, int vocab) {
+  const int b = blockIdx.x;
+  const int mr = mask_row ? mask_row[b] : -1;
+  const int blo = bias_offsets ? bias_offsets[b] : 0;
+  const int bhi = bias_offsets ? bias_offsets[b + 1] : 0;
+  if (mr < 0 && blo >= bhi) return;
+  float* row = logits + (int64_t)b * vocab;
+  if (blo < bhi) {
+    // 先加 bias（bias 列若随后被 mask 掉仍是 -inf，与 vLLM 一致）
+    for (int i = blo + threadIdx.x; i < bhi; i += BLOCK) {
+      const int id = bias_ids[i];
+      if (id >= 0 && id < vocab) row[id] += bias_vals[i];
+    }
+    __syncthreads();
+  }
+  if (mr >= 0) {
+    const uint32_t* bits = mask_bits + (int64_t)mr * mask_words;
+    for (int i = threadIdx.x; i < vocab; i += BLOCK) {
+      const int w = i >> 5;
+      const bool ok = w < mask_words && ((bits[w] >> (i & 31)) & 1u);
+      if (!ok) row[i] = -INFINITY;
+    }
+  }
+}
+
 // ---- penalties（vLLM ops/penalties.py 语义）----
 // 对每行：对出现在 prompt 或 output 的 token：repetition：logit>0 ? /r : *r（r 作用于 prompt∪output）；
 // frequency：logit -= f · count_in_output；presence：logit -= p · [in_output]。
@@ -460,6 +492,16 @@ extern "C" int row_gather_i32(const int32_t* prev, const int32_t* gather_idx, in
                               cudaStream_t stream) {
   if (n <= 0) return 0;
   row_gather_i32_kernel<<<(unsigned)((n + 255) / 256), 256, 0, stream>>>(prev, gather_idx, ids, (int)n);
+  return last_err();
+}
+
+extern "C" int logits_mask_f32(float* logits, const int32_t* mask_row, const uint32_t* mask_bits, int64_t mask_words,
+                               const int32_t* bias_offsets, const int32_t* bias_ids, const float* bias_vals,
+                               int64_t batch, int64_t vocab, cudaStream_t stream) {
+  if (batch <= 0) return 0;
+  if (vocab <= 0 || (mask_row && !mask_bits)) return err(cudaErrorInvalidValue);
+  logits_mask_kernel<<<(unsigned)batch, BLOCK, 0, stream>>>(logits, mask_row, mask_bits, (int)mask_words, bias_offsets,
+                                                           bias_ids, bias_vals, (int)vocab);
   return last_err();
 }
 

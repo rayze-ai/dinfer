@@ -7,6 +7,7 @@ members = [
     "crates/layers",
     "crates/text",
     "crates/server",
+    "crates/guided",
     # 模型 crate（每个模型一个；构建 = core + server + 一个模型）
     "models/qwen3",
     "models/glm53",
@@ -33,6 +34,7 @@ dinfer-kimik3 = { path = "models/kimik3" }
 dinfer-glm53 = { path = "models/glm53" }
 dinfer-qwen3 = { path = "models/qwen3" }
 dinfer-text = { path = "crates/text" }
+dinfer-guided = { path = "crates/guided" }
 
 # 第三方：固定版本（见 docs/design.md §3.1）
 anyhow = "=1.0.98"
@@ -58,6 +60,10 @@ cudarc = { version = "=0.18.2", default-features = false, features = ["std", "dr
 criterion = "=0.6.0"
 tokio-stream = "=0.1.17"
 futures-core = "=0.3.34"
+# 受限解码（docs/loops/guided-decoding.md）：vLLM guidance 后端同源
+llguidance = "=1.9.1"
+toktrie_hf_tokenizers = "=1.9.1"
+jsonschema = { version = "=0.30.0", default-features = false }
 reqwest = { version = "=0.12.15", default-features = false, features = ["json", "stream"] }
 cc = "=1.2.27"
 

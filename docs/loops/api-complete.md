@@ -47,5 +47,6 @@ server 现有 `/health /metrics /v1/models /v1/chat/completions`。补齐 vLLM `
 ## 状态
 
 - 第 1 轮通过（2026-10-18）：表内端点全部实现，`scripts/verify/api_surface.sh` exit 0。
-- 留下的 TODO(api)：completions 多 prompt 共用一份 `SamplingParams`（max_tokens 余量按最长 prompt 算，vLLM 逐 prompt）；echo 时不含 prompt 的 logprobs（vLLM 需 `prompt_logprobs`）；`/tokenize` 的 `add_generation_prompt=false` 400（渲染器固定 true）、`add_special_tokens` 忽略；pooling / 音频 / responses 501。
-- 未做：`openai` Python SDK 冒烟（可选项）。
+- 留下的 TODO(api)（completions 多 prompt 逐 prompt room、echo+logprobs 的 prompt 段、`/tokenize` 的 `add_generation_prompt=false`）已在 `docs/loops/guided-decoding.md` A2/A3 解决；`add_special_tokens` 仍忽略；pooling / 音频 / responses 501。
+- 已做（2026-10-19）：`openai` Python SDK 1.77.0 冒烟 `scripts/verify/sdk_smoke.sh`（起 serve → `python3 -I scripts/verify/sdk_smoke.py`），14 项全过：models.list / retrieve、chat 非流式 / 流式逐字相同 / tools / n=2 / seed 复现、completions echo+logprobs=2 非流式 / 流式逐字相同 / n=2 / stop、错例 404（未知 model）/ 400（suffix）/ 501（embeddings）。
+- （已修，guided-decoding 第 2 轮：有 tool_calls 时 finish_reason = `tool_calls`）；`target/release/dinfer` 是旧构建（缺 completions），脚本按 mtime 取较新的二进制。

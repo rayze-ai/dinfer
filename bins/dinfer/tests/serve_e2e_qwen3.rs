@@ -1217,3 +1217,397 @@ async fn e2e_qwen3_openai_surface() {
     assert!(e["error"]["param"].is_null());
     let _ = srv.logs.len();
 }
+
+/// A4 n-gram 投机解码（docs/loops/ngram-spec.md）：同一组 greedy prompt 先关投机、再开投机（`--speculative ngram`）。
+/// 正确性口径对齐 vLLM `tests/v1/e2e/test_cpu_spec_decode.py` 的 `check_logprobs_close`：逐 token 比较到**首个不同
+/// token**，该处投机侧选的 token 必须在基线的 top-2 里且基线 top-1/top-2 logprob 差 < 0.5（并列）——draft 验证行走 paged
+/// 多行 attention / 多行 GEMM，KV 与 logits 与单行 decode 有 bf16 级差异，只会在并列处翻转；在明显非并列处翻转就是 bug。
+/// 另要求至少 1 个普通 prompt 逐 token 完全一致（防止"全在并列处翻转"掩盖系统性偏移）。
+/// 重复性 prompt 的接受率 `spec_accepted_total / spec_draft_total > 0.5`；普通 prompt 总耗时不比关闭慢 > 10%（+100 ms 噪声余量）。
+/// GPU 只有一张：两套 server 顺序起。
+#[tokio::test]
+#[ignore]
+async fn e2e_qwen3_ngram() {
+    let c = reqwest::Client::new();
+    let passage = "The quick brown fox jumps over the lazy dog while the small grey cat sleeps quietly under the old \
+wooden table in the corner of the warm kitchen, and the clock on the wall keeps ticking slowly through the long afternoon.";
+    let qs = [
+        "Explain what a hash map is in two sentences.",
+        "Write a short poem about the sea.",
+        "List three uses of Rust and why.",
+        "What is the capital of France? Answer briefly.",
+        "Describe how a bicycle works in one paragraph.",
+    ];
+    let normal: Vec<serde_json::Value> = qs
+        .iter()
+        .map(|q| {
+            serde_json::json!({"messages": [{"role":"user","content":q}], "max_tokens": 64, "temperature": 0.0,
+                "logprobs": true, "top_logprobs": 2})
+        })
+        .collect();
+    let repeat = serde_json::json!({
+        "messages": [{"role":"user","content": format!("Repeat the following three times verbatim: {passage}")}],
+        "max_tokens": 200, "temperature": 0.0,
+        "chat_template_kwargs": {"enable_thinking": false}
+    });
+    let common = ["--num-blocks", "512", "--max-num-seqs", "8"];
+
+    /// (文本, completion_tokens, 耗时, 每 token (token, logprob, top-1/top-2 gap, top-2 token 列表))
+    struct Out {
+        text: String,
+        n: u64,
+        el: Duration,
+        toks: Vec<(String, f64, f64, Vec<String>)>,
+    }
+    async fn run(c: &reqwest::Client, base: &str, body: &serde_json::Value) -> Out {
+        let t = Instant::now();
+        let r = c.post(format!("{base}/v1/chat/completions")).json(body).send().await.unwrap();
+        assert_eq!(r.status(), 200, "{}", r.text().await.unwrap());
+        let v: serde_json::Value = r.json().await.unwrap();
+        let el = t.elapsed();
+        let m = &v["choices"][0]["message"];
+        let text = format!("{}|{}", m["reasoning_content"].as_str().unwrap_or(""), m["content"].as_str().unwrap_or(""));
+        let toks = v["choices"][0]["logprobs"]["content"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|t| {
+                        let lp = t["logprob"].as_f64().unwrap();
+                        let tl = t["top_logprobs"].as_array().unwrap();
+                        let tops: Vec<f64> = tl.iter().map(|x| x["logprob"].as_f64().unwrap()).collect();
+                        let top_toks: Vec<String> = tl.iter().map(|x| x["token"].as_str().unwrap_or("").to_string()).collect();
+                        let gap = if tops.len() >= 2 { tops[0] - tops[1] } else { f64::INFINITY };
+                        (t["token"].as_str().unwrap_or("").to_string(), lp, gap, top_toks)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Out { text, n: v["usage"]["completion_tokens"].as_u64().unwrap(), el, toks }
+    }
+
+    // 1) 关投机：基线
+    let (mut base_out, mut base_t) = (Vec::new(), Duration::ZERO);
+    let base_rep;
+    {
+        let srv = spawn_server_with(&common);
+        let _ = run(&c, &srv.base, &normal[0]).await; // 预热
+        for b in &normal {
+            let o = run(&c, &srv.base, b).await;
+            base_t += o.el;
+            base_out.push(o);
+        }
+        base_rep = run(&c, &srv.base, &repeat).await;
+        assert_eq!(metrics_val(&c, &srv.base, "dinfer:spec_draft_total").await, 0.0, "spec off must not draft");
+        drop(srv);
+    }
+    eprintln!("e2e: ngram off  normal {:?}  repeat {} tok {:?}", base_t, base_rep.n, base_rep.el);
+
+    // 2) 开投机
+    let mut args: Vec<&str> = common.to_vec();
+    args.extend(["--speculative", "ngram", "--num-speculative-tokens", "3", "--ngram-min", "2", "--ngram-max", "4"]);
+    let srv = spawn_server_with(&args);
+    let _ = run(&c, &srv.base, &normal[0]).await;
+    let mut spec_t = Duration::ZERO;
+    let mut identical = 0usize;
+    for (i, b) in normal.iter().enumerate() {
+        let o = run(&c, &srv.base, b).await;
+        spec_t += o.el;
+        let bo = &base_out[i];
+        if o.text == bo.text && o.n == bo.n {
+            identical += 1;
+            continue;
+        }
+        // 分叉：首个不同 token 处，投机侧 token ∈ 基线 top-2 且基线处近似并列（vLLM check_logprobs_close）
+        let k = bo.toks.iter().zip(o.toks.iter()).position(|(a, b)| a.0 != b.0).unwrap_or(bo.toks.len().min(o.toks.len()));
+        let (tok, lp, gap, tops) = bo.toks.get(k).cloned().unwrap_or_default();
+        let spec_tok = o.toks.get(k).map(|t| t.0.clone()).unwrap_or_default();
+        eprintln!("e2e: prompt {i} diverges at token {k}: base {tok:?} (lp {lp:.3}, top2 gap {gap:.3}, top2 {tops:?}) vs spec {spec_tok:?}");
+        assert!(
+            tops.contains(&spec_tok) && gap < 0.5,
+            "prompt {i}: spec on/off diverge at token {k} where base is not a near-tie (gap {gap:.3}, top2 {tops:?}): {tok:?} vs {spec_tok:?}"
+        );
+    }
+    eprintln!("e2e: {identical}/{} prompts identical with spec on", normal.len());
+    assert!(identical >= 1, "no prompt identical with spec on ({identical}/{})", normal.len());
+
+    let d0 = metrics_val(&c, &srv.base, "dinfer:spec_draft_total").await;
+    let a0 = metrics_val(&c, &srv.base, "dinfer:spec_accepted_total").await;
+    let rep = run(&c, &srv.base, &repeat).await;
+    let d1 = metrics_val(&c, &srv.base, "dinfer:spec_draft_total").await;
+    let a1 = metrics_val(&c, &srv.base, "dinfer:spec_accepted_total").await;
+    assert_eq!(rep.n, base_rep.n, "repeat: completion_tokens differ");
+    assert_eq!(rep.text, base_rep.text, "repeat: text differs (spec on vs off)");
+    let rate_all = if d1 > 0.0 { a1 / d1 } else { 0.0 };
+    let rate_rep = if d1 > d0 { (a1 - a0) / (d1 - d0) } else { 0.0 };
+    eprintln!(
+        "e2e: ngram on   normal {:?} ({:+.1}% vs off)  repeat {} tok {:?} ({:+.1}%)  accept: normal {}/{} repeat {:.3} ({}/{}) overall {:.3}",
+        spec_t,
+        (spec_t.as_secs_f64() / base_t.as_secs_f64() - 1.0) * 100.0,
+        rep.n,
+        rep.el,
+        (rep.el.as_secs_f64() / base_rep.el.as_secs_f64() - 1.0) * 100.0,
+        a0,
+        d0,
+        rate_rep,
+        a1 - a0,
+        d1 - d0,
+        rate_all
+    );
+    assert!(d1 > d0, "repeat prompt must produce drafts");
+    assert!(rate_rep > 0.5, "repeat prompt acceptance {rate_rep:.3} <= 0.5");
+    assert!(
+        spec_t.as_secs_f64() <= base_t.as_secs_f64() * 1.10 + 0.1,
+        "normal prompts slower with spec on: {spec_t:?} vs {base_t:?}"
+    );
+    eprintln!("e2e: ngram PASS");
+    drop(srv);
+}
+
+/// 受限解码 + chat 字段补全（docs/loops/guided-decoding.md）。
+#[tokio::test]
+#[ignore]
+async fn e2e_qwen3_guided() {
+    let srv = spawn_server();
+    let c = reqwest::Client::new();
+    let url = format!("{}/v1/chat/completions", srv.base);
+    let post = |b: serde_json::Value| {
+        let c = c.clone();
+        let url = url.clone();
+        async move {
+            let r = c.post(&url).json(&b).send().await.unwrap();
+            let st = r.status();
+            let v: serde_json::Value = r.json().await.unwrap();
+            (st, v)
+        }
+    };
+    let no_think = serde_json::json!({"enable_thinking": false});
+    // ---- 1) response_format=json_object：5 个 prompt 全部能 parse ----
+    for q in [
+        "Describe a cat as JSON.",
+        "Give me a JSON object with your name and age.",
+        "List three colors.",
+        "Who are you?",
+        "Return the weather in Beijing.",
+    ] {
+        let (st, v) = post(serde_json::json!({
+            "messages": [{"role":"user","content": q}], "max_tokens": 96, "temperature": 0.0,
+            "response_format": {"type":"json_object"}, "chat_template_kwargs": no_think
+        }))
+        .await;
+        assert_eq!(st, 200, "{v}");
+        let txt = v["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string();
+        eprintln!("e2e: json_object({q:?}) → {txt:?} finish={}", v["choices"][0]["finish_reason"]);
+        if v["choices"][0]["finish_reason"] == "length" {
+            continue; // 被 max_tokens 截断的 JSON 不完整是预期（文法只保证前缀合法）
+        }
+        let parsed: serde_json::Value = serde_json::from_str(&txt).unwrap_or_else(|e| panic!("not JSON: {e}: {txt:?}"));
+        assert!(parsed.is_object(), "json_object must yield an object: {txt:?}");
+    }
+    // ---- 2) json_schema：jsonschema 校验 ----
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "age": {"type": "integer", "minimum": 0, "maximum": 150},
+            "tags": {"type": "array", "items": {"type": "string"}, "maxItems": 3}
+        },
+        "required": ["name", "age"],
+        "additionalProperties": false
+    });
+    let (st, v) = post(serde_json::json!({
+        "messages": [{"role":"user","content":"Invent a person with a name, age and some tags."}],
+        "max_tokens": 96, "temperature": 0.0,
+        "response_format": {"type":"json_schema","json_schema":{"name":"person","schema": schema}},
+        "chat_template_kwargs": no_think
+    }))
+    .await;
+    assert_eq!(st, 200, "{v}");
+    let txt = v["choices"][0]["message"]["content"].as_str().unwrap().to_string();
+    eprintln!("e2e: json_schema → {txt:?}");
+    let parsed: serde_json::Value = serde_json::from_str(&txt).expect("schema output parses");
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    assert!(validator.is_valid(&parsed), "schema violated: {txt}");
+    // 坏 schema / 坏 response_format.type → 400
+    let (st, _) = post(serde_json::json!({"messages":[{"role":"user","content":"x"}],"max_tokens":1,
+        "response_format":{"type":"json_schema","json_schema":{"schema":{"type":"nope"}}}})).await;
+    assert_eq!(st, 400);
+    let (st, _) = post(serde_json::json!({"messages":[{"role":"user","content":"x"}],"max_tokens":1,
+        "response_format":{"type":"yaml"}})).await;
+    assert_eq!(st, 400);
+    // ---- 3) tool_choice ----
+    let tools = serde_json::json!([
+        {"type":"function","function":{"name":"get_weather","description":"Get weather of a city",
+            "parameters":{"type":"object","properties":{"city":{"type":"string"},"unit":{"type":"string","enum":["c","f"]}},"required":["city"]}}},
+        {"type":"function","function":{"name":"get_time","description":"Current time in a timezone",
+            "parameters":{"type":"object","properties":{"tz":{"type":"string"}},"required":["tz"]}}}
+    ]);
+    let msgs = serde_json::json!([{"role":"user","content":"What's the weather like in Beijing right now?"}]);
+    // required → ≥ 1 tool_call，arguments 合法 JSON，finish_reason = tool_calls
+    let (st, v) = post(serde_json::json!({"messages": msgs, "tools": tools, "tool_choice": "required",
+        "max_tokens": 96, "temperature": 0.0, "chat_template_kwargs": no_think})).await;
+    assert_eq!(st, 200, "{v}");
+    let tcs = v["choices"][0]["message"]["tool_calls"].as_array().cloned().unwrap_or_default();
+    eprintln!("e2e: tool_choice=required → {tcs:?} finish={}", v["choices"][0]["finish_reason"]);
+    assert!(!tcs.is_empty(), "required must yield a tool_call: {v}");
+    for tc in &tcs {
+        let name = tc["function"]["name"].as_str().unwrap();
+        assert!(name == "get_weather" || name == "get_time", "unknown fn {name}");
+        let args: serde_json::Value = serde_json::from_str(tc["function"]["arguments"].as_str().unwrap()).expect("arguments JSON");
+        assert!(args.is_object());
+    }
+    assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
+    assert!(v["choices"][0]["message"]["content"].is_null());
+    // 流式：最后一个 chunk 的 finish_reason 也是 tool_calls
+    let r = c
+        .post(&url)
+        .json(&serde_json::json!({"messages": msgs, "tools": tools, "tool_choice": "required", "stream": true,
+            "max_tokens": 96, "temperature": 0.0, "chat_template_kwargs": no_think}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let (_, finish, _, done) = parse_sse(&r.text().await.unwrap(), 1);
+    assert!(done && finish[0].as_deref() == Some("tool_calls"), "stream finish={finish:?}");
+    // 指定函数：name 一致；parallel_tool_calls=false → 恰 1 个
+    let (st, v) = post(serde_json::json!({"messages": msgs, "tools": tools, "parallel_tool_calls": false,
+        "tool_choice": {"type":"function","function":{"name":"get_time"}},
+        "max_tokens": 96, "temperature": 0.0, "chat_template_kwargs": no_think})).await;
+    assert_eq!(st, 200, "{v}");
+    let tcs = v["choices"][0]["message"]["tool_calls"].as_array().cloned().unwrap_or_default();
+    eprintln!("e2e: tool_choice=get_time → {tcs:?}");
+    assert_eq!(tcs.len(), 1, "{v}");
+    assert_eq!(tcs[0]["function"]["name"], "get_time");
+    let args: serde_json::Value = serde_json::from_str(tcs[0]["function"]["arguments"].as_str().unwrap()).unwrap();
+    assert!(args["tz"].is_string(), "{args}");
+    // none → 无 tool_call，finish_reason != tool_calls
+    let (st, v) = post(serde_json::json!({"messages": msgs, "tools": tools, "tool_choice": "none",
+        "max_tokens": 32, "temperature": 0.0, "chat_template_kwargs": no_think})).await;
+    assert_eq!(st, 200, "{v}");
+    assert!(v["choices"][0]["message"]["tool_calls"].is_null(), "{v}");
+    assert_ne!(v["choices"][0]["finish_reason"], "tool_calls");
+    // 错例：未知函数名 / 没 tools 的 required
+    let (st, _) = post(serde_json::json!({"messages": msgs, "tools": tools, "max_tokens": 1,
+        "tool_choice": {"type":"function","function":{"name":"nope"}}})).await;
+    assert_eq!(st, 400);
+    let (st, _) = post(serde_json::json!({"messages": msgs, "tool_choice": "required", "max_tokens": 1})).await;
+    assert_eq!(st, 400);
+    // ---- 4) logit_bias：把 greedy 首 token 置 -100 → 输出首 token 变了 ----
+    let base = serde_json::json!({
+        "messages": [{"role":"user","content":"Count from 1 to 20 separated by commas, nothing else."}],
+        "max_tokens": 8, "temperature": 0.0, "chat_template_kwargs": no_think, "return_token_ids": true
+    });
+    let (st, v0) = post(base.clone()).await;
+    assert_eq!(st, 200);
+    let ids0 = v0["token_ids"].as_array().unwrap().iter().map(|x| x.as_u64().unwrap() as u32).collect::<Vec<_>>();
+    let first = ids0[0];
+    let mut b = base.clone();
+    b["logit_bias"] = serde_json::json!({first.to_string(): -100});
+    let (st, v1) = post(b).await;
+    assert_eq!(st, 200, "{v1}");
+    let ids1 = v1["token_ids"].as_array().unwrap().iter().map(|x| x.as_u64().unwrap() as u32).collect::<Vec<_>>();
+    eprintln!("e2e: logit_bias first={first} → {:?} vs {:?}", &ids0[..3.min(ids0.len())], &ids1[..3.min(ids1.len())]);
+    assert_ne!(ids1[0], first, "logit_bias -100 must suppress the greedy first token");
+    assert!(!ids1.contains(&first), "token {first} must not appear with -100 bias: {ids1:?}");
+    let mut b = base.clone();
+    b["logit_bias"] = serde_json::json!({"abc": 1});
+    assert_eq!(post(b).await.0, 400);
+    // ---- 5) prompt_logprobs：长度 = prompt_tokens，第 0 项 null，其余含 rank/logprob/decoded_token ----
+    let mut b = base.clone();
+    b["prompt_logprobs"] = serde_json::json!(2);
+    b["max_tokens"] = serde_json::json!(2);
+    let (st, v) = post(b).await;
+    assert_eq!(st, 200, "{v}");
+    let plp = v["prompt_logprobs"].as_array().expect("prompt_logprobs present");
+    let pt = v["usage"]["prompt_tokens"].as_u64().unwrap() as usize;
+    assert_eq!(plp.len(), pt, "prompt_logprobs len vs prompt_tokens");
+    assert!(plp[0].is_null());
+    let filled = plp.iter().skip(1).filter(|x| !x.is_null()).count();
+    assert_eq!(filled, pt - 1, "all prompt positions ≥ 1 must be filled (prompt fits one chunk)");
+    let ids = v["prompt_token_ids"].as_array().unwrap();
+    for (i, e) in plp.iter().enumerate().skip(1) {
+        let m = e.as_object().unwrap();
+        assert!((1..=3).contains(&m.len()), "pos {i}: {m:?}");
+        let tok = ids[i].as_u64().unwrap().to_string();
+        let mine = &m[&tok];
+        assert!(mine["logprob"].as_f64().unwrap() <= 0.0 && mine["rank"].as_u64().unwrap() >= 1 && mine["decoded_token"].is_string(), "pos {i}: {mine}");
+    }
+    assert!(v["choices"][0]["logprobs"].is_null(), "prompt_logprobs must not turn on completion logprobs");
+    // ---- 6) truncate_prompt_tokens=8 → usage.prompt_tokens == 8 ----
+    let mut b = base.clone();
+    b["truncate_prompt_tokens"] = serde_json::json!(8);
+    b["max_tokens"] = serde_json::json!(1);
+    let (st, v) = post(b).await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["usage"]["prompt_tokens"], 8);
+    // ---- 7) continue_final_message / add_generation_prompt；/tokenize 放开 add_generation_prompt=false ----
+    let msgs2 = serde_json::json!([{"role":"user","content":"Say hello."},{"role":"assistant","content":"Hello, my name"}]);
+    let (st, v) = post(serde_json::json!({"messages": msgs2, "continue_final_message": true, "add_generation_prompt": false,
+        "max_tokens": 4, "temperature": 0.0, "return_token_ids": true})).await;
+    assert_eq!(st, 200, "{v}");
+    let pids: Vec<u32> = v["prompt_token_ids"].as_array().unwrap().iter().map(|x| x.as_u64().unwrap() as u32).collect();
+    let tail: serde_json::Value = c
+        .post(format!("{}/detokenize", srv.base))
+        .json(&serde_json::json!({"tokens": pids}))
+        .send().await.unwrap().json().await.unwrap();
+    let ptxt = tail["prompt"].as_str().unwrap();
+    assert!(ptxt.ends_with("Hello, my name"), "continue_final_message prompt must end with assistant prefix: {ptxt:?}");
+    assert!(!ptxt.ends_with("<|im_end|>\n"), "{ptxt:?}");
+    let (st, _) = post(serde_json::json!({"messages": msgs2, "continue_final_message": true, "add_generation_prompt": true, "max_tokens": 1})).await;
+    assert_eq!(st, 400);
+    let t1: serde_json::Value = c.post(format!("{}/tokenize", srv.base))
+        .json(&serde_json::json!({"messages": [{"role":"user","content":"hi"}], "add_generation_prompt": false}))
+        .send().await.unwrap().json().await.unwrap();
+    let t2: serde_json::Value = c.post(format!("{}/tokenize", srv.base))
+        .json(&serde_json::json!({"messages": [{"role":"user","content":"hi"}], "add_generation_prompt": true}))
+        .send().await.unwrap().json().await.unwrap();
+    assert!(t1["count"].as_u64().unwrap() < t2["count"].as_u64().unwrap(), "{t1} vs {t2}");
+    // user 字段接受忽略；skip_special_tokens=false 时特殊 token 以字面出现（eos 本身不进文本，用 stop_token 之外的 <|im_end|> 不好造 → 只验不报错）
+    let (st, _) = post(serde_json::json!({"messages": msgs, "max_tokens": 2, "user": "u1", "skip_special_tokens": false, "spaces_between_special_tokens": false})).await;
+    assert_eq!(st, 200);
+    // ---- 8) completions：echo + logprobs 的 prompt 段（第 0 项 null）；多 prompt 逐 prompt max_tokens 余量 ----
+    let curl = format!("{}/v1/completions", srv.base);
+    let v: serde_json::Value = c.post(&curl)
+        .json(&serde_json::json!({"prompt": "1, 2, 3, 4,", "max_tokens": 3, "temperature": 0.0, "echo": true, "logprobs": 1}))
+        .send().await.unwrap().json().await.unwrap();
+    let lp = &v["choices"][0]["logprobs"];
+    let pt = v["usage"]["prompt_tokens"].as_u64().unwrap() as usize;
+    let ct = v["usage"]["completion_tokens"].as_u64().unwrap() as usize;
+    assert_eq!(lp["tokens"].as_array().unwrap().len(), pt + ct, "{lp}");
+    assert!(lp["token_logprobs"][0].is_null() && lp["top_logprobs"][0].is_null(), "{lp}");
+    assert!(lp["token_logprobs"][1].is_number() && lp["token_logprobs"][pt].is_number(), "{lp}");
+    assert_eq!(lp["text_offset"][0], 0);
+    assert_eq!(lp["tokens"].as_array().unwrap().iter().map(|t| t.as_str().unwrap()).collect::<String>(), v["choices"][0]["text"]);
+    // 多 prompt：短 prompt 的余量比长的多 → max_tokens 很大时 completion_tokens 不同（max_model_len 2048）
+    let long: Vec<u32> = (0..2040).map(|i| 1000 + (i % 100) as u32).collect();
+    let v: serde_json::Value = c.post(&curl)
+        .json(&serde_json::json!({"prompt": [[1, 2, 3], long], "max_tokens": 20, "temperature": 0.0, "ignore_eos": true}))
+        .send().await.unwrap().json().await.unwrap();
+    let texts = v["choices"].as_array().unwrap();
+    assert_eq!(texts.len(), 2, "{v}");
+    assert_eq!(texts[0]["finish_reason"], "length");
+    assert_eq!(texts[1]["finish_reason"], "length");
+    drop(srv);
+    // ---- 9) `--speculative ngram` 开着：带文法的请求不提案（runner 门控），输出仍合法；无文法请求照常 ----
+    let srv = spawn_server_with(&["--num-blocks", "256", "--no-prefix-caching", "--speculative", "ngram",
+        "--num-speculative-tokens", "3", "--ngram-min", "2", "--ngram-max", "4"]);
+    let url2 = format!("{}/v1/chat/completions", srv.base);
+    for q in ["Describe a cat as JSON.", "Return the weather in Beijing as JSON with city, temp, humidity."] {
+        let v: serde_json::Value = c.post(&url2).json(&serde_json::json!({
+            "messages": [{"role":"user","content": q}], "max_tokens": 96, "temperature": 0.0,
+            "response_format": {"type":"json_object"}, "chat_template_kwargs": no_think
+        })).send().await.unwrap().json().await.unwrap();
+        let txt = v["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string();
+        eprintln!("e2e: ngram+json_object({q:?}) → {txt:?} finish={}", v["choices"][0]["finish_reason"]);
+        if v["choices"][0]["finish_reason"] != "length" {
+            let p: serde_json::Value = serde_json::from_str(&txt).unwrap_or_else(|e| panic!("not JSON with ngram on: {e}: {txt:?}"));
+            assert!(p.is_object());
+        }
+    }
+    let v: serde_json::Value = c.post(&url2).json(&serde_json::json!({"messages": msgs, "tools": tools, "tool_choice": "required",
+        "max_tokens": 96, "temperature": 0.0, "chat_template_kwargs": no_think})).send().await.unwrap().json().await.unwrap();
+    let tcs = v["choices"][0]["message"]["tool_calls"].as_array().cloned().unwrap_or_default();
+    assert!(!tcs.is_empty() && v["choices"][0]["finish_reason"] == "tool_calls", "ngram + required: {v}");
+    let _: serde_json::Value = serde_json::from_str(tcs[0]["function"]["arguments"].as_str().unwrap()).unwrap();
+    eprintln!("e2e: guided PASS");
+    drop(srv);
+}

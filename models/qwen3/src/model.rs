@@ -770,4 +770,33 @@ impl<O: OpSet> Qwen3Model<O> {
         k::bf16_to_f32_n(stream, &self.logits_bf16.data, &mut logits.data, rows * v)?;
         Ok(())
     }
+
+    /// `prompt_logprobs` 用：对上一次 `forward` 留在 `hidden` 里的任意 `rows[..n]` 行（n ≤ max_logits_rows）再做一次
+    /// 末层 RMSNorm + lm_head，fp32 logits 写进 `logits[..n*vocab]`。只在 prefill 步、请求要了 prompt_logprobs 时调用
+    ///（forward 本身只取每请求最后一行，不为此多算）。
+    pub fn logits_for_rows(
+        &mut self,
+        stream: &Stream,
+        gemm: &Gemm,
+        rows: &k::cudarc::driver::CudaSlice<i32>,
+        n: usize,
+        logits: &mut k::cudarc::driver::CudaSlice<f32>,
+    ) -> Result<()> {
+        ensure!(n <= self.max_logits_rows && rows.len() >= n, "logits_for_rows: {n} > max_logits_rows");
+        let h = self.cfg.hidden_size as usize;
+        let v = self.cfg.vocab_size as usize;
+        ensure!(logits.len() >= n * v, "logits_for_rows: logits buffer");
+        self.ops.norm().gather_rmsnorm(
+            stream,
+            &self.hidden.data,
+            rows,
+            &self.norm.w.data,
+            &mut self.final_normed.data,
+            n,
+            h,
+            self.cfg.rms_norm_eps,
+        )?;
+        gemm.forward_bf16(&self.final_normed.data, &self.lm_head.w.data, None, &mut self.logits_bf16.data, n, v, h)?;
+        k::bf16_to_f32_n(stream, &self.logits_bf16.data, logits, n * v)
+    }
 }

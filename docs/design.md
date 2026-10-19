@@ -540,6 +540,7 @@ pub struct DeviceBlockRef { pub layer: u8, pub block: BlockId, pub ptr: u64, pub
 | attention | FA2 的算法结构（online softmax、P 片直接当 PV 的 A 片） | 自写 mma.sync 版 v4/v5（Ampere/Ada 无 FA3），paged/prefill 同一模板，混批 decode 行分流到 split-K | 4090 T=1514 0.14 ms/层，TTFT 领先 vLLM 2× |
 | decode attention | split-K | v2：8 lane/key、两 q head 共享 K 读、splits 按 batch 自适应 | 与 FA2 decode 持平 |
 | 采样 | top-k/top-p/min-p/penalties 语义、Philox | 四 kernel 融一个（`sample_fused_f32`，共用 row_* 原语，逐位同语义）；vLLM 走 PyTorch 多个 op | bench25：c1 TPOT 2.0 → 1.9，图内 -3 节点 |
+| 受限解码（2026-10-19） | `llguidance` 后端（vLLM `guidance` 同源，crates.io 1.9；CPU 算 bitmask、JSON schema → 文法、`{"type":"object"}` 做 json_object）、mask / logit_bias 在 penalties 之前、tool_choice 用 lark 包 tool_call 文本 | ① 文法状态挂在 `SamplingParams.grammar`（Arc<Mutex>），runner 建 `SampleBatch` 时按输出序列追赶 consume + 算 mask，无 vLLM 的 structured_output_manager 线程 / 跨进程 bitmask 传输；② mask + logit_bias 一个 kernel（`logits_mask_f32`：mask 行号 -1 跳过、bias CSR），CUDA graph 内常驻、无约束行零工作、无约束步零额外 H2D（`mask_dirty` 只在有→无时清一次）；③ 错误文法不卡请求：退化为无约束 + warn | 代码在 `crates/guided`（core / kernels 不依赖 llguidance）；e2e `e2e_qwen3_guided`；思考段不约束（vLLM reasoning-aware）留 TODO |
 | 权重加载 | safetensors mmap | bf16 直传不经 Vec、设备拼接 qkv/gate_up、并行填页、tokenizer 独立线程 | 2.9 → 0.6 s |
 | bench 口径 | `benchmarks/serve.py` 的 TTFT/TPOT/ITL 定义、ignore_eos | 每轮换 seed（避免常驻侧 prefix cache 全命中）；开环泊松 + 长短混合 | 发现并修正了 bench11 之前的口径偏差 |
 | 进程结构 | — | 单进程（API + engine 同进程不同线程），无 ZMQ / 多进程 IPC | TTFT 低一半的主要来源之一 |

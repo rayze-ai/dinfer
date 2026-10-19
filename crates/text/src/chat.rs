@@ -27,6 +27,9 @@ pub struct RenderParams<'a> {
     /// OpenAI 格式 tools（`{"type":"function","function":{...}}`），None = 不带。
     pub tools: Option<&'a [serde_json::Value]>,
     pub add_generation_prompt: bool,
+    /// vLLM `continue_final_message`：最后一条是 assistant 时不闭合它（去掉模板在其 content 之后追加的结束符，
+    /// 模型从该 content 末尾续写）。要求 add_generation_prompt=false。
+    pub continue_final_message: bool,
     /// 模型特定模板变量，原样进上下文（GLM：`reasoning_effort`、`clear_thinking`；Qwen3：`enable_thinking`）。
     pub extra: &'a serde_json::Map<String, serde_json::Value>,
 }
@@ -74,7 +77,21 @@ impl ChatTemplate {
         ctx.insert("messages", Value::from_serialize(p.messages));
         ctx.insert("tools", tools);
         ctx.insert("add_generation_prompt", Value::from(p.add_generation_prompt));
-        tmpl.render(Value::from_serialize(&ctx)).map_err(|e| anyhow!("render chat template: {e:#}"))
+        let text = tmpl.render(Value::from_serialize(&ctx)).map_err(|e| anyhow!("render chat template: {e:#}"))?;
+        if p.continue_final_message {
+            // vLLM `apply_hf_chat_template(continue_final_message=True)`：按最后一条 assistant 的 content 文本把其后的
+            // 结束符截掉（HF 的实现同样是 "render 后 rstrip 到 final message content"）。
+            anyhow::ensure!(!p.add_generation_prompt, "continue_final_message requires add_generation_prompt=false");
+            let last = p.messages.last().context("continue_final_message: no messages")?;
+            anyhow::ensure!(last["role"] == "assistant", "continue_final_message requires the last message to be assistant");
+            let content = last["content"].as_str().unwrap_or("");
+            let trimmed = content.trim_end();
+            if let Some(i) = text.rfind(trimmed) {
+                return Ok(text[..i + trimmed.len()].to_string());
+            }
+            anyhow::bail!("continue_final_message: final assistant content not found in rendered prompt");
+        }
+        Ok(text)
     }
 }
 
