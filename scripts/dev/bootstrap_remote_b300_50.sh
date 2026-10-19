@@ -7,7 +7,8 @@ set -euo pipefail
 ROOT=/data/yaochen/infer
 mkdir -p $ROOT/bootstrap $ROOT/models $ROOT/cargo $ROOT/rustup
 cat > $ROOT/env.sh <<ENV
-export http_proxy=http://172.16.1.35:7890 https_proxy=http://172.16.1.35:7890 no_proxy=localhost,127.0.0.1,172.16.0.0/16
+export http_proxy=http://10.96.0.106:1080 https_proxy=http://10.96.0.106:1080 HTTP_PROXY=http://10.96.0.106:1080 HTTPS_PROXY=http://10.96.0.106:1080
+export no_proxy=localhost,127.0.0.1,::1,172.16.0.0/16,10.0.0.0/8 NO_PROXY=localhost,127.0.0.1,::1,172.16.0.0/16,10.0.0.0/8   # 大小写都给：curl 读小写，reqwest / 部分工具读大写（用户 2026-10-19：注意设置 NO_PROXY）
 export RUSTUP_HOME=$ROOT/rustup CARGO_HOME=$ROOT/cargo
 # 固定版本 1.89.0：TUNA 只镜像 stable 频道（2026-10-19 实测 channel-rust-1.89.0.toml 404），USTC 有完整 dist
 export RUSTUP_DIST_SERVER=https://mirrors.ustc.edu.cn/rust-static RUSTUP_UPDATE_ROOT=https://mirrors.ustc.edu.cn/rust-static/rustup

@@ -528,6 +528,6 @@
 ## bench 对本机 vLLM 四组全部 "send: error sending request"，curl 同 body 却 200（2026-10-19，B300-50）
 
 - 现象：`bench_vllm_only.sh` 四组预热请求全失败；`curl -N` 用完全相同的 body（stream + ignore_eos + chat_template_kwargs）打同一端口 200 正常；容器日志无任何 4xx/5xx。
-- 根因：B300-50 的 `env.sh` 导出了 `http_proxy / https_proxy`（代理 B）。bench 用 reqwest，reqwest 读代理环境变量但对 `no_proxy` 的匹配与 curl 不同（CIDR `172.16.0.0/16,10.0.0.0/8` 不识别，`127.0.0.1` 也未命中），于是把 `http://127.0.0.1:8013` 发给了代理，代理连不到 → 连接层错误。诊断 2 里 bench 能跑是因为那条 ssh 命令没 `source env.sh`。
-- 解法：`bench_vllm_only.sh` / `bench_compare.sh` 开头 `unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY`。
-- 避免：任何对 127.0.0.1 的压测 / 对拍脚本都不要继承代理；排查这类错先对比 "有没有 source env.sh"。
+- 根因（部分确认）：失败与成功的唯一差别是那条 ssh 命令有没有 `source env.sh`，env.sh 导出代理 B 的 4 个 `*_proxy` 变量 + **只有小写 `no_proxy`**。本机用死代理复现：reqwest 0.12.15 对大小写 `no_proxy` / CIDR 都能识别（self-check 四种组合全过），**没能在本机复现"小写 no_proxy 不生效"**——所以精确触发条件未钉死（可能与 B300-50 上代理 B 对 CONNECT 127.0.0.1 的行为或别的 env.sh 变量有关）。
+- 解法（两层）：① env.sh 同时导出 `no_proxy` 与 `NO_PROXY`（`localhost,127.0.0.1,::1,172.16.0.0/16,10.0.0.0/8`，用户要求"注意设置 NO_PROXY"）；② bench 脚本开头仍 `unset` 全部代理变量（本地压测本来就不该走代理）。
+- 避免：新机器 env.sh 的代理行大小写两套都给；排查这类错先对比 "有没有 source env.sh"。
