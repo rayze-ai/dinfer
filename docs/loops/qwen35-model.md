@@ -37,3 +37,14 @@
 | 7 | service.rs + parser.rs + bins/dinfer `--features qwen35` | `cargo build -p dinfer --features qwen35` 过；commit 5766cdc / 8c3e01a |
 | 8 | tiny golden（`scripts/dev/make_qwen35_tiny.py`）+ `golden_parity.rs` + `qwen35_golden.sh`。**踩坑**：① 参考侧 `rmsnorm` 写成"f32 归一化 × f32 权重再落 bf16"，与 kernel 的"乘权重**后**落 bf16"差一个舍入点 → prefill 差 0.2 且 greedy 第 1 步偏；改成 `qb(norm*w)` 后 prefill max abs 0.20 → 一致。② 参考 `step_logits[i]` 最初是"喂了第 i 个 token 之后"的 logits，对拍口径要"预测第 i 个 token"的那一行 → 索引整体错一位（表现为教师强制步 0 差 4.0）。③ tiny 随机权重下 greedy 有大量平局（ref top-2 gap 最低 0.03），我们的 logits 与参考差 ~0.2 → 平局步 argmax 断言无意义，改成"只有 ref gap > 0.15 的行断言 argmax"，并把 chunked 用例改成教师强制（喂 golden token）。 | **4/4 通过**（prefill 28 行 max abs 0.2031 / argmax 全对；greedy 16 全对；chunked 4/4/1 + 15 步教师强制；双请求混批各 16 全对）；commit b8162b1 |
 | 9 | 收口：KV 块数改为按剩余显存自动估算（去掉硬编码 54 GiB）、TP（world > 1）明确报错而不是静默少算、GDN slot 复用给带历史请求时清零并告警、GDN 状态显存进启动日志 | golden 仍 4/4；commit 29276b1 / 74e81d3 / 58dccd5 / 3083226 |
+
+## 里程碑 5：B300-50 真权重 e2e + vLLM 对比（2026-10-19 晚，用户："qwen35 在 B300-50 上跑测试包括 vllm 基准测试，跑完再跑 k3"）
+
+环境：B300-50 GPU 0 dinfer `:8012`（`/data/models/Qwen/Qwen3.8-27B` bf16，tmux `q35`，日志 `$R/bootstrap/q35_serve.log`）、
+GPU 1 vLLM nightly 容器 `vllm-qwen35-b300 :8013`（`VLLM_MODEL=... VLLM_NAME=... scripts/dev/vllm_nerdctl.sh run 1 8013 1`）。
+停止条件：3 条 greedy prompt 两边前缀一致 + `bench_compare.sh test/qwen35/2026-10-19/bench_b300_1` 四组跑通。
+
+| 轮 | 改动 / 观察 | 结果 |
+|---|---|---|
+| 10 | push + `cargo build --release --features qwen35 -p dinfer -p dinfer-bench`（sm_103，38 s）；`qwen35_golden.sh` 在 sm_103 | golden 4/4 + 单测 13/13 过 |
+| 11 | 真权重 serve：加载 8.2 s（64 层 6.1 s），GDN 状态 9.2 GiB / 64 slot，KV 自动预算 161245 块 157 GiB。首个请求 → `engine step failed: qwen35 enqueue: DriverError(CUDA_ERROR_INVALID_CONTEXT)`，之后所有请求 0 token `finish_reason=stop`（引擎已死但 HTTP 仍应答）。tiny golden 单线程不触发 → 引擎线程上某条 CUDA 路径没绑上下文 | 排查中 |
