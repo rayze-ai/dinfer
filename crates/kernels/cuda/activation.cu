@@ -15,6 +15,24 @@ __global__ void silu_and_mul_kernel(const bf16* __restrict__ x, bf16* __restrict
   }
 }
 
+// SituAndMul（Kimi-K3 `hidden_act=situ`，HF modeling_kimi_linear.py::SituAndMul）：
+//   a = beta·tanh(gate/beta)·sigmoid(gate)；linear_beta>0 时 up ← linear_beta·tanh(up/linear_beta)；out = bf16(a·up)
+// 全部 f32 计算（HF 把 gate/up cast 到 f32 再算），beta / linear_beta 由 host 传（模型参数，不写死）。
+__global__ void situ_and_mul_kernel(const bf16* __restrict__ x, bf16* __restrict__ out, int inter, float beta,
+                                    float linear_beta) {
+  const int64_t row = blockIdx.x;
+  const bf16* gate = x + row * 2 * inter;
+  const bf16* up = gate + inter;
+  bf16* o = out + row * inter;
+  for (int i = threadIdx.x; i < inter; i += blockDim.x) {
+    const float g = to_f32(gate[i]);
+    float u = to_f32(up[i]);
+    const float a = beta * tanhf(g / beta) * (1.f / (1.f + __expf(-g)));
+    if (linear_beta > 0.f) u = linear_beta * tanhf(u / linear_beta);
+    o[i] = to_bf16(a * u);
+  }
+}
+
 // 向量化版本（B4 第 1 轮）：grid = (tokens, ceil(inter/8/256))，每线程 8 个元素一次 16 B 读写，一个 token 拆成
 // 多个 block 并行而不是一个 block 串行 inter/256 轮——decode T=1 时旧版每 token 只有 1 个 block × 12 轮串行访存
 // （Qwen3 inter=3072），B300 上 6.9 µs，带宽下限 0.5 µs。
@@ -88,6 +106,14 @@ extern "C" int silu_and_mul_bf16(const void* x, void* out, int64_t tokens, int64
   silu_and_mul_kernel<<<(unsigned)tokens, threads, 0, stream>>>(static_cast<const bf16*>(x),
                                                                  static_cast<bf16*>(out), (int)inter);
   return last_err();
+}
+
+extern "C" int situ_and_mul_bf16(const void* x, void* out, int64_t tokens, int64_t inter, float beta, float linear_beta,
+                                 cudaStream_t stream) {
+  if (tokens <= 0 || inter <= 0 || !(beta > 0.f)) return err(cudaErrorInvalidValue);
+  situ_and_mul_kernel<<<(unsigned)tokens, 256, 0, stream>>>(static_cast<const bf16*>(x), static_cast<bf16*>(out),
+                                                            (int)inter, beta, linear_beta);
+  return err(cudaGetLastError());
 }
 
 extern "C" int embedding_bf16(const int32_t* ids, const void* table, void* out, int64_t tokens, int64_t hidden,

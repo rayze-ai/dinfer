@@ -242,7 +242,7 @@ impl KdaLayer {
         let proj = self.sh.proj();
         ensure!(t <= self.q_buf.shape[0], "kda: {t} tokens > max {}", self.q_buf.shape[0]);
         ensure!(meta.state_indices.numel() >= meta.num_reqs, "kda: state_indices");
-        ensure!(x.numel() == t * self.sh.hidden && out.numel() == x.numel(), "kda: x/out 形状");
+        ensure!(x.numel() >= t * self.sh.hidden && out.numel() >= t * self.sh.hidden, "kda: x/out 不足 {t} 行");
 
         // 1. 投影（q/k/v/g 各 7168→12288；f_a 7168→128 → f_b 128→12288；b 7168→96）
         self.q_proj.forward_rows(gemm, x, &mut self.q_buf, t)?;
