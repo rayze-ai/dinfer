@@ -7,8 +7,8 @@
 - 2026-10-19 结构事实核对完成（下）。实现由独立子代理推进，loop 文档 `docs/loops/qwen35-gdn.md`。
 ```
 [x] §1 结构事实   [x] 差距三分类   [x] gdn loop 文档   [x] GDN kernel 对拍（3090/4090/B300 三卡 10/10）
-[x] 全注意力 kernel 扩模板（D=256 / GROUP 6 / partial RoPE / 输出门，3090+4090 对拍）   [ ] config/weights + tiny golden
-[ ] prefill logits 对拍   [ ] greedy 32 / 混批   [ ] chat_parity   [ ] 真权重 e2e vs vLLM   [ ] bench CSV   [ ] §11 台账
+[x] 全注意力 kernel 扩模板（D=256 / GROUP 6 / partial RoPE / 输出门，3090+4090 对拍）   [x] config/weights + tiny golden
+[x] prefill logits 对拍   [x] greedy 16 / 混批（tiny golden 4/4）   [ ] chat_parity   [ ] 真权重 e2e vs vLLM   [ ] bench CSV   [ ] §11 台账
 ```
 
 ## 0.1 vLLM 基线（追赶目标）
@@ -58,7 +58,7 @@ models/qwen35/src/
   executor.rs    与 qwen3 同骨架；两个 KV group（paged + mamba 状态）
   parser.rs      思考段 / tool_call（核对后决定能否复用 qwen3 的）
   service.rs     ChatBackend
-tests/           golden_parity.rs（tiny golden）、real_parity.rs、chat_parity.rs
+tests/           golden_parity.rs（tiny golden：4 个用例，`scripts/verify/qwen35_golden.sh`）、real_parity.rs、chat_parity.rs
 ```
 
 ### 2.1 权重映射表（里程碑 3 已核对的语义，写代码前先看这张表）
@@ -76,15 +76,31 @@ tests/           golden_parity.rs（tiny golden）、real_parity.rs、chat_parit
 | `model.layers.{l}.linear_attn.*` | 见 `docs/loops/qwen35-gdn.md` | GDN 已对拍 |
 | `lm_head.weight` | 独立 `lm_head` | `tie_word_embeddings false` |
 
-拼接顺序（attention 层 kernel 侧）：`[q(H·D) | gate(H·D) | k | v]`，`qkv_post_ext(qmul=2)` 只处理 q/k/v 段，gate 段由
-`mul_sigmoid_bf16` 在 attention **之后**消费（vLLM：`attn_output * sigmoid(gate)` 再进 `o_proj`）。
+拼接顺序：kernel 支持 `[q(H·D) | gate(H·D) | k | v]`（`qkv_post_ext(qmul=2)` 只处理 q/k/v 段，gate 段由 `mul_sigmoid_bf16`
+在 attention **之后**消费），但**模型侧改用两条紧凑 GEMM**（`qkv [q|k|v]` + 独立 `gate`，`qmul = 1`）——FLOPs 相同、
+少一次按行搬运，见 §2.2。
+
+## 2.2 实现决定（里程碑 4，2026-10-19，与 vLLM 对照后落定）
+
+| 项 | 决定 | 原因 |
+|---|---|---|
+| q_proj 输出门 | **拆成两条紧凑 GEMM**（`qkv [q|k|v]` + 独立 `gate`），不用 `qkv_post_ext(qmul=2)` 的行内 gate 段 | 行内 gate 段带 stride，attention 之后要 `mul_sigmoid` 就得按行搬一次；两条紧凑 GEMM 的 FLOPs 相同、少一次搬运。kernel 的 `qmul=2` 路径仍保留（对拍用） |
+| `qkv_post_ext` | `rope_dim = 64`、`norm_beta = 1.0`（`q_norm/k_norm` zero-centered） | 与 HF `Qwen3_5RMSNorm((1 + w))` 一致 |
+| GDN 状态 | crate 内 `SlotTable`（`RequestId → slot`）+ 每层 `conv [slots, 10240, 3]` bf16 / `rec [slots, 48, 128, 128]` f32；"首 token 位置 == 0" 的请求清零 | 不改 core 的 KV group；slot 复用发生在"本步不在场且最久未见"的请求上 |
+| GDN prefill | 逐 token 顺序递归（与 chunk 形式数值等价） | 里程碑 4 先对拍；chunk 形式是 perf 项 |
+| executor | eager 单流，无 CUDA graph / 跨流 pair / host tier / PD / TP 通信 | 里程碑 4 目标是对拍；这些接过来是一轮独立工作（Qwen3 的对应实现可直接搬） |
+| mrope | 纯文本三路位置相同 → 退化为 1D RoPE（同 vLLM `qwen3_next.py`） | tiny golden 已验证（partial RoPE 前 64 维） |
+| `conv1d` | 权重 `[dim, 1, width]` → `[dim, width]`，无 bias | HF `bias=False` |
 
 ## 3. 风险 / 待定
 
 - ~~输出门拼接顺序~~：**已定**（见 §2.1，per-head 交错，vLLM `qwen3_next.py:436-443` 与 HF `modeling_qwen3_5.py:779-782` 一致）。
 - mrope 纯文本退化：对拍确认。
 - GDN 的 q/k 归一化、A = -exp(A_log)、dt = softplus(a + dt_bias) 等约定：以 vLLM / fla 源码为准，对拍 Triton 参考。
-- 两个 KV group 的 core 支持程度：核实后决定是在 core 加还是 qwen35 内自管。
+- ~~两个 KV group 的 core 支持程度~~：**已定**（见 §2.2）——全注意力层用 core 的 paged `FullAttention` 组；GDN 状态
+  由 crate 内 `SlotTable` 自管。接 `KvCacheSpec::Mamba` 是后续项（要动 core；收益是前缀缓存 / 抢占时状态可随块回收）。
+- 真权重（52 GB bf16）需要 ≥ 60 GB 显存：本机 3090 / 4090 装不下 → 里程碑 5 上 B300（用户 2026-10-19 "B300 先不用"，
+  待指示）。tiny golden 与真权重无关（形状参数驱动），已通过。
 - FP8 版：bf16 跑通后，FP8 权重 dequant 到 bf16 加载是第一步；原生 FP8 GEMM 是性能项。
 
 ## 4. 参考材料
