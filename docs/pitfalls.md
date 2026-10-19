@@ -2,7 +2,21 @@
 
 > 一条一个坑，标题写**现象**（搜索时按现象搜），正文讲根因与解法。新条目加在最上面。
 >
-> 条目格式（标题用 `## 2026-10-18 同一张卡起第二个 dinfer 实例：`not enough GPU memory for KV cache: free 5.5 GiB, cap 30%`
+> 条目格式（标题用 `## 2026-10-19 Qwen35 tiny golden 对拍差 0.2 / 差一位 / 平局步 argmax 乱跳（三个独立坑）
+
+- 现象一：prefill 前几行 logits 对得很好，`prompt_b` 起 max abs 2.85、argmax 错 2 行。根因不是模型，是**测试助手没清 GDN slot**：
+  `prefill()` 复用 slot 0，上一个 prompt 的 conv / 递推状态还在。executor 里靠"首个 token 位置 == 0 → 清零"做这件事，裸 `Forward` 调用要自己调 `reset_slots`。
+- 现象二：整段 prefill 的 logits 差到 0.2（本应 ≤ 0.01）。根因是 torch 参考的 `rmsnorm` 写成 `qb(f32 归一化) * f32 权重`，
+  而 kernel 是 `qb(归一化 * 权重)`——**乘权重之后才落 bf16**。改成 `qb(norm * w)` 后 0.2 → 一致级别。写 bf16 参考时每个 kernel 的
+  "bf16 边界在哪一步" 都要按 kernel 源码抄，不能按 "f32 内部算到底再转" 的直觉写。
+- 现象三：教师强制 decode 第一步就差 4.0。根因是参考 `expect_step_logits[i]` 存的是"喂了第 i 个 token **之后**"的 logits，
+  而对拍要的是"**预测**第 i 个 token"的那一行（= prefill 末行 / 喂第 i-1 个 token 之后）。差一位。
+- 现象四：tiny 随机权重下 greedy 经常平局（参考 top-2 gap 最低 0.03），我们的 logits 与参考差 ~0.2 时 argmax 自然翻。
+  这是随机权重的性质，不是 bug；对拍口径同 `硬判决不可逐位复现`——只有参考 gap > 阈值的行才断言 argmax，其余步改成教师强制。
+- 如何避免：写 golden 前先把参考实现的每个算子与 kernel 源码对齐"bf16 边界"；先跑单 prompt 全量 prefill 把 max abs 压到
+  0.01 级，再加 greedy / chunked / 混批；`reset_slots` 这类状态清零在裸调用路径上显式做。
+
+## 2026-10-18 同一张卡起第二个 dinfer 实例：`not enough GPU memory for KV cache: free 5.5 GiB, cap 30%`
 
 - 现象：PD 验收在 GPU 3 上先起 D（默认 utilization 0.9）再起 P（0.3），P 报 KV 预算不足；free 明明还有 5.5 GiB。
 - 根因：自动预算 = `min(free, total × u − used) − reserve`。`used` 是**整卡已用**（含别的进程），`u` 是**整卡占比上限**，不是本进程配额。第二个进程看到 `used ≈ 17 GiB > cap 7 GiB`，预算 0。这和 vLLM 的 `gpu_memory_utilization` 语义一致，不是 bug，但同卡多实例就不能靠它分配。
