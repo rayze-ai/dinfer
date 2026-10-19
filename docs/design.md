@@ -551,6 +551,8 @@ pub struct DeviceBlockRef { pub layer: u8, pub block: BlockId, pub ptr: u64, pub
 | 跨流 prefill/decode 并行 | 无（vLLM 单流） | 实现并证实真并行（nsys 39% 重叠） | 闭环 bench 下混批步 <5%，TPOT 无感；留给 prefill 比例高的负载 |
 | 2026-10-18 | 改进 | vLLM PD 用 NIXL（UCX / RDMA）搬 KV，同机也经 UCX；我们按机器事实分档：同卡 cuda-ipc D2D、跨卡无 P2P 走 shm pinned 共享区，P 直写 D 的槽 + credit 环，TCP 只传 header+槽号 | design §10.3 后端 b；不引入 NIXL C++ 依赖，接口形状保留 |
 | PD 异构 tp（2026-10-18） | vLLM NixlConnector / Mooncake 的"按 KV 头切片、P 与 D tp 可不同"思路 | 不走 connector 插件，wire 固定为 head-major canonical `[block][layer][kv_head][slot][K/V][D]`，pack kernel 顺手转置，各 rank `cuMemcpy2DAsync` 一次列拷贝即完成分片 / 重排，没有额外 gather kernel 与元数据协商 | 4090 P tp1 → D tp2：TTFT 616 → 60 ms，TPOT 3.17 < 单机；DCP 可复用同一布局 |
+| lm_head 列切 | vLLM `ParallelLMHead`（vocab 按 tp 切，`gather` logits 到全 vocab 再采样） | 开关默认关（vLLM 默认开）：小模型 lm_head GEMM 省的时间 ≈ all_gather 代价，bench 说话；gather 传 bf16 + 一趟 `gather_blocks_bf16_to_f32` 修布局升精度，vLLM 是 `tensor_model_parallel_gather` f32/bf16 后 `.float()` 两步 | 2026-10-19 实现，待 B300 bench（loop b-nvlink B2） |
+| one-shot all-reduce + 融合 add-rmsnorm（2026-10-19 B2） | vLLM `csrc/custom_all_reduce.cuh` 协议原样采用：每 rank cuda-ipc 区 = `Signal{start/end[36][8], _flag[36]}` + 镜像区，`barrier_at_start / barrier_at_end` volatile flag、单调计数器（图内重放不重置）、固定 rank 顺序 fp32 累加后一次 bf16 round（逐位一致）、阈值 world≤4 <512 KB / world 8 <256 KB | ① handle 交换走进程内 `TpExecutor::dispatch/collect`（vLLM 走 torch.distributed all_gather），任一 rank 失败全组一致回退 NCCL；② 把 all-reduce 与紧随的 residual add + RMSNorm 融成一个 kernel `ar_oneshot_add_rmsnorm_bf16`（和不落回 attn_out / mlp_out，省一次 t×h 读写 + 一次 launch；vLLM 需 flashinfer `trtllm_allreduce_fusion` 才有）；③ 跨层 `pending_mlp` 让第 ② 处 all-reduce 并进下一层 input_norm 的融合 kernel | 测试 `crates/kernels/tests/allreduce.rs`（one-shot == CPU 参考逐位；world 2 == NCCL 逐位）；bench 见 `docs/loops/b-nvlink.md` 第 3 轮 |
 
 ## 12. 整体功能待办路线图（2026-10-18 盘点，不分模型）
 
@@ -593,10 +595,11 @@ pub struct DeviceBlockRef { pub layer: u8, pub block: BlockId, pub ptr: u64, pub
 | o_proj | 列切（dim 1） | 输入 `H·D/tp`，输出部分和 → **all-reduce ①** |
 | gate_proj / up_proj | 行切（dim 0） | `I/tp` |
 | down_proj | 列切（dim 1） | 部分和 → **all-reduce ②** |
-| embed / norm / lm_head | 复制 | 见 13.1 |
+| embed / norm | 复制 | 见 13.1 |
+| lm_head | 复制（默认）/ 列切（开关 `LMHEAD_COLSPLIT=1`） | 列切 = 行切 dim 0 按 vocab，各 rank 算 `vocab/world` 列 logits → bf16 **all_gather** → `gather_blocks_bf16_to_f32` 一趟修正 `[world][rows][vl]` 块布局 + 升 f32（`Qwen3Model::lm_head_logits`）。只在 world>1 且文件有独立 `lm_head.weight` 时生效（纯 tied 不切，embed 要整份 gather）。收益 = 省 (world-1)/world 份 lm_head 权重与 GEMM 读，代价 = 一次 t×vocab bf16 all_gather；小模型收益小，bench 决定是否默认开（loop b-nvlink B2） |
 | KV cache | 每 rank 只存自己的 kv 头 | `kv_bytes_per_block` 用本地 Hkv；block 数由 rank 0 决定并广播，各 rank 一致 |
 
-每层 2 次 all-reduce（`t × hidden` bf16），与 vLLM 一致；vLLM 的 `fused_allreduce_rms_norm`（all-reduce + 残差 + RMSNorm 融合，Hopper custom allreduce）是后续改进项。实现：`Qwen3Model.comm: Option<Comm>`，`forward` 在 o_proj / down 之后原地 all-reduce；`TpShard{rank,world}` 传给 `Attention::load` / `Mlp::load_tp`；本地 `cfg` 的 `num_attention_heads / num_key_value_heads / intermediate_size` 除以 tp，`vocab / hidden` 不变。
+每层 2 次 all-reduce（`t × hidden` bf16），与 vLLM 一致；vLLM 的 `fused_allreduce_rms_norm`（all-reduce + 残差 + RMSNorm 融合，Hopper custom allreduce）是后续改进项（**2026-10-19 B2 已做**：`crates/kernels/cuda/allreduce.cu` one-shot all-reduce + `ar_oneshot_add_rmsnorm`，`comm.rs::all_reduce_add_rmsnorm_bf16` 按消息大小分流，无 P2P 自动回退 NCCL，`CUSTOM_AR=0` 关；见 §11 "one-shot all-reduce"）。实现：`Qwen3Model.comm: Option<Comm>`，`forward` 在 o_proj / down 之后原地 all-reduce；`TpShard{rank,world}` 传给 `Attention::load` / `Mlp::load_tp`；本地 `cfg` 的 `num_attention_heads / num_key_value_heads / intermediate_size` 除以 tp，`vocab / hidden` 不变。
 
 **实测（2026-10-18，4090 GPU 5/6，loop q5 第 3 轮）**：tp2 vs vLLM 单卡 c1 1.14× / c8 0.92× / c32 0.64× / c8-long 0.68×；dp2 c32 1.20× / c8-long 1.31×（≈1.9× 单卡 dinfer）。
 

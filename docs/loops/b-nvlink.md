@@ -29,7 +29,16 @@
 - 无 docker / 外网；containerd `k8s.io` 命名空间已缓存 `docker.io/vllm/vllm-openai:nightly`（**vllm 0.29.1rc1.dev573**，torch 2.13 cu130，B300 sm_103 可跑）与 `:kimi-k3`、`ghcr.io/novitalabs/vllm:glm53-*`。镜像站 image.paigpu.com / ppinfra 对 `v0.31.0` manifest 不响应，所以基线版本是 **nightly 0.29.1**，不是 4090 上的 0.31.0 —— 跨卡比值不可直接对照，CSV `baseline` 列写 `vllm-0.29.1rc1`。
 - `nerdctl` 默认桥接网络缺 CNI bridge 插件 → `--net host`；GPU `--gpus device=N`。脚本 `scripts/dev/vllm_nerdctl.sh run|wait|smoke|logs|stop|ps`。**每次 bench 完 `stop`**（删容器，不删机器原有镜像）。
 - 占卡约定：vLLM 基线 GPU 7（`:8013`）；dinfer single / tpN 从 GPU 0 起；lm_head 列切 bench 用 GPU 4–6。
-- `bench_compare.sh` 在 B300 两次 exit 141：真因是 8 卡下 `nvidia-smi --query-gpu=name | head -1` 触发 SIGPIPE（pipefail），已改 `-i 0`（pitfalls）；`docker inspect` 那行顺带加 `/version` 回退。`bench_b300_1`（dinfer GPU 6 vs vLLM GPU 7）第三次跑。
+- `bench_compare.sh` 在 B300 两次 exit 141：真因是 8 卡下 `nvidia-smi --query-gpu=name | head -1` 触发 SIGPIPE（pipefail），已改 `-i 0`（pitfalls）；`docker inspect` 那行顺带加 `/version` 回退。`bench_b300_1`（dinfer GPU 6 vs vLLM nightly GPU 7，CSV 主线 gpu=B300）：
+
+| 组 | dinfer tok/s / TTFT / TPOT | vLLM tok/s / TTFT / TPOT | 比值 |
+|---|---|---|---|
+| c1 | 650 / 2.4 / 1.5 | 772 / 11.6 / 1.2 | **0.84×** |
+| c8 | 4600 / 11.3 / 1.7 | 5304 / 27.3 / 1.3 | **0.87×** |
+| c32 | 14401 / 11.4 / 2.1 | 14492 / 47.8 / 1.8 | 0.99× |
+| c8-long | 3406 / 13.7 / 2.2 | 4827 / 38.0 / 1.4 | **0.71×** |
+
+**B300 上 dinfer 单卡落后 vLLM**：TTFT 全面领先（2–4×），但 **TPOT 落后 20–35%**（1.5 vs 1.2，长 prompt 2.2 vs 1.4）。4090 上是领先的（c1 1.12×），说明 B300 上 vLLM 用上了 Blackwell 特有的东西（FlashInfer / FA4 sm_100 kernel、cuBLAS 新 GEMM）而我们的 `gqa.cu` mma.sync 路径与 cuBLASLt 调用没按 sm_103 调优。这是 **B 类新增的 B4：B300 单卡 TPOT 追平**，优先级在 B2 之后（TP 通信优化照做，但单卡差距更大）。vLLM 版本 0.29.1rc1（nightly）≠ 4090 的 0.31.0，比值不跨卡对照。
 
 ## 环境
 
@@ -70,4 +79,5 @@ B300 单卡 TPOT 1.54 ms（4090 3.5 ms 的 2.3×）。**NVLink 下 tp2 仍比单
 
 ## 状态
 
+- **B4（新）：B300 单卡 TPOT 落后 vLLM nightly 20–35%（长 prompt 更差）**，TTFT 领先。待查：nsys 看 decode 一步各 kernel 占比，对照 vLLM 在 B300 上选的 attention backend / GEMM；sm_103 专项调优（mma.sync → wgmma/tcgen05 或接 cuBLASLt 新算法）。
 - B0 完成。B1 完成：tp2 / tp4 一致性 PASS；性能 tp2 慢单卡 30%，差值 = 56 × NCCL all-reduce 延迟，B2 的目标就是这 0.45 ms。趋势图已加卡型维度（GPU 文件 + gpu 列 + 顶层卡型按钮）。**vLLM 基线在这台机器上暂无法起**（无 docker / torch / 外网），B1 先用 dinfer 单卡 vs tpN 自比，vLLM 对比列留空。
