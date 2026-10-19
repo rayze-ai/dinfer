@@ -1,0 +1,1 @@
+Qwen3.5-27B bf16 vLLM nightly 单卡基线（B300-50 GPU 7，/data/models/Qwen/Qwen3.8-27B，dinfer 侧未实现）

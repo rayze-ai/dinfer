@@ -24,9 +24,10 @@ MD="$OUT/summary.md"
 } > "$MD"
 row() { python3 -I - "$1" "$2" "$3" "$4" "$5" <<'PY'
 import json,sys
-c,p,o,side,f=sys.argv[1:6]; j=json.load(open(f))
-g=lambda k,d=float('nan'): j.get(k,d)
-print(f"| {c} | {p} | {o} | {side} | {g('completed','?')}/{g('num_requests','?')} | {g('req_per_s',0):.2f} | {g('output_tok_per_s',0):.1f} | {g('ttft_p50_ms',0):.1f} / {g('ttft_p99_ms',0):.1f} | {g('tpot_p50_ms',0):.2f} / {g('tpot_p99_ms',0):.2f} | {g('itl_p50_ms',0):.2f} | {g('latency_p50_ms',0):.1f} |")
+c,p,o,side,f=sys.argv[1:6]; d=json.load(open(f))
+g=lambda v: f"{v:.2f}" if isinstance(v,(int,float)) else "nan"
+print(f"| {c} | {p} | {o} | {side} | {d['completed']}/{d['num_requests']} | {d['request_throughput_rps']:.2f} | {g(d['output_token_throughput_tps'])} | "
+      f"{g(d['ttft_ms']['p50'])} / {g(d['ttft_ms']['p99'])} | {g(d['tpot_ms']['p50'])} / {g(d['tpot_ms']['p99'])} | {g(d['itl_ms']['p50'])} | {g(d['latency_ms']['p50'])} |")
 PY
 }
 for grp in "1 128 128" "8 128 128" "32 128 128" "8 1024 128"; do
