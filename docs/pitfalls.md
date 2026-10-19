@@ -517,3 +517,10 @@
 - 根因：CUDA 限制——IPC handle 不能在导出它的**同一进程**里打开（文档：`cuIpcOpenMemHandle` "cannot be used to open a handle created in the same process"）。TP 是一进程多线程，每个 rank 一个主 ctx，不是多进程。vLLM `custom_all_reduce` 是多进程（一 rank 一进程）所以能用 IPC。
 - 解法：一进程多线程下直接交换 `cuMemAlloc` 的裸指针（UVA 下进程内全局唯一）+ `cuCtxEnablePeerAccess(cuDevicePrimaryCtxRetain(对端设备))`（`CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED` 当成功），kernel 直接读对端地址。`comm.rs::enable_peer_access`；handle 仍导出随 `ArPeerInfo` 传递，留给将来跨进程。
 - 避免：凡"同进程多 ctx 共享设备内存"都走 peer access，不走 IPC；IPC 只给跨进程（PD）。
+
+## vLLM 容器里软链接模型目录悬空（2026-10-19，Qwen3.5 基线）
+
+- 现象：`vllm_nerdctl.sh run` 起容器后 `wait` 超时，日志 `HFValidationError: Repo id must be in the form 'repo_name'...: '/models/qwen3.5-27b'`，bench 全部 connection refused。
+- 根因：`$ROOT/models/qwen3.5-27b` 是指向 `/data/models/Qwen/Qwen3.8-27B` 的软链接；容器只挂了 `$ROOT/models:/models`，链接目标在容器内不存在，vLLM 把路径当 HF repo id 去校验。
+- 解法：容器同时挂 `/data/models:/data/models:ro`（已改 `vllm_nerdctl.sh`）。
+- 避免：权重按用户要求一律软链接到 `/data/models`（不下载不拷贝），所以任何容器都要把 `/data/models` 挂进去；`wait` 失败先看 `logs` 的最后一个 Traceback。
