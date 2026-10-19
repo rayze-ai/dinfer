@@ -172,15 +172,20 @@ fn cos_sin_table(max_pos: usize, d: usize, theta: f64) -> Vec<f32> {
 #[ignore]
 fn parity_rmsnorm() {
     let (_d, s) = dev();
-    for (ci, &(t, h)) in [(3usize, 64usize), (37, HID)].iter().enumerate() {
-        let mut c = Case::new("rmsnorm", &format!("t{t}_h{h}"));
+    // 第 7 轮：三种线程布局都对一遍（h=64/1024 走 warp 版 VPL 1/4，h=5120 走 block1024 / block256 VPT=4）
+    let mut cases = vec![];
+    for l in dinfer_kernels::arch::RmsnormLayout::ALL {
+        cases.extend([(3usize, 64usize, l), (37, HID, l), (9, 5120, l)]);
+    }
+    for (ci, &(t, h, l)) in cases.iter().enumerate() {
+        let mut c = Case::new("rmsnorm", &format!("t{t}_h{h}_{}", l.name()));
         let mut r = Rng::new(100 + ci as u64);
         let x = r.normals_bf16(t * h, 1.0);
         let w: Vec<bf16> = (0..h).map(|_| bf16::from_f32(r.uniform() + 0.5)).collect();
         let dx = s.htod_copy(x.clone()).unwrap();
         let dw = s.htod_copy(w.clone()).unwrap();
         let mut out = s.alloc_zeros::<bf16>(t * h).unwrap();
-        dinfer_kernels::rmsnorm_bf16_n(&s, &dx, &dw, &mut out, t, h, EPS).unwrap();
+        dinfer_kernels::rmsnorm_bf16_layout(&s, &dx, &dw, &mut out, t, h, EPS, Some(l)).unwrap();
         c.bf16("x", &[t, h], &x);
         c.bf16("w", &[h], &w);
         c.bf16("out", &[t, h], &s.dtoh_sync_copy(&out).unwrap());
@@ -193,8 +198,12 @@ fn parity_rmsnorm() {
 #[ignore]
 fn parity_fused_add_rmsnorm() {
     let (_d, s) = dev();
-    for (ci, &(t, h)) in [(5usize, 64usize), (33, HID)].iter().enumerate() {
-        let mut c = Case::new("fused_add_rmsnorm", &format!("t{t}_h{h}"));
+    let mut cases = vec![];
+    for l in dinfer_kernels::arch::RmsnormLayout::ALL {
+        cases.extend([(5usize, 64usize, l), (33, HID, l), (9, 5120, l)]);
+    }
+    for (ci, &(t, h, l)) in cases.iter().enumerate() {
+        let mut c = Case::new("fused_add_rmsnorm", &format!("t{t}_h{h}_{}", l.name()));
         let mut r = Rng::new(200 + ci as u64);
         let x = r.normals_bf16(t * h, 1.0);
         let res = r.normals_bf16(t * h, 1.0);
@@ -203,7 +212,8 @@ fn parity_fused_add_rmsnorm() {
         let mut dres = s.htod_copy(res.clone()).unwrap();
         let dw = s.htod_copy(w.clone()).unwrap();
         let mut out = s.alloc_zeros::<bf16>(t * h).unwrap();
-        dinfer_kernels::fused_add_rmsnorm_bf16_n(&s, &dx, &mut dres, &dw, &mut out, t, h, EPS).unwrap();
+        dinfer_kernels::fused_add_rmsnorm_bf16_layout(&s, &dx, &mut dres, &dw, &mut out, t, h, EPS, Some(l))
+            .unwrap();
         c.bf16("x", &[t, h], &x);
         c.bf16("res_in", &[t, h], &res);
         c.bf16("w", &[h], &w);
@@ -355,7 +365,10 @@ fn parity_gemm_small_m() {
         (3, 6144, hid, 1, true),   // 非 2 的幂 M（M_TILE=4 只算 3 行）+ bias
     ];
     for (ci, &(m, n, k, splits, bias)) in cases.iter().enumerate() {
-        let c = Case::new("gemm_small_m", &format!("m{m}_n{n}_k{k}_s{splits}{}", if bias { "_bias" } else { "" }));
+        let c = Case::new(
+            "gemm_small_m",
+            &format!("m{m}_n{n}_k{k}_s{splits}{}", if bias { "_bias" } else { "" }),
+        );
         let mut r = Rng::new(760 + ci as u64);
         let a = r.normals_bf16(m * k, 1.0);
         let w = r.normals_bf16(n * k, (1.0 / k as f32).sqrt());
@@ -365,7 +378,19 @@ fn parity_gemm_small_m() {
         let db = s.htod_copy(b.clone()).unwrap();
         let mut out = s.alloc_zeros::<bf16>(m * n).unwrap();
         let mut partial = s.alloc_zeros::<f32>(splits * m * n).unwrap();
-        dinfer_kernels::gemm_small_m_bf16(&s, &da, &dw, bias.then_some(&db), &mut out, Some(&mut partial), m, n, k, splits).unwrap();
+        dinfer_kernels::gemm_small_m_bf16(
+            &s,
+            &da,
+            &dw,
+            bias.then_some(&db),
+            &mut out,
+            Some(&mut partial),
+            m,
+            n,
+            k,
+            splits,
+        )
+        .unwrap();
         c.bf16("a", &[m, k], &a);
         c.bf16("w", &[n, k], &w);
         if bias {
@@ -404,8 +429,10 @@ fn parity_qkv_post() {
         let dcs = s.htod_copy(cs.clone()).unwrap();
         let mut cache = s.alloc_zeros::<bf16>(nblocks * BS * hk * 2 * D).unwrap();
         let dslots = s.htod_copy(slots.clone()).unwrap();
-        dinfer_kernels::qkv_post_bf16(&s, &mut dqkv, &dwq, &dwk, &dpos, &dcs, &mut cache, &dslots, t, h, hk, D, EPS, BS)
-            .unwrap();
+        dinfer_kernels::qkv_post_bf16(
+            &s, &mut dqkv, &dwq, &dwk, &dpos, &dcs, &mut cache, &dslots, t, h, hk, D, EPS, BS,
+        )
+        .unwrap();
         c.bf16("qkv_in", &[t, w], &qkv);
         c.bf16("wq", &[D], &wq);
         c.bf16("wk", &[D], &wk);
@@ -455,7 +482,10 @@ fn parity_gqa_prefill() {
     let shapes: [(usize, usize, Vec<usize>); 2] = [(4, 2, vec![5, 3]), (H, HK, vec![200, 57, 1])];
     for (ci, (h, hk, lens)) in shapes.iter().enumerate() {
         let (h, hk) = (*h, *hk);
-        let mut c = Case::new("gqa_prefill", &format!("h{h}_hk{hk}_lens{}", lens.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("-")));
+        let mut c = Case::new(
+            "gqa_prefill",
+            &format!("h{h}_hk{hk}_lens{}", lens.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("-")),
+        );
         let mut r = Rng::new(900 + ci as u64);
         let t: usize = lens.iter().sum();
         let w = (h + 2 * hk) * D;
@@ -471,8 +501,23 @@ fn parity_gqa_prefill() {
         let kv = dqkv.slice(h * D..);
         let vv = dqkv.slice((h + hk) * D..);
         let scale = (D as f32).powf(-0.5);
-        dinfer_kernels::gqa_prefill_bf16(&s, &qv, &kv, &vv, &mut out, &dcu, lens.len(), *lens.iter().max().unwrap(), h, hk, D, scale, w, w)
-            .unwrap();
+        dinfer_kernels::gqa_prefill_bf16(
+            &s,
+            &qv,
+            &kv,
+            &vv,
+            &mut out,
+            &dcu,
+            lens.len(),
+            *lens.iter().max().unwrap(),
+            h,
+            hk,
+            D,
+            scale,
+            w,
+            w,
+        )
+        .unwrap();
         c.bf16("qkv", &[t, w], &qkv);
         c.i32("cu_seqlens", &[cu.len()], &cu);
         c.bf16("out", &[t, h, D], &s.dtoh_sync_copy(&out).unwrap());
@@ -485,10 +530,25 @@ fn parity_gqa_prefill() {
 }
 
 /// paged / decode / mixed 共用：hist + new 全部写 cache，q 只有 new 行（紧凑 [tq, h, D]）。
-fn paged_case(s: &Stream, op: &str, seed: u64, h: usize, hk: usize, d: usize, hist: &[usize], new: &[usize], mode: &str) {
+fn paged_case(
+    s: &Stream,
+    op: &str,
+    seed: u64,
+    h: usize,
+    hk: usize,
+    d: usize,
+    hist: &[usize],
+    new: &[usize],
+    mode: &str,
+) {
     let name = if hist.len() > 8 {
         // 大 batch：只写 B 与 hist 范围，避免目录名过长
-        format!("h{h}_hk{hk}_d{d}_b{}_hist{}-{}_new1", hist.len(), hist.iter().min().unwrap(), hist.iter().max().unwrap())
+        format!(
+            "h{h}_hk{hk}_d{d}_b{}_hist{}-{}_new1",
+            hist.len(),
+            hist.iter().min().unwrap(),
+            hist.iter().max().unwrap()
+        )
     } else {
         format!(
             "h{h}_hk{hk}_d{d}_hist{}_new{}",
@@ -533,14 +593,54 @@ fn paged_case(s: &Stream, op: &str, seed: u64, h: usize, hk: usize, d: usize, hi
     let scale = (d as f32).powf(-0.5);
     let max_q = *new.iter().max().unwrap();
     match mode {
-        "paged" => dinfer_kernels::gqa_paged_bf16(s, &dq, &cache, &dbt, &dseq, &dcu, &mut out, n, max_q, h, hk, d, BS, max_blocks, scale, 0, false).unwrap(),
+        "paged" => dinfer_kernels::gqa_paged_bf16(
+            s, &dq, &cache, &dbt, &dseq, &dcu, &mut out, n, max_q, h, hk, d, BS, max_blocks, scale, 0, false,
+        )
+        .unwrap(),
         "decode" => {
             let mut scratch = s.alloc_zeros::<f32>(dinfer_kernels::gqa_decode_scratch_len(n, h, d)).unwrap();
-            dinfer_kernels::gqa_decode_bf16(s, &dq, &cache, &dbt, &dseq, &mut out, &mut scratch, n, h, hk, d, BS, max_blocks, scale, 0, None).unwrap()
+            dinfer_kernels::gqa_decode_bf16(
+                s,
+                &dq,
+                &cache,
+                &dbt,
+                &dseq,
+                &mut out,
+                &mut scratch,
+                n,
+                h,
+                hk,
+                d,
+                BS,
+                max_blocks,
+                scale,
+                0,
+                None,
+            )
+            .unwrap()
         }
         "mixed" => {
             let mut scratch = s.alloc_zeros::<f32>(dinfer_kernels::gqa_decode_scratch_len(n, h, d)).unwrap();
-            dinfer_kernels::gqa_mixed_bf16(s, &dq, &cache, &dbt, &dseq, &dcu, &mut out, &mut scratch, n, max_q, h, hk, d, BS, max_blocks, scale, 0).unwrap()
+            dinfer_kernels::gqa_mixed_bf16(
+                s,
+                &dq,
+                &cache,
+                &dbt,
+                &dseq,
+                &dcu,
+                &mut out,
+                &mut scratch,
+                n,
+                max_q,
+                h,
+                hk,
+                d,
+                BS,
+                max_blocks,
+                scale,
+                0,
+            )
+            .unwrap()
         }
         _ => unreachable!(),
     }
@@ -600,7 +700,13 @@ fn parity_gqa_prefill_qwen35() {
         [(H35, HK35, D35, vec![1, 37, 200]), (H35, HK35, D35, vec![512])];
     for (ci, (h, hk, d, lens)) in shapes.iter().enumerate() {
         let (h, hk, d) = (*h, *hk, *d);
-        let mut c = Case::new("gqa_prefill", &format!("h{h}_hk{hk}_d{d}_lens{}", lens.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("-")));
+        let mut c = Case::new(
+            "gqa_prefill",
+            &format!(
+                "h{h}_hk{hk}_d{d}_lens{}",
+                lens.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("-")
+            ),
+        );
         let mut r = Rng::new(1900 + ci as u64);
         let t: usize = lens.iter().sum();
         let w = (h + 2 * hk) * d;
@@ -616,8 +722,23 @@ fn parity_gqa_prefill_qwen35() {
         let kv = dqkv.slice(h * d..);
         let vv = dqkv.slice((h + hk) * d..);
         let scale = (d as f32).powf(-0.5);
-        dinfer_kernels::gqa_prefill_bf16(&s, &qv, &kv, &vv, &mut out, &dcu, lens.len(), *lens.iter().max().unwrap(), h, hk, d, scale, w, w)
-            .unwrap();
+        dinfer_kernels::gqa_prefill_bf16(
+            &s,
+            &qv,
+            &kv,
+            &vv,
+            &mut out,
+            &dcu,
+            lens.len(),
+            *lens.iter().max().unwrap(),
+            h,
+            hk,
+            d,
+            scale,
+            w,
+            w,
+        )
+        .unwrap();
         c.bf16("qkv", &[t, w], &qkv);
         c.i32("cu_seqlens", &[cu.len()], &cu);
         c.bf16("out", &[t, h, d], &s.dtoh_sync_copy(&out).unwrap());
@@ -735,7 +856,9 @@ fn parity_mul_sigmoid() {
 #[ignore]
 fn parity_kv_pack() {
     let (_d, s) = dev();
-    for (ci, &(layers, hk, nblocks_total, npack)) in [(2usize, 2usize, 6usize, 3usize), (28, HK, 40, 9)].iter().enumerate() {
+    for (ci, &(layers, hk, nblocks_total, npack)) in
+        [(2usize, 2usize, 6usize, 3usize), (28, HK, 40, 9)].iter().enumerate()
+    {
         let mut c = Case::new("kv_pack", &format!("L{layers}_hk{hk}_blocks{npack}"));
         let mut r = Rng::new(1300 + ci as u64);
         let per_block_elems = BS * hk * 2 * D;
@@ -744,7 +867,8 @@ fn parity_kv_pack() {
         let mut caches = vec![];
         let mut host = vec![];
         for _ in 0..layers {
-            let v: Vec<u16> = (0..nblocks_total * per_block_elems).map(|_| (r.next_u64() >> 48) as u16).collect();
+            let v: Vec<u16> =
+                (0..nblocks_total * per_block_elems).map(|_| (r.next_u64() >> 48) as u16).collect();
             let vb: Vec<bf16> = v.iter().map(|&b| bf16::from_bits(b)).collect();
             caches.push(s.htod_copy(vb).unwrap());
             host.push(v);
@@ -754,7 +878,8 @@ fn parity_kv_pack() {
         let blocks: Vec<i32> = r.perm(nblocks_total)[..npack].iter().map(|&b| b as i32).collect();
         let dblocks = s.htod_copy(blocks.clone()).unwrap();
         let mut staging = s.alloc_zeros::<u8>(npack * layers * per_layer_bytes).unwrap();
-        dinfer_kernels::kv_pack(&s, &dptrs, &dblocks, &mut staging, npack, layers, per_layer_bytes, BS, hk).unwrap();
+        dinfer_kernels::kv_pack(&s, &dptrs, &dblocks, &mut staging, npack, layers, per_layer_bytes, BS, hk)
+            .unwrap();
         let st = s.dtoh_sync_copy(&staging).unwrap();
         // unpack 到全零 cache，回读
         let mut caches2 = vec![];
@@ -763,7 +888,8 @@ fn parity_kv_pack() {
         }
         let ptrs2: Vec<u64> = caches2.iter().map(|cc| s.ptr(cc)).collect();
         let dptrs2 = s.htod_copy(ptrs2).unwrap();
-        dinfer_kernels::kv_unpack(&s, &dptrs2, &dblocks, &staging, npack, layers, per_layer_bytes, BS, hk).unwrap();
+        dinfer_kernels::kv_unpack(&s, &dptrs2, &dblocks, &staging, npack, layers, per_layer_bytes, BS, hk)
+            .unwrap();
         let mut all_in: Vec<bf16> = vec![];
         let mut all_out: Vec<bf16> = vec![];
         for l in 0..layers {
@@ -847,7 +973,21 @@ fn parity_sampler() {
         // 融合：从 penalties 之后的 logits 起（sample_fused 不含 penalties）
         let mut w2 = s.htod_copy(after_pen.clone()).unwrap();
         let mut o_fused = s.alloc_zeros::<i32>(b).unwrap();
-        dinfer_kernels::sample_fused_f32(&s, &mut w2, &dt, &dmp, &dk, &dp, &dt01, &dseeds, &doffsets, &mut o_fused, b, v).unwrap();
+        dinfer_kernels::sample_fused_f32(
+            &s,
+            &mut w2,
+            &dt,
+            &dmp,
+            &dk,
+            &dp,
+            &dt01,
+            &dseeds,
+            &doffsets,
+            &mut o_fused,
+            b,
+            v,
+        )
+        .unwrap();
         // argmax（原始 logits）
         let dl = s.htod_copy(logits.clone()).unwrap();
         let mut o_arg = s.alloc_zeros::<i32>(b).unwrap();
@@ -857,7 +997,8 @@ fn parity_sampler() {
         let mut lp_ids = s.alloc_zeros::<i32>(b * (kk + 1)).unwrap();
         let mut lp_val = s.alloc_zeros::<f32>(b * (kk + 1)).unwrap();
         let mut lp_rank = s.alloc_zeros::<i32>(b).unwrap();
-        dinfer_kernels::logprobs_f32(&s, &dl, &o_chain, kk, &mut lp_ids, &mut lp_val, &mut lp_rank, v).unwrap();
+        dinfer_kernels::logprobs_f32(&s, &dl, &o_chain, kk, &mut lp_ids, &mut lp_val, &mut lp_rank, v)
+            .unwrap();
         // row_gather：ids[i] = prev[g[i]]（g<0 不动）
         let prev: Vec<i32> = (0..b).map(|i| 1000 + i as i32).collect();
         let mut g: Vec<i32> = r.perm(b).iter().map(|&x| x as i32).collect();
@@ -898,5 +1039,72 @@ fn parity_sampler() {
         c.i32("rg_out", &[b], &s.dtoh_sync_copy(&dout).unwrap());
         c.meta("logprobs_k", kk);
         c.finish();
+    }
+}
+
+/// rmsnorm / fused_add_rmsnorm 三种线程布局计时（第 7 轮）：B ∈ {1, 8, 32, 64}，hidden 5120（Qwen3.5-27B）与 1024（Qwen3-0.6B）。
+/// 数字写进 `docs/loops/qwen35-perf.md` 第 7 行，选法进 `ArchProfile::rmsnorm_layout`。不写 dump，不参与对拍。
+#[test]
+#[ignore]
+fn rmsnorm_bench() {
+    use dinfer_kernels::arch::RmsnormLayout;
+    // 3090 上单次 launch ≈ 4.5 µs 全是启动开销，看不出 kernel 差异：把 50 次 launch 捕获进一个 CUDA graph 回放，
+    // 报告的是每次 kernel 的净耗时（含 graph 内节点间隔 ~1 µs）。
+    let (d, _s0) = dev();
+    d.disable_event_tracking(); // cudarc 的 device_ptr 事件记录在捕获中报 901
+    let s = d.new_stream().unwrap(); // 非默认流（capture 要求）
+    let iters = 50;
+    let replays = 20;
+    for h in [5120usize, 1024] {
+        for t in [1usize, 8, 32, 64] {
+            let mut r = Rng::new(7);
+            let x = r.normals_bf16(t * h, 1.0);
+            let w: Vec<bf16> = (0..h).map(|_| bf16::from_f32(r.uniform() + 0.5)).collect();
+            let dx = s.htod_copy(x.clone()).unwrap();
+            let dw = s.htod_copy(w).unwrap();
+            let mut dres = s.htod_copy(x).unwrap();
+            let mut out = s.alloc_zeros::<bf16>(t * h).unwrap();
+            let mut line = format!("  h={h:>4} B={t:>2}:");
+            for fused in [false, true] {
+                for l in RmsnormLayout::ALL {
+                    let once = |s: &Stream, dres: &mut _, out: &mut _| {
+                        if fused {
+                            dinfer_kernels::fused_add_rmsnorm_bf16_layout(
+                                s,
+                                &dx,
+                                dres,
+                                &dw,
+                                out,
+                                t,
+                                h,
+                                EPS,
+                                Some(l),
+                            )
+                            .unwrap();
+                        } else {
+                            dinfer_kernels::rmsnorm_bf16_layout(s, &dx, &dw, out, t, h, EPS, Some(l))
+                                .unwrap();
+                        }
+                    };
+                    once(&s, &mut dres, &mut out);
+                    s.synchronize().unwrap();
+                    s.begin_capture().unwrap();
+                    for _ in 0..iters {
+                        once(&s, &mut dres, &mut out);
+                    }
+                    let graph = s.end_capture().unwrap();
+                    graph.launch().unwrap();
+                    s.synchronize().unwrap();
+                    let t0 = std::time::Instant::now();
+                    for _ in 0..replays {
+                        graph.launch().unwrap();
+                    }
+                    s.synchronize().unwrap();
+                    let us = t0.elapsed().as_secs_f64() * 1e6 / (iters * replays) as f64;
+                    line.push_str(&format!(" {}{} {us:5.2}", if fused { "add+" } else { "" }, l.name()));
+                }
+            }
+            println!("{line}  (µs)");
+        }
     }
 }

@@ -18,6 +18,7 @@ extern "C" {
         tokens: i64,
         hidden: i64,
         eps: f32,
+        layout: i32,
         stream: cudaStream_t,
     ) -> i32;
     pub fn gather_rmsnorm_bf16(
@@ -28,6 +29,7 @@ extern "C" {
         num_rows: i64,
         hidden: i64,
         eps: f32,
+        layout: i32,
         stream: cudaStream_t,
     ) -> i32;
     pub fn fused_add_rmsnorm_bf16(
@@ -38,6 +40,7 @@ extern "C" {
         tokens: i64,
         hidden: i64,
         eps: f32,
+        layout: i32,
         stream: cudaStream_t,
     ) -> i32;
 
@@ -112,7 +115,13 @@ extern "C" {
     ) -> i32;
     pub fn argmax_f32(logits: *const f32, out: *mut i32, batch: i64, vocab: i64, stream: cudaStream_t)
         -> i32;
-    pub fn row_gather_i32(prev: *const i32, gather_idx: *const i32, ids: *mut i32, n: i64, stream: cudaStream_t) -> i32;
+    pub fn row_gather_i32(
+        prev: *const i32,
+        gather_idx: *const i32,
+        ids: *mut i32,
+        n: i64,
+        stream: cudaStream_t,
+    ) -> i32;
     pub fn topk_topp_mask_f32(
         logits: *mut f32,
         top_k: *const i32,
@@ -389,8 +398,28 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
     pub fn add_inplace_bf16(x: *const c_void, y: *mut c_void, n: i64, stream: cudaStream_t) -> i32;
-    pub fn kv_pack(layer_ptrs: *const *const c_void, blocks: *const i32, staging: *mut c_void, n_blocks: i64, num_layers: i64, per_layer_bytes: i64, block_size: i64, kv_heads: i64, stream: cudaStream_t) -> i32;
-    pub fn kv_unpack(layer_ptrs: *const *mut c_void, blocks: *const i32, staging: *const c_void, n_blocks: i64, num_layers: i64, per_layer_bytes: i64, block_size: i64, kv_heads: i64, stream: cudaStream_t) -> i32;
+    pub fn kv_pack(
+        layer_ptrs: *const *const c_void,
+        blocks: *const i32,
+        staging: *mut c_void,
+        n_blocks: i64,
+        num_layers: i64,
+        per_layer_bytes: i64,
+        block_size: i64,
+        kv_heads: i64,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn kv_unpack(
+        layer_ptrs: *const *mut c_void,
+        blocks: *const i32,
+        staging: *const c_void,
+        n_blocks: i64,
+        num_layers: i64,
+        per_layer_bytes: i64,
+        block_size: i64,
+        kv_heads: i64,
+        stream: cudaStream_t,
+    ) -> i32;
     pub fn gather_rows_bf16(
         src: *const c_void,
         dst: *mut c_void,
@@ -400,7 +429,14 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
     pub fn bf16_to_f32(x: *const c_void, y: *mut f32, n: i64, stream: cudaStream_t) -> i32;
-    pub fn gather_blocks_bf16_to_f32(x: *const c_void, y: *mut f32, nb: i64, rows: i64, cols: i64, stream: cudaStream_t) -> i32;
+    pub fn gather_blocks_bf16_to_f32(
+        x: *const c_void,
+        y: *mut f32,
+        nb: i64,
+        rows: i64,
+        cols: i64,
+        stream: cudaStream_t,
+    ) -> i32;
     pub fn scale_f32(x: *mut f32, n: i64, a: f32, stream: cudaStream_t) -> i32;
 
     // ---- DSA ----
@@ -871,8 +907,8 @@ mod stubs {
         };
     }
     stub!(add_f32(a: *const f32, b: *const f32, out: *mut f32, n: i64, s: cudaStream_t));
-    stub!(rmsnorm_bf16(x: *const c_void, w: *const c_void, o: *mut c_void, t: i64, h: i64, e: f32, s: cudaStream_t));
-    stub!(fused_add_rmsnorm_bf16(x: *const c_void, r: *mut c_void, w: *const c_void, o: *mut c_void, t: i64, h: i64, e: f32, s: cudaStream_t));
+    stub!(rmsnorm_bf16(x: *const c_void, w: *const c_void, o: *mut c_void, t: i64, h: i64, e: f32, l: i32, s: cudaStream_t));
+    stub!(fused_add_rmsnorm_bf16(x: *const c_void, r: *mut c_void, w: *const c_void, o: *mut c_void, t: i64, h: i64, e: f32, l: i32, s: cudaStream_t));
     stub!(rope_bf16(q: *mut c_void, k: *mut c_void, p: *const i32, cs: *const f32, t: i64, qh: i64, kh: i64, hd: i64, rd: i64, n: i32, s: cudaStream_t));
     stub!(silu_and_mul_bf16(x: *const c_void, o: *mut c_void, t: i64, i: i64, s: cudaStream_t));
     stub!(mul_sigmoid_bf16(x: *mut c_void, g: *const c_void, n: i64, s: cudaStream_t));

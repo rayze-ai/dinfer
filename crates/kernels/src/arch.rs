@@ -159,14 +159,17 @@ impl ArchProfile {
         }
     }
 
-    /// `rmsnorm` / `fused_add_rmsnorm` 的线程布局：按 (行数, hidden) 选。规则由 3090 `rmsnorm_bench` 定
-    /// （`docs/loops/qwen35-perf.md` 第 7 行），B300 待实测后按 arch 分叉。
+    /// `rmsnorm` / `fused_add_rmsnorm` 的线程布局：按 (行数, hidden) 选。规则由 3090 `rmsnorm_bench`（CUDA graph 内
+    /// 净耗时）定，见 `docs/loops/qwen35-perf.md` 第 7 行：hidden ≤ 1024 时 128 线程 × 1 向量（Block256 档内）最快，
+    /// warp-per-row 慢 1.8×（一 lane 顺序 4 次 16 B 读）；hidden ∈ (1024, 8192] 时 1024 线程 × 1 向量比 256 × VPT 快 5–8%
+    /// （每线程只等一次访存）。行数目前不影响选择；B300 待实测后按 arch 分叉。
     /// hidden > 8192 或非 8 的倍数时 kernel 侧回标量版，这里的返回值无效。
     pub fn rmsnorm_layout(&self, rows: usize, hidden: usize) -> RmsnormLayout {
-        const RMSNORM_WARP_MAX_HIDDEN: usize = 4096;
+        const RMSNORM_ONE_VEC_MAX_HIDDEN: usize = 1024;
+        const RMSNORM_BLOCK1024_MAX_HIDDEN: usize = 8192;
         let _ = rows;
-        if hidden <= RMSNORM_WARP_MAX_HIDDEN {
-            RmsnormLayout::Block256
+        if hidden > RMSNORM_ONE_VEC_MAX_HIDDEN && hidden <= RMSNORM_BLOCK1024_MAX_HIDDEN {
+            RmsnormLayout::Block1024
         } else {
             RmsnormLayout::Block256
         }
@@ -271,6 +274,16 @@ mod tests {
         // K 不支持 → 0；V 只被 16/32 整除时不选 64
         assert_eq!(ArchProfile::gdn_decode_bv(82, 48, 96, 128), 0);
         assert_eq!(ArchProfile::gdn_decode_bv(82, 4 * 48, 64, 32), 32);
+    }
+
+    #[test]
+    fn rmsnorm_layout_tiers() {
+        use super::RmsnormLayout;
+        let p = ArchProfile::for_cc((8, 6), 82);
+        assert_eq!(p.rmsnorm_layout(1, 1024), RmsnormLayout::Block256);
+        assert_eq!(p.rmsnorm_layout(32, 5120), RmsnormLayout::Block1024);
+        assert_eq!(p.rmsnorm_layout(32, 8192), RmsnormLayout::Block1024);
+        assert_eq!(p.rmsnorm_layout(32, 16384), RmsnormLayout::Block256);
     }
 
     #[test]

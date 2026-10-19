@@ -52,7 +52,20 @@ pub fn gemm_small_m_bf16(
     let po = stream.ptr_mut(out) as *mut c_void;
     // SAFETY: 指针来自有效 CudaSlice，长度已校验；stream 同 context。
     check(
-        unsafe { ffi::gemm_small_m_bf16(pa, pw, pb, po, pp, m as i64, n as i64, k as i64, splits as i64, stream.raw() as ffi::cudaStream_t) },
+        unsafe {
+            ffi::gemm_small_m_bf16(
+                pa,
+                pw,
+                pb,
+                po,
+                pp,
+                m as i64,
+                n as i64,
+                k as i64,
+                splits as i64,
+                stream.raw() as ffi::cudaStream_t,
+            )
+        },
         "gemm_small_m_bf16",
     )
 }
@@ -99,7 +112,18 @@ pub fn rmsnorm_bf16(
     let po = stream.ptr_mut(out) as *mut c_void;
     // SAFETY: 指针与长度已校验。
     check(
-        unsafe { ffi::rmsnorm_bf16(px, pw, po, tokens, hidden as i64, eps, stream.raw() as _) },
+        unsafe {
+            ffi::rmsnorm_bf16(
+                px,
+                pw,
+                po,
+                tokens,
+                hidden as i64,
+                eps,
+                rmsnorm_layout(stream, tokens as usize, hidden, None),
+                stream.raw() as _,
+            )
+        },
         "rmsnorm_bf16",
     )
 }
@@ -126,7 +150,19 @@ pub fn fused_add_rmsnorm_bf16(
     let po = stream.ptr_mut(out) as *mut c_void;
     // SAFETY: 指针与长度已校验；res 与 out 是不同缓冲。
     check(
-        unsafe { ffi::fused_add_rmsnorm_bf16(px, pr, pw, po, tokens, hidden as i64, eps, stream.raw() as _) },
+        unsafe {
+            ffi::fused_add_rmsnorm_bf16(
+                px,
+                pr,
+                pw,
+                po,
+                tokens,
+                hidden as i64,
+                eps,
+                rmsnorm_layout(stream, tokens as usize, hidden, None),
+                stream.raw() as _,
+            )
+        },
         "fused_add_rmsnorm_bf16",
     )
 }
@@ -340,6 +376,21 @@ pub fn rmsnorm_bf16_n(
     hidden: usize,
     eps: f32,
 ) -> Result<()> {
+    rmsnorm_bf16_layout(stream, x, w, out, tokens, hidden, eps, None)
+}
+
+/// 同上，`layout` 显式给（`None` = `ArchProfile::rmsnorm_layout` / `RMSNORM_LAYOUT=`）；`rmsnorm_bench` 用。
+#[allow(clippy::too_many_arguments)]
+pub fn rmsnorm_bf16_layout(
+    stream: &Stream,
+    x: &CudaSlice<bf16>,
+    w: &CudaSlice<bf16>,
+    out: &mut CudaSlice<bf16>,
+    tokens: usize,
+    hidden: usize,
+    eps: f32,
+    layout: Option<crate::arch::RmsnormLayout>,
+) -> Result<()> {
     ensure!(
         x.len() >= tokens * hidden && out.len() >= tokens * hidden && w.len() == hidden,
         "rmsnorm_n: shape"
@@ -348,7 +399,18 @@ pub fn rmsnorm_bf16_n(
     let po = stream.ptr_mut(out) as *mut c_void;
     // SAFETY: 缓冲容量已校验。
     check(
-        unsafe { ffi::rmsnorm_bf16(px, pw, po, tokens as i64, hidden as i64, eps, stream.raw() as _) },
+        unsafe {
+            ffi::rmsnorm_bf16(
+                px,
+                pw,
+                po,
+                tokens as i64,
+                hidden as i64,
+                eps,
+                rmsnorm_layout(stream, tokens, hidden, layout),
+                stream.raw() as _,
+            )
+        },
         "rmsnorm_bf16",
     )
 }
@@ -364,13 +426,28 @@ pub fn gather_rmsnorm_bf16(
     hidden: usize,
     eps: f32,
 ) -> Result<()> {
-    ensure!(rows.len() >= num_rows && out.len() >= num_rows * hidden && w.len() == hidden, "gather_rmsnorm: shape");
+    ensure!(
+        rows.len() >= num_rows && out.len() >= num_rows * hidden && w.len() == hidden,
+        "gather_rmsnorm: shape"
+    );
     let (px, pw) = (stream.ptr(x) as *const c_void, stream.ptr(w) as *const c_void);
     let pr = stream.ptr(rows) as *const i32;
     let po = stream.ptr_mut(out) as *mut c_void;
     // SAFETY: 容量已校验；rows 下标范围（< x 行数）由 runner 保证。
     check(
-        unsafe { ffi::gather_rmsnorm_bf16(px, pr, pw, po, num_rows as i64, hidden as i64, eps, stream.raw() as _) },
+        unsafe {
+            ffi::gather_rmsnorm_bf16(
+                px,
+                pr,
+                pw,
+                po,
+                num_rows as i64,
+                hidden as i64,
+                eps,
+                rmsnorm_layout(stream, num_rows, hidden, None),
+                stream.raw() as _,
+            )
+        },
         "gather_rmsnorm_bf16",
     )
 }
@@ -387,6 +464,22 @@ pub fn fused_add_rmsnorm_bf16_n(
     hidden: usize,
     eps: f32,
 ) -> Result<()> {
+    fused_add_rmsnorm_bf16_layout(stream, x, res, w, out, tokens, hidden, eps, None)
+}
+
+/// 同上，`layout` 显式给（`None` = `ArchProfile::rmsnorm_layout` / `RMSNORM_LAYOUT=`）；`rmsnorm_bench` 用。
+#[allow(clippy::too_many_arguments)]
+pub fn fused_add_rmsnorm_bf16_layout(
+    stream: &Stream,
+    x: &CudaSlice<bf16>,
+    res: &mut CudaSlice<bf16>,
+    w: &CudaSlice<bf16>,
+    out: &mut CudaSlice<bf16>,
+    tokens: usize,
+    hidden: usize,
+    eps: f32,
+    layout: Option<crate::arch::RmsnormLayout>,
+) -> Result<()> {
     ensure!(
         x.len() >= tokens * hidden
             && res.len() >= tokens * hidden
@@ -401,7 +494,17 @@ pub fn fused_add_rmsnorm_bf16_n(
     // SAFETY: 缓冲容量已校验。
     check(
         unsafe {
-            ffi::fused_add_rmsnorm_bf16(px, pr, pw, po, tokens as i64, hidden as i64, eps, stream.raw() as _)
+            ffi::fused_add_rmsnorm_bf16(
+                px,
+                pr,
+                pw,
+                po,
+                tokens as i64,
+                hidden as i64,
+                eps,
+                rmsnorm_layout(stream, tokens, hidden, layout),
+                stream.raw() as _,
+            )
         },
         "fused_add_rmsnorm_bf16",
     )
@@ -617,15 +720,35 @@ pub fn kv_pack(
     kv_heads: usize,
 ) -> Result<()> {
     ensure!(
-        layer_ptrs.len() >= num_layers && blocks.len() >= n_blocks && staging.len() >= n_blocks * num_layers * per_layer_bytes,
+        layer_ptrs.len() >= num_layers
+            && blocks.len() >= n_blocks
+            && staging.len() >= n_blocks * num_layers * per_layer_bytes,
         "kv_pack: shape"
     );
-    ensure!(block_size > 0 && kv_heads > 0 && per_layer_bytes % (block_size * kv_heads) == 0, "kv_pack: per_layer_bytes vs bs×hk");
+    ensure!(
+        block_size > 0 && kv_heads > 0 && per_layer_bytes % (block_size * kv_heads) == 0,
+        "kv_pack: per_layer_bytes vs bs×hk"
+    );
     let lp = stream.ptr(layer_ptrs) as *const *const c_void;
     let pb = stream.ptr(blocks) as *const i32;
     let ps = stream.ptr_mut(staging) as *mut c_void;
     // SAFETY: 容量已校验；layer_ptrs 内容是有效设备地址（由 executor 填）。
-    check(unsafe { ffi::kv_pack(lp, pb, ps, n_blocks as i64, num_layers as i64, per_layer_bytes as i64, block_size as i64, kv_heads as i64, stream.raw() as _) }, "kv_pack")
+    check(
+        unsafe {
+            ffi::kv_pack(
+                lp,
+                pb,
+                ps,
+                n_blocks as i64,
+                num_layers as i64,
+                per_layer_bytes as i64,
+                block_size as i64,
+                kv_heads as i64,
+                stream.raw() as _,
+            )
+        },
+        "kv_pack",
+    )
 }
 /// 反向：staging → 各层 cache 的 `blocks[..n]`。
 pub fn kv_unpack(
@@ -640,15 +763,35 @@ pub fn kv_unpack(
     kv_heads: usize,
 ) -> Result<()> {
     ensure!(
-        layer_ptrs.len() >= num_layers && blocks.len() >= n_blocks && staging.len() >= n_blocks * num_layers * per_layer_bytes,
+        layer_ptrs.len() >= num_layers
+            && blocks.len() >= n_blocks
+            && staging.len() >= n_blocks * num_layers * per_layer_bytes,
         "kv_unpack: shape"
     );
-    ensure!(block_size > 0 && kv_heads > 0 && per_layer_bytes % (block_size * kv_heads) == 0, "kv_unpack: per_layer_bytes vs bs×hk");
+    ensure!(
+        block_size > 0 && kv_heads > 0 && per_layer_bytes % (block_size * kv_heads) == 0,
+        "kv_unpack: per_layer_bytes vs bs×hk"
+    );
     let lp = stream.ptr(layer_ptrs) as *const *mut c_void;
     let pb = stream.ptr(blocks) as *const i32;
     let ps = stream.ptr(staging) as *const c_void;
     // SAFETY: 同上。
-    check(unsafe { ffi::kv_unpack(lp, pb, ps, n_blocks as i64, num_layers as i64, per_layer_bytes as i64, block_size as i64, kv_heads as i64, stream.raw() as _) }, "kv_unpack")
+    check(
+        unsafe {
+            ffi::kv_unpack(
+                lp,
+                pb,
+                ps,
+                n_blocks as i64,
+                num_layers as i64,
+                per_layer_bytes as i64,
+                block_size as i64,
+                kv_heads as i64,
+                stream.raw() as _,
+            )
+        },
+        "kv_unpack",
+    )
 }
 
 /// 异步调度：`ids[i] = prev[gather_idx[i]]`（gather_idx[i] < 0 的行保持 host 上传的值）。可进 CUDA graph。
@@ -1116,14 +1259,28 @@ pub fn bf16_to_f32_n(stream: &Stream, x: &CudaSlice<bf16>, y: &mut CudaSlice<f32
 
 /// y[rows, nb*cols] (f32) = 拼接 x 的 nb 个 [rows, cols] bf16 块（块 b 落到列段 [b*cols, (b+1)*cols)）。
 /// 用于 TP 按输出维切分的 GEMM 结果经 `all_gather` 后的 `[world][rows][cols]` 块布局：一趟修正布局 + 升 f32。
-pub fn gather_blocks_bf16_to_f32(stream: &Stream, x: &CudaSlice<bf16>, y: &mut CudaSlice<f32>, nb: usize, rows: usize, cols: usize) -> Result<()> {
+pub fn gather_blocks_bf16_to_f32(
+    stream: &Stream,
+    x: &CudaSlice<bf16>,
+    y: &mut CudaSlice<f32>,
+    nb: usize,
+    rows: usize,
+    cols: usize,
+) -> Result<()> {
     let n = nb * rows * cols;
-    ensure!(x.len() >= n && y.len() >= n, "gather_blocks_bf16_to_f32: buffer ({} / {} < {n})", x.len(), y.len());
+    ensure!(
+        x.len() >= n && y.len() >= n,
+        "gather_blocks_bf16_to_f32: buffer ({} / {} < {n})",
+        x.len(),
+        y.len()
+    );
     let px = stream.ptr(x) as *const c_void;
     let py = stream.ptr_mut(y) as *mut f32;
     // SAFETY: 容量已校验。
     check(
-        unsafe { ffi::gather_blocks_bf16_to_f32(px, py, nb as i64, rows as i64, cols as i64, stream.raw() as _) },
+        unsafe {
+            ffi::gather_blocks_bf16_to_f32(px, py, nb as i64, rows as i64, cols as i64, stream.raw() as _)
+        },
         "gather_blocks_bf16_to_f32",
     )
 }
@@ -1784,12 +1941,41 @@ pub fn gqa_mixed_bf16<Q: DevicePtr<bf16> + ?Sized>(
 ) -> Result<()> {
     ensure!(head_dim == 128 || head_dim == 256, "gqa_mixed: head_dim must be 128 or 256");
     gqa_decode_bf16(
-        stream, q, cache, block_table, seq_lens, out, scratch, num_reqs, heads, kv_heads, head_dim, block_size,
-        max_blocks, scale, q_stride, Some(cu_seqlens_q),
+        stream,
+        q,
+        cache,
+        block_table,
+        seq_lens,
+        out,
+        scratch,
+        num_reqs,
+        heads,
+        kv_heads,
+        head_dim,
+        block_size,
+        max_blocks,
+        scale,
+        q_stride,
+        Some(cu_seqlens_q),
     )?;
     gqa_paged_bf16(
-        stream, q, cache, block_table, seq_lens, cu_seqlens_q, out, num_reqs, max_q_len, heads, kv_heads, head_dim,
-        block_size, max_blocks, scale, q_stride, true,
+        stream,
+        q,
+        cache,
+        block_table,
+        seq_lens,
+        cu_seqlens_q,
+        out,
+        num_reqs,
+        max_q_len,
+        heads,
+        kv_heads,
+        head_dim,
+        block_size,
+        max_blocks,
+        scale,
+        q_stride,
+        true,
     )
 }
 
@@ -1906,13 +2092,22 @@ pub fn qkv_post_ext_bf16(
 }
 
 /// 输出门（原地）：`x *= sigmoid(gate)`，`n` 元素；`n` 必须是 8 的倍数。
-pub fn mul_sigmoid_bf16(stream: &Stream, x: &mut CudaSlice<bf16>, gate: &CudaSlice<bf16>, n: usize) -> Result<()> {
+pub fn mul_sigmoid_bf16(
+    stream: &Stream,
+    x: &mut CudaSlice<bf16>,
+    gate: &CudaSlice<bf16>,
+    n: usize,
+) -> Result<()> {
     ensure!(x.len() >= n && gate.len() >= n, "mul_sigmoid: buffer too small");
     ensure!(n % 8 == 0, "mul_sigmoid: n must be a multiple of 8");
     check(
         unsafe {
-            ffi::mul_sigmoid_bf16(stream.ptr_mut(x) as *mut c_void, stream.ptr(gate) as *const c_void, n as i64,
-                                  stream.raw() as _)
+            ffi::mul_sigmoid_bf16(
+                stream.ptr_mut(x) as *mut c_void,
+                stream.ptr(gate) as *const c_void,
+                n as i64,
+                stream.raw() as _,
+            )
         },
         "mul_sigmoid_bf16",
     )
@@ -2247,7 +2442,10 @@ pub fn kda_gate(
 ) -> Result<()> {
     ensure!(a_log.len() >= heads, "kda_gate: a_log");
     ensure!(dt_bias.len() >= heads * head_dim, "kda_gate: dt_bias");
-    ensure!(g.len() >= tokens * heads * head_dim && out.len() >= tokens * heads * head_dim, "kda_gate: g/out");
+    ensure!(
+        g.len() >= tokens * heads * head_dim && out.len() >= tokens * heads * head_dim,
+        "kda_gate: g/out"
+    );
     // SAFETY: 容量已校验。
     check(
         unsafe {
@@ -2482,7 +2680,14 @@ pub struct KdaChunkScratch {
 }
 
 impl KdaChunkScratch {
-    pub fn new(stream: &Stream, tokens: usize, heads: usize, head_dim: usize, num_chunks: usize, bt: usize) -> Result<Self> {
+    pub fn new(
+        stream: &Stream,
+        tokens: usize,
+        heads: usize,
+        head_dim: usize,
+        num_chunks: usize,
+        bt: usize,
+    ) -> Result<Self> {
         let n = tokens * heads * head_dim;
         Ok(Self {
             qn: stream.alloc_uninit::<bf16>(n)?,
@@ -2518,8 +2723,14 @@ pub fn kda_chunk_prep(
 ) -> Result<()> {
     // 输入 / scratch 都允许是按 max_tokens 预分配的更大缓冲：只按本步 `tokens` 判容量。
     let n = tokens * heads * head_dim;
-    ensure!(q.len() >= n && k.len() >= n && raw_g.len() >= n && raw_beta.len() >= tokens * heads, "kda_chunk_prep: q/k/g/beta < {tokens} 行");
-    ensure!(sc.qn.len() >= n && sc.kn.len() >= n && sc.gc.len() >= n, "kda_chunk_prep: scratch 容量 < {tokens} 行");
+    ensure!(
+        q.len() >= n && k.len() >= n && raw_g.len() >= n && raw_beta.len() >= tokens * heads,
+        "kda_chunk_prep: q/k/g/beta < {tokens} 行"
+    );
+    ensure!(
+        sc.qn.len() >= n && sc.kn.len() >= n && sc.gc.len() >= n,
+        "kda_chunk_prep: scratch 容量 < {tokens} 行"
+    );
     ensure!(dt_bias.len() >= heads * head_dim && a_log.len() >= heads, "kda_chunk_prep: a_log/dt_bias");
     // SAFETY: 容量已校验；plan 由同一 cu_seqlens 生成。
     check(
@@ -2564,7 +2775,10 @@ pub fn kda_chunk_wy(
 ) -> Result<()> {
     let n = tokens * heads * head_dim;
     ensure!(sc.aq.len() >= plan.num_chunks * heads * plan.bt * plan.bt, "kda_chunk_wy: aq 容量");
-    ensure!(v.len() >= n && sc.u.len() >= n && sc.w.len() >= n && sc.kg.len() >= n, "kda_chunk_wy: v/scratch < {tokens} 行");
+    ensure!(
+        v.len() >= n && sc.u.len() >= n && sc.w.len() >= n && sc.kg.len() >= n,
+        "kda_chunk_wy: v/scratch < {tokens} 行"
+    );
     // SAFETY: 容量已校验。
     check(
         unsafe {
@@ -2650,8 +2864,10 @@ pub fn kda_gated_rmsnorm(
     eps: f32,
 ) -> Result<()> {
     ensure!(w.len() >= head_dim, "kda_gated_rmsnorm: w");
-    ensure!(x.len() >= rows * head_dim && gate.len() >= rows * head_dim && out.len() >= rows * head_dim,
-            "kda_gated_rmsnorm: x/gate/out");
+    ensure!(
+        x.len() >= rows * head_dim && gate.len() >= rows * head_dim && out.len() >= rows * head_dim,
+        "kda_gated_rmsnorm: x/gate/out"
+    );
     // SAFETY: 容量已校验。
     check(
         unsafe {
@@ -2711,8 +2927,21 @@ pub fn gdn_conv1d_prefill(
 ) -> Result<()> {
     let rows = gdn_conv_rows(stream, tokens, dim, width, state_len);
     gdn_conv1d_prefill_with(
-        stream, x, w, out, conv_state, cu_seqlens, state_indices, has_initial, num_seqs, tokens, dim, width, state_len,
-        act, rows,
+        stream,
+        x,
+        w,
+        out,
+        conv_state,
+        cu_seqlens,
+        state_indices,
+        has_initial,
+        num_seqs,
+        tokens,
+        dim,
+        width,
+        state_len,
+        act,
+        rows,
     )
 }
 
@@ -2878,8 +3107,26 @@ pub fn gdn_recurrent(
     scale: f32,
 ) -> Result<()> {
     gdn_recurrent_with(
-        stream, mixed_qkv, g, beta, a_raw, b_raw, a_log, dt_bias, out, state, cu_seqlens, state_indices, num_seqs, tokens,
-        heads_k, heads_v, k_dim, v_dim, scale, None,
+        stream,
+        mixed_qkv,
+        g,
+        beta,
+        a_raw,
+        b_raw,
+        a_log,
+        dt_bias,
+        out,
+        state,
+        cu_seqlens,
+        state_indices,
+        num_seqs,
+        tokens,
+        heads_k,
+        heads_v,
+        k_dim,
+        v_dim,
+        scale,
+        None,
     )
 }
 
@@ -2909,8 +3156,28 @@ pub fn gdn_recurrent_with(
     decode_bv: Option<usize>,
 ) -> Result<()> {
     gdn_recurrent_variant(
-        stream, mixed_qkv, g, beta, a_raw, b_raw, a_log, dt_bias, out, state, cu_seqlens, state_indices, tokens,
-        num_seqs, heads_k, heads_v, k_dim, v_dim, scale, decode_bv, None, None,
+        stream,
+        mixed_qkv,
+        g,
+        beta,
+        a_raw,
+        b_raw,
+        a_log,
+        dt_bias,
+        out,
+        state,
+        cu_seqlens,
+        state_indices,
+        num_seqs,
+        tokens,
+        heads_k,
+        heads_v,
+        k_dim,
+        v_dim,
+        scale,
+        decode_bv,
+        None,
+        None,
     )
 }
 
@@ -2941,13 +3208,20 @@ pub fn gdn_recurrent_variant(
     decode_variant: Option<crate::arch::GdnDecodeVariant>,
     decode_grid: Option<usize>,
 ) -> Result<()> {
-    ensure!(heads_k > 0 && heads_v % heads_k == 0, "gdn_recurrent: heads_v {heads_v} 不能被 heads_k {heads_k} 整除");
+    ensure!(
+        heads_k > 0 && heads_v % heads_k == 0,
+        "gdn_recurrent: heads_v {heads_v} 不能被 heads_k {heads_k} 整除"
+    );
     ensure!(cu_seqlens.len() >= num_seqs + 1, "gdn_recurrent: cu_seqlens");
     ensure!(a_log.len() >= heads_v && dt_bias.len() >= heads_v, "gdn_recurrent: a_log/dt_bias");
     let row = 2 * heads_k * k_dim + heads_v * v_dim;
     // tokens 由调用方显式给（不能从缓冲长度推：激活缓冲按 max_tokens 预分配，推出来永远 ≠ num_seqs，
     // decode 寄存器 kernel 分发条件就永远不成立——2026-10-20 bench_b300_8 踩坑）。
-    ensure!(mixed_qkv.len() >= tokens * row, "gdn_recurrent: mixed_qkv {} < tokens {tokens} × row {row}", mixed_qkv.len());
+    ensure!(
+        mixed_qkv.len() >= tokens * row,
+        "gdn_recurrent: mixed_qkv {} < tokens {tokens} × row {row}",
+        mixed_qkv.len()
+    );
     ensure!(tokens >= num_seqs, "gdn_recurrent: tokens {tokens} < num_seqs {num_seqs}");
     ensure!(out.len() >= tokens * heads_v * v_dim, "gdn_recurrent: out");
     let per_slot = heads_v * v_dim * k_dim;
@@ -2971,10 +3245,16 @@ pub fn gdn_recurrent_variant(
         ensure!(a_raw.unwrap().len() >= tokens * heads_v, "gdn_recurrent: a_raw");
     } else {
         ensure!(beta.is_some(), "gdn_recurrent: 非 fused 路径需要 beta");
-        ensure!(g.unwrap().len() >= tokens * heads_v && beta.unwrap().len() >= tokens * heads_v, "gdn_recurrent: g/beta");
+        ensure!(
+            g.unwrap().len() >= tokens * heads_v && beta.unwrap().len() >= tokens * heads_v,
+            "gdn_recurrent: g/beta"
+        );
     }
     let (variant, grid) = if decode_bv > 0 {
-        (decode_variant.unwrap_or_else(|| gdn_decode_variant(stream)), decode_grid.unwrap_or_else(gdn_decode_grid))
+        (
+            decode_variant.unwrap_or_else(|| gdn_decode_variant(stream)),
+            decode_grid.unwrap_or_else(gdn_decode_grid),
+        )
     } else {
         (crate::arch::GdnDecodeVariant::Base, 0)
     };
@@ -3043,6 +3323,42 @@ fn gdn_decode_bv(stream: &Stream, base_blocks: usize, k_dim: usize, v_dim: usize
     }
     let sm = *SM.get_or_init(|| stream.device().sm_count().unwrap_or(1));
     crate::arch::ArchProfile::gdn_decode_bv(sm, base_blocks, k_dim, v_dim)
+}
+
+/// rmsnorm 系的线程布局：显式 `layout` 优先；否则 `RMSNORM_LAYOUT=block256|warp|block1024` 覆盖；否则
+/// `ArchProfile::rmsnorm_layout(rows, hidden)`。返回 C ABI 编码。
+fn rmsnorm_layout(
+    stream: &Stream,
+    rows: usize,
+    hidden: usize,
+    layout: Option<crate::arch::RmsnormLayout>,
+) -> i32 {
+    use crate::arch::{ArchProfile, RmsnormLayout};
+    use std::sync::OnceLock;
+    if let Some(l) = layout {
+        return l.code();
+    }
+    static OVER: OnceLock<Option<RmsnormLayout>> = OnceLock::new();
+    static PROF: OnceLock<ArchProfile> = OnceLock::new();
+    let over = *OVER.get_or_init(|| {
+        let s = std::env::var("RMSNORM_LAYOUT").ok()?;
+        let l = RmsnormLayout::parse(&s);
+        match l {
+            Some(_) => tracing::info!(layout = s, "rmsnorm 布局由环境变量覆盖"),
+            None => tracing::warn!(layout = s, "RMSNORM_LAYOUT 不识别，用 ArchProfile 默认"),
+        }
+        l
+    });
+    if let Some(l) = over {
+        return l.code();
+    }
+    PROF.get_or_init(|| {
+        let cc = stream.device().compute_capability().unwrap_or((8, 0));
+        let sm = stream.device().sm_count().unwrap_or(1);
+        ArchProfile::for_cc(cc, sm)
+    })
+    .rmsnorm_layout(rows, hidden)
+    .code()
 }
 
 /// decode 寄存器版 kernel 的变体：默认 `ArchProfile::gdn_decode_variant(arch)`；`GDN_DECODE_VARIANT=base|tr|pipe|pipe_base` 覆盖。
@@ -3259,7 +3575,10 @@ pub fn gdn_chunk_prep(
     v_dim: usize,
     scale: f32,
 ) -> Result<()> {
-    ensure!(heads_k > 0 && heads_v % heads_k == 0, "gdn_chunk_prep: heads_v {heads_v} 不能被 heads_k {heads_k} 整除");
+    ensure!(
+        heads_k > 0 && heads_v % heads_k == 0,
+        "gdn_chunk_prep: heads_v {heads_v} 不能被 heads_k {heads_k} 整除"
+    );
     let row = 2 * heads_k * k_dim + heads_v * v_dim;
     ensure!(mixed_qkv.len() >= tokens * row, "gdn_chunk_prep: mixed_qkv");
     ensure!(g.len() >= tokens * heads_v, "gdn_chunk_prep: g");
@@ -3307,7 +3626,9 @@ pub fn gdn_chunk_wy(
     v_dim: usize,
 ) -> Result<()> {
     let mma = gdn_chunk_wy_mma(k_dim, v_dim);
-    gdn_chunk_wy_with(stream, mixed_qkv, beta, cu_seqlens, plan, sc, tokens, heads_k, heads_v, k_dim, v_dim, mma)
+    gdn_chunk_wy_with(
+        stream, mixed_qkv, beta, cu_seqlens, plan, sc, tokens, heads_k, heads_v, k_dim, v_dim, mma,
+    )
 }
 
 /// `gdn_chunk_wy` 指定实现：`mma = true` 走 tensor core 版（第 5A 轮），否则老 fp32 版。对拍 / 计时用。
@@ -3374,7 +3695,21 @@ pub fn gdn_chunk_ho(
     v_dim: usize,
 ) -> Result<()> {
     let bv = gdn_chunk_ho_bv(stream, plan.num_seqs * heads_v, k_dim, v_dim);
-    gdn_chunk_ho_with(stream, cu_seqlens, plan, sc, out, state, state_indices, tokens, heads_k, heads_v, k_dim, v_dim, bv)
+    gdn_chunk_ho_with(
+        stream,
+        cu_seqlens,
+        plan,
+        sc,
+        out,
+        state,
+        state_indices,
+        tokens,
+        heads_k,
+        heads_v,
+        k_dim,
+        v_dim,
+        bv,
+    )
 }
 
 /// `gdn_chunk_ho` 指定 V 分片：`ho_bv ∈ {16, 32}` 走 tensor core 版（第 5A 轮），`0` 走老 fp32 版。对拍 / 计时用。
@@ -3442,7 +3777,10 @@ pub fn mxfp4_dequant_bf16(
     cols: usize,
     group: usize,
 ) -> Result<()> {
-    ensure!(cols % 2 == 0 && cols % group == 0, "mxfp4_dequant: cols {cols} 必须能被 2 和 group {group} 整除");
+    ensure!(
+        cols % 2 == 0 && cols % group == 0,
+        "mxfp4_dequant: cols {cols} 必须能被 2 和 group {group} 整除"
+    );
     ensure!(packed.len() >= rows * cols / 2, "mxfp4_dequant: packed");
     ensure!(scale.len() >= rows * cols / group, "mxfp4_dequant: scale");
     ensure!(out.len() >= rows * cols, "mxfp4_dequant: out");
@@ -3483,7 +3821,15 @@ pub fn situ_and_mul_bf16_n(
     // SAFETY: 容量已校验。
     check(
         unsafe {
-            ffi::situ_and_mul_bf16(px, po, tokens as i64, inter as i64, beta, linear_beta.unwrap_or(0.0), stream.raw() as _)
+            ffi::situ_and_mul_bf16(
+                px,
+                po,
+                tokens as i64,
+                inter as i64,
+                beta,
+                linear_beta.unwrap_or(0.0),
+                stream.raw() as _,
+            )
         },
         "situ_and_mul_bf16",
     )

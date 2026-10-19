@@ -754,6 +754,42 @@ __global__ void gated_rmsnorm_kernel(const bf16* __restrict__ x, const bf16* __r
   }
 }
 
+// 第 7 轮：一 warp 一 (token, v 头) 行、kGatedWarps 个 warp 一 block。老版一 block 256 线程算 128 列（一半线程空转）
+// + 两次 __syncthreads + x 读两遍；本版每 lane 持 DPL = head_dim/32 个元素（x / z / w 各一次合并读，一起发出），
+// 只有 warp shuffle。head_dim ∈ {32, 64, 128, 256}（DPL ∈ {1,2,4,8}），其它回老 kernel。
+constexpr int kGatedWarps = 8;
+
+template <int DPL>
+__global__ void __launch_bounds__(kGatedWarps * 32) gated_rmsnorm_warp_kernel(const bf16* __restrict__ x,
+                                                                              const bf16* __restrict__ w,
+                                                                              const bf16* __restrict__ z,
+                                                                              bf16* __restrict__ out, long rows,
+                                                                              float eps, int act) {
+  constexpr int D = DPL * 32;
+  const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+  const long row = (long)blockIdx.x * kGatedWarps + warp;
+  if (row >= rows) return;
+  const bf16* xr = x + row * D;
+  const bf16* zr = z + row * D;
+  float xv[DPL], zv[DPL], wv[DPL];
+  float ss = 0.f;
+#pragma unroll
+  for (int c = 0; c < DPL; ++c) {
+    const int d = lane + 32 * c;
+    xv[c] = to_f32(xr[d]);
+    zv[c] = to_f32(zr[d]);
+    wv[c] = to_f32(w[d]);
+    ss += xv[c] * xv[c];
+  }
+  ss = warp_sum_f(ss);
+  const float rstd = rsqrtf(ss / D + eps);
+#pragma unroll
+  for (int c = 0; c < DPL; ++c) {
+    const int d = lane + 32 * c;
+    out[row * D + d] = to_bf16(xv[c] * rstd * wv[c] * act_f(zv[c], act));
+  }
+}
+
 int set_smem(const void* fn, int bytes) {
   return err(cudaFuncSetAttribute(fn, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes));
 }
@@ -888,6 +924,21 @@ int gdn_recurrent(const void* mixed_qkv, const float* g, const float* beta, cons
 int gdn_gated_rmsnorm(const void* x, const void* w, const void* z, void* out, int64_t rows,
                       int64_t head_dim, float eps, int act, cudaStream_t stream) {
   if (rows <= 0) return 0;
+  const unsigned wgrid = (unsigned)((rows + kGatedWarps - 1) / kGatedWarps);
+#define GATED_WARP_CASE(DPL)                                                                                   \
+  case DPL * 32:                                                                                               \
+    gated_rmsnorm_warp_kernel<DPL><<<wgrid, kGatedWarps * 32, 0, stream>>>((const bf16*)x, (const bf16*)w,     \
+                                                                           (const bf16*)z, (bf16*)out, (long)rows, \
+                                                                           eps, act);                          \
+    return last_err();
+  switch (head_dim) {
+    GATED_WARP_CASE(1)
+    GATED_WARP_CASE(2)
+    GATED_WARP_CASE(4)
+    GATED_WARP_CASE(8)
+    default: break;
+  }
+#undef GATED_WARP_CASE
   gated_rmsnorm_kernel<<<(unsigned)rows, 256, 0, stream>>>((const bf16*)x, (const bf16*)w, (const bf16*)z,
                                                 (bf16*)out, (int)head_dim, eps, act);
   return last_err();

@@ -701,3 +701,16 @@
 - 现象：K3 子代理在 B300 生成的参考 `.npy`（`test/kimik3/2026-10-20/model/`）被主会话推 Qwen3.5 改动时清空；`.gitkeep` 只保目录不保内容。
 - 根因：push 用 rsync `--delete`，远端工作目录被当成本地的镜像；多人 / 多子代理共用一个远端目录时，任何一方 push 都会删别人没 pull 的生成物。
 - 解法：① 生成物落在 `$R/bootstrap/` 或 `/tmp`（push 不覆盖的目录），用完 pull；② 要 push 前先问同在跑 B300 的子代理 / 先 pull；③ 考虑给 push 加 `--exclude 'test/**/refs*/'` 之类的保护（已有 bench*/ab_*/stage* 排除，参考目录命名要进这个列表）。
+
+## 用运行时循环变量做下标的"寄存器数组"会被 ptxas 压进 local memory：无 spill 报告，但慢 40%（2026-10-20，Qwen35 perf 第 7 轮）
+
+- 现象：`recurrent_decode_kernel` 的 tr 变体（多值 warp 归约 `warp_sum_multi<32>`）3090 B=32 351 µs，比 base 的 248 慢 40%；`-Xptxas -v` 显示 `Used 128 registers, 0 bytes spill`，但多了 **`128 bytes stack frame`**。
+- 根因：归约写成 `for (n = N, half = 16; n > 1; n >>= 1, half >>= 1) { for (i < n/2) v[i] = ... v[i + n/2] ... }`，外层循环的 `n` 虽然每轮可推出，但 `#pragma unroll` 没把它完全展开，`v[i + hn]` 变成运行时下标 → 数组整体落 local memory（stack frame ≠ spill，spill 统计为 0）。
+- 解法：改成模板递归 `WarpSumMulti<N, HALF>::run` 把每一层折半展开成独立函数，所有下标编译期常量；stack frame 0，B=32 351 → 246.5 µs。
+- 避免：寄存器数组的 kernel 看 `-Xptxas -v` 时**同时看 stack frame**，不只看 spill；任何"跳变步长"的循环（n >>= 1）对数组下标都要用模板递归或 `if constexpr` 手写展开。
+
+## 测试里对非默认流做 CUDA graph 捕获报 901，哪怕缓冲都在该流上分配（2026-10-20，`rmsnorm_bench`）
+
+- 现象：`d.new_stream()` + 在该流 `htod_copy` / `alloc_zeros` → `begin_capture` → 第一个 kernel launch 返回 `cudaError 901`。
+- 根因：cudarc `device_ptr()` 默认在每次取指针时记录事件（event tracking），`cudaEventRecord` 在 thread-local 捕获模式下不允许；`graph_probe.rs` 之所以能过是因为它先调了 `dev.disable_event_tracking()`（executor 也是，见上文 Qwen35 capture 条）。
+- 解法 / 避免：任何要 capture 的测试 / bench 开头 `dev.disable_event_tracking()`；非默认流仍是必要条件。

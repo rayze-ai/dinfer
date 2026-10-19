@@ -71,6 +71,24 @@
   `proc_state`，期望状态只存 K 维 / V 维求和）；`gdn_decode_bench --ignored` 给老 vs 新 µs（B ∈ {1, 8, 32, 64}）。
 - 3090：B=1 48 → 7.9 µs，B=8 272 → 66，B=32 1014 → 246，B=64 1947 → 490（≈ 4×；B=32 已到带宽下限 214 µs 的 87%）。
 
+### 第 7 轮变体（2026-10-20）：`GDN_DECODE_VARIANT=base|tr|pipe|pipe_base`
+
+B300 实测 B=32 43.6 µs/层 vs 带宽下限 25（`qwen35-perf.md` 第 6e 行），3090 看不出差别（已在带宽下限），所以做成模板开关让 B300 对比：
+
+- **tr**（默认，`ArchProfile::gdn_decode_variant`）：把每 token 的 2·ROWS+2 次 `warp_sum`（各 5 shuffle）换成两次多值蝶式归约
+  `warp_sum_multi<N>`（N 个部分和折半 log2 N 轮，共 ~N 次 shuffle；**必须模板递归展开**，循环版数组落 local memory，见 pitfalls）：
+  第一次 {q·q, k·k, k·q}；第二次 ROWS 行的 {S_old·k, S_old·q}（2·ROWS ≤ 32 → BV ≤ 64），行 i 的 p 落在 lane i·S、o₀ 落在 lane 16+i·S
+  （S = 16/ROWS）。用 S_new = eg·S_old + v'·k 展开：p = eg·(S_old·k)，v' = (v − p)·β，o = eg·(S_old·q) + v'·(k·q)，
+  状态只扫一遍 `fmaf(eg, S, v'·k)`。数值只差结合顺序：state_vs_legacy 1e-7。
+- **pipe**（含 tr）：持久 block，grid = `cudaOccupancyMaxActiveBlocksPerMultiprocessor × SM`（每实例查一次缓存；`GDN_DECODE_GRID=`
+  覆盖），tile = blockIdx.x + k·gridDim.x → (seq, hv, V 块)；下一 tile 的状态用 `cp.async.cg` 16 B 预取进 smem（BV=64：32 KB 静态，
+  单缓冲：每 lane 先 `wait_group 0` + `__syncwarp` 把自己那 ROWS 个 16 B 取进寄存器，再对同一位置发下一 tile 的 cp.async，
+  不需要 block 同步），算当前 tile + 写回时下一 tile 的读在飞。K=64（KPL=2）走普通 8 B ld/st 进 smem。
+  目的：B300 HBM 延迟 / 带宽比高，"读 → 算 → 写"锁步的 block 波之间 HBM 空转。**pipe_base** = 流水 + base 归约，隔离流水本身的收益。
+- 寄存器（BV=64 KPL=4）：base 128 / tr 150 / pipe 168 / pipe_base 146，均 0 spill 0 stack；3090 上 pipe 因 occupancy 2 → 1 block/SM 略慢 5%。
+- 3090 µs（B=1/8/32/64）：base 8.2/67.8/247.9/491.7，tr 7.8/64.9/246.5/490.7，pipe 7.9/65.3/259.4/518.2，pipe_base 9.0/70.0/258.6/507.6。
+- `gdn_decode_bench --ignored` 一次打印 legacy + 4 变体 + tr/pipe 的 bv16/bv32；B300 上四个 `GDN_DECODE_VARIANT=` 各跑一遍 + nsys 看 `recurrent_decode_*` 项定 Sm100 默认。
+
 ## chunk prefill `ho` tensor core 版 + conv1d 按 token 分块（2026-10-20，性能第 5A 轮）
 
 - 起因：B300 nsys c8-long 的 prefill 步 198 ms 里 `ho_kernel` 65 ms、`conv1d_prefill_kernel` 42 ms、`wy_kernel` 31 ms（GEMM 只 30 ms）。

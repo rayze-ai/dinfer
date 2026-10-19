@@ -14,13 +14,14 @@ int add_f32(const float* a, const float* b, float* out, int64_t n, cudaStream_t 
 
 // ---- 归一化 ----
 // out[t,:] = x[t,:] * rsqrt(mean(x^2) + eps) * w   （bf16 in/out，fp32 累加）
+// layout：线程布局（0 一 block 256 线程一行 / 1 一 warp 一行 / 2 一 block 1024 线程一行），由 `ArchProfile::rmsnorm_layout` 给。
 int gather_rmsnorm_bf16(const void* x, const int32_t* rows, const void* w, void* out, int64_t num_rows,
-                        int64_t hidden, float eps, cudaStream_t stream);
-int rmsnorm_bf16(const void* x, const void* w, void* out, int64_t tokens, int64_t hidden, float eps,
+                        int64_t hidden, float eps, int layout, cudaStream_t stream);
+int rmsnorm_bf16(const void* x, const void* w, void* out, int64_t tokens, int64_t hidden, float eps, int layout,
                  cudaStream_t stream);
 // residual 融合：res[t,:] += x[t,:]; out[t,:] = rmsnorm(res[t,:])。res 原位更新。
 int fused_add_rmsnorm_bf16(const void* x, void* res, const void* w, void* out, int64_t tokens, int64_t hidden,
-                           float eps, cudaStream_t stream);
+                           float eps, int layout, cudaStream_t stream);
 
 // ---- 小消息 one-shot all-reduce（allreduce.cu，对齐 vLLM custom_all_reduce；需 cuda-ipc / P2P）----
 // Signal / RankData 的字节数（Rust 侧按此分配 ipc 区头部 / 设备 RankData）。
