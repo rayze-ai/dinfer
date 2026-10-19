@@ -1,6 +1,6 @@
 // 布局搬运类小算子：列切片拷贝、按 head 的 strided 拷贝、广播拼接。全部 bf16 逐元素。
 #include "common.cuh"
-#include "dinfer_kernels.h"
+#include "kernels.h"
 
 using namespace dinfer;
 

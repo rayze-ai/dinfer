@@ -150,7 +150,7 @@
 
 - 现象：`copy_cols: range` ensure 失败，但调用处参数看起来合理。
 - 根因：`ops.rs` 里 `copy_cols_bf16` 的参数顺序写成 `(src_cols, col0, width, dcol0, dst_cols)`，头文件是 `(src_cols, col0, dst_cols, dcol0, width)`；调用方按头文件传。
-- 解法：包装层参数顺序改成与 `dinfer_kernels.h` 完全一致。
+- 解法：包装层参数顺序改成与 `kernels.h` 完全一致。
 - 如何避免：写包装时直接从头文件复制参数列表；考虑在 ops.rs 里给多 usize 参数的函数用结构体参数（P4 起）。
 - 相关：`crates/kernels/src/ops.rs::copy_cols_bf16`
 

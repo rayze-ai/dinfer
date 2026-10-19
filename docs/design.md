@@ -427,7 +427,7 @@ pub struct DefaultOps { .. }   // 现有 ops.rs 函数的薄包装；impl OpSet
 落地步骤（约 1 天）：① 加 `opset.rs` 与 `DefaultOps`（纯搬运，不改 kernel）；② `layers::nn` 与 `qwen3::model` 换成泛型；③ ref 测试泛型化；④ bench 对比 `DefaultOps` 与直调（预期 0 差异）。GLM/K3 线暂不动（它们直调的 MLA/MoE 入口另起 trait）。
 
 #### 方案 B：外部 `.so`（第三方 kernel 库）
-- 约定 C ABI = 现有 `dinfer_kernels.h` 的 extern "C" 签名（已约定不带项目前缀），**加一个 `abi_version()` 与 `capabilities()`**（返回支持的 head_dim 列表、block_size 约束、dtype）。
+- 约定 C ABI = 现有 `kernels.h` 的 extern "C" 签名（已约定不带项目前缀），**加一个 `abi_version()` 与 `capabilities()`**（返回支持的 head_dim 列表、block_size 约束、dtype）。
 - `ExternOps` 实现 `OpSet`：`libloading::Library::new(path)`，按符号名取函数指针，缺的符号回落到 `DefaultOps`（逐组回落，不是整库）。
 - 典型用途：FlashInfer 的 decode attention（它的 paged layout 与我们一致：`[num_blocks, block_size, Hkv, 2, D]` 需确认 K/V 交错方式，不一致则 `.so` 侧做一次 layout 适配）；自研 CUTLASS GEMM（epilogue 融合）。
 - 风险：`.so` 内部用的 CUDA runtime / 流语义必须接受我们传入的 `cudaStream_t`；不能有自己的全局流或隐式同步。校验：在 `check()` 里跑一次 capture 探针（begin_capture → 调一次 → end_capture），不能 capture 的实现只允许用在 eager 路径（标记 `graph_safe=false`，执行器据此关掉该算子所在步的图）。

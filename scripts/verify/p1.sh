@@ -17,13 +17,13 @@ cargo test -p dinfer-core -- --nocapture </dev/null 2>&1 | grep -E '^test |test 
 
 step "criterion bench (scheduler)"
 # criterion 输出形如：time:   [123.45 µs 125.00 µs 126.80 µs]
-cargo bench -p dinfer-core --bench scheduler -- --warm-up-time 1 --measurement-time 3 </dev/null 2>&1 | tee /tmp/dinfer_bench.log | grep -E 'schedule\+update|time:'
+cargo bench -p dinfer-core --bench scheduler -- --warm-up-time 1 --measurement-time 3 </dev/null 2>&1 | tee /tmp/bench_bin.log | grep -E 'schedule\+update|time:'
 
 step "threshold check (< ${THRESHOLD_US} µs median)"
 python3 - "$THRESHOLD_US" <<'EOF'
 import re, sys
 thr = float(sys.argv[1])
-log = open('/tmp/dinfer_bench.log').read()
+log = open('/tmp/bench_bin.log').read()
 names = re.findall(r'(schedule\+update[^\n]*)\n\s+time:\s+\[([\d.]+) (\S+) ([\d.]+) (\S+) ([\d.]+) (\S+)\]', log)
 if not names:
     print("no bench results parsed"); sys.exit(1)

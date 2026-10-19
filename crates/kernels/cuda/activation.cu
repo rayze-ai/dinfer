@@ -1,5 +1,5 @@
 #include "common.cuh"
-#include "dinfer_kernels.h"
+#include "kernels.h"
 
 using namespace dinfer;
 

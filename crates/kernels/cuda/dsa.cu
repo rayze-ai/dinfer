@@ -9,7 +9,7 @@
 //   scores = relu(q.float() @ k.float()^T * softmax_scale)；index_scores = weights @ scores；causal mask；topk。
 // 真机版（fp8 索引 cache、DeepGEMM fp8_mqa_logits、radix top-k）放 P10。
 #include "common.cuh"
-#include "dinfer_kernels.h"
+#include "kernels.h"
 
 using namespace dinfer;
 

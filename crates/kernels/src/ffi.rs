@@ -1,4 +1,4 @@
-//! `cuda/dinfer_kernels.h` 的 Rust 声明。手写而非 bindgen，保持签名可审计。
+//! `cuda/kernels.h` 的 Rust 声明。手写而非 bindgen，保持签名可审计。
 //! 每个入口返回 cudaError_t 数值（0 = success）。符号名不带项目前缀（项目可能改名）。
 
 #![allow(non_camel_case_types)]
@@ -7,7 +7,7 @@ use std::ffi::c_void;
 
 pub type cudaStream_t = *mut c_void;
 
-#[cfg(not(dinfer_no_nvcc))]
+#[cfg(not(no_nvcc_stub))]
 extern "C" {
     pub fn add_f32(a: *const f32, b: *const f32, out: *mut f32, n: i64, stream: cudaStream_t) -> i32;
 
@@ -651,7 +651,7 @@ extern "C" {
 
 }
 
-#[cfg(dinfer_no_nvcc)]
+#[cfg(no_nvcc_stub)]
 mod stubs {
     use super::*;
     macro_rules! stub {
@@ -717,5 +717,5 @@ mod stubs {
         0
     }
 }
-#[cfg(dinfer_no_nvcc)]
+#[cfg(no_nvcc_stub)]
 pub use stubs::*;

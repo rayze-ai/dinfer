@@ -37,7 +37,7 @@ print(f"| {rate} | {side} | {d['completed']}/{d['num_requests']} | {f(d['output_
 PY
 }
 for x in 1 0; do
-  restart_dinfer "$x"; side="dinfer_xs$x"
+  restart_dinfer "$x"; side="our_xs$x"
   for r in $RATES; do run "$side" http://127.0.0.1:8012 "$r"; row "$OUT/${side}_r${r}.json" "$r" "$side"; done
 done
 for r in $RATES; do run vllm "$V" "$r"; row "$OUT/vllm_r${r}.json" "$r" vllm; done

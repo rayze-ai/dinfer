@@ -7,7 +7,7 @@
 // 线程组织：grid = T，block = 128（= D；一个 warp 处理一个 head 的 D 维中的 32 列，4 warp 一次处理 4 个 head），
 // head 数 H + Hkv 个要 norm+rope，再 Hkv 个 v 只写 cache。D 必须 == 128（Qwen3）；其他 D 由 host 回退到旧多 kernel 路径。
 #include "common.cuh"
-#include "dinfer_kernels.h"
+#include "kernels.h"
 
 using namespace dinfer;
 

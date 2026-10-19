@@ -1,7 +1,7 @@
 // 采样参考 kernel。每行一个 block；vocab 可到 16 万（K3 163840 / GLM 154880）。
 // 目标是正确性与可读性；性能版（radix select、无全排序）留到 P10。
 #include "common.cuh"
-#include "dinfer_kernels.h"
+#include "kernels.h"
 
 using namespace dinfer;
 

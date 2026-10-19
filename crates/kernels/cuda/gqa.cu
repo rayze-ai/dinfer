@@ -14,7 +14,7 @@
 #include <cstdlib>
 #include "common.cuh"
 #include <stdlib.h>
-#include "dinfer_kernels.h"
+#include "kernels.h"
 
 using namespace dinfer;
 

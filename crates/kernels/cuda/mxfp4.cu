@@ -9,7 +9,7 @@
 //
 // 这是**参考路径**（正确性优先，bf16 回退用）：原生 MXFP4 GEMM 见 docs/loops/k3-moe.md 的 TODO。
 #include "common.cuh"
-#include "dinfer_kernels.h"
+#include "kernels.h"
 
 using namespace dinfer;
 

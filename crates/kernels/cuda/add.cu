@@ -1,4 +1,4 @@
-#include "dinfer_kernels.h"
+#include "kernels.h"
 
 namespace {
 __global__ void add_f32_kernel(const float* __restrict__ a, const float* __restrict__ b,

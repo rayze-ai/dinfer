@@ -12,6 +12,6 @@ RUST_LOG=info nohup ./target/release/dinfer serve --model "$R/models/qwen3-0.6b"
   --device "$BASE" "$@" > $LOG 2>&1 &
 for _ in $(seq 1 240); do curl -s -m 2 "http://127.0.0.1:$PORT/health" >/dev/null && break; sleep 0.5; done
 curl -s -m 2 "http://127.0.0.1:$PORT/health" >/dev/null || { echo "serve DOWN:"; sed 's/\x1b\[[0-9;]*m//g' $LOG | grep -iE "error|panick" | tail -5; exit 1; }
-DINFER_URL="http://127.0.0.1:$PORT" bash scripts/verify/bench_compare.sh "$OUT" "$CHANGE" 2>&1 | tail -6 | cut -c1-200
+SERVE_URL="http://127.0.0.1:$PORT" bash scripts/verify/bench_compare.sh "$OUT" "$CHANGE" 2>&1 | tail -6 | cut -c1-200
 pkill -INT -f "dinfer serve .*--port $PORT"; sleep 3; pkill -KILL -f "dinfer serve .*--port $PORT" 2>/dev/null
 echo "--- serve log tail:"; sed 's/\x1b\[[0-9;]*m//g' $LOG | grep -iE "error|panick|step breakdown|cuda graphs|serving" | cut -c1-200 | tail -5

@@ -22,7 +22,7 @@
 // 这里给的是**顺序递归**实现：prefill 与 decode 走同一条路径（varlen + 状态槽），
 // 慢但对拍精确；块级并行（chunk 形式，BT=64）留 v2，见 docs/loops/k3-kda.md。
 #include "common.cuh"
-#include "dinfer_kernels.h"
+#include "kernels.h"
 
 using namespace dinfer;
 

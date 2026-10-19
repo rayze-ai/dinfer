@@ -1,6 +1,6 @@
 // 逐元素小算子：原位加、按行 gather、bf16→f32。
 #include "common.cuh"
-#include "dinfer_kernels.h"
+#include "kernels.h"
 
 using namespace dinfer;
 

@@ -7,7 +7,7 @@
 //
 // paged cache 布局：[num_blocks, block_size, L+R] bf16（与 vLLM concat_and_cache_mla 一致）。
 #include "common.cuh"
-#include "dinfer_kernels.h"
+#include "kernels.h"
 
 using namespace dinfer;
 

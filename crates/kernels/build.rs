@@ -17,10 +17,10 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CUDA_ARCHS");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
-    println!("cargo:rustc-check-cfg=cfg(dinfer_no_nvcc)");
+    println!("cargo:rustc-check-cfg=cfg(no_nvcc_stub)");
 
     if env::var_os("CARGO_FEATURE_NO_NVCC").is_some() {
-        println!("cargo:rustc-cfg=dinfer_no_nvcc");
+        println!("cargo:rustc-cfg=no_nvcc_stub");
         return;
     }
 

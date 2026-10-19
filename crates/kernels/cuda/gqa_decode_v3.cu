@@ -14,7 +14,7 @@
 // 运行时可调参数只从 host 传入（keys_per_split）；模板参数 GROUP 由 host 按 heads/kv_heads 选。
 #include <cstdlib>
 #include "common.cuh"
-#include "dinfer_kernels.h"
+#include "kernels.h"
 
 using namespace dinfer;
 

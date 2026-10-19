@@ -10,7 +10,7 @@
 // 融合版 ar_oneshot_add_rmsnorm：② 的和不落回，直接 res += sum，再对该行做 RMSNorm 写 normed（一 block 一行；
 // hidden 用 grid-stride 行覆盖）。替代 "all-reduce + fused_add_rmsnorm" 两步，省一次 t×h 读写和一次 launch。
 #include "common.cuh"
-#include "dinfer_kernels.h"
+#include "kernels.h"
 
 using namespace dinfer;
 

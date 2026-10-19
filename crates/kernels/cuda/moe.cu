@@ -9,7 +9,7 @@
 //   moe_gather_bf16      按 sorted_tok 把 x[T,H] 行收集到 xg[T*K, H]
 //   moe_scatter_add_bf16 out[tok] += w * y[i]（i 为 sorted 下标）
 #include "common.cuh"
-#include "dinfer_kernels.h"
+#include "kernels.h"
 
 using namespace dinfer;
 
