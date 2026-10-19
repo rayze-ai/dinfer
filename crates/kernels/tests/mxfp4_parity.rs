@@ -128,8 +128,9 @@ fn mxfp4_gemm_all_cases() {
 
 // --------------------------------------------------------------------------- 计时（真形状）
 
-/// 计时：K3 真实专家形状上的 grouped GEMM（`docs/loops/k3-moe.md`）。
-/// w1/w3：3584→3072；w2：3072→3584。E=8 专家 × 每专家 32 token（= 256 pairs，接近一个 decode 批在单层上的量级）。
+/// 计时：真实专家形状（latent MoE 的 w1/w3 与 w2）上的 grouped GEMM；口径见 `docs/loops/k3-moe.md`。
+/// 两个真实形状：`[3072, 3584]`（K=3584）与 `[3584, 3072]`（K=3072）。E=8 专家 × 每专家 32 token
+/// （= 256 pairs，接近一个 decode 批在单层上的量级）。
 /// 同时跑一条「解包成 bf16 + cuBLASLt」的参照，用来看 v1 标量路径离 tensor core 有多远。
 #[test]
 #[ignore]

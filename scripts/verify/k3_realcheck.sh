@@ -12,7 +12,7 @@ export PATH="$CUDA_HOME/bin:$PATH"
 PY="${PY:-python3}"
 OUT="${OUT:-/tmp/mxfp4_real}"
 LAYER="${LAYER:-1}"; EXPERT="${EXPERT:-0}"; W="${W:-1,2,3}"; ROWS_LIMIT="${ROWS_LIMIT:-0}"
-LOG=/tmp/dinfer_mxfp4_realcheck.log
+LOG=/tmp/k3_mxfp4_realcheck.log
 
 if [ "${SKIP_GEN:-0}" = "1" ]; then
   OUT="${REFS_DIR:-$OUT}"
