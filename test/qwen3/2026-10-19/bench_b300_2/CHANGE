@@ -1,0 +1,1 @@
+B4 第 1–2 轮：rmsnorm/silu/qkv_post 向量化、decode splits 32 + 两级预取、merge 寄存器归约
