@@ -1,0 +1,1 @@
+decode CUDA graph（bucket 懒捕获，GRAPH_CAPTURE=eager 启动全捕获）+ GDN fused gate + 独立非默认流
