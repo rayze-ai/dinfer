@@ -125,3 +125,98 @@ fn mxfp4_gemm_all_cases() {
         assert!(max_err / amax <= 1e-2 && cos >= 0.999, "{case}: rel {:.3e} cos {cos:.7}", max_err / amax);
     }
 }
+
+// --------------------------------------------------------------------------- 计时（真形状）
+
+/// 计时：K3 真实专家形状上的 grouped GEMM（`docs/loops/k3-moe.md`）。
+/// w1/w3：3584→3072；w2：3072→3584。E=8 专家 × 每专家 32 token（= 256 pairs，接近一个 decode 批在单层上的量级）。
+/// 同时跑一条「解包成 bf16 + cuBLASLt」的参照，用来看 v1 标量路径离 tensor core 有多远。
+#[test]
+#[ignore]
+fn mxfp4_gemm_bench() {
+    use dinfer_kernels::{ops, Gemm};
+    let dev = Device::new(0).unwrap();
+    let st = dev.default_stream();
+    let e = 8usize;
+    let ntok = 32usize;
+    let group = 32usize;
+
+    for (name, n_out, k_in) in [("w1/w3", 3072usize, 3584usize), ("w2", 3584, 3072)] {
+        let pairs = e * ntok;
+        // 权重用真权重量级的 e8m0 指数 [118,126) 与全 16 种半字节（与 parity case 同口径）。
+        let mut packed = vec![0u8; e * n_out * k_in / 2];
+        for (i, b) in packed.iter_mut().enumerate() {
+            *b = (i as u8) | ((i / 3) as u8) << 4;
+        }
+        let mut scale = vec![0u8; e * n_out * k_in / group];
+        for (i, s) in scale.iter_mut().enumerate() {
+            *s = 118 + (i % 8) as u8;
+        }
+        let x: Vec<bf16> = (0..pairs * k_in).map(|i| bf16::from_f32(((i % 17) as f32 - 8.0) / 64.0)).collect();
+        let off: Vec<i32> = (0..=e).map(|i| (i * ntok) as i32).collect();
+
+        let dwp = st.htod_copy(packed.clone()).unwrap();
+        let dws = st.htod_copy(scale.clone()).unwrap();
+        let dx = st.htod_copy(x.clone()).unwrap();
+        let doff = st.htod_copy(off.clone()).unwrap();
+        let mut dout = st.alloc_zeros::<bf16>(pairs * n_out).unwrap();
+        let tiles = ops::Mxfp4GemmTiles::new(&st, &off, n_out, 16, 64).unwrap();
+        let run = |st: &dinfer_kernels::Stream, out: &mut _| {
+            ops::mxfp4_gemm_grouped(st, &dx, &dwp, &dws, &doff, &tiles, out, k_in, n_out, group).unwrap();
+        };
+        run(&st, &mut dout);
+        st.synchronize().unwrap();
+        let iters = 5;
+        let t0 = std::time::Instant::now();
+        for _ in 0..iters { run(&st, &mut dout); }
+        st.synchronize().unwrap();
+        let ms = t0.elapsed().as_secs_f64() * 1e3 / iters as f64;
+
+        // 参照：解包成 bf16 权重（每专家一份）走 cuBLASLt。解包只做一次，计时单独报。
+        // H2D 在计时外（只算 GPU 侧解包时间，与 mxfp4 grouped 同口径）。
+        let gemm = Gemm::new(&st).unwrap();
+        let dp_e: Vec<_> = (0..e)
+            .map(|ei| st.htod_copy(packed[ei * n_out * k_in / 2..(ei + 1) * n_out * k_in / 2].to_vec()).unwrap())
+            .collect();
+        let ds_e: Vec<_> = (0..e)
+            .map(|ei| st.htod_copy(scale[ei * n_out * k_in / group..(ei + 1) * n_out * k_in / group].to_vec()).unwrap())
+            .collect();
+        let mut wbf: Vec<_> = (0..e).map(|_| st.alloc_uninit::<bf16>(n_out * k_in).unwrap()).collect();
+        let mut deq_run = |st: &dinfer_kernels::Stream| {
+            for ei in 0..e {
+                ops::mxfp4_dequant_bf16(st, &dp_e[ei], &ds_e[ei], &mut wbf[ei], n_out, k_in, group).unwrap();
+            }
+        };
+        deq_run(&st);
+        st.synchronize().unwrap();
+        let t1 = std::time::Instant::now();
+        for _ in 0..iters { deq_run(&st); }
+        st.synchronize().unwrap();
+        let ms_deq = t1.elapsed().as_secs_f64() * 1e3 / iters as f64;
+
+        // 每专家一次 bf16 GEMM（M=ntok）。x 按专家切成独立缓冲（拷贝在计时外）。
+        let xs: Vec<_> = (0..e)
+            .map(|ei| st.htod_copy(x[ei * ntok * k_in..(ei + 1) * ntok * k_in].to_vec()).unwrap())
+            .collect();
+        let mut o_e = st.alloc_uninit::<bf16>(ntok * n_out).unwrap();
+        let mut g_run = |st: &dinfer_kernels::Stream| {
+            for ei in 0..e {
+                gemm.forward_bf16(&xs[ei], &wbf[ei], None, &mut o_e, ntok, n_out, k_in).unwrap();
+            }
+            let _ = st;
+        };
+        g_run(&st);
+        st.synchronize().unwrap();
+        let t2 = std::time::Instant::now();
+        for _ in 0..iters { g_run(&st); }
+        st.synchronize().unwrap();
+        let ms_gemm = t2.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        let _ = &mut wbf;
+
+        println!(
+            "  {name:<6} N={n_out} K={k_in} E={e} pairs={pairs} tiles={}: mxfp4 grouped {ms:.2} ms | \
+             解包 bf16 {ms_deq:.1} ms（一次） | bf16 cuBLASLt ×{e} {ms_gemm:.2} ms",
+            tiles.num_tiles
+        );
+    }
+}
