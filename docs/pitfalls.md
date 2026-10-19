@@ -505,9 +505,8 @@
 - 根因：JumpServer 的"连接 token"是一次性凭据（4090 那台靠公钥 + 常驻 ControlMaster 才稳定，掩盖了这一点）。
 - 解法 / 避免：拿到 token **第一件事**就是 `remote_b300.sh up` 建常驻连接（ControlPersist），之后全部 `run` 复用；不要先单独 ssh 一下"试试"。长期方案：让用户在 JumpServer 上给账号配公钥，或给 `yaochen` 账号固定密码走资产形式登录。
 
-## 2026-10-19 bench_compare.sh 在无 docker 机器上 exit 141
-- 现象：B300 上 `bench_compare.sh` 起了 serve、写了 CHANGE / GPU 就退出，exit 141（SIGPIPE），没有任何 json。
-- 根因：summary.md 头部一行用 `$(docker inspect vllm-qwen3 ...)` 取 vLLM 镜像 tag；机器没有 docker，`set -euo pipefail` 下子 shell 失败 + 管道断开直接终止脚本。
-- 解法：改成 `docker inspect || curl /version || echo unknown` 三级回退。
-- 避免：脚本里"只为了打印"的外部命令一律 `|| true` 或给默认值；新机器第一次跑 verify 脚本先 `bash -x` 看前 30 行。
-
+## 2026-10-19 bench_compare.sh 在 8 卡机器上 exit 141（SIGPIPE）
+- 现象：B300 上 `bench_compare.sh` 起了 serve、写了 CHANGE / GPU 就退出，exit 141，没有任何 json；`bash -x` 停在 `gpu_tag` 第二次调用的 `nvidia-smi --query-gpu=name | head -1`。
+- 根因：8 卡可见时 `nvidia-smi` 输出 8 行，`head -1` 读完一行关管道，`nvidia-smi` 收 SIGPIPE 退出码 141，`set -o pipefail` 下整条命令失败 → `set -e` 退出。4090 Pod 只可见 1 张卡从未触发。第一次猜是 `docker inspect`（没先 `bash -x`）——猜错一轮。
+- 解法：`nvidia-smi -i 0 --query-gpu=name`（只查一张卡，不再 `| head`）；`docker inspect` 那行顺带加了 `/version` 回退。
+- 避免：`pipefail` 脚本里 `<多行命令> | head -N` 一律改成让生产者只产 N 行，或 `|| true`；新机器首次跑 verify 脚本**先 `bash -x`**，不要猜。

@@ -29,7 +29,7 @@
 - 无 docker / 外网；containerd `k8s.io` 命名空间已缓存 `docker.io/vllm/vllm-openai:nightly`（**vllm 0.29.1rc1.dev573**，torch 2.13 cu130，B300 sm_103 可跑）与 `:kimi-k3`、`ghcr.io/novitalabs/vllm:glm53-*`。镜像站 image.paigpu.com / ppinfra 对 `v0.31.0` manifest 不响应，所以基线版本是 **nightly 0.29.1**，不是 4090 上的 0.31.0 —— 跨卡比值不可直接对照，CSV `baseline` 列写 `vllm-0.29.1rc1`。
 - `nerdctl` 默认桥接网络缺 CNI bridge 插件 → `--net host`；GPU `--gpus device=N`。脚本 `scripts/dev/vllm_nerdctl.sh run|wait|smoke|logs|stop|ps`。**每次 bench 完 `stop`**（删容器，不删机器原有镜像）。
 - 占卡约定：vLLM 基线 GPU 7（`:8013`）；dinfer single / tpN 从 GPU 0 起；lm_head 列切 bench 用 GPU 4–6。
-- 首跑 `bench_compare.sh` 在 B300 exit 141：summary 头部那行 `docker inspect ...` 在无 docker 机器上失败，`set -euo pipefail` 下整条管道被 SIGPIPE 打死，目录里只剩 CHANGE / GPU。已改成 docker → `/version` → unknown 三级回退。`bench_b300_1`（dinfer GPU 6 vs vLLM GPU 7）重跑中。
+- `bench_compare.sh` 在 B300 两次 exit 141：真因是 8 卡下 `nvidia-smi --query-gpu=name | head -1` 触发 SIGPIPE（pipefail），已改 `-i 0`（pitfalls）；`docker inspect` 那行顺带加 `/version` 回退。`bench_b300_1`（dinfer GPU 6 vs vLLM GPU 7）第三次跑。
 
 ## 环境
 
