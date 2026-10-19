@@ -4,7 +4,7 @@
 //! 这里直接调用 nvcc 生成 .o，再用 `cc::Build` 只做归档（`ar`）。
 //!
 //! 环境变量：
-//! - `CUDA_ARCHS`：逗号分隔的 sm 列表，默认 `86,89,90`（3090 / 4090 / H100）。
+//! - `CUDA_ARCHS`：逗号分隔的 sm 列表，默认 `86,89,90`（3090 / 4090 / H100）；B300 用 `103`（Blackwell Ultra，远端 env.sh 设）。
 //! - `CUDA_HOME` / `CUDA_PATH`：CUDA 安装目录，默认 `/usr/local/cuda`。
 //! - feature `no-nvcc`：跳过编译，kernel 入口以 stub 形式存在（调用即 panic）。
 

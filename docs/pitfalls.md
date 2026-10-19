@@ -499,3 +499,8 @@
 - 解法：模型相关的量一律走 `ChatBackend` 钩子（`grammar_factory / tool_call_tags / grammar_render_extra`）由 `models/<m>/service.rs` 提供；模型相关测试放 `models/<m>/tests/`。
 - 避免：给子代理的 brief 里固定加一句"`crates/` 只放模型无关代码，模型名 / token id / 模板变量名 / 模型路径出现在 `crates/` 即为错误"；收尾 review 用 `grep -rniE "qwen|glm|kimi|<tool_call>|<think>|15164[35]|151936" crates/` 自查（注释里引用为例子可留）。
 
+
+## 2026-10-19 JumpServer 连接 token 一次性
+- 现象：B300 机器 token 第一次 ssh 成功，几分钟后同 token 再 ssh `Permission denied (password,publickey)`；第二个新 token 也直接被拒（可能是密码与 token 不配对，或 token 在生成后被别处用过）。
+- 根因：JumpServer 的"连接 token"是一次性凭据（4090 那台靠公钥 + 常驻 ControlMaster 才稳定，掩盖了这一点）。
+- 解法 / 避免：拿到 token **第一件事**就是 `remote_b300.sh up` 建常驻连接（ControlPersist），之后全部 `run` 复用；不要先单独 ssh 一下"试试"。长期方案：让用户在 JumpServer 上给账号配公钥，或给 `yaochen` 账号固定密码走资产形式登录。
