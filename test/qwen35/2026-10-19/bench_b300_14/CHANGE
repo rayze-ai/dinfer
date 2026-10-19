@@ -1,0 +1,1 @@
+第 7 轮：GDN decode kernel tr 变体 + bv32、rmsnorm block1024、gated_rmsnorm warp（B300 实测定默认）

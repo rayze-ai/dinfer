@@ -155,3 +155,15 @@ bench_b300_13,2026-10-19,激活缓冲全模型共享一套（ActScratch，170 GB
 bench_b300_13,2026-10-19,激活缓冲全模型共享一套（ActScratch，170 GB → 2.8 GB）；预算 16384,c8-long,out_tok_per_s,509.995,557.589,0.915,0.1,higher,main,B300,vllm,dinfer,qwen35
 bench_b300_13,2026-10-19,激活缓冲全模型共享一套（ActScratch，170 GB → 2.8 GB）；预算 16384,c8-long,ttft_p50_ms,473.977,407.576,1.163,0.2,lower,main,B300,vllm,dinfer,qwen35
 bench_b300_13,2026-10-19,激活缓冲全模型共享一套（ActScratch，170 GB → 2.8 GB）；预算 16384,c8-long,tpot_p50_ms,12.075,11.239,1.074,-0.0,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_14,2026-10-19,第 7 轮：GDN decode kernel tr 变体 + bv32、rmsnorm block1024、gated_rmsnorm warp（B300 实测定默认）,c1,out_tok_per_s,94.907,94.484,1.004,3.0,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_14,2026-10-19,第 7 轮：GDN decode kernel tr 变体 + bv32、rmsnorm block1024、gated_rmsnorm warp（B300 实测定默认）,c1,ttft_p50_ms,21.419,47.355,0.452,3.1,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_14,2026-10-19,第 7 轮：GDN decode kernel tr 变体 + bv32、rmsnorm block1024、gated_rmsnorm warp（B300 实测定默认）,c1,tpot_p50_ms,10.449,10.295,1.015,2.9,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_14,2026-10-19,第 7 轮：GDN decode kernel tr 变体 + bv32、rmsnorm block1024、gated_rmsnorm warp（B300 实测定默认）,c8,out_tok_per_s,682.430,671.113,1.017,4.4,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_14,2026-10-19,第 7 轮：GDN decode kernel tr 变体 + bv32、rmsnorm block1024、gated_rmsnorm warp（B300 实测定默认）,c8,ttft_p50_ms,81.889,106.656,0.768,3.2,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_14,2026-10-19,第 7 轮：GDN decode kernel tr 变体 + bv32、rmsnorm block1024、gated_rmsnorm warp（B300 实测定默认）,c8,tpot_p50_ms,11.142,11.190,0.996,4.2,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_14,2026-10-19,第 7 轮：GDN decode kernel tr 变体 + bv32、rmsnorm block1024、gated_rmsnorm warp（B300 实测定默认）,c32,out_tok_per_s,2086.987,2147.778,0.972,5.4,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_14,2026-10-19,第 7 轮：GDN decode kernel tr 变体 + bv32、rmsnorm block1024、gated_rmsnorm warp（B300 实测定默认）,c32,ttft_p50_ms,258.240,262.988,0.982,6.0,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_14,2026-10-19,第 7 轮：GDN decode kernel tr 变体 + bv32、rmsnorm block1024、gated_rmsnorm warp（B300 实测定默认）,c32,tpot_p50_ms,13.408,12.903,1.039,5.1,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_14,2026-10-19,第 7 轮：GDN decode kernel tr 变体 + bv32、rmsnorm block1024、gated_rmsnorm warp（B300 实测定默认）,c8-long,out_tok_per_s,530.886,557.027,0.953,4.1,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_14,2026-10-19,第 7 轮：GDN decode kernel tr 变体 + bv32、rmsnorm block1024、gated_rmsnorm warp（B300 实测定默认）,c8-long,ttft_p50_ms,456.754,412.808,1.106,3.6,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_14,2026-10-19,第 7 轮：GDN decode kernel tr 变体 + bv32、rmsnorm block1024、gated_rmsnorm warp（B300 实测定默认）,c8-long,tpot_p50_ms,11.591,11.240,1.031,4.0,lower,main,B300,vllm,dinfer,qwen35
