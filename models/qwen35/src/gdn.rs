@@ -260,6 +260,7 @@ impl GdnLayer {
                 Some(&meta.state_indices.data),
                 Some(&meta.has_initial.data),
                 meta.num_reqs,
+                t,
                 conv_dim,
                 width,
                 width - 1,

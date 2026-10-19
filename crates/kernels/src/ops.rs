@@ -2703,12 +2703,41 @@ pub fn gdn_conv1d_prefill(
     state_indices: Option<&CudaSlice<i32>>,
     has_initial: Option<&CudaSlice<i32>>,
     num_seqs: usize,
+    tokens: usize,
     dim: usize,
     width: usize,
     state_len: usize,
     act: GdnAct,
 ) -> Result<()> {
+    let rows = gdn_conv_rows(stream, tokens, dim, width, state_len);
+    gdn_conv1d_prefill_with(
+        stream, x, w, out, conv_state, cu_seqlens, state_indices, has_initial, num_seqs, tokens, dim, width, state_len,
+        act, rows,
+    )
+}
+
+/// `gdn_conv1d_prefill` 指定分块行数：`rows_per_block == 0` 走老 kernel（每 (seq, 通道) 一线程串行扫 T），
+/// 否则按 token 分块（`docs/loops/qwen35-perf.md` 第 5A 轮）。对拍 / 计时用。
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_conv1d_prefill_with(
+    stream: &Stream,
+    x: &CudaSlice<bf16>,
+    w: &CudaSlice<bf16>,
+    out: &mut CudaSlice<bf16>,
+    conv_state: &mut CudaSlice<bf16>,
+    cu_seqlens: &CudaSlice<i32>,
+    state_indices: Option<&CudaSlice<i32>>,
+    has_initial: Option<&CudaSlice<i32>>,
+    num_seqs: usize,
+    tokens: usize,
+    dim: usize,
+    width: usize,
+    state_len: usize,
+    act: GdnAct,
+    rows_per_block: usize,
+) -> Result<()> {
     ensure!(width >= 1 && width <= 8, "gdn_conv1d_prefill: width {width} 超出 [1,8]");
+    ensure!(x.len() >= tokens * dim, "gdn_conv1d_prefill: x 容量 < tokens·dim");
     ensure!(state_len >= width.saturating_sub(1), "gdn_conv1d_prefill: state_len {state_len} < width-1");
     ensure!(cu_seqlens.len() >= num_seqs + 1, "gdn_conv1d_prefill: cu_seqlens");
     ensure!(w.len() >= dim * width && out.len() >= x.len(), "gdn_conv1d_prefill: w/out");
@@ -2731,6 +2760,8 @@ pub fn gdn_conv1d_prefill(
                 width as i64,
                 state_len as i64,
                 act.code(),
+                tokens as i64,
+                rows_per_block as i64,
                 stream.raw() as ffi::cudaStream_t,
             )
         },
@@ -2974,6 +3005,73 @@ fn gdn_decode_bv(stream: &Stream, base_blocks: usize, k_dim: usize, v_dim: usize
     crate::arch::ArchProfile::gdn_decode_bv(sm, base_blocks, k_dim, v_dim)
 }
 
+/// chunk prefill `ho` 的 V 分片 BV：默认 `ArchProfile::gdn_chunk_ho_bv`；`GDN_CHUNK_HO=legacy` 回老 fp32 kernel（返回 0）；
+/// `GDN_CHUNK_HO_BV=<16|32>` 覆盖。
+fn gdn_chunk_ho_bv(stream: &Stream, base_blocks: usize, k_dim: usize, v_dim: usize) -> usize {
+    use std::sync::OnceLock;
+    static MODE: OnceLock<(bool, Option<usize>)> = OnceLock::new();
+    static SM: OnceLock<usize> = OnceLock::new();
+    let (legacy, over) = *MODE.get_or_init(|| {
+        let legacy = matches!(std::env::var("GDN_CHUNK_HO").as_deref(), Ok("legacy"));
+        let over = std::env::var("GDN_CHUNK_HO_BV").ok().and_then(|s| s.parse().ok());
+        if legacy || over.is_some() {
+            tracing::info!(legacy, ?over, "gdn chunk ho kernel 由环境变量覆盖");
+        }
+        (legacy, over)
+    });
+    if legacy {
+        return 0;
+    }
+    if let Some(bv) = over {
+        if matches!(bv, 16 | 32) && v_dim % bv == 0 {
+            return bv;
+        }
+    }
+    let sm = *SM.get_or_init(|| stream.device().sm_count().unwrap_or(1));
+    crate::arch::ArchProfile::gdn_chunk_ho_bv(sm, base_blocks, k_dim, v_dim)
+}
+
+/// chunk prefill `wy` 走 tensor core 版的条件：K ∈ {64,128,256} 且 V % 8 == 0；`GDN_CHUNK_WY=legacy` 回老 fp32 kernel。
+fn gdn_chunk_wy_mma(k_dim: usize, v_dim: usize) -> bool {
+    use std::sync::OnceLock;
+    static LEGACY: OnceLock<bool> = OnceLock::new();
+    let legacy = *LEGACY.get_or_init(|| {
+        let l = matches!(std::env::var("GDN_CHUNK_WY").as_deref(), Ok("legacy"));
+        if l {
+            tracing::info!("gdn chunk wy kernel 由环境变量回退到 fp32 版");
+        }
+        l
+    });
+    !legacy && matches!(k_dim, 64 | 128 | 256) && v_dim % 8 == 0
+}
+
+/// conv1d prefill 的按 token 分块行数：默认 `ArchProfile::gdn_conv_rows`；`CONV_PREFILL=legacy` 回老 kernel（返回 0）；
+/// `CONV_PREFILL_ROWS=<n>` 覆盖。
+fn gdn_conv_rows(stream: &Stream, tokens: usize, dim: usize, width: usize, state_len: usize) -> usize {
+    use std::sync::OnceLock;
+    static MODE: OnceLock<(bool, Option<usize>)> = OnceLock::new();
+    static SM: OnceLock<usize> = OnceLock::new();
+    let (legacy, over) = *MODE.get_or_init(|| {
+        let legacy = matches!(std::env::var("CONV_PREFILL").as_deref(), Ok("legacy"));
+        let over = std::env::var("CONV_PREFILL_ROWS").ok().and_then(|s| s.parse().ok());
+        if legacy || over.is_some() {
+            tracing::info!(legacy, ?over, "conv1d prefill kernel 由环境变量覆盖");
+        }
+        (legacy, over)
+    });
+    // 新 kernel 的形状前提：width ∈ [2,4] 且 state_len == width-1（qwen35 形状；其余走老版）
+    if legacy || !(2..=4).contains(&width) || state_len != width - 1 {
+        return 0;
+    }
+    if let Some(r) = over {
+        if r >= width - 1 {
+            return r;
+        }
+    }
+    let sm = *SM.get_or_init(|| stream.device().sm_count().unwrap_or(1));
+    crate::arch::ArchProfile::gdn_conv_rows(sm, tokens, dim, width)
+}
+
 /// `gdn_recurrent` 的 V 维切分数：默认由 `ArchProfile::gdn_recurrent_vsplit`（按 SM 数把 block 数补到 ≥ SM 数，
 /// 只取 V 的约数、上限 4）；`GDN_VSPLIT=<n>` 环境变量覆盖（对拍 / 回退用，须整除 V）。SM 数按首个 stream 的设备缓存一次。
 fn gdn_recurrent_vsplit(stream: &Stream, base_blocks: usize, v_dim: usize) -> usize {
@@ -3136,6 +3234,26 @@ pub fn gdn_chunk_wy(
     k_dim: usize,
     v_dim: usize,
 ) -> Result<()> {
+    let mma = gdn_chunk_wy_mma(k_dim, v_dim);
+    gdn_chunk_wy_with(stream, mixed_qkv, beta, cu_seqlens, plan, sc, tokens, heads_k, heads_v, k_dim, v_dim, mma)
+}
+
+/// `gdn_chunk_wy` 指定实现：`mma = true` 走 tensor core 版（第 5A 轮），否则老 fp32 版。对拍 / 计时用。
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_chunk_wy_with(
+    stream: &Stream,
+    mixed_qkv: &CudaSlice<bf16>,
+    beta: &CudaSlice<f32>,
+    cu_seqlens: &CudaSlice<i32>,
+    plan: &KdaChunkPlan,
+    sc: &mut GdnChunkScratch,
+    tokens: usize,
+    heads_k: usize,
+    heads_v: usize,
+    k_dim: usize,
+    v_dim: usize,
+    mma: bool,
+) -> Result<()> {
     ensure!(sc.fits(tokens, plan.num_chunks), "gdn_chunk_wy: scratch 容量");
     ensure!(beta.len() >= tokens * heads_v, "gdn_chunk_wy: beta");
     // SAFETY: 容量已校验。
@@ -3159,6 +3277,7 @@ pub fn gdn_chunk_wy(
                 k_dim as i64,
                 v_dim as i64,
                 plan.bt as i64,
+                mma as i64,
                 stream.raw() as _,
             )
         },
@@ -3181,6 +3300,27 @@ pub fn gdn_chunk_ho(
     heads_v: usize,
     k_dim: usize,
     v_dim: usize,
+) -> Result<()> {
+    let bv = gdn_chunk_ho_bv(stream, plan.num_seqs * heads_v, k_dim, v_dim);
+    gdn_chunk_ho_with(stream, cu_seqlens, plan, sc, out, state, state_indices, tokens, heads_k, heads_v, k_dim, v_dim, bv)
+}
+
+/// `gdn_chunk_ho` 指定 V 分片：`ho_bv ∈ {16, 32}` 走 tensor core 版（第 5A 轮），`0` 走老 fp32 版。对拍 / 计时用。
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_chunk_ho_with(
+    stream: &Stream,
+    cu_seqlens: &CudaSlice<i32>,
+    plan: &KdaChunkPlan,
+    sc: &GdnChunkScratch,
+    out: &mut CudaSlice<bf16>,
+    state: &mut CudaSlice<f32>,
+    state_indices: Option<&CudaSlice<i32>>,
+    tokens: usize,
+    heads_k: usize,
+    heads_v: usize,
+    k_dim: usize,
+    v_dim: usize,
+    ho_bv: usize,
 ) -> Result<()> {
     let per_slot = heads_v * v_dim * k_dim;
     ensure!(state.len() >= per_slot, "gdn_chunk_ho: state");
@@ -3210,6 +3350,7 @@ pub fn gdn_chunk_ho(
                 k_dim as i64,
                 v_dim as i64,
                 plan.bt as i64,
+                ho_bv as i64,
                 stream.raw() as _,
             )
         },

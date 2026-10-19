@@ -71,6 +71,30 @@
   `proc_state`，期望状态只存 K 维 / V 维求和）；`gdn_decode_bench --ignored` 给老 vs 新 µs（B ∈ {1, 8, 32, 64}）。
 - 3090：B=1 48 → 7.9 µs，B=8 272 → 66，B=32 1014 → 246，B=64 1947 → 490（≈ 4×；B=32 已到带宽下限 214 µs 的 87%）。
 
+## chunk prefill `ho` tensor core 版 + conv1d 按 token 分块（2026-10-20，性能第 5A 轮）
+
+- 起因：B300 nsys c8-long 的 prefill 步 198 ms 里 `ho_kernel` 65 ms、`conv1d_prefill_kernel` 42 ms、`wy_kernel` 31 ms（GEMM 只 30 ms）。
+  fp32 CUDA core 算 ho 的下限就是 ~0.65 ms/层（23 GFMA ÷ 36 TFMA/s），≤ 150 µs 只能上 tensor core；conv 是每 (seq, 通道) 线程串行扫 T，
+  T=1100 一步一次 L2 往返 ≈ 0.6 µs × 1100 = 0.7 ms，是延迟链不是带宽。
+- `ho_mma_kernel<BT=64, BV, K>`（`gdn_chunk.cu`）：block = (seq, v 头, BV 行 V 分片)，4 warp；每 chunk 顺序
+  (2) wh = w·hᵀ → v' = u − wh 转置写 svT[v][i] bf16 → (1)+(3) o = (q·hᵀ)·exp2(gc) + Aq·v' → (4) h = h·exp2(gc_last) + v'ᵀ·kg。
+  mma 操作数：A 行主序走 `ldmatrix.x4`；B 对 h / v'ᵀ 是 [n][k] 直接 32 位读（col-major B）；kg 是 [k=j][n] 行主序走 `ldmatrix.x4.trans`
+  （一条取相邻两个 8 列 tile，所以每 warp 的 h tile 成对）。h fp32 主本在寄存器（BV=32,K=128 → 每 warp 8 tile = 32 寄存器），
+  bf16 影子在 smem 每 chunk 末重写。数值口径与 fla Triton 一致（h / w / kg / Aq / v' 过 bf16，fp32 累加）；
+  parity 实测 out max_err 2.4e-4、state rel 3.7–4.3e-3（老 fp32 版 1.2e-4 / 2.0–2.5e-3），golden 不变。
+- `conv1d_prefill_blocked_kernel<EPT=8|1, W∈{2,3,4}>`（`gdn.cu`）：block = (rows_per_block 行, 2048 通道)。跨 block 的 state 读写顺序
+  没有保证，所以规定 **旧状态只被含 bos 的 block 读、新状态也只由它写**（新状态 = 序列最后 W-1 个输入，从只读的 x 取，len < W-1 时用旧状态补），
+  该 block 额外接管 [bos, bos+W-1) 几行；后续 block 从 max(r0, bos+W-1) 起，halo 全在 x 内。前提 rows_per_block ≥ W-1（host 保证）。
+  width ∉ [2,4] 或 state_len ≠ W-1 回老 kernel。
+- 调优数值全在 host：`ArchProfile::gdn_chunk_ho_bv`（BV 候选 32/16，取最大的仍能铺 ≥ 2 波 SM 的）、`ArchProfile::gdn_conv_rows`
+  （行候选 256/128/64/32，同规则）；环境变量只做覆盖 / 回退：`GDN_CHUNK_HO=legacy`、`GDN_CHUNK_HO_BV=`、`CONV_PREFILL=legacy`、`CONV_PREFILL_ROWS=`。
+- `wy_mma_kernel<BT=64, K>`：block = (chunk, v 头)，4 warp 各持 16 行。1) k·kᵀ / q·kᵀ mma → 乘衰减 / β 写 fp32 sM（A）与 aq_out；
+  2) M = (I+A)⁻¹ 原地前代 fp32（每列一线程、64 步、每步两次 sync；**线程数 128 ≠ 列数 64，多出的线程只参与同步**——
+  第一版按 2 列/线程写越界进 sgc/sb，u/w 全 0、kg 没衰减，`gdn_chunk_wy_mma_vs_legacy` 抓到），同时写 bf16 影子 sM16；
+  3) u = M·(β⊙v)、4) w = M·(β⊙k⊙exp2 gc) 按 64 列一片把右操作数转 bf16 进 stage，B 走 `ldmatrix.trans`；kg 在 4) 的装载里顺手写。
+  只有 M 与 β⊙v / β⊙k 过 bf16（q/k 本来就是 bf16），parity state rel 5.3–6.7e-3（容差 1e-2）。
+- 3090 数字见 `qwen35-perf.md` 第 5A 行。未做：wy 前代分块（现在是 wy 的大头）、conv 多序列时通道维更细、ho 装载 cp.async 双缓冲。
+
 ## 环境备注（踩过的坑）
 
 - 4090 的 GPU 3–5 常被他人进程占满（~23 GB / 24 GB）：先看 `nvidia-smi --query-gpu=index,memory.used` 再选卡。

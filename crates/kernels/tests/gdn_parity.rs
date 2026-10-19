@@ -130,20 +130,41 @@ fn conv_case(tag: &str, k: usize, v: usize, h: usize, hv: usize, width: usize) {
 
     let dx = up_bf16(&st, &x);
     let dw = up_bf16(&st, &w);
-    let mut dst = st.htod_copy(st_in.iter().map(|&x| bf16::from_f32(x)).collect::<Vec<_>>()).unwrap();
     let dcu = st.htod_copy(cu).unwrap();
     let dhi = st.htod_copy(hi).unwrap();
     let dsi = st.htod_copy(si).unwrap();
     let mut dout = st.alloc_uninit::<bf16>(x.len()).unwrap();
+    let tokens = xs[0];
+    // 老 kernel（rows=0）与新按 token 分块 kernel（rows ∈ {width-1（极端小块，逼出跨块 halo / 状态补齐）, 32, 默认}）都对参考
+    let mut variants: Vec<(String, usize)> = vec![("legacy".into(), 0), (format!("rows{}", width - 1), width - 1), ("rows32".into(), 32)];
+    variants.push(("default".into(), usize::MAX));
+    for (vname, rows) in variants {
+        let mut dst = st.htod_copy(st_in.iter().map(|&x| bf16::from_f32(x)).collect::<Vec<_>>()).unwrap();
+        if rows == usize::MAX {
+            ops::gdn_conv1d_prefill(
+                &st, &dx, &dw, &mut dout, &mut dst, &dcu, Some(&dsi), Some(&dhi), num_seqs, tokens, dim, width,
+                state_len, GdnAct::Silu,
+            )
+            .unwrap();
+        } else {
+            ops::gdn_conv1d_prefill_with(
+                &st, &dx, &dw, &mut dout, &mut dst, &dcu, Some(&dsi), Some(&dhi), num_seqs, tokens, dim, width,
+                state_len, GdnAct::Silu, rows,
+            )
+            .unwrap();
+        }
+        st.synchronize().unwrap();
+        assert_close(&format!("conv1d_{tag}/{vname}/out"), &st.dtoh_sync_copy(&dout).unwrap(), &want, 1e-2, 0.999);
+        let got_st: Vec<f32> = st.dtoh_sync_copy(&dst).unwrap().iter().map(|b| b.to_f32()).collect();
+        assert_close_f32(&format!("conv1d_{tag}/{vname}/state"), &got_st, &want_st, 1e-2, 0.999);
+    }
+    let mut dst = st.htod_copy(st_in.iter().map(|&x| bf16::from_f32(x)).collect::<Vec<_>>()).unwrap();
     ops::gdn_conv1d_prefill(
-        &st, &dx, &dw, &mut dout, &mut dst, &dcu, Some(&dsi), Some(&dhi), num_seqs, dim, width,
+        &st, &dx, &dw, &mut dout, &mut dst, &dcu, Some(&dsi), Some(&dhi), num_seqs, tokens, dim, width,
         state_len, GdnAct::Silu,
     )
     .unwrap();
     st.synchronize().unwrap();
-    assert_close(&format!("conv1d_{tag}/out"), &st.dtoh_sync_copy(&dout).unwrap(), &want, 1e-2, 0.999);
-    let got_st: Vec<f32> = st.dtoh_sync_copy(&dst).unwrap().iter().map(|b| b.to_f32()).collect();
-    assert_close_f32(&format!("conv1d_{tag}/state"), &got_st, &want_st, 1e-2, 0.999);
 
     // update 连续 4 步（decode）：状态继续累积
     let udir = format!("conv_update_{tag}");
@@ -391,6 +412,8 @@ fn run_gdn_chunk(
     hv: usize,
     k: usize,
     v: usize,
+    ho_bv: usize,
+    wy_mma: bool,
 ) -> dinfer_kernels::cudarc::driver::CudaSlice<bf16> {
     let plan = ops::KdaChunkPlan::new(st, cu, BT).unwrap();
     let mut sc = ops::GdnChunkScratch::new(st, tokens, h, hv, k, v, plan.num_chunks, BT).unwrap();
@@ -401,8 +424,8 @@ fn run_gdn_chunk(
     let scale = (k as f32).powf(-0.5);
     ops::gdn_gate(st, a, b, a_log, dt_bias, &mut g, &mut beta, tokens, hv).unwrap();
     ops::gdn_chunk_prep(st, mixed, &g, &dcu, &plan, &mut sc, tokens, h, hv, k, v, scale).unwrap();
-    ops::gdn_chunk_wy(st, mixed, &beta, &dcu, &plan, &mut sc, tokens, h, hv, k, v).unwrap();
-    ops::gdn_chunk_ho(st, &dcu, &plan, &sc, &mut out, state, None, tokens, h, hv, k, v).unwrap();
+    ops::gdn_chunk_wy_with(st, mixed, &beta, &dcu, &plan, &mut sc, tokens, h, hv, k, v, wy_mma).unwrap();
+    ops::gdn_chunk_ho_with(st, &dcu, &plan, &sc, &mut out, state, None, tokens, h, hv, k, v, ho_bv).unwrap();
     st.synchronize().unwrap();
     out
 }
@@ -429,14 +452,20 @@ fn chunk_case(dir: &str, k: usize, v: usize, h: usize, hv: usize) {
     assert_eq!(ms[1], 2 * h * k + hv * v, "{dir}: mixed 宽度与形状参数不符");
     let dal = st.htod_copy(a_log).unwrap();
     let ddb = st.htod_copy(dt_bias).unwrap();
-    let mut dstate = st.htod_copy(st_in).unwrap();
     let dm = up_bf16(&st, &mixed);
     let da = up_bf16(&st, &a);
     let db = up_bf16(&st, &b);
-    let out = run_gdn_chunk(&st, &dm, &da, &db, &dal, &ddb, &mut dstate, &cu, tokens, h, hv, k, v);
-    assert_close(&format!("{dir}/out"), &st.dtoh_sync_copy(&out).unwrap(), &want, 5e-4, 0.9999);
-    let got_st: Vec<f32> = st.dtoh_sync_copy(&dstate).unwrap();
-    assert_close_rel(&format!("{dir}/state"), &got_st, &want_st, 5e-3, 0.9999);
+    // ho：老 fp32 版（bv=0）与 tensor core 版（bv 16 / 32，第 5A 轮）都对参考。tensor core 版 h / w / kg / Aq / v' 过 bf16，
+    // 容差放宽到 out 2e-3 / state rel 1e-2（fla 同口径；参考是 fp32 顺序递归）。
+    // (wy 实现, ho bv, out 容差, state rel 容差)：老 fp32 全链；新 ho；新 wy + 新 ho（默认路径）
+    for (wy, bv, tol_o, tol_s) in [(false, 0usize, 5e-4f32, 5e-3f32), (false, 16, 2e-3, 1e-2), (false, 32, 2e-3, 1e-2), (true, 32, 2e-3, 1e-2), (true, 16, 2e-3, 1e-2)] {
+        let mut dstate = st.htod_copy(st_in.clone()).unwrap();
+        let out = run_gdn_chunk(&st, &dm, &da, &db, &dal, &ddb, &mut dstate, &cu, tokens, h, hv, k, v, bv, wy);
+        let tag = format!("{dir}/wy{}ho{bv}", if wy { "mma" } else { "32" });
+        assert_close(&format!("{tag}/out"), &st.dtoh_sync_copy(&out).unwrap(), &want, tol_o, 0.9999);
+        let got_st: Vec<f32> = st.dtoh_sync_copy(&dstate).unwrap();
+        assert_close_rel(&format!("{tag}/state"), &got_st, &want_st, tol_s, 0.9999);
+    }
 }
 
 #[test]
@@ -457,71 +486,151 @@ fn gdn_chunk_qwen_shape() {
     chunk_case("chunk_qwen", 128, 128, 16, 48);
 }
 
-/// 计时：27B 形状 T=1024 / H=16 HV=48 / K=V=128，顺序递归 vs chunk 全链（都含 gate）。
-/// 数字记到 `docs/loops/qwen35-perf.md` 记录表。门槛：chunk ≤ 顺序 1/5。
+/// wy 老 fp32 版 vs tensor core 版：直接比 scratch 的 aq / u / w / kg（定位用）。
+#[test]
+#[ignore]
+fn gdn_chunk_wy_mma_vs_legacy() {
+    let (dev, st) = dev();
+    let _ = dev;
+    let (h, hv, k, v) = (4usize, 12usize, 128usize, 128usize);
+    let cu = vec![0i32, 130, 194, 201];
+    let t = 201usize;
+    let row = 2 * h * k + hv * v;
+    let mixed: Vec<f32> = (0..t * row).map(|i| (((i * 7919) % 1000) as f32 / 1000.0 - 0.5) * 0.5).collect();
+    let g: Vec<f32> = (0..t * hv).map(|i| -0.01 - ((i % 23) as f32) / 200.0).collect();
+    let beta: Vec<f32> = (0..t * hv).map(|i| 0.3 + ((i % 17) as f32) / 40.0).collect();
+    let dm = up_bf16(&st, &mixed);
+    let dg = st.htod_copy(g).unwrap();
+    let dbeta = st.htod_copy(beta).unwrap();
+    let dcu = st.htod_copy(cu.clone()).unwrap();
+    let plan = ops::KdaChunkPlan::new(&st, &cu, BT).unwrap();
+    let scale = (k as f32).powf(-0.5);
+    let mut outs = vec![];
+    for mma in [false, true] {
+        let mut sc = ops::GdnChunkScratch::new(&st, t, h, hv, k, v, plan.num_chunks, BT).unwrap();
+        ops::gdn_chunk_prep(&st, &dm, &dg, &dcu, &plan, &mut sc, t, h, hv, k, v, scale).unwrap();
+        ops::gdn_chunk_wy_with(&st, &dm, &dbeta, &dcu, &plan, &mut sc, t, h, hv, k, v, mma).unwrap();
+        st.synchronize().unwrap();
+        let aq: Vec<f32> = st.dtoh_sync_copy(&sc.aq).unwrap();
+        let u: Vec<f32> = st.dtoh_sync_copy(&sc.u).unwrap();
+        let w: Vec<f32> = st.dtoh_sync_copy(&sc.w).unwrap();
+        let kg: Vec<f32> = st.dtoh_sync_copy(&sc.kg).unwrap();
+        outs.push((aq, u, w, kg));
+    }
+    let (a0, u0, w0, k0) = &outs[0];
+    let (a1, u1, w1, k1) = &outs[1];
+    let n_tok = t * hv;
+    // 只比有效 token 行（scratch 多余部分未写）
+    let cmp = |name: &str, x: &[f32], y: &[f32], n: usize, cols: usize| {
+        let mut worst = (0f32, 0usize);
+        let mut nz_y = 0usize;
+        for i in 0..n * cols {
+            let e = (x[i] - y[i]).abs();
+            if y[i] != 0.0 { nz_y += 1; }
+            if e > worst.0 { worst = (e, i); }
+        }
+        let i = worst.1;
+        println!("  wy {name:<3} max_err {:.3e} at {} (tok {} hv {} col {}): old {} new {}  new 非零数 {nz_y}/{}", worst.0, i, i / cols / hv, (i / cols) % hv, i % cols, x[i], y[i], n * cols);
+        worst.0
+    };
+    let ea = cmp("aq", a0, a1, plan.num_chunks * hv, BT * BT);
+    let eu = cmp("u", u0, u1, n_tok, v);
+    let ew = cmp("w", w0, w1, n_tok, k);
+    let ek = cmp("kg", k0, k1, n_tok, k);
+    assert!(ea < 1e-2 && eu < 2e-2 && ew < 2e-2 && ek < 1e-3, "wy mma 与老版不一致");
+}
+
+/// 计时：27B 形状 H=16 HV=48 / K=V=128，三种批形状（1×1024、8×1024、32×128）：
+/// 顺序递归 vs chunk 全链（都含 gate），再分 kernel：conv1d prefill 老 / 新、ho 老 / 新（bv 16 / 32）、wy。
+/// 数字记到 `docs/loops/qwen35-perf.md` 记录表。门槛：1×1024 chunk ≤ 顺序 1/5。
 #[test]
 #[ignore]
 fn gdn_chunk_bench() {
     let (dev, st) = dev();
     let _ = dev;
-    let (t, h, hv, k, v) = (1024usize, 16usize, 48usize, 128usize, 128usize);
+    let (h, hv, k, v) = (16usize, 48usize, 128usize, 128usize);
+    for (nseq, len) in [(1usize, 1024usize), (8, 1024), (32, 128)] {
+        bench_case(&st, nseq, len, h, hv, k, v);
+    }
+}
+
+fn time_us(st: &Stream, iters: usize, mut f: impl FnMut()) -> f64 {
+    f();
+    st.synchronize().unwrap();
+    let t0 = std::time::Instant::now();
+    for _ in 0..iters {
+        f();
+    }
+    st.synchronize().unwrap();
+    t0.elapsed().as_secs_f64() * 1e6 / iters as f64
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bench_case(st: &Stream, nseq: usize, len: usize, h: usize, hv: usize, k: usize, v: usize) {
+    let t = nseq * len;
     let row = 2 * h * k + hv * v;
     let mixed: Vec<f32> = (0..t * row).map(|i| (((i * 7919) % 1000) as f32 / 1000.0 - 0.5) * 0.5).collect();
     let a: Vec<f32> = (0..t * hv).map(|i| ((i % 23) as f32 - 11.0) / 4.0).collect();
     let b: Vec<f32> = (0..t * hv).map(|i| ((i % 17) as f32 - 8.0) / 4.0).collect();
     let a_log: Vec<f32> = (0..hv).map(|i| (0.2 + 0.03 * i as f32).ln()).collect();
     let dt_bias = vec![0.1f32; hv];
-    let cu = vec![0i32, t as i32];
+    let cu: Vec<i32> = (0..=nseq).map(|i| (i * len) as i32).collect();
     let scale = (k as f32).powf(-0.5);
-    let dm = up_bf16(&st, &mixed);
-    let da = up_bf16(&st, &a);
-    let db = up_bf16(&st, &b);
+    let dm = up_bf16(st, &mixed);
+    let da = up_bf16(st, &a);
+    let db = up_bf16(st, &b);
     let dal = st.htod_copy(a_log).unwrap();
     let ddb = st.htod_copy(dt_bias).unwrap();
     let dcu = st.htod_copy(cu.clone()).unwrap();
     let iters = 5;
 
-    // 顺序版（gate + recurrent）
     let mut g = st.alloc_uninit::<f32>(t * hv).unwrap();
     let mut beta = st.alloc_uninit::<f32>(t * hv).unwrap();
-    let mut out_seq = st.alloc_uninit::<bf16>(t * hv * v).unwrap();
-    let mut state_seq = st.alloc_zeros::<f32>(hv * v * k).unwrap();
-    let seq_once = |st: &Stream, g: &mut _, beta: &mut _, out: &mut _, state: &mut _| {
-        ops::gdn_gate(st, &da, &db, &dal, &ddb, g, beta, t, hv).unwrap();
-        ops::gdn_recurrent(st, &dm, Some(&*g), Some(&*beta), None, None, &dal, &ddb, out, state, &dcu, None, 1, t, h, hv, k, v, scale).unwrap();
-    };
-    seq_once(&st, &mut g, &mut beta, &mut out_seq, &mut state_seq);
-    st.synchronize().unwrap();
-    let t0 = std::time::Instant::now();
-    for _ in 0..iters {
-        seq_once(&st, &mut g, &mut beta, &mut out_seq, &mut state_seq);
-    }
-    st.synchronize().unwrap();
-    let ms_seq = t0.elapsed().as_secs_f64() * 1e3 / iters as f64;
+    let mut out = st.alloc_uninit::<bf16>(t * hv * v).unwrap();
+    let mut state = st.alloc_zeros::<f32>(nseq * hv * v * k).unwrap();
 
-    // chunk 全链（gate + prep + wy + ho）
-    let plan = ops::KdaChunkPlan::new(&st, &cu, BT).unwrap();
-    let mut sc = ops::GdnChunkScratch::new(&st, t, h, hv, k, v, plan.num_chunks, BT).unwrap();
-    let mut out_ch = st.alloc_uninit::<bf16>(t * hv * v).unwrap();
-    let mut state_ch = st.alloc_zeros::<f32>(hv * v * k).unwrap();
-    let chunk_once = |st: &Stream, g: &mut _, beta: &mut _, sc: &mut ops::GdnChunkScratch, out: &mut _, state: &mut _| {
-        ops::gdn_gate(st, &da, &db, &dal, &ddb, g, beta, t, hv).unwrap();
-        ops::gdn_chunk_prep(st, &dm, &*g, &dcu, &plan, sc, t, h, hv, k, v, scale).unwrap();
-        ops::gdn_chunk_wy(st, &dm, &*beta, &dcu, &plan, sc, t, h, hv, k, v).unwrap();
-        ops::gdn_chunk_ho(st, &dcu, &plan, sc, out, state, None, t, h, hv, k, v).unwrap();
-    };
-    chunk_once(&st, &mut g, &mut beta, &mut sc, &mut out_ch, &mut state_ch);
-    st.synchronize().unwrap();
-    let t1 = std::time::Instant::now();
-    for _ in 0..iters {
-        chunk_once(&st, &mut g, &mut beta, &mut sc, &mut out_ch, &mut state_ch);
-    }
-    st.synchronize().unwrap();
-    let ms_chunk = t1.elapsed().as_secs_f64() * 1e3 / iters as f64;
+    // 顺序版（gate + recurrent）
+    let us_seq = time_us(st, iters, || {
+        ops::gdn_gate(st, &da, &db, &dal, &ddb, &mut g, &mut beta, t, hv).unwrap();
+        ops::gdn_recurrent(st, &dm, Some(&g), Some(&beta), None, None, &dal, &ddb, &mut out, &mut state, &dcu, None, nseq, t, h, hv, k, v, scale).unwrap();
+    });
 
-    let speedup = ms_seq / ms_chunk;
-    println!("  T={t} H={h} HV={hv} K={k} V={v}: 顺序 {ms_seq:.3} ms, chunk {ms_chunk:.3} ms, 加速 {speedup:.2}x（门槛 5x）");
-    assert!(speedup >= 5.0, "chunk 加速 {speedup:.2}x < 5x（顺序 {ms_seq:.3} ms / chunk {ms_chunk:.3} ms）");
+    // chunk 全链（gate + prep + wy + ho 默认）
+    let plan = ops::KdaChunkPlan::new(st, &cu, BT).unwrap();
+    let mut sc = ops::GdnChunkScratch::new(st, t, h, hv, k, v, plan.num_chunks, BT).unwrap();
+    let us_chunk = time_us(st, iters, || {
+        ops::gdn_gate(st, &da, &db, &dal, &ddb, &mut g, &mut beta, t, hv).unwrap();
+        ops::gdn_chunk_prep(st, &dm, &g, &dcu, &plan, &mut sc, t, h, hv, k, v, scale).unwrap();
+        ops::gdn_chunk_wy(st, &dm, &beta, &dcu, &plan, &mut sc, t, h, hv, k, v).unwrap();
+        ops::gdn_chunk_ho(st, &dcu, &plan, &sc, &mut out, &mut state, None, t, h, hv, k, v).unwrap();
+    });
+    // 分 kernel
+    let us_prep = time_us(st, iters, || ops::gdn_chunk_prep(st, &dm, &g, &dcu, &plan, &mut sc, t, h, hv, k, v, scale).unwrap());
+    let us_wy0 = time_us(st, iters, || ops::gdn_chunk_wy_with(st, &dm, &beta, &dcu, &plan, &mut sc, t, h, hv, k, v, false).unwrap());
+    let us_wy = time_us(st, iters, || ops::gdn_chunk_wy_with(st, &dm, &beta, &dcu, &plan, &mut sc, t, h, hv, k, v, true).unwrap());
+    let mut ho = vec![];
+    for bv in [0usize, 16, 32] {
+        ho.push((bv, time_us(st, iters, || ops::gdn_chunk_ho_with(st, &dcu, &plan, &sc, &mut out, &mut state, None, t, h, hv, k, v, bv).unwrap())));
+    }
+    // conv1d prefill（dim = row，width 4）
+    let width = 4;
+    let wv: Vec<f32> = (0..row * width).map(|i| ((i % 13) as f32 - 6.0) / 20.0).collect();
+    let dw = up_bf16(st, &wv);
+    let mut cout = st.alloc_uninit::<bf16>(t * row).unwrap();
+    let mut cst = st.alloc_zeros::<bf16>(nseq * row * (width - 1)).unwrap();
+    let mut conv = vec![];
+    for rows in [0usize, 32, 64, 128, 256] {
+        conv.push((rows, time_us(st, iters, || ops::gdn_conv1d_prefill_with(st, &dm, &dw, &mut cout, &mut cst, &dcu, None, None, nseq, t, row, width, width - 1, GdnAct::Silu, rows).unwrap())));
+    }
+
+    println!("  [{nseq}×{len}] 顺序 {:.0} µs | chunk 全链 {:.0} µs（{:.1}x）| prep {:.0} | wy old {:.0} mma {:.0} | ho {} | conv {}",
+        us_seq, us_chunk, us_seq / us_chunk, us_prep, us_wy0, us_wy,
+        ho.iter().map(|(bv, u)| format!("bv{bv}={u:.0}")).collect::<Vec<_>>().join(" "),
+        conv.iter().map(|(r, u)| format!("rows{r}={u:.0}")).collect::<Vec<_>>().join(" "));
+    if nseq == 1 {
+        let speedup = us_seq / us_chunk;
+        assert!(speedup >= 5.0, "chunk 加速 {speedup:.2}x < 5x");
+    }
 }
 
 // ---------------------------------------------------------------- decode 寄存器版 kernel（第 4 轮，docs/loops/qwen35-perf.md）

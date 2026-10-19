@@ -41,7 +41,7 @@ __device__ __forceinline__ float act_f(float x, int act) {  // 0 = silu, 1 = sig
 }
 
 // ---------------------------------------------------------------- conv1d prefill
-// 每 block 一个 (序列, 通道块)。线程按通道并行，时间维串行，寄存器窗口保存 W-1 个历史值。
+// 老版（每 (seq, 通道) 一线程串行扫 T）：T=1100 时每步一次 L2 往返，串行链 ~0.9 ms/层；只作回退（CONV_PREFILL=legacy）。
 // conv_state 布局 [slots, dim, state_len]，列 0 最旧、最后一列最新。
 __global__ void conv1d_prefill_kernel(const bf16* __restrict__ x, const bf16* __restrict__ w,
                                       bf16* __restrict__ out, bf16* __restrict__ conv_state,
@@ -84,6 +84,148 @@ __global__ void conv1d_prefill_kernel(const bf16* __restrict__ x, const bf16* __
   if (conv_state && state_len > 0) {
     bf16* st = conv_state + ((long)slot * dim + d) * state_len;
     for (int j = 0; j < state_len; ++j) st[j] = to_bf16(hist[j]);
+  }
+}
+
+// 新版（第 5A 轮）：按 token 平铺分块。每 block 一个 (token 块 rows_per_block 行, 通道块 256·EPT 通道)，
+// 线程持 EPT 个连续通道（EPT=8 → 16 B 向量访存；dim 不是 8 的倍数时 EPT=1）。块内行串行、块间并行。
+// 块首的 W-1 个历史值直接从 x 读（同序列的前几行），序列首行的历史从 conv_state 读。
+// 跨 block 的读写顺序：旧状态只被"包含序列首行 bos 的 block"读，新状态也只由它写（新状态 = 序列最后 W-1 个输入，
+// 从只读的 x 取，不足用旧状态补），同一线程先读后写，无竞争。为了让别的 block 永不读 state，
+// 包含 bos 的 block 额外接管 [bos, bos+W-1) 这几行（即使越过本块行界），后续 block 从 max(r0, bos+W-1) 起算，
+// 其 halo 全部落在 x 内。要求 rows_per_block ≥ W-1（host 保证）。
+// 调优数值（rows_per_block）由 host 给（ArchProfile::gdn_conv_rows），不在 kernel 内。
+__device__ __forceinline__ void ld_bf16x8(float* f, const bf16* p) {
+  const uint4 raw = *reinterpret_cast<const uint4*>(p);
+  const __nv_bfloat162* h = reinterpret_cast<const __nv_bfloat162*>(&raw);
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    const float2 t = __bfloat1622float2(h[i]);
+    f[2 * i] = t.x;
+    f[2 * i + 1] = t.y;
+  }
+}
+__device__ __forceinline__ void st_bf16x8(bf16* p, const float* f) {
+  uint4 raw;
+  __nv_bfloat162* h = reinterpret_cast<__nv_bfloat162*>(&raw);
+#pragma unroll
+  for (int i = 0; i < 4; ++i) h[i] = __floats2bfloat162_rn(f[2 * i], f[2 * i + 1]);
+  *reinterpret_cast<uint4*>(p) = raw;
+}
+
+template <int EPT, int W>
+__global__ void __launch_bounds__(256) conv1d_prefill_blocked_kernel(
+    const bf16* __restrict__ x, const bf16* __restrict__ w, bf16* __restrict__ out, bf16* __restrict__ conv_state,
+    const int* __restrict__ cu_seqlens, const int* __restrict__ state_indices, const int* __restrict__ has_initial,
+    int num_seqs, int dim, int total, int rows_per_block, int act) {
+  constexpr int H = W - 1;  // 历史长度 = state_len
+  static_assert(H >= 1, "width >= 2");
+  const int d0 = (blockIdx.y * 256 + threadIdx.x) * EPT;
+  if (d0 >= dim) return;
+  const int r0 = blockIdx.x * rows_per_block;
+  const int r1 = min(total, r0 + rows_per_block);
+  if (r0 >= r1) return;
+
+  float ww[EPT][W];
+#pragma unroll
+  for (int e = 0; e < EPT; ++e)
+#pragma unroll
+    for (int j = 0; j < W; ++j) ww[e][j] = to_f32(w[(long)(d0 + e) * W + j]);
+
+  auto load_x = [&](float* f, int row) {
+    if (EPT == 8) {
+      ld_bf16x8(f, x + (long)row * dim + d0);
+    } else {
+#pragma unroll
+      for (int e = 0; e < EPT; ++e) f[e] = to_f32(x[(long)row * dim + d0 + e]);
+    }
+  };
+
+  // r0 所在序列（cu[seq+1] > r0 的最小 seq）
+  int seq;
+  {
+    int lo = 0, hi = num_seqs - 1;
+    while (lo < hi) {
+      const int mid = (lo + hi) >> 1;
+      if (cu_seqlens[mid + 1] <= r0) lo = mid + 1; else hi = mid;
+    }
+    seq = lo;
+  }
+
+  float hist[EPT][H];  // [e][0] 最旧 … [e][H-1] 最新
+  for (; seq < num_seqs; ++seq) {
+    const int bos = cu_seqlens[seq], eos = cu_seqlens[seq + 1];
+    if (bos >= r1) break;
+    if (eos <= bos) continue;
+    const bool owns_head = bos >= r0;
+    const int start = owns_head ? bos : max(r0, bos + H);
+    const int end = owns_head ? min(eos, max(r1, bos + H)) : min(eos, r1);
+    if (start >= end) continue;
+
+    if (owns_head) {
+      const int slot = state_indices ? state_indices[seq] : seq;
+      const bool init = conv_state && slot >= 0 && (!has_initial || has_initial[seq]);
+#pragma unroll
+      for (int e = 0; e < EPT; ++e) {
+        const bf16* st = conv_state + ((long)slot * dim + d0 + e) * H;
+#pragma unroll
+        for (int j = 0; j < H; ++j) hist[e][j] = init ? to_f32(st[j]) : 0.f;
+      }
+      // 新状态 = 最后 H 个输入（位置 eos-H+j；落在序列前的用旧状态列 j+len 补），先读后写同线程
+      if (conv_state && slot >= 0) {
+        const int len = eos - bos;
+        float ns[EPT][H];
+#pragma unroll
+        for (int j = 0; j < H; ++j) {
+          const int p = eos - H + j;
+          if (p >= bos) {
+            float f[EPT];
+            load_x(f, p);
+#pragma unroll
+            for (int e = 0; e < EPT; ++e) ns[e][j] = f[e];
+          } else {
+#pragma unroll
+            for (int e = 0; e < EPT; ++e) ns[e][j] = hist[e][j + len];
+          }
+        }
+#pragma unroll
+        for (int e = 0; e < EPT; ++e) {
+          bf16* st = conv_state + ((long)slot * dim + d0 + e) * H;
+#pragma unroll
+          for (int j = 0; j < H; ++j) st[j] = to_bf16(ns[e][j]);
+        }
+      }
+    } else {
+      // start ≥ bos + H：历史全在 x 内
+#pragma unroll
+      for (int j = 0; j < H; ++j) {
+        float f[EPT];
+        load_x(f, start - H + j);
+#pragma unroll
+        for (int e = 0; e < EPT; ++e) hist[e][j] = f[e];
+      }
+    }
+
+    for (int r = start; r < end; ++r) {
+      float xt[EPT], o[EPT];
+      load_x(xt, r);
+#pragma unroll
+      for (int e = 0; e < EPT; ++e) {
+        float acc = ww[e][W - 1] * xt[e];
+#pragma unroll
+        for (int j = 0; j < H; ++j) acc += ww[e][j] * hist[e][j];
+        o[e] = act_f(acc, act);
+#pragma unroll
+        for (int j = 0; j + 1 < H; ++j) hist[e][j] = hist[e][j + 1];
+        hist[e][H - 1] = xt[e];
+      }
+      if (EPT == 8) {
+        st_bf16x8(out + (long)r * dim + d0, o);
+      } else {
+#pragma unroll
+        for (int e = 0; e < EPT; ++e) out[(long)r * dim + d0 + e] = to_bf16(o[e]);
+      }
+    }
   }
 }
 
@@ -418,13 +560,31 @@ extern "C" {
 int gdn_conv1d_prefill(const void* x, const void* w, void* out, void* conv_state,
                        const int* cu_seqlens, const int* state_indices, const int* has_initial,
                        int64_t num_seqs, int64_t dim, int64_t width, int64_t state_len, int act,
-                       cudaStream_t stream) {
+                       int64_t total, int64_t rows_per_block, cudaStream_t stream) {
   if (num_seqs <= 0) return 0;
   const int per_block = 256;
-  dim3 grid((unsigned)num_seqs, (unsigned)((dim + per_block - 1) / per_block));
-  conv1d_prefill_kernel<<<grid, per_block, 0, stream>>>(
-      (const bf16*)x, (const bf16*)w, (bf16*)out, (bf16*)conv_state, cu_seqlens, state_indices,
-      has_initial, (int)dim, (int)width, (int)state_len, per_block, act);
+  // rows_per_block == 0 → 老版（每 (seq, 通道) 串行扫 T）
+  if (rows_per_block < width - 1 || rows_per_block <= 0 || total <= 0 || width < 2 || width > 4 ||
+      state_len != width - 1) {
+    dim3 grid((unsigned)num_seqs, (unsigned)((dim + per_block - 1) / per_block));
+    conv1d_prefill_kernel<<<grid, per_block, 0, stream>>>(
+        (const bf16*)x, (const bf16*)w, (bf16*)out, (bf16*)conv_state, cu_seqlens, state_indices,
+        has_initial, (int)dim, (int)width, (int)state_len, per_block, act);
+    return last_err();
+  }
+  const int ept = (dim % 8 == 0) ? 8 : 1;
+  const long dim_blocks = (dim + (long)per_block * ept - 1) / ((long)per_block * ept);
+  dim3 grid((unsigned)((total + rows_per_block - 1) / rows_per_block), (unsigned)dim_blocks);
+#define LAUNCH_CONV(E, W)                                                                                    \
+  conv1d_prefill_blocked_kernel<E, W><<<grid, per_block, 0, stream>>>(                                       \
+      (const bf16*)x, (const bf16*)w, (bf16*)out, (bf16*)conv_state, cu_seqlens, state_indices, has_initial, \
+      (int)num_seqs, (int)dim, (int)total, (int)rows_per_block, act);
+  if (ept == 8) {
+    if (width == 4) { LAUNCH_CONV(8, 4) } else if (width == 3) { LAUNCH_CONV(8, 3) } else { LAUNCH_CONV(8, 2) }
+  } else {
+    if (width == 4) { LAUNCH_CONV(1, 4) } else if (width == 3) { LAUNCH_CONV(1, 3) } else { LAUNCH_CONV(1, 2) }
+  }
+#undef LAUNCH_CONV
   return last_err();
 }
 

@@ -667,3 +667,17 @@
 
 - 现象：用 `test/qwen35/golden/tiny`（vocab 512）跑 `dinfer serve --tokenizer test/qwen35/tokenizer` 启动即报 `model vocab 512 < tokenizer 248077`。
 - 解法：`scripts/dev/make_qwen35_tiny.py <out> --vocab 248320 --gen 2` 另生成一份全词表 tiny（lm_head 2.5 GB bf16，放 /tmp 不进仓库），只用来量调度 / 混批 / metrics，不做数值对拍（golden 仍用 vocab 512 那份）。
+
+## tensor core kernel 里混入"每列一线程"的串行段时，线程数 ≠ 列数 → 越界写邻接 smem（2026-10-20，第 5A 轮）
+
+- 现象：`wy_mma_kernel` 新版 aq 与老版全等，u / w 全 0、kg 没乘衰减；parity out max_err 0.04、cos 0.08。
+- 根因：block 从 256 线程改成 128（4 warp 各一个 16 行 tile），M 前代那段仍按"每线程 2 列 = BT"写，线程 64–127 写到 `sM` 之后的 `sgc` / `sb`（β、gc 被清 0）。
+- 解法：串行段显式 `if (tid < BT)`，列数由 `static_assert(BT <= 线程数)` 守；定位靠 `gdn_chunk_wy_mma_vs_legacy` 直接比 scratch（aq / u / w / kg 分开看，一眼看出哪段坏）。
+- 避免：mma 改写时把 block 线程数写成常量（`kWyWarps * 32`），所有 `idx += 256` 一律换成 `+= NW * 32`；每个有"状态"的中间缓冲都做一次老 vs 新的逐缓冲对拍，不只比最终输出。
+
+## 按 token 分块的 conv1d：旧 state 的读与新 state 的写落在不同 block 时顺序无保证（2026-10-20）
+
+- 现象（设计期发现，未上线）：序列跨多个 token 块时，首块读 conv_state 做 halo、末块写 conv_state；末块先跑完则首块读到新状态。
+- 解法：规定旧状态只被"含 bos 的 block"读、新状态也只由它写（新状态 = 序列最后 W-1 个输入，从只读的 x 取，len < W-1 时用旧状态补），
+  并让它额外接管 [bos, bos+W-1) 几行，后续 block 从 max(r0, bos+W-1) 起、halo 全在 x 内。前提 rows_per_block ≥ W-1（host 保证）。
+- 避免：任何"按 T 分块 + 块间状态传递"的 kernel，先列出每个状态槽的读者 / 写者 block，读写不在同一 block 就要重新切分职责，不要靠启动顺序。

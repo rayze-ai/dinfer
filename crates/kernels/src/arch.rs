@@ -103,6 +103,43 @@ impl ArchProfile {
         fallback
     }
 
+    /// chunk prefill `ho`（tensor core 版）的 V 分片 BV：block 数 = `base_blocks · v_dim / BV`（base = num_seqs · HV），
+    /// 每 block 在 chunk 上串行，所以 block 数要能铺 ≥ `GDN_CHUNK_HO_WAVES` 波 SM；满足的档里取最大的（BV 大 → q/w/kg 重读少）。
+    /// 都铺不满（单序列小卡）取最小档。K ∉ {64,128,256} 或 V 不被任何档整除返回 0（调用方回老 kernel）。
+    pub fn gdn_chunk_ho_bv(sm_count: usize, base_blocks: usize, k_dim: usize, v_dim: usize) -> usize {
+        const GDN_CHUNK_HO_BV_CANDIDATES: [usize; 2] = [32, 16];
+        const GDN_CHUNK_HO_WAVES: usize = 2;
+        if !matches!(k_dim, 64 | 128 | 256) {
+            return 0;
+        }
+        let mut fallback = 0;
+        for &bv in &GDN_CHUNK_HO_BV_CANDIDATES {
+            if v_dim % bv != 0 {
+                continue;
+            }
+            if base_blocks * (v_dim / bv) >= GDN_CHUNK_HO_WAVES * sm_count {
+                return bv;
+            }
+            fallback = bv;
+        }
+        fallback
+    }
+
+    /// conv1d prefill 按 token 分块的块行数：block 数 = `ceil(tokens / rows) · ceil(dim / 2048)`（256 线程 × 8 通道），
+    /// 取最大的仍能铺 ≥ `GDN_CONV_WAVES` 波 SM 的档（行多 → halo 重读占比小、块内串行链长；行少 → 反之），
+    /// 都铺不满取最小档；下限 width-1（kernel 要求块 ≥ halo）。
+    pub fn gdn_conv_rows(sm_count: usize, tokens: usize, dim: usize, width: usize) -> usize {
+        const GDN_CONV_ROWS_CANDIDATES: [usize; 4] = [256, 128, 64, 32];
+        const GDN_CONV_WAVES: usize = 2;
+        let dim_blocks = dim.div_ceil(256 * 8).max(1);
+        for &r in &GDN_CONV_ROWS_CANDIDATES {
+            if tokens.div_ceil(r) * dim_blocks >= GDN_CONV_WAVES * sm_count {
+                return r.max(width - 1);
+            }
+        }
+        GDN_CONV_ROWS_CANDIDATES[GDN_CONV_ROWS_CANDIDATES.len() - 1].max(width - 1)
+    }
+
     /// 小 M kernel 的 split-K 候选（去重、升序、≥1）。`blocks_per_split` = 不切时的 block 数（ceil(N / warps/block)）。
     pub fn small_m_split_candidates(&self, blocks_per_split: usize, k: usize) -> Vec<usize> {
         let mut v: Vec<usize> = vec![1];
@@ -134,5 +171,24 @@ mod tests {
         // K 不支持 → 0；V 只被 16/32 整除时不选 64
         assert_eq!(ArchProfile::gdn_decode_bv(82, 48, 96, 128), 0);
         assert_eq!(ArchProfile::gdn_decode_bv(82, 4 * 48, 64, 32), 32);
+    }
+
+    #[test]
+    fn gdn_chunk_ho_bv_tiers() {
+        // 27B 形状 HV=48 V=128：3090 单序列 48·4=192 ≥ 164 → 32；B300 单序列 192 < 296 → 16（384 块）；8 序列 → 32
+        assert_eq!(ArchProfile::gdn_chunk_ho_bv(82, 48, 128, 128), 32);
+        assert_eq!(ArchProfile::gdn_chunk_ho_bv(148, 48, 128, 128), 16);
+        assert_eq!(ArchProfile::gdn_chunk_ho_bv(148, 8 * 48, 128, 128), 32);
+        assert_eq!(ArchProfile::gdn_chunk_ho_bv(82, 48, 96, 128), 0);
+        assert_eq!(ArchProfile::gdn_chunk_ho_bv(82, 4, 64, 16), 16);
+    }
+
+    #[test]
+    fn gdn_conv_rows_tiers() {
+        // dim 10240 → 5 通道块。3090 T=1024：1024/256·5=20 < 164 … 1024/32·5=160 < 164 → 兜底 32；
+        // B300 8×1100=8800：8800/128·5=345 ≥ 296 → 128；T=3 → 32 ≥ width-1
+        assert_eq!(ArchProfile::gdn_conv_rows(82, 1024, 10240, 4), 32);
+        assert_eq!(ArchProfile::gdn_conv_rows(148, 8800, 10240, 4), 128);
+        assert_eq!(ArchProfile::gdn_conv_rows(148, 3, 10240, 4), 32);
     }
 }

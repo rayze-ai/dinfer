@@ -207,9 +207,11 @@ int kda_chunk_ho(const void* qn, const float* gc, const float* aq, const float* 
 // act：0 = siLU（Qwen3.5），1 = sigmoid（其它 GDN 变体）。
 // 短卷积 y[t,d] = act(Σ_j w[d,j]·x[t-W+1+j,d])，w 布局 [dim, width]，宽度维从旧到新；
 // conv_state 布局 [slots, dim, state_len]（state_len = width-1），列 0 最旧。
+// total = token 总数（cu_seqlens 末值）；rows_per_block = 新版按 token 分块的块行数（0 = 老版每 (seq, 通道) 串行）。
 int gdn_conv1d_prefill(const void* x, const void* w, void* out, void* conv_state,
                        const int* cu_seqlens, const int* state_indices, const int* has_initial,
-                       int64_t num_seqs, int64_t dim, int64_t width, int64_t state_len, int act);
+                       int64_t num_seqs, int64_t dim, int64_t width, int64_t state_len, int act,
+                       int64_t total, int64_t rows_per_block, cudaStream_t stream);
 int gdn_conv1d_update(const void* x, const void* w, void* out, void* conv_state,
                       const int* state_indices, int64_t batch, int64_t dim, int64_t width,
                       int64_t state_len, int act);
@@ -238,11 +240,11 @@ int gdn_chunk_prep(const void* mixed_qkv, const float* g, void* qn, void* kn, fl
                    int64_t V, int64_t bt, float scale, cudaStream_t stream);
 int gdn_chunk_wy(const void* qn, const void* kn, const void* mixed_qkv, const float* gc, const float* beta,
                  float* aq, float* u, float* w, float* kg, const int* cu_seqlens, const int* chunk_tab,
-                 int64_t num_chunks, int64_t H, int64_t HV, int64_t K, int64_t V, int64_t bt, cudaStream_t stream);
+                 int64_t num_chunks, int64_t H, int64_t HV, int64_t K, int64_t V, int64_t bt, int64_t wy_mode, cudaStream_t stream);
 int gdn_chunk_ho(const void* qn, const float* gc, const float* aq, const float* u, const float* w, const float* kg,
                  void* out, void* state, const int* cu_seqlens, const int* cu_nt, const int* chunk_off,
                  const int* state_indices, int64_t state_stride_tok, int64_t num_seqs, int64_t H, int64_t HV,
-                 int64_t K, int64_t V, int64_t bt, cudaStream_t stream);
+                 int64_t K, int64_t V, int64_t bt, int64_t ho_bv, cudaStream_t stream);
 
 // ---- 布局搬运（layout.cu）----
 int copy_cols_bf16(const void* src, void* dst, int64_t tokens, int64_t src_cols, int64_t col0, int64_t dst_cols,
