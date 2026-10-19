@@ -868,13 +868,15 @@ extern "C" int gqa_decode_bf16(const void* q, const void* cache, const int32_t* 
     static int keys_per_split = -1;
     if (keys_per_split < 0) {
       const char* e = getenv("DECODE_KEYS_PER_SPLIT");
-      keys_per_split = (e && atoi(e) > 0) ? atoi(e) : 128;
+      // 默认 32：B300 kps 16/32/64 扫描（loop 第 4b 轮）中 32 在 c1/c8/c8-long 三组 TPOT 全部最优或并列最优
+      keys_per_split = (e && atoi(e) > 0) ? atoi(e) : 32;
     }
     dim3 grid1((unsigned)num_reqs, (unsigned)kv_heads, (unsigned)splits);
     bf16* direct = splits == 1 ? static_cast<bf16*>(out) : nullptr;
-    // B4 第 4 轮：GQA_DECODE_V3=1 走 gqa_decode_v3.cu（对拍 / bench 开关，收口后由 ArchProfile 选）
+    // B4 第 4b 轮：默认走 gqa_decode_v3.cu（B300 三组 TPOT 全部优于 v2，3090 也快 5–20%）；GQA_DECODE_V3=0 回退 v2 对拍。
+    // 收口后由 ArchProfile 选实现，不再读环境变量。
     static int use_v3 = -1;
-    if (use_v3 < 0) { const char* e = getenv("GQA_DECODE_V3"); use_v3 = (e && atoi(e) == 1) ? 1 : 0; }
+    if (use_v3 < 0) { const char* e = getenv("GQA_DECODE_V3"); use_v3 = (e && atoi(e) == 0) ? 0 : 1; }
     if (use_v3 && (group == 1 || group == 2 || group == 4)) {
       int rc = gqa_decode_v3_bf16(q, cache, block_table, seq_lens, cu_seqlens_q, scratch, direct, num_reqs, heads, kv_heads,
                                   block_size, max_blocks, scale, q_stride, splits, keys_per_split, stream);
