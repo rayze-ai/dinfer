@@ -681,3 +681,10 @@
 - 解法：规定旧状态只被"含 bos 的 block"读、新状态也只由它写（新状态 = 序列最后 W-1 个输入，从只读的 x 取，len < W-1 时用旧状态补），
   并让它额外接管 [bos, bos+W-1) 几行，后续 block 从 max(r0, bos+W-1) 起、halo 全在 x 内。前提 rows_per_block ≥ W-1（host 保证）。
 - 避免：任何"按 T 分块 + 块间状态传递"的 kernel，先列出每个状态槽的读者 / 写者 block，读写不在同一 block 就要重新切分职责，不要靠启动顺序。
+
+## B300-50：`CUDA_VISIBLE_DEVICES=4` 报 "free 34.6 GiB" 而 nvidia-smi 说 GPU 4 是 0 MiB（2026-10-20）
+
+- 现象：nsys 起 dinfer 到 GPU 4 两次失败 `not enough GPU memory for KV cache: free 34.59 GiB`，nvidia-smi 4 号卡空，0/1 号卡各 246 GB 被占。
+- 根因：CUDA runtime 默认按"性能最快"排序设备编号，与 nvidia-smi 的 PCI 顺序不一致；多卡机上 `CUDA_VISIBLE_DEVICES=4` 可能落到正在跑服务的那张卡。
+- 解法：所有多卡脚本一律 `export CUDA_DEVICE_ORDER=PCI_BUS_ID`（已加进 `scripts/dev/b300_nsys_decode.sh` 与 `env.sh` 建议），或用 UUID。
+- 避免：起服务后用 `nvidia-smi --query-compute-apps=pid,gpu_uuid,used_memory` 核一次落在哪张卡。
