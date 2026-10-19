@@ -86,6 +86,9 @@ pub struct GemmTuneReport {
     pub elapsed_ms: f64,
     /// 为 split-K 分配的 partial 工作区字节数
     pub partial_bytes: usize,
+    /// 非桶 M 借桶结论的条数 / 因 AlgoCheck 不合法而放弃的条数
+    pub borrowed: usize,
+    pub rejected: usize,
 }
 
 impl GemmTuneReport {
@@ -154,6 +157,9 @@ pub struct Gemm {
     profile: ArchProfile,
     enabled: bool,
     plans: Mutex<HashMap<Key, GemmPlan>>,
+    /// 未调优形状的 cuBLASLt 默认 algo（启发式第 1 个）缓存：形状 + workspace 固定时启发式结果确定，
+    /// 不缓存则 decode 每步几百次 GEMM 各查一次启发式（host 侧 µs 级 × 几百 = 每步毫秒级 CPU）。
+    default_algos: Mutex<HashMap<Key, sys::cublasLtMatmulAlgo_t>>,
     /// split-K 的 partial 工作区（自调优后按所选 plan 的最大需要分配；forward 内不分配，便于 graph 捕获）
     partial: Mutex<Option<CudaSlice<f32>>>,
 }
@@ -173,7 +179,11 @@ impl Drop for Gemm {
 
 impl Gemm {
     pub fn new(stream: &Stream) -> Result<Self> {
-        let profile = ArchProfile::detect(&stream.device())?;
+        let mut profile = ArchProfile::detect(&stream.device())?;
+        // 环境变量只做覆盖（默认值在 ArchProfile）：实验更多启发式候选对小 M 桶的收益
+        if let Some(n) = std::env::var("GEMM_LT_CANDIDATES").ok().and_then(|v| v.parse::<usize>().ok()) {
+            profile.gemm_tune.lt_candidates = n.clamp(1, 64);
+        }
         let handle = lt_err(lt::create_handle(), "cublasLt create")?;
         let workspace = stream.alloc_zeros::<u8>(profile.cublaslt_workspace_bytes)?;
         let enabled = std::env::var("GEMM_TUNE").map_or(true, |v| v != "off" && v != "0");
@@ -184,6 +194,7 @@ impl Gemm {
             profile,
             enabled,
             plans: Mutex::new(HashMap::new()),
+            default_algos: Mutex::new(HashMap::new()),
             partial: Mutex::new(None),
         })
     }
@@ -247,7 +258,8 @@ impl Gemm {
         if let Some(p) = plans.get(&Key { m, n, k, bias }) {
             return Some(*p);
         }
-        // 非桶 M（eager decode 的 m=3 之类）：小 M kernel 对任意 m ≤ 桶都正确，借上一个桶的结论；Lt algo 不借（layout 不同）。
+        // 非桶 M 在 autotune 末尾已按桶展开（1..=最大桶 每个 m 一条，Lt algo 过 AlgoCheck 才借）；
+        // 这里只兜底 small_m（对任意 m ≤ 桶都正确）。
         if m <= self.profile.gemm_tune.small_m_max {
             let bucket = m.next_power_of_two();
             if let Some(p @ GemmPlan::SmallM { .. }) = plans.get(&Key { m: bucket, n, k, bias }) {
@@ -255,6 +267,50 @@ impl Gemm {
             }
         }
         None
+    }
+
+    /// 桶 M 选出的 Lt algo 能否用于同 (N,K) 的另一个 M（layout 的列数变了）：`cublasLtMatmulAlgoCheck`。
+    fn algo_valid_for(&self, d: &LtDescs, algo: &sys::cublasLtMatmulAlgo_t) -> bool {
+        // SAFETY: 描述符与 algo 均有效；result 只是输出缓冲。
+        unsafe {
+            let mut res: sys::cublasLtMatmulHeuristicResult_t = std::mem::zeroed();
+            let st = sys::cublasLtMatmulAlgoCheck(self.handle, d.op, d.a, d.b, d.c, d.c, algo as *const _, &mut res);
+            st == sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS
+                && res.state == sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS
+                && res.workspaceSize <= self.workspace.len()
+        }
+    }
+
+    /// 调优时的实测：某 plan 在实际 (m,n,k) 上的 µs（微基准用；LtAlgo 先过 AlgoCheck，不合法返回 None）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn time_plan(
+        &self,
+        plan: GemmPlan,
+        m: usize,
+        n: usize,
+        k: usize,
+        w: &CudaSlice<bf16>,
+        bias: Option<&CudaSlice<bf16>>,
+        a_scratch: &CudaSlice<bf16>,
+        out_scratch: &mut CudaSlice<bf16>,
+        partial_scratch: &mut CudaSlice<f32>,
+    ) -> Result<Option<f32>> {
+        let iters = self.profile.gemm_tune.timing_iters.max(1);
+        match plan {
+            GemmPlan::LtAlgo(algo) => {
+                let d = self.make_descs(m, n, k, bias.map(|b| self.stream.ptr(b)))?;
+                if !self.algo_valid_for(&d, &algo) {
+                    return Ok(None);
+                }
+                self.time_us(iters, || self.run_lt(&d, &algo, a_scratch, w, out_scratch)).map(Some)
+            }
+            GemmPlan::SmallM { splits } => {
+                if m > self.profile.gemm_tune.small_m_max || k % 8 != 0 || splits * m * n > partial_scratch.len() {
+                    return Ok(None);
+                }
+                self.time_us(iters, || ops::gemm_small_m_bf16(&self.stream, a_scratch, w, bias, out_scratch, Some(&mut *partial_scratch), m, n, k, splits)).map(Some)
+            }
+        }
     }
 
     fn run_lt_default(
@@ -268,9 +324,18 @@ impl Gemm {
         k: usize,
     ) -> Result<()> {
         let d = self.make_descs(m, n, k, bias.map(|b| self.stream.ptr(b)))?;
-        let h = self.heuristics(&d, 1)?;
-        ensure!(!h.is_empty(), "cublasLt: no algo for m={m} n={n} k={k}");
-        self.run_lt(&d, &h[0].algo, a, w, out)
+        let key = Key { m, n, k, bias: bias.is_some() };
+        let cached = self.default_algos.lock().unwrap().get(&key).copied();
+        let algo = match cached {
+            Some(a) => a,
+            None => {
+                let h = self.heuristics(&d, 1)?;
+                ensure!(!h.is_empty(), "cublasLt: no algo for m={m} n={n} k={k}");
+                self.default_algos.lock().unwrap().insert(key, h[0].algo);
+                h[0].algo
+            }
+        };
+        self.run_lt(&d, &algo, a, w, out)
     }
 
     fn make_descs(&self, m: usize, n: usize, k: usize, bias_ptr: Option<u64>) -> Result<LtDescs> {
@@ -479,7 +544,7 @@ impl Gemm {
     /// 模型加载后、CUDA graph 捕获前调一次。`GEMM_TUNE=off` 时直接返回空报告。
     pub fn autotune(&self, entries: &[GemmTuneEntry<'_>]) -> Result<GemmTuneReport> {
         let t0 = Instant::now();
-        let mut report = GemmTuneReport { rows: Vec::new(), elapsed_ms: 0.0, partial_bytes: 0 };
+        let mut report = GemmTuneReport { rows: Vec::new(), elapsed_ms: 0.0, partial_bytes: 0, borrowed: 0, rejected: 0 };
         if !self.enabled || entries.is_empty() {
             return Ok(report);
         }
@@ -503,6 +568,38 @@ impl Gemm {
                 report.rows.push(row);
             }
         }
+        // 非桶 M 展开（eager 混批 / 请求交错完成时 decode 批常是 7、9、31 这类非 2 的幂）：借上一个 2 的幂桶的结论。
+        // small_m 对任意 m ≤ 桶正确；Lt algo 对别的 M 是否合法要过 AlgoCheck（不合法就留给默认启发式）。
+        // 行数按桶算 partial，覆盖 m < 桶。
+        let mut borrowed = 0usize;
+        let mut rejected = 0usize;
+        for e in entries {
+            let key_bias = e.bias.is_some();
+            for m in 1..=m_max {
+                if tp.m_buckets.contains(&m) {
+                    continue;
+                }
+                let bucket = m.next_power_of_two();
+                let Some(&bp) = plans.get(&Key { m: bucket, n: e.n, k: e.k, bias: key_bias }) else { continue };
+                let plan = match bp {
+                    GemmPlan::SmallM { .. } if m <= tp.small_m_max => Some(bp),
+                    GemmPlan::SmallM { .. } => None,
+                    GemmPlan::LtAlgo(algo) => {
+                        let d = self.make_descs(m, e.n, e.k, e.bias.map(|b| self.stream.ptr(b)))?;
+                        self.algo_valid_for(&d, &algo).then_some(bp)
+                    }
+                };
+                match plan {
+                    Some(p) => {
+                        plans.insert(Key { m, n: e.n, k: e.k, bias: key_bias }, p);
+                        borrowed += 1;
+                    }
+                    None => rejected += 1,
+                }
+            }
+        }
+        report.borrowed = borrowed;
+        report.rejected = rejected;
         drop(partial_scratch);
         if need_partial > 0 {
             *self.partial.lock().unwrap() = Some(self.stream.alloc_zeros::<f32>(need_partial)?);
@@ -516,6 +613,8 @@ impl Gemm {
             buckets = tp.m_buckets.len(),
             elapsed_ms = format!("{:.0}", report.elapsed_ms),
             partial_mb = format!("{:.1}", report.partial_bytes as f64 / 1048576.0),
+            borrowed = report.borrowed,
+            rejected = report.rejected,
             "gemm autotune done"
         );
         Ok(report)
