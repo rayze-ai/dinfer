@@ -8,6 +8,7 @@ pub mod kda;
 pub mod latent_moe;
 pub mod layer;
 pub mod mla;
+pub mod model;
 pub mod weights;
 
 pub const MODEL_NAME: &str = "kimi-k3";
