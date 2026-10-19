@@ -123,6 +123,9 @@ out[t, n] = bf16( Σ_k bf16(dequant(w[n, k])) · bf16(x[t, k]) )      fp32 累�
 |---|---|---|---|
 | 1 | 2026-10-19 | 规格定稿（本节） | 规格定稿 |
 | 2 | 2026-10-19 | `mxfp4_gemm_sm8x.cu` tile kernel（权重分块解包到 shared，256 线程 × 每线程 4 输出列的 4 路 FMA）+ `mxfp4_gemm_sm100.cu` 空壳；`kernels.h`/`ffi.rs`/`ops.rs` 加 `Mxfp4GemmTiles` 与入口；参考侧加 3 个 GEMM case | **3/3 通过**，见下表 |
+| 3 | 2026-10-19 | B300-50（sm_103）`CUDA_ARCHS=103` 重编 + `k3_moe.sh`（`MXFP4_SKIP_GEN=1`） | **2/2 通过，exit 0**，数值与两卡一致；sm100 空壳照常编，无 arch 编译问题 |
+| 4 | 2026-10-19 | 新增 `mxfp4_gemm_bench`（E=8 / 256 pairs / 真形状，release，5 次均值）+ 解包 bf16→cuBLASLt 参照 | **B300 w1/w3 1.67 ms、w2 1.61 ms**；3090 5.50 / 5.20 ms；参照 0.06 ms（v2 差距 28×） |
+| 5 | 2026-10-19 | 真权重解包核对：`k3_mxfp4_realcheck.py`（纯 numpy）+ `mxfp4_realcheck.rs`（`#[ignore]`，`MXFP4_REALCHECK_DIR`）+ `k3_realcheck.sh` | **L1 e0 w1/w2/w3 各 11,010,048 元素逐位一致（max_err 0）**；scale u8 ∈ [112,122]，无 0/255 |
 
 ### 实测（2026-10-19，`k3_moe.sh` exit 0，3090 与 4090 同结果）
 
