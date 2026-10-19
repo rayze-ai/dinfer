@@ -567,3 +567,10 @@
 - 根因：HF `Qwen3_5RMSNorm.forward` 是 `norm(x) * (1.0 + weight)`（weight 初值 0），dinfer / 参考脚本按 `norm(x) * weight`。tiny 生成器把 `input_layernorm / post_attention_layernorm / norm` 设成 `torch.ones` → 两种约定数值相同，golden 不可能发现。
 - 解法：`models/qwen35/src/weights.rs::rmsnorm` 加载时把 `1 + w` 算进权重；`make_qwen35_tiny.py` 参考侧改 `1 + w` 且三类权重改随机。
 - 避免：**造 tiny golden 时所有权重必须随机（含 norm / bias / 门）**，任何"全 1 / 全 0"的权重都是对拍盲区；接新模型先 grep HF 源码里的 `1.0 + self.weight` / `zero-centered`。
+
+## Qwen3.5：prefix cache 命中让 GDN 递归状态从零开始（2026-10-19）
+
+- 现象：c8-long bench 86 条 `GDN 状态 slot 被复用给带历史的请求` 告警，pos 全是 144/160/176；c1/c8/c32 没有。
+- 根因：prefix cache 命中后 scheduler 从 position>0 喂 prompt。全注意力层能复用 KV 块，GDN 的递归 / conv 状态是"每请求一份、随 token 顺序递推"的，没有按块快照 → 新请求拿到新 slot 但历史已跳过。
+- 解法：qwen35 service 强制关 prefix caching（warn）。真正支持要像 vLLM `mamba_block_size` / `mamba_cache_mode` 那样按块缓存 GDN 状态（设计待办）。
+- 避免：接任何带递归状态的模型（Mamba / GDN / KDA），prefix cache 默认关，直到状态缓存实现。K3（KDA）同样适用。

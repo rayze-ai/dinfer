@@ -137,6 +137,12 @@ impl Qwen35Service {
         let tok = Arc::new(tok);
         anyhow::ensure!(cfg.vocab_size as usize >= tok.vocab_size(), "model vocab {} < tokenizer {}", cfg.vocab_size, tok.vocab_size());
 
+        // prefix cache 在 GDN 混合模型上不可用：命中后 scheduler 从 position>0 开始喂 prompt，全注意力层能读 KV，但 GDN 的
+        // 递归状态没有"按块缓存"（vLLM 用 mamba_block_size / mamba_cache_mode 另做，我们未实现）→ 状态从零起，输出错
+        //（2026-10-19 B300 c8-long bench：86 条 "slot 被复用给带历史的请求" 全是 pos=144/160/176 的模板前缀命中）。
+        if opt.enable_prefix_caching {
+            tracing::warn!("qwen35: prefix caching 对 GDN 混合模型未实现（递归状态不可按块复用），已强制关闭");
+        }
         let params = engine::scheduler_params(
             SchedulerConfig {
                 max_num_seqs: opt.max_num_seqs,
@@ -147,7 +153,7 @@ impl Qwen35Service {
             },
             CacheConfig {
                 block_size: opt.block_size,
-                enable_prefix_caching: opt.enable_prefix_caching,
+                enable_prefix_caching: false, // 见上：GDN 不能跳过已缓存的 prompt token
                 hash_block_size: opt.block_size,
                 gpu_memory_utilization: opt.gpu_memory_utilization,
             },
