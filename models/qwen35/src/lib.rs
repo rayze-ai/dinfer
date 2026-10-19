@@ -5,10 +5,12 @@
 //! kernel 已对拍：GDN（`docs/loops/qwen35-gdn.md`）、attention D=256 / GROUP 6 / qkv_post_ext / mul_sigmoid（`docs/loops/qwen35-attn.md`）。
 #![forbid(unsafe_code)]
 pub mod config;
-pub mod full_attn;
 pub mod executor;
+pub mod full_attn;
+pub mod gdn;
 pub mod layer;
 pub mod model;
-pub mod gdn;
+pub mod parser;
+pub mod service;
 pub mod weights;
 pub const MODEL_NAME: &str = "qwen35";
