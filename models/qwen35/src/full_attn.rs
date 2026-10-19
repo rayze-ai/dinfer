@@ -56,8 +56,9 @@ impl FullAttention {
         tp: (usize, usize),
     ) -> Result<Self> {
         let (rank, world) = tp;
+        // cfg 已是本 rank 的配置（TP 在 `Qwen35Model::load_with_budget` 里拒绝 world > 1，这里 world 恒为 1）。
         let (h, hk, d) =
-            (cfg.num_attention_heads as usize / world, cfg.num_key_value_heads as usize / world, cfg.head_dim as usize);
+            (cfg.num_attention_heads as usize, cfg.num_key_value_heads as usize, cfg.head_dim as usize);
         let hidden = cfg.hidden_size as usize;
         let qkv = crate::weights::load_qkv(stream, src, t, layer, cfg, tp)?;
         ensure!(qkv.out_features == (h + 2 * hk) * d, "qkv out {} != {}", qkv.out_features, (h + 2 * hk) * d);
@@ -105,10 +106,11 @@ impl FullAttention {
         out: &mut Tensor<bf16>,
     ) -> Result<()> {
         let (h, hk, d) = (
-            cfg.num_attention_heads as usize / self.world,
-            cfg.num_key_value_heads as usize / self.world,
+            cfg.num_attention_heads as usize,
+            cfg.num_key_value_heads as usize,
             cfg.head_dim as usize,
         );
+        debug_assert_eq!(self.world, 1, "qwen35: TP 未实现");
         let eps = cfg.rms_norm_eps;
         let qkv_w = (h + 2 * hk) * d;
         let rope_dim = cfg.rope_dim() as usize;

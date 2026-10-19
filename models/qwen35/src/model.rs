@@ -120,21 +120,15 @@ impl<O: OpSet> Qwen35Model<O> {
         O: Default,
     {
         let (rank, world) = tp;
-        ensure!(world >= 1 && rank < world, "bad tp shard {rank}/{world}");
+        // 里程碑 4 不做 TP 通信（executor 里没有 all-reduce）；分片装载本身是对的，但跑起来会少一半结果，
+        // 所以直接拒绝，而不是给一个静默错的路径。接 TP 时：加 comm、把 cfg 按 world 切、kernels 侧不用改。
+        ensure!(world == 1 && rank == 0, "qwen35: TP（world {world}）尚未实现；请用单卡（design-qwen35 §3）");
         ensure!(num_slots > 0, "num_slots must be > 0");
         if let Some(n) = num_blocks {
             ensure!(n > 0, "num_blocks must be > 0");
         }
         let mut cfg = cfg;
-        if world > 1 {
-            ensure!(cfg.num_attention_heads as usize % world == 0, "num_attention_heads % tp != 0");
-            ensure!(cfg.num_key_value_heads as usize % world == 0, "num_key_value_heads % tp != 0");
-            ensure!(cfg.intermediate_size as usize % world == 0, "intermediate_size % tp != 0");
-            cfg.num_attention_heads /= world as u32;
-            cfg.num_key_value_heads /= world as u32;
-            cfg.intermediate_size /= world as u32;
-            tracing::info!(rank, world, heads = cfg.num_attention_heads, kv_heads = cfg.num_key_value_heads, "tp: local shard config");
-        }
+        let _ = &mut cfg;
         let t_load0 = std::time::Instant::now();
         let table = Table::open(src)?;
         let hidden = cfg.hidden_size as usize;
