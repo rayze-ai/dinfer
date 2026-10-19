@@ -594,3 +594,18 @@
 - 现象（推演，未发生）：Qwen3 的捕获假 plan 用 slot=-1 不写 KV 就够了；但 GDN 的 `conv1d_update` / `recurrent` kernel 对**每一行**都读写 `state[state_indices[i]]`，捕获时的 eager 预热 + 图里的 padding 行若指到 0..nb-1，会把活请求的递归状态改掉（且 capture 期间的 kernel 不执行，只有预热那次写，排查会很诡异）。
 - 解法：`GdnState` 多分 1 个 slot（下标 `num_slots`）做废纸篓，捕获假 plan 与 padding 行的 `state_indices` 全指它；`has_initial` 填 1（不走清零分支）。
 - 避免：带递归状态的模型（GDN / KDA / Mamba）接 graph，先问"padding 行写到哪"；KV 有 slot=-1 约定，状态 kernel 没有，要显式留废纸篓。
+
+## K3 单层对拍：vLLM `chunk_kda_with_fused_gate` 的 beta 要先 sigmoid（2026-10-20）
+
+- 现象：torch 参考与 Rust kernel 互相 cos 0.99998，但两者对 vLLM fla 参考都只有 cos 0.23。
+- 根因：HF 调 `fla.ops.kda.chunk_kda(use_beta_sigmoid_in_kernel=True)`；vLLM 自带的 `chunk_kda_with_fused_gate` 签名里**没有**这个开关，
+  `**kwargs` 静默吞掉，beta 被当成已 sigmoid 的值。vLLM 模型侧是在投影融合 kernel 里先做了 sigmoid。
+- 解法：参考脚本 `beta=torch.sigmoid(raw_beta)`。
+- 避免：对拍参考至少两份且互相独立（fla + 纯 torch），哪一份离群一眼可见；vLLM 的 fla 变体与上游 fla 的 kwargs 不要混用。
+
+## 层内激活缓冲按 max_tokens 预分配时，kernel 封装不能按缓冲长度判容量（2026-10-20，K3 KDA）
+
+- 现象：`Linear::forward` 报 `out shape [64, 12288]`（decode t=1），`kda_chunk_prep` 报 `scratch 容量`（prefill 63）。
+- 根因：封装用 `x.numel()` 推 tokens / 用 `sc.qn.len() >= q.len()` 判容量，缓冲比本步大就误判。
+- 解法：`Linear::forward_rows(…, tokens)`；`kda_chunk_{prep,wy,ho}` 加显式 `tokens` 参数，只按本步行数判。
+- 避免：新 kernel 封装一律收显式 `tokens`，`ensure!(buf.len() >= tokens·row)`，不要用 `==` 或互相比缓冲长度。

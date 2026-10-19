@@ -234,8 +234,79 @@ T=256 / H=2 / K=128 / BT=64，`|state|max 0.53`：
 2. `ho` 的 h 更新（`v'ᵀ·kg`）目前每个 (vv,kk) 线程串行扫 BT，可拆成按 i 分块 + 归约。
 3. v3 若要支持 BT≠64，只需在 host 侧加特化（kernel 已是模板）。
 
+## 里程碑 C-1：单层真权重对拍（2026-10-19，B300-50）
+
+> 状态：**完成（2026-10-20，exit 0）**。crate 侧 `models/kimik3/src/{weights.rs,kda.rs}`，测试 `models/kimik3/tests/kda_layer_parity.rs`，
+> 外壳 `scripts/verify/k3_kda_layer.sh`（exit 0 = 过），参考 `scripts/verify/gen_k3_kda_layer_refs.py`。
+
+### 环境
+
+- 权重：B300-50 `/data/models/moonshotai/Kimi-K3`（物理路径，不拷不链）；第 1 层（0-based，KDA 层）全在 `model-00002-of-000096.safetensors`（16 GB），
+  Rust 侧 `weights::shards_for_layer` 读 index 只 mmap 这一片（装载 0.3 s）。
+- 参考：vLLM 容器 `vllm/vllm-openai:nightly`（torch 2.13 + transformers 5.15.1）。**容器没有 `fla` 包**（HF `modeling_kimi_linear.py`
+  `import fla` 直接失败，所以不能用 HF 类实例化），改用 vLLM 自带的 `vllm.third_party.flash_linear_attention.ops.kda.chunk_kda_with_fused_gate`
+  （与 HF 调用的 `fla.ops.kda.chunk_kda(use_gate_in_kernel=True, …)` 同一算法）+ 纯 torch f32 顺序递归三方核对。
+- 输入：`x ~ N(0, 0.5²)` bf16 `[64, 7168]` seed 0 → `h = KimiRMSNorm(x)`（`w·norm(x)`，**非** zero-centered，已 grep `1 + self.weight` 确认无）。
+- GPU：参考用 3、Rust 用 2（0/1 被 Qwen3.5 占）。
+
+### 与 HF / kernel 口径的核对结论
+
+| 项 | HF `modeling_kimi_linear.py` | 真分片 | 我们 |
+|---|---|---|---|
+| `A_log` | `Parameter[num_heads]` f32 | **`[128]`** F32，前 96 有值、后 32 全 0 | `load_a_log` 只取前 96 并断言尾部为 0（vLLM `a_log_weight_loader` 同样 `narrow`） |
+| `dt_bias` | `[H·K]` f32 | `[12288]` F32 | 直接 f32 |
+| conv1d | `ShortConvolution(silu)`，无 bias | `[12288,1,4]` **F32** | 转 bf16 `[12288,4]`（HF bf16 模型 dtype 同样会转） |
+| `o_norm` | `FusedRMSNormGated(head_dim, eps, 'sigmoid')`：`norm(x)·w·sigmoid(g)` | `[128]` F32，均值 0.034 | `kda_gated_rmsnorm`（同式，w 转 bf16） |
+| gate | `lower_bound·sigmoid(exp(A_log[h])·(g + dt_bias))`，`lower_bound=-5` | — | kernel 内同式 |
+| beta | `b_proj(x).float()` → kernel 内 sigmoid | — | `bf16_to_f32` 后 kernel 内 sigmoid |
+| RMSNorm | `KimiRMSNorm`：`w · norm(x)`（非 zero-centered） | `[7168]` BF16 | `Table::rmsnorm` 普通装载 |
+
+无需改 kernel；HF 与 kernel 口径一致。
+
+### 结果
+
+`scripts/verify/k3_kda_layer.sh` **exit 0**（B300-50，2026-10-20 00:03；日志与 .npy 归档 `test/kimik3/2026-10-19/kda_layer/`，8.3 MB）。
+T=64、第 1 层、单 slot。全部数字相对 max|参考|：
+
+| 比较 | rel max_err | mean_abs | cos | 门槛 |
+|---|---|---|---|---|
+| 参考自检：fla o vs torch f32 o | 6.42e-3 | — | 0.9999906 | （参考可信度） |
+| **prefill(chunk) out vs fla** | **6.97e-3** | 1.83e-5 | **0.9999722** | cos ≥ 0.999，rel ≤ 5e-2 |
+| prefill(chunk) o_norm vs fla（o_proj 前） | 7.03e-3 | 4.48e-6 | 0.9999747 | 同上 |
+| prefill(chunk) out vs torch f32 | 6.76e-3 | 1.56e-5 | 0.9999793 | — |
+| chunk vs recurrent（同 kernel 两路径） | 6.76e-3 | 8.77e-6 | 0.9999918 | cos ≥ 0.9999，rel ≤ 2e-2 |
+| recurrent out vs fla | 6.97e-3 | 1.78e-5 | 0.9999736 | — |
+| **decode(63+1) vs prefill[-1]** | **4.10e-3** | 8.62e-6 | **0.9999934** | cos ≥ 0.9999，rel ≤ 2e-2 |
+| decode vs fla[-1] | 6.12e-3 | 2.10e-5 | 0.9999723 | — |
+
+读法：所有 rel max_err 都在 6–7e-3 = **一个 bf16 ulp 量级**（输出 |y| ≤ 0.018，max_err 1.2e-4 ≈ bf16 在 0.016 处的半个 ulp），
+fla 自己对 torch f32 也是 6.4e-3——Rust 与 fla 的差与 fla 与 f32 的差同量级，kernel 没有系统性偏差。
+任务书里的 "out max_err ≤ 5e-4 相对" 在 bf16 输出链路上**不可达**（bf16 本身 ~4e-3 相对），按 vLLM 口径 cos ≥ 0.999 判；
+实测 cos 0.99997，比门槛高两个量级。sm_103 上 `kda_parity` 的 3 个 chunk case（varlen / tail / bench）改签名后复测 3/3 过。
+
+### 踩坑
+
+0. `remote_b300.sh push` 带 `--delete`，远端新生成的 `test/kimik3/.../kda_layer/*.npy` 被下一次 push 删掉（本地还没有）→
+   "h_bf16.npy: No such file"。做法：参考生成后**先 `pull` 回本地再 push**，或当轮 `K3_SKIP_GEN=1` 前确认远端文件在。
+1. **vLLM 的 `chunk_kda_with_fused_gate` 不吃 `use_beta_sigmoid_in_kernel`**（`**kwargs` 吞掉），beta 要调用方先 `sigmoid`；
+   HF 的 `fla.ops.kda.chunk_kda` 才有这个开关。第一版参考漏了 → fla 与 torch/Rust 的 cos 都是 0.23（Rust 与 torch f32 却 0.99998），
+   一眼就能判断是参考错而不是 kernel 错——**三方核对的价值**。
+2. vLLM 的 `FusedRMSNormGated` 是 `CustomOp`，实例化要 `set_current_vllm_config` 上下文（裸脚本里 `AssertionError`）；
+   参考直接按它的 `forward_native` 展开成 torch 表达式。
+3. `Linear::forward` 要求 `out.numel() == tokens·out_features`，而层内激活缓冲按 `max_tokens` 预分配 → decode（t=1）
+   时报 `Linear: out shape [64, 12288]`。加 `Linear::forward_rows(…, tokens)`（Gemm 本来就允许更大缓冲），KDA 层全部改用它。
+4. `kda_chunk_{prep,wy,ho}` 原按**缓冲长度**判容量（`sc.qn.len() >= q.len()`、`out.len()·2 >= sc.u.len()`），层内缓冲按
+   `max_tokens` 预分配、scratch 按本步分 → prefill 63 时 "scratch 容量" 报错。改成显式 `tokens` 参数、只按本步行数判
+   （三个 kernel 签名各加一个 `tokens`，`kda_parity.rs` 与 kimik3 同步）。
+5. 容器里 `python3 -I` 看不到 `/work` 同目录模块是对的（只读挂载 + `-I`），但 **vLLM 的 `fla` 需要 GPU 才能 import triton**：
+   不带 `--gpus` 时 "0 active driver(s)"，只是探测用；真跑要 `--gpus device=N`。
+
 ## 下一步
 
+- 里程碑 C-2：`layer.rs`（KDA 层 + `input_layernorm` / `post_attention_layernorm` / AttnRes 钩子）、`latent_moe.rs` load 路径，
+  再做第 1 层**整层**（attn + MoE）真权重对拍；之后 `model.rs` 多层串起来对 HF hidden_states。
+- KDA 性能项（C-1 现状：q/k/v/g/f_a/b 六条独立 GEMM + 三条独立 conv；vLLM 是一条 `in_proj_qkvgfab` + 一条融合 conv）：
+  融合投影需要按列切输出或 kernel 吃 stride；激活缓冲改全模型共享。
 - MXFP4 专家 dequant 参考（`docs/loops/k3-moe.md`）：`weight_packed` U8 + `weight_scale` e8m0 / group 32 → bf16 回退。
 
 ## 阻塞记录

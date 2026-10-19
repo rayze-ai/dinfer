@@ -135,8 +135,11 @@ def main():
     sys.path.insert(0, "/")
     from vllm.third_party.flash_linear_attention.ops.kda import chunk_kda_with_fused_gate
 
+    # vLLM 的 chunk_kda_with_fused_gate 不吃 HF 的 use_beta_sigmoid_in_kernel（**kwargs 吞掉）：beta 要先 sigmoid
+    # （vLLM kda.py 在投影融合 kernel 里做 sigmoid；只有 flashinfer 路径有 beta_is_logit=True）。第一版漏了 → cos 0.23。
     o_fla, _ = chunk_kda_with_fused_gate(
-        q=q3.unsqueeze(0), k=k3.unsqueeze(0), v=v3.unsqueeze(0), raw_g=g3.unsqueeze(0), beta=raw_beta.unsqueeze(0),
+        q=q3.unsqueeze(0), k=k3.unsqueeze(0), v=v3.unsqueeze(0), raw_g=g3.unsqueeze(0),
+        beta=torch.sigmoid(raw_beta).unsqueeze(0),
         A_log=a_log, g_bias=dt_bias, scale=scale, initial_state=None, output_final_state=True,
         lower_bound=lb, use_qk_l2norm_in_kernel=True, cu_seqlens=None,
     )

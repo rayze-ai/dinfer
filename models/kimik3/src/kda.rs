@@ -66,20 +66,19 @@ impl KdaChunkWorkspace {
         Self { plan: None, scratch: None, tokens: 0, cap_tokens: 0, cap_chunks: 0, bt: Self::BT }
     }
 
-    /// 每步一次：按 host 侧 `cu_seqlens` 重建切块表；缓冲不够就按本步形状重分。
-    /// `kda_chunk_ho` 要求 `out.len()·2 ≥ scratch.u.len()`，所以缓冲比本步大 2 倍以上时也重分（不能只增不减）。
+    /// 每步一次：按 host 侧 `cu_seqlens` 重建切块表；缓冲不够就按本步形状重分（只增不减；三段 kernel 都按本步
+    /// `tokens` 判容量，缓冲偏大无妨）。
     pub fn prepare(&mut self, stream: &Stream, cu_seqlens: &[i32], sh: &KdaShapes) -> Result<()> {
         let plan = k::KdaChunkPlan::new(stream, cu_seqlens, self.bt)?;
         let tokens = (*cu_seqlens.last().unwrap_or(&0)).max(0) as usize;
-        let fits = self.scratch.is_some()
-            && tokens <= self.cap_tokens
-            && plan.num_chunks <= self.cap_chunks
-            && self.cap_tokens <= 2 * tokens.max(1);
+        let fits = self.scratch.is_some() && tokens <= self.cap_tokens && plan.num_chunks <= self.cap_chunks;
         if !fits {
+            let cap_t = tokens.max(self.cap_tokens);
+            let cap_c = plan.num_chunks.max(self.cap_chunks);
             self.scratch = None;
-            self.scratch = Some(k::KdaChunkScratch::new(stream, tokens, sh.heads, sh.head_dim, plan.num_chunks, self.bt)?);
-            self.cap_tokens = tokens;
-            self.cap_chunks = plan.num_chunks;
+            self.scratch = Some(k::KdaChunkScratch::new(stream, cap_t, sh.heads, sh.head_dim, cap_c, self.bt)?);
+            self.cap_tokens = cap_t;
+            self.cap_chunks = cap_c;
         }
         self.tokens = tokens;
         self.plan = Some(plan);
@@ -246,13 +245,13 @@ impl KdaLayer {
         ensure!(x.numel() == t * self.sh.hidden && out.numel() == x.numel(), "kda: x/out 形状");
 
         // 1. 投影（q/k/v/g 各 7168→12288；f_a 7168→128 → f_b 128→12288；b 7168→96）
-        self.q_proj.forward(gemm, x, &mut self.q_buf)?;
-        self.k_proj.forward(gemm, x, &mut self.k_buf)?;
-        self.v_proj.forward(gemm, x, &mut self.v_buf)?;
-        self.g_proj.forward(gemm, x, &mut self.g2_buf)?;
-        self.f_a.forward(gemm, x, &mut self.fa_buf)?;
-        self.f_b.forward(gemm, &self.fa_buf, &mut self.g1_buf)?;
-        self.b_proj.forward(gemm, x, &mut self.b_buf)?;
+        self.q_proj.forward_rows(gemm, x, &mut self.q_buf, t)?;
+        self.k_proj.forward_rows(gemm, x, &mut self.k_buf, t)?;
+        self.v_proj.forward_rows(gemm, x, &mut self.v_buf, t)?;
+        self.g_proj.forward_rows(gemm, x, &mut self.g2_buf, t)?;
+        self.f_a.forward_rows(gemm, x, &mut self.fa_buf, t)?;
+        self.f_b.forward_rows(gemm, &self.fa_buf, &mut self.g1_buf, t)?;
+        self.b_proj.forward_rows(gemm, x, &mut self.b_buf, t)?;
         k::bf16_to_f32_n(stream, &self.b_buf.data, &mut self.beta_buf.data, t * h)?;
 
         // 2. 三个短卷积（decode 单 token 走 update，其余走 varlen prefill）
@@ -311,12 +310,13 @@ impl KdaLayer {
                 &meta.cu_seqlens.data,
                 plan,
                 sc,
+                t,
                 h,
                 kd,
                 scale,
                 self.lower_bound,
             )?;
-            k::kda_chunk_wy(stream, &self.vc_buf.data, &meta.cu_seqlens.data, plan, sc, h, kd)?;
+            k::kda_chunk_wy(stream, &self.vc_buf.data, &meta.cu_seqlens.data, plan, sc, t, h, kd)?;
             k::kda_chunk_ho(
                 stream,
                 &meta.cu_seqlens.data,
@@ -325,6 +325,7 @@ impl KdaLayer {
                 &mut self.o_buf.data,
                 &mut self.state.rec.data,
                 Some(&meta.state_indices.data),
+                t,
                 h,
                 kd,
             )?;
@@ -354,7 +355,7 @@ impl KdaLayer {
         k::kda_gated_rmsnorm(stream, &self.o_buf.data, &self.norm_w.data, &self.g2_buf.data, &mut self.n_buf.data, t * h, kd, self.eps)?;
 
         // 5. o_proj
-        self.o_proj.forward(gemm, &self.n_buf, out)
+        self.o_proj.forward_rows(gemm, &self.n_buf, out, t)
     }
 
     /// 对拍 / 调试用：上一步 `o_norm` 的输出 `[t, H·K]`（`o_proj` 之前）。

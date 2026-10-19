@@ -1,0 +1,19 @@
+{
+ "layer": 1,
+ "T": 64,
+ "seed": 0,
+ "H": 96,
+ "K": 128,
+ "W": 4,
+ "hidden": 7168,
+ "eps": 1e-05,
+ "lower_bound": -5.0,
+ "files": [
+  "model-00002-of-000096.safetensors"
+ ],
+ "torch": "2.13.0+cu130",
+ "fla_vs_torch_o": {
+  "rel": 0.006422101985663176,
+  "cos": 0.9999906420707703
+ }
+}
