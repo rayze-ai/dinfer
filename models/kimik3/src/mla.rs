@@ -196,6 +196,7 @@ impl MlaLayer {
     }
 
     /// `x[:t]`（input_layernorm 之后）→ `out[:t]`。`slot_mapping[i]`：第 i 个 token 的 latent 写入 cache 的槽位（-1 跳过）。
+    #[allow(clippy::too_many_arguments)]
     pub fn forward(&mut self, stream: &Stream, gemm: &Gemm, t: usize, x: &Tensor<bf16>, slot_mapping: &Tensor<i64>, meta: &MlaMeta<'_>, out: &mut Tensor<bf16>) -> Result<()> {
         let (h, nope, rope, kv_lora, v_dim, q_lora, hidden) = (self.heads, self.nope, self.rope, self.kv_lora, self.v_dim, self.q_lora, self.hidden);
         let qk = nope + rope;

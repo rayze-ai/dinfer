@@ -3,7 +3,7 @@
 <!-- ===== 当前状态（交接区）：每次收功整体重写，保持 ≤ 20 行 ===== -->
 ## 当前状态
 
-- 更新日期：2026-10-20 03:xx（Qwen3.5 bench_b300_13 吞吐 0.97/0.97/0.92/0.91×、第 7 轮进行中；K3 C-3 对拍收尾中）
+- 更新日期：2026-10-20 03:xx（Qwen3.5 bench_b300_13 吞吐 0.97/0.97/0.92/0.91×、第 7 轮进行中；K3 C-3 完成，push 冻结可解除）
 - 总览：Qwen3-0.6B 线 Q1–Q5 阶段性完成（Q3 四组 ≥ vLLM；Q4 PD / Q5 TP 功能通过，细节见 `docs/design.md` §10/§13 与 10-18 日志）；GLM 线 P0–P6 通过、真权重挂起；B300 单卡 B4 调优进行中（`docs/loops/b4-sm100.md`，c1/c8/c32 已追平或超越，c8-long 落后 38%）。
 - **Qwen3.5-27B（`models/qwen35`）里程碑 5 完成（2026-10-19，B300-50 GPU 0，`docs/loops/qwen35-model.md` 第 10–20 轮）**：真权重 bf16 52 GB 加载 7–8 s；3 条 greedy prompt 与 vLLM 逐字一致。修了 3 个真权重才暴露的 bug：① 引擎线程未绑 CUDA ctx（`forward_sample` 加 `bind_ctx`）；② **HF `Qwen3_5RMSNorm` 是 zero-centered `(1+w)`**（input/post/final norm 加载时 `1+w`；tiny golden 之前全 1 权重是盲区，已随机化 + seed 8）；③ prefix cache 命中让 GDN 递归状态从零起（强制关；真支持要按块缓存状态）+ `SlotTable::release`（`BatchPlan.finished_req_ids` 新字段）。
 - Qwen3.5 性能基线 `test/qwen35/2026-10-19/bench_b300_{1,2,3}` + `test/qwen35/perf-trend.*`：**bench_b300_3** TPOT c1 24.1 / c8 28.3 / c32 59.7 / c8-long 157.5 ms vs vLLM 10.3 / 11.2 / 12.9 / 11.2（0.07–0.43×）；TTFT c8-long 8.1 s vs 0.41 s。差距来源：GDN prefill 逐 token 顺序递归（`gdn.cu` 无 chunk 版）、decode 无 CUDA graph、eager 单流。vLLM 基线数字在 `docs/design-qwen35.md` §0.1/§0.2。
