@@ -333,3 +333,162 @@ fn kda_gated_rmsnorm_op() {
     st.synchronize().unwrap();
     assert_close("gated_rmsnorm", &st.dtoh_sync_copy(&dout).unwrap(), &want, 1e-2, 0.999);
 }
+
+
+// --------------------------------------------------------------------------- chunk 形式 prefill
+
+/// 相对口径（coordinator 2026-10-19 确认）：state 用 cos ≥ 0.9999 + 相对 max_err ≤ 5e-3
+/// （相对 `|want|max`）；口径依据 `docs/pitfalls.md`「软判决不比逐位」。
+fn assert_close_rel(name: &str, got: &[f32], want: &[f32], rel: f32, min_cos: f32) {
+    assert_eq!(got.len(), want.len(), "{name}: 长度");
+    let mut max_err = 0f32;
+    let (mut dot, mut na, mut nb) = (0f64, 0f64, 0f64);
+    let mut worst = 0usize;
+    for (i, (a, b)) in got.iter().zip(want).enumerate() {
+        let e = (a - b).abs();
+        if e > max_err {
+            max_err = e;
+            worst = i;
+        }
+        dot += (*a as f64) * (*b as f64);
+        na += (*a as f64) * (*a as f64);
+        nb += (*b as f64) * (*b as f64);
+    }
+    let scale = want.iter().fold(0f32, |m, v| m.max(v.abs())).max(1e-30);
+    let cos = if na > 0.0 && nb > 0.0 { dot / (na.sqrt() * nb.sqrt()) } else { 1.0 };
+    let min_cos = min_cos as f64;
+    assert!(
+        max_err / scale <= rel && cos >= min_cos,
+        "{name}: max_err {max_err:.3e}（相对 {:.3e}，at {worst}: {} vs {}）cos {cos:.7}（要求 <= {rel:.1e} / >= {min_cos}）",
+        max_err / scale,
+        got[worst],
+        want[worst]
+    );
+    println!("  {name:<28} max_err {max_err:.3e}  rel {:.3e}  cos {cos:.7}", max_err / scale);
+}
+
+const BT: usize = 64;
+
+/// 跑 chunk 形式全链（prep → wy → ho），返回 (out, state)。
+#[allow(clippy::too_many_arguments)]
+fn run_chunk(
+    st: &Stream,
+    q: &[f32], k: &[f32], v: &[f32], raw_g: &[f32], raw_beta: &[f32],
+    a_log: &[f32], dt_bias: &[f32], state0: &[f32], cu: &[i32],
+    heads: usize, head_dim: usize, lower_bound: f32,
+) -> (Vec<bf16>, Vec<f32>) {
+    let tokens = q.len() / (heads * head_dim);
+    let plan = ops::KdaChunkPlan::new(st, cu, BT).unwrap();
+    let mut sc = ops::KdaChunkScratch::new(st, tokens, heads, head_dim, plan.num_chunks, BT).unwrap();
+    let dq = up_bf16(st, q);
+    let dk = up_bf16(st, k);
+    let dv = up_bf16(st, v);
+    let dg = up_bf16(st, raw_g);
+    let dbeta = st.htod_copy(raw_beta.to_vec()).unwrap();
+    let da = st.htod_copy(a_log.to_vec()).unwrap();
+    let db = st.htod_copy(dt_bias.to_vec()).unwrap();
+    let dcu = st.htod_copy(cu.to_vec()).unwrap();
+    let mut dout = st.alloc_uninit::<bf16>(q.len()).unwrap();
+    let mut dstate = st.htod_copy(state0.to_vec()).unwrap();
+    let scale = (head_dim as f32).powf(-0.5);
+    ops::kda_chunk_prep(st, &dq, &dk, &dg, &dbeta, &da, &db, &dcu, &plan, &mut sc, heads, head_dim, scale, Some(lower_bound)).unwrap();
+    ops::kda_chunk_wy(st, &dv, &dcu, &plan, &mut sc, heads, head_dim).unwrap();
+    ops::kda_chunk_ho(st, &dcu, &plan, &sc, &mut dout, &mut dstate, None, heads, head_dim).unwrap();
+    st.synchronize().unwrap();
+    (st.dtoh_sync_copy(&dout).unwrap(), st.dtoh_sync_copy(&dstate).unwrap())
+}
+
+fn chunk_case(dir: &str) {
+    let (dev, st) = dev();
+    let _ = &dev;
+    let (qs, q) = load(dir, "q");
+    let (_, k) = load(dir, "k");
+    let (_, v) = load(dir, "v");
+    let (_, raw_g) = load(dir, "raw_g");
+    let (_, raw_beta) = load(dir, "raw_beta");
+    let (_, a_log) = load(dir, "a_log");
+    let (_, dt_bias) = load(dir, "dt_bias");
+    let (_, want) = load(dir, "out");
+    let (_, want_state) = load(dir, "state_out");
+    let (_, st_in) = load(dir, "state_in");
+    let cu = load_i32(dir, "cu_seqlens");
+    let heads = qs[1];
+    let head_dim = qs[2];
+    let (got, got_state) =
+        run_chunk(&st, &q, &k, &v, &raw_g, &raw_beta, &a_log, &dt_bias, &st_in, &cu, heads, head_dim, -5.0);
+    // out：atol 1e-2 + cos ≥ 0.9999
+    assert_close(&format!("{dir}/out"), &got, &want, 1e-2, 0.9999);
+    // state：相对 5e-3 + cos ≥ 0.9999
+    assert_close_rel(&format!("{dir}/state"), &got_state, &want_state, 5e-3, 0.9999);
+}
+
+#[test]
+#[ignore]
+fn kda_chunk_varlen() { chunk_case("recurrent_chunk"); }
+
+#[test]
+#[ignore]
+fn kda_chunk_tail() { chunk_case("recurrent_chunk_tail"); }
+
+/// 计时：K3 真实形状 T=1024 / 96 头 / head_dim 128，chunk 全链 vs 顺序递归。
+/// 门槛见 `docs/loops/k3-kda.md`：chunk ≤ 顺序版 1/5。
+#[test]
+#[ignore]
+fn kda_chunk_bench() {
+    let (dev, st) = dev();
+    let _ = &dev;
+    let (t, heads, kd) = (1024usize, 96usize, 128usize);
+    let n = t * heads * kd;
+    // 用真实量级的 gate：-5·sigmoid(a·x)
+    let raw_g: Vec<f32> = (0..n).map(|i| ((i % 97) as f32 - 48.0) / 32.0).collect();
+    let q = vec![0.03f32; n];
+    let v = vec![0.03f32; n];
+    let raw_beta = vec![0.5f32; t * heads];
+    let a_log: Vec<f32> = (0..heads).map(|h| (0.2 + 0.16 * h as f32).ln()).collect();
+    let dt_bias = vec![0.1f32; heads * kd];
+    let cu = vec![0i32, t as i32];
+    let scale = (kd as f32).powf(-0.5);
+
+    // 顺序版基线
+    let dq = up_bf16(&st, &q);
+    let dk = up_bf16(&st, &q);
+    let dv = up_bf16(&st, &v);
+    let dg = up_bf16(&st, &raw_g);
+    let dbeta = st.htod_copy(raw_beta.clone()).unwrap();
+    let da = st.htod_copy(a_log.clone()).unwrap();
+    let db = st.htod_copy(dt_bias.clone()).unwrap();
+    let dcu = st.htod_copy(cu.clone()).unwrap();
+    let mut out_seq = st.alloc_uninit::<bf16>(n).unwrap();
+    let mut state_seq = st.alloc_zeros::<f32>(heads * kd * kd).unwrap();
+    let seq_once = |st: &Stream, out: &mut _, state: &mut _| {
+        ops::kda_recurrent(st, &dq, &dk, &dv, &dg, &dbeta, &da, &db, out, state, &dcu, None, 1, heads, kd, scale, Some(-5.0)).unwrap();
+    };
+    seq_once(&st, &mut out_seq, &mut state_seq);
+    st.synchronize().unwrap();
+    let iters = 3;
+    let t0 = std::time::Instant::now();
+    for _ in 0..iters { seq_once(&st, &mut out_seq, &mut state_seq); }
+    st.synchronize().unwrap();
+    let ms_seq = t0.elapsed().as_secs_f64() * 1e3 / iters as f64;
+
+    // chunk 全链
+    let plan = ops::KdaChunkPlan::new(&st, &cu, BT).unwrap();
+    let mut sc = ops::KdaChunkScratch::new(&st, t, heads, kd, plan.num_chunks, BT).unwrap();
+    let mut out_ch = st.alloc_uninit::<bf16>(n).unwrap();
+    let mut state_ch = st.alloc_zeros::<f32>(heads * kd * kd).unwrap();
+    let chunk_once = |st: &Stream, sc: &mut ops::KdaChunkScratch, out: &mut _, state: &mut _| {
+        ops::kda_chunk_prep(st, &dq, &dk, &dg, &dbeta, &da, &db, &dcu, &plan, sc, heads, kd, scale, Some(-5.0)).unwrap();
+        ops::kda_chunk_wy(st, &dv, &dcu, &plan, sc, heads, kd).unwrap();
+        ops::kda_chunk_ho(st, &dcu, &plan, sc, out, state, None, heads, kd).unwrap();
+    };
+    chunk_once(&st, &mut sc, &mut out_ch, &mut state_ch);
+    st.synchronize().unwrap();
+    let t1 = std::time::Instant::now();
+    for _ in 0..iters { chunk_once(&st, &mut sc, &mut out_ch, &mut state_ch); }
+    st.synchronize().unwrap();
+    let ms_chunk = t1.elapsed().as_secs_f64() * 1e3 / iters as f64;
+
+    let speedup = ms_seq / ms_chunk;
+    println!("  T={t} H={heads} K={kd}: 顺序 {ms_seq:.3} ms, chunk {ms_chunk:.3} ms, 加速 {speedup:.2}x（门槛 5x）");
+    assert!(speedup >= 5.0, "chunk 加速 {speedup:.2}x < 5x（顺序 {ms_seq:.3} ms / chunk {ms_chunk:.3} ms）");
+}

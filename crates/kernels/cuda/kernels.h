@@ -164,6 +164,29 @@ int kda_recurrent(const void* q, const void* k, const void* v, const void* raw_g
 int kda_gated_rmsnorm(const void* x, const void* w, const void* gate, void* out, int64_t rows,
                       int64_t head_dim, float eps);
 
+// ---- KDA chunk 形式 prefill（kda_chunk.cu，规格见 docs/loops/k3-kda.md「v2 规格」）----
+// 三段式，host 侧按顺序调用；中间量（qn/kn/beta/gc/aq/u/w/kg）由调用方按下面尺寸分配（全 fp32，bf16 除外）：
+//   qn/kn            bf16 [T, heads, head_dim]     （q 已乘 scale，k 已 l2norm）
+//   beta             f32  [T, heads]
+//   gc               f32  [T, heads, head_dim]     （块内 inclusive cumsum(gate)·1/ln2）
+//   chunk_tab        i32  [2, num_chunks]          （chunk → (序列, 块号)）
+//   cu_nt            i32  [num_seqs]               （每序列的块数）
+//   chunk_off        i32  [num_seqs+1]             （每序列首块在 chunk_tab 的下标）
+//   aq               f32  [num_chunks, heads, BT, BT]
+//   u/w/kg           f32  [T, heads, head_dim]
+// bt 是模板参数，host 选（当前支持 64）。head_dim <= 256；ho 段的 BV 由实现按 head_dim 选。
+int kda_chunk_prep(const void* q, const void* k, const void* raw_g, const float* raw_beta, const float* a_log,
+                   const float* dt_bias, void* qn, void* kn, float* beta, float* gc, const int* cu_seqlens,
+                   int64_t num_seqs, int64_t heads, int64_t head_dim, int64_t bt, float scale, float lower_bound,
+                   int use_lower_bound, cudaStream_t stream);
+int kda_chunk_wy(const void* qn, const void* kn, const void* v, const float* gc, const float* beta, float* aq,
+                 float* u, float* w, float* kg, const int* cu_seqlens, const int* chunk_tab, int64_t num_chunks,
+                 int64_t heads, int64_t head_dim, int64_t bt, cudaStream_t stream);
+int kda_chunk_ho(const void* qn, const float* gc, const float* aq, const float* u, const float* w,
+                 const float* kg, void* out, void* state, const int* cu_seqlens, const int* cu_nt,
+                 const int* chunk_off, const int* state_indices, int64_t state_stride_tok, int64_t num_seqs,
+                 int64_t heads, int64_t head_dim, int64_t bt, cudaStream_t stream);
+
 // ---- GDN（gdn.cu）：Gated DeltaNet 的模型无关算子（Qwen3.5 线；与 KDA 同族，口径见 gdn.cu 顶部）----
 // act：0 = siLU（Qwen3.5），1 = sigmoid（其它 GDN 变体）。
 // 短卷积 y[t,d] = act(Σ_j w[d,j]·x[t-W+1+j,d])，w 布局 [dim, width]，宽度维从旧到新；

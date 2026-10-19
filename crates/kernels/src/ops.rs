@@ -2290,6 +2290,219 @@ pub fn kda_recurrent(
     )
 }
 
+// --------------------------------------------------------------------------- KDA chunk 形式 prefill
+
+/// KDA chunk 形式 prefill 的工作区与执行计划。
+///
+/// 规格见 `docs/loops/k3-kda.md`「v2 规格」。所有中间量 fp32（`qn`/`kn` 为 bf16），
+/// 尺寸见 `cuda/kernels.h` 的同名注释。
+pub struct KdaChunkPlan {
+    /// `[chunk, 2]`：chunk → (序列下标, 该序列内的块号)。
+    pub chunk_tab: CudaSlice<i32>,
+    /// `[num_seqs]`：每序列的块数。
+    pub cu_nt: CudaSlice<i32>,
+    /// `[num_seqs + 1]`：每序列首块在 `chunk_tab` 中的下标。
+    pub chunk_off: CudaSlice<i32>,
+    pub num_chunks: usize,
+    pub num_seqs: usize,
+    pub bt: usize,
+}
+
+impl KdaChunkPlan {
+    /// 按 `cu_seqlens` 切块。`bt` 必须是 kernel 支持的块大小（当前 64）。
+    pub fn new(stream: &Stream, cu_seqlens: &[i32], bt: usize) -> Result<Self> {
+        ensure!(bt > 0 && cu_seqlens.len() >= 2, "kda_chunk plan: bt/cu_seqlens");
+        let num_seqs = cu_seqlens.len() - 1;
+        let mut tab = Vec::new();
+        let mut nt = Vec::with_capacity(num_seqs);
+        let mut off = Vec::with_capacity(num_seqs + 1);
+        for s in 0..num_seqs {
+            off.push(tab.len() as i32 / 2);
+            let len = (cu_seqlens[s + 1] - cu_seqlens[s]).max(0) as usize;
+            let n = len.div_ceil(bt);
+            nt.push(n as i32);
+            for c in 0..n {
+                tab.push(s as i32);
+                tab.push(c as i32);
+            }
+        }
+        off.push(tab.len() as i32 / 2);
+        let num_chunks = tab.len() / 2;
+        Ok(Self {
+            chunk_tab: stream.htod_copy(tab)?,
+            cu_nt: stream.htod_copy(nt)?,
+            chunk_off: stream.htod_copy(off)?,
+            num_chunks,
+            num_seqs,
+            bt,
+        })
+    }
+}
+
+/// chunk 形式 prefill 的中间缓冲。尺寸随 `[T, heads, head_dim]` 与块数变化。
+pub struct KdaChunkScratch {
+    pub qn: CudaSlice<bf16>,
+    pub kn: CudaSlice<bf16>,
+    pub beta: CudaSlice<f32>,
+    pub gc: CudaSlice<f32>,
+    pub aq: CudaSlice<f32>,
+    pub u: CudaSlice<f32>,
+    pub w: CudaSlice<f32>,
+    pub kg: CudaSlice<f32>,
+}
+
+impl KdaChunkScratch {
+    pub fn new(stream: &Stream, tokens: usize, heads: usize, head_dim: usize, num_chunks: usize, bt: usize) -> Result<Self> {
+        let n = tokens * heads * head_dim;
+        Ok(Self {
+            qn: stream.alloc_uninit::<bf16>(n)?,
+            kn: stream.alloc_uninit::<bf16>(n)?,
+            beta: stream.alloc_uninit::<f32>(tokens * heads)?,
+            gc: stream.alloc_uninit::<f32>(n)?,
+            aq: stream.alloc_uninit::<f32>(num_chunks * heads * bt * bt)?,
+            u: stream.alloc_uninit::<f32>(n)?,
+            w: stream.alloc_uninit::<f32>(n)?,
+            kg: stream.alloc_uninit::<f32>(n)?,
+        })
+    }
+}
+
+/// 三段的第 1 段：q/k 归一化（q 乘 `scale`）、beta、块内 inclusive cumsum(gate)·1/ln2。
+#[allow(clippy::too_many_arguments)]
+pub fn kda_chunk_prep(
+    stream: &Stream,
+    q: &CudaSlice<bf16>,
+    k: &CudaSlice<bf16>,
+    raw_g: &CudaSlice<bf16>,
+    raw_beta: &CudaSlice<f32>,
+    a_log: &CudaSlice<f32>,
+    dt_bias: &CudaSlice<f32>,
+    cu_seqlens: &CudaSlice<i32>,
+    plan: &KdaChunkPlan,
+    sc: &mut KdaChunkScratch,
+    heads: usize,
+    head_dim: usize,
+    scale: f32,
+    lower_bound: Option<f32>,
+) -> Result<()> {
+    ensure!(
+        sc.qn.len() >= q.len() && sc.kn.len() >= k.len() && sc.gc.len() >= q.len(),
+        "kda_chunk_prep: scratch 容量"
+    );
+    ensure!(dt_bias.len() >= heads * head_dim && a_log.len() >= heads, "kda_chunk_prep: a_log/dt_bias");
+    // SAFETY: 容量已校验；plan 由同一 cu_seqlens 生成。
+    check(
+        unsafe {
+            ffi::kda_chunk_prep(
+                stream.ptr(q) as *const c_void,
+                stream.ptr(k) as *const c_void,
+                stream.ptr(raw_g) as *const c_void,
+                stream.ptr(raw_beta) as *const f32,
+                stream.ptr(a_log) as *const f32,
+                stream.ptr(dt_bias) as *const f32,
+                stream.ptr_mut(&mut sc.qn) as *mut c_void,
+                stream.ptr_mut(&mut sc.kn) as *mut c_void,
+                stream.ptr_mut(&mut sc.beta) as *mut f32,
+                stream.ptr_mut(&mut sc.gc) as *mut f32,
+                stream.ptr(cu_seqlens) as *const i32,
+                plan.num_seqs as i64,
+                heads as i64,
+                head_dim as i64,
+                plan.bt as i64,
+                scale,
+                lower_bound.unwrap_or(0.0),
+                i32::from(lower_bound.is_some()),
+                stream.raw() as _,
+            )
+        },
+        "kda_chunk_prep",
+    )
+}
+
+/// 第 2 段：A/Aq → M = (I+A)⁻¹ → u / w / kg。
+#[allow(clippy::too_many_arguments)]
+pub fn kda_chunk_wy(
+    stream: &Stream,
+    v: &CudaSlice<bf16>,
+    cu_seqlens: &CudaSlice<i32>,
+    plan: &KdaChunkPlan,
+    sc: &mut KdaChunkScratch,
+    heads: usize,
+    head_dim: usize,
+) -> Result<()> {
+    ensure!(sc.aq.len() >= plan.num_chunks * heads * plan.bt * plan.bt, "kda_chunk_wy: aq 容量");
+    ensure!(v.len() >= sc.u.len() / 2, "kda_chunk_wy: v 容量"); // bf16 与 f32 同元素数
+    // SAFETY: 容量已校验。
+    check(
+        unsafe {
+            ffi::kda_chunk_wy(
+                stream.ptr(&sc.qn) as *const c_void,
+                stream.ptr(&sc.kn) as *const c_void,
+                stream.ptr(v) as *const c_void,
+                stream.ptr(&sc.gc) as *const f32,
+                stream.ptr(&sc.beta) as *const f32,
+                stream.ptr_mut(&mut sc.aq) as *mut f32,
+                stream.ptr_mut(&mut sc.u) as *mut f32,
+                stream.ptr_mut(&mut sc.w) as *mut f32,
+                stream.ptr_mut(&mut sc.kg) as *mut f32,
+                stream.ptr(cu_seqlens) as *const i32,
+                stream.ptr(&plan.chunk_tab) as *const i32,
+                plan.num_chunks as i64,
+                heads as i64,
+                head_dim as i64,
+                plan.bt as i64,
+                stream.raw() as _,
+            )
+        },
+        "kda_chunk_wy",
+    )
+}
+
+/// 第 3 段：跨 chunk 扫 h（fp32）并输出 o。
+#[allow(clippy::too_many_arguments)]
+pub fn kda_chunk_ho(
+    stream: &Stream,
+    cu_seqlens: &CudaSlice<i32>,
+    plan: &KdaChunkPlan,
+    sc: &KdaChunkScratch,
+    out: &mut CudaSlice<bf16>,
+    state: &mut CudaSlice<f32>,
+    state_indices: Option<&CudaSlice<i32>>,
+    heads: usize,
+    head_dim: usize,
+) -> Result<()> {
+    let per_slot = heads * head_dim * head_dim;
+    ensure!(state.len() >= per_slot, "kda_chunk_ho: state");
+    ensure!(out.len() * 2 >= sc.u.len(), "kda_chunk_ho: out 容量");
+    let psi = state_indices.map_or(std::ptr::null(), |s| stream.ptr(s) as *const i32);
+    // SAFETY: 容量已校验；slot 编号由调度器保证 < state 槽数。
+    check(
+        unsafe {
+            ffi::kda_chunk_ho(
+                stream.ptr(&sc.qn) as *const c_void,
+                stream.ptr(&sc.gc) as *const f32,
+                stream.ptr(&sc.aq) as *const f32,
+                stream.ptr(&sc.u) as *const f32,
+                stream.ptr(&sc.w) as *const f32,
+                stream.ptr(&sc.kg) as *const f32,
+                stream.ptr_mut(out) as *mut c_void,
+                stream.ptr_mut(state) as *mut c_void,
+                stream.ptr(cu_seqlens) as *const i32,
+                stream.ptr(&plan.cu_nt) as *const i32,
+                stream.ptr(&plan.chunk_off) as *const i32,
+                psi,
+                per_slot as i64,
+                plan.num_seqs as i64,
+                heads as i64,
+                head_dim as i64,
+                plan.bt as i64,
+                stream.raw() as _,
+            )
+        },
+        "kda_chunk_ho",
+    )
+}
+
 /// 输出门 + gated RMSNorm：`y = rmsnorm(x, w, head_dim, eps) * sigmoid(gate)`。
 /// `x`/`gate`/`out`: `[rows, head_dim]` bf16，`w`: `[head_dim]` bf16。
 pub fn kda_gated_rmsnorm(
