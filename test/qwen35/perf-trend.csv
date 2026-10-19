@@ -143,3 +143,15 @@ bench_b300_12,2026-10-19,调度预算 max_num_batched_tokens 2048 → 16384（�
 bench_b300_12,2026-10-19,调度预算 max_num_batched_tokens 2048 → 16384（与 vLLM 容器一致）；代码同 bench_b300_11,c8-long,out_tok_per_s,509.715,557.830,0.914,1.5,higher,main,B300,vllm,dinfer,qwen35
 bench_b300_12,2026-10-19,调度预算 max_num_batched_tokens 2048 → 16384（与 vLLM 容器一致）；代码同 bench_b300_11,c8-long,ttft_p50_ms,474.939,406.309,1.169,-123.9,lower,main,B300,vllm,dinfer,qwen35
 bench_b300_12,2026-10-19,调度预算 max_num_batched_tokens 2048 → 16384（与 vLLM 容器一致）；代码同 bench_b300_11,c8-long,tpot_p50_ms,12.071,11.240,1.074,15.3,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_13,2026-10-19,激活缓冲全模型共享一套（ActScratch，170 GB → 2.8 GB）；预算 16384,c1,out_tok_per_s,92.120,94.512,0.975,-0.8,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_13,2026-10-19,激活缓冲全模型共享一套（ActScratch，170 GB → 2.8 GB）；预算 16384,c1,ttft_p50_ms,22.099,46.466,0.476,1.6,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_13,2026-10-19,激活缓冲全模型共享一套（ActScratch，170 GB → 2.8 GB）；预算 16384,c1,tpot_p50_ms,10.764,10.296,1.045,-0.9,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_13,2026-10-19,激活缓冲全模型共享一套（ActScratch，170 GB → 2.8 GB）；预算 16384,c8,out_tok_per_s,653.933,672.139,0.973,-0.0,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_13,2026-10-19,激活缓冲全模型共享一套（ActScratch，170 GB → 2.8 GB）；预算 16384,c8,ttft_p50_ms,84.611,100.972,0.838,0.1,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_13,2026-10-19,激活缓冲全模型共享一套（ActScratch，170 GB → 2.8 GB）；预算 16384,c8,tpot_p50_ms,11.636,11.193,1.040,-0.0,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_13,2026-10-19,激活缓冲全模型共享一套（ActScratch，170 GB → 2.8 GB）；预算 16384,c32,out_tok_per_s,1980.095,2148.395,0.922,0.5,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_13,2026-10-19,激活缓冲全模型共享一套（ActScratch，170 GB → 2.8 GB）；预算 16384,c32,ttft_p50_ms,274.719,264.091,1.040,0.6,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_13,2026-10-19,激活缓冲全模型共享一套（ActScratch，170 GB → 2.8 GB）；预算 16384,c32,tpot_p50_ms,14.122,12.903,1.094,0.5,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_13,2026-10-19,激活缓冲全模型共享一套（ActScratch，170 GB → 2.8 GB）；预算 16384,c8-long,out_tok_per_s,509.995,557.589,0.915,0.1,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_13,2026-10-19,激活缓冲全模型共享一套（ActScratch，170 GB → 2.8 GB）；预算 16384,c8-long,ttft_p50_ms,473.977,407.576,1.163,0.2,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_13,2026-10-19,激活缓冲全模型共享一套（ActScratch，170 GB → 2.8 GB）；预算 16384,c8-long,tpot_p50_ms,12.075,11.239,1.074,-0.0,lower,main,B300,vllm,dinfer,qwen35
