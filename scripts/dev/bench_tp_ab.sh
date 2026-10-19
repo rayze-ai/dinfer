@@ -7,7 +7,7 @@ set -uo pipefail
 OUT="$1"; CHANGE="$2"; BASE="$3"; TPS="$4"; shift 4
 R="${R:-/data/yaochen/infer}"; PORT="${PORT:-8341}"; BENCH=./target/release/bench; BIN=./target/release/dinfer
 mkdir -p "$OUT"; echo "$CHANGE" > "$OUT/CHANGE"
-gpu_tag() { local n; n=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1); case "$n" in *4090*) echo 4090;; *B300*) echo B300;; *) echo "${n// /}";; esac; }
+gpu_tag() { local n; n=$(nvidia-smi -i 0 --query-gpu=name --format=csv,noheader 2>/dev/null); case "$n" in *4090*) echo 4090;; *B300*) echo B300;; *) echo "${n// /}";; esac; }
 [ -n "$(gpu_tag)" ] && gpu_tag > "$OUT/GPU"   # 卡型，bench_trend.py 的 gpu 维度
 [ -x "$BENCH" ] || cargo build --release -p dinfer-bench
 SEED=$(( $(date +%s) % 100000 ))
