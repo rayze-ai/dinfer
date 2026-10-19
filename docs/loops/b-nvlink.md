@@ -24,6 +24,13 @@
 - **验证**：① 单测 `ar_oneshot` vs NCCL 结果逐位一致（随机 bf16，world 2/4/8，size 1 KB–512 KB）；② `q5_tp.sh` 一致性不变；③ `bench_tp_ab.sh` 每项改动一行进 CSV（变体名 `tp2_car` / `tp2_car_fused` / `tp2_lmcol`），停止条件 TPOT 相对上一轮不退化、至少一项 ≥ 3%。
 - **分工**：kernel + IpcBuf + 单测一个子代理；model.rs 接线 + 开关 + bench 另一个；lm_head 列切第三个（独立）。brief 固定加"`crates/` 不得出现模型特定内容"。
 
+## vLLM 基线（B300，用户 2026-10-19："需要 vllm 基线，机器上有 containerd 可以用，用完记得清理"）
+
+- 无 docker / 外网；containerd `k8s.io` 命名空间已缓存 `docker.io/vllm/vllm-openai:nightly`（**vllm 0.29.1rc1.dev573**，torch 2.13 cu130，B300 sm_103 可跑）与 `:kimi-k3`、`ghcr.io/novitalabs/vllm:glm53-*`。镜像站 image.paigpu.com / ppinfra 对 `v0.31.0` manifest 不响应，所以基线版本是 **nightly 0.29.1**，不是 4090 上的 0.31.0 —— 跨卡比值不可直接对照，CSV `baseline` 列写 `vllm-0.29.1rc1`。
+- `nerdctl` 默认桥接网络缺 CNI bridge 插件 → `--net host`；GPU `--gpus device=N`。脚本 `scripts/dev/vllm_nerdctl.sh run|wait|smoke|logs|stop|ps`。**每次 bench 完 `stop`**（删容器，不删机器原有镜像）。
+- 占卡约定：vLLM 基线 GPU 7（`:8013`）；dinfer single / tpN 从 GPU 0 起；lm_head 列切 bench 用 GPU 4–6。
+- 首跑 `bench_compare.sh` 在 B300 exit 141：summary 头部那行 `docker inspect ...` 在无 docker 机器上失败，`set -euo pipefail` 下整条管道被 SIGPIPE 打死，目录里只剩 CHANGE / GPU。已改成 docker → `/version` → unknown 三级回退。`bench_b300_1`（dinfer GPU 6 vs vLLM GPU 7）重跑中。
+
 ## 环境
 
 - 远端 `/data/yaochen/infer/{dinfer,models,cargo,rustup,pip,lib}`，`source /data/yaochen/infer/env.sh`。
@@ -50,6 +57,7 @@ B0–B1 4 轮；B2 8 轮；B3 8 轮。
 |---|---|---|
 | 0 | 用户给三个 JumpServer token（12:07 / 12:11 / 12:14 过期）。第一个首次登录成功后再登被拒，第二个直接被拒，**第三个拿到立刻 `remote_b300.sh up` 建常驻 ControlMaster 成功**。机器：登录用户 `jumpserver`，`sudo NOPASSWD ALL`；`/data/yaochen` 原归 root，`sudo chown` 后建 `/data/yaochen/infer`；系统自带 `/usr/lib/x86_64-linux-gnu/libnccl.so.2.30.3` 与 `/usr/local/cuda-13.1`；**无 cargo、无 docker、无 torch、无 vllm、外网全不通**（只有内网 apt 镜像 100.66.200.250:8080）；glibc 2.35 与本机同 → 工具链 / registry / 权重全部从本机 rsync，cargo 走 `CARGO_NET_OFFLINE=true`。8 卡空闲（各 1.6 GB 常驻）。 | B0：rsync 工具链（rust 1.89 + registry 869 MB）/ 权重 / 仓库完成；`env.sh`（`CUDA_ARCHS=103`、`CARGO_NET_OFFLINE=true`、系统 CUDA 13.1 + NCCL 2.30.3）。**`probe_ipc`：8 卡两两 `canAccessPeer=1`，IPC 64 MB 拷贝 0.09 ms ≈ 740 GB/s，跨 NUMA（0→4）同速** → PD cuda-ipc 跨卡、one-shot all-reduce 都可用。**sm_103 release 编译通过**（`cargo build --release --offline --features qwen3`，nvcc 13.1 `-gencode arch=compute_103,code=sm_103` 全部 .cu 直接过，无需改 kernel）。B0 完成 |
 | 1 | B1：B300 GPU 0–7 `q5_tp.sh 2 0` / `q5_tp.sh 4 0` 一致性 + `bench_tp_ab.sh` single vs tp2 / tp4 / tp8（`test/qwen3/2026-10-19/ab_tp_b300`，进 CSV tp 页签） | 首跑：**`q5_tp.sh 4 0` PASS（2/3 逐字一致 + 12 词前缀一致，与 4090 tp2 口径同）**；tp2 那次失败是权重 rsync 还没完成（`no *.safetensors`），bench 失败是 `bench_tp_ab.sh` 写在 push 之后（exit 127）——都是顺序问题不是代码问题。重推后重跑：**`q5_tp.sh 2 0` PASS（3/3 逐字一致）**。bench（GPU 0–7，`--num-blocks 4000`，CUDA graph 3954/4000 步）：
+| 2 | B2 lm_head 列切（开关 `LMHEAD_COLSPLIT=1`，默认关；本机 3090 子代理，不上 B300）：`Linear::load_shard(dim 0)` 按 vocab 切 `lm_head.weight`（world>1 且文件有独立 lm_head.weight 才生效，纯 tied 不切并打 info；Qwen3-0.6B 文件带 lm_head.weight，可生效）；`Qwen3Model::lm_head_logits` 统一 forward / `logits_for_rows` 末尾：GEMM `[rows, vocab/world]` bf16 → `comm::all_gather_bf16`（新包装，NCCL，可入图）→ 新 kernel `gather_blocks_bf16_to_f32`（`[world][rows][vl]` 块布局一趟拼成 `[rows][vocab]` f32，省"转置 + 升精度"两趟）。传 bf16 让 NVLink 字节减半。单测 `models/qwen3/tests/lmhead_colsplit.rs`（切片拼回 == 全量逐位；块布局修正 == CPU 参考逐位，3090 PASS）；`cargo test --workspace --features qwen3` 全过，glm53 编译过。**预估**：Qwen3-0.6B lm_head 311 MB bf16，tp2 每卡 GEMM 权重读 155 MB（省 ~20 µs @8 TB/s），多 1 次 all_gather（decode t=32：9.7 MB bf16 ≈ 5 µs NVLink + 同步）；收益小且依赖 t，**bench 说话**。方案 B（局部 top-k 归并免传全 vocab）留 TODO 在 `lm_head_logits` 注释。 | **待 B300**（GPU 4–7，避开 0–3）：① `CUDA_VISIBLE_DEVICES=4,5,6,7 LMHEAD_COLSPLIT=1 scripts/verify/q5_tp.sh 2 0` 一致性；② `LMHEAD_COLSPLIT=1 scripts/dev/bench_tp_ab.sh test/qwen3/2026-10-19/ab_tp_b300_lmcol "B2: lm_head 列切" 4 "2 4"` 变体名 `tp2_lmcol` / `tp4_lmcol`，对照第 1 轮 tp2 / tp4。启动日志应有 `lm_head colsplit enabled`；若 TPOT 不降就保持默认关。 |
 
 | 变体 | c1 tok/s / TPOT | c8 tok/s / TPOT | c32 tok/s / TPOT | c8-long tok/s / TPOT |
 |---|---|---|---|---|

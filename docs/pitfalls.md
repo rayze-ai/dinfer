@@ -504,3 +504,10 @@
 - 现象：B300 机器 token 第一次 ssh 成功，几分钟后同 token 再 ssh `Permission denied (password,publickey)`；第二个新 token 也直接被拒（可能是密码与 token 不配对，或 token 在生成后被别处用过）。
 - 根因：JumpServer 的"连接 token"是一次性凭据（4090 那台靠公钥 + 常驻 ControlMaster 才稳定，掩盖了这一点）。
 - 解法 / 避免：拿到 token **第一件事**就是 `remote_b300.sh up` 建常驻连接（ControlPersist），之后全部 `run` 复用；不要先单独 ssh 一下"试试"。长期方案：让用户在 JumpServer 上给账号配公钥，或给 `yaochen` 账号固定密码走资产形式登录。
+
+## 2026-10-19 bench_compare.sh 在无 docker 机器上 exit 141
+- 现象：B300 上 `bench_compare.sh` 起了 serve、写了 CHANGE / GPU 就退出，exit 141（SIGPIPE），没有任何 json。
+- 根因：summary.md 头部一行用 `$(docker inspect vllm-qwen3 ...)` 取 vLLM 镜像 tag；机器没有 docker，`set -euo pipefail` 下子 shell 失败 + 管道断开直接终止脚本。
+- 解法：改成 `docker inspect || curl /version || echo unknown` 三级回退。
+- 避免：脚本里"只为了打印"的外部命令一律 `|| true` 或给默认值；新机器第一次跑 verify 脚本先 `bash -x` 看前 30 行。
+
