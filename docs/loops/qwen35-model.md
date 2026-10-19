@@ -4,7 +4,10 @@
 > 第一位里程碑 4 子代理 40 min 只读文档无产出，主会话 20:1x 接手搭骨架。
 
 ## 环境
-本机 3090（编译 / 单测 / tiny golden GPU 对拍）、4090 GPU 7（sm89 对拍，`CUDA_VISIBLE_DEVICES=7 GPU_WAIT_S=5`）。B300 不跑（用户规则：等确认）。
+本机 3090（编译 / 单测 / tiny golden GPU 对拍）、4090 GPU 7（sm89 对拍，`CUDA_VISIBLE_DEVICES=7 GPU_WAIT_S=5`）。
+远端跑脚本要显式给 `RUSTUP_TOOLCHAIN=1.89.0-x86_64-unknown-linux-gnu`：4090 的 rustup 没有默认工具链，
+且 2026-10-19 晚其 1.89.0 工具链只剩 58 MB（缺 rustc，`cargo test` 静默卡在 rustup 下载，表现为脚本超时而日志只有一行），
+已从本机 rsync 完整工具链（`~/.rustup/toolchains/1.89.0-...`，633 MB）修好。B300 不跑（用户规则：等确认）。
 
 ## 观察方法
 - `cargo test -p dinfer-qwen35`（CPU：config / weights 映射单测）。
