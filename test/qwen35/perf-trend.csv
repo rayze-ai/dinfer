@@ -83,3 +83,15 @@ bench_b300_7,2026-10-19,GDN / 全注意力 7 处 GEMM 改 forward_rows（之前 
 bench_b300_7,2026-10-19,GDN / 全注意力 7 处 GEMM 改 forward_rows（之前 decode 每步按 max_tokens=2112 行算）,c8-long,out_tok_per_s,306.895,557.864,0.550,52.4,higher,main,B300,vllm,dinfer,qwen35
 bench_b300_7,2026-10-19,GDN / 全注意力 7 处 GEMM 改 forward_rows（之前 decode 每步按 max_tokens=2112 行算）,c8-long,ttft_p50_ms,472.864,405.923,1.165,-0.1,lower,main,B300,vllm,dinfer,qwen35
 bench_b300_7,2026-10-19,GDN / 全注意力 7 处 GEMM 改 forward_rows（之前 decode 每步按 max_tokens=2112 行算）,c8-long,tpot_p50_ms,22.420,11.240,1.995,37.7,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_8,2026-10-19,"GDN decode 递归 kernel 重写：寄存器驻留 warp kernel，grid (B, HV, V/BV)，BV 由 ArchProfile 给",c1,out_tok_per_s,83.494,94.301,0.885,-0.2,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_8,2026-10-19,"GDN decode 递归 kernel 重写：寄存器驻留 warp kernel，grid (B, HV, V/BV)，BV 由 ArchProfile 给",c1,ttft_p50_ms,35.320,47.971,0.736,-0.1,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_8,2026-10-19,"GDN decode 递归 kernel 重写：寄存器驻留 warp kernel，grid (B, HV, V/BV)，BV 由 ArchProfile 给",c1,tpot_p50_ms,11.789,10.296,1.145,-0.1,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_8,2026-10-19,"GDN decode 递归 kernel 重写：寄存器驻留 warp kernel，grid (B, HV, V/BV)，BV 由 ArchProfile 给",c8,out_tok_per_s,460.038,671.461,0.685,0.3,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_8,2026-10-19,"GDN decode 递归 kernel 重写：寄存器驻留 warp kernel，grid (B, HV, V/BV)，BV 由 ArchProfile 给",c8,ttft_p50_ms,153.508,103.217,1.487,-0.8,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_8,2026-10-19,"GDN decode 递归 kernel 重写：寄存器驻留 warp kernel，grid (B, HV, V/BV)，BV 由 ArchProfile 给",c8,tpot_p50_ms,16.302,11.194,1.456,0.4,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_8,2026-10-19,"GDN decode 递归 kernel 重写：寄存器驻留 warp kernel，grid (B, HV, V/BV)，BV 由 ArchProfile 给",c32,out_tok_per_s,873.234,2147.414,0.407,0.2,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_8,2026-10-19,"GDN decode 递归 kernel 重写：寄存器驻留 warp kernel，grid (B, HV, V/BV)，BV 由 ArchProfile 给",c32,ttft_p50_ms,365.615,265.235,1.378,0.9,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_8,2026-10-19,"GDN decode 递归 kernel 重写：寄存器驻留 warp kernel，grid (B, HV, V/BV)，BV 由 ArchProfile 给",c32,tpot_p50_ms,34.028,12.900,2.638,0.1,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_8,2026-10-19,"GDN decode 递归 kernel 重写：寄存器驻留 warp kernel，grid (B, HV, V/BV)，BV 由 ArchProfile 给",c8-long,out_tok_per_s,305.649,557.019,0.549,-0.4,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_8,2026-10-19,"GDN decode 递归 kernel 重写：寄存器驻留 warp kernel，grid (B, HV, V/BV)，BV 由 ArchProfile 给",c8-long,ttft_p50_ms,449.566,405.796,1.108,4.9,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_8,2026-10-19,"GDN decode 递归 kernel 重写：寄存器驻留 warp kernel，grid (B, HV, V/BV)，BV 由 ArchProfile 给",c8-long,tpot_p50_ms,22.475,11.247,1.998,-0.2,lower,main,B300,vllm,dinfer,qwen35

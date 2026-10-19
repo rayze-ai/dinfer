@@ -1,0 +1,1 @@
+GDN decode 递归 kernel 重写：寄存器驻留 warp kernel，grid (B, HV, V/BV)，BV 由 ArchProfile 给
