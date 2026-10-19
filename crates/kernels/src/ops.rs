@@ -2469,15 +2469,16 @@ pub fn kda_chunk_prep(
     cu_seqlens: &CudaSlice<i32>,
     plan: &KdaChunkPlan,
     sc: &mut KdaChunkScratch,
+    tokens: usize,
     heads: usize,
     head_dim: usize,
     scale: f32,
     lower_bound: Option<f32>,
 ) -> Result<()> {
-    ensure!(
-        sc.qn.len() >= q.len() && sc.kn.len() >= k.len() && sc.gc.len() >= q.len(),
-        "kda_chunk_prep: scratch 容量"
-    );
+    // 输入 / scratch 都允许是按 max_tokens 预分配的更大缓冲：只按本步 `tokens` 判容量。
+    let n = tokens * heads * head_dim;
+    ensure!(q.len() >= n && k.len() >= n && raw_g.len() >= n && raw_beta.len() >= tokens * heads, "kda_chunk_prep: q/k/g/beta < {tokens} 行");
+    ensure!(sc.qn.len() >= n && sc.kn.len() >= n && sc.gc.len() >= n, "kda_chunk_prep: scratch 容量 < {tokens} 行");
     ensure!(dt_bias.len() >= heads * head_dim && a_log.len() >= heads, "kda_chunk_prep: a_log/dt_bias");
     // SAFETY: 容量已校验；plan 由同一 cu_seqlens 生成。
     check(
@@ -2516,11 +2517,13 @@ pub fn kda_chunk_wy(
     cu_seqlens: &CudaSlice<i32>,
     plan: &KdaChunkPlan,
     sc: &mut KdaChunkScratch,
+    tokens: usize,
     heads: usize,
     head_dim: usize,
 ) -> Result<()> {
+    let n = tokens * heads * head_dim;
     ensure!(sc.aq.len() >= plan.num_chunks * heads * plan.bt * plan.bt, "kda_chunk_wy: aq 容量");
-    ensure!(v.len() >= sc.u.len() / 2, "kda_chunk_wy: v 容量"); // bf16 与 f32 同元素数
+    ensure!(v.len() >= n && sc.u.len() >= n && sc.w.len() >= n && sc.kg.len() >= n, "kda_chunk_wy: v/scratch < {tokens} 行");
     // SAFETY: 容量已校验。
     check(
         unsafe {
@@ -2557,12 +2560,13 @@ pub fn kda_chunk_ho(
     out: &mut CudaSlice<bf16>,
     state: &mut CudaSlice<f32>,
     state_indices: Option<&CudaSlice<i32>>,
+    tokens: usize,
     heads: usize,
     head_dim: usize,
 ) -> Result<()> {
     let per_slot = heads * head_dim * head_dim;
     ensure!(state.len() >= per_slot, "kda_chunk_ho: state");
-    ensure!(out.len() * 2 >= sc.u.len(), "kda_chunk_ho: out 容量");
+    ensure!(out.len() >= tokens * heads * head_dim, "kda_chunk_ho: out < {tokens} 行");
     let psi = state_indices.map_or(std::ptr::null(), |s| stream.ptr(s) as *const i32);
     // SAFETY: 容量已校验；slot 编号由调度器保证 < state 槽数。
     check(

@@ -50,6 +50,13 @@ impl Linear {
         let tokens = x.numel() / self.in_features;
         ensure!(x.numel() == tokens * self.in_features, "Linear: x shape {:?}", x.shape);
         ensure!(out.numel() == tokens * self.out_features, "Linear: out shape {:?}", out.shape);
+        self.forward_rows(gemm, x, out, tokens)
+    }
+
+    /// 只算前 `tokens` 行：`x` / `out` 允许是按 max_tokens 预分配的更大缓冲（decode 时 t ≪ max_tokens）。
+    pub fn forward_rows(&self, gemm: &Gemm, x: &Tensor<bf16>, out: &mut Tensor<bf16>, tokens: usize) -> Result<()> {
+        ensure!(x.numel() >= tokens * self.in_features, "Linear: x {:?} < {tokens} 行", x.shape);
+        ensure!(out.numel() >= tokens * self.out_features, "Linear: out {:?} < {tokens} 行", out.shape);
         gemm.forward_bf16(
             &x.data,
             &self.w.data,

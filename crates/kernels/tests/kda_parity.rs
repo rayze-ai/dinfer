@@ -391,9 +391,9 @@ fn run_chunk(
     let mut dout = st.alloc_uninit::<bf16>(q.len()).unwrap();
     let mut dstate = st.htod_copy(state0.to_vec()).unwrap();
     let scale = (head_dim as f32).powf(-0.5);
-    ops::kda_chunk_prep(st, &dq, &dk, &dg, &dbeta, &da, &db, &dcu, &plan, &mut sc, heads, head_dim, scale, Some(lower_bound)).unwrap();
-    ops::kda_chunk_wy(st, &dv, &dcu, &plan, &mut sc, heads, head_dim).unwrap();
-    ops::kda_chunk_ho(st, &dcu, &plan, &sc, &mut dout, &mut dstate, None, heads, head_dim).unwrap();
+    ops::kda_chunk_prep(st, &dq, &dk, &dg, &dbeta, &da, &db, &dcu, &plan, &mut sc, tokens, heads, head_dim, scale, Some(lower_bound)).unwrap();
+    ops::kda_chunk_wy(st, &dv, &dcu, &plan, &mut sc, tokens, heads, head_dim).unwrap();
+    ops::kda_chunk_ho(st, &dcu, &plan, &sc, &mut dout, &mut dstate, None, tokens, heads, head_dim).unwrap();
     st.synchronize().unwrap();
     (st.dtoh_sync_copy(&dout).unwrap(), st.dtoh_sync_copy(&dstate).unwrap())
 }
@@ -477,9 +477,9 @@ fn kda_chunk_bench() {
     let mut out_ch = st.alloc_uninit::<bf16>(n).unwrap();
     let mut state_ch = st.alloc_zeros::<f32>(heads * kd * kd).unwrap();
     let chunk_once = |st: &Stream, sc: &mut ops::KdaChunkScratch, out: &mut _, state: &mut _| {
-        ops::kda_chunk_prep(st, &dq, &dk, &dg, &dbeta, &da, &db, &dcu, &plan, sc, heads, kd, scale, Some(-5.0)).unwrap();
-        ops::kda_chunk_wy(st, &dv, &dcu, &plan, sc, heads, kd).unwrap();
-        ops::kda_chunk_ho(st, &dcu, &plan, sc, out, state, None, heads, kd).unwrap();
+        ops::kda_chunk_prep(st, &dq, &dk, &dg, &dbeta, &da, &db, &dcu, &plan, sc, t, heads, kd, scale, Some(-5.0)).unwrap();
+        ops::kda_chunk_wy(st, &dv, &dcu, &plan, sc, t, heads, kd).unwrap();
+        ops::kda_chunk_ho(st, &dcu, &plan, sc, out, state, None, t, heads, kd).unwrap();
     };
     chunk_once(&st, &mut sc, &mut out_ch, &mut state_ch);
     st.synchronize().unwrap();
