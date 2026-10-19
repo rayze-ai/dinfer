@@ -341,3 +341,185 @@ fn gdn_gated_rmsnorm_silu_qwen_shape() {
 fn gdn_gated_rmsnorm_sigmoid_small_shape() {
     norm_case("sigmoid", GdnAct::Sigmoid, "small", 32);
 }
+
+// --------------------------------------------------------------------------- chunk 形式 prefill（gdn_chunk.cu）
+// 参考仍是顺序递归（gen_gdn_refs.py 的 gdn_ref）：这正是 chunk 版等价性的证明。
+// 容差（任务口径，比 KDA chunk 的 1e-2 严）：out bf16 atol 5e-4 + cos ≥ 0.9999；state 相对 |want|max 5e-3 + cos ≥ 0.9999。
+
+const BT: usize = 64;
+
+fn assert_close_rel(name: &str, got: &[f32], want: &[f32], rel: f32, min_cos: f64) {
+    assert_eq!(got.len(), want.len(), "{name}: 长度");
+    let mut max_err = 0f32;
+    let (mut dot, mut na, mut nb) = (0f64, 0f64, 0f64);
+    let mut worst = 0usize;
+    for (i, (a, b)) in got.iter().zip(want).enumerate() {
+        let e = (a - b).abs();
+        if e > max_err {
+            max_err = e;
+            worst = i;
+        }
+        dot += (*a as f64) * (*b as f64);
+        na += (*a as f64) * (*a as f64);
+        nb += (*b as f64) * (*b as f64);
+    }
+    let scale = want.iter().fold(0f32, |m, v| m.max(v.abs())).max(1e-30);
+    let cos = if na > 0.0 && nb > 0.0 { dot / (na.sqrt() * nb.sqrt()) } else { 1.0 };
+    assert!(
+        max_err / scale <= rel && cos >= min_cos,
+        "{name}: max_err {max_err:.3e}（相对 {:.3e}，at {worst}: {} vs {}）cos {cos:.7}（要求 <= {rel:.1e} / >= {min_cos}）",
+        max_err / scale,
+        got[worst],
+        want[worst]
+    );
+    println!("  {name:<28} max_err {max_err:.3e}  rel {:.3e}  cos {cos:.7}", max_err / scale);
+}
+
+/// 跑 chunk 全链（gate → prep → wy → ho），`state` 原地更新，返回 out。
+#[allow(clippy::too_many_arguments)]
+fn run_gdn_chunk(
+    st: &Stream,
+    mixed: &dinfer_kernels::cudarc::driver::CudaSlice<bf16>,
+    a: &dinfer_kernels::cudarc::driver::CudaSlice<bf16>,
+    b: &dinfer_kernels::cudarc::driver::CudaSlice<bf16>,
+    a_log: &dinfer_kernels::cudarc::driver::CudaSlice<f32>,
+    dt_bias: &dinfer_kernels::cudarc::driver::CudaSlice<f32>,
+    state: &mut dinfer_kernels::cudarc::driver::CudaSlice<f32>,
+    cu: &[i32],
+    tokens: usize,
+    h: usize,
+    hv: usize,
+    k: usize,
+    v: usize,
+) -> dinfer_kernels::cudarc::driver::CudaSlice<bf16> {
+    let plan = ops::KdaChunkPlan::new(st, cu, BT).unwrap();
+    let mut sc = ops::GdnChunkScratch::new(st, tokens, h, hv, k, v, plan.num_chunks, BT).unwrap();
+    let mut g = st.alloc_uninit::<f32>(tokens * hv).unwrap();
+    let mut beta = st.alloc_uninit::<f32>(tokens * hv).unwrap();
+    let dcu = st.htod_copy(cu.to_vec()).unwrap();
+    let mut out = st.alloc_uninit::<bf16>(tokens * hv * v).unwrap();
+    let scale = (k as f32).powf(-0.5);
+    ops::gdn_gate(st, a, b, a_log, dt_bias, &mut g, &mut beta, tokens, hv).unwrap();
+    ops::gdn_chunk_prep(st, mixed, &g, &dcu, &plan, &mut sc, tokens, h, hv, k, v, scale).unwrap();
+    ops::gdn_chunk_wy(st, mixed, &beta, &dcu, &plan, &mut sc, tokens, h, hv, k, v).unwrap();
+    ops::gdn_chunk_ho(st, &dcu, &plan, &sc, &mut out, state, None, tokens, h, hv, k, v).unwrap();
+    st.synchronize().unwrap();
+    out
+}
+
+fn chunk_case(dir: &str, k: usize, v: usize, h: usize, hv: usize) {
+    let (dev, st) = dev();
+    let _ = dev;
+    let (_, a_log) = load(dir, "a_log");
+    let (_, dt_bias) = load(dir, "dt_bias");
+    let cu = load_i32(dir, "cu_seqlens");
+    let slots = cu.len() - 1;
+    // chunk_qwen 的 state_in 不落盘（3.1 MB/槽）：缺文件 = 零初始
+    let st_in = if refs_root().join(dir).join("state_in.npy").exists() {
+        load(dir, "state_in").1
+    } else {
+        vec![0f32; slots * hv * v * k]
+    };
+    let (ms, mixed) = load(dir, "mixed");
+    let (_, a) = load(dir, "a");
+    let (_, b) = load(dir, "b");
+    let (_, want) = load(dir, "out");
+    let (_, want_st) = load(dir, "state_out");
+    let tokens = ms[0];
+    assert_eq!(ms[1], 2 * h * k + hv * v, "{dir}: mixed 宽度与形状参数不符");
+    let dal = st.htod_copy(a_log).unwrap();
+    let ddb = st.htod_copy(dt_bias).unwrap();
+    let mut dstate = st.htod_copy(st_in).unwrap();
+    let dm = up_bf16(&st, &mixed);
+    let da = up_bf16(&st, &a);
+    let db = up_bf16(&st, &b);
+    let out = run_gdn_chunk(&st, &dm, &da, &db, &dal, &ddb, &mut dstate, &cu, tokens, h, hv, k, v);
+    assert_close(&format!("{dir}/out"), &st.dtoh_sync_copy(&out).unwrap(), &want, 5e-4, 0.9999);
+    let got_st: Vec<f32> = st.dtoh_sync_copy(&dstate).unwrap();
+    assert_close_rel(&format!("{dir}/state"), &got_st, &want_st, 5e-3, 0.9999);
+}
+
+#[test]
+#[ignore]
+fn gdn_chunk_single_t200() {
+    chunk_case("chunk", 128, 128, 4, 12);
+}
+
+#[test]
+#[ignore]
+fn gdn_chunk_varlen() {
+    chunk_case("chunk_varlen", 128, 128, 4, 12);
+}
+
+#[test]
+#[ignore]
+fn gdn_chunk_qwen_shape() {
+    chunk_case("chunk_qwen", 128, 128, 16, 48);
+}
+
+/// 计时：27B 形状 T=1024 / H=16 HV=48 / K=V=128，顺序递归 vs chunk 全链（都含 gate）。
+/// 数字记到 `docs/loops/qwen35-perf.md` 记录表。门槛：chunk ≤ 顺序 1/5。
+#[test]
+#[ignore]
+fn gdn_chunk_bench() {
+    let (dev, st) = dev();
+    let _ = dev;
+    let (t, h, hv, k, v) = (1024usize, 16usize, 48usize, 128usize, 128usize);
+    let row = 2 * h * k + hv * v;
+    let mixed: Vec<f32> = (0..t * row).map(|i| (((i * 7919) % 1000) as f32 / 1000.0 - 0.5) * 0.5).collect();
+    let a: Vec<f32> = (0..t * hv).map(|i| ((i % 23) as f32 - 11.0) / 4.0).collect();
+    let b: Vec<f32> = (0..t * hv).map(|i| ((i % 17) as f32 - 8.0) / 4.0).collect();
+    let a_log: Vec<f32> = (0..hv).map(|i| (0.2 + 0.03 * i as f32).ln()).collect();
+    let dt_bias = vec![0.1f32; hv];
+    let cu = vec![0i32, t as i32];
+    let scale = (k as f32).powf(-0.5);
+    let dm = up_bf16(&st, &mixed);
+    let da = up_bf16(&st, &a);
+    let db = up_bf16(&st, &b);
+    let dal = st.htod_copy(a_log).unwrap();
+    let ddb = st.htod_copy(dt_bias).unwrap();
+    let dcu = st.htod_copy(cu.clone()).unwrap();
+    let iters = 5;
+
+    // 顺序版（gate + recurrent）
+    let mut g = st.alloc_uninit::<f32>(t * hv).unwrap();
+    let mut beta = st.alloc_uninit::<f32>(t * hv).unwrap();
+    let mut out_seq = st.alloc_uninit::<bf16>(t * hv * v).unwrap();
+    let mut state_seq = st.alloc_zeros::<f32>(hv * v * k).unwrap();
+    let seq_once = |st: &Stream, g: &mut _, beta: &mut _, out: &mut _, state: &mut _| {
+        ops::gdn_gate(st, &da, &db, &dal, &ddb, g, beta, t, hv).unwrap();
+        ops::gdn_recurrent(st, &dm, Some(&*g), Some(&*beta), None, None, &dal, &ddb, out, state, &dcu, None, 1, h, hv, k, v, scale).unwrap();
+    };
+    seq_once(&st, &mut g, &mut beta, &mut out_seq, &mut state_seq);
+    st.synchronize().unwrap();
+    let t0 = std::time::Instant::now();
+    for _ in 0..iters {
+        seq_once(&st, &mut g, &mut beta, &mut out_seq, &mut state_seq);
+    }
+    st.synchronize().unwrap();
+    let ms_seq = t0.elapsed().as_secs_f64() * 1e3 / iters as f64;
+
+    // chunk 全链（gate + prep + wy + ho）
+    let plan = ops::KdaChunkPlan::new(&st, &cu, BT).unwrap();
+    let mut sc = ops::GdnChunkScratch::new(&st, t, h, hv, k, v, plan.num_chunks, BT).unwrap();
+    let mut out_ch = st.alloc_uninit::<bf16>(t * hv * v).unwrap();
+    let mut state_ch = st.alloc_zeros::<f32>(hv * v * k).unwrap();
+    let chunk_once = |st: &Stream, g: &mut _, beta: &mut _, sc: &mut ops::GdnChunkScratch, out: &mut _, state: &mut _| {
+        ops::gdn_gate(st, &da, &db, &dal, &ddb, g, beta, t, hv).unwrap();
+        ops::gdn_chunk_prep(st, &dm, &*g, &dcu, &plan, sc, t, h, hv, k, v, scale).unwrap();
+        ops::gdn_chunk_wy(st, &dm, &*beta, &dcu, &plan, sc, t, h, hv, k, v).unwrap();
+        ops::gdn_chunk_ho(st, &dcu, &plan, sc, out, state, None, t, h, hv, k, v).unwrap();
+    };
+    chunk_once(&st, &mut g, &mut beta, &mut sc, &mut out_ch, &mut state_ch);
+    st.synchronize().unwrap();
+    let t1 = std::time::Instant::now();
+    for _ in 0..iters {
+        chunk_once(&st, &mut g, &mut beta, &mut sc, &mut out_ch, &mut state_ch);
+    }
+    st.synchronize().unwrap();
+    let ms_chunk = t1.elapsed().as_secs_f64() * 1e3 / iters as f64;
+
+    let speedup = ms_seq / ms_chunk;
+    println!("  T={t} H={h} HV={hv} K={k} V={v}: 顺序 {ms_seq:.3} ms, chunk {ms_chunk:.3} ms, 加速 {speedup:.2}x（门槛 5x）");
+    assert!(speedup >= 5.0, "chunk 加速 {speedup:.2}x < 5x（顺序 {ms_seq:.3} ms / chunk {ms_chunk:.3} ms）");
+}

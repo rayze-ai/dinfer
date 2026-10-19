@@ -214,6 +214,44 @@ def gen_recurrent(cfg, tag, decode=False):
         save("state_out", st_out, d)
 
 
+# --------------------------------------------------------------------------- 3b. chunk 形式 prefill（gdn_chunk.cu）
+# 参考仍是顺序递归 gdn_ref：这正是 chunk 版与顺序版等价性的证明。
+# 覆盖：非 BT(64) 整数倍长度、3 序列 varlen（其中一条带非零初始 state）、27B 真形状。
+#   chunk         T=200 单序列，初始 state 非零
+#   chunk_varlen  lens [130, 64, 7]，只有第 1 条带非零初始 state（其余零，对应 has_initial=0）
+#   chunk_qwen    H=16 HV=48 K=V=128（27B 形状）T=256，初始 state 零；state_in 不落盘（3.1 MB/槽），
+#                 Rust 侧缺 state_in 时按零初始化。
+def gen_chunk(cfg, name, lens, init_mask, save_state_in=True, seed=23):
+    K, V, H, HV = cfg["K"], cfg["V"], cfg["H"], cfg["HV"]
+    d = out_dir(name)
+    torch.manual_seed(seed)
+    S = len(lens)
+    T = int(np.sum(lens))
+    qkv_row = 2 * H * K + HV * V
+    mixed = bf16(torch.randn(T, qkv_row) * 0.5)
+    a = bf16(torch.randn(T, HV) * 2.0)
+    b = bf16(torch.randn(T, HV) * 2.0)
+    a_log = torch.randn(HV) * 0.5
+    dt_bias = torch.randn(HV)
+    state = torch.randn(S, HV, V, K) * 0.05
+    for s, m in enumerate(init_mask):
+        if not m:
+            state[s].zero_()
+    save("a_log", a_log.float(), d)
+    save("dt_bias", dt_bias.float(), d)
+    if save_state_in:
+        save("state_in", state.clone(), d)
+    cu = np.concatenate([[0], np.cumsum(lens)]).astype(np.int32)
+    save("cu_seqlens", torch.from_numpy(cu), d)
+    # 输入已是 bf16 取值，按 bf16 位存（体积减半；Rust 侧 load 自动找 *_bf16.npy）
+    save("mixed", mixed.to(torch.bfloat16), d)
+    save("a", a.to(torch.bfloat16), d)
+    save("b", b.to(torch.bfloat16), d)
+    o, st_out = gdn_ref(mixed, a, b, a_log, dt_bias, state, lens, K, V, H, HV)
+    save("out", o.to(torch.bfloat16), d)
+    save("state_out", st_out, d)
+
+
 # --------------------------------------------------------------------------- 4. gated RMSNorm
 def gen_norm(cfg, tag):
     V = cfg["V"]
@@ -242,4 +280,7 @@ if __name__ == "__main__":
         gen_recurrent(QWEN_REC if tag == "qwen" else cfg, tag, decode=False)
         gen_recurrent(QWEN_REC if tag == "qwen" else cfg, tag, decode=True)
         gen_norm(cfg, tag)
+    gen_chunk(QWEN_REC, "chunk", [200], [True])
+    gen_chunk(QWEN_REC, "chunk_varlen", [130, 64, 7], [True, False, False])
+    gen_chunk(QWEN, "chunk_qwen", [256], [False], save_state_in=False)
     print("gdn refs ->", DIR)
