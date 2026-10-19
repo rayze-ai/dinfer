@@ -14,8 +14,14 @@ DIR="${GDN_REFS_DIR:-test/qwen35/2026-10-19/gdn_refs}"
 LOG=/tmp/dinfer_gdn_parity.log
 
 rm -f target/.rustc_info.json
-printf '==> 1/3 生成参考 %s\n' "$DIR"
-"$PY" -I scripts/verify/gen_gdn_refs.py "$DIR" || exit 1
+# 参考是模型无关的 .npy（已进仓库），无 torch 的机器（4090 / B300 容器外）直接复用：
+#   SKIP_REF_GEN=1 跳过生成；PY 指定带 torch 的解释器。
+if [ "${SKIP_REF_GEN:-0}" = "1" ] || { [ -d "$DIR" ] && [ -z "${FORCE_REF_GEN:-}" ]; }; then
+  printf '==> 1/3 复用已有参考 %s\n' "$DIR"
+else
+  printf '==> 1/3 生成参考 %s\n' "$DIR"
+  "$PY" -I scripts/verify/gen_gdn_refs.py "$DIR" || exit 1
+fi
 
 printf '\n==> 2/3 GDN 对拍（CUDA_ARCHS=%s）\n' "${CUDA_ARCHS:-默认}"
 GDN_REFS_DIR="$DIR" cargo test -p dinfer-kernels --features ref-tests --test gdn_parity -- \
