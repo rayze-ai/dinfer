@@ -1,0 +1,63 @@
+{
+ "layers": 5,
+ "T": 31,
+ "ids": [
+  1008,
+  5072,
+  16331,
+  69275,
+  60062,
+  1312,
+  276,
+  29292,
+  7751,
+  13,
+  220,
+  3108,
+  8597,
+  6523,
+  378,
+  41943,
+  8825,
+  28257,
+  2386,
+  292,
+  109464,
+  333,
+  79678,
+  318,
+  437,
+  5847,
+  44,
+  1765,
+  413,
+  14464,
+  2416
+ ],
+ "text": "The quick brown fox jumps over the lazy dog. 今天天气很好，我们去公园散步吧。Rust rewrites of vLLM should be faster because",
+ "text_back": "The quick brown fox jumps over the lazy dog. 今天天气很好，我们去公园散步吧。Rust rewrites of vLLM should be faster because",
+ "tokenizer": "hf-tokenizer",
+ "kinds": [
+  "kda+dense",
+  "kda+moe",
+  "kda+moe",
+  "mla+moe",
+  "kda+moe"
+ ],
+ "n_blocks": 1,
+ "experts_used": {
+  "1": 332,
+  "2": 253,
+  "3": 209,
+  "4": 180
+ },
+ "hidden": 7168,
+ "torch": "2.13.0+cu130",
+ "top5": [
+  30530,
+  69931,
+  33573,
+  49880,
+  11239
+ ]
+}
