@@ -37,8 +37,8 @@ B0–B1 4 轮；B2 8 轮；B3 8 轮。
 
 | 轮 | 改动 | 结果 |
 |---|---|---|
-| 0 | 用户给两个 JumpServer token（12:07 / 12:11 过期）。第一个首次登录成功（探到 8 × B300 / NV18 / cuda-13.1 / /data 7T），**之后同 token 再登 `Permission denied`**；第二个 token 直接被拒。结论：连接 token 一次性，必须一次登录就起 ControlMaster。写 `remote_b300.sh`（up 即建常驻）、`bootstrap_remote_b300.sh`、`CUDA_ARCHS=103`。 | 等用户给新 token 或 `yaochen` 账号固定密码 |
+| 0 | 用户给三个 JumpServer token（12:07 / 12:11 / 12:14 过期）。第一个首次登录成功后再登被拒，第二个直接被拒，**第三个拿到立刻 `remote_b300.sh up` 建常驻 ControlMaster 成功**。机器：登录用户 `jumpserver`，`sudo NOPASSWD ALL`；`/data/yaochen` 原归 root，`sudo chown` 后建 `/data/yaochen/infer`；系统自带 `/usr/lib/x86_64-linux-gnu/libnccl.so.2.30.3` 与 `/usr/local/cuda-13.1`；**无 cargo、无 docker、无 torch、无 vllm、外网全不通**（只有内网 apt 镜像 100.66.200.250:8080）；glibc 2.35 与本机同 → 工具链 / registry / 权重全部从本机 rsync，cargo 走 `CARGO_NET_OFFLINE=true`。8 卡空闲（各 1.6 GB 常驻）。 | B0 进行中：rsync 工具链 + 权重 + 仓库 |
 
 ## 状态
 
-- B0 进行中：脚本就位，等凭据。
+- B0 进行中：常驻连接已建；工具链 / registry / 权重 rsync 中；下一步远端 `cargo build --release --features qwen3`（sm_103 首次编译）、`probe_ipc`、`q5_tp.sh`。**vLLM 基线在这台机器上暂无法起**（无 docker / torch / 外网），B1 先用 dinfer 单卡 vs tpN 自比，vLLM 对比列留空。
