@@ -49,7 +49,7 @@ rm -f target/.rustc_info.json                     # cargo 报 "failed to run rus
 - **多卡型实现（用户 2026-10-19）**：一套接口多套实现，按 arch **分文件**（`*_sm8x.cu` / `*_sm100.cu`），Rust 侧按 `ArchProfile` 选；**kernel 体内禁止 `#if __CUDA_ARCH__`**，共享头的分叉只在 `arch.cuh` 用有名字的能力常量（`kHasTma`），不写裸数字；性能改动必须过两卡门禁（`scripts/verify/bench_gate.sh`，任一卡退化 > 3% 不合入）。规格 `docs/loops/arch-profile.md`。
 - **kernel 内不写卡型 / 模型相关的调优数值**（splits、目标 block 数、向量档位、warp 数等，用户 2026-10-19）：kernel 只收运行时参数，数值由 `ArchProfile`（按卡默认）+ 启动自调优（按模型形状实测）给，环境变量只做覆盖。规格 `docs/loops/arch-profile.md`。
 - `crates/` 只放模型无关代码：模型名 / token id / 模板变量名 / 模型路径出现在 `crates/` 即为错误，走 `ChatBackend` 钩子由 `models/<m>` 提供；模型相关测试放 `models/<m>/tests/`（用户 2026-10-19）。
-- 代码 / 脚本 / 环境变量 / C ABI 符号不带项目名前缀（`DINFER_*`、`dinfer_*`），项目可能改名；新代码前 `grep -rn DINFER crates scripts` 自查。
+- 代码 / 脚本 / 环境变量 / C ABI 符号不带项目名前缀（`DINFER_*`、`dinfer_*`），项目可能改名；新代码前自查：`grep -rniE '\bdinfer_[a-z]|DINFER_' crates scripts | grep -v 'dinfer_[a-z0-9]*::'`（crate 名 `dinfer-xxx` 与 `use dinfer_xxx::` 是例外，大小写都查）。
 - 所有跨会话要记住的事写进文件并进 git，不要只留在对话里。
 - **目标是超越，不是重写**（用户 2026-10-17）：vLLM 做得对的直接采用，能改进的改进，两种情况都要在 `docs/design.md` §11 "采用 / 改进台账" 记一行（采用了什么、为什么、我们改了哪里、收益）。不为"不一样"而不一样。
 - **每轮性能改动必须进 CSV 趋势**（用户 2026-10-16 两次强调）：改动 → 4090 `bench_compare.sh test/qwen3/<日期>/benchN "改动一句话"`（写 `CHANGE`）→ 自动重生成 `test/qwen3/perf-trend.{csv,md,svg,html}`（每组 tok/s ×vLLM、TTFT、TPOT、相对上一轮 %）→ `pull` 回本机 commit。没有 bench 记录的改动视为未完成。

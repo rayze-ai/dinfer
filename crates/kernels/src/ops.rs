@@ -2028,3 +2028,225 @@ mod tests {
         assert_eq!(s.dtoh_sync_copy(&d2).unwrap(), want);
     }
 }
+
+// ---------------------------------------------------------------------------
+// KDA（Kimi Delta Attention，模型无关）。数学口径见 cuda/kda.cu 顶部注释。
+// ---------------------------------------------------------------------------
+
+/// depthwise causal conv1d + siLU 的 prefill 段。`x`/`out`: varlen `[T, dim]` bf16；
+/// `w`: `[dim, width]` bf16（width 维按时间从旧到新）；`conv_state`: `[slots, dim, width-1]` bf16。
+/// `cu_seqlens` 长 `num_seqs + 1`；`state_indices` 可为空（则槽号 = 序列号）。
+#[allow(clippy::too_many_arguments)]
+pub fn kda_conv1d_prefill(
+    stream: &Stream,
+    x: &CudaSlice<bf16>,
+    w: &CudaSlice<bf16>,
+    out: &mut CudaSlice<bf16>,
+    conv_state: &mut CudaSlice<bf16>,
+    cu_seqlens: &CudaSlice<i32>,
+    state_indices: Option<&CudaSlice<i32>>,
+    has_initial: Option<&CudaSlice<i32>>,
+    num_seqs: usize,
+    dim: usize,
+    width: usize,
+    state_len: usize,
+) -> Result<()> {
+    ensure!(width >= 1 && width <= 8, "kda_conv1d_prefill: width {width} 超出 [1,8]");
+    ensure!(state_len >= width.saturating_sub(1), "kda_conv1d_prefill: state_len {state_len} < width-1");
+    ensure!(cu_seqlens.len() >= num_seqs + 1, "kda_conv1d_prefill: cu_seqlens");
+    ensure!(w.len() >= dim * width && out.len() >= x.len(), "kda_conv1d_prefill: w/out");
+    ensure!(conv_state.len() >= state_len, "kda_conv1d_prefill: conv_state");
+    let psi = state_indices.map_or(std::ptr::null(), |s| stream.ptr(s) as *const i32);
+    let phi = has_initial.map_or(std::ptr::null(), |s| stream.ptr(s) as *const i32);
+    // SAFETY: 上面已校验各缓冲容量；cu_seqlens 的单调性由调度侧保证。
+    check(
+        unsafe {
+            ffi::kda_conv1d_prefill(
+                stream.ptr(x) as *const c_void,
+                stream.ptr(w) as *const c_void,
+                stream.ptr_mut(out) as *mut c_void,
+                stream.ptr_mut(conv_state) as *mut c_void,
+                stream.ptr(cu_seqlens) as *const i32,
+                psi,
+                phi,
+                num_seqs as i64,
+                dim as i64,
+                width as i64,
+                state_len as i64,
+                stream.raw() as _,
+            )
+        },
+        "kda_conv1d_prefill",
+    )
+}
+
+/// depthwise causal conv1d + siLU 的单 token update（decode）。`x`/`out`: `[batch, dim]`。
+/// `conv_state` 原地左移并追加新 token。
+pub fn kda_conv1d_update(
+    stream: &Stream,
+    x: &CudaSlice<bf16>,
+    w: &CudaSlice<bf16>,
+    out: &mut CudaSlice<bf16>,
+    conv_state: &mut CudaSlice<bf16>,
+    state_indices: Option<&CudaSlice<i32>>,
+    batch: usize,
+    dim: usize,
+    width: usize,
+    state_len: usize,
+) -> Result<()> {
+    ensure!(width >= 1 && width <= 8, "kda_conv1d_update: width {width} 超出 [1,8]");
+    ensure!(state_len >= width.saturating_sub(1), "kda_conv1d_update: state_len");
+    ensure!(x.len() >= batch * dim && out.len() >= batch * dim, "kda_conv1d_update: x/out");
+    ensure!(w.len() >= dim * width, "kda_conv1d_update: w");
+    let psi = state_indices.map_or(std::ptr::null(), |s| stream.ptr(s) as *const i32);
+    // SAFETY: 容量已校验；槽号由调度器保证 < slots。
+    check(
+        unsafe {
+            ffi::kda_conv1d_update(
+                stream.ptr(x) as *const c_void,
+                stream.ptr(w) as *const c_void,
+                stream.ptr_mut(out) as *mut c_void,
+                stream.ptr_mut(conv_state) as *mut c_void,
+                psi,
+                batch as i64,
+                dim as i64,
+                width as i64,
+                state_len as i64,
+                stream.raw() as _,
+            )
+        },
+        "kda_conv1d_update",
+    )
+}
+
+/// KDA 的衰减门。`g`: `[tokens, heads, head_dim]` bf16 原始投影；`a_log`: `[heads]` f32；
+/// `dt_bias`: `[heads*head_dim]` f32；`out`: 同 `g` 形状的 f32（log 域）。
+pub fn kda_gate(
+    stream: &Stream,
+    g: &CudaSlice<bf16>,
+    a_log: &CudaSlice<f32>,
+    dt_bias: &CudaSlice<f32>,
+    out: &mut CudaSlice<f32>,
+    tokens: usize,
+    heads: usize,
+    head_dim: usize,
+    lower_bound: Option<f32>,
+) -> Result<()> {
+    ensure!(a_log.len() >= heads, "kda_gate: a_log");
+    ensure!(dt_bias.len() >= heads * head_dim, "kda_gate: dt_bias");
+    ensure!(g.len() >= tokens * heads * head_dim && out.len() >= tokens * heads * head_dim, "kda_gate: g/out");
+    // SAFETY: 容量已校验。
+    check(
+        unsafe {
+            ffi::kda_gate(
+                stream.ptr(g) as *const c_void,
+                stream.ptr(a_log) as *const f32,
+                stream.ptr(dt_bias) as *const f32,
+                stream.ptr_mut(out) as *mut f32,
+                tokens as i64,
+                heads as i64,
+                head_dim as i64,
+                lower_bound.unwrap_or(0.0),
+                i32::from(lower_bound.is_some()),
+                stream.raw() as _,
+            )
+        },
+        "kda_gate",
+    )
+}
+
+/// KDA 递归核心（prefill 与 decode 同一条路径，内部按 `cu_seqlens` 分段逐 token 递推）。
+/// `q`/`k`/`v`: `[T, heads, head_dim]` bf16，`raw_g` 同形 bf16，`raw_beta`: `[T, heads]` f32，
+/// `state`: `[num_slots, heads, head_dim, head_dim]` f32（原地更新），`out`: `[T, heads, head_dim]`。
+#[allow(clippy::too_many_arguments)]
+pub fn kda_recurrent(
+    stream: &Stream,
+    q: &CudaSlice<bf16>,
+    k: &CudaSlice<bf16>,
+    v: &CudaSlice<bf16>,
+    raw_g: &CudaSlice<bf16>,
+    raw_beta: &CudaSlice<f32>,
+    a_log: &CudaSlice<f32>,
+    dt_bias: &CudaSlice<f32>,
+    out: &mut CudaSlice<bf16>,
+    state: &mut CudaSlice<f32>,
+    cu_seqlens: &CudaSlice<i32>,
+    state_indices: Option<&CudaSlice<i32>>,
+    num_seqs: usize,
+    heads: usize,
+    head_dim: usize,
+    scale: f32,
+    lower_bound: Option<f32>,
+) -> Result<()> {
+    ensure!(cu_seqlens.len() >= num_seqs + 1, "kda_recurrent: cu_seqlens");
+    let n = q.len();
+    ensure!(
+        k.len() >= n && v.len() >= n && raw_g.len() >= n && out.len() >= n,
+        "kda_recurrent: q/k/v/g/out 长度不一致"
+    );
+    ensure!(raw_beta.len() >= n / head_dim, "kda_recurrent: raw_beta");
+    ensure!(a_log.len() >= heads && dt_bias.len() >= heads * head_dim, "kda_recurrent: a_log/dt_bias");
+    let per_slot = heads * head_dim * head_dim;
+    ensure!(state.len() >= per_slot, "kda_recurrent: state");
+    let psi = state_indices.map_or(std::ptr::null(), |s| stream.ptr(s) as *const i32);
+    // SAFETY: 容量已校验；slot 编号由调度器保证 < state 槽数。
+    check(
+        unsafe {
+            ffi::kda_recurrent(
+                stream.ptr(q) as *const c_void,
+                stream.ptr(k) as *const c_void,
+                stream.ptr(v) as *const c_void,
+                stream.ptr(raw_g) as *const c_void,
+                stream.ptr(raw_beta) as *const f32,
+                stream.ptr(a_log) as *const f32,
+                stream.ptr(dt_bias) as *const f32,
+                stream.ptr_mut(out) as *mut c_void,
+                stream.ptr_mut(state) as *mut c_void,
+                stream.ptr(cu_seqlens) as *const i32,
+                psi,
+                num_seqs as i64,
+                heads as i64,
+                head_dim as i64,
+                per_slot as i64,
+                scale,
+                lower_bound.unwrap_or(0.0),
+                i32::from(lower_bound.is_some()),
+                stream.raw() as _,
+            )
+        },
+        "kda_recurrent",
+    )
+}
+
+/// 输出门 + gated RMSNorm：`y = rmsnorm(x, w, head_dim, eps) * sigmoid(gate)`。
+/// `x`/`gate`/`out`: `[rows, head_dim]` bf16，`w`: `[head_dim]` bf16。
+pub fn kda_gated_rmsnorm(
+    stream: &Stream,
+    x: &CudaSlice<bf16>,
+    w: &CudaSlice<bf16>,
+    gate: &CudaSlice<bf16>,
+    out: &mut CudaSlice<bf16>,
+    rows: usize,
+    head_dim: usize,
+    eps: f32,
+) -> Result<()> {
+    ensure!(w.len() >= head_dim, "kda_gated_rmsnorm: w");
+    ensure!(x.len() >= rows * head_dim && gate.len() >= rows * head_dim && out.len() >= rows * head_dim,
+            "kda_gated_rmsnorm: x/gate/out");
+    // SAFETY: 容量已校验。
+    check(
+        unsafe {
+            ffi::kda_gated_rmsnorm(
+                stream.ptr(x) as *const c_void,
+                stream.ptr(w) as *const c_void,
+                stream.ptr(gate) as *const c_void,
+                stream.ptr_mut(out) as *mut c_void,
+                rows as i64,
+                head_dim as i64,
+                eps,
+                stream.raw() as _,
+            )
+        },
+        "kda_gated_rmsnorm",
+    )
+}

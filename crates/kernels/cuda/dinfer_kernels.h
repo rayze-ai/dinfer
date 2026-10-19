@@ -122,6 +122,30 @@ int qkv_post_bf16(void* qkv, const void* wq, const void* wk, const int32_t* posi
                   const int64_t* slot_mapping, int64_t tokens, int64_t heads, int64_t kv_heads, int64_t head_dim, float eps,
                   int64_t block_size, cudaStream_t stream);
 
+// ---- KDA（kda.cu）：Kimi Delta Attention 的模型无关算子 ----
+// 短卷积（depthwise causal conv1d, width<=8, 带 siLU）：
+//   y[t,d] = silu(Σ_j w[d,j]·x[t-W+1+j,d])，越界部分取 conv_state（布局 [slots, dim, state_len]）。
+//   prefill：x 为 varlen 拼接 [T, dim]，按 cu_seqlens 分段；state_indices/has_initial 可空。
+int kda_conv1d_prefill(const void* x, const void* w, void* out, void* conv_state, const int* cu_seqlens,
+                       const int* state_indices, const int* has_initial, int64_t num_seqs, int64_t dim,
+                       int64_t width, int64_t state_len);
+//   update（decode 单 token）：x [batch, dim]；conv_state 原地左移并追加。
+int kda_conv1d_update(const void* x, const void* w, void* out, void* conv_state, const int* state_indices,
+                      int64_t batch, int64_t dim, int64_t width, int64_t state_len);
+// gate：out[t,h,k] = lower_bound·sigmoid(exp(A_log[h])·(g+dt_bias)) 或 -exp(A_log[h])·softplus(g+dt_bias)。
+int kda_gate(const void* g, const float* a_log, const float* dt_bias, float* out, int64_t tokens,
+             int64_t heads, int64_t head_dim, float lower_bound, int use_lower_bound);
+// 递归核心（prefill 与 decode 同一路径）：q/k/v [T,heads,head_dim] bf16（v 用 head_dim 当 V），
+// raw_g 同形 bf16，raw_beta [T,heads] f32，state [slots, heads, head_dim(V), head_dim(K)] f32。
+// kda 输出 out [T,heads,head_dim] bf16。
+int kda_recurrent(const void* q, const void* k, const void* v, const void* raw_g, const float* raw_beta,
+                  const float* a_log, const float* dt_bias, void* out, void* state, const int* cu_seqlens,
+                  const int* state_indices, int64_t num_seqs, int64_t heads, int64_t head_dim,
+                  int64_t state_stride_tok, float scale, float lower_bound, int use_lower_bound);
+// 输出门 + gated RMSNorm：y = rmsnorm(x, w, eps) · sigmoid(gate)，逐 (token,head) 一行。
+int kda_gated_rmsnorm(const void* x, const void* w, const void* gate, void* out, int64_t rows,
+                      int64_t head_dim, float eps);
+
 // ---- 布局搬运（layout.cu）----
 int copy_cols_bf16(const void* src, void* dst, int64_t tokens, int64_t src_cols, int64_t col0, int64_t dst_cols,
                    int64_t dcol0, int64_t width, cudaStream_t stream);

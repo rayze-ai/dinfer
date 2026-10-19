@@ -498,6 +498,77 @@ extern "C" {
         eps: f32,
         stream: cudaStream_t,
     ) -> i32;
+    // ---- KDA（cuda/kda.cu）----
+    pub fn kda_conv1d_prefill(
+        x: *const c_void,
+        w: *const c_void,
+        out: *mut c_void,
+        conv_state: *mut c_void,
+        cu_seqlens: *const i32,
+        state_indices: *const i32,
+        has_initial: *const i32,
+        num_seqs: i64,
+        dim: i64,
+        width: i64,
+        state_len: i64,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn kda_conv1d_update(
+        x: *const c_void,
+        w: *const c_void,
+        out: *mut c_void,
+        conv_state: *mut c_void,
+        state_indices: *const i32,
+        batch: i64,
+        dim: i64,
+        width: i64,
+        state_len: i64,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn kda_gate(
+        g: *const c_void,
+        a_log: *const f32,
+        dt_bias: *const f32,
+        out: *mut f32,
+        tokens: i64,
+        heads: i64,
+        head_dim: i64,
+        lower_bound: f32,
+        use_lower_bound: i32,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn kda_recurrent(
+        q: *const c_void,
+        k: *const c_void,
+        v: *const c_void,
+        raw_g: *const c_void,
+        raw_beta: *const f32,
+        a_log: *const f32,
+        dt_bias: *const f32,
+        out: *mut c_void,
+        state: *mut c_void,
+        cu_seqlens: *const i32,
+        state_indices: *const i32,
+        num_seqs: i64,
+        heads: i64,
+        head_dim: i64,
+        state_stride_tok: i64,
+        scale: f32,
+        lower_bound: f32,
+        use_lower_bound: i32,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn kda_gated_rmsnorm(
+        x: *const c_void,
+        w: *const c_void,
+        gate: *const c_void,
+        out: *mut c_void,
+        rows: i64,
+        head_dim: i64,
+        eps: f32,
+        stream: cudaStream_t,
+    ) -> i32;
+
 }
 
 #[cfg(dinfer_no_nvcc)]
@@ -538,6 +609,11 @@ mod stubs {
     stub!(moe_bucket(ti: *const i32, c: *mut i32, o: *mut i32, cu: *mut i32, st: *mut i32, sk: *mut i32, t: i64, e: i64, k: i64, s: cudaStream_t));
     stub!(moe_gather_bf16(x: *const c_void, xg: *mut c_void, st: *const i32, n: i64, h: i64, s: cudaStream_t));
     stub!(moe_scatter_add_f32(y: *const c_void, a: *mut f32, st: *const i32, sk: *const i32, tw: *const f32, n: i64, k: i64, h: i64, s: cudaStream_t));
+    stub!(kda_conv1d_prefill(x: *const c_void, w: *const c_void, o: *mut c_void, cs: *mut c_void, cu: *const i32, si: *const i32, hi: *const i32, ns: i64, d: i64, wid: i64, sl: i64, s: cudaStream_t));
+    stub!(kda_conv1d_update(x: *const c_void, w: *const c_void, o: *mut c_void, cs: *mut c_void, si: *const i32, b: i64, d: i64, wid: i64, sl: i64, s: cudaStream_t));
+    stub!(kda_gate(g: *const c_void, al: *const f32, db: *const f32, o: *mut f32, t: i64, h: i64, hd: i64, lb: f32, ulb: i32, s: cudaStream_t));
+    stub!(kda_recurrent(q: *const c_void, k: *const c_void, v: *const c_void, g: *const c_void, rb: *const f32, al: *const f32, db: *const f32, o: *mut c_void, st: *mut c_void, cu: *const i32, si: *const i32, ns: i64, h: i64, hd: i64, sst: i64, sc: f32, lb: f32, ulb: i32, s: cudaStream_t));
+    stub!(kda_gated_rmsnorm(x: *const c_void, w: *const c_void, g: *const c_void, o: *mut c_void, r: i64, hd: i64, e: f32, s: cudaStream_t));
     stub!(f32_add_to_bf16(a: *const f32, o: *mut c_void, n: i64, s: cudaStream_t));
     stub!(gather_blocks_bf16_to_f32(x: *const c_void, y: *mut f32, nb: i64, r: i64, c: i64, s: cudaStream_t));
     stub!(add_inplace_bf16(x: *const c_void, y: *mut c_void, n: i64, s: cudaStream_t));
