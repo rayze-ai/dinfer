@@ -2882,6 +2882,198 @@ pub fn gdn_gated_rmsnorm(
     )
 }
 
+// ------------------------------------------------------------------ GDN chunk 形式 prefill（gdn_chunk.cu）
+// 切块表与 KDA 完全同构（只看 cu_seqlens / bt），直接复用 `KdaChunkPlan`。
+
+/// GDN chunk prefill 的中间缓冲。尺寸随 `[T, H, K]` / `[T, HV, V]` 与块数变化。
+pub struct GdnChunkScratch {
+    pub qn: CudaSlice<bf16>,
+    pub kn: CudaSlice<bf16>,
+    pub gc: CudaSlice<f32>,
+    pub aq: CudaSlice<f32>,
+    pub u: CudaSlice<f32>,
+    pub w: CudaSlice<f32>,
+    pub kg: CudaSlice<f32>,
+    pub tokens: usize,
+    pub num_chunks: usize,
+}
+
+impl GdnChunkScratch {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        stream: &Stream,
+        tokens: usize,
+        heads_k: usize,
+        heads_v: usize,
+        k_dim: usize,
+        v_dim: usize,
+        num_chunks: usize,
+        bt: usize,
+    ) -> Result<Self> {
+        Ok(Self {
+            qn: stream.alloc_uninit::<bf16>(tokens * heads_k * k_dim)?,
+            kn: stream.alloc_uninit::<bf16>(tokens * heads_k * k_dim)?,
+            gc: stream.alloc_uninit::<f32>(tokens * heads_v)?,
+            aq: stream.alloc_uninit::<f32>(num_chunks * heads_v * bt * bt)?,
+            u: stream.alloc_uninit::<f32>(tokens * heads_v * v_dim)?,
+            w: stream.alloc_uninit::<f32>(tokens * heads_v * k_dim)?,
+            kg: stream.alloc_uninit::<f32>(tokens * heads_v * k_dim)?,
+            tokens,
+            num_chunks,
+        })
+    }
+
+    /// 已分配容量是否够这一步（tokens / num_chunks 都不超）。
+    pub fn fits(&self, tokens: usize, num_chunks: usize) -> bool {
+        self.tokens >= tokens && self.num_chunks >= num_chunks
+    }
+}
+
+/// 三段的第 1 段：q/k 的 l2norm（q 乘 `scale`）→ qn/kn；块内 inclusive cumsum(g)·1/ln2 → gc。
+/// `mixed_qkv`: `[T, 2·H·K + HV·V]` bf16（与 `gdn_recurrent` 同布局）；`g`: `[T, HV]` f32（`gdn_gate` 的输出）。
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_chunk_prep(
+    stream: &Stream,
+    mixed_qkv: &CudaSlice<bf16>,
+    g: &CudaSlice<f32>,
+    cu_seqlens: &CudaSlice<i32>,
+    plan: &KdaChunkPlan,
+    sc: &mut GdnChunkScratch,
+    tokens: usize,
+    heads_k: usize,
+    heads_v: usize,
+    k_dim: usize,
+    v_dim: usize,
+    scale: f32,
+) -> Result<()> {
+    ensure!(heads_k > 0 && heads_v % heads_k == 0, "gdn_chunk_prep: heads_v {heads_v} 不能被 heads_k {heads_k} 整除");
+    let row = 2 * heads_k * k_dim + heads_v * v_dim;
+    ensure!(mixed_qkv.len() >= tokens * row, "gdn_chunk_prep: mixed_qkv");
+    ensure!(g.len() >= tokens * heads_v, "gdn_chunk_prep: g");
+    ensure!(sc.fits(tokens, plan.num_chunks), "gdn_chunk_prep: scratch 容量");
+    ensure!(cu_seqlens.len() >= plan.num_seqs + 1, "gdn_chunk_prep: cu_seqlens");
+    // SAFETY: 容量已校验；plan 由同一 cu_seqlens 生成。
+    check(
+        unsafe {
+            ffi::gdn_chunk_prep(
+                stream.ptr(mixed_qkv) as *const c_void,
+                stream.ptr(g) as *const f32,
+                stream.ptr_mut(&mut sc.qn) as *mut c_void,
+                stream.ptr_mut(&mut sc.kn) as *mut c_void,
+                stream.ptr_mut(&mut sc.gc) as *mut f32,
+                stream.ptr(cu_seqlens) as *const i32,
+                stream.ptr(&plan.chunk_tab) as *const i32,
+                tokens as i64,
+                plan.num_chunks as i64,
+                heads_k as i64,
+                heads_v as i64,
+                k_dim as i64,
+                v_dim as i64,
+                plan.bt as i64,
+                scale,
+                stream.raw() as _,
+            )
+        },
+        "gdn_chunk_prep",
+    )
+}
+
+/// 第 2 段：A/Aq → M = (I+A)⁻¹ → u / w / kg。`beta`: `[T, HV]` f32（`gdn_gate` 的输出）。
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_chunk_wy(
+    stream: &Stream,
+    mixed_qkv: &CudaSlice<bf16>,
+    beta: &CudaSlice<f32>,
+    cu_seqlens: &CudaSlice<i32>,
+    plan: &KdaChunkPlan,
+    sc: &mut GdnChunkScratch,
+    tokens: usize,
+    heads_k: usize,
+    heads_v: usize,
+    k_dim: usize,
+    v_dim: usize,
+) -> Result<()> {
+    ensure!(sc.fits(tokens, plan.num_chunks), "gdn_chunk_wy: scratch 容量");
+    ensure!(beta.len() >= tokens * heads_v, "gdn_chunk_wy: beta");
+    // SAFETY: 容量已校验。
+    check(
+        unsafe {
+            ffi::gdn_chunk_wy(
+                stream.ptr(&sc.qn) as *const c_void,
+                stream.ptr(&sc.kn) as *const c_void,
+                stream.ptr(mixed_qkv) as *const c_void,
+                stream.ptr(&sc.gc) as *const f32,
+                stream.ptr(beta) as *const f32,
+                stream.ptr_mut(&mut sc.aq) as *mut f32,
+                stream.ptr_mut(&mut sc.u) as *mut f32,
+                stream.ptr_mut(&mut sc.w) as *mut f32,
+                stream.ptr_mut(&mut sc.kg) as *mut f32,
+                stream.ptr(cu_seqlens) as *const i32,
+                stream.ptr(&plan.chunk_tab) as *const i32,
+                plan.num_chunks as i64,
+                heads_k as i64,
+                heads_v as i64,
+                k_dim as i64,
+                v_dim as i64,
+                plan.bt as i64,
+                stream.raw() as _,
+            )
+        },
+        "gdn_chunk_wy",
+    )
+}
+
+/// 第 3 段：跨 chunk 扫 h（fp32，`state` 原地）并输出 `out` `[T, HV, V]` bf16。
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_chunk_ho(
+    stream: &Stream,
+    cu_seqlens: &CudaSlice<i32>,
+    plan: &KdaChunkPlan,
+    sc: &GdnChunkScratch,
+    out: &mut CudaSlice<bf16>,
+    state: &mut CudaSlice<f32>,
+    state_indices: Option<&CudaSlice<i32>>,
+    tokens: usize,
+    heads_k: usize,
+    heads_v: usize,
+    k_dim: usize,
+    v_dim: usize,
+) -> Result<()> {
+    let per_slot = heads_v * v_dim * k_dim;
+    ensure!(state.len() >= per_slot, "gdn_chunk_ho: state");
+    ensure!(out.len() >= tokens * heads_v * v_dim, "gdn_chunk_ho: out 容量");
+    ensure!(sc.fits(tokens, plan.num_chunks), "gdn_chunk_ho: scratch 容量");
+    let psi = state_indices.map_or(std::ptr::null(), |s| stream.ptr(s) as *const i32);
+    // SAFETY: 容量已校验；slot 编号由调度器保证 < state 槽数。
+    check(
+        unsafe {
+            ffi::gdn_chunk_ho(
+                stream.ptr(&sc.qn) as *const c_void,
+                stream.ptr(&sc.gc) as *const f32,
+                stream.ptr(&sc.aq) as *const f32,
+                stream.ptr(&sc.u) as *const f32,
+                stream.ptr(&sc.w) as *const f32,
+                stream.ptr(&sc.kg) as *const f32,
+                stream.ptr_mut(out) as *mut c_void,
+                stream.ptr_mut(state) as *mut c_void,
+                stream.ptr(cu_seqlens) as *const i32,
+                stream.ptr(&plan.cu_nt) as *const i32,
+                stream.ptr(&plan.chunk_off) as *const i32,
+                psi,
+                per_slot as i64,
+                plan.num_seqs as i64,
+                heads_k as i64,
+                heads_v as i64,
+                k_dim as i64,
+                v_dim as i64,
+                plan.bt as i64,
+                stream.raw() as _,
+            )
+        },
+        "gdn_chunk_ho",
+    )
+}
+
 /// MXFP4 解包（compressed-tensors `mxfp4-pack-quantized` 的参考回退路径）。
 /// `packed`: `[rows, cols/2]` u8（低半字节 = 偶数下标）；`scale`: `[rows, cols/group]` u8，e8m0 = 2^(u8-127)；
 /// `out`: `[rows, cols]` bf16。原生 MXFP4 GEMM 见 `docs/loops/k3-moe.md` 的 TODO。

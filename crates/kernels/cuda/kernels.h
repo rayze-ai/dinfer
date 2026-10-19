@@ -222,6 +222,23 @@ int gdn_recurrent(const void* mixed_qkv, const float* g, const float* beta, cons
 // 输出门 + RMSNorm：y[t,hv,d] = rmsnorm(o[t,hv,:], w, eps) · act(z[t,hv,d])，w 为 [head_dim]。
 int gdn_gated_rmsnorm(const void* x, const void* w, const void* z, void* out, int64_t rows,
                       int64_t head_dim, float eps, int act);
+// ---- GDN chunk 形式 prefill（gdn_chunk.cu，规格 docs/loops/qwen35-perf.md 第 1 轮）----
+// 与 kda_chunk 同三段结构；输入沿用 gdn_recurrent 的 mixed_qkv 与 gdn_gate 的 g/beta。中间量由调用方分配：
+//   qn/kn   bf16 [T, H, K]        （q 已乘 scale，k 已 l2norm）
+//   gc      f32  [T, HV]          （块内 inclusive cumsum(g)·1/ln2）
+//   aq      f32  [num_chunks, HV, BT, BT]
+//   u       f32  [T, HV, V]；w/kg  f32 [T, HV, K]
+//   chunk_tab / cu_nt / chunk_off 同 kda_chunk。bt 当前只支持 64；K ∈ {64,128,256}；V 是 16 的整数倍。
+int gdn_chunk_prep(const void* mixed_qkv, const float* g, void* qn, void* kn, float* gc, const int* cu_seqlens,
+                   const int* chunk_tab, int64_t total, int64_t num_chunks, int64_t H, int64_t HV, int64_t K,
+                   int64_t V, int64_t bt, float scale, cudaStream_t stream);
+int gdn_chunk_wy(const void* qn, const void* kn, const void* mixed_qkv, const float* gc, const float* beta,
+                 float* aq, float* u, float* w, float* kg, const int* cu_seqlens, const int* chunk_tab,
+                 int64_t num_chunks, int64_t H, int64_t HV, int64_t K, int64_t V, int64_t bt, cudaStream_t stream);
+int gdn_chunk_ho(const void* qn, const float* gc, const float* aq, const float* u, const float* w, const float* kg,
+                 void* out, void* state, const int* cu_seqlens, const int* cu_nt, const int* chunk_off,
+                 const int* state_indices, int64_t state_stride_tok, int64_t num_seqs, int64_t H, int64_t HV,
+                 int64_t K, int64_t V, int64_t bt, cudaStream_t stream);
 
 // ---- 布局搬运（layout.cu）----
 int copy_cols_bf16(const void* src, void* dst, int64_t tokens, int64_t src_cols, int64_t col0, int64_t dst_cols,
