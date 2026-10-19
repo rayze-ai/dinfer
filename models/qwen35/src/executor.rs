@@ -147,6 +147,17 @@ impl Qwen35Executor {
         dev.disable_event_tracking();
         let stream = dev.new_stream()?;
         let gemm = Gemm::new(&stream).context("cublasLt on executor stream")?;
+        // GEMM 自调优（docs/loops/qwen35-perf.md 第 3 轮）：模型加载后、graph 捕获前，对每个 (N,K) × M 桶实测
+        // cuBLASLt 候选 / small_m kernel 取最快。`GEMM_TUNE=off` 关。耗时与每形状选择进启动日志。
+        if gemm.tune_enabled() {
+            let report = gemm.autotune(&model.gemm_tune_entries()).context("gemm autotune")?;
+            for line in report.summary_lines() {
+                tracing::info!("gemm tune: {line}");
+            }
+            tracing::info!("gemm autotune: {:.0} ms, partial workspace {:.1} MB", report.elapsed_ms, report.partial_bytes as f64 / 1048576.0);
+        } else {
+            tracing::info!("gemm autotune: off (GEMM_TUNE=off)");
+        }
         let (mt, rows, v) = (model.max_tokens, model.max_logits_rows, model.cfg.vocab_size as usize);
         let slots = SlotTable::new(model.num_slots);
         let buf = StepBuffers::alloc(&stream, mt, rows, max_blocks)?;

@@ -530,6 +530,7 @@ pub struct DeviceBlockRef { pub layer: u8, pub block: BlockId, pub ptr: u64, pub
 
 | 项 | 采用 vLLM 的 | 我们改进的 | 收益 / 状态 |
 |---|---|---|---|
+| decode 小 M GEMM | vLLM 直接用 torch/cuBLAS，让 cuBLASLt 启发式选 algo（M=1 在 sm_103 上被选成 2-CTA 大 tile，43% 带宽） | 启动自调优（`Gemm::autotune`）：对每个 (N,K) × M 桶实测 cuBLASLt 前 8 候选 + 自写访存型 `gemm_small_m` kernel（split-K 份数一起搜）取最快，查表执行；搜索参数在 `ArchProfile`，`GEMM_TUNE=off` 回退 | 3090：默认→所选 −9%（已近峰值带宽）；B300 待 bench_b300_6（`docs/loops/qwen35-perf.md` 第 3 轮） |
 | 调度模型 | v1 的 "无 prefill/decode 之分，只有 num_computed 追赶 num_tokens"、chunked prefill、FCFS + 抢占末尾 | `decode_exempt_from_budget`（decode 行不占 token 预算，每步装下全部 decode + 预算内 prefill） | 调度结构零成本沿用；免预算让混批可能，但闭环 bench 下看不出（q3-xstream） |
 | KV 分页 + prefix cache | 块哈希、按块命中、`block_size=16` | 无 | 一致 |
 | TP 切分与通信点 | GQA 按头切 qkv、o_proj/down 行并行、每层 2 all-reduce、每 rank 都采样 | 一进程多线程 lockstep（`BatchPlan` clone 直传，无 shm 队列 / 序列化）；lm_head 复制省 all-gather | T1 功能完成，4090 无 P2P 性能待 NVLink 机器 |

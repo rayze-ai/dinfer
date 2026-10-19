@@ -74,6 +74,34 @@ pub struct Qwen35Model<O: OpSet = dinfer_layers::DefaultOps> {
 }
 
 impl<O: OpSet> Qwen35Model<O> {
+    /// GEMM 自调优的形状表：按 (N, K, 有无 bias) 去重，每个形状取第一层的真权重（各层形状相同，只调一次）。
+    pub fn gemm_tune_entries(&self) -> Vec<dinfer_kernels::GemmTuneEntry<'_>> {
+        let mut all: Vec<(&str, &Linear)> = Vec::new();
+        for l in &self.layers {
+            match &l.attn {
+                crate::layer::Attn::Gdn(g) => all.extend(g.linears()),
+                crate::layer::Attn::Full(f) => all.extend(f.linears()),
+            }
+            all.push(("mlp.gate_up", &l.mlp.gate_up));
+            all.push(("mlp.down", &l.mlp.down));
+        }
+        all.push(("lm_head", &self.lm_head));
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for (name, l) in all {
+            if seen.insert((l.out_features, l.in_features, l.b.is_some())) {
+                out.push(dinfer_kernels::GemmTuneEntry {
+                    name: name.to_string(),
+                    n: l.out_features,
+                    k: l.in_features,
+                    w: &l.w.data,
+                    bias: l.b.as_ref().map(|b| &b.data),
+                });
+            }
+        }
+        out
+    }
+
     /// `num_slots`：GDN 状态最多容纳多少并发请求（= `max_num_seqs`）。
     #[allow(clippy::too_many_arguments)]
     pub fn load(

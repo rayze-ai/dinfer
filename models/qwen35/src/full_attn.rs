@@ -89,6 +89,11 @@ impl FullAttention {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// 本层所有 Linear（GEMM 自调优用）。
+    pub fn linears(&self) -> Vec<(&'static str, &Linear)> {
+        vec![("attn.qkv", &self.qkv), ("attn.gate", &self.gate), ("attn.o_proj", &self.o_proj)]
+    }
+
     pub fn forward<O: OpSet>(
         &mut self,
         stream: &Stream,

@@ -609,3 +609,14 @@
 - 根因：封装用 `x.numel()` 推 tokens / 用 `sc.qn.len() >= q.len()` 判容量，缓冲比本步大就误判。
 - 解法：`Linear::forward_rows(…, tokens)`；`kda_chunk_{prep,wy,ho}` 加显式 `tokens` 参数，只按本步行数判。
 - 避免：新 kernel 封装一律收显式 `tokens`，`ensure!(buf.len() >= tokens·row)`，不要用 `==` 或互相比缓冲长度。
+
+## cudarc 0.18 cuBLASLt：多候选 algo 要走 `cublaslt::result` / `sys` 裸层（2026-10-20）
+- 现象：`CudaBlasLT::matmul` 每次只取启发式第 1 个 algo（`requestedAlgoCount=1`）且不暴露 algo；想按形状选最快候选没有安全 API。
+- 根因 / 解法：`Gemm` 自持 `cublasLtHandle_t` + 工作区，用 `result::create_matrix_layout / create_matmul_desc / set_*_attribute` 建描述符，
+  直接调 `sys::cublasLtMatmulAlgoGetHeuristic(…, N, …)` 取前 N 个，`result::matmul` 传 `&h.algo`。注意：`sys` 里没有 `cublasOperation_t`
+  枚举（cudarc 以 `i32` 传 TRANSA/TRANSB：1 = T，0 = N）；`cublasLtMatmulAlgo_t` 是 `[u64; 8]` 不透明值，可 Copy 进 HashMap 缓存。
+- 避免：algo 只对同 (M,N,K,layout) 有效，不要跨 M 借用；bf16 GEMM 的工作区 32 MiB（sm90+）/ 4 MiB 与 cudarc 同策略放 `ArchProfile`。
+
+## 新 .cu 里 `bf16` 未定义：common.cuh 的工具都在 `namespace dinfer`（2026-10-20）
+- 现象：`identifier "bf16" is undefined`、`to_f32` 找不到。
+- 解法：实现文件照 `gdn.cu`：`namespace dinfer { namespace { …kernels… } extern "C" { … } }`，`extern "C"` 放在 `namespace dinfer` 内（C 符号不受命名空间影响）。

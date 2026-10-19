@@ -202,6 +202,11 @@ impl GdnLayer {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// 本层所有 Linear（GEMM 自调优用）。
+    pub fn linears(&self) -> Vec<(&'static str, &Linear)> {
+        vec![("gdn.in_proj_qkv", &self.in_qkv), ("gdn.in_proj_z", &self.in_z), ("gdn.in_proj_a", &self.in_a), ("gdn.in_proj_b", &self.in_b), ("gdn.out_proj", &self.out_proj)]
+    }
+
     pub fn forward(
         &mut self,
         stream: &Stream,
