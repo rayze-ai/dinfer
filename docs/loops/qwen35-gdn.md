@@ -1,6 +1,6 @@
 # Loop: GDN 算子（Qwen3.5 线）
 
-> 状态：**进行中**。里程碑 2（GDN 对拍通过）是本次交付目标。方法论见 `docs/model-onboarding.md` §3。
+> 状态：**里程碑 2 通过**（2026-10-19，3090 sm86 / 4090 sm89 / B300 sm103，10/10 case）。方法论见 `docs/model-onboarding.md` §3。
 
 ## 环境
 
@@ -52,6 +52,12 @@
 - 并且 `cargo build --workspace --features qwen3` exit 0（公共 trait 无回归）；
 - 3090 跑通后再在 4090 上跑同一个脚本 exit 0；B300（`CUDA_ARCHS=103`）同。
 
+## 环境备注（踩过的坑）
+
+- 4090 的 GPU 3–5 常被他人进程占满（~23 GB / 24 GB）：先看 `nvidia-smi --query-gpu=index,memory.used` 再选卡。
+- 4090 / B300 没有 torch：参考 `.npy` 已进仓库，`qwen35_gdn.sh` 默认复用（`FORCE_REF_GEN=1` 强制重生成）。
+- B300 kernel 编译要 `CUDA_ARCHS=103`；4090 走远端 `env.sh`（`CUDA_ARCHS=89`）。
+
 ## 迭代上限
 
 - 同一错误（同一 case 同一方向偏差）最多 3 轮；超过就停，把现象与已排除的假设写进下面这张表再继续。
@@ -62,3 +68,7 @@
 | # | 日期 | 改动 | 结果 |
 |---|---|---|---|
 | 1 | 2026-10-19 | 建规格：数学口径（含与 KDA 的三处差异：dt_bias 逐头、输出门 silu、group 映射）+ 参考脚本方案（纯 torch） | 规格定稿 |
+| 2 | 2026-10-19 | 写 `gdn.cu` + Rust 封装 + `gen_gdn_refs.py` + `gdn_parity.rs` + `qwen35_gdn.sh`；首次跑 3090：conv/gate/norm 6 项过，4 项递归 case 报 `CUDA_ERROR_ILLEGAL_ADDRESS` | 用 compute-sanitizer 定位：递归 kernel 用动态 shared 但启动未传 smem 字节数（`<<<grid, block>>>` 缺第三参）→ 修 | 
+| 3 | 2026-10-19 | 修 launch 参数 | **3090 10/10 过**：conv/norm 0 误差，gate 1.4e-6，递归 out 8e-6 / 状态 1e-7 |
+| 4 | 2026-10-19 | 4090（sm89，GPU 7）：首次用 GPU 3 撞上别人的进程（23 GB 占满）→ OOM；换 7 | **10/10 过** |
+| 5 | 2026-10-19 | B300（sm103，GPU 6） | **10/10 过**，里程碑 2 完成 |
