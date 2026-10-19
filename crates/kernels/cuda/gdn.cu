@@ -125,7 +125,7 @@ __global__ void gate_kernel(const bf16* __restrict__ a, const bf16* __restrict__
 
 // ---------------------------------------------------------------- 递归核心（prefill + decode）
 // 每 block 一个 (序列, v 头)。S 为 [V, K] fp32 放动态 shared：一次 load、整段循环、一次 store。
-// 共享内存 = (V·K + 2·K) · 4 字节；V=K=128 时 66 KB。
+// 共享内存 = (V/vsplit·K + 2·K) · 4 字节；V=K=128、vsplit=1 时 66 KB。grid.z = vsplit（host 给，须整除 V）。
 // FUSE_GATE=1：g/beta 在 kernel 内由 raw a/b + A_log/dt_bias 现算（decode 的 fused 路径）；
 // FUSE_GATE=0：读调用方预算好的 g/beta（prefill 路径，与 vLLM fused_post_conv_prep 对应）。
 template <int BLOCK, bool FUSE_GATE>
@@ -138,8 +138,11 @@ __global__ void recurrent_kernel(const bf16* __restrict__ mixed, const float* __
                                  const int* __restrict__ state_indices, int H, int HV, int K, int V,
                                  int group, float scale, long state_stride_tok) {
   extern __shared__ float smem[];
-  float* S = smem;             // [V, K]
-  float* kbuf = S + (long)V * K;
+  // V 维切 gridDim.z 份：本 block 只负责状态的 [v0, v0+Vb) 行（各行递推互不依赖；q/k 归一化每块重复算，很便宜）。
+  const int Vb = V / (int)gridDim.z;
+  const int v0 = (int)blockIdx.z * Vb;
+  float* S = smem;             // [Vb, K]
+  float* kbuf = S + (long)Vb * K;
   float* qbuf = kbuf + K;
   const int tid = threadIdx.x;
 
@@ -151,9 +154,9 @@ __global__ void recurrent_kernel(const bf16* __restrict__ mixed, const float* __
   const int len = eos - bos;
 
   const long qkv_row = 2L * H * K + (long)HV * V;  // mixed_qkv 的每 token 宽度
-  float* Sg = state + (long)slot * state_stride_tok + (long)hv * V * K;
+  float* Sg = state + (long)slot * state_stride_tok + (long)hv * V * K + (long)v0 * K;
   if (slot < 0 || len <= 0) return;
-  for (int i = tid; i < V * K; i += BLOCK) S[i] = Sg[i];
+  for (int i = tid; i < Vb * K; i += BLOCK) S[i] = Sg[i];
   __syncthreads();
 
   // 该 v 头对应的 k 头偏移
@@ -193,26 +196,26 @@ __global__ void recurrent_kernel(const bf16* __restrict__ mixed, const float* __
     }
     const float eg = __expf(g);
 
-    for (int vv = tid; vv < V; vv += BLOCK) {
+    for (int vv = tid; vv < Vb; vv += BLOCK) {
       float* r = S + (long)vv * K;
       float p = 0.f;
       for (int kk = 0; kk < K; ++kk) {
         r[kk] *= eg;
         p += r[kk] * kbuf[kk];
       }
-      const float vin = to_f32(vp[row * qkv_row + vv]);
+      const float vin = to_f32(vp[row * qkv_row + v0 + vv]);
       const float vprime = (vin - p) * beta;
       float o = 0.f;
       for (int kk = 0; kk < K; ++kk) {
         r[kk] += vprime * kbuf[kk];
         o += r[kk] * qbuf[kk];
       }
-      out[(row * HV + hv) * V + vv] = to_bf16(o);
+      out[(row * HV + hv) * V + v0 + vv] = to_bf16(o);
     }
     __syncthreads();  // 下一 token 会覆盖 kbuf/qbuf
   }
 
-  for (int i = tid; i < V * K; i += BLOCK) Sg[i] = S[i];
+  for (int i = tid; i < Vb * K; i += BLOCK) Sg[i] = S[i];
 }
 
 // ---------------------------------------------------------------- 输出门 + RMSNorm
@@ -284,10 +287,12 @@ int gdn_recurrent(const void* mixed_qkv, const float* g, const float* beta, cons
                   const void* b_raw, const float* a_log, const float* dt_bias, void* out,
                   void* state, const int* cu_seqlens, const int* state_indices, int64_t num_seqs,
                   int64_t H, int64_t HV, int64_t K, int64_t V, int64_t group, float scale,
-                  int64_t state_stride_tok, int fused_gate, cudaStream_t stream) {
+                  int64_t state_stride_tok, int fused_gate, int64_t vsplit, cudaStream_t stream) {
   if (num_seqs <= 0) return 0;
-  const int smem = (int)((V * K + 2 * K) * 4);
-  dim3 grid((unsigned)num_seqs, (unsigned)HV);
+  // vsplit：V 维切几个 block（host 给，须整除 V；1 = 不切）。decode 时 (seq, v 头) 只有几十个 block，切开才铺满 SM。
+  if (vsplit <= 0 || V % vsplit != 0) return (int)cudaErrorInvalidValue;
+  const int smem = (int)((V / vsplit * K + 2 * K) * 4);
+  dim3 grid((unsigned)num_seqs, (unsigned)HV, (unsigned)vsplit);
   // cudaFuncSetAttribute 不能在 stream capture 期间调（CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED）：
   // 每个模板实例只在首次（capture 前的 eager 预热）设一次；smem 只随 (V, K) 变，同一模型内恒定。
   static int smem_set_fused = 0, smem_set_plain = 0;

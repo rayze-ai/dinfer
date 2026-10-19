@@ -62,3 +62,62 @@ fn gemm_small_m_bench() {
         drop(dw);
     }
 }
+
+/// 自调优后 forward_bf16 走表（Lt 指定 algo / small_m split）仍与 CPU 参考一致；覆盖桶 M、非桶 M（3）、超小 M 上限的 M（16）。
+#[test]
+#[ignore]
+fn gemm_autotuned_matches_cpu() {
+    use dinfer_kernels::GemmTuneEntry;
+    let dev = Device::new(0).unwrap();
+    dev.disable_event_tracking();
+    let s = dev.new_stream().unwrap();
+    let g = Gemm::new(&s).unwrap();
+    assert!(g.tune_enabled(), "GEMM_TUNE=off 时本测试无意义");
+    let shapes = [(48usize, 5120usize, false), (5120, 6144, true), (6144, 5120, false)];
+    let mut x = 0x2545f4914f6cdd1du64;
+    let mut rnd = move || {
+        x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+        (x >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+    };
+    let mut ws = Vec::new();
+    for &(n, k, bias) in &shapes {
+        let w: Vec<bf16> = (0..n * k).map(|_| bf16::from_f32(rnd() * (1.0 / k as f32).sqrt() * 2.0)).collect();
+        let b: Vec<bf16> = (0..n).map(|_| bf16::from_f32(rnd())).collect();
+        ws.push((n, k, bias, w.clone(), b.clone(), s.htod_copy(w).unwrap(), s.htod_copy(b).unwrap()));
+    }
+    let entries: Vec<GemmTuneEntry> = ws
+        .iter()
+        .map(|(n, k, bias, _, _, dw, db)| GemmTuneEntry { name: format!("n{n}_k{k}"), n: *n, k: *k, w: dw, bias: bias.then_some(db) })
+        .collect();
+    let report = g.autotune(&entries).unwrap();
+    println!("autotune {:.0} ms, partial {} B", report.elapsed_ms, report.partial_bytes);
+    for l in report.summary_lines() {
+        println!("  {l}");
+    }
+    for (n, k, bias, w, b, dw, db) in &ws {
+        for &m in &[1usize, 3, 8, 16] {
+            let a: Vec<bf16> = (0..m * k).map(|_| bf16::from_f32(rnd())).collect();
+            let da = s.htod_copy(a.clone()).unwrap();
+            let mut out = s.alloc_zeros::<bf16>(m * n).unwrap();
+            g.forward_bf16(&da, dw, bias.then_some(db), &mut out, m, *n, *k).unwrap();
+            let got = s.dtoh_sync_copy(&out).unwrap();
+            // 抽查 64 个元素（CPU 全算 5120×6144 太慢）
+            let mut bad = 0;
+            for t in 0..64 {
+                let (i, j) = ((t * 7) % m, (t * 2654435761usize) % n);
+                let mut acc = if *bias { b[j].to_f32() } else { 0.0 };
+                for kk in 0..*k {
+                    acc += a[i * k + kk].to_f32() * w[j * k + kk].to_f32();
+                }
+                let gv = got[i * n + j].to_f32();
+                if (gv - acc).abs() > 3e-2 + 2e-2 * acc.abs() {
+                    bad += 1;
+                    if bad <= 3 {
+                        println!("n{n} k{k} m{m} ({i},{j}) got={gv} want={acc}");
+                    }
+                }
+            }
+            assert_eq!(bad, 0, "n{n} k{k} m{m}: {bad}/64 超容差");
+        }
+    }
+}

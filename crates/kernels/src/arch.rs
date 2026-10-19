@@ -72,6 +72,14 @@ impl ArchProfile {
         Self { arch, cc, sm_count, cublaslt_workspace_bytes, gemm_tune }
     }
 
+    /// `gdn_recurrent` decode 的 V 维切分：(seq, v 头) 共 `base_blocks` 个 block，不足 SM 数时按 V 切 2/4 份补齐；
+    /// 结果必须整除 `v_dim`，上限 `GDN_VSPLIT_MAX`（每块再小则 q/k 归一化的重复计算占比上升）。
+    pub fn gdn_recurrent_vsplit(sm_count: usize, base_blocks: usize, v_dim: usize) -> usize {
+        const GDN_VSPLIT_MAX: usize = 4;
+        let want = sm_count.div_ceil(base_blocks.max(1)).clamp(1, GDN_VSPLIT_MAX);
+        (1..=want).rev().find(|s| v_dim % s == 0).unwrap_or(1)
+    }
+
     /// 小 M kernel 的 split-K 候选（去重、升序、≥1）。`blocks_per_split` = 不切时的 block 数（ceil(N / warps/block)）。
     pub fn small_m_split_candidates(&self, blocks_per_split: usize, k: usize) -> Vec<usize> {
         let mut v: Vec<usize> = vec![1];

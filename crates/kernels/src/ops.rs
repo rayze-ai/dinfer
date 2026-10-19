@@ -2852,6 +2852,7 @@ pub fn gdn_recurrent(
     ensure!(state.len() >= per_slot, "gdn_recurrent: state");
     let group = heads_v / heads_k;
     let fused = g.is_none();
+    let vsplit = gdn_recurrent_vsplit(stream, num_seqs * heads_v, v_dim);
     if fused {
         ensure!(a_raw.is_some() && b_raw.is_some(), "gdn_recurrent: fused_gate 需要 a_raw/b_raw");
         ensure!(a_raw.unwrap().len() >= tokens * heads_v, "gdn_recurrent: a_raw");
@@ -2889,11 +2890,27 @@ pub fn gdn_recurrent(
                 scale,
                 per_slot as i64,
                 i32::from(fused),
+                vsplit as i64,
                 stream.raw() as ffi::cudaStream_t,
             )
         },
         "gdn_recurrent",
     )
+}
+
+/// `gdn_recurrent` 的 V 维切分数：默认由 `ArchProfile::gdn_recurrent_vsplit`（按 SM 数把 block 数补到 ≥ SM 数，
+/// 只取 V 的约数、上限 4）；`GDN_VSPLIT=<n>` 环境变量覆盖（对拍 / 回退用，须整除 V）。SM 数按首个 stream 的设备缓存一次。
+fn gdn_recurrent_vsplit(stream: &Stream, base_blocks: usize, v_dim: usize) -> usize {
+    use std::sync::OnceLock;
+    static OVERRIDE: OnceLock<Option<usize>> = OnceLock::new();
+    static SM: OnceLock<usize> = OnceLock::new();
+    if let Some(v) = OVERRIDE.get_or_init(|| std::env::var("GDN_VSPLIT").ok().and_then(|s| s.parse().ok())) {
+        if *v >= 1 && v_dim % *v == 0 {
+            return *v;
+        }
+    }
+    let sm = *SM.get_or_init(|| stream.device().sm_count().unwrap_or(1));
+    crate::arch::ArchProfile::gdn_recurrent_vsplit(sm, base_blocks, v_dim)
 }
 
 /// 输出门 + RMSNorm：`y = rmsnorm(x, w, eps) · act(z)`，一个 `(token, v 头)` 一行。
