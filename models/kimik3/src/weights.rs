@@ -127,19 +127,40 @@ impl Table {
 /// 某层的张量落在哪几个分片（读 `model.safetensors.index.json`）。单层对拍 / 按层流式加载用，
 /// 不必 mmap 全部 96 个分片（1.56 TB）。
 pub fn shards_for_layer(dir: &Path, layer: usize) -> Result<Vec<PathBuf>> {
+    shards_for_prefix(dir, &format!("{LM_PREFIX}layers.{layer}."))
+}
+
+/// 顶层张量（`embed_tokens` / `norm` / `output_attn_res_*` / `lm_head`）所在分片：名字以 `language_model.` 开头且不含 `.layers.`。
+pub fn shards_for_top(dir: &Path) -> Result<Vec<PathBuf>> {
     let idx = dir.join("model.safetensors.index.json");
     let s = std::fs::read_to_string(&idx).with_context(|| idx.display().to_string())?;
     let v: serde_json::Value = serde_json::from_str(&s)?;
     let map = v.get("weight_map").and_then(|m| m.as_object()).context("index: weight_map")?;
-    let pre = format!("{LM_PREFIX}layers.{layer}.");
     let mut files: Vec<PathBuf> = map
         .iter()
-        .filter(|(k, _)| k.starts_with(&pre))
+        .filter(|(k, _)| k.starts_with("language_model.") && !k.contains(".layers."))
         .filter_map(|(_, f)| f.as_str().map(|f| dir.join(f)))
         .collect();
     files.sort();
     files.dedup();
-    ensure!(!files.is_empty(), "index 里没有第 {layer} 层（前缀 {pre}）");
+    ensure!(!files.is_empty(), "index 里没有顶层张量");
+    Ok(files)
+}
+
+/// 名字以 `pre` 开头的张量落在哪几个分片。
+pub fn shards_for_prefix(dir: &Path, pre: &str) -> Result<Vec<PathBuf>> {
+    let idx = dir.join("model.safetensors.index.json");
+    let s = std::fs::read_to_string(&idx).with_context(|| idx.display().to_string())?;
+    let v: serde_json::Value = serde_json::from_str(&s)?;
+    let map = v.get("weight_map").and_then(|m| m.as_object()).context("index: weight_map")?;
+    let mut files: Vec<PathBuf> = map
+        .iter()
+        .filter(|(k, _)| k.starts_with(pre))
+        .filter_map(|(_, f)| f.as_str().map(|f| dir.join(f)))
+        .collect();
+    files.sort();
+    files.dedup();
+    ensure!(!files.is_empty(), "index 里没有前缀 {pre} 的张量");
     Ok(files)
 }
 

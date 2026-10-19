@@ -19,16 +19,38 @@
 use crate::config::KimiLinearConfig;
 use crate::kda::{KdaLayer, KdaMeta};
 use crate::latent_moe::{LatentMoe, Situ};
+use crate::mla::{MlaLayer, MlaMeta};
 use crate::weights::{Table, LM_PREFIX};
-use anyhow::{bail, ensure, Result};
+use anyhow::{ensure, Result};
 use dinfer_kernels::ops as k;
 use dinfer_layers::{bf16, Gemm, Linear, Mlp, RmsNorm, Stream, Tensor, WeightSource};
 
+#[allow(clippy::large_enum_variant)]
 pub enum Attn {
     Kda(KdaLayer),
-    // Mla：里程碑 C-3
+    Mla(MlaLayer),
 }
 
+/// 一步前向里两种注意力各自需要的 batch 描述（KDA 用 slot 状态表，MLA 用 paged KV）。
+pub struct StepMeta<'a> {
+    pub kda: KdaMeta<'a>,
+    pub mla: MlaMeta<'a>,
+    /// MLA 层 latent 写 cache 的槽位（每 token 一个，-1 跳过）。
+    pub slot_mapping: &'a Tensor<i64>,
+}
+
+/// 装载时的缓冲 / cache 容量。
+#[derive(Clone, Copy, Debug)]
+pub struct LayerBudget {
+    pub max_tokens: usize,
+    /// KDA 状态槽数（并发请求数上限）。
+    pub num_slots: usize,
+    /// 每个 MLA 层的 paged KV 块数与块大小。
+    pub kv_blocks: usize,
+    pub block_size: usize,
+}
+
+#[allow(clippy::large_enum_variant)]
 pub enum Ffn {
     Dense(Mlp),
     LatentMoe(LatentMoe),
@@ -53,12 +75,22 @@ pub struct AttnRes {
 impl AttnRes {
     /// `max_blocks`：模型里块残差最多几个（93 层 / 12 = 8）；候选行数 R ≤ max_blocks + 1。
     pub fn load(stream: &Stream, src: &WeightSource, t: &Table, layer: usize, cfg: &KimiLinearConfig, max_tokens: usize, max_blocks: usize) -> Result<Self> {
+        let p = format!("layers.{layer}.");
+        Self::load_named(stream, src, t, cfg, max_tokens, max_blocks, &format!("{p}self_attention_res"), &format!("{p}mlp_res"))
+    }
+
+    /// 模型级 `output_attn_res_{proj,norm}`（只有一个门，两个槽位装同一组权重，`apply(which=0)`）。
+    pub fn load_output(stream: &Stream, src: &WeightSource, t: &Table, cfg: &KimiLinearConfig, max_tokens: usize, max_blocks: usize) -> Result<Self> {
+        Self::load_named(stream, src, t, cfg, max_tokens, max_blocks, "output_attn_res", "output_attn_res")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn load_named(stream: &Stream, src: &WeightSource, t: &Table, cfg: &KimiLinearConfig, max_tokens: usize, max_blocks: usize, attn_key: &str, mlp_key: &str) -> Result<Self> {
         let hidden = cfg.hidden_size as usize;
         let block_size = cfg.attn_res_block_size.ok_or_else(|| anyhow::anyhow!("attn_res_block_size 缺失"))? as usize;
-        let p = format!("layers.{layer}");
-        let proj = |name: &str| -> Result<Linear> {
-            let l = t.linear(stream, src, &format!("{p}.{name}.weight"))?;
-            ensure!(l.w.shape == [1, hidden], "{p}.{name}: shape {:?}", l.w.shape);
+        let proj = |key: &str| -> Result<Linear> {
+            let l = t.linear(stream, src, &format!("{key}_proj.weight"))?;
+            ensure!(l.w.shape == [1, hidden], "{key}_proj: shape {:?}", l.w.shape);
             Ok(l)
         };
         let max_cands = max_blocks + 1;
@@ -70,10 +102,10 @@ impl AttnRes {
             kidx.extend(std::iter::repeat_n(r as i32, tm));
         }
         Ok(Self {
-            attn_proj: proj("self_attention_res_proj")?,
-            attn_norm: t.rmsnorm(stream, src, &format!("{p}.self_attention_res_norm.weight"), cfg.rms_norm_eps)?,
-            mlp_proj: proj("mlp_res_proj")?,
-            mlp_norm: t.rmsnorm(stream, src, &format!("{p}.mlp_res_norm.weight"), cfg.rms_norm_eps)?,
+            attn_proj: proj(attn_key)?,
+            attn_norm: t.rmsnorm(stream, src, &format!("{attn_key}_norm.weight"), cfg.rms_norm_eps)?,
+            mlp_proj: proj(mlp_key)?,
+            mlp_norm: t.rmsnorm(stream, src, &format!("{mlp_key}_norm.weight"), cfg.rms_norm_eps)?,
             block_size,
             max_cands,
             nrm: Tensor::zeros(stream, &[tm, hidden])?,
@@ -147,13 +179,14 @@ pub struct KimiDecoderLayer {
 }
 
 impl KimiDecoderLayer {
-    /// 只支持 KDA 注意力 + （Dense | latent MoE）；MLA 层报错（C-3）。
-    pub fn load(stream: &Stream, src: &WeightSource, t: &Table, layer: usize, cfg: &KimiLinearConfig, max_tokens: usize, num_slots: usize) -> Result<Self> {
+    /// （KDA | MLA）× （Dense | latent MoE）+ 可选 AttnRes。
+    pub fn load(stream: &Stream, src: &WeightSource, t: &Table, layer: usize, cfg: &KimiLinearConfig, b: LayerBudget) -> Result<Self> {
         let hidden = cfg.hidden_size as usize;
+        let max_tokens = b.max_tokens;
         let attn = if cfg.is_kda_layer(layer as u32) {
-            Attn::Kda(KdaLayer::load(stream, src, t, layer, cfg, max_tokens, num_slots)?)
+            Attn::Kda(KdaLayer::load(stream, src, t, layer, cfg, max_tokens, b.num_slots)?)
         } else {
-            bail!("第 {layer} 层是 MLA 层：里程碑 C-3 才支持");
+            Attn::Mla(MlaLayer::load(stream, src, t, layer, cfg, max_tokens, b.kv_blocks, b.block_size)?)
         };
         let act = Situ::from_config(cfg)?;
         let ffn = if cfg.is_moe_layer(layer as u32) {
@@ -196,7 +229,8 @@ impl KimiDecoderLayer {
     }
 
     /// `x[:t]`（上一层 prefix_sum）、`blocks`（已写入的块残差，每个 `[≥t, hidden]`）→ `out[:t]`。
-    pub fn forward(&mut self, stream: &Stream, gemm: &Gemm, t: usize, x: &Tensor<bf16>, blocks: &[&Tensor<bf16>], meta: &KdaMeta<'_>, out: &mut Tensor<bf16>) -> Result<()> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward(&mut self, stream: &Stream, gemm: &Gemm, t: usize, x: &Tensor<bf16>, blocks: &[&Tensor<bf16>], meta: &StepMeta<'_>, out: &mut Tensor<bf16>) -> Result<()> {
         let h = self.hidden;
         ensure!(t <= self.hn.shape[0], "layer: {t} > max_tokens");
         ensure!(x.numel() >= t * h && out.numel() >= t * h, "layer: x/out");
@@ -216,9 +250,8 @@ impl KimiDecoderLayer {
         // 2. attention
         k::rmsnorm_bf16_n(stream, &h_src.data, &self.input_norm.w.data, &mut self.hn.data, t, h, self.input_norm.eps)?;
         match &mut self.attn {
-            Attn::Kda(kda) => {
-                kda.forward(stream, gemm, t, &self.hn, meta, &mut self.a)?;
-            }
+            Attn::Kda(kda) => kda.forward(stream, gemm, t, &self.hn, &meta.kda, &mut self.a)?,
+            Attn::Mla(mla) => mla.forward(stream, gemm, t, &self.hn, meta.slot_mapping, &meta.mla, &mut self.a)?,
         }
         // 3. prefix_sum：写块层 p = a；否则 p = x + a
         if writer {

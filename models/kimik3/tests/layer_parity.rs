@@ -12,7 +12,8 @@
 use dinfer_core::runner::BatchMode;
 use dinfer_kimik3::config::KimiK3Config;
 use dinfer_kimik3::kda::{KdaChunkWorkspace, KdaMeta};
-use dinfer_kimik3::layer::{Attn, Ffn, KimiDecoderLayer};
+use dinfer_kimik3::layer::{Attn, Ffn, KimiDecoderLayer, LayerBudget, StepMeta};
+use dinfer_kimik3::mla::MlaMeta;
 use dinfer_kimik3::weights::{shards_for_layer, KdaShapes, Table};
 use dinfer_layers::{bf16, Device, Gemm, Stream, Tensor, WeightSource};
 use std::cell::RefCell;
@@ -113,7 +114,7 @@ fn layer1_real_weights() {
     let src = WeightSource::open_files(&files).unwrap();
     let table = Table::from_names(&src.names().collect::<Vec<_>>()).unwrap();
     let (free0, _) = s.mem_info().unwrap();
-    let mut layer = KimiDecoderLayer::load(&s, &src, &table, LAYER, tc, t, 1).unwrap();
+    let mut layer = KimiDecoderLayer::load(&s, &src, &table, LAYER, tc, LayerBudget { max_tokens: t, num_slots: 1, kv_blocks: 1, block_size: 16 }).unwrap();
     s.synchronize().unwrap();
     let (free1, _) = s.mem_info().unwrap();
     println!("  装载 {:.1} s，显存 +{:.2} GB", t0.elapsed().as_secs_f32(), (free0 - free1) as f64 / 1e9);
@@ -138,11 +139,15 @@ fn layer1_real_weights() {
     let hi = Tensor::from_vec(&s, vec![0i32], &[1]).unwrap();
     let ws = RefCell::new(KdaChunkWorkspace::new());
     ws.borrow_mut().prepare(&s, &cu_host, &sh).unwrap();
-    let meta = KdaMeta { cu_seqlens: &cu, state_indices: &si, has_initial: &hi, num_reqs: 1, mode: BatchMode::Prefill, chunk: Some(&ws) };
+    let kda = KdaMeta { cu_seqlens: &cu, state_indices: &si, has_initial: &hi, num_reqs: 1, mode: BatchMode::Prefill, chunk: Some(&ws) };
+    // 第 1 层是 KDA 层，MLA 侧 meta 只是占位
+    let slots = Tensor::from_vec(&s, vec![-1i64; t], &[t]).unwrap();
+    let meta = StepMeta { kda, mla: MlaMeta { mode: BatchMode::Prefill, cu_seqlens: &cu, block_table: &si, seq_lens: &si, num_reqs: 1, max_blocks: 0 }, slot_mapping: &slots };
 
     let run = |layer: &mut KimiDecoderLayer, out: &mut Tensor<bf16>| {
         match &mut layer.attn {
             Attn::Kda(k) => k.reset_slot(&s, 0).unwrap(),
+            Attn::Mla(_) => panic!("第 1 层应是 KDA 层"),
         }
         let t0 = std::time::Instant::now();
         layer.forward(&s, &gemm, t, &xd, &[&b0d], &meta, out).unwrap();
