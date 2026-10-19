@@ -13,6 +13,7 @@
 //   gqa_decode_bf16        纯 decode（每请求 1 行）split-K 版（Q3-b）：reqs × Hkv × 8 split 个 block + merge kernel
 #include <cstdlib>
 #include "common.cuh"
+#include <stdlib.h>
 #include "dinfer_kernels.h"
 
 using namespace dinfer;
@@ -562,7 +563,7 @@ __global__ void __launch_bounds__(D2_WARPS * 32) gqa_decode_v2_kernel(
     const bf16* __restrict__ q, const bf16* __restrict__ cache, const int32_t* __restrict__ block_table,
     const int32_t* __restrict__ seq_lens, const int32_t* __restrict__ cu_seqlens_q, float* __restrict__ scratch,
     bf16* __restrict__ out_direct, int H, int Hkv, int block_size, int max_blocks, float scale, int q_stride,
-    int splits) {
+    int splits, int keys_per_split) {
   const int b = blockIdx.x, hk = blockIdx.y, split = blockIdx.z;
   // 混批（Q3 第 34 轮）：cu_seqlens_q 非空时只处理 q_len==1 的请求，q/out 行号 = cu_seqlens_q[b]（而不是 b）
   int row = b;
@@ -572,7 +573,12 @@ __global__ void __launch_bounds__(D2_WARPS * 32) gqa_decode_v2_kernel(
   }
   const int group = H / Hkv;  // ≤ D2_MAXG
   const int n = seq_lens[b];
-  const int seg = (n + splits - 1) / splits;
+  // B4 第 3 轮：grid.z（splits）按 batch 桶固定（CUDA graph），但每请求的有效 splits 按 seq_len 自适应：
+  // eff = ceil(n / keys_per_split)，多余 block 直接退出（merge 也只读 eff 份）。B300 实测 splits 过多时每 block 固定开销
+  // （读 q / 写 partial / merge）占主导：b=8 n=1024 splits 32 比 8 慢 46%。keys_per_split 由 host 传入（待进 ArchProfile）。
+  const int eff = min(splits, max(1, (n + keys_per_split - 1) / keys_per_split));
+  if (split >= eff) return;
+  const int seg = (n + eff - 1) / eff;
   const int k_begin = split * seg, k_end = min(n, k_begin + seg);
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   const int kslot = lane / D2_LPK;          // 0..3：本 lane 处理的 key 槽
@@ -719,7 +725,8 @@ __global__ void __launch_bounds__(D2_WARPS * 32) gqa_decode_v2_kernel(
 }
 
 __global__ void gqa_decode_merge_v2_kernel(const float* __restrict__ scratch, const int32_t* __restrict__ cu_seqlens_q,
-                                           bf16* __restrict__ out, int H, int splits) {
+                                           const int32_t* __restrict__ seq_lens, bf16* __restrict__ out, int H, int splits,
+                                           int keys_per_split) {
   const int b = blockIdx.x, h = blockIdx.y;
   int row = b;
   if (cu_seqlens_q) {
@@ -728,12 +735,14 @@ __global__ void gqa_decode_merge_v2_kernel(const float* __restrict__ scratch, co
   }
   const float* base = scratch + ((int64_t)b * H + h) * splits * (PF_D + 2);
   const int d = threadIdx.x;
+  const int n = seq_lens[b];
+  const int eff = min(splits, max(1, (n + keys_per_split - 1) / keys_per_split));  // 与 v2 kernel 同式
   // B4 第 2 轮：splits ≤ D2_MAX_SPLITS 时把全部 (m, l, o_d) 一次读进寄存器再归约——原来 2 × splits 轮串行依赖读，
   // splits 8 → 32 后 B300 上 2.4 → 5.4 µs。
   float ms[D2_MAX_SPLITS], ls[D2_MAX_SPLITS], os[D2_MAX_SPLITS];
 #pragma unroll
   for (int s = 0; s < D2_MAX_SPLITS; ++s) {
-    if (s < splits) {
+    if (s < eff) {
       const float* p = base + s * (PF_D + 2);
       ms[s] = p[0]; ls[s] = p[1]; os[s] = p[2 + d];
     } else {
@@ -848,15 +857,28 @@ extern "C" int gqa_decode_bf16(const void* q, const void* cache, const int32_t* 
     // 只依赖 batch（CUDA graph 按 batch 桶捕获，图内 splits 不能随 seq_len 变）。
     int splits = (int)((D2_TARGET_BLOCKS + num_reqs * kv_heads - 1) / (num_reqs * kv_heads));
     splits = splits < 1 ? 1 : (splits > D2_MAX_SPLITS ? D2_MAX_SPLITS : splits);
+    // 诊断用覆盖（decode_sweep 微基准扫 splits；服务路径不设）
+    static int force_splits = -1;
+    if (force_splits < 0) {
+      const char* e = getenv("DECODE_SPLITS");
+      force_splits = e ? atoi(e) : 0;
+    }
+    if (force_splits > 0) splits = force_splits > D2_MAX_SPLITS ? D2_MAX_SPLITS : force_splits;
+    // 每个有效 split 至少处理多少 key（kernel 内按 seq_len 算有效 splits）。临时：默认 128 + 环境变量覆盖，待进 ArchProfile。
+    static int keys_per_split = -1;
+    if (keys_per_split < 0) {
+      const char* e = getenv("DECODE_KEYS_PER_SPLIT");
+      keys_per_split = (e && atoi(e) > 0) ? atoi(e) : 128;
+    }
     dim3 grid1((unsigned)num_reqs, (unsigned)kv_heads, (unsigned)splits);
     bf16* direct = splits == 1 ? static_cast<bf16*>(out) : nullptr;
     gqa_decode_v2_kernel<<<grid1, D2_WARPS * 32, 0, stream>>>(
         static_cast<const bf16*>(q), static_cast<const bf16*>(cache), block_table, seq_lens, cu_seqlens_q, scratch, direct,
-        (int)heads, (int)kv_heads, (int)block_size, (int)max_blocks, scale, (int)q_stride, splits);
+        (int)heads, (int)kv_heads, (int)block_size, (int)max_blocks, scale, (int)q_stride, splits, keys_per_split);
     if (splits > 1) {
       dim3 grid2((unsigned)num_reqs, (unsigned)heads);
-      gqa_decode_merge_v2_kernel<<<grid2, PF_D, 0, stream>>>(scratch, cu_seqlens_q, static_cast<bf16*>(out), (int)heads,
-                                                             splits);
+      gqa_decode_merge_v2_kernel<<<grid2, PF_D, 0, stream>>>(scratch, cu_seqlens_q, seq_lens, static_cast<bf16*>(out),
+                                                             (int)heads, splits, keys_per_split);
     }
     return last_err();
   }
