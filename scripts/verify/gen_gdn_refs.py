@@ -214,6 +214,46 @@ def gen_recurrent(cfg, tag, decode=False):
         save("state_out", st_out, d)
 
 
+def proc_state(S, HV, V, K):
+    """程序化初始状态（Rust 侧 gdn_parity.rs::proc_state 同式，逐位一致）：
+    27B 形状 B=32 的 [S, HV, V, K] f32 有 100 MB，不能进仓库，两侧各按同一公式生成。
+    值 = ((idx · 2654435761) mod 2^32 >> 8) / 2^24 · 0.1 − 0.05，idx 为平铺下标（u32 乘法回绕）。"""
+    n = S * HV * V * K
+    idx = np.arange(n, dtype=np.uint64)
+    h = (idx * np.uint64(2654435761)) & np.uint64(0xFFFFFFFF)
+    h = (h >> np.uint64(8)).astype(np.float32)
+    v = h / np.float32(16777216.0) * np.float32(0.1) - np.float32(0.05)
+    return torch.from_numpy(v.reshape(S, HV, V, K))
+
+
+def gen_recurrent_decode_batch(cfg, name, B):
+    """decode 一步、B 条序列、27B 真形状、非零初始状态：对拍寄存器版 decode kernel 的 batch 扩展。
+    状态 100 MB 不落盘：state_in 程序化（proc_state），期望状态只存 K 维求和 `state_sum_k` [S,HV,V] 与
+    V 维求和 `state_sum_v` [S,HV,K]（能抓到行 / 列 / 槽错位），out 存全量 bf16。"""
+    K, V, H, HV = cfg["K"], cfg["V"], cfg["H"], cfg["HV"]
+    d = out_dir(name)
+    torch.manual_seed(31)
+    lens = [1] * B
+    qkv_row = 2 * H * K + HV * V
+    mixed = bf16(torch.randn(B, qkv_row) * 0.5)
+    a = bf16(torch.randn(B, HV) * 2.0)
+    b = bf16(torch.randn(B, HV) * 2.0)
+    a_log = torch.randn(HV) * 0.5
+    dt_bias = torch.randn(HV)
+    state = proc_state(B, HV, V, K)
+    save("a_log", a_log.float(), d)
+    save("dt_bias", dt_bias.float(), d)
+    cu = np.concatenate([[0], np.cumsum(lens)]).astype(np.int32)
+    save("cu_seqlens", torch.from_numpy(cu), d)
+    save("mixed", mixed, d)
+    save("a", a, d)
+    save("b", b, d)
+    o, st = gdn_ref(mixed, a, b, a_log, dt_bias, state, lens, K, V, H, HV)
+    save("out", o.to(torch.bfloat16), d)
+    save("state_sum_k", st.double().sum(dim=3).float(), d)
+    save("state_sum_v", st.double().sum(dim=2).float(), d)
+
+
 # --------------------------------------------------------------------------- 3b. chunk 形式 prefill（gdn_chunk.cu）
 # 参考仍是顺序递归 gdn_ref：这正是 chunk 版与顺序版等价性的证明。
 # 覆盖：非 BT(64) 整数倍长度、3 序列 varlen（其中一条带非零初始 state）、27B 真形状。
@@ -283,4 +323,5 @@ if __name__ == "__main__":
     gen_chunk(QWEN_REC, "chunk", [200], [True])
     gen_chunk(QWEN_REC, "chunk_varlen", [130, 64, 7], [True, False, False])
     gen_chunk(QWEN, "chunk_qwen", [256], [False], save_state_in=False)
+    gen_recurrent_decode_batch(QWEN, "recurrent_qwen_decode_b32", 32)
     print("gdn refs ->", DIR)

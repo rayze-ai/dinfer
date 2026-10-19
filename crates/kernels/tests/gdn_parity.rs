@@ -523,3 +523,142 @@ fn gdn_chunk_bench() {
     println!("  T={t} H={h} HV={hv} K={k} V={v}: 顺序 {ms_seq:.3} ms, chunk {ms_chunk:.3} ms, 加速 {speedup:.2}x（门槛 5x）");
     assert!(speedup >= 5.0, "chunk 加速 {speedup:.2}x < 5x（顺序 {ms_seq:.3} ms / chunk {ms_chunk:.3} ms）");
 }
+
+// ---------------------------------------------------------------- decode 寄存器版 kernel（第 4 轮，docs/loops/qwen35-perf.md）
+// 27B 真形状、B=32、非零初始状态：状态 100 MB 不进仓库，两侧按同一公式程序化生成（gen_gdn_refs.py::proc_state）。
+
+fn proc_state(slots: usize, hv: usize, v: usize, k: usize) -> Vec<f32> {
+    (0..slots * hv * v * k)
+        .map(|i| {
+            let h = (i as u64).wrapping_mul(2654435761) & 0xFFFF_FFFF;
+            ((h >> 8) as f32) / 16777216.0f32 * 0.1f32 - 0.05f32
+        })
+        .collect()
+}
+
+/// state [S, HV, V, K] → K 维求和 [S, HV, V] 与 V 维求和 [S, HV, K]（f64 累加，与参考侧同）。
+fn state_sums(st: &[f32], slots: usize, hv: usize, v: usize, k: usize) -> (Vec<f32>, Vec<f32>) {
+    let mut sk = vec![0f64; slots * hv * v];
+    let mut sv = vec![0f64; slots * hv * k];
+    for s in 0..slots {
+        for h in 0..hv {
+            for vv in 0..v {
+                let row = &st[((s * hv + h) * v + vv) * k..][..k];
+                sk[(s * hv + h) * v + vv] = row.iter().map(|&x| x as f64).sum();
+                for kk in 0..k {
+                    sv[(s * hv + h) * k + kk] += row[kk] as f64;
+                }
+            }
+        }
+    }
+    (sk.into_iter().map(|x| x as f32).collect(), sv.into_iter().map(|x| x as f32).collect())
+}
+
+#[test]
+#[ignore]
+fn gdn_recurrent_decode_b32_qwen_shape() {
+    let (dev, st) = dev();
+    let _ = dev;
+    let (k, v, h, hv) = (128usize, 128usize, 16usize, 48usize);
+    let dir = "recurrent_qwen_decode_b32";
+    let (_, a_log) = load(dir, "a_log");
+    let (_, dt_bias) = load(dir, "dt_bias");
+    let cu = load_i32(dir, "cu_seqlens");
+    let b = cu.len() - 1;
+    let (ms, mixed) = load(dir, "mixed");
+    assert_eq!(ms, vec![b, 2 * h * k + hv * v]);
+    let (_, a) = load(dir, "a");
+    let (_, bb) = load(dir, "b");
+    let (_, want) = load(dir, "out");
+    let (_, want_sk) = load(dir, "state_sum_k");
+    let (_, want_sv) = load(dir, "state_sum_v");
+    let dal = st.htod_copy(a_log).unwrap();
+    let ddb = st.htod_copy(dt_bias).unwrap();
+    let dcu = st.htod_copy(cu).unwrap();
+    let si: Vec<i32> = (0..b as i32).collect();
+    let dsi = st.htod_copy(si).unwrap();
+    let dm = up_bf16(&st, &mixed);
+    let da = up_bf16(&st, &a);
+    let db = up_bf16(&st, &bb);
+    let scale = (k as f32).powf(-0.5);
+    let init = proc_state(b, hv, v, k);
+
+    // 新 kernel 的三个 BV 档 + 老 kernel（decode_bv=0），每个都对参考；再拿老 vs 新全量状态逐元素对。
+    let mut legacy_state: Option<Vec<f32>> = None;
+    for bv in [0usize, 16, 32, 64] {
+        let mut dstate = st.htod_copy(init.clone()).unwrap();
+        let mut dout = st.alloc_uninit::<bf16>(b * hv * v).unwrap();
+        ops::gdn_recurrent_with(
+            &st, &dm, None, None, Some(&da), Some(&db), &dal, &ddb, &mut dout, &mut dstate, &dcu, Some(&dsi), b, h,
+            hv, k, v, scale, Some(bv),
+        )
+        .unwrap();
+        st.synchronize().unwrap();
+        let tag = format!("recurrent_qwen_decode_b32/bv{bv}");
+        assert_close(&format!("{tag}/out"), &st.dtoh_sync_copy(&dout).unwrap(), &want, 1e-2, 0.999);
+        let got_st: Vec<f32> = st.dtoh_sync_copy(&dstate).unwrap();
+        let (sk, sv) = state_sums(&got_st, b, hv, v, k);
+        assert_close_f32(&format!("{tag}/state_sum_k"), &sk, &want_sk, 2e-3, 0.999);
+        assert_close_f32(&format!("{tag}/state_sum_v"), &sv, &want_sv, 2e-3, 0.999);
+        match &legacy_state {
+            None => legacy_state = Some(got_st),
+            Some(lg) => assert_close_f32(&format!("{tag}/state_vs_legacy"), &got_st, lg, 1e-5, 0.999_999),
+        }
+    }
+}
+
+/// decode kernel 计时：老 shared 版 vs 寄存器版（自动 BV 与三档），B ∈ {1, 8, 32, 64}，27B 形状，fused gate。
+/// 数字写进 `docs/loops/qwen35-perf.md` 第 4 行；只断言 B=32 新版不慢于老版。
+#[test]
+#[ignore]
+fn gdn_decode_bench() {
+    let (dev, st) = dev();
+    let _ = dev;
+    let (k, v, h, hv) = (128usize, 128usize, 16usize, 48usize);
+    let row = 2 * h * k + hv * v;
+    let scale = (k as f32).powf(-0.5);
+    let a_log: Vec<f32> = (0..hv).map(|i| (0.2 + 0.03 * i as f32).ln()).collect();
+    let dal = st.htod_copy(a_log).unwrap();
+    let ddb = st.htod_copy(vec![0.1f32; hv]).unwrap();
+    let iters = 20;
+    let mut worst_ratio = 0f64;
+    for b in [1usize, 8, 32, 64] {
+        let mixed: Vec<f32> = (0..b * row).map(|i| (((i * 7919) % 1000) as f32 / 1000.0 - 0.5) * 0.5).collect();
+        let a: Vec<f32> = (0..b * hv).map(|i| ((i % 23) as f32 - 11.0) / 4.0).collect();
+        let bb: Vec<f32> = (0..b * hv).map(|i| ((i % 17) as f32 - 8.0) / 4.0).collect();
+        let dm = up_bf16(&st, &mixed);
+        let da = up_bf16(&st, &a);
+        let db = up_bf16(&st, &bb);
+        let cu: Vec<i32> = (0..=b as i32).collect();
+        let dcu = st.htod_copy(cu).unwrap();
+        let mut dstate = st.htod_copy(proc_state(b, hv, v, k)).unwrap();
+        let mut dout = st.alloc_uninit::<bf16>(b * hv * v).unwrap();
+        let mut line = format!("  B={b:>2}:");
+        let mut us_legacy = 0f64;
+        for (name, bv) in [("legacy", Some(0usize)), ("auto", None), ("bv16", Some(16)), ("bv32", Some(32)), ("bv64", Some(64))] {
+            let once = |st: &Stream, dstate: &mut _, dout: &mut _| {
+                ops::gdn_recurrent_with(
+                    st, &dm, None, None, Some(&da), Some(&db), &dal, &ddb, dout, dstate, &dcu, None, b, h, hv, k, v,
+                    scale, bv,
+                )
+                .unwrap();
+            };
+            once(&st, &mut dstate, &mut dout);
+            st.synchronize().unwrap();
+            let t0 = std::time::Instant::now();
+            for _ in 0..iters {
+                once(&st, &mut dstate, &mut dout);
+            }
+            st.synchronize().unwrap();
+            let us = t0.elapsed().as_secs_f64() * 1e6 / iters as f64;
+            if name == "legacy" {
+                us_legacy = us;
+            } else if name == "auto" && b == 32 {
+                worst_ratio = us / us_legacy;
+            }
+            line.push_str(&format!(" {name} {us:7.1} µs"));
+        }
+        println!("{line}");
+    }
+    assert!(worst_ratio <= 1.0, "B=32 新 decode kernel 慢于老版（{worst_ratio:.2}x）");
+}

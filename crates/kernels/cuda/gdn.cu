@@ -218,6 +218,173 @@ __global__ void recurrent_kernel(const bf16* __restrict__ mixed, const float* __
   for (int i = tid; i < Vb * K; i += BLOCK) Sg[i] = S[i];
 }
 
+// ---------------------------------------------------------------- 递归核心：decode 专用（寄存器版）
+// 老 recurrent_kernel 把整个 [V, K] 状态装进 shared，再按 v 行逐线程串行扫 K 维两趟：decode（len=1）时
+// 整个 kernel 只是"读一遍状态 + 两个 K 维点积 + 写一遍状态"，却被 block 归约 / 同步和串行 K 循环拖成
+// 延迟绑定，B=32 时不随 batch 扩展（docs/loops/qwen35-perf.md 第 3g 行）。本版：
+//   - 每 block 一个 (序列, v 头, V 块 BV)；kDecodeWarps 个 warp，每 warp 负责 ROWS = BV/kDecodeWarps 行状态；
+//   - 每行 [K] f32 按 lane 切成 KPL = K/32 个连续元素（KPL=4 → 16 B 向量读写），全程在寄存器，不经 shared；
+//   - K 维点积 = 每 lane KPL 次乘加 + warp shuffle 归约；q/k 的 l2 归一化每 warp 重复算（K 维一次 warp 归约，
+//     远比 block 级 __syncthreads 便宜），没有任何 block 级同步；
+//   - 支持任意 len（逐 token 循环，状态留在寄存器），所以 host 把 prefill 尾段误送进来也不影响正确性。
+// BV 由 host 给（`ArchProfile::gdn_decode_bv`），kDecodeWarps 是结构常量（不是按卡调的数值）。
+constexpr int kDecodeWarps = 4;
+
+template <int KPL> struct DecodeVec;
+template <> struct DecodeVec<4> { using type = float4; };
+template <> struct DecodeVec<2> { using type = float2; };
+
+__device__ __forceinline__ float warp_sum_f(float v) {
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
+  return v;
+}
+
+template <int KPL>
+__device__ __forceinline__ void vec_load(float (&r)[KPL], const float* p) {
+  using Vec = typename DecodeVec<KPL>::type;
+  const Vec v = *reinterpret_cast<const Vec*>(p);
+  if constexpr (KPL == 4) { r[0] = v.x; r[1] = v.y; r[2] = v.z; r[3] = v.w; }
+  else { r[0] = v.x; r[1] = v.y; }
+}
+
+template <int KPL>
+__device__ __forceinline__ void vec_store(float* p, const float (&r)[KPL]) {
+  using Vec = typename DecodeVec<KPL>::type;
+  Vec v;
+  if constexpr (KPL == 4) { v.x = r[0]; v.y = r[1]; v.z = r[2]; v.w = r[3]; }
+  else { v.x = r[0]; v.y = r[1]; }
+  *reinterpret_cast<Vec*>(p) = v;
+}
+
+template <int BV, int KPL, bool FUSE_GATE>
+__global__ void __launch_bounds__(kDecodeWarps * 32)
+recurrent_decode_kernel(const bf16* __restrict__ mixed, const float* __restrict__ g_in,
+                        const float* __restrict__ beta_in, const bf16* __restrict__ a_raw,
+                        const bf16* __restrict__ b_raw, const float* __restrict__ a_log,
+                        const float* __restrict__ dt_bias, bf16* __restrict__ out,
+                        float* __restrict__ state, const int* __restrict__ cu_seqlens,
+                        const int* __restrict__ state_indices, int H, int HV, int K, int V, int group,
+                        float scale, long state_stride_tok) {
+  constexpr int ROWS = BV / kDecodeWarps;
+  static_assert(BV % kDecodeWarps == 0, "BV 必须是 warp 数的整数倍");
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  const int seq = blockIdx.x;
+  const int hv = blockIdx.y;
+  const int h = hv / group;
+  const int v0 = (int)blockIdx.z * BV + warp * ROWS;  // 本 warp 的首行
+  const int slot = state_indices ? state_indices[seq] : seq;
+  const int bos = cu_seqlens[seq], eos = cu_seqlens[seq + 1];
+  const int len = eos - bos;
+  if (slot < 0 || len <= 0) return;
+
+  const long qkv_row = 2L * H * K + (long)HV * V;
+  float* Sg = state + (long)slot * state_stride_tok + (long)hv * V * K + (long)v0 * K + lane * KPL;
+  const bf16* qp = mixed + (long)h * K + lane * KPL;
+  const bf16* kp = mixed + (long)H * K + (long)h * K + lane * KPL;
+  const bf16* vp = mixed + 2L * H * K + (long)hv * V + v0;
+
+  // 状态进寄存器：ROWS 个 16 B 读一次性发出（访存并行度）
+  float r[ROWS][KPL];
+#pragma unroll
+  for (int i = 0; i < ROWS; ++i) vec_load<KPL>(r[i], Sg + (long)i * K);
+
+  for (int t = 0; t < len; ++t) {
+    const long row = bos + t;
+    float q[KPL], k[KPL];
+    float qsq = 0.f, ksq = 0.f;
+#pragma unroll
+    for (int j = 0; j < KPL; ++j) {
+      q[j] = to_f32(qp[row * qkv_row + j]);
+      k[j] = to_f32(kp[row * qkv_row + j]);
+      qsq += q[j] * q[j];
+      ksq += k[j] * k[j];
+    }
+    const float qn = 1.f / sqrtf(warp_sum_f(qsq) + 1e-6f) * scale;
+    const float kn = 1.f / sqrtf(warp_sum_f(ksq) + 1e-6f);
+#pragma unroll
+    for (int j = 0; j < KPL; ++j) {
+      q[j] *= qn;
+      k[j] *= kn;
+    }
+
+    float g, beta;
+    if (FUSE_GATE) {
+      const float A = __expf(a_log[hv]);
+      g = -A * softplus_f(to_f32(a_raw[row * HV + hv]) + dt_bias[hv]);
+      beta = sigmoid_f(to_f32(b_raw[row * HV + hv]));
+    } else {
+      g = g_in[row * HV + hv];
+      beta = beta_in[row * HV + hv];
+    }
+    const float eg = __expf(g);
+
+    float o_mine = 0.f;  // lane i 保存第 i 行的输出，最后 ROWS 个 lane 连续写出
+#pragma unroll
+    for (int i = 0; i < ROWS; ++i) {
+      float p = 0.f;
+#pragma unroll
+      for (int j = 0; j < KPL; ++j) {
+        r[i][j] *= eg;
+        p += r[i][j] * k[j];
+      }
+      p = warp_sum_f(p);
+      const float vin = to_f32(vp[row * qkv_row + i]);  // 全 warp 同址，广播
+      const float vprime = (vin - p) * beta;
+      float o = 0.f;
+#pragma unroll
+      for (int j = 0; j < KPL; ++j) {
+        r[i][j] += vprime * k[j];
+        o += r[i][j] * q[j];
+      }
+      o = warp_sum_f(o);
+      if (lane == i) o_mine = o;
+    }
+    if (lane < ROWS) out[(row * HV + hv) * V + v0 + lane] = to_bf16(o_mine);
+  }
+
+#pragma unroll
+  for (int i = 0; i < ROWS; ++i) vec_store<KPL>(Sg + (long)i * K, r[i]);
+}
+
+template <int BV, int KPL>
+int launch_recurrent_decode(bool fused, dim3 grid, const bf16* mixed, const float* g, const float* beta,
+                            const bf16* a_raw, const bf16* b_raw, const float* a_log, const float* dt_bias,
+                            bf16* out, float* state, const int* cu_seqlens, const int* state_indices, int H,
+                            int HV, int K, int V, int group, float scale, long stride, cudaStream_t stream) {
+  if (fused) {
+    recurrent_decode_kernel<BV, KPL, true><<<grid, kDecodeWarps * 32, 0, stream>>>(
+        mixed, g, beta, a_raw, b_raw, a_log, dt_bias, out, state, cu_seqlens, state_indices, H, HV, K, V,
+        group, scale, stride);
+  } else {
+    recurrent_decode_kernel<BV, KPL, false><<<grid, kDecodeWarps * 32, 0, stream>>>(
+        mixed, g, beta, a_raw, b_raw, a_log, dt_bias, out, state, cu_seqlens, state_indices, H, HV, K, V,
+        group, scale, stride);
+  }
+  return last_err();
+}
+
+template <int KPL>
+int launch_recurrent_decode_bv(int bv, bool fused, dim3 grid, const bf16* mixed, const float* g,
+                               const float* beta, const bf16* a_raw, const bf16* b_raw, const float* a_log,
+                               const float* dt_bias, bf16* out, float* state, const int* cu_seqlens,
+                               const int* state_indices, int H, int HV, int K, int V, int group, float scale,
+                               long stride, cudaStream_t stream) {
+#define GDN_DECODE_CASE(BV)                                                                            \
+  case BV:                                                                                             \
+    return launch_recurrent_decode<BV, KPL>(fused, grid, mixed, g, beta, a_raw, b_raw, a_log, dt_bias, \
+                                            out, state, cu_seqlens, state_indices, H, HV, K, V, group, \
+                                            scale, stride, stream);
+  switch (bv) {
+    GDN_DECODE_CASE(16)
+    GDN_DECODE_CASE(32)
+    GDN_DECODE_CASE(64)
+    default: return (int)cudaErrorInvalidValue;
+  }
+#undef GDN_DECODE_CASE
+}
+
 // ---------------------------------------------------------------- 输出门 + RMSNorm
 // y[t,hv,d] = rmsnorm(o[t,hv,:], w, eps) · act(z[t,hv,d])，一个 (token, v 头) 一行。
 __global__ void gated_rmsnorm_kernel(const bf16* __restrict__ x, const bf16* __restrict__ w,
@@ -283,12 +450,30 @@ int gdn_gate(const void* a, const void* b, const float* a_log, const float* dt_b
 }
 
 // fused_gate = 0：读 g/beta（prefill）；= 1：kernel 内由 raw a/b 现算（decode）。
+// decode_bv > 0：走寄存器版 recurrent_decode_kernel（每 block 一个 (seq, v 头, BV 行)；BV ∈ {16, 32, 64} 且整除 V，
+//   K ∈ {64, 128}）；= 0：走老 shared 版（vsplit 生效）。
 int gdn_recurrent(const void* mixed_qkv, const float* g, const float* beta, const void* a_raw,
                   const void* b_raw, const float* a_log, const float* dt_bias, void* out,
                   void* state, const int* cu_seqlens, const int* state_indices, int64_t num_seqs,
                   int64_t H, int64_t HV, int64_t K, int64_t V, int64_t group, float scale,
-                  int64_t state_stride_tok, int fused_gate, int64_t vsplit, cudaStream_t stream) {
+                  int64_t state_stride_tok, int fused_gate, int64_t vsplit, int64_t decode_bv,
+                  cudaStream_t stream) {
   if (num_seqs <= 0) return 0;
+  if (decode_bv > 0) {
+    if (V % decode_bv != 0 || (K != 64 && K != 128)) return (int)cudaErrorInvalidValue;
+    dim3 grid((unsigned)num_seqs, (unsigned)HV, (unsigned)(V / decode_bv));
+    const bool fused = fused_gate != 0;
+    if (K == 128) {
+      return launch_recurrent_decode_bv<4>((int)decode_bv, fused, grid, (const bf16*)mixed_qkv, g, beta,
+                                           (const bf16*)a_raw, (const bf16*)b_raw, a_log, dt_bias, (bf16*)out,
+                                           (float*)state, cu_seqlens, state_indices, (int)H, (int)HV, (int)K,
+                                           (int)V, (int)group, scale, (long)state_stride_tok, stream);
+    }
+    return launch_recurrent_decode_bv<2>((int)decode_bv, fused, grid, (const bf16*)mixed_qkv, g, beta,
+                                         (const bf16*)a_raw, (const bf16*)b_raw, a_log, dt_bias, (bf16*)out,
+                                         (float*)state, cu_seqlens, state_indices, (int)H, (int)HV, (int)K,
+                                         (int)V, (int)group, scale, (long)state_stride_tok, stream);
+  }
   // vsplit：V 维切几个 block（host 给，须整除 V；1 = 不切）。decode 时 (seq, v 头) 只有几十个 block，切开才铺满 SM。
   if (vsplit <= 0 || V % vsplit != 0) return (int)cudaErrorInvalidValue;
   const int smem = (int)((V / vsplit * K + 2 * K) * 4);

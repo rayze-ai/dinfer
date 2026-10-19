@@ -80,6 +80,29 @@ impl ArchProfile {
         (1..=want).rev().find(|s| v_dim % s == 0).unwrap_or(1)
     }
 
+    /// `gdn_recurrent` decode 寄存器版 kernel 的 V 块大小 BV（kernel 支持 `GDN_DECODE_BV_CANDIDATES`）。
+    /// 每 block 处理 (seq, v 头, BV 行)：BV 越大每 warp 持的状态行越多（访存并行度高、q/k 归一化重复算的占比低），
+    /// 但 block 数 = `base_blocks · v_dim / BV` 越少；取最大的、仍能把 block 数铺到 ≥ `GDN_DECODE_WAVES` 波 SM 的 BV，
+    /// 都铺不满（B=1）则取最小档。返回 0 = 形状不支持（K ∉ {64,128} 或 V 不被任何档整除），调用方回老 kernel。
+    pub fn gdn_decode_bv(sm_count: usize, base_blocks: usize, k_dim: usize, v_dim: usize) -> usize {
+        const GDN_DECODE_BV_CANDIDATES: [usize; 3] = [64, 32, 16];
+        const GDN_DECODE_WAVES: usize = 2;
+        if k_dim != 64 && k_dim != 128 {
+            return 0;
+        }
+        let mut fallback = 0;
+        for &bv in &GDN_DECODE_BV_CANDIDATES {
+            if v_dim % bv != 0 {
+                continue;
+            }
+            if base_blocks * (v_dim / bv) >= GDN_DECODE_WAVES * sm_count {
+                return bv;
+            }
+            fallback = bv;
+        }
+        fallback
+    }
+
     /// 小 M kernel 的 split-K 候选（去重、升序、≥1）。`blocks_per_split` = 不切时的 block 数（ceil(N / warps/block)）。
     pub fn small_m_split_candidates(&self, blocks_per_split: usize, k: usize) -> Vec<usize> {
         let mut v: Vec<usize> = vec![1];
@@ -93,5 +116,23 @@ impl ArchProfile {
         v.sort_unstable();
         v.dedup();
         v
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ArchProfile;
+
+    #[test]
+    fn gdn_decode_bv_tiers() {
+        // 27B 形状 HV=48 K=V=128：B=1 铺不满取小档，B≥4 都取 64；三种卡的 SM 数
+        for (sm, b1) in [(82usize, 32usize), (128, 16), (148, 16)] {
+            assert_eq!(ArchProfile::gdn_decode_bv(sm, 48, 128, 128), b1, "sm={sm} B=1");
+            assert_eq!(ArchProfile::gdn_decode_bv(sm, 4 * 48, 128, 128), 64, "sm={sm} B=4");
+            assert_eq!(ArchProfile::gdn_decode_bv(sm, 32 * 48, 128, 128), 64, "sm={sm} B=32");
+        }
+        // K 不支持 → 0；V 只被 16/32 整除时不选 64
+        assert_eq!(ArchProfile::gdn_decode_bv(82, 48, 96, 128), 0);
+        assert_eq!(ArchProfile::gdn_decode_bv(82, 4 * 48, 64, 32), 32);
     }
 }

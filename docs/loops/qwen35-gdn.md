@@ -52,6 +52,25 @@
 - 并且 `cargo build --workspace --features qwen3` exit 0（公共 trait 无回归）；
 - 3090 跑通后再在 4090 上跑同一个脚本 exit 0；B300（`CUDA_ARCHS=103`）同。
 
+## decode 递归 kernel（寄存器版，2026-10-20，性能第 4 轮）
+
+老 `recurrent_kernel` 把整个 [V, K] f32 状态装进 shared 后按 v 行逐线程串行扫 K 维两趟，decode（len=1）时整个 kernel
+只是"读状态 + 两个 K 维点积 + 写状态"，却被 block 归约 / `__syncthreads` 和 128 次串行乘加拖成延迟绑定：B300 c32 实测
+257 µs/层（带宽下限 25 µs），且不随 batch 扩展（`qwen35-perf.md` 第 3g 行）。`recurrent_decode_kernel<BV, KPL, FUSE_GATE>`：
+
+- grid = (B, HV, V/BV)，block = 4 warp（`kDecodeWarps`，结构常量）；每 warp 负责 ROWS = BV/4 行状态。
+- 每行 [K] 按 lane 切 KPL = K/32 个连续元素（K=128 → float4 16 B 向量读写；K=64 → float2），
+  `float r[ROWS][KPL]` 全程在寄存器，ROWS 个向量读一次性发出（访存并行度），无 shared、无 block 同步。
+- K 维点积 = KPL 次乘加 + 5 次 `__shfl_xor_sync`；q/k 的 l2 归一化每 warp 重复算（一次 warp 归约比 block 同步便宜）。
+- 支持任意 len（逐 token 循环，状态留寄存器）：host 把 prefill 尾段误送进来也不影响正确性；输出由 ROWS 个 lane 连续写出。
+- 数值与老 kernel 同口径（fp32 累加、`1/sqrtf(Σ+1e-6)`、`__expf`），差异只在求和顺序：B=32 全量状态 max_err 1e-7。
+- 数值参数不进 kernel：BV 由 `ArchProfile::gdn_decode_bv(sm_count, B·HV, K, V)` 给（候选 {64, 32, 16}，取最大的仍能铺
+  ≥ 2 波 SM 的档；B=1 铺不满则取 16），`GDN_DECODE_BV=<n>` 覆盖，`GDN_DECODE=legacy` 回老 kernel；
+  `ops::gdn_recurrent` 在 `tokens == num_seqs` 时走新 kernel，`gdn_recurrent_with(.., decode_bv)` 给对拍 / 计时显式指定。
+- 对拍：`recurrent_qwen_decode_b32`（27B 形状 B=32，**状态 100 MB 不进仓库**：两侧按同一公式程序化生成
+  `proc_state`，期望状态只存 K 维 / V 维求和）；`gdn_decode_bench --ignored` 给老 vs 新 µs（B ∈ {1, 8, 32, 64}）。
+- 3090：B=1 48 → 7.9 µs，B=8 272 → 66，B=32 1014 → 246，B=64 1947 → 490（≈ 4×；B=32 已到带宽下限 214 µs 的 87%）。
+
 ## 环境备注（踩过的坑）
 
 - 4090 的 GPU 3–5 常被他人进程占满（~23 GB / 24 GB）：先看 `nvidia-smi --query-gpu=index,memory.used` 再选卡。
@@ -72,3 +91,4 @@
 | 3 | 2026-10-19 | 修 launch 参数 | **3090 10/10 过**：conv/norm 0 误差，gate 1.4e-6，递归 out 8e-6 / 状态 1e-7 |
 | 4 | 2026-10-19 | 4090（sm89，GPU 7）：首次用 GPU 3 撞上别人的进程（23 GB 占满）→ OOM；换 7 | **10/10 过** |
 | 5 | 2026-10-19 | B300（sm103，GPU 6） | **10/10 过**，里程碑 2 完成 |
+| 6 | 2026-10-20 | decode 寄存器版 kernel（上节）+ `recurrent_qwen_decode_b32` case + `gdn_decode_bench` | **3090 16/16 过**；decode ≈ 4×（B=32 1014 → 246 µs） |

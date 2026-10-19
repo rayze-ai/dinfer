@@ -2821,6 +2821,9 @@ pub fn gdn_gate(
 /// `out`: `[T, heads_v, v_dim]` bf16；`state`: `[num_slots, heads_v, v_dim, k_dim]` f32（原地更新）。
 /// `fused_gate = true` 时 gate/beta 由 `a_raw`/`b_raw` + `a_log`/`dt_bias` 现算（decode）；
 /// 否则读调用方预算好的 `g`/`beta`（prefill，形状 `[T, heads_v]` f32）。
+/// decode 步（每序列 1 token，`tokens == num_seqs`）走寄存器版 `recurrent_decode_kernel`（BV 由
+/// `ArchProfile::gdn_decode_bv` 给，`GDN_DECODE_BV=<n>` 覆盖，`GDN_DECODE=legacy` 回老 shared 版）；
+/// prefill 尾段走老 kernel。
 #[allow(clippy::too_many_arguments)]
 pub fn gdn_recurrent(
     stream: &Stream,
@@ -2842,6 +2845,36 @@ pub fn gdn_recurrent(
     v_dim: usize,
     scale: f32,
 ) -> Result<()> {
+    gdn_recurrent_with(
+        stream, mixed_qkv, g, beta, a_raw, b_raw, a_log, dt_bias, out, state, cu_seqlens, state_indices, num_seqs,
+        heads_k, heads_v, k_dim, v_dim, scale, None,
+    )
+}
+
+/// `gdn_recurrent` 的显式版：`decode_bv = Some(0)` 强制老 kernel，`Some(n)` 强制寄存器版 BV=n，`None` 自动
+///（对拍 / 计时用，模型侧用 `gdn_recurrent`）。
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_recurrent_with(
+    stream: &Stream,
+    mixed_qkv: &CudaSlice<bf16>,
+    g: Option<&CudaSlice<f32>>,
+    beta: Option<&CudaSlice<f32>>,
+    a_raw: Option<&CudaSlice<bf16>>,
+    b_raw: Option<&CudaSlice<bf16>>,
+    a_log: &CudaSlice<f32>,
+    dt_bias: &CudaSlice<f32>,
+    out: &mut CudaSlice<bf16>,
+    state: &mut CudaSlice<f32>,
+    cu_seqlens: &CudaSlice<i32>,
+    state_indices: Option<&CudaSlice<i32>>,
+    num_seqs: usize,
+    heads_k: usize,
+    heads_v: usize,
+    k_dim: usize,
+    v_dim: usize,
+    scale: f32,
+    decode_bv: Option<usize>,
+) -> Result<()> {
     ensure!(heads_k > 0 && heads_v % heads_k == 0, "gdn_recurrent: heads_v {heads_v} 不能被 heads_k {heads_k} 整除");
     ensure!(cu_seqlens.len() >= num_seqs + 1, "gdn_recurrent: cu_seqlens");
     ensure!(a_log.len() >= heads_v && dt_bias.len() >= heads_v, "gdn_recurrent: a_log/dt_bias");
@@ -2853,6 +2886,17 @@ pub fn gdn_recurrent(
     let group = heads_v / heads_k;
     let fused = g.is_none();
     let vsplit = gdn_recurrent_vsplit(stream, num_seqs * heads_v, v_dim);
+    let decode_bv = match decode_bv {
+        Some(bv) => bv,
+        None if tokens == num_seqs => gdn_decode_bv(stream, num_seqs * heads_v, k_dim, v_dim),
+        None => 0,
+    };
+    if decode_bv > 0 {
+        ensure!(
+            v_dim % decode_bv == 0 && (k_dim == 64 || k_dim == 128),
+            "gdn_recurrent: decode_bv {decode_bv} 不适用于 K={k_dim} V={v_dim}"
+        );
+    }
     if fused {
         ensure!(a_raw.is_some() && b_raw.is_some(), "gdn_recurrent: fused_gate 需要 a_raw/b_raw");
         ensure!(a_raw.unwrap().len() >= tokens * heads_v, "gdn_recurrent: a_raw");
@@ -2891,11 +2935,38 @@ pub fn gdn_recurrent(
                 per_slot as i64,
                 i32::from(fused),
                 vsplit as i64,
+                decode_bv as i64,
                 stream.raw() as ffi::cudaStream_t,
             )
         },
         "gdn_recurrent",
     )
+}
+
+/// decode 寄存器版 kernel 的 BV：默认 `ArchProfile::gdn_decode_bv`（按 SM 数选最大的仍能铺满的档）；
+/// `GDN_DECODE=legacy` 关闭（返回 0 → 老 kernel）；`GDN_DECODE_BV=<n>` 覆盖（须是 kernel 支持的档且整除 V）。
+fn gdn_decode_bv(stream: &Stream, base_blocks: usize, k_dim: usize, v_dim: usize) -> usize {
+    use std::sync::OnceLock;
+    static MODE: OnceLock<(bool, Option<usize>)> = OnceLock::new();
+    static SM: OnceLock<usize> = OnceLock::new();
+    let (legacy, over) = *MODE.get_or_init(|| {
+        let legacy = matches!(std::env::var("GDN_DECODE").as_deref(), Ok("legacy"));
+        let over = std::env::var("GDN_DECODE_BV").ok().and_then(|s| s.parse().ok());
+        if legacy || over.is_some() {
+            tracing::info!(legacy, ?over, "gdn decode kernel 由环境变量覆盖");
+        }
+        (legacy, over)
+    });
+    if legacy || (k_dim != 64 && k_dim != 128) {
+        return 0;
+    }
+    if let Some(bv) = over {
+        if matches!(bv, 16 | 32 | 64) && v_dim % bv == 0 {
+            return bv;
+        }
+    }
+    let sm = *SM.get_or_init(|| stream.device().sm_count().unwrap_or(1));
+    crate::arch::ArchProfile::gdn_decode_bv(sm, base_blocks, k_dim, v_dim)
 }
 
 /// `gdn_recurrent` 的 V 维切分数：默认由 `ArchProfile::gdn_recurrent_vsplit`（按 SM 数把 block 数补到 ≥ SM 数，
