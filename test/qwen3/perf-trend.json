@@ -41,7 +41,8 @@
     "ratio": 0.029302160534286314
    }
   },
-  "change": "bench 基线：参考 kernel（prefill 逐行三遍扫、decode 单 warp），debug 构建"
+  "change": "bench 基线：参考 kernel（prefill 逐行三遍扫、decode 单 warp），debug 构建",
+  "kind": "single"
  },
  {
   "dir": "test/qwen3/2026-10-16/bench3",
@@ -85,7 +86,8 @@
     "ratio": 0.16520561165393868
    }
   },
-  "change": "a prefill attention：flash tile kernel（prefill + paged）；release 构建"
+  "change": "a prefill attention：flash tile kernel（prefill + paged）；release 构建",
+  "kind": "single"
  },
  {
   "dir": "test/qwen3/2026-10-16/bench4",
@@ -129,7 +131,8 @@
     "ratio": 0.29239031562017515
    }
   },
-  "change": "b decode attention：split-K kernel"
+  "change": "b decode attention：split-K kernel",
+  "kind": "single"
  },
  {
   "dir": "test/qwen3/2026-10-16/bench5",
@@ -173,7 +176,8 @@
     "ratio": 0.2993549845130794
    }
   },
-  "change": "c CUDA graph：固定地址缓冲 + decode 按桶捕获（forward+采样图内）"
+  "change": "c CUDA graph：固定地址缓冲 + decode 按桶捕获（forward+采样图内）",
+  "kind": "single"
  },
  {
   "dir": "test/qwen3/2026-10-16/bench6",
@@ -217,7 +221,8 @@
     "ratio": 0.29993191669471486
    }
   },
-  "change": "d TCP_NODELAY（Nagle 导致 TTFT +38 ms）"
+  "change": "d TCP_NODELAY（Nagle 导致 TTFT +38 ms）",
+  "kind": "single"
  },
  {
   "dir": "test/qwen3/2026-10-16/bench7",
@@ -261,7 +266,8 @@
     "ratio": 0.3079054215428708
    }
   },
-  "change": ""
+  "change": "e kernel 融合：qkv_post（norm+rope+cache write 一个 kernel）、attention 按 stride 读 qkv_buf（去 copy_cols）、MLP 残差并入下一层 norm；17→8 kernel/层",
+  "kind": "single"
  },
  {
   "dir": "test/qwen3/2026-10-16/bench8",
@@ -305,7 +311,8 @@
     "ratio": 0.3780526428240067
    }
   },
-  "change": "e 续：decode attention v2（8 lane/key、uint4 向量读 K/V、4 key/warp、两 q head 共享 K 读、splits 自适应）"
+  "change": "e 续：decode attention v2（8 lane/key、uint4 向量读 K/V、4 key/warp、两 q head 共享 K 读、splits 自适应）",
+  "kind": "single"
  },
  {
   "dir": "test/qwen3/2026-10-16/bench9",
@@ -349,7 +356,8 @@
     "ratio": 0.3776932380434956
    }
   },
-  "change": "e 续：decode splits==1 时跳过 merge kernel（B≥32 少 28 launch/step）；面板加点击轮次详情"
+  "change": "e 续：decode splits==1 时跳过 merge kernel（B≥32 少 28 launch/step）；面板加点击轮次详情",
+  "kind": "single"
  },
  {
   "dir": "test/qwen3/2026-10-16/bench10",
@@ -393,7 +401,8 @@
     "ratio": 0.7352762975896229
    }
   },
-  "change": "e 续 3：prefill/paged attention v2（32 行/block 按 kv head 分块、两 q head 共享 K/V tile、uint4 装载）；3090 T=1514 9.6→2.6 ms/层"
+  "change": "e 续 3：prefill/paged attention v2（32 行/block 按 kv head 分块、两 q head 共享 K/V tile、uint4 装载）；3090 T=1514 9.6→2.6 ms/层",
+  "kind": "single"
  },
  {
   "dir": "test/qwen3/2026-10-16/bench11",
@@ -437,7 +446,8 @@
     "ratio": 0.8324984345019363
    }
   },
-  "change": "e 续 4：prefill/paged attention v3 = WMMA bf16 tensor core（S=QKᵀ、O+=PV 走 mma；online softmax 在 smem）；3090 T=1514 2.6→1.34 ms/层"
+  "change": "e 续 4：prefill/paged attention v3 = WMMA bf16 tensor core（S=QKᵀ、O+=PV 走 mma；online softmax 在 smem）；3090 T=1514 2.6→1.34 ms/层",
+  "kind": "single"
  },
  {
   "dir": "test/qwen3/2026-10-16/bench12",
@@ -481,7 +491,8 @@
     "ratio": 0.9067316593714734
    }
   },
-  "change": "口径修正：bench 每次运行换 seed（之前固定 seed 让常驻 vLLM prefix cache 90% 命中、dinfer 冷）；代码与 bench11 相同（prefill v3）"
+  "change": "口径修正：bench 每次运行换 seed（之前固定 seed 让常驻 vLLM prefix cache 90% 命中、dinfer 冷）；代码与 bench11 相同（prefill v3）",
+  "kind": "single"
  },
  {
   "dir": "test/qwen3/2026-10-16/bench13",
@@ -525,7 +536,8 @@
     "ratio": 0.9069933236601724
    }
   },
-  "change": "f decode splits：decode_v2 splits 目标 256 → 1024 block（B=8 长序列 64 → 512 block；4090 B=8 seq=2048 0.040 → 0.032 ms）"
+  "change": "f decode splits：decode_v2 splits 目标 256 → 1024 block（B=8 长序列 64 → 512 block；4090 B=8 seq=2048 0.040 → 0.032 ms）",
+  "kind": "single"
  },
  {
   "dir": "test/qwen3/2026-10-16/bench14",
@@ -569,7 +581,8 @@
     "ratio": 0.9036661412926064
    }
   },
-  "change": "g 混批分流：Paged 步里 decode 行走 decode_v2（cu_seqlens_q 行映射）、prefill 行走 paged_tc（跳过 q_len==1）；3090 微基准 C 形状 0.86→0.76 ms、D 0.32→0.07"
+  "change": "g 混批分流：Paged 步里 decode 行走 decode_v2（cu_seqlens_q 行映射）、prefill 行走 paged_tc（跳过 q_len==1）；3090 微基准 C 形状 0.86→0.76 ms、D 0.32→0.07",
+  "kind": "single"
  },
  {
   "dir": "test/qwen3/2026-10-16/bench15",
@@ -613,7 +626,8 @@
     "ratio": 1.0037009337888159
    }
   },
-  "change": "h prefill/paged attention v4：FA2 结构（裸 mma.sync m16n8k16 + ldmatrix，S/P/O 全寄存器，64-key tile，34 KB smem 2 block/SM）；3090 T=1514 1.34→0.28 ms/层"
+  "change": "h prefill/paged attention v4：FA2 结构（裸 mma.sync m16n8k16 + ldmatrix，S/P/O 全寄存器，64-key tile，34 KB smem 2 block/SM）；3090 T=1514 1.34→0.28 ms/层",
+  "kind": "single"
  },
  {
   "dir": "test/qwen3/2026-10-16/bench16",
@@ -657,7 +671,8 @@
     "ratio": 1.0047478707895607
    }
   },
-  "change": "参数对齐实验（无代码改动）：--max-num-batched-tokens 4096 → 2048（= vLLM 4090 实际值），减少单个 prefill step 对 decode 的打断"
+  "change": "参数对齐实验（无代码改动）：--max-num-batched-tokens 4096 → 2048（= vLLM 4090 实际值），减少单个 prefill step 对 decode 的打断",
+  "kind": "single"
  },
  {
   "dir": "test/qwen3/2026-10-17/bench17",
@@ -701,51 +716,8 @@
     "ratio": 1.000993602335761
    }
   },
-  "change": "j 跨流并行：混批 step 拆成 decode 批（主流，CUDA graph）+ prefill 批（副流，eager），事件同步，两套激活 scratch"
- },
- {
-  "dir": "test/qwen3/2026-10-17/bench18",
-  "label": "bench18",
-  "date": "2026-10-17",
-  "groups": {
-   "c1_p128_o128": {
-    "tps": 499.2193917466957,
-    "vllm_tps": 442.12069520169456,
-    "ttft": 3.9694200000000004,
-    "vllm_ttft": 19.901988999999997,
-    "tpot": 1.9840859842519685,
-    "vllm_tpot": 2.1144507086614173,
-    "ratio": 1.1291473056219474
-   },
-   "c8_p128_o128": {
-    "tps": 3078.434425886872,
-    "vllm_tps": 2876.581668784006,
-    "ttft": 8.678719,
-    "vllm_ttft": 37.014212,
-    "tpot": 2.532074244094488,
-    "vllm_tpot": 2.5395421653543306,
-    "ratio": 1.0701710503453892
-   },
-   "c32_p128_o128": {
-    "tps": 8346.341455954733,
-    "vllm_tps": 8279.048059712792,
-    "ttft": 22.290013000000002,
-    "vllm_ttft": 75.318214,
-    "tpot": 3.645801622047244,
-    "vllm_tpot": 3.305953992125984,
-    "ratio": 1.0081281562513693
-   },
-   "c8_p1024_o128": {
-    "tps": 1909.8024715409347,
-    "vllm_tps": 1898.0492229603578,
-    "ttft": 39.378085999999996,
-    "vllm_ttft": 67.50455199999999,
-    "tpot": 3.87847062992126,
-    "vllm_tpot": 3.744808708661417,
-    "ratio": 1.0061922780707686
-   }
-  },
-  "change": "j 续：可读性整理 + 删 v3 死代码（功能同 bench17，回归基线）"
+  "change": "j 跨流并行：混批 step 拆成 decode 批（主流，CUDA graph）+ prefill 批（副流，eager），事件同步，两套激活 scratch",
+  "kind": "single"
  },
  {
   "dir": "test/qwen3/2026-10-17/bench19",
@@ -789,7 +761,8 @@
     "ratio": 1.0036786630434176
    }
   },
-  "change": "j 续：调度 decode 免预算（每步装下全部 decode 行 + 预算内 prefill）+ 跨流并行（decode 批主流图 / prefill 批副流）"
+  "change": "j 续：调度 decode 免预算（每步装下全部 decode 行 + 预算内 prefill）+ 跨流并行（decode 批主流图 / prefill 批副流）",
+  "kind": "single"
  },
  {
   "dir": "test/qwen3/2026-10-17/bench20",
@@ -833,7 +806,8 @@
     "ratio": 1.0042079575100165
    }
   },
-  "change": "启动 loop 收尾后的回归（懒捕获图 + 权重直传 + KV uninit；运行期逻辑同 bench19）"
+  "change": "启动 loop 收尾后的回归（懒捕获图 + 权重直传 + KV uninit；运行期逻辑同 bench19）",
+  "kind": "single"
  },
  {
   "dir": "test/qwen3/2026-10-17/bench21",
@@ -877,7 +851,8 @@
     "ratio": 0.9316640677400938
    }
   },
-  "change": "k host 路径：每 step 输入打包进 pinned 缓冲，一次异步 H2D + D2D 散开（原 14 次同步 pageable memcpy ≈ 650 µs/步）"
+  "change": "k host 路径：每 step 输入打包进 pinned 缓冲，一次异步 H2D + D2D 散开（原 14 次同步 pageable memcpy ≈ 650 µs/步）",
+  "kind": "single"
  },
  {
   "dir": "test/qwen3/2026-10-17/bench22",
@@ -921,7 +896,8 @@
     "ratio": 0.9395710021234802
    }
   },
-  "change": "k host 路径：block_table 缓冲行跨度改为 max_model_len/block_size（原用 KV 池总块数 9972 → 每步 1.3 MB 零填充 + H2D）"
+  "change": "k host 路径：block_table 缓冲行跨度改为 max_model_len/block_size（原用 KV 池总块数 9972 → 每步 1.3 MB 零填充 + H2D）",
+  "kind": "single"
  },
  {
   "dir": "test/qwen3/2026-10-17/bench23",
@@ -965,7 +941,8 @@
     "ratio": 1.0102843116531877
    }
   },
-  "change": "干净重启（restart_dinfer.sh；之前 :8012 是 20 h 前的孤儿旧进程）后的全量回归 = 新基线；代码含 block_table 跨度修复"
+  "change": "干净重启（restart_dinfer.sh；之前 :8012 是 20 h 前的孤儿旧进程）后的全量回归 = 新基线；代码含 block_table 跨度修复",
+  "kind": "single"
  },
  {
   "dir": "test/qwen3/2026-10-17/bench24",
@@ -1009,7 +986,8 @@
     "ratio": 1.014906589972962
    }
   },
-  "change": "l 异步调度：步 n 入队后不等 GPU 先调度并入队 n+1（设备侧 gather 上一步 chosen 作 input_ids，pinned 双槽异步 D2H）；host 开销藏进 GPU 时间"
+  "change": "l 异步调度：步 n 入队后不等 GPU 先调度并入队 n+1（设备侧 gather 上一步 chosen 作 input_ids，pinned 双槽异步 D2H）；host 开销藏进 GPU 时间",
+  "kind": "single"
  },
  {
   "dir": "test/qwen3/2026-10-17/bench25",
@@ -1053,7 +1031,8 @@
     "ratio": 1.0219008579691902
    }
   },
-  "change": "m 采样融合：temperature/min_p/topk-topp/sample 四 kernel → 一个（共用 row_* 原语，逐位同语义）；图内 -3 节点"
+  "change": "m 采样融合：temperature/min_p/topk-topp/sample 四 kernel → 一个（共用 row_* 原语，逐位同语义）；图内 -3 节点",
+  "kind": "single"
  },
  {
   "dir": "test/qwen3/2026-10-17/bench26",
@@ -1097,7 +1076,8 @@
     "ratio": 1.0132971791350518
    }
   },
-  "change": "n 小 kernel 融合：lm_head 前 gather_rows + 末层 rmsnorm → 一个 kernel（-1 launch/步）"
+  "change": "n 小 kernel 融合：lm_head 前 gather_rows + 末层 rmsnorm → 一个 kernel（-1 launch/步）",
+  "kind": "single"
  },
  {
   "dir": "test/qwen3/2026-10-17/bench27",
@@ -1141,7 +1121,8 @@
     "ratio": 1.0035241621404745
    }
   },
-  "change": "o 插队 prefill：在飞 decode 步未完成时，新请求立刻 schedule_waiting_only 并同步跑 prefill（不写 prev_chosen），首 token 提前一步"
+  "change": "o 插队 prefill：在飞 decode 步未完成时，新请求立刻 schedule_waiting_only 并同步跑 prefill（不写 prev_chosen），首 token 提前一步",
+  "kind": "single"
  },
  {
   "dir": "test/qwen3/2026-10-17/bench28",
@@ -1185,7 +1166,8 @@
     "ratio": 1.002510547485573
    }
   },
-  "change": "o 插队 prefill 修正：结果立刻回填再调度 n+1（修首 token 丢失）；负载门槛在飞 ≤8 行才插队"
+  "change": "o 插队 prefill 修正：结果立刻回填再调度 n+1（修首 token 丢失）；负载门槛在飞 ≤8 行才插队",
+  "kind": "single"
  },
  {
   "dir": "test/qwen3/2026-10-17/bench29",
@@ -1229,7 +1211,8 @@
     "ratio": 0.9993145032348834
    }
   },
-  "change": "q OpSet：四组热路径算子进 trait（DefaultOps 零成本包装），模型泛型化；应与 bench28 零差异"
+  "change": "q OpSet：四组热路径算子进 trait（DefaultOps 零成本包装），模型泛型化；应与 bench28 零差异",
+  "kind": "single"
  },
  {
   "dir": "test/qwen3/2026-10-17/bench30",
@@ -1273,7 +1256,8 @@
     "ratio": 1.0023395402000046
    }
   },
-  "change": "r host tier 实现（默认关，常驻未开）+ OpSet；回归基线应与 bench29 持平"
+  "change": "r host tier 实现（默认关，常驻未开）+ OpSet；回归基线应与 bench29 持平",
+  "kind": "single"
  },
  {
   "dir": "test/qwen3/2026-10-17/bench31",
@@ -1317,7 +1301,8 @@
     "ratio": 1.0081755229410234
    }
   },
-  "change": "r 续：livelock 修复（不自抢占 + 空步退避 + 启动校验）+ host tier（默认关）；回归基线"
+  "change": "r 续：livelock 修复（不自抢占 + 空步退避 + 启动校验）+ host tier（默认关）；回归基线",
+  "kind": "single"
  },
  {
   "dir": "test/qwen3/2026-10-18/bench32",
@@ -1361,94 +1346,7 @@
     "ratio": 1.0056147968527707
    }
   },
-  "change": "HostTierPolicy 抽出 core（tier 默认关，预期零差异）"
- },
- {
-  "dir": "test/qwen3/2026-10-18/bench_dp2",
-  "label": "bench_dp2",
-  "date": "2026-10-18",
-  "groups": {
-   "c1_p128_o128": {
-    "tps": 514.1255042146242,
-    "vllm_tps": 446.68482319495814,
-    "ttft": 3.9151510000000003,
-    "vllm_ttft": 17.055381,
-    "tpot": 1.9278056062992126,
-    "vllm_tpot": 2.1212410866141735,
-    "ratio": 1.1509804621014206
-   },
-   "c8_p128_o128": {
-    "tps": 3258.9380966148656,
-    "vllm_tps": 2891.354961960241,
-    "ttft": 10.039188,
-    "vllm_ttft": 34.347299,
-    "tpot": 2.316101039370079,
-    "vllm_tpot": 2.546861637795276,
-    "ratio": 1.127131790973674
-   },
-   "c32_p128_o128": {
-    "tps": 10001.483557463971,
-    "vllm_tps": 8309.669051991386,
-    "ttft": 21.328436,
-    "vllm_ttft": 72.098935,
-    "tpot": 3.0289740708661417,
-    "vllm_tpot": 3.296827559055118,
-    "ratio": 1.2035958947206382
-   },
-   "c8_p1024_o128": {
-    "tps": 2491.7399156380816,
-    "vllm_tps": 1896.3636294963892,
-    "ttft": 28.185133,
-    "vllm_ttft": 67.934168,
-    "tpot": 2.9656394488188975,
-    "vllm_tpot": 3.754268023622047,
-    "ratio": 1.313956815497355
-   }
-  },
-  "change": "Q5 T2: --dp 2 (GPU 5,6, 同进程 DpBackend 按在飞数路由) vs vLLM 单卡"
- },
- {
-  "dir": "test/qwen3/2026-10-18/bench_tp2",
-  "label": "bench_tp2",
-  "date": "2026-10-18",
-  "groups": {
-   "c1_p128_o128": {
-    "tps": 510.57534938887426,
-    "vllm_tps": 447.0295559281361,
-    "ttft": 10.703776999999999,
-    "vllm_ttft": 17.033091,
-    "tpot": 1.8845129448818898,
-    "vllm_tpot": 2.1192408031496064,
-    "ratio": 1.1421512126391788
-   },
-   "c8_p128_o128": {
-    "tps": 2655.7612120441863,
-    "vllm_tps": 2893.328374618698,
-    "ttft": 13.490065000000001,
-    "vllm_ttft": 33.199206000000004,
-    "tpot": 2.718900047244095,
-    "vllm_tpot": 2.541520692913386,
-    "ratio": 0.9178913929512685
-   },
-   "c32_p128_o128": {
-    "tps": 5264.483328733889,
-    "vllm_tps": 8224.988842825727,
-    "ttft": 96.75681,
-    "vllm_ttft": 75.896427,
-    "tpot": 5.203352393700787,
-    "vllm_tpot": 3.324738795275591,
-    "ratio": 0.6400596316098168
-   },
-   "c8_p1024_o128": {
-    "tps": 1297.9618898241586,
-    "vllm_tps": 1908.3172273681068,
-    "ttft": 231.549463,
-    "vllm_ttft": 54.273365,
-    "tpot": 4.338215527559055,
-    "vllm_tpot": 3.752593716535433,
-    "ratio": 0.6801604425141978
-   }
-  },
-  "change": "Q5 T1: --tp 2 (GPU 5,6, 无 P2P → NCCL SHM, 每层 2 all-reduce) vs vLLM 单卡"
+  "change": "HostTierPolicy 抽出 core（tier 默认关，预期零差异）",
+  "kind": "single"
  }
 ]
