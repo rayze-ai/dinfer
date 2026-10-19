@@ -695,3 +695,9 @@
 - 根因：`GdnLayer` / `FullAttention` / `dinfer_layers::Mlp` 各自在 `load` 里 `Tensor::zeros(&[max_tokens, 列数])`，每层一套、互不复用；按 token 数线性、按层数线性，预算 ×8 就是 ×8：48 GDN 层 ×（2×10240 + 3×6144 + …）+ 64 层 Mlp ×（34816 + 17408）bf16 × 16448 token ≈ **170 GB**。小预算 / 小模型（qwen3-0.6B、tiny）看不出来，所以一直没发现。
 - 解法：层在同一条流上串行，层 i 的中间量在层 i+1 开始前已消费完，**全模型只需一套**：`models/qwen35/src/scratch.rs::ActScratch`（列数取各层类型最大值），forward 以 `&mut ActScratch` 借用；`Mlp` 自带缓冲改 `Option`（`max_tokens == 0` 不分配）+ `forward_with_scratch`。改后 ≈ 2.8 GB；启动日志 `qwen35: activation scratch bytes=… (max_tokens=…)` 直接看。
 - 避免：① 任何 `[max_tokens, …]` 预分配都要问"是每层一份还是全模型一份"，层内临时量一律借全模型的一套，只有跨步存活的状态（KV、GDN slot 状态）才每层持有；② 新模型 crate 起步时就在启动日志打激活字节，并把"预算 × 8 后显存去哪了"写进验收；③ 真 27B 预算改动后看一眼 `kv_gib` 是否随预算反向缩水。qwen3 crate 目前仍是每层一套（0.6B 列数小暂无害），上大模型前要同样改。
+
+## `remote_b300.sh push --delete` 会删掉远端由容器 / 脚本生成、尚未 pull 回来的文件（2026-10-20，两次）
+
+- 现象：K3 子代理在 B300 生成的参考 `.npy`（`test/kimik3/2026-10-20/model/`）被主会话推 Qwen3.5 改动时清空；`.gitkeep` 只保目录不保内容。
+- 根因：push 用 rsync `--delete`，远端工作目录被当成本地的镜像；多人 / 多子代理共用一个远端目录时，任何一方 push 都会删别人没 pull 的生成物。
+- 解法：① 生成物落在 `$R/bootstrap/` 或 `/tmp`（push 不覆盖的目录），用完 pull；② 要 push 前先问同在跑 B300 的子代理 / 先 pull；③ 考虑给 push 加 `--exclude 'test/**/refs*/'` 之类的保护（已有 bench*/ab_*/stage* 排除，参考目录命名要进这个列表）。
