@@ -69,7 +69,7 @@ fn load() -> Env {
     let dir = golden_dir().join("tiny");
     let cfg = Qwen35Config::from_json(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
     let src = WeightSource::open_dir(&dir).unwrap();
-    let model = Qwen35Model::load(&s, &src, cfg.clone(), 128, NUM_BLOCKS, BLOCK, 8).unwrap();
+    let model = Qwen35Model::load(&s, &src, cfg.clone(), 128, Some(NUM_BLOCKS), BLOCK, 8).unwrap();
     Env { s, gemm, cfg, model }
 }
 

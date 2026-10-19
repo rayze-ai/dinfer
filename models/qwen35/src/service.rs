@@ -98,34 +98,22 @@ impl Qwen35Service {
         let dev = Device::new(opt.device)?;
         let s = dev.default_stream();
         let gemm = dinfer_layers::Gemm::new(&s)?;
-        // 先按"权重 + scratch 已分配"的剩余显存估 KV 块数（等价 vLLM profile run，但不用真跑 forward）。
-        let num_blocks = match opt.num_blocks {
-            Some(n) => n as usize,
-            None => {
-                // 保守：先用 1 块加载（权重 + scratch），再 mem_info 估；这里简化为按总量的固定比例，
-                // 真正的 mem_info 估算留给第二版（见 design-qwen35 §3）。
-                let (free, _total) = {
-                    s.synchronize()?;
-                    s.mem_info()?
-                };
-                let est_weight = 54usize << 30;
-                let avail = free.saturating_sub(est_weight).max(1 << 30);
-                let per_block = Qwen35Model::<dinfer_layers::DefaultOps>::kv_bytes_per_block(&cfg, bs);
-                (avail / per_block).max(1)
-            }
-        };
+        // KV 块数：`--num-blocks` 给定就用；否则权重 + scratch 分配完后按剩余显存自动算（`load_with_budget` 内部）。
         let model: Qwen35Model = Qwen35Model::load_with_budget(
             &s,
             &src,
             cfg.clone(),
             max_tokens,
             max_logits_rows,
-            num_blocks,
+            opt.num_blocks.map(|n| n as usize),
             bs,
             opt.max_num_seqs as usize * (1 + num_spec),
             (0, 1),
+            opt.gpu_memory_utilization,
+            512 << 20,
         )?;
         s.synchronize()?;
+        let num_blocks = model.num_blocks();
         let exec = Qwen35Executor::new(s.clone(), gemm, model, max_blocks_per_seq)?;
         let need = max_blocks_per_seq;
         anyhow::ensure!(

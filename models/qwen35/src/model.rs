@@ -79,14 +79,14 @@ impl<O: OpSet> Qwen35Model<O> {
         src: &WeightSource,
         cfg: Qwen35Config,
         max_tokens: usize,
-        num_blocks: usize,
+        num_blocks: Option<usize>,
         block_size: usize,
         num_slots: usize,
     ) -> Result<Self>
     where
         O: Default,
     {
-        Self::load_with_budget(stream, src, cfg, max_tokens, max_tokens, num_blocks, block_size, num_slots, (0, 1))
+        Self::load_with_budget(stream, src, cfg, max_tokens, max_tokens, num_blocks, block_size, num_slots, (0, 1), 0.9, 512 << 20)
     }
 
     /// 全注意力层每个 KV block 的字节数（只数全注意力层）：`n_full × block_size × kv_heads × 2 × D × 2`。
@@ -100,6 +100,8 @@ impl<O: OpSet> Qwen35Model<O> {
             * 2
     }
 
+    /// `num_blocks = None`：权重 + 激活 scratch 分配完之后读剩余显存，按 `gpu_memory_utilization` 算 KV 块数
+    /// （等价 vLLM 的 profile run，但不用真跑一次 forward；K3/GLM/Qwen3 同法）。
     #[allow(clippy::too_many_arguments)]
     pub fn load_with_budget(
         stream: &Stream,
@@ -107,17 +109,22 @@ impl<O: OpSet> Qwen35Model<O> {
         cfg: Qwen35Config,
         max_tokens: usize,
         max_logits_rows: usize,
-        num_blocks: usize,
+        num_blocks: Option<usize>,
         block_size: usize,
         num_slots: usize,
         tp: (usize, usize),
+        gpu_memory_utilization: f32,
+        reserve_bytes: usize,
     ) -> Result<Self>
     where
         O: Default,
     {
         let (rank, world) = tp;
         ensure!(world >= 1 && rank < world, "bad tp shard {rank}/{world}");
-        ensure!(num_blocks > 0 && num_slots > 0, "num_blocks / num_slots must be > 0");
+        ensure!(num_slots > 0, "num_slots must be > 0");
+        if let Some(n) = num_blocks {
+            ensure!(n > 0, "num_blocks must be > 0");
+        }
         let mut cfg = cfg;
         if world > 1 {
             ensure!(cfg.num_attention_heads as usize % world == 0, "num_attention_heads % tp != 0");
@@ -160,6 +167,37 @@ impl<O: OpSet> Qwen35Model<O> {
         stream.synchronize()?;
 
         let v = cfg.vocab_size as usize;
+        let hidden_t = Tensor::zeros(stream, &[max_tokens, hidden])?;
+        let normed = Tensor::zeros(stream, &[max_tokens, hidden])?;
+        let attn_out = Tensor::zeros(stream, &[max_tokens, hidden])?;
+        let mlp_out = Tensor::zeros(stream, &[max_tokens, hidden])?;
+        let final_normed = Tensor::zeros(stream, &[max_logits_rows, hidden])?;
+        let logits_bf16 = Tensor::zeros(stream, &[max_logits_rows, v])?;
+        let decode_scratch =
+            Tensor::zeros(stream, &[k::gqa_decode_scratch_len(max_logits_rows, h, d)])?;
+        stream.synchronize()?;
+        // KV 最后分配：此时 free 已扣掉权重与 scratch（等价 vLLM profile run 的作用，但不真跑 forward）。
+        let per_block = Self::kv_bytes_per_block(&cfg, block_size).max(1);
+        let exec_scratch = 3 * max_logits_rows * v * 4; // executor 的 fp32 logits / 采样工作区 / logprobs 副本
+        let num_blocks = match num_blocks {
+            Some(n) => n,
+            None => {
+                let (free, total) = stream.mem_info()?;
+                let used = total.saturating_sub(free);
+                let cap = (total as f64 * gpu_memory_utilization as f64) as usize;
+                let budget = free.min(cap.saturating_sub(used)).saturating_sub(reserve_bytes + exec_scratch);
+                let nb = budget / per_block;
+                ensure!(
+                    nb >= 1,
+                    "not enough GPU memory for KV cache: free {:.2} GiB, cap {:.0}% of {:.2} GiB, reserve {:.2} GiB",
+                    free as f64 / (1u64 << 30) as f64,
+                    gpu_memory_utilization * 100.0,
+                    total as f64 / (1u64 << 30) as f64,
+                    (reserve_bytes + exec_scratch) as f64 / (1u64 << 30) as f64
+                );
+                nb
+            }
+        };
         let mut kv = Vec::with_capacity(n);
         for l in 0..n {
             kv.push(if layers[l].attn.is_full() {
@@ -172,20 +210,12 @@ impl<O: OpSet> Qwen35Model<O> {
                 None
             });
         }
-        let hidden_t = Tensor::zeros(stream, &[max_tokens, hidden])?;
-        let normed = Tensor::zeros(stream, &[max_tokens, hidden])?;
-        let attn_out = Tensor::zeros(stream, &[max_tokens, hidden])?;
-        let mlp_out = Tensor::zeros(stream, &[max_tokens, hidden])?;
-        let final_normed = Tensor::zeros(stream, &[max_logits_rows, hidden])?;
-        let logits_bf16 = Tensor::zeros(stream, &[max_logits_rows, v])?;
-        let decode_scratch =
-            Tensor::zeros(stream, &[k::gqa_decode_scratch_len(max_logits_rows, h, d)])?;
         stream.synchronize()?;
         tracing::info!(
             num_blocks,
             block_size,
             tokens = num_blocks * block_size,
-            kv_gib = (num_blocks * Self::kv_bytes_per_block(&cfg, block_size)) as f64 / (1u64 << 30) as f64,
+            kv_gib = (num_blocks * per_block) as f64 / (1u64 << 30) as f64,
             num_slots,
             "qwen35: kv / gdn slots"
         );
@@ -210,6 +240,11 @@ impl<O: OpSet> Qwen35Model<O> {
             logits_bf16,
             decode_scratch,
         })
+    }
+
+    /// 全注意力层的 KV 块数。
+    pub fn num_blocks(&self) -> usize {
+        self.kv.iter().flatten().next().map_or(0, |k| k.num_blocks)
     }
 
     pub fn last_hidden(&self) -> &Tensor<bf16> {
