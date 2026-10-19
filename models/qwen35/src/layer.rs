@@ -97,6 +97,14 @@ impl DecoderLayer {
         })
     }
 
+    /// 调试用：层类型名。
+    pub fn kind(&self) -> &'static str {
+        match self.attn {
+            Attn::Full(_) => "full",
+            Attn::Gdn(_) => "gdn",
+        }
+    }
+
     /// `normed` 是本层 attn 的输入（调用方已算好），`hidden` 是主干残差，`out` 本层 attn 输出。
     #[allow(clippy::too_many_arguments)]
     pub fn forward<O: OpSet>(

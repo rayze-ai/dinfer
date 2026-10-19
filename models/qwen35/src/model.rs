@@ -342,6 +342,11 @@ impl<O: OpSet> Qwen35Model<O> {
         // 每层：input_norm → attn → (res += attn_out) + post_norm → mlp → 下一层开头 res += mlp_out
         //（最后一层循环后补一次 add）。与 Qwen3 的 `pending_mlp` 写法一致。
         let mut pending_mlp = false;
+        let trace = std::env::var("QWEN35_TRACE").is_ok();
+        if trace {
+            let n = trace_norm(stream, &self.hidden, &self.hidden, t, h)?;
+            tracing::info!(norm = n.0, "qwen35 trace embed");
+        }
         for (li, layer) in self.layers.iter_mut().enumerate() {
             if pending_mlp {
                 self.ops.norm().fused_add_rmsnorm(
@@ -392,6 +397,11 @@ impl<O: OpSet> Qwen35Model<O> {
             )?;
             layer.mlp.forward(stream, gemm, self.ops.act(), t, &self.normed, &mut self.mlp_out)?;
             pending_mlp = true;
+            if trace {
+                // 调试：最后一个 token 的残差（含本层 mlp 输出）范数，与 HF `output_hidden_states` 逐层对拍
+                let n = trace_norm(stream, &self.hidden, &self.mlp_out, t, h)?;
+                tracing::info!(layer = li, kind = ?layer.kind(), norm = n.0, attn_out = n.1, "qwen35 trace");
+            }
         }
         if pending_mlp {
             self.ops.norm().add_inplace(stream, &self.mlp_out.data, &mut self.hidden.data, t * h)?;
@@ -445,4 +455,19 @@ impl<O: OpSet> Qwen35Model<O> {
 /// 本步是否纯 decode（GDN 用 update 路径的判据与 Qwen3 的 attention 分流同源）。
 pub fn is_pure_decode(mode: BatchMode, num_reqs: usize, t: usize) -> bool {
     mode == BatchMode::Decode && t == num_reqs
+}
+
+/// 调试：取最后一个 token 行，返回 (|hidden + add| , |add|) 的 L2 范数（同步 D2H，只在 QWEN35_TRACE 下调用）。
+fn trace_norm(stream: &Stream, hidden: &Tensor<bf16>, add: &Tensor<bf16>, t: usize, h: usize) -> Result<(f32, f32)> {
+    let a = stream.dtoh_sync_copy_view(&hidden.data.slice((t - 1) * h..t * h))?;
+    let b = stream.dtoh_sync_copy_view(&add.data.slice((t - 1) * h..t * h))?;
+    let same = std::ptr::eq(hidden, add);
+    let (mut s1, mut s2) = (0f64, 0f64);
+    for i in 0..h {
+        let x = a[i].to_f32() as f64;
+        let y = if same { 0.0 } else { b[i].to_f32() as f64 };
+        s1 += (x + y) * (x + y);
+        s2 += y * y;
+    }
+    Ok((s1.sqrt() as f32, s2.sqrt() as f32))
 }
