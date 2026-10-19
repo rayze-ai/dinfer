@@ -59,3 +59,15 @@ bench_b300_5,2026-10-19,decode CUDA graph（bucket 懒捕获，GRAPH_CAPTURE=eag
 bench_b300_5,2026-10-19,decode CUDA graph（bucket 懒捕获，GRAPH_CAPTURE=eager 启动全捕获）+ GDN fused gate + 独立非默认流,c8-long,out_tok_per_s,200.947,557.051,0.361,0.3,higher,main,B300,vllm,dinfer,qwen35
 bench_b300_5,2026-10-19,decode CUDA graph（bucket 懒捕获，GRAPH_CAPTURE=eager 启动全捕获）+ GDN fused gate + 独立非默认流,c8-long,ttft_p50_ms,455.471,411.048,1.108,3.0,lower,main,B300,vllm,dinfer,qwen35
 bench_b300_5,2026-10-19,decode CUDA graph（bucket 懒捕获，GRAPH_CAPTURE=eager 启动全捕获）+ GDN fused gate + 独立非默认流,c8-long,tpot_p50_ms,36.078,11.243,3.209,0.5,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_6,2026-10-19,decode 小 M GEMM：cuBLASLt algo 启动自调优 + 自写 gemm_small_m split-K 取优（ArchProfile）+ GDN recurrent vsplit,c1,out_tok_per_s,43.357,94.516,0.459,3.7,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_6,2026-10-19,decode 小 M GEMM：cuBLASLt algo 启动自调优 + 自写 gemm_small_m split-K 取优（ArchProfile）+ GDN recurrent vsplit,c1,ttft_p50_ms,45.298,46.563,0.973,0.3,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_6,2026-10-19,decode 小 M GEMM：cuBLASLt algo 启动自调优 + 自写 gemm_small_m split-K 取优（ArchProfile）+ GDN recurrent vsplit,c1,tpot_p50_ms,22.889,10.295,2.223,3.7,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_6,2026-10-19,decode 小 M GEMM：cuBLASLt algo 启动自调优 + 自写 gemm_small_m split-K 取优（ArchProfile）+ GDN recurrent vsplit,c8,out_tok_per_s,274.812,671.881,0.409,0.2,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_6,2026-10-19,decode 小 M GEMM：cuBLASLt algo 启动自调优 + 自写 gemm_small_m split-K 取优（ArchProfile）+ GDN recurrent vsplit,c8,ttft_p50_ms,168.559,102.032,1.652,-0.3,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_6,2026-10-19,decode 小 M GEMM：cuBLASLt algo 启动自调优 + 自写 gemm_small_m split-K 取优（ArchProfile）+ GDN recurrent vsplit,c8,tpot_p50_ms,28.013,11.195,2.502,0.2,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_6,2026-10-19,decode 小 M GEMM：cuBLASLt algo 启动自调优 + 自写 gemm_small_m split-K 取优（ArchProfile）+ GDN recurrent vsplit,c32,out_tok_per_s,661.031,2150.213,0.307,-3.3,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_6,2026-10-19,decode 小 M GEMM：cuBLASLt algo 启动自调优 + 自写 gemm_small_m split-K 取优（ArchProfile）+ GDN recurrent vsplit,c32,ttft_p50_ms,366.368,261.136,1.403,0.7,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_6,2026-10-19,decode 小 M GEMM：cuBLASLt algo 启动自调优 + 自写 gemm_small_m split-K 取优（ArchProfile）+ GDN recurrent vsplit,c32,tpot_p50_ms,45.809,12.903,3.550,-3.6,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_6,2026-10-19,decode 小 M GEMM：cuBLASLt algo 启动自调优 + 自写 gemm_small_m split-K 取优（ArchProfile）+ GDN recurrent vsplit,c8-long,out_tok_per_s,201.324,557.368,0.361,0.2,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_6,2026-10-19,decode 小 M GEMM：cuBLASLt algo 启动自调优 + 自写 gemm_small_m split-K 取优（ArchProfile）+ GDN recurrent vsplit,c8-long,ttft_p50_ms,472.185,408.325,1.156,-3.7,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_6,2026-10-19,decode 小 M GEMM：cuBLASLt algo 启动自调优 + 自写 gemm_small_m split-K 取优（ArchProfile）+ GDN recurrent vsplit,c8-long,tpot_p50_ms,36.016,11.239,3.204,0.2,lower,main,B300,vllm,dinfer,qwen35

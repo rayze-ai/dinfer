@@ -233,5 +233,52 @@
   "change": "decode CUDA graph（bucket 懒捕获，GRAPH_CAPTURE=eager 启动全捕获）+ GDN fused gate + 独立非默认流",
   "has_vllm": true,
   "kind": "single"
+ },
+ {
+  "dir": "test/qwen35/2026-10-19/bench_b300_6",
+  "label": "bench_b300_6",
+  "date": "2026-10-19",
+  "groups": {
+   "c1_p128_o128": {
+    "tps": 43.357261089688556,
+    "ttft": 45.298457,
+    "tpot": 22.889193763779527,
+    "vllm_tps": 94.51646850609092,
+    "vllm_ttft": 46.562918,
+    "vllm_tpot": 10.29539913385827,
+    "ratio": 0.4587270533377418
+   },
+   "c8_p128_o128": {
+    "tps": 274.8118893227782,
+    "ttft": 168.558785,
+    "tpot": 28.013050803149607,
+    "vllm_tps": 671.8806976351511,
+    "vllm_ttft": 102.031838,
+    "vllm_tpot": 11.19482611023622,
+    "ratio": 0.4090188783366542
+   },
+   "c32_p128_o128": {
+    "tps": 661.0305502840566,
+    "ttft": 366.368015,
+    "tpot": 45.8088340472441,
+    "vllm_tps": 2150.213149662298,
+    "vllm_ttft": 261.13570200000004,
+    "vllm_tpot": 12.903163023622048,
+    "ratio": 0.30742559191765473
+   },
+   "c8_p1024_o128": {
+    "tps": 201.32414631452826,
+    "ttft": 472.185209,
+    "tpot": 36.01568343307086,
+    "vllm_tps": 557.3679038816219,
+    "vllm_ttft": 408.32472600000006,
+    "vllm_tpot": 11.239382314960633,
+    "ratio": 0.36120513024246015
+   }
+  },
+  "gpu": "B300",
+  "change": "decode 小 M GEMM：cuBLASLt algo 启动自调优 + 自写 gemm_small_m split-K 取优（ArchProfile）+ GDN recurrent vsplit",
+  "has_vllm": true,
+  "kind": "single"
  }
 ]

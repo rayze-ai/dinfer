@@ -1,0 +1,1 @@
+decode 小 M GEMM：cuBLASLt algo 启动自调优 + 自写 gemm_small_m split-K 取优（ArchProfile）+ GDN recurrent vsplit
