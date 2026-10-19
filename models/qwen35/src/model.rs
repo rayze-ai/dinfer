@@ -89,6 +89,20 @@ impl<O: OpSet> Qwen35Model<O> {
         Self::load_with_budget(stream, src, cfg, max_tokens, max_tokens, num_blocks, block_size, num_slots, (0, 1), 0.9, 512 << 20)
     }
 
+    /// 每层每个请求的 GDN 状态字节数 × 层数：conv `[conv_dim, width-1]` bf16 + 递推 `[HV, V, K]` f32。
+    /// 真 27B ≈ 152 MB / slot（48 层），`max_num_seqs` 每加 1 就多吃这么多显存——自动 KV 预算里要算进去。
+    pub fn gdn_state_bytes_per_slot(cfg: &Qwen35Config) -> usize {
+        let n_lin = cfg.layer_types.iter().filter(|t| **t == crate::config::LayerType::LinearAttention).count();
+        let conv_dim = 2 * cfg.linear_num_key_heads as usize * cfg.linear_key_head_dim as usize
+            + cfg.linear_num_value_heads as usize * cfg.linear_value_head_dim as usize;
+        let conv = conv_dim * (cfg.linear_conv_kernel_dim as usize - 1) * 2;
+        let rec = cfg.linear_num_value_heads as usize
+            * cfg.linear_value_head_dim as usize
+            * cfg.linear_key_head_dim as usize
+            * 4;
+        n_lin * (conv + rec)
+    }
+
     /// 全注意力层每个 KV block 的字节数（只数全注意力层）：`n_full × block_size × kv_heads × 2 × D × 2`。
     pub fn kv_bytes_per_block(cfg: &Qwen35Config, block_size: usize) -> usize {
         let n_full = cfg.layer_types.iter().filter(|t| **t == crate::config::LayerType::FullAttention).count();
@@ -205,6 +219,13 @@ impl<O: OpSet> Qwen35Model<O> {
             });
         }
         stream.synchronize()?;
+        // GDN 状态显存（真 27B：每 slot ≈ 152 MB = 48 层 × (48·128·128 f32 + 10240·3 bf16)），随 max_num_seqs 线性增长。
+        let gdn_bytes_per_slot = Self::gdn_state_bytes_per_slot(&cfg);
+        tracing::info!(
+            gdn_slots = num_slots,
+            gdn_state_gib = (gdn_bytes_per_slot * num_slots) as f64 / (1u64 << 30) as f64,
+            "qwen35: GDN state buffers"
+        );
         tracing::info!(
             num_blocks,
             block_size,
