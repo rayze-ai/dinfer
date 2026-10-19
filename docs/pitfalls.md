@@ -522,5 +522,5 @@
 
 - 现象：`vllm_nerdctl.sh run` 起容器后 `wait` 超时，日志 `HFValidationError: Repo id must be in the form 'repo_name'...: '/models/qwen3.5-27b'`，bench 全部 connection refused。
 - 根因：`$ROOT/models/qwen3.5-27b` 是指向 `/data/models/Qwen/Qwen3.8-27B` 的软链接；容器只挂了 `$ROOT/models:/models`，链接目标在容器内不存在，vLLM 把路径当 HF repo id 去校验。
-- 解法：容器同时挂 `/data/models:/data/models:ro`（已改 `vllm_nerdctl.sh`）。
-- 避免：权重按用户要求一律软链接到 `/data/models`（不下载不拷贝），所以任何容器都要把 `/data/models` 挂进去；`wait` 失败先看 `logs` 的最后一个 Traceback。
+- 解法：**不用软链接**（用户 2026-10-19："软链接是你加的"），`VLLM_MODEL` 直接给 `/data/models/...` 物理路径，容器只挂 `/data/models:ro`。
+- 避免：权重路径一律写物理路径，不在 `$ROOT/models` 下造别名；`wait` 失败先看 `logs` 的最后一个 Traceback。
