@@ -43,7 +43,8 @@ def read_gpu(d):
 
 
 def category(label, change=""):
-    if re.fullmatch(r"bench\d*", label):
+    # benchN（4090 主线）与 bench_<卡型>_N（如 bench_b300_1，别的卡上的主线 dinfer vs vLLM）都是 single；bench_tp2 / bench_dp2 走下面的 tp / dp
+    if re.fullmatch(r"bench\d*", label) or (re.fullmatch(r"bench_[a-z0-9]+_\d+", label) and not re.search(r"_(tp|dp)\d*_", label)):
         return "single"
     s = (label + " " + change).lower()
     if label.startswith("ab_pd") or re.search(r"\bpd\b|pd 分离|pd1", s):
@@ -81,7 +82,7 @@ def load_round(d):
 def round_key(d):
     # benchN（数字轮次）或 bench_<tag>（如 bench_tp2 / bench_dp2，多卡轮次）；带 tag 的排在同日数字轮之后
     b = os.path.basename(d)
-    m = re.search(r"bench(\d*)$", b)
+    m = re.search(r"bench(\d*)$", b) or re.fullmatch(r"bench_[a-z0-9]+_(\d+)", b)
     if m:
         return (os.path.basename(os.path.dirname(d)), 0, int(m.group(1) or 0), "")
     return (os.path.basename(os.path.dirname(d)), 1, 0, b)

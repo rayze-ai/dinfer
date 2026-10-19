@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="980" height="2428" font-family="sans-serif">
-<rect width="980" height="2428" fill="white"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="2948" font-family="sans-serif">
+<rect width="980" height="2948" fill="white"/>
 <text x="48" y="20" font-size="18" font-weight="bold">4090</text>
 <text x="128" y="20" font-size="11" fill="#555">single：主线 benchN，dinfer vs vLLM 单卡（下方 pd / tp / dp / other 各一行，基线见各节）</text>
 <text x="48" y="46" font-size="14" font-weight="bold">out tok/s ÷ vLLM（越高越好；虚线 = 1.0）</text>
@@ -1027,248 +1027,220 @@
 <text x="913.7" y="1833.0" font-size="7.5" text-anchor="middle">c16_p1024_rep50_o128</text>
 <text x="48" y="1884" font-size="18" font-weight="bold">B300</text>
 <text x="128" y="1884" font-size="11" fill="#555">single：主线 benchN，dinfer vs vLLM 单卡（下方 pd / tp / dp / other 各一行，基线见各节）</text>
-<text x="48" y="1912" font-size="15" font-weight="bold">tp</text>
-<text x="88" y="1912" font-size="11" fill="#555">基线 = single（同卡 dinfer 单实例）或 vLLM 单卡（见 baseline 列）；变量 = dinfer --tp N（多卡张量并行）</text>
-<text x="34.0" y="1932" font-size="12" font-weight="bold">out tok/s（↑ 好）</text>
-<line x1="34.0" y1="2118.0" x2="292.6666666666667" y2="2118.0" stroke="#888"/>
-<rect x="40.5" y="2112.2" width="11.6" height="5.8" fill="#9a9a9a"/>
-<text x="46.3" y="2110.2" font-size="8" text-anchor="middle">646</text>
-<rect x="105.1" y="1989.2" width="11.6" height="128.8" fill="#9a9a9a"/>
-<text x="111.0" y="1987.2" font-size="8" text-anchor="middle">14392</text>
-<rect x="169.8" y="2087.3" width="11.6" height="30.7" fill="#9a9a9a"/>
-<text x="175.6" y="2085.3" font-size="8" text-anchor="middle">3432</text>
-<rect x="234.5" y="2076.4" width="11.6" height="41.6" fill="#9a9a9a"/>
-<text x="240.3" y="2074.4" font-size="8" text-anchor="middle">4643</text>
-<rect x="34.0" y="1938" width="8" height="8" fill="#9a9a9a"/>
-<text x="45.0" y="1946" font-size="9">single（基线）</text>
-<rect x="53.4" y="2113.6" width="11.6" height="4.4" fill="#1f77b4"/>
-<text x="59.2" y="2111.6" font-size="8" text-anchor="middle">496</text>
-<rect x="118.1" y="2014.9" width="11.6" height="103.1" fill="#1f77b4"/>
-<text x="123.9" y="2012.9" font-size="8" text-anchor="middle">11522</text>
-<rect x="182.7" y="2093.3" width="11.6" height="24.7" fill="#1f77b4"/>
-<text x="188.6" y="2091.3" font-size="8" text-anchor="middle">2761</text>
-<rect x="247.4" y="2087.3" width="11.6" height="30.7" fill="#1f77b4"/>
-<text x="253.2" y="2085.3" font-size="8" text-anchor="middle">3435</text>
-<rect x="104.0" y="1938" width="8" height="8" fill="#1f77b4"/>
-<text x="115.0" y="1946" font-size="9">tp2</text>
-<rect x="66.3" y="2114.0" width="11.6" height="4.0" fill="#ff7f0e"/>
-<text x="72.2" y="2112.0" font-size="8" text-anchor="middle">446</text>
-<rect x="131.0" y="2009.9" width="11.6" height="108.1" fill="#ff7f0e"/>
-<text x="136.8" y="2007.9" font-size="8" text-anchor="middle">12079</text>
-<rect x="195.7" y="2093.7" width="11.6" height="24.3" fill="#ff7f0e"/>
-<text x="201.5" y="2091.7" font-size="8" text-anchor="middle">2712</text>
-<rect x="260.3" y="2088.1" width="11.6" height="29.9" fill="#ff7f0e"/>
-<text x="266.2" y="2086.1" font-size="8" text-anchor="middle">3345</text>
-<rect x="174.0" y="1938" width="8" height="8" fill="#ff7f0e"/>
-<text x="185.0" y="1946" font-size="9">tp4</text>
-<rect x="79.3" y="2114.8" width="11.6" height="3.2" fill="#2ca02c"/>
-<text x="85.1" y="2112.8" font-size="8" text-anchor="middle">361</text>
-<rect x="143.9" y="2036.5" width="11.6" height="81.5" fill="#2ca02c"/>
-<text x="149.8" y="2034.5" font-size="8" text-anchor="middle">9105</text>
-<rect x="208.6" y="2097.5" width="11.6" height="20.5" fill="#2ca02c"/>
-<text x="214.4" y="2095.5" font-size="8" text-anchor="middle">2288</text>
-<rect x="273.3" y="2093.8" width="11.6" height="24.2" fill="#2ca02c"/>
-<text x="279.1" y="2091.8" font-size="8" text-anchor="middle">2706</text>
-<rect x="244.0" y="1938" width="8" height="8" fill="#2ca02c"/>
-<text x="255.0" y="1946" font-size="9">tp8</text>
-<text x="66.3" y="2128.0" font-size="7.5" text-anchor="middle">ab_tp_b300</text>
-<text x="66.3" y="2137.0" font-size="7.5" text-anchor="middle">c1</text>
-<text x="131.0" y="2128.0" font-size="7.5" text-anchor="middle">ab_tp_b300</text>
-<text x="131.0" y="2137.0" font-size="7.5" text-anchor="middle">c32</text>
-<text x="195.7" y="2128.0" font-size="7.5" text-anchor="middle">ab_tp_b300</text>
-<text x="195.7" y="2137.0" font-size="7.5" text-anchor="middle">c8-long</text>
-<text x="260.3" y="2128.0" font-size="7.5" text-anchor="middle">ab_tp_b300</text>
-<text x="260.3" y="2137.0" font-size="7.5" text-anchor="middle">c8</text>
-<text x="360.6666666666667" y="1932" font-size="12" font-weight="bold">TTFT p50 ms（↓ 好）</text>
-<line x1="360.6666666666667" y1="2118.0" x2="619.3333333333334" y2="2118.0" stroke="#888"/>
-<rect x="367.1" y="2098.9" width="11.6" height="19.1" fill="#9a9a9a"/>
-<text x="373.0" y="2096.9" font-size="8" text-anchor="middle">2</text>
-<rect x="431.8" y="2042.5" width="11.6" height="75.5" fill="#9a9a9a"/>
-<text x="437.6" y="2040.5" font-size="8" text-anchor="middle">9</text>
-<rect x="496.5" y="2019.0" width="11.6" height="99.0" fill="#9a9a9a"/>
-<text x="502.3" y="2017.0" font-size="8" text-anchor="middle">12</text>
-<rect x="561.1" y="2039.5" width="11.6" height="78.5" fill="#9a9a9a"/>
-<text x="567.0" y="2037.5" font-size="8" text-anchor="middle">10</text>
-<rect x="360.7" y="1938" width="8" height="8" fill="#9a9a9a"/>
-<text x="371.7" y="1946" font-size="9">single（基线）</text>
-<rect x="380.1" y="2091.1" width="11.6" height="26.9" fill="#1f77b4"/>
-<text x="385.9" y="2089.1" font-size="8" text-anchor="middle">3</text>
-<rect x="444.7" y="2014.0" width="11.6" height="104.0" fill="#1f77b4"/>
-<text x="450.6" y="2012.0" font-size="8" text-anchor="middle">13</text>
-<rect x="509.4" y="2000.2" width="11.6" height="117.8" fill="#1f77b4"/>
-<text x="515.2" y="1998.2" font-size="8" text-anchor="middle">15</text>
-<rect x="574.1" y="2041.7" width="11.6" height="76.3" fill="#1f77b4"/>
-<text x="579.9" y="2039.7" font-size="8" text-anchor="middle">10</text>
-<rect x="430.7" y="1938" width="8" height="8" fill="#1f77b4"/>
-<text x="441.7" y="1946" font-size="9">tp2</text>
-<rect x="393.0" y="2091.2" width="11.6" height="26.8" fill="#ff7f0e"/>
-<text x="398.8" y="2089.2" font-size="8" text-anchor="middle">3</text>
-<rect x="457.7" y="2025.3" width="11.6" height="92.7" fill="#ff7f0e"/>
-<text x="463.5" y="2023.3" font-size="8" text-anchor="middle">12</text>
-<rect x="522.3" y="2001.4" width="11.6" height="116.6" fill="#ff7f0e"/>
-<text x="528.2" y="1999.4" font-size="8" text-anchor="middle">15</text>
-<rect x="587.0" y="2043.2" width="11.6" height="74.8" fill="#ff7f0e"/>
-<text x="592.8" y="2041.2" font-size="8" text-anchor="middle">9</text>
-<rect x="500.7" y="1938" width="8" height="8" fill="#ff7f0e"/>
-<text x="511.7" y="1946" font-size="9">tp4</text>
-<rect x="405.9" y="2083.6" width="11.6" height="34.4" fill="#2ca02c"/>
-<text x="411.8" y="2081.6" font-size="8" text-anchor="middle">4</text>
-<rect x="470.6" y="1989.2" width="11.6" height="128.8" fill="#2ca02c"/>
-<text x="476.4" y="1987.2" font-size="8" text-anchor="middle">16</text>
-<rect x="535.3" y="1996.8" width="11.6" height="121.2" fill="#2ca02c"/>
-<text x="541.1" y="1994.8" font-size="8" text-anchor="middle">15</text>
-<rect x="599.9" y="2022.8" width="11.6" height="95.2" fill="#2ca02c"/>
-<text x="605.8" y="2020.8" font-size="8" text-anchor="middle">12</text>
-<rect x="570.7" y="1938" width="8" height="8" fill="#2ca02c"/>
-<text x="581.7" y="1946" font-size="9">tp8</text>
-<text x="393.0" y="2128.0" font-size="7.5" text-anchor="middle">ab_tp_b300</text>
-<text x="393.0" y="2137.0" font-size="7.5" text-anchor="middle">c1</text>
-<text x="457.7" y="2128.0" font-size="7.5" text-anchor="middle">ab_tp_b300</text>
-<text x="457.7" y="2137.0" font-size="7.5" text-anchor="middle">c32</text>
-<text x="522.3" y="2128.0" font-size="7.5" text-anchor="middle">ab_tp_b300</text>
-<text x="522.3" y="2137.0" font-size="7.5" text-anchor="middle">c8-long</text>
-<text x="587.0" y="2128.0" font-size="7.5" text-anchor="middle">ab_tp_b300</text>
-<text x="587.0" y="2137.0" font-size="7.5" text-anchor="middle">c8</text>
-<text x="687.3333333333334" y="1932" font-size="12" font-weight="bold">TPOT p50 ms（↓ 好）</text>
-<line x1="687.3333333333334" y1="2118.0" x2="946.0" y2="2118.0" stroke="#888"/>
-<rect x="693.8" y="2059.0" width="11.6" height="59.0" fill="#9a9a9a"/>
-<text x="699.6" y="2057.0" font-size="8" text-anchor="middle">1.54</text>
-<rect x="758.5" y="2037.1" width="11.6" height="80.9" fill="#9a9a9a"/>
-<text x="764.3" y="2035.1" font-size="8" text-anchor="middle">2.11</text>
-<rect x="823.1" y="2032.8" width="11.6" height="85.2" fill="#9a9a9a"/>
-<text x="829.0" y="2030.8" font-size="8" text-anchor="middle">2.23</text>
-<rect x="887.8" y="2054.9" width="11.6" height="63.1" fill="#9a9a9a"/>
-<text x="893.6" y="2052.9" font-size="8" text-anchor="middle">1.65</text>
-<rect x="687.3" y="1938" width="8" height="8" fill="#9a9a9a"/>
-<text x="698.3" y="1946" font-size="9">single（基线）</text>
-<rect x="706.7" y="2041.3" width="11.6" height="76.7" fill="#1f77b4"/>
-<text x="712.6" y="2039.3" font-size="8" text-anchor="middle">2.00</text>
-<rect x="771.4" y="2015.6" width="11.6" height="102.4" fill="#1f77b4"/>
-<text x="777.2" y="2013.6" font-size="8" text-anchor="middle">2.68</text>
-<rect x="836.1" y="2012.2" width="11.6" height="105.8" fill="#1f77b4"/>
-<text x="841.9" y="2010.2" font-size="8" text-anchor="middle">2.76</text>
-<rect x="900.7" y="2032.2" width="11.6" height="85.8" fill="#1f77b4"/>
-<text x="906.6" y="2030.2" font-size="8" text-anchor="middle">2.24</text>
-<rect x="757.3" y="1938" width="8" height="8" fill="#1f77b4"/>
-<text x="768.3" y="1946" font-size="9">tp2</text>
-<rect x="719.7" y="2032.5" width="11.6" height="85.5" fill="#ff7f0e"/>
-<text x="725.5" y="2030.5" font-size="8" text-anchor="middle">2.23</text>
-<rect x="784.3" y="2020.7" width="11.6" height="97.3" fill="#ff7f0e"/>
-<text x="790.2" y="2018.7" font-size="8" text-anchor="middle">2.54</text>
-<rect x="849.0" y="2009.9" width="11.6" height="108.1" fill="#ff7f0e"/>
-<text x="854.8" y="2007.9" font-size="8" text-anchor="middle">2.83</text>
-<rect x="913.7" y="2029.7" width="11.6" height="88.3" fill="#ff7f0e"/>
-<text x="919.5" y="2027.7" font-size="8" text-anchor="middle">2.31</text>
-<rect x="827.3" y="1938" width="8" height="8" fill="#ff7f0e"/>
-<text x="838.3" y="1946" font-size="9">tp4</text>
-<rect x="732.6" y="2012.7" width="11.6" height="105.3" fill="#2ca02c"/>
-<text x="738.4" y="2010.7" font-size="8" text-anchor="middle">2.75</text>
-<rect x="797.3" y="1991.8" width="11.6" height="126.2" fill="#2ca02c"/>
-<text x="803.1" y="1989.8" font-size="8" text-anchor="middle">3.30</text>
-<rect x="861.9" y="1989.2" width="11.6" height="128.8" fill="#2ca02c"/>
-<text x="867.8" y="1987.2" font-size="8" text-anchor="middle">3.37</text>
-<rect x="926.6" y="2009.6" width="11.6" height="108.4" fill="#2ca02c"/>
-<text x="932.4" y="2007.6" font-size="8" text-anchor="middle">2.83</text>
-<rect x="897.3" y="1938" width="8" height="8" fill="#2ca02c"/>
-<text x="908.3" y="1946" font-size="9">tp8</text>
-<text x="719.7" y="2128.0" font-size="7.5" text-anchor="middle">ab_tp_b300</text>
-<text x="719.7" y="2137.0" font-size="7.5" text-anchor="middle">c1</text>
-<text x="784.3" y="2128.0" font-size="7.5" text-anchor="middle">ab_tp_b300</text>
-<text x="784.3" y="2137.0" font-size="7.5" text-anchor="middle">c32</text>
-<text x="849.0" y="2128.0" font-size="7.5" text-anchor="middle">ab_tp_b300</text>
-<text x="849.0" y="2137.0" font-size="7.5" text-anchor="middle">c8-long</text>
-<text x="913.7" y="2128.0" font-size="7.5" text-anchor="middle">ab_tp_b300</text>
-<text x="913.7" y="2137.0" font-size="7.5" text-anchor="middle">c8</text>
-<text x="48" y="2172" font-size="15" font-weight="bold">other</text>
-<text x="88" y="2172" font-size="11" fill="#555">基线 = 每个目录字典序第一个 variant（见 baseline 列）</text>
-<text x="34.0" y="2192" font-size="12" font-weight="bold">out tok/s（↑ 好）</text>
-<line x1="34.0" y1="2378.0" x2="292.6666666666667" y2="2378.0" stroke="#888"/>
-<rect x="44.8" y="2371.1" width="19.4" height="6.9" fill="#9a9a9a"/>
-<text x="54.5" y="2369.1" font-size="8" text-anchor="middle">771</text>
-<rect x="109.4" y="2330.9" width="19.4" height="47.1" fill="#9a9a9a"/>
-<text x="119.1" y="2328.9" font-size="8" text-anchor="middle">5304</text>
-<rect x="174.1" y="2249.2" width="19.4" height="128.8" fill="#9a9a9a"/>
-<text x="183.8" y="2247.2" font-size="8" text-anchor="middle">14492</text>
-<rect x="238.8" y="2335.1" width="19.4" height="42.9" fill="#9a9a9a"/>
-<text x="248.5" y="2333.1" font-size="8" text-anchor="middle">4827</text>
-<rect x="34.0" y="2198" width="8" height="8" fill="#9a9a9a"/>
-<text x="45.0" y="2206" font-size="9">vllm（基线）</text>
-<rect x="66.3" y="2372.2" width="19.4" height="5.8" fill="#1f77b4"/>
-<text x="76.0" y="2370.2" font-size="8" text-anchor="middle">650</text>
-<rect x="131.0" y="2337.1" width="19.4" height="40.9" fill="#1f77b4"/>
-<text x="140.7" y="2335.1" font-size="8" text-anchor="middle">4600</text>
-<rect x="195.7" y="2250.0" width="19.4" height="128.0" fill="#1f77b4"/>
-<text x="205.4" y="2248.0" font-size="8" text-anchor="middle">14401</text>
-<rect x="260.3" y="2347.7" width="19.4" height="30.3" fill="#1f77b4"/>
-<text x="270.0" y="2345.7" font-size="8" text-anchor="middle">3406</text>
-<rect x="104.0" y="2198" width="8" height="8" fill="#1f77b4"/>
-<text x="115.0" y="2206" font-size="9">dinfer</text>
-<text x="66.3" y="2388.0" font-size="7.5" text-anchor="middle">bench_b300_1</text>
-<text x="66.3" y="2397.0" font-size="7.5" text-anchor="middle">c1</text>
-<text x="131.0" y="2388.0" font-size="7.5" text-anchor="middle">bench_b300_1</text>
-<text x="131.0" y="2397.0" font-size="7.5" text-anchor="middle">c8</text>
-<text x="195.7" y="2388.0" font-size="7.5" text-anchor="middle">bench_b300_1</text>
-<text x="195.7" y="2397.0" font-size="7.5" text-anchor="middle">c32</text>
-<text x="260.3" y="2388.0" font-size="7.5" text-anchor="middle">bench_b300_1</text>
-<text x="260.3" y="2397.0" font-size="7.5" text-anchor="middle">c8-long</text>
-<text x="360.6666666666667" y="2192" font-size="12" font-weight="bold">TTFT p50 ms（↓ 好）</text>
-<line x1="360.6666666666667" y1="2378.0" x2="619.3333333333334" y2="2378.0" stroke="#888"/>
-<rect x="371.4" y="2346.8" width="19.4" height="31.2" fill="#9a9a9a"/>
-<text x="381.1" y="2344.8" font-size="8" text-anchor="middle">12</text>
-<rect x="436.1" y="2304.5" width="19.4" height="73.5" fill="#9a9a9a"/>
-<text x="445.8" y="2302.5" font-size="8" text-anchor="middle">27</text>
-<rect x="500.8" y="2249.2" width="19.4" height="128.8" fill="#9a9a9a"/>
-<text x="510.5" y="2247.2" font-size="8" text-anchor="middle">48</text>
-<rect x="565.4" y="2275.6" width="19.4" height="102.4" fill="#9a9a9a"/>
-<text x="575.1" y="2273.6" font-size="8" text-anchor="middle">38</text>
-<rect x="360.7" y="2198" width="8" height="8" fill="#9a9a9a"/>
-<text x="371.7" y="2206" font-size="9">vllm（基线）</text>
-<rect x="393.0" y="2371.6" width="19.4" height="6.4" fill="#1f77b4"/>
-<text x="402.7" y="2369.6" font-size="8" text-anchor="middle">2</text>
-<rect x="457.7" y="2347.6" width="19.4" height="30.4" fill="#1f77b4"/>
-<text x="467.4" y="2345.6" font-size="8" text-anchor="middle">11</text>
-<rect x="522.3" y="2347.2" width="19.4" height="30.8" fill="#1f77b4"/>
-<text x="532.0" y="2345.2" font-size="8" text-anchor="middle">11</text>
-<rect x="587.0" y="2341.0" width="19.4" height="37.0" fill="#1f77b4"/>
-<text x="596.7" y="2339.0" font-size="8" text-anchor="middle">14</text>
-<rect x="430.7" y="2198" width="8" height="8" fill="#1f77b4"/>
-<text x="441.7" y="2206" font-size="9">dinfer</text>
-<text x="393.0" y="2388.0" font-size="7.5" text-anchor="middle">bench_b300_1</text>
-<text x="393.0" y="2397.0" font-size="7.5" text-anchor="middle">c1</text>
-<text x="457.7" y="2388.0" font-size="7.5" text-anchor="middle">bench_b300_1</text>
-<text x="457.7" y="2397.0" font-size="7.5" text-anchor="middle">c8</text>
-<text x="522.3" y="2388.0" font-size="7.5" text-anchor="middle">bench_b300_1</text>
-<text x="522.3" y="2397.0" font-size="7.5" text-anchor="middle">c32</text>
-<text x="587.0" y="2388.0" font-size="7.5" text-anchor="middle">bench_b300_1</text>
-<text x="587.0" y="2397.0" font-size="7.5" text-anchor="middle">c8-long</text>
-<text x="687.3333333333334" y="2192" font-size="12" font-weight="bold">TPOT p50 ms（↓ 好）</text>
-<line x1="687.3333333333334" y1="2378.0" x2="946.0" y2="2378.0" stroke="#888"/>
-<rect x="698.1" y="2307.9" width="19.4" height="70.1" fill="#9a9a9a"/>
-<text x="707.8" y="2305.9" font-size="8" text-anchor="middle">1.22</text>
-<rect x="762.8" y="2301.4" width="19.4" height="76.6" fill="#9a9a9a"/>
-<text x="772.5" y="2299.4" font-size="8" text-anchor="middle">1.33</text>
-<rect x="827.4" y="2272.9" width="19.4" height="105.1" fill="#9a9a9a"/>
-<text x="837.1" y="2270.9" font-size="8" text-anchor="middle">1.82</text>
-<rect x="892.1" y="2298.5" width="19.4" height="79.5" fill="#9a9a9a"/>
-<text x="901.8" y="2296.5" font-size="8" text-anchor="middle">1.38</text>
-<rect x="687.3" y="2198" width="8" height="8" fill="#9a9a9a"/>
-<text x="698.3" y="2206" font-size="9">vllm（基线）</text>
-<rect x="719.7" y="2289.7" width="19.4" height="88.3" fill="#1f77b4"/>
-<text x="729.4" y="2287.7" font-size="8" text-anchor="middle">1.53</text>
-<rect x="784.3" y="2282.7" width="19.4" height="95.3" fill="#1f77b4"/>
-<text x="794.0" y="2280.7" font-size="8" text-anchor="middle">1.65</text>
-<rect x="849.0" y="2255.1" width="19.4" height="122.9" fill="#1f77b4"/>
-<text x="858.7" y="2253.1" font-size="8" text-anchor="middle">2.13</text>
-<rect x="913.7" y="2249.2" width="19.4" height="128.8" fill="#1f77b4"/>
-<text x="923.4" y="2247.2" font-size="8" text-anchor="middle">2.23</text>
-<rect x="757.3" y="2198" width="8" height="8" fill="#1f77b4"/>
-<text x="768.3" y="2206" font-size="9">dinfer</text>
-<text x="719.7" y="2388.0" font-size="7.5" text-anchor="middle">bench_b300_1</text>
-<text x="719.7" y="2397.0" font-size="7.5" text-anchor="middle">c1</text>
-<text x="784.3" y="2388.0" font-size="7.5" text-anchor="middle">bench_b300_1</text>
-<text x="784.3" y="2397.0" font-size="7.5" text-anchor="middle">c8</text>
-<text x="849.0" y="2388.0" font-size="7.5" text-anchor="middle">bench_b300_1</text>
-<text x="849.0" y="2397.0" font-size="7.5" text-anchor="middle">c32</text>
-<text x="913.7" y="2388.0" font-size="7.5" text-anchor="middle">bench_b300_1</text>
-<text x="913.7" y="2397.0" font-size="7.5" text-anchor="middle">c8-long</text>
+<text x="48" y="1910" font-size="14" font-weight="bold">out tok/s ÷ vLLM（越高越好；虚线 = 1.0）</text>
+<line x1="48" y1="2104.0" x2="932" y2="2104.0" stroke="#888"/>
+<line x1="48" y1="1940" x2="48" y2="2104.0" stroke="#888"/>
+<text x="42" y="1944" font-size="10" text-anchor="end">1.09</text>
+<text x="42" y="2108.0" font-size="10" text-anchor="end">0</text>
+<line x1="48" y1="1953.9664746582225" x2="932" y2="1953.9664746582225" stroke="#444" stroke-dasharray="4 3"/>
+<text x="936" y="1957.9664746582225" font-size="10">vLLM = 1.0</text>
+<polyline points="48.0,1977.5" fill="none" stroke="#1f77b4" stroke-width="2"/>
+<circle cx="48.0" cy="1977.5" r="3" fill="#1f77b4"/>
+<text x="936" y="1981.5435240204379" font-size="10" fill="#1f77b4">c1</text>
+<polyline points="48.0,1973.9" fill="none" stroke="#ff7f0e" stroke-width="2"/>
+<circle cx="48.0" cy="1973.9" r="3" fill="#ff7f0e"/>
+<text x="936" y="1977.8823557681878" font-size="10" fill="#ff7f0e">c8</text>
+<polyline points="48.0,1954.9" fill="none" stroke="#2ca02c" stroke-width="2"/>
+<circle cx="48.0" cy="1954.9" r="3" fill="#2ca02c"/>
+<text x="936" y="1958.909090909091" font-size="10" fill="#2ca02c">c32</text>
+<polyline points="48.0,1998.1" fill="none" stroke="#d62728" stroke-width="2"/>
+<circle cx="48.0" cy="1998.1" r="3" fill="#d62728"/>
+<text x="936" y="2002.123394406692" font-size="10" fill="#d62728">c8-long</text>
+<text x="48.0" y="2118.0" font-size="9" text-anchor="middle">bench_b300_1</text>
+<text x="48" y="2170" font-size="14" font-weight="bold">TTFT p50 ms（实线 dinfer，虚线 vLLM；越低越好）</text>
+<line x1="48" y1="2364.0" x2="932" y2="2364.0" stroke="#888"/>
+<line x1="48" y1="2200" x2="48" y2="2364.0" stroke="#888"/>
+<text x="42" y="2204" font-size="10" text-anchor="end">52.60</text>
+<text x="42" y="2368.0" font-size="10" text-anchor="end">0</text>
+<polyline points="48.0,2356.6" fill="none" stroke="#1f77b4" stroke-width="2"/>
+<circle cx="48.0" cy="2356.6" r="3" fill="#1f77b4"/>
+<polyline points="48.0,2327.9" fill="none" stroke="#1f77b4" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<text x="936" y="2360.595375250443" font-size="10" fill="#1f77b4">c1</text>
+<polyline points="48.0,2328.8" fill="none" stroke="#ff7f0e" stroke-width="2"/>
+<circle cx="48.0" cy="2328.8" r="3" fill="#ff7f0e"/>
+<polyline points="48.0,2279.0" fill="none" stroke="#ff7f0e" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<text x="936" y="2332.7627999996857" font-size="10" fill="#ff7f0e">c8</text>
+<polyline points="48.0,2328.4" fill="none" stroke="#2ca02c" stroke-width="2"/>
+<circle cx="48.0" cy="2328.4" r="3" fill="#2ca02c"/>
+<polyline points="48.0,2214.9" fill="none" stroke="#2ca02c" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<text x="936" y="2332.397535749902" font-size="10" fill="#2ca02c">c32</text>
+<polyline points="48.0,2321.1" fill="none" stroke="#d62728" stroke-width="2"/>
+<circle cx="48.0" cy="2321.1" r="3" fill="#d62728"/>
+<polyline points="48.0,2245.4" fill="none" stroke="#d62728" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<text x="936" y="2325.142834150345" font-size="10" fill="#d62728">c8-long</text>
+<text x="48.0" y="2378.0" font-size="9" text-anchor="middle">bench_b300_1</text>
+<text x="48" y="2430" font-size="14" font-weight="bold">TPOT p50 ms（实线 dinfer，虚线 vLLM；越低越好）</text>
+<line x1="48" y1="2624.0" x2="932" y2="2624.0" stroke="#888"/>
+<line x1="48" y1="2460" x2="48" y2="2624.0" stroke="#888"/>
+<text x="42" y="2464" font-size="10" text-anchor="end">2.46</text>
+<text x="42" y="2628.0" font-size="10" text-anchor="end">0</text>
+<polyline points="48.0,2521.8" fill="none" stroke="#1f77b4" stroke-width="2"/>
+<circle cx="48.0" cy="2521.8" r="3" fill="#1f77b4"/>
+<polyline points="48.0,2542.9" fill="none" stroke="#1f77b4" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<text x="936" y="2525.788510696368" font-size="10" fill="#1f77b4">c1</text>
+<polyline points="48.0,2513.8" fill="none" stroke="#ff7f0e" stroke-width="2"/>
+<circle cx="48.0" cy="2513.8" r="3" fill="#ff7f0e"/>
+<polyline points="48.0,2535.3" fill="none" stroke="#ff7f0e" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<text x="936" y="2517.751421382768" font-size="10" fill="#ff7f0e">c8</text>
+<polyline points="48.0,2481.7" fill="none" stroke="#2ca02c" stroke-width="2"/>
+<circle cx="48.0" cy="2481.7" r="3" fill="#2ca02c"/>
+<polyline points="48.0,2502.4" fill="none" stroke="#2ca02c" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<text x="936" y="2485.720864554372" font-size="10" fill="#2ca02c">c32</text>
+<polyline points="48.0,2474.9" fill="none" stroke="#d62728" stroke-width="2"/>
+<circle cx="48.0" cy="2474.9" r="3" fill="#d62728"/>
+<polyline points="48.0,2532.0" fill="none" stroke="#d62728" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<text x="936" y="2478.909090909091" font-size="10" fill="#d62728">c8-long</text>
+<text x="48.0" y="2638.0" font-size="9" text-anchor="middle">bench_b300_1</text>
+<text x="48" y="2692" font-size="15" font-weight="bold">tp</text>
+<text x="88" y="2692" font-size="11" fill="#555">基线 = single（同卡 dinfer 单实例）或 vLLM 单卡（见 baseline 列）；变量 = dinfer --tp N（多卡张量并行）</text>
+<text x="34.0" y="2712" font-size="12" font-weight="bold">out tok/s（↑ 好）</text>
+<line x1="34.0" y1="2898.0" x2="292.6666666666667" y2="2898.0" stroke="#888"/>
+<rect x="40.5" y="2892.2" width="11.6" height="5.8" fill="#9a9a9a"/>
+<text x="46.3" y="2890.2" font-size="8" text-anchor="middle">646</text>
+<rect x="105.1" y="2769.2" width="11.6" height="128.8" fill="#9a9a9a"/>
+<text x="111.0" y="2767.2" font-size="8" text-anchor="middle">14392</text>
+<rect x="169.8" y="2867.3" width="11.6" height="30.7" fill="#9a9a9a"/>
+<text x="175.6" y="2865.3" font-size="8" text-anchor="middle">3432</text>
+<rect x="234.5" y="2856.4" width="11.6" height="41.6" fill="#9a9a9a"/>
+<text x="240.3" y="2854.4" font-size="8" text-anchor="middle">4643</text>
+<rect x="34.0" y="2718" width="8" height="8" fill="#9a9a9a"/>
+<text x="45.0" y="2726" font-size="9">single（基线）</text>
+<rect x="53.4" y="2893.6" width="11.6" height="4.4" fill="#1f77b4"/>
+<text x="59.2" y="2891.6" font-size="8" text-anchor="middle">496</text>
+<rect x="118.1" y="2794.9" width="11.6" height="103.1" fill="#1f77b4"/>
+<text x="123.9" y="2792.9" font-size="8" text-anchor="middle">11522</text>
+<rect x="182.7" y="2873.3" width="11.6" height="24.7" fill="#1f77b4"/>
+<text x="188.6" y="2871.3" font-size="8" text-anchor="middle">2761</text>
+<rect x="247.4" y="2867.3" width="11.6" height="30.7" fill="#1f77b4"/>
+<text x="253.2" y="2865.3" font-size="8" text-anchor="middle">3435</text>
+<rect x="104.0" y="2718" width="8" height="8" fill="#1f77b4"/>
+<text x="115.0" y="2726" font-size="9">tp2</text>
+<rect x="66.3" y="2894.0" width="11.6" height="4.0" fill="#ff7f0e"/>
+<text x="72.2" y="2892.0" font-size="8" text-anchor="middle">446</text>
+<rect x="131.0" y="2789.9" width="11.6" height="108.1" fill="#ff7f0e"/>
+<text x="136.8" y="2787.9" font-size="8" text-anchor="middle">12079</text>
+<rect x="195.7" y="2873.7" width="11.6" height="24.3" fill="#ff7f0e"/>
+<text x="201.5" y="2871.7" font-size="8" text-anchor="middle">2712</text>
+<rect x="260.3" y="2868.1" width="11.6" height="29.9" fill="#ff7f0e"/>
+<text x="266.2" y="2866.1" font-size="8" text-anchor="middle">3345</text>
+<rect x="174.0" y="2718" width="8" height="8" fill="#ff7f0e"/>
+<text x="185.0" y="2726" font-size="9">tp4</text>
+<rect x="79.3" y="2894.8" width="11.6" height="3.2" fill="#2ca02c"/>
+<text x="85.1" y="2892.8" font-size="8" text-anchor="middle">361</text>
+<rect x="143.9" y="2816.5" width="11.6" height="81.5" fill="#2ca02c"/>
+<text x="149.8" y="2814.5" font-size="8" text-anchor="middle">9105</text>
+<rect x="208.6" y="2877.5" width="11.6" height="20.5" fill="#2ca02c"/>
+<text x="214.4" y="2875.5" font-size="8" text-anchor="middle">2288</text>
+<rect x="273.3" y="2873.8" width="11.6" height="24.2" fill="#2ca02c"/>
+<text x="279.1" y="2871.8" font-size="8" text-anchor="middle">2706</text>
+<rect x="244.0" y="2718" width="8" height="8" fill="#2ca02c"/>
+<text x="255.0" y="2726" font-size="9">tp8</text>
+<text x="66.3" y="2908.0" font-size="7.5" text-anchor="middle">ab_tp_b300</text>
+<text x="66.3" y="2917.0" font-size="7.5" text-anchor="middle">c1</text>
+<text x="131.0" y="2908.0" font-size="7.5" text-anchor="middle">ab_tp_b300</text>
+<text x="131.0" y="2917.0" font-size="7.5" text-anchor="middle">c32</text>
+<text x="195.7" y="2908.0" font-size="7.5" text-anchor="middle">ab_tp_b300</text>
+<text x="195.7" y="2917.0" font-size="7.5" text-anchor="middle">c8-long</text>
+<text x="260.3" y="2908.0" font-size="7.5" text-anchor="middle">ab_tp_b300</text>
+<text x="260.3" y="2917.0" font-size="7.5" text-anchor="middle">c8</text>
+<text x="360.6666666666667" y="2712" font-size="12" font-weight="bold">TTFT p50 ms（↓ 好）</text>
+<line x1="360.6666666666667" y1="2898.0" x2="619.3333333333334" y2="2898.0" stroke="#888"/>
+<rect x="367.1" y="2878.9" width="11.6" height="19.1" fill="#9a9a9a"/>
+<text x="373.0" y="2876.9" font-size="8" text-anchor="middle">2</text>
+<rect x="431.8" y="2822.5" width="11.6" height="75.5" fill="#9a9a9a"/>
+<text x="437.6" y="2820.5" font-size="8" text-anchor="middle">9</text>
+<rect x="496.5" y="2799.0" width="11.6" height="99.0" fill="#9a9a9a"/>
+<text x="502.3" y="2797.0" font-size="8" text-anchor="middle">12</text>
+<rect x="561.1" y="2819.5" width="11.6" height="78.5" fill="#9a9a9a"/>
+<text x="567.0" y="2817.5" font-size="8" text-anchor="middle">10</text>
+<rect x="360.7" y="2718" width="8" height="8" fill="#9a9a9a"/>
+<text x="371.7" y="2726" font-size="9">single（基线）</text>
+<rect x="380.1" y="2871.1" width="11.6" height="26.9" fill="#1f77b4"/>
+<text x="385.9" y="2869.1" font-size="8" text-anchor="middle">3</text>
+<rect x="444.7" y="2794.0" width="11.6" height="104.0" fill="#1f77b4"/>
+<text x="450.6" y="2792.0" font-size="8" text-anchor="middle">13</text>
+<rect x="509.4" y="2780.2" width="11.6" height="117.8" fill="#1f77b4"/>
+<text x="515.2" y="2778.2" font-size="8" text-anchor="middle">15</text>
+<rect x="574.1" y="2821.7" width="11.6" height="76.3" fill="#1f77b4"/>
+<text x="579.9" y="2819.7" font-size="8" text-anchor="middle">10</text>
+<rect x="430.7" y="2718" width="8" height="8" fill="#1f77b4"/>
+<text x="441.7" y="2726" font-size="9">tp2</text>
+<rect x="393.0" y="2871.2" width="11.6" height="26.8" fill="#ff7f0e"/>
+<text x="398.8" y="2869.2" font-size="8" text-anchor="middle">3</text>
+<rect x="457.7" y="2805.3" width="11.6" height="92.7" fill="#ff7f0e"/>
+<text x="463.5" y="2803.3" font-size="8" text-anchor="middle">12</text>
+<rect x="522.3" y="2781.4" width="11.6" height="116.6" fill="#ff7f0e"/>
+<text x="528.2" y="2779.4" font-size="8" text-anchor="middle">15</text>
+<rect x="587.0" y="2823.2" width="11.6" height="74.8" fill="#ff7f0e"/>
+<text x="592.8" y="2821.2" font-size="8" text-anchor="middle">9</text>
+<rect x="500.7" y="2718" width="8" height="8" fill="#ff7f0e"/>
+<text x="511.7" y="2726" font-size="9">tp4</text>
+<rect x="405.9" y="2863.6" width="11.6" height="34.4" fill="#2ca02c"/>
+<text x="411.8" y="2861.6" font-size="8" text-anchor="middle">4</text>
+<rect x="470.6" y="2769.2" width="11.6" height="128.8" fill="#2ca02c"/>
+<text x="476.4" y="2767.2" font-size="8" text-anchor="middle">16</text>
+<rect x="535.3" y="2776.8" width="11.6" height="121.2" fill="#2ca02c"/>
+<text x="541.1" y="2774.8" font-size="8" text-anchor="middle">15</text>
+<rect x="599.9" y="2802.8" width="11.6" height="95.2" fill="#2ca02c"/>
+<text x="605.8" y="2800.8" font-size="8" text-anchor="middle">12</text>
+<rect x="570.7" y="2718" width="8" height="8" fill="#2ca02c"/>
+<text x="581.7" y="2726" font-size="9">tp8</text>
+<text x="393.0" y="2908.0" font-size="7.5" text-anchor="middle">ab_tp_b300</text>
+<text x="393.0" y="2917.0" font-size="7.5" text-anchor="middle">c1</text>
+<text x="457.7" y="2908.0" font-size="7.5" text-anchor="middle">ab_tp_b300</text>
+<text x="457.7" y="2917.0" font-size="7.5" text-anchor="middle">c32</text>
+<text x="522.3" y="2908.0" font-size="7.5" text-anchor="middle">ab_tp_b300</text>
+<text x="522.3" y="2917.0" font-size="7.5" text-anchor="middle">c8-long</text>
+<text x="587.0" y="2908.0" font-size="7.5" text-anchor="middle">ab_tp_b300</text>
+<text x="587.0" y="2917.0" font-size="7.5" text-anchor="middle">c8</text>
+<text x="687.3333333333334" y="2712" font-size="12" font-weight="bold">TPOT p50 ms（↓ 好）</text>
+<line x1="687.3333333333334" y1="2898.0" x2="946.0" y2="2898.0" stroke="#888"/>
+<rect x="693.8" y="2839.0" width="11.6" height="59.0" fill="#9a9a9a"/>
+<text x="699.6" y="2837.0" font-size="8" text-anchor="middle">1.54</text>
+<rect x="758.5" y="2817.1" width="11.6" height="80.9" fill="#9a9a9a"/>
+<text x="764.3" y="2815.1" font-size="8" text-anchor="middle">2.11</text>
+<rect x="823.1" y="2812.8" width="11.6" height="85.2" fill="#9a9a9a"/>
+<text x="829.0" y="2810.8" font-size="8" text-anchor="middle">2.23</text>
+<rect x="887.8" y="2834.9" width="11.6" height="63.1" fill="#9a9a9a"/>
+<text x="893.6" y="2832.9" font-size="8" text-anchor="middle">1.65</text>
+<rect x="687.3" y="2718" width="8" height="8" fill="#9a9a9a"/>
+<text x="698.3" y="2726" font-size="9">single（基线）</text>
+<rect x="706.7" y="2821.3" width="11.6" height="76.7" fill="#1f77b4"/>
+<text x="712.6" y="2819.3" font-size="8" text-anchor="middle">2.00</text>
+<rect x="771.4" y="2795.6" width="11.6" height="102.4" fill="#1f77b4"/>
+<text x="777.2" y="2793.6" font-size="8" text-anchor="middle">2.68</text>
+<rect x="836.1" y="2792.2" width="11.6" height="105.8" fill="#1f77b4"/>
+<text x="841.9" y="2790.2" font-size="8" text-anchor="middle">2.76</text>
+<rect x="900.7" y="2812.2" width="11.6" height="85.8" fill="#1f77b4"/>
+<text x="906.6" y="2810.2" font-size="8" text-anchor="middle">2.24</text>
+<rect x="757.3" y="2718" width="8" height="8" fill="#1f77b4"/>
+<text x="768.3" y="2726" font-size="9">tp2</text>
+<rect x="719.7" y="2812.5" width="11.6" height="85.5" fill="#ff7f0e"/>
+<text x="725.5" y="2810.5" font-size="8" text-anchor="middle">2.23</text>
+<rect x="784.3" y="2800.7" width="11.6" height="97.3" fill="#ff7f0e"/>
+<text x="790.2" y="2798.7" font-size="8" text-anchor="middle">2.54</text>
+<rect x="849.0" y="2789.9" width="11.6" height="108.1" fill="#ff7f0e"/>
+<text x="854.8" y="2787.9" font-size="8" text-anchor="middle">2.83</text>
+<rect x="913.7" y="2809.7" width="11.6" height="88.3" fill="#ff7f0e"/>
+<text x="919.5" y="2807.7" font-size="8" text-anchor="middle">2.31</text>
+<rect x="827.3" y="2718" width="8" height="8" fill="#ff7f0e"/>
+<text x="838.3" y="2726" font-size="9">tp4</text>
+<rect x="732.6" y="2792.7" width="11.6" height="105.3" fill="#2ca02c"/>
+<text x="738.4" y="2790.7" font-size="8" text-anchor="middle">2.75</text>
+<rect x="797.3" y="2771.8" width="11.6" height="126.2" fill="#2ca02c"/>
+<text x="803.1" y="2769.8" font-size="8" text-anchor="middle">3.30</text>
+<rect x="861.9" y="2769.2" width="11.6" height="128.8" fill="#2ca02c"/>
+<text x="867.8" y="2767.2" font-size="8" text-anchor="middle">3.37</text>
+<rect x="926.6" y="2789.6" width="11.6" height="108.4" fill="#2ca02c"/>
+<text x="932.4" y="2787.6" font-size="8" text-anchor="middle">2.83</text>
+<rect x="897.3" y="2718" width="8" height="8" fill="#2ca02c"/>
+<text x="908.3" y="2726" font-size="9">tp8</text>
+<text x="719.7" y="2908.0" font-size="7.5" text-anchor="middle">ab_tp_b300</text>
+<text x="719.7" y="2917.0" font-size="7.5" text-anchor="middle">c1</text>
+<text x="784.3" y="2908.0" font-size="7.5" text-anchor="middle">ab_tp_b300</text>
+<text x="784.3" y="2917.0" font-size="7.5" text-anchor="middle">c32</text>
+<text x="849.0" y="2908.0" font-size="7.5" text-anchor="middle">ab_tp_b300</text>
+<text x="849.0" y="2917.0" font-size="7.5" text-anchor="middle">c8-long</text>
+<text x="913.7" y="2908.0" font-size="7.5" text-anchor="middle">ab_tp_b300</text>
+<text x="913.7" y="2917.0" font-size="7.5" text-anchor="middle">c8</text>
 </svg>

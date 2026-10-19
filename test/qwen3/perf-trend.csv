@@ -359,6 +359,18 @@ bench32,2026-10-18,HostTierPolicy 抽出 core（tier 默认关，预期零差异
 bench32,2026-10-18,HostTierPolicy 抽出 core（tier 默认关，预期零差异）,c8-long,out_tok_per_s,1909.637,1898.974,1.006,-0.4,higher,main,4090,vllm,dinfer
 bench32,2026-10-18,HostTierPolicy 抽出 core（tier 默认关，预期零差异）,c8-long,ttft_p50_ms,34.747,67.675,0.513,12.1,lower,main,4090,vllm,dinfer
 bench32,2026-10-18,HostTierPolicy 抽出 core（tier 默认关，预期零差异）,c8-long,tpot_p50_ms,3.925,3.754,1.046,-1.5,lower,main,4090,vllm,dinfer
+bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c1,out_tok_per_s,650.259,771.496,0.843,,higher,main,B300,vllm,dinfer
+bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c1,ttft_p50_ms,2.375,11.588,0.205,,lower,main,B300,vllm,dinfer
+bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c1,tpot_p50_ms,1.532,1.215,1.260,,lower,main,B300,vllm,dinfer
+bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c8,out_tok_per_s,4600.276,5304.397,0.867,,higher,main,B300,vllm,dinfer
+bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c8,ttft_p50_ms,11.302,27.278,0.414,,lower,main,B300,vllm,dinfer
+bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c8,tpot_p50_ms,1.652,1.329,1.244,,lower,main,B300,vllm,dinfer
+bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c32,out_tok_per_s,14400.953,14492.002,0.994,,higher,main,B300,vllm,dinfer
+bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c32,ttft_p50_ms,11.419,47.819,0.239,,lower,main,B300,vllm,dinfer
+bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c32,tpot_p50_ms,2.132,1.823,1.170,,lower,main,B300,vllm,dinfer
+bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c8-long,out_tok_per_s,3406.002,4826.510,0.706,,higher,main,B300,vllm,dinfer
+bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c8-long,ttft_p50_ms,13.746,38.032,0.361,,lower,main,B300,vllm,dinfer
+bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c8-long,tpot_p50_ms,2.234,1.379,1.620,,lower,main,B300,vllm,dinfer
 bench_dp2,2026-10-18,"Q5 T2: --dp 2 (GPU 5,6, 同进程 DpBackend 按在飞数路由) vs vLLM 单卡",c1,out_tok_per_s,514.126,446.685,1.151,,higher,dp,4090,vllm,dinfer
 bench_dp2,2026-10-18,"Q5 T2: --dp 2 (GPU 5,6, 同进程 DpBackend 按在飞数路由) vs vLLM 单卡",c1,ttft_p50_ms,3.915,17.055,0.230,,lower,dp,4090,vllm,dinfer
 bench_dp2,2026-10-18,"Q5 T2: --dp 2 (GPU 5,6, 同进程 DpBackend 按在飞数路由) vs vLLM 单卡",c1,ttft_p99_ms,4.417,19.234,0.230,,lower,dp,4090,vllm,dinfer
@@ -399,26 +411,6 @@ bench_tp2,2026-10-18,"Q5 T1: --tp 2 (GPU 5,6, 无 P2P → NCCL SHM, 每层 2 all
 bench_tp2,2026-10-18,"Q5 T1: --tp 2 (GPU 5,6, 无 P2P → NCCL SHM, 每层 2 all-reduce) vs vLLM 单卡",c8-long,ttft_p99_ms,371.063,96.201,3.857,,lower,tp,4090,vllm,dinfer
 bench_tp2,2026-10-18,"Q5 T1: --tp 2 (GPU 5,6, 无 P2P → NCCL SHM, 每层 2 all-reduce) vs vLLM 单卡",c8-long,tpot_p50_ms,4.338,3.753,1.156,,lower,tp,4090,vllm,dinfer
 bench_tp2,2026-10-18,"Q5 T1: --tp 2 (GPU 5,6, 无 P2P → NCCL SHM, 每层 2 all-reduce) vs vLLM 单卡",c8-long,failed,0.000,0.000,,,lower,tp,4090,vllm,dinfer
-bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c1,out_tok_per_s,650.259,771.496,0.843,,higher,other,B300,vllm,dinfer
-bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c1,ttft_p50_ms,2.375,11.588,0.205,,lower,other,B300,vllm,dinfer
-bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c1,ttft_p99_ms,2.509,12.594,0.199,,lower,other,B300,vllm,dinfer
-bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c1,tpot_p50_ms,1.532,1.215,1.260,,lower,other,B300,vllm,dinfer
-bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c1,failed,0.000,0.000,,,lower,other,B300,vllm,dinfer
-bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c8,out_tok_per_s,4600.276,5304.397,0.867,,higher,other,B300,vllm,dinfer
-bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c8,ttft_p50_ms,11.302,27.278,0.414,,lower,other,B300,vllm,dinfer
-bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c8,ttft_p99_ms,13.675,30.685,0.446,,lower,other,B300,vllm,dinfer
-bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c8,tpot_p50_ms,1.652,1.329,1.244,,lower,other,B300,vllm,dinfer
-bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c8,failed,0.000,0.000,,,lower,other,B300,vllm,dinfer
-bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c32,out_tok_per_s,14400.953,14492.002,0.994,,higher,other,B300,vllm,dinfer
-bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c32,ttft_p50_ms,11.419,47.819,0.239,,lower,other,B300,vllm,dinfer
-bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c32,ttft_p99_ms,24.540,83.729,0.293,,lower,other,B300,vllm,dinfer
-bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c32,tpot_p50_ms,2.132,1.823,1.170,,lower,other,B300,vllm,dinfer
-bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c32,failed,0.000,0.000,,,lower,other,B300,vllm,dinfer
-bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c8-long,out_tok_per_s,3406.002,4826.510,0.706,,higher,other,B300,vllm,dinfer
-bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c8-long,ttft_p50_ms,13.746,38.032,0.361,,lower,other,B300,vllm,dinfer
-bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c8-long,ttft_p99_ms,38.197,41.484,0.921,,lower,other,B300,vllm,dinfer
-bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c8-long,tpot_p50_ms,2.234,1.379,1.620,,lower,other,B300,vllm,dinfer
-bench_b300_1,2026-10-19,B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7）,c8-long,failed,0.000,0.000,,,lower,other,B300,vllm,dinfer
 poisson1,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r8,out_tok_per_s,1065.027,1066.343,0.999,,higher,other,4090,vllm,dinfer_xs1
 poisson1,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r8,ttft_p50_ms,15.182,22.622,0.671,,lower,other,4090,vllm,dinfer_xs1
 poisson1,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r8,ttft_p99_ms,38.981,49.074,0.794,,lower,other,4090,vllm,dinfer_xs1

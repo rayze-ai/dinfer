@@ -131,7 +131,20 @@
 
 ## single
 
-（本卡暂无主线 benchN 轮次）
+基线 = vLLM v0.31.0 单卡（同机同配置）。
+
+| 轮 | 日期 | 改动 | c1 tok/s (×vLLM) | c8 tok/s (×vLLM) | c32 tok/s (×vLLM) | c8-long tok/s (×vLLM) | c1 TTFT ms | c8 TTFT ms | c32 TTFT ms | c8-long TTFT ms | c1 TPOT ms | c8 TPOT ms | c32 TPOT ms | c8-long TPOT ms |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| bench_b300_1 | 2026-10-19 | B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7） | 650 (0.84×) | 4600 (0.87×) | 14401 (0.99×) | 3406 (0.71×) | 2.4 / 11.6 | 11.3 / 27.3 | 11.4 / 47.8 | 13.7 / 38.0 | 1.53 / 1.22 | 1.65 / 1.33 | 2.13 / 1.82 | 2.23 / 1.38 |
+
+### 首轮 → 最新
+
+| 组 | out tok/s | ×vLLM | TTFT ms | TPOT ms |
+|---|---|---|---|---|
+| c1 | 650 → 650 (+0%) | 0.84 → 0.84 | 2.4 → 2.4 (+0%) | 1.53 → 1.53 (+0%) |
+| c8 | 4600 → 4600 (+0%) | 0.87 → 0.87 | 11.3 → 11.3 (+0%) | 1.65 → 1.65 (+0%) |
+| c32 | 14401 → 14401 (+0%) | 0.99 → 0.99 | 11.4 → 11.4 (+0%) | 2.13 → 2.13 (+0%) |
+| c8-long | 3406 → 3406 (+0%) | 0.71 → 0.71 | 13.7 → 13.7 (+0%) | 2.23 → 2.23 (+0%) |
 
 ## tp
 
@@ -155,20 +168,5 @@
 | | | | c8 | single | tp2 | 3435 (-26%) | 9.5 (+3%) | 2.24 (-36%) |
 | | | | c8 | single | tp4 | 3345 (-28%) | 9.3 (+5%) | 2.31 (-40%) |
 | | | | c8 | single | tp8 | 2706 (-42%) | 11.9 (-21%) | 2.83 (-72%) |
-
-## other
-
-基线 = 每个目录字典序第一个 variant（见 baseline 列）。每行 = 一个目录 × 一组 × 一个 variant；括号内 = 相对基线（↑ 为好 / TTFT、TPOT ↓ 为好）。
-
-| 目录 | 日期 | 改动 | 组 | 基线 | variant | out tok/s | TTFT p50 ms | TPOT p50 ms |
-|---|---|---|---|---|---|---|---|---|
-| bench_b300_1 | 2026-10-19 | B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7） | c1 | vllm | vllm（基线） | 771 | 11.6 | 1.22 |
-| | | | c1 | vllm | dinfer | 650 (-16%) | 2.4 (+80%) | 1.53 (-26%) |
-| bench_b300_1 | 2026-10-19 | B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7） | c8 | vllm | vllm（基线） | 5304 | 27.3 | 1.33 |
-| | | | c8 | vllm | dinfer | 4600 (-13%) | 11.3 (+59%) | 1.65 (-24%) |
-| bench_b300_1 | 2026-10-19 | B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7） | c32 | vllm | vllm（基线） | 14492 | 47.8 | 1.82 |
-| | | | c32 | vllm | dinfer | 14401 (-1%) | 11.4 (+76%) | 2.13 (-17%) |
-| bench_b300_1 | 2026-10-19 | B300 基线：dinfer 单卡 GPU 6 vs vLLM nightly 0.29.1rc1（containerd nerdctl，GPU 7） | c8-long | vllm | vllm（基线） | 4827 | 38.0 | 1.38 |
-| | | | c8-long | vllm | dinfer | 3406 (-29%) | 13.7 (+64%) | 2.23 (-62%) |
 
 ![trend](perf-trend.svg)
