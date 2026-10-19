@@ -372,6 +372,9 @@ impl ModelExecutor for Qwen35Executor {
         drafts: &mut Vec<Vec<u32>>,
     ) -> Result<()> {
         let t0 = std::time::Instant::now();
+        // 引擎线程 != 构建线程：cudarc 的流/上下文对象不会自动把 ctx 绑到新线程，首个 kernel/cuBLASLt 调用会报
+        // CUDA_ERROR_INVALID_CONTEXT（B300-50 真权重首请求复现；qwen3 走 record_timing 顺带绑上）。每步绑一次很便宜。
+        self.stream.bind_ctx()?;
         let nrows = self.enqueue(plan).context("qwen35 enqueue")?;
         let chosen = self.collect(nrows)?;
         push_tokens(generated, drafts, &chosen);

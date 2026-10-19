@@ -48,3 +48,5 @@ GPU 1 vLLM nightly 容器 `vllm-qwen35-b300 :8013`（`VLLM_MODEL=... VLLM_NAME=.
 |---|---|---|
 | 10 | push + `cargo build --release --features qwen35 -p dinfer -p dinfer-bench`（sm_103，38 s）；`qwen35_golden.sh` 在 sm_103 | golden 4/4 + 单测 13/13 过 |
 | 11 | 真权重 serve：加载 8.2 s（64 层 6.1 s），GDN 状态 9.2 GiB / 64 slot，KV 自动预算 161245 块 157 GiB。首个请求 → `engine step failed: qwen35 enqueue: DriverError(CUDA_ERROR_INVALID_CONTEXT)`，之后所有请求 0 token `finish_reason=stop`（引擎已死但 HTTP 仍应答）。tiny golden 单线程不触发 → 引擎线程上某条 CUDA 路径没绑上下文 | 排查中 |
+| 12 | 根因：引擎线程 ≠ 构建线程，cudarc 不自动把 ctx 绑到新线程；qwen3 的 `mark_gpu_start → record_timing` 顺带 `bind_ctx`，qwen35 没有。`forward_sample` 开头加 `self.stream.bind_ctx()` | INVALID_CONTEXT 消失，请求返回 48 token |
+| 13 | 真权重输出乱码：`/v1/completions` "The capital of France is" → `'�� +:+'`，top-3 logprob 全 −9.1~−9.3（近均匀）；vLLM 同 prompt `' Paris'` −0.45。tiny golden 4/4 过 → 真权重特有：大形状（hidden 5120 / vocab 248320 / 64 层）、权重映射（layout=Vl tensors=851）、或 layer_types 表 | 排查中 |
