@@ -6,7 +6,8 @@
 
 - 2026-10-19 结构事实核对完成（下）。实现由独立子代理推进，loop 文档 `docs/loops/qwen35-gdn.md`。
 ```
-[x] §1 结构事实   [x] 差距三分类   [x] gdn loop 文档   [x] GDN kernel 对拍（3090/4090/B300 三卡 10/10）   [ ] config/weights + tiny golden
+[x] §1 结构事实   [x] 差距三分类   [x] gdn loop 文档   [x] GDN kernel 对拍（3090/4090/B300 三卡 10/10）
+[x] 全注意力 kernel 扩模板（D=256 / GROUP 6 / partial RoPE / 输出门，3090+4090 对拍）   [ ] config/weights + tiny golden
 [ ] prefill logits 对拍   [ ] greedy 32 / 混批   [ ] chat_parity   [ ] 真权重 e2e vs vLLM   [ ] bench CSV   [ ] §11 台账
 ```
 
@@ -49,9 +50,27 @@ models/qwen35/src/
 tests/           golden_parity.rs（tiny golden）、real_parity.rs、chat_parity.rs
 ```
 
+### 2.1 权重映射表（里程碑 3 已核对的语义，写代码前先看这张表）
+
+| HF 名字（`language_model.` 前缀剥离后） | 我们存成 | 备注 |
+|---|---|---|
+| `model.embed_tokens.weight` | embedding | `[248320, 5120]` |
+| `model.layers.{l}.input_layernorm.weight` | `input_norm.w` | 普通 RMSNorm（`x·w`） |
+| `model.layers.{l}.post_attention_layernorm.weight` | `post_norm.w` | 同上 |
+| `model.layers.{l}.mlp.{gate,up,down}_proj.weight` | `gate_up`（前两者拼接）+ `down` | 同 Qwen3 的 `Mlp::load_tp` |
+| `model.layers.{l}.self_attn.q_proj.weight` | **拆成两段** `[q(H·D)]`、`[gate(H·D)]` | **per-head 交错**：vLLM `q_gate.view(..., num_heads, 2*head_dim)` 后 `chunk(2, -1)`，即第 h 头在行 `h·2D .. h·2D+D` 是 q、`+D .. +2D` 是 gate。**不能整段前后切** |
+| `model.layers.{l}.self_attn.k_proj / v_proj` | `[k | v]` 拼接 | 同 Qwen3 |
+| `model.layers.{l}.self_attn.o_proj.weight` | 原样 | 输入维 = `H·D`（不带 gate） |
+| `model.layers.{l}.self_attn.q_norm / k_norm.weight` | 原样 | **zero-centered**：norm 里用 `(1 + w)`，即 `qkv_post_ext` 的 `norm_beta = 1.0`；权重初值全 0 |
+| `model.layers.{l}.linear_attn.*` | 见 `docs/loops/qwen35-gdn.md` | GDN 已对拍 |
+| `lm_head.weight` | 独立 `lm_head` | `tie_word_embeddings false` |
+
+拼接顺序（attention 层 kernel 侧）：`[q(H·D) | gate(H·D) | k | v]`，`qkv_post_ext(qmul=2)` 只处理 q/k/v 段，gate 段由
+`mul_sigmoid_bf16` 在 attention **之后**消费（vLLM：`attn_output * sigmoid(gate)` 再进 `o_proj`）。
+
 ## 3. 风险 / 待定
 
-- 输出门拼接顺序（q 与 gate 在 12288 维里是交错还是前后半）：以 vLLM `qwen3_next.py` `Qwen3NextAttention` 为准。
+- ~~输出门拼接顺序~~：**已定**（见 §2.1，per-head 交错，vLLM `qwen3_next.py:436-443` 与 HF `modeling_qwen3_5.py:779-782` 一致）。
 - mrope 纯文本退化：对拍确认。
 - GDN 的 q/k 归一化、A = -exp(A_log)、dt = softplus(a + dt_bias) 等约定：以 vLLM / fla 源码为准，对拍 Triton 参考。
 - 两个 KV group 的 core 支持程度：核实后决定是在 core 加还是 qwen35 内自管。
