@@ -2839,6 +2839,7 @@ pub fn gdn_recurrent(
     cu_seqlens: &CudaSlice<i32>,
     state_indices: Option<&CudaSlice<i32>>,
     num_seqs: usize,
+    tokens: usize,
     heads_k: usize,
     heads_v: usize,
     k_dim: usize,
@@ -2846,7 +2847,7 @@ pub fn gdn_recurrent(
     scale: f32,
 ) -> Result<()> {
     gdn_recurrent_with(
-        stream, mixed_qkv, g, beta, a_raw, b_raw, a_log, dt_bias, out, state, cu_seqlens, state_indices, num_seqs,
+        stream, mixed_qkv, g, beta, a_raw, b_raw, a_log, dt_bias, out, state, cu_seqlens, state_indices, num_seqs, tokens,
         heads_k, heads_v, k_dim, v_dim, scale, None,
     )
 }
@@ -2868,6 +2869,7 @@ pub fn gdn_recurrent_with(
     cu_seqlens: &CudaSlice<i32>,
     state_indices: Option<&CudaSlice<i32>>,
     num_seqs: usize,
+    tokens: usize,
     heads_k: usize,
     heads_v: usize,
     k_dim: usize,
@@ -2879,7 +2881,10 @@ pub fn gdn_recurrent_with(
     ensure!(cu_seqlens.len() >= num_seqs + 1, "gdn_recurrent: cu_seqlens");
     ensure!(a_log.len() >= heads_v && dt_bias.len() >= heads_v, "gdn_recurrent: a_log/dt_bias");
     let row = 2 * heads_k * k_dim + heads_v * v_dim;
-    let tokens = mixed_qkv.len() / row.max(1);
+    // tokens 由调用方显式给（不能从缓冲长度推：激活缓冲按 max_tokens 预分配，推出来永远 ≠ num_seqs，
+    // decode 寄存器 kernel 分发条件就永远不成立——2026-10-20 bench_b300_8 踩坑）。
+    ensure!(mixed_qkv.len() >= tokens * row, "gdn_recurrent: mixed_qkv {} < tokens {tokens} × row {row}", mixed_qkv.len());
+    ensure!(tokens >= num_seqs, "gdn_recurrent: tokens {tokens} < num_seqs {num_seqs}");
     ensure!(out.len() >= tokens * heads_v * v_dim, "gdn_recurrent: out");
     let per_slot = heads_v * v_dim * k_dim;
     ensure!(state.len() >= per_slot, "gdn_recurrent: state");

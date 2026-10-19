@@ -329,6 +329,7 @@ impl GdnLayer {
                 &meta.cu_seqlens.data,
                 Some(&meta.state_indices.data),
                 meta.num_reqs,
+                t,
                 h,
                 hv,
                 kd,

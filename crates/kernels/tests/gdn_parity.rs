@@ -276,7 +276,7 @@ fn recurrent_case(tag: &str, decode: bool, k: usize, v: usize, h: usize, hv: usi
         let mut dout = st.alloc_uninit::<bf16>(tokens * hv * v).unwrap();
         ops::gdn_recurrent(
             &st, &dm, None, None, Some(&da), Some(&db), &dal, &ddb, &mut dout, &mut dstate, &dcu,
-            Some(&dsi), cu0.len() - 1, h, hv, k, v, scale,
+            Some(&dsi), cu0.len() - 1, tokens, h, hv, k, v, scale,
         )
         .unwrap();
         st.synchronize().unwrap();
@@ -488,7 +488,7 @@ fn gdn_chunk_bench() {
     let mut state_seq = st.alloc_zeros::<f32>(hv * v * k).unwrap();
     let seq_once = |st: &Stream, g: &mut _, beta: &mut _, out: &mut _, state: &mut _| {
         ops::gdn_gate(st, &da, &db, &dal, &ddb, g, beta, t, hv).unwrap();
-        ops::gdn_recurrent(st, &dm, Some(&*g), Some(&*beta), None, None, &dal, &ddb, out, state, &dcu, None, 1, h, hv, k, v, scale).unwrap();
+        ops::gdn_recurrent(st, &dm, Some(&*g), Some(&*beta), None, None, &dal, &ddb, out, state, &dcu, None, 1, t, h, hv, k, v, scale).unwrap();
     };
     seq_once(&st, &mut g, &mut beta, &mut out_seq, &mut state_seq);
     st.synchronize().unwrap();
@@ -589,7 +589,7 @@ fn gdn_recurrent_decode_b32_qwen_shape() {
         let mut dstate = st.htod_copy(init.clone()).unwrap();
         let mut dout = st.alloc_uninit::<bf16>(b * hv * v).unwrap();
         ops::gdn_recurrent_with(
-            &st, &dm, None, None, Some(&da), Some(&db), &dal, &ddb, &mut dout, &mut dstate, &dcu, Some(&dsi), b, h,
+            &st, &dm, None, None, Some(&da), Some(&db), &dal, &ddb, &mut dout, &mut dstate, &dcu, Some(&dsi), b, b, h,
             hv, k, v, scale, Some(bv),
         )
         .unwrap();
@@ -638,7 +638,7 @@ fn gdn_decode_bench() {
         for (name, bv) in [("legacy", Some(0usize)), ("auto", None), ("bv16", Some(16)), ("bv32", Some(32)), ("bv64", Some(64))] {
             let once = |st: &Stream, dstate: &mut _, dout: &mut _| {
                 ops::gdn_recurrent_with(
-                    st, &dm, None, None, Some(&da), Some(&db), &dal, &ddb, dout, dstate, &dcu, None, b, h, hv, k, v,
+                    st, &dm, None, None, Some(&da), Some(&db), &dal, &ddb, dout, dstate, &dcu, None, b, b, h, hv, k, v,
                     scale, bv,
                 )
                 .unwrap();
