@@ -228,10 +228,10 @@ impl GdnLayer {
         ensure!(meta.state_indices.numel() >= meta.num_reqs, "gdn: state_indices");
 
         // 1. 三个投影
-        self.in_qkv.forward(gemm, x, &mut self.qkv_buf)?;
-        self.in_z.forward(gemm, x, &mut self.z_buf)?;
-        self.in_a.forward(gemm, x, &mut self.a_buf)?;
-        self.in_b.forward(gemm, x, &mut self.b_buf)?;
+        self.in_qkv.forward_rows(gemm, x, &mut self.qkv_buf, t)?;
+        self.in_z.forward_rows(gemm, x, &mut self.z_buf, t)?;
+        self.in_a.forward_rows(gemm, x, &mut self.a_buf, t)?;
+        self.in_b.forward_rows(gemm, x, &mut self.b_buf, t)?;
 
         // 2. 短卷积（decode 单 token 走 update，其余走 varlen prefill）
         let single = meta.mode == BatchMode::Decode && meta.num_reqs == t;
@@ -353,7 +353,7 @@ impl GdnLayer {
         // 6. out_proj
         let _ = act;
         let _ = group;
-        self.out_proj.forward(gemm, &self.n_buf, out)
+        self.out_proj.forward_rows(gemm, &self.n_buf, out, t)
     }
 }
 

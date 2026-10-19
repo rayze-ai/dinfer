@@ -639,3 +639,10 @@
 ## `Stream::htod_into` 只接 `&mut CudaSlice`，往大张量的一段拷要走 `inner_arc().memcpy_htod(src, &mut slice_mut(..))`（2026-10-20）
 - 现象：`ExpertPack::load` 把 896 个专家拼进一个 `[E, N, K/2]` 大张量时 `htod_into(.., &mut big.slice_mut(a..b))` 类型不匹配（`CudaViewMut` ≠ `CudaSlice`）。
 - 解法：`latent_moe.rs::h2d`：`stream.inner_arc().memcpy_htod(src, &mut dst.slice_mut(off..off+len))`。
+
+## `Linear::forward` 对预分配缓冲推断行数 → decode 每步按 max_tokens 行算 GEMM（2026-10-20）
+
+- 现象：Qwen3.5 c1 decode TPOT 24 ms，CUDA graph / GEMM 自调优都没收益；nsys 里 decode 步出现 `nvjet 128x192 2cta` 81 µs 的大 tile GEMM，每步 112 次。
+- 根因：`Linear::forward(gemm, x, out)` 用 `x.numel() / in_features` 推断 M，而 qwen35 的激活缓冲按 `max_tokens`（2112）预分配 → 每步都算 2112 行，GEMM 时间 ≈ 2112/1 倍，且自调优表（M=1 键）不命中。
+- 解法：所有预分配缓冲上的 GEMM 一律 `forward_rows(gemm, x, out, tokens)` 显式传本步 token 数（qwen35 7 处；K3 在 C-1 已如此）。
+- 避免：新模型 crate 禁用 `Linear::forward`（考虑把它改成只接受精确形状或删掉）；nsys 中 decode 出现大 M tile 名字（`128x192` / `2cta`）即是信号；自调优日志的 µs 与 nsys 实测对不上时先查 M。

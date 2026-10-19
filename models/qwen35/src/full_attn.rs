@@ -204,9 +204,9 @@ impl FullAttention {
             )?,
         }
         // 4. 输出门：attn *= sigmoid(gate)
-        self.gate.forward(gemm, x, &mut self.gate_buf)?;
+        self.gate.forward_rows(gemm, x, &mut self.gate_buf, t)?;
         k::mul_sigmoid_bf16(stream, &mut self.attn.data, &self.gate_buf.data, t * h * d)?;
         // 5. o_proj
-        self.o_proj.forward(gemm, &self.attn, out)
+        self.o_proj.forward_rows(gemm, &self.attn, out, t)
     }
 }
