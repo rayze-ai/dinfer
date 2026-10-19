@@ -1,0 +1,1 @@
+GDN / 全注意力 7 处 GEMM 改 forward_rows（之前 decode 每步按 max_tokens=2112 行算）

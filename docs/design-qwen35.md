@@ -47,6 +47,19 @@ B300 单卡、vLLM nightly 0.29.1rc1、bf16、max-model-len 8192（`test/qwen35/
 
 prefill 问题解决（`gdn_chunk.cu`，3090 T=1024 顺序 41.5 → 4.2 ms）；剩余是 decode：eager 单流 64 层无 CUDA graph，c1 TPOT 24 ms。
 
+### 0.4 里程碑 6 第 3 轮：decode GEMM 修正（`bench_b300_7`，2026-10-20）
+
+根因是 `Linear::forward` 对预分配缓冲推断行数，decode 每步按 2112 行算 GEMM（见 pitfalls）；改 `forward_rows` 后：
+
+| 组 | dinfer TPOT | vLLM | dinfer TTFT | vLLM | 吞吐倍率 |
+|---|---|---|---|---|---|
+| c1 p128 | 11.8 ms | 10.3 | 35 ms | 46 | 0.88× |
+| c8 p128 | 16.4 | 11.2 | 152 | 99 | 0.68× |
+| c32 p128 | 34.1 | 12.9 | 369 | 262 | 0.41× |
+| c8 p1024 | 22.4 | 11.2 | 473 | 406 | 0.55× |
+
+剩余差距在 decode 批内扩展性（TPOT 随并发线性涨），见 `docs/loops/qwen35-perf.md` 第 3f 行。
+
 ## 1. 结构事实
 
 来源：B300 `/data/models/Qwen/Qwen3.8-27B/config.json`（`text_config`）+ 分片 header（bf16 52 GB / 18 分片；FP8 版 29 GB / 66 分片 `fmt e4m3` dynamic，抽样分片 header 解析失败，先用 bf16）。vLLM 参考 `vllm/model_executor/models/qwen3_5.py`（继承 `qwen3_next.py`），GDN 层 `vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py`。

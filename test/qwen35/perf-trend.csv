@@ -71,3 +71,15 @@ bench_b300_6,2026-10-19,decode 小 M GEMM：cuBLASLt algo 启动自调优 + 自�
 bench_b300_6,2026-10-19,decode 小 M GEMM：cuBLASLt algo 启动自调优 + 自写 gemm_small_m split-K 取优（ArchProfile）+ GDN recurrent vsplit,c8-long,out_tok_per_s,201.324,557.368,0.361,0.2,higher,main,B300,vllm,dinfer,qwen35
 bench_b300_6,2026-10-19,decode 小 M GEMM：cuBLASLt algo 启动自调优 + 自写 gemm_small_m split-K 取优（ArchProfile）+ GDN recurrent vsplit,c8-long,ttft_p50_ms,472.185,408.325,1.156,-3.7,lower,main,B300,vllm,dinfer,qwen35
 bench_b300_6,2026-10-19,decode 小 M GEMM：cuBLASLt algo 启动自调优 + 自写 gemm_small_m split-K 取优（ArchProfile）+ GDN recurrent vsplit,c8-long,tpot_p50_ms,36.016,11.239,3.204,0.2,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_7,2026-10-19,GDN / 全注意力 7 处 GEMM 改 forward_rows（之前 decode 每步按 max_tokens=2112 行算）,c1,out_tok_per_s,83.620,94.547,0.884,92.9,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_7,2026-10-19,GDN / 全注意力 7 处 GEMM 改 forward_rows（之前 decode 每步按 max_tokens=2112 行算）,c1,ttft_p50_ms,35.278,46.016,0.767,22.1,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_7,2026-10-19,GDN / 全注意力 7 处 GEMM 改 forward_rows（之前 decode 每步按 max_tokens=2112 行算）,c1,tpot_p50_ms,11.774,10.296,1.144,48.6,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_7,2026-10-19,GDN / 全注意力 7 处 GEMM 改 forward_rows（之前 decode 每步按 max_tokens=2112 行算）,c8,out_tok_per_s,458.542,672.435,0.682,66.9,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_7,2026-10-19,GDN / 全注意力 7 处 GEMM 改 forward_rows（之前 decode 每步按 max_tokens=2112 行算）,c8,ttft_p50_ms,152.353,98.941,1.540,9.6,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_7,2026-10-19,GDN / 全注意力 7 处 GEMM 改 forward_rows（之前 decode 每步按 max_tokens=2112 行算）,c8,tpot_p50_ms,16.360,11.196,1.461,41.6,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_7,2026-10-19,GDN / 全注意力 7 处 GEMM 改 forward_rows（之前 decode 每步按 max_tokens=2112 行算）,c32,out_tok_per_s,871.827,2150.636,0.405,31.9,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_7,2026-10-19,GDN / 全注意力 7 处 GEMM 改 forward_rows（之前 decode 每步按 max_tokens=2112 行算）,c32,ttft_p50_ms,368.808,262.400,1.406,-0.7,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_7,2026-10-19,GDN / 全注意力 7 处 GEMM 改 forward_rows（之前 decode 每步按 max_tokens=2112 行算）,c32,tpot_p50_ms,34.050,12.905,2.638,25.7,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_7,2026-10-19,GDN / 全注意力 7 处 GEMM 改 forward_rows（之前 decode 每步按 max_tokens=2112 行算）,c8-long,out_tok_per_s,306.895,557.864,0.550,52.4,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_7,2026-10-19,GDN / 全注意力 7 处 GEMM 改 forward_rows（之前 decode 每步按 max_tokens=2112 行算）,c8-long,ttft_p50_ms,472.864,405.923,1.165,-0.1,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_7,2026-10-19,GDN / 全注意力 7 处 GEMM 改 forward_rows（之前 decode 每步按 max_tokens=2112 行算）,c8-long,tpot_p50_ms,22.420,11.240,1.995,37.7,lower,main,B300,vllm,dinfer,qwen35
