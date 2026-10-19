@@ -726,6 +726,7 @@ extern "C" {
         width: i64,
         state_len: i64,
         act: i32,
+        stream: cudaStream_t,
     ) -> i32;
     pub fn gdn_conv1d_update(
         x: *const c_void,
@@ -738,6 +739,7 @@ extern "C" {
         width: i64,
         state_len: i64,
         act: i32,
+        stream: cudaStream_t,
     ) -> i32;
     pub fn gdn_gate(
         a: *const c_void,
@@ -749,6 +751,7 @@ extern "C" {
         total: i64,
         heads: i64,
         do_beta: i32,
+        stream: cudaStream_t,
     ) -> i32;
     pub fn gdn_recurrent(
         mixed_qkv: *const c_void,
@@ -771,6 +774,7 @@ extern "C" {
         scale: f32,
         state_stride_tok: i64,
         fused_gate: i32,
+        stream: cudaStream_t,
     ) -> i32;
     pub fn gdn_gated_rmsnorm(
         x: *const c_void,
@@ -781,6 +785,7 @@ extern "C" {
         head_dim: i64,
         eps: f32,
         act: i32,
+        stream: cudaStream_t,
     ) -> i32;
     pub fn mxfp4_dequant_bf16(
         packed: *const c_void,

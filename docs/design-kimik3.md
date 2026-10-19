@@ -11,7 +11,9 @@
   1.6e-3，加速 3090 7.2×、4090 5.15×（T=1024/96 头/128 维，门槛 5×）。细节 `docs/loops/k3-kda.md`。
 - **MXFP4 grouped GEMM 完成**（`crates/kernels/cuda/mxfp4_gemm_sm8x.cu`，里程碑 B）：按专家分组、权重 kernel
   内解包 + bf16 乘加，rel 6e-3 / cos 0.9999967；sm100 原生路径留空壳（`mxfp4_gemm_sm100.cu`）。`docs/loops/k3-moe.md`。
-- 待做：crate 骨架（`weights.rs` / `kda.rs` / `latent_moe.rs` / `layer.rs` 的 load 路径，里程碑 C），
+- **里程碑 C-1 完成（2026-10-19）**：`weights.rs`（名字表 + §2.1 张量表）+ `kda.rs`（`KdaLayer` prefill chunk / decode 递归）+
+  B300 真权重第 1 层单层对拍（`models/kimik3/tests/kda_layer_parity.rs`，`scripts/verify/k3_kda_layer.sh`；数字见 `docs/loops/k3-kda.md`）。
+- 待做：`latent_moe.rs` / `layer.rs` / `model.rs` 的 load 路径（里程碑 C-2+），
   以及 KDA（K 维改 bf16 mma）与 MXFP4（tile 改 mma、GPU 侧 tile 计划）的 v2 提速。
 对应阶段 P7 KDA / P8 K3 特有 / P9 多模态 + tokenizer（见 `design.md` §5 阶段表，均标 ⏸）。重启时按 §2 的模块表从 `kda.rs` 开始。
 
@@ -72,6 +74,24 @@ kimik3/src/
   parser.rs      思考段 / 工具调用流式解析（对照 vllm/parser/kimi_k3.py、reasoning/kimi_k3_reasoning_parser.py、tool_parsers/kimi_k3_tool_parser.py；格式见 §1.4b）
   weights.rs     名字映射与融合规则（见 2.1）；MXFP4 专家权重按 [E, 2*I, H/2] 打包
 ```
+
+### 2.1 KDA 层权重表（B300 真分片 header 核对，2026-10-19，第 1 层 `model-00002-of-000096`）
+
+前缀 `language_model.model.layers.N.self_attn.`；`weights.rs` 的 `Table` 剥掉 `language_model.model.`，`lm_head` 在 `language_model.lm_head.weight`。
+
+| 张量 | dtype | shape | 装载 |
+|---|---|---|---|
+| `q_proj` / `k_proj` / `v_proj` / `g_proj.weight` | BF16 | `[12288, 7168]` | 四条 `Linear`（HF 分开存；vLLM 融合 `in_proj_qkvgfab`，我们 C-2 再融） |
+| `f_a_proj.weight` / `f_b_proj.weight` | BF16 | `[128, 7168]` / `[12288, 128]` | gate 低秩两段，Rust 侧两条 GEMM |
+| `b_proj.weight` | BF16 | `[96, 7168]` | beta（逐头标量），输出 bf16→f32 给 kernel |
+| `{q,k,v}_conv1d.weight` | **F32** | `[12288, 1, 4]` | 转 bf16 `[12288, 4]`（HF 以 bf16 模型 dtype 跑） |
+| `A_log` | F32 | **`[128]`** | 前 96 有值、尾 32 为 0 填充；只取前 96（`load_a_log` 断言尾部全 0；vLLM loader 同样 `narrow`） |
+| `dt_bias` | F32 | `[12288]` | 逐 k 维 |
+| `o_norm.weight` | **F32** | `[128]` | 均值 0.034，普通 `norm(x)·w·sigmoid(g)`，**非** zero-centered；转 bf16 给 `kda_gated_rmsnorm` |
+| `o_proj.weight` | BF16 | `[7168, 12288]` | |
+| `input_layernorm` / `post_attention_layernorm.weight` | BF16 | `[7168]` | `KimiRMSNorm`：`w·norm(x)`，非 zero-centered（与 Qwen3.5 不同） |
+
+每层每 slot 状态：conv `3 × [12288, 3]` bf16（221 KB）+ 递推 `[96, 128, 128]` f32（6.3 MB）。
 
 ## 3. 模型特有的风险 / 待定
 

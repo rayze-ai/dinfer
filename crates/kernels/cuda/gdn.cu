@@ -247,11 +247,12 @@ extern "C" {
 
 int gdn_conv1d_prefill(const void* x, const void* w, void* out, void* conv_state,
                        const int* cu_seqlens, const int* state_indices, const int* has_initial,
-                       int64_t num_seqs, int64_t dim, int64_t width, int64_t state_len, int act) {
+                       int64_t num_seqs, int64_t dim, int64_t width, int64_t state_len, int act,
+                       cudaStream_t stream) {
   if (num_seqs <= 0) return 0;
   const int per_block = 256;
   dim3 grid((unsigned)num_seqs, (unsigned)((dim + per_block - 1) / per_block));
-  conv1d_prefill_kernel<<<grid, per_block>>>(
+  conv1d_prefill_kernel<<<grid, per_block, 0, stream>>>(
       (const bf16*)x, (const bf16*)w, (bf16*)out, (bf16*)conv_state, cu_seqlens, state_indices,
       has_initial, (int)dim, (int)width, (int)state_len, per_block, act);
   return last_err();
@@ -259,21 +260,21 @@ int gdn_conv1d_prefill(const void* x, const void* w, void* out, void* conv_state
 
 int gdn_conv1d_update(const void* x, const void* w, void* out, void* conv_state,
                       const int* state_indices, int64_t batch, int64_t dim, int64_t width,
-                      int64_t state_len, int act) {
+                      int64_t state_len, int act, cudaStream_t stream) {
   if (batch <= 0) return 0;
   const int per_block = 256;
   dim3 grid((unsigned)batch, (unsigned)((dim + per_block - 1) / per_block));
-  conv1d_update_kernel<<<grid, per_block>>>((const bf16*)x, (const bf16*)w, (bf16*)out,
+  conv1d_update_kernel<<<grid, per_block, 0, stream>>>((const bf16*)x, (const bf16*)w, (bf16*)out,
                                             (bf16*)conv_state, state_indices, (int)batch, (int)dim,
                                             (int)width, (int)state_len, act);
   return last_err();
 }
 
 int gdn_gate(const void* a, const void* b, const float* a_log, const float* dt_bias, float* g_out,
-             float* beta_out, int64_t total, int64_t heads, int do_beta) {
+             float* beta_out, int64_t total, int64_t heads, int do_beta, cudaStream_t stream) {
   if (total <= 0) return 0;
   const long blocks = (long)((total + kBlock - 1) / kBlock);
-  gate_kernel<<<(unsigned)blocks, kBlock>>>((const bf16*)a, (const bf16*)b, a_log, dt_bias, g_out,
+  gate_kernel<<<(unsigned)blocks, kBlock, 0, stream>>>((const bf16*)a, (const bf16*)b, a_log, dt_bias, g_out,
                                             beta_out, (long)total, (int)heads, do_beta);
   return last_err();
 }
@@ -283,19 +284,28 @@ int gdn_recurrent(const void* mixed_qkv, const float* g, const float* beta, cons
                   const void* b_raw, const float* a_log, const float* dt_bias, void* out,
                   void* state, const int* cu_seqlens, const int* state_indices, int64_t num_seqs,
                   int64_t H, int64_t HV, int64_t K, int64_t V, int64_t group, float scale,
-                  int64_t state_stride_tok, int fused_gate) {
+                  int64_t state_stride_tok, int fused_gate, cudaStream_t stream) {
   if (num_seqs <= 0) return 0;
   const int smem = (int)((V * K + 2 * K) * 4);
   dim3 grid((unsigned)num_seqs, (unsigned)HV);
+  // cudaFuncSetAttribute 不能在 stream capture 期间调（CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED）：
+  // 每个模板实例只在首次（capture 前的 eager 预热）设一次；smem 只随 (V, K) 变，同一模型内恒定。
+  static int smem_set_fused = 0, smem_set_plain = 0;
   if (fused_gate) {
-    set_smem((const void*)recurrent_kernel<kBlock, true>, smem);
-    recurrent_kernel<kBlock, true><<<grid, kBlock, smem>>>(
+    if (smem_set_fused < smem) {
+      if (const int rc = set_smem((const void*)recurrent_kernel<kBlock, true>, smem)) return rc;
+      smem_set_fused = smem;
+    }
+    recurrent_kernel<kBlock, true><<<grid, kBlock, smem, stream>>>(
         (const bf16*)mixed_qkv, g, beta, (const bf16*)a_raw, (const bf16*)b_raw, a_log, dt_bias,
         (bf16*)out, (float*)state, cu_seqlens, state_indices, (int)H, (int)HV, (int)K, (int)V,
         (int)group, scale, (long)state_stride_tok);
   } else {
-    set_smem((const void*)recurrent_kernel<kBlock, false>, smem);
-    recurrent_kernel<kBlock, false><<<grid, kBlock, smem>>>(
+    if (smem_set_plain < smem) {
+      if (const int rc = set_smem((const void*)recurrent_kernel<kBlock, false>, smem)) return rc;
+      smem_set_plain = smem;
+    }
+    recurrent_kernel<kBlock, false><<<grid, kBlock, smem, stream>>>(
         (const bf16*)mixed_qkv, g, beta, (const bf16*)a_raw, (const bf16*)b_raw, a_log, dt_bias,
         (bf16*)out, (float*)state, cu_seqlens, state_indices, (int)H, (int)HV, (int)K, (int)V,
         (int)group, scale, (long)state_stride_tok);
@@ -304,9 +314,9 @@ int gdn_recurrent(const void* mixed_qkv, const float* g, const float* beta, cons
 }
 
 int gdn_gated_rmsnorm(const void* x, const void* w, const void* z, void* out, int64_t rows,
-                      int64_t head_dim, float eps, int act) {
+                      int64_t head_dim, float eps, int act, cudaStream_t stream) {
   if (rows <= 0) return 0;
-  gated_rmsnorm_kernel<<<(unsigned)rows, 256>>>((const bf16*)x, (const bf16*)w, (const bf16*)z,
+  gated_rmsnorm_kernel<<<(unsigned)rows, 256, 0, stream>>>((const bf16*)x, (const bf16*)w, (const bf16*)z,
                                                 (bf16*)out, (int)head_dim, eps, act);
   return last_err();
 }

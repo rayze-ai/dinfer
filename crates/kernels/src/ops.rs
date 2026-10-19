@@ -2686,6 +2686,7 @@ pub fn gdn_conv1d_prefill(
                 width as i64,
                 state_len as i64,
                 act.code(),
+                stream.raw() as ffi::cudaStream_t,
             )
         },
         "gdn_conv1d_prefill",
@@ -2726,6 +2727,7 @@ pub fn gdn_conv1d_update(
                 width as i64,
                 state_len as i64,
                 act.code(),
+                stream.raw() as ffi::cudaStream_t,
             )
         },
         "gdn_conv1d_update",
@@ -2762,6 +2764,7 @@ pub fn gdn_gate(
                 n as i64,
                 heads_v as i64,
                 1,
+                stream.raw() as ffi::cudaStream_t,
             )
         },
         "gdn_gate",
@@ -2841,6 +2844,7 @@ pub fn gdn_recurrent(
                 scale,
                 per_slot as i64,
                 i32::from(fused),
+                stream.raw() as ffi::cudaStream_t,
             )
         },
         "gdn_recurrent",
@@ -2876,6 +2880,7 @@ pub fn gdn_gated_rmsnorm(
                 head_dim as i64,
                 eps,
                 act.code(),
+                stream.raw() as ffi::cudaStream_t,
             )
         },
         "gdn_gated_rmsnorm",
