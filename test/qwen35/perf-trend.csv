@@ -1,0 +1,37 @@
+round,date,change,group,metric,dinfer,vllm,ratio_dinfer_over_vllm,delta_pct_vs_prev_round,better_is,kind,gpu,baseline,variant,model
+bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c1,out_tok_per_s,37.769,94.422,0.400,,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c1,ttft_p50_ms,322.769,47.314,6.822,,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c1,tpot_p50_ms,24.142,10.297,2.345,,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c8,out_tok_per_s,241.694,670.737,0.360,,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c8,ttft_p50_ms,349.187,101.104,3.454,,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c8,tpot_p50_ms,28.387,11.199,2.535,,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c32,out_tok_per_s,453.750,2138.844,0.212,,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c32,ttft_p50_ms,2200.053,263.671,8.344,,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c32,tpot_p50_ms,54.834,12.907,4.249,,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c8-long,out_tok_per_s,45.039,556.950,0.081,,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c8-long,ttft_p50_ms,7147.267,407.711,17.530,,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c8-long,tpot_p50_ms,118.984,11.244,10.582,,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c1,out_tok_per_s,37.804,94.538,0.400,0.1,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c1,ttft_p50_ms,318.872,46.235,6.897,1.2,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c1,tpot_p50_ms,24.137,10.297,2.344,0.0,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c8,out_tok_per_s,241.568,672.049,0.359,-0.1,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c8,ttft_p50_ms,349.027,99.683,3.501,0.0,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c8,tpot_p50_ms,28.312,11.198,2.528,0.3,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c32,out_tok_per_s,451.542,2149.246,0.210,-0.5,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c32,ttft_p50_ms,2331.578,265.208,8.792,-6.0,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c32,tpot_p50_ms,54.742,12.903,4.243,0.2,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c8-long,out_tok_per_s,45.003,557.819,0.081,-0.1,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c8-long,ttft_p50_ms,7130.743,409.703,17.405,0.2,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c8-long,tpot_p50_ms,119.170,11.245,10.598,-0.2,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_3,2026-10-19,强制关 prefix caching（GDN 状态不可按块复用）；slot 归还,c1,out_tok_per_s,37.841,94.521,0.400,0.1,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_3,2026-10-19,强制关 prefix caching（GDN 状态不可按块复用）；slot 归还,c1,ttft_p50_ms,319.144,46.414,6.876,-0.1,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_3,2026-10-19,强制关 prefix caching（GDN 状态不可按块复用）；slot 归还,c1,tpot_p50_ms,24.135,10.297,2.344,0.0,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_3,2026-10-19,强制关 prefix caching（GDN 状态不可按块复用）；slot 归还,c8,out_tok_per_s,212.571,671.788,0.316,-12.0,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_3,2026-10-19,强制关 prefix caching（GDN 状态不可按块复用）；slot 归还,c8,ttft_p50_ms,1218.020,101.610,11.987,-249.0,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_3,2026-10-19,强制关 prefix caching（GDN 状态不可按块复用）；slot 归还,c8,tpot_p50_ms,28.317,11.196,2.529,-0.0,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_3,2026-10-19,强制关 prefix caching（GDN 状态不可按块复用）；slot 归还,c32,out_tok_per_s,405.526,2151.150,0.189,-10.2,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_3,2026-10-19,强制关 prefix caching（GDN 状态不可按块复用）；slot 归还,c32,ttft_p50_ms,2547.234,260.414,9.781,-9.2,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_3,2026-10-19,强制关 prefix caching（GDN 状态不可按块复用）；slot 归还,c32,tpot_p50_ms,59.690,12.905,4.625,-9.0,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_3,2026-10-19,强制关 prefix caching（GDN 状态不可按块复用）；slot 归还,c8-long,out_tok_per_s,36.787,557.000,0.066,-18.3,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_3,2026-10-19,强制关 prefix caching（GDN 状态不可按块复用）；slot 归还,c8-long,ttft_p50_ms,8137.850,408.134,19.939,-14.1,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_3,2026-10-19,强制关 prefix caching（GDN 状态不可按块复用）；slot 归还,c8-long,tpot_p50_ms,157.471,11.245,14.004,-32.1,lower,main,B300,vllm,dinfer,qwen35

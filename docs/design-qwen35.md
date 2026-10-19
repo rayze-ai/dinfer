@@ -22,7 +22,7 @@ B300 单卡、vLLM nightly 0.29.1rc1、bf16、max-model-len 8192（`test/qwen35/
 | c32 p128 | 12.87 | 263 | 2148 |
 | c8 p1024 | 11.20 | 413 | 557 |
 
-### 0.2 dinfer 首轮（里程碑 5，2026-10-19，`test/qwen35/2026-10-19/bench_b300_1/`）
+### 0.2 dinfer 首轮（里程碑 5，2026-10-19，`test/qwen35/2026-10-19/bench_b300_{1,2,3}/`；bench_b300_3 为正确性修完的基线：关 prefix cache、slot 归还，c8 TTFT 1218 / c8-long 8138、TPOT 59.7 / 157.5）
 
 同机同 seed，dinfer GPU 0 eager 单流（无 CUDA graph / 跨流 / chunk GDN prefill）：
 
