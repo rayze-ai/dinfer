@@ -582,3 +582,15 @@
 - 解法：测试里加 `chunk_ws()` 小助手（prefill 步建 `GdnChunkWorkspace`，`GDN_PREFILL=recurrent` → None），3 处补字段。
 - 避免：改 `StepMeta` / `Forward` 这类"executor 与测试都在构造"的结构体时，先 `grep -rn "StepMeta {" models/qwen35` 把所有构造点一起改；`cargo build` 不编译 `tests/`，要用 `cargo test --no-run`。
 
+## Qwen3.5 CUDA graph 捕获首个 kernel 就报 CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED（2026-10-19，性能第 2 轮）
+
+- 现象：`capture_bucket` 里 `begin_capture` 后第一个 `embedding_bf16` 就 `cudaError 901`（operation not permitted when stream is capturing）；eager 跑完全正常。
+- 根因（三件叠在一起）：① executor 用的是 `dev.default_stream()`（legacy 默认流不能 capture）；② cudarc 的自动跨流事件跟踪在 capture 期间会被驱动拒绝（Qwen3 早就 `disable_event_tracking`，qwen35 没抄这段）；③ `gdn.cu` 五个 launcher 都没收 stream 参数（发到 legacy 默认流），`gdn_recurrent` 还每次 launch 都 `cudaFuncSetAttribute`——capture 期间都不允许。前两条只在真正进 capture 时才暴露，eager 下全部"碰巧能跑"。
+- 解法：`Qwen35Executor::with_graphs` 照 Qwen3：`stream.synchronize()` → `disable_event_tracking()` → `new_stream()` → 在新流上重建 `Gemm`；`gdn.cu` 五个 launcher 加 `cudaStream_t` 末参数、`ops.rs` 传 `stream.raw()`，`set_smem` 按模板实例只设一次（static 记已设的 smem）。
+- 避免：新 kernel 的 host launcher **必须**收 `cudaStream_t` 并用 4 参 `<<<grid, block, smem, stream>>>`（`grep -n "<<<" crates/kernels/cuda/*.cu | grep -v "stream>>>"` 自查；`kda.cu` / `mxfp4.cu` 还在用 `nullptr`，K3 接 graph 前要改）；`cudaFuncSetAttribute` / `cudaOccupancy*` 这类"配置型"调用放 once-guard 里；任何新模型 executor 接 graph 时先抄 Qwen3 的流 / 事件跟踪设置，别用 default_stream。
+
+## Qwen3.5 CUDA graph：捕获 / padding 行会写活请求的 GDN 状态（2026-10-19，设计时规避）
+
+- 现象（推演，未发生）：Qwen3 的捕获假 plan 用 slot=-1 不写 KV 就够了；但 GDN 的 `conv1d_update` / `recurrent` kernel 对**每一行**都读写 `state[state_indices[i]]`，捕获时的 eager 预热 + 图里的 padding 行若指到 0..nb-1，会把活请求的递归状态改掉（且 capture 期间的 kernel 不执行，只有预热那次写，排查会很诡异）。
+- 解法：`GdnState` 多分 1 个 slot（下标 `num_slots`）做废纸篓，捕获假 plan 与 padding 行的 `state_indices` 全指它；`has_initial` 填 1（不走清零分支）。
+- 避免：带递归状态的模型（GDN / KDA / Mamba）接 graph，先问"padding 行写到哪"；KV 有 slot=-1 约定，状态 kernel 没有，要显式留废纸篓。
