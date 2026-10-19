@@ -524,3 +524,10 @@
 - 根因：`$ROOT/models/qwen3.5-27b` 是指向 `/data/models/Qwen/Qwen3.8-27B` 的软链接；容器只挂了 `$ROOT/models:/models`，链接目标在容器内不存在，vLLM 把路径当 HF repo id 去校验。
 - 解法：**不用软链接**（用户 2026-10-19："软链接是你加的"），`VLLM_MODEL` 直接给 `/data/models/...` 物理路径，容器只挂 `/data/models:ro`。
 - 避免：权重路径一律写物理路径，不在 `$ROOT/models` 下造别名；`wait` 失败先看 `logs` 的最后一个 Traceback。
+
+## bench 对本机 vLLM 四组全部 "send: error sending request"，curl 同 body 却 200（2026-10-19，B300-50）
+
+- 现象：`bench_vllm_only.sh` 四组预热请求全失败；`curl -N` 用完全相同的 body（stream + ignore_eos + chat_template_kwargs）打同一端口 200 正常；容器日志无任何 4xx/5xx。
+- 根因：B300-50 的 `env.sh` 导出了 `http_proxy / https_proxy`（代理 B）。bench 用 reqwest，reqwest 读代理环境变量但对 `no_proxy` 的匹配与 curl 不同（CIDR `172.16.0.0/16,10.0.0.0/8` 不识别，`127.0.0.1` 也未命中），于是把 `http://127.0.0.1:8013` 发给了代理，代理连不到 → 连接层错误。诊断 2 里 bench 能跑是因为那条 ssh 命令没 `source env.sh`。
+- 解法：`bench_vllm_only.sh` / `bench_compare.sh` 开头 `unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY`。
+- 避免：任何对 127.0.0.1 的压测 / 对拍脚本都不要继承代理；排查这类错先对比 "有没有 source env.sh"。
