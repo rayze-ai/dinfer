@@ -1,0 +1,1 @@
+B4 第 1–3 轮（4090 回归）：rmsnorm/silu/qkv_post 向量化、decode 自适应 splits + 两级预取、merge 寄存器归约
