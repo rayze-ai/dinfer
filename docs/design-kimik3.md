@@ -5,6 +5,14 @@
 ## 0. 状态
 
 **挂起（2026-10-15）→ 解挂条件满足（2026-10-19）**：B300 8 卡 NVLink 到手，真权重在 B300 `/data/models/moonshotai/Kimi-K3`（1.5 TB、96 分片、专家 MXFP4 `weight_packed`）；等用户定优先级后按 §2 重启。原因记录：暂无 ≥ 8×H200 级别机器，真权重跑不了。crate 只有 `config.rs`（解析官方 config.json 并断言结构事实）+ `lib.rs`。
+
+**2026-10-19 第二阶段进展（KDA / MoE kernel 先行，crate 骨架未动）**：
+- KDA **chunk 形式 prefill 完成**（`crates/kernels/cuda/kda_chunk.cu`，里程碑 A）：对拍 out 2.4e-4 / state 相对
+  1.6e-3，加速 3090 7.2×、4090 5.15×（T=1024/96 头/128 维，门槛 5×）。细节 `docs/loops/k3-kda.md`。
+- **MXFP4 grouped GEMM 完成**（`crates/kernels/cuda/mxfp4_gemm_sm8x.cu`，里程碑 B）：按专家分组、权重 kernel
+  内解包 + bf16 乘加，rel 6e-3 / cos 0.9999967；sm100 原生路径留空壳（`mxfp4_gemm_sm100.cu`）。`docs/loops/k3-moe.md`。
+- 待做：crate 骨架（`weights.rs` / `kda.rs` / `latent_moe.rs` / `layer.rs` 的 load 路径，里程碑 C），
+  以及 KDA（K 维改 bf16 mma）与 MXFP4（tile 改 mma、GPU 侧 tile 计划）的 v2 提速。
 对应阶段 P7 KDA / P8 K3 特有 / P9 多模态 + tokenizer（见 `design.md` §5 阶段表，均标 ⏸）。重启时按 §2 的模块表从 `kda.rs` 开始。
 
 ## 1. 结构事实

@@ -47,6 +47,27 @@
 - 历史阶段 / 已知简化 / 对拍口径：git log、`docs/design.md` §4、`test/<model>/<日期>/*.md`、pitfalls。
 - 阻塞 / 待决策：`docs/design.md` §9；**整体功能待办路线图 `docs/design.md` §12**（2026-10-18 盘点，7 个模块）。
 
+### 2026-10-19（K3 线第二阶段：KDA chunk prefill 里程碑 A + MXFP4 grouped GEMM 里程碑 B）
+
+- **里程碑 A（chunk 形式 KDA prefill）完成**，commit `006db48`。`crates/kernels/cuda/kda_chunk.cu`
+  三段（prep / wy / ho），BT 为模板参数；规格与代数口径在 `docs/loops/k3-kda.md`「v2 规格」。
+  对拍（`scripts/verify/k3_kda.sh`，3090 + 4090 GPU 7 均 exit 0）：out 2.4e-4 / cos 0.9999947，
+  state 相对 1.6e-3 / cos 0.9999986。**加速 T=1024/96 头/128 维：3090 76→10.3 ms（7.2–7.4×）、
+  4090 29.2→5.66 ms（5.15×）**，门槛 5×。上一阶段五算子 8/8 无回归。
+- **里程碑 B（MXFP4 grouped GEMM）完成**，commit `4dcd3b7`。`mxfp4_gemm_sm8x.cu`（权重 kernel 内解包
+  + bf16 乘加）+ `mxfp4_gemm_sm100.cu` 空壳 TODO；`scripts/verify/k3_moe.sh` 两卡 exit 0。
+  rel 5.0–6.1e-3（= bf16 输出粒度）/ cos 0.9999967；解包 3 case 逐位一致。
+- **里程碑 C（models/kimik3 骨架）未开始**：仍只有 config.rs。下一会话起点见下。
+- 关键口径（跨会话要用）：KDA chunk 的 cumsum 是**块内 inclusive**，A 严格下三角、Aq 含对角；
+  `state` 容差用**相对 |state|max ≤ 5e-3 + cos ≥ 0.9999**（绝对 atol 不适用，bf16 输出粒度是相对 2^-8）。
+  `gen_kda_refs.py` / `gen_mxfp4_refs.py` 已固定 seed（参考 .npy 入库，重跑逐字节一致）。
+- 4090 上 `source /data/yaochen/infer/env.sh` 才能找到 cargo/nvcc（`set -u` 会撞 `RUSTFLAGS` 未定义）；
+  远端无 torch，参考 .npy 随仓库 rsync 过去，用 `KDA_SKIP_GEN=1` / `MXFP4_SKIP_GEN=1`。
+- **下一会话起点（里程碑 C）**：`models/kimik3` 加 `weights.rs`（名字映射 + MXFP4 张量识别，表进
+  `docs/design-kimik3.md` §2.1）、`kda.rs`、`latent_moe.rs`、`layer.rs` 的结构体与 load 路径（forward 不要求通）；
+  tiny golden 规划写进 `docs/loops/k3-kda.md`。之后是 v2 提速（KDA 的 K 维改 bf16 mma、
+  MXFP4 的 tile 改 mma + GPU 侧 tile 计划），两项都在各自 loop 文档的 TODO 节。
+
 <!-- ===== 日志：按日期追加，不改旧条目 ===== -->
 
 ## 2026-10-18
