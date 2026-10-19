@@ -401,6 +401,7 @@ impl<E: ModelExecutor> Runner<E> {
             sampled: Vec::with_capacity(pending.req_ids.len()),
             drafts: Vec::with_capacity(pending.req_ids.len()),
             logprobs: Vec::with_capacity(pending.req_ids.len()),
+            mode: Some(self.plan.mode),
         };
         let mut lps = match pending.lps_override {
             Some(l) => l,

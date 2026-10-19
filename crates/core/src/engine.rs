@@ -336,6 +336,15 @@ impl<E: ModelExecutor> Engine<E> {
         }
         self.metrics.step_schedule.observe((t_sched - t_step).as_secs_f64());
         self.metrics.step_execute.observe((t_exec - t_sched).as_secs_f64());
+        if let Some(mode) = mro.mode {
+            use crate::runner::BatchMode;
+            let h = match mode {
+                BatchMode::Prefill => &self.metrics.step_execute_prefill,
+                BatchMode::Decode => &self.metrics.step_execute_decode,
+                BatchMode::Paged => &self.metrics.step_execute_mixed,
+            };
+            h.observe((t_exec - t_sched).as_secs_f64());
+        }
         self.record_step(so, &results, t_step);
         self.metrics.step_update.observe(t_exec.elapsed().as_secs_f64());
         for (i, (rid, toks, finish)) in results.iter().enumerate() {

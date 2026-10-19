@@ -37,6 +37,7 @@ fn make(n: u64, prefix_cache: bool) -> (Scheduler, ModelRunnerOutput) {
         sampled: (0..n).map(|_| vec![7]).collect(),
         drafts: vec![Vec::new(); n as usize],
         logprobs: vec![],
+        mode: None,
     };
     s.update_from_output(&o, &mro);
     (s, mro)

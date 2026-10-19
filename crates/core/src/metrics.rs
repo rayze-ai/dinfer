@@ -95,6 +95,10 @@ pub struct Metrics {
     /// step 内分段：调度（schedule）/ 执行（runner.execute：H2D + GPU + D2H 等待）/ 回填与下发。
     pub step_schedule: Histogram,
     pub step_execute: Histogram,
+    /// `step_execute` 按 plan 模式分桶（qwen35-perf 第 5B 轮：量化 c32 下混批步比例与耗时）。
+    pub step_execute_prefill: Histogram,
+    pub step_execute_decode: Histogram,
+    pub step_execute_mixed: Histogram,
     pub step_update: Histogram,
 }
 
@@ -113,6 +117,9 @@ impl Metrics {
             step_time: Histogram::new(STEP_BUCKETS),
             step_schedule: Histogram::new(STEP_BUCKETS),
             step_execute: Histogram::new(STEP_BUCKETS),
+            step_execute_prefill: Histogram::new(STEP_BUCKETS),
+            step_execute_decode: Histogram::new(STEP_BUCKETS),
+            step_execute_mixed: Histogram::new(STEP_BUCKETS),
             step_update: Histogram::new(STEP_BUCKETS),
             ..Default::default()
         }
@@ -240,6 +247,17 @@ impl Metrics {
             &format!("{prefix}engine_step_execute_seconds"),
             "Runner execute (H2D + GPU + D2H) time per step.",
         );
+        for (h, mode) in [
+            (&self.step_execute_prefill, "prefill"),
+            (&self.step_execute_decode, "decode"),
+            (&self.step_execute_mixed, "mixed"),
+        ] {
+            h.render(
+                &mut o,
+                &format!("{prefix}engine_step_execute_{mode}_seconds"),
+                &format!("Runner execute time per step, plan mode = {mode} (mixed = chunked prefill + decode)."),
+            );
+        }
         self.step_update.render(
             &mut o,
             &format!("{prefix}engine_step_update_seconds"),

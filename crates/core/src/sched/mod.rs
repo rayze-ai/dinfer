@@ -663,6 +663,7 @@ mod tests {
             sampled: toks.iter().map(|(_, t)| t.clone()).collect(),
             drafts: vec![Vec::new(); toks.len()],
             logprobs: vec![],
+            mode: None,
         };
         let r = s.update_from_output(&o, &mro);
         (o, r)
@@ -809,6 +810,7 @@ mod tests {
                 sampled: vec![vec![1]],
                 drafts: vec![Vec::new(); 1],
                 logprobs: vec![],
+                mode: None,
             },
         );
         s.add_request(req(2, 40, 1));
@@ -844,6 +846,7 @@ mod tests {
                 sampled: vec![vec![50]],
                 drafts: vec![Vec::new(); 1],
                 logprobs: vec![],
+                mode: None,
             },
         );
         assert_eq!(s.request(1).unwrap().num_output_placeholders, 3);
@@ -855,6 +858,7 @@ mod tests {
                 sampled: vec![vec![51, 52]],
                 drafts: vec![Vec::new(); 1],
                 logprobs: vec![],
+                mode: None,
             },
         );
         let r = s.request(1).unwrap();
