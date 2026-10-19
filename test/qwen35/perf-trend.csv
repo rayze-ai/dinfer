@@ -131,3 +131,15 @@ bench_b300_11,2026-10-19,GDN prefill 三段 mma 化：ho/wy 走 mma.sync bf16，
 bench_b300_11,2026-10-19,GDN prefill 三段 mma 化：ho/wy 走 mma.sync bf16，conv1d prefill 按 T 分块（ArchProfile 选 BV / rows）,c8-long,out_tok_per_s,502.292,556.907,0.902,0.3,higher,main,B300,vllm,dinfer,qwen35
 bench_b300_11,2026-10-19,GDN prefill 三段 mma 化：ho/wy 走 mma.sync bf16，conv1d prefill 按 T 分块（ArchProfile 选 BV / rows）,c8-long,ttft_p50_ms,212.087,406.018,0.522,1.0,lower,main,B300,vllm,dinfer,qwen35
 bench_b300_11,2026-10-19,GDN prefill 三段 mma 化：ho/wy 走 mma.sync bf16，conv1d prefill 按 T 分块（ArchProfile 选 BV / rows）,c8-long,tpot_p50_ms,14.256,11.245,1.268,0.1,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_12,2026-10-19,调度预算 max_num_batched_tokens 2048 → 16384（与 vLLM 容器一致）；代码同 bench_b300_11,c1,out_tok_per_s,92.871,94.423,0.984,0.6,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_12,2026-10-19,调度预算 max_num_batched_tokens 2048 → 16384（与 vLLM 容器一致）；代码同 bench_b300_11,c1,ttft_p50_ms,22.461,47.763,0.470,-0.4,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_12,2026-10-19,调度预算 max_num_batched_tokens 2048 → 16384（与 vLLM 容器一致）；代码同 bench_b300_11,c1,tpot_p50_ms,10.672,10.295,1.037,0.6,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_12,2026-10-19,调度预算 max_num_batched_tokens 2048 → 16384（与 vLLM 容器一致）；代码同 bench_b300_11,c8,out_tok_per_s,654.169,671.881,0.974,0.3,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_12,2026-10-19,调度预算 max_num_batched_tokens 2048 → 16384（与 vLLM 容器一致）；代码同 bench_b300_11,c8,ttft_p50_ms,84.699,100.282,0.845,3.1,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_12,2026-10-19,调度预算 max_num_batched_tokens 2048 → 16384（与 vLLM 容器一致）；代码同 bench_b300_11,c8,tpot_p50_ms,11.635,11.192,1.040,0.2,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_12,2026-10-19,调度预算 max_num_batched_tokens 2048 → 16384（与 vLLM 容器一致）；代码同 bench_b300_11,c32,out_tok_per_s,1970.130,2147.346,0.917,1.7,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_12,2026-10-19,调度预算 max_num_batched_tokens 2048 → 16384（与 vLLM 容器一致）；代码同 bench_b300_11,c32,ttft_p50_ms,276.365,264.976,1.043,-38.1,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_12,2026-10-19,调度预算 max_num_batched_tokens 2048 → 16384（与 vLLM 容器一致）；代码同 bench_b300_11,c32,tpot_p50_ms,14.200,12.904,1.100,5.5,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_12,2026-10-19,调度预算 max_num_batched_tokens 2048 → 16384（与 vLLM 容器一致）；代码同 bench_b300_11,c8-long,out_tok_per_s,509.715,557.830,0.914,1.5,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_12,2026-10-19,调度预算 max_num_batched_tokens 2048 → 16384（与 vLLM 容器一致）；代码同 bench_b300_11,c8-long,ttft_p50_ms,474.939,406.309,1.169,-123.9,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_12,2026-10-19,调度预算 max_num_batched_tokens 2048 → 16384（与 vLLM 容器一致）；代码同 bench_b300_11,c8-long,tpot_p50_ms,12.071,11.240,1.074,15.3,lower,main,B300,vllm,dinfer,qwen35

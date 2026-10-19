@@ -1,0 +1,1 @@
+调度预算 max_num_batched_tokens 2048 → 16384（与 vLLM 容器一致）；代码同 bench_b300_11
