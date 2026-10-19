@@ -137,9 +137,15 @@ impl Table {
         })
     }
 
-    /// RMSNorm（同 `RmsNorm::load` 的前缀约定）。
+    /// **zero-centered** RMSNorm（HF `Qwen3_5RMSNorm`：`y = norm(x) · (1 + w)`，权重初值 0；27B 真权重
+    /// `input_layernorm` 均值 −0.03、`post_attention_layernorm` 均值 −0.22）。加载时把 `1 + w` 算进权重，kernel 仍按
+    /// 普通 `norm(x) · w` 跑。注意 `linear_attn.norm.weight`（gated RMSNorm，初值 1）**不是** zero-centered，走 `load_bf16`。
+    /// 2026-10-19 B300 真权重首次 e2e 才暴露：tiny golden 的这三类权重全是 1，`1·x` 与 `(1+0)·x` 分不出来。
     pub fn rmsnorm(&self, stream: &Stream, src: &WeightSource, key: &str, eps: f32) -> Result<dinfer_layers::RmsNorm> {
-        let w = self.load_bf16(stream, src, key)?;
+        let name = self.name(key)?.to_string();
+        let (shape, v) = src.load_f32_host(&name).map_err(|e| e.context(format!("load {name}")))?;
+        let w: Vec<bf16> = v.into_iter().map(|x| bf16::from_f32(1.0 + x)).collect();
+        let w = Tensor::from_vec(stream, w, &shape)?;
         Ok(dinfer_layers::RmsNorm { hidden: w.numel(), w, eps })
     }
 

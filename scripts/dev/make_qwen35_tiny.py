@@ -71,8 +71,8 @@ W_ = {}
 W_["model.embed_tokens.weight"] = rnd(V, H, scale=0.05)
 for l, lt in enumerate(LAYERS):
     p = f"model.layers.{l}"
-    W_[f"{p}.input_layernorm.weight"] = torch.ones(H, dtype=torch.bfloat16)
-    W_[f"{p}.post_attention_layernorm.weight"] = torch.ones(H, dtype=torch.bfloat16)
+    W_[f"{p}.input_layernorm.weight"] = (torch.randn(H, generator=g) * 0.2).to(torch.bfloat16)  # zero-centered：(1+w)
+    W_[f"{p}.post_attention_layernorm.weight"] = (torch.randn(H, generator=g) * 0.2).to(torch.bfloat16)  # zero-centered：(1+w)
     W_[f"{p}.mlp.gate_proj.weight"] = rnd(INTER, H)
     W_[f"{p}.mlp.up_proj.weight"] = rnd(INTER, H)
     W_[f"{p}.mlp.down_proj.weight"] = rnd(H, INTER)
@@ -95,7 +95,7 @@ for l, lt in enumerate(LAYERS):
         W_[f"{s}.o_proj.weight"] = rnd(H, NH * D)
         W_[f"{s}.q_norm.weight"] = (torch.randn(D, generator=g) * 0.02).to(torch.bfloat16)  # zero-centered：(1+w)
         W_[f"{s}.k_norm.weight"] = (torch.randn(D, generator=g) * 0.02).to(torch.bfloat16)
-W_["model.norm.weight"] = torch.ones(H, dtype=torch.bfloat16)
+W_["model.norm.weight"] = (torch.randn(H, generator=g) * 0.2).to(torch.bfloat16)  # zero-centered：(1+w)
 W_["lm_head.weight"] = rnd(V, H, scale=0.05)
 save_file(W_, os.path.join(MODEL, "model.safetensors"))
 
@@ -228,16 +228,16 @@ def forward(ids, Wd, states=None, pos0=0, cache=None):
     st = states if states is not None else [GdnState() for _ in LAYERS]
     for l, lt in enumerate(LAYERS):
         p = f"model.layers.{l}"
-        h = rmsnorm(x, Wd[f"{p}.input_layernorm.weight"].float())
+        h = rmsnorm(x, 1.0 + Wd[f"{p}.input_layernorm.weight"].float())
         a = gdn_forward(h, Wd, st[l], f"{p}.linear_attn") if lt == "linear_attention" else full_forward(h, Wd, f"{p}.self_attn", pos)
         x = qb(x + a)
-        h2 = rmsnorm(x, Wd[f"{p}.post_attention_layernorm.weight"].float())
+        h2 = rmsnorm(x, 1.0 + Wd[f"{p}.post_attention_layernorm.weight"].float())
         gu = qb(h2 @ Wd[f"{p}.mlp.gate_proj.weight"].float().T)
         uu = qb(h2 @ Wd[f"{p}.mlp.up_proj.weight"].float().T)
         act = qb(silu(gu) * uu)
         m = qb(act @ Wd[f"{p}.mlp.down_proj.weight"].float().T)
         x = qb(x + m)
-    x = rmsnorm(x, Wd["model.norm.weight"].float())
+    x = rmsnorm(x, 1.0 + Wd["model.norm.weight"].float())
     return qb(x @ Wd["lm_head.weight"].float().T)  # [T, V]
 
 

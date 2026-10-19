@@ -560,3 +560,10 @@
 - 根因（部分确认）：失败与成功的唯一差别是那条 ssh 命令有没有 `source env.sh`，env.sh 导出代理 B 的 4 个 `*_proxy` 变量 + **只有小写 `no_proxy`**。本机用死代理复现：reqwest 0.12.15 对大小写 `no_proxy` / CIDR 都能识别（self-check 四种组合全过），**没能在本机复现"小写 no_proxy 不生效"**——所以精确触发条件未钉死（可能与 B300-50 上代理 B 对 CONNECT 127.0.0.1 的行为或别的 env.sh 变量有关）。
 - 解法（两层）：① env.sh 同时导出 `no_proxy` 与 `NO_PROXY`（`localhost,127.0.0.1,::1,172.16.0.0/16,10.0.0.0/8`，用户要求"注意设置 NO_PROXY"）；② bench 脚本开头仍 `unset` 全部代理变量（本地压测本来就不该走代理）。
 - 避免：新机器 env.sh 的代理行大小写两套都给；排查这类错先对比 "有没有 source env.sh"。
+
+## Qwen3.5 真权重乱码：zero-centered RMSNorm 被 tiny golden 的全 1 权重掩盖（2026-10-19）
+
+- 现象：B300 真权重 27B 首次 e2e，输出 `'�� +:+'`，top logprob 全 −9（近均匀）；tiny golden 4/4 过。逐层末 token 残差范数：embed 一致，**L0 起偏**（24.5 vs HF 11.9），L0 mlp_out 9.19 vs 0.958。
+- 根因：HF `Qwen3_5RMSNorm.forward` 是 `norm(x) * (1.0 + weight)`（weight 初值 0），dinfer / 参考脚本按 `norm(x) * weight`。tiny 生成器把 `input_layernorm / post_attention_layernorm / norm` 设成 `torch.ones` → 两种约定数值相同，golden 不可能发现。
+- 解法：`models/qwen35/src/weights.rs::rmsnorm` 加载时把 `1 + w` 算进权重；`make_qwen35_tiny.py` 参考侧改 `1 + w` 且三类权重改随机。
+- 避免：**造 tiny golden 时所有权重必须随机（含 norm / bias / 门）**，任何"全 1 / 全 0"的权重都是对拍盲区；接新模型先 grep HF 源码里的 `1.0 + self.weight` / `zero-centered`。
