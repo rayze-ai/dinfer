@@ -4,7 +4,7 @@
 
 ## 0. 状态
 
-**挂起（2026-10-15）**：暂无 ≥ 8×H200 级别机器，真权重（1.56 TB）跑不了。crate 只有 `config.rs`（解析官方 config.json 并断言结构事实）+ `lib.rs`。
+**挂起（2026-10-15）→ 解挂条件满足（2026-10-19）**：B300 8 卡 NVLink 到手，真权重在 B300 `/data/models/moonshotai/Kimi-K3`（1.5 TB、96 分片、专家 MXFP4 `weight_packed`）；等用户定优先级后按 §2 重启。原因记录：暂无 ≥ 8×H200 级别机器，真权重跑不了。crate 只有 `config.rs`（解析官方 config.json 并断言结构事实）+ `lib.rs`。
 对应阶段 P7 KDA / P8 K3 特有 / P9 多模态 + tokenizer（见 `design.md` §5 阶段表，均标 ⏸）。重启时按 §2 的模块表从 `kda.rs` 开始。
 
 ## 1. 结构事实
