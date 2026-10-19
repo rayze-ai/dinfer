@@ -672,9 +672,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dinfer-core",
+ "dinfer-kernels",
  "dinfer-layers",
+ "npyz",
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]
