@@ -1,0 +1,1 @@
+B4 第 3 轮：decode 有效 splits 按 seq_len 自适应（keys_per_split=128）
