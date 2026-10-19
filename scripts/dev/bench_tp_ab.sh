@@ -7,6 +7,8 @@ set -uo pipefail
 OUT="$1"; CHANGE="$2"; BASE="$3"; TPS="$4"; shift 4
 R="${R:-/data/yaochen/infer}"; PORT="${PORT:-8341}"; BENCH=./target/release/bench; BIN=./target/release/dinfer
 mkdir -p "$OUT"; echo "$CHANGE" > "$OUT/CHANGE"
+gpu_tag() { local n; n=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1); case "$n" in *4090*) echo 4090;; *B300*) echo B300;; *) echo "${n// /}";; esac; }
+[ -n "$(gpu_tag)" ] && gpu_tag > "$OUT/GPU"   # 卡型，bench_trend.py 的 gpu 维度
 [ -x "$BENCH" ] || cargo build --release -p dinfer-bench
 SEED=$(( $(date +%s) % 100000 ))
 # ab_serve.sh 用 CUDA_VISIBLE_DEVICES=<gpus> 钉卡并自带 --model；tpN 给 BASE..BASE+N-1 的逗号卡表，serve 内 --device 0 起
@@ -26,4 +28,5 @@ one() { # variant ngpu [serve args]
 }
 one single 1 "$@"
 for tp in $TPS; do one "tp$tp" "$tp" --tp "$tp" "$@"; done
-python3 -I scripts/dev/bench_trend.py --root "$(dirname "$(dirname "$OUT")")" | tail -n +2 | tail -3
+python3 -I scripts/dev/bench_trend.py --root "$(dirname "$(dirname "$OUT")")" | tail -n +2 | tail -3 || true
+exit 0

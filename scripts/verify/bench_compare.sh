@@ -8,6 +8,9 @@ cd "$(dirname "$0")/../.."
 OUT="${1:-test/qwen3/$(date +%F)/bench}"; mkdir -p "$OUT"
 # 本轮改了什么（进趋势表）：第二个参数或 $CHANGE
 [ -n "${2:-${CHANGE:-}}" ] && printf '%s\n' "${2:-$CHANGE}" > "$OUT/CHANGE"
+# 卡型（进趋势表的 gpu 维度；bench_trend.py 没有该文件按 4090）：含 4090 → 4090，含 B300 → B300，其余取 name 去空格
+gpu_tag() { local n; n=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1); case "$n" in *4090*) echo 4090;; *B300*) echo B300;; *) echo "${n// /}";; esac; }
+[ -n "$(gpu_tag)" ] && gpu_tag > "$OUT/GPU"
 BENCH=./target/release/bench
 # 每次运行换 seed（默认取当前秒）：prompt 不与历史轮次重复，两边都只命中聊天模板前缀的 prefix cache。固定 seed 会让常驻 vLLM 全命中、重启的 dinfer 冷启动，口径不公（pitfalls 2026-10-16）。
 SEED="${SEED:-$(date +%s)}"

@@ -7,36 +7,45 @@
 @media (prefers-color-scheme: dark){:root:not([data-theme=light]){--bg:#111;--fg:#eee;--muted:#9a9a9a;--card:#1b1d20;--line:#2a2d31}}
 body{margin:0;padding:16px;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,sans-serif}
 h1{font-size:18px;margin:0 0 4px}.sub{color:var(--muted);margin-bottom:12px}
+.gpus{display:flex;gap:6px;align-items:center;margin:6px 0 2px;flex-wrap:wrap}.gpus span{color:var(--muted);font-size:12px;margin-right:4px}
+.gpus button{border:1px solid var(--line);background:var(--card);color:var(--fg);padding:5px 14px;font:inherit;font-weight:600;border-radius:999px;cursor:pointer}
+.gpus button.on{background:var(--acc);border-color:var(--acc);color:#fff}
 .tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin:8px 0 12px;flex-wrap:wrap}
 .tabs button{background:none;border:1px solid transparent;border-bottom:none;color:var(--muted);padding:6px 14px;font:inherit;cursor:pointer;border-radius:6px 6px 0 0}
 .tabs button.on{color:var(--fg);border-color:var(--line);background:var(--card);font-weight:600}
 .tabs button[hidden]{display:none}
 .page[hidden]{display:none}
 .base{padding:6px 10px;margin-bottom:12px;border-left:3px solid var(--acc);background:var(--card);font-size:13px}
+.empty{padding:24px;text-align:center;color:var(--muted)}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:14px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px;position:relative}
 .card h2{font-size:14px;margin:0 0 6px}
+.nov{position:absolute;inset:40px 10px 10px;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:13px;pointer-events:none}
 table{border-collapse:collapse;width:100%;font-size:12.5px}th,td{border-bottom:1px solid var(--line);padding:4px 6px;text-align:right;vertical-align:top}
 th:first-child,td:first-child,td.change,th.change,td.l,th.l{text-align:left}
 .up{color:#1a7f37}.down{color:#c62828}.chg{max-width:420px;white-space:normal;color:var(--muted)}
 .updated{color:var(--muted);font-size:12px}
 </style></head><body>
-<h1>dinfer perf trend — Qwen3-0.6B，4090</h1>
-<div class="sub">数据：<code>perf-trend.csv</code>（每 10 s 重读）。页签：single = 主线 benchN（dinfer vs vLLM）；pd / tp / dp / other = A/B 组，每页顶部写明基线。URL hash 直达（如 <code>#pd</code>）。<span id="updated" class="updated"></span></div>
+<h1>dinfer perf trend — Qwen3-0.6B</h1>
+<div class="sub">数据：<code>perf-trend.csv</code>（每 10 s 重读）。先选卡型，再选页签：single = 主线 benchN（dinfer vs vLLM）；pd / tp / dp / other = A/B 组，每页顶部写明基线。URL hash 直达（如 <code>#B300/tp</code>）。<span id="updated" class="updated"></span></div>
+<div class="gpus" id="gpus"><span>卡型</span></div>
 <nav class="tabs" id="tabs">
  <button data-tab="single" class="on">single</button><button data-tab="pd" hidden>pd</button><button data-tab="tp" hidden>tp</button><button data-tab="dp" hidden>dp</button><button data-tab="other" hidden>other</button>
 </nav>
 
 <section class="page" id="page-single">
-<div class="base">基线 = vLLM v0.31.0 单卡（同机同配置）。比值 = dinfer out tok/s ÷ vLLM；虚线 1.0 = 追平。TTFT/TPOT 越低越好。只含 benchN 主线轮次。</div>
+<div class="base" id="base-single">基线 = vLLM v0.31.0 单卡（同机同配置）。比值 = dinfer out tok/s ÷ vLLM；虚线 1.0 = 追平。TTFT/TPOT 越低越好。只含 benchN 主线轮次。</div>
+<div id="single-body">
 <div class="grid">
- <div class="card"><h2>out tok/s ÷ vLLM</h2><canvas id="ratio"></canvas></div>
+ <div class="card"><h2>out tok/s ÷ vLLM</h2><canvas id="ratio"></canvas><div class="nov" id="nov-ratio" hidden>无 vLLM 基线（本卡只有 dinfer 结果）</div></div>
  <div class="card"><h2>TTFT p50 (ms)，实线 dinfer / 虚线 vLLM</h2><canvas id="ttft"></canvas></div>
  <div class="card"><h2>TPOT p50 (ms)，实线 dinfer / 虚线 vLLM</h2><canvas id="tpot"></canvas></div>
  <div class="card"><h2>out tok/s，实线 dinfer / 虚线 vLLM</h2><canvas id="tps"></canvas></div>
 </div>
 <div class="card" id="detail" style="margin-top:14px;display:none"><h2 id="detail-title">轮次详情</h2><div id="detail-change" class="chg" style="margin-bottom:8px"></div><div id="detail-table"></div></div>
 <div class="card" style="margin-top:14px"><h2>每轮改动与提升（相对上一轮；绿色 = 变好；点击轮次看详情）</h2><div id="table"></div></div>
+</div>
+<div class="empty" id="single-empty" hidden>本卡暂无主线 benchN 轮次</div>
 </section>
 <section class="page" id="page-pd" hidden><div class="base" id="base-pd"></div><div class="grid" id="grid-pd"></div><div class="card" style="margin-top:14px"><div id="table-pd"></div></div></section>
 <section class="page" id="page-tp" hidden><div class="base" id="base-tp"></div><div class="grid" id="grid-tp"></div><div class="card" style="margin-top:14px"><div id="table-tp"></div></div></section>
@@ -44,25 +53,35 @@ th:first-child,td:first-child,td.change,th.change,td.l,th.l{text-align:left}
 <section class="page" id="page-other" hidden><div class="base" id="base-other"></div><div class="grid" id="grid-other"></div><div class="card" style="margin-top:14px"><div id="table-other"></div></div></section>
 
 <script>
+const KNOWN_GPUS=["4090", "B300"], DEFAULT_GPU="4090";
 const GROUPS=["c1","c8","c32","c8-long"], COLORS=["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd","#8c564b"];
 const CATS=["pd","tp","dp","other"];
-const HINT={pd:"基线 = single（单机 :8012，同卡同配置的 dinfer 单实例）。变量 = PD 分离的传输方式 / 卡分布（tcp / shm / ipc / 跨卡 / tp）。柱 = 各 variant 并列，灰柱基线。",
-  tp:"基线 = vLLM 单卡。变量 = dinfer --tp N（多卡张量并行，无 P2P 走 NCCL SHM）。",
+const HINT={single:"基线 = vLLM v0.31.0 单卡（同机同配置）。比值 = dinfer out tok/s ÷ vLLM；虚线 1.0 = 追平。TTFT/TPOT 越低越好。只含 benchN 主线轮次。",
+  pd:"基线 = single（单机 :8012，同卡同配置的 dinfer 单实例）。变量 = PD 分离的传输方式 / 卡分布（tcp / shm / ipc / 跨卡 / tp）。柱 = 各 variant 并列，灰柱基线。",
+  tp:"变量 = dinfer --tp N（多卡张量并行）。基线 = single（同卡 dinfer 单实例，bench_tp_ab.sh）或 vLLM 单卡（bench_tp2），以表中基线列为准。",
   dp:"基线 = vLLM 单卡。变量 = dinfer --dp N（同进程数据并行，按在飞数路由）。",
   other:"基线 = 各目录字典序第一个 variant（见表中基线列）。"};
 const charts={};
+let ALL=[];
 function parseCSV(t){const lines=t.trim().split(/\r?\n/);const hdr=lines[0].split(",");return lines.slice(1).map(l=>{const cells=[];let cur="",q=false;for(const ch of l){if(ch=='"'){q=!q;continue}if(ch==','&&!q){cells.push(cur);cur="";continue}cur+=ch}cells.push(cur);const o={};hdr.forEach((h,i)=>o[h]=cells[i]);return o;});}
 const fg=()=>getComputedStyle(document.body).color;
+const num=(s)=>{if(s===undefined||s==="")return null;const v=parseFloat(s);return isNaN(v)?null:v;};
+const f=(v,d)=>v===null||v===undefined||isNaN(v)?"—":v.toFixed(d);
 function upsert(id,cfg){if(charts[id]){charts[id].data=cfg.data;charts[id].options=cfg.options;charts[id].update();}else charts[id]=new Chart(document.getElementById(id),cfg);}
 // ---- single（主线）----
 function buildMain(rows){
+  const empty=!rows.length;
+  document.getElementById("single-body").hidden=empty; document.getElementById("single-empty").hidden=!empty;
+  const hasV=rows.some(r=>r.vllm!=="");
+  document.getElementById("base-single").textContent=HINT.single+(hasV?"":" 本卡无 vLLM 基线：只有 dinfer 自己的 TTFT / TPOT / tok/s。");
+  document.getElementById("nov-ratio").hidden=hasV||empty;
   const rounds=[...new Set(rows.map(r=>r.round))];
   const change={};rows.forEach(r=>change[r.round]=r.change);
-  const get=(metric,g,field)=>rounds.map(rd=>{const x=rows.find(r=>r.round==rd&&r.group==g&&r.metric==metric);return x?parseFloat(x[field]):null;});
+  const get=(metric,g,field)=>rounds.map(rd=>{const x=rows.find(r=>r.round==rd&&r.group==g&&r.metric==metric);return x?num(x[field]):null;});
   const mk=(id,metric,field,withV,refLine)=>{
-    const ds=[];GROUPS.forEach((g,i)=>{ds.push({label:g,data:get(metric,g,field),borderColor:COLORS[i],backgroundColor:COLORS[i],tension:.15,pointRadius:3});
-      if(withV)ds.push({label:g+" vLLM",data:get(metric,g,"vllm"),borderColor:COLORS[i],borderDash:[4,4],pointRadius:0,borderWidth:1});});
-    if(refLine)ds.push({label:"vLLM = 1.0",data:rounds.map(()=>1),borderColor:"#888",borderDash:[6,3],pointRadius:0,borderWidth:1});
+    const ds=[];GROUPS.forEach((g,i)=>{ds.push({label:g,data:get(metric,g,field),borderColor:COLORS[i],backgroundColor:COLORS[i],tension:.15,pointRadius:3,spanGaps:true});
+      if(withV&&hasV)ds.push({label:g+" vLLM",data:get(metric,g,"vllm"),borderColor:COLORS[i],borderDash:[4,4],pointRadius:0,borderWidth:1,spanGaps:true});});
+    if(refLine&&hasV)ds.push({label:"vLLM = 1.0",data:rounds.map(()=>1),borderColor:"#888",borderDash:[6,3],pointRadius:0,borderWidth:1});
     upsert(id,{type:"line",data:{labels:rounds,datasets:ds},options:{animation:false,responsive:true,interaction:{mode:"index",intersect:false},
       onClick:(evt,els,chart)=>{const pts=chart.getElementsAtEventForMode(evt,"index",{intersect:false},true);if(pts.length){showRound(rounds[pts[0].index]);}},
       plugins:{legend:{labels:{boxWidth:10,font:{size:11}}},tooltip:{callbacks:{afterTitle:(it)=>"改动: "+(change[it[0].label]||"")}}},
@@ -75,12 +94,12 @@ function buildMain(rows){
   let h="<table><tr><th>轮</th><th class=change>改动</th>";GROUPS.forEach(g=>h+=`<th>${g} tok/s<br>(×vLLM, Δ)</th>`);GROUPS.forEach(g=>h+=`<th>${g} TTFT ms<br>(Δ)</th>`);GROUPS.forEach(g=>h+=`<th>${g} TPOT ms<br>(Δ)</th>`);h+="</tr>";
   rounds.forEach(rd=>{h+=`<tr><td><a href="#" onclick="showRound('${rd}');return false;">${rd}</a></td><td class="change chg">${change[rd]||"—"}</td>`;
     for(const m of ["out_tok_per_s","ttft_p50_ms","tpot_p50_ms"])GROUPS.forEach(g=>{const x=rows.find(r=>r.round==rd&&r.group==g&&r.metric==m);if(!x){h+="<td>—</td>";return;}
-      const d=x.delta_pct_vs_prev_round===""?"":parseFloat(x.delta_pct_vs_prev_round);const cls=d===""?"":(d>0.5?"up":(d<-0.5?"down":""));const ds=d===""?"":` <span class="${cls}">${d>0?"+":""}${d.toFixed(0)}%</span>`;
-      const v=parseFloat(x.dinfer);h+=m=="out_tok_per_s"?`<td>${v.toFixed(0)} (${parseFloat(x.ratio_dinfer_over_vllm).toFixed(2)}×)${ds}</td>`:`<td>${v.toFixed(m=="tpot_p50_ms"?2:1)} / ${parseFloat(x.vllm).toFixed(m=="tpot_p50_ms"?2:1)}${ds}</td>`;});
+      const d=num(x.delta_pct_vs_prev_round);const cls=d===null?"":(d>0.5?"up":(d<-0.5?"down":""));const ds=d===null?"":` <span class="${cls}">${d>0?"+":""}${d.toFixed(0)}%</span>`;
+      const v=num(x.dinfer), dec=m=="tpot_p50_ms"?2:1;h+=m=="out_tok_per_s"?`<td>${f(v,0)} (${f(num(x.ratio_dinfer_over_vllm),2)}×)${ds}</td>`:`<td>${f(v,dec)} / ${f(num(x.vllm),dec)}${ds}</td>`;});
     h+="</tr>";});
   document.getElementById("table").innerHTML=h+"</table>";
   window.__rows=rows; window.__rounds=rounds; window.__change=change;
-  if(window.__selected) showRound(window.__selected);
+  if(window.__selected&&rounds.includes(window.__selected)) showRound(window.__selected); else document.getElementById("detail").style.display="none";
 }
 function showRound(rd){
   const rows=window.__rows||[], rounds=window.__rounds||[], change=window.__change||{};
@@ -92,20 +111,20 @@ function showRound(rd){
   const M=[["out_tok_per_s","out tok/s",0,false],["ttft_p50_ms","TTFT p50 ms",1,true],["tpot_p50_ms","TPOT p50 ms",2,true]];
   let h="<table><tr><th>组</th><th>指标</th><th>dinfer</th><th>vLLM（基线）</th><th>dinfer ÷ vLLM</th><th>相对上一轮</th><th>相对首轮</th></tr>";
   GROUPS.forEach(g=>M.forEach(([m,name,dec,lower])=>{const x=rows.find(r=>r.round==rd&&r.group==g&&r.metric==m); if(!x) return;
-    const f=rows.find(r=>r.round==rounds[0]&&r.group==g&&r.metric==m); const v=parseFloat(x.dinfer), vv=parseFloat(x.vllm);
-    const d=x.delta_pct_vs_prev_round===""?"—":(parseFloat(x.delta_pct_vs_prev_round)>0?"+":"")+parseFloat(x.delta_pct_vs_prev_round).toFixed(1)+"%";
-    const d0=f?(((lower?(parseFloat(f.dinfer)-v)/parseFloat(f.dinfer):(v-parseFloat(f.dinfer))/parseFloat(f.dinfer))*100)):null;
+    const fr=rows.find(r=>r.round==rounds[0]&&r.group==g&&r.metric==m); const v=num(x.dinfer), vv=num(x.vllm);
+    const dn=num(x.delta_pct_vs_prev_round); const d=dn===null?"—":(dn>0?"+":"")+dn.toFixed(1)+"%";
+    const f0=fr?num(fr.dinfer):null; const d0=f0?(((lower?(f0-v)/f0:(v-f0)/f0)*100)):null;
     const cls=(s)=>{const n=parseFloat(s);return isNaN(n)?"":(n>0.5?"up":(n<-0.5?"down":""));};
-    const ratio=lower?(vv/v):(v/vv);
-    h+=`<tr><td>${g}</td><td>${name}</td><td>${v.toFixed(dec)}</td><td>${vv.toFixed(dec)}</td><td>${ratio.toFixed(2)}×${lower?"（vLLM÷dinfer，>1 = 我们更快）":""}</td><td class="${cls(d)}">${d}</td><td class="${d0===null?"":cls(d0)}">${d0===null?"—":(d0>0?"+":"")+d0.toFixed(0)+"%"}</td></tr>`;}));
+    const ratio=vv===null?null:(lower?(vv/v):(v/vv));
+    h+=`<tr><td>${g}</td><td>${name}</td><td>${f(v,dec)}</td><td>${f(vv,dec)}</td><td>${ratio===null?"—":ratio.toFixed(2)+"×"+(lower?"（vLLM÷dinfer，>1 = 我们更快）":"")}</td><td class="${cls(d)}">${d}</td><td class="${d0===null?"":cls(d0)}">${d0===null?"—":(d0>0?"+":"")+d0.toFixed(0)+"%"}</td></tr>`;}));
   document.getElementById("detail-table").innerHTML=h+"</table>";
   document.getElementById("detail").scrollIntoView({behavior:"smooth",block:"nearest"});
 }
 // ---- ab 页（pd / tp / dp / other）：每个目录×组 一簇柱，灰 = 基线，彩 = variant ----
 function buildCat(cat,rows){
   const tab=document.querySelector(`.tabs button[data-tab="${cat}"]`);
-  if(!rows.length){tab.hidden=true;return;}
-  tab.hidden=false;
+  tab.hidden=!rows.length;
+  if(!rows.length) return;
   const keys=[...new Set(rows.map(r=>r.round+"\u0000"+r.group))].map(k=>k.split("\u0000"));
   const variants=[...new Set(rows.map(r=>r.variant))];
   const bases=[...new Set(rows.map(r=>r.baseline))];
@@ -117,37 +136,47 @@ function buildCat(cat,rows){
   const chg={};rows.forEach(r=>chg[r.round]=r.change);
   M.forEach(([m,title])=>{
     document.getElementById(`h-${cat}-${m}`).textContent=title+`，${variants.join(" / ")} vs ${bases.join("/")}（灰柱）`;
-    const ds=[{label:bases.join("/")+"（基线）",backgroundColor:"#9a9a9a",data:keys.map(([rd,g])=>{const x=rows.find(r=>r.round==rd&&r.group==g&&r.metric==m);return x?parseFloat(x.vllm):null;})}];
-    variants.forEach((vn,i)=>ds.push({label:vn,backgroundColor:COLORS[i%COLORS.length],data:keys.map(([rd,g])=>{const x=rows.find(r=>r.round==rd&&r.group==g&&r.metric==m&&r.variant==vn);return x?parseFloat(x.dinfer):null;})}));
+    const ds=[{label:bases.join("/")+"（基线）",backgroundColor:"#9a9a9a",data:keys.map(([rd,g])=>{const x=rows.find(r=>r.round==rd&&r.group==g&&r.metric==m);return x?num(x.vllm):null;})}];
+    variants.forEach((vn,i)=>ds.push({label:vn,backgroundColor:COLORS[i%COLORS.length],data:keys.map(([rd,g])=>{const x=rows.find(r=>r.round==rd&&r.group==g&&r.metric==m&&r.variant==vn);return x?num(x.dinfer):null;})}));
     upsert(`c-${cat}-${m}`,{type:"bar",data:{labels,datasets:ds},options:{animation:false,responsive:true,
       plugins:{legend:{labels:{boxWidth:10,font:{size:11}}},tooltip:{callbacks:{afterTitle:(it)=>"改动: "+(chg[labels[it[0].dataIndex][0]]||"")}}},
       scales:{y:{beginAtZero:true,ticks:{color:fg()}},x:{ticks:{color:fg(),font:{size:10}}}}}});
   });
   let h=`<table><tr><th class=l>目录</th><th class=l>改动</th><th>组</th><th class=l>基线</th><th class=l>variant</th><th>out tok/s（vs 基线）</th><th>TTFT p50 ms</th><th>TTFT p99 ms</th><th>TPOT p50 ms</th><th>failed</th></tr>`;
-  const cell=(x,dec,lower)=>{if(!x)return"<td>—</td>";const a=parseFloat(x.dinfer),b=parseFloat(x.vllm);const d=b?((lower?(b-a)/b:(a-b)/b)*100):null;const cls=d===null?"":(d>0.5?"up":(d<-0.5?"down":""));
-    return `<td>${a.toFixed(dec)} / ${b.toFixed(dec)}${d===null?"":` <span class="${cls}">${d>0?"+":""}${d.toFixed(0)}%</span>`}</td>`;};
-  keys.forEach(([rd,g])=>variants.forEach(vn=>{const f=(m)=>rows.find(r=>r.round==rd&&r.group==g&&r.metric==m&&r.variant==vn);if(!f("out_tok_per_s"))return;
-    h+=`<tr><td class=l>${rd}</td><td class="l chg">${chg[rd]||"—"}</td><td>${g}</td><td class=l>${f("out_tok_per_s").baseline}</td><td class=l>${vn}</td>${cell(f("out_tok_per_s"),0,false)}${cell(f("ttft_p50_ms"),1,true)}${cell(f("ttft_p99_ms"),1,true)}${cell(f("tpot_p50_ms"),2,true)}${cell(f("failed"),0,true)}</tr>`;}));
+  const cell=(x,dec,lower)=>{if(!x)return"<td>—</td>";const a=num(x.dinfer),b=num(x.vllm);const d=b?((lower?(b-a)/b:(a-b)/b)*100):null;const cls=d===null?"":(d>0.5?"up":(d<-0.5?"down":""));
+    return `<td>${f(a,dec)} / ${f(b,dec)}${d===null?"":` <span class="${cls}">${d>0?"+":""}${d.toFixed(0)}%</span>`}</td>`;};
+  keys.forEach(([rd,g])=>variants.forEach(vn=>{const q=(m)=>rows.find(r=>r.round==rd&&r.group==g&&r.metric==m&&r.variant==vn);if(!q("out_tok_per_s"))return;
+    h+=`<tr><td class=l>${rd}</td><td class="l chg">${chg[rd]||"—"}</td><td>${g}</td><td class=l>${q("out_tok_per_s").baseline}</td><td class=l>${vn}</td>${cell(q("out_tok_per_s"),0,false)}${cell(q("ttft_p50_ms"),1,true)}${cell(q("ttft_p99_ms"),1,true)}${cell(q("tpot_p50_ms"),2,true)}${cell(q("failed"),0,true)}</tr>`;}));
   document.getElementById("table-"+cat).innerHTML=h+"</table><div class=updated>单元格 = variant / 基线，百分比 = variant 相对基线（绿色 = 变好）。</div>";
 }
-function build(rows){
+// ---- 卡型 + 切页：纯 JS + URL hash（#<gpu>/<tab>）----
+let curGpu=DEFAULT_GPU, curTab="single";
+function parseHash(){const h=(location.hash||"").slice(1);if(!h)return;const [a,b]=h.split("/");if(b!==undefined){curGpu=decodeURIComponent(a)||curGpu;curTab=b||"single";}else if(["single",...CATS].includes(a)){curTab=a;}else{curGpu=decodeURIComponent(a);}}
+function gpuList(rows){const s=new Set(KNOWN_GPUS);rows.forEach(r=>{if(r.gpu)s.add(r.gpu);});return [...s];}
+function renderGpus(rows){
+  const gpus=gpuList(rows); if(!gpus.includes(curGpu)) curGpu=gpus[0]||DEFAULT_GPU;
+  const box=document.getElementById("gpus"); box.querySelectorAll("button").forEach(b=>b.remove());
+  gpus.forEach(g=>{const b=document.createElement("button");b.textContent=g;b.dataset.gpu=g;b.classList.toggle("on",g==curGpu);b.onclick=()=>{curGpu=g;rebuild();show(true);};box.appendChild(b);});
+}
+function rebuild(){
+  const rows=ALL.filter(r=>(r.gpu||DEFAULT_GPU)==curGpu);
   buildMain(rows.filter(r=>r.kind=="main"||r.kind===undefined));
   CATS.forEach(c=>buildCat(c,rows.filter(r=>r.kind==c)));
-  document.getElementById("updated").textContent=" 更新于 "+new Date().toLocaleTimeString();
-  showTab(current,false);
+  document.querySelectorAll(".gpus button").forEach(b=>b.classList.toggle("on",b.dataset.gpu==curGpu));
 }
-// ---- 切页：纯 JS + URL hash ----
-let current=(location.hash||"#single").slice(1);
-function showTab(t,push){
-  if(!document.getElementById("page-"+t)) t="single";
-  current=t;
-  document.querySelectorAll(".page").forEach(p=>p.hidden=(p.id!="page-"+t));
-  document.querySelectorAll(".tabs button").forEach(b=>b.classList.toggle("on",b.dataset.tab==t));
-  if(push&&location.hash!="#"+t) history.replaceState(null,"","#"+t);
+function show(push){
+  const tab=document.querySelector(`.tabs button[data-tab="${curTab}"]`);
+  if(!tab||tab.hidden) curTab="single";
+  document.querySelectorAll(".page").forEach(p=>p.hidden=(p.id!="page-"+curTab));
+  document.querySelectorAll(".tabs button").forEach(b=>b.classList.toggle("on",b.dataset.tab==curTab));
+  const want="#"+encodeURIComponent(curGpu)+"/"+curTab;
+  if(push&&location.hash!=want) history.replaceState(null,"",want);
   requestAnimationFrame(()=>Object.values(charts).forEach(c=>{try{c.resize();}catch(e){}}));
 }
-document.getElementById("tabs").addEventListener("click",e=>{const b=e.target.closest("button[data-tab]");if(b)showTab(b.dataset.tab,true);});
-window.addEventListener("hashchange",()=>showTab((location.hash||"#single").slice(1),false));
+function build(rows){ALL=rows;renderGpus(rows);rebuild();document.getElementById("updated").textContent=" 更新于 "+new Date().toLocaleTimeString();show(true);}
+document.getElementById("tabs").addEventListener("click",e=>{const b=e.target.closest("button[data-tab]");if(b){curTab=b.dataset.tab;show(true);}});
+window.addEventListener("hashchange",()=>{parseHash();if(ALL.length){rebuild();}show(false);});
+parseHash();
 async function refresh(){try{const t=await (await fetch("perf-trend.csv?ts="+Date.now(),{cache:"no-store"})).text();build(parseCSV(t));}catch(e){document.getElementById("updated").textContent=" 读取 CSV 失败: "+e;}}
 refresh();setInterval(refresh,10000);
 </script></body></html>

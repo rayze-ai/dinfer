@@ -13,8 +13,11 @@ kill_port() {
   pgrep -f "dinfer serve .*--port $port" >/dev/null && { pkill -KILL -f "dinfer serve .*--port $port"; sleep 2; }
   for _ in $(seq 1 20); do curl -s -m 1 "http://127.0.0.1:$port/v1/models" >/dev/null 2>&1 || break; sleep 0.5; done
 }
-wait_gpu_free() { # $1 = gpu index；等显存回落（刚退出的实例要几秒才释放）
-  for _ in $(seq 1 60); do used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i "$1" 2>/dev/null || echo 0); [ "${used:-0}" -lt 2000 ] && return 0; sleep 0.5; done
+wait_gpu_free() { # $1 = gpu index 或逗号卡表（TP）；等每张卡显存回落（刚退出的实例要几秒才释放）
+  for _ in $(seq 1 60); do
+    used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i "$1" 2>/dev/null | sort -n | tail -1); used=${used:-0}
+    [ "$used" -lt 2000 ] && return 0; sleep 0.5
+  done
   echo "WARNING: GPU $1 still has ${used} MiB used"
 }
 case "$cmd" in
