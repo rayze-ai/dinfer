@@ -122,6 +122,12 @@ int qkv_post_bf16(void* qkv, const void* wq, const void* wk, const int32_t* posi
                   const int64_t* slot_mapping, int64_t tokens, int64_t heads, int64_t kv_heads, int64_t head_dim, float eps,
                   int64_t block_size, cudaStream_t stream);
 
+// ---- MXFP4 解包（mxfp4.cu）：compressed-tensors `mxfp4-pack-quantized` 的参考回退 ----
+// packed u8 [rows, cols/2]（低半字节 = 偶数下标）+ scale u8 [rows, cols/group]（e8m0 = 2^(u8-127)）
+// → bf16 [rows, cols]。原生 MXFP4 GEMM 留 TODO（docs/loops/k3-moe.md）。
+int mxfp4_dequant_bf16(const void* packed, const void* scale, void* out, int64_t rows, int64_t cols,
+                       int64_t group);
+
 // ---- KDA（kda.cu）：Kimi Delta Attention 的模型无关算子 ----
 // 短卷积（depthwise causal conv1d, width<=8, 带 siLU）：
 //   y[t,d] = silu(Σ_j w[d,j]·x[t-W+1+j,d])，越界部分取 conv_state（布局 [slots, dim, state_len]）。

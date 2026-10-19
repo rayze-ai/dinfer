@@ -569,6 +569,15 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
 
+    pub fn mxfp4_dequant_bf16(
+        packed: *const c_void,
+        scale: *const c_void,
+        out: *mut c_void,
+        rows: i64,
+        cols: i64,
+        group: i64,
+        stream: cudaStream_t,
+    ) -> i32;
 }
 
 #[cfg(dinfer_no_nvcc)]
@@ -609,6 +618,7 @@ mod stubs {
     stub!(moe_bucket(ti: *const i32, c: *mut i32, o: *mut i32, cu: *mut i32, st: *mut i32, sk: *mut i32, t: i64, e: i64, k: i64, s: cudaStream_t));
     stub!(moe_gather_bf16(x: *const c_void, xg: *mut c_void, st: *const i32, n: i64, h: i64, s: cudaStream_t));
     stub!(moe_scatter_add_f32(y: *const c_void, a: *mut f32, st: *const i32, sk: *const i32, tw: *const f32, n: i64, k: i64, h: i64, s: cudaStream_t));
+    stub!(mxfp4_dequant_bf16(p: *const c_void, sc: *const c_void, o: *mut c_void, r: i64, c: i64, g: i64, s: cudaStream_t));
     stub!(kda_conv1d_prefill(x: *const c_void, w: *const c_void, o: *mut c_void, cs: *mut c_void, cu: *const i32, si: *const i32, hi: *const i32, ns: i64, d: i64, wid: i64, sl: i64, s: cudaStream_t));
     stub!(kda_conv1d_update(x: *const c_void, w: *const c_void, o: *mut c_void, cs: *mut c_void, si: *const i32, b: i64, d: i64, wid: i64, sl: i64, s: cudaStream_t));
     stub!(kda_gate(g: *const c_void, al: *const f32, db: *const f32, o: *mut f32, t: i64, h: i64, hd: i64, lb: f32, ulb: i32, s: cudaStream_t));

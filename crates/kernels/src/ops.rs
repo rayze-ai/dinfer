@@ -2250,3 +2250,36 @@ pub fn kda_gated_rmsnorm(
         "kda_gated_rmsnorm",
     )
 }
+
+/// MXFP4 解包（compressed-tensors `mxfp4-pack-quantized` 的参考回退路径）。
+/// `packed`: `[rows, cols/2]` u8（低半字节 = 偶数下标）；`scale`: `[rows, cols/group]` u8，e8m0 = 2^(u8-127)；
+/// `out`: `[rows, cols]` bf16。原生 MXFP4 GEMM 见 `docs/loops/k3-moe.md` 的 TODO。
+pub fn mxfp4_dequant_bf16(
+    stream: &Stream,
+    packed: &CudaSlice<u8>,
+    scale: &CudaSlice<u8>,
+    out: &mut CudaSlice<bf16>,
+    rows: usize,
+    cols: usize,
+    group: usize,
+) -> Result<()> {
+    ensure!(cols % 2 == 0 && cols % group == 0, "mxfp4_dequant: cols {cols} 必须能被 2 和 group {group} 整除");
+    ensure!(packed.len() >= rows * cols / 2, "mxfp4_dequant: packed");
+    ensure!(scale.len() >= rows * cols / group, "mxfp4_dequant: scale");
+    ensure!(out.len() >= rows * cols, "mxfp4_dequant: out");
+    // SAFETY: 容量已校验。
+    check(
+        unsafe {
+            ffi::mxfp4_dequant_bf16(
+                stream.ptr(packed) as *const c_void,
+                stream.ptr(scale) as *const c_void,
+                stream.ptr_mut(out) as *mut c_void,
+                rows as i64,
+                cols as i64,
+                group as i64,
+                stream.raw() as _,
+            )
+        },
+        "mxfp4_dequant_bf16",
+    )
+}
