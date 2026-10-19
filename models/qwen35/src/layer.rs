@@ -3,6 +3,7 @@
 use crate::config::{LayerType, Qwen35Config};
 use crate::full_attn::{AttnMeta, FullAttention, PagedKv};
 use crate::gdn::{GdnLayer, GdnMeta};
+use crate::scratch::ActScratch;
 use crate::weights::Table;
 use anyhow::Result;
 use dinfer_core::runner::BatchMode;
@@ -17,12 +18,6 @@ pub enum Attn {
 impl Attn {
     pub fn is_full(&self) -> bool {
         matches!(self, Attn::Full(_))
-    }
-    /// 给全注意力层换一套激活缓冲（跨流并行用）；GDN 层不换（副流路径暂不支持 GDN）。
-    pub fn swap_bufs(&mut self, qkv: &mut Tensor<bf16>, gate: &mut Tensor<bf16>, attn: &mut Tensor<bf16>) {
-        if let Attn::Full(a) = self {
-            a.swap_bufs(qkv, gate, attn);
-        }
     }
 }
 
@@ -85,6 +80,7 @@ impl DecoderLayer {
         tp: (usize, usize),
     ) -> Result<Self> {
         let (rank, world) = tp;
+        let _ = max_tokens; // 激活缓冲全模型共享，见 `crate::scratch`
         let p = format!("layers.{l}");
         let attn = match cfg.layer_types[l] {
             LayerType::FullAttention => {
@@ -96,7 +92,8 @@ impl DecoderLayer {
             input_norm: t.rmsnorm(stream, src, &format!("{p}.input_layernorm.weight"), cfg.rms_norm_eps)?,
             attn,
             post_norm: t.rmsnorm(stream, src, &format!("{p}.post_attention_layernorm.weight"), cfg.rms_norm_eps)?,
-            mlp: Mlp::load_tp(stream, src, &t.prefix_of(&format!("{p}.mlp")), max_tokens, rank, world)?,
+            // max_tokens = 0：Mlp 不自带缓冲，forward 走 `forward_with_scratch` 借全模型共享的一套
+            mlp: Mlp::load_tp(stream, src, &t.prefix_of(&format!("{p}.mlp")), 0, rank, world)?,
         })
     }
 
@@ -124,6 +121,7 @@ impl DecoderLayer {
         kv: &mut Option<PagedKv>,
         meta: &StepMeta<'_>,
         decode_scratch: &mut Tensor<f32>,
+        sc: &mut ActScratch,
         out: &mut Tensor<bf16>,
     ) -> Result<()> {
         match (&mut self.attn, kv) {
@@ -140,9 +138,10 @@ impl DecoderLayer {
                 kv,
                 &meta.attn_meta(),
                 decode_scratch,
+                sc,
                 out,
             ),
-            (Attn::Gdn(g), None) => g.forward(stream, gemm, ops.act(), cfg, t, normed, &meta.gdn_meta(), out),
+            (Attn::Gdn(g), None) => g.forward(stream, gemm, ops.act(), cfg, t, normed, &meta.gdn_meta(), sc, out),
             (Attn::Full(_), None) => anyhow::bail!("full attention layer without a KV cache slot"),
             (Attn::Gdn(_), Some(_)) => anyhow::bail!("GDN layer with a KV cache slot"),
         }

@@ -7,6 +7,7 @@
 //! - `qkv_post_ext`：`rope_dim = 64`、`norm_beta = 1.0`（`q_norm/k_norm` 是 zero-centered，`w + 1`）。
 //! - attention 之后、o_proj 之前 `out *= sigmoid(gate)`（vLLM `qwen3_next.py`）。
 use crate::config::Qwen35Config;
+use crate::scratch::ActScratch;
 use crate::weights::Table;
 use anyhow::{ensure, Result};
 use dinfer_core::runner::BatchMode;
@@ -40,9 +41,6 @@ pub struct FullAttention {
     k_norm: Tensor<bf16>,
     /// TP 世界大小（本 rank 的 heads = cfg / world）。
     world: usize,
-    qkv_buf: Tensor<bf16>, // [T, (H + 2Hkv)·D]
-    gate_buf: Tensor<bf16>, // [T, H·D]
-    attn: Tensor<bf16>,    // [T, H·D]
 }
 
 impl FullAttention {
@@ -56,6 +54,7 @@ impl FullAttention {
         tp: (usize, usize),
     ) -> Result<Self> {
         let (rank, world) = tp;
+        let _ = max_tokens; // 激活缓冲全模型共享（`crate::scratch::ActScratch`）
         // cfg 已是本 rank 的配置（TP 在 `Qwen35Model::load_with_budget` 里拒绝 world > 1，这里 world 恒为 1）。
         let (h, hk, d) =
             (cfg.num_attention_heads as usize, cfg.num_key_value_heads as usize, cfg.head_dim as usize);
@@ -76,16 +75,7 @@ impl FullAttention {
             q_norm,
             k_norm,
             world,
-            qkv_buf: Tensor::zeros(stream, &[max_tokens, (h + 2 * hk) * d])?,
-            gate_buf: Tensor::zeros(stream, &[max_tokens, h * d])?,
-            attn: Tensor::zeros(stream, &[max_tokens, h * d])?,
         })
-    }
-
-    pub fn swap_bufs(&mut self, qkv_buf: &mut Tensor<bf16>, gate_buf: &mut Tensor<bf16>, attn: &mut Tensor<bf16>) {
-        std::mem::swap(&mut self.qkv_buf, qkv_buf);
-        std::mem::swap(&mut self.gate_buf, gate_buf);
-        std::mem::swap(&mut self.attn, attn);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -108,8 +98,10 @@ impl FullAttention {
         kv: &mut PagedKv,
         meta: &AttnMeta<'_>,
         decode_scratch: &mut Tensor<f32>,
+        sc: &mut ActScratch,
         out: &mut Tensor<bf16>,
     ) -> Result<()> {
+        ensure!(t <= sc.max_tokens, "attn: {t} tokens > max {}", sc.max_tokens);
         let (h, hk, d) = (
             cfg.num_attention_heads as usize,
             cfg.num_key_value_heads as usize,
@@ -120,13 +112,13 @@ impl FullAttention {
         let qkv_w = (h + 2 * hk) * d;
         let rope_dim = cfg.rope_dim() as usize;
         // 1. qkv = x · W^T → [t, (H+2Hkv)·D]（q | k | v）
-        gemm.forward_bf16(&x.data, &self.qkv.w.data, None, &mut self.qkv_buf.data, t, qkv_w, cfg.hidden_size as usize)?;
+        gemm.forward_bf16(&x.data, &self.qkv.w.data, None, &mut sc.qkv.data, t, qkv_w, cfg.hidden_size as usize)?;
         // 2. per-head RMSNorm（zero-centered）+ partial RoPE（原地）+ K/V 写 paged cache
         // `qkv_post_ext` 是 ops.rs 的自由函数（QkvPost trait 只有 Qwen3 的旧签名）；Qwen3.5 需要 partial RoPE +
         // zero-centered norm，直接调。
         k::qkv_post_ext_bf16(
             stream,
-            &mut self.qkv_buf.data,
+            &mut sc.qkv.data,
             &self.q_norm.data,
             &self.k_norm.data,
             &positions.data,
@@ -145,16 +137,16 @@ impl FullAttention {
         )?;
         // 3. GQA：q 从第 0 列起、k 从 H·D、v 从 (H+Hkv)·D，行跨度 qkv_w
         let scale = (d as f32).powf(-0.5);
-        let q_view = self.qkv_buf.data.slice(..);
-        let k_view = self.qkv_buf.data.slice(h * d..);
-        let v_view = self.qkv_buf.data.slice((h + hk) * d..);
+        let q_view = sc.qkv.data.slice(..);
+        let k_view = sc.qkv.data.slice(h * d..);
+        let v_view = sc.qkv.data.slice((h + hk) * d..);
         match meta.mode {
             BatchMode::Prefill => ops.attn().prefill(
                 stream,
                 &q_view,
                 &k_view,
                 &v_view,
-                &mut self.attn.data,
+                &mut sc.o.data,
                 &meta.cu_seqlens.data,
                 meta.num_reqs,
                 meta.max_seqlen,
@@ -171,7 +163,7 @@ impl FullAttention {
                 &kv.cache.data,
                 &meta.block_table.data,
                 &meta.seq_lens.data,
-                &mut self.attn.data,
+                &mut sc.o.data,
                 &mut decode_scratch.data,
                 meta.num_reqs,
                 h,
@@ -190,7 +182,7 @@ impl FullAttention {
                 &meta.block_table.data,
                 &meta.seq_lens.data,
                 &meta.cu_seqlens.data,
-                &mut self.attn.data,
+                &mut sc.o.data,
                 &mut decode_scratch.data,
                 meta.num_reqs,
                 meta.max_seqlen,
@@ -204,9 +196,9 @@ impl FullAttention {
             )?,
         }
         // 4. 输出门：attn *= sigmoid(gate)
-        self.gate.forward_rows(gemm, x, &mut self.gate_buf, t)?;
-        k::mul_sigmoid_bf16(stream, &mut self.attn.data, &self.gate_buf.data, t * h * d)?;
+        self.gate.forward_rows(gemm, x, &mut sc.z, t)?;
+        k::mul_sigmoid_bf16(stream, &mut sc.o.data, &sc.z.data, t * h * d)?;
         // 5. o_proj
-        self.o_proj.forward_rows(gemm, &self.attn, out, t)
+        self.o_proj.forward_rows(gemm, &sc.o, out, t)
     }
 }

@@ -10,6 +10,7 @@
 //! decode 单 token 走 `gdn_recurrent`；`GDN_PREFILL=recurrent` 回退到老路径。chunk 中间缓冲全模型共用一份
 //! （`GdnChunkWorkspace`，executor 每步 `prepare` 一次，缓冲按需增长）。
 use crate::config::Qwen35Config;
+use crate::scratch::ActScratch;
 use crate::weights::Table;
 use anyhow::{ensure, Result};
 use dinfer_core::runner::BatchMode;
@@ -94,17 +95,6 @@ pub struct GdnLayer {
     norm_w: Tensor<bf16>, // [V]
     out_proj: Linear,
     pub state: GdnState,
-    // scratch
-    qkv_buf: Tensor<bf16>,  // [T, conv_dim]
-    conv_buf: Tensor<bf16>, // [T, conv_dim]
-    z_buf: Tensor<bf16>,    // [T, HV·V]
-    a_buf: Tensor<bf16>,    // [T, HV]
-    b_buf: Tensor<bf16>,    // [T, HV]
-    g_buf: Tensor<f32>,     // [T, HV]
-    beta_buf: Tensor<f32>,  // [T, HV]
-    o_buf: Tensor<bf16>,    // [T, HV·V]
-    n_buf: Tensor<bf16>,    // [T, HV·V]
-    /// `reset_slot` 的 dtod 源（一层一个 slot 大小的常驻零）。
     rec_zeros: Option<Tensor<f32>>,
     conv_zeros: Option<Tensor<bf16>>,
 }
@@ -152,7 +142,7 @@ impl GdnLayer {
             conv: Tensor::zeros(stream, &[num_slots + 1, conv_dim, st])?,
             rec: Tensor::zeros(stream, &[num_slots + 1, hv, vd, kd])?,
         };
-        let (tt, vv) = (max_tokens, hv * vd);
+        let _ = max_tokens; // 激活缓冲改为全模型共享（`crate::scratch::ActScratch`），不再按层预分配
         Ok(Self {
             in_qkv,
             in_z,
@@ -164,15 +154,6 @@ impl GdnLayer {
             norm_w,
             out_proj,
             state,
-            qkv_buf: Tensor::zeros(stream, &[tt, conv_dim])?,
-            conv_buf: Tensor::zeros(stream, &[tt, conv_dim])?,
-            z_buf: Tensor::zeros(stream, &[tt, vv])?,
-            a_buf: Tensor::zeros(stream, &[tt, hv])?,
-            b_buf: Tensor::zeros(stream, &[tt, hv])?,
-            g_buf: Tensor::zeros(stream, &[tt, hv])?,
-            beta_buf: Tensor::zeros(stream, &[tt, hv])?,
-            o_buf: Tensor::zeros(stream, &[tt, vv])?,
-            n_buf: Tensor::zeros(stream, &[tt, vv])?,
             rec_zeros: Some(Tensor::zeros(stream, &[hv, vd, kd])?),
             conv_zeros: Some(Tensor::zeros(stream, &[conv_dim, st])?),
         })
@@ -216,6 +197,7 @@ impl GdnLayer {
         t: usize,
         x: &Tensor<bf16>,
         meta: &GdnMeta<'_>,
+        abuf: &mut ActScratch,
         out: &mut Tensor<bf16>,
     ) -> Result<()> {
         let hv = cfg.linear_num_value_heads as usize;
@@ -224,23 +206,23 @@ impl GdnLayer {
         let width = cfg.linear_conv_kernel_dim as usize;
         let conv_dim = 2 * h * kd + hv * vd;
         let group = hv / h;
-        ensure!(t <= self.qkv_buf.shape[0], "gdn: {t} tokens > max {}", self.qkv_buf.shape[0]);
+        ensure!(t <= abuf.max_tokens, "gdn: {t} tokens > max {}", abuf.max_tokens);
         ensure!(meta.state_indices.numel() >= meta.num_reqs, "gdn: state_indices");
 
         // 1. 三个投影
-        self.in_qkv.forward_rows(gemm, x, &mut self.qkv_buf, t)?;
-        self.in_z.forward_rows(gemm, x, &mut self.z_buf, t)?;
-        self.in_a.forward_rows(gemm, x, &mut self.a_buf, t)?;
-        self.in_b.forward_rows(gemm, x, &mut self.b_buf, t)?;
+        self.in_qkv.forward_rows(gemm, x, &mut abuf.qkv, t)?;
+        self.in_z.forward_rows(gemm, x, &mut abuf.z, t)?;
+        self.in_a.forward_rows(gemm, x, &mut abuf.a, t)?;
+        self.in_b.forward_rows(gemm, x, &mut abuf.b, t)?;
 
         // 2. 短卷积（decode 单 token 走 update，其余走 varlen prefill）
         let single = meta.mode == BatchMode::Decode && meta.num_reqs == t;
         if single {
             k::gdn_conv1d_update(
                 stream,
-                &self.qkv_buf.data,
+                &abuf.qkv.data,
                 &self.conv_w.data,
-                &mut self.conv_buf.data,
+                &mut abuf.conv.data,
                 &mut self.state.conv.data,
                 Some(&meta.state_indices.data),
                 meta.num_reqs,
@@ -252,9 +234,9 @@ impl GdnLayer {
         } else {
             k::gdn_conv1d_prefill(
                 stream,
-                &self.qkv_buf.data,
+                &abuf.qkv.data,
                 &self.conv_w.data,
-                &mut self.conv_buf.data,
+                &mut abuf.conv.data,
                 &mut self.state.conv.data,
                 &meta.cu_seqlens.data,
                 Some(&meta.state_indices.data),
@@ -272,12 +254,12 @@ impl GdnLayer {
         if !single {
             k::gdn_gate(
                 stream,
-                &self.a_buf.data,
-                &self.b_buf.data,
+                &abuf.a.data,
+                &abuf.b.data,
                 &self.a_log.data,
                 &self.dt_bias.data,
-                &mut self.g_buf.data,
-                &mut self.beta_buf.data,
+                &mut abuf.g.data,
+                &mut abuf.beta.data,
                 t,
                 hv,
             )?;
@@ -294,14 +276,14 @@ impl GdnLayer {
             let sc = ws.scratch.as_mut().ok_or_else(|| anyhow::anyhow!("gdn: chunk scratch 未分配"))?;
             ensure!(plan.num_seqs == meta.num_reqs && ws.tokens == t, "gdn: chunk plan 与本步不符");
             tracing::trace!(t, num_reqs = meta.num_reqs, chunks = plan.num_chunks, "gdn prefill: chunk 路径");
-            k::gdn_chunk_prep(stream, &self.conv_buf.data, &self.g_buf.data, &meta.cu_seqlens.data, plan, sc, t, h, hv, kd, vd, scale)?;
-            k::gdn_chunk_wy(stream, &self.conv_buf.data, &self.beta_buf.data, &meta.cu_seqlens.data, plan, sc, t, h, hv, kd, vd)?;
+            k::gdn_chunk_prep(stream, &abuf.conv.data, &abuf.g.data, &meta.cu_seqlens.data, plan, sc, t, h, hv, kd, vd, scale)?;
+            k::gdn_chunk_wy(stream, &abuf.conv.data, &abuf.beta.data, &meta.cu_seqlens.data, plan, sc, t, h, hv, kd, vd)?;
             k::gdn_chunk_ho(
                 stream,
                 &meta.cu_seqlens.data,
                 plan,
                 sc,
-                &mut self.o_buf.data,
+                &mut abuf.o.data,
                 &mut self.state.rec.data,
                 Some(&meta.state_indices.data),
                 t,
@@ -312,20 +294,20 @@ impl GdnLayer {
             )?;
         } else {
             let (g, beta, a_raw, b_raw) = if single {
-                (None, None, Some(&self.a_buf.data), Some(&self.b_buf.data))
+                (None, None, Some(&abuf.a.data), Some(&abuf.b.data))
             } else {
-                (Some(&self.g_buf.data), Some(&self.beta_buf.data), None, None)
+                (Some(&abuf.g.data), Some(&abuf.beta.data), None, None)
             };
             k::gdn_recurrent(
                 stream,
-                &self.conv_buf.data,
+                &abuf.conv.data,
                 g,
                 beta,
                 a_raw,
                 b_raw,
                 &self.a_log.data,
                 &self.dt_bias.data,
-                &mut self.o_buf.data,
+                &mut abuf.o.data,
                 &mut self.state.rec.data,
                 &meta.cu_seqlens.data,
                 Some(&meta.state_indices.data),
@@ -342,10 +324,10 @@ impl GdnLayer {
         // 5. 输出门 + RMSNorm（z 门，silu）
         k::gdn_gated_rmsnorm(
             stream,
-            &self.o_buf.data,
+            &abuf.o.data,
             &self.norm_w.data,
-            &self.z_buf.data,
-            &mut self.n_buf.data,
+            &abuf.z.data,
+            &mut abuf.n.data,
             t * hv,
             vd,
             cfg.rms_norm_eps,
@@ -355,7 +337,7 @@ impl GdnLayer {
         // 6. out_proj
         let _ = act;
         let _ = group;
-        self.out_proj.forward_rows(gemm, &self.n_buf, out, t)
+        self.out_proj.forward_rows(gemm, &abuf.n, out, t)
     }
 }
 

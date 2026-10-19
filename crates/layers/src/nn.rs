@@ -198,8 +198,10 @@ pub struct Mlp {
     pub gate_up: Linear,
     pub down: Linear,
     pub inter: usize,
-    gate_up_buf: Tensor<bf16>,
-    act_buf: Tensor<bf16>,
+    /// 自带的两块激活缓冲（`[max_tokens, 2I]` / `[max_tokens, I]`）。`load*` 的 `max_tokens == 0` 时不分配，
+    /// 调用方必须走 `forward_with_scratch` 借全模型共享的一套（每层各持一套在大预算下会爆显存，见 pitfalls）。
+    gate_up_buf: Option<Tensor<bf16>>,
+    act_buf: Option<Tensor<bf16>>,
 }
 
 impl Mlp {
@@ -228,16 +230,17 @@ impl Mlp {
             gate_up,
             down,
             inter,
-            gate_up_buf: Tensor::zeros(stream, &[max_tokens, 2 * inter])?,
-            act_buf: Tensor::zeros(stream, &[max_tokens, inter])?,
+            gate_up_buf: if max_tokens > 0 { Some(Tensor::zeros(stream, &[max_tokens, 2 * inter])?) } else { None },
+            act_buf: if max_tokens > 0 { Some(Tensor::zeros(stream, &[max_tokens, inter])?) } else { None },
         })
     }
     /// `tokens`：本步实际 token 数；x / out 缓冲只用前 tokens 行。
-    /// 跨流并行：把本层的两块激活缓冲与外部一套互换（副流用自己的 scratch）。形状必须一致。
+    /// 跨流并行：把本层的两块激活缓冲与外部一套互换（副流用自己的 scratch）。形状必须一致；只对自带缓冲的 Mlp 有效。
     pub fn swap_bufs(&mut self, gate_up: &mut Tensor<bf16>, act: &mut Tensor<bf16>) {
-        std::mem::swap(&mut self.gate_up_buf, gate_up);
-        std::mem::swap(&mut self.act_buf, act);
+        std::mem::swap(self.gate_up_buf.as_mut().expect("Mlp::swap_bufs: Mlp 未自带缓冲"), gate_up);
+        std::mem::swap(self.act_buf.as_mut().expect("Mlp::swap_bufs: Mlp 未自带缓冲"), act);
     }
+    /// 用自带缓冲算（`load*` 时 `max_tokens > 0`）。
     pub fn forward(
         &mut self,
         stream: &Stream,
@@ -247,27 +250,46 @@ impl Mlp {
         x: &Tensor<bf16>,
         out: &mut Tensor<bf16>,
     ) -> Result<()> {
-        let hidden = self.gate_up.in_features;
-        ensure!(x.numel() >= tokens * hidden && out.numel() >= tokens * hidden, "Mlp: buffer too small");
-        ensure!(self.gate_up_buf.numel() >= tokens * 2 * self.inter, "Mlp: tokens > max_tokens");
-        gemm.forward_bf16(
-            &x.data,
-            &self.gate_up.w.data,
-            None,
-            &mut self.gate_up_buf.data,
-            tokens,
-            2 * self.inter,
-            hidden,
-        )?;
-        act.silu_and_mul(stream, &self.gate_up_buf.data, &mut self.act_buf.data, tokens, self.inter)?;
-        gemm.forward_bf16(
-            &self.act_buf.data,
-            &self.down.w.data,
-            None,
-            &mut out.data,
-            tokens,
-            hidden,
-            self.inter,
-        )
+        let (Some(gu), Some(ab)) = (self.gate_up_buf.as_mut(), self.act_buf.as_mut()) else {
+            anyhow::bail!("Mlp::forward: 未自带激活缓冲（max_tokens = 0），请用 forward_with_scratch");
+        };
+        mlp_forward(&self.gate_up, &self.down, self.inter, stream, gemm, act, tokens, x, out, gu, ab)
     }
+    /// 用调用方借来的缓冲算：`gate_up` ≥ `[tokens, 2I]`，`act_buf` ≥ `[tokens, I]`（全模型共享一套时用）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_with_scratch(
+        &self,
+        stream: &Stream,
+        gemm: &Gemm,
+        act: &impl crate::Act,
+        tokens: usize,
+        x: &Tensor<bf16>,
+        out: &mut Tensor<bf16>,
+        gate_up: &mut Tensor<bf16>,
+        act_buf: &mut Tensor<bf16>,
+    ) -> Result<()> {
+        mlp_forward(&self.gate_up, &self.down, self.inter, stream, gemm, act, tokens, x, out, gate_up, act_buf)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mlp_forward(
+    gate_up: &Linear,
+    down: &Linear,
+    inter: usize,
+    stream: &Stream,
+    gemm: &Gemm,
+    act: &impl crate::Act,
+    tokens: usize,
+    x: &Tensor<bf16>,
+    out: &mut Tensor<bf16>,
+    gate_up_buf: &mut Tensor<bf16>,
+    act_buf: &mut Tensor<bf16>,
+) -> Result<()> {
+    let hidden = gate_up.in_features;
+    ensure!(x.numel() >= tokens * hidden && out.numel() >= tokens * hidden, "Mlp: buffer too small");
+    ensure!(gate_up_buf.numel() >= tokens * 2 * inter && act_buf.numel() >= tokens * inter, "Mlp: tokens > max_tokens");
+    gemm.forward_bf16(&x.data, &gate_up.w.data, None, &mut gate_up_buf.data, tokens, 2 * inter, hidden)?;
+    act.silu_and_mul(stream, &gate_up_buf.data, &mut act_buf.data, tokens, inter)?;
+    gemm.forward_bf16(&act_buf.data, &down.w.data, None, &mut out.data, tokens, hidden, inter)
 }

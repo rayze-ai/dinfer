@@ -11,6 +11,7 @@ pub mod gdn;
 pub mod layer;
 pub mod model;
 pub mod parser;
+pub mod scratch;
 pub mod service;
 pub mod weights;
 pub const MODEL_NAME: &str = "qwen35";

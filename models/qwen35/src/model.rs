@@ -7,6 +7,7 @@
 //! `lm_head.weight` 独立（`tie_word_embeddings false`）。
 use crate::config::Qwen35Config;
 use crate::full_attn::PagedKv;
+use crate::scratch::ActScratch;
 use crate::layer::{Attn, DecoderLayer, StepMeta};
 use crate::weights::Table;
 use anyhow::{ensure, Context, Result};
@@ -28,15 +29,6 @@ pub struct Forward<'a> {
     pub req_ids: &'a [u64],
 }
 
-/// 每层可换的一套激活缓冲（跨流并行用；GDN 层不参与）。
-pub struct LayerScratch {
-    pub qkv_buf: Tensor<bf16>,
-    pub gate_buf: Tensor<bf16>,
-    pub attn: Tensor<bf16>,
-    pub gate_up: Tensor<bf16>,
-    pub act: Tensor<bf16>,
-}
-
 pub struct ModelScratch {
     pub hidden: Tensor<bf16>,
     pub normed: Tensor<bf16>,
@@ -45,7 +37,8 @@ pub struct ModelScratch {
     pub final_normed: Tensor<bf16>,
     pub logits_bf16: Tensor<bf16>,
     pub decode_scratch: Tensor<f32>,
-    pub layers: Vec<LayerScratch>,
+    /// 全模型共享的 per-token 激活缓冲（GDN / 全注意力 / Mlp 轮流借用）。
+    pub act: ActScratch,
 }
 
 pub struct Qwen35Model<O: OpSet = dinfer_layers::DefaultOps> {
@@ -64,6 +57,7 @@ pub struct Qwen35Model<O: OpSet = dinfer_layers::DefaultOps> {
     pub num_slots: usize,
     hidden: Tensor<bf16>,
     normed: Tensor<bf16>,
+    act: ActScratch,
     attn_out: Tensor<bf16>,
     mlp_out: Tensor<bf16>,
     final_normed: Tensor<bf16>,
@@ -213,7 +207,17 @@ impl<O: OpSet> Qwen35Model<O> {
         let logits_bf16 = Tensor::zeros(stream, &[max_logits_rows, v])?;
         let decode_scratch =
             Tensor::zeros(stream, &[k::gqa_decode_scratch_len(max_logits_rows, h, d)])?;
+        // 全模型共享一套 per-token 激活缓冲（原先每层各一套，预算 16384 时 64 层 ≈ 180 GB，见 scratch.rs）。
+        let act = ActScratch::new(stream, &cfg, max_tokens)?;
         stream.synchronize()?;
+        tracing::info!(
+            bytes = ActScratch::bytes(&cfg, max_tokens),
+            gib = ActScratch::bytes(&cfg, max_tokens) as f64 / (1u64 << 30) as f64,
+            max_tokens,
+            "qwen35: activation scratch bytes={} (max_tokens={})",
+            ActScratch::bytes(&cfg, max_tokens),
+            max_tokens
+        );
         // KV 最后分配：此时 free 已扣掉权重与 scratch（等价 vLLM profile run 的作用，但不真跑 forward）。
         let per_block = Self::kv_bytes_per_block(&cfg, block_size).max(1);
         let exec_scratch = 3 * max_logits_rows * v * 4; // executor 的 fp32 logits / 采样工作区 / logprobs 副本
@@ -279,6 +283,7 @@ impl<O: OpSet> Qwen35Model<O> {
             num_slots,
             hidden: hidden_t,
             normed,
+            act,
             attn_out,
             mlp_out,
             final_normed,
@@ -312,26 +317,12 @@ impl<O: OpSet> Qwen35Model<O> {
         Ok(())
     }
 
+    /// 第二套激活缓冲（跨流并行用；形状同主套）。
     pub fn alloc_scratch(&self, stream: &Stream) -> Result<ModelScratch> {
         let cfg = &self.cfg;
-        let (h, hk, d) = (
-            cfg.num_attention_heads as usize,
-            cfg.num_key_value_heads as usize,
-            cfg.head_dim as usize,
-        );
+        let (h, d) = (cfg.num_attention_heads as usize, cfg.head_dim as usize);
         let hidden = cfg.hidden_size as usize;
         let (t, rows, v) = (self.max_tokens, self.max_logits_rows, cfg.vocab_size as usize);
-        let mut layers = Vec::with_capacity(self.layers.len());
-        for l in &self.layers {
-            let inter = l.mlp.inter;
-            layers.push(LayerScratch {
-                qkv_buf: Tensor::zeros(stream, &[t, (h + 2 * hk) * d])?,
-                gate_buf: Tensor::zeros(stream, &[t, h * d])?,
-                attn: Tensor::zeros(stream, &[t, h * d])?,
-                gate_up: Tensor::zeros(stream, &[t, 2 * inter])?,
-                act: Tensor::zeros(stream, &[t, inter])?,
-            });
-        }
         Ok(ModelScratch {
             hidden: Tensor::zeros(stream, &[t, hidden])?,
             normed: Tensor::zeros(stream, &[t, hidden])?,
@@ -340,7 +331,7 @@ impl<O: OpSet> Qwen35Model<O> {
             final_normed: Tensor::zeros(stream, &[rows, hidden])?,
             logits_bf16: Tensor::zeros(stream, &[rows, v])?,
             decode_scratch: Tensor::zeros(stream, &[k::gqa_decode_scratch_len(rows, h, d)])?,
-            layers,
+            act: ActScratch::new(stream, cfg, t)?,
         })
     }
 
@@ -352,10 +343,7 @@ impl<O: OpSet> Qwen35Model<O> {
         std::mem::swap(&mut self.final_normed, &mut s.final_normed);
         std::mem::swap(&mut self.logits_bf16, &mut s.logits_bf16);
         std::mem::swap(&mut self.decode_scratch, &mut s.decode_scratch);
-        for (l, ls) in self.layers.iter_mut().zip(s.layers.iter_mut()) {
-            l.attn.swap_bufs(&mut ls.qkv_buf, &mut ls.gate_buf, &mut ls.attn);
-            l.mlp.swap_bufs(&mut ls.gate_up, &mut ls.act);
-        }
+        std::mem::swap(&mut self.act, &mut s.act);
     }
 
     /// 诊断：捕获第 `l` 层 attention 后的 attn_out 与 MLP 后的 hidden（对拍用）。
@@ -414,6 +402,7 @@ impl<O: OpSet> Qwen35Model<O> {
                 &mut self.kv[li],
                 &f.meta,
                 &mut self.decode_scratch,
+                &mut self.act,
                 &mut self.attn_out,
             )?;
             self.ops.norm().fused_add_rmsnorm(
@@ -426,7 +415,7 @@ impl<O: OpSet> Qwen35Model<O> {
                 h,
                 eps,
             )?;
-            layer.mlp.forward(stream, gemm, self.ops.act(), t, &self.normed, &mut self.mlp_out)?;
+            layer.mlp.forward_with_scratch(stream, gemm, self.ops.act(), t, &self.normed, &mut self.mlp_out, &mut self.act.gate_up, &mut self.act.act)?;
             pending_mlp = true;
             if trace {
                 // 调试：最后一个 token 的残差（含本层 mlp 输出）范数，与 HF `output_hidden_states` 逐层对拍
