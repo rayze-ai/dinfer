@@ -6,6 +6,8 @@
 #![forbid(unsafe_code)]
 pub mod config;
 pub mod full_attn;
+pub mod layer;
+pub mod model;
 pub mod gdn;
 pub mod weights;
 pub const MODEL_NAME: &str = "qwen35";
