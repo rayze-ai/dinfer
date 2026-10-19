@@ -14,7 +14,7 @@ using namespace dinfer;
 namespace {
 
 constexpr int QP_D = 128;
-constexpr int QP_WARPS = 4;
+constexpr int QP_WARPS = 8;  // B4 第 1 轮：4 → 8 warp/block，并按 grid.y 把头铺到多个 block（见 kernel 注释）
 
 __device__ __forceinline__ float warp_sum(float v) {
 #pragma unroll
@@ -34,12 +34,17 @@ __global__ void __launch_bounds__(QP_WARPS * 32) qkv_post_kernel(
   const int64_t slot = slot_mapping[t];
   bf16* cdst = slot < 0 ? nullptr : cache + slot * Hkv * 2 * QP_D;  // slot_off(slot) with D=128
 
-  // 每 warp 轮流处理 head：h in [0, H + Hkv)：q 头 [0,H)，k 头 [H, H+Hkv)
-  for (int hh = warp; hh < H + Hkv; hh += QP_WARPS) {
+  // B4 第 1 轮：原来 4 个 warp 轮流处理 H+Hkv 个头（Qwen3 24 头 → 每 warp 6 轮串行访存，B300 上 6.1 µs，
+  // 带宽下限 0.5 µs）。现在每个 warp 只处理一个"工作项"：gh in [0, H+Hkv) 是 q/k 头的 norm+rope，
+  // [H+Hkv, H+2Hkv) 是 v 头搬 cache；工作项按 grid.y 铺开，所有访存同时在飞。
+  const int gh = blockIdx.y * QP_WARPS + warp;
+  if (gh >= H + 2 * Hkv) return;
+  if (gh < H + Hkv) {
+    const int hh = gh;
     const bool is_q = hh < H;
     bf16* base = row + hh * QP_D;                  // q 段紧接 k 段，正好连续
     const bf16* w = is_q ? wq : wk;
-    // lane 持有 4 个维度：d = lane, lane+32, lane+64, lane+96
+    // lane 持有 4 个维度：d = lane, lane+32, lane+64, lane+96（4 次 64 B 合并读，一起发出）
     float x[4];
     float ss = 0.f;
 #pragma unroll
@@ -70,15 +75,13 @@ __global__ void __launch_bounds__(QP_WARPS * 32) qkv_post_kernel(
 #pragma unroll
       for (int c = 0; c < 4; ++c) kd[lane + 32 * c] = to_bf16(x[c]);
     }
-  }
-  // v 头：只搬到 cache
-  if (cdst) {
-    for (int hk = warp; hk < Hkv; hk += QP_WARPS) {
-      const bf16* vs = row + (H + Hkv + hk) * QP_D;
-      bf16* vd = cdst + (hk * 2 + 1) * QP_D;
+  } else if (cdst) {
+    // v 头：只搬到 cache
+    const int hk = gh - H - Hkv;
+    const bf16* vs = row + (H + Hkv + hk) * QP_D;
+    bf16* vd = cdst + (hk * 2 + 1) * QP_D;
 #pragma unroll
-      for (int c = 0; c < 4; ++c) vd[lane + 32 * c] = vs[lane + 32 * c];
-    }
+    for (int c = 0; c < 4; ++c) vd[lane + 32 * c] = vs[lane + 32 * c];
   }
 }
 
@@ -89,7 +92,9 @@ extern "C" int qkv_post_bf16(void* qkv, const void* wq, const void* wk, const in
                              int64_t head_dim, float eps, int64_t block_size, cudaStream_t stream) {
   if (tokens <= 0) return 0;
   if (head_dim != QP_D || heads <= 0 || kv_heads <= 0 || block_size <= 0) return err(cudaErrorInvalidValue);
-  qkv_post_kernel<<<(unsigned)tokens, QP_WARPS * 32, 0, stream>>>(
+  const unsigned items = (unsigned)(heads + 2 * kv_heads);
+  const dim3 grid((unsigned)tokens, (items + QP_WARPS - 1) / QP_WARPS);
+  qkv_post_kernel<<<grid, QP_WARPS * 32, 0, stream>>>(
       static_cast<bf16*>(qkv), static_cast<const bf16*>(wq), static_cast<const bf16*>(wk), positions, cos_sin,
       static_cast<bf16*>(cache), slot_mapping, (int)heads, (int)kv_heads, eps, (int)block_size);
   return last_err();

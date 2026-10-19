@@ -545,6 +545,11 @@ constexpr int D2_KPW = 4;                 // keys per warp-iteration
 constexpr int D2_LPK = 8;                 // lanes per key
 constexpr int D2_DPL = PF_D / D2_LPK;     // 16 dims per lane
 constexpr int D2_MAXG = 2;                // group size (H / Hkv) supported in registers
+// B4 第 1 轮：splits 上限 8 → 32（scratch 按 D2_MAX_SPLITS 分配，Rust 侧 gqa_decode_scratch_len 同步）。
+// 原因：c8 长序列每 (req, kv_head) 只有 8 个 block、每 warp 串行 35 个 key（9 轮依赖访存），B300 上 23 µs，
+// 带宽下限 5 µs；目标 block 数 1024 → 2048（B300 148 SM，每 SM 16 个 128 线程 block 可驻留）。
+constexpr int D2_MAX_SPLITS = 32;
+constexpr int D2_TARGET_BLOCKS = 2048;
 
 __device__ __forceinline__ float sum8(float v) {
   v += __shfl_xor_sync(0xffffffffu, v, 4);
@@ -600,52 +605,39 @@ __global__ void __launch_bounds__(D2_WARPS * 32) gqa_decode_v2_kernel(
   if (k_begin < k_end) {
     const int wlen = (k_end - k_begin + D2_WARPS - 1) / D2_WARPS;
     const int w0 = k_begin + warp * wlen, w1 = min(k_end, w0 + wlen);
+    // B4 第 2 轮：两级预取。本轮 key 的 K/V 128 bit 读在上一轮算 softmax 之前就已发出，每 lane 同时在飞 4 个
+    // 16 B 读（原来 2 个且每轮等齐），依赖访存链长度减半——c8 长序列每 warp 串行 9 轮 → B300 23 µs 的主因。
+    auto load_kv = [&](int key, uint4& k0, uint4& k1, uint4& v0, uint4& v1) {
+      if (key < w1) {
+        const int64_t blk = bt[key / block_size];
+        const bf16* slotp = cache + slot_off(blk * block_size + (key % block_size), Hkv, PF_D);
+        const uint4* kp4 = reinterpret_cast<const uint4*>(slotp + (hk * 2) * PF_D + dl);
+        const uint4* vp4 = reinterpret_cast<const uint4*>(slotp + (hk * 2 + 1) * PF_D + dl);
+        k0 = kp4[0]; k1 = kp4[1]; v0 = vp4[0]; v1 = vp4[1];
+      } else {
+        k0 = k1 = v0 = v1 = make_uint4(0u, 0u, 0u, 0u);
+      }
+    };
+    uint4 nk0, nk1, nv0, nv1;
+    load_kv(w0 + kslot, nk0, nk1, nv0, nv1);
     for (int base = w0; base < w1; base += D2_KPW) {
       const int key = base + kslot;
       const bool valid = key < w1;
-      // K 行指针（valid 时）
-      const bf16* kp = nullptr; const bf16* vp = nullptr;
-      if (valid) {
-        const int64_t blk = bt[key / block_size];
-        const bf16* slotp = cache + slot_off(blk * block_size + (key % block_size), Hkv, PF_D);
-        kp = slotp + (hk * 2) * PF_D + dl;
-        vp = slotp + (hk * 2 + 1) * PF_D + dl;
-      }
-      // 读 16 个 bf16 的 K（两次 uint4）
-      float kf[D2_DPL];
-      if (valid) {
-        const uint4* kp4 = reinterpret_cast<const uint4*>(kp);
-        uint4 r0 = kp4[0], r1 = kp4[1];
-        const __nv_bfloat162* p0 = reinterpret_cast<const __nv_bfloat162*>(&r0);
-        const __nv_bfloat162* p1 = reinterpret_cast<const __nv_bfloat162*>(&r1);
+      const uint4 ck0 = nk0, ck1 = nk1, cv0 = nv0, cv1 = nv1;
+      load_kv(key + D2_KPW, nk0, nk1, nv0, nv1);  // 下一轮的读先发出
+      float kf[D2_DPL], vf[D2_DPL];
+      {
+        const __nv_bfloat162* p0 = reinterpret_cast<const __nv_bfloat162*>(&ck0);
+        const __nv_bfloat162* p1 = reinterpret_cast<const __nv_bfloat162*>(&ck1);
+        const __nv_bfloat162* q0 = reinterpret_cast<const __nv_bfloat162*>(&cv0);
+        const __nv_bfloat162* q1 = reinterpret_cast<const __nv_bfloat162*>(&cv1);
 #pragma unroll
         for (int i = 0; i < 4; ++i) {
-          float2 a = __bfloat1622float2(p0[i]);
-          float2 c2 = __bfloat1622float2(p1[i]);
-          kf[2 * i] = a.x; kf[2 * i + 1] = a.y;
-          kf[8 + 2 * i] = c2.x; kf[8 + 2 * i + 1] = c2.y;
+          const float2 a = __bfloat1622float2(p0[i]), c2 = __bfloat1622float2(p1[i]);
+          kf[2 * i] = a.x; kf[2 * i + 1] = a.y; kf[8 + 2 * i] = c2.x; kf[8 + 2 * i + 1] = c2.y;
+          const float2 e = __bfloat1622float2(q0[i]), f2 = __bfloat1622float2(q1[i]);
+          vf[2 * i] = e.x; vf[2 * i + 1] = e.y; vf[8 + 2 * i] = f2.x; vf[8 + 2 * i + 1] = f2.y;
         }
-      } else {
-#pragma unroll
-        for (int c = 0; c < D2_DPL; ++c) kf[c] = 0.f;
-      }
-      // V 同样向量读
-      float vf[D2_DPL];
-      if (valid) {
-        const uint4* vp4 = reinterpret_cast<const uint4*>(vp);
-        uint4 r0 = vp4[0], r1 = vp4[1];
-        const __nv_bfloat162* p0 = reinterpret_cast<const __nv_bfloat162*>(&r0);
-        const __nv_bfloat162* p1 = reinterpret_cast<const __nv_bfloat162*>(&r1);
-#pragma unroll
-        for (int i = 0; i < 4; ++i) {
-          float2 a = __bfloat1622float2(p0[i]);
-          float2 c2 = __bfloat1622float2(p1[i]);
-          vf[2 * i] = a.x; vf[2 * i + 1] = a.y;
-          vf[8 + 2 * i] = c2.x; vf[8 + 2 * i + 1] = c2.y;
-        }
-      } else {
-#pragma unroll
-        for (int c = 0; c < D2_DPL; ++c) vf[c] = 0.f;
       }
 #pragma unroll
       for (int g = 0; g < D2_MAXG; ++g) {
@@ -735,15 +727,28 @@ __global__ void gqa_decode_merge_v2_kernel(const float* __restrict__ scratch, co
     row = cu_seqlens_q[b];
   }
   const float* base = scratch + ((int64_t)b * H + h) * splits * (PF_D + 2);
-  float M = -INFINITY;
-  for (int s = 0; s < splits; ++s) M = fmaxf(M, base[s * (PF_D + 2)]);
-  float L = 0.f, o = 0.f;
   const int d = threadIdx.x;
-  for (int s = 0; s < splits; ++s) {
-    const float* p = base + s * (PF_D + 2);
-    const float a = (p[0] == -INFINITY) ? 0.f : __expf(p[0] - M);
-    L += p[1] * a;
-    o += p[2 + d] * a;
+  // B4 第 2 轮：splits ≤ D2_MAX_SPLITS 时把全部 (m, l, o_d) 一次读进寄存器再归约——原来 2 × splits 轮串行依赖读，
+  // splits 8 → 32 后 B300 上 2.4 → 5.4 µs。
+  float ms[D2_MAX_SPLITS], ls[D2_MAX_SPLITS], os[D2_MAX_SPLITS];
+#pragma unroll
+  for (int s = 0; s < D2_MAX_SPLITS; ++s) {
+    if (s < splits) {
+      const float* p = base + s * (PF_D + 2);
+      ms[s] = p[0]; ls[s] = p[1]; os[s] = p[2 + d];
+    } else {
+      ms[s] = -INFINITY; ls[s] = 0.f; os[s] = 0.f;
+    }
+  }
+  float M = -INFINITY;
+#pragma unroll
+  for (int s = 0; s < D2_MAX_SPLITS; ++s) M = fmaxf(M, ms[s]);
+  float L = 0.f, o = 0.f;
+#pragma unroll
+  for (int s = 0; s < D2_MAX_SPLITS; ++s) {
+    const float a = (ms[s] == -INFINITY) ? 0.f : __expf(ms[s] - M);
+    L += ls[s] * a;
+    o += os[s] * a;
   }
   out[((int64_t)row * H + h) * PF_D + d] = to_bf16(o / L);
 }
@@ -841,8 +846,8 @@ extern "C" int gqa_decode_bf16(const void* q, const void* cache, const int32_t* 
     // splits 自适应（Q3 第 31 轮）：目标 ≥ 1024 个 block（4090 128 SM × 每 SM 多 block 掩盖 KV 读延迟；旧值 256 在
     // B=8 长序列只有 64 block，一半 SM 空），上限 8（scratch 按 8 分配）。
     // 只依赖 batch（CUDA graph 按 batch 桶捕获，图内 splits 不能随 seq_len 变）。
-    int splits = (int)((1024 + num_reqs * kv_heads - 1) / (num_reqs * kv_heads));
-    splits = splits < 1 ? 1 : (splits > DC_SPLITS ? DC_SPLITS : splits);
+    int splits = (int)((D2_TARGET_BLOCKS + num_reqs * kv_heads - 1) / (num_reqs * kv_heads));
+    splits = splits < 1 ? 1 : (splits > D2_MAX_SPLITS ? D2_MAX_SPLITS : splits);
     dim3 grid1((unsigned)num_reqs, (unsigned)kv_heads, (unsigned)splits);
     bf16* direct = splits == 1 ? static_cast<bf16*>(out) : nullptr;
     gqa_decode_v2_kernel<<<grid1, D2_WARPS * 32, 0, stream>>>(

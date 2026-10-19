@@ -1754,7 +1754,8 @@ pub fn gqa_mixed_bf16<Q: DevicePtr<bf16> + ?Sized>(
 
 /// `gqa_decode_bf16` 的 scratch 元素数：B × heads × 8 split × (D + 2)。
 pub fn gqa_decode_scratch_len(num_reqs: usize, heads: usize, head_dim: usize) -> usize {
-    num_reqs * heads * 8 * (head_dim + 2)
+    // 与 gqa.cu `D2_MAX_SPLITS` 同步（B4 第 1 轮 8 → 32）
+    num_reqs * heads * 32 * (head_dim + 2)
 }
 
 /// Qwen3 QKV 后处理融合（D=128）：q/k per-head RMSNorm + neox RoPE 原地写回 `qkv`（[T, (H+2Hkv)·D]），K/V 写 paged cache。
