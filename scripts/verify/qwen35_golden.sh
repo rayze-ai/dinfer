@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 export PATH="$CUDA_HOME/bin:$HOME/.cargo/bin:$PATH"   # 远端（4090）cargo 在 ~/.cargo/bin，非交互 ssh 不读 profile
-export CUDA_VISIBLE_DEVICES="${GPU:-0}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-${GPU:-0}}"   # 调用方已指定（如 4090 的 GPU 7）就不要覆盖
 export QWEN35_GOLDEN="$(pwd)/test/qwen35/golden"
 echo "== qwen35 golden parity (CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES) =="
 cargo test -p dinfer-qwen35 --features ref-tests --test golden_parity -- --ignored --test-threads=1
