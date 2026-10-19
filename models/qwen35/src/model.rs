@@ -323,13 +323,6 @@ impl<O: OpSet> Qwen35Model<O> {
         ensure!(t <= self.max_tokens && t <= f.input_ids.numel(), "forward: {t} tokens > max {}", self.max_tokens);
         let h = self.cfg.hidden_size as usize;
         let eps = self.cfg.rms_norm_eps;
-        let world = self.tp.1;
-        let (h_attn, hk, d) = (
-            self.cfg.num_attention_heads as usize / world,
-            self.cfg.num_key_value_heads as usize / world,
-            self.cfg.head_dim as usize,
-        );
-        let _ = (h_attn, hk, d);
         k::embedding_bf16_n(stream, &f.input_ids.data, &self.embed.table.data, &mut self.hidden.data, t, h)?;
         // 每层：input_norm → attn → (res += attn_out) + post_norm → mlp → 下一层开头 res += mlp_out
         //（最后一层循环后补一次 add）。与 Qwen3 的 `pending_mlp` 写法一致。
