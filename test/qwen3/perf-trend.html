@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh"><head><meta charset="utf-8"><title>dinfer perf trend</title>
+<html lang="zh"><head><meta charset="utf-8"><title>perf trend — qwen3</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
@@ -26,7 +26,7 @@ th:first-child,td:first-child,td.change,th.change,td.l,th.l{text-align:left}
 .up{color:#1a7f37}.down{color:#c62828}.chg{max-width:420px;white-space:normal;color:var(--muted)}
 .updated{color:var(--muted);font-size:12px}
 </style></head><body>
-<h1>dinfer perf trend — Qwen3-0.6B</h1>
+<h1>perf trend — qwen3 <a href="../index.html" style="font-size:13px;font-weight:normal;margin-left:12px">← 全部模型索引</a></h1>
 <div class="sub">数据：<code>perf-trend.csv</code>（每 10 s 重读）。先选卡型，再选页签：single = 主线 benchN（dinfer vs vLLM）；pd / tp / dp / other = A/B 组，每页顶部写明基线。URL hash 直达（如 <code>#B300/tp</code>）。<span id="updated" class="updated"></span></div>
 <div class="gpus" id="gpus"><span>卡型</span></div>
 <nav class="tabs" id="tabs">
@@ -53,7 +53,7 @@ th:first-child,td:first-child,td.change,th.change,td.l,th.l{text-align:left}
 <section class="page" id="page-other" hidden><div class="base" id="base-other"></div><div class="grid" id="grid-other"></div><div class="card" style="margin-top:14px"><div id="table-other"></div></div></section>
 
 <script>
-const KNOWN_GPUS=["B300", "4090"], DEFAULT_GPU="B300";
+const KNOWN_GPUS=["4090", "B300"], DEFAULT_GPU="4090", MODEL="qwen3";
 const GROUPS=["c1","c8","c32","c8-long"], COLORS=["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd","#8c564b"];
 const CATS=["pd","tp","dp","other"];
 const HINT={single:"基线 = vLLM v0.31.0 单卡（同机同配置）。比值 = dinfer out tok/s ÷ vLLM；虚线 1.0 = 追平。TTFT/TPOT 越低越好。只含 benchN 主线轮次。",
@@ -151,7 +151,7 @@ function buildCat(cat,rows){
 }
 // ---- 卡型 + 切页：纯 JS + URL hash（#<gpu>/<tab>）----
 let curGpu=DEFAULT_GPU, curTab="single";
-function parseHash(){const h=(location.hash||"").slice(1);if(!h)return;const [a,b]=h.split("/");if(b!==undefined){curGpu=decodeURIComponent(a)||curGpu;curTab=b||"single";}else if(["single",...CATS].includes(a)){curTab=a;}else{curGpu=decodeURIComponent(a);}}
+function parseHash(){const h=(location.hash||"").slice(1);if(!h)return;let parts=h.split("/");if(parts.length===3){if(decodeURIComponent(parts[0])!==MODEL)return;parts=parts.slice(1);}const [a,b]=parts;if(b!==undefined){curGpu=decodeURIComponent(a)||curGpu;curTab=b||"single";}else if(["single",...CATS].includes(a)){curTab=a;}else{curGpu=decodeURIComponent(a);}}
 function gpuList(rows){const s=new Set(KNOWN_GPUS);rows.forEach(r=>{if(r.gpu)s.add(r.gpu);});return [...s];}
 function renderGpus(rows){
   const gpus=gpuList(rows); if(!gpus.includes(curGpu)) curGpu=gpus[0]||DEFAULT_GPU;
@@ -169,7 +169,7 @@ function show(push){
   if(!tab||tab.hidden) curTab="single";
   document.querySelectorAll(".page").forEach(p=>p.hidden=(p.id!="page-"+curTab));
   document.querySelectorAll(".tabs button").forEach(b=>b.classList.toggle("on",b.dataset.tab==curTab));
-  const want="#"+encodeURIComponent(curGpu)+"/"+curTab;
+  const want="#"+encodeURIComponent(MODEL)+"/"+encodeURIComponent(curGpu)+"/"+curTab;
   if(push&&location.hash!=want) history.replaceState(null,"",want);
   requestAnimationFrame(()=>Object.values(charts).forEach(c=>{try{c.resize();}catch(e){}}));
 }

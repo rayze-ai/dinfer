@@ -17,6 +17,9 @@
 import csv, glob, json, math, os, re, sys
 
 ROOT = sys.argv[sys.argv.index("--root") + 1] if "--root" in sys.argv else "test/qwen3"
+# 模型维度（用户 2026-10-19：图表维度多了 → URL 带模型、加索引页）：模型名 = ROOT 最后一段（test/qwen3 → qwen3），
+# 进 CSV `model` 列、HTML 标题与 hash（#<model>/<gpu>/<tab>，旧 #<gpu>/<tab> 仍兼容），索引页 test/index.html 由 bench_index.py 汇总。
+MODEL = os.path.basename(os.path.normpath(ROOT))
 GROUPS = ["c1_p128_o128", "c8_p128_o128", "c32_p128_o128", "c8_p1024_o128"]
 SHORT = {"c1_p128_o128": "c1", "c8_p128_o128": "c8", "c32_p128_o128": "c32", "c8_p1024_o128": "c8-long"}
 CATS = ["pd", "tp", "dp", "other"]
@@ -372,7 +375,7 @@ open(os.path.join(ROOT, "perf-trend.svg"), "w").write("\n".join(svg))
 with open(os.path.join(ROOT, "perf-trend.csv"), "w", newline="") as f:
     w = csv.writer(f)
     w.writerow(["round", "date", "change", "group", "metric", "dinfer", "vllm", "ratio_dinfer_over_vllm", "delta_pct_vs_prev_round", "better_is",
-                "kind", "gpu", "baseline", "variant"])
+                "kind", "gpu", "baseline", "variant", "model"])
     for gpu in GPUS:
         prev = None
         for r in rounds_of[gpu]:
@@ -386,7 +389,7 @@ with open(os.path.join(ROOT, "perf-trend.csv"), "w", newline="") as f:
                     vv = x[vkey]
                     ratio = (x[key] / vv) if (not isnan(vv) and vv) else ""
                     w.writerow([r["label"], r["date"], r["change"], SHORT[g], metric, f"{x[key]:.3f}", "" if isnan(vv) else f"{vv:.3f}",
-                                f"{ratio:.3f}" if ratio != "" else "", d, "lower" if lower else "higher", "main", gpu, "vllm", "dinfer"])
+                                f"{ratio:.3f}" if ratio != "" else "", d, "lower" if lower else "higher", "main", gpu, "vllm", "dinfer", MODEL])
             prev = r
     # 附加实验：dinfer 列 = variant，vllm 列 = 基线
     for e in extras:
@@ -394,13 +397,13 @@ with open(os.path.join(ROOT, "perf-trend.csv"), "w", newline="") as f:
             for k, av in a.items():
                 bv = e["base"][k]
                 w.writerow([e["round"], e["date"], e["change"], e["group"], k, f"{av:.3f}", f"{bv:.3f}", f"{(av / bv):.3f}" if bv else "", "", BETTER[k],
-                            e["kind"], e["gpu"], e["baseline"], name])
+                            e["kind"], e["gpu"], e["baseline"], name, MODEL])
 
 # ---------------------------------------------------------------------------
 # HTML 面板：静态页，fetch 同目录 perf-trend.csv，每 10 s 重画；Chart.js 走 cdnjs；卡型按钮 + 切页纯 JS，hash = #<gpu>/<tab>
 # ---------------------------------------------------------------------------
 html = r"""<!doctype html>
-<html lang="zh"><head><meta charset="utf-8"><title>dinfer perf trend</title>
+<html lang="zh"><head><meta charset="utf-8"><title>perf trend — __MODEL__</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
@@ -427,7 +430,7 @@ th:first-child,td:first-child,td.change,th.change,td.l,th.l{text-align:left}
 .up{color:#1a7f37}.down{color:#c62828}.chg{max-width:420px;white-space:normal;color:var(--muted)}
 .updated{color:var(--muted);font-size:12px}
 </style></head><body>
-<h1>dinfer perf trend — Qwen3-0.6B</h1>
+<h1>perf trend — __MODEL__ <a href="../index.html" style="font-size:13px;font-weight:normal;margin-left:12px">← 全部模型索引</a></h1>
 <div class="sub">数据：<code>perf-trend.csv</code>（每 10 s 重读）。先选卡型，再选页签：single = 主线 benchN（dinfer vs vLLM）；pd / tp / dp / other = A/B 组，每页顶部写明基线。URL hash 直达（如 <code>#B300/tp</code>）。<span id="updated" class="updated"></span></div>
 <div class="gpus" id="gpus"><span>卡型</span></div>
 <nav class="tabs" id="tabs">
@@ -454,7 +457,7 @@ th:first-child,td:first-child,td.change,th.change,td.l,th.l{text-align:left}
 <section class="page" id="page-other" hidden><div class="base" id="base-other"></div><div class="grid" id="grid-other"></div><div class="card" style="margin-top:14px"><div id="table-other"></div></div></section>
 
 <script>
-const KNOWN_GPUS=__GPUS__, DEFAULT_GPU=__DEFAULT__;
+const KNOWN_GPUS=__GPUS__, DEFAULT_GPU=__DEFAULT__, MODEL=__MODEL__;
 const GROUPS=["c1","c8","c32","c8-long"], COLORS=["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd","#8c564b"];
 const CATS=["pd","tp","dp","other"];
 const HINT={single:"基线 = vLLM v0.31.0 单卡（同机同配置）。比值 = dinfer out tok/s ÷ vLLM；虚线 1.0 = 追平。TTFT/TPOT 越低越好。只含 benchN 主线轮次。",
@@ -552,7 +555,7 @@ function buildCat(cat,rows){
 }
 // ---- 卡型 + 切页：纯 JS + URL hash（#<gpu>/<tab>）----
 let curGpu=DEFAULT_GPU, curTab="single";
-function parseHash(){const h=(location.hash||"").slice(1);if(!h)return;const [a,b]=h.split("/");if(b!==undefined){curGpu=decodeURIComponent(a)||curGpu;curTab=b||"single";}else if(["single",...CATS].includes(a)){curTab=a;}else{curGpu=decodeURIComponent(a);}}
+function parseHash(){const h=(location.hash||"").slice(1);if(!h)return;let parts=h.split("/");if(parts.length===3){if(decodeURIComponent(parts[0])!==MODEL)return;parts=parts.slice(1);}const [a,b]=parts;if(b!==undefined){curGpu=decodeURIComponent(a)||curGpu;curTab=b||"single";}else if(["single",...CATS].includes(a)){curTab=a;}else{curGpu=decodeURIComponent(a);}}
 function gpuList(rows){const s=new Set(KNOWN_GPUS);rows.forEach(r=>{if(r.gpu)s.add(r.gpu);});return [...s];}
 function renderGpus(rows){
   const gpus=gpuList(rows); if(!gpus.includes(curGpu)) curGpu=gpus[0]||DEFAULT_GPU;
@@ -570,7 +573,7 @@ function show(push){
   if(!tab||tab.hidden) curTab="single";
   document.querySelectorAll(".page").forEach(p=>p.hidden=(p.id!="page-"+curTab));
   document.querySelectorAll(".tabs button").forEach(b=>b.classList.toggle("on",b.dataset.tab==curTab));
-  const want="#"+encodeURIComponent(curGpu)+"/"+curTab;
+  const want="#"+encodeURIComponent(MODEL)+"/"+encodeURIComponent(curGpu)+"/"+curTab;
   if(push&&location.hash!=want) history.replaceState(null,"",want);
   requestAnimationFrame(()=>Object.values(charts).forEach(c=>{try{c.resize();}catch(e){}}));
 }
@@ -582,7 +585,7 @@ async function refresh(){try{const t=await (await fetch("perf-trend.csv?ts="+Dat
 refresh();setInterval(refresh,10000);
 </script></body></html>
 """
-html = html.replace("__GPUS__", json.dumps(GPUS, ensure_ascii=False)).replace("__DEFAULT__", json.dumps(DEFAULT, ensure_ascii=False))
+html = html.replace("__GPUS__", json.dumps(GPUS, ensure_ascii=False)).replace("__DEFAULT__", json.dumps(DEFAULT, ensure_ascii=False)).replace("__MODEL__", json.dumps(MODEL, ensure_ascii=False)).replace("<title>perf trend — \"" + MODEL + "\"</title>", "<title>perf trend — " + MODEL + "</title>").replace("<h1>perf trend — \"" + MODEL + "\" ", "<h1>perf trend — " + MODEL + " ")
 open(os.path.join(ROOT, "perf-trend.html"), "w").write(html)
 
 print(f"{len(single_rounds)} rounds ({', '.join(f'{g} {gpu_count.get(g, 0)}' for g in GPUS)}) → {ROOT}/perf-trend.{{md,json,csv,svg,html}}")

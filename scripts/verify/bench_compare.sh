@@ -58,3 +58,4 @@ run_one 8 1024 128
 echo; cat "$MD"
 # 趋势：所有轮次汇总成表 + 曲线（用户要求：每轮改动在每个指标上的提升）
 python3 -I scripts/dev/bench_trend.py --root "$(dirname "$(dirname "$OUT")")" | tail -n +2 | tail -3
+python3 -I scripts/dev/bench_index.py --root "$(dirname "$(dirname "$(dirname "$OUT")")")" | tail -1   # 模型 × 卡型索引页 test/index.html
