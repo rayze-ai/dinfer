@@ -2,7 +2,18 @@
 
 > 一条一个坑，标题写**现象**（搜索时按现象搜），正文讲根因与解法。新条目加在最上面。
 >
-> 条目格式（标题用 `## 2026-10-19 Qwen35 tiny golden 对拍差 0.2 / 差一位 / 平局步 argmax 乱跳（三个独立坑）
+> 条目格式（标题用 `## 2026-10-19 4090 上 `cargo test` 静默卡死：rustup 工具链只剩 58 MB（缺 rustc）
+
+- 现象：`remote4090.sh run '... bash scripts/verify/qwen35_golden.sh'` 只有第一行 `== qwen35 golden parity ==`，25 min 后超时；
+  远端 `ps` 里 cargo 是 `S (sleeping)`，`/proc/<pid>/fd` 打开着 `~/.rustup/downloads/*.partial`，没有 rustc/nvcc 子进程。
+- 根因：4090 的 `~/.rustup/toolchains/1.89.0-...` 只有 58 MB（正常 633 MB），缺 `bin/rustc`；`rust-toolchain.toml` 指 1.89.0，
+  cargo 于是去 rustup 下载（网络极慢），且 `rustup default` 未配置 → 非交互 ssh 里连 `rustc -V` 都报 "no default toolchain"。
+- 解法：本机 `rsync -az ~/.rustup/toolchains/1.89.0-x86_64-unknown-linux-gnu/ 4090:同名目录/`，之后远端命令带
+  `RUSTUP_TOOLCHAIN=1.89.0-x86_64-unknown-linux-gnu`；旧的卡住的 cargo 要先 `kill`（它持有 target 锁）。
+- 如何避免：远端跑任何 cargo 前先 `du -sh ~/.rustup/toolchains/*`（< 500 MB 就是坏的）与 `rustc -V`；脚本超时但日志只有一行时，
+  第一反应查工具链而不是查代码。
+
+## 2026-10-19 Qwen35 tiny golden 对拍差 0.2 / 差一位 / 平局步 argmax 乱跳（三个独立坑）
 
 - 现象一：prefill 前几行 logits 对得很好，`prompt_b` 起 max abs 2.85、argmax 错 2 行。根因不是模型，是**测试助手没清 GDN slot**：
   `prefill()` 复用 slot 0，上一个 prompt 的 conv / 递推状态还在。executor 里靠"首个 token 位置 == 0 → 清零"做这件事，裸 `Forward` 调用要自己调 `reset_slots`。
