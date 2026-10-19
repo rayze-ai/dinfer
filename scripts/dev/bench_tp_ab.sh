@@ -9,9 +9,11 @@ R="${R:-/data/yaochen/infer}"; PORT="${PORT:-8341}"; BENCH=./target/release/benc
 mkdir -p "$OUT"; echo "$CHANGE" > "$OUT/CHANGE"
 [ -x "$BENCH" ] || cargo build --release -p dinfer-bench
 SEED=$(( $(date +%s) % 100000 ))
-one() { # variant [serve args]
-  local var=$1; shift
-  bash scripts/dev/ab_serve.sh start "$PORT" "$BASE" --model "$R/models/qwen3-0.6b" --max-model-len 8192 --max-num-seqs 64 \
+# ab_serve.sh 用 CUDA_VISIBLE_DEVICES=<gpus> 钉卡并自带 --model；tpN 给 BASE..BASE+N-1 的逗号卡表，serve 内 --device 0 起
+gpus() { local n=$1 s=""; for i in $(seq 0 $((n-1))); do s+="${s:+,}$((BASE+i))"; done; echo "$s"; }
+one() { # variant ngpu [serve args]
+  local var=$1 n=$2; shift 2
+  bash scripts/dev/ab_serve.sh start "$PORT" "$(gpus "$n")" --max-model-len 8192 --max-num-seqs 64 \
     --max-num-batched-tokens 2048 --gpu-memory-utilization 0.85 --num-blocks 4000 "$@" | tail -2
   curl -s -m 2 "http://127.0.0.1:$PORT/health" >/dev/null || { echo "$var serve DOWN"; bash scripts/dev/ab_serve.sh stop "$PORT"; return 1; }
   for g in "1 128 128" "8 128 128" "32 128 128" "8 1024 128"; do
@@ -22,6 +24,6 @@ one() { # variant [serve args]
   done
   bash scripts/dev/ab_serve.sh stop "$PORT" >/dev/null
 }
-one single "$@"
-for tp in $TPS; do one "tp$tp" --tp "$tp" "$@"; done
+one single 1 "$@"
+for tp in $TPS; do one "tp$tp" "$tp" --tp "$tp" "$@"; done
 python3 -I scripts/dev/bench_trend.py --root "$(dirname "$(dirname "$OUT")")" | tail -n +2 | tail -3
