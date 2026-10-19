@@ -574,3 +574,11 @@
 - 根因：prefix cache 命中后 scheduler 从 position>0 喂 prompt。全注意力层能复用 KV 块，GDN 的递归 / conv 状态是"每请求一份、随 token 顺序递推"的，没有按块快照 → 新请求拿到新 slot 但历史已跳过。
 - 解法：qwen35 service 强制关 prefix caching（warn）。真正支持要像 vLLM `mamba_block_size` / `mamba_cache_mode` 那样按块缓存 GDN 状态（设计待办）。
 - 避免：接任何带递归状态的模型（Mamba / GDN / KDA），prefix cache 默认关，直到状态缓存实现。K3（KDA）同样适用。
+
+## Qwen3.5：给 `StepMeta` 加字段后 golden 测试编译失败（2026-10-19，GDN chunk 第 1 轮）
+
+- 现象：`cargo build --workspace --features qwen35` 过，`scripts/verify/qwen35_golden.sh` rc=101：`missing field gdn_chunk in initializer of StepMeta`（`models/qwen35/tests/golden_parity.rs` 3 处）。
+- 根因：golden 测试不走 `Qwen35Executor::enqueue`，自己手搓 `StepMeta` / `Forward` 调 `model.forward`；executor 里加的"每步 prepare 工作区"在测试里没有对应物。
+- 解法：测试里加 `chunk_ws()` 小助手（prefill 步建 `GdnChunkWorkspace`，`GDN_PREFILL=recurrent` → None），3 处补字段。
+- 避免：改 `StepMeta` / `Forward` 这类"executor 与测试都在构造"的结构体时，先 `grep -rn "StepMeta {" models/qwen35` 把所有构造点一起改；`cargo build` 不编译 `tests/`，要用 `cargo test --no-run`。
+

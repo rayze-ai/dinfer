@@ -40,3 +40,5 @@
 
 | 轮 | 改动 | 结果 |
 |---|---|---|
+| 1 | **GDN chunk prefill kernel**：`crates/kernels/cuda/gdn_chunk.cu`（prep / wy / ho 三段，全 fp32，BT=64 host 选）+ `ops::gdn_chunk_{prep,wy,ho}`（切块表复用 `KdaChunkPlan`，`GdnChunkScratch` 按 `[T,H,K]`/`[T,HV,V]`）；`gdn.rs` prefill（`t > num_reqs`）走 chunk，decode 仍 `gdn_recurrent`；`GDN_PREFILL=recurrent` 回退；chunk 中间缓冲全模型一份（`GdnChunkWorkspace`，executor 每步 `prepare`，按需增长） | 对拍（3090，参考 = 顺序递归 `gdn_ref`）：`chunk`(T=200) out max_err 2.4e-4 cos 0.999995 / state rel 2.5e-3；`chunk_varlen`([130,64,7]，首条带初始 state) out 1.2e-4 / state rel 2.0e-3；`chunk_qwen`(27B 形状 T=256) out 1.2e-4 / state rel 2.3e-3（容差 out ≤ 5e-4、state rel ≤ 5e-3）。**3090 T=1024 27B 形状（含 gate）：顺序 41.46 ms → chunk 4.16 ms（9.96×）**。golden 见下行。 |
+| 1b | 接入验证（同上改动） | `qwen35_golden.sh` 4/4（chunk 路径实测命中：单序列 prefill t=4/7/8/9/12、chunked prefill 4/4/1、双请求混批 t=8 n=2 c=2）；`GDN_PREFILL=recurrent` 回退也 4/4；`ops_parity.sh` PASS；`cargo build --workspace --features qwen3` / `qwen35` 都过。**B300 真权重 bench 未跑**（K3 基线占卡）→ 下一步：`bench_compare.sh test/qwen35/2026-10-19/bench_b300_4 "GDN chunk prefill"`，看 c8-long TTFT 8.1 s 降到哪。 |
