@@ -188,6 +188,12 @@ impl ArchProfile {
     /// 但 block 数 = `base_blocks · v_dim / BV` 越少；取最大的、仍能把 block 数铺到 ≥ `GDN_DECODE_WAVES` 波 SM 的 BV，
     /// 都铺不满（B=1）则取最小档。返回 0 = 形状不支持（K ∉ {64,128} 或 V 不被任何档整除），调用方回老 kernel。
     pub fn gdn_decode_bv(sm_count: usize, base_blocks: usize, k_dim: usize, v_dim: usize) -> usize {
+        Self::gdn_decode_bv_for(Arch::Sm8x, sm_count, base_blocks, k_dim, v_dim)
+    }
+
+    /// 按卡型：Sm100（B300 实测，`docs/loops/qwen35-perf.md` 7c）BV=64 的寄存器 / 占用组合比 32 慢 6%（B=32：34.1 vs 32.1 µs），
+    /// 候选上限收到 32；Sm8x 两档差 < 1%，保持原规则（最大的仍能铺 ≥ 2 波的 BV）。
+    pub fn gdn_decode_bv_for(arch: Arch, sm_count: usize, base_blocks: usize, k_dim: usize, v_dim: usize) -> usize {
         const GDN_DECODE_BV_CANDIDATES: [usize; 3] = [64, 32, 16];
         const GDN_DECODE_WAVES: usize = 2;
         if k_dim != 64 && k_dim != 128 {
@@ -195,6 +201,9 @@ impl ArchProfile {
         }
         let mut fallback = 0;
         for &bv in &GDN_DECODE_BV_CANDIDATES {
+            if matches!(arch, Arch::Sm100) && bv > 32 {
+                continue;
+            }
             if v_dim % bv != 0 {
                 continue;
             }
@@ -270,6 +279,9 @@ mod tests {
             assert_eq!(ArchProfile::gdn_decode_bv(sm, 48, 128, 128), b1, "sm={sm} B=1");
             assert_eq!(ArchProfile::gdn_decode_bv(sm, 4 * 48, 128, 128), 64, "sm={sm} B=4");
             assert_eq!(ArchProfile::gdn_decode_bv(sm, 32 * 48, 128, 128), 64, "sm={sm} B=32");
+            // Sm100：上限 32（B300 实测）
+            assert_eq!(ArchProfile::gdn_decode_bv_for(Arch::Sm100, sm, 32 * 48, 128, 128), 32, "sm100 sm={sm} B=32");
+            assert_eq!(ArchProfile::gdn_decode_bv_for(Arch::Sm100, sm, 8 * 48, 128, 128), 32, "sm100 sm={sm} B=8");
         }
         // K 不支持 → 0；V 只被 16/32 整除时不选 64
         assert_eq!(ArchProfile::gdn_decode_bv(82, 48, 96, 128), 0);

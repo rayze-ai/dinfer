@@ -3322,7 +3322,11 @@ fn gdn_decode_bv(stream: &Stream, base_blocks: usize, k_dim: usize, v_dim: usize
         }
     }
     let sm = *SM.get_or_init(|| stream.device().sm_count().unwrap_or(1));
-    crate::arch::ArchProfile::gdn_decode_bv(sm, base_blocks, k_dim, v_dim)
+    static ARCH: OnceLock<crate::arch::Arch> = OnceLock::new();
+    let arch = *ARCH.get_or_init(|| {
+        stream.device().compute_capability().map(|cc| crate::arch::ArchProfile::for_cc(cc, sm).arch).unwrap_or(crate::arch::Arch::Sm8x)
+    });
+    crate::arch::ArchProfile::gdn_decode_bv_for(arch, sm, base_blocks, k_dim, v_dim)
 }
 
 /// rmsnorm 系的线程布局：显式 `layout` 优先；否则 `RMSNORM_LAYOUT=block256|warp|block1024` 覆盖；否则
