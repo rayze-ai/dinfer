@@ -5,7 +5,7 @@ set -uo pipefail
 kre=$1; conc=$2; plen=$3; gpu=${4:-6}
 cd "$(dirname "$0")/../.." && source ../env.sh
 export CUDA_VISIBLE_DEVICES=$gpu
-M=/data/yaochen/infer/models/qwen3-0.6b; PORT=8413; OUT=/tmp/b4_ncu_$kre
+M=${MODEL_DIR:-/data/yaochen/infer/models/qwen3-0.6b}   # B300-50 无该目录：MODEL_DIR=/data/models/Qwen/Qwen3-0.6B（物理路径，不软链）; PORT=8413; OUT=/tmp/b4_ncu_$kre
 pkill -KILL -f "dinfer serve .*--port $PORT" 2>/dev/null; sleep 1
 ncu --target-processes all --kernel-name "regex:$kre" --launch-skip ${SKIP:-500} --launch-count 3 --log-file $OUT.csv \
   --section SpeedOfLight --section Occupancy --section WarpStateStats --section LaunchStats --section SchedulerStats \

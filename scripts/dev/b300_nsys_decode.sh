@@ -5,7 +5,7 @@ set -uo pipefail
 tag=$1; conc=$2; plen=$3; gpu=${4:-6}
 cd "$(dirname "$0")/../.." && source ../env.sh
 export CUDA_VISIBLE_DEVICES=$gpu
-M=/data/yaochen/infer/models/qwen3-0.6b; PORT=8412
+M=${MODEL_DIR:-/data/yaochen/infer/models/qwen3-0.6b}   # B300-50 无该目录：MODEL_DIR=/data/models/Qwen/Qwen3-0.6B（物理路径，不软链）; PORT=8412
 pkill -KILL -f "dinfer serve .*--port $PORT" 2>/dev/null; sleep 1
 nsys profile -t cuda --cuda-graph-trace=node -o /tmp/b4_$tag --force-overwrite true \
   ./target/release/dinfer serve --model $M --tokenizer $M --port $PORT --max-num-batched-tokens 2048 \
