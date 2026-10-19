@@ -646,3 +646,12 @@
 - 根因：`Linear::forward(gemm, x, out)` 用 `x.numel() / in_features` 推断 M，而 qwen35 的激活缓冲按 `max_tokens`（2112）预分配 → 每步都算 2112 行，GEMM 时间 ≈ 2112/1 倍，且自调优表（M=1 键）不命中。
 - 解法：所有预分配缓冲上的 GEMM 一律 `forward_rows(gemm, x, out, tokens)` 显式传本步 token 数（qwen35 7 处；K3 在 C-1 已如此）。
 - 避免：新模型 crate 禁用 `Linear::forward`（考虑把它改成只接受精确形状或删掉）；nsys 中 decode 出现大 M tile 名字（`128x192` / `2cta`）即是信号；自调优日志的 µs 与 nsys 实测对不上时先查 M。
+
+## `remote_b300.sh push --delete` 会删掉远端**空目录**，容器里的 `-v $ABS_REFS:/out` 随之写进"不存在的目录"（2026-10-20，K3 C-3）
+
+- 现象：`k3_model.sh` 远端 `mkdir -p $REFS` 后起容器，脚本第一个 `np.save('/out/ids.npy')` 看似成功，几分钟后 `layer0.npy` 报
+  `FileNotFoundError: /out/layer0.npy`，远端 `test/kimik3/2026-10-20/model` 不存在。
+- 根因：另一个会话 / 子代理在这期间 `push --delete`，本地没有这个目录 → rsync 把远端刚建的空目录删了；nerdctl 的 bind mount 指向
+  被删的 inode，写入全丢（容器里看不到错误直到下一次 open）。
+- 解法：**本地先建目录 + `.gitkeep` 并 commit**，再 push / 起容器；参考生成完 `pull` 回本地后再做下一次 push（与 k3-kda.md 踩坑 0 同根）。
+- 避免：所有会写远端生成物的脚本，REFS 目录都先在仓库里占位。多子代理共用一台远端机时，push 前 `pull` 一次对方可能生成的目录。
