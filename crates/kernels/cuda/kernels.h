@@ -140,6 +140,18 @@ int qkv_post_ext_bf16(void* qkv, const void* wq, const void* wk, const int32_t* 
 int mxfp4_dequant_bf16(const void* packed, const void* scale, void* out, int64_t rows, int64_t cols,
                        int64_t group);
 
+// ---- MXFP4 grouped GEMM（mxfp4_gemm_sm8x.cu；sm100 路径见 mxfp4_gemm_sm100.cu 空壳）----
+// 分组语义同 moe.cu：专家 e 的 token 占 `[expert_off[e], expert_off[e+1])`；xg 由 moe_gather_bf16 收集。
+// 权重：[E, N, K/2] u8 + [E, N, K/group] u8 e8m0。out: [tokens, N] bf16（按 xg 的行号写，即排序后的行）。
+// tile 三元组已由 host 展平到 tile_e/tile_m/tile_n（长度 = num_tiles）。
+int mxfp4_gemm_grouped(const void* xg, const void* wp, const void* ws, const int32_t* expert_off,
+                       const int32_t* tile_e, const int32_t* tile_m, const int32_t* tile_n, void* out,
+                       int64_t num_tiles, int64_t K, int64_t N, int64_t group, cudaStream_t stream);
+// sm100 专用入口；未实现期间返回 cudaErrorNotSupported，host 回落到上面的 sm8x 入口。
+int mxfp4_gemm_grouped_sm100(const void* xg, const void* wp, const void* ws, const int32_t* expert_off,
+                             const int32_t* tile_e, const int32_t* tile_m, const int32_t* tile_n, void* out,
+                             int64_t num_tiles, int64_t K, int64_t N, int64_t group, cudaStream_t stream);
+
 // ---- KDA（kda.cu）：Kimi Delta Attention 的模型无关算子 ----
 // 短卷积（depthwise causal conv1d, width<=8, 带 siLU）：
 //   y[t,d] = silu(Σ_j w[d,j]·x[t-W+1+j,d])，越界部分取 conv_state（布局 [slots, dim, state_len]）。

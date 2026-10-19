@@ -729,6 +729,37 @@ extern "C" {
         group: i64,
         stream: cudaStream_t,
     ) -> i32;
+    // ---- MXFP4 grouped GEMM（mxfp4_gemm_sm8x.cu）----
+    pub fn mxfp4_gemm_grouped(
+        xg: *const c_void,
+        wp: *const c_void,
+        ws: *const c_void,
+        expert_off: *const i32,
+        tile_e: *const i32,
+        tile_m: *const i32,
+        tile_n: *const i32,
+        out: *mut c_void,
+        num_tiles: i64,
+        k: i64,
+        n: i64,
+        group: i64,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn mxfp4_gemm_grouped_sm100(
+        xg: *const c_void,
+        wp: *const c_void,
+        ws: *const c_void,
+        expert_off: *const i32,
+        tile_e: *const i32,
+        tile_m: *const i32,
+        tile_n: *const i32,
+        out: *mut c_void,
+        num_tiles: i64,
+        k: i64,
+        n: i64,
+        group: i64,
+        stream: cudaStream_t,
+    ) -> i32;
 
 }
 
@@ -773,6 +804,8 @@ mod stubs {
     stub!(moe_gather_bf16(x: *const c_void, xg: *mut c_void, st: *const i32, n: i64, h: i64, s: cudaStream_t));
     stub!(moe_scatter_add_f32(y: *const c_void, a: *mut f32, st: *const i32, sk: *const i32, tw: *const f32, n: i64, k: i64, h: i64, s: cudaStream_t));
     stub!(mxfp4_dequant_bf16(p: *const c_void, sc: *const c_void, o: *mut c_void, r: i64, c: i64, g: i64, s: cudaStream_t));
+    stub!(mxfp4_gemm_grouped(xg: *const c_void, wp: *const c_void, ws: *const c_void, eo: *const i32, te: *const i32, tm: *const i32, tn: *const i32, o: *mut c_void, nt: i64, k: i64, n: i64, g: i64, s: cudaStream_t));
+    stub!(mxfp4_gemm_grouped_sm100(xg: *const c_void, wp: *const c_void, ws: *const c_void, eo: *const i32, te: *const i32, tm: *const i32, tn: *const i32, o: *mut c_void, nt: i64, k: i64, n: i64, g: i64, s: cudaStream_t));
     stub!(kda_conv1d_prefill(x: *const c_void, w: *const c_void, o: *mut c_void, cs: *mut c_void, cu: *const i32, si: *const i32, hi: *const i32, ns: i64, d: i64, wid: i64, sl: i64, s: cudaStream_t));
     stub!(kda_conv1d_update(x: *const c_void, w: *const c_void, o: *mut c_void, cs: *mut c_void, si: *const i32, b: i64, d: i64, wid: i64, sl: i64, s: cudaStream_t));
     stub!(kda_gate(g: *const c_void, al: *const f32, db: *const f32, o: *mut f32, t: i64, h: i64, hd: i64, lb: f32, ulb: i32, s: cudaStream_t));

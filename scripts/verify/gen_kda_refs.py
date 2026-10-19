@@ -40,6 +40,11 @@ def bf16(t):
     return t.to(torch.bfloat16).float()
 
 
+# 固定 seed：参考 .npy 入库（远端无 torch 时直接用），重跑必须与入库版本一致，
+# 否则 `git status` 会一直显示这些 .npy 被修改。
+torch.manual_seed(20261019)
+
+
 def rnd(*shape, scale=1.0):
     return torch.randn(*shape) * scale
 

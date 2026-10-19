@@ -2290,6 +2290,95 @@ pub fn kda_recurrent(
     )
 }
 
+// --------------------------------------------------------------------------- MXFP4 grouped GEMM
+
+/// 分组 GEMM 的展平 tile 计划：每专家按 `ceil(ntok / BM)` 个 M tile × `N / BN` 个 N tile 展开。
+/// 块三元组放在三个 i32 数组里（16 的倍数、并行度足够时用 `token4` 打包会更省，见 loop 文档 TODO）。
+pub struct Mxfp4GemmTiles {
+    pub tile_e: CudaSlice<i32>,
+    pub tile_m: CudaSlice<i32>,
+    pub tile_n: CudaSlice<i32>,
+    pub num_tiles: usize,
+}
+
+impl Mxfp4GemmTiles {
+    /// `expert_off`：host 侧 `[E+1]`（每专家在排序后 token 段的起止）。
+    /// `bm`/`bn` 必须与 kernel 的模板参数一致（当前 16 / 64）。
+    pub fn new(stream: &Stream, expert_off: &[i32], n: usize, bm: usize, bn: usize) -> Result<Self> {
+        ensure!(expert_off.len() >= 2 && bm > 0 && bn > 0 && n % bn == 0, "mxfp4 tiles: 参数");
+        ensure!(expert_off.windows(2).all(|w| w[1] >= w[0]), "mxfp4 tiles: expert_off 必须单调");
+        let nt_n = n / bn;
+        let mut te = Vec::new();
+        let mut tm = Vec::new();
+        let mut tn = Vec::new();
+        for e in 0..expert_off.len() - 1 {
+            let ntok = (expert_off[e + 1] - expert_off[e]).max(0) as usize;
+            if ntok == 0 {
+                continue;
+            }
+            for mt in 0..ntok.div_ceil(bm) {
+                for nt in 0..nt_n {
+                    te.push(e as i32);
+                    tm.push(mt as i32);
+                    tn.push(nt as i32);
+                }
+            }
+        }
+        let num_tiles = te.len();
+        Ok(Self {
+            tile_e: stream.htod_copy(te)?,
+            tile_m: stream.htod_copy(tm)?,
+            tile_n: stream.htod_copy(tn)?,
+            num_tiles,
+        })
+    }
+}
+
+/// MXFP4 grouped GEMM（sm8x 路径）。`xg`: `[pairs, K]` bf16（`moe_gather_bf16` 的结果），
+/// `wp`: `[E, N, K/2]` u8，`ws`: `[E, N, K/group]` u8，`out`: `[pairs, N]` bf16。
+#[allow(clippy::too_many_arguments)]
+pub fn mxfp4_gemm_grouped(
+    stream: &Stream,
+    xg: &CudaSlice<bf16>,
+    wp: &CudaSlice<u8>,
+    ws: &CudaSlice<u8>,
+    expert_off: &CudaSlice<i32>,
+    tiles: &Mxfp4GemmTiles,
+    out: &mut CudaSlice<bf16>,
+    k: usize,
+    n: usize,
+    group: usize,
+) -> Result<()> {
+    ensure!(k % group == 0 && k % 2 == 0, "mxfp4 gemm: K % group / 2");
+    let pairs = xg.len() / k;
+    ensure!(xg.len() >= pairs * k, "mxfp4 gemm: xg");
+    ensure!(out.len() >= pairs * n, "mxfp4 gemm: out");
+    let experts = expert_off.len().saturating_sub(1);
+    ensure!(wp.len() >= experts * n * k / 2, "mxfp4 gemm: wp 容量");
+    ensure!(ws.len() >= experts * n * k / group, "mxfp4 gemm: ws 容量");
+    // SAFETY: 容量已校验；tiles 由同一 expert_off 生成。
+    check(
+        unsafe {
+            ffi::mxfp4_gemm_grouped(
+                stream.ptr(xg) as *const c_void,
+                stream.ptr(wp) as *const c_void,
+                stream.ptr(ws) as *const c_void,
+                stream.ptr(expert_off) as *const i32,
+                stream.ptr(&tiles.tile_e) as *const i32,
+                stream.ptr(&tiles.tile_m) as *const i32,
+                stream.ptr(&tiles.tile_n) as *const i32,
+                stream.ptr_mut(out) as *mut c_void,
+                tiles.num_tiles as i64,
+                k as i64,
+                n as i64,
+                group as i64,
+                stream.raw() as _,
+            )
+        },
+        "mxfp4_gemm_grouped",
+    )
+}
+
 // --------------------------------------------------------------------------- KDA chunk 形式 prefill
 
 /// KDA chunk 形式 prefill 的工作区与执行计划。
