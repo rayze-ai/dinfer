@@ -13,6 +13,17 @@
    - 每项单独 bench 进 CSV，不达标回退开关。
 4. **B3 T4 DCP**（design §13.5）：长上下文 KV 按 token 段切到多卡，decode 复用 split-K 的 lse 归并（`gqa_decode` 已有 scratch 布局 `[B][H][splits][D+2]`）；wire 布局已 head-major。目标：单请求 context 超单卡 KV 仍可跑。
 
+## B2 设计（2026-10-19，B1 跑的同时定稿；对齐 vLLM `csrc/custom_all_reduce.cuh`，§11 台账记"采用"）
+
+- **何时走自定义**：world ∈ {2,4,8}、全 P2P、消息 ≤ 512 KB（world ≤ 4）/ 256 KB（world 8）走 one-shot；更大消息先保留 NCCL（two-stage reduce-scatter + all-gather 留 TODO）。decode `t×hidden×2B`：Qwen3-0.6B t=32 时 64 KB，全部命中 one-shot；prefill 2048 token = 4 MB 走 NCCL。开关 `CUSTOM_AR=0` 回退。
+- **缓冲**：每 rank 一块 cuda-ipc 设备区 = `Signal`（start/end flag `[kMaxBlocks=36][8]`，128 B 对齐）+ 输入镜像区（max_size）。rank 建区 `cuIpcGetMemHandle`，经 `TpExecutor::dispatch/collect` 在进程内交换 handle（不走文件 / NCCL），各 rank `cuIpcOpenMemHandle` 打开其余 world-1 份 → `RankData{ptrs[8]}` 上传设备。复用 `shared.rs` 的 `RegionKind::CudaIpc` 代码路径（抽一个 `IpcBuf::{create, open}`）。
+- **kernel `ar_oneshot_bf16<world>`**（`crates/kernels/cuda/allreduce.cu`）：① 本 rank 输入 D2D 进自己镜像区（或让 o_proj / down 直接写镜像区省一次拷贝，第二步再做）；② `barrier_at_start`（每 block 对每个 peer 写 start flag、自旋等齐，`st.volatile` / `ld.volatile`）；③ 每线程按**固定 rank 顺序** 0..world 累加 8 个 bf16 的 packed 读（所有 rank 相同顺序 → 逐位一致，TP 采样一致性依赖这点）；④ 写 result；⑤ `barrier_at_end`（release / acquire）。grid ≤ 36 block × 512 线程。
+- **融合 `ar_oneshot_add_rmsnorm_bf16`**：③ 的和不落回 attn_out / mlp_out，直接 `hidden += sum` 再对该行 RMSNorm 写 normed（一行 = 一个 block 处理 hidden=1024 → 512 线程 × 2 元素，归约在 block 内）。替换 forward 里 "all-reduce ① + fused_add_rmsnorm(post_norm)" 与 "all-reduce ② + 下一层 fused_add_rmsnorm(input_norm)" 两处（第二处跨层，`pending_mlp` 逻辑要改成"上一层的 mlp 部分和还在镜像区"）。省一次 t×h 读写 + 一次 kernel launch。
+- **CUDA graph**：flag 用单调递增的 `_flag[block]` 计数器（vLLM 做法），图内重放无需重置；镜像区地址固定。
+- **lm_head 列切**：vocab 151936 ÷ world 各 rank 算一段 logits（GEMM N 维切），采样需要全 vocab → rank 0 `all_gather` logits（t × 151936 × 4 B，decode t=32 时 19 MB，比省下的 GEMM 不一定划算）。**先 bench 再决定**：只做开关 + all_gather 版本，若 TPOT 不降就不默认开。
+- **验证**：① 单测 `ar_oneshot` vs NCCL 结果逐位一致（随机 bf16，world 2/4/8，size 1 KB–512 KB）；② `q5_tp.sh` 一致性不变；③ `bench_tp_ab.sh` 每项改动一行进 CSV（变体名 `tp2_car` / `tp2_car_fused` / `tp2_lmcol`），停止条件 TPOT 相对上一轮不退化、至少一项 ≥ 3%。
+- **分工**：kernel + IpcBuf + 单测一个子代理；model.rs 接线 + 开关 + bench 另一个；lm_head 列切第三个（独立）。brief 固定加"`crates/` 不得出现模型特定内容"。
+
 ## 环境
 
 - 远端 `/data/yaochen/infer/{dinfer,models,cargo,rustup,pip,lib}`，`source /data/yaochen/infer/env.sh`。
