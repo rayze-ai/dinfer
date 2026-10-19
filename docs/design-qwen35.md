@@ -6,7 +6,7 @@
 
 - 2026-10-19 结构事实核对完成（下）。实现由独立子代理推进，loop 文档 `docs/loops/qwen35-gdn.md`。
 ```
-[x] §1 结构事实   [x] 差距三分类   [ ] gdn loop 文档   [ ] GDN kernel 对拍（两卡）   [ ] config/weights + tiny golden
+[x] §1 结构事实   [x] 差距三分类   [x] gdn loop 文档   [x] GDN kernel 对拍（3090/4090/B300 三卡 10/10）   [ ] config/weights + tiny golden
 [ ] prefill logits 对拍   [ ] greedy 32 / 混批   [ ] chat_parity   [ ] 真权重 e2e vs vLLM   [ ] bench CSV   [ ] §11 台账
 ```
 
