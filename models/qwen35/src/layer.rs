@@ -45,6 +45,8 @@ pub struct StepMeta<'a> {
     pub num_reqs: usize,
     pub max_blocks: usize,
     pub max_seqlen: usize,
+    /// GDN chunk prefill 的共享工作区（`None` = 顺序递归）。
+    pub gdn_chunk: Option<&'a std::cell::RefCell<crate::gdn::GdnChunkWorkspace>>,
 }
 
 impl<'a> StepMeta<'a> {
@@ -66,6 +68,7 @@ impl<'a> StepMeta<'a> {
             has_initial: self.has_initial,
             num_reqs: self.num_reqs,
             mode: self.mode,
+            chunk: self.gdn_chunk,
         }
     }
 }

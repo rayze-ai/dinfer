@@ -6,12 +6,15 @@
 //! 状态（每层每 slot）：conv `[slots, conv_dim, width-1]` bf16 + 递推 `[slots, HV, V, K]` f32，全部由本 crate 自管
 //! （`SlotTable` 按 `RequestId` 分 slot，新请求首次出现时清零）；core 的 `KvCacheSpec::Mamba` 接法留 §3 待办。
 //!
-//! 本里程碑：prefill 也走逐 token 递归（与 chunk 形式数值等价，慢）；perf 项见设计 §3。
+//! prefill（`t > num_reqs`）走 chunk 三段（`gdn_chunk_{prep,wy,ho}`，`docs/loops/qwen35-perf.md` 第 1 轮），
+//! decode 单 token 走 `gdn_recurrent`；`GDN_PREFILL=recurrent` 回退到老路径。chunk 中间缓冲全模型共用一份
+//! （`GdnChunkWorkspace`，executor 每步 `prepare` 一次，缓冲按需增长）。
 use crate::config::Qwen35Config;
 use crate::weights::Table;
 use anyhow::{ensure, Result};
 use dinfer_core::runner::BatchMode;
 use dinfer_kernels as k;
+use std::cell::RefCell;
 use dinfer_layers::{bf16, Gemm, Linear, Stream, Tensor, WeightSource};
 use std::collections::HashMap;
 
@@ -30,6 +33,54 @@ pub struct GdnMeta<'a> {
     pub has_initial: &'a Tensor<i32>,
     pub num_reqs: usize,
     pub mode: BatchMode,
+    /// chunk prefill 的共享工作区；`None` = 本步走顺序递归（decode / 回退）。
+    pub chunk: Option<&'a RefCell<GdnChunkWorkspace>>,
+}
+
+/// chunk prefill 的切块表 + 中间缓冲，全模型 48 层共用一份（每层串行，无重入）。
+/// 块大小：`BT`（kernel 当前只支持 64；由 host 选，不是 kernel 内常量）。
+pub struct GdnChunkWorkspace {
+    pub plan: Option<k::ops::KdaChunkPlan>,
+    pub scratch: Option<k::ops::GdnChunkScratch>,
+    pub tokens: usize,
+    bt: usize,
+}
+
+impl GdnChunkWorkspace {
+    pub const BT: usize = 64;
+
+    pub fn new() -> Self {
+        Self { plan: None, scratch: None, tokens: 0, bt: Self::BT }
+    }
+
+    /// 每步一次：按 host 侧 `cu_seqlens` 重建切块表，缓冲不够就按本步形状重分（只增不减）。
+    pub fn prepare(&mut self, stream: &Stream, cu_seqlens: &[i32], cfg: &Qwen35Config) -> Result<()> {
+        let plan = k::ops::KdaChunkPlan::new(stream, cu_seqlens, self.bt)?;
+        let tokens = (*cu_seqlens.last().unwrap_or(&0)).max(0) as usize;
+        let need_realloc = match &self.scratch {
+            Some(sc) => !sc.fits(tokens, plan.num_chunks),
+            None => true,
+        };
+        if need_realloc {
+            let h = cfg.linear_num_key_heads as usize;
+            let hv = cfg.linear_num_value_heads as usize;
+            let (kd, vd) = (cfg.linear_key_head_dim as usize, cfg.linear_value_head_dim as usize);
+            let old = self.scratch.as_ref().map_or((0, 0), |s| (s.tokens, s.num_chunks));
+            let cap_t = tokens.max(old.0);
+            let cap_c = plan.num_chunks.max(old.1);
+            self.scratch = None; // 先释放旧的再分新的
+            self.scratch = Some(k::ops::GdnChunkScratch::new(stream, cap_t, h, hv, kd, vd, cap_c, self.bt)?);
+        }
+        self.tokens = tokens;
+        self.plan = Some(plan);
+        Ok(())
+    }
+}
+
+impl Default for GdnChunkWorkspace {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 pub struct GdnLayer {
@@ -222,27 +273,55 @@ impl GdnLayer {
             hv,
         )?;
 
-        // 4. delta rule 递归核心（q/k 的 l2norm 与 q 的 scale 在 kernel 内）
-        k::gdn_recurrent(
-            stream,
-            &self.conv_buf.data,
-            Some(&self.g_buf.data),
-            Some(&self.beta_buf.data),
-            None,
-            None,
-            &self.a_log.data,
-            &self.dt_bias.data,
-            &mut self.o_buf.data,
-            &mut self.state.rec.data,
-            &meta.cu_seqlens.data,
-            Some(&meta.state_indices.data),
-            meta.num_reqs,
-            h,
-            hv,
-            kd,
-            vd,
-            (kd as f32).powf(-0.5),
-        )?;
+        // 4. delta rule 核心（q/k 的 l2norm 与 q 的 scale 在 kernel 内）：
+        //    prefill 走 chunk 三段（prep → wy → ho），decode / 回退走逐 token 递归。两者数值等价（gdn_parity chunk case）。
+        let scale = (kd as f32).powf(-0.5);
+        let use_chunk = !single && t > meta.num_reqs && meta.chunk.is_some();
+        if use_chunk {
+            let mut ws = meta.chunk.unwrap().borrow_mut();
+            let ws = &mut *ws;
+            let plan = ws.plan.as_ref().ok_or_else(|| anyhow::anyhow!("gdn: chunk workspace 未 prepare"))?;
+            let sc = ws.scratch.as_mut().ok_or_else(|| anyhow::anyhow!("gdn: chunk scratch 未分配"))?;
+            ensure!(plan.num_seqs == meta.num_reqs && ws.tokens == t, "gdn: chunk plan 与本步不符");
+            tracing::trace!(t, num_reqs = meta.num_reqs, chunks = plan.num_chunks, "gdn prefill: chunk 路径");
+            k::gdn_chunk_prep(stream, &self.conv_buf.data, &self.g_buf.data, &meta.cu_seqlens.data, plan, sc, t, h, hv, kd, vd, scale)?;
+            k::gdn_chunk_wy(stream, &self.conv_buf.data, &self.beta_buf.data, &meta.cu_seqlens.data, plan, sc, t, h, hv, kd, vd)?;
+            k::gdn_chunk_ho(
+                stream,
+                &meta.cu_seqlens.data,
+                plan,
+                sc,
+                &mut self.o_buf.data,
+                &mut self.state.rec.data,
+                Some(&meta.state_indices.data),
+                t,
+                h,
+                hv,
+                kd,
+                vd,
+            )?;
+        } else {
+            k::gdn_recurrent(
+                stream,
+                &self.conv_buf.data,
+                Some(&self.g_buf.data),
+                Some(&self.beta_buf.data),
+                None,
+                None,
+                &self.a_log.data,
+                &self.dt_bias.data,
+                &mut self.o_buf.data,
+                &mut self.state.rec.data,
+                &meta.cu_seqlens.data,
+                Some(&meta.state_indices.data),
+                meta.num_reqs,
+                h,
+                hv,
+                kd,
+                vd,
+                scale,
+            )?;
+        }
 
         // 5. 输出门 + RMSNorm（z 门，silu）
         k::gdn_gated_rmsnorm(

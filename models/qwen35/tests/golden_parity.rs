@@ -83,7 +83,9 @@ fn prefill(e: &mut Env, prompt: &[i32]) -> Vec<f32> {
     let ids = Tensor::from_vec(s, prompt.to_vec(), &[t]).unwrap();
     let pos = Tensor::from_vec(s, (0..t as i32).collect(), &[t]).unwrap();
     let slots = Tensor::from_vec(s, (0..t as i64).collect(), &[t]).unwrap();
-    let cu = Tensor::from_vec(s, vec![0i32, t as i32], &[2]).unwrap();
+    let cu_host = vec![0i32, t as i32];
+    let ws = chunk_ws(s, &e.model.cfg, &cu_host);
+    let cu = Tensor::from_vec(s, cu_host, &[2]).unwrap();
     let bt = Tensor::from_vec(s, (0..NUM_BLOCKS as i32).collect(), &[1, NUM_BLOCKS]).unwrap();
     let seq = Tensor::from_vec(s, vec![t as i32], &[1]).unwrap();
     let rows = Tensor::from_vec(s, (0..t as i32).collect(), &[t]).unwrap();
@@ -105,6 +107,7 @@ fn prefill(e: &mut Env, prompt: &[i32]) -> Vec<f32> {
             num_reqs: 1,
             max_blocks: NUM_BLOCKS,
             max_seqlen: t,
+            gdn_chunk: ws.as_ref(),
         },
         logits_rows: &rows,
         t,
@@ -135,6 +138,26 @@ fn check_rows(tag: &str, got: &[f32], want: &[f32], v: usize) -> usize {
     assert!(worst < MAX_ABS, "{tag}: max abs {worst} > {MAX_ABS}");
     assert_eq!(bad, 0, "{tag}: argmax differs on a non-tie row");
     rows
+}
+
+
+/// GDN chunk prefill 工作区（与 executor 同口径：prefill 步建表，`GDN_PREFILL=recurrent` 回退 → None）。
+fn chunk_ws(
+    s: &dinfer_layers::Stream,
+    cfg: &dinfer_qwen35::config::Qwen35Config,
+    cu: &[i32],
+) -> Option<std::cell::RefCell<dinfer_qwen35::gdn::GdnChunkWorkspace>> {
+    if matches!(std::env::var("GDN_PREFILL").as_deref(), Ok("recurrent")) {
+        return None;
+    }
+    let n = cu.len() - 1;
+    let t = *cu.last().unwrap() as usize;
+    if t <= n {
+        return None;
+    }
+    let mut ws = dinfer_qwen35::gdn::GdnChunkWorkspace::new();
+    ws.prepare(s, cu, cfg).unwrap();
+    Some(std::cell::RefCell::new(ws))
 }
 
 #[test]
@@ -255,7 +278,9 @@ fn golden_chunked_teacher_forced() {
         let ids = Tensor::from_vec(&s, prompt[pos0..pos0 + n].to_vec(), &[n]).unwrap();
         let posv = Tensor::from_vec(&s, (pos0 as i32..(pos0 + n) as i32).collect(), &[n]).unwrap();
         let slots = Tensor::from_vec(&s, (pos0 as i64..(pos0 + n) as i64).collect(), &[n]).unwrap();
-        let cu = Tensor::from_vec(&s, vec![0i32, n as i32], &[2]).unwrap();
+        let cu_host = vec![0i32, n as i32];
+        let ws = chunk_ws(&s, &e.model.cfg, &cu_host);
+        let cu = Tensor::from_vec(&s, cu_host, &[2]).unwrap();
         let seq = Tensor::from_vec(&s, vec![(pos0 + n) as i32], &[1]).unwrap();
         let rows = Tensor::from_vec(&s, vec![(n - 1) as i32], &[1]).unwrap();
         let has_init = Tensor::from_vec(&s, vec![i32::from(pos0 > 0)], &[1]).unwrap();
@@ -274,6 +299,7 @@ fn golden_chunked_teacher_forced() {
                 num_reqs: 1,
                 max_blocks: NUM_BLOCKS,
                 max_seqlen: n,
+                gdn_chunk: ws.as_ref(),
             },
             logits_rows: &rows,
             t: n,
@@ -315,6 +341,7 @@ fn golden_chunked_teacher_forced() {
                 num_reqs: 1,
                 max_blocks: NUM_BLOCKS,
                 max_seqlen: 1,
+                gdn_chunk: None,
             },
             logits_rows: &rows,
             t: 1,

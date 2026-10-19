@@ -100,6 +100,9 @@ pub struct Qwen35Executor {
     pub steps: u64,
     /// 跨流并行用的第二套激活缓冲（第二版接 `forward_sample_pair`）。
     pub alt: Option<ModelScratch>,
+    /// GDN chunk prefill 的共享工作区（48 层共用；按需增长）。`GDN_PREFILL=recurrent` 时关闭。
+    gdn_chunk: Option<crate::gdn::GdnChunkWorkspace>,
+    gdn_chunk_enabled: bool,
 }
 
 impl Qwen35Executor {
@@ -123,6 +126,8 @@ impl Qwen35Executor {
             last_rows: 0,
             steps: 0,
             alt: None,
+            gdn_chunk: None,
+            gdn_chunk_enabled: !matches!(std::env::var("GDN_PREFILL").as_deref(), Ok("recurrent")),
         })
     }
 
@@ -191,6 +196,14 @@ impl Qwen35Executor {
         self.buf.up.flush(s)?;
 
         let max_seqlen = plan.num_tokens.iter().copied().max().unwrap_or(0).max(1) as usize;
+        // GDN chunk prefill 工作区：只有 prefill 步（有请求本步 > 1 token）才建表；GDN_PREFILL=recurrent 回退。
+        let gdn_chunk = if t > n && self.gdn_chunk_enabled {
+            let mut ws = self.gdn_chunk.take().unwrap_or_default();
+            ws.prepare(s, &plan.cu_seqlens, &self.model.cfg)?;
+            Some(std::cell::RefCell::new(ws))
+        } else {
+            None
+        };
         let meta = StepMeta {
             mode: plan.mode,
             cu_seqlens: &self.buf.cu,
@@ -201,6 +214,7 @@ impl Qwen35Executor {
             num_reqs: n,
             max_blocks: self.buf.max_blocks,
             max_seqlen,
+            gdn_chunk: gdn_chunk.as_ref(),
         };
         let f = Forward {
             input_ids: &self.buf.ids,
@@ -213,6 +227,9 @@ impl Qwen35Executor {
             req_ids: &req_ids,
         };
         self.model.forward(s, &self.gemm, &f, &mut self.logits)?;
+        if let Some(ws) = gdn_chunk {
+            self.gdn_chunk = Some(ws.into_inner());
+        }
         self.sample_eager(&plan.sample, nrows)?;
         self.last_rows = nrows;
         self.steps += 1;
