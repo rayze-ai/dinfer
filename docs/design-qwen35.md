@@ -11,6 +11,17 @@
 [ ] prefill logits 对拍   [ ] greedy 32 / 混批   [ ] chat_parity   [ ] 真权重 e2e vs vLLM   [ ] bench CSV   [ ] §11 台账
 ```
 
+## 0.1 vLLM 基线（追赶目标）
+
+B300 单卡、vLLM nightly 0.29.1rc1、bf16、max-model-len 8192（`test/qwen35/2026-10-19/bench_b300_vllm1/`，2026-10-19）：
+
+| 组 | TPOT p50 | TTFT p50 | out tok/s |
+|---|---|---|---|
+| c1 p128 | 10.24 ms | 45 ms | 95 |
+| c8 p128 | 11.15 | 99 | 675 |
+| c32 p128 | 12.87 | 263 | 2148 |
+| c8 p1024 | 11.20 | 413 | 557 |
+
 ## 1. 结构事实
 
 来源：B300 `/data/models/Qwen/Qwen3.8-27B/config.json`（`text_config`）+ 分片 header（bf16 52 GB / 18 分片；FP8 版 29 GB / 66 分片 `fmt e4m3` dynamic，抽样分片 header 解析失败，先用 bf16）。vLLM 参考 `vllm/model_executor/models/qwen3_5.py`（继承 `qwen3_next.py`），GDN 层 `vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py`。
