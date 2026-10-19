@@ -37,8 +37,9 @@ B0–B1 4 轮；B2 8 轮；B3 8 轮。
 
 | 轮 | 改动 | 结果 |
 |---|---|---|
-| 0 | 用户给三个 JumpServer token（12:07 / 12:11 / 12:14 过期）。第一个首次登录成功后再登被拒，第二个直接被拒，**第三个拿到立刻 `remote_b300.sh up` 建常驻 ControlMaster 成功**。机器：登录用户 `jumpserver`，`sudo NOPASSWD ALL`；`/data/yaochen` 原归 root，`sudo chown` 后建 `/data/yaochen/infer`；系统自带 `/usr/lib/x86_64-linux-gnu/libnccl.so.2.30.3` 与 `/usr/local/cuda-13.1`；**无 cargo、无 docker、无 torch、无 vllm、外网全不通**（只有内网 apt 镜像 100.66.200.250:8080）；glibc 2.35 与本机同 → 工具链 / registry / 权重全部从本机 rsync，cargo 走 `CARGO_NET_OFFLINE=true`。8 卡空闲（各 1.6 GB 常驻）。 | B0：rsync 工具链（rust 1.89 + registry 869 MB）/ 权重 / 仓库完成；`env.sh`（`CUDA_ARCHS=103`、`CARGO_NET_OFFLINE=true`、系统 CUDA 13.1 + NCCL 2.30.3）。**`probe_ipc`：8 卡两两 `canAccessPeer=1`，IPC 64 MB 拷贝 0.09 ms ≈ 740 GB/s，跨 NUMA（0→4）同速** → PD cuda-ipc 跨卡、one-shot all-reduce 都可用。sm_103 首次 release 编译进行中 |
+| 0 | 用户给三个 JumpServer token（12:07 / 12:11 / 12:14 过期）。第一个首次登录成功后再登被拒，第二个直接被拒，**第三个拿到立刻 `remote_b300.sh up` 建常驻 ControlMaster 成功**。机器：登录用户 `jumpserver`，`sudo NOPASSWD ALL`；`/data/yaochen` 原归 root，`sudo chown` 后建 `/data/yaochen/infer`；系统自带 `/usr/lib/x86_64-linux-gnu/libnccl.so.2.30.3` 与 `/usr/local/cuda-13.1`；**无 cargo、无 docker、无 torch、无 vllm、外网全不通**（只有内网 apt 镜像 100.66.200.250:8080）；glibc 2.35 与本机同 → 工具链 / registry / 权重全部从本机 rsync，cargo 走 `CARGO_NET_OFFLINE=true`。8 卡空闲（各 1.6 GB 常驻）。 | B0：rsync 工具链（rust 1.89 + registry 869 MB）/ 权重 / 仓库完成；`env.sh`（`CUDA_ARCHS=103`、`CARGO_NET_OFFLINE=true`、系统 CUDA 13.1 + NCCL 2.30.3）。**`probe_ipc`：8 卡两两 `canAccessPeer=1`，IPC 64 MB 拷贝 0.09 ms ≈ 740 GB/s，跨 NUMA（0→4）同速** → PD cuda-ipc 跨卡、one-shot all-reduce 都可用。**sm_103 release 编译通过**（`cargo build --release --offline --features qwen3`，nvcc 13.1 `-gencode arch=compute_103,code=sm_103` 全部 .cu 直接过，无需改 kernel）。B0 完成 |
+| 1 | B1：B300 GPU 0–7 `q5_tp.sh 2 0` / `q5_tp.sh 4 0` 一致性 + `bench_tp_ab.sh` single vs tp2 / tp4 / tp8（`test/qwen3/2026-10-19/ab_tp_b300`，进 CSV tp 页签） | 运行中 |
 
 ## 状态
 
-- B0 进行中：常驻连接已建；工具链 / registry / 权重 rsync 中；下一步远端 `cargo build --release --features qwen3`（sm_103 首次编译）、`probe_ipc`、`q5_tp.sh`。**vLLM 基线在这台机器上暂无法起**（无 docker / torch / 外网），B1 先用 dinfer 单卡 vs tpN 自比，vLLM 对比列留空。
+- B0 完成（连接 / 工具链 / 权重 / sm_103 编译 / P2P 确认）。B1 运行中。**vLLM 基线在这台机器上暂无法起**（无 docker / torch / 外网），B1 先用 dinfer 单卡 vs tpN 自比，vLLM 对比列留空。
