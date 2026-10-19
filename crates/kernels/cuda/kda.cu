@@ -176,6 +176,9 @@ __global__ void recurrent_kernel(const bf16* __restrict__ q, const bf16* __restr
     float qsq = (tid < K) ? qbuf[tid] * qbuf[tid] : 0.f;
     float ksq = (tid < K) ? kbuf[tid] * kbuf[tid] : 0.f;
     const float qs = block_reduce_sum<256>(qsq);
+    // block_reduce_sum 内部复用同一块静态 shared 作中转，且返回值是最后一步读 smem[0]；
+    // 紧接的第二次调用会立刻写 smem，必须在两次之间加屏障，否则先到的 warp 拿到后一次的值。
+    __syncthreads();
     const float ks = block_reduce_sum<256>(ksq);
     if (tid < K) {
       qbuf[tid] = qbuf[tid] / sqrtf(qs + 1e-6f) * scale;

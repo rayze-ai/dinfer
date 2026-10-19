@@ -60,3 +60,31 @@
 | # | 日期 | 改动 | 结果 |
 |---|---|---|---|
 | 1 | 2026-10-19 | 建规格：KDA 数学口径 + 参考脚本方案（纯 torch，不依赖 fla） | 规格定稿 |
+| 2 | 2026-10-19 | 实现 `crates/kernels/cuda/kda.cu` 五个算子（conv1d prefill / conv1d update / gate / 顺序递归 / gated RMSNorm）+ Rust 封装 + `gen_kda_refs.py` + `kda_parity.rs` | **8/8 case 通过**（3090 sm86） |
+| 3 | 2026-10-19 | 修两处：`concurrent block_reduce_sum` 之间缺 `__syncthreads`（q/k 归一化的两个归约共用静态 shared）；参考侧 `has_state=0` 槽未清零 | 全过，误差见下表 |
+
+### 实测误差（3090 sm86，`scripts/verify/k3_kda.sh` exit 0）
+
+| case | 最大误差 | cos |
+|---|---|---|
+| conv_prefill / varlen / update ×4（out+state） | 0 | 1.0 |
+| gate（lower_bound / softplus） | 1e-6 / 2.3e-5 | 1.0 |
+| recurrent_prefill out / state | 3e-5 / 1e-7 | 1.0 |
+| recurrent_varlen out / state | 1e-5 / 1e-7 | 1.0 |
+| recurrent_decode ×4 步 out / state | 0 / 1e-7 | 1.0 |
+| gated_rmsnorm | 0 | 1.0 |
+
+### 已知限制 / v2 待办
+
+1. **顺序递归，不是 chunk 并行**：`recurrent_kernel` 每 block 一个 (序列, 头)，块内时间维串行，
+   `head_dim²=16384` 次乘加/头/token。对拍精确，性能远低于 fla 的 chunk 形式（BT=64 矩阵化）。
+   prefill 的真实现要做块级：`A=(I+tril(diag(β)KKᵀ,-1))⁻¹`、`w/u` 重算、跨 chunk 扫 h、`o=q·h + tril(qKᵀ)v'`。
+2. **`head_dim > 76` 时 shared 超 64 KB**：递归 kernel 用 `cudaFuncSetAttribute` 提到 67 KB（sm86 上限 99 KB），
+   到 `head_dim=256` 会顶到 262 KB 上限，需改成分块（每 block 一个 V 分片）。
+3. gate 的 fp32 中间量走独立 kernel（`kda_gate`）；K3 的 packed decode 把 gate + conv + 递归融成一个 kernel，
+   等模型层接好后按实际瓶颈再定是否合并。
+4. sm_103（B300）尚未跑过对拍，等 kernel 进 B300 构建后补一轮。
+
+## 下一步
+
+- MXFP4 专家 dequant 参考（`docs/loops/k3-moe.md`）：`weight_packed` U8 + `weight_scale` e8m0 / group 32 → bf16 回退。

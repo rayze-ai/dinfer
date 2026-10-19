@@ -29,13 +29,15 @@ fn load(dir: &str, name: &str) -> (Vec<usize>, Vec<f32>) {
     };
     let arr = npyz::NpyFile::new(&bytes[..]).unwrap();
     let shape: Vec<usize> = arr.shape().iter().map(|&d| d as usize).collect();
-    // bf16 以原始位存成 `u2`。npyz 的 into_vec 只认精确的 Rust 类型，所以用 `try_into_vec` 分支。
-    let v: Vec<f32> = match arr.try_into_vec::<u16>() {
-        Ok(bits) => bits.iter().map(|&b| bf16::from_bits(b).to_f32()).collect(),
-        Err(_) => {
-            let arr = npyz::NpyFile::new(&bytes[..]).unwrap();
-            arr.into_vec::<f32>().unwrap_or_else(|e| panic!("{name}: 既非 u2 也非 f4: {e}"))
-        }
+    // bf16 以原始位存成 `u2`（见 `gen_kda_refs.py` 的 save）。npyz 的 into_vec 只认精确的 Rust 类型，
+    // 先看 npy 头里的 descr 再选分支。
+    let descr = String::from_utf8_lossy(&bytes[10..128.min(bytes.len())]).to_string();
+    let v: Vec<f32> = if descr.contains("'<u2'") || descr.contains("\"<u2\"") {
+        arr.into_vec::<u16>().unwrap().iter().map(|&b| bf16::from_bits(b).to_f32()).collect()
+    } else if descr.contains("<f4") {
+        arr.into_vec::<f32>().unwrap()
+    } else {
+        panic!("{name}: 未支持的 descr {descr}")
     };
     (shape, v)
 }

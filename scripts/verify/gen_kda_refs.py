@@ -211,6 +211,10 @@ def _recurrent_case(name, lens, has_state, T_extra=0, width=4, seed_case=None):
     dt_bias = rnd(heads * head_dim, scale=1.0)
     S = len(lens)
     st0 = rnd(S, heads, head_dim, head_dim, scale=0.05)
+    # has_state=0 的槽由调用方保证是零（调度器语义）：参考与 kernel 都以零初态起步。
+    for i, hs in enumerate(has_state):
+        if not hs:
+            st0[i] = 0.0
     cu = torch.tensor([0] + list(np.cumsum(lens)), dtype=torch.int32)
     scale = head_dim ** -0.5
     o, st = recurrent_ref(q, k, v, raw_g, raw_beta, a_log, dt_bias, st0, cu.tolist(), has_state,
