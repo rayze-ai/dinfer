@@ -210,13 +210,10 @@ impl<O: OpSet> Qwen35Model<O> {
         // 全模型共享一套 per-token 激活缓冲（原先每层各一套，预算 16384 时 64 层 ≈ 180 GB，见 scratch.rs）。
         let act = ActScratch::new(stream, &cfg, max_tokens)?;
         stream.synchronize()?;
+        let act_bytes = ActScratch::bytes(&cfg, max_tokens);
         tracing::info!(
-            bytes = ActScratch::bytes(&cfg, max_tokens),
-            gib = ActScratch::bytes(&cfg, max_tokens) as f64 / (1u64 << 30) as f64,
-            max_tokens,
-            "qwen35: activation scratch bytes={} (max_tokens={})",
-            ActScratch::bytes(&cfg, max_tokens),
-            max_tokens
+            gib = act_bytes as f64 / (1u64 << 30) as f64,
+            "qwen35: activation scratch bytes={act_bytes} (max_tokens={max_tokens})"
         );
         // KV 最后分配：此时 free 已扣掉权重与 scratch（等价 vLLM profile run 的作用，但不真跑 forward）。
         let per_block = Self::kv_bytes_per_block(&cfg, block_size).max(1);

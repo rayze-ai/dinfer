@@ -688,3 +688,10 @@
 - 根因：qwen35 的激活缓冲按 `max_tokens`（≈ 预算 + max_num_seqs）预分配，每层 GDN / 全注意力各有多块 `[max_tokens, 10240/6144/8192…]` bf16，预算从 2048 到 16384 时这部分从 ~几 GB 涨到 ~180 GB（free 从 ~200 GiB 掉到 34.6）；再叠加 `gpu_memory_utilization 0.6` 的预算公式 `min(free, cap − used)`，cap 160 GiB < used → 0。
 - 解法：① bench 用 0.9（与 vLLM 一致），nsys 也用 0.9；② 激活缓冲应全模型共享一套（qwen3 是这样），不是每层一份——性能 loop 待办；③ 启动日志打印激活缓冲总字节数。
 - 避免：改预算 / max_tokens 后看一眼启动日志的 free / 激活字节；"free 很小但卡空"先怀疑自己分配了什么。`CUDA_DEVICE_ORDER=PCI_BUS_ID` 仍建议加（无害，编号稳定）。
+
+## 每层各持一套按 `max_tokens` 预分配的激活缓冲：预算一上去显存按"层数 × 预算"爆炸（2026-10-20，Qwen35 perf 第 6 轮）
+
+- 现象：`--max-num-batched-tokens` 从 2048 提到 16384（对齐 vLLM）后，27B 在 B300 上 utilization 0.9 只剩 ~20 GB 给 KV（块数大缩水，长上下文抢占），0.6 直接 `not enough GPU memory`，而卡是空的（见上条 "B300-50：nsys 起服务报 not enough GPU memory"）。
+- 根因：`GdnLayer` / `FullAttention` / `dinfer_layers::Mlp` 各自在 `load` 里 `Tensor::zeros(&[max_tokens, 列数])`，每层一套、互不复用；按 token 数线性、按层数线性，预算 ×8 就是 ×8：48 GDN 层 ×（2×10240 + 3×6144 + …）+ 64 层 Mlp ×（34816 + 17408）bf16 × 16448 token ≈ **170 GB**。小预算 / 小模型（qwen3-0.6B、tiny）看不出来，所以一直没发现。
+- 解法：层在同一条流上串行，层 i 的中间量在层 i+1 开始前已消费完，**全模型只需一套**：`models/qwen35/src/scratch.rs::ActScratch`（列数取各层类型最大值），forward 以 `&mut ActScratch` 借用；`Mlp` 自带缓冲改 `Option`（`max_tokens == 0` 不分配）+ `forward_with_scratch`。改后 ≈ 2.8 GB；启动日志 `qwen35: activation scratch bytes=… (max_tokens=…)` 直接看。
+- 避免：① 任何 `[max_tokens, …]` 预分配都要问"是每层一份还是全模型一份"，层内临时量一律借全模型的一套，只有跨步存活的状态（KV、GDN slot 状态）才每层持有；② 新模型 crate 起步时就在启动日志打激活字节，并把"预算 × 8 后显存去哪了"写进验收；③ 真 27B 预算改动后看一眼 `kv_gib` 是否随预算反向缩水。qwen3 crate 目前仍是每层一套（0.6B 列数小暂无害），上大模型前要同样改。
