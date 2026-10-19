@@ -60,6 +60,17 @@ prefill 问题解决（`gdn_chunk.cu`，3090 T=1024 顺序 41.5 → 4.2 ms）；
 
 剩余差距在 decode 批内扩展性（TPOT 随并发线性涨），见 `docs/loops/qwen35-perf.md` 第 3f 行。
 
+### 0.5 里程碑 6 第 4 轮：GDN decode 寄存器 kernel（`bench_b300_9`，2026-10-20）
+
+| 组 | dinfer TPOT | vLLM | dinfer TTFT | vLLM | 吞吐倍率 |
+|---|---|---|---|---|---|
+| c1 p128 | 10.7 ms | 10.3 | 35 ms | 48 | 0.97× |
+| c8 p128 | 11.6 | 11.2 | 153 | 99 | 0.93× |
+| c32 p128 | 15.9 | 12.9 | 367 | 265 | 0.80× |
+| c8 p1024 | 18.0 | 11.2 | 448 | 410 | 0.66× |
+
+`gdn.cu::recurrent_decode_kernel<BV,KPL,FUSE_GATE>`：grid (B, HV, V/BV)，状态行驻寄存器，K 维 warp 归约；BV 由 `ArchProfile::gdn_decode_bv` 按 SM 数选。3090 B=32 1014 → 246 µs（带宽下限 87%）。剩余差距：c8-long decode（长 KV）与 c8/c32 TTFT。
+
 ## 1. 结构事实
 
 来源：B300 `/data/models/Qwen/Qwen3.8-27B/config.json`（`text_config`）+ 分片 header（bf16 52 GB / 18 分片；FP8 版 29 GB / 66 分片 `fmt e4m3` dynamic，抽样分片 header 解析失败，先用 bf16）。vLLM 参考 `vllm/model_executor/models/qwen3_5.py`（继承 `qwen3_next.py`），GDN 层 `vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py`。

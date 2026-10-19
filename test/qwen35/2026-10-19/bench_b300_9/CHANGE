@@ -1,0 +1,1 @@
+gdn_recurrent 显式 tokens → decode 真正走寄存器 kernel（第 4 轮生效）
