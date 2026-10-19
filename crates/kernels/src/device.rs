@@ -51,6 +51,12 @@ impl Device {
         Ok((major, minor))
     }
 
+    /// SM 数（multiprocessor count）。
+    pub fn sm_count(&self) -> Result<usize> {
+        use cudarc::driver::sys::CUdevice_attribute as A;
+        Ok(self.ctx.attribute(A::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)? as usize)
+    }
+
     pub fn ordinal(&self) -> usize {
         self.ctx.ordinal()
     }

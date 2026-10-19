@@ -338,6 +338,44 @@ fn parity_gemm() {
     }
 }
 
+// ------------------------------------------------------------------ gemm_small_m（自写 decode 小 M kernel）
+
+#[test]
+#[ignore]
+fn parity_gemm_small_m() {
+    let (_d, s) = dev();
+    // (m, n, k, splits, bias)：Qwen3.5-27B 真形状（hidden 5120）+ M∈{1,4,8}；splits 覆盖不切 / 切；一例带 bias。
+    let hid = 5120usize;
+    let cases: [(usize, usize, usize, usize, bool); 6] = [
+        (1, 34816, hid, 1, false), // mlp.gate_up
+        (1, 48, hid, 16, false),   // gdn.in_proj_a（小 N 必须 split 才能铺满）
+        (4, hid, 6144, 4, false),  // gdn.out_proj / attn.o_proj
+        (8, 10240, hid, 2, false), // gdn.in_proj_qkv
+        (8, hid, 17408, 8, true),  // mlp.down + bias
+        (3, 6144, hid, 1, true),   // 非 2 的幂 M（M_TILE=4 只算 3 行）+ bias
+    ];
+    for (ci, &(m, n, k, splits, bias)) in cases.iter().enumerate() {
+        let c = Case::new("gemm_small_m", &format!("m{m}_n{n}_k{k}_s{splits}{}", if bias { "_bias" } else { "" }));
+        let mut r = Rng::new(760 + ci as u64);
+        let a = r.normals_bf16(m * k, 1.0);
+        let w = r.normals_bf16(n * k, (1.0 / k as f32).sqrt());
+        let b = r.normals_bf16(n, 1.0);
+        let da = s.htod_copy(a.clone()).unwrap();
+        let dw = s.htod_copy(w.clone()).unwrap();
+        let db = s.htod_copy(b.clone()).unwrap();
+        let mut out = s.alloc_zeros::<bf16>(m * n).unwrap();
+        let mut partial = s.alloc_zeros::<f32>(splits * m * n).unwrap();
+        dinfer_kernels::gemm_small_m_bf16(&s, &da, &dw, bias.then_some(&db), &mut out, Some(&mut partial), m, n, k, splits).unwrap();
+        c.bf16("a", &[m, k], &a);
+        c.bf16("w", &[n, k], &w);
+        if bias {
+            c.bf16("bias", &[n], &b);
+        }
+        c.bf16("out", &[m, n], &s.dtoh_sync_copy(&out).unwrap());
+        c.finish();
+    }
+}
+
 // ------------------------------------------------------------------ qkv_post（q/k norm + neox rope + KV 写 cache）
 
 #[test]

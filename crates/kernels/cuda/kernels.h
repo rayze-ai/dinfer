@@ -47,6 +47,10 @@ int rope_bf16(void* q, void* k, const int32_t* positions, const float* cos_sin, 
 int silu_and_mul_bf16(const void* x, void* out, int64_t tokens, int64_t inter, cudaStream_t stream);
 // 输出门（Qwen3.5 attn_output_gate）：x *= sigmoid(gate)，原地逐元素。n 必须是 8 的倍数。
 int mul_sigmoid_bf16(void* x, const void* gate, int64_t n, cudaStream_t stream);
+// SituAndMul（Kimi-K3 situ 激活）：out = beta·tanh(g/beta)·sigmoid(g) · (linear_beta>0 ? linear_beta·tanh(u/linear_beta) : u)，
+// g = x[:, :inter]，u = x[:, inter:]；beta / linear_beta 是模型参数（host 传）。
+int situ_and_mul_bf16(const void* x, void* out, int64_t tokens, int64_t inter, float beta, float linear_beta,
+                      cudaStream_t stream);
 
 // ---- Embedding ----
 int embedding_bf16(const int32_t* ids, const void* table, void* out, int64_t tokens, int64_t hidden, int64_t vocab,
@@ -303,6 +307,10 @@ int dsa_topk_i32(const float* score, const int32_t* vis, int32_t* out, int64_t r
 // vis[row] = seq_lens[b] - q_len[b] + i + 1
 int dsa_row_vis_i32(const int32_t* seq_lens, const int32_t* cu_seqlens_q, int32_t* vis, int64_t num_reqs,
                     cudaStream_t stream);
+
+// 小 M bf16 GEMM（decode）：out[M,N] = a[M,K]·w[N,K]^T (+bias)；splits>1 时需 partial[splits,M,N] f32。见 gemm_small_m.cu。
+int gemm_small_m_bf16(const void* a, const void* w, const void* bias, void* out, float* partial, int64_t m,
+                      int64_t n, int64_t k, int64_t splits, cudaStream_t stream);
 
 #ifdef __cplusplus
 }

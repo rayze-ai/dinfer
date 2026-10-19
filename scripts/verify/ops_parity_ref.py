@@ -111,6 +111,15 @@ def chk_gemm(t, m, case):
     rec("gemm", case, e, bad == 0, f"{bad} bad (atol 3e-2 rtol 2e-2)")
 
 
+
+def chk_gemm_small_m(t, m, case):
+    want = t["a"] @ t["w"].T
+    if "bias" in t:
+        want = want + t["bias"]
+    e, bad = close(t["out"], bf(want), 3e-2, 2e-2)
+    rec("gemm_small_m", case, e, bad == 0, f"{bad} bad (atol 3e-2 rtol 2e-2)")
+
+
 def rope_neox(x, cs_row):
     """x [..., D] f32；cs_row [D] = cos(D/2) | sin(D/2)。"""
     half = x.shape[-1] // 2
@@ -395,7 +404,7 @@ def chk_sampler(t, m, case):
 CHECKS = {
     "rmsnorm": chk_rmsnorm, "fused_add_rmsnorm": chk_fused_add_rmsnorm, "gather_rmsnorm": chk_gather_rmsnorm,
     "silu_mul": chk_silu_mul, "embedding": chk_embedding, "add_inplace": chk_add_inplace, "bf16_to_f32": chk_bf16_to_f32,
-    "gemm": chk_gemm, "qkv_post": chk_qkv_post, "qkv_post_ext": chk_qkv_post_ext,
+    "gemm": chk_gemm, "gemm_small_m": chk_gemm_small_m, "qkv_post": chk_qkv_post, "qkv_post_ext": chk_qkv_post_ext,
     "mul_sigmoid": chk_mul_sigmoid, "gqa_prefill": chk_gqa_prefill,
     "gqa_paged": lambda t, m, c: chk_paged_like("gqa_paged", t, m, c),
     "gqa_decode": lambda t, m, c: chk_paged_like("gqa_decode", t, m, c),

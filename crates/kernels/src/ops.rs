@@ -16,6 +16,47 @@ fn check(rc: i32, what: &str) -> Result<()> {
     Ok(())
 }
 
+/// 小 M（≤ 8）bf16 GEMM：`out[m,n] = a[m,k]·w[n,k]^T (+bias)`。`splits` 为 split-K 份数（host 给，1 = 不切）；
+/// `partial` 在 splits > 1 时必须 ≥ splits·m·n 个 f32。
+#[allow(clippy::too_many_arguments)]
+pub fn gemm_small_m_bf16(
+    stream: &Stream,
+    a: &CudaSlice<bf16>,
+    w: &CudaSlice<bf16>,
+    bias: Option<&CudaSlice<bf16>>,
+    out: &mut CudaSlice<bf16>,
+    partial: Option<&mut CudaSlice<f32>>,
+    m: usize,
+    n: usize,
+    k: usize,
+    splits: usize,
+) -> Result<()> {
+    ensure!(m <= 8 && k % 8 == 0, "gemm_small_m: m={m} (≤8) k={k} (8 的倍数)");
+    ensure!(a.len() >= m * k && w.len() == n * k && out.len() >= m * n, "gemm_small_m: 形状");
+    if let Some(b) = bias {
+        ensure!(b.len() == n, "gemm_small_m: bias.len {} != n {n}", b.len());
+    }
+    let pp = match partial {
+        Some(p) if splits > 1 => {
+            ensure!(p.len() >= splits * m * n, "gemm_small_m: partial.len {} < {}", p.len(), splits * m * n);
+            stream.ptr_mut(p) as *mut f32
+        }
+        _ => {
+            ensure!(splits <= 1, "gemm_small_m: splits > 1 需要 partial");
+            std::ptr::null_mut()
+        }
+    };
+    let pa = stream.ptr(a) as *const c_void;
+    let pw = stream.ptr(w) as *const c_void;
+    let pb = bias.map_or(std::ptr::null(), |b| stream.ptr(b) as *const c_void);
+    let po = stream.ptr_mut(out) as *mut c_void;
+    // SAFETY: 指针来自有效 CudaSlice，长度已校验；stream 同 context。
+    check(
+        unsafe { ffi::gemm_small_m_bf16(pa, pw, pb, po, pp, m as i64, n as i64, k as i64, splits as i64, stream.raw() as ffi::cudaStream_t) },
+        "gemm_small_m_bf16",
+    )
+}
+
 /// out = a + b（fp32）。P0 自检。
 pub fn add_f32(
     stream: &Stream,
@@ -3113,5 +3154,31 @@ pub fn mxfp4_dequant_bf16(
             )
         },
         "mxfp4_dequant_bf16",
+    )
+}
+
+// --------------------------------------------------------------------------- SituAndMul（Kimi-K3）
+
+/// `out[:tokens] = situ(x[:, :inter]) · up'(x[:, inter:])`：`beta·tanh(g/beta)·sigmoid(g)`，`linear_beta > 0` 时
+/// `up' = linear_beta·tanh(u/linear_beta)`，否则 `up' = u`（HF `SituAndMul`）。`beta` / `linear_beta` 是模型参数。
+pub fn situ_and_mul_bf16_n(
+    stream: &Stream,
+    x: &CudaSlice<bf16>,
+    out: &mut CudaSlice<bf16>,
+    tokens: usize,
+    inter: usize,
+    beta: f32,
+    linear_beta: Option<f32>,
+) -> Result<()> {
+    ensure!(inter > 0 && x.len() >= tokens * 2 * inter && out.len() >= tokens * inter, "situ_and_mul: shape");
+    ensure!(beta > 0.0, "situ_and_mul: beta 必须 > 0");
+    let px = stream.ptr(x) as *const c_void;
+    let po = stream.ptr_mut(out) as *mut c_void;
+    // SAFETY: 容量已校验。
+    check(
+        unsafe {
+            ffi::situ_and_mul_bf16(px, po, tokens as i64, inter as i64, beta, linear_beta.unwrap_or(0.0), stream.raw() as _)
+        },
+        "situ_and_mul_bf16",
     )
 }

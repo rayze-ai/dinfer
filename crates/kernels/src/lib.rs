@@ -7,6 +7,7 @@ pub mod comm;
 pub mod device;
 pub mod shared;
 pub use shared::{RegionKind, SharedRegion};
+pub mod arch;
 pub mod ffi;
 pub mod gemm;
 pub mod ops;
@@ -14,7 +15,8 @@ pub mod opset;
 
 pub use cudarc;
 pub use device::{Device, Graph, Stream, Event, TimingEvent, PinnedUploader, PinnedSlot, HostArena, PinnedPool, PinnedBuf};
-pub use gemm::Gemm;
+pub use arch::{Arch, ArchProfile, GemmTuneParams};
+pub use gemm::{Gemm, GemmPlan, GemmTuneEntry, GemmTuneReport};
 pub use opset::{Act, Attention, DefaultOps, Norm, OpSet, QkvPost};
 pub use half::bf16;
 pub use ops::*;
