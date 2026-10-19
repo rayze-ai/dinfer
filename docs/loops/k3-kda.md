@@ -88,3 +88,10 @@
 ## 下一步
 
 - MXFP4 专家 dequant 参考（`docs/loops/k3-moe.md`）：`weight_packed` U8 + `weight_scale` e8m0 / group 32 → bf16 回退。
+
+## 阻塞记录
+
+- **2026-10-19 收尾时 B300 8 卡全部被别的作业占满**（每卡约 248 GB，`k8s://aiinf-580/aiinf580-decode-0` 的
+  llm-d PD 推理，4 分钟前启动）。因此 sm_103 上的 KDA 对拍 **没跑成**；3090 sm86 已过。
+  下一会话若卡仍被占，先找主会话确认归属，**不要杀掉别人的 Pod**。
+- 本机 3090 可继续跑全部 CPU/GPU 单测（已验证），4090 GPU 3–7 也可用。
