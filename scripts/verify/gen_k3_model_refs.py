@@ -13,8 +13,8 @@
 MLA（KimiMLAAttention，mla_use_nope=True，无 RoPE；mla_use_output_gate=True）：
   q = q_b(rmsnorm(q_a(x))).view(T,H,192)；[kv_c | k_pe] = kv_a_with_mqa(x)；kv = kv_b(rmsnorm(kv_c)).view(T,H,256)
   k = [kv.nope | k_pe 广播]，v = kv.v；softmax(q·kᵀ·192^-0.5，causal)·v（f32）→ *sigmoid(g_proj(x)) → o_proj
-输出 .npy：ids（int32 [T]）、layer{l}（f32 [T,hidden]，第 l 层输出 prefix_sum）、res_out、final、logits_last（f32 [vocab]）、
-每 MLA 层 attn{l}（attention 子块输出，o_proj 之后）、meta.json。
+输出 .npy：ids（int32 [T]）、embed、in{l} / layer{l}（f32 [T,hidden]，第 l 层输入 / 输出 prefix_sum）、res_out、final、logits_last（f32 [vocab]）、
+每 MLA 层 attn{l}（attention 子块输出，o_proj 之后）、每 MoE 层 moe{l}/{topk_ids,topk_margin,...}（路由，隔离口径只在路由一致行判）、meta.json。
 """
 import argparse
 import json
@@ -55,14 +55,14 @@ def mla(sh, h, cfg, out_dir, layer):
     H = cfg["num_attention_heads"]
     nope, rope, v_dim = cfg["qk_nope_head_dim"], cfg["qk_rope_head_dim"], cfg["v_head_dim"]
     q_lora, kv_lora = cfg["q_lora_rank"], cfg["kv_lora_rank"]
-    eps = cfg["rms_norm_eps"]
     assert cfg["mla_use_nope"] and cfg["mla_use_output_gate"]
     w = lambda n: sh.get(f"self_attn.{n}.weight").to(bf)
     lin = lambda n, t: F.linear(t, w(n))
-    q = lin("q_b_proj", rmsnorm(lin("q_a_proj", h), sh.get("self_attn.q_a_layernorm.weight"), eps)).view(T, H, nope + rope)
+    a_eps = 1e-6  # HF KimiMLAAttention: KimiRMSNorm(q_lora_rank) / KimiRMSNorm(kv_lora_rank) 没传 eps → 默认 1e-6（vLLM 用 rms_norm_eps）
+    q = lin("q_b_proj", rmsnorm(lin("q_a_proj", h), sh.get("self_attn.q_a_layernorm.weight"), a_eps)).view(T, H, nope + rope)
     ckv = lin("kv_a_proj_with_mqa", h)
     kv_c, k_pe = ckv[:, :kv_lora], ckv[:, kv_lora:]
-    kv = lin("kv_b_proj", rmsnorm(kv_c, sh.get("self_attn.kv_a_layernorm.weight"), eps)).view(T, H, nope + v_dim)
+    kv = lin("kv_b_proj", rmsnorm(kv_c, sh.get("self_attn.kv_a_layernorm.weight"), a_eps)).view(T, H, nope + v_dim)
     k_nope, v = kv[..., :nope], kv[..., nope:]
     k = torch.cat([k_nope, k_pe.unsqueeze(1).expand(T, H, rope)], dim=-1)  # 无 RoPE
     # f32 causal attention（flash_attention_2 的 bf16 内部累加是 f32；这里全 f32 更接近"真值"）
@@ -136,6 +136,7 @@ def main():
         is_moe = l >= cfg["first_k_dense_replace"] and l % cfg.get("moe_layer_freq", 1) == 0
         kinds.append(("kda" if is_kda else "mla") + "+" + ("moe" if is_moe else "dense"))
         writer = l % bs == 0
+        save_f32(os.path.join(a.out_dir, f"in{l}.npy"), x)  # 本层输入（隔离口径：Rust 每层喂 HF 的输入）
         h = apply_attn_res(x, blocks, sh.get("self_attention_res_proj.weight"), sh.get("self_attention_res_norm.weight"), eps)[0] if blocks else x
         if writer:
             blocks = blocks + [x]

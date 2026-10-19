@@ -27,6 +27,9 @@ use dinfer_core::runner::BatchMode;
 use dinfer_kernels::ops as k;
 use dinfer_layers::{bf16, Gemm, Linear, RmsNorm, Stream, Tensor, WeightSource};
 
+/// HF `KimiRMSNorm` 的默认 eps：`q_a_layernorm` / `kv_a_layernorm` 构造时没传 `rms_norm_eps`。
+const A_NORM_EPS: f32 = 1e-6;
+
 /// 一步 attention 的 batch 描述（设备张量由调用方上传）。
 /// - `Prefill`：所有请求从 0 开始，用 `cu_seqlens`（展开 K/V 的 causal attention）；
 /// - `Decode`：每请求 1 token，用 `block_table / seq_lens / max_blocks`（`seq_lens` 含本步）；
@@ -67,7 +70,6 @@ pub struct MlaLayer {
     nope: usize,
     rope: usize,
     v_dim: usize,
-    eps: f32,
     scale: f32,
     max_tokens: usize,
     // scratch（按 max_tokens）
@@ -102,7 +104,6 @@ impl MlaLayer {
         let q_lora = cfg.q_lora_rank.ok_or_else(|| anyhow::anyhow!("q_lora_rank 缺失"))? as usize;
         let kv_lora = cfg.kv_lora_rank as usize;
         let (nope, rope, v_dim) = (cfg.qk_nope_head_dim as usize, cfg.qk_rope_head_dim as usize, cfg.v_head_dim as usize);
-        let eps = cfg.rms_norm_eps;
         let p = format!("layers.{layer}.self_attn");
 
         // fused = [q_a_proj ; kv_a_proj_with_mqa ; g_proj]（行拼接；文件是 bf16，经 f32 往返无损）
@@ -119,9 +120,11 @@ impl MlaLayer {
         let fused = Linear::new(Tensor::from_f32(stream, &cat, &[wide, hidden])?, None)?;
         drop(cat);
 
-        let q_a_norm = t.rmsnorm(stream, src, &format!("{p}.q_a_layernorm.weight"), eps)?;
+        // HF `KimiMLAAttention` 里 `q_a_layernorm = KimiRMSNorm(q_lora_rank)` / `kv_a_layernorm = KimiRMSNorm(kv_lora_rank)` **没传 eps**，
+        // 用 KimiRMSNorm 默认 1e-6（vLLM 用 rms_norm_eps=1e-5；以 HF 为口径，差异 ~1e-6 相对，远低于 bf16）。
+        let q_a_norm = t.rmsnorm(stream, src, &format!("{p}.q_a_layernorm.weight"), A_NORM_EPS)?;
         ensure!(q_a_norm.hidden == q_lora, "q_a_layernorm {}", q_a_norm.hidden);
-        let kv_a_norm = t.rmsnorm(stream, src, &format!("{p}.kv_a_layernorm.weight"), eps)?;
+        let kv_a_norm = t.rmsnorm(stream, src, &format!("{p}.kv_a_layernorm.weight"), A_NORM_EPS)?;
         ensure!(kv_a_norm.hidden == kv_lora, "kv_a_layernorm {}", kv_a_norm.hidden);
         let q_b = t.linear(stream, src, &format!("{p}.q_b_proj.weight"))?;
         ensure!(q_b.w.shape == [heads * (nope + rope), q_lora], "q_b_proj shape {:?}", q_b.w.shape);
@@ -166,7 +169,6 @@ impl MlaLayer {
             nope,
             rope,
             v_dim,
-            eps,
             scale: ((nope + rope) as f32).powf(-0.5),
             max_tokens,
             fused_out: Tensor::zeros(stream, &[tm, wide])?,
@@ -210,8 +212,8 @@ impl MlaLayer {
         k::copy_cols_bf16(stream, &self.fused_out.data, &mut self.k_pe.data, t, wide, q_lora + kv_lora, rope, 0, rope)?;
         k::copy_cols_bf16(stream, &self.fused_out.data, &mut self.gate.data, t, wide, q_lora + entry, h * v_dim, 0, h * v_dim)?;
         // 2. 两个 a_layernorm
-        k::rmsnorm_bf16_n(stream, &self.q_c_raw.data, &self.q_a_norm.w.data, &mut self.q_c.data, t, q_lora, self.eps)?;
-        k::rmsnorm_bf16_n(stream, &self.kv_c_raw.data, &self.kv_a_norm.w.data, &mut self.kv_c.data, t, kv_lora, self.eps)?;
+        k::rmsnorm_bf16_n(stream, &self.q_c_raw.data, &self.q_a_norm.w.data, &mut self.q_c.data, t, q_lora, self.q_a_norm.eps)?;
+        k::rmsnorm_bf16_n(stream, &self.kv_c_raw.data, &self.kv_a_norm.w.data, &mut self.kv_c.data, t, kv_lora, self.kv_a_norm.eps)?;
         // 3. q = q_b(q_c)：[t, H, nope + rope]，不旋转
         self.q_b.forward_rows(gemm, &self.q_c, &mut self.q, t)?;
         // 4. latent = [kv_c | k_pe] → paged cache
