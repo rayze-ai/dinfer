@@ -35,3 +35,15 @@ bench_b300_3,2026-10-19,强制关 prefix caching（GDN 状态不可按块复用�
 bench_b300_3,2026-10-19,强制关 prefix caching（GDN 状态不可按块复用）；slot 归还,c8-long,out_tok_per_s,36.787,557.000,0.066,-18.3,higher,main,B300,vllm,dinfer,qwen35
 bench_b300_3,2026-10-19,强制关 prefix caching（GDN 状态不可按块复用）；slot 归还,c8-long,ttft_p50_ms,8137.850,408.134,19.939,-14.1,lower,main,B300,vllm,dinfer,qwen35
 bench_b300_3,2026-10-19,强制关 prefix caching（GDN 状态不可按块复用）；slot 归还,c8-long,tpot_p50_ms,157.471,11.245,14.004,-32.1,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_4,2026-10-19,GDN chunk prefill kernel（prep/wy/ho 三段 fp32，BT=64）替代逐 token 顺序递归,c1,out_tok_per_s,41.158,94.532,0.435,8.8,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_4,2026-10-19,GDN chunk prefill kernel（prep/wy/ho 三段 fp32，BT=64）替代逐 token 顺序递归,c1,ttft_p50_ms,44.832,46.076,0.973,86.0,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_4,2026-10-19,GDN chunk prefill kernel（prep/wy/ho 三段 fp32，BT=64）替代逐 token 顺序递归,c1,tpot_p50_ms,24.133,10.296,2.344,0.0,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_4,2026-10-19,GDN chunk prefill kernel（prep/wy/ho 三段 fp32，BT=64）替代逐 token 顺序递归,c8,out_tok_per_s,272.574,670.191,0.407,28.2,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_4,2026-10-19,GDN chunk prefill kernel（prep/wy/ho 三段 fp32，BT=64）替代逐 token 顺序递归,c8,ttft_p50_ms,168.797,104.855,1.610,86.1,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_4,2026-10-19,GDN chunk prefill kernel（prep/wy/ho 三段 fp32，BT=64）替代逐 token 顺序递归,c8,tpot_p50_ms,28.262,11.192,2.525,0.2,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_4,2026-10-19,GDN chunk prefill kernel（prep/wy/ho 三段 fp32，BT=64）替代逐 token 顺序递归,c32,out_tok_per_s,680.475,2132.605,0.319,67.8,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_4,2026-10-19,GDN chunk prefill kernel（prep/wy/ho 三段 fp32，BT=64）替代逐 token 顺序递归,c32,ttft_p50_ms,356.623,261.173,1.365,86.0,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_4,2026-10-19,GDN chunk prefill kernel（prep/wy/ho 三段 fp32，BT=64）替代逐 token 顺序递归,c32,tpot_p50_ms,44.524,12.909,3.449,25.4,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_4,2026-10-19,GDN chunk prefill kernel（prep/wy/ho 三段 fp32，BT=64）替代逐 token 顺序递归,c8-long,out_tok_per_s,200.444,558.479,0.359,444.9,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_4,2026-10-19,GDN chunk prefill kernel（prep/wy/ho 三段 fp32，BT=64）替代逐 token 顺序递归,c8-long,ttft_p50_ms,469.627,403.374,1.164,94.2,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_4,2026-10-19,GDN chunk prefill kernel（prep/wy/ho 三段 fp32，BT=64）替代逐 token 顺序递归,c8-long,tpot_p50_ms,36.263,11.241,3.226,77.0,lower,main,B300,vllm,dinfer,qwen35

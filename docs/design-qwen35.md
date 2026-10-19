@@ -36,6 +36,17 @@ B300 单卡、vLLM nightly 0.29.1rc1、bf16、max-model-len 8192（`test/qwen35/
 正确性：3 条 greedy prompt 与 vLLM 逐字一致（修了 zero-centered RMSNorm 与引擎线程 ctx 绑定，见 `docs/loops/qwen35-model.md` 第 12–16 轮）。
 性能差距的来源按优先级：① GDN prefill 走逐 token 顺序递归（c8-long TTFT 7 s）→ 接 chunk kernel；② decode 无 CUDA graph（c1 24 ms，64 层 × ~10 launch）；③ GDN slot 复用 bug（正确性，先修）。
 
+### 0.3 里程碑 6 第 1 轮：GDN chunk prefill（`bench_b300_4`，2026-10-19）
+
+| 组 | dinfer TPOT | vLLM | dinfer TTFT | vLLM | 吞吐倍率 |
+|---|---|---|---|---|---|
+| c1 p128 | 24.1 ms | 10.3 | 45 ms | 46 | 0.44× |
+| c8 p128 | 28.3 | 11.2 | 169 | 105 | 0.41× |
+| c32 p128 | 44.5 | 12.9 | 357 | 261 | 0.32× |
+| c8 p1024 | 36.3 | 11.2 | 470 | 403 | 0.36× |
+
+prefill 问题解决（`gdn_chunk.cu`，3090 T=1024 顺序 41.5 → 4.2 ms）；剩余是 decode：eager 单流 64 层无 CUDA graph，c1 TPOT 24 ms。
+
 ## 1. 结构事实
 
 来源：B300 `/data/models/Qwen/Qwen3.8-27B/config.json`（`text_config`）+ 分片 header（bf16 52 GB / 18 分片；FP8 版 29 GB / 66 分片 `fmt e4m3` dynamic，抽样分片 header 解析失败，先用 bf16）。vLLM 参考 `vllm/model_executor/models/qwen3_5.py`（继承 `qwen3_next.py`），GDN 层 `vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py`。

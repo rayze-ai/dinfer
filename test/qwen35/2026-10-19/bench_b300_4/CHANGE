@@ -1,0 +1,1 @@
+GDN chunk prefill kernel（prep/wy/ho 三段 fp32，BT=64）替代逐 token 顺序递归
