@@ -179,4 +179,4 @@
 
 - decode 非桶 M GEMM：自调优表展开 1..=最大桶 的每个 m（借幂桶 plan + `cublasLtMatmulAlgoCheck`），默认 algo 按形状缓存；3090 真形状 M=7/8 `gdn.in_proj_a` 默认 31 µs → 8 µs，其它形状 4–17%。候选数 8→32 无收益（不改）。
 - 新指标 `engine_step_execute_{prefill,decode,mixed}_seconds`：tiny 全词表模型 c32 混批步 4.6%、每步 2.6× decode；结论 pair 跨流不优先。详见 `docs/loops/qwen35-perf.md` 5B 行。
-- 验证：golden 4/4（含 `GEMM_TUNE=off`）、ops_parity 95/95、core 55 单测、workspace check qwen3 / qwen35。**待 B300**：bench_b300_10 看 `borrowed=` 日志 + 三个 mode 直方图 + c32 / c8-long TPOT。
+- 验证：golden 4/4（含 `GEMM_TUNE=off`）、ops_parity 95/95、core 55 单测、workspace check qwen3 / qwen35。**待 B300**：bench_b300_10 看 `borrowed=` 日志 + 三个 mode 直方图 + c32 / c8-long TPOT。**改口径后 B300 复跑 exit 0（03:07，`/tmp/k3_model_full.log`，产物在远端 `test/kimik3/2026-10-20/model/` 24 MB 待 pull）**：隔离口径 L0–L4 cos 0.999983–0.999991（L3 MLA+MoE 0.999989）；端到端 L0 0.999985 → L4 0.999269、logits 0.999897、decode-vs-prefill 0.999970。子代理因后台任务完成通知丢失空等 4.5 h（07:3x 已叫醒收尾：pull 产物 + 填 `k3-model.md` 表 + commit）。**教训**：子代理等后台任务要给超时并主动查产物时间戳，不能只等通知。 
