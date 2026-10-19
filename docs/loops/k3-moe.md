@@ -221,3 +221,4 @@ scale 统计（`scripts/verify/k3_mxfp4_scale_stats.py`，36 张量 = L{1,12,45,
 - `vllm/vllm-openai:nightly`（0.26.1rc1.dev1177）支持 `KimiK3ForConditionalGeneration`（`tokenizer_mode=kimi_k3` 自动，`--trust-remote-code`）；prefix caching 开时默认 `Mamba cache mode = align`（KDA 递归状态按块对齐缓存——我们 Qwen35 / K3 都还没有，见 design §11 台账）。
 - **tp=6（GPU 2–7）失败**：`AssertionError: 4096 is not divisible by 6`，栈在 `kimi_k25_vit.py:331 → linear.py:467`，是**视觉塔**的 4096 维列切，不是文本侧。MXFP4 权重 1561 GB，4 卡放不下 → 只能 **tp=8 独占 8 卡**（已停掉 GPU 0/1 的 Qwen35 两端后启动）。
 - 基线口径：`bench_vllm_only.sh test/kimik3/2026-10-19/bench_b300_vllm1 Kimi-K3`（`VLLM_URL=:8014`），四组同 Qwen35。
+- **基线已跑（2026-10-19 23:2x）**：tp8，TPOT c1 8.70 / c8 13.09 / c32 19.15 / c8-long 13.11 ms，TTFT 193 / 368 / 421 / 508 ms，详见 `docs/design-kimik3.md` §0.1。容器已 stop，8 卡释放。

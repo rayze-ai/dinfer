@@ -15,6 +15,21 @@
   以及 KDA（K 维改 bf16 mma）与 MXFP4（tile 改 mma、GPU 侧 tile 计划）的 v2 提速。
 对应阶段 P7 KDA / P8 K3 特有 / P9 多模态 + tokenizer（见 `design.md` §5 阶段表，均标 ⏸）。重启时按 §2 的模块表从 `kda.rs` 开始。
 
+## 0.1 vLLM 基线（追赶目标，B300-50 8 卡 tp8，2026-10-19）
+
+vLLM nightly 0.26.1rc1（`vllm/vllm-openai:nightly`），Kimi-K3 MXFP4 1.56 TB，`--tensor-parallel-size 8 --max-model-len 8192 --trust-remote-code`，
+prefix caching 默认开且 `Mamba cache mode = align`（KDA 递归状态按块对齐缓存）；KV 78 万 token；init 624 s（权重 ~18 min + graph 捕获 + flashinfer 自调优）。
+tp6 不可用（视觉塔 4096 维列切不整除）。`test/kimik3/2026-10-19/bench_b300_vllm1/`：
+
+| 组 | TPOT p50 / p99 | TTFT p50 / p99 | out tok/s |
+|---|---|---|---|
+| c1 p128 | 8.70 / 8.70 ms | 193 / 200 ms | 98.7 |
+| c8 p128 | 13.09 / 14.52 | 368 / 402 | 503.0 |
+| c32 p128 | 19.15 / 20.80 | 421 / 462 | 1432.4 |
+| c8 p1024 | 13.11 / 15.65 | 508 / 536 | 469.4 |
+
+与 Qwen3.5-27B 单卡（TPOT 10.3–12.9）比：K3 c1 更快（8.7，tp8 分摊）但 c32 慢（19 vs 12.9，MoE 896 专家 all-to-all + MXFP4 解包）。dinfer K3 的目标口径就是这四行。
+
 ## 1. 结构事实
 
 | 项 | 值 |
