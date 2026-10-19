@@ -114,6 +114,23 @@ kimik3/src/
 专家 packed 常驻字节：每专家 `w13` 11,010,048 + scale 688,128 + `w2` 5,505,024 + scale 344,064 = **17.55 MB**；
 每层 896 专家 = **15.72 GB**（bf16 解包要 ~45 GB/层，放不下——这就是保持 packed 的原因，见 k3-moe.md）。
 
+### 2.3 MLA 层权重表（C-3，第 3 层 `model-00004-of-000096`，形状由 `mla.rs` 装载时断言）
+
+前缀 `layers.N.self_attn.`（N ∈ {3,7,11,…,91,92}，24 层）。装载实现 `models/kimik3/src/mla.rs`；与 HF 核对表见 `docs/loops/k3-model.md`。
+
+| 张量 | dtype | shape | 装载 |
+|---|---|---|---|
+| `q_a_proj.weight` | BF16 | `[1536, 7168]` | 与下面两条按行拼成 `fused [14400, 7168]`（顺序 q_a / kv_a_with_mqa / g，同 vLLM `fused_qkv_a_g_proj`），输出按列拆 |
+| `kv_a_proj_with_mqa.weight` | BF16 | `[576, 7168]` | 前 512 = kv latent（过 `kv_a_layernorm`），尾 64 = `k_pe`（**不旋转**，所有 head 共享） |
+| `g_proj.weight` | BF16 | `[12288, 7168]` | 输出门：`attn *= sigmoid(g)`，o_proj 之前 |
+| `q_a_layernorm.weight` / `kv_a_layernorm.weight` | BF16 | `[1536]` / `[512]` | `KimiRMSNorm`；HF 用默认 eps 1e-6，vLLM 用 `rms_norm_eps` 1e-5（我们目前 1e-5，差异远低于 bf16，见 k3-model.md TODO） |
+| `q_b_proj.weight` | BF16 | `[18432, 1536]` | 96 head × (128 nope + 64 "rope")；无 RoPE，尾 64 维原样参与点积 |
+| `kv_b_proj.weight` | BF16 | `[24576, 512]` | 96 head × (128 nope + 128 v)；prefill 展开用；decode 拆成每 head `W_UK^T [512,128]` / `W_UV [128,512]`（吸收） |
+| `o_proj.weight` | BF16 | `[7168, 12288]` | |
+
+KV cache：每 token latent `[kv_c(512) | k_pe(64)]` bf16 = 1152 B，paged `[num_blocks, block_size, 576]`，每层独立（`MlaLayer.kv`）。
+scale `192^-0.5`。顶层：`embed_tokens [163840, 7168]`、`norm [7168]`、`output_attn_res_proj [1, 7168]`、`output_attn_res_norm [7168]`、`lm_head [163840, 7168]` 全在 `model-00094-of-000096`（`weights::shards_for_top`）。
+
 ## 3. 模型特有的风险 / 待定
 
 - **KDA kernel 移植量大**：vLLM 的 KDA 是 Triton（`third_party/flash_linear_attention/ops/kda.py` ~1500 行 + K3 私有 `kda.py` 1372 行 + `kda_metadata.py` 752 行）。两条路：手写 CUDA；或用 Triton AOT 编译成 PTX 嵌入 Rust（保留算法，省掉翻译）。P7 开始前定。
