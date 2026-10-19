@@ -11,7 +11,7 @@
 ## 项目是什么
 
 用 Rust 重写 vLLM v1 引擎主干（启动 / 调度 / KV / 执行 / 采样 / HTTP），去掉通用插件层，目标之一是性能超越 vLLM（瓶颈分析见 design.md §8）；
-每个模型一个 crate：Kimi-K3、GLM-5.3、**Qwen3-0.6B**（2026-10-15 起用它做主流程验证：真权重 / 采样 / 性能 / PD 分离，因为暂无高端卡；K3/GLM 真权重挂起，见 design.md §5b）。构建 = `core + server + 一个模型 crate`（cargo feature）。目录：公用基础设施在 `crates/{core,kernels,layers,text,server}`，模型 crate 在 `models/{qwen3,glm53,kimik3}`（2026-10-16 起）。
+每个模型一个 crate：Kimi-K3、GLM-5.3、**Qwen3-0.6B**、Qwen3.5-27B（`models/qwen35`，2026-10-19 起：48 GDN + 16 全注意力混合模型，tiny golden 4/4 已过，真权重待 B300）（2026-10-15 起用它做主流程验证：真权重 / 采样 / 性能 / PD 分离，因为暂无高端卡；K3/GLM 真权重挂起，见 design.md §5b）。构建 = `core + server + 一个模型 crate`（cargo feature）。目录：公用基础设施在 `crates/{core,kernels,layers,text,server}`，模型 crate 在 `models/{qwen3,glm53,kimik3,qwen35}`（2026-10-19 起）。
 远程：`git@github.com:rayze-ai/dinfer.git`，工作分支 **`dev`**（2026-10-16 起；远端暂无 main）。编译 / GPU 测试在 4090 测试机（`scripts/dev/remote4090.sh`，见 `scripts/dev/README-remote4090.md`）。
 分析基线：vLLM main `de8291e`（0.31.0），源码在 `/data/ref/vllm`；模型 HF 文件在 `/data/ref/models/{kimik3,glm53,qwen3-0.6b}`（qwen3 含真权重；均不进仓库）。
 详细模块划分与分阶段计划见 `docs/design.md`；各模型的结构事实 / 模块 / 状态见 `docs/design-{kimik3,glm53,qwen3}.md`。
@@ -34,7 +34,7 @@
 
 ```bash
 export CUDA_HOME=/usr/local/cuda PATH=/usr/local/cuda/bin:$PATH   # nvcc 不在默认 PATH
-cargo build --workspace --features glm53          # 或 --features kimik3 / qwen3；无 nvcc 加 --features no-nvcc
+cargo build --workspace --features glm53          # 或 --features kimik3 / qwen3 / qwen35；无 nvcc 加 --features no-nvcc
 cargo test --workspace --features glm53           # CPU 单测；GPU 测试：cargo test -p dinfer-kernels -- --ignored
 scripts/verify/p6.sh                              # GLM 线验收（含 p0–p5）；Qwen3 线：scripts/verify/q1.sh；OpenAI 服务面：scripts/verify/{api_surface,guided,sdk_smoke}.sh；投机：ngram.sh；算子对拍：ops_parity.sh
 cargo run -p dinfer --features glm53 -- serve --model test/tiny_glm_dsa_fullvocab --tokenizer /data/ref/models/glm53 --port 8011 [--mtp]
