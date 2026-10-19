@@ -4,6 +4,7 @@
 # 矩阵：并发 1 / 8 / 32 × (prompt 128, out 128)，再加一组长 prompt (1024, out 128) 并发 8。每组先 bench --self-check 一次。
 # 环境变量：SERVE_URL / VLLM_URL（默认 :8012 / :8013）、REQS（每组请求数，默认 = 4×并发，最少 16）。
 set -euo pipefail
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY   # bench(reqwest) 不走代理，见 bench_vllm_only.sh 注释
 cd "$(dirname "$0")/../.."
 OUT="${1:-test/qwen3/$(date +%F)/bench}"; mkdir -p "$OUT"
 # 本轮改了什么（进趋势表）：第二个参数或 $CHANGE

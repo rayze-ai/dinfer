@@ -124,6 +124,49 @@ def recurrent_ref(q, k, v, raw_g, raw_beta, a_log, dt_bias, state, cu_seqlens, h
     return bf16(o), st
 
 
+def _chunk_case(name, lens, has_state, bt=64, heads=4, head_dim=128, seed_case=None):
+    """chunk 形式 prefill 的对拍 case。
+
+    期望值由**顺序递归**（recurrent_ref）产出——chunk 是被测实现，参考必须独立于它。
+    覆盖：非 BT 整数倍的长度（末块不满）、varlen 多段、非零初态。
+    """
+    d = case(name)
+    T = sum(lens)
+    q = bf16(rnd(T, heads, head_dim, scale=0.8))
+    k = bf16(rnd(T, heads, head_dim, scale=0.8))
+    v = bf16(rnd(T, heads, head_dim, scale=0.8))
+    raw_g = bf16(rnd(T, heads, head_dim, scale=1.5))
+    raw_beta = rnd(T, heads, scale=2.0)
+    a_log = torch.log(torch.tensor([1.0, 3.5, 9.0, 15.9][:heads]))
+    dt_bias = rnd(heads * head_dim, scale=1.0)
+    S = len(lens)
+    st0 = rnd(S, heads, head_dim, head_dim, scale=0.05)
+    for i, hs in enumerate(has_state):
+        if not hs:
+            st0[i] = 0.0
+    cu = torch.tensor([0] + list(np.cumsum(lens)), dtype=torch.int32)
+    scale = head_dim ** -0.5
+    o, st = recurrent_ref(q, k, v, raw_g, raw_beta, a_log, dt_bias, st0, cu.tolist(), has_state,
+                          heads, head_dim, scale, -5.0, 4)
+    save("q", q, d); save("k", k, d); save("v", v, d); save("raw_g", raw_g, d)
+    save("raw_beta", raw_beta, d); save("a_log", a_log, d); save("dt_bias", dt_bias, d)
+    save("cu_seqlens", cu, d); save("state_in", st0, d); save("out", o, d); save("state_out", st, d)
+    return d, (lens, heads, head_dim, bt)
+
+
+def gen_recurrent_chunk():
+    """chunk 形式的 prefill 对拍：varlen（130/100）+ 非零初态 + 末块不满 + T 跨多块。
+    另有 `recurrent_chunk_long` 用 T=1024/96 头做计时（形状对齐 K3 真实）。"""
+    d, _ = _chunk_case("recurrent_chunk", [130, 100], [1, 0])
+    return "recurrent_chunk", "chunk 形式 varlen 2 段（130/100，末块不满）带非零初态"
+
+
+def gen_recurrent_chunk_tail():
+    """纯短序列：单段 5 token（远小于 BT），检验块内 masked 行不污染输出与状态。"""
+    d, _ = _chunk_case("recurrent_chunk_tail", [5, 3], [1, 1])
+    return "recurrent_chunk_tail", "chunk 形式 varlen 2 段短序列（5/3 << BT）"
+
+
 def gated_rmsnorm_ref(x, w, gate, eps=1e-5):
     """x/gate: [rows, head_dim] → y = rmsnorm(x)·sigmoid(gate)。"""
     rstd = torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps)
@@ -273,7 +316,8 @@ def gen_gated_rmsnorm():
 
 
 CASES = [gen_conv_prefill, gen_conv_prefill_varlen, gen_conv_update, gen_gate, gen_recurrent_prefill,
-         gen_recurrent_varlen, gen_recurrent_decode, gen_gated_rmsnorm]
+         gen_recurrent_varlen, gen_recurrent_decode, gen_recurrent_chunk, gen_recurrent_chunk_tail,
+         gen_gated_rmsnorm]
 
 
 def main():

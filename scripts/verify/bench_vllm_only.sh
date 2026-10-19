@@ -4,6 +4,9 @@
 # bench_compare.sh 即可补齐对比。用户 2026-10-19："qwen3.5 可以在 B300-50 上做基线测试了"。
 #   bash scripts/verify/bench_vllm_only.sh <OUT_DIR> <served-model-name> ["改动一句话"]   # VLLM_URL 默认 :8013
 set -uo pipefail
+# bench 用 reqwest：会读 http(s)_proxy 但对 no_proxy 的处理与 curl 不同，B300-50 的 env.sh 带代理时 127.0.0.1 请求会被发给代理
+# → "send: error sending request"（2026-10-19 Qwen3.5 基线四组全失败的根因；curl 同 body 却 200）。本地压测一律不走代理。
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
 OUT="$1"; MODEL_NAME="$2"; mkdir -p "$OUT"
 [ -n "${3:-}" ] && printf '%s\n' "$3" > "$OUT/CHANGE"
 gpu_tag() { local n; n=$(nvidia-smi -i 0 --query-gpu=name --format=csv,noheader 2>/dev/null); case "$n" in *4090*) echo 4090;; *B300*) echo B300;; *) echo "$n" | tr -d " ";; esac; }

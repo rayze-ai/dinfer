@@ -12,10 +12,16 @@ DIR="${KDA_REFS_DIR:-test/kimik3/2026-10-19/kda_refs}"
 LOG=/tmp/dinfer_kda_parity.log
 
 rm -f target/.rustc_info.json
-printf '==> 生成参考 %s\n' "$DIR"
-"$PY" scripts/verify/gen_kda_refs.py "$DIR" || exit 1
+# KDA_SKIP_GEN=1：跳过参考生成（参考 .npy 随仓库带过去，远端无 torch 时用这个）。
+if [ "${KDA_SKIP_GEN:-0}" = "1" ]; then
+  printf '==> 跳过参考生成（KDA_SKIP_GEN=1），用 %s\n' "$DIR"
+  [ -d "$DIR" ] || { echo "缺少参考目录 $DIR"; exit 1; }
+else
+  printf '==> 生成参考 %s\n' "$DIR"
+  "$PY" scripts/verify/gen_kda_refs.py "$DIR" || exit 1
+fi
 printf '\n==> 对拍\n'
-KDA_REFS_DIR="$DIR" cargo test -p dinfer-kernels --features ref-tests --test kda_parity -- --ignored --test-threads=1 2>&1 | tee "$LOG" | grep -E "^  [a-z_]+/|^test |test result|panicked|error\[|^error" 
+KDA_REFS_DIR="$DIR" cargo test -p dinfer-kernels --features ref-tests --test kda_parity -- --ignored --test-threads=1 --nocapture 2>&1 | tee "$LOG" | grep -E "^  [a-z_]+/|^  T=|^test |test result|panicked|error\[|^error" 
 rc=${PIPESTATUS[0]}
 printf '\n日志：%s\n' "$LOG"
 exit $rc
