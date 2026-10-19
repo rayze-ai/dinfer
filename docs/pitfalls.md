@@ -12,6 +12,10 @@
   `RUSTUP_TOOLCHAIN=1.89.0-x86_64-unknown-linux-gnu`；旧的卡住的 cargo 要先 `kill`（它持有 target 锁）。
 - 如何避免：远端跑任何 cargo 前先 `du -sh ~/.rustup/toolchains/*`（< 500 MB 就是坏的）与 `rustc -V`；脚本超时但日志只有一行时，
   第一反应查工具链而不是查代码。
+- 附带坑（同一现象的第二层）：工具链修好后 cargo 仍卡在 `Blocking waiting for file lock on package cache` + crates.io
+  `Timeout was reached (less than 10 bytes/sec)`——4090 的 `~/.cargo/registry` 只有 6 MB（没缓存过依赖），远端下载极慢。
+  解法：本机 `rsync -az ~/.cargo/registry/ 4090:同名目录/`（887 MB），之后离线可解析；同时先 `pkill -f "cargo test"` 清掉
+  上次卡住的进程（它持有 package cache 锁）。
 
 ## 2026-10-19 Qwen35 tiny golden 对拍差 0.2 / 差一位 / 平局步 argmax 乱跳（三个独立坑）
 
