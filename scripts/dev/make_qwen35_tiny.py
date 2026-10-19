@@ -26,14 +26,15 @@ from safetensors.torch import save_file
 ap = argparse.ArgumentParser()
 ap.add_argument("out")
 ap.add_argument("--gen", type=int, default=16)
+ap.add_argument("--seed", type=int, default=20261019)
 args = ap.parse_args()
 OUT = args.out
 os.makedirs(OUT, exist_ok=True)
 MODEL = os.path.join(OUT, "tiny")
 os.makedirs(MODEL, exist_ok=True)
 
-torch.manual_seed(20261019)
-g = torch.Generator().manual_seed(20261019)
+torch.manual_seed(args.seed)
+g = torch.Generator().manual_seed(args.seed)
 
 H, V, INTER = 256, 512, 512
 NH, NKV, D = 2, 1, 256

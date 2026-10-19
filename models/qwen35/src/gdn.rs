@@ -283,6 +283,17 @@ impl SlotTable {
         self.cap
     }
 
+    /// 请求结束（finish / abort）：归还 slot。不调用它也能工作（LRU 回收兜底），但兜底只能淘汰"本步不在场"的请求——
+    /// 分块 prefill / 被抢占的活请求也可能不在场，会被误当受害者（2026-10-19 B300 c8-long bench 87 条 slot 复用告警）。
+    pub fn release(&mut self, req_ids: &[u64]) {
+        for r in req_ids {
+            if let Some(s) = self.slots.remove(r) {
+                self.last_seen.remove(r);
+                self.free.push(s);
+            }
+        }
+    }
+
     /// 开始一步：返回本步新分配的 slot（调用方需清零）。
     pub fn begin_step(&mut self, req_ids: &[u64]) -> Result<Vec<usize>> {
         self.step += 1;

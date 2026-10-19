@@ -46,6 +46,9 @@ pub struct ReqState {
 pub struct BatchPlan {
     /// 按 batch 顺序的请求 id。
     pub req_ids: Vec<RequestId>,
+    /// 本 step 之前已结束（finish / abort）的请求：executor 用来释放按请求持有的状态（如 GDN 递归状态 slot）。
+    /// KV 块由 scheduler 释放，这里只是通知。
+    pub finished_req_ids: Vec<RequestId>,
     /// 每请求本 step 的 token 数（与 req_ids 平行）。
     pub num_tokens: Vec<u32>,
     pub input_ids: Vec<i32>,
@@ -574,6 +577,8 @@ impl<E: ModelExecutor> Runner<E> {
         let bs = self.block_size;
         let p = &mut self.plan;
         p.req_ids.clear();
+        p.finished_req_ids.clear();
+        p.finished_req_ids.extend_from_slice(&so.finished_req_ids);
         p.num_tokens.clear();
         p.input_ids.clear();
         p.positions.clear();

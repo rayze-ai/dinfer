@@ -143,6 +143,7 @@ impl Qwen35Executor {
         }
         // GDN slot：分配 + 判定"从头开始"的请求
         let req_ids: Vec<u64> = plan.req_ids.clone();
+        self.slots.release(&plan.finished_req_ids);
         let fresh_slots = self.slots.begin_step(&req_ids)?;
         let state_idx = self.slots.indices(&req_ids);
         // 首个 token 位置 == 0 → 从头开始（新请求 / 被抢占后的重算），状态清零。
