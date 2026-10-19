@@ -93,6 +93,27 @@ kimik3/src/
 
 每层每 slot 状态：conv `3 × [12288, 3]` bf16（221 KB）+ 递推 `[96, 128, 128]` f32（6.3 MB）。
 
+### 2.2 MoE / AttnRes 层权重表（C-2，第 1 层，形状由 `latent_moe.rs` / `layer.rs` 装载时断言）
+
+前缀 `layers.N.block_sparse_moe.`（AttnRes 在 `layers.N.`）。装载实现 `models/kimik3/src/latent_moe.rs`、`layer.rs`。
+
+| 张量 | dtype | shape | 装载 |
+|---|---|---|---|
+| `gate.weight` | BF16 | `[896, 7168]` | 路由；`moe_gate_f32` 内升 f32（HF 把 x 与 w 都 cast f32 再 linear） |
+| `gate.e_score_correction_bias` | F32 | `[896]` | 只参与选择，不参与权重（`moe.cu::route_kernel` 同口径） |
+| `routed_expert_down_proj.weight` | BF16 | `[3584, 7168]` | latent 投影，普通 `Linear` |
+| `experts.E.w1/w3.weight_packed` | U8 | `[3072, 1792]` | MXFP4 两值一字节；装载时按输出维拼成 `w13 [896, 6144, 1792]`（gate 在前），**packed 常驻** |
+| `experts.E.w1/w3.weight_scale` | U8 | `[3072, 112]` | e8m0，group 32 → `[896, 6144, 112]` |
+| `experts.E.w2.weight_packed` / `weight_scale` | U8 | `[3584, 1536]` / `[3584, 96]` | → `[896, 3584, 1536]` / `[896, 3584, 96]` |
+| `routed_expert_norm.weight` | BF16 | `[3584]` | `KimiRMSNorm`，专家加权和之后、up_proj 之前 |
+| `routed_expert_up_proj.weight` | BF16 | `[7168, 3584]` | |
+| `shared_experts.{gate,up,down}_proj.weight` | BF16 | `[6144, 7168]` ×2 / `[7168, 6144]` | `dinfer_layers::Mlp`（gate\|up 拼接）+ `Situ` 激活 |
+| `self_attention_res_proj.weight` / `mlp_res_proj.weight` | BF16 | `[1, 7168]` | AttnRes 标量门（`moe_gate_f32` E=1 取 f32 分数） |
+| `self_attention_res_norm.weight` / `mlp_res_norm.weight` | BF16 | `[7168]` | AttnRes 的 RMSNorm（HF 公式里 norm.w 与 proj.w 相乘后再与 norm(v) 点积） |
+
+专家 packed 常驻字节：每专家 `w13` 11,010,048 + scale 688,128 + `w2` 5,505,024 + scale 344,064 = **17.55 MB**；
+每层 896 专家 = **15.72 GB**（bf16 解包要 ~45 GB/层，放不下——这就是保持 packed 的原因，见 k3-moe.md）。
+
 ## 3. 模型特有的风险 / 待定
 
 - **KDA kernel 移植量大**：vLLM 的 KDA 是 Triton（`third_party/flash_linear_attention/ops/kda.py` ~1500 行 + K3 私有 `kda.py` 1372 行 + `kda_metadata.py` 752 行）。两条路：手写 CUDA；或用 Triton AOT 编译成 PTX 嵌入 Rust（保留算法，省掉翻译）。P7 开始前定。

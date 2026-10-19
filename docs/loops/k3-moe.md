@@ -210,6 +210,54 @@ scale 统计（`scripts/verify/k3_mxfp4_scale_stats.py`，36 张量 = L{1,12,45,
    bf16 回退只用于**单测 / 小批专家**；真跑要保留 packed 形式（原生 MXFP4 或按需分块解包）。
 3. **激活量化**：专家输入需要量化成 MXFP4（group 32）才能走原生路径；参考路径直接用 bf16 激活。
 
+## 里程碑 C-2：第 1 层整层真权重对拍（KDA + latent MoE + AttnRes，2026-10-20，B300-50）
+
+> 状态：**代码完成、远端对拍进行中**（结果见本节末尾的表）。crate 侧 `models/kimik3/src/{latent_moe.rs,layer.rs}`，
+> 测试 `models/kimik3/tests/layer_parity.rs`，外壳 `scripts/verify/k3_layer.sh`（exit 0 = 过），参考 `scripts/verify/gen_k3_layer_refs.py`。
+
+### 与 HF 代码核对（`modeling_kimi_linear.py`，唯一口径）
+
+| 项 | HF | 我们 |
+|---|---|---|
+| 路由 | `KimiMoEGate`：f32 `linear(x, gate.w)` → sigmoid → `+e_score_correction_bias` 选 top-16（`sorted=False`）→ 权重 = **不含 bias 的 sigmoid 分数** / Σ（`moe_renormalize`）× `routed_scaling_factor`(1.0)；`num_expert_group=1` → 无分组 | `moe_gate_f32` + `moe_route_f32`（GLM 线同 kernel，同式；相等取小下标） |
+| latent | `routed_expert_down_proj`(7168→3584) → 专家 → `routed_expert_norm`(KimiRMSNorm, 3584) → `routed_expert_up_proj`(3584→7168) | `Linear` / `rmsnorm_bf16_n` / `Linear` |
+| 专家 | `KimiBlockSparseMLP`：`w2(situ(cat[w1 z, w3 z]))`，**w1 = gate 在前、w3 = up 在后** | 装载时 w1/w3 拼成 `w13 [E, 2I, L/2]`，一条 `mxfp4_gemm_grouped` 出 `gate\|up` → `situ_and_mul` → 第二条 grouped GEMM（w2） |
+| 加权和 | `moe_infer`：bf16 专家输出 `.type(topk_weight.dtype)`(f32) `.mul_(w).sum(dim=1)` → bf16 | `moe_scatter_add_f32`（bf16 y × f32 w，f32 累加）→ `f32_add_to_bf16` |
+| shared | `KimiMLP`（intermediate 2×3072，`cat[gate, up]` → situ → down），加到 routed 结果上 | `dinfer_layers::Mlp` + `Situ: Act` |
+| situ | `beta·tanh(g/beta)·sigmoid(g) · linear_beta·tanh(u/linear_beta)`，全 f32，beta 4.0 / linear_beta 25.0 | 新 kernel `activation.cu::situ_and_mul_bf16`，beta / linear_beta 走 host 参数（config），kernel 内无常量 |
+| AttnRes | `_forward_attn_residual`：`h = res(B∪{x})`（B 非空）→ `a = attn(norm(h))` → **`p = x + a`**（残差加 x 不是 h）→ `m = res(B∪{p})` → `y = mlp(norm(m))` → `out = p + y`；写块层（`layer%12==0`）把 x 追加进 B 且 p = a | `layer.rs` 同序；`AttnRes::apply` = 每候选 `rmsnorm` + `moe_gate_f32`(E=1) 取 f32 分数 → host softmax → `moe_scatter_add_f32` 加权和。**第 1 层的 B = {x₀}**：HF 里 x₀ 是第 0 层输入（embedding 输出），本轮对拍用随机 x₀（seed+1）——不是零初始，避免 norm 退化 |
+| 第 0 层 | `B = ∅`：`h = x`，不走 attention 门；写块 | `blocks.is_empty()` 分支 |
+
+与任务书不同之处：
+1. **专家权重形状**：任务书写"w1/w3: 3584→3072"正确，但 HF 里专家输入是 `routed_expert_down_proj` 的输出 `z`，**路由分数却在 7168 维的 `mn` 上算**（gate 在 down_proj 之前）。
+2. **AttnRes 不依赖第 0 层的"状态"**，只依赖第 0 层**写入的块残差 x₀**（即第 0 层输入）。零初始会让 `norm(0)` 全 0、分数 0，门退化成均匀混合；所以参考与测试都用随机 x₀。
+3. shared experts 的 `gate_proj/up_proj` 在真分片里是 `[6144, 7168]`（2×3072 已合并成一个 MLP），不是两个独立专家。
+
+### 环境
+
+- 权重 `/data/models/moonshotai/Kimi-K3`（物理路径），第 1 层全在 `model-00002-of-000096.safetensors`（16 GB：含 896 专家）；
+  Rust 侧 `shards_for_layer` 只 mmap 这一片，`ExpertPack::load` 按专家 896×6 次 H2D 拼成 4 个大张量。
+- 参考：vLLM 容器（`vllm/vllm-openai:nightly`，GPU 3），fla kda 复用 C-1 脚本；MoE 纯 torch（只解包被路由到的专家，
+  `dequant_mxfp4` 与 `k3_mxfp4_realcheck.py` 逐位同口径），Rust 测试 GPU 2（`--release`）。
+- 输入：`x ~ N(0, 0.5²)` bf16 `[64, 7168]`（seed 0）、`x₀`（seed 1）。
+
+### 结果
+
+（远端 `k3_layer.sh` 跑完后填：各子块 rel / cos、top-16 命中率、单层 T=64 耗时、专家常驻字节。）
+
+### 性能事实（单层，T=64，B300）
+
+- 每 token 专家 GEMM：top-16 × 2（w13、w2）= **32 次**；grouped 实现每步只有 **2 条 kernel**（tile 数 = Σ_e ceil(n_e/16) × N/64）。
+- 专家权重 packed 常驻 **15.72 GB/层**（计算见 design-kimik3 §2.2）；不整层解包。
+- 每步 host 同步：MoE 1 次（读 offsets 展平 tile 计划）+ AttnRes 2 门 × R 次（取分数做 host softmax）。两者都是 C-2 的"先对"口径，
+  融合（GPU 侧 tile 计划、attn_res 融合 kernel）记入 TODO。
+
+### TODO（C-2 之后）
+
+1. AttnRes 融合 kernel（vLLM `models/kimi_k3/nvidia/ops/attn_res.py`）：去掉 R 次 D2H + host softmax。
+2. grouped GEMM tile 计划 GPU 侧生成；专家 GEMM 换 tensor core（见「TODO（v2 / 后续）」）。
+3. `ExpertPack::load` 896×6 次小 H2D → 先在 host 拼好再一次 H2D 或 pinned 流水（装载时间见结果表）。
+
 ## 阻塞记录
 
 - ~~2026-10-19 收尾时 B300 8 卡被别的作业占满~~ → **当晚 21:00 卡全空，真权重解包核对已完成**（逐位一致，见「真权重解包核对」）。
