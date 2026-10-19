@@ -99,6 +99,9 @@ tests/           golden_parity.rs（tiny golden：4 个用例，`scripts/verify/
 - GDN 的 q/k 归一化、A = -exp(A_log)、dt = softplus(a + dt_bias) 等约定：以 vLLM / fla 源码为准，对拍 Triton 参考。
 - ~~两个 KV group 的 core 支持程度~~：**已定**（见 §2.2）——全注意力层用 core 的 paged `FullAttention` 组；GDN 状态
   由 crate 内 `SlotTable` 自管。接 `KvCacheSpec::Mamba` 是后续项（要动 core；收益是前缀缓存 / 抢占时状态可随块回收）。
+- **TP**：`Qwen35Model::load_with_budget` 在 `world > 1` 时直接报错（里程碑 4 没接 all-reduce；静默跑会少一半结果）。
+  接法照 Qwen3：`crates/core` 不动，模型侧加 `comm`、qkv / gate_up 按头切（`weights::load_qkv` / `load_gate` 已支持）、
+  o_proj / down 各一次 all-reduce；GDN 的 `in_proj_*` / `out_proj` 同样按头切。
 - 真权重（52 GB bf16）需要 ≥ 60 GB 显存：本机 3090 / 4090 装不下 → 里程碑 5 上 B300（用户 2026-10-19 "B300 先不用"，
   待指示）。tiny golden 与真权重无关（形状参数驱动），已通过。
 - FP8 版：bf16 跑通后，FP8 权重 dequant 到 bf16 加载是第一步；原生 FP8 GEMM 是性能项。
