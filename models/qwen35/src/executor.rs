@@ -145,12 +145,24 @@ impl Qwen35Executor {
         let req_ids: Vec<u64> = plan.req_ids.clone();
         let fresh_slots = self.slots.begin_step(&req_ids)?;
         let state_idx = self.slots.indices(&req_ids);
-        // 首个 token 位置 == 0 → 从头开始（新请求或被抢占后的重算），状态清零
+        // 首个 token 位置 == 0 → 从头开始（新请求 / 被抢占后的重算），状态清零。
+        // 分到全新 slot 的请求也必须清（旧占用者的状态不能用）；若它带着历史（position > 0）说明中间被回收过，
+        // 状态已丢失 → 打 warn（结果会错，只能提高 max_num_seqs 避免）。
         let mut has_init = vec![1i32; n];
         let mut restarts = Vec::new();
         for i in 0..n {
             let p0 = plan.cu_seqlens[i] as usize;
-            if plan.positions.get(p0).copied().unwrap_or(0) == 0 {
+            let pos0 = plan.positions.get(p0).copied().unwrap_or(0);
+            let fresh = fresh_slots.contains(&(state_idx[i] as usize));
+            if pos0 == 0 || fresh {
+                if fresh && pos0 != 0 {
+                    tracing::warn!(
+                        req = req_ids[i],
+                        pos = pos0,
+                        slot = state_idx[i],
+                        "qwen35: GDN 状态 slot 被复用给带历史的请求，状态已丢失（提高 max_num_seqs / 调大 slot 表）"
+                    );
+                }
                 has_init[i] = 0;
                 restarts.push(state_idx[i] as usize);
             }
@@ -158,7 +170,6 @@ impl Qwen35Executor {
         if !restarts.is_empty() {
             self.model.reset_slots(s, &restarts)?;
         }
-        let _ = fresh_slots;
 
         self.buf.up.reset_step();
         self.buf.up.push(s, &plan.input_ids, &mut self.buf.ids.data)?;
