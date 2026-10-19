@@ -2251,6 +2251,263 @@ pub fn kda_gated_rmsnorm(
     )
 }
 
+// ------------------------------------------------------------------ GDN（Qwen3.5 线的 Gated DeltaNet）
+// 数学口径见 `cuda/gdn.cu` 顶部与 `docs/loops/qwen35-gdn.md`。全部只收形状参数。
+
+/// 短卷积的激活：`siLU`（Qwen3.5）或 `sigmoid`（其它 GDN 变体）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GdnAct {
+    Silu,
+    Sigmoid,
+}
+
+impl GdnAct {
+    /// kernel 侧的整数编码（与 `cuda/gdn.cu` 约定一致）。
+    pub fn code(self) -> i32 {
+        match self {
+            GdnAct::Silu => 0,
+            GdnAct::Sigmoid => 1,
+        }
+    }
+}
+
+/// GDN 短卷积 prefill（varlen）。`x`/`out`: `[T, dim]` bf16，`w`: `[dim, width]` bf16（从旧到新），
+/// `conv_state`: `[slots, dim, state_len]` bf16（`state_len = width-1`，原地写回）。
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_conv1d_prefill(
+    stream: &Stream,
+    x: &CudaSlice<bf16>,
+    w: &CudaSlice<bf16>,
+    out: &mut CudaSlice<bf16>,
+    conv_state: &mut CudaSlice<bf16>,
+    cu_seqlens: &CudaSlice<i32>,
+    state_indices: Option<&CudaSlice<i32>>,
+    has_initial: Option<&CudaSlice<i32>>,
+    num_seqs: usize,
+    dim: usize,
+    width: usize,
+    state_len: usize,
+    act: GdnAct,
+) -> Result<()> {
+    ensure!(width >= 1 && width <= 8, "gdn_conv1d_prefill: width {width} 超出 [1,8]");
+    ensure!(state_len >= width.saturating_sub(1), "gdn_conv1d_prefill: state_len {state_len} < width-1");
+    ensure!(cu_seqlens.len() >= num_seqs + 1, "gdn_conv1d_prefill: cu_seqlens");
+    ensure!(w.len() >= dim * width && out.len() >= x.len(), "gdn_conv1d_prefill: w/out");
+    ensure!(conv_state.len() >= state_len, "gdn_conv1d_prefill: conv_state");
+    let psi = state_indices.map_or(std::ptr::null(), |s| stream.ptr(s) as *const i32);
+    let phi = has_initial.map_or(std::ptr::null(), |s| stream.ptr(s) as *const i32);
+    // SAFETY: 容量已校验；cu_seqlens 的单调性与槽号范围由调度侧保证。
+    check(
+        unsafe {
+            ffi::gdn_conv1d_prefill(
+                stream.ptr(x) as *const c_void,
+                stream.ptr(w) as *const c_void,
+                stream.ptr_mut(out) as *mut c_void,
+                stream.ptr_mut(conv_state) as *mut c_void,
+                stream.ptr(cu_seqlens) as *const i32,
+                psi,
+                phi,
+                num_seqs as i64,
+                dim as i64,
+                width as i64,
+                state_len as i64,
+                act.code(),
+            )
+        },
+        "gdn_conv1d_prefill",
+    )
+}
+
+/// GDN 短卷积单 token 更新（decode）：`x`/`out`: `[batch, dim]`，`conv_state` 原地左移并追加。
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_conv1d_update(
+    stream: &Stream,
+    x: &CudaSlice<bf16>,
+    w: &CudaSlice<bf16>,
+    out: &mut CudaSlice<bf16>,
+    conv_state: &mut CudaSlice<bf16>,
+    state_indices: Option<&CudaSlice<i32>>,
+    batch: usize,
+    dim: usize,
+    width: usize,
+    state_len: usize,
+    act: GdnAct,
+) -> Result<()> {
+    ensure!(width >= 1 && width <= 8, "gdn_conv1d_update: width {width} 超出 [1,8]");
+    ensure!(state_len >= width.saturating_sub(1), "gdn_conv1d_update: state_len");
+    ensure!(x.len() >= batch * dim && out.len() >= batch * dim, "gdn_conv1d_update: x/out");
+    ensure!(w.len() >= dim * width, "gdn_conv1d_update: w");
+    let psi = state_indices.map_or(std::ptr::null(), |s| stream.ptr(s) as *const i32);
+    // SAFETY: 容量已校验；槽号由调度器保证 < state 槽数。
+    check(
+        unsafe {
+            ffi::gdn_conv1d_update(
+                stream.ptr(x) as *const c_void,
+                stream.ptr(w) as *const c_void,
+                stream.ptr_mut(out) as *mut c_void,
+                stream.ptr_mut(conv_state) as *mut c_void,
+                psi,
+                batch as i64,
+                dim as i64,
+                width as i64,
+                state_len as i64,
+                act.code(),
+            )
+        },
+        "gdn_conv1d_update",
+    )
+}
+
+/// 逐 v 头标量的 gate / beta：`g = -exp(A_log[hv])·softplus(a + dt_bias[hv])`、`beta = sigmoid(b)`。
+/// `a`/`b`: `[T, heads_v]` bf16，`a_log`/`dt_bias`: `[heads_v]` f32，输出 f32 同形。
+pub fn gdn_gate(
+    stream: &Stream,
+    a: &CudaSlice<bf16>,
+    b: &CudaSlice<bf16>,
+    a_log: &CudaSlice<f32>,
+    dt_bias: &CudaSlice<f32>,
+    g_out: &mut CudaSlice<f32>,
+    beta_out: &mut CudaSlice<f32>,
+    tokens: usize,
+    heads_v: usize,
+) -> Result<()> {
+    let n = tokens * heads_v;
+    ensure!(a_log.len() >= heads_v && dt_bias.len() >= heads_v, "gdn_gate: a_log/dt_bias");
+    ensure!(a.len() >= n && b.len() >= n, "gdn_gate: a/b");
+    ensure!(g_out.len() >= n && beta_out.len() >= n, "gdn_gate: outputs");
+    // SAFETY: 容量已校验。
+    check(
+        unsafe {
+            ffi::gdn_gate(
+                stream.ptr(a) as *const c_void,
+                stream.ptr(b) as *const c_void,
+                stream.ptr(a_log) as *const f32,
+                stream.ptr(dt_bias) as *const f32,
+                stream.ptr_mut(g_out) as *mut f32,
+                stream.ptr_mut(beta_out) as *mut f32,
+                n as i64,
+                heads_v as i64,
+                1,
+            )
+        },
+        "gdn_gate",
+    )
+}
+
+/// GDN 递归核心（prefill 与 decode 同一条逐 token 路径）。
+/// `mixed_qkv`: `[T, 2·heads_k·k_dim + heads_v·v_dim]` bf16（q|k|v 平铺）；
+/// `out`: `[T, heads_v, v_dim]` bf16；`state`: `[num_slots, heads_v, v_dim, k_dim]` f32（原地更新）。
+/// `fused_gate = true` 时 gate/beta 由 `a_raw`/`b_raw` + `a_log`/`dt_bias` 现算（decode）；
+/// 否则读调用方预算好的 `g`/`beta`（prefill，形状 `[T, heads_v]` f32）。
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_recurrent(
+    stream: &Stream,
+    mixed_qkv: &CudaSlice<bf16>,
+    g: Option<&CudaSlice<f32>>,
+    beta: Option<&CudaSlice<f32>>,
+    a_raw: Option<&CudaSlice<bf16>>,
+    b_raw: Option<&CudaSlice<bf16>>,
+    a_log: &CudaSlice<f32>,
+    dt_bias: &CudaSlice<f32>,
+    out: &mut CudaSlice<bf16>,
+    state: &mut CudaSlice<f32>,
+    cu_seqlens: &CudaSlice<i32>,
+    state_indices: Option<&CudaSlice<i32>>,
+    num_seqs: usize,
+    heads_k: usize,
+    heads_v: usize,
+    k_dim: usize,
+    v_dim: usize,
+    scale: f32,
+) -> Result<()> {
+    ensure!(heads_k > 0 && heads_v % heads_k == 0, "gdn_recurrent: heads_v {heads_v} 不能被 heads_k {heads_k} 整除");
+    ensure!(cu_seqlens.len() >= num_seqs + 1, "gdn_recurrent: cu_seqlens");
+    ensure!(a_log.len() >= heads_v && dt_bias.len() >= heads_v, "gdn_recurrent: a_log/dt_bias");
+    let row = 2 * heads_k * k_dim + heads_v * v_dim;
+    let tokens = mixed_qkv.len() / row.max(1);
+    ensure!(out.len() >= tokens * heads_v * v_dim, "gdn_recurrent: out");
+    let per_slot = heads_v * v_dim * k_dim;
+    ensure!(state.len() >= per_slot, "gdn_recurrent: state");
+    let group = heads_v / heads_k;
+    let fused = g.is_none();
+    if fused {
+        ensure!(a_raw.is_some() && b_raw.is_some(), "gdn_recurrent: fused_gate 需要 a_raw/b_raw");
+        ensure!(a_raw.unwrap().len() >= tokens * heads_v, "gdn_recurrent: a_raw");
+    } else {
+        ensure!(beta.is_some(), "gdn_recurrent: 非 fused 路径需要 beta");
+        ensure!(g.unwrap().len() >= tokens * heads_v && beta.unwrap().len() >= tokens * heads_v, "gdn_recurrent: g/beta");
+    }
+    let null_bf16 = std::ptr::null::<c_void>();
+    let pg = g.map_or(std::ptr::null(), |s| stream.ptr(s) as *const f32);
+    let pb = beta.map_or(std::ptr::null(), |s| stream.ptr(s) as *const f32);
+    let par = a_raw.map_or(null_bf16, |s| stream.ptr(s) as *const c_void);
+    let pbr = b_raw.map_or(null_bf16, |s| stream.ptr(s) as *const c_void);
+    let psi = state_indices.map_or(std::ptr::null(), |s| stream.ptr(s) as *const i32);
+    // SAFETY: 容量已校验；槽号与 cu_seqlens 由调度侧保证。
+    check(
+        unsafe {
+            ffi::gdn_recurrent(
+                stream.ptr(mixed_qkv) as *const c_void,
+                pg,
+                pb,
+                par,
+                pbr,
+                stream.ptr(a_log) as *const f32,
+                stream.ptr(dt_bias) as *const f32,
+                stream.ptr_mut(out) as *mut c_void,
+                stream.ptr_mut(state) as *mut c_void,
+                stream.ptr(cu_seqlens) as *const i32,
+                psi,
+                num_seqs as i64,
+                heads_k as i64,
+                heads_v as i64,
+                k_dim as i64,
+                v_dim as i64,
+                group as i64,
+                scale,
+                per_slot as i64,
+                i32::from(fused),
+            )
+        },
+        "gdn_recurrent",
+    )
+}
+
+/// 输出门 + RMSNorm：`y = rmsnorm(x, w, eps) · act(z)`，一个 `(token, v 头)` 一行。
+pub fn gdn_gated_rmsnorm(
+    stream: &Stream,
+    x: &CudaSlice<bf16>,
+    w: &CudaSlice<bf16>,
+    z: &CudaSlice<bf16>,
+    out: &mut CudaSlice<bf16>,
+    rows: usize,
+    head_dim: usize,
+    eps: f32,
+    act: GdnAct,
+) -> Result<()> {
+    ensure!(w.len() >= head_dim, "gdn_gated_rmsnorm: w");
+    ensure!(
+        x.len() >= rows * head_dim && z.len() >= rows * head_dim && out.len() >= rows * head_dim,
+        "gdn_gated_rmsnorm: x/z/out"
+    );
+    // SAFETY: 容量已校验。
+    check(
+        unsafe {
+            ffi::gdn_gated_rmsnorm(
+                stream.ptr(x) as *const c_void,
+                stream.ptr(w) as *const c_void,
+                stream.ptr(z) as *const c_void,
+                stream.ptr_mut(out) as *mut c_void,
+                rows as i64,
+                head_dim as i64,
+                eps,
+                act.code(),
+            )
+        },
+        "gdn_gated_rmsnorm",
+    )
+}
+
 /// MXFP4 解包（compressed-tensors `mxfp4-pack-quantized` 的参考回退路径）。
 /// `packed`: `[rows, cols/2]` u8（低半字节 = 偶数下标）；`scale`: `[rows, cols/group]` u8，e8m0 = 2^(u8-127)；
 /// `out`: `[rows, cols]` bf16。原生 MXFP4 GEMM 见 `docs/loops/k3-moe.md` 的 TODO。

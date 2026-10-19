@@ -569,6 +569,76 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
 
+    // ---- GDN（gdn.cu）----
+    pub fn gdn_conv1d_prefill(
+        x: *const c_void,
+        w: *const c_void,
+        out: *mut c_void,
+        conv_state: *mut c_void,
+        cu_seqlens: *const i32,
+        state_indices: *const i32,
+        has_initial: *const i32,
+        num_seqs: i64,
+        dim: i64,
+        width: i64,
+        state_len: i64,
+        act: i32,
+    ) -> i32;
+    pub fn gdn_conv1d_update(
+        x: *const c_void,
+        w: *const c_void,
+        out: *mut c_void,
+        conv_state: *mut c_void,
+        state_indices: *const i32,
+        batch: i64,
+        dim: i64,
+        width: i64,
+        state_len: i64,
+        act: i32,
+    ) -> i32;
+    pub fn gdn_gate(
+        a: *const c_void,
+        b: *const c_void,
+        a_log: *const f32,
+        dt_bias: *const f32,
+        g_out: *mut f32,
+        beta_out: *mut f32,
+        total: i64,
+        heads: i64,
+        do_beta: i32,
+    ) -> i32;
+    pub fn gdn_recurrent(
+        mixed_qkv: *const c_void,
+        g: *const f32,
+        beta: *const f32,
+        a_raw: *const c_void,
+        b_raw: *const c_void,
+        a_log: *const f32,
+        dt_bias: *const f32,
+        out: *mut c_void,
+        state: *mut c_void,
+        cu_seqlens: *const i32,
+        state_indices: *const i32,
+        num_seqs: i64,
+        heads_k: i64,
+        heads_v: i64,
+        k_dim: i64,
+        v_dim: i64,
+        group: i64,
+        scale: f32,
+        state_stride_tok: i64,
+        fused_gate: i32,
+    ) -> i32;
+    pub fn gdn_gated_rmsnorm(
+        x: *const c_void,
+        w: *const c_void,
+        z: *const c_void,
+        out: *mut c_void,
+        rows: i64,
+        head_dim: i64,
+        eps: f32,
+        act: i32,
+    ) -> i32;
     pub fn mxfp4_dequant_bf16(
         packed: *const c_void,
         scale: *const c_void,
@@ -578,6 +648,7 @@ extern "C" {
         group: i64,
         stream: cudaStream_t,
     ) -> i32;
+
 }
 
 #[cfg(dinfer_no_nvcc)]
@@ -624,6 +695,11 @@ mod stubs {
     stub!(kda_gate(g: *const c_void, al: *const f32, db: *const f32, o: *mut f32, t: i64, h: i64, hd: i64, lb: f32, ulb: i32, s: cudaStream_t));
     stub!(kda_recurrent(q: *const c_void, k: *const c_void, v: *const c_void, g: *const c_void, rb: *const f32, al: *const f32, db: *const f32, o: *mut c_void, st: *mut c_void, cu: *const i32, si: *const i32, ns: i64, h: i64, hd: i64, sst: i64, sc: f32, lb: f32, ulb: i32, s: cudaStream_t));
     stub!(kda_gated_rmsnorm(x: *const c_void, w: *const c_void, g: *const c_void, o: *mut c_void, r: i64, hd: i64, e: f32, s: cudaStream_t));
+    stub!(gdn_conv1d_prefill(x: *const c_void, w: *const c_void, o: *mut c_void, cs: *mut c_void, cu: *const i32, si: *const i32, hi: *const i32, ns: i64, d: i64, wd: i64, sl: i64, a: i32));
+    stub!(gdn_conv1d_update(x: *const c_void, w: *const c_void, o: *mut c_void, cs: *mut c_void, si: *const i32, b: i64, d: i64, wd: i64, sl: i64, a: i32));
+    stub!(gdn_gate(a: *const c_void, b: *const c_void, al: *const f32, db: *const f32, g: *mut f32, be: *mut f32, t: i64, h: i64, d: i32));
+    stub!(gdn_recurrent(mq: *const c_void, g: *const f32, be: *const f32, ar: *const c_void, br: *const c_void, al: *const f32, db: *const f32, o: *mut c_void, st: *mut c_void, cu: *const i32, si: *const i32, ns: i64, hk: i64, hv: i64, k: i64, v: i64, gp: i64, sc: f32, sst: i64, fg: i32));
+    stub!(gdn_gated_rmsnorm(x: *const c_void, w: *const c_void, z: *const c_void, o: *mut c_void, r: i64, hd: i64, e: f32, a: i32));
     stub!(f32_add_to_bf16(a: *const f32, o: *mut c_void, n: i64, s: cudaStream_t));
     stub!(gather_blocks_bf16_to_f32(x: *const c_void, y: *mut f32, nb: i64, r: i64, c: i64, s: cudaStream_t));
     stub!(add_inplace_bf16(x: *const c_void, y: *mut c_void, n: i64, s: cudaStream_t));

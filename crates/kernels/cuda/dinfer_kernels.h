@@ -152,6 +152,30 @@ int kda_recurrent(const void* q, const void* k, const void* v, const void* raw_g
 int kda_gated_rmsnorm(const void* x, const void* w, const void* gate, void* out, int64_t rows,
                       int64_t head_dim, float eps);
 
+// ---- GDN（gdn.cu）：Gated DeltaNet 的模型无关算子（Qwen3.5 线；与 KDA 同族，口径见 gdn.cu 顶部）----
+// act：0 = siLU（Qwen3.5），1 = sigmoid（其它 GDN 变体）。
+// 短卷积 y[t,d] = act(Σ_j w[d,j]·x[t-W+1+j,d])，w 布局 [dim, width]，宽度维从旧到新；
+// conv_state 布局 [slots, dim, state_len]（state_len = width-1），列 0 最旧。
+int gdn_conv1d_prefill(const void* x, const void* w, void* out, void* conv_state,
+                       const int* cu_seqlens, const int* state_indices, const int* has_initial,
+                       int64_t num_seqs, int64_t dim, int64_t width, int64_t state_len, int act);
+int gdn_conv1d_update(const void* x, const void* w, void* out, void* conv_state,
+                      const int* state_indices, int64_t batch, int64_t dim, int64_t width,
+                      int64_t state_len, int act);
+// 逐 v 头标量的 gate / beta：g = -exp(A_log[hv])·softplus(a+dt_bias)，beta = sigmoid(b)（f32 输出）。
+int gdn_gate(const void* a, const void* b, const float* a_log, const float* dt_bias, float* g_out,
+             float* beta_out, int64_t total, int64_t heads, int do_beta);
+// 递归核心：mixed_qkv [T, 2·H·K + HV·V] bf16（q|k|v 平铺），out [T, HV, V] bf16，
+// state [slots, HV, V, K] f32（原地更新）。fused_gate=1 时 g/beta 由 raw a/b 现算，忽略 g/beta 入口。
+int gdn_recurrent(const void* mixed_qkv, const float* g, const float* beta, const void* a_raw,
+                  const void* b_raw, const float* a_log, const float* dt_bias, void* out,
+                  void* state, const int* cu_seqlens, const int* state_indices, int64_t num_seqs,
+                  int64_t H, int64_t HV, int64_t K, int64_t V, int64_t group, float scale,
+                  int64_t state_stride_tok, int fused_gate);
+// 输出门 + RMSNorm：y[t,hv,d] = rmsnorm(o[t,hv,:], w, eps) · act(z[t,hv,d])，w 为 [head_dim]。
+int gdn_gated_rmsnorm(const void* x, const void* w, const void* z, void* out, int64_t rows,
+                      int64_t head_dim, float eps, int act);
+
 // ---- 布局搬运（layout.cu）----
 int copy_cols_bf16(const void* src, void* dst, int64_t tokens, int64_t src_cols, int64_t col0, int64_t dst_cols,
                    int64_t dcol0, int64_t width, cudaStream_t stream);
