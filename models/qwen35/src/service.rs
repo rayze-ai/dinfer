@@ -82,6 +82,14 @@ impl Qwen35Service {
             Ok((tok, tmpl))
         });
         let defaults = read_generation_defaults(tok_dir);
+        // 里程碑 4 的 executor 是 eager 单流：前缀缓存能命中（scheduler 侧），但没有 decode CUDA graph，
+        // 也没有跨流 / host tier / PD / 投机。这些在 `bin/dinfer` 里被忽略——启动时明确打一行，不静默。
+        tracing::info!(
+            cuda_graphs = 0,
+            chunked_prefill = opt.enable_chunked_prefill,
+            prefix_caching = opt.enable_prefix_caching,
+            "qwen35: eager single-stream executor (no CUDA graph / xstream / host tier / PD / speculative yet)"
+        );
         let cfg = Qwen35Config::from_json(&std::fs::read_to_string(model_dir.join("config.json"))?)?;
         let src = Arc::new(WeightSource::open_dir(model_dir)?);
 
