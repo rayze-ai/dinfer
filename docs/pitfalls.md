@@ -620,3 +620,22 @@
 ## 新 .cu 里 `bf16` 未定义：common.cuh 的工具都在 `namespace dinfer`（2026-10-20）
 - 现象：`identifier "bf16" is undefined`、`to_f32` 找不到。
 - 解法：实现文件照 `gdn.cu`：`namespace dinfer { namespace { …kernels… } extern "C" { … } }`，`extern "C"` 放在 `namespace dinfer` 内（C 符号不受命名空间影响）。
+
+## MoE 整层对拍：路由平局行的专家输出按定义不同，数值容差只能在路由一致的行判（2026-10-20，K3 C-2）
+- 现象：第 1 层整层 `out` cos 0.999999，但 MoE 子块 `ysum` rel 0.145 / cos 0.9985 → 断言挂。top-16 pair 级 99.71%（1021/1024），
+  3 个 pair 不同，全落在 `choice` 第 16/17 大相差 ≤ 2e-3 的行（bf16 输入 + f32 logits 的舍入已经能翻转）。
+- 根因：硬判决（top-k）不可逐位复现（记忆 / pitfalls 已有口径）；路由一次翻转 = 该 token 换了一个专家，输出整行不同，
+  但权重 ~1/16、再过 up_proj 与残差后对整层只有 1e-3 量级影响。
+- 解法：`layer_parity.rs` 把 token 分成"路由整行一致"与"平局（margin ≤ 2e-3）"，断言 (a) 不一致行必须都是平局，(b) 可判定行全中，
+  (c) MoE 子块（ysum / routed up / MoE out）的 rel / cos **只取路由一致的行**；全部行的数字照常打印供参考。
+- 避免：以后多层 / 整模对拍同样先比路由、再按一致行比数值；整层输出用 cos 判（残差主导）。
+
+## 其它子代理并行改同一批共享文件（kernels.h / ffi.rs / ops.rs）时的提交策略（2026-10-20）
+- 现象：我给 `situ_and_mul_bf16` 加的 kernels.h / ffi.rs / ops.rs 声明被另一子代理的 commit（`ffea2b3`）一并带进仓库，
+  而 `activation.cu` 的定义还在我的工作区 → HEAD 一度链接不过（声明有、定义无）。
+- 解法：发现后立刻把定义文件 commit；共享文件只加"自己的符号"且放在文件末尾 / 独立 hunk，便于对方 `git add -p` 或整文件 add 时不冲突。
+- 避免：改共享文件前先 `git status --short` 看是否有别人的未提交改动；声明与定义**同一次 commit**。
+
+## `Stream::htod_into` 只接 `&mut CudaSlice`，往大张量的一段拷要走 `inner_arc().memcpy_htod(src, &mut slice_mut(..))`（2026-10-20）
+- 现象：`ExpertPack::load` 把 896 个专家拼进一个 `[E, N, K/2]` 大张量时 `htod_into(.., &mut big.slice_mut(a..b))` 类型不匹配（`CudaViewMut` ≠ `CudaSlice`）。
+- 解法：`latent_moe.rs::h2d`：`stream.inner_arc().memcpy_htod(src, &mut dst.slice_mut(off..off+len))`。

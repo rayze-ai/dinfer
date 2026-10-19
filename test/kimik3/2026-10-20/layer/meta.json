@@ -1,0 +1,14 @@
+{
+ "layer": 1,
+ "T": 64,
+ "seed": 0,
+ "hidden": 7168,
+ "eps": 1e-05,
+ "files": [
+  "model-00002-of-000096.safetensors"
+ ],
+ "experts_used": 400,
+ "torch": "2.13.0+cu130",
+ "attn_gate_prob_prefix_mean": 0.49431365728378296,
+ "mlp_gate_prob_prefix_mean": 0.4977092444896698
+}

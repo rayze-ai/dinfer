@@ -180,12 +180,19 @@ fn layer1_real_weights() {
     let (ids, _w) = moe.last_routing(&s, t).unwrap();
     let thresh = 2e-3f32;
     let (mut decidable, mut hit_rows, mut hit_pairs, mut total_pairs) = (0usize, 0usize, 0usize, 0usize);
+    let mut matched = Vec::new(); // 路由整行一致的 token
+    let mut tie_mismatch = 0usize; // 路由不一致且 margin ≤ thresh（不可判定的平局，预期）
     for i in 0..t {
         let got: HashSet<i32> = ids[i * kk..(i + 1) * kk].iter().cloned().collect();
         let want: HashSet<i32> = ids_ref[i * kk..(i + 1) * kk].iter().cloned().collect();
         let inter = got.intersection(&want).count();
         total_pairs += kk;
         hit_pairs += inter;
+        if inter == kk {
+            matched.push(i);
+        } else if margin[i] <= thresh {
+            tie_mismatch += 1;
+        }
         if margin[i] > thresh {
             decidable += 1;
             if inter == kk {
@@ -194,12 +201,23 @@ fn layer1_real_weights() {
         }
     }
     println!(
-        "  top-{kk} 命中：pair 级 {hit_pairs}/{total_pairs}（{:.2}%）；可判定行（margin>{thresh:.0e}）{decidable}/{t}，其中整行全中 {hit_rows}",
-        100.0 * hit_pairs as f64 / total_pairs as f64
+        "  top-{kk} 命中：pair 级 {hit_pairs}/{total_pairs}（{:.2}%）；可判定行（margin>{thresh:.0e}）{decidable}/{t}，其中整行全中 {hit_rows}；路由整行一致 {}/{t}（不一致行全是平局：{tie_mismatch}）",
+        100.0 * hit_pairs as f64 / total_pairs as f64,
+        matched.len()
     );
-    let (rel_ys, cos_ys) = compare("专家加权和 ysum", &rows(moe.last_expert_sum(), &s, t * moe.experts.latent), &ysum_ref);
-    let (rel_yr, cos_yr) = compare("routed up_proj", &rows(moe.last_routed_out(), &s, n), &yrouted_ref);
-    let (rel_ym, cos_ym) = compare("MoE out（+shared）", &rows(layer.last_mlp_out(), &s, n), &ymoe_ref);
+    // 路由在平局行选了不同专家 → 该行专家输出按定义不同（硬判决不可逐位复现），MoE 子块的数值容差只在路由一致的行上判。
+    let sel = |v: &[f32], w: usize| -> Vec<f32> { matched.iter().flat_map(|&i| v[i * w..(i + 1) * w].iter().cloned()).collect() };
+    let latent = moe.experts.latent;
+    let ysum_got = rows(moe.last_expert_sum(), &s, t * latent);
+    let yr_got = rows(moe.last_routed_out(), &s, n);
+    let ym_got = rows(layer.last_mlp_out(), &s, n);
+    compare("ysum（全部行）", &ysum_got, &ysum_ref);
+    compare("routed up（全部行）", &yr_got, &yrouted_ref);
+    compare("MoE out（全部行）", &ym_got, &ymoe_ref);
+    println!("  —— 下面三行只取路由一致的 {} 行 ——", matched.len());
+    let (rel_ys, cos_ys) = compare("专家加权和 ysum", &sel(&ysum_got, latent), &sel(&ysum_ref, latent));
+    let (rel_yr, cos_yr) = compare("routed up_proj", &sel(&yr_got, hidden), &sel(&yrouted_ref, hidden));
+    let (rel_ym, cos_ym) = compare("MoE out（+shared）", &sel(&ym_got, hidden), &sel(&ymoe_ref, hidden));
     println!("== 整层");
     let (rel_o, cos_o) = compare("layer out vs HF", &rows(&out, &s, n), &out_ref);
 
@@ -217,6 +235,8 @@ fn layer1_real_weights() {
     assert!(cos_m >= 0.999 && rel_m <= 5e-2, "mlp 门 m：rel {rel_m:.3e} cos {cos_m:.6}");
     assert!(cos_lg >= 0.999 && rel_lg <= 2e-2, "router logits：rel {rel_lg:.3e} cos {cos_lg:.6}");
     assert!(decidable == 0 || hit_rows == decidable, "可判定行 top-{kk} 应全中：{hit_rows}/{decidable}");
+    assert!(matched.len() + tie_mismatch == t, "路由不一致的行必须都是平局（margin ≤ {thresh:.0e}）");
+    assert!(matched.len() * 2 >= t, "路由一致行太少：{}/{t}", matched.len());
     assert!(cos_ys >= 0.999 && rel_ys <= 5e-2, "ysum：rel {rel_ys:.3e} cos {cos_ys:.6}");
     assert!(cos_yr >= 0.999 && rel_yr <= 5e-2, "routed up：rel {rel_yr:.3e} cos {cos_yr:.6}");
     assert!(cos_ym >= 0.999 && rel_ym <= 5e-2, "MoE out：rel {rel_ym:.3e} cos {cos_ym:.6}");

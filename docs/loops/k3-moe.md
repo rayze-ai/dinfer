@@ -212,7 +212,7 @@ scale 统计（`scripts/verify/k3_mxfp4_scale_stats.py`，36 张量 = L{1,12,45,
 
 ## 里程碑 C-2：第 1 层整层真权重对拍（KDA + latent MoE + AttnRes，2026-10-20，B300-50）
 
-> 状态：**代码完成、远端对拍进行中**（结果见本节末尾的表）。crate 侧 `models/kimik3/src/{latent_moe.rs,layer.rs}`，
+> 状态：**完成（2026-10-20，`k3_layer.sh` exit 0，B300-50）**。crate 侧 `models/kimik3/src/{latent_moe.rs,layer.rs}`，
 > 测试 `models/kimik3/tests/layer_parity.rs`，外壳 `scripts/verify/k3_layer.sh`（exit 0 = 过），参考 `scripts/verify/gen_k3_layer_refs.py`。
 
 ### 与 HF 代码核对（`modeling_kimi_linear.py`，唯一口径）
@@ -243,7 +243,34 @@ scale 统计（`scripts/verify/k3_mxfp4_scale_stats.py`，36 张量 = L{1,12,45,
 
 ### 结果
 
-（远端 `k3_layer.sh` 跑完后填：各子块 rel / cos、top-16 命中率、单层 T=64 耗时、专家常驻字节。）
+`scripts/verify/k3_layer.sh` **exit 0**（B300-50，2026-10-20；日志 + .npy 归档 `test/kimik3/2026-10-20/layer/`，18 MB）。
+T=64、第 1 层、单 slot、`--release`。rel = max_err / max|参考|。
+
+| 比较 | rel | mean_abs | cos | 门槛 |
+|---|---|---|---|---|
+| attn 门 `h = AttnRes({x₀,x})` vs HF | 4.59e-3 | 2.6e-5 | 0.9999998 | cos ≥ 0.999 |
+| attn out vs fla | 9.87e-3 | 2.5e-5 | 0.9999514 | cos ≥ 0.999 |
+| prefix `p = x + a` vs HF | 3.36e-3 | 2.5e-5 | 0.9999999 | — |
+| mlp 门 `m = AttnRes({x₀,p})` vs HF | 4.59e-3 | 3.6e-5 | 0.9999998 | cos ≥ 0.999 |
+| post_norm `mn` vs HF | 6.17e-3 | 4.4e-5 | 0.9999958 | — |
+| router logits（f32）vs HF | 4.21e-3 | 5.5e-4 | 0.9999956 | cos ≥ 0.999 |
+| **top-16 命中** | pair 级 **1021/1024（99.71%）**；可判定行（margin > 2e-3）23/64 **全中**；路由整行一致 61/64，不一致 3 行全是平局 | | | 可判定行全中 |
+| 专家加权和 `ysum`（路由一致 61 行） | 3.65e-3 | 2.0e-5 | 0.9999860 | cos ≥ 0.999 |
+| routed `up_proj`（61 行） | 3.76e-3 | 4.4e-5 | 0.9999802 | cos ≥ 0.999 |
+| MoE out（+shared，61 行） | 7.09e-3 | 4.8e-5 | 0.9999782 | cos ≥ 0.999 |
+| （参考）`ysum` / routed / MoE out **全部 64 行** | 1.45e-1 / 7.98e-2 / 7.54e-2 | — | 0.99851 / 0.99840 / 0.99854 | 不判（平局行专家不同） |
+| **整层 `out` vs HF** | **5.07e-3** | 1.6e-4 | **0.9999990** | cos ≥ 0.999 |
+
+读法：所有子块 rel 在 4–10e-3 = bf16 一 ulp 量级，无系统性偏差；MXFP4 专家 GEMM（kernel 内解包 + bf16 乘加）对 torch
+"解包→bf16 linear" 参考 3.7e-3。3 个路由翻转 pair 全在 `choice` 第 16/17 大相差 ≤ 2e-3 的行（bf16 输入已足以翻转），
+这是硬判决不可逐位复现的既定口径（pitfalls 新条目）；对整层只有 1e-3 量级影响（整层 cos 0.999999）。
+参考侧：64×16 pairs 命中 400 个专家，torch 解包+算 9.5 s；attn / mlp 门对 prefix 的平均概率 0.494 / 0.498（两候选接近均匀——随机 x₀ 的预期）。
+
+| 事实 | 数值 |
+|---|---|
+| 装载（mmap 16 GB 分片 → 896×6 次 H2D + 其余 bf16） | 2.0 s，显存 +17.11 GB（专家 packed 15.72 GB + bf16 投影/shared ~1.4 GB） |
+| 单层 T=64 耗时（B300，release） | 首轮 194–204 ms（含 cuBLASLt 首次 / tile 计划），**之后 5 次均值 39.5 ms**（含 MoE 1 次 D2H + AttnRes 2 门 × 2 候选 = 4 次 D2H + host softmax） |
+| 每 token 专家 GEMM | 16 × 2 = 32 次；grouped 实现每步 2 条 kernel |
 
 ### 性能事实（单层，T=64，B300）
 
