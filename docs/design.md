@@ -579,6 +579,7 @@ finish, stash_sync_result}` 与 pinned 原语 `PinnedSlot` 本来就是公共的
 | GDN 混合模型（Qwen3.5，2026-10-19 里程碑 4） | vLLM `qwen3_next.py` / `qwen_gdn_linear_attn.py` 的层语义（in_proj → conv1d(silu) → gate/beta → delta rule → gated RMSNorm(z)）、per-head 交错 q/gate 输出门、partial RoPE + zero-centered q/k norm（`fused_qk_rmsnorm_rope_gate`）、`chunk_gated_delta_rule` 的数学口径 | ① q_proj 的 q/gate 拆成**两条紧凑 GEMM**（省 attention 后的按行搬运，FLOPs 相同）；② GDN 状态由模型 crate 自管 per-request slot（新增一个模型不需要动 core 的 KV group 抽象）；③ prefill 先用顺序递归（数值等价），chunk 形式留作 perf 项 | 里程碑 4：tiny golden 4/4（`scripts/verify/qwen35_golden.sh`） |
 | 2026-10-19 | 采用（待做） | vLLM 对 Mamba/GDN/KDA 混合模型的 prefix cache：`mamba_cache_mode=align` + `mamba_block_size`，递归状态按块对齐快照才能跳过已缓存 prompt | Qwen3.5 真权重 bench 发现命中前缀后 GDN 状态从零起；现强制关 prefix cache（`models/qwen35/src/service.rs`），K3（KDA）同样 | 待实现后重开 prefix cache，c8-long TTFT 可回到命中档 |
 | 2026-10-20 | 采用（口径） | `/data/code/llm-cache-prediction`（用户指定参考）：K3 渲染参照物是 vLLM 服务端 Rust renderer 而非 HF python（浮点 / tool 参数 / name 字段 / thinking 对象四处偏差）；tiktoken 400k/25k 切分；vLLM K3 前缀命中粒度 1536 = 12×128（mamba align 下状态快照在注意力 block 配平边界） | K3 C-4a golden 按服务端语义生成；递归模型 prefix cache 设计按 block 配平粒度 | 避免重踩 4 处偏差；prefix cache 粒度不再拍脑袋 |
+| 2026-10-20 | 采用 | vLLM `qwen3_next.py` 的 `in_proj_qkvz`（GDN 四投影一条 GEMM）与 `qkv_proj`（q/gate/k/v 一条 GEMM）：`models/qwen35` 第 9 轮改为融合 `in_proj [qkv|z|a|b]` 与 `qkv [q|gate|k|v]`，下游 kernel 按列段 + 行距读（`x_stride / ab_stride / z_stride / mul_sigmoid_rows`），不拷贝 | 每层 GEMM GDN 5→2、attn 3→2，B=32 一步少 160 次 launch（含 96 次 splitK reduce）；撤回里程碑 4 的"两条紧凑 GEMM"决定（当时为省一次按行搬，现在 kernel 直接带 stride） |
 
 ## 12. 整体功能待办路线图（2026-10-18 盘点，不分模型）
 
@@ -672,3 +673,31 @@ finish, stash_sync_result}` 与 pinned 原语 `PinnedSlot` 本来就是公共的
 | T3 | TP 下 CUDA graph 含 all-reduce；`fused_allreduce_rmsnorm`；lm_head 列切开关 | TPOT 开销 ≤ 单卡 + 56 × all-reduce |
 | T4 | DCP（Qwen3 先做，复用 split-K 归并） | 单请求 context 超单卡 KV 仍可跑 |
 | T5 | EP（GLM/K3 真权重到位后） + DP 波次同步 | 功能 |
+
+## 14. 超越 vLLM 的质变路径（2026-10-20，用户："大部分还在照着 vLLM 实现，有没有自己的想法能够实现质的提升"）
+
+### 14.1 为什么"继续抠 kernel"到不了质变
+
+Qwen3.5-27B bf16 单卡 B300（`test/qwen35/2026-10-19/bench_b300_15`）：decode 每步读权重 52 GB，8 TB/s 的物理下限 **6.5 ms**；我们 TPOT c1 10.3 ms = vLLM 10.3 ms，都在 63%。剩下 3.8 ms 不在任何一个 kernel 里：每步 ~900 个 kernel 的边界效应（尾部 SM 空转、launch 间隙、延迟型小算子各 2–3 µs）。nsys 已证实 GPU 100% 忙（async 后 span < kernel 之和），GEMM 在 HBM 72–76%。同精度同硬件、"一算子一 kernel"结构下，上限约 1.1×。vLLM 基于 PyTorch 算子，torch.compile 只融 elementwise，跨 GEMM 融不了——**它结构上到不了下一档，这是我们唯一能拉开差距的地方**。
+
+### 14.2 三条有质变潜力的路（按"是否只有我们能做"排序）
+
+| 路 | 做法 | 预期 | 为什么 vLLM 做不到 / 做不好 |
+|---|---|---|---|
+| **A. decode 整步 megakernel** | 64 层的 GEMV / norm / GDN 状态更新 / attention 编成静态任务图，一个 persistent grid 跑完整步；SM 间用全局计数器做细粒度依赖；权重 TMA 预取进 smem；B 维请求在 SM 间分配 | B=1：10.3 → ~7.5 ms（1.4×，边界效应消失）；B=32 的 +3 ms B 维开销吃掉大半；Hazy Research 在 Llama-1B 上对 vLLM/SGLang 做到 1.5× | 需要整个前向在自己手里（我们是 Rust + 手写 CUDA，已满足）；PyTorch 算子图做不了 |
+| **B. NVFP4 权重（B300）** | 权重 52 → 13 GB，下限 6.5 → 1.6 ms；按层混精度（敏感层 bf16）+ 校准 | 与 A 叠加后 TPOT 进入 2–3 ms 档 | vLLM 也支持，但按层混精度 + 自调优是可以做得更好的地方；不是独有 |
+| **C. K3 MoE 融合路径** | 路由 → 按专家聚合 → `tcgen05` MXFP4 grouped GEMM → situ → 散回 + AttnRes 标量门，一个 kernel；`mxfp4_gemm_sm100.cu` 现在是空壳 | K3 92 层 MoE，收益比 Qwen3.5 大一个量级 | vLLM 用通用 Marlin / FlashInfer 类 kernel，路由 / GEMM / 激活 / AttnRes 分开 |
+
+判断为**非质变**的：调度 / 引擎层（已零 Python、TTFT 领先一倍，但 TPOT 由 GPU 决定）；投机解码（两边都有，加法不是乘法）；PD / TP（能力项不是倍率项）。
+
+### 14.3 第一阶段实验（先要数字，不直接重写）
+
+- **范围**：Qwen3.5 的**一个 GDN 层** decode（B ∈ {1, 8, 32}）：rmsnorm → in_proj（合并后 1 个 N=16480 GEMV）→ conv1d_update → gate → GDN 递归 → gated_rmsnorm → out_proj → 残差+rmsnorm → gate_up → silu → down → 残差，现在是 ~11 个 kernel，改成 1 个 persistent kernel。
+- **结构**：block = 一个 SM 常驻 CTA；任务 = (阶段, N 分片 / 请求分片)；依赖用全局 `ready[stage][shard]` 计数器 + `ld.acquire`；GEMV 权重分片按 N 切给 CTA，A 行广播；GDN 状态更新复用 `recurrent_decode_kernel` 的寄存器方案；阶段间的激活走全局（L2 常驻，一层的激活 B=32 × 16480 × 2 B = 1 MB）。
+- **门禁**：单层 B300 耗时 vs 现有 11 kernel 之和（nsys node 级，现在 B=1 ≈ 0.14 ms/层、B=32 ≈ 0.21 ms/层）；赢 ≥ 25% 才扩到整步；数值与现有路径 bf16 逐位或 cos ≥ 0.9999；代码放 `crates/kernels/cuda/mega_sm100.cu`（Blackwell 专用，TMA / cluster），sm8x 不做（没有 TMA，收益不同）。
+- **预算**：一周；失败即止，记入本节。
+- **顺序建议**：A 第一阶段 → 若成立，B（NVFP4）与 A 的 GEMV 一起做（FP4 解包就在 GEMV 片段里）→ C 复用 A 的任务图框架做 K3 MoE 层。
+
+### 14.4 与 §11 台账的关系
+
+A / C 是"改进"而非"采用"；做成后在 §11 各记一行。本节由用户决定是否开工。
