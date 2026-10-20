@@ -70,6 +70,24 @@
 - 1x4096 chain_us dinfer：r9 第 2 轮：ho 两段版 h-pass + o-pass（*sp 列）；3090 默认仍融合版（ArchProfile 门限待 B300 数字）
 - 1x8192 chain_us dinfer：r9 第 2 轮：ho 两段版 h-pass + o-pass（*sp 列）；3090 默认仍融合版（ArchProfile 门限待 B300 数字）
 
+## probe_gdn_r9_3（2026-10-20，3090）
+
+### gdn_scale（us）
+
+| x | chain_us dinfer | conv_rows0_us dinfer | conv_rows128_us dinfer | conv_rows256_us dinfer | conv_rows32_us dinfer | conv_rows64_us dinfer | ho_bv16_us dinfer | ho_bv16pf_us dinfer | ho_bv16pfsp_us dinfer | ho_bv16sp_us dinfer | ho_bv32_us dinfer | ho_bv32pf_us dinfer | ho_bv32pfsp_us dinfer | ho_bv32sp_us dinfer | ho_legacy_us dinfer | prep_us dinfer | wy_legacy_us dinfer | wy_serial_us dinfer | wy_us dinfer |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1x1024 | 591 | 560 | 135 | 253 | 75 | 78 | 352 | 448 | 330 | 343 | 281 | 448 | 320 | 322 | 2942 | 32 | 1219 | 342 | 274 |
+| 8x1024 | 3878 | 1039 | 443 | 456 | 511 | 463 | 2699 | 3468 | 2524 | 2466 | 1916 | 3113 | 2135 | 2116 | 18746 | 173 | 9247 | 2287 | 1906 |
+| 32x128 | 2263 | 448 | 240 | 311 | 269 | 249 | 1407 | 1869 | 1364 | 1354 | 1170 | 1931 | 1270 | 1202 | 9261 | 92 | 4607 | 1220 | 1010 |
+| 1x4096 | 2125 | 2354 | 225 | 290 | 260 | 238 | 1370 | 1713 | 1319 | 1372 | 1029 | 1767 | 1287 | 1274 | 12001 | 93 | 4618 | 1218 | 1002 |
+| 1x8192 | 4140 | 4775 | 435 | 424 | 513 | 462 | 2781 | 3552 | 2684 | 2687 | 2052 | 3558 | 2688 | 2607 | 23891 | 173 | 9414 | 2284 | 1910 |
+
+- 1x1024 chain_us dinfer：r9 第 3 轮：wy 分块三角逆（16×16 对角块 warp 内前代 + 非对角 fp32 乘）+ sM f32 复用 sK∪sQ 省 16 KB smem；wy_serial 列 = 64 步前代回退
+- 8x1024 chain_us dinfer：r9 第 3 轮：wy 分块三角逆（16×16 对角块 warp 内前代 + 非对角 fp32 乘）+ sM f32 复用 sK∪sQ 省 16 KB smem；wy_serial 列 = 64 步前代回退
+- 32x128 chain_us dinfer：r9 第 3 轮：wy 分块三角逆（16×16 对角块 warp 内前代 + 非对角 fp32 乘）+ sM f32 复用 sK∪sQ 省 16 KB smem；wy_serial 列 = 64 步前代回退
+- 1x4096 chain_us dinfer：r9 第 3 轮：wy 分块三角逆（16×16 对角块 warp 内前代 + 非对角 fp32 乘）+ sM f32 复用 sK∪sQ 省 16 KB smem；wy_serial 列 = 64 步前代回退
+- 1x8192 chain_us dinfer：r9 第 3 轮：wy 分块三角逆（16×16 对角块 warp 内前代 + 非对角 fp32 乘）+ sM f32 复用 sK∪sQ 省 16 KB smem；wy_serial 列 = 64 步前代回退
+
 ## probe_prefill_1（2026-10-20，B300）
 
 ### ttft_len（ms）

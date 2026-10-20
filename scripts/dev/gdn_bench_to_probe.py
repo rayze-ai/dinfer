@@ -12,17 +12,19 @@ if len(sys.argv) >= 2 and sys.argv[1] == "--header":
     print(COLS); sys.exit(0)
 log, probe, gpu, date = sys.argv[1:5]
 note = sys.argv[5] if len(sys.argv) > 5 else ""
-pat = re.compile(r"\[(\d+)×(\d+)\].*?chunk 全链 (\d+) µs.*?prep (\d+) \| wy old (\d+) mma (\d+) \| ho (.*?) \| conv (.*)$")
+pat = re.compile(r"\[(\d+)×(\d+)\].*?chunk 全链 (\d+) µs.*?prep (\d+) \| wy old (\d+) mma (\d+)(?: mma64 (\d+))? \| ho (.*?) \| conv (.*)$")
 for line in open(log, encoding="utf-8"):
     m = pat.search(line.strip())
     if not m:
         continue
     x = f"{m.group(1)}x{m.group(2)}"
     rows = [("chain_us", m.group(3)), ("prep_us", m.group(4)), ("wy_legacy_us", m.group(5)), ("wy_us", m.group(6))]
-    for kv in m.group(7).split():
-        k, v = kv.split("=")
-        rows.append((("ho_legacy_us" if k == "bv0" else f"ho_{k}_us"), v))  # bv16 / bv32 / bv16pf / bv32pf / split…  # bv16 / bv32 / bv16pf / bv32pf / split…
+    if m.group(7):
+        rows.append(("wy_serial_us", m.group(7)))  # r9 第 3 轮起：64 步前代版（回退）
     for kv in m.group(8).split():
+        k, v = kv.split("=")
+        rows.append((("ho_legacy_us" if k == "bv0" else f"ho_{k}_us"), v))  # bv16 / bv32 / *pf / *sp
+    for kv in m.group(9).split():
         k, v = kv.split("=")
         rows.append((f"conv_{k}_us", v))
     for i, (metric, v) in enumerate(rows):

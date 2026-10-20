@@ -3652,18 +3652,50 @@ fn gdn_chunk_ho_prefetch(ho_bv: usize) -> bool {
     over.unwrap_or_else(|| crate::arch::ArchProfile::gdn_chunk_ho_prefetch(ho_bv))
 }
 
-/// chunk prefill `wy` 走 tensor core 版的条件：K ∈ {64,128,256} 且 V % 8 == 0；`GDN_CHUNK_WY=legacy` 回老 fp32 kernel。
-fn gdn_chunk_wy_mma(k_dim: usize, v_dim: usize) -> bool {
-    use std::sync::OnceLock;
-    static LEGACY: OnceLock<bool> = OnceLock::new();
-    let legacy = *LEGACY.get_or_init(|| {
-        let l = matches!(std::env::var("GDN_CHUNK_WY").as_deref(), Ok("legacy"));
-        if l {
-            tracing::info!("gdn chunk wy kernel 由环境变量回退到 fp32 版");
+/// chunk prefill `wy` 的实现：`Legacy` 老 fp32；`Mma` tensor core + 分块三角逆（r9 第 3 轮，默认）；
+/// `MmaSerial` tensor core + 64 步前代（第 5A 轮，回退）。`GDN_CHUNK_WY=legacy|serial` 覆盖。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GdnChunkWy {
+    Legacy,
+    Mma,
+    MmaSerial,
+}
+
+impl GdnChunkWy {
+    fn code(self) -> i64 {
+        match self {
+            Self::Legacy => 0,
+            Self::Mma => 1,
+            Self::MmaSerial => 2,
         }
-        l
+    }
+}
+
+impl From<bool> for GdnChunkWy {
+    fn from(mma: bool) -> Self {
+        if mma { Self::Mma } else { Self::Legacy }
+    }
+}
+
+/// 默认 wy 实现：K ∈ {64,128,256} 且 V % 8 == 0 才有 tensor core 版，否则老 fp32。
+fn gdn_chunk_wy_default(k_dim: usize, v_dim: usize) -> GdnChunkWy {
+    use std::sync::OnceLock;
+    static OVER: OnceLock<Option<GdnChunkWy>> = OnceLock::new();
+    let over = *OVER.get_or_init(|| {
+        let o = match std::env::var("GDN_CHUNK_WY").as_deref() {
+            Ok("legacy") => Some(GdnChunkWy::Legacy),
+            Ok("serial") => Some(GdnChunkWy::MmaSerial),
+            _ => None,
+        };
+        if o.is_some() {
+            tracing::info!(?o, "gdn chunk wy kernel 由环境变量覆盖");
+        }
+        o
     });
-    !legacy && matches!(k_dim, 64 | 128 | 256) && v_dim % 8 == 0
+    if !(matches!(k_dim, 64 | 128 | 256) && v_dim % 8 == 0) {
+        return GdnChunkWy::Legacy;
+    }
+    over.unwrap_or(GdnChunkWy::Mma)
 }
 
 /// conv1d prefill 的按 token 分块行数：默认 `ArchProfile::gdn_conv_rows`；`CONV_PREFILL=legacy` 回老 kernel（返回 0）；
@@ -3887,13 +3919,13 @@ pub fn gdn_chunk_wy(
     k_dim: usize,
     v_dim: usize,
 ) -> Result<()> {
-    let mma = gdn_chunk_wy_mma(k_dim, v_dim);
+    let how = gdn_chunk_wy_default(k_dim, v_dim);
     gdn_chunk_wy_with(
-        stream, mixed_qkv, beta, cu_seqlens, plan, sc, tokens, heads_k, heads_v, k_dim, v_dim, mma,
+        stream, mixed_qkv, beta, cu_seqlens, plan, sc, tokens, heads_k, heads_v, k_dim, v_dim, how,
     )
 }
 
-/// `gdn_chunk_wy` 指定实现：`mma = true` 走 tensor core 版（第 5A 轮），否则老 fp32 版。对拍 / 计时用。
+/// `gdn_chunk_wy` 指定实现（见 `GdnChunkWy`；`bool` 可直接传：true = Mma，false = Legacy）。对拍 / 计时用。
 #[allow(clippy::too_many_arguments)]
 pub fn gdn_chunk_wy_with(
     stream: &Stream,
@@ -3907,8 +3939,9 @@ pub fn gdn_chunk_wy_with(
     heads_v: usize,
     k_dim: usize,
     v_dim: usize,
-    mma: bool,
+    how: impl Into<GdnChunkWy>,
 ) -> Result<()> {
+    let how = how.into();
     ensure!(sc.fits(tokens, plan.num_chunks), "gdn_chunk_wy: scratch 容量");
     ensure!(beta.len() >= tokens * heads_v, "gdn_chunk_wy: beta");
     // SAFETY: 容量已校验。
@@ -3932,7 +3965,7 @@ pub fn gdn_chunk_wy_with(
                 k_dim as i64,
                 v_dim as i64,
                 plan.bt as i64,
-                mma as i64,
+                how.code(),
                 stream.raw() as _,
             )
         },
