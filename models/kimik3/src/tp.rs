@@ -17,6 +17,7 @@ struct Step {
     drafts: Vec<Vec<u32>>,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum Msg {
     Step(Step),
     Shutdown,
@@ -50,15 +51,10 @@ impl TpExecutor {
                             let _ = dtx.send(Err(e));
                             return;
                         }
-                        loop {
-                            match rx.recv() {
-                                Ok(Msg::Step(mut st)) => {
-                                    let r = ex.forward_sample(&st.plan, &mut st.generated, &mut st.drafts);
-                                    if dtx.send(r).is_err() {
-                                        break;
-                                    }
-                                }
-                                Ok(Msg::Shutdown) | Err(_) => break,
+                        while let Ok(Msg::Step(mut st)) = rx.recv() {
+                            let r = ex.forward_sample(&st.plan, &mut st.generated, &mut st.drafts);
+                            if dtx.send(r).is_err() {
+                                break;
                             }
                         }
                     })
