@@ -129,7 +129,7 @@ models/qwen35/src/
   executor.rs    与 qwen3 同骨架；两个 KV group（paged + mamba 状态）
   parser.rs      思考段 / tool_call（核对后决定能否复用 qwen3 的）
   service.rs     ChatBackend
-tests/           golden_parity.rs（tiny golden：4 个用例，`scripts/verify/qwen35_golden.sh`）、real_parity.rs、chat_parity.rs
+tests/           golden_parity.rs（tiny golden：11 个用例，r8 加 4 个快照 / 命中 / 抢占、r8b 加 1 个 kernel 边界快照，`scripts/verify/qwen35_golden.sh`）、real_parity.rs、chat_parity.rs
 ```
 
 ### 2.1 权重映射表（里程碑 3 已核对的语义，写代码前先看这张表）

@@ -4,10 +4,20 @@
 
 | 轮 | 卡 | 改动 | SLO 下最大 req/s dinfer | vLLM | 比 |
 |---|---|---|---|---|---|
+| 2026-10-20/engine_r8b | B300 | r8b kernel 沿 chunk 边界写快照、调度不切步 | 8 | - | - |
 | 2026-10-20/engine_smoke | 3090 | 引擎口径工具冒烟（tiny 全词表 qwen35，3090，仅 dinfer） | 8 | - | - |
 | 2026-10-20/engine_1 | B300 | 引擎口径首轮：钉核 Rust bench，rate 2/4/8/12，mix 128/1024/4096 + out mix，prefix-repeat 0.5，allow-eos，SLO 500/20 | 2 | 4 | 0.50× |
 | 2026-10-20/engine_2 | B300 | 第 7 轮：GdnChunkWorkspace 一次分配 + warmup 预载 + graph 全桶预捕获 + 四段计时（host 空转清零） | 4 | 12 | 0.33× |
 | 2026-10-20/engine_r8 | B300 | r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉） | 8 | - | - |
+
+## 2026-10-20/engine_r8b（B300）— r8b kernel 沿 chunk 边界写快照、调度不切步
+
+SLO：TTFT ≤ 500 ms 且 TPOT ≤ 20 ms。负载：prompt mix 128:0.5,1024:0.35,4096:0.15；out mix 128:0.5,512:0.35,1024:0.15；不 ignore_eos；prefix_repeat 0.5；multi_turn 1；每率 64 条
+
+| rate | 端 | 完成/失败 | goodput | req/s | out tok/s | TTFT p50/p90/p99/max | TPOT p50/p90/p99/max | cache hit |
+|---|---|---|---|---|---|---|---|---|
+| 4 | dinfer | 64/0 | 2.25 (59/64) | 2.44 | 1084 | 49.7/186.6/540.6/647.4 | 14.4/15.9/20.1/20.2 | 0.488 |
+| 8 | dinfer | 64/0 | 3.15 (64/64) | 3.15 | 1390 | 50.6/67.6/95.6/96.0 | 16.1/17.2/18.3/18.4 | 0.786 |
 
 ## 2026-10-20/engine_smoke（3090）— 引擎口径工具冒烟（tiny 全词表 qwen35，3090，仅 dinfer）
 

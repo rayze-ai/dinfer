@@ -1,4 +1,35 @@
 round,date,gpu,change,side,rate,metric,value
+2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,4.0,goodput_rps,2.2516
+2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,4.0,request_rps,2.4424
+2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,4.0,out_tps,1084.2946
+2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,4.0,ttft_p50,49.6704
+2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,4.0,ttft_p90,186.6449
+2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,4.0,ttft_p99,540.6138
+2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,4.0,ttft_max,647.4441
+2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,4.0,ttft_1st_p50,49.6668
+2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,4.0,tpot_p50,14.3687
+2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,4.0,tpot_p90,15.9053
+2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,4.0,tpot_p99,20.0778
+2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,4.0,tpot_max,20.2202
+2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,4.0,cache_hit,0.4876
+2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,4.0,completed,64.0000
+2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,4.0,failed,0.0000
+2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,8.0,goodput_rps,3.1494
+2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,8.0,request_rps,3.1494
+2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,8.0,out_tps,1389.9577
+2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,8.0,ttft_p50,50.5986
+2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,8.0,ttft_p90,67.5805
+2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,8.0,ttft_p99,95.6486
+2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,8.0,ttft_max,95.9948
+2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,8.0,ttft_1st_p50,50.5959
+2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,8.0,tpot_p50,16.1403
+2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,8.0,tpot_p90,17.2225
+2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,8.0,tpot_p99,18.2676
+2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,8.0,tpot_max,18.4011
+2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,8.0,cache_hit,0.7864
+2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,8.0,completed,64.0000
+2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,8.0,failed,0.0000
+2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,,max_good_rate,8.00
 2026-10-20/engine_smoke,2026-10-20,3090,引擎口径工具冒烟（tiny 全词表 qwen35，3090，仅 dinfer）,dinfer,4.0,goodput_rps,3.8154
 2026-10-20/engine_smoke,2026-10-20,3090,引擎口径工具冒烟（tiny 全词表 qwen35，3090，仅 dinfer）,dinfer,4.0,request_rps,3.8154
 2026-10-20/engine_smoke,2026-10-20,3090,引擎口径工具冒烟（tiny 全词表 qwen35，3090，仅 dinfer）,dinfer,4.0,out_tps,122.0918

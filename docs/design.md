@@ -821,6 +821,8 @@ B300 单 GDN 层 decode，基线 = 现路径 11 kernel + 自调优 GEMM + CUDA g
   | 8 | dinfer engine_2（无 cache） | 1.32 | 126.4 / 401.6 | 20.9 / 31.4 | 0 | 0 |
   | 8 | **dinfer r8** | **2.99** | **61.8 / 116.8** | 17.4 / 20.2 | **0.806** | 0 |
   | 8 | vLLM engine_2 | 2.87 | 100.1 / 163.7 | 15.4 / 18.1 | 0.699 | - |
+  | 4 | **dinfer r8b**（`engine_r8b`，B300-50 GPU 2） | **2.25** | **49.7** / 540.6 | 14.4 / 20.1 | **0.488** | 0 |
+  | 8 | **dinfer r8b** | **3.15** | **50.6 / 95.6** | 16.1 / **18.3** | 0.786 | 0 |
 
   - rate 8：goodput 1.32 → **2.99（> vLLM 2.87）**，TTFT p99 402 → **117（< vLLM 164）**，cache hit 0.806（> vLLM 0.699：我们对齐粒度 1024 ≤ 共享前缀 1024 词 ≈ 1.2k token，vLLM 的 align 粒度更粗）。验收 "cache hit ≥ 0.4、rate 4 TTFT p99 ≤ 150、goodput ≥ vLLM" 三条：cache ✅、goodput ✅（4 / 8 都 ≥ vLLM）、**rate 4 p99 ❌（432）**——拆开看：命中请求（30 条，prompt p50 1233）TTFT p50 61.6 / max 182；p99 的 7 条全是**冷** 4.8k prompt（cached 0，TTFT 363–439），即 4k prefill 单步 ~400 ms（engine-gap 8e 的 "GDN 大 T 线性涨"），与本轮无关、与 rate 8 的 p99 117 不矛盾（rate 8 随机 seed 下冷 4.8k 条少）。下一步是 4k prefill 的 chunk 并行（r9 wy/ho）。
   - 正确性：serve 全程 0 条 "slot 被复用给带历史的请求"（engine_2 之前 86 条）；同 prompt 两次 smoke 第二次 `cached_tokens` 5120/5887、输出逐字相同；抢占 0。
@@ -834,7 +836,7 @@ B300 单 GDN 层 decode，基线 = 现路径 11 kernel + 自调优 GEMM + CUDA g
 - **kernel**（`crates/kernels/cuda/gdn_chunk.cu`）：`gdn_chunk_ho_v3` = v2 + `snap_off / snap_pos / snap_slot / snap_state`（v2 转 v3(nullptr)，v1 不动）。三个 ho kernel（legacy fp32 / mma 融合 / h-pass）在 chunk 循环末尾 `snap_target(seq, ci*BT+len)` 命中时把 h（fp32 主本，寄存器）用与末态回写同一个 `store_h` 多写一份到快照槽；递推 / 装载 / mma 不动。每序列条目 ≤ 本步 token / 粒度，查表是几次 int 比较。写出成本 = 每边界 3.15 MB/层 ≈ µs 级（r8 的步末 dtod 154 MB 本来也只 20 µs，代价一直在切步不在拷贝）。conv 状态：`gdn.cu::gdn_conv_snapshot`，状态 = 原始输入行 `[p-(W-1), p)` 转置（p < W-1 的列从入口状态补、无入口状态为 0），在 `conv1d_prefill` 覆盖活槽之前调用。
 - **公共件**（`dinfer_layers::exec::PlanBuffers`）：`snap_off [rows+1] / snap_pos / snap_slot`，`upload` 按 `plan.recurrent_snapshot` 把绝对位置换成相对该请求段首（`positions[cu_seqlens[i]]`）的偏移上传，padding 行无条目；`snap_count` host 镜像。模型侧（qwen35 `GdnMeta.snapshot`）只把三列交给 GDN 层。
 - **executor**（qwen35）：走 chunk 路径（`t > n && gdn_chunk_enabled`）时快照全由 kernel 写、步末不再 dtod；回退路径（`GDN_PREFILL=recurrent`）只接受位置 == 段末的条目（步末 dtod），步内快照直接报错——不静默算错。
-- **验收**：sched 单测 26/26；golden 11/11（新 `golden_kernel_boundary_snapshot_one_step`）。B300：6 K 单发步数 / TTFT、engine 口径三指标见下表（待 ssh 通道恢复后填）。
+- **验收**：sched 单测 26/26；golden 11/11（新 `golden_kernel_boundary_snapshot_one_step`）。engine 口径（表中 r8b 行，与 r8 第二跑同配置、新 seed）：rate 8 goodput 3.04 → **3.15**、TTFT p50/p99 60.0/103.7 → **50.6/95.6**、TPOT p99 18.8 → **18.3**、cache 0.807 → 0.786（seed 差）；rate 4 goodput 2.15 → 2.25、TTFT p50 59.4 → 49.7、cache 0.348 → 0.488，p99 401 → 540 仍是冷 4.8k prompt（seed 决定有几条，与本轮无关；单发 6 K 探针反证）。多轮收益完整保留且 TTFT p50 再降 ~10 ms（命中请求的剩余段 / 冷请求都不再切步）。B300-50 GPU 2（`probe_prefill_5`）：6 K 单发 **1 步**（r8 池开 6 步），TTFT 中位 **291.8 ms**（r8 346.8；池关 290.5；vLLM 260），3 K 142.5 / 1 步（r8 163.1 / 3 步）——切步代价全部拿回。engine 口径（`engine_r8b`，rate 4 / 8，prefix_repeat 0.5）：见下表 r8b 行。
 
 **engine_2（第 7 轮二进制：warmup + 全桶预捕获 + GdnChunkWorkspace 一次分配；同配置、不同 seed）**：
 
