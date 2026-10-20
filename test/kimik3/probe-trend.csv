@@ -1,0 +1,29 @@
+probe,date,gpu,model,group,metric,side,x,value,unit,note
+probe_c6_tp8_1,2026-10-20,B300,kimik3,c6_closed_loop,tpot_p50_ms,dinfer,c1,168.78,ms,C-6 首轮 tp8 全 93 层，预算 512，graph 关；vLLM = bench_b300_vllm1 tp8 预算 16384
+probe_c6_tp8_1,2026-10-20,B300,kimik3,c6_closed_loop,ttft_p50_ms,dinfer,c1,1822.35,ms,C-6 首轮 tp8 全 93 层，预算 512，graph 关；vLLM = bench_b300_vllm1 tp8 预算 16384
+probe_c6_tp8_1,2026-10-20,B300,kimik3,c6_closed_loop,out_tok_per_s,dinfer,c1,5.51,tok/s,C-6 首轮 tp8 全 93 层，预算 512，graph 关；vLLM = bench_b300_vllm1 tp8 预算 16384
+probe_c6_tp8_1,2026-10-20,B300,kimik3,c6_closed_loop,completed,dinfer,c1,16,req,C-6 首轮 tp8 全 93 层，预算 512，graph 关；vLLM = bench_b300_vllm1 tp8 预算 16384
+probe_c6_tp8_1,2026-10-20,B300,kimik3,c6_closed_loop,tpot_p50_ms,vllm,c1,8.70,ms,
+probe_c6_tp8_1,2026-10-20,B300,kimik3,c6_closed_loop,ttft_p50_ms,vllm,c1,192.59,ms,
+probe_c6_tp8_1,2026-10-20,B300,kimik3,c6_closed_loop,out_tok_per_s,vllm,c1,98.73,tok/s,
+probe_c6_tp8_1,2026-10-20,B300,kimik3,c6_closed_loop,completed,vllm,c1,16,req,
+probe_c6_tp8_1,2026-10-20,B300,kimik3,c6_closed_loop,tpot_p50_ms,dinfer,c8,324.45,ms,
+probe_c6_tp8_1,2026-10-20,B300,kimik3,c6_closed_loop,ttft_p50_ms,dinfer,c8,7313.95,ms,
+probe_c6_tp8_1,2026-10-20,B300,kimik3,c6_closed_loop,out_tok_per_s,dinfer,c8,21.07,tok/s,
+probe_c6_tp8_1,2026-10-20,B300,kimik3,c6_closed_loop,completed,dinfer,c8,32,req,
+probe_c6_tp8_1,2026-10-20,B300,kimik3,c6_closed_loop,tpot_p50_ms,vllm,c8,13.09,ms,
+probe_c6_tp8_1,2026-10-20,B300,kimik3,c6_closed_loop,ttft_p50_ms,vllm,c8,368.42,ms,
+probe_c6_tp8_1,2026-10-20,B300,kimik3,c6_closed_loop,out_tok_per_s,vllm,c8,502.98,tok/s,
+probe_c6_tp8_1,2026-10-20,B300,kimik3,c6_closed_loop,completed,vllm,c8,32,req,
+probe_c6_tp8_1,2026-10-20,B300,kimik3,c6_closed_loop,tpot_p50_ms,dinfer,c32,817.28,ms,"n=32（脚本 max(c×4,16)）"
+probe_c6_tp8_1,2026-10-20,B300,kimik3,c6_closed_loop,ttft_p50_ms,dinfer,c32,32958.10,ms,"n=32（脚本 max(c×4,16)）"
+probe_c6_tp8_1,2026-10-20,B300,kimik3,c6_closed_loop,out_tok_per_s,dinfer,c32,20.88,tok/s,"n=32（脚本 max(c×4,16)）"
+probe_c6_tp8_1,2026-10-20,B300,kimik3,c6_closed_loop,completed,dinfer,c32,32,req,"n=32（脚本 max(c×4,16)）"
+probe_c6_tp8_1,2026-10-20,B300,kimik3,c6_closed_loop,tpot_p50_ms,vllm,c32,19.15,ms,
+probe_c6_tp8_1,2026-10-20,B300,kimik3,c6_closed_loop,ttft_p50_ms,vllm,c32,420.56,ms,
+probe_c6_tp8_1,2026-10-20,B300,kimik3,c6_closed_loop,out_tok_per_s,vllm,c32,1432.39,tok/s,
+probe_c6_tp8_1,2026-10-20,B300,kimik3,c6_closed_loop,completed,vllm,c32,128,req,
+probe_c6_tp8_1,2026-10-20,B300,kimik3,c6_closed_loop,tpot_p50_ms,vllm,c8-long,13.11,ms,
+probe_c6_tp8_1,2026-10-20,B300,kimik3,c6_closed_loop,ttft_p50_ms,vllm,c8-long,508.34,ms,
+probe_c6_tp8_1,2026-10-20,B300,kimik3,c6_closed_loop,out_tok_per_s,vllm,c8-long,469.43,tok/s,
+probe_c6_tp8_1,2026-10-20,B300,kimik3,c6_closed_loop,completed,vllm,c8-long,32,req,
