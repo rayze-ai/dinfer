@@ -6,7 +6,7 @@
           不等于 GPU 步时间）；time_to_first_token_seconds / time_per_output_token_seconds 直方图增量的 mean 与 p50/p99（桶内线性插值）；
           prefix_cache_{queries,hits}_total 增量 → 服务端命中率。
   vLLM：  vllm:time_to_first_token_seconds / vllm:time_per_output_token_seconds（旧版）或 vllm:inter_token_latency_seconds 直方图增量同上；
-          vllm:prefix_cache_{queries,hits} 增量。
+          vllm:prefix_cache_{queries,hits} 增量；两边 num_preemptions[_total] 增量（抢占次数）。
 直方图分位数 = 增量桶计数的累积分布上线性插值（Prometheus histogram_quantile 同法）；精度受桶边界限制，只用于对账量级，不替代客户端分位数。
 """
 import json
@@ -109,6 +109,11 @@ def summarize(before, after):
         h = counter(d, "prefix_cache_hits")
     if q is not None and h is not None:
         out["prefix_cache"] = {"queries": int(q), "hits": int(h), "hit_ratio": (h / q) if q else None}
+    pre = counter(d, "num_preemptions_total")
+    if pre is None:
+        pre = counter(d, "num_preemptions")
+    if pre is not None:
+        out["preemptions"] = int(pre)
     return out
 
 
@@ -148,3 +153,4 @@ if __name__ == "__main__":
         print("server TPOT mean/p50/p99 ms:", fmt_hist(r.get("tpot")))
         pc = r.get("prefix_cache")
         print("server prefix cache:", "-" if not pc else f"{pc['hits']}/{pc['queries']} = {pc['hit_ratio']:.3f}" if pc["queries"] else "0 queries")
+        print("preemptions:", r.get("preemptions", "-"))

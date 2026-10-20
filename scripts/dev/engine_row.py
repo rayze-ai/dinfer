@@ -28,8 +28,9 @@ except Exception:  # 服务没有 /metrics 或快照为空
     srv = {}
 pc = srv.get("prefix_cache")
 pc = "-" if not pc else (f"{pc['hit_ratio']:.3f}" if pc["queries"] else "0q")
+pre = srv.get("preemptions"); pre = "-" if pre is None else str(pre)
 c = d.get("client") or {}
 cl = "-" if not c else f"{c.get('cpu_cores_avg', 0):.2f}/{c.get('max_rss_mib', 0):.0f}/{c.get('parse_ms_per_request', 0):.2f}"
 print(f"| {rate} | {side} | {d['completed']}/{d['failed']} | {gp} | {d['request_throughput_rps']:.2f} | {f(d['output_token_throughput_tps'])} | "
       f"{four(d['ttft_ms'])} | {f(d['ttft_first_chunk_ms']['p50'])} | {four(d['tpot_ms'])} | {ch} | {d['finished_by_length']}/{d['completed']} | "
-      f"{md.fmt_hist(srv.get('ttft'))} | {md.fmt_hist(srv.get('tpot'))} | {pc} | {md.fmt_steps(srv.get('steps'))} | {cl} |")
+      f"{md.fmt_hist(srv.get('ttft'))} | {md.fmt_hist(srv.get('tpot'))} | {pc} | {pre} | {md.fmt_steps(srv.get('steps'))} | {cl} |")

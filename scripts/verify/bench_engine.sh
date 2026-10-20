@@ -65,11 +65,11 @@ MD="$OUT/summary.md"
   echo "CPU：dinfer 服务进程 $CPUS_D；vLLM 服务进程 $CPUS_V；压测进程 taskset $BENCH_CPUS（nproc=$NCPU）。$OV"
   echo "压测工具自校验：$(grep 'measurement error' "$OUT/self_check.log" | sed 's/^ *//')"
   echo "服务端口径（每率 bench 前后 /metrics 差值，scripts/dev/metrics_delta.py）：srv TTFT/TPOT = 服务自报直方图增量的 mean/p50/p99 ms（桶内插值，只对量级），与客户端列的差 = 网络 + 工具开销；"
-  echo "step = dinfer engine_step_execute_{prefill,decode,mixed} count 增量（均值 ms）——**async 调度下量的是含 finish 等待的 host 侧步时，不等于 GPU 步时间**；srv cache = 服务自报 prefix_cache hits/queries。"
+  echo "step = dinfer engine_step_execute_{prefill,decode,mixed} count 增量（均值 ms）——**async 调度下量的是含 finish 等待的 host 侧步时，不等于 GPU 步时间**；混批步占比 = M/(P+D+M)。两边单卡默认都是混批（vLLM 单卡无 prefill throttle）。srv cache = 服务自报 prefix_cache hits/queries（dinfer *_total / vllm:prefix_cache_*）；preempt = num_preemptions[_total] 增量。"
   echo "client = 压测进程开销（bench JSON client 段）：平均占用核数 / 峰值 RSS MiB / SSE+JSON 解析 ms 每请求。"
   echo
-  echo "| rate | 端 | 完成/失败 | goodput | req/s | out tok/s | TTFT p50/p90/p99/max | TTFT1st p50 | TPOT p50/p90/p99/max | cache hit | len-stop | srv TTFT mean/p50/p99 | srv TPOT mean/p50/p99 | srv cache | step P/D/M (mean ms) | client cores/RSS/parse |"
-  echo "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+  echo "| rate | 端 | 完成/失败 | goodput | req/s | out tok/s | TTFT p50/p90/p99/max | TTFT1st p50 | TPOT p50/p90/p99/max | cache hit | len-stop | srv TTFT mean/p50/p99 | srv TPOT mean/p50/p99 | srv cache | preempt | step P/D/M (mean ms) | client cores/RSS/parse |"
+  echo "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
 } > "$MD"
 
 row() { # json rate side metrics_before metrics_after
