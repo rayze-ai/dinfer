@@ -4,6 +4,7 @@
 
 ## 0. 状态
 
+- **C-5（2026-10-20）TP + EP 完成**：切分表 §2.4；tp2 × 前 5 层对拍 / 冒烟过（`docs/loops/k3-tp.md`）；下一步 C-6 全 93 层 tp8 e2e（需 8 卡独占）。
 **挂起（2026-10-15）→ 解挂条件满足（2026-10-19）**：B300 8 卡 NVLink 到手，真权重在 B300 `/data/models/moonshotai/Kimi-K3`（1.5 TB、96 分片、专家 MXFP4 `weight_packed`）；等用户定优先级后按 §2 重启。原因记录：暂无 ≥ 8×H200 级别机器，真权重跑不了。crate 只有 `config.rs`（解析官方 config.json 并断言结构事实）+ `lib.rs`。
 
 **2026-10-19 第二阶段进展（KDA / MoE kernel 先行，crate 骨架未动）**：
