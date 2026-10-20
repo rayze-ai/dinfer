@@ -1854,7 +1854,9 @@ fn gqa_prefill_cfg(stream: &Stream) -> i32 {
         }
         let cc = stream.device().compute_capability().unwrap_or((8, 0));
         let sm = stream.device().sm_count().unwrap_or(1);
-        crate::arch::ArchProfile::gqa_prefill_cfg_for(crate::arch::ArchProfile::for_cc(cc, sm).arch)
+        let c = crate::arch::ArchProfile::gqa_prefill_cfg_for(crate::arch::ArchProfile::for_cc(cc, sm).arch);
+        // r12a：sm100 的 tcgen05 路径尚未赢过 v6，默认仍走 v6；`GQA_PREFILL_CFG=5xxx` 可显式开启。
+        c
     })
 }
 

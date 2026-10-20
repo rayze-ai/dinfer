@@ -1322,6 +1322,22 @@ extern "C" int gqa_cache_write_bf16(const void* k, const void* v, void* cache, c
   return last_err();
 }
 
+// r12a：D=256 全注意力 prefill 的 tcgen05 路径（gqa_fa_sm100.cu）。`gqa_fa_umma_launch` 由那个文件提供；
+extern "C" int gqa_fa_umma_launch(int paged, int max_q, int heads, int num_reqs, const void* q, const void* k,
+                                  const void* v, const void* cache, const int32_t* bt, const int32_t* seq_lens,
+                                  const int32_t* cu, void* out, int H, int Hkv, float scale_log2, int q_stride,
+                                  int kv_stride, int block_size, int max_blocks, int skip_single, void* prof,
+                                  cudaStream_t stream);
+// 该文件不在编译集里时（CUDA_ARCHS 不含 100/103）直接不调，分发处回退 v5/v6。
+// 用 build.rs 传的 `-DMEGA_SM100` 决定：弱符号在这里靠不住——归档里 `gqa_fa_sm100.o` 排在
+// `gqa.o` 之后时链接器取先看到的弱定义，tcgen05 路径被静默跳过（实测：数字与 v5 一模一样）。
+// 这是 host 侧的编译开关，不是 `#if __CUDA_ARCH__`（不随卡型变化，也不在 kernel 体内）。
+#ifdef MEGA_SM100
+#define GQA_UMMA_RC(paged, ...) gqa_fa_umma_launch(paged, __VA_ARGS__)
+#else
+#define GQA_UMMA_RC(paged, ...) ((void)(paged), (int)cudaErrorInvalidValue)
+#endif
+
 extern "C" int gqa_prefill_bf16(const void* q, const void* k, const void* v, void* out, const int32_t* cu_seqlens,
                                 int64_t num_reqs, int64_t max_seqlen, int64_t heads, int64_t kv_heads, int64_t head_dim,
                                 float scale, int64_t q_stride, int64_t kv_stride, int cfg, cudaStream_t stream) {
@@ -1330,7 +1346,14 @@ extern "C" int gqa_prefill_bf16(const void* q, const void* k, const void* v, voi
   if (num_reqs <= 0) return 0;
   if (heads <= 0 || kv_heads <= 0 || head_dim <= 0 || head_dim > MAX_D || heads % kv_heads != 0 || max_seqlen <= 0)
     return err(cudaErrorInvalidValue);
-  if (head_dim == 256 && cfg != 0)
+  if (head_dim == 256 && cfg >= 5000) {
+    const int rc = GQA_UMMA_RC(0, (int)max_seqlen, (int)heads, (int)num_reqs, q, k, v, nullptr, nullptr, nullptr,
+                                      cu_seqlens, out, (int)heads, (int)kv_heads, scale * LOG2E_F, (int)q_stride,
+                                      (int)kv_stride, 0, 0, 0, nullptr, stream);
+    if (rc == (int)cudaErrorInvalidValue) cfg = 0;  // 该形状不走这条路 → 回退 v5
+    else return rc;
+  }
+  if (head_dim == 256 && cfg >= 1000 && cfg < 5000)
     return v6_dispatch<false>(cfg, (int)max_seqlen, (int)heads, (int)num_reqs, stream, static_cast<const bf16*>(q),
                               static_cast<const bf16*>(k), static_cast<const bf16*>(v), nullptr, nullptr, nullptr,
                               cu_seqlens, static_cast<bf16*>(out), (int)heads, (int)kv_heads, scale * LOG2E_F,
@@ -1360,7 +1383,14 @@ extern "C" int gqa_paged_bf16(const void* q, const void* cache, const int32_t* b
   if (head_dim <= 0 || head_dim > MAX_D || heads <= 0 || kv_heads <= 0 || heads % kv_heads != 0 || block_size <= 0 ||
       max_q_len <= 0)
     return err(cudaErrorInvalidValue);
-  if (head_dim == 256 && cfg != 0)
+  if (head_dim == 256 && cfg >= 5000) {
+    const int rc = GQA_UMMA_RC(1, (int)max_q_len, (int)heads, (int)num_reqs, q, nullptr, nullptr, cache, block_table,
+                                      seq_lens, cu_seqlens_q, out, (int)heads, (int)kv_heads, scale * LOG2E_F,
+                                      (int)q_stride, 0, (int)block_size, (int)max_blocks, skip_single, nullptr, stream);
+    if (rc == (int)cudaErrorInvalidValue) cfg = 0;
+    else return rc;
+  }
+  if (head_dim == 256 && cfg >= 1000 && cfg < 5000)
     return v6_dispatch<true>(cfg, (int)max_q_len, (int)heads, (int)num_reqs, stream, static_cast<const bf16*>(q), nullptr,
                              nullptr, static_cast<const bf16*>(cache), block_table, seq_lens, cu_seqlens_q,
                              static_cast<bf16*>(out), (int)heads, (int)kv_heads, scale * LOG2E_F, (int)q_stride, 0,

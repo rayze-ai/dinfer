@@ -92,6 +92,11 @@ fn main() {
                 let (src, obj) = (&srcs[i], &objs[i]);
                 let mut cmd = Command::new(&nvcc_s);
                 cmd.args(["-c", "-std=c++17", opt, "--expt-relaxed-constexpr", "-Xcompiler", "-fPIC", "-I", "cuda"]);
+                // 与 cargo:rustc-cfg=mega_sm100 同步：`.cu` 侧用它决定是否调用 sm100 专用入口
+                // （弱符号在归档里靠不住，见 gqa.cu 的说明）。只在编入 sm100 文件时定义。
+                if has_sm100 {
+                    cmd.arg("-DMEGA_SM100=1");
+                }
                 if profile != "release" {
                     cmd.arg("-lineinfo");
                 }

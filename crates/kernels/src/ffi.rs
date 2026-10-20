@@ -1074,10 +1074,28 @@ extern "C" {
     pub fn umma_peak_launch(a: *const c_void, b: *const c_void, c: *mut c_void, k_iters: i64, blocks: i64,
                             check: i64, stream: cudaStream_t) -> i32;
 }
+#[cfg(all(not(no_nvcc_stub), mega_sm100))]
+extern "C" {
+    pub fn gqa_fa_umma_launch(paged: i32, max_q: i32, heads: i32, num_reqs: i32, q: *const c_void, k: *const c_void,
+                              v: *const c_void, cache: *const c_void, bt: *const i32, seq_lens: *const i32,
+                              cu: *const i32, out: *mut c_void, h: i32, hkv: i32, scale_log2: f32, q_stride: i32,
+                              kv_stride: i32, block_size: i32, max_blocks: i32, skip_single: i32, prof: *mut c_void,
+                              stream: cudaStream_t) -> i32;
+}
 #[cfg(not(all(not(no_nvcc_stub), mega_sm100)))]
 #[allow(clippy::missing_safety_doc)]
 pub unsafe fn umma_peak_launch(_a: *const c_void, _b: *const c_void, _c: *mut c_void, _k: i64, _b2: i64,
                                _ck: i64, _s: cudaStream_t) -> i32 {
+    CUDA_ERROR_NOT_SUPPORTED
+}
+
+#[cfg(not(all(not(no_nvcc_stub), mega_sm100)))]
+#[allow(clippy::too_many_arguments, clippy::missing_safety_doc)]
+pub unsafe fn gqa_fa_umma_launch(_paged: i32, _max_q: i32, _heads: i32, _num_reqs: i32, _q: *const c_void,
+                                 _k: *const c_void, _v: *const c_void, _cache: *const c_void, _bt: *const i32,
+                                 _seq_lens: *const i32, _cu: *const i32, _out: *mut c_void, _h: i32, _hkv: i32,
+                                 _scale_log2: f32, _q_stride: i32, _kv_stride: i32, _block_size: i32,
+                                 _max_blocks: i32, _skip_single: i32, _prof: *mut c_void, _s: cudaStream_t) -> i32 {
     CUDA_ERROR_NOT_SUPPORTED
 }
 

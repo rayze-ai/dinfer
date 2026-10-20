@@ -375,6 +375,14 @@ int mega_gdn_layer_decode_sm100(const MegaLayerArgs* a, cudaStream_t stream);
 int umma_peak_launch(const void* a, const void* b, void* c, int64_t k_iters, int64_t blocks, int64_t check,
                      cudaStream_t stream);
 
+// ---- D=256 全注意力 prefill 的 tcgen05 路径（gqa_fa_sm100.cu，r12a；只在 CUDA_ARCHS 含 100/103 时编入）----
+// 返回 cudaErrorInvalidValue = 该形状不走这条路（调用方回退 v5 / v6）。
+// prof 非空时写 [0]=等 QK [1]=softmax [2]=rescale [3]=PV+装载 [4]=tile 数（clock64 累加，仅 tid 0）。
+int gqa_fa_umma_launch(int paged, int max_q, int heads, int num_reqs, const void* q, const void* k, const void* v,
+                       const void* cache, const int32_t* bt, const int32_t* seq_lens, const int32_t* cu, void* out,
+                       int H, int Hkv, float scale_log2, int q_stride, int kv_stride, int block_size, int max_blocks,
+                       int skip_single, void* prof, cudaStream_t stream);
+
 #ifdef __cplusplus
 }
 #endif

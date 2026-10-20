@@ -137,6 +137,10 @@ __device__ __forceinline__ void mma_commit(uint64_t* bar) {
 }
 // 发 MMA 的线程与做 smem 写 / 读的线程之间需要这对栅栏（CUTLASS / DeepGEMM 同）。
 __device__ __forceinline__ void fence_before_sync() { asm volatile("tcgen05.fence::before_thread_sync;\n"); }
+// generic proxy 写（普通 st.shared）之后、async proxy（UMMA 读 smem）之前必须有的栅栏。
+__device__ __forceinline__ void fence_proxy_async_shared() {
+  asm volatile("fence.proxy.async.shared::cta;\n");
+}
 __device__ __forceinline__ void fence_after_sync() { asm volatile("tcgen05.fence::after_thread_sync;\n"); }
 
 // ------------------------------------------------------------ 累加器取回
@@ -146,6 +150,53 @@ __device__ __forceinline__ void tmem_ld32_x4(uint32_t taddr, uint32_t (&v)[4]) {
   asm volatile("tcgen05.ld.sync.aligned.32x32b.x4.b32 {%0, %1, %2, %3}, [%4];\n"
                : "=r"(v[0]), "=r"(v[1]), "=r"(v[2]), "=r"(v[3])
                : "r"(taddr));
+}
+
+// 32 列一次（softmax / epilogue 的主通道）。x32 是 x4 的 8 倍宽，一条指令取回一整行片段。
+__device__ __forceinline__ void tmem_ld32_x32(uint32_t taddr, uint32_t (&v)[32]) {
+  asm volatile(
+      "tcgen05.ld.sync.aligned.32x32b.x32.b32 "
+      "{%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,"
+      "%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31}, [%32];\n"
+      : "=r"(v[0]), "=r"(v[1]), "=r"(v[2]), "=r"(v[3]), "=r"(v[4]), "=r"(v[5]), "=r"(v[6]), "=r"(v[7]),
+        "=r"(v[8]), "=r"(v[9]), "=r"(v[10]), "=r"(v[11]), "=r"(v[12]), "=r"(v[13]), "=r"(v[14]), "=r"(v[15]),
+        "=r"(v[16]), "=r"(v[17]), "=r"(v[18]), "=r"(v[19]), "=r"(v[20]), "=r"(v[21]), "=r"(v[22]), "=r"(v[23]),
+        "=r"(v[24]), "=r"(v[25]), "=r"(v[26]), "=r"(v[27]), "=r"(v[28]), "=r"(v[29]), "=r"(v[30]), "=r"(v[31])
+      : "r"(taddr));
+}
+
+// 写回累加器（online softmax 的 rescale 用）。
+__device__ __forceinline__ void tmem_st32_x32(uint32_t taddr, const uint32_t (&v)[32]) {
+  asm volatile(
+      "tcgen05.st.sync.aligned.32x32b.x32.b32 [%0], "
+      "{%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,"
+      "%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31,%32};\n" ::"r"(taddr),
+      "r"(v[0]), "r"(v[1]), "r"(v[2]), "r"(v[3]), "r"(v[4]), "r"(v[5]), "r"(v[6]), "r"(v[7]), "r"(v[8]),
+      "r"(v[9]), "r"(v[10]), "r"(v[11]), "r"(v[12]), "r"(v[13]), "r"(v[14]), "r"(v[15]), "r"(v[16]), "r"(v[17]),
+      "r"(v[18]), "r"(v[19]), "r"(v[20]), "r"(v[21]), "r"(v[22]), "r"(v[23]), "r"(v[24]), "r"(v[25]), "r"(v[26]),
+      "r"(v[27]), "r"(v[28]), "r"(v[29]), "r"(v[30]), "r"(v[31]));
+}
+__device__ __forceinline__ void tmem_st_wait() { asm volatile("tcgen05.wait::st.sync.aligned;\n"); }
+
+// TMEM 地址：低 16 位列号、高 16 位 lane。lane 基址 = 32·warp（CUTLASS copy_traits 的断言）。
+__device__ __forceinline__ uint32_t tmem_addr(uint32_t base, int warp, int col) {
+  return base + ((uint32_t)(warp * 32) << 16) + (uint32_t)col;
+}
+
+// ------------------------------------------------- MN-major 的 128 B 描述符
+// 用于 PV 的 B 操作数（V 在 smem 里按 [d 块][key][64 d] 放：d 是 MN、key 是 K）。
+// 由 canonical ((8,n),(8,k)):((1,LBO),(8,SBO))（16 B 单位）推得：
+//   一个 atom = 8 个 k 行 × 128 B；LBO = MN 块之间的距离，SBO = 8 个 k 行（一个 atom）之间的距离。
+__device__ __forceinline__ uint64_t mn_major_128b_desc(uint32_t saddr, uint32_t lbo_bytes, uint32_t sbo_bytes) {
+  return make_smem_desc(saddr, lbo_bytes, sbo_bytes, kSwz128B);
+}
+
+
+// softmax 的 exp2：SFU 近似，v6 实测比库函数快（r11a 第 4 轮）。
+__device__ __forceinline__ float ex2(float x) {
+  float y;
+  asm("ex2.approx.ftz.f32 %0, %1;\n" : "=f"(y) : "f"(x));
+  return y;
 }
 
 __device__ __forceinline__ bool elect_one() {
