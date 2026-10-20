@@ -3722,7 +3722,11 @@ pub fn gdn_conv_rows(stream: &Stream, tokens: usize, dim: usize, width: usize, s
         }
     }
     let sm = *SM.get_or_init(|| stream.device().sm_count().unwrap_or(1));
-    crate::arch::ArchProfile::gdn_conv_rows(sm, tokens, dim, width)
+    static ARCH: OnceLock<crate::arch::Arch> = OnceLock::new();
+    let arch = *ARCH.get_or_init(|| {
+        stream.device().compute_capability().map(|cc| crate::arch::ArchProfile::for_cc(cc, sm).arch).unwrap_or(crate::arch::Arch::Sm8x)
+    });
+    crate::arch::ArchProfile::gdn_conv_rows_for(arch, sm, tokens, dim, width)
 }
 
 /// `gdn_recurrent` 的 V 维切分数：默认由 `ArchProfile::gdn_recurrent_vsplit`（按 SM 数把 block 数补到 ≥ SM 数，

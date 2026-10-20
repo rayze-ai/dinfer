@@ -124,6 +124,22 @@
 - 1x4096 chain_us dinfer：r9 第 5 轮（3090 收口）：o-pass VT=128 为首选档（8 warp）、conv 回 2 波规则；默认路径 = wy Mma(分块逆) + ho 融合 bv32 PF=0
 - 1x8192 chain_us dinfer：r9 第 5 轮（3090 收口）：o-pass VT=128 为首选档（8 warp）、conv 回 2 波规则；默认路径 = wy Mma(分块逆) + ho 融合 bv32 PF=0
 
+## probe_gdn_r9_6（2026-10-20，B300）
+
+### gdn_scale（us）
+
+| x | chain_us dinfer | conv_rows0_us dinfer | conv_rows128_us dinfer | conv_rows16_us dinfer | conv_rows256_us dinfer | conv_rows32_us dinfer | conv_rows64_us dinfer | conv_rows8_us dinfer | ho_bv16_us dinfer | ho_bv16pf_us dinfer | ho_bv16pfsp_us dinfer | ho_bv16sp_us dinfer | ho_bv32_us dinfer | ho_bv32pf_us dinfer | ho_bv32pfsp_us dinfer | ho_bv32sp_us dinfer | ho_legacy_us dinfer | prep_us dinfer | wy_legacy_us dinfer | wy_serial_us dinfer | wy_us dinfer |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 8x1024 | 1110 | 808 | 310 | 220 | 321 | 222 | 247 | 249 | 694 | 755 | 793 | 981 | 498 | 649 | 671 | 648 | 5102 | 82 | 2955 | 685 | 531 |
+| 32x128 | 593 | 217 | 172 | 128 | 301 | 137 | 168 | 137 | 403 | 418 | 455 | 503 | 265 | 350 | 366 | 348 | 2519 | 43 | 1504 | 371 | 284 |
+| 1x4096 | 786 | 3063 | 162 | 122 | 296 | 133 | 160 | 131 | 483 | 548 | 509 | 641 | 334 | 441 | 407 | 512 | 3390 | 44 | 1505 | 371 | 284 |
+| 1x8192 | 1538 | 6155 | 311 | 219 | 315 | 222 | 246 | 249 | 946 | 1095 | 999 | 1264 | 660 | 874 | 792 | 1001 | 6933 | 82 | 2956 | 685 | 532 |
+
+- 8x1024 chain_us dinfer：r9 第 6 轮：B300-50 GPU 6 sm_103 首次复测（r5 代码，默认门限还是 3090 的：ho bv16 / conv rows128）；chunk_qwen parity 过，decode_b32 bv0_legacy 失败待查是否既有
+- 32x128 chain_us dinfer：r9 第 6 轮：B300-50 GPU 6 sm_103 首次复测（r5 代码，默认门限还是 3090 的：ho bv16 / conv rows128）；chunk_qwen parity 过，decode_b32 bv0_legacy 失败待查是否既有
+- 1x4096 chain_us dinfer：r9 第 6 轮：B300-50 GPU 6 sm_103 首次复测（r5 代码，默认门限还是 3090 的：ho bv16 / conv rows128）；chunk_qwen parity 过，decode_b32 bv0_legacy 失败待查是否既有
+- 1x8192 chain_us dinfer：r9 第 6 轮：B300-50 GPU 6 sm_103 首次复测（r5 代码，默认门限还是 3090 的：ho bv16 / conv rows128）；chunk_qwen parity 过，decode_b32 bv0_legacy 失败待查是否既有
+
 ## probe_prefill_1（2026-10-20，B300）
 
 ### ttft_len（ms）
