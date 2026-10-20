@@ -31,9 +31,12 @@ if [ "${K3_SKIP_GEN:-0}" != "1" ]; then
 fi
 
 printf '\n==> 对拍（GPU %s，前 %s 层，tp %s）\n' "$GPU" "$LAYERS" "$TP"
-CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$GPU" KIMIK3_DIR="$MODEL" KIMIK3_REFS="$REFS" KIMIK3_LAYERS="$LAYERS" KIMIK3_TP="$TP" ${DUMP:+KIMIK3_DUMP="$DUMP"} RUST_LOG=info \
+# 用 env 显式传：之前 `${DUMP:+KIMIK3_DUMP="$DUMP"} RUST_LOG=info cargo …` 在 DUMP 为空时展开成空词，
+# bash 把 `RUST_LOG=info` 当命令名 → "command not found"，cargo test 根本没跑（2026-10-20 C-6 乱文取证时发现）。
+env CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$GPU" KIMIK3_DIR="$MODEL" KIMIK3_REFS="$REFS" KIMIK3_LAYERS="$LAYERS" KIMIK3_TP="$TP" ${DUMP:+KIMIK3_DUMP="$DUMP"} RUST_LOG=info \
   cargo test --release -p dinfer-kimik3 --features ref-tests --test model_parity -- --ignored --nocapture 2>&1 \
   | tee "$LOG" | grep -E '^\s+(第|装载|layer|embed|attn|res_out|final|logits|top|decode|前|显存|耗时|prefill|TP)|kimik3 layer loaded|kimik3: TP|^==|test result|panicked|error' | cut -c1-240
 rc=${PIPESTATUS[0]}
+grep -qE "^test result: ok" "$LOG" || { echo "FAIL: cargo test 未产出 test result（看 $LOG）"; rc=1; }
 printf '\n日志：%s\n' "$LOG"
 exit $rc
