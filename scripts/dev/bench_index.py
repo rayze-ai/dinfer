@@ -52,6 +52,7 @@ body = "\n".join(
     for m, g, n, lbl, date, cells, chg in rows)
 page = f"""<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>dinfer perf index</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="5">
 <style>
 :root{{--fg:#1b1f23;--muted:#6a737d;--line:#e1e4e8;--bg:#fff;--hl:#f6f8fa}}
 @media (prefers-color-scheme:dark){{:root:not([data-theme=light]){{--fg:#e6edf3;--muted:#8b949e;--line:#30363d;--bg:#0d1117;--hl:#161b22}}}}
