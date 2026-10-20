@@ -261,3 +261,27 @@ token 在两种用法里都是 K 维，但 A/B 的 MN-major 语义不同，LBO/S
 (4) 可以不用转置：**先算 `v'ᵀ` 到 smem 的独立缓冲区**（BT×V 的一次转置写，64 个 token × 128 v = 16 KB），
 然后 (4) 变成普通的 K-major × K-major。代价是每 chunk 多一次 16 KB 的 smem 写（约 0.1 µs），
 换掉 MN-major 的所有不确定性。**推荐先走这条**——转置写是平凡的，(4) 立刻变成和 (1)(2) 一模一样的形状。
+
+### 2026-10-21 07:4x 追加：已定位到 UMMA 描述符层，不是业务逻辑
+
+隔离单测（`o = Aq(64×64) · v'(64×128)`，A/B 都在 smem）的结论：
+
+| 配置 | 结果 |
+|---|---|
+| A K-major + B K-major，N=128 | `c[0]=3.46`（错，期望 -9.78）；`n<64` 对、`n≥64` 全 0 → **N 只算出一半** |
+| A K-major + B **MN-major**（`b_mn=true`, lbo=BT*64*2, sbo=1024） | `c[0] = -9.77879` **正确**；但 `i≥16` 全 0 |
+| 同上 + A 的 lbo 改成 2048 / lbo=1024 sbo=0 | `i≥16` 仍然全 0（甚至变成 `i≥8`） |
+
+**确认的事实**：
+1. **B 操作数当 K 维在行上时必须用 MN-major**（`b_mn=true`），K-major 只覆盖一半 N。
+2. A 在 smem 里的装载**已验证正确**（打印 64 行，每行对角线恰好 1 个非零），所以不是 staging bug。
+3. 指令描述符编码**已对着 CUTLASS 核过**（`m_dim = M>>4`，4 对应 M=64；`n_dim = N>>3`），与 `mma_sm100_desc.hpp` 第 431/486 行一致。
+4. 剩下的问题在 **A 操作数的 M 方向寻址**：M=64 时硬件只读到第一个 M-tile（16 行）。
+   `k_major_128b_desc` 给的 `lbo=0 / sbo=8*128` 是为 `umma_peak` 的 M=128 调的；
+   M=64 时 A 需要跨 4 个 M-tile，对应字段应该是哪个还没定。
+
+**下一步（明确的两条）**：
+- 读 CUTLASS `make_umma_desc` 对 **M=64 / K-major** 的 canonical layout 推导，别猜 LBO/SBO。
+  文件在 B300 上：`/root/develop/vllm-dev/tree/vllm/third_party/deep_gemm/include/cute/atom/mma_traits_sm100.hpp`（需 `sudo -n`）。
+- 或者**绕开 M=64**：把 A 的 M 也做成 128（`Aq` 用 64 行 + 64 行零填充），沿用 `umma_peak` 已验证的 M=128 路径。
+  GDN 的 BT=64 是因为 chunk 大小，但 GEMM 的 M=128 只是多算一半零行，代价 2× 但立即能用。
