@@ -39,8 +39,17 @@
 5. 日志无 `CUDA error` / `panicked`；`graph_steps > 0`（decode 走了图）；c8 一轮看混批 / 槽归还不炸。
 归档 `test/kimik3/2026-10-20/smoke5/`。迭代上限 8 轮。
 
+## TODO（C-4b 之后）
+
+- **decode CUDA graph 现在默认关**：要开必须去掉两处 host 同步——LatentMoe 的 `offsets` D2H（改 GPU 侧 tile 计划，`k3-moe.md` TODO）和 AttnRes 的 host softmax（融合 kernel，`k3-moe.md` C-2 TODO）。都做完后把 `K3_GRAPH` 默认翻回开并复测。
+- `OutputStream` 没拿到本请求的 render 结果：`reasoning_effort=none` 的请求 parser 初态仍是 Think（靠 `fresh` 吞标记兜底）；server 侧若加"render → stream 钩子"再接。
+- `tool_call_tags()` / `grammar_factory()` 返回 None：guided / 强制 tool_choice 未接（executor 也 bail `any_mask`）。
+- 采样流水（`upload_sampling` / `sample_eager`）与 Qwen3 / Qwen3.5 三份同文：下一个公共件候选（`exec::Sampler`）。
+
 ## 轮次记录
 
 | 轮 | 改动 | 结果 |
 |---|---|---|
 | 0 | 本机：kimik3 lib / bin 构建、clippy、`cargo test -p dinfer-kimik3` 24/24（含 chat_parity 5）、ref-tests `--no-run` 过 | 等 B300 |
+| 1 | B300 GPU 2，`k3_b300_smoke.sh`（5 层） | 装载 5 层 + 顶层 **13.0 s**（layer 0 0.5 s、MoE 层各 2.3 s、MLA 层 3.0 s；health 可达 14.1 s），显存 82.2 GB；`/v1/models` 过；**首请求炸**：`graph capture: body: LatentMoe: pairs 0 ≠ t·K`——LatentMoe 每步 `dtoh_sync_copy(offsets)` 展平 tile 计划、AttnRes host softmax，体内 D2H 不能进 capture，引擎线程退出 → chat 无 chunk、/metrics 空、bench 失败 |
+| 2 | executor：decode 图默认关（`K3_GRAPH=1` 强制开），其余不变 | 见下 |
