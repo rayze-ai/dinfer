@@ -23,3 +23,4 @@ rate 8 下 dinfer goodput ≥ vLLM（≥ 5.0），TPOT p99 ≤ 20 ms；再扫 2�
 |---|---|---|
 | 0 | §15.4 数据点（prefix 512，rate 4/8） | goodput 1.25/0.35 vs 2.84/5.07 |
 | 1 | 跑中：dinfer rate 8 prefix 512（抓 metrics 差值）、dinfer rate 8 prefix 0、vLLM rate 8 prefix 0 | — |
+| 1a | **TTFT 伪像根因**：`crates/server/src/chat.rs` 在**请求接受时**就发空 role delta（`for i in 0..n { send(role chunk) }` 在 `consume` 之前），而 vLLM 的 role chunk 随首个输出一起发；工具把首个 SSE chunk 当首 token → dinfer TTFT 5 ms。修：role chunk 改为随首个 content delta 懒发（`role_sent[i]`）。之后 dinfer 的 TTFT 会变成真实值（≥ prefill 时间），goodput 的 TTFT 项才有意义 | 修复中 |
