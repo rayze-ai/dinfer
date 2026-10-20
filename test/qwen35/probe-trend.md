@@ -51,6 +51,18 @@
 
 - 1024 fa_us dinfer：r11a 第 4 轮：v6 + SFU ex2.approx（cfg 3464）B300-50 GPU 4；6 K 1650 → 1556
 
+## probe_attn_r11a_7（2026-10-20，B300）
+
+### attn_scale（us）
+
+| x | fa_us dinfer | tflops dinfer |
+|---|---|---|
+| 1024 | 78 | 166.0 |
+| 3009 | 454 | 245.2 |
+| 6019 | 1558 | 285.8 |
+
+- 1024 fa_us dinfer：r11a 第 7 轮最终确认：默认 cfg 3464（v6 4 warp × tile 64 + SFU），50 次迭代；B300-50 GPU 4
+
 ## probe_gdn_r10_1（2026-10-20，B300）
 
 ### gdn_scale（us）

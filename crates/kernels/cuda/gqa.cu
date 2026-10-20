@@ -473,6 +473,7 @@ __global__ void __launch_bounds__(NW * 32) gqa_fa_v6_kernel(
         }
       }
       l_a = l_a * alpha_a + ps_a; l_b = l_b * alpha_b + ps_b;
+      // O 重缩放（第 6 轮试过 alpha==1 时跳过：无收益，B300 1577 vs 1556，分支 + 谓词打断 mma 流水，已回退）
 #pragma unroll
       for (int nt = 0; nt < OF; ++nt) { o[nt][0] *= alpha_a; o[nt][1] *= alpha_a; o[nt][2] *= alpha_b; o[nt][3] *= alpha_b; }
 #pragma unroll
@@ -785,6 +786,8 @@ static int v6_dispatch(int cfg, int max_q, int heads, int num_reqs, cudaStream_t
     V6B_CASE(4, 64)
     V6F_CASE(4, 32)
     V6F_CASE(4, 64)
+    V6F_CASE(8, 32)
+    V6F_CASE(8, 64)
     V7_CASE(4, 32)
     V7_CASE(4, 64)
     V7_CASE(8, 32)

@@ -83,6 +83,12 @@ probe_attn_r11a_4,2026-10-20,B300,qwen35,attn_scale,fa_cfg3432_us,dinfer,3009,49
 probe_attn_r11a_4,2026-10-20,B300,qwen35,attn_scale,tflops_cfg3432,dinfer,3009,224.3,TFLOP/s,
 probe_attn_r11a_4,2026-10-20,B300,qwen35,attn_scale,fa_cfg3432_us,dinfer,6019,1753,us,
 probe_attn_r11a_4,2026-10-20,B300,qwen35,attn_scale,tflops_cfg3432,dinfer,6019,254.0,TFLOP/s,
+probe_attn_r11a_7,2026-10-20,B300,qwen35,attn_scale,fa_us,dinfer,1024,78,us,r11a 第 7 轮最终确认：默认 cfg 3464（v6 4 warp × tile 64 + SFU），50 次迭代；B300-50 GPU 4
+probe_attn_r11a_7,2026-10-20,B300,qwen35,attn_scale,tflops,dinfer,1024,166.0,TFLOP/s,
+probe_attn_r11a_7,2026-10-20,B300,qwen35,attn_scale,fa_us,dinfer,3009,454,us,
+probe_attn_r11a_7,2026-10-20,B300,qwen35,attn_scale,tflops,dinfer,3009,245.2,TFLOP/s,
+probe_attn_r11a_7,2026-10-20,B300,qwen35,attn_scale,fa_us,dinfer,6019,1558,us,
+probe_attn_r11a_7,2026-10-20,B300,qwen35,attn_scale,tflops,dinfer,6019,285.8,TFLOP/s,
 probe_gdn_r10_1,2026-10-20,B300,qwen35,gdn_scale,chain_us,dinfer,1x1024,185,us,r10 第 1 轮：aq/u/w/kg f32→bf16，ho uint4 直载；B300-50 GPU 7 target_r10；默认路径（ArchProfile）
 probe_gdn_r10_1,2026-10-20,B300,qwen35,gdn_scale,prep_us,dinfer,1x1024,18,us,
 probe_gdn_r10_1,2026-10-20,B300,qwen35,gdn_scale,wy_legacy_us,dinfer,1x1024,421,us,
