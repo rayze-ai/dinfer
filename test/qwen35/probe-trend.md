@@ -111,6 +111,24 @@
 - 1x4096 chain_us dinfer：r10 第 6 轮：ho BV=64 档（bench 列 bv64/bv64pf；默认档仍 32）；B300-50 GPU 7
 - 1x8192 chain_us dinfer：r10 第 6 轮：ho BV=64 档（bench 列 bv64/bv64pf；默认档仍 32）；B300-50 GPU 7
 
+## probe_gdn_r10_7（2026-10-20，B300）
+
+### gdn_scale（us）
+
+| x | chain_us dinfer | conv_rows0_us dinfer | conv_rows128_us dinfer | conv_rows16_us dinfer | conv_rows256_us dinfer | conv_rows32_us dinfer | conv_rows64_us dinfer | conv_rows8_us dinfer | ho_bv16_us dinfer | ho_bv16pf_us dinfer | ho_bv16pfsp_us dinfer | ho_bv16sp_us dinfer | ho_bv32_us dinfer | ho_bv32pf_us dinfer | ho_bv32pfsp_us dinfer | ho_bv32sp_us dinfer | ho_bv64_us dinfer | ho_bv64pf_us dinfer | ho_legacy_us dinfer | prep_us dinfer | wy_legacy_us dinfer | wy_mma8_us dinfer | wy_serial_us dinfer | wy_us dinfer |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1x1024 | 147 | 487 | 114 | 38 | 217 | 40 | 62 | 37 | 74 | 77 | 106 | 111 | 63 | 65 | 85 | 102 | 59 | 65 | 786 | 18 | 421 | 57 | 94 | 60 |
+| 8x1024 | 770 | 809 | 309 | 220 | 320 | 221 | 247 | 249 | 509 | 549 | 700 | 738 | 382 | 388 | 575 | 556 | 308 | 327 | 5008 | 82 | 2927 | 360 | 508 | 372 |
+| 32x128 | 423 | 218 | 171 | 127 | 300 | 136 | 169 | 137 | 304 | 323 | 375 | 392 | 216 | 222 | 325 | 302 | 180 | 190 | 2502 | 43 | 1486 | 187 | 276 | 194 |
+| 1x4096 | 495 | 3066 | 162 | 122 | 296 | 132 | 164 | 131 | 356 | 397 | 421 | 449 | 256 | 265 | 339 | 408 | 302 | 318 | 3289 | 42 | 1485 | 187 | 275 | 195 |
+| 1x8192 | 969 | 6168 | 308 | 219 | 314 | 221 | 248 | 249 | 720 | 788 | 828 | 883 | 504 | 523 | 661 | 801 | 595 | 631 | 6613 | 82 | 2925 | 360 | 508 | 370 |
+
+- 1x1024 chain_us dinfer：r10 第 7 轮：ArchProfile 按 block 铺满选 BV 64/32（Sm100）；默认路径；B300-50 GPU 7
+- 8x1024 chain_us dinfer：r10 第 7 轮：ArchProfile 按 block 铺满选 BV 64/32（Sm100）；默认路径；B300-50 GPU 7
+- 32x128 chain_us dinfer：r10 第 7 轮：ArchProfile 按 block 铺满选 BV 64/32（Sm100）；默认路径；B300-50 GPU 7
+- 1x4096 chain_us dinfer：r10 第 7 轮：ArchProfile 按 block 铺满选 BV 64/32（Sm100）；默认路径；B300-50 GPU 7
+- 1x8192 chain_us dinfer：r10 第 7 轮：ArchProfile 按 block 铺满选 BV 64/32（Sm100）；默认路径；B300-50 GPU 7
+
 ## probe_gdn_r9_0（2026-10-20，3090）
 
 ### gdn_scale（us）
