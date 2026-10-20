@@ -10,6 +10,8 @@
 //! 不经过 core 的 `KvCacheSpec::Mamba`（与 Qwen3.5 同口径，design-qwen35 §3 待办）。prefix cache 强制关（递归状态不可按块复用）。
 use crate::config::KimiK3Config;
 use crate::executor::KimiK3Executor;
+use crate::tp::TpExecutor;
+use crate::weights::Shard;
 use crate::layer::LayerBudget;
 use crate::model::KimiK3Model;
 use crate::parser::OutputParser;
@@ -48,6 +50,8 @@ pub struct ServeOptions {
     pub layers: Option<usize>,
     /// 聊天渲染方言：`hf`（默认，基线 vLLM 路径）| `serving`（Moonshot 线上 Rust renderer 口径）。
     pub chat_dialect: String,
+    /// TP/EP 组大小（design-kimik3 §2.4）：用卡 `device .. device+tp`，每 rank 一线程 lockstep；1 = 单卡。
+    pub tp: usize,
 }
 
 impl Default for ServeOptions {
@@ -68,6 +72,7 @@ impl Default for ServeOptions {
             enable_cuda_graph: true,
             layers: None,
             chat_dialect: "hf".into(),
+            tp: 1,
         }
     }
 }
@@ -150,26 +155,6 @@ impl KimiK3Service {
             "kimik3: single-stream executor（decode CUDA graph lazy per bucket；no TP / EP / PD / MTP yet）"
         );
 
-        let dev = Device::new(opt.device)?;
-        let s = dev.default_stream();
-        let gemm = dinfer_layers::Gemm::new(&s)?;
-        let (free0, total) = s.mem_info()?;
-        let t_load = std::time::Instant::now();
-        let model = KimiK3Model::load_with_rows(&s, model_dir, tc, n_layers, budget, max_rows)
-            .context("kimik3 model load")?;
-        s.synchronize()?;
-        let (free1, _) = s.mem_info()?;
-        let used_gb = free0.saturating_sub(free1) as f64 / 1e9;
-        tracing::info!(
-            n_layers,
-            secs = format!("{:.1}", t_load.elapsed().as_secs_f32()),
-            gb = format!("{used_gb:.2}"),
-            act_mib_est = (max_tokens * tc.hidden_size as usize * 2 * 16) as f64 / 1048576.0,
-            free_gb = format!("{:.1}", free1 as f64 / 1e9),
-            total_gb = format!("{:.1}", total as f64 / 1e9),
-            "kimik3 model loaded（权重 + 激活 + KV 合计；激活估算 = max_tokens × hidden × bf16 × ~16 份）"
-        );
-        let exec = KimiK3Executor::new(s.clone(), gemm, model, max_blocks_per_seq, opt.enable_cuda_graph)?;
         anyhow::ensure!(
             max_blocks_per_seq < kv_blocks,
             "KV pool too small: max_model_len {} needs {} blocks, pool has {}",
@@ -177,6 +162,57 @@ impl KimiK3Service {
             max_blocks_per_seq,
             kv_blocks
         );
+        // 每个 rank 一张卡：Device + 模型分片 + executor（+ NCCL comm）。rank 0 在本线程，其余各起一线程并行装载（同 qwen3 service）。
+        let tp_world = opt.tp.max(1);
+        let comm_id = if tp_world > 1 { Some(dinfer_kernels::comm::CommId::new()?) } else { None };
+        let build_rank = {
+            let tc = tc.clone();
+            let model_dir = model_dir.to_path_buf();
+            let (dev0, graphs, act_est) =
+                (opt.device, opt.enable_cuda_graph, (max_tokens * tc.hidden_size as usize * 2 * 16) as f64 / 1048576.0);
+            move |rank: usize| -> Result<KimiK3Executor> {
+                let dev = Device::new(dev0 + rank)?;
+                let s = dev.default_stream();
+                let gemm = dinfer_layers::Gemm::new(&s)?;
+                let (free0, total) = s.mem_info()?;
+                let t_load = std::time::Instant::now();
+                let shard = Shard::new(rank, tp_world)?;
+                let model = KimiK3Model::load_tp(&s, &model_dir, &tc, n_layers, budget, max_rows, shard)
+                    .with_context(|| format!("kimik3 model load (rank {rank})"))?;
+                s.synchronize()?;
+                let (free1, _) = s.mem_info()?;
+                let used_gb = free0.saturating_sub(free1) as f64 / 1e9;
+                tracing::info!(
+                    rank,
+                    n_layers,
+                    secs = format!("{:.1}", t_load.elapsed().as_secs_f32()),
+                    gb = format!("{used_gb:.2}"),
+                    act_mib_est = act_est,
+                    free_gb = format!("{:.1}", free1 as f64 / 1e9),
+                    total_gb = format!("{:.1}", total as f64 / 1e9),
+                    "kimik3 model loaded（权重 + 激活 + KV 合计；激活估算 = max_tokens × hidden × bf16 × ~16 份）"
+                );
+                KimiK3Executor::new_with_tp(
+                    s.clone(),
+                    gemm,
+                    model,
+                    max_blocks_per_seq,
+                    graphs,
+                    comm_id.map(|id| (rank, tp_world, id)),
+                )
+            }
+        };
+        let other_ranks: Vec<_> = (1..tp_world)
+            .map(|r| {
+                let b = build_rank.clone();
+                std::thread::Builder::new().name(format!("tp-load{r}")).spawn(move || b(r)).expect("spawn tp load")
+            })
+            .collect();
+        let exec0 = build_rank(0)?;
+        let mut others = Vec::with_capacity(other_ranks.len());
+        for jh in other_ranks {
+            others.push(jh.join().map_err(|_| anyhow::anyhow!("tp load thread panicked"))??);
+        }
         let t_model = t_start.elapsed();
 
         let tok = Arc::new(tok_thread.join().map_err(|_| anyhow::anyhow!("tokenizer thread panicked"))??);
@@ -210,7 +246,12 @@ impl KimiK3Service {
             block_size: opt.block_size,
         }];
         let sched = Scheduler::new(params, groups, kv_blocks as u32);
-        let (handle, jh) = engine::spawn(sched, Runner::new(exec, bs));
+        let (handle, jh) = if tp_world > 1 {
+            tracing::info!(tp = tp_world, "kimik3: TP/EP lockstep executor（rank 0 = engine 线程）");
+            engine::spawn(sched, Runner::new(TpExecutor::new(exec0, others), bs))
+        } else {
+            engine::spawn(sched, Runner::new(exec0, bs))
+        };
         tracing::info!(
             model = %served_name,
             max_model_len = opt.max_model_len,

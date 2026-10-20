@@ -171,6 +171,7 @@ fn layer1_real_weights() {
             max_blocks: 0,
         },
         slot_mapping: &slots,
+        comm: None,
     };
 
     let run = |layer: &mut KimiDecoderLayer, out: &mut Tensor<bf16>| {

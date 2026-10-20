@@ -20,7 +20,7 @@
 //! 待办（里程碑 C-2+）：六条投影 GEMM 融合成 vLLM 的 `in_proj_qkvgfab`（一次 GEMM 再按列切）；
 //! 激活缓冲改全模型共享（现在每层一套，`max_tokens` 大时占内存）；TP 按头切。
 use crate::config::KimiLinearConfig;
-use crate::weights::{self, KdaShapes, Table};
+use crate::weights::{self, KdaShapes, Shard, Table};
 use anyhow::{ensure, Result};
 use dinfer_core::runner::BatchMode;
 use dinfer_kernels::ops as k;
@@ -136,31 +136,57 @@ impl KdaLayer {
         max_tokens: usize,
         num_slots: usize,
     ) -> Result<Self> {
+        Self::load_tp(stream, src, t, layer, cfg, max_tokens, num_slots, Shard::SINGLE)
+    }
+
+    /// TP（design-kimik3 §2.4）：96 头按 rank 均分；q/k/v/g/f_b/b/conv/A_log/dt_bias 按头行切，`o_proj` 列切（输出是部分和，
+    /// 调用方 all-reduce）；`f_a` / `o_norm` 复制；状态只存本 rank 的头。`sh.world == 1` 与 `load` 逐位相同。
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_tp(
+        stream: &Stream,
+        src: &WeightSource,
+        t: &Table,
+        layer: usize,
+        cfg: &KimiLinearConfig,
+        max_tokens: usize,
+        num_slots: usize,
+        shard: Shard,
+    ) -> Result<Self> {
         ensure!(cfg.is_kda_layer(layer as u32), "第 {layer} 层不是 KDA 层");
-        let sh = KdaShapes::new(cfg);
+        let full = KdaShapes::new(cfg);
+        let sh = KdaShapes::with_shard(cfg, shard);
         let (hidden, h, kd, width) = (sh.hidden, sh.heads, sh.head_dim, sh.width);
         let proj = sh.proj();
         let p = format!("layers.{layer}.self_attn");
-        let lin = |name: &str, out: usize, inp: usize| -> Result<Linear> {
-            let l = t.linear(stream, src, &format!("{p}.{name}.weight"))?;
+        // dim：0 = 按输出行切，1 = 按输入列切，None = 复制
+        let lin = |name: &str, out: usize, inp: usize, dim: Option<usize>| -> Result<Linear> {
+            let key = format!("{p}.{name}.weight");
+            let l = match dim {
+                Some(d) => t.linear_shard(stream, src, &key, d, shard)?,
+                None => t.linear(stream, src, &key)?,
+            };
             ensure!(l.w.shape == [out, inp], "{p}.{name}: shape {:?}（期望 [{out}, {inp}]）", l.w.shape);
             Ok(l)
         };
-        let q_proj = lin("q_proj", proj, hidden)?;
-        let k_proj = lin("k_proj", proj, hidden)?;
-        let v_proj = lin("v_proj", proj, hidden)?;
-        let g_proj = lin("g_proj", proj, hidden)?;
-        let f_a = lin("f_a_proj", kd, hidden)?;
-        let f_b = lin("f_b_proj", proj, kd)?;
-        let b_proj = lin("b_proj", h, hidden)?;
-        let o_proj = lin("o_proj", hidden, proj)?;
+        let q_proj = lin("q_proj", proj, hidden, Some(0))?;
+        let k_proj = lin("k_proj", proj, hidden, Some(0))?;
+        let v_proj = lin("v_proj", proj, hidden, Some(0))?;
+        let g_proj = lin("g_proj", proj, hidden, Some(0))?;
+        let f_a = lin("f_a_proj", kd, hidden, None)?;
+        let f_b = lin("f_b_proj", proj, kd, Some(0))?;
+        let b_proj = lin("b_proj", h, hidden, Some(0))?;
+        let o_proj = lin("o_proj", hidden, proj, Some(1))?;
         let conv_w = [
-            weights::load_conv1d(stream, src, t, &format!("{p}.q_conv1d.weight"), proj, width)?,
-            weights::load_conv1d(stream, src, t, &format!("{p}.k_conv1d.weight"), proj, width)?,
-            weights::load_conv1d(stream, src, t, &format!("{p}.v_conv1d.weight"), proj, width)?,
+            weights::load_conv1d_shard(stream, src, t, &format!("{p}.q_conv1d.weight"), full.proj(), width, shard)?,
+            weights::load_conv1d_shard(stream, src, t, &format!("{p}.k_conv1d.weight"), full.proj(), width, shard)?,
+            weights::load_conv1d_shard(stream, src, t, &format!("{p}.v_conv1d.weight"), full.proj(), width, shard)?,
         ];
-        let a_log = weights::load_a_log(stream, src, t, &format!("{p}.A_log"), h)?;
-        let dt_bias = t.load_f32(stream, src, &format!("{p}.dt_bias"))?;
+        let a_log = weights::load_a_log_shard(stream, src, t, &format!("{p}.A_log"), full.heads, shard)?;
+        let dt_bias = if shard.is_single() {
+            t.load_f32(stream, src, &format!("{p}.dt_bias"))?
+        } else {
+            t.load_f32_shard1d(stream, src, &format!("{p}.dt_bias"), full.proj(), shard)?
+        };
         ensure!(dt_bias.numel() == proj, "dt_bias {} != H·K {proj}", dt_bias.numel());
         let norm_w = t.load_bf16(stream, src, &format!("{p}.o_norm.weight"))?;
         ensure!(norm_w.numel() == kd, "o_norm.weight {} != K {kd}", norm_w.numel());

@@ -20,8 +20,9 @@ use crate::config::KimiLinearConfig;
 use crate::kda::{KdaLayer, KdaMeta};
 use crate::latent_moe::{LatentMoe, Situ};
 use crate::mla::{MlaLayer, MlaMeta};
-use crate::weights::{Table, LM_PREFIX};
-use anyhow::{ensure, Result};
+use crate::weights::{Shard, Table, LM_PREFIX};
+use dinfer_kernels::comm::Comm;
+use anyhow::{ensure, Context, Result};
 use dinfer_kernels::ops as k;
 use dinfer_layers::{bf16, Gemm, Linear, Mlp, RmsNorm, Stream, Tensor, WeightSource};
 
@@ -37,6 +38,8 @@ pub struct StepMeta<'a> {
     pub mla: MlaMeta<'a>,
     /// MLA 层 latent 写 cache 的槽位（每 token 一个，-1 跳过）。
     pub slot_mapping: &'a Tensor<i64>,
+    /// TP/EP 组（`None` = 单卡，无任何通信调用，路径逐位不变）。通信点见 design-kimik3 §2.4。
+    pub comm: Option<&'a Comm>,
 }
 
 /// 装载时的缓冲 / cache 容量。
@@ -242,19 +245,39 @@ impl KimiDecoderLayer {
         cfg: &KimiLinearConfig,
         b: LayerBudget,
     ) -> Result<Self> {
+        Self::load_tp(stream, src, t, layer, cfg, b, Shard::SINGLE)
+    }
+
+    /// TP/EP 分片装载（design-kimik3 §2.4）：attention 按头、MoE 按专家 id、dense / shared MLP 按 inter；AttnRes / norm 复制。
+    pub fn load_tp(
+        stream: &Stream,
+        src: &WeightSource,
+        t: &Table,
+        layer: usize,
+        cfg: &KimiLinearConfig,
+        b: LayerBudget,
+        shard: Shard,
+    ) -> Result<Self> {
         let hidden = cfg.hidden_size as usize;
         let max_tokens = b.max_tokens;
         let attn = if cfg.is_kda_layer(layer as u32) {
-            Attn::Kda(KdaLayer::load(stream, src, t, layer, cfg, max_tokens, b.num_slots)?)
+            Attn::Kda(KdaLayer::load_tp(stream, src, t, layer, cfg, max_tokens, b.num_slots, shard)?)
         } else {
-            Attn::Mla(MlaLayer::load(stream, src, t, layer, cfg, max_tokens, b.kv_blocks, b.block_size)?)
+            Attn::Mla(MlaLayer::load_tp(stream, src, t, layer, cfg, max_tokens, b.kv_blocks, b.block_size, shard)?)
         };
         let act = Situ::from_config(cfg)?;
         let ffn = if cfg.is_moe_layer(layer as u32) {
-            Ffn::LatentMoe(LatentMoe::load(stream, src, t, layer, cfg, max_tokens)?)
+            Ffn::LatentMoe(LatentMoe::load_tp(stream, src, t, layer, cfg, max_tokens, shard)?)
         } else {
-            let m = Mlp::load(stream, src, &format!("{LM_PREFIX}layers.{layer}.mlp"), max_tokens)?;
-            ensure!(m.inter == cfg.intermediate_size as usize, "dense mlp inter {}", m.inter);
+            let m = Mlp::load_tp(
+                stream,
+                src,
+                &format!("{LM_PREFIX}layers.{layer}.mlp"),
+                max_tokens,
+                shard.rank,
+                shard.world,
+            )?;
+            ensure!(m.inter * shard.world == cfg.intermediate_size as usize, "dense mlp inter {}×{}", m.inter, shard.world);
             Ffn::Dense(m)
         };
         let attn_res = if cfg.attn_res_block_size.is_some() {
@@ -339,6 +362,10 @@ impl KimiDecoderLayer {
                 mla.forward(stream, gemm, t, &self.hn, meta.slot_mapping, &meta.mla, &mut self.a)?
             }
         }
+        // all-reduce ①：o_proj 列切的部分和（TP）
+        if let Some(c) = meta.comm {
+            dinfer_kernels::comm::all_reduce_bf16(c, &mut self.a.data, n).context("layer attn all-reduce")?;
+        }
         // 3. prefix_sum：写块层 p = a；否则 p = x + a
         if writer {
             stream.dtod_copy_n(&self.a.data, &mut self.p.data, n)?;
@@ -369,8 +396,14 @@ impl KimiDecoderLayer {
             self.post_norm.eps,
         )?;
         match &mut self.ffn {
-            Ffn::LatentMoe(moe) => moe.forward(stream, gemm, t, &self.mn, &mut self.y)?,
-            Ffn::Dense(mlp) => mlp.forward(stream, gemm, &self.act, t, &self.mn, &mut self.y)?,
+            Ffn::LatentMoe(moe) => moe.forward_tp(stream, gemm, t, &self.mn, &mut self.y, meta.comm)?,
+            Ffn::Dense(mlp) => {
+                mlp.forward(stream, gemm, &self.act, t, &self.mn, &mut self.y)?;
+                // 稠密层 down 行切的部分和（TP）
+                if let Some(c) = meta.comm {
+                    dinfer_kernels::comm::all_reduce_bf16(c, &mut self.y.data, n).context("layer dense all-reduce")?;
+                }
+            }
         }
         // 6. out = p + y
         stream.dtod_copy_n(&self.p.data, &mut out.data, n)?;

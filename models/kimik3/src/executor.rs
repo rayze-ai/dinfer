@@ -116,6 +116,8 @@ pub struct KimiK3Executor {
     async_inflight: std::collections::VecDeque<Ticket>,
     skip_prev_chosen: bool,
     sync_stash: Option<SyncResult>,
+    /// TP/EP 组（`new_with_tp`；`None` = 单卡）。在 executor 自己的流上建，图捕获之前。
+    comm: Option<dinfer_kernels::comm::Comm>,
     /// 日志用
     pub trace: bool,
 }
@@ -124,6 +126,19 @@ impl KimiK3Executor {
     /// `max_blocks`：每请求 block_table 的最大列数（`max_model_len / block_size`）。`enable_graphs`：decode 步走 CUDA graph
     ///（`NO_GRAPH` 环境变量强制关；`GRAPH_CAPTURE=eager` 启动时全捕获）。
     pub fn new(stream: Stream, gemm: Gemm, model: KimiK3Model, max_blocks: usize, enable_graphs: bool) -> Result<Self> {
+        Self::new_with_tp(stream, gemm, model, max_blocks, enable_graphs, None)
+    }
+
+    /// 同 `new`，`tp = Some((rank, world, id))` 时在 executor 流上 `Comm::init`（所有 rank 必须并发调用；阻塞到全组到齐），
+    /// 并在（可能的）启动期图捕获之前完成。模型必须是同一 `(rank, world)` 的 `load_tp` 分片。
+    pub fn new_with_tp(
+        stream: Stream,
+        gemm: Gemm,
+        model: KimiK3Model,
+        max_blocks: usize,
+        enable_graphs: bool,
+        tp: Option<(usize, usize, dinfer_kernels::comm::CommId)>,
+    ) -> Result<Self> {
         ensure!(model.num_slots() >= 2, "kimik3 executor: num_slots 至少 2（1 个活请求 + 1 个废纸篓）");
         // 同 Qwen3 / Qwen3.5：capture 要求非默认流；关掉 cudarc 的跨流事件跟踪；cuBLASLt 句柄在新流上重建。
         let _ = gemm;
@@ -149,6 +164,15 @@ impl KimiK3Executor {
         let logits = Tensor::zeros(&stream, &[rows * v])?;
         let work = Tensor::zeros(&stream, &[rows * v])?;
         let raw = Tensor::zeros(&stream, &[rows * v])?;
+        let comm = match tp {
+            Some((rank, world, id)) if world > 1 => {
+                let c = dinfer_kernels::comm::Comm::init(&stream, rank, world, id)
+                    .with_context(|| format!("kimik3 tp: Comm::init rank {rank}/{world}"))?;
+                tracing::info!(rank, world, "kimik3 tp: NCCL comm ready");
+                Some(c)
+            }
+            _ => None,
+        };
         let mut ex = Self {
             stream,
             gemm,
@@ -169,12 +193,18 @@ impl KimiK3Executor {
             async_inflight: std::collections::VecDeque::with_capacity(2),
             skip_prev_chosen: false,
             sync_stash: None,
+            comm,
             trace: std::env::var("KIMIK3_TRACE").is_ok(),
         };
         if ex.graphs.enabled() && graph_capture_eager() {
             ex.capture_decode_graphs()?;
         }
         Ok(ex)
+    }
+
+    /// TP rank（单卡 0）。
+    pub fn tp_rank(&self) -> usize {
+        self.comm.as_ref().map_or(0, |c| c.rank())
     }
 
     /// KDA 状态的废纸篓 slot（装载时比 `max_num_seqs` 多分的最后一个）。
@@ -309,6 +339,7 @@ impl KimiK3Executor {
                 max_blocks: self.buf.plan.max_blocks,
             },
             slot_mapping: &self.buf.plan.slots,
+            comm: self.comm.as_ref(),
         };
         self.model.forward_rows(
             s,

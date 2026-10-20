@@ -115,6 +115,22 @@ impl Table {
         Ok(RmsNorm { hidden: w.numel(), w, eps })
     }
 
+    /// 按 `dim`（0 = 输出行 / 1 = 输入列）取第 `sh.rank/sh.world` 片的 `Linear`（TP；design-kimik3 §2.4）。world=1 等价 `linear`。
+    pub fn linear_shard(&self, stream: &Stream, src: &WeightSource, key: &str, dim: usize, sh: Shard) -> Result<Linear> {
+        if sh.world <= 1 {
+            return self.linear(stream, src, key);
+        }
+        let name = self.name(key)?.to_string();
+        let w = src.load_bf16_shard(stream, &name, dim, sh.rank, sh.world).with_context(|| format!("load shard {name}"))?;
+        Linear::new(w, None)
+    }
+    /// f32 一维张量按行均分取第 `sh.rank` 片（`dt_bias` / `A_log` 这类逐头 / 逐通道参数）。
+    pub fn load_f32_shard1d(&self, stream: &Stream, src: &WeightSource, key: &str, len: usize, sh: Shard) -> Result<Tensor<f32>> {
+        let (shape, v) = self.load_f32_host(src, key)?;
+        ensure!(v.len() >= len, "{key}: {shape:?} 少于 {len}");
+        let (lo, hi) = sh.range(len);
+        Tensor::from_vec(stream, v[lo..hi].to_vec(), &[hi - lo])
+    }
     /// 无 bias 的 `Linear`（K3 所有投影都无 bias）。
     pub fn linear(&self, stream: &Stream, src: &WeightSource, key: &str) -> Result<Linear> {
         let w = self.load_bf16(stream, src, key)?;
@@ -164,6 +180,34 @@ pub fn shards_for_prefix(dir: &Path, pre: &str) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+/// TP 分片坐标：本 rank 持第 `rank`/`world` 份。`world == 1` 即单卡（所有 `load_tp` 退化为原 `load`，逐位相同）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Shard {
+    pub rank: usize,
+    pub world: usize,
+}
+
+impl Shard {
+    pub const SINGLE: Shard = Shard { rank: 0, world: 1 };
+    pub fn new(rank: usize, world: usize) -> Result<Self> {
+        ensure!(world >= 1 && rank < world, "Shard: rank {rank} / world {world}");
+        Ok(Self { rank, world })
+    }
+    pub fn is_single(&self) -> bool {
+        self.world <= 1
+    }
+    /// 把 `n` 均分成 `world` 份后本 rank 的 `[lo, hi)`。
+    pub fn range(&self, n: usize) -> (usize, usize) {
+        let part = self.part(n);
+        (self.rank * part, (self.rank + 1) * part)
+    }
+    /// `n / world`（要求整除）。
+    pub fn part(&self, n: usize) -> usize {
+        assert!(n % self.world == 0, "Shard: {n} 不能被 world {} 整除", self.world);
+        n / self.world
+    }
+}
+
 /// `{q,k,v}_conv1d.weight [dim, 1, width]`（F32）→ bf16 `[dim, width]`。
 pub fn load_conv1d(
     stream: &Stream,
@@ -173,10 +217,30 @@ pub fn load_conv1d(
     dim: usize,
     width: usize,
 ) -> Result<Tensor<bf16>> {
-    let mut w = t.load_bf16(stream, src, key)?;
-    ensure!(w.numel() == dim * width, "{key}: [{dim}, 1, {width}] 不匹配：文件 {:?}", w.shape);
-    w.reshape(&[dim, width])?;
-    Ok(w)
+    load_conv1d_shard(stream, src, t, key, dim, width, Shard::SINGLE)
+}
+
+/// 同上，按通道（行）取第 `sh.rank` 片 → `[dim/world, width]`。
+#[allow(clippy::too_many_arguments)]
+pub fn load_conv1d_shard(
+    stream: &Stream,
+    src: &WeightSource,
+    t: &Table,
+    key: &str,
+    dim: usize,
+    width: usize,
+    sh: Shard,
+) -> Result<Tensor<bf16>> {
+    if sh.is_single() {
+        let mut w = t.load_bf16(stream, src, key)?;
+        ensure!(w.numel() == dim * width, "{key}: [{dim}, 1, {width}] 不匹配：文件 {:?}", w.shape);
+        w.reshape(&[dim, width])?;
+        return Ok(w);
+    }
+    let (shape, v) = t.load_f32_host(src, key)?;
+    ensure!(v.len() == dim * width, "{key}: [{dim}, 1, {width}] 不匹配：文件 {shape:?}");
+    let (lo, hi) = sh.range(dim);
+    Tensor::from_f32(stream, &v[lo * width..hi * width], &[hi - lo, width])
 }
 
 /// `A_log`：文件 `[128]`（按 head_dim 填充），只取前 `heads` 个（vLLM `a_log_weight_loader` 同样 `narrow`）。
@@ -187,11 +251,24 @@ pub fn load_a_log(
     key: &str,
     heads: usize,
 ) -> Result<Tensor<f32>> {
+    load_a_log_shard(stream, src, t, key, heads, Shard::SINGLE)
+}
+
+/// 同上，再按头取第 `sh.rank` 片 → `[heads/world]`。
+pub fn load_a_log_shard(
+    stream: &Stream,
+    src: &WeightSource,
+    t: &Table,
+    key: &str,
+    heads: usize,
+    sh: Shard,
+) -> Result<Tensor<f32>> {
     let (shape, mut v) = t.load_f32_host(src, key)?;
     ensure!(v.len() >= heads, "{key}: {shape:?} 少于头数 {heads}");
     ensure!(v[heads..].iter().all(|x| *x == 0.0), "{key}: 第 {heads} 项之后应为 0 填充");
     v.truncate(heads);
-    Tensor::from_vec(stream, v, &[heads])
+    let (lo, hi) = sh.range(heads);
+    Tensor::from_vec(stream, v[lo..hi].to_vec(), &[hi - lo])
 }
 
 /// KDA 层各张量的期望形状（`cfg` 给定），给 `KdaLayer::load` 做断言用。
@@ -211,6 +288,12 @@ impl KdaShapes {
             head_dim: la.head_dim as usize,
             width: la.short_conv_kernel_size as usize,
         }
+    }
+    /// TP：本 rank 的形状（头数 = 全部 / world；`hidden` / `head_dim` / `width` 不变）。
+    pub fn with_shard(cfg: &KimiLinearConfig, sh: Shard) -> Self {
+        let mut s = Self::new(cfg);
+        s.heads = sh.part(s.heads);
+        s
     }
     /// 头 × head_dim（q/k/v/g 的输出维）。
     pub fn proj(&self) -> usize {

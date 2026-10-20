@@ -21,7 +21,7 @@
 //! ```
 //! 性能项（后补）：吸收路径每 head 一次小 GEMM（96 × 2 次），GLM 线同样待 batched GEMM。
 use crate::config::KimiLinearConfig;
-use crate::weights::Table;
+use crate::weights::{Shard, Table};
 use anyhow::{ensure, Result};
 use dinfer_core::runner::BatchMode;
 use dinfer_kernels::ops as k;
@@ -105,11 +105,29 @@ impl MlaLayer {
         num_blocks: usize,
         block_size: usize,
     ) -> Result<Self> {
+        Self::load_tp(stream, src, t, layer, cfg, max_tokens, num_blocks, block_size, Shard::SINGLE)
+    }
+
+    /// TP（design-kimik3 §2.4）：q 头按 rank 均分——`g_proj` / `q_b` / `kv_b`（及拆出的 W_UK^T / W_UV）按头行切，`o_proj` 列切
+    ///（输出部分和，调用方 all-reduce）；`q_a` / `kv_a_with_mqa` / 两个 a_norm / latent KV cache 每 rank 复制（576 维很小）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_tp(
+        stream: &Stream,
+        src: &WeightSource,
+        t: &Table,
+        layer: usize,
+        cfg: &KimiLinearConfig,
+        max_tokens: usize,
+        num_blocks: usize,
+        block_size: usize,
+        shard: Shard,
+    ) -> Result<Self> {
         ensure!(!cfg.is_kda_layer(layer as u32), "第 {layer} 层是 KDA 层，不是 MLA");
         ensure!(cfg.mla_use_nope, "只支持 mla_use_nope=True（K3）");
         ensure!(cfg.mla_use_output_gate, "只支持 mla_use_output_gate=True（K3）");
         let hidden = cfg.hidden_size as usize;
-        let heads = cfg.num_attention_heads as usize;
+        let heads_all = cfg.num_attention_heads as usize;
+        let heads = shard.part(heads_all);
         let q_lora = cfg.q_lora_rank.ok_or_else(|| anyhow::anyhow!("q_lora_rank 缺失"))? as usize;
         let kv_lora = cfg.kv_lora_rank as usize;
         let (nope, rope, v_dim) =
@@ -122,10 +140,12 @@ impl MlaLayer {
         let (g_s, g) = t.load_f32_host(src, &format!("{p}.g_proj.weight"))?;
         ensure!(qa_s == [q_lora, hidden], "q_a_proj shape {qa_s:?}");
         ensure!(kva_s == [kv_lora + rope, hidden], "kv_a_proj_with_mqa shape {kva_s:?}");
-        ensure!(g_s == [heads * v_dim, hidden], "g_proj shape {g_s:?}");
+        ensure!(g_s == [heads_all * v_dim, hidden], "g_proj shape {g_s:?}");
+        let (g_lo, g_hi) = shard.range(heads_all * v_dim);
         let mut cat = qa;
         cat.extend_from_slice(&kva);
-        cat.extend_from_slice(&g);
+        cat.extend_from_slice(&g[g_lo * hidden..g_hi * hidden]);
+        drop(g);
         let wide = q_lora + kv_lora + rope + heads * v_dim;
         let fused = Linear::new(Tensor::from_f32(stream, &cat, &[wide, hidden])?, None)?;
         drop(cat);
@@ -136,19 +156,21 @@ impl MlaLayer {
         ensure!(q_a_norm.hidden == q_lora, "q_a_layernorm {}", q_a_norm.hidden);
         let kv_a_norm = t.rmsnorm(stream, src, &format!("{p}.kv_a_layernorm.weight"), A_NORM_EPS)?;
         ensure!(kv_a_norm.hidden == kv_lora, "kv_a_layernorm {}", kv_a_norm.hidden);
-        let q_b = t.linear(stream, src, &format!("{p}.q_b_proj.weight"))?;
+        let q_b = t.linear_shard(stream, src, &format!("{p}.q_b_proj.weight"), 0, shard)?;
         ensure!(q_b.w.shape == [heads * (nope + rope), q_lora], "q_b_proj shape {:?}", q_b.w.shape);
-        let kv_b = t.linear(stream, src, &format!("{p}.kv_b_proj.weight"))?;
+        let kv_b = t.linear_shard(stream, src, &format!("{p}.kv_b_proj.weight"), 0, shard)?;
         ensure!(kv_b.w.shape == [heads * (nope + v_dim), kv_lora], "kv_b_proj shape {:?}", kv_b.w.shape);
-        let o_proj = t.linear(stream, src, &format!("{p}.o_proj.weight"))?;
+        let o_proj = t.linear_shard(stream, src, &format!("{p}.o_proj.weight"), 1, shard)?;
         ensure!(o_proj.w.shape == [hidden, heads * v_dim], "o_proj shape {:?}", o_proj.w.shape);
 
         // 拆 kv_b [H·(nope+v), kv_lora]（行 = 输出维）：W_UK_h [nope, kv_lora] 需转置成 GEMM 权重 [kv_lora, nope]；W_UV_h [v, kv_lora] 直接用。
+        // TP：只拆本 rank 的头（全局头号 h0 + h）。
         let (_, kvb) = t.load_f32_host(src, &format!("{p}.kv_b_proj.weight"))?;
+        let (h0, _) = shard.range(heads_all);
         let mut w_uk_t = Vec::with_capacity(heads);
         let mut w_uv = Vec::with_capacity(heads);
         for h in 0..heads {
-            let base = h * (nope + v_dim);
+            let base = (h0 + h) * (nope + v_dim);
             let uk = &kvb[base * kv_lora..(base + nope) * kv_lora];
             let mut uk_t = vec![0f32; kv_lora * nope];
             for i in 0..nope {

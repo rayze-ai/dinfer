@@ -85,7 +85,7 @@ enum Cmd {
         no_cuda_graph: bool,
         #[arg(long, default_value_t = 0)]
         device: usize,
-        /// 张量并行组大小（qwen3；design §13）：用卡 device..device+tp
+        /// 张量并行组大小（qwen3 / kimik3；design §13）：用卡 device..device+tp
         #[arg(long, default_value_t = 1)]
         tp: usize,
         /// 数据并行副本数（qwen3）：副本 i 用卡 device+i*tp..；同进程按在飞数路由
@@ -227,6 +227,7 @@ async fn main() -> Result<()> {
                     enable_cuda_graph: !no_cuda_graph,
                     layers,
                     chat_dialect,
+                    tp: tp.max(1),
                 };
                 let name = name.clone();
                 let svc = tokio::task::spawn_blocking(move || {

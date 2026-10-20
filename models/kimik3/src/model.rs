@@ -9,7 +9,7 @@
 //! 装载按层打开分片（`weights::shards_for_layer`，每层恰好一片 16 GB），顶层张量在 `shards_for_top`。
 use crate::config::KimiLinearConfig;
 use crate::layer::{Attn, AttnRes, KimiDecoderLayer, LayerBudget, StepMeta};
-use crate::weights::{shards_for_layer, shards_for_top, KdaShapes, Table, LM_HEAD};
+use crate::weights::{shards_for_layer, shards_for_top, KdaShapes, Shard, Table, LM_HEAD};
 use anyhow::{ensure, Result};
 use dinfer_kernels::ops as k;
 use dinfer_layers::{bf16, Gemm, Linear, RmsNorm, Stream, Tensor, WeightSource};
@@ -62,7 +62,24 @@ impl KimiK3Model {
         budget: LayerBudget,
         max_rows: usize,
     ) -> Result<Self> {
+        Self::load_tp(stream, dir, cfg, n_layers, budget, max_rows, Shard::SINGLE)
+    }
+
+    /// TP/EP 分片装载（design-kimik3 §2.4）：每层按 `shard` 切；embed / norm / output_attn_res / lm_head 复制。
+    /// 通信由调用方经 `StepMeta.comm` 传入 forward（模型本身不持 Comm）。`shard.world == 1` 与 `load_with_rows` 逐位相同。
+    pub fn load_tp(
+        stream: &Stream,
+        dir: &Path,
+        cfg: &KimiLinearConfig,
+        n_layers: usize,
+        budget: LayerBudget,
+        max_rows: usize,
+        shard: Shard,
+    ) -> Result<Self> {
         ensure!(n_layers >= 1 && n_layers <= cfg.num_hidden_layers as usize, "n_layers {n_layers}");
+        if !shard.is_single() {
+            tracing::info!(rank = shard.rank, world = shard.world, "kimik3: TP/EP 分片装载");
+        }
         if n_layers < cfg.num_hidden_layers as usize {
             tracing::warn!(
                 n_layers,
@@ -101,7 +118,7 @@ impl KimiK3Model {
             let (free0, _) = stream.mem_info()?;
             let src = WeightSource::open_files(&shards_for_layer(dir, l)?)?;
             let table = Table::from_names(&src.names().collect::<Vec<_>>())?;
-            let layer = KimiDecoderLayer::load(stream, &src, &table, l, cfg, budget)?;
+            let layer = KimiDecoderLayer::load_tp(stream, &src, &table, l, cfg, budget, shard)?;
             stream.synchronize()?;
             let (free1, _) = stream.mem_info()?;
             tracing::info!(
@@ -129,7 +146,7 @@ impl KimiK3Model {
             vocab,
             max_tokens: tm,
             max_rows,
-            kda_shapes: KdaShapes::new(cfg),
+            kda_shapes: KdaShapes::with_shard(cfg, shard),
             x: z(stream)?,
             y: z(stream)?,
             blocks,

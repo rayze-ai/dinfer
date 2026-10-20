@@ -17,8 +17,9 @@
 //! 路由 / 分桶 / gather / scatter 复用 `moe.cu`（GLM 线同一套）；每步一次 D2H 读 `offsets`（tile 计划在 host 展平，
 //! 见 k3-moe.md TODO 2）。
 use crate::config::KimiLinearConfig;
-use crate::weights::Table;
+use crate::weights::{Shard, Table};
 use anyhow::{ensure, Context, Result};
+use dinfer_kernels::comm::Comm;
 use dinfer_kernels::cudarc::driver::CudaSlice;
 use dinfer_kernels::ops as k;
 use dinfer_layers::{bf16, Act, Gemm, Linear, Mlp, RmsNorm, Stream, Tensor, WeightSource};
@@ -81,7 +82,22 @@ impl ExpertPack {
         latent: usize,
         inter: usize,
     ) -> Result<Self> {
-        let group = quant_group(src, t, &format!("{prefix}.experts.0.w1"), latent)?;
+        Self::load_range(stream, src, t, prefix, 0, num_experts, latent, inter)
+    }
+
+    /// 只装专家 `[first, first + num_experts)`（EP：每 rank 一段连续专家 id；design-kimik3 §2.4）。本地下标 e ↔ 全局 first + e。
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_range(
+        stream: &Stream,
+        src: &WeightSource,
+        t: &Table,
+        prefix: &str,
+        first: usize,
+        num_experts: usize,
+        latent: usize,
+        inter: usize,
+    ) -> Result<Self> {
+        let group = quant_group(src, t, &format!("{prefix}.experts.{first}.w1"), latent)?;
         let (w13_n, w13_k, w2_n, w2_k) = (2 * inter, latent, latent, inter);
         let w13_pk = w13_n * w13_k / 2;
         let w13_sc = w13_n * w13_k / group;
@@ -94,7 +110,7 @@ impl ExpertPack {
         let half_pk = w13_pk / 2;
         let half_sc = w13_sc / 2;
         for e in 0..num_experts {
-            let p = format!("{prefix}.experts.{e}");
+            let p = format!("{prefix}.experts.{}", first + e);
             // w1 → w13 的前 inter 行，w3 → 后 inter 行（HF `cat([w1(x), w3(x)])`，gate 在前）。
             for (i, w) in ["w1", "w3"].into_iter().enumerate() {
                 let pk = raw_u8(src, t, &format!("{p}.{w}.weight_packed"), &[inter, latent / 2])?;
@@ -113,6 +129,7 @@ impl ExpertPack {
         let bytes = num_experts * (w13_pk + w13_sc + w2_pk + w2_sc);
         tracing::info!(
             experts = num_experts,
+            first,
             latent,
             inter,
             group,
@@ -228,6 +245,10 @@ pub struct LatentMoe {
     norm: Option<RmsNorm>,     // routed_expert_norm [latent]
     pub experts: ExpertPack,
     shared: Option<Mlp>,
+    /// EP：本 rank 专家 id 起点（全局 `[e_lo, e_lo + experts.num_experts)`）；world=1 时 0。
+    e_lo: usize,
+    /// 本 rank 专家段的 offsets（`[E_local+1]`，相对本段起点）；world=1 时就是全量 offsets 的拷贝（同一地址语义）。
+    offsets_local: Tensor<i32>,
     buckets: k::MoeBuckets,
     offsets_host: Vec<i32>,
     tile_bm: usize,
@@ -256,6 +277,20 @@ impl LatentMoe {
         layer: usize,
         cfg: &KimiLinearConfig,
         max_tokens: usize,
+    ) -> Result<Self> {
+        Self::load_tp(stream, src, t, layer, cfg, max_tokens, Shard::SINGLE)
+    }
+
+    /// TP + EP（design-kimik3 §2.4）：gate / bias / down / up / norm 复制；专家按 id 均分（本 rank `[r·E/w, (r+1)·E/w)`）；
+    /// shared experts 走 `Mlp::load_tp` 列 / 行切。forward 内两次 all-reduce（acc f32、shared 部分和 bf16）。
+    pub fn load_tp(
+        stream: &Stream,
+        src: &WeightSource,
+        t: &Table,
+        layer: usize,
+        cfg: &KimiLinearConfig,
+        max_tokens: usize,
+        shard: Shard,
     ) -> Result<Self> {
         ensure!(cfg.is_moe_layer(layer as u32), "第 {layer} 层不是 MoE 层");
         let router = RouterCfg::from_config(cfg)?;
@@ -288,18 +323,22 @@ impl LatentMoe {
         } else {
             None
         };
-        let experts = ExpertPack::load(stream, src, t, &p, e, latent, inter)?;
+        let (e_lo, e_hi) = shard.range(e);
+        let experts = ExpertPack::load_range(stream, src, t, &p, e_lo, e_hi - e_lo, latent, inter)?;
         let shared = if cfg.num_shared_experts > 0 {
-            let m = Mlp::load(
+            let m = Mlp::load_tp(
                 stream,
                 src,
                 &format!("{}{p}.shared_experts", crate::weights::LM_PREFIX),
                 max_tokens,
+                shard.rank,
+                shard.world,
             )?;
             ensure!(
-                m.inter == inter * cfg.num_shared_experts as usize,
-                "shared_experts inter {} ≠ {}×{inter}",
+                m.inter * shard.world == inter * cfg.num_shared_experts as usize,
+                "shared_experts inter {}×{} ≠ {}×{inter}",
                 m.inter,
+                shard.world,
                 cfg.num_shared_experts
             );
             Some(m)
@@ -311,6 +350,8 @@ impl LatentMoe {
         Ok(Self {
             buckets: k::MoeBuckets::new(stream, e, max_tokens, kk)?,
             offsets_host: vec![0; e + 1],
+            e_lo,
+            offsets_local: Tensor::zeros(stream, &[e_hi - e_lo + 1])?,
             tile_bm: 16,
             tile_bn: 64,
             logits: Tensor::zeros(stream, &[max_tokens, e])?,
@@ -353,7 +394,23 @@ impl LatentMoe {
         x: &Tensor<bf16>,
         out: &mut Tensor<bf16>,
     ) -> Result<()> {
+        self.forward_tp(stream, gemm, t, x, out, None)
+    }
+
+    /// `comm`：TP/EP 组（`None` = 单卡，路径与原来逐位相同）。有 comm 时：本 rank 只算自己专家段的 (token,k) 对，
+    /// 加权和 `acc`（f32）all-reduce 后再 norm / up；shared experts 的 down 部分和 all-reduce 后加 routed。
+    pub fn forward_tp(
+        &mut self,
+        stream: &Stream,
+        gemm: &Gemm,
+        t: usize,
+        x: &Tensor<bf16>,
+        out: &mut Tensor<bf16>,
+        comm: Option<&Comm>,
+    ) -> Result<()> {
         let (h, e, kk) = (self.hidden, self.router.num_experts, self.router.topk);
+        let e_local = self.experts.num_experts;
+        ensure!(comm.is_none() || comm.unwrap().world() * e_local == e, "LatentMoe: comm world 与专家分片不符");
         let (latent, inter, group) = (self.experts.latent, self.experts.inter, self.experts.group);
         ensure!(t <= self.z.shape[0], "LatentMoe: {t} tokens > max {}", self.z.shape[0]);
         ensure!(x.numel() >= t * h && out.numel() >= t * h, "LatentMoe: x/out 缓冲");
@@ -376,68 +433,93 @@ impl LatentMoe {
         self.down.forward_rows(gemm, x, &mut self.z, t)?;
         k::moe_bucket(stream, &self.topk_ids.data, &mut self.buckets, t, kk)?;
         self.offsets_host = stream.dtoh_sync_copy(&self.buckets.offsets)?;
-        let pairs = self.offsets_host[e] as usize;
-        ensure!(pairs == t * kk, "LatentMoe: pairs {pairs} ≠ t·K");
-        // 3. gather 全部 (token, k) 行 → grouped GEMM w13 → situ → grouped GEMM w2
-        k::moe_gather_bf16(
-            stream,
-            &self.z.data,
-            &mut self.zg.data,
-            &self.buckets.sorted_tok,
-            0,
-            pairs,
-            latent,
-        )?;
-        let tiles13 =
-            k::Mxfp4GemmTiles::new(stream, &self.offsets_host, 2 * inter, self.tile_bm, self.tile_bn)?;
-        k::mxfp4_gemm_grouped(
-            stream,
-            &self.zg.data,
-            &self.experts.w13_packed,
-            &self.experts.w13_scale,
-            &self.buckets.offsets,
-            &tiles13,
-            &mut self.gu.data,
-            latent,
-            2 * inter,
-            group,
-        )?;
-        k::situ_and_mul_bf16_n(
-            stream,
-            &self.gu.data,
-            &mut self.a.data,
-            pairs,
-            inter,
-            self.act.beta,
-            self.act.linear_beta,
-        )?;
-        let tiles2 = k::Mxfp4GemmTiles::new(stream, &self.offsets_host, latent, self.tile_bm, self.tile_bn)?;
-        k::mxfp4_gemm_grouped(
-            stream,
-            &self.a.data,
-            &self.experts.w2_packed,
-            &self.experts.w2_scale,
-            &self.buckets.offsets,
-            &tiles2,
-            &mut self.yg.data,
-            inter,
-            latent,
-            group,
-        )?;
-        // 4. 加权散回（f32 累加）→ bf16 → norm → up_proj
+        let pairs_all = self.offsets_host[e] as usize;
+        ensure!(pairs_all == t * kk, "LatentMoe: pairs {pairs_all} ≠ t·K");
+        // EP：本 rank 专家段 [e_lo, e_lo + e_local) 在排序后 pair 流里的 [p_lo, p_hi)；world=1 时就是全部
+        let (e_lo, e_hi) = (self.e_lo, self.e_lo + e_local);
+        let p_lo = self.offsets_host[e_lo] as usize;
+        let p_hi = self.offsets_host[e_hi] as usize;
+        let pairs = p_hi - p_lo;
+        let off_dev: &CudaSlice<i32> = if comm.is_none() {
+            &self.buckets.offsets
+        } else {
+            let local: Vec<i32> = self.offsets_host[e_lo..=e_hi].iter().map(|&o| o - p_lo as i32).collect();
+            stream.htod_into(&local, &mut self.offsets_local.data)?;
+            &self.offsets_local.data
+        };
+        let off_host: Vec<i32> = if comm.is_none() {
+            self.offsets_host.clone()
+        } else {
+            self.offsets_host[e_lo..=e_hi].iter().map(|&o| o - p_lo as i32).collect()
+        };
+        // 3. gather 本段 (token, k) 行 → grouped GEMM w13 → situ → grouped GEMM w2
         stream.memset_zeros_n(&mut self.acc.data, t * latent)?;
-        k::moe_scatter_add_f32(
-            stream,
-            &self.yg.data,
-            &mut self.acc.data,
-            &self.buckets.sorted_tok,
-            &self.buckets.sorted_k,
-            &self.topk_w.data,
-            0,
-            pairs,
-            kk,
-            latent,
-        )?;
+        if pairs > 0 {
+            k::moe_gather_bf16(
+                stream,
+                &self.z.data,
+                &mut self.zg.data,
+                &self.buckets.sorted_tok,
+                p_lo,
+                pairs,
+                latent,
+            )?;
+            let tiles13 = k::Mxfp4GemmTiles::new(stream, &off_host, 2 * inter, self.tile_bm, self.tile_bn)?;
+            // 缓冲按 max pairs 分配；wrapper 只用 len 做容量校验，tile 计划决定实际触碰的行
+            k::mxfp4_gemm_grouped(
+                stream,
+                &self.zg.data,
+                &self.experts.w13_packed,
+                &self.experts.w13_scale,
+                off_dev,
+                &tiles13,
+                &mut self.gu.data,
+                latent,
+                2 * inter,
+                group,
+            )?;
+            k::situ_and_mul_bf16_n(
+                stream,
+                &self.gu.data,
+                &mut self.a.data,
+                pairs,
+                inter,
+                self.act.beta,
+                self.act.linear_beta,
+            )?;
+            let tiles2 = k::Mxfp4GemmTiles::new(stream, &off_host, latent, self.tile_bm, self.tile_bn)?;
+            k::mxfp4_gemm_grouped(
+                stream,
+                &self.a.data,
+                &self.experts.w2_packed,
+                &self.experts.w2_scale,
+                off_dev,
+                &tiles2,
+                &mut self.yg.data,
+                inter,
+                latent,
+                group,
+            )?;
+            // 4. 加权散回（f32 累加）
+            k::moe_scatter_add_f32(
+                stream,
+                &self.yg.data,
+                &mut self.acc.data,
+                &self.buckets.sorted_tok,
+                &self.buckets.sorted_k,
+                &self.topk_w.data,
+                p_lo,
+                pairs,
+                kk,
+                latent,
+            )?;
+        }
+        // all-reduce ②：各 rank 专家段的部分和 → 全量（f32，norm 之前）
+        if let Some(c) = comm {
+            let mut v = self.acc.data.slice_mut(..t * latent);
+            c.all_reduce_sum(&mut v, t * latent).context("LatentMoe acc all-reduce")?;
+        }
+        // → bf16 → norm → up_proj
         stream.memset_zeros_n(&mut self.ysum.data, t * latent)?;
         k::f32_add_to_bf16_n(stream, &self.acc.data, &mut self.ysum.data, t * latent)?;
         let y_in = if let Some(n) = &self.norm {
@@ -447,9 +529,12 @@ impl LatentMoe {
             &self.ysum
         };
         self.up.forward_rows(gemm, y_in, &mut self.yup, t)?;
-        // 5. shared experts → out；out += routed
+        // 5. shared experts → out（TP 下是 down 的部分和 → all-reduce ③）；out += routed（各 rank 一致）
         if let Some(sh) = &mut self.shared {
             sh.forward(stream, gemm, &self.act, t, x, out)?;
+            if let Some(c) = comm {
+                dinfer_kernels::comm::all_reduce_bf16(c, &mut out.data, t * h).context("LatentMoe shared all-reduce")?;
+            }
             k::add_inplace_bf16_n(stream, &self.yup.data, &mut out.data, t * h)?;
         } else {
             stream.dtod_copy_n(&self.yup.data, &mut out.data, t * h)?;
