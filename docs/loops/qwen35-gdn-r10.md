@@ -73,3 +73,7 @@
 - 第 4 轮 bv32（无预取）反超 bv32pf 的现象与此一致：PF 的寄存器预取把 regs 顶到 242 → 2 block/SM；无预取版 regs 更少可能 3 block/SM，掩延迟反而更好。等 ncu 的 hpass / bv32 无 PF 行再定预取默认。
 
 ho_mma 原始计数（第 4 轮代码，8×1024 launch，`r10_ncu_ho3.txt`，第 5 轮对照基线）：inst 112.8 M，其中 **shared_ld 16.0 M**（lds_u32，B 操作数 h16 + sdec/sb 等）、ldsm 4.3 M、shared_st 6.1 M；每发射停顿（周期）：wait 1.40 / short_scoreboard 1.13 / long_scoreboard 1.02 / **mio_throttle 0.92** / not_selected 0.22 / barrier 0.20；smem bank 冲突：ld 0.29 M、**st 0.73 M**（svT 转置写 + sh16 写）。第 5 轮（B 读改 ldmatrix）预期：shared_ld 16 M → ~4 M、mio_throttle 与 short_scoreboard 下降；st 冲突不动（第 6 轮候选：svT 行跨 / swizzle）。
+
+### 第 6 轮候选（从第 4 轮代码的 ncu 计数推，待第 5 轮数字确认方向）：svT 的 2 B 转置写是 st bank 冲突源
+
+`svT[vv*TS + i0]`（TS=72 bf16 = 36 word）：同一 warp 内 lane(g, t4) 写 word = (8·t4·36 + g/2) mod 32 → g=2m 与 g=2m+1 落同一 word、t4 四档落 bank 0/0/0/0 偏移（8·36 = 288 ≡ 0 mod 32），**32 lane 只占 16 bank，每条 st 2 路冲突**；sh16 的 `sts_u32`（KS=136 → 68 word，68g mod 32 = 4g）32 lane 恰铺 32 bank，无冲突。所以 st 冲突 0.73 M 全在 svT（每 chunk 4 条 × NT_V × 4 warp）。改法：v' 不转置，按 [j][v] 行主序 32 位 `pack_bf16x2` 存（与 sh16 同款、无冲突，写指令减半）；(3) 的 B 操作数 v'[j][v]（k=j，n=v）用 `ldsm_x4_t`（与 (4) 读 skg [j][k] 完全同式）；(4) 的 A 操作数 v'ᵀ[v][j] 用 `ldsm_x4_t` 从 [j][v] 取（lane 地址 = `sv + (ks·16 + ((lane>>4)&1)·8 + (lane&7))·VS + mt·16 + ((lane>>3)&1)·8`，与 opass 第 1364 行读 sv 同族）。smem 不变（[BT][VS] 与 [BV][TS] 同量级）。
