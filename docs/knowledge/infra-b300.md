@@ -1,7 +1,7 @@
 # 远端机器口径（B300-50 / 4090 / 3090）
 
 ## B300-50（`B300_TAG=50 scripts/dev/remote_b300.sh up|run|push|pull|put`）
-- token 一次性约 2 h；`run` 无输出 / rsync code 12 = 过期 → 向用户要，不要猜。
+- token 一次性约 2 h；`run` 无输出 / rsync code 12 = 过期 → 向用户要，不要猜。**拿到 token 先看"过期时间"字段再动手**（2026-10-20 一枚 10:44 过期的 token 10:40 才到手，`up` 成功但 3 分钟后全部失效；`status` 的 alive 是陈旧 socket，不可信）。有效窗口 < 30 min 的 token 直接要新的。
 - 远端 `source /data/yaochen/infer/env.sh`（CUDA 13.1、CUDA_ARCHS=103、代理变量）；**本地 HTTP 前 `unset http_proxy https_proxy`**（reqwest 会把 127.0.0.1 发给代理）。
 - 权重用物理路径 `/data/models/...`，不拷贝不软链。
 - 多卡编号：`CUDA_DEVICE_ORDER=PCI_BUS_ID`（无害且稳定）；但"卡空却 OOM"先怀疑自己的分配（见 perf-method 误读表）。
