@@ -3635,6 +3635,23 @@ fn gdn_chunk_ho_bv(stream: &Stream, base_blocks: usize, k_dim: usize, v_dim: usi
     crate::arch::ArchProfile::gdn_chunk_ho_bv(sm, base_blocks, k_dim, v_dim)
 }
 
+/// chunk prefill `ho` 是否寄存器预取：默认 `ArchProfile::gdn_chunk_ho_prefetch(bv)`；`GDN_CHUNK_HO_PREFETCH=0|1` 覆盖。
+fn gdn_chunk_ho_prefetch(ho_bv: usize) -> bool {
+    use std::sync::OnceLock;
+    static OVER: OnceLock<Option<bool>> = OnceLock::new();
+    let over = *OVER.get_or_init(|| {
+        let o = std::env::var("GDN_CHUNK_HO_PREFETCH").ok().map(|s| s != "0");
+        if o.is_some() {
+            tracing::info!(?o, "gdn chunk ho 预取由环境变量覆盖");
+        }
+        o
+    });
+    if ho_bv == 0 {
+        return false;
+    }
+    over.unwrap_or_else(|| crate::arch::ArchProfile::gdn_chunk_ho_prefetch(ho_bv))
+}
+
 /// chunk prefill `wy` 走 tensor core 版的条件：K ∈ {64,128,256} 且 V % 8 == 0；`GDN_CHUNK_WY=legacy` 回老 fp32 kernel。
 fn gdn_chunk_wy_mma(k_dim: usize, v_dim: usize) -> bool {
     use std::sync::OnceLock;
@@ -3935,6 +3952,7 @@ pub fn gdn_chunk_ho(
     v_dim: usize,
 ) -> Result<()> {
     let bv = gdn_chunk_ho_bv(stream, plan.num_seqs * heads_v, k_dim, v_dim);
+    let pf = gdn_chunk_ho_prefetch(bv);
     gdn_chunk_ho_with(
         stream,
         cu_seqlens,
@@ -3948,11 +3966,25 @@ pub fn gdn_chunk_ho(
         heads_v,
         k_dim,
         v_dim,
-        bv,
+        GdnChunkHo { bv, prefetch: pf },
     )
 }
 
-/// `gdn_chunk_ho` 指定 V 分片：`ho_bv ∈ {16, 32}` 走 tensor core 版（第 5A 轮），`0` 走老 fp32 版。对拍 / 计时用。
+/// `gdn_chunk_ho` 的实现选择（对拍 / 计时用；正常路径由 `ArchProfile` 给）。
+/// `bv ∈ {16, 32}` 走 tensor core 版（第 5A 轮），`0` 走老 fp32 版；`prefetch` 寄存器预取下一 chunk（r9 第 1 轮，仅 bv ≠ 0 有效）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GdnChunkHo {
+    pub bv: usize,
+    pub prefetch: bool,
+}
+
+impl From<usize> for GdnChunkHo {
+    fn from(bv: usize) -> Self {
+        Self { bv, prefetch: false }
+    }
+}
+
+/// `gdn_chunk_ho` 指定实现（见 `GdnChunkHo`；`usize` 可直接传作 bv、不预取）。
 #[allow(clippy::too_many_arguments)]
 pub fn gdn_chunk_ho_with(
     stream: &Stream,
@@ -3967,8 +3999,9 @@ pub fn gdn_chunk_ho_with(
     heads_v: usize,
     k_dim: usize,
     v_dim: usize,
-    ho_bv: usize,
+    how: impl Into<GdnChunkHo>,
 ) -> Result<()> {
+    let how = how.into();
     let per_slot = heads_v * v_dim * k_dim;
     ensure!(state.len() >= per_slot, "gdn_chunk_ho: state");
     ensure!(out.len() >= tokens * heads_v * v_dim, "gdn_chunk_ho: out 容量");
@@ -3977,27 +4010,33 @@ pub fn gdn_chunk_ho_with(
     // SAFETY: 容量已校验；slot 编号由调度器保证 < state 槽数。
     check(
         unsafe {
-            ffi::gdn_chunk_ho(
+            ffi::gdn_chunk_ho_v2(
                 stream.ptr(&sc.qn) as *const c_void,
                 stream.ptr(&sc.gc) as *const f32,
                 stream.ptr(&sc.aq) as *const f32,
                 stream.ptr(&sc.u) as *const f32,
                 stream.ptr(&sc.w) as *const f32,
                 stream.ptr(&sc.kg) as *const f32,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
                 stream.ptr_mut(out) as *mut c_void,
                 stream.ptr_mut(state) as *mut c_void,
                 stream.ptr(cu_seqlens) as *const i32,
                 stream.ptr(&plan.cu_nt) as *const i32,
                 stream.ptr(&plan.chunk_off) as *const i32,
+                stream.ptr(&plan.chunk_tab) as *const i32,
                 psi,
                 per_slot as i64,
                 plan.num_seqs as i64,
+                plan.num_chunks as i64,
                 heads_k as i64,
                 heads_v as i64,
                 k_dim as i64,
                 v_dim as i64,
                 plan.bt as i64,
-                ho_bv as i64,
+                how.bv as i64,
+                (how.bv != 0 && how.prefetch) as i64,
+                0,
                 stream.raw() as _,
             )
         },

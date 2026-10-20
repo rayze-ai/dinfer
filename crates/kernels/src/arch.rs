@@ -264,6 +264,14 @@ impl ArchProfile {
         fallback
     }
 
+    /// chunk prefill `ho` 是否寄存器预取下一 chunk（r9 第 1 轮）。3090 实测：装载改成"每线程固定向量数进寄存器再转 bf16 写 smem"
+    /// 本身就赢（bv32 1×8192 2961 → 2043 µs）；再把下一 chunk 的读提前到本 chunk 计算前（PF=1）反而慢 20–70%（多 ~130 个
+    /// 寄存器 → 255 上限、occupancy 掉）。所以默认不预取；保留 PF=1 特化给 B300 复测 / 环境变量覆盖。
+    pub fn gdn_chunk_ho_prefetch(ho_bv: usize) -> bool {
+        let _ = ho_bv;
+        false
+    }
+
     /// conv1d prefill 按 token 分块的块行数：block 数 = `ceil(tokens / rows) · ceil(dim / 2048)`（256 线程 × 8 通道），
     /// 取最大的仍能铺 ≥ `GDN_CONV_WAVES` 波 SM 的档（行多 → halo 重读占比小、块内串行链长；行少 → 反之），
     /// 都铺不满取最小档；下限 width-1（kernel 要求块 ≥ halo）。
@@ -378,6 +386,9 @@ mod tests {
         assert_eq!(ArchProfile::gdn_chunk_ho_bv(148, 8 * 48, 128, 128), 32);
         assert_eq!(ArchProfile::gdn_chunk_ho_bv(82, 48, 96, 128), 0);
         assert_eq!(ArchProfile::gdn_chunk_ho_bv(82, 4, 64, 16), 16);
+        assert!(!ArchProfile::gdn_chunk_ho_prefetch(16));
+        assert!(!ArchProfile::gdn_chunk_ho_prefetch(32));
+        assert!(!ArchProfile::gdn_chunk_ho_prefetch(0));
     }
 
     #[test]

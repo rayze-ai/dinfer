@@ -413,7 +413,7 @@ fn run_gdn_chunk(
     hv: usize,
     k: usize,
     v: usize,
-    ho_bv: usize,
+    ho: ops::GdnChunkHo,
     wy_mma: bool,
 ) -> dinfer_kernels::cudarc::driver::CudaSlice<bf16> {
     let plan = ops::KdaChunkPlan::new(st, cu, BT).unwrap();
@@ -426,7 +426,7 @@ fn run_gdn_chunk(
     ops::gdn_gate(st, a, b, a_log, dt_bias, &mut g, &mut beta, tokens, hv).unwrap();
     ops::gdn_chunk_prep(st, mixed, &g, &dcu, &plan, &mut sc, tokens, h, hv, k, v, scale).unwrap();
     ops::gdn_chunk_wy_with(st, mixed, &beta, &dcu, &plan, &mut sc, tokens, h, hv, k, v, wy_mma).unwrap();
-    ops::gdn_chunk_ho_with(st, &dcu, &plan, &sc, &mut out, state, None, tokens, h, hv, k, v, ho_bv).unwrap();
+    ops::gdn_chunk_ho_with(st, &dcu, &plan, &sc, &mut out, state, None, tokens, h, hv, k, v, ho).unwrap();
     st.synchronize().unwrap();
     out
 }
@@ -458,11 +458,20 @@ fn chunk_case(dir: &str, k: usize, v: usize, h: usize, hv: usize) {
     let db = up_bf16(&st, &b);
     // ho：老 fp32 版（bv=0）与 tensor core 版（bv 16 / 32，第 5A 轮）都对参考。tensor core 版 h / w / kg / Aq / v' 过 bf16，
     // 容差放宽到 out 2e-3 / state rel 1e-2（fla 同口径；参考是 fp32 顺序递归）。
-    // (wy 实现, ho bv, out 容差, state rel 容差)：老 fp32 全链；新 ho；新 wy + 新 ho（默认路径）
-    for (wy, bv, tol_o, tol_s) in [(false, 0usize, 5e-4f32, 5e-3f32), (false, 16, 2e-3, 1e-2), (false, 32, 2e-3, 1e-2), (true, 32, 2e-3, 1e-2), (true, 16, 2e-3, 1e-2)] {
+    // (wy 实现, ho bv, ho 预取, out 容差, state rel 容差)：老 fp32 全链；新 ho（预取 / 不预取，r9 第 1 轮）；新 wy + 新 ho（默认路径）
+    for (wy, bv, pf, tol_o, tol_s) in [
+        (false, 0usize, false, 5e-4f32, 5e-3f32),
+        (false, 16, false, 2e-3, 1e-2),
+        (false, 32, false, 2e-3, 1e-2),
+        (false, 16, true, 2e-3, 1e-2),
+        (false, 32, true, 2e-3, 1e-2),
+        (true, 32, false, 2e-3, 1e-2),
+        (true, 16, true, 2e-3, 1e-2),
+    ] {
         let mut dstate = st.htod_copy(st_in.clone()).unwrap();
-        let out = run_gdn_chunk(&st, &dm, &da, &db, &dal, &ddb, &mut dstate, &cu, tokens, h, hv, k, v, bv, wy);
-        let tag = format!("{dir}/wy{}ho{bv}", if wy { "mma" } else { "32" });
+        let ho = ops::GdnChunkHo { bv, prefetch: pf };
+        let out = run_gdn_chunk(&st, &dm, &da, &db, &dal, &ddb, &mut dstate, &cu, tokens, h, hv, k, v, ho, wy);
+        let tag = format!("{dir}/wy{}ho{bv}{}", if wy { "mma" } else { "32" }, if pf { "pf" } else { "" });
         assert_close(&format!("{tag}/out"), &st.dtoh_sync_copy(&out).unwrap(), &want, tol_o, 0.9999);
         let got_st: Vec<f32> = st.dtoh_sync_copy(&dstate).unwrap();
         assert_close_rel(&format!("{tag}/state"), &got_st, &want_st, tol_s, 0.9999);
@@ -610,9 +619,16 @@ fn bench_case(st: &Stream, nseq: usize, len: usize, h: usize, hv: usize, k: usiz
     let us_prep = time_us(st, iters, || ops::gdn_chunk_prep(st, &dm, &g, &dcu, &plan, &mut sc, t, h, hv, k, v, scale).unwrap());
     let us_wy0 = time_us(st, iters, || ops::gdn_chunk_wy_with(st, &dm, &beta, &dcu, &plan, &mut sc, t, h, hv, k, v, false).unwrap());
     let us_wy = time_us(st, iters, || ops::gdn_chunk_wy_with(st, &dm, &beta, &dcu, &plan, &mut sc, t, h, hv, k, v, true).unwrap());
+    // ho 变体：bv0 老 fp32；bv16 / bv32 融合 mma；bv16pf / bv32pf 寄存器预取（r9 第 1 轮）
     let mut ho = vec![];
-    for bv in [0usize, 16, 32] {
-        ho.push((bv, time_us(st, iters, || ops::gdn_chunk_ho_with(st, &dcu, &plan, &sc, &mut out, &mut state, None, t, h, hv, k, v, bv).unwrap())));
+    for (name, how) in [
+        ("bv0", ops::GdnChunkHo { bv: 0, prefetch: false }),
+        ("bv16", ops::GdnChunkHo { bv: 16, prefetch: false }),
+        ("bv32", ops::GdnChunkHo { bv: 32, prefetch: false }),
+        ("bv16pf", ops::GdnChunkHo { bv: 16, prefetch: true }),
+        ("bv32pf", ops::GdnChunkHo { bv: 32, prefetch: true }),
+    ] {
+        ho.push((name, time_us(st, iters, || ops::gdn_chunk_ho_with(st, &dcu, &plan, &sc, &mut out, &mut state, None, t, h, hv, k, v, how).unwrap())));
     }
     // conv1d prefill（dim = row，width 4）
     let width = 4;
@@ -627,7 +643,7 @@ fn bench_case(st: &Stream, nseq: usize, len: usize, h: usize, hv: usize, k: usiz
 
     println!("  [{nseq}×{len}] 顺序 {:.0} µs | chunk 全链 {:.0} µs（{:.1}x）| prep {:.0} | wy old {:.0} mma {:.0} | ho {} | conv {}",
         us_seq, us_chunk, us_seq / us_chunk, us_prep, us_wy0, us_wy,
-        ho.iter().map(|(bv, u)| format!("bv{bv}={u:.0}")).collect::<Vec<_>>().join(" "),
+        ho.iter().map(|(name, u)| format!("{name}={u:.0}")).collect::<Vec<_>>().join(" "),
         conv.iter().map(|(r, u)| format!("rows{r}={u:.0}")).collect::<Vec<_>>().join(" "));
     if nseq == 1 {
         let speedup = us_seq / us_chunk;

@@ -21,7 +21,7 @@ for line in open(log, encoding="utf-8"):
     rows = [("chain_us", m.group(3)), ("prep_us", m.group(4)), ("wy_legacy_us", m.group(5)), ("wy_us", m.group(6))]
     for kv in m.group(7).split():
         k, v = kv.split("=")
-        rows.append((("ho_legacy_us" if k == "bv0" else f"ho_{k}_us"), v))
+        rows.append((("ho_legacy_us" if k == "bv0" else f"ho_{k}_us"), v))  # bv16 / bv32 / bv16pf / bv32pf / split…  # bv16 / bv32 / bv16pf / bv32pf / split…
     for kv in m.group(8).split():
         k, v = kv.split("=")
         rows.append((f"conv_{k}_us", v))

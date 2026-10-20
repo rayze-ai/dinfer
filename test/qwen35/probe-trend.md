@@ -34,6 +34,24 @@
 - 1x1024 wy_us dinfer：B300 GPU 6 sm_103（engine-gap 8e / 8g）
 - 1x1024 chain_us vllm：fla chunk_gated_delta_rule 含 l2norm（engine-gap 8d）
 
+## probe_gdn_r9_1（2026-10-20，3090）
+
+### gdn_scale（us）
+
+| x | chain_us dinfer | conv_rows0_us dinfer | conv_rows128_us dinfer | conv_rows256_us dinfer | conv_rows32_us dinfer | conv_rows64_us dinfer | ho_bv16_us dinfer | ho_bv16pf_us dinfer | ho_bv32_us dinfer | ho_bv32pf_us dinfer | ho_legacy_us dinfer | prep_us dinfer | wy_legacy_us dinfer | wy_us dinfer |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1x1024 | 845 | 551 | 133 | 248 | 75 | 77 | 346 | 440 | 278 | 441 | 2906 | 32 | 1201 | 542 |
+| 8x1024 | 6156 | 986 | 442 | 425 | 510 | 463 | 2698 | 3494 | 1857 | 3148 | 18619 | 173 | 9202 | 4196 |
+| 32x128 | 3229 | 427 | 238 | 294 | 270 | 245 | 1400 | 1897 | 1176 | 1907 | 9227 | 93 | 4604 | 1972 |
+| 1x4096 | 3095 | 2280 | 227 | 279 | 262 | 237 | 1351 | 1712 | 1037 | 1779 | 12030 | 93 | 4609 | 1980 |
+| 1x8192 | 6429 | 4501 | 440 | 425 | 508 | 458 | 2736 | 3467 | 2043 | 3473 | 24022 | 172 | 9224 | 4198 |
+
+- 1x1024 chain_us dinfer：r9 第 1 轮：ho 装载改寄存器向量（PF=0）+ 可选预取（PF=1，bv*pf 列）；默认 PF=0
+- 8x1024 chain_us dinfer：r9 第 1 轮：ho 装载改寄存器向量（PF=0）+ 可选预取（PF=1，bv*pf 列）；默认 PF=0
+- 32x128 chain_us dinfer：r9 第 1 轮：ho 装载改寄存器向量（PF=0）+ 可选预取（PF=1，bv*pf 列）；默认 PF=0
+- 1x4096 chain_us dinfer：r9 第 1 轮：ho 装载改寄存器向量（PF=0）+ 可选预取（PF=1，bv*pf 列）；默认 PF=0
+- 1x8192 chain_us dinfer：r9 第 1 轮：ho 装载改寄存器向量（PF=0）+ 可选预取（PF=1，bv*pf 列）；默认 PF=0
+
 ## probe_prefill_1（2026-10-20，B300）
 
 ### ttft_len（ms）
