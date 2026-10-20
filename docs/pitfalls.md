@@ -761,3 +761,10 @@
 - 根因：主会话推 server 修复后在 B300 重编时漏了 `--features qwen35`（之前每次都带）；`bins/dinfer` 的 feature 决定模型分支，默认 feature 是别的模型。
 - 解法：重编带 feature；**启动日志第一行打印编译进的模型 feature**，bench 脚本启动前核对 `/v1/models` 的 id 与预期一致再压（`bench_compare.sh` 已有 self-check，`bench_engine.sh` 也要）。
 - 避免：远端构建命令写进 `scripts/dev/`（`q35_b300_build.sh`），不手敲。
+
+## 压测工具自身开销把被测引擎拖慢 2×（2026-10-20，用户："测试程序的准确性、测试程序占用资源的影响"）
+
+- 现象：同负载（rate 8、1024/256）dinfer decode 步均值 GPU 0 上 29.4 ms、TPOT 24.5；GPU 5 单独跑 14.9 ms、TPOT 18.3。
+- 根因：`vllm bench serve`（Python）在 vLLM 容器里跑，rate 8 时 CPU 229–410%、192–322 线程；dinfer / vLLM / 压测端都没钉核（128 核 2 NUMA 全开放），dinfer 的异步调度线程被抢。两个工具对同一 vLLM 服务测 TTFT p99 差 15%。
+- 解法：三方 `taskset` 隔离（dinfer 0-31、bench 96-127），Rust `bench`（CPU 0.3 s / 64 req）作主口径；隔离后 dinfer TPOT 23.3 / vLLM 16.9（差 1.4×，这才是引擎差距）。
+- 避免：CLAUDE.md 硬性规则"测试程序本身要可信"五条；`bench_engine.sh` 自动钉核 + 写 CPU 集合进 summary。

@@ -36,6 +36,8 @@ pub struct ServeOptions {
     pub enable_chunked_prefill: bool,
     pub enable_prefix_caching: bool,
     pub decode_exempt_from_budget: bool,
+    /// 单条 prefill 每步最多 token（0 = 不限）；vLLM `long_prefill_token_threshold`
+    pub long_prefill_token_threshold: u32,
     pub device: usize,
     /// decode 步走 CUDA graph 重放（`--no-cuda-graph` 关；`NO_GRAPH` 环境变量也关）。
     pub enable_cuda_graph: bool,
@@ -55,6 +57,7 @@ impl Default for ServeOptions {
             enable_chunked_prefill: true,
             enable_prefix_caching: true,
             decode_exempt_from_budget: true,
+            long_prefill_token_threshold: 0,
             device: 0,
             enable_cuda_graph: true,
         }
@@ -151,7 +154,7 @@ impl Qwen35Service {
                 max_num_seqs: opt.max_num_seqs,
                 max_num_batched_tokens: opt.max_num_batched_tokens,
                 enable_chunked_prefill: opt.enable_chunked_prefill,
-                long_prefill_token_threshold: 0,
+                long_prefill_token_threshold: opt.long_prefill_token_threshold,
                 decode_exempt_from_budget: opt.decode_exempt_from_budget,
             },
             CacheConfig {

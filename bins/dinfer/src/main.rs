@@ -56,6 +56,9 @@ enum Cmd {
         /// 关闭 "decode 行不占 token 预算"（默认开：每步装下全部 decode + 预算内 prefill，使跨流并行生效）
         #[arg(long, default_value_t = false)]
         no_decode_exempt: bool,
+        /// 单条 prefill 每步最多喂多少 token（0 = 不限；vLLM `long_prefill_token_threshold`）：限长 prefill 对同批 decode 的拖累
+        #[arg(long, default_value_t = 0)]
+        long_prefill_token_threshold: u32,
         /// KV host tier：用这么多 GiB 的 pinned 主机内存做 prefix cache 的第二层（0 = 关）
         #[arg(long, default_value_t = 0.0)]
         kv_host_gib: f64,
@@ -179,6 +182,7 @@ async fn main() -> Result<()> {
             no_prefix_caching,
 
             no_decode_exempt,
+            long_prefill_token_threshold,
 
 
             kv_host_gib,
@@ -223,6 +227,7 @@ async fn main() -> Result<()> {
                     enable_chunked_prefill: true,
                     enable_prefix_caching: !no_prefix_caching,
                     decode_exempt_from_budget: !no_decode_exempt,
+                    long_prefill_token_threshold,
                     device,
                     enable_cuda_graph: !no_cuda_graph,
                     layers,
@@ -275,6 +280,7 @@ async fn main() -> Result<()> {
                     enable_chunked_prefill: true,
                     enable_prefix_caching: !no_prefix_caching,
                     decode_exempt_from_budget: !no_decode_exempt,
+                    long_prefill_token_threshold,
                     kv_host_gib,
                     role: role.parse().map_err(anyhow::Error::msg)?,
                     kv_port,
@@ -329,6 +335,7 @@ async fn main() -> Result<()> {
                     enable_chunked_prefill: true,
                     enable_prefix_caching: !no_prefix_caching,
                     decode_exempt_from_budget: !no_decode_exempt,
+                    long_prefill_token_threshold,
                     device,
                     enable_cuda_graph: !no_cuda_graph,
                 };
