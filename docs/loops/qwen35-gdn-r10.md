@@ -40,3 +40,16 @@
 | 0 | 基线 = r9 第 7 轮（`probe_gdn_r9_7`，GPU 6） | 18/102/87/38/208 · 82/532/498/219/1109 · 82/533/659/221/1271 | 14/14 | fla：wy 334 / ho 332 / 440 |
 | 1 | **aq / u / w / kg f32 → bf16**（`GdnChunkScratch` 四字段、wy 存 pack、ho / hpass fetch 改 uint4 直载省 pack，opass aq 直拷，legacy 两 kernel 跟改；C 入口按 kernels.h 约定 void*）`d2cc649` | 18/76/65/39/**185** · 82/505/405/221/**988** · 82/505/690(bv32pf **520**)/219/**1271** | 15/15（3090 + B300） | 8×1024 chain −11%（wy −5%、ho −19%）；1×8192 默认 bv32 反而 659→690，但 **bv32pf 520**（r9_7 为 685）：bf16 把 PF 的寄存器开销减半，预取从"全形状退"翻成"长形状赢 25%"。wy 只降 5% → wy 的 ~200 µs 差不在写量，在 u/w 两 GEMM 的 stage 装载 / M·stage 算力（下一轮看 ncu）。**第 2 轮：`ArchProfile::gdn_chunk_ho_prefetch` 在 sm_100 开 PF**（kernel 不变，只改选档）+ hpass 双缓冲 |
 | 2 | **`ArchProfile::gdn_chunk_ho_prefetch_for(Sm100) = true`**（kernel 不变，默认路径 = bv32pf；Sm8x 仍关；`GDN_CHUNK_HO_PREFETCH=0/1` 覆盖）`55f3e0e` | 18/76/66/38/**178** · 82/505/378/221/**967** · 82/505/520/219/**1103** | 14/15（B300：`gdn_recurrent_decode_b32_qwen_shape` 的 `bv0_legacy/out` max_err 0.009–0.016 波动于 0.01 门限，**r9_b300.log / r9_b300_7.log 同一测试已经在 0.0078 擦线**，是老 fp32 decode kernel + 随机 100 MB 状态的既有飘动，与本轮改动无关；3090 15/15） | 1×8192 chain 1271 → **1103**（−13%），8×1024 988 → 967。累计 r9_7 → r10_2：8×1024 1109 → 967（−13%）、1×8192 1271 → 1103（−13%）。ho 1×8192 520 vs fla fwd_h+fwd_o 440 还差 18%；wy 505 vs 334 差 51% —— **wy 现在是最大差距**。第 3 轮 ho smem 双缓冲（cp.async，Sm100 smem 够两份）或先转 wy？按分解：wy 差 171 µs > ho 差 80 µs，**先 wy** |
+
+### 第 3 轮前置：B300 ncu `wy_mma_kernel<64,128,TRI=1>`（8×1024，GPU 7，`probe_gdn_r10_3/ncu_wy_b300.txt`；**ncu 在 B300 要 `sudo -n`**，普通用户 ERR_NVGPUCTRPERM）
+
+| 指标 | B300 | 3090（对照） | 读法 |
+|---|---|---|---|
+| Duration | 422 µs | 1140 µs | bench 505 含 launch 间隙 |
+| SM 吞吐 / Mem 吞吐 / DRAM | 34% / 62% / **6%** | 27% / 32% | 不是 HBM 带宽；Mem 62% 全是 smem（ldmatrix / sts） |
+| 占用：理论 / 实际 | 31% / 29%（5 block/SM，regs 96 与 smem 45.6 KB 都限 5） | 17% / 16%（smem 限 2） | 资源没满，**warp 数不够掩延迟** |
+| 每 scheduler 可发射 warp | **0.53**，64% 周期无可发射 warp | 0.22，80% | 典型延迟型 |
+| 每指令周期 | 12.8，其中 **4.6 短记分板（smem 依赖）= 36%** | 9.8 | 分块逆的 sM 标量链 + stage 的 2 B 标量装载 |
+| grid | 3072 block × 128 线程 = 4 warp | — | 148 SM × 5 = 740 常驻 → 4.15 波 |
+
+结论：wy 不缺带宽、不缺占用槽位，缺**每 block 的并行 warp**和**更少的 smem 依赖链**。fla 把 wy 拆成 3 个 kernel 各自 autotune num_warps（kkt / wu 常用 8 warp）。第 3 轮改法：`kWyWarps` 4 → 8（u / w 阶段 8 warp 各持 64×64 片的 8 列 tile；点积阶段 8 warp 各 16 行 × 一半列；分块逆 4 对角块给 4 warp、另 4 warp 并行做非对角块的 S 累加），smem 不变。目标 505 → ≤ 400。

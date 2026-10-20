@@ -22,6 +22,8 @@
 - **性能改动在 B300 上出数定去留**，3090 只跑 parity / 编译。r9 六轮 3090 迭代 + 两轮 B300 复测，B300 没超 vLLM：3090 撞带宽墙（conv 84% 带宽、两段版多搬 200 MB 输），B300 撞延迟 / 并行度墙（h-pass 单独 721 > 融合 659 µs，串行链每 chunk ~5 µs 掩不住），3090 上筛出的候选集不含 B300 要的改法。
 - **先看 B300 的 nsys / ncu 再写改法**，不从 3090 profile 推；"验过" = ≥ 2 卡型 × 全部 bench 形状进 probe.csv；`ArchProfile` 每个分档要有该卡的实测行。
 - 3090 上看不出的 B300 特性：smem 227 KB（双缓冲装得下）、HBM 延迟型（occupancy / 软件流水比减字节数更要紧）、148 SM（单序列 192 block 铺不满）。
+- **B300 上 ncu 要 `sudo -n /usr/local/cuda-13.1/bin/ncu ...`**（普通用户 ERR_NVGPUCTRPERM；nerdctl 已走 sudo -n 免密）。看三个数就够定方向：`Eligible Warps Per Scheduler`（< 1 = 延迟型，加 warp / 减依赖链）、`Block Limit Registers/Shared Mem`（哪个限占用）、`DRAM Throughput`（< 20% 就别再减字节）。r10 第 1 轮 bf16 中间量只换来 wy −5%，ncu 一看 DRAM 6%——"减写量"本来就不是 wy 的瓶颈（r10 loop 页第 3 轮前置）。
+- **fla 对照要按 kernel 对段**（`scripts/dev/fla_prof.py`，torch.profiler 在 vLLM 容器里跑）：kkt+tril+wu ↔ wy、fwd_h+fwd_o ↔ ho、l2norm+cumsum ↔ prep，fla 不含 conv（vLLM 另走 causal_conv1d）。r9 的 "chain vs fla" 数把 conv 219 µs 算进了自己一侧。
 
 ## 数值口径
 - 硬判决（top-k / 路由 / argmax）只在可判定行断言（ref top-2 gap > 阈值）；bf16 输出链 rel ~5e-3 = 一 ulp，用 cos ≥ 0.999x 而不是 abs。
