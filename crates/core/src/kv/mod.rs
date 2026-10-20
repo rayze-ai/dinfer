@@ -4,9 +4,11 @@ pub mod block_pool;
 pub mod hash;
 pub mod host_tier;
 pub mod manager;
+pub mod snapshot;
 pub mod spec;
 
 pub use block_pool::{BlockId, BlockPool};
 pub use hash::{hash_block, BlockHash, BlockHasher};
 pub use manager::{GroupInfo, KvBlocks, KvCacheManager};
+pub use snapshot::StateSnapshotPool;
 pub use spec::KvCacheSpec;

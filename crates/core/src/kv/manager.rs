@@ -40,6 +40,12 @@ impl KvBlocks {
     pub fn group(&self, gid: usize) -> &[BlockId] {
         self.groups.get(gid).map_or(&[], |g| g.as_slice())
     }
+    /// 把每个 group 的块表截到覆盖 `num_tokens` 所需的块数（prefix cache 命中按更粗粒度对齐时用）。
+    pub fn truncate_to(&mut self, num_tokens: u32, group_block_sizes: &[u32]) {
+        for (g, &bs) in self.groups.iter_mut().zip(group_block_sizes) {
+            g.truncate((num_tokens / bs.max(1)) as usize);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +135,9 @@ impl KvCacheManager {
     #[inline]
     pub fn num_groups(&self) -> usize {
         self.groups.len()
+    }
+    pub fn group_block_sizes(&self) -> Vec<u32> {
+        self.groups.iter().map(|g| g.block_size).collect()
     }
 
     fn state(&self, slot: usize) -> Option<&ReqState> {

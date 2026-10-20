@@ -93,6 +93,8 @@ fn engine(max_tokens: usize, max_seqs: u32, budget: u32) -> Engine {
         num_spec_tokens: 0,
         async_scheduling: false,
         eos_token_ids: vec![],
+        recurrent_snapshot_tokens: 0,
+        recurrent_snapshot_slots: 0,
     };
     let g = vec![GroupInfo {
         spec: KvCacheSpec::FullAttention {

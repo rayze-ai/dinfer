@@ -37,6 +37,22 @@ pub struct SchedulerParams {
     pub async_scheduling: bool,
     /// eos / stop token 集合（模型给）。
     pub eos_token_ids: Vec<u32>,
+    /// 递归状态（GDN / KDA / Mamba）快照粒度（token 数，design §15.7）；0 = 关（非递归模型）。
+    /// > 0 时：prefix cache 命中长度向下对齐到该粒度；prefill chunk 边界落在对齐点；跑过对齐点的 prefill 步登记快照。
+    /// 必须是 `cache.block_size` 的整数倍。
+    pub recurrent_snapshot_tokens: u32,
+    /// 快照槽数（显存由模型侧分配；0 = 无快照池：命中仍对齐，但没有快照可续 → 整段重算）。
+    pub recurrent_snapshot_slots: u32,
+}
+
+/// 对齐位置 `pos`（快照粒度的整数倍、> 0）处的块 hash：`block_hashes[pos / hash_block_size - 1]`。
+#[inline]
+fn snapshot_hash_at(r: &Request, pos: u32) -> Option<crate::kv::BlockHash> {
+    if pos == 0 {
+        return None;
+    }
+    let hbs = r.block_hashes_block_size();
+    r.block_hashes.hashes.get((pos / hbs) as usize - 1).copied()
 }
 
 #[derive(Debug)]
@@ -68,12 +84,29 @@ pub struct Scheduler {
     force_finished: Vec<(RequestId, FinishReason)>,
     /// PD：Export 请求 finish 时先推这里，下一次 `schedule()` 搬进 `out.kv_export`（runner 在 begin 最前面导出）。
     pd_pending_export: Vec<(RequestId, KvBlocks)>,
+    /// 递归状态快照池（design §15.7；`recurrent_snapshot_tokens > 0 && slots > 0` 时存在）。
+    snapshots: Option<crate::kv::StateSnapshotPool>,
+    /// 统计：命中但快照已淘汰 → 整段重算的请求数；池满无槽可写的快照数。
+    snapshot_resume_misses: u64,
+    snapshot_write_skipped: u64,
 }
 
 impl Scheduler {
     pub fn new(p: SchedulerParams, groups: Vec<GroupInfo>, num_blocks: u32) -> Self {
         let kv = KvCacheManager::new(groups, num_blocks, p.cache.enable_prefix_caching, p.max_model_len);
         let cap = p.sched.max_num_seqs as usize * 2;
+        if p.recurrent_snapshot_tokens > 0 {
+            assert!(
+                p.recurrent_snapshot_tokens % p.cache.block_size.max(1) == 0
+                    && p.recurrent_snapshot_tokens % p.cache.hash_block_size.max(1) == 0,
+                "recurrent_snapshot_tokens {} must be a multiple of block_size {} / hash_block_size {}",
+                p.recurrent_snapshot_tokens,
+                p.cache.block_size,
+                p.cache.hash_block_size
+            );
+        }
+        let snapshots = (p.recurrent_snapshot_tokens > 0 && p.recurrent_snapshot_slots > 0)
+            .then(|| crate::kv::StateSnapshotPool::new(p.recurrent_snapshot_slots as usize));
         Self {
             p,
             kv,
@@ -90,6 +123,52 @@ impl Scheduler {
             host_tier_fetched: 0,
             force_finished: Vec::new(),
             pd_pending_export: Vec::new(),
+            snapshots,
+            snapshot_resume_misses: 0,
+            snapshot_write_skipped: 0,
+        }
+    }
+
+    /// 递归状态快照池统计：(lookup 命中, lookup 未命中, 淘汰, 命中后无快照整段重算, 池满放弃写)。
+    pub fn snapshot_stats(&self) -> (u64, u64, u64, u64, u64) {
+        let (h, m, e) = self.snapshots.as_ref().map_or((0, 0, 0), |p| (p.hits, p.misses, p.evictions));
+        (h, m, e, self.snapshot_resume_misses, self.snapshot_write_skipped)
+    }
+
+    /// prefill chunk 边界落在递归快照对齐点：`[computed, computed + num_new)` 若跨过下一个对齐点就截到对齐点
+    /// （只对 prompt 内的 token 做；decode 不受影响）。返回新的 num_new。
+    #[inline]
+    fn cap_to_snapshot_grain(&self, computed: u32, num_new: u32, num_prompt: u32) -> u32 {
+        let g = self.p.recurrent_snapshot_tokens;
+        if g == 0 || num_new <= 1 || computed >= num_prompt {
+            return num_new;
+        }
+        let next = (computed / g + 1) * g;
+        if next <= num_prompt && computed + num_new > next { next - computed } else { num_new }
+    }
+
+    /// 本步结束后 `computed_after` 恰好落在 prompt 内的对齐点 → 登记快照槽（已有同 hash 的快照则不重写）。
+    fn register_snapshot(&mut self, slot: usize, computed_after: u32, out: &mut SchedulerOutput) {
+        let g = self.p.recurrent_snapshot_tokens;
+        if g == 0 || computed_after == 0 || computed_after % g != 0 {
+            return;
+        }
+        let r = &self.slab[slot].as_ref().unwrap().req;
+        if computed_after > r.num_prompt_tokens() {
+            return;
+        }
+        let Some(hash) = snapshot_hash_at(r, computed_after) else { return };
+        let rid = r.id;
+        let Some(pool) = self.snapshots.as_mut() else { return };
+        if pool.contains(hash) {
+            return; // 同前缀的快照已在（并发同 prompt / 重复请求）
+        }
+        match pool.insert(hash) {
+            Some(s) => {
+                pool.pin(s); // 本步内不许被后来的 insert 淘汰
+                out.recurrent_snapshot.push((rid, s as u32));
+            }
+            None => self.snapshot_write_skipped += 1,
         }
     }
 
@@ -211,6 +290,9 @@ impl Scheduler {
         out.cached_reqs.new_block_ids.reserve(cap);
         out.cached_reqs.num_computed_tokens.reserve(cap);
         self.sched_slots.clear();
+        if let Some(pool) = self.snapshots.as_mut() {
+            pool.unpin_all(); // 上一步的 resume / snapshot 已入流
+        }
 
         let mut token_budget = self.p.sched.max_num_batched_tokens;
         let num_lookahead = self.p.num_spec_tokens;
@@ -256,6 +338,7 @@ impl Scheduler {
             }
             // 不超过 max_model_len（留出本 step 要采样的 1 个 token）。
             num_new = num_new.min(max_model_len.saturating_sub(r.num_computed_tokens + 1));
+            num_new = self.cap_to_snapshot_grain(r.num_computed_tokens, num_new, r.num_prompt_tokens());
             if num_new == 0 {
                 i += 1;
                 continue;
@@ -320,6 +403,7 @@ impl Scheduler {
             out.cached_reqs.resumed.push(false);
             out.cached_reqs.new_block_ids.push(if new_blocks.is_empty() { None } else { Some(new_blocks) });
             out.cached_reqs.num_computed_tokens.push(computed_after);
+            self.register_snapshot(slot, computed_after, &mut out);
             i += 1;
         }
 
@@ -359,12 +443,38 @@ impl Scheduler {
                         block_ids: new_blocks,
                         num_computed_tokens: prompt_len,
                         known_output: vec![first_token],
+                        resume_from: None,
                     });
                     continue;
                 }
 
                 // prefix cache（只在首次调度，即 num_computed_tokens == 0 时查）。
-                let (computed, num_new_computed) = self.kv.get_computed_blocks(r);
+                let (mut computed, mut num_new_computed) = self.kv.get_computed_blocks(r);
+                // 递归状态按块缓存（design §15.7）：命中长度向下对齐到快照粒度，且该对齐位置必须有状态快照，
+                // 否则递归层无法续算 → 整段重算（KV 块命中作废）。
+                let mut resume: Option<(u32, crate::kv::BlockHash, usize)> = None;
+                if self.p.recurrent_snapshot_tokens > 0 && num_new_computed > 0 {
+                    let g = self.p.recurrent_snapshot_tokens;
+                    let aligned = num_new_computed / g * g;
+                    let hit = snapshot_hash_at(r, aligned).and_then(|h| {
+                        let s = self.snapshots.as_mut()?.lookup(h)?;
+                        Some((h, s))
+                    });
+                    match hit {
+                        Some((h, s)) if aligned > 0 => {
+                            computed.truncate_to(aligned, &self.kv.group_block_sizes());
+                            num_new_computed = aligned;
+                            resume = Some((aligned, h, s));
+                        }
+                        _ => {
+                            if aligned > 0 {
+                                self.snapshot_resume_misses += 1;
+                            }
+                            computed = KvBlocks::none();
+                            num_new_computed = 0;
+                        }
+                    }
+                }
                 if self.p.cache.enable_prefix_caching && r.num_computed_tokens == 0 {
                     self.prefix_cache_queries += r.num_tokens().saturating_sub(1) as u64;
                     self.prefix_cache_hits += num_new_computed as u64;
@@ -384,6 +494,7 @@ impl Scheduler {
                     num_new = long_prefill_threshold;
                 }
                 num_new = num_new.min(token_budget);
+                num_new = self.cap_to_snapshot_grain(num_computed, num_new, r.num_prompt_tokens());
                 if num_new == 0 {
                     break;
                 }
@@ -432,6 +543,11 @@ impl Scheduler {
                     g.extend(nb);
                 }
                 let computed_after = num_computed + num_new;
+                if let Some((pos, _, snap)) = resume {
+                    self.snapshots.as_mut().unwrap().pin(snap);
+                    out.recurrent_resume.push((rid, snap as u32));
+                    debug_assert_eq!(pos, num_computed);
+                }
                 if s.seen_by_worker {
                     // 抢占后恢复：走 cached_reqs，block 表全量替换。
                     out.cached_reqs.req_ids.push(rid);
@@ -447,8 +563,10 @@ impl Scheduler {
                         block_ids: all,
                         num_computed_tokens: num_computed,
                         known_output: Vec::new(),
+                        resume_from: resume.map(|(p, h, _)| (p, h)),
                     });
                 }
+                self.register_snapshot(slot, computed_after, &mut out);
             }
         }
 
@@ -642,6 +760,8 @@ mod tests {
             num_spec_tokens: 0,
             async_scheduling: false,
             eos_token_ids: vec![2],
+            recurrent_snapshot_tokens: 0,
+            recurrent_snapshot_slots: 0,
         };
         let g = vec![GroupInfo {
             spec: KvCacheSpec::Mla { block_size: 16, head_size: 576, dtype_bytes: 2 },
@@ -792,6 +912,104 @@ mod tests {
         assert_eq!(o.num_scheduled_tokens, vec![(2, 16)]);
         assert_eq!(o.new_reqs[0].num_computed_tokens, 32);
         assert_eq!(o.new_reqs[0].block_ids.groups[0].len(), 3);
+    }
+
+    /// 递归快照（design §15.7）：粒度 = 4 块（64 token）、池 4 槽。
+    fn mk_snap(blocks: u32, grain: u32, slots: u32) -> Scheduler {
+        let (mut p, g, b) = params(8, 1000, blocks);
+        p.recurrent_snapshot_tokens = grain;
+        p.recurrent_snapshot_slots = slots;
+        p.cache.enable_prefix_caching = true;
+        Scheduler::new(p, g, b)
+    }
+
+    #[test]
+    fn snapshot_prefill_chunks_split_at_grain_and_register_snapshots() {
+        let mut s = mk_snap(64, 64, 4);
+        // 150 token 的 prompt：步 1 算 0..64（登记快照 @64），步 2 算 64..128（@128），步 3 算 128..150
+        s.add_request(req_same(1, 150, 4));
+        let o = s.schedule();
+        assert_eq!(o.num_scheduled_tokens, vec![(1, 64)], "chunk 边界落在对齐点");
+        assert_eq!(o.recurrent_snapshot.len(), 1, "本步末尾 = 64 → 登记快照");
+        assert!(o.recurrent_resume.is_empty());
+        assert!(o.new_reqs[0].resume_from.is_none());
+        let mro = ModelRunnerOutput {
+            req_ids: vec![1], sampled: vec![vec![]], drafts: vec![vec![]], logprobs: vec![], mode: None, phases: None,
+        };
+        s.update_from_output(&o, &mro);
+        let o = s.schedule();
+        assert_eq!(o.num_scheduled_tokens, vec![(1, 64)]);
+        assert_eq!(o.recurrent_snapshot.len(), 1);
+        s.update_from_output(&o, &mro);
+        let o = s.schedule();
+        assert_eq!(o.num_scheduled_tokens, vec![(1, 22)], "尾段不跨对齐点，一次算完");
+        assert!(o.recurrent_snapshot.is_empty(), "150 不是对齐点");
+        let (_, m, _, _, skipped) = s.snapshot_stats();
+        assert_eq!((m, skipped), (0, 0));
+    }
+
+    #[test]
+    fn snapshot_hit_aligns_down_and_resumes_from_snapshot() {
+        // 任务口径：命中 1300、粒度 1024 → resume 1024。这里缩比：块 16、粒度 64；prompt 150 → KV 可命中 144（149 向下取块），
+        // 对齐到 64 → 128，且 @128 有快照 → resume 128。
+        let mut s = mk_snap(64, 64, 4);
+        s.add_request(req_same(1, 150, 1));
+        let mro0 = ModelRunnerOutput {
+            req_ids: vec![1], sampled: vec![vec![]], drafts: vec![vec![]], logprobs: vec![], mode: None, phases: None,
+        };
+        for _ in 0..2 {
+            let o = s.schedule();
+            s.update_from_output(&o, &mro0);
+        }
+        step(&mut s, &[(1, vec![2])]); // 最后一块 + 采样 → 完成
+        assert!(!s.has_requests());
+        s.add_request(req_same(2, 150, 1));
+        let o = s.schedule();
+        assert_eq!(o.new_reqs[0].num_computed_tokens, 128, "144 向下对齐到 128");
+        assert_eq!(o.num_scheduled_tokens, vec![(2, 22)]);
+        let (pos, _h) = o.new_reqs[0].resume_from.expect("resume_from");
+        assert_eq!(pos, 128);
+        assert_eq!(o.recurrent_resume.len(), 1);
+        assert_eq!(o.recurrent_resume[0].0, 2);
+        assert_eq!(o.new_reqs[0].block_ids.groups[0].len(), 128 / 16 + 2, "命中 8 块 + 新 2 块");
+        let (h, m, _, miss_resume, _) = s.snapshot_stats();
+        assert_eq!((h, m, miss_resume), (1, 0, 0));
+        let (q, hits) = s.prefix_cache_stats();
+        assert_eq!((q, hits), (149 * 2, 128), "两条请求都计 query；命中按对齐后的数");
+    }
+
+    #[test]
+    fn snapshot_hit_without_snapshot_recomputes_from_zero() {
+        // 池 0 槽：命中仍按粒度对齐，但没有快照 → 整段重算（KV 命中作废）
+        let mut s = mk_snap(64, 64, 0);
+        s.add_request(req_same(1, 150, 1));
+        let mro0 = ModelRunnerOutput {
+            req_ids: vec![1], sampled: vec![vec![]], drafts: vec![vec![]], logprobs: vec![], mode: None, phases: None,
+        };
+        for _ in 0..2 {
+            let o = s.schedule();
+            assert!(o.recurrent_snapshot.is_empty(), "无池不登记");
+            s.update_from_output(&o, &mro0);
+        }
+        step(&mut s, &[(1, vec![2])]);
+        s.add_request(req_same(2, 150, 1));
+        let o = s.schedule();
+        assert_eq!(o.new_reqs[0].num_computed_tokens, 0);
+        assert!(o.new_reqs[0].resume_from.is_none());
+        assert_eq!(o.num_scheduled_tokens, vec![(2, 64)], "从 0 起、chunk 仍切在对齐点");
+        assert_eq!(s.snapshot_stats().3, 1, "记一次命中无快照");
+    }
+
+    #[test]
+    fn snapshot_grain_zero_keeps_old_behaviour() {
+        let mut s = mk(8, 1000, 32);
+        s.add_request(req_same(1, 48, 1));
+        step(&mut s, &[(1, vec![2])]);
+        s.add_request(req_same(2, 48, 1));
+        let o = s.schedule();
+        assert_eq!(o.new_reqs[0].num_computed_tokens, 32);
+        assert!(o.new_reqs[0].resume_from.is_none());
+        assert!(o.recurrent_resume.is_empty() && o.recurrent_snapshot.is_empty());
     }
 
     #[test]

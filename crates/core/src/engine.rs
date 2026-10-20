@@ -702,7 +702,16 @@ pub fn scheduler_params(
     num_spec_tokens: u32,
 ) -> SchedulerParams {
     let async_scheduling = std::env::var("ASYNC_SCHED").map(|v| v != "0").unwrap_or(true);
-    SchedulerParams { sched, cache, max_model_len, num_spec_tokens, async_scheduling, eos_token_ids }
+    SchedulerParams {
+        sched,
+        cache,
+        max_model_len,
+        num_spec_tokens,
+        async_scheduling,
+        eos_token_ids,
+        recurrent_snapshot_tokens: 0,
+        recurrent_snapshot_slots: 0,
+    }
 }
 
 #[cfg(test)]
@@ -758,6 +767,8 @@ mod pd_tests {
             num_spec_tokens: 0,
             async_scheduling: false,
             eos_token_ids: vec![],
+            recurrent_snapshot_tokens: 0,
+            recurrent_snapshot_slots: 0,
         };
         let g = vec![GroupInfo { spec: KvCacheSpec::Mla { block_size: 16, head_size: 64, dtype_bytes: 2 }, block_size: 16 }];
         Scheduler::new(p, g, 64)

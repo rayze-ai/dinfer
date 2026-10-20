@@ -15,6 +15,9 @@ pub struct NewRequestData {
     /// PD Import：首次登记时已知的输出 token（P 采样的首 token）。runner 直接追加进 token_ids，
     /// 下一步 decode 以它为输入。普通请求为空。
     pub known_output: Vec<u32>,
+    /// 递归状态按块缓存（design §15.7）：prefix cache 命中且该对齐位置有状态快照时 = (对齐位置 token 数, 该位置的块 hash)。
+    /// 此时 `num_computed_tokens` == 对齐位置；executor 侧的快照槽见 `SchedulerOutput::recurrent_resume`。
+    pub resume_from: Option<(u32, crate::kv::BlockHash)>,
 }
 
 /// 老请求：只传增量。
@@ -50,6 +53,11 @@ pub struct SchedulerOutput {
     pub kv_export: Vec<(RequestId, super::super::kv::KvBlocks)>,
     /// PD：D 侧 Import 请求本步新分配的块，按位置填入 payload（engine 持 payload，forward 前导入）。
     pub kv_import: Vec<(RequestId, super::super::kv::KvBlocks)>,
+    /// 递归状态按块缓存（design §15.7）：本步 forward **之前** 要从快照槽恢复进活槽的请求 (req, 快照槽)。
+    /// 该请求本步 `positions` 从对齐位置起、`has_initial = 1`。
+    pub recurrent_resume: Vec<(RequestId, u32)>,
+    /// 本步 forward **之后** 要把活槽状态保存到快照槽的请求 (req, 快照槽)：本步末尾恰好落在对齐位置。
+    pub recurrent_snapshot: Vec<(RequestId, u32)>,
 }
 
 impl SchedulerOutput {

@@ -195,6 +195,8 @@ fn run_engine_mode(e: Env, prompts: &[Vec<i32>], gen: u32, budget: u32, overlap:
         num_spec_tokens: 0,
         async_scheduling: overlap,
         eos_token_ids: vec![],
+        recurrent_snapshot_tokens: 0,
+        recurrent_snapshot_slots: 0,
     };
     let g = vec![GroupInfo {
         spec: KvCacheSpec::FullAttention {

@@ -162,6 +162,8 @@ fn run_engine(e: Env, prompts: &[Vec<i32>], gen: u32, budget: u32) -> Vec<Vec<u3
         num_spec_tokens: 0,
         async_scheduling: false,
         eos_token_ids: vec![], // 对拍：不提前停
+        recurrent_snapshot_tokens: 0,
+        recurrent_snapshot_slots: 0,
     };
     let g = vec![GroupInfo {
         spec: KvCacheSpec::FullAttention {

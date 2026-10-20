@@ -81,6 +81,10 @@ pub struct BatchPlan {
     /// 插队 prefill 步（Q3-o）：在飞的 decode 步 n 还没 finish 时同步跑的、只含新请求的步。
     /// 它的采样结果**不能**覆盖 `prev_chosen`（n+1 要从那里 gather 步 n 的结果）。
     pub skip_prev_chosen: bool,
+    /// 递归状态按块缓存（design §15.7；来自 `SchedulerOutput`，只保留本 plan 内的请求）：
+    /// forward 前从快照槽恢复进活槽的 (req, 快照槽)；forward 后把活槽保存到快照槽的 (req, 快照槽)。
+    pub recurrent_resume: Vec<(RequestId, u32)>,
+    pub recurrent_snapshot: Vec<(RequestId, u32)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -610,8 +614,20 @@ impl<E: ModelExecutor> Runner<E> {
         p.gather_idx.clear();
         p.any_gather = false;
         p.skip_prev_chosen = false;
+        p.recurrent_resume.clear();
+        p.recurrent_snapshot.clear();
         p.cu_seqlens.push(0);
         p.logits_row_start.push(0);
+        for &(rid, s) in &so.recurrent_resume {
+            if so.num_scheduled_tokens.iter().any(|(r, _)| *r == rid) {
+                p.recurrent_resume.push((rid, s));
+            }
+        }
+        for &(rid, s) in &so.recurrent_snapshot {
+            if so.num_scheduled_tokens.iter().any(|(r, _)| *r == rid) {
+                p.recurrent_snapshot.push((rid, s));
+            }
+        }
 
         let mut any_prefill = false;
         let mut any_decode = false;
@@ -846,6 +862,8 @@ mod tests {
             num_spec_tokens: 0,
             async_scheduling: false,
             eos_token_ids: vec![],
+            recurrent_snapshot_tokens: 0,
+            recurrent_snapshot_slots: 0,
         };
         let g = vec![GroupInfo {
             spec: KvCacheSpec::Mla { block_size: 16, head_size: 64, dtype_bytes: 2 },

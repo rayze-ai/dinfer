@@ -183,6 +183,8 @@ fn run_greedy(mtp: bool, prompt: &[i32], gen: u32) -> (Vec<u32>, usize, usize) {
         num_spec_tokens: if mtp { 1 } else { 0 },
         async_scheduling: false,
         eos_token_ids: vec![],
+        recurrent_snapshot_tokens: 0,
+        recurrent_snapshot_slots: 0,
     };
     let entry = cfg.kv_lora_rank + cfg.qk_rope_head_dim;
     let g = vec![GroupInfo {
@@ -288,6 +290,8 @@ fn mtp_verify_accepts_oracle_drafts() {
         num_spec_tokens: 1,
         async_scheduling: false,
         eos_token_ids: vec![],
+        recurrent_snapshot_tokens: 0,
+        recurrent_snapshot_slots: 0,
     };
     let entry = cfg.kv_lora_rank + cfg.qk_rope_head_dim;
     let g = vec![GroupInfo {
