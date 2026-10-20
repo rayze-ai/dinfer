@@ -58,6 +58,8 @@ memmap2 = "=0.9.5"
 safetensors = "=0.5.3"
 tokenizers = { version = "=0.21.2", default-features = false, features = ["onig"] }
 minijinja = { version = "=2.10.2", features = ["json", "loader", "loop_controls", "builtins", "preserve_order"] }
+fancy-regex = "=0.14.0"   # K3 tiktoken pat_str（类交集 && + 负向前瞻），与 tiktoken 自身同实现
+base64 = "=0.22.1"        # tiktoken.model ranks 行 base64
 cudarc = { version = "=0.18.2", default-features = false, features = ["std", "driver", "nvrtc", "cublas", "cublaslt", "f16", "nccl", "dynamic-linking", "cuda-version-from-build-system"] }
 criterion = "=0.6.0"
 tokio-stream = "=0.1.17"

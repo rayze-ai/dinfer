@@ -671,9 +671,11 @@ name = "dinfer-kimik3"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "dinfer-core",
  "dinfer-kernels",
  "dinfer-layers",
+ "fancy-regex",
  "npyz",
  "serde",
  "serde_json",
