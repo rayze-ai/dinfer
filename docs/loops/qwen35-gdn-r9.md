@@ -33,6 +33,10 @@
 
 r9 子代理两次 `remote_b300.sh push`（rsync `--delete`）把 B300 远端 `test/qwen35/2026-10-20/engine_r8/`（r8 刚跑完、尚未 pull 的 engine 产物）删了，本机也没有副本，只能重跑。规则（主会话）：**子代理不 push**，同步代码发消息让主会话推；非得推用 `remote_b300.sh put <文件> <远端路径>` 单文件；产物落远端 `bootstrap/` 或 `/tmp`，由主会话 pull。pitfalls 已有同类条目（另一会话 push 删 k3 refs）。
 
+## 备忘（用户 2026-10-20）
+
+- 本轮 fla 基线用的是 B300 上既有的 `vllm/vllm-openai:nightly`（0.26.1rc1 / torch 2.13 cu130，与 engine-gap 8d 同口径），**本次不改**；**后续 vLLM 对照一律用最新版本**（镜像要更新：机器无外网，走 `remote_b300.sh put` 中转，见 infra-b300）。
+
 ## 停止条件（机器可判定）
 
 - `gdn_parity` 14/14（3090 + B300 sm_103）；
