@@ -48,10 +48,14 @@ attn 是干净目标：纯 GEMM + softmax，无跨 chunk 串行依赖，已有 r
 
 - **新代码只进 `*_sm100.cu` / `*_sm100.cuh`**，`gqa.cu` 里的 v5 / v6 一行不改（只加分发分支）。
 - kernel 体内不写卡型 / 形状调优数值；BT / warp / stage 由 `ArchProfile` + 自调优给。
-- **build.rs**：`*_sm100.cu` 的编译门限现在是 `sm100_sm100` 白名单 + `MEGA_SM100_DEV`；新文件要按 `has_sm100` 走，
-  且 sm_103 上必须能编（`-gencode=arch=compute_103a,code=sm_103a`）。本机 nvcc 是 12.4（无 sm_103），
-  **只能在 B300 上编**，本机开发用 `MEGA_SM100_DEV=1` 只做语法检查。
-- 3090 上不编 sm100 文件（`has_sm100=false`），保证本机 `cargo build --workspace` 不破。
+- **build.rs**：① `sm100_only` 白名单**显式加项**（`mega_sm100` / `gqa_fa_sm100` / `umma_peak_sm100`），
+  **不改成"stem 以 `_sm100` 结尾"**——那会让 `mxfp4_gemm_sm100.cu`（glm53/kimik3 在用）从"永远编"变成"has_sm100 才编"，超范围；
+  ② 目标 arch 含 100/103 时**全局**换 `a` 变体（`-gencode=arch=compute_103a,code=sm_103a`）——tcgen05 需要 `a` 后缀，
+  而 `sm_103a` cubin 的可运行范围与 `sm_103` 相同，全局换无副作用且不用引入 per-file 旗标。
+- **本机编译约束（2026-10-21 实测纠正）**：本机 nvcc 12.4 最高 sm_90a，`MEGA_SM100_DEV=1` **也编不过 tcgen05 语法**
+  （PTX 版本 / 指令不支持）。所以本机**不能**做 tcgen05 的语法检查。开发循环是：本地写 → 单文件 `put` →
+  B300 GPU 5 上 `nvcc -arch=sm_103a` 直接编（不经 cargo，几秒一轮）→ 通过后走 cargo 全量 + 测试。
+- 3090 上不编 sm100 文件（`has_sm100=false`），只需保证 ① `cargo build --workspace` 不破 ② `ops_parity` 不受影响。
 
 ## 环境
 
