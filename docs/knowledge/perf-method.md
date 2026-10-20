@@ -67,3 +67,10 @@
 - **为什么**：2026-10-20 engine-gap 8c–8g 四组探针测量只写了 markdown 表行，用户看页面发现没有；形状不同不是不进 CSV 的理由，长表（group/metric/side/x/value）能装任何探针。
 - **怎么用**：探针开始前先建 `probe_<名>/probe.csv` 写表头，每拿到一组数就追加一行，结束跑 `python3 scripts/dev/probe_trend.py --root test/<model> && python3 scripts/dev/bench_index.py`，commit 生成物。
 - **证据**：`docs/loops/engine-gap.md` 8h；`test/qwen35/2026-10-20/probe_prefill_1/`。
+
+## 9. 调度策略改动必测"单发长 prompt 的 prefill 步数"（2026-10-20 r8 切步）
+
+- **判断**：任何改 prefill chunk 边界 / 对齐 / 预算的调度改动，合入前除了 engine 口径（多请求、prefix-repeat），还要测**单发 6 K prompt** 的 TTFT 与 `/metrics` 的 engine_steps 增量；步数变了就有每步 ~6 ms 的固定开销乘进去。
+- **为什么**：r8 的 1024 对齐切步让 6 K 单发从 1 步变 6 步，TTFT +32 ms（+10%），把 r9 kernel 的 −80 ms 实效遮掉一半；engine 口径（64 请求混批）和四组闭环（p128 / p1024）都看不出来，因为那些 prompt 要么短于粒度、要么多请求本来就多步。A/B 时只关池（`--gdn-snapshot-gib 0`）不关粒度，第一轮误判为"不是快照"的同时也差点把切步放过。
+- **怎么用**：`ttft1.py <port> 5 860` + 前后 `engine_steps_total` 差值；步数 > 1 要说清为什么；无登记需要时不切。
+- **证据**：`docs/loops/engine-gap.md` 8k–8m；`test/qwen35/2026-10-20/probe_prefill_2/`。
