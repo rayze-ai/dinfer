@@ -298,9 +298,9 @@ impl ArchProfile {
     /// `GQA_PREFILL_CFG` 环境变量只做覆盖（微基准 / 对拍扫变体）。
     pub fn gqa_prefill_cfg_for(arch: Arch) -> i32 {
         match arch {
-            Arch::Sm100 => 464,
-            Arch::Sm90 => 464,
-            Arch::Sm8x => 0,
+            Arch::Sm100 => 3464,  // 第 4 轮：SFU ex2.approx（464 + FEXP）6 K 1650 → 1556 µs
+            Arch::Sm90 => 3464,
+            Arch::Sm8x => 0,  // 3090 99 KB 装不下 tile 64（3464 需 101 KB），v5 回退；待单独量 3432
         }
     }
 

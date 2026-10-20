@@ -39,6 +39,18 @@
 
 - 1024 fa_us dinfer：r11a 第 2 轮：v6 cfg 464 复现（默认路径）；同轮 v7 warp 对分工 1864/1832/1464/1432 全更慢
 
+## probe_attn_r11a_4（2026-10-20，B300）
+
+### attn_scale（us）
+
+| x | fa_cfg3432_us dinfer | fa_us dinfer | tflops dinfer | tflops_cfg3432 dinfer |
+|---|---|---|---|---|
+| 1024 | 84 | 78 | 165.1 | 153.9 |
+| 3009 | 496 | 455 | 244.3 | 224.3 |
+| 6019 | 1753 | 1556 | 286.1 | 254.0 |
+
+- 1024 fa_us dinfer：r11a 第 4 轮：v6 + SFU ex2.approx（cfg 3464）B300-50 GPU 4；6 K 1650 → 1556
+
 ## probe_gdn_r10_1（2026-10-20，B300）
 
 ### gdn_scale（us）

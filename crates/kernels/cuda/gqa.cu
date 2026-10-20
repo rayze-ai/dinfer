@@ -330,7 +330,17 @@ template <int NW, int TILE>
 struct V6Cfg {
   static constexpr int BQ = NW * 16, THREADS = NW * 32;
 };
-template <bool PAGED, int D, int NW, int TILE>
+__device__ __forceinline__ float ex2_approx(float x) {
+  float y;
+  asm("ex2.approx.ftz.f32 %0, %1;\n" : "=f"(y) : "f"(x));
+  return y;
+}
+// softmax 指数：FEXP=false 用库 exp2f（精确多项式），true 用 SFU ex2.approx（ncu：定点延迟依赖 + fast math 建议）
+template <bool FEXP>
+__device__ __forceinline__ float ex2f(float x) {
+  return FEXP ? ex2_approx(x) : exp2f(x);
+}
+template <bool PAGED, int D, int NW, int TILE, int NBUF = 1, bool FEXP = false>
 __global__ void __launch_bounds__(NW * 32) gqa_fa_v6_kernel(
     const bf16* __restrict__ q, const bf16* __restrict__ k, const bf16* __restrict__ v, const bf16* __restrict__ cache,
     const int32_t* __restrict__ block_table, const int32_t* __restrict__ seq_lens, const int32_t* __restrict__ cu_seqlens,
@@ -342,8 +352,8 @@ __global__ void __launch_bounds__(NW * 32) gqa_fa_v6_kernel(
   static_assert(QITERS * THREADS == BQ * U && KITERS * THREADS == TILE * U, "v6 装载整除");
   extern __shared__ __align__(128) unsigned char v6_smem[];
   bf16* sQ = reinterpret_cast<bf16*>(v6_smem);
-  bf16* sK = sQ + (size_t)BQ * LDS;
-  bf16* sV = sK + (size_t)TILE * LDS;
+  bf16* sK = sQ + (size_t)BQ * LDS;   // [NBUF][TILE][LDS]
+  bf16* sV = sK + (size_t)NBUF * TILE * LDS;
   const int b = blockIdx.z, h = blockIdx.y;
   const int group = H / Hkv, hk = h / group;
   const int q0 = cu_seqlens[b], q_len = cu_seqlens[b + 1] - q0;
@@ -365,7 +375,7 @@ __global__ void __launch_bounds__(NW * 32) gqa_fa_v6_kernel(
     const bf16* pq = q + (int64_t)(q0 + min(row, q_len - 1)) * q_stride + (int64_t)h * D + d8;
     cp_async16(sQ + j * LDS + d8, pq, row < q_len ? 16 : 0);
   }
-  auto load_tile = [&](int tile) {
+  auto load_tile = [&](int tile, int buf) {
     const int k0 = tile * TILE;
     const int kn = min(TILE, seq_len - k0);
 #pragma unroll
@@ -389,12 +399,12 @@ __global__ void __launch_bounds__(NW * 32) gqa_fa_v6_kernel(
       } else {
         pk = pv = k ? k : cache;
       }
-      cp_async16(sK + j * LDS + d8, pk, bytes);
-      cp_async16(sV + j * LDS + d8, pv, bytes);
+      cp_async16(sK + (size_t)buf * TILE * LDS + j * LDS + d8, pk, bytes);
+      cp_async16(sV + (size_t)buf * TILE * LDS + j * LDS + d8, pv, bytes);
     }
     cp_async_commit();
   };
-  load_tile(0);  // 与 Q 同一 commit 组
+  load_tile(0, 0);  // 与 Q 同一 commit 组（Q 的 cp.async 在此一并 commit）
   float o[OF][4];
 #pragma unroll
   for (int i = 0; i < OF; ++i) { o[i][0] = o[i][1] = o[i][2] = o[i][3] = 0.f; }
@@ -407,8 +417,12 @@ __global__ void __launch_bounds__(NW * 32) gqa_fa_v6_kernel(
   const bf16* sQw = sQ + (warp * 16) * LDS;
   for (int tile = 0; tile < n_tiles; ++tile) {
     const int k0 = tile * TILE;
-    cp_async_wait_all();
-    __syncthreads();
+    const int buf = NBUF == 1 ? 0 : (tile & 1);
+    cp_async_wait_all();  // NBUF=2 时下一 tile 已在算本 tile 时装好，这里只等它
+    __syncthreads();      // 本 tile 对全 block 可见；NBUF=2 时上一 tile 的计算都已结束（另一缓冲才可覆盖）
+    if (NBUF == 2 && tile + 1 < n_tiles) load_tile(tile + 1, buf ^ 1);
+    const bf16* sKb = sK + (size_t)buf * TILE * LDS;
+    const bf16* sVb = sV + (size_t)buf * TILE * LDS;
     if (k0 <= warp_max_vis) {  // 整 warp 不可见的 tile 只参与同步
       float sacc[SFRAG][4];
 #pragma unroll
@@ -422,7 +436,7 @@ __global__ void __launch_bounds__(NW * 32) gqa_fa_v6_kernel(
 #pragma unroll
         for (int nt = 0; nt < SFRAG; ++nt) {
           uint32_t bk[4];
-          ldsm_x4(bk, sK + (nt * 8 + (lane & 7)) * LDS + kk2 * 32 + 8 * (lane >> 3));
+          ldsm_x4(bk, sKb + (nt * 8 + (lane & 7)) * LDS + kk2 * 32 + 8 * (lane >> 3));
           mma16816(sacc[nt], qa, bk[0], bk[1]);
           mma16816(sacc[nt], qa + 4, bk[2], bk[3]);
         }
@@ -446,15 +460,15 @@ __global__ void __launch_bounds__(NW * 32) gqa_fa_v6_kernel(
       mx_a = fmaxf(mx_a, __shfl_xor_sync(0xffffffffu, mx_a, 1)); mx_a = fmaxf(mx_a, __shfl_xor_sync(0xffffffffu, mx_a, 2));
       mx_b = fmaxf(mx_b, __shfl_xor_sync(0xffffffffu, mx_b, 1)); mx_b = fmaxf(mx_b, __shfl_xor_sync(0xffffffffu, mx_b, 2));
       float alpha_a = 1.f, alpha_b = 1.f;
-      if (mx_a != -INFINITY) { const float mn = fmaxf(m_a, mx_a); alpha_a = exp2f(m_a - mn); m_a = mn; }
-      if (mx_b != -INFINITY) { const float mn = fmaxf(m_b, mx_b); alpha_b = exp2f(m_b - mn); m_b = mn; }
+      if (mx_a != -INFINITY) { const float mn = fmaxf(m_a, mx_a); alpha_a = ex2f<FEXP>(m_a - mn); m_a = mn; }
+      if (mx_b != -INFINITY) { const float mn = fmaxf(m_b, mx_b); alpha_b = ex2f<FEXP>(m_b - mn); m_b = mn; }
       float ps_a = 0.f, ps_b = 0.f;
 #pragma unroll
       for (int nt = 0; nt < SFRAG; ++nt) {
 #pragma unroll
         for (int e = 0; e < 2; ++e) {
-          const float pa = (sacc[nt][e] == -INFINITY) ? 0.f : exp2f(sacc[nt][e] - m_a);
-          const float pb = (sacc[nt][2 + e] == -INFINITY) ? 0.f : exp2f(sacc[nt][2 + e] - m_b);
+          const float pa = (sacc[nt][e] == -INFINITY) ? 0.f : ex2f<FEXP>(sacc[nt][e] - m_a);
+          const float pb = (sacc[nt][2 + e] == -INFINITY) ? 0.f : ex2f<FEXP>(sacc[nt][2 + e] - m_b);
           sacc[nt][e] = pa; sacc[nt][2 + e] = pb; ps_a += pa; ps_b += pb;
         }
       }
@@ -471,15 +485,15 @@ __global__ void __launch_bounds__(NW * 32) gqa_fa_v6_kernel(
 #pragma unroll
         for (int nt2 = 0; nt2 < D / 16; ++nt2) {
           uint32_t bv[4];
-          ldsm_x4_t(bv, sV + (j * 16 + 8 * ((lane >> 3) & 1) + (lane & 7)) * LDS + nt2 * 16 + 8 * (lane >> 4));
+          ldsm_x4_t(bv, sVb + (j * 16 + 8 * ((lane >> 3) & 1) + (lane & 7)) * LDS + nt2 * 16 + 8 * (lane >> 4));
           mma16816(o[2 * nt2], pa, bv[0], bv[1]);
           mma16816(o[2 * nt2 + 1], pa, bv[2], bv[3]);
         }
       }
     }
-    if (tile + 1 < n_tiles) {
+    if (NBUF == 1 && tile + 1 < n_tiles) {
       __syncthreads();  // 单缓冲：全 block 算完才能覆盖
-      load_tile(tile + 1);
+      load_tile(tile + 1, 0);
     }
   }
   l_a += __shfl_xor_sync(0xffffffffu, l_a, 1); l_a += __shfl_xor_sync(0xffffffffu, l_a, 2);
@@ -498,22 +512,22 @@ __global__ void __launch_bounds__(NW * 32) gqa_fa_v6_kernel(
       *reinterpret_cast<uint32_t*>(op + nt * 8) = pack_bf16x2(o[nt][2] * inv_b, o[nt][3] * inv_b);
   }
 }
-template <bool PAGED, int D, int NW, int TILE>
+template <bool PAGED, int D, int NW, int TILE, int NBUF = 1, bool FEXP = false>
 static int v6_launch(int max_q, int heads, int num_reqs, cudaStream_t stream, const bf16* q, const bf16* k, const bf16* v,
                      const bf16* cache, const int32_t* bt, const int32_t* seq_lens, const int32_t* cu, bf16* out, int H,
                      int Hkv, float scale_log2, int q_stride, int kv_stride, int block_size, int max_blocks,
                      int skip_single) {
   constexpr int BQ = V6Cfg<NW, TILE>::BQ, LDS = D + 8;
-  const size_t smem = (size_t)(BQ + 2 * TILE) * LDS * 2;
+  const size_t smem = (size_t)(BQ + 2 * NBUF * TILE) * LDS * 2;
   static int attr = 0;  // 0 未设 / 1 成功 / -1 失败（smem 超卡上限）
   if (attr == 0) {
-    attr = cudaFuncSetAttribute(gqa_fa_v6_kernel<PAGED, D, NW, TILE>, cudaFuncAttributeMaxDynamicSharedMemorySize,
+    attr = cudaFuncSetAttribute(gqa_fa_v6_kernel<PAGED, D, NW, TILE, NBUF, FEXP>, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                 (int)smem) == cudaSuccess ? 1 : -1;
     if (attr < 0) (void)cudaGetLastError();
   }
   if (attr < 0) return (int)cudaErrorInvalidConfiguration;
   dim3 grid((unsigned)((max_q + BQ - 1) / BQ), (unsigned)heads, (unsigned)num_reqs);
-  gqa_fa_v6_kernel<PAGED, D, NW, TILE><<<grid, NW * 32, smem, stream>>>(q, k, v, cache, bt, seq_lens, cu, out, H, Hkv,
+  gqa_fa_v6_kernel<PAGED, D, NW, TILE, NBUF, FEXP><<<grid, NW * 32, smem, stream>>>(q, k, v, cache, bt, seq_lens, cu, out, H, Hkv,
                                                                        scale_log2, q_stride, kv_stride, block_size,
                                                                        max_blocks, skip_single);
   return (int)cudaGetLastError();
@@ -526,11 +540,6 @@ static int v6_launch(int max_q, int heads, int num_reqs, cudaStream_t stream, co
 // 对内同步用 named barrier（id = 1 + 对号，64 线程），与 block 级 `__syncthreads`（barrier 0）不冲突。
 __device__ __forceinline__ void bar_named(int id, int nthreads) {
   asm volatile("bar.sync %0, %1;\n" ::"r"(id), "r"(nthreads));
-}
-__device__ __forceinline__ float ex2_approx(float x) {
-  float y;
-  asm("ex2.approx.ftz.f32 %0, %1;\n" : "=f"(y) : "f"(x));
-  return y;
 }
 template <int NW, int TILE>
 struct V7Cfg {
@@ -755,6 +764,14 @@ static int v6_dispatch(int cfg, int max_q, int heads, int num_reqs, cudaStream_t
   case NW * 100 + TILE:                                                                                           \
     return v6_launch<PAGED, 256, NW, TILE>(max_q, heads, num_reqs, stream, q, k, v, cache, bt, seq_lens, cu, out, H, \
                                            Hkv, scale_log2, q_stride, kv_stride, block_size, max_blocks, skip_single);
+#define V6B_CASE(NW, TILE)                                                                                        \
+  case 2000 + NW * 100 + TILE:                                                                                    \
+    return v6_launch<PAGED, 256, NW, TILE, 2>(max_q, heads, num_reqs, stream, q, k, v, cache, bt, seq_lens, cu, out, \
+                                              H, Hkv, scale_log2, q_stride, kv_stride, block_size, max_blocks, skip_single);
+#define V6F_CASE(NW, TILE)                                                                                        \
+  case 3000 + NW * 100 + TILE:                                                                                    \
+    return v6_launch<PAGED, 256, NW, TILE, 1, true>(max_q, heads, num_reqs, stream, q, k, v, cache, bt, seq_lens, cu, \
+                                                    out, H, Hkv, scale_log2, q_stride, kv_stride, block_size, max_blocks, skip_single);
 #define V7_CASE(NW, TILE)                                                                                         \
   case 1000 + NW * 100 + TILE:                                                                                    \
     return v7_launch<PAGED, 256, NW, TILE>(max_q, heads, num_reqs, stream, q, k, v, cache, bt, seq_lens, cu, out, H, \
@@ -764,6 +781,10 @@ static int v6_dispatch(int cfg, int max_q, int heads, int num_reqs, cudaStream_t
     V6_CASE(4, 64)
     V6_CASE(8, 32)
     V6_CASE(8, 64)
+    V6B_CASE(4, 32)
+    V6B_CASE(4, 64)
+    V6F_CASE(4, 32)
+    V6F_CASE(4, 64)
     V7_CASE(4, 32)
     V7_CASE(4, 64)
     V7_CASE(8, 32)
@@ -771,6 +792,8 @@ static int v6_dispatch(int cfg, int max_q, int heads, int num_reqs, cudaStream_t
     default: return (int)cudaErrorInvalidValue;
   }
 #undef V6_CASE
+#undef V6B_CASE
+#undef V6F_CASE
 #undef V7_CASE
 }
 constexpr float LOG2E_F = 1.4426950408889634f;
