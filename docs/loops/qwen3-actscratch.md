@@ -44,3 +44,4 @@
 
 | 轮 | 改动 | 结果 | 结论 |
 |---|---|---|---|
+| 1 | 新建 `models/qwen3/src/scratch.rs::ActScratch`；`Attention` 去掉 `qkv_buf`/`attn` 两个字段与 `swap_bufs`；`Attention::forward` 收 `&mut ActScratch`，GEMM 的 `ld` / `qkv_post` 行宽 / attention 的 `q_stride` 一律用本层 `qkv_w`（显式，不从 `numel` 反推），加 `numel ≥ t × 行宽` 断言；`Mlp::load_tp(..., 0, ...)` + `forward_with_scratch`；删 `LayerScratch`，`ModelScratch.act: ActScratch`，`swap_scratch` 变成一次 `mem::swap`；启动日志新增 `act_scratch_rows/bytes/mib` | `cargo build --release --features qwen3 -p dinfer` OK（49.9 s）；`cargo test --release -p dinfer-qwen3` 11 项全过（8 单测 + 1 guided + 2 lmhead_colsplit） | 编译与 CPU 侧通过；`compute-apps` 空，下一轮跑 q1 + 真权重启动对比 |

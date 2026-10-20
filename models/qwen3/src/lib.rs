@@ -7,6 +7,7 @@ pub mod config;
 pub mod executor;
 pub mod model;
 pub mod parser;
+pub mod scratch;
 pub mod service;
 pub mod tp;
 

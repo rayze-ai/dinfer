@@ -6,6 +6,7 @@
 //! self_attn.{q,k}_norm, post_attention_layernorm, mlp.{gate,up,down}_proj}`、`model.norm`、`lm_head`（tied 时文件里也有一份）。
 
 use crate::config::Qwen3Config;
+use crate::scratch::ActScratch;
 use anyhow::{ensure, Context, Result};
 use dinfer_core::runner::BatchMode;
 use dinfer_kernels as k;
@@ -28,9 +29,8 @@ pub struct Attention {
     pub o_proj: Linear,
     pub q_norm: RmsNorm, // over head_dim
     pub k_norm: RmsNorm,
-    // scratch（[max_tokens, ...]）：qkv GEMM 输出（q/k 经 qkv_post 原地 norm+rope 后直接给 attention 按 stride 读）
-    qkv_buf: Tensor<bf16>,
-    attn: Tensor<bf16>,
+    // 激活缓冲不再每层各持一套：qkv GEMM 输出 / attention 输出借全模型共享的 `ActScratch`
+    //（每层一套在大预算下把 KV 池挤爆，见 scratch.rs）。
 }
 
 pub struct DecoderLayer {
@@ -101,6 +101,8 @@ pub struct Qwen3Model<O: OpSet = DefaultOps> {
     logits_local: Tensor<bf16>,
     /// decode split-K attention 的 partial 缓冲（全层共享）：[max_logits_rows × H × 8 × (D+2)] f32。
     decode_scratch: Tensor<f32>,
+    /// 全模型共享的一套 per-token 激活缓冲（28 层轮流借用；每层一套在大预算下把 KV 池挤爆，见 scratch.rs）。
+    pub act: ActScratch,
 }
 
 
@@ -130,7 +132,6 @@ impl Attention {
         src: &WeightSource,
         p: &str,
         cfg: &Qwen3Config,
-        max_tokens: usize,
         (rank, world): (usize, usize),
     ) -> Result<Self> {
         // TP（design §13.2）：cfg 已是本 rank 的本地配置（头数 / tp）；q/k/v 按头行切，o_proj 按输入列切。
@@ -170,19 +171,9 @@ impl Attention {
         let q_norm = RmsNorm::load(stream, src, &format!("{p}.q_norm"), cfg.rms_norm_eps)?;
         let k_norm = RmsNorm::load(stream, src, &format!("{p}.k_norm"), cfg.rms_norm_eps)?;
         load_phase::add(load_phase::NORMS, tn);
-        let tz = std::time::Instant::now();
-        let t = max_tokens;
-        let qkv_buf = Tensor::zeros(stream, &[t, (h + 2 * hk) * d])?;
-        let attn = Tensor::zeros(stream, &[t, h, d])?;
-        load_phase::add(load_phase::ATTN_ZEROS, tz);
-        Ok(Self { qkv, o_proj, q_norm, k_norm, qkv_buf, attn })
+        Ok(Self { qkv, o_proj, q_norm, k_norm })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn swap_bufs(&mut self, qkv_buf: &mut Tensor<bf16>, attn: &mut Tensor<bf16>) {
-        std::mem::swap(&mut self.qkv_buf, qkv_buf);
-        std::mem::swap(&mut self.attn, attn);
-    }
     #[allow(clippy::too_many_arguments)]
     fn forward<O: OpSet>(
         &mut self,
@@ -198,20 +189,34 @@ impl Attention {
         kv: &mut PagedKv,
         meta: &AttnMeta<'_>,
         decode_scratch: &mut Tensor<f32>,
+        sc: &mut ActScratch,
         out: &mut Tensor<bf16>,
     ) -> Result<()> {
         let (h, hk, d) =
             (cfg.num_attention_heads as usize, cfg.num_key_value_heads as usize, cfg.head_dim as usize);
         let hidden = cfg.hidden_size as usize;
         let eps = cfg.rms_norm_eps;
+        // 本层逻辑行宽：GEMM 的 ld、qkv_post 的逐行写入、attention 的 q_stride / kv_stride 三者必须都是它。
+        // 共享缓冲比本层宽是安全的（只用前缀），但**不能**从 `numel / t` 反推行宽。
         let qkv_w = (h + 2 * hk) * d;
+        ensure!(
+            t <= sc.max_tokens
+                && sc.qkv.numel() >= t * qkv_w
+                && sc.attn.numel() >= t * h * d,
+            "attn: t={t} 超过共享激活缓冲 (max_tokens={}, qkv={} < {} / attn={} < {})",
+            sc.max_tokens,
+            sc.qkv.numel(),
+            t * qkv_w,
+            sc.attn.numel(),
+            t * h * d
+        );
         // 1. qkv = x · W^T → [t, (H+2Hkv)·D]（q | k | v）
-        gemm.forward_bf16(&x.data, &self.qkv.w.data, None, &mut self.qkv_buf.data, t, qkv_w, hidden)?;
+        gemm.forward_bf16(&x.data, &self.qkv.w.data, None, &mut sc.qkv.data, t, qkv_w, hidden)?;
         // 2–4. 一个 kernel：q/k per-head RMSNorm + neox RoPE（原地）+ K/V 写 paged cache（Q3-e 融合；D 必须 128）
         ensure!(d == 128 && rope.rope_dim == d, "qkv_post needs head_dim == rope_dim == 128");
         ops.qkv_post().apply(
             stream,
-            &mut self.qkv_buf.data,
+            &mut sc.qkv.data,
             &self.q_norm.w.data,
             &self.k_norm.w.data,
             &positions.data,
@@ -227,16 +232,16 @@ impl Attention {
         )?;
         // 5. attention：q 从 qkv_buf 第 0 列起、k 从 H·D 列起、v 从 (H+Hkv)·D 列起，行跨度 qkv_w
         let scale = (d as f32).powf(-0.5);
-        let q_view = self.qkv_buf.data.slice(..);
-        let k_view = self.qkv_buf.data.slice(h * d..);
-        let v_view = self.qkv_buf.data.slice((h + hk) * d..);
+        let q_view = sc.qkv.data.slice(..);
+        let k_view = sc.qkv.data.slice(h * d..);
+        let v_view = sc.qkv.data.slice((h + hk) * d..);
         match meta.mode {
             BatchMode::Prefill => ops.attn().prefill(
                 stream,
                 &q_view,
                 &k_view,
                 &v_view,
-                &mut self.attn.data,
+                &mut sc.attn.data,
                 &meta.cu_seqlens.data,
                 meta.num_reqs,
                 meta.max_seqlen,
@@ -254,7 +259,7 @@ impl Attention {
                 &kv.cache.data,
                 &meta.block_table.data,
                 &meta.seq_lens.data,
-                &mut self.attn.data,
+                &mut sc.attn.data,
                 &mut decode_scratch.data,
                 meta.num_reqs,
                 h,
@@ -274,7 +279,7 @@ impl Attention {
                 &meta.block_table.data,
                 &meta.seq_lens.data,
                 &meta.cu_seqlens.data,
-                &mut self.attn.data,
+                &mut sc.attn.data,
                 &mut decode_scratch.data,
                 meta.num_reqs,
                 meta.max_seqlen,
@@ -293,7 +298,7 @@ impl Attention {
                 &meta.block_table.data,
                 &meta.seq_lens.data,
                 &meta.cu_seqlens.data,
-                &mut self.attn.data,
+                &mut sc.attn.data,
                 meta.num_reqs,
                 meta.max_seqlen,
                 h,
@@ -307,17 +312,12 @@ impl Attention {
             )?,
         }
         // 6. o_proj
-        gemm.forward_bf16(&self.attn.data, &self.o_proj.w.data, None, &mut out.data, t, hidden, h * d)
+        gemm.forward_bf16(&sc.attn.data, &self.o_proj.w.data, None, &mut out.data, t, hidden, h * d)
     }
 }
 
-/// 一套完整的 per-step 激活缓冲（跨流并行时副流用；`Qwen3Model::swap_scratch` 整体换入 / 换出）。
-pub struct LayerScratch {
-    pub qkv_buf: Tensor<bf16>,
-    pub attn: Tensor<bf16>,
-    pub gate_up: Tensor<bf16>,
-    pub act: Tensor<bf16>,
-}
+/// 第二套 per-step 激活缓冲（跨流并行时副流用；`Qwen3Model::swap_scratch` 整体换入 / 换出）。
+/// 每层各持有的一套（原 `LayerScratch`）已并入 `ActScratch`：层串行执行，一套够用。
 pub struct ModelScratch {
     pub hidden: Tensor<bf16>,
     pub normed: Tensor<bf16>,
@@ -327,7 +327,7 @@ pub struct ModelScratch {
     pub logits_bf16: Tensor<bf16>,
     pub logits_local: Tensor<bf16>,
     pub decode_scratch: Tensor<f32>,
-    pub layers: Vec<LayerScratch>,
+    pub act: ActScratch,
 }
 
 impl<O: OpSet> Qwen3Model<O> {
@@ -432,7 +432,7 @@ impl<O: OpSet> Qwen3Model<O> {
             let p = format!("model.layers.{l}");
             let layer = DecoderLayer {
                 input_norm: RmsNorm::load(stream, src, &format!("{p}.input_layernorm"), cfg.rms_norm_eps)?,
-                attn: Attention::load(stream, src, &format!("{p}.self_attn"), &cfg, max_tokens, tp)
+                attn: Attention::load(stream, src, &format!("{p}.self_attn"), &cfg, tp)
                     .with_context(|| format!("layer {l} attn"))?,
                 post_norm: RmsNorm::load(
                     stream,
@@ -442,7 +442,8 @@ impl<O: OpSet> Qwen3Model<O> {
                 )?,
                 mlp: {
                     let tm = std::time::Instant::now();
-                    let m = Mlp::load_tp(stream, src, &format!("{p}.mlp"), max_tokens, rank, world)
+                    // max_tokens = 0：Mlp 不自带激活缓冲，走全模型共享的 `ActScratch`（`forward_with_scratch`）
+                    let m = Mlp::load_tp(stream, src, &format!("{p}.mlp"), 0, rank, world)
                         .with_context(|| format!("layer {l} mlp"))?;
                     load_phase::add(load_phase::MLP, tm);
                     m
@@ -517,7 +518,7 @@ impl<O: OpSet> Qwen3Model<O> {
             zeros_n = z_n,
             zeros_mib = z_bytes / (1 << 20),
             zeros_ms = z_us / 1000,
-            "load timing: per-layer activation buffers (Tensor::zeros inside Attention/Mlp::load)"
+            "load timing: per-layer activation buffers (should be 0: 共享 ActScratch，见下一条)"
         );
         tracing::info!(
             tensors = ls.tensors,
@@ -541,6 +542,10 @@ impl<O: OpSet> Qwen3Model<O> {
             stream,
             &[k::gqa_decode_scratch_len(max_logits_rows, cfg.num_attention_heads as usize, d)],
         )?;
+        // 全模型共享一套 per-token 激活缓冲（原先 Attention::load / Mlp::load_tp 每层各一套，
+        // 预算 16384 时 28 层 ≈ 14 GB 白占，见 scratch.rs）。必须在读 free 算 KV 预算之前分配。
+        let act_bytes = ActScratch::bytes(&cfg, max_tokens);
+        let act = ActScratch::new(stream, &cfg, max_tokens)?;
         // executor 还会分配 fp32 logits [max_logits_rows, vocab] + 采样工作区 + logprobs 原始副本（各 ≤ 同大小）
         let exec_scratch = 3 * max_logits_rows * v * 4;
 
@@ -551,7 +556,10 @@ impl<O: OpSet> Qwen3Model<O> {
             zeros_n = z_n,
             zeros_mib = z_bytes / (1 << 20),
             zeros_ms = z_us / 1000,
-            "load timing: activation scratch"
+            act_scratch_rows = max_tokens,
+            act_scratch_bytes = act_bytes,
+            act_scratch_mib = act_bytes / (1 << 20),
+            "load timing: activation scratch (含全模型共享的 ActScratch：qkv/attn/gate_up/act 各一套)"
         );
         let t_kv = std::time::Instant::now();
         let per_block = Self::kv_bytes_per_block(&cfg, block_size);
@@ -630,6 +638,7 @@ impl<O: OpSet> Qwen3Model<O> {
             logits_bf16,
             logits_local,
             decode_scratch,
+            act,
             cfg,
         })
     }
@@ -644,23 +653,12 @@ impl<O: OpSet> Qwen3Model<O> {
         &self.hidden
     }
 
-    /// 返回 logits（fp32，[num_logits_rows, vocab]）。
     /// 分配第二套激活缓冲（形状同主套：max_tokens / max_logits_rows）。
     pub fn alloc_scratch(&self, stream: &Stream) -> Result<ModelScratch> {
         let cfg = &self.cfg;
-        let (h, hk, d) = (cfg.num_attention_heads as usize, cfg.num_key_value_heads as usize, cfg.head_dim as usize);
+        let (h, d) = (cfg.num_attention_heads as usize, cfg.head_dim as usize);
         let hidden = cfg.hidden_size as usize;
         let (t, rows, v) = (self.max_tokens, self.max_logits_rows, cfg.vocab_size as usize);
-        let mut layers = Vec::with_capacity(self.layers.len());
-        for l in &self.layers {
-            let inter = l.mlp.inter;
-            layers.push(LayerScratch {
-                qkv_buf: Tensor::zeros(stream, &[t, (h + 2 * hk) * d])?,
-                attn: Tensor::zeros(stream, &[t, h, d])?,
-                gate_up: Tensor::zeros(stream, &[t, 2 * inter])?,
-                act: Tensor::zeros(stream, &[t, inter])?,
-            });
-        }
         Ok(ModelScratch {
             hidden: Tensor::zeros(stream, &[t, hidden])?,
             normed: Tensor::zeros(stream, &[t, hidden])?,
@@ -670,7 +668,7 @@ impl<O: OpSet> Qwen3Model<O> {
             logits_bf16: Tensor::zeros(stream, &[rows, v])?,
             logits_local: Tensor::zeros(stream, &[if self.lm_head_colsplit { rows * self.vocab_local } else { 1 }])?,
             decode_scratch: Tensor::zeros(stream, &[k::gqa_decode_scratch_len(rows, h, d)])?,
-            layers,
+            act: ActScratch::new(stream, cfg, t)?,
         })
     }
     /// 整体互换当前激活缓冲与 `s`（O(层数) 次指针交换，无拷贝）。
@@ -683,10 +681,7 @@ impl<O: OpSet> Qwen3Model<O> {
         std::mem::swap(&mut self.logits_bf16, &mut s.logits_bf16);
         std::mem::swap(&mut self.logits_local, &mut s.logits_local);
         std::mem::swap(&mut self.decode_scratch, &mut s.decode_scratch);
-        for (l, ls) in self.layers.iter_mut().zip(s.layers.iter_mut()) {
-            l.attn.swap_bufs(&mut ls.qkv_buf, &mut ls.attn);
-            l.mlp.swap_bufs(&mut ls.gate_up, &mut ls.act);
-        }
+        std::mem::swap(&mut self.act, &mut s.act);
     }
     pub fn forward(
         &mut self,
@@ -761,6 +756,7 @@ impl<O: OpSet> Qwen3Model<O> {
                 &mut self.kv[li],
                 &f.meta,
                 &mut self.decode_scratch,
+                &mut self.act,
                 &mut self.attn_out,
             )?;
             if let Some(c) = comm {
@@ -786,7 +782,17 @@ impl<O: OpSet> Qwen3Model<O> {
                     eps,
                 )?;
             }
-            layer.mlp.forward(stream, gemm, self.ops.act(), t, &self.normed, &mut self.mlp_out)?;
+            // mlp 不再自带缓冲（load 时 max_tokens = 0），借全模型共享的一套
+            layer.mlp.forward_with_scratch(
+                stream,
+                gemm,
+                self.ops.act(),
+                t,
+                &self.normed,
+                &mut self.mlp_out,
+                &mut self.act.gate_up,
+                &mut self.act.act,
+            )?;
             // TP all-reduce ②（down 部分和）推迟到下一层开头 / 循环后的补加里与 fused_add 合成
             pending_mlp = true;
             if let Some(cap) = self.capture_layers.as_mut() {
