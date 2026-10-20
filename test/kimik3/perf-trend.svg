@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="824" font-family="sans-serif">
+<rect width="980" height="824" fill="white"/>
+<text x="48" y="20" font-size="18" font-weight="bold">B300</text>
+<text x="128" y="20" font-size="11" fill="#555">single：主线 benchN，dinfer vs vLLM 单卡（下方 pd / tp / dp / other 各一行，基线见各节）</text>
+<text x="48" y="46" font-size="14" font-weight="bold">out tok/s ÷ vLLM（越高越好；虚线 = 1.0）</text>
+<text x="490.0" y="158.0" font-size="13" text-anchor="middle" fill="#888">无 vLLM 基线（本卡只有 dinfer 结果）</text>
+<text x="48" y="306" font-size="14" font-weight="bold">TTFT p50 ms（实线 dinfer，虚线 vLLM；越低越好）</text>
+<line x1="48" y1="500.0" x2="932" y2="500.0" stroke="#888"/>
+<line x1="48" y1="336" x2="48" y2="500.0" stroke="#888"/>
+<text x="42" y="340" font-size="10" text-anchor="end">559.18</text>
+<text x="42" y="504.0" font-size="10" text-anchor="end">0</text>
+<polyline points="" fill="none" stroke="#1f77b4" stroke-width="2"/>
+<polyline points="48.0,443.5" fill="none" stroke="#1f77b4" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<polyline points="" fill="none" stroke="#ff7f0e" stroke-width="2"/>
+<polyline points="48.0,391.9" fill="none" stroke="#ff7f0e" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<polyline points="" fill="none" stroke="#2ca02c" stroke-width="2"/>
+<polyline points="48.0,376.7" fill="none" stroke="#2ca02c" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<polyline points="" fill="none" stroke="#d62728" stroke-width="2"/>
+<polyline points="48.0,350.9" fill="none" stroke="#d62728" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<text x="48.0" y="514.0" font-size="9" text-anchor="middle">bench_b300_vllm1</text>
+<text x="48" y="566" font-size="14" font-weight="bold">TPOT p50 ms（实线 dinfer，虚线 vLLM；越低越好）</text>
+<line x1="48" y1="760.0" x2="932" y2="760.0" stroke="#888"/>
+<line x1="48" y1="596" x2="48" y2="760.0" stroke="#888"/>
+<text x="42" y="600" font-size="10" text-anchor="end">21.07</text>
+<text x="42" y="764.0" font-size="10" text-anchor="end">0</text>
+<polyline points="" fill="none" stroke="#1f77b4" stroke-width="2"/>
+<polyline points="48.0,692.3" fill="none" stroke="#1f77b4" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<polyline points="" fill="none" stroke="#ff7f0e" stroke-width="2"/>
+<polyline points="48.0,658.1" fill="none" stroke="#ff7f0e" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<polyline points="" fill="none" stroke="#2ca02c" stroke-width="2"/>
+<polyline points="48.0,610.9" fill="none" stroke="#2ca02c" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<polyline points="" fill="none" stroke="#d62728" stroke-width="2"/>
+<polyline points="48.0,657.9" fill="none" stroke="#d62728" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<text x="48.0" y="774.0" font-size="9" text-anchor="middle">bench_b300_vllm1</text>
+</svg>

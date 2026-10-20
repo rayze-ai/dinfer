@@ -87,7 +87,8 @@ def load_round(d):
             has_v = True
         r["groups"][g] = x
     r["has_vllm"] = has_v
-    r["kind"] = "baseline" if r.get("baseline_only") else category(r["label"], r["change"])
+    # 仅 vLLM 基线的轮仍归 single 页（dinfer 列 NaN，表里显示"—"），用 baseline_only 标记区分
+    r["kind"] = category(r["label"], r["change"])
     return r
 
 
@@ -213,13 +214,13 @@ def main_table_lines(rs):
         cells = [r["label"], r["date"], r["change"] or "—"]
         for g in GROUPS:
             x = r["groups"][g]; d = f" ({pct(x['tps'], prev['groups'][g]['tps'])})" if prev else ""
-            cells.append(f"{x['tps']:.0f} ({fmt(x['ratio'], 2)}×){d}")
+            cells.append(f"{fmt(x['tps'], 0)} ({fmt(x['ratio'], 2)}×){d}")
         for g in GROUPS:
             x = r["groups"][g]; d = f" ({pct(x['ttft'], prev['groups'][g]['ttft'], True)})" if prev else ""
-            cells.append(f"{x['ttft']:.1f} / {fmt(x['vllm_ttft'], 1)}{d}")
+            cells.append(f"{fmt(x['ttft'], 1)} / {fmt(x['vllm_ttft'], 1)}{d}")
         for g in GROUPS:
             x = r["groups"][g]; d = f" ({pct(x['tpot'], prev['groups'][g]['tpot'], True)})" if prev else ""
-            cells.append(f"{x['tpot']:.2f} / {fmt(x['vllm_tpot'], 2)}{d}")
+            cells.append(f"{fmt(x['tpot'], 2)} / {fmt(x['vllm_tpot'], 2)}{d}")
         out.append("| " + " | ".join(cells) + " |")
         prev = r
     return out

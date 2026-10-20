@@ -1,0 +1,50 @@
+[
+ {
+  "dir": "test/kimik3/2026-10-19/bench_b300_vllm1",
+  "label": "bench_b300_vllm1",
+  "date": "2026-10-19",
+  "groups": {
+   "c1_p128_o128": {
+    "tps": NaN,
+    "ttft": NaN,
+    "tpot": NaN,
+    "vllm_tps": 98.73275824557808,
+    "vllm_ttft": 192.586063,
+    "vllm_tpot": 8.698210732283465,
+    "ratio": NaN
+   },
+   "c8_p128_o128": {
+    "tps": NaN,
+    "ttft": NaN,
+    "tpot": NaN,
+    "vllm_tps": 502.9783559423437,
+    "vllm_ttft": 368.415387,
+    "vllm_tpot": 13.086486637795275,
+    "ratio": NaN
+   },
+   "c32_p128_o128": {
+    "tps": NaN,
+    "ttft": NaN,
+    "tpot": NaN,
+    "vllm_tps": 1432.391630839245,
+    "vllm_ttft": 420.55679299999997,
+    "vllm_tpot": 19.1518155511811,
+    "ratio": NaN
+   },
+   "c8_p1024_o128": {
+    "tps": NaN,
+    "ttft": NaN,
+    "tpot": NaN,
+    "vllm_tps": 469.4276284444078,
+    "vllm_ttft": 508.343944,
+    "vllm_tpot": 13.113149905511811,
+    "ratio": NaN
+   }
+  },
+  "gpu": "B300",
+  "change": "vLLM nightly Kimi-K3 MXFP4 tp8 基线",
+  "baseline_only": true,
+  "has_vllm": true,
+  "kind": "single"
+ }
+]

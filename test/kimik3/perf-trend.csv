@@ -1,0 +1,13 @@
+round,date,change,group,metric,dinfer,vllm,ratio_dinfer_over_vllm,delta_pct_vs_prev_round,better_is,kind,gpu,baseline,variant,model
+bench_b300_vllm1,2026-10-19,vLLM nightly Kimi-K3 MXFP4 tp8 基线,c1,out_tok_per_s,nan,98.733,nan,,higher,main,B300,vllm,dinfer,kimik3
+bench_b300_vllm1,2026-10-19,vLLM nightly Kimi-K3 MXFP4 tp8 基线,c1,ttft_p50_ms,nan,192.586,nan,,lower,main,B300,vllm,dinfer,kimik3
+bench_b300_vllm1,2026-10-19,vLLM nightly Kimi-K3 MXFP4 tp8 基线,c1,tpot_p50_ms,nan,8.698,nan,,lower,main,B300,vllm,dinfer,kimik3
+bench_b300_vllm1,2026-10-19,vLLM nightly Kimi-K3 MXFP4 tp8 基线,c8,out_tok_per_s,nan,502.978,nan,,higher,main,B300,vllm,dinfer,kimik3
+bench_b300_vllm1,2026-10-19,vLLM nightly Kimi-K3 MXFP4 tp8 基线,c8,ttft_p50_ms,nan,368.415,nan,,lower,main,B300,vllm,dinfer,kimik3
+bench_b300_vllm1,2026-10-19,vLLM nightly Kimi-K3 MXFP4 tp8 基线,c8,tpot_p50_ms,nan,13.086,nan,,lower,main,B300,vllm,dinfer,kimik3
+bench_b300_vllm1,2026-10-19,vLLM nightly Kimi-K3 MXFP4 tp8 基线,c32,out_tok_per_s,nan,1432.392,nan,,higher,main,B300,vllm,dinfer,kimik3
+bench_b300_vllm1,2026-10-19,vLLM nightly Kimi-K3 MXFP4 tp8 基线,c32,ttft_p50_ms,nan,420.557,nan,,lower,main,B300,vllm,dinfer,kimik3
+bench_b300_vllm1,2026-10-19,vLLM nightly Kimi-K3 MXFP4 tp8 基线,c32,tpot_p50_ms,nan,19.152,nan,,lower,main,B300,vllm,dinfer,kimik3
+bench_b300_vllm1,2026-10-19,vLLM nightly Kimi-K3 MXFP4 tp8 基线,c8-long,out_tok_per_s,nan,469.428,nan,,higher,main,B300,vllm,dinfer,kimik3
+bench_b300_vllm1,2026-10-19,vLLM nightly Kimi-K3 MXFP4 tp8 基线,c8-long,ttft_p50_ms,nan,508.344,nan,,lower,main,B300,vllm,dinfer,kimik3
+bench_b300_vllm1,2026-10-19,vLLM nightly Kimi-K3 MXFP4 tp8 基线,c8-long,tpot_p50_ms,nan,13.113,nan,,lower,main,B300,vllm,dinfer,kimik3
