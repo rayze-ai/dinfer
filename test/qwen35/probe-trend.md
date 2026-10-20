@@ -93,6 +93,24 @@
 - 1x4096 chain_us dinfer：r10 第 5 轮：ho h16 B 操作数 ldmatrix.x4；B300-50 GPU 7
 - 1x8192 chain_us dinfer：r10 第 5 轮：ho h16 B 操作数 ldmatrix.x4；B300-50 GPU 7
 
+## probe_gdn_r10_6（2026-10-20，B300）
+
+### gdn_scale（us）
+
+| x | chain_us dinfer | conv_rows0_us dinfer | conv_rows128_us dinfer | conv_rows16_us dinfer | conv_rows256_us dinfer | conv_rows32_us dinfer | conv_rows64_us dinfer | conv_rows8_us dinfer | ho_bv16_us dinfer | ho_bv16pf_us dinfer | ho_bv16pfsp_us dinfer | ho_bv16sp_us dinfer | ho_bv32_us dinfer | ho_bv32pf_us dinfer | ho_bv32pfsp_us dinfer | ho_bv32sp_us dinfer | ho_bv64_us dinfer | ho_bv64pf_us dinfer | ho_legacy_us dinfer | prep_us dinfer | wy_legacy_us dinfer | wy_mma8_us dinfer | wy_serial_us dinfer | wy_us dinfer |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1x1024 | 147 | 487 | 114 | 38 | 218 | 41 | 63 | 38 | 74 | 77 | 106 | 112 | 63 | 65 | 85 | 102 | 59 | 65 | 786 | 18 | 421 | 57 | 91 | 60 |
+| 8x1024 | 829 | 810 | 311 | 221 | 320 | 222 | 248 | 250 | 510 | 549 | 700 | 741 | 382 | 388 | 573 | 556 | 308 | 327 | 5006 | 82 | 2922 | 360 | 508 | 372 |
+| 32x128 | 454 | 218 | 171 | 128 | 301 | 137 | 167 | 138 | 305 | 324 | 375 | 392 | 216 | 222 | 324 | 302 | 180 | 190 | 2509 | 43 | 1484 | 187 | 276 | 194 |
+| 1x4096 | 496 | 3066 | 162 | 121 | 297 | 132 | 162 | 131 | 365 | 395 | 420 | 447 | 256 | 266 | 338 | 408 | 302 | 319 | 3296 | 43 | 1489 | 187 | 276 | 195 |
+| 1x8192 | 968 | 6161 | 308 | 220 | 314 | 221 | 246 | 249 | 727 | 780 | 827 | 883 | 504 | 525 | 660 | 798 | 595 | 632 | 6605 | 82 | 2926 | 360 | 508 | 371 |
+
+- 1x1024 chain_us dinfer：r10 第 6 轮：ho BV=64 档（bench 列 bv64/bv64pf；默认档仍 32）；B300-50 GPU 7
+- 8x1024 chain_us dinfer：r10 第 6 轮：ho BV=64 档（bench 列 bv64/bv64pf；默认档仍 32）；B300-50 GPU 7
+- 32x128 chain_us dinfer：r10 第 6 轮：ho BV=64 档（bench 列 bv64/bv64pf；默认档仍 32）；B300-50 GPU 7
+- 1x4096 chain_us dinfer：r10 第 6 轮：ho BV=64 档（bench 列 bv64/bv64pf；默认档仍 32）；B300-50 GPU 7
+- 1x8192 chain_us dinfer：r10 第 6 轮：ho BV=64 档（bench 列 bv64/bv64pf；默认档仍 32）；B300-50 GPU 7
+
 ## probe_gdn_r9_0（2026-10-20，3090）
 
 ### gdn_scale（us）
