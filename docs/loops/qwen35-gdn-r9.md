@@ -33,6 +33,21 @@
 
 r9 子代理两次 `remote_b300.sh push`（rsync `--delete`）把 B300 远端 `test/qwen35/2026-10-20/engine_r8/`（r8 刚跑完、尚未 pull 的 engine 产物）删了，本机也没有副本，只能重跑。规则（主会话）：**子代理不 push**，同步代码发消息让主会话推；非得推用 `remote_b300.sh put <文件> <远端路径>` 单文件；产物落远端 `bootstrap/` 或 `/tmp`，由主会话 pull。pitfalls 已有同类条目（另一会话 push 删 k3 refs）。
 
+## 为什么 B300 上还是没超过 vLLM（2026-10-20 收口后分析）
+
+**先承认方法问题（用户问"3090 上验证的在 B300 真能最优吗"）**：r0–r5 六轮全在 3090 迭代，B300 只有 r6 / r7 两轮"复测 + 在 3090 设计的候选里按 B300 数选门限"，**没有一轮是以 B300 的瓶颈为目标改 kernel**。两卡瓶颈不同：3090（936 GB/s、82 SM）上 wy / ho 撞的是**带宽墙**（conv 84% 带宽；两段版因 h16 多搬 200 MB 输）；B300（8 TB/s、148 SM、HBM 延迟型）上同一批 kernel 撞的是**延迟 / 并行度墙**——两段版 / PF=1 在 B300 也输，但输的原因没在 B300 上查过。所以 r9 的准确结论是：**3090 设计空间收口，B300 设计空间没进。**
+
+**B300 nsys 分解（GPU 6，`dinfer_gdn_r9.nsys-rep`，默认路径 kernel，min = 1×1024 / max = 1×8192 或 8×1024，µs）**
+- `wy_mma<64,128,TRI=1>` 89 / 532；`ho_mma<64,32,128,PF=0>` 82 / 659；`conv1d_prefill_blocked<8,4>` 36 / 318（rows 扫描的 max）；prep 的 norm + cumsum ~18 / 82。
+- 两段版：`ho_hpass<64,32,128,PF=0>` 93 / 721 + `ho_opass<64,128,128>` 36 / 289 —— **h-pass 单独就比融合版慢**（721 vs 659），说明 B300 上 ho 的瓶颈不是"每 chunk 四个乘法太多"，而是**每 block 串行走 128 个 chunk 的延迟链本身**：每 chunk 约 5 µs = 装载（全局 → smem，无预取）+ 4 次 `__syncthreads` + mma 发射延迟，148 SM 只有 192 个 block、每 SM 1–2 个 block、4 warp，**掩不住延迟**。fla 的 chunk_fwd_h 也是串行扫 chunk，但 num_warps 2–4、BV 32/64 由 autotune 选、num_stages 2–4 做软件流水，同一条串行链每 chunk 更短。
+- wy：fla 把 wy 拆成 4 个小 kernel（kkt 点积 → solve_tril 分块逆 → recompute_w_u → 各自 autotune BK/BV/num_warps），中间量 A / Ai / w / u 全 **bf16**；我们一个 kernel 做完，中间量 aq / u / w / kg 全 **f32**（写 2× 字节，ho 再读 2×），1×8192 下 aq 100 MB + u/w/kg 各 200 MB。3090 上这是带宽，B300 上是 L2 / HBM 延迟。
+
+**下一轮（r10）该怎么做（都在 B300 上迭代，3090 只跑 parity）**
+1. 中间量 f32 → bf16（aq / u / w / kg；fla 同口径，parity 容差已经是 bf16 级）：wy 写量减半、ho 读量减半，预计 ho 1×8192 659 → ~450。
+2. ho 串行链每 chunk 延迟：真正的 cp.async 双缓冲（smem 两份，不是寄存器预取；B300 smem 227 KB 装得下两份 75 KB），4 warp → 8 warp 分 V 列，减少 `__syncthreads` 次数（装载与 (2) 合并一次）。目标每 chunk 5 → 3 µs。
+3. wy 的 (I+A)⁻¹ 非对角块 fp32 标量乘 → mma（16×16×16 刚好一条 m16n8k16 ×2）。
+4. 门限自调优：`ArchProfile` 给候选，启动时按真实形状各跑一次取优（现在是按卡写死的分档）。
+
 ## 备忘（用户 2026-10-20）
 
 - 本轮 fla 基线用的是 B300 上既有的 `vllm/vllm-openai:nightly`（0.26.1rc1 / torch 2.13 cu130，与 engine-gap 8d 同口径），**本次不改**；**后续 vLLM 对照一律用最新版本**（镜像要更新：机器无外网，走 `remote_b300.sh put` 中转，见 infra-b300）。
