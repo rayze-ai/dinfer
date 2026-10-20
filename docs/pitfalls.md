@@ -754,3 +754,10 @@
 - 现象：`remote_b300.sh run 'pkill -f "while pgrep"; ...后续命令'` 后续全没执行、无输出。
 - 根因：ssh 远端 shell 的命令行里含同一字串，`pkill -f` 把自己杀了。
 - 解法 / 避免：启动器写成文件（`scripts/dev/k3_b300_tp_launch.sh`）再 `bash` 跑；要 pkill 用 pid 文件或 `pgrep -f 'pattern' | grep -v $$`。
+
+## 远端 `cargo build --release -p dinfer` 忘带 `--features qwen35` → 编出 kimik3 分支二进制，Qwen3.5 配置解析报 `missing field kv_lora_rank`（2026-10-20）
+
+- 现象：nsys 起 serve 立即 `Error: missing field kv_lora_rank at line 118`；同一二进制已被用来重启 :8012（服务没起来，bench 空跑 goodput 0.00）。
+- 根因：主会话推 server 修复后在 B300 重编时漏了 `--features qwen35`（之前每次都带）；`bins/dinfer` 的 feature 决定模型分支，默认 feature 是别的模型。
+- 解法：重编带 feature；**启动日志第一行打印编译进的模型 feature**，bench 脚本启动前核对 `/v1/models` 的 id 与预期一致再压（`bench_compare.sh` 已有 self-check，`bench_engine.sh` 也要）。
+- 避免：远端构建命令写进 `scripts/dev/`（`q35_b300_build.sh`），不手敲。
