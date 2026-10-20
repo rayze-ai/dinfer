@@ -61,12 +61,15 @@ def load_round(d):
             f"每率 {a.get('num_requests_requested', any_json.get('num_requests'))} 条")
     date = os.path.basename(os.path.dirname(d))
     return {"label": f"{date}/{os.path.basename(d)}", "date": date, "gpu": read1(d, "GPU", "?"), "change": read1(d, "CHANGE"),
+            "mtime": os.path.getmtime(d),
             "slo": f"TTFT ≤ {slo.get('ttft_ms', 0):.0f} ms 且 TPOT ≤ {slo.get('tpot_ms', 0):.0f} ms", "load": load, "data": data}
 
 
 def round_key(r):
     m = re.search(r"engine_?r?(\d*)$", r["label"])  # engine_2 / engine_r8 都按尾数排
-    return (r["date"], int(m.group(1) or 0) if m else 0, r["label"])
+    # 无尾数的具名轮（engine_final / engine_merge / engine_r8b）按"有尾数之后"排，内部按 mtime——否则会和 engine_1 同分被字母序挪到前面
+    n = int(m.group(1)) if (m and m.group(1)) else None
+    return (r["date"], 0 if n is not None else 1, n if n is not None else 0, r.get("mtime", 0), r["label"])
 
 
 GOOD_FRAC = 0.95

@@ -4,49 +4,13 @@
 
 | 轮 | 卡 | 改动 | SLO 下最大 req/s dinfer | vLLM | 比 |
 |---|---|---|---|---|---|
-| 2026-10-20/engine_final | B300 | 第 12 轮合体定稿 engine 口径 | 8 | - | - |
-| 2026-10-20/engine_merge | B300 | 第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径 | 8 | - | - |
-| 2026-10-20/engine_r8b | B300 | r8b kernel 沿 chunk 边界写快照、调度不切步 | 8 | - | - |
-| 2026-10-20/engine_smoke | 3090 | 引擎口径工具冒烟（tiny 全词表 qwen35，3090，仅 dinfer） | 8 | - | - |
 | 2026-10-20/engine_1 | B300 | 引擎口径首轮：钉核 Rust bench，rate 2/4/8/12，mix 128/1024/4096 + out mix，prefix-repeat 0.5，allow-eos，SLO 500/20 | 2 | 4 | 0.50× |
 | 2026-10-20/engine_2 | B300 | 第 7 轮：GdnChunkWorkspace 一次分配 + warmup 预载 + graph 全桶预捕获 + 四段计时（host 空转清零） | 4 | 12 | 0.33× |
 | 2026-10-20/engine_r8 | B300 | r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉） | 8 | - | - |
-
-## 2026-10-20/engine_final（B300）— 第 12 轮合体定稿 engine 口径
-
-SLO：TTFT ≤ 500 ms 且 TPOT ≤ 20 ms。负载：prompt mix 128:0.5,1024:0.35,4096:0.15；out mix 128:0.5,512:0.35,1024:0.15；不 ignore_eos；prefix_repeat 0.5；multi_turn 1；每率 64 条
-
-| rate | 端 | 完成/失败 | goodput | req/s | out tok/s | TTFT p50/p90/p99/max | TPOT p50/p90/p99/max | cache hit |
-|---|---|---|---|---|---|---|---|---|
-| 4 | dinfer | 64/0 | 2.37 (61/64) | 2.48 | 921 | 47.5/230.6/271.0/274.9 | 13.8/18.2/20.1/20.8 | 0.493 |
-| 8 | dinfer | 64/0 | 3.21 (64/64) | 3.21 | 1194 | 53.7/73.7/85.8/95.3 | 16.1/19.3/19.6/19.9 | 0.809 |
-
-## 2026-10-20/engine_merge（B300）— 第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径
-
-SLO：TTFT ≤ 500 ms 且 TPOT ≤ 20 ms。负载：prompt mix 128:0.5,1024:0.35,4096:0.15；out mix 128:0.5,512:0.35,1024:0.15；不 ignore_eos；prefix_repeat 0.5；multi_turn 1；每率 64 条
-
-| rate | 端 | 完成/失败 | goodput | req/s | out tok/s | TTFT p50/p90/p99/max | TPOT p50/p90/p99/max | cache hit |
-|---|---|---|---|---|---|---|---|---|
-| 4 | dinfer | 64/0 | 2.37 (64/64) | 2.37 | 956 | 51.4/89.5/244.1/248.4 | 13.9/15.1/16.6/17.0 | 0.470 |
-| 8 | dinfer | 64/0 | 3.12 (64/64) | 3.12 | 1245 | 49.9/68.3/77.1/83.5 | 15.5/17.7/19.0/19.2 | 0.815 |
-
-## 2026-10-20/engine_r8b（B300）— r8b kernel 沿 chunk 边界写快照、调度不切步
-
-SLO：TTFT ≤ 500 ms 且 TPOT ≤ 20 ms。负载：prompt mix 128:0.5,1024:0.35,4096:0.15；out mix 128:0.5,512:0.35,1024:0.15；不 ignore_eos；prefix_repeat 0.5；multi_turn 1；每率 64 条
-
-| rate | 端 | 完成/失败 | goodput | req/s | out tok/s | TTFT p50/p90/p99/max | TPOT p50/p90/p99/max | cache hit |
-|---|---|---|---|---|---|---|---|---|
-| 4 | dinfer | 64/0 | 2.25 (59/64) | 2.44 | 1084 | 49.7/186.6/540.6/647.4 | 14.4/15.9/20.1/20.2 | 0.488 |
-| 8 | dinfer | 64/0 | 3.15 (64/64) | 3.15 | 1390 | 50.6/67.6/95.6/96.0 | 16.1/17.2/18.3/18.4 | 0.786 |
-
-## 2026-10-20/engine_smoke（3090）— 引擎口径工具冒烟（tiny 全词表 qwen35，3090，仅 dinfer）
-
-SLO：TTFT ≤ 500 ms 且 TPOT ≤ 20 ms。负载：prompt mix 64:0.6,256:0.4；out mix 16:0.5,48:0.5；不 ignore_eos；prefix_repeat 0.5；multi_turn 1；每率 24 条
-
-| rate | 端 | 完成/失败 | goodput | req/s | out tok/s | TTFT p50/p90/p99/max | TPOT p50/p90/p99/max | cache hit |
-|---|---|---|---|---|---|---|---|---|
-| 4 | dinfer | 24/0 | 3.82 (24/24) | 3.82 | 122 | 1.9/2.0/2.2/2.2 | 0.3/0.3/0.3/0.3 | 0.000 |
-| 8 | dinfer | 24/0 | 7.61 (24/24) | 7.61 | 244 | 1.9/2.3/2.5/2.5 | 0.3/0.3/0.3/0.3 | 0.000 |
+| 2026-10-20/engine_smoke | 3090 | 引擎口径工具冒烟（tiny 全词表 qwen35，3090，仅 dinfer） | 8 | - | - |
+| 2026-10-20/engine_r8b | B300 | r8b kernel 沿 chunk 边界写快照、调度不切步 | 8 | - | - |
+| 2026-10-20/engine_merge | B300 | 第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径 | 8 | - | - |
+| 2026-10-20/engine_final | B300 | 第 12 轮合体定稿 engine 口径 | 8 | - | - |
 
 ## 2026-10-20/engine_1（B300）— 引擎口径首轮：钉核 Rust bench，rate 2/4/8/12，mix 128/1024/4096 + out mix，prefix-repeat 0.5，allow-eos，SLO 500/20
 
@@ -86,3 +50,39 @@ SLO：TTFT ≤ 500 ms 且 TPOT ≤ 20 ms。负载：prompt mix 128:0.5,1024:0.35
 |---|---|---|---|---|---|---|---|---|
 | 4 | dinfer | 64/0 | 2.15 (61/64) | 2.26 | 819 | 59.4/171.9/401.0/416.6 | 14.8/17.1/20.4/21.5 | 0.348 |
 | 8 | dinfer | 64/0 | 3.04 (64/64) | 3.04 | 1110 | 60.0/88.1/103.7/104.3 | 15.7/18.4/18.8/19.0 | 0.807 |
+
+## 2026-10-20/engine_smoke（3090）— 引擎口径工具冒烟（tiny 全词表 qwen35，3090，仅 dinfer）
+
+SLO：TTFT ≤ 500 ms 且 TPOT ≤ 20 ms。负载：prompt mix 64:0.6,256:0.4；out mix 16:0.5,48:0.5；不 ignore_eos；prefix_repeat 0.5；multi_turn 1；每率 24 条
+
+| rate | 端 | 完成/失败 | goodput | req/s | out tok/s | TTFT p50/p90/p99/max | TPOT p50/p90/p99/max | cache hit |
+|---|---|---|---|---|---|---|---|---|
+| 4 | dinfer | 24/0 | 3.82 (24/24) | 3.82 | 122 | 1.9/2.0/2.2/2.2 | 0.3/0.3/0.3/0.3 | 0.000 |
+| 8 | dinfer | 24/0 | 7.61 (24/24) | 7.61 | 244 | 1.9/2.3/2.5/2.5 | 0.3/0.3/0.3/0.3 | 0.000 |
+
+## 2026-10-20/engine_r8b（B300）— r8b kernel 沿 chunk 边界写快照、调度不切步
+
+SLO：TTFT ≤ 500 ms 且 TPOT ≤ 20 ms。负载：prompt mix 128:0.5,1024:0.35,4096:0.15；out mix 128:0.5,512:0.35,1024:0.15；不 ignore_eos；prefix_repeat 0.5；multi_turn 1；每率 64 条
+
+| rate | 端 | 完成/失败 | goodput | req/s | out tok/s | TTFT p50/p90/p99/max | TPOT p50/p90/p99/max | cache hit |
+|---|---|---|---|---|---|---|---|---|
+| 4 | dinfer | 64/0 | 2.25 (59/64) | 2.44 | 1084 | 49.7/186.6/540.6/647.4 | 14.4/15.9/20.1/20.2 | 0.488 |
+| 8 | dinfer | 64/0 | 3.15 (64/64) | 3.15 | 1390 | 50.6/67.6/95.6/96.0 | 16.1/17.2/18.3/18.4 | 0.786 |
+
+## 2026-10-20/engine_merge（B300）— 第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径
+
+SLO：TTFT ≤ 500 ms 且 TPOT ≤ 20 ms。负载：prompt mix 128:0.5,1024:0.35,4096:0.15；out mix 128:0.5,512:0.35,1024:0.15；不 ignore_eos；prefix_repeat 0.5；multi_turn 1；每率 64 条
+
+| rate | 端 | 完成/失败 | goodput | req/s | out tok/s | TTFT p50/p90/p99/max | TPOT p50/p90/p99/max | cache hit |
+|---|---|---|---|---|---|---|---|---|
+| 4 | dinfer | 64/0 | 2.37 (64/64) | 2.37 | 956 | 51.4/89.5/244.1/248.4 | 13.9/15.1/16.6/17.0 | 0.470 |
+| 8 | dinfer | 64/0 | 3.12 (64/64) | 3.12 | 1245 | 49.9/68.3/77.1/83.5 | 15.5/17.7/19.0/19.2 | 0.815 |
+
+## 2026-10-20/engine_final（B300）— 第 12 轮合体定稿 engine 口径
+
+SLO：TTFT ≤ 500 ms 且 TPOT ≤ 20 ms。负载：prompt mix 128:0.5,1024:0.35,4096:0.15；out mix 128:0.5,512:0.35,1024:0.15；不 ignore_eos；prefix_repeat 0.5；multi_turn 1；每率 64 条
+
+| rate | 端 | 完成/失败 | goodput | req/s | out tok/s | TTFT p50/p90/p99/max | TPOT p50/p90/p99/max | cache hit |
+|---|---|---|---|---|---|---|---|---|
+| 4 | dinfer | 64/0 | 2.37 (61/64) | 2.48 | 921 | 47.5/230.6/271.0/274.9 | 13.8/18.2/20.1/20.8 | 0.493 |
+| 8 | dinfer | 64/0 | 3.21 (64/64) | 3.21 | 1194 | 53.7/73.7/85.8/95.3 | 16.1/19.3/19.6/19.9 | 0.809 |
