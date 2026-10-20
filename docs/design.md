@@ -748,3 +748,14 @@ B300 单 GDN 层 decode，基线 = 现路径 11 kernel + 自调优 GEMM + CUDA g
 2. `scripts/verify/bench_engine.sh <OUT> "改动"`：到达率扫描（如 2/4/8/12/16/24 req/s），长度混合 + 前缀复用 0.5，两边各最佳配置，出表（goodput / p50 / p99 / cache hit）+ 曲线进 `test/<model>/engine-trend.*`。
 3. 首轮：Qwen3.5-27B B300 单卡（vLLM 开 prefix cache + 它的默认最佳；我们 prefix cache 关），拿到第一组引擎数字——预期多轮前缀负载下我们落后，这就把"GDN 状态按块缓存"（§11 待做）变成引擎层面的第一优先级，而不是继续下钻 kernel。
 4. 之后 K3 tp8（C-6）直接用此口径。
+
+### 15.4 首个引擎层面数据点（2026-10-20 11:2x，第三方工具 `vllm bench serve`，B300 单卡，Qwen3.5-27B bf16，random 1024 in / 256 out、range 0.5、**512 共享前缀**、64 req、goodput = TTFT ≤ 500 且 TPOT ≤ 20 ms；`test/qwen35/2026-10-20/engine0/`）
+
+| rate | 端 | req/s | **goodput** | out tok/s | TTFT mean / p99 | TPOT mean / p99 |
+|---|---|---|---|---|---|---|
+| 4 | dinfer | 3.07 | **1.25** | 797 | 5.0 / 7.6 ms | 20.8 / 25.7 |
+| 4 | vLLM | 3.14 | **2.84** | 815 | 161 / 275 | 17.0 / 20.6 |
+| 8 | dinfer | 4.47 | **0.35** | 1163 | 4.7 / 7.6 | 29.5 / 45.2 |
+| 8 | vLLM | 5.07 | **5.07** | 1319 | 93 / 154 | 16.6 / 19.4 |
+
+**结论：引擎层面我们明显落后**（goodput 1.25 vs 2.84、0.35 vs 5.07），和四组闭环的 1.10× 完全是两回事——用户的判断是对的。两处要查：① dinfer TTFT 5 ms 不可能（1024 token prefill 至少几十 ms），应是 server 先发了一个空 role delta 被工具当首 token，**测量伪像**，要改成首个带内容 chunk 才发（与 vLLM 一致）；② **TPOT 真差**：rate 8 时 29.5 / 45.2 vs 16.6 / 19.4，而四组闭环 c8 是 10.2 vs 11.2——差在负载形态：长度分布宽（512–1536 in、128–384 out）+ 请求交错到达 → 混批步多、decode 批不整、chunk prefill 插入频繁；vLLM 的 prefix cache 命中 512 前缀也把它的 prefill 砍了一半。下一步：dinfer 侧 `/metrics` 的 prefill / decode / mixed 步分布 + nsys 这类负载，定位是调度策略（预算 16384 一步吞掉大 prefill 把 decode 卡住 → TPOT 尾部）还是 prefix cache 缺失。
