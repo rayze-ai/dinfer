@@ -48,3 +48,10 @@
   (2) 小算子在 148 个 CTA 上变延迟链（gdn B=1 span 15 µs、busy 2）；(3) graph 基线的边界效应只有 ~17%（147 µs vs 下限 ~120），
   不够抵消 (1)(2)。依赖等待不是瓶颈（Σwait 10–30%）。**判断**：在"权重流下限 + graph"这个基线上，减 kernel 数的收益上限 ≈ 边界效应
   占比，27B 级模型 < 20%，不值一次架构重写；质变要靶向字节（NVFP4）或算子融合本身（K3 MoE 路径）。证据：`docs/loops/mega-sm100.md`。
+
+## smem 瘦身优先于算法改动；寄存器预取在 255 上限附近反伤（r9，2026-10-20）
+
+- **判断**：block 级 kernel 慢，先看 `--resource-usage` 的 smem / 寄存器，把 smem 压到让 occupancy 从 1 → 2 block/SM，往往比改算法收益大；寄存器已接近 255 时再加"预取下一块到寄存器"会 spill，反而慢 20–70%。
+- **为什么**：r9 wy kernel 把 sM 复用 sK∪sQ（72 → 56 KB）占了 2.2× 提速的大半，分块三角逆只再省 17–20%；ho 的 PF=1 预取在 3090 / 占满寄存器时全形状退化。两段版 ho（h-pass + o-pass）在 3090 比融合慢 10–30%，因为中间 h16 一写一读 201 MB @ 8K 吃带宽——这类"拆 kernel 换并行度"的改动收益随卡的带宽变，门限必须进 `ArchProfile` 按卡实测，不能按一张卡的结论定死。
+- **怎么用**：改 kernel 前 `nvcc --resource-usage` 记 smem / reg / occupancy；先做瘦身，再做算法；"预取 / 拆段"这类结构开关一律 `ArchProfile` 默认 + 环境变量覆盖，两卡各测后再定默认。
+- **证据**：`docs/loops/qwen35-gdn-r9.md` 轮次 1–5；`test/qwen35/2026-10-20/probe_gdn_r9_*`；commits ba23769 / 515ef0c / e78ccfe。
