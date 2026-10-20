@@ -38,7 +38,7 @@ taskset -c 100-103 python3 -I scripts/dev/ttft_probe.py $port 1 146 >/dev/null 2
 for w in $lengths; do
   taskset -c 100-103 python3 -I scripts/dev/ttft_probe.py $port 5 $w 2>&1 | tail -1
 done
-sleep 3   # 让最后一次 flush 跑完
+sleep 12  # 让最后一次 flush 跑完（3 s 不够：6 K 五步被截，engine-gap 9b）
 
 # SIGINT 发给 nsys 本身（不是 serve），它才会 flush 报告
 np=$(pgrep -x nsys | head -1)

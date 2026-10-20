@@ -38,6 +38,21 @@ def main():
     pre = [s for s in steps if any(any(x in k[2] for x in PRE) for k in s)]
     if not pre:
         print("no prefill steps"); return
+    if K == 0:
+        # 逐步模式：按时间顺序打每个 prefill 步（含 1 个预热），不聚簇；gap = 距上一步末尾（含 HTTP / tokenizer / 调度）
+        print(f"{'#':>3} {'t_rel_s':>8} {'gap_ms':>7} {'span_ms':>8} {'kern_ms':>8} {'busy%':>5} {'GEMM':>7} {'GDN':>6} {'attn':>6} {'other':>6} {'n_k':>5}")
+        prev_end = None
+        for i, s in enumerate(pre):
+            st, en = s[0][0], s[-1][1]
+            tot = collections.Counter()
+            for a, b, nm in s:
+                tot[fam(nm)] += b - a
+            busy = sum(tot.values()) / 1e6
+            gdn = sum(v for f, v in tot.items() if f.startswith("GDN")) / 1e6
+            gap = (st - prev_end) / 1e6 if prev_end else 0.0
+            print(f"{i:3d} {(st - t0)/1e9:8.2f} {gap:7.1f} {(en-st)/1e6:8.1f} {busy:8.1f} {busy/((en-st)/1e6)*100:5.0f} {tot['GEMM']/1e6:7.1f} {gdn:6.1f} {tot['attn gqa_fa']/1e6:6.1f} {(busy-tot['GEMM']/1e6-gdn-tot['attn gqa_fa']/1e6):6.1f} {len(s):5d}")
+            prev_end = en
+        return
     spans = sorted((s[-1][1] - s[0][0]) / 1e6 for s in pre)
     # 简单 1-D K 均值（按 span），初值取分位点
     cents = [spans[int(len(spans) * (i + 0.5) / K)] for i in range(K)]
