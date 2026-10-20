@@ -256,10 +256,18 @@ impl ArchProfile {
 
     /// chunk prefill `ho` 是否寄存器预取下一 chunk（r9 第 1 轮）。3090 实测：装载改成"每线程固定向量数进寄存器再转 bf16 写 smem"
     /// 本身就赢（bv32 1×8192 2961 → 2043 µs）；再把下一 chunk 的读提前到本 chunk 计算前（PF=1）反而慢 20–70%（多 ~130 个
-    /// 寄存器 → 255 上限、occupancy 掉）。所以默认不预取；保留 PF=1 特化给 B300 复测 / 环境变量覆盖。
+    /// 寄存器 → 255 上限、occupancy 掉）。所以 Sm8x 默认不预取。
+    /// **Sm100 开**（r10 第 2 轮，B300 GPU 7 实测）：r10 第 1 轮中间量 bf16 后预取寄存器减半，PF=1 由"全形状退"翻成
+    /// 1×8192 bv32 690 → 520 µs（−25%）、8×1024 405 → 379；3090 同代码仍退（bv32pf 1798 vs 1686），按卡分叉。
     pub fn gdn_chunk_ho_prefetch(ho_bv: usize) -> bool {
-        let _ = ho_bv;
-        false
+        Self::gdn_chunk_ho_prefetch_for(Arch::Sm8x, ho_bv)
+    }
+
+    pub fn gdn_chunk_ho_prefetch_for(arch: Arch, ho_bv: usize) -> bool {
+        if ho_bv == 0 {
+            return false;
+        }
+        matches!(arch, Arch::Sm100)
     }
 
     /// chunk prefill `ho` 是否拆两段（h-pass + o-pass，r9 第 2 轮）。融合版的并行度 = num_seqs · HV · V/BV 个 block，

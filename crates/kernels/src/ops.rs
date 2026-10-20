@@ -3636,9 +3636,14 @@ fn gdn_chunk_ho_bv(stream: &Stream, base_blocks: usize, k_dim: usize, v_dim: usi
 }
 
 /// chunk prefill `ho` 是否寄存器预取：默认 `ArchProfile::gdn_chunk_ho_prefetch(bv)`；`GDN_CHUNK_HO_PREFETCH=0|1` 覆盖。
-fn gdn_chunk_ho_prefetch(ho_bv: usize) -> bool {
+fn gdn_chunk_ho_prefetch(stream: &Stream, ho_bv: usize) -> bool {
     use std::sync::OnceLock;
     static OVER: OnceLock<Option<bool>> = OnceLock::new();
+    static ARCH: OnceLock<crate::arch::Arch> = OnceLock::new();
+    let arch = *ARCH.get_or_init(|| {
+        let sm = stream.device().sm_count().unwrap_or(1);
+        stream.device().compute_capability().map(|cc| crate::arch::ArchProfile::for_cc(cc, sm).arch).unwrap_or(crate::arch::Arch::Sm8x)
+    });
     let over = *OVER.get_or_init(|| {
         let o = std::env::var("GDN_CHUNK_HO_PREFETCH").ok().map(|s| s != "0");
         if o.is_some() {
@@ -3649,7 +3654,7 @@ fn gdn_chunk_ho_prefetch(ho_bv: usize) -> bool {
     if ho_bv == 0 {
         return false;
     }
-    over.unwrap_or_else(|| crate::arch::ArchProfile::gdn_chunk_ho_prefetch(ho_bv))
+    over.unwrap_or_else(|| crate::arch::ArchProfile::gdn_chunk_ho_prefetch_for(arch, ho_bv))
 }
 
 /// chunk prefill `wy` 的实现：`Legacy` 老 fp32；`Mma` tensor core + 分块三角逆（r9 第 3 轮，默认）；
@@ -3995,7 +4000,7 @@ pub fn gdn_chunk_ho(
     v_dim: usize,
 ) -> Result<()> {
     let bv = gdn_chunk_ho_bv(stream, plan.num_seqs * heads_v, k_dim, v_dim);
-    let pf = gdn_chunk_ho_prefetch(bv);
+    let pf = gdn_chunk_ho_prefetch(stream, bv);
     let split = gdn_chunk_ho_split(stream, bv, plan.num_seqs, plan.num_chunks, heads_v, k_dim, v_dim);
     gdn_chunk_ho_with(
         stream,
