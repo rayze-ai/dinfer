@@ -56,6 +56,21 @@ tp6 不可用（视觉塔 4096 维列切不整除）。`test/kimik3/2026-10-19/b
 顶层 `language_model.model.embed_tokens / norm / output_attn_res_norm / output_attn_res_proj`、`language_model.lm_head`、`vision_tower.*`、`mm_projector.*`。
 vLLM 的融合规则（`model.py:1110` `packed_modules_mapping`）：`gate_up_proj=[gate,up]`、`in_proj_qkvgfab=[q,k,v,b,f_a]`、`conv1d=[q,k,v conv]`、`fused_qkv_a_g_proj=[q_a, kv_a_with_mqa, g]`、专家 `w13=[w1,w3]`。
 
+
+### 1.6 参考 `/data/code/llm-cache-prediction`（用户 2026-10-20 指定；采纳口径，不搬代码）
+
+该项目是网关侧 K3 前缀缓存命中率测算 sidecar（纯 CPU Rust），其 `crates/kimik3/{tokenizer.rs,xtml.rs,pyjson.rs}` 已与 vLLM 服务端逐 token 对齐过 100+ 轮，`docs/kimik3/{README,other}.md` 记了四处对齐偏差。对 dinfer 的价值与取舍：
+
+| 项 | 它的结论 | 我们采纳 | 不采纳 / 原因 |
+|---|---|---|---|
+| 渲染参照物 | **vLLM 服务端 Rust renderer**（`rust/src/chat/src/renderer/kimi_k3/`），不是 HF `encoding_k3.py`：浮点序列化走 serde ryu（`100.0`→`100`、`1e2`→`100.0`、`1e-6` 保留）、tool_calls 参数 serde 完整解析后重序列化、消息 `name` 字段被前端丢弃、thinking 对象形式 | ✅ C-4a 的 golden 生成脚本按它的 `tools/gen_goldens.py` 方式 monkeypatch `encoding_k3` 成服务端语义；我们对拍目标是 vLLM 的 token 序列 | — |
+| tiktoken | special 空间 `[len(ranks), +256)`、未命名 `<|reserved_token_{i}|>`；`allow_special` 分段；**400k 字符窗口 + 25k 连续(非)空白 run 切分后再 BPE**（边界影响结果）；BOS 不前置；`thinking_effort` 默认 `max` | ✅ 全部复刻进 `models/kimik3/src/tokenizer.rs` / `xtml.rs` | 代码独立写，不依赖该 crate |
+| 命中粒度 | vLLM 对 K3 的 `--prefix-match-unit 128` + `--mamba-cache-mode align` 下，**页大小配平把注意力 block 抬到 1536 = 12×128**，KDA 状态只在 1536 边界有快照；全命中至少留末块重算（`hit_tail_tokens` 按部署实测，三个模型各不同） | ✅ 作为 dinfer 做递归模型 prefix cache（design.md §11 待做项）的设计输入：GDN / KDA 状态快照粒度 = 注意力 block 的整数倍，由 KV 页配平决定，不是独立常量；`cached_tokens` 口径要留末块 | 容量 / LRU / Mooncake 对账是网关侧需求，dinfer 不做 |
+| 图片 | `navit_resize_image` token 数公式、`mm_hash` | 暂不（视觉塔 C-6 以后） | — |
+| 对账方法 | 100 轮逐 token 对比落盘两列（simulator / vLLM）、边界 ±1 case、非 ASCII 函数名被 vLLM 400 | ✅ C-4a 的 case 清单与"两列落盘"方式 | — |
+
+**结论**：它解决的是"和 vLLM 字节一致地算 token 与命中"，与我们 C-4a 的目标完全重合，它踩过的四处偏差是我们最该借的；命中粒度 1536 的事实直接影响 Qwen3.5 / K3 重开 prefix cache 的设计。
+
 ## 2. crate 模块
 
 
