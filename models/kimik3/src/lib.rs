@@ -12,5 +12,6 @@ pub mod mla;
 pub mod model;
 pub mod tokenizer;
 pub mod weights;
+pub mod xtml;
 
 pub const MODEL_NAME: &str = "kimi-k3";
