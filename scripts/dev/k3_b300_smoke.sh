@@ -75,7 +75,7 @@ PY
 
 step "/metrics"
 curl -sf -m 5 "$URL/metrics" > "$OUT/metrics.txt" || fail "/metrics"
-grep -cE '^[a-z_]+(\{|\s)' "$OUT/metrics.txt" | sed 's/^/metrics_lines=/' | tee -a "$OUT/summary.txt"
+grep -cE '^[a-z_:]+(\{|\s)' "$OUT/metrics.txt" | sed 's/^/metrics_lines=/' | tee -a "$OUT/summary.txt"
 
 step "bench c1 ×8（p128 o128，只记录）"
 target/release/bench --url "$URL" --label dinfer --concurrency 1 --num-requests 8 --prompt-len 128 --max-tokens 128 \

@@ -1,6 +1,6 @@
 # Kimi-K3 里程碑 C-4b：executor + service（ChatBackend）+ `dinfer --features kimik3 serve`，前 N 层真权重冒烟
 
-> 状态：**进行中（2026-10-20）**。crate 侧 `models/kimik3/src/{executor,service}.rs`，入口 `bins/dinfer/src/main.rs` 的 `kimik3` 分支。
+> 状态：**冒烟通过（2026-10-20 第 2 轮，B300 GPU 2，`scripts/dev/k3_b300_smoke.sh` exit 0）**。crate 侧 `models/kimik3/src/{executor,service}.rs`，入口 `bins/dinfer/src/main.rs` 的 `kimik3` 分支。
 > 前置：C-3（`k3-model.md`：`KimiK3Model::load(dir, n_layers, LayerBudget)` / `forward`）、C-4a（`k3-chat.md`：tokenizer / xtml / parser）。
 > 下一步 C-5：EP / TP 切分（全模型专家 packed 1.45 TB，vLLM 基线 tp8 独占 8 卡）。
 
@@ -52,4 +52,4 @@
 |---|---|---|
 | 0 | 本机：kimik3 lib / bin 构建、clippy、`cargo test -p dinfer-kimik3` 24/24（含 chat_parity 5）、ref-tests `--no-run` 过 | 等 B300 |
 | 1 | B300 GPU 2，`k3_b300_smoke.sh`（5 层） | 装载 5 层 + 顶层 **13.0 s**（layer 0 0.5 s、MoE 层各 2.3 s、MLA 层 3.0 s；health 可达 14.1 s），显存 82.2 GB；`/v1/models` 过；**首请求炸**：`graph capture: body: LatentMoe: pairs 0 ≠ t·K`——LatentMoe 每步 `dtoh_sync_copy(offsets)` 展平 tile 计划、AttnRes host softmax，体内 D2H 不能进 capture，引擎线程退出 → chat 无 chunk、/metrics 空、bench 失败 |
-| 2 | executor：decode 图默认关（`K3_GRAPH=1` 强制开），其余不变 | 见下 |
+| 2 | executor：decode 图默认关（`K3_GRAPH=1` 强制开），其余不变 | **`k3_b300_smoke.sh` exit 0**（`test/kimik3/2026-10-20/smoke5/`）：装载 11.7 s（health 可达 14.1 s）、显存 85.5 GB（权重 ~75 + 激活 / KV / 采样缓冲；nvidia-smi 82.7 GB）；`/v1/models` = `kimi-k3`；流式 chat 66 chunk、`finish=length`、265 字 reasoning（乱文，预期）、content 0（5 层永远出不到 `<\|close\|>`）；`/metrics` 13 KB Prometheus（`dinfer:*`，脚本首版 grep 漏了冒号 → 0 行，已修）；**bench c1×8 8/8 ok：TPOT 12.5 ms、TTFT 386 ms**（p128：prefill 走 KDA chunk + MLA 展开 + MoE 解包）；**c8×16 16/16 ok：TPOT 42.7 ms、TTFT 2.2 s**（eager 单流、无图；仅记录，5 层数字不进趋势 CSV）；serve.log 无 ERROR / panic / CUDA error / slot 复用告警 |

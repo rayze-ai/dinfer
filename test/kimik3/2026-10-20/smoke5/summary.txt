@@ -1,0 +1,38 @@
+
+==> 启动 dinfer（前 5 层，GPU 2，:8014）
+startup_wall_s=14.1
+2026-10-20T01:58:26.562201Z  WARN dinfer_kimik3::service: kimik3: TRUNCATED MODEL —— 只装前 5/93 层，输出无语义，仅用于流程冒烟 n_layers=5 total_layers=93
+2026-10-20T01:58:26.563001Z  INFO dinfer_kimik3::service: kimik3: single-stream executor（decode CUDA graph lazy per bucket；no TP / EP / PD / MTP yet） cuda_graphs=true chunked_prefill=true 
+2026-10-20T01:58:27.522365Z  WARN dinfer_kimik3::model: kimik3: TRUNCATED MODEL（只装前 5 层 + 顶层；输出无语义，只用于流程冒烟 / 对拍） n_layers=5 total=93
+2026-10-20T01:58:39.224987Z  INFO dinfer_kimik3::service: kimik3 model loaded（权重 + 激活 + KV 合计；激活估算 = max_tokens × hidden × bf16 × ~16 份） n_layers=5 secs="11.7" 
+2026-10-20T01:58:39.227049Z  INFO dinfer_kimik3::service: kimik3 eos eos=[163586] eos_name=["<|end_of_msg|>"]
+2026-10-20T01:58:39.227222Z  INFO dinfer_kimik3::service: kimik3 engine started model=kimi-k3 max_model_len=4096 num_blocks=4097 kv_tokens=65552 num_slots
+2026-10-20T01:58:39.227228Z  INFO dinfer_kimik3::service: startup timing model_load_ms=12665 total_ms=12665
+
+==> /v1/models
+['kimi-k3']
+
+==> 流式 chat 一条（内容乱是预期）
+chunks=66 finish=length reasoning_chars=265 content_chars=0 err=None
+reasoning[:120]= ' quicker就够新闻联播_rename掌心呼吸负责人 negligentEX craftsmanship利剑(CH拳脚Su版权归�ှိ坐在(displaybastReceive_Base genu心想事成drawing地利(rxánt再'
+content[:120]= ''
+
+==> /metrics
+metrics_lines=0
+
+==> bench c1 ×8（p128 o128，只记录）
+== dinfer http://127.0.0.1:8014 model=kimi-k3 concurrency=1 requests=8 (8 ok, 0 failed) in 15.82s
+   throughput: 0.51 req/s   64.7 output tok/s   188.3 total tok/s
+   TTFT     mean   386.34  p50   385.29  p90   390.03  p99   393.23  max   393.23  (ms)
+   TPOT     mean    12.53  p50    12.53  p90    12.54  p99    12.54  max    12.54  (ms)
+
+==> bench c8 ×16（混批 / 槽归还）
+== dinfer http://127.0.0.1:8014 model=kimi-k3 concurrency=8 requests=16 (16 ok, 0 failed) in 15.27s
+   throughput: 1.05 req/s   134.1 output tok/s   390.5 total tok/s
+   TTFT     mean  2207.44  p50  2454.09  p90  2482.29  p99  2482.34  max  2482.34  (ms)
+   TPOT     mean    42.73  p50    40.74  p90    57.07  p99    57.11  max    57.11  (ms)
+
+==> 日志检查
+2, 82678 MiB
+
+smoke_rc=0
