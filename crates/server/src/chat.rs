@@ -619,19 +619,23 @@ pub async fn chat_completions(State(be): State<Backend>, Json(req): Json<ChatCom
             let send = |c: &ChatCompletionChunk| {
                 tx.send(Event::default().data(serde_json::to_string(c).unwrap())).is_ok()
             };
-            for i in 0..n {
-                // 首 chunk：role
-                let d = Delta { role: Some("assistant"), content: Some(String::new()), ..Default::default() };
-                if !send(&chunk(&id, created, &model, i, d, None, None)) {
-                    return;
-                }
-            }
+            // 首 chunk（role + 空 content）**随首个 token 一起发**，不在请求接受时发：客户端 / 压测工具（vLLM `bench serve`）
+            // 把首个 SSE chunk 当首 token 计 TTFT，提前发会把 TTFT 测成 5 ms 的伪像（2026-10-20 引擎层面对比发现，
+            // design §15.4）。vLLM 的 serving_chat 同样是首个输出时才发 role chunk。
+            let mut role_sent = vec![false; n as usize];
             let r = consume(
                 &mut merged,
                 &mut states,
                 &mut guard,
                 false,
                 |i, d, lps| {
+                    if !role_sent[i as usize] {
+                        role_sent[i as usize] = true;
+                        let d0 = Delta { role: Some("assistant"), content: Some(String::new()), ..Default::default() };
+                        if !send(&chunk(&id, created, &model, i, d0, None, None)) {
+                            return false;
+                        }
+                    }
                     let lp = want_lp.then_some(ChatLogprobs { content: lps });
                     send(&chunk(&id, created, &model, i, delta_from(d), None, lp))
                 },
