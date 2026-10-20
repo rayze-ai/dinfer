@@ -23,3 +23,10 @@
 
 ## 上下文纪律
 - 主会话每 ~10 次调用写一次 loop / progress 并 commit；超 60 次建议 `/clear`，靠交接区恢复（本次会话 1500+ 次调用全靠这个）。
+
+## 远端同步只由主会话 push；子代理 put 单文件、产物落 /tmp（2026-10-20 两次事故）
+
+- **判断**：`remote_b300.sh push` 带 `--delete`，谁的本机工作区不全谁 push 就会删别人的远端目录。多子代理并行时只有主会话工作区含全部 commit，所以只有主会话能 push；子代理要同步代码就发消息。
+- **为什么**：10-20 上午 K3 refs 被另一会话 push 删掉、下午 r8 的 engine_r8 产物被 r9 push 删掉，各损失 20–40 min GPU 时间。
+- **怎么用**：子代理 brief 固定一句"不要 push；要推代码发消息；远端产物写 /tmp 或 bootstrap/，主会话 pull"。主会话 push 前 `git status` 确认子代理的 commit 都已在本地 dev。
+- **证据**：`docs/pitfalls.md` 2026-10-20 两条。

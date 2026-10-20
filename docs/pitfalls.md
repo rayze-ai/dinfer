@@ -798,3 +798,9 @@
 - **根因**：`kda.cu` 等 6 处用函数内 `static` 变量缓存"动态 smem 上限已设"（`cudaFuncSetAttribute(MaxDynamicSharedMemorySize)`），而该属性**按设备（当前 ctx）生效**。一进程多线程 TP、每线程一张卡并发首次调用：先到者设完就把 static 标已设，其余卡没设，动态 smem > 48 KB 的 launch 直接 InvalidValue。static 还不是线程安全的。
 - **解法**：缓存改 `thread_local`（每 rank 线程 = 一张卡，一份缓存），`common.cuh` 提供统一 `set_smem_once(fn, bytes)`；或缓存键加 `cudaGetDevice`。TP worker / rank0 forward 出错当场 `tracing::error`（`models/kimik3/src/tp.rs`），否则 rank 0 卡在集合通信永远读不到 Err。
 - **避免**：kernel host 侧凡 `static` 缓存与设备 / ctx 相关的状态（func attribute、occupancy 查询、cuBLAS handle）一律 `thread_local` 或按 device 键；新多卡路径先用 tp≥4 × 小层数冒烟（tp2 碰不到的并发撞车 tp8 会碰到）；`grep -n 'static int' crates/kernels/cuda/*.cu` 进 PR 自查。
+
+## 2026-10-20（再犯）子代理 `remote_b300.sh push` 删掉另一子代理的远端产物
+
+- **现象**：r8 在 B300 跑完 engine bench，compare 跑到第 2 组时远端 `test/qwen35/2026-10-20/engine_r8/` 整目录消失；同时出现 r9 的 probe 目录。
+- **根因**：`push` = rsync `--delete`，远端有、推送方本机没有的目录一律删。两个子代理各自本机工作区不含对方的新目录。10-20 上午 K3 refs 目录同款事故已记一次。
+- **解法 / 避免**：**子代理禁止 push**，代码同步发消息让主会话推（主会话工作区含全部 commit）；子代理只能 `put` 单文件；远端产物一律先落 `/tmp` 或 `bootstrap/`，由主会话 `pull` 回本机 `test/`，不要直接写远端 `test/`。写进 `knowledge/subagent-ops.md`。
