@@ -78,3 +78,18 @@ ho_mma 原始计数（第 4 轮代码，8×1024 launch，`r10_ncu_ho3.txt`，第
 
 `svT[vv*TS + i0]`（TS=72 bf16 = 36 word）：同一 warp 内 lane(g, t4) 写 word = (8·t4·36 + g/2) mod 32 → g=2m 与 g=2m+1 落同一 word、t4 四档落 bank 0/0/0/0 偏移（8·36 = 288 ≡ 0 mod 32），**32 lane 只占 16 bank，每条 st 2 路冲突**；sh16 的 `sts_u32`（KS=136 → 68 word，68g mod 32 = 4g）32 lane 恰铺 32 bank，无冲突。所以 st 冲突 0.73 M 全在 svT（每 chunk 4 条 × NT_V × 4 warp）。改法：v' 不转置，按 [j][v] 行主序 32 位 `pack_bf16x2` 存（与 sh16 同款、无冲突，写指令减半）；(3) 的 B 操作数 v'[j][v]（k=j，n=v）用 `ldsm_x4_t`（与 (4) 读 skg [j][k] 完全同式）；(4) 的 A 操作数 v'ᵀ[v][j] 用 `ldsm_x4_t` 从 [j][v] 取（lane 地址 = `sv + (ks·16 + ((lane>>4)&1)·8 + (lane&7))·VS + mt·16 + ((lane>>3)&1)·8`，与 opass 第 1364 行读 sv 同族）。smem 不变（[BT][VS] 与 [BV][TS] 同量级）。
 | 5 | **ho_mma / hpass 的 h16 B 操作数 4×lds_u32 → ldmatrix.x4**（(1)(2) 两处 + hpass 一处，smem 布局不变）`b10eceb` | 18/57/63/39/**147** · 82/360/384/221/**833** · 82/360/504(bv32)/219/**966** | 4/4 chunk（B300）；3090 过 | **中性**：ncu 计数按预期动了（shared_ld 16.0 → 3.4 M、ldsm 4.3 → 7.5 M、总指令 112.8 → 105.9 M、mio_throttle 0.92 → 0.62），**时钟不动**（ncu 615 → 618 µs；bench ho 380 → 384 / 524 → 525，噪声内）。说明 ho 的"smem 管线 77%"是症状不是瓶颈——减掉 12.6 M 条 lds 一点没省时间，**瓶颈在 mma 依赖链 / 每 block 的并行 warp 数**（short_scoreboard 反升 1.13 → 1.54：少了 lds 的掩护，mma 之间的等待裸露）。保留本轮（指令更少、后续改并行度时少一个变量）。第 6 轮**不做** svT bank 冲突（同理不会动时钟），改做并行度：BV=32 每 warp 只 2 个 V tile + H_TILES=4 个 h tile，mma 链太短；候选 (a) BV=64 一 block 持 8 warp（regs 不增、每 SM warp ×2），(b) 一 block 两条序列 / 两个 hv 交错（独立链填空）。先取 ncu 1×8192 单 launch + Source 级 stall 定位再定 |
+
+### 第 6 轮前置：ho_mma **1×8192 单 launch** ncu（`r10_ncu_ho6.txt.29`，bv32 PF=1，默认路径）
+
+| 指标 | 1×8192 | 8×1024（bv16 PF=0 对照，`.39`） |
+|---|---|---|
+| grid | **192 block**（1 seq × 48 hv × 4 V 片）；regs 239 → 2 block/SM；148 SM 只有 96 个 SM 有活 | 3072 block |
+| `sm__warps_active` | **8.5%** | 12.2% |
+| `issue_active` | **23%**（每 4 周期发 1 条） | 25% |
+| `pipe_tensor_cycles_active` | **19%** | 17% |
+| 每条指令延迟 | 5.8 周期（wait 1.48 / long_sb 1.23 / short_sb 1.16 / mio 0.37） | 7.7 |
+
+结论：ho 是**并行度 / ILP 型**——tensor pipe 五分之一在转，发射槽四分之三空着；不是 smem、不是 HBM（第 5 轮已证）。BV=32 下每 warp 一步只有 2 个 V tile（o / w 各 2 条独立 mma 链）+ 4 个 h tile；mma 之间互相等。两条路：
+- **(a) BV=64**：每 warp 8 个 h tile、o / w 各 8 条独立链（ILP ×2），smem 86.5 KB（仍 2 block/SM 档），grid 减半（1×8192 → 96 block，但每 block 8 warp 的 mma 流更满；148 SM 本来就铺不满，再少一半 SM 也只是把两个 block 的活合成一个更满的 block）。regs 风险：PF=1 预取数组随 BV 翻倍 → ~250，要带 PF=0 档一起测；`static_assert` 已允许 BV=64（(MT_V·NT_K) % (2·NW) = 64 % 8 = 0）。
+- (b) 一 block 两条独立链（两个 hv 交错）：改动大、regs 翻倍，B300 上不如 (a)。
+第 6 轮做 (a)：加 `LAUNCH_HO_MMA(64, K)` 档 + bench `bv64` / `bv64pf` 列；默认档仍 32，B300 出数后再改 `ArchProfile::gdn_chunk_ho_bv` 候选序。
