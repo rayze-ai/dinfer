@@ -86,6 +86,12 @@ enum Cmd {
         /// 关闭 decode CUDA graph（默认开；qwen3）
         #[arg(long, default_value_t = false)]
         no_cuda_graph: bool,
+        /// qwen35：GDN 递归状态快照粒度（token；prefix cache 命中对齐到它，须为 block_size 整数倍；0 = 关 prefix cache）
+        #[arg(long, default_value_t = 1024)]
+        gdn_snapshot_tokens: u32,
+        /// qwen35：GDN 快照区显存 GiB（<0 = 自动取 KV 预算的 10%；0 = 无快照区）
+        #[arg(long, default_value_t = -1.0)]
+        gdn_snapshot_gib: f64,
         #[arg(long, default_value_t = 0)]
         device: usize,
         /// 张量并行组大小（qwen3 / kimik3；design §13）：用卡 device..device+tp
@@ -204,17 +210,19 @@ async fn main() -> Result<()> {
             ngram_max,
             layers,
             chat_dialect,
+            gdn_snapshot_tokens,
+            gdn_snapshot_gib,
         } => {
             let name = served_model_name.unwrap_or_else(|| model_name().to_string());
             let addr = format!("{host}:{port}");
             #[cfg(not(feature = "kimik3"))]
-            let _ = (layers, &chat_dialect);
+            let _ = (layers, &chat_dialect, gdn_snapshot_tokens, gdn_snapshot_gib);
             #[cfg(feature = "kimik3")]
             {
                 let _ = (
                     &role, kv_port, &peer, pd_wait_ms, pd_pool_bufs, &kv_transport, kv_slots, tp, dp, mtp,
                     &speculative, num_speculative_tokens, ngram_min, ngram_max, kv_host_gib,
-                );
+                , gdn_snapshot_tokens, gdn_snapshot_gib);
                 let opt = dinfer_kimik3::service::ServeOptions {
                     model_dir: model,
                     tokenizer_dir: tokenizer,
@@ -338,6 +346,8 @@ async fn main() -> Result<()> {
                     long_prefill_token_threshold,
                     device,
                     enable_cuda_graph: !no_cuda_graph,
+                    gdn_snapshot_tokens,
+                    gdn_snapshot_gib,
                 };
                 let name = name.clone();
                 let svc = tokio::task::spawn_blocking(move || {

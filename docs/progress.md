@@ -4,6 +4,7 @@
 ## 当前状态
 
 - 更新日期：2026-10-20 12:4x +0800。引擎口径：engine_1 → engine_2 尾部大改善（host 一次性开销清零），稳态 rate ≥ 8 TPOT p99 31–40 vs 18–20 未变 → 第 8 轮 GDN 状态按块缓存重开 prefix cache（design §15.7）；K3 C-6 脚本就位等 8 卡。
+- **r8 子代理进展（13:xx）**：第 1–3 步已 commit（core 对齐 + StateSnapshotPool + qwen35 快照读写 + `--gdn-snapshot-tokens/--gdn-snapshot-gib`）；进行中：golden 新 case（3090）→ B300 GPU 5 engine_r8。
 - **进行中（12:3x）**：r8 子代理（GDN 状态按块缓存，design §15.7，GPU 5）；第 7 轮公共 trait 回归门禁——3090 core 56 / layers 5 / server 3 / qwen3 sampling_parity 5 过，4090 `bench_r7gate` ±1% vs bench_common1 **门禁过**；纯 prefill 1024 nsys（GPU 6）重跑中（上次 `--kill=sigint` 非法选项空跑）；K3 C-6 脚本就位等 8 卡（r8 + engine_3 之后）。
 - **2026-10-20 第 8 轮（子代理）：executor 公共件抽取已做**——`crates/layers/src/exec.rs`（`AsyncResultRing` / `DecodeGraphs` / `StateSlotTable` / `PlanBuffers`，接口表见 design §"已做：executor 公共件抽取"）；qwen3 接回 4090 `test/qwen3/2026-10-20/bench_common1` 四组 vs bench25 +0/+1/+0/+1%（门禁过）；**qwen35 已接 async scheduling**（`ASYNC_SCHED` 默认开），golden 6/6 含两条 engine 口径 overlap 测试；kimik3 `kda::SlotTable` 改 re-export。待：B300 `bench_b300_15`（主会话）、kimik3 有 executor 后接 `DecodeGraphs`。
 - 总览：Qwen3-0.6B 线 Q1–Q5 阶段性完成（Q3 四组 ≥ vLLM；Q4 PD / Q5 TP 功能通过，细节见 `docs/design.md` §10/§13 与 10-18 日志）；GLM 线 P0–P6 通过、真权重挂起；B300 单卡 B4 调优进行中（`docs/loops/b4-sm100.md`，c1/c8/c32 已追平或超越，c8-long 落后 38%）。

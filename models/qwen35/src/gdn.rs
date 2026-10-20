@@ -24,6 +24,48 @@ pub struct GdnState {
     pub conv: Tensor<bf16>,
     /// `[slots, HV, V, K]` f32。
     pub rec: Tensor<f32>,
+    /// 快照区（design §15.7，prefix cache 对齐位置的状态；`alloc_snapshots` 之后才有）：`[snapshots, conv_dim, width-1]`。
+    pub snap_conv: Option<Tensor<bf16>>,
+    /// `[snapshots, HV, V, K]` f32。
+    pub snap_rec: Option<Tensor<f32>>,
+}
+
+impl GdnState {
+    fn per_slot(&self) -> (usize, usize) {
+        (self.rec.numel() / self.rec.shape[0], self.conv.numel() / self.conv.shape[0])
+    }
+    /// 活槽 `slot` → 快照槽 `snap`（同流 dtod；prefill 步 forward 之后调用）。
+    pub fn save_snapshot(&mut self, stream: &Stream, slot: usize, snap: usize) -> Result<()> {
+        let (n, cn) = self.per_slot();
+        let (sr, sc) = (self.snap_rec.as_mut(), self.snap_conv.as_mut());
+        let (Some(sr), Some(sc)) = (sr, sc) else { anyhow::bail!("gdn: 快照区未分配") };
+        ensure!(snap < sr.shape[0], "gdn: snapshot slot {snap} >= {}", sr.shape[0]);
+        let src = self.rec.data.slice(slot * n..(slot + 1) * n);
+        let mut dst = sr.data.slice_mut(snap * n..(snap + 1) * n);
+        stream.inner_arc().memcpy_dtod(&src, &mut dst)?;
+        let src = self.conv.data.slice(slot * cn..(slot + 1) * cn);
+        let mut dst = sc.data.slice_mut(snap * cn..(snap + 1) * cn);
+        stream.inner_arc().memcpy_dtod(&src, &mut dst)?;
+        Ok(())
+    }
+    /// 快照槽 `snap` → 活槽 `slot`（forward 之前调用；之后该请求 `has_initial = 1`）。
+    pub fn restore_snapshot(&mut self, stream: &Stream, snap: usize, slot: usize) -> Result<()> {
+        let (n, cn) = self.per_slot();
+        let (Some(sr), Some(sc)) = (self.snap_rec.as_ref(), self.snap_conv.as_ref()) else {
+            anyhow::bail!("gdn: 快照区未分配")
+        };
+        ensure!(snap < sr.shape[0], "gdn: snapshot slot {snap} >= {}", sr.shape[0]);
+        let src = sr.data.slice(snap * n..(snap + 1) * n);
+        let mut dst = self.rec.data.slice_mut(slot * n..(slot + 1) * n);
+        stream.inner_arc().memcpy_dtod(&src, &mut dst)?;
+        let src = sc.data.slice(snap * cn..(snap + 1) * cn);
+        let mut dst = self.conv.data.slice_mut(slot * cn..(slot + 1) * cn);
+        stream.inner_arc().memcpy_dtod(&src, &mut dst)?;
+        Ok(())
+    }
+    pub fn num_snapshots(&self) -> usize {
+        self.snap_rec.as_ref().map_or(0, |t| t.shape[0])
+    }
 }
 
 /// 步内元数据（executor 上传后的设备张量）。
@@ -191,6 +233,8 @@ impl GdnLayer {
             // 状态，捕获与 padding 行都指到它，才不会碰活请求的 slot（见 executor `scratch_slot`）。
             conv: Tensor::zeros(stream, &[num_slots + 1, conv_dim, st])?,
             rec: Tensor::zeros(stream, &[num_slots + 1, hv, vd, kd])?,
+            snap_conv: None,
+            snap_rec: None,
         };
         let _ = max_tokens; // 激活缓冲改为全模型共享（`crate::scratch::ActScratch`），不再按层预分配
         Ok(Self {
@@ -205,6 +249,16 @@ impl GdnLayer {
             rec_zeros: Some(Tensor::zeros(stream, &[hv, vd, kd])?),
             conv_zeros: Some(Tensor::zeros(stream, &[conv_dim, st])?),
         })
+    }
+
+    /// 分配 `n` 个快照槽（design §15.7；不清零：写快照前不会被读）。
+    pub fn alloc_snapshots(&mut self, stream: &Stream, n: usize) -> Result<()> {
+        let hv = self.state.rec.shape[1];
+        let (vd, kd) = (self.state.rec.shape[2], self.state.rec.shape[3]);
+        let (conv_dim, st) = (self.state.conv.shape[1], self.state.conv.shape[2]);
+        self.state.snap_rec = Some(Tensor::uninit(stream, &[n, hv, vd, kd])?);
+        self.state.snap_conv = Some(Tensor::uninit(stream, &[n, conv_dim, st])?);
+        Ok(())
     }
 
     /// 清零 slot `s` 的两份状态（新请求首次出现时调用）。

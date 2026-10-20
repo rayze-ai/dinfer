@@ -41,6 +41,10 @@ pub struct ServeOptions {
     pub device: usize,
     /// decode 步走 CUDA graph 重放（`--no-cuda-graph` 关；`NO_GRAPH` 环境变量也关）。
     pub enable_cuda_graph: bool,
+    /// GDN 递归状态快照粒度（token，design §15.7）：prefix cache 命中对齐到它；0 = 关 prefix cache。须为 block_size 整数倍。
+    pub gdn_snapshot_tokens: u32,
+    /// 快照区显存：< 0 = 自动（KV 预算的 10%），0 = 无快照区（prefix cache 命中全部整段重算），> 0 = GiB。
+    pub gdn_snapshot_gib: f64,
 }
 
 impl Default for ServeOptions {
@@ -60,6 +64,8 @@ impl Default for ServeOptions {
             long_prefill_token_threshold: 0,
             device: 0,
             enable_cuda_graph: true,
+            gdn_snapshot_tokens: 1024,
+            gdn_snapshot_gib: -1.0,
         }
     }
 }
@@ -125,9 +131,17 @@ impl Qwen35Service {
             (0, 1),
             opt.gpu_memory_utilization,
             512 << 20,
+            if opt.gdn_snapshot_tokens == 0 || opt.gdn_snapshot_gib == 0.0 {
+                Some(0)
+            } else if opt.gdn_snapshot_gib > 0.0 {
+                Some((opt.gdn_snapshot_gib * (1u64 << 30) as f64) as usize)
+            } else {
+                None
+            },
         )?;
         s.synchronize()?;
         let num_blocks = model.num_blocks();
+        let num_snapshots = model.num_snapshots;
         let exec = Qwen35Executor::with_graphs(s.clone(), gemm, model, max_blocks_per_seq, opt.enable_cuda_graph)?;
         let need = max_blocks_per_seq;
         anyhow::ensure!(
@@ -143,13 +157,19 @@ impl Qwen35Service {
         let tok = Arc::new(tok);
         anyhow::ensure!(cfg.vocab_size as usize >= tok.vocab_size(), "model vocab {} < tokenizer {}", cfg.vocab_size, tok.vocab_size());
 
-        // prefix cache 在 GDN 混合模型上不可用：命中后 scheduler 从 position>0 开始喂 prompt，全注意力层能读 KV，但 GDN 的
-        // 递归状态没有"按块缓存"（vLLM 用 mamba_block_size / mamba_cache_mode 另做，我们未实现）→ 状态从零起，输出错
-        //（2026-10-19 B300 c8-long bench：86 条 "slot 被复用给带历史的请求" 全是 pos=144/160/176 的模板前缀命中）。
-        if opt.enable_prefix_caching {
-            tracing::warn!("qwen35: prefix caching 对 GDN 混合模型未实现（递归状态不可按块复用），已强制关闭");
+        // prefix cache 在 GDN 混合模型上要配合"递归状态按块缓存"（design §15.7）：命中长度对齐到 `gdn_snapshot_tokens`，
+        // 对齐位置的 GDN 状态从快照槽恢复（executor `recurrent_resume`）。粒度 0 → 关 prefix cache（2026-10-19 之前的行为：
+        // 命中后状态从零起会输出错，B300 c8-long 86 条 "slot 被复用给带历史的请求" 就是这个）。
+        let snapshot_tokens = if opt.enable_prefix_caching { opt.gdn_snapshot_tokens } else { 0 };
+        if opt.enable_prefix_caching && snapshot_tokens == 0 {
+            tracing::warn!("qwen35: --gdn-snapshot-tokens 0 → prefix caching 关闭（GDN 状态无快照不能续算）");
         }
-        let params = engine::scheduler_params(
+        anyhow::ensure!(
+            snapshot_tokens % opt.block_size == 0,
+            "--gdn-snapshot-tokens {snapshot_tokens} 必须是 --block-size {} 的整数倍",
+            opt.block_size
+        );
+        let mut params = engine::scheduler_params(
             SchedulerConfig {
                 max_num_seqs: opt.max_num_seqs,
                 max_num_batched_tokens: opt.max_num_batched_tokens,
@@ -159,7 +179,7 @@ impl Qwen35Service {
             },
             CacheConfig {
                 block_size: opt.block_size,
-                enable_prefix_caching: false, // 见上：GDN 不能跳过已缓存的 prompt token
+                enable_prefix_caching: snapshot_tokens > 0,
                 hash_block_size: opt.block_size,
                 gpu_memory_utilization: opt.gpu_memory_utilization,
             },
@@ -167,6 +187,8 @@ impl Qwen35Service {
             tok.eos_ids().to_vec(),
             num_spec as u32,
         );
+        params.recurrent_snapshot_tokens = snapshot_tokens;
+        params.recurrent_snapshot_slots = if snapshot_tokens > 0 { num_snapshots as u32 } else { 0 };
         let groups = vec![GroupInfo {
             spec: KvCacheSpec::FullAttention {
                 block_size: opt.block_size,
@@ -184,6 +206,9 @@ impl Qwen35Service {
             num_blocks,
             kv_tokens = num_blocks * bs,
             num_slots = opt.max_num_seqs,
+            prefix_caching = snapshot_tokens > 0,
+            gdn_snapshot_tokens = snapshot_tokens,
+            gdn_snapshots = num_snapshots,
             "qwen35 engine started"
         );
         tracing::info!(

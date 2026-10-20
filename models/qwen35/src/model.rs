@@ -55,6 +55,8 @@ pub struct Qwen35Model<O: OpSet = dinfer_layers::DefaultOps> {
     pub max_logits_rows: usize,
     pub tp: (usize, usize),
     pub num_slots: usize,
+    /// 递归状态快照槽数（design §15.7；0 = 无快照区）。
+    pub num_snapshots: usize,
     hidden: Tensor<bf16>,
     normed: Tensor<bf16>,
     act: ActScratch,
@@ -110,7 +112,7 @@ impl<O: OpSet> Qwen35Model<O> {
     where
         O: Default,
     {
-        Self::load_with_budget(stream, src, cfg, max_tokens, max_tokens, num_blocks, block_size, num_slots, (0, 1), 0.9, 512 << 20)
+        Self::load_with_budget(stream, src, cfg, max_tokens, max_tokens, num_blocks, block_size, num_slots, (0, 1), 0.9, 512 << 20, Some(0))
     }
 
     /// 每层每个请求的 GDN 状态字节数 × 层数：conv `[conv_dim, width-1]` bf16 + 递推 `[HV, V, K]` f32。
@@ -153,6 +155,7 @@ impl<O: OpSet> Qwen35Model<O> {
         tp: (usize, usize),
         gpu_memory_utilization: f32,
         reserve_bytes: usize,
+        snapshot_bytes: Option<usize>,
     ) -> Result<Self>
     where
         O: Default,
@@ -218,6 +221,35 @@ impl<O: OpSet> Qwen35Model<O> {
         // KV 最后分配：此时 free 已扣掉权重与 scratch（等价 vLLM profile run 的作用，但不真跑 forward）。
         let per_block = Self::kv_bytes_per_block(&cfg, block_size).max(1);
         let exec_scratch = 3 * max_logits_rows * v * 4; // executor 的 fp32 logits / 采样工作区 / logprobs 副本
+        // 递归状态快照区（design §15.7）：`snapshot_bytes` None = 自动拿 KV 预算的 10%；Some(0) = 关；Some(b) = 指定字节。
+        // 先于 KV 块数计算：快照区从同一预算里扣（`--num-blocks` 指定时 None 按 10% × 块数×块字节折算）。
+        let snap_per = Self::gdn_state_bytes_per_slot(&cfg).max(1);
+        let (free0, total0) = stream.mem_info()?;
+        let budget0 = {
+            let used = total0.saturating_sub(free0);
+            let cap = (total0 as f64 * gpu_memory_utilization as f64) as usize;
+            free0.min(cap.saturating_sub(used)).saturating_sub(reserve_bytes + exec_scratch)
+        };
+        let snapshot_bytes = match (snapshot_bytes, num_blocks) {
+            (Some(b), _) => b,
+            (None, Some(nb)) => nb * per_block / 10,
+            (None, None) => budget0 / 10,
+        };
+        let num_snapshots = (snapshot_bytes / snap_per).min(budget0 / snap_per);
+        if num_snapshots > 0 {
+            for l in layers.iter_mut() {
+                if let Attn::Gdn(g) = &mut l.attn {
+                    g.alloc_snapshots(stream, num_snapshots)?;
+                }
+            }
+            stream.synchronize()?;
+        }
+        tracing::info!(
+            num_snapshots,
+            snapshot_gib = (num_snapshots * snap_per) as f64 / (1u64 << 30) as f64,
+            per_snapshot_mib = snap_per as f64 / (1u64 << 20) as f64,
+            "qwen35: GDN state snapshot pool (design §15.7)"
+        );
         let num_blocks = match num_blocks {
             Some(n) => n,
             None => {
@@ -278,6 +310,7 @@ impl<O: OpSet> Qwen35Model<O> {
             max_logits_rows,
             tp,
             num_slots,
+            num_snapshots,
             hidden: hidden_t,
             normed,
             act,
@@ -308,6 +341,36 @@ impl<O: OpSet> Qwen35Model<O> {
             if let Attn::Gdn(g) = &mut l.attn {
                 for &s in slots {
                     g.reset_slot(stream, s, &self.cfg)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 递归状态按块缓存（design §15.7）：活槽 → 快照槽（prefill 步 forward 之后）。
+    pub fn save_snapshots(&mut self, stream: &Stream, pairs: &[(usize, usize)]) -> Result<()> {
+        if pairs.is_empty() {
+            return Ok(());
+        }
+        for l in self.layers.iter_mut() {
+            if let Attn::Gdn(g) = &mut l.attn {
+                for &(slot, snap) in pairs {
+                    g.state.save_snapshot(stream, slot, snap)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 快照槽 → 活槽（forward 之前；之后该请求 `has_initial = 1`）。
+    pub fn restore_snapshots(&mut self, stream: &Stream, pairs: &[(usize, usize)]) -> Result<()> {
+        if pairs.is_empty() {
+            return Ok(());
+        }
+        for l in self.layers.iter_mut() {
+            if let Attn::Gdn(g) = &mut l.attn {
+                for &(snap, slot) in pairs {
+                    g.state.restore_snapshot(stream, snap, slot)?;
                 }
             }
         }

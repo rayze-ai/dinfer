@@ -106,6 +106,9 @@ pub struct Qwen35Executor {
     graphs: DecodeGraphs,
     pub graph_steps: u64,
     pub eager_steps: u64,
+    /// 递归状态快照（design §15.7）：恢复 / 保存次数。
+    pub snapshot_restores: u64,
+    pub snapshot_saves: u64,
     /// 异步调度：pinned 槽环 + 在飞票据（engine 先 begin n+1 再 finish n，最多 2 在飞）。
     async_ring: AsyncResultRing,
     /// 在飞票据 + 该步的 (t0, t_launch, t_wait)（四段计时，engine-gap 第 7 轮）。
@@ -170,6 +173,8 @@ impl Qwen35Executor {
             alt: None,
             gdn_chunk: None,
             gdn_chunk_enabled: !matches!(std::env::var("GDN_PREFILL").as_deref(), Ok("recurrent")),
+            snapshot_restores: 0,
+            snapshot_saves: 0,
             graphs,
             graph_steps: 0,
             eager_steps: 0,
@@ -276,9 +281,26 @@ impl Qwen35Executor {
         // 首个 token 位置 == 0 → 从头开始（新请求 / 被抢占后的重算），状态清零。
         // 分到全新 slot 的请求也必须清（旧占用者的状态不能用）；若它带着历史（position > 0）说明中间被回收过，
         // 状态已丢失 → 打 warn（结果会错，只能提高 max_num_seqs 避免）。
+        // 递归状态按块缓存（design §15.7）：prefix cache 命中的请求先把快照槽 dtod 进活槽，再当作"带历史"的请求跑
+        //（has_initial = 1、positions 从对齐位置起）；本步末尾落在对齐点的请求 forward 之后把活槽存进快照槽。
+        let mut restores: Vec<(usize, usize)> = Vec::new();
+        let mut resumed = vec![false; n];
+        for &(rid, snap) in &plan.recurrent_resume {
+            if let Some(i) = req_ids.iter().position(|r| *r == rid) {
+                restores.push((snap as usize, state_idx[i] as usize));
+                resumed[i] = true;
+            }
+        }
+        if !restores.is_empty() {
+            self.model.restore_snapshots(&self.stream, &restores)?;
+            self.snapshot_restores += restores.len() as u64;
+        }
         let mut has_init = vec![1i32; n];
         let mut restarts = Vec::new();
         for i in 0..n {
+            if resumed[i] {
+                continue;
+            }
             let p0 = plan.cu_seqlens[i] as usize;
             let pos0 = plan.positions.get(p0).copied().unwrap_or(0);
             let fresh = fresh_slots.contains(&(state_idx[i] as usize));
@@ -334,6 +356,17 @@ impl Qwen35Executor {
                 tracing::info!(?plan.mode, t, n, nrows, "qwen35: step eager");
             }
             self.eager_steps += 1;
+        }
+        if !plan.recurrent_snapshot.is_empty() {
+            let mut saves: Vec<(usize, usize)> = Vec::new();
+            for &(rid, snap) in &plan.recurrent_snapshot {
+                if let Some(i) = req_ids.iter().position(|r| *r == rid) {
+                    saves.push((state_idx[i] as usize, snap as usize));
+                }
+            }
+            // 图外、同流：排在本步全部 kernel（图重放或 eager）之后
+            self.model.save_snapshots(&self.stream, &saves)?;
+            self.snapshot_saves += saves.len() as u64;
         }
         self.last_rows = nrows;
         self.steps += 1;
