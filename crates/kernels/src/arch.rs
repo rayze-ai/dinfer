@@ -272,6 +272,22 @@ impl ArchProfile {
         false
     }
 
+    /// chunk prefill `ho` 是否拆两段（h-pass + o-pass，r9 第 2 轮）。融合版的并行度 = num_seqs · HV · V/BV 个 block，
+    /// 每 block 串行走该序列全部 chunk；两段版把 o 的算量搬到 (chunk, head) 全并行的 o-pass，h-pass 每 chunk 少两个乘法，
+    /// 代价是 h16 / v16 一写一读。平均每序列 chunk 数 ≥ `GDN_CHUNK_HO_SPLIT_MIN_CHUNKS`（串行链够长、o-pass 够多 block 铺满 SM）
+    /// 才值得拆；短序列大批次（32×128）融合版已经并行度足够、拆了只多搬数据。
+    /// 3090 实测（r9 第 2 轮）两段版在五个形状上都比融合版慢 10–30%（h16 一写一读 201 MB @ 1×8192，3090 带宽吃不下），
+    /// 所以 3090 一律 false；B300 带宽 8× 待复测后再按 `sm_count` / 带宽分档开。候选门限：平均每序列 chunk ≥ 4 且
+    /// num_chunks · HV ≥ sm_count（o-pass 铺满）。
+    pub fn gdn_chunk_ho_split(sm_count: usize, num_seqs: usize, num_chunks: usize, heads_v: usize) -> bool {
+        const GDN_CHUNK_HO_SPLIT_MIN_CHUNKS: usize = 4;
+        const GDN_CHUNK_HO_SPLIT_ENABLED: bool = false;  // 待 B300 数字
+        if !GDN_CHUNK_HO_SPLIT_ENABLED || num_seqs == 0 {
+            return false;
+        }
+        num_chunks >= GDN_CHUNK_HO_SPLIT_MIN_CHUNKS * num_seqs && num_chunks * heads_v >= sm_count
+    }
+
     /// conv1d prefill 按 token 分块的块行数：block 数 = `ceil(tokens / rows) · ceil(dim / 2048)`（256 线程 × 8 通道），
     /// 取最大的仍能铺 ≥ `GDN_CONV_WAVES` 波 SM 的档（行多 → halo 重读占比小、块内串行链长；行少 → 反之），
     /// 都铺不满取最小档；下限 width-1（kernel 要求块 ≥ halo）。
@@ -389,6 +405,9 @@ mod tests {
         assert!(!ArchProfile::gdn_chunk_ho_prefetch(16));
         assert!(!ArchProfile::gdn_chunk_ho_prefetch(32));
         assert!(!ArchProfile::gdn_chunk_ho_prefetch(0));
+        // 两段版默认关（3090 不赢，待 B300）；32×128（每序列 2 chunk）任何情况不拆
+        assert!(!ArchProfile::gdn_chunk_ho_split(82, 1, 16, 48));
+        assert!(!ArchProfile::gdn_chunk_ho_split(82, 32, 64, 48));
     }
 
     #[test]

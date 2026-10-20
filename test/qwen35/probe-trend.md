@@ -52,6 +52,24 @@
 - 1x4096 chain_us dinfer：r9 第 1 轮：ho 装载改寄存器向量（PF=0）+ 可选预取（PF=1，bv*pf 列）；默认 PF=0
 - 1x8192 chain_us dinfer：r9 第 1 轮：ho 装载改寄存器向量（PF=0）+ 可选预取（PF=1，bv*pf 列）；默认 PF=0
 
+## probe_gdn_r9_2（2026-10-20，3090）
+
+### gdn_scale（us）
+
+| x | chain_us dinfer | conv_rows0_us dinfer | conv_rows128_us dinfer | conv_rows256_us dinfer | conv_rows32_us dinfer | conv_rows64_us dinfer | ho_bv16_us dinfer | ho_bv16pf_us dinfer | ho_bv16pfsp_us dinfer | ho_bv16sp_us dinfer | ho_bv32_us dinfer | ho_bv32pf_us dinfer | ho_bv32pfsp_us dinfer | ho_bv32sp_us dinfer | ho_legacy_us dinfer | prep_us dinfer | wy_legacy_us dinfer | wy_us dinfer |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1x1024 | 983 | 551 | 132 | 249 | 73 | 77 | 347 | 442 | 326 | 340 | 278 | 441 | 316 | 318 | 2972 | 33 | 1363 | 603 |
+| 8x1024 | 6483 | 1027 | 443 | 427 | 512 | 464 | 2678 | 3536 | 2539 | 2489 | 1816 | 3142 | 2147 | 2111 | 18632 | 173 | 9258 | 4203 |
+| 32x128 | 3191 | 444 | 238 | 311 | 269 | 250 | 1407 | 1851 | 1342 | 1324 | 1156 | 1878 | 1235 | 1196 | 9261 | 93 | 4606 | 1977 |
+| 1x4096 | 3346 | 2321 | 230 | 283 | 260 | 236 | 1362 | 1730 | 1282 | 1344 | 1035 | 1744 | 1280 | 1300 | 11993 | 93 | 4609 | 1974 |
+| 1x8192 | 6943 | 4716 | 436 | 427 | 513 | 463 | 2792 | 3415 | 2605 | 2696 | 2045 | 3498 | 2654 | 2634 | 23781 | 173 | 9252 | 4206 |
+
+- 1x1024 chain_us dinfer：r9 第 2 轮：ho 两段版 h-pass + o-pass（*sp 列）；3090 默认仍融合版（ArchProfile 门限待 B300 数字）
+- 8x1024 chain_us dinfer：r9 第 2 轮：ho 两段版 h-pass + o-pass（*sp 列）；3090 默认仍融合版（ArchProfile 门限待 B300 数字）
+- 32x128 chain_us dinfer：r9 第 2 轮：ho 两段版 h-pass + o-pass（*sp 列）；3090 默认仍融合版（ArchProfile 门限待 B300 数字）
+- 1x4096 chain_us dinfer：r9 第 2 轮：ho 两段版 h-pass + o-pass（*sp 列）；3090 默认仍融合版（ArchProfile 门限待 B300 数字）
+- 1x8192 chain_us dinfer：r9 第 2 轮：ho 两段版 h-pass + o-pass（*sp 列）；3090 默认仍融合版（ArchProfile 门限待 B300 数字）
+
 ## probe_prefill_1（2026-10-20，B300）
 
 ### ttft_len（ms）

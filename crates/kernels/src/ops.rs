@@ -3780,6 +3780,9 @@ pub struct GdnChunkScratch {
     pub u: CudaSlice<f32>,
     pub w: CudaSlice<f32>,
     pub kg: CudaSlice<f32>,
+    /// r9 两段版 ho 的中间量：每 chunk 入口状态 bf16 `[num_chunks, HV, V, K]`、v' bf16 `[T, HV, V]`。
+    pub h16: CudaSlice<bf16>,
+    pub v16: CudaSlice<bf16>,
     pub tokens: usize,
     pub num_chunks: usize,
 }
@@ -3804,6 +3807,8 @@ impl GdnChunkScratch {
             u: stream.alloc_uninit::<f32>(tokens * heads_v * v_dim)?,
             w: stream.alloc_uninit::<f32>(tokens * heads_v * k_dim)?,
             kg: stream.alloc_uninit::<f32>(tokens * heads_v * k_dim)?,
+            h16: stream.alloc_uninit::<bf16>(num_chunks * heads_v * v_dim * k_dim)?,
+            v16: stream.alloc_uninit::<bf16>(tokens * heads_v * v_dim)?,
             tokens,
             num_chunks,
         })
@@ -3953,6 +3958,7 @@ pub fn gdn_chunk_ho(
 ) -> Result<()> {
     let bv = gdn_chunk_ho_bv(stream, plan.num_seqs * heads_v, k_dim, v_dim);
     let pf = gdn_chunk_ho_prefetch(bv);
+    let split = gdn_chunk_ho_split(stream, bv, plan.num_seqs, plan.num_chunks, heads_v, k_dim, v_dim);
     gdn_chunk_ho_with(
         stream,
         cu_seqlens,
@@ -3966,21 +3972,46 @@ pub fn gdn_chunk_ho(
         heads_v,
         k_dim,
         v_dim,
-        GdnChunkHo { bv, prefetch: pf },
+        GdnChunkHo { bv, prefetch: pf, split },
     )
+}
+
+/// chunk prefill `ho` 是否走两段版（h-pass + o-pass，r9 第 2 轮）：默认 `ArchProfile::gdn_chunk_ho_split`；
+/// `GDN_CHUNK_HO_SPLIT=0|1` 覆盖。bv = 0（老 fp32 版）或 (K, V) 无 o-pass 特化时恒为 false。
+fn gdn_chunk_ho_split(stream: &Stream, bv: usize, num_seqs: usize, num_chunks: usize, heads_v: usize, k_dim: usize, v_dim: usize) -> bool {
+    use std::sync::OnceLock;
+    static OVER: OnceLock<Option<bool>> = OnceLock::new();
+    static SM: OnceLock<usize> = OnceLock::new();
+    if bv == 0 || !matches!((k_dim, v_dim), (128, 128) | (64, 64) | (128, 64)) {
+        return false;
+    }
+    let over = *OVER.get_or_init(|| {
+        let o = std::env::var("GDN_CHUNK_HO_SPLIT").ok().map(|s| s != "0");
+        if o.is_some() {
+            tracing::info!(?o, "gdn chunk ho 两段版由环境变量覆盖");
+        }
+        o
+    });
+    if let Some(o) = over {
+        return o;
+    }
+    let sm = *SM.get_or_init(|| stream.device().sm_count().unwrap_or(1));
+    crate::arch::ArchProfile::gdn_chunk_ho_split(sm, num_seqs, num_chunks, heads_v)
 }
 
 /// `gdn_chunk_ho` 的实现选择（对拍 / 计时用；正常路径由 `ArchProfile` 给）。
 /// `bv ∈ {16, 32}` 走 tensor core 版（第 5A 轮），`0` 走老 fp32 版；`prefetch` 寄存器预取下一 chunk（r9 第 1 轮，仅 bv ≠ 0 有效）。
+/// `split`：两段版 h-pass + o-pass（r9 第 2 轮；中间量 `GdnChunkScratch::{h16, v16}`），仅 bv ≠ 0 且 (K, V) 有特化时有效。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct GdnChunkHo {
     pub bv: usize,
     pub prefetch: bool,
+    pub split: bool,
 }
 
 impl From<usize> for GdnChunkHo {
     fn from(bv: usize) -> Self {
-        Self { bv, prefetch: false }
+        Self { bv, prefetch: false, split: false }
     }
 }
 
@@ -4017,8 +4048,10 @@ pub fn gdn_chunk_ho_with(
                 stream.ptr(&sc.u) as *const f32,
                 stream.ptr(&sc.w) as *const f32,
                 stream.ptr(&sc.kg) as *const f32,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
+                // h16 / v16 是 scratch 的中间缓冲（只有两段版写）；`sc` 按共享引用传是为了保持 `gdn_chunk_ho` 的签名，
+                // 调用方（models/qwen35）在这一步之外不读它们。
+                stream.ptr(&sc.h16) as *mut c_void,
+                stream.ptr(&sc.v16) as *mut c_void,
                 stream.ptr_mut(out) as *mut c_void,
                 stream.ptr_mut(state) as *mut c_void,
                 stream.ptr(cu_seqlens) as *const i32,
@@ -4036,7 +4069,7 @@ pub fn gdn_chunk_ho_with(
                 plan.bt as i64,
                 how.bv as i64,
                 (how.bv != 0 && how.prefetch) as i64,
-                0,
+                (how.bv != 0 && how.split) as i64,
                 stream.raw() as _,
             )
         },

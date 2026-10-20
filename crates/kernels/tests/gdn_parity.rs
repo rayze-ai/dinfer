@@ -459,19 +459,28 @@ fn chunk_case(dir: &str, k: usize, v: usize, h: usize, hv: usize) {
     // ho：老 fp32 版（bv=0）与 tensor core 版（bv 16 / 32，第 5A 轮）都对参考。tensor core 版 h / w / kg / Aq / v' 过 bf16，
     // 容差放宽到 out 2e-3 / state rel 1e-2（fla 同口径；参考是 fp32 顺序递归）。
     // (wy 实现, ho bv, ho 预取, out 容差, state rel 容差)：老 fp32 全链；新 ho（预取 / 不预取，r9 第 1 轮）；新 wy + 新 ho（默认路径）
-    for (wy, bv, pf, tol_o, tol_s) in [
-        (false, 0usize, false, 5e-4f32, 5e-3f32),
-        (false, 16, false, 2e-3, 1e-2),
-        (false, 32, false, 2e-3, 1e-2),
-        (false, 16, true, 2e-3, 1e-2),
-        (false, 32, true, 2e-3, 1e-2),
-        (true, 32, false, 2e-3, 1e-2),
-        (true, 16, true, 2e-3, 1e-2),
+    // 第 7 列 split：两段版 h-pass + o-pass（r9 第 2 轮；仅 K=V=128 / 64 有 o-pass 特化，其余形状跳过）
+    let split_ok = matches!((k, v), (128, 128) | (64, 64) | (128, 64));
+    for (wy, bv, pf, split, tol_o, tol_s) in [
+        (false, 0usize, false, false, 5e-4f32, 5e-3f32),
+        (false, 16, false, false, 2e-3, 1e-2),
+        (false, 32, false, false, 2e-3, 1e-2),
+        (false, 16, true, false, 2e-3, 1e-2),
+        (false, 32, true, false, 2e-3, 1e-2),
+        (true, 32, false, false, 2e-3, 1e-2),
+        (true, 16, true, false, 2e-3, 1e-2),
+        (false, 16, false, true, 2e-3, 1e-2),
+        (false, 32, true, true, 2e-3, 1e-2),
+        (true, 32, true, true, 2e-3, 1e-2),
+        (true, 16, false, true, 2e-3, 1e-2),
     ] {
+        if split && !split_ok {
+            continue;
+        }
         let mut dstate = st.htod_copy(st_in.clone()).unwrap();
-        let ho = ops::GdnChunkHo { bv, prefetch: pf };
+        let ho = ops::GdnChunkHo { bv, prefetch: pf, split };
         let out = run_gdn_chunk(&st, &dm, &da, &db, &dal, &ddb, &mut dstate, &cu, tokens, h, hv, k, v, ho, wy);
-        let tag = format!("{dir}/wy{}ho{bv}{}", if wy { "mma" } else { "32" }, if pf { "pf" } else { "" });
+        let tag = format!("{dir}/wy{}ho{bv}{}{}", if wy { "mma" } else { "32" }, if pf { "pf" } else { "" }, if split { "sp" } else { "" });
         assert_close(&format!("{tag}/out"), &st.dtoh_sync_copy(&out).unwrap(), &want, tol_o, 0.9999);
         let got_st: Vec<f32> = st.dtoh_sync_copy(&dstate).unwrap();
         assert_close_rel(&format!("{tag}/state"), &got_st, &want_st, tol_s, 0.9999);
@@ -621,12 +630,17 @@ fn bench_case(st: &Stream, nseq: usize, len: usize, h: usize, hv: usize, k: usiz
     let us_wy = time_us(st, iters, || ops::gdn_chunk_wy_with(st, &dm, &beta, &dcu, &plan, &mut sc, t, h, hv, k, v, true).unwrap());
     // ho 变体：bv0 老 fp32；bv16 / bv32 融合 mma；bv16pf / bv32pf 寄存器预取（r9 第 1 轮）
     let mut ho = vec![];
+    // + sp = 两段版（r9 第 2 轮）
     for (name, how) in [
-        ("bv0", ops::GdnChunkHo { bv: 0, prefetch: false }),
-        ("bv16", ops::GdnChunkHo { bv: 16, prefetch: false }),
-        ("bv32", ops::GdnChunkHo { bv: 32, prefetch: false }),
-        ("bv16pf", ops::GdnChunkHo { bv: 16, prefetch: true }),
-        ("bv32pf", ops::GdnChunkHo { bv: 32, prefetch: true }),
+        ("bv0", ops::GdnChunkHo { bv: 0, prefetch: false, split: false }),
+        ("bv16", ops::GdnChunkHo { bv: 16, prefetch: false, split: false }),
+        ("bv32", ops::GdnChunkHo { bv: 32, prefetch: false, split: false }),
+        ("bv16pf", ops::GdnChunkHo { bv: 16, prefetch: true, split: false }),
+        ("bv32pf", ops::GdnChunkHo { bv: 32, prefetch: true, split: false }),
+        ("bv16sp", ops::GdnChunkHo { bv: 16, prefetch: false, split: true }),
+        ("bv32sp", ops::GdnChunkHo { bv: 32, prefetch: false, split: true }),
+        ("bv16pfsp", ops::GdnChunkHo { bv: 16, prefetch: true, split: true }),
+        ("bv32pfsp", ops::GdnChunkHo { bv: 32, prefetch: true, split: true }),
     ] {
         ho.push((name, time_us(st, iters, || ops::gdn_chunk_ho_with(st, &dcu, &plan, &sc, &mut out, &mut state, None, t, h, hv, k, v, how).unwrap())));
     }
