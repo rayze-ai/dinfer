@@ -847,3 +847,11 @@
 - **现象**：用 `q35_nsys_prefill.sh` 式流程抓 6 K 单发 prefill，`nsys export` 出的报告里 `gqa_fa_v6_kernel` 只有 16 次、每次 7.7 µs（那是 1 K 预热请求的 16 层），GDN 只有 2.8 ms，整份报告 span **1.16 s**——真实 6 K prefill 一步就该 277 ms、16 层 attn 各 1.5 ms 以上，全都不在里面。同时报告里 `small_m_mma_kernel` 4968 次共 460 ms，看着像"推理路径退化"，其实是**启动自调优**试跑所有候选。
 - **根因**：CUPTI 的 `--cuda-flush-interval` 只决定"多久写一次"，不决定"能装多久"；默认容量下 B300 上个把秒就满了，早段被覆盖/丢弃。启动 + 1 K 预热已经吃掉 1.1 s，6 K 那批自然没进去。`--cuda-buffer-size` **不是合法选项**（`unrecognised option`）。
 - **解法 / 避免**：① 抓报告前先 `nsys stats` 或 sqlite 查 `min(start)/max(end)` 的 span，确认覆盖到目标请求的绝对时间；② 用「按 kernel 名的 count」做自检——16 层模型跑一步 6 K，`gqa_fa_*` 就该是 16 次且每次 ~1.5 ms，count 或单次时长对不上就是抓错了窗口；③ 自调优的候选试跑会污染分解，按时间分桶（`t+0.0s … t+1.1s`）把启动段与推理段切开再统计，或 `RUST_LOG` 里先读 `gemm autotune done` 的耗时。④ 报告里出现"某 kernel 几千次、总量惊人"时，先查是不是自调优。
+
+## Qwen3 每层一套激活缓冲：预算 16384 下**直接起不来**（2026-10-21，ActScratch 第四例）
+
+- 现象：`serve --max-num-batched-tokens 16384`，`kv_cache: auto num_blocks=3050` 之后紧跟 `Error: DriverError(CUDA_ERROR_OUT_OF_MEMORY)`，日志里 `per-layer activation buffers zeros_mib=14013`。改小预算（2048）就正常，容易误判成"卡不够"。
+- 根因：`Attention::load` 与 `Mlp::load_tp` 每层各 `Tensor::zeros(&[max_tokens, …])`（qkv 4096 + attn 2048 + gate_up 6144 + act 3072 列 × 2 B = 30 KB/token/层），28 层 × 16400 token ≈ **13.7 GiB**；KV 池先分完（3050 块）之后才轮到 `xstream` 的**第二套**每层缓冲，那一步就炸——所以不是"浪费"而是起不来。
+- 解法：`models/qwen3/src/scratch.rs::ActScratch`（qkv / attn / gate_up / act 四块，列宽从本 rank cfg 推），`Attention::forward` / `Mlp::forward_with_scratch` 借用；`swap_scratch` 退化成一次 `mem::swap`。改后 480 MiB，`num_blocks` 3050 → 10808。
+- **共享缓冲后行跨度必须显式传本层行宽**：GEMM 的 `ld = n`、`qkv_post` 逐行原地写、attention 的 `q_stride` 三者都必须是 `(H+2Hkv)·D`；共享块比它宽是安全的（只读前缀），**不能**用 `numel / t` 反推。qwen3 里加了 `numel ≥ t × 行宽` 断言兜住。
+- **别用 HTTP 端到端 greedy 判正确性**：同一二进制同一配置连跑两次，12 条里 6 条输出不同（批组成随机 + greedy 放大逐位分歧）。要确定性证据用 `real_parity::real_scratch_swap_is_bitwise_identical`（主套 / 副套 / 换回，logits 逐位比）。
