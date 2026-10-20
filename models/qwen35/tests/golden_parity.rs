@@ -223,6 +223,7 @@ fn run_engine_mode(e: Env, prompts: &[Vec<i32>], gen: u32, budget: u32, overlap:
                     let so_next = sched.schedule();
                     let pend_next = runner.begin(&so_next).unwrap();
                     if runner.last_begin_was_async() {
+                        async_steps += 1;
                         next = Some((so_next, pend_next));
                     } else {
                         let mro_next = runner.finish(pend_next).unwrap();
@@ -282,6 +283,24 @@ fn golden_greedy_overlap() {
     let out = run_engine_mode(e, &[prompt], want.len() as u32, 128, true);
     let n = compare_greedy("greedy a (async overlap)", &out[0], &want, &steps, v);
     assert!(n >= 1, "too few comparable greedy steps: {n}");
+}
+
+/// 两请求并发 + 异步流水（chunked prefill 的插队同步步 + decode 异步步交替，slot 表 / gather 行号跨步变化）。
+#[test]
+#[ignore]
+fn golden_two_requests_overlap() {
+    let e = load();
+    let v = e.cfg.vocab_size as usize;
+    let (_, p1) = npy_i32("prompt_a.npy");
+    let (_, p2) = npy_i32("prompt_b.npy");
+    let (_, w1) = npy_i32("expect_greedy_a.npy");
+    let (_, w2) = npy_i32("expect_greedy_b.npy");
+    let (_, l1) = npy_f32("expect_step_logits_a.npy");
+    let (_, l2) = npy_f32("expect_step_logits_b.npy");
+    let out = run_engine_mode(e, &[p1, p2], w1.len() as u32, 8, true);
+    let n1 = compare_greedy("a (concurrent, async overlap)", &out[0], &w1, &l1, v);
+    let n2 = compare_greedy("b (concurrent, async overlap)", &out[1], &w2, &l2, v);
+    assert!(n1 + n2 >= 1, "too few comparable steps: {n1} / {n2}");
 }
 
 /// 逐步比 greedy token：非平局步（ref top-2 gap > TIE_GAP）必须一致；平局步跳过不计。
