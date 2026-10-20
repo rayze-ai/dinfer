@@ -810,7 +810,21 @@ B300 单 GDN 层 decode，基线 = 现路径 11 kernel + 自调优 GEMM + CUDA g
 - qwen35：`GdnState.snap_{conv,rec}`（`alloc_snapshots`，`save_snapshot` / `restore_snapshot` 同流 dtod）；`load_with_budget(.., snapshot_bytes)` 先于 KV 块数从同一预算扣（None = 10%）；executor `enqueue`：`plan.recurrent_resume` → forward 前快照→活槽、`has_init=1`、不清零；`plan.recurrent_snapshot` → 本步 kernel（图 / eager）之后活槽→快照槽。`service.rs` 不再强制关 prefix cache：`--gdn-snapshot-tokens`（默认 1024）> 0 即开。
 - 没做 chunk kernel 中途吐状态：用"调度让 chunk 边界落在对齐点"替代（一条 1024–1536 的 prompt 多一步 prefill；命中请求的剩余段不跨对齐点时不多步）。decode 跨对齐点不快照（设计第 3 条）。
 - golden（3090，tiny，`models/qwen35/tests/golden_parity.rs`）：`snapshot_save_restore_bitwise`（快照→另一活槽续算与原槽续算 **逐位相同**，与整段 prefill 对应行在 MAX_ABS 内）、`golden_prefix_hit_resumes_from_snapshot`（同 prompt 两次：命中 32、恢复 1、保存 ≥ 1，两次输出一致且 = 教师强制参考）、`golden_multi_turn_resume`（A → A+B 命中 32 续算）、`golden_mixed_hit_and_preempt`（7 块池逼出抢占：命中 + 新请求混批 + 抢占恢复三条都 = 参考）；原 6 case 不退化；`ASYNC_SCHED=0` 下 8/10（两个 `*_overlap` 本就只在异步模式有意义，见 pitfalls）。顺手抓到并修了一个既有 bug：异步调度下被抢占请求的在飞 token 被 scheduler 丢掉（pitfalls）。
-- B300 engine_r8 实测：**待 GPU 5（C-6 期间 B300 独占）**。
+- **B300 engine_r8 实测（2026-10-20 14:5x，GPU 5，Qwen3.8-27B，`--gdn-snapshot-tokens 1024` 自动 10% 预算 → 119 槽 17.1 GiB、每槽 147 MB；KV 158685 块；dinfer 钉 0-31 / bench 96-127；单端 64 条/率，prefix_repeat 0.5；与 engine_2 同口径）**：
+
+  | rate | 端 | goodput | TTFT p50 / p99 (ms) | TPOT p50 / p99 (ms) | cache hit | preempt |
+  |---|---|---|---|---|---|---|
+  | 4 | dinfer engine_2（无 cache） | 1.96 | 98.1 / 291.3 | 15.9 / 20.0 | 0 | 0 |
+  | 4 | **dinfer r8** | **2.12** | **62.8** / 432.8 | 15.9 / 20.6 | **0.378** | 0 |
+  | 4 | vLLM engine_2 | 2.05 | 69.0 / 116.8 | 13.8 / 15.2 | 0.699 | - |
+  | 8 | dinfer engine_2（无 cache） | 1.32 | 126.4 / 401.6 | 20.9 / 31.4 | 0 | 0 |
+  | 8 | **dinfer r8** | **2.99** | **61.8 / 116.8** | 17.4 / 20.2 | **0.806** | 0 |
+  | 8 | vLLM engine_2 | 2.87 | 100.1 / 163.7 | 15.4 / 18.1 | 0.699 | - |
+
+  - rate 8：goodput 1.32 → **2.99（> vLLM 2.87）**，TTFT p99 402 → **117（< vLLM 164）**，cache hit 0.806（> vLLM 0.699：我们对齐粒度 1024 ≤ 共享前缀 1024 词 ≈ 1.2k token，vLLM 的 align 粒度更粗）。验收 "cache hit ≥ 0.4、rate 4 TTFT p99 ≤ 150、goodput ≥ vLLM" 三条：cache ✅、goodput ✅（4 / 8 都 ≥ vLLM）、**rate 4 p99 ❌（432）**——拆开看：命中请求（30 条，prompt p50 1233）TTFT p50 61.6 / max 182；p99 的 7 条全是**冷** 4.8k prompt（cached 0，TTFT 363–439），即 4k prefill 单步 ~400 ms（engine-gap 8e 的 "GDN 大 T 线性涨"），与本轮无关、与 rate 8 的 p99 117 不矛盾（rate 8 随机 seed 下冷 4.8k 条少）。下一步是 4k prefill 的 chunk 并行（r9 wy/ho）。
+  - 正确性：serve 全程 0 条 "slot 被复用给带历史的请求"（engine_2 之前 86 条）；同 prompt 两次 smoke 第二次 `cached_tokens` 5120/5887、输出逐字相同；抢占 0。
+  - 成本：快照区 17 GiB（可用 `--gdn-snapshot-gib` 调；每 1024 token 的快照 147 MB，119 槽覆盖 119 个不同的 1k 对齐前缀）；KV 块数 158685（engine_2 为 ~176k，少 10%）。
+  - 产物：`test/qwen35/2026-10-20/engine_r8/`（第一跑产物目录在远端被外部清掉，表中数字来自第一跑 summary 的原始行；第二跑重出产物 + engine-trend）。
 
 **engine_2（第 7 轮二进制：warmup + 全桶预捕获 + GdnChunkWorkspace 一次分配；同配置、不同 seed）**：
 
