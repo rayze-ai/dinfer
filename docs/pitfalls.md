@@ -727,3 +727,10 @@
 - 根因：`b300_nsys_decode.sh` 抓的是**整个 serve 进程**，含 bench 的 warmup 2 条串行请求（M=1，256 步）、128 条请求收尾时的小批段、自调优与 graph 捕获预热；M=1 步里 in_proj_qkv/z/a/b、attn.qkv/gate、out_proj、gate_up、down 的 m1 行自调优全选 small_m，这些 launch 全是 `small_m_kernel<1>`，16.2 µs 是混合均值。代码上 `small_m_kernel<1>` 只在 `m == 1` 实例化，`m > small_m_max` 在 Rust / C 两侧都直接拒绝，M=32 不可能走到。
 - 解法：不改代码；第 9 轮改 GEMM 合并（in_proj_a/b 不再单独存在）。
 - 避免：nsys 汇总先找一个**每步固定次数、与 M 无关**的 kernel（如 `recurrent_decode`：48 次/步）反推步数，再除；或只用 `--capture-range` 抓纯 decode 段。按模板实参（`<1>`）认 M 时先查 host 分发代码。
+
+## 2026-10-20 CUDA graph capture 体内有同步 D2H：表现为 host 侧 shape 断言，不是 CUDA 错（K3 C-4b）
+
+- 现象：`dinfer --features kimik3 serve` 首个 decode 步 `graph capture: body: LatentMoe: pairs 0 ≠ t·K`，引擎线程退出，之后所有请求无 chunk、`/metrics` 还能访问。
+- 根因：`LatentMoe::forward` 每步 `dtoh_sync_copy(offsets)` 在 host 展平 tile 计划、`AttnRes::apply` host softmax；capture 期间 kernel 不真正执行，D2H 读回全 0，host 断言失败。错误信息完全不提 graph / stream capture。
+- 解法：K3 executor decode 图默认关（`K3_GRAPH=1` 强制开）；根治 = GPU 侧 tile 计划 + AttnRes 融合 kernel（`docs/loops/k3-serve.md` TODO）。
+- 避免：新模型接 `DecodeGraphs` 前先 `grep -n 'dtoh\|synchronize' models/<m>/src/*.rs`，forward 路径上一处都不能有；有则先不开图，日志明示原因。
