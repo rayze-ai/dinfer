@@ -78,3 +78,4 @@ attn 是干净目标：纯 GEMM + softmax，无跨 chunk 串行依赖，已有 r
 |---|---|---|---|---|---|
 | 0 | 基线 v6（cfg 3464） | 575（mma.sync） | 78 / 454 / 1558 | 过 | 起点 |
 | 1 | **工具链自证**：`umma.cuh`（TMEM 分配 / 128 B swizzle 描述符 / UMMA 指令描述符 / `tcgen05.ld` / mbarrier）+ `umma_peak_sm100.cu`（M=128 N=256 K=64 循环，8 深度 mbarrier 流水）+ `tests/umma_peak.rs`。build.rs：`sm100_only` 加两项、arch 旗标 100/103 全局换 `a` 变体 | **2236**（148 block = 1 CTA/SM，两次一致 2236.0 / 2236.5；296 block 2243.7 / 2233.4；592 block 1809） | — | — | **门槛 900 过**（目标 2.25 PF 的 99.4%）。正确性两处都验：check 模式 k=192 cos=1.0 rel=4.0e-7；峰值模式 4096 轮同块累加 cos=0.99999999（证明 MMA 全执行，不是排空不彻底） |
+| 2 | **attn 移植 WIP**：`gqa_fa_sm100.cu`（BQ=128 / NKI=64 / 每线程一行），QK+PV 走 UMMA、S 与 O 在 TMEM、softmax 在寄存器、P 写 smem 当 A；`cfg >= 5000` 分发，默认仍 3464 | — | **651 / 1691 / 5158**（v6：78 / 454 / 1558） | 过（cos 0.9999995，v5 对拍） | **慢 3.3×，未达目标**。插桩：qk_wait 2% / softmax 22% / rescale 5% / **pv+load 72%**（其中"等 K/V 装载"占该段 91%）；每 tile 每 SM 实测 13.5 µs vs 理想 0.56 µs（24×） |
