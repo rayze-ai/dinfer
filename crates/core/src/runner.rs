@@ -82,9 +82,10 @@ pub struct BatchPlan {
     /// 它的采样结果**不能**覆盖 `prev_chosen`（n+1 要从那里 gather 步 n 的结果）。
     pub skip_prev_chosen: bool,
     /// 递归状态按块缓存（design §15.7；来自 `SchedulerOutput`，只保留本 plan 内的请求）：
-    /// forward 前从快照槽恢复进活槽的 (req, 快照槽)；forward 后把活槽保存到快照槽的 (req, 快照槽)。
+    /// forward 前从快照槽恢复进活槽的 (req, 快照槽)；本步内把状态保存到快照槽的 (req, 对齐位置 token 数, 快照槽)
+    /// （位置 = 该请求算到多少 token 时的状态；可在本步中间，由 prefill kernel 沿 chunk 边界写出）。
     pub recurrent_resume: Vec<(RequestId, u32)>,
-    pub recurrent_snapshot: Vec<(RequestId, u32)>,
+    pub recurrent_snapshot: Vec<(RequestId, u32, u32)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -623,9 +624,9 @@ impl<E: ModelExecutor> Runner<E> {
                 p.recurrent_resume.push((rid, s));
             }
         }
-        for &(rid, s) in &so.recurrent_snapshot {
+        for &(rid, pos, s) in &so.recurrent_snapshot {
             if so.num_scheduled_tokens.iter().any(|(r, _)| *r == rid) {
-                p.recurrent_snapshot.push((rid, s));
+                p.recurrent_snapshot.push((rid, pos, s));
             }
         }
 
@@ -864,6 +865,7 @@ mod tests {
             eos_token_ids: vec![],
             recurrent_snapshot_tokens: 0,
             recurrent_snapshot_slots: 0,
+            recurrent_snapshot_chunk: 0,
         };
         let g = vec![GroupInfo {
             spec: KvCacheSpec::Mla { block_size: 16, head_size: 64, dtype_bytes: 2 },

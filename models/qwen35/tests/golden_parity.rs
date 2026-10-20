@@ -219,6 +219,7 @@ fn run_engine_cfg(
         eos_token_ids: vec![],
         recurrent_snapshot_tokens: snapshot_grain,
         recurrent_snapshot_slots: if snapshot_grain > 0 { num_snapshots } else { 0 },
+        recurrent_snapshot_chunk: 0,
     };
     let g = vec![GroupInfo {
         spec: KvCacheSpec::FullAttention {

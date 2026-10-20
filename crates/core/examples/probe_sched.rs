@@ -18,6 +18,7 @@ fn make(n: u64, pc: bool) -> (Scheduler, ModelRunnerOutput) {
         eos_token_ids: vec![2],
         recurrent_snapshot_tokens: 0,
         recurrent_snapshot_slots: 0,
+        recurrent_snapshot_chunk: 0,
     };
     let g = vec![GroupInfo {
         spec: KvCacheSpec::Mla { block_size: 16, head_size: 576, dtype_bytes: 2 },

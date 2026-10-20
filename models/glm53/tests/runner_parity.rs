@@ -101,6 +101,7 @@ fn run(budget: u32, chunked: bool, _unused: u32, expect_steps: usize) {
         eos_token_ids: vec![], // tiny 模型随机权重，不用 eos
         recurrent_snapshot_tokens: 0,
         recurrent_snapshot_slots: 0,
+        recurrent_snapshot_chunk: 0,
     };
     let g = vec![GroupInfo {
         spec: KvCacheSpec::Mla { block_size: BLOCK as u32, head_size: 48, dtype_bytes: 2 },

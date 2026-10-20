@@ -190,6 +190,8 @@ impl Qwen35Service {
         );
         params.recurrent_snapshot_tokens = snapshot_tokens;
         params.recurrent_snapshot_slots = if snapshot_tokens > 0 { num_snapshots as u32 } else { 0 };
+        // r8b：对齐点相对段首的偏移要是 chunk prefill 块大小的倍数，kernel 才能在 chunk 边界顺带写快照
+        params.recurrent_snapshot_chunk = crate::gdn::GdnChunkWorkspace::BT as u32;
         let groups = vec![GroupInfo {
             spec: KvCacheSpec::FullAttention {
                 block_size: opt.block_size,
