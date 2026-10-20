@@ -21,3 +21,9 @@
 ## 对拍口径（与 vLLM 参考）
 - 逐层末 token 范数 + cos（`QWEN35_TRACE` 式打点）定位首个偏离层，再对该层内部子块；HF 参考在 vLLM 镜像容器里跑（无 fla 时用 vLLM 内置 kernel，注意 `use_beta_sigmoid_in_kernel` 这类被 `**kwargs` 吞掉的开关）。
 - 链式多层 cos 每层衰减 2–3e-4（bf16 + MoE 平局行），全模型只能看 logits top-k / 生成文本；隔离口径（每层喂 HF 输入）才断言 ≥ 0.999。
+
+## MoE 模型的对拍口径（K3 C-5，2026-10-20）
+- **单卡自身不逐位**：`moe_scatter_add_f32` 原子加顺序 + 路由平局 → 同一输入两次运行链式 5 层 final cos 0.99898。所以"tp2 vs 单卡链式 ≥ 0.9998"这类门槛在 MoE 上不可达，不是 bug。
+- TP / EP 对拍的可达口径：隔离各层（两边 `topk_ids` 完全相同的行）cos ≥ 0.9999；路由一致行的 `expert_sum` ≤ bf16 1 ulp；对 HF 的 logits **top-1 一致**；链式 cos 与 top-5 只报数（tp2 实测 top-5 第 5 位因上游平局翻转不同，margin 一 ulp）。
+- 中间量定位顺序：attn_out → mlp_in（TP attention + all-reduce 是否对）→ expert_sum → routed_out（EP 路径）；`TP_REDUCE_F32=1` 开关可排除 bf16 双舍入。
+- 确定性 TODO：scatter_add 改按行归约（两边都受益）；之后链式门槛才有意义。
