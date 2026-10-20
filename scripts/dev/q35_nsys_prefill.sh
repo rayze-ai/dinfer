@@ -18,23 +18,27 @@ cd "$(dirname "$0")/../.." && source /data/yaochen/infer/env.sh 2>/dev/null
 export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=$gpu
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
 
-pkill -x dinfer 2>/dev/null; sleep 2
+# 只杀本端口的 serve：全局 `pkill -x dinfer` 会连 GPU 0 的常驻 :8012 一起杀（2026-10-20 误杀过）
+pkill -f "dinfer serve .*--port $port\b" 2>/dev/null; sleep 2
 rm -f /tmp/q35_$tag.nsys-rep /tmp/q35_$tag.sqlite
 
 tmux kill-session -t nsprof 2>/dev/null
 tmux new-session -d -s nsprof -c "$PWD" "source /data/yaochen/infer/env.sh; CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=$gpu \
-  nsys profile -t cuda -o /tmp/q35_$tag --force-overwrite true \
+  nsys profile -t cuda --cuda-flush-interval=1000 -o /tmp/q35_$tag --force-overwrite true \
   ./target/release/dinfer serve --model $M --served-model-name Qwen3.8-27B --host 127.0.0.1 --port $port \
   --max-model-len 8192 --max-num-seqs 64 --max-num-batched-tokens 16384 > /tmp/q35_${tag}_serve.log 2>&1"
 
 for i in $(seq 1 240); do sleep 1; curl -s -m 2 127.0.0.1:$port/v1/models >/dev/null 2>&1 && break; done
 curl -s -m 3 127.0.0.1:$port/v1/models | grep -oE '"id":"[^"]+"' | head -1 || { echo "serve 未起"; tail -5 /tmp/q35_${tag}_serve.log; exit 1; }
 
-# 每个长度发一次（max_tokens=1 → 每请求恰好一个 prefill 步），先发一发预热（不计）
+# 每个长度发 5 次（max_tokens=1 → 每请求恰好一个 prefill 步），先发一发预热（不计）。
+# 只发 3 条时 CUPTI 活动缓冲填不满、进程被信号杀前不 flush → 报告 0 kernel（2026-10-20 四次空报告的根因候选）；
+# 配合 --cuda-flush-interval=1000 周期 flush。
 taskset -c 100-103 python3 -I scripts/dev/ttft_probe.py $port 1 146 >/dev/null 2>&1
 for w in $lengths; do
-  taskset -c 100-103 python3 -I scripts/dev/ttft_probe.py $port 1 $w 2>&1 | tail -1
+  taskset -c 100-103 python3 -I scripts/dev/ttft_probe.py $port 5 $w 2>&1 | tail -1
 done
+sleep 3   # 让最后一次 flush 跑完
 
 # SIGINT 发给 nsys 本身（不是 serve），它才会 flush 报告
 np=$(pgrep -x nsys | head -1)
@@ -43,4 +47,4 @@ echo "nsys pid=$np → SIGINT"
 [ -n "$np" ] && kill -INT "$np"
 for i in $(seq 1 120); do sleep 1; [ -f /tmp/q35_$tag.nsys-rep ] && break; done
 ls -la /tmp/q35_$tag.nsys-rep 2>/dev/null | cut -c25- || { echo "报告未生成"; tmux capture-pane -pt nsprof 2>/dev/null | tail -8; }
-pkill -x dinfer 2>/dev/null; tmux kill-session -t nsprof 2>/dev/null
+pkill -f "dinfer serve .*--port $port\b" 2>/dev/null; tmux kill-session -t nsprof 2>/dev/null
