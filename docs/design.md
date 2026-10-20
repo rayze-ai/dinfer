@@ -525,18 +525,23 @@ pub struct DeviceBlockRef { pub layer: u8, pub block: BlockId, pub ptr: u64, pub
 **PD bench 口径（用户 2026-10-18 确认）**：同机 Qwen3-0.6B 下 PD 经 proxy 的 TTFT 高于单机是预期内（prefill 本身 15 ms，任何中转都比它贵），不再纠结、不作为门槛；PD 线以功能正确 + 故障回退 + 跨卡 TPOT 接近单机（4090：3.75 vs 3.53）为收口标准。真正的收益评估等生产级模型 + 跨机。
 
 
-### 待办（用户 2026-10-20 要求记录）：executor 公共件抽取——"调度相关的东西不应该每个模型实现一遍"
+### 已做（2026-10-20，用户要求记录）：executor 公共件抽取——"调度相关的东西不应该每个模型实现一遍"
 
-现状：runner / engine 侧的异步流水（`ModelExecutor::{supports_async, begin, finish, stash_sync_result}`）与 pinned 槽原语（`PinnedSlot`）已是公共的，但把它们接起来的胶水在 `models/qwen3/src/executor.rs` 内联，qwen35 / kimik3 要么复制要么没接（qwen35 因此走同步路径，每步 GPU 空闲 0.6–0.9 ms，是 c1 / c8 剩余差距的全部）。同类复制还有三处。要抽到 `crates/core`（或 `crates/layers`）：
+公共件在 **`crates/layers/src/exec.rs`**（`dinfer_layers::exec`；放 layers 是因为它同时依赖 core 的 `BatchPlan` 与 kernels 的
+`PinnedSlot` / `Graph`，三个模型 crate 都依赖 layers，不引入循环）。runner / engine 侧的 `ModelExecutor::{supports_async, begin,
+finish, stash_sync_result}` 与 pinned 原语 `PinnedSlot` 本来就是公共的，这里补的是把它们接起来的胶水：
 
-| 公共件 | 现在在哪 | 依赖 | 接口 |
-|---|---|---|---|
-| `AsyncResultRing` | qwen3 executor（`async_slots` / `async_inflight`） | 流、已选 token 设备缓冲、行数 | `enqueue(stream, chosen, n) -> Token`、`wait(Token) -> Vec<i32>`，2 槽 + 事件 |
-| `DecodeGraphs<F>` | qwen3 / qwen35 executor 各一份（`DecodeGraph` / `graph_buckets` / `capture_bucket` / `ensure_graph` / `capture_plan`） | `FnMut(nb) -> Result<()>` 跑 forward+sample | `ensure(n)` / `launch(n)` / `capture_all()`，桶表来自 `graph_buckets(max_rows)` |
-| `StateSlotTable` | qwen35 `gdn.rs::SlotTable`，kimik3 复制了一份 | 请求 id | `begin_step(req_ids) -> fresh` / `indices` / `release(finished)`（LRU 兜底） |
-| `PlanUpload` | 三个 executor 各一份 `upload_plan`（pad 到桶 + 固定缓冲） | `BatchPlan`、`UploadArena` | `upload(plan, pad_to) -> (n, t, rows)` |
+| 公共件 | 接口 | 谁在用 |
+|---|---|---|
+| `AsyncResultRing` | `new(stream, depth, rows)`、`enqueue(stream, chosen, n) -> Ticket`（异步 D2H 到 pinned 槽 + 事件，不等 GPU）、`wait(Ticket) -> Vec<i32>`（FIFO）、`inflight()`；`async_sched_enabled()` 读 `ASYNC_SCHED` | qwen3、qwen35 |
+| `DecodeGraphs` | `new(stream, enabled, max_rows)`、`get(n) -> (桶, &Graph)`、`ensure(n, body)`（懒捕获）、`capture_all(body)`（`GRAPH_CAPTURE=eager`，`graph_capture_eager()`）；`body(nb, CapturePhase)`：**`Prepare`（上传假 plan / 采样参数，capture 外）→ `Body` 预热 → 同步 → capture(`Body`)**；`decode_capture_plan(nb)`、`graph_buckets(max_rows)` | qwen3、qwen35 |
+| `StateSlotTable` | `new(cap)`、`begin_step(req_ids) -> fresh`、`indices(req_ids)`、`release(finished)`（LRU 兜底） | qwen35 `gdn::SlotTable`、kimik3 `kda::SlotTable`（均为 re-export） |
+| `PlanBuffers` | 固定地址列 ids / pos / slots / rows / cu / seq / bt / max_blocks + 异步 `gather_idx` / `prev_chosen`；`upload(stream, uploader, plan, pad_to) -> (tt, nb, nrows)`（pad 到桶，不 flush，模型特有列之后追加）、`gather_inflight(stream, t)`（图内 `row_gather_i32`）、`save_chosen(stream, chosen, n)` | qwen3、qwen35（追加 state_idx / has_init） |
 
-顺序：先抽 + qwen3 接回（4090 `bench_compare.sh` 门禁不退化），再 qwen35 接 `AsyncResultRing`（= Qwen3.5 性能 loop 第 8 轮，预期 c1 / c8 追平 vLLM）、kimik3 接 `StateSlotTable` / `DecodeGraphs`。
+顺序已按计划走完：qwen3 接回（4090 `bench_common1` 门禁，见 `test/qwen3/perf-trend.md`）→ qwen35 接 `AsyncResultRing`
+（性能 loop 第 8 轮）→ kimik3 接 `StateSlotTable`（kimik3 尚无 executor，`DecodeGraphs` 等它有了再接）。
+踩坑：H2D 不能进 capture（图会记下 host 指针，重放读已释放的 Vec → `row_gather` 越界），所以捕获体分 `Prepare` / `Body`
+两阶段（pitfalls 2026-10-20）。
 
 ## 11. 采用 / 改进台账（对 vLLM）
 
@@ -552,6 +557,7 @@ pub struct DeviceBlockRef { pub layer: u8, pub block: BlockId, pub ptr: u64, pub
 | DCP | block 交错分卡 + lse 归并 | 复用 split-K decode 的 partial/lse 归并，kernel 不改 | 设计 §13.5 |
 | CUDA graph | decode-only 按 batch 桶捕获（FULL_DECODE_ONLY） | 按桶**懒捕获**（启动 -210 ms；`GRAPH_CAPTURE=eager` 恢复） | 启动 2.9 → 0.6 s 的一部分 |
 | 异步调度 | placeholder 机制、stop 检查晚一步、下一步在上一步结果回来前调度 | 下一步的 input_ids 在**设备上**从上一步 `chosen` gather（图内 `row_gather_i32`，不经 host 往返）；D2H 用 pinned 双槽 + 事件；engine 单线程双步流水（pending/sync_done 两槽），不需要 vLLM 的多进程 | bench24：c32 1.05 → 1.08×、c8 1.06 → 1.08×；代价 TTFT +1 步（c8-long 39 → 54 ms） |
+| 异步调度（Qwen3.5 / 多模型） | 同上（vLLM 每个 model runner 都走同一套 async 路径） | 胶水抽成公共件 `dinfer_layers::exec::{AsyncResultRing, DecodeGraphs, PlanBuffers, StateSlotTable}`，模型 executor 只提供捕获体与模型特有列；Qwen3.5 接入后纯 decode 步不再每步 `dtoh_sync` 等 GPU（GDN 模型同样在图内 gather 在飞 token） | 第 8 轮 `bench_b300_15`（主会话跑）；golden `golden_greedy_overlap` 5/5 |
 | attention | FA2 的算法结构（online softmax、P 片直接当 PV 的 A 片） | 自写 mma.sync 版 v4/v5（Ampere/Ada 无 FA3），paged/prefill 同一模板，混批 decode 行分流到 split-K | 4090 T=1514 0.14 ms/层，TTFT 领先 vLLM 2× |
 | GDN chunk prefill（Qwen3.5） | fla `chunk_gated_delta_rule` 的 WY 形式（块内 `(I+A)⁻¹`、跨块扫 h）与 BT=64 | 与 KDA chunk 同一 CUDA 实现骨架（prep / wy / ho 三段，全 fp32，无 Triton），切块表 `KdaChunkPlan` 两模型共用；中间缓冲全模型一份按需增长；输入直接吃 `mixed_qkv` 不再拆 q/k/v | 3090 T=1024 27B 形状 顺序 41.5 → chunk 4.2 ms（9.96×）；对拍见 `docs/loops/qwen35-perf.md` 第 1 轮 |
 | decode attention | split-K | v2：8 lane/key、两 q head 共享 K 读、splits 按 batch 自适应 | 与 FA2 decode 持平 |

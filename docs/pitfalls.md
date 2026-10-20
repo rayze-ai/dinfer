@@ -714,3 +714,9 @@
 - 现象：`d.new_stream()` + 在该流 `htod_copy` / `alloc_zeros` → `begin_capture` → 第一个 kernel launch 返回 `cudaError 901`。
 - 根因：cudarc `device_ptr()` 默认在每次取指针时记录事件（event tracking），`cudaEventRecord` 在 thread-local 捕获模式下不允许；`graph_probe.rs` 之所以能过是因为它先调了 `dev.disable_event_tracking()`（executor 也是，见上文 Qwen35 capture 条）。
 - 解法 / 避免：任何要 capture 的测试 / bench 开头 `dev.disable_event_tracking()`；非默认流仍是必要条件。
+
+## CUDA graph 捕获体里含 H2D（`htod` / `PinnedUploader::push`）：重放时读已释放的 host 内存（2026-10-20，executor 公共件抽取）
+
+- 现象：`DecodeGraphs` 第一版把"上传假 plan + 采样参数 + forward + 采样"整个当捕获体（预热一次、capture 内再跑一次），qwen35 golden 第一步 decode 就 `CUDA_ERROR_ILLEGAL_ADDRESS`；`compute-sanitizer` 指到 `row_gather_i32_kernel` 读 `prev[g]` 越界；NO_GRAPH 下全过；ASYNC_SCHED 开关无关。
+- 根因：capture 内的 `cuMemcpyHtoDAsync`（pageable 源）被记成 memcpy 节点，**源地址是那个临时 `Vec` 的 host 指针**；重放时 Vec 早已释放，`gather_idx` / `ids` 被填成垃圾 → gather 越界。原来两个 executor 的 `capture_bucket` 都是上传在 `begin_capture` 之前、只把 forward + sample 进图，抽公共件时把顺序合掉了。
+- 解法 / 避免：捕获闭包分 `CapturePhase::Prepare`（capture 外，一次）/ `CapturePhase::Body`（预热 + capture 内）；**任何进图的代码路径里不能有 host → device 拷贝**（固定地址缓冲的内容在图外换）。定位手段：`compute-sanitizer --tool memcheck <test binary> <name> --ignored`，比 `CUDA_LAUNCH_BLOCKING` 直接（异步错误只会在下一次同步点冒出来，backtrace 指向 `dtoh_sync` / `wait_read` 没有信息量）。
