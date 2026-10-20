@@ -38,17 +38,10 @@ for jf in sorted(glob.glob(os.path.join(ROOT, "*", "perf-trend.json"))):
         rows.append((model, gpu, len(rs), last.get("label", ""), last.get("date", ""), cells, chg))
 
 def td(x): return f"<td>{x}</td>"
-def extra_links(m):
-    # 同模型目录下其它趋势页（engine-trend = 开环泊松 / SLO goodput；probe-trend = TTFT-长度 / kernel 分解 / 微基准）
-    out = []
-    for name, label in (("engine-trend.html", "engine"), ("probe-trend.html", "probe")):
-        if os.path.exists(os.path.join(ROOT, m, name)):
-            out.append(f'<a href="{html.escape(m)}/{name}">{label}</a>')
-    return " · ".join(out) or "—"
 body = "\n".join(
     f'<tr><td><a href="{html.escape(m)}/perf-trend.html#{html.escape(m)}/{html.escape(g)}/single"><b>{html.escape(m)}</b></a></td>'
     f'<td><a href="{html.escape(m)}/perf-trend.html#{html.escape(m)}/{html.escape(g)}/single">{html.escape(g)}</a></td>'
-    f"{td(n)}{td(html.escape(lbl))}{td(date)}" + "".join(td(c) for c in cells) + td(extra_links(m)) + f'<td class=chg>{html.escape(chg)}</td></tr>'
+    f"{td(n)}{td(html.escape(lbl))}{td(date)}" + "".join(td(c) for c in cells) + f'<td class=chg>{html.escape(chg)}</td></tr>'
     for m, g, n, lbl, date, cells, chg in rows)
 page = f"""<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>dinfer perf index</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -63,8 +56,8 @@ th{{background:var(--hl);position:sticky;top:0}} td.chg{{white-space:normal;colo
 .r{{color:var(--muted);font-size:12px}} a{{color:inherit}}
 </style></head><body>
 <h1>dinfer perf index</h1>
-<div class="sub">每个（模型 × 卡型）一行：最新主线轮次与四组 TPOT p50（ms，括号 = vLLM/dinfer 倍数，&gt;1 为我们快）。点模型或卡型进该模型的趋势页（URL 带 #模型/卡型/页签）。数据来自各模型目录的 <code>perf-trend.json</code>。</div>
-<table><thead><tr><th>模型</th><th>卡型</th><th>轮次数</th><th>最新轮</th><th>日期</th><th>c1</th><th>c8</th><th>c32</th><th>c8-long</th><th>其它趋势页</th><th>最新改动</th></tr></thead>
+<div class="sub">每个（模型 × 卡型）一行：最新主线轮次与四组 TPOT p50（ms，括号 = vLLM/dinfer 倍数，&gt;1 为我们快）。点模型或卡型进该模型的趋势页（URL 带 #模型/卡型/页签；页签含 single / pd / tp / dp / other / engine / probe）。数据来自各模型目录的 <code>perf-trend.json</code>。</div>
+<table><thead><tr><th>模型</th><th>卡型</th><th>轮次数</th><th>最新轮</th><th>日期</th><th>c1</th><th>c8</th><th>c32</th><th>c8-long</th><th>最新改动</th></tr></thead>
 <tbody>
 {body}
 </tbody></table>

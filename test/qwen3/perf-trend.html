@@ -14,6 +14,8 @@ h1{font-size:18px;margin:0 0 4px}.sub{color:var(--muted);margin-bottom:12px}
 .tabs button{background:none;border:1px solid transparent;border-bottom:none;color:var(--muted);padding:6px 14px;font:inherit;cursor:pointer;border-radius:6px 6px 0 0}
 .tabs button.on{color:var(--fg);border-color:var(--line);background:var(--card);font-weight:600}
 .tabs button[hidden]{display:none}
+.tabs button.off{opacity:.45;cursor:not-allowed}
+.pchart{height:320px;margin:8px 0 18px}.pnote{color:var(--muted);font-size:12.5px;margin:0 0 6px}
 .page[hidden]{display:none}
 .base{padding:6px 10px;margin-bottom:12px;border-left:3px solid var(--acc);background:var(--card);font-size:13px}
 .empty{padding:24px;text-align:center;color:var(--muted)}
@@ -27,10 +29,10 @@ th:first-child,td:first-child,td.change,th.change,td.l,th.l{text-align:left}
 .updated{color:var(--muted);font-size:12px}
 </style></head><body>
 <h1>perf trend — qwen3 <a href="../index.html" style="font-size:13px;font-weight:normal;margin-left:12px">← 全部模型索引</a></h1>
-<div class="sub">数据：<code>perf-trend.csv</code>（每 10 s 重读）。先选卡型，再选页签：single = 主线 benchN（dinfer vs vLLM）；pd / tp / dp / other = A/B 组，每页顶部写明基线。URL hash 直达（如 <code>#B300/tp</code>）。<span id="updated" class="updated"></span></div>
+<div class="sub">数据：<code>perf-trend.csv</code>（每 10 s 重读）。先选卡型，再选页签：single = 主线 benchN（dinfer vs vLLM）；pd / tp / dp / other = A/B 组，每页顶部写明基线；engine = 开环泊松 / SLO goodput（<code>engine-trend.csv</code>）；probe = TTFT-长度 / kernel 分解 / 微基准（<code>probe-trend.csv</code>）。URL hash 直达（如 <code>#B300/tp</code>）。<span id="updated" class="updated"></span></div>
 <div class="gpus" id="gpus"><span>卡型</span></div>
 <nav class="tabs" id="tabs">
- <button data-tab="single" class="on">single</button><button data-tab="pd" hidden>pd</button><button data-tab="tp" hidden>tp</button><button data-tab="dp" hidden>dp</button><button data-tab="other" hidden>other</button>
+ <button data-tab="single" class="on">single</button><button data-tab="pd" hidden>pd</button><button data-tab="tp" hidden>tp</button><button data-tab="dp" hidden>dp</button><button data-tab="other" hidden>other</button><button data-tab="engine" class="off" title="无 engine-trend.csv">engine</button><button data-tab="probe" class="off" title="无 probe-trend.csv">probe</button>
 </nav>
 
 <section class="page" id="page-single">
@@ -51,6 +53,25 @@ th:first-child,td:first-child,td.change,th.change,td.l,th.l{text-align:left}
 <section class="page" id="page-tp" hidden><div class="base" id="base-tp"></div><div class="grid" id="grid-tp"></div><div class="card" style="margin-top:14px"><div id="table-tp"></div></div></section>
 <section class="page" id="page-dp" hidden><div class="base" id="base-dp"></div><div class="grid" id="grid-dp"></div><div class="card" style="margin-top:14px"><div id="table-dp"></div></div></section>
 <section class="page" id="page-other" hidden><div class="base" id="base-other"></div><div class="grid" id="grid-other"></div><div class="card" style="margin-top:14px"><div id="table-other"></div></div></section>
+<section class="page" id="page-engine" hidden>
+<div class="base">引擎层面（开环泊松到达、SLO goodput，<code>bench_engine.sh</code>，design.md §15）。轮次 <select id="eng-round"></select> <span id="eng-meta" class="updated"></span>
+ <span style="float:right"><a href="engine-trend.md">md</a> · <a href="engine-trend.csv">csv</a></span></div>
+<div class="grid">
+ <div class="card"><h2>goodput（req/s）vs 到达率</h2><canvas id="c-goodput"></canvas></div>
+ <div class="card"><h2>TTFT p99（ms）vs 到达率</h2><canvas id="c-ttft"></canvas></div>
+ <div class="card"><h2>TPOT p99（ms）vs 到达率</h2><canvas id="c-tpot"></canvas></div>
+ <div class="card"><h2>prefix cache 命中率 vs 到达率</h2><canvas id="c-cache"></canvas></div>
+ <div class="card" style="grid-column:1/-1"><h2>各轮 SLO 下最大 req/s</h2><canvas id="c-max"></canvas></div>
+</div>
+<div class="card" style="margin-top:14px"><div id="eng-tbl"></div></div>
+<div class="empty" id="eng-empty" hidden>本目录没有 engine-trend.csv</div>
+</section>
+<section class="page" id="page-probe" hidden>
+<div class="base">探针测量（TTFT-长度曲线 / kernel 分解 / 微基准伸缩 / 第三方 kernel 对照）。probe <select id="probe-sel"></select>
+ <span style="float:right"><a href="probe-trend.md">md</a> · <a href="probe-trend.csv">csv</a></span><br><span class="updated">dinfer 蓝实线 / vLLM 橙虚线；x 数值 → 折线，类别 → 分组柱。</span></div>
+<div id="probe-charts"></div>
+<div class="empty" id="probe-empty" hidden>本目录没有 probe-trend.csv</div>
+</section>
 
 <script>
 const KNOWN_GPUS=["4090", "B300"], DEFAULT_GPU="4090", MODEL="qwen3";
@@ -151,7 +172,7 @@ function buildCat(cat,rows){
 }
 // ---- 卡型 + 切页：纯 JS + URL hash（#<gpu>/<tab>）----
 let curGpu=DEFAULT_GPU, curTab="single";
-function parseHash(){const h=(location.hash||"").slice(1);if(!h)return;let parts=h.split("/");if(parts.length===3){if(decodeURIComponent(parts[0])!==MODEL)return;parts=parts.slice(1);}const [a,b]=parts;if(b!==undefined){curGpu=decodeURIComponent(a)||curGpu;curTab=b||"single";}else if(["single",...CATS].includes(a)){curTab=a;}else{curGpu=decodeURIComponent(a);}}
+function parseHash(){const h=(location.hash||"").slice(1);if(!h)return;let parts=h.split("/");if(parts.length===3){if(decodeURIComponent(parts[0])!==MODEL)return;parts=parts.slice(1);}const [a,b]=parts;if(b!==undefined){curGpu=decodeURIComponent(a)||curGpu;curTab=b||"single";}else if(["single",...CATS,"engine","probe"].includes(a)){curTab=a;}else{curGpu=decodeURIComponent(a);}}
 function gpuList(rows){const s=new Set(KNOWN_GPUS);rows.forEach(r=>{if(r.gpu)s.add(r.gpu);});return [...s];}
 function renderGpus(rows){
   const gpus=gpuList(rows); if(!gpus.includes(curGpu)) curGpu=gpus[0]||DEFAULT_GPU;
@@ -166,7 +187,8 @@ function rebuild(){
 }
 function show(push){
   const tab=document.querySelector(`.tabs button[data-tab="${curTab}"]`);
-  if(!tab||tab.hidden) curTab="single";
+  if(!tab||tab.hidden||tab.classList.contains("off")) curTab="single";
+  if(curTab==="engine") engineDraw(); if(curTab==="probe") probeRender();
   document.querySelectorAll(".page").forEach(p=>p.hidden=(p.id!="page-"+curTab));
   document.querySelectorAll(".tabs button").forEach(b=>b.classList.toggle("on",b.dataset.tab==curTab));
   const want="#"+encodeURIComponent(MODEL)+"/"+encodeURIComponent(curGpu)+"/"+curTab;
@@ -175,8 +197,94 @@ function show(push){
 }
 function build(rows){ALL=rows;renderGpus(rows);rebuild();document.getElementById("updated").textContent=" 更新于 "+new Date().toLocaleTimeString();show(true);}
 document.getElementById("tabs").addEventListener("click",e=>{const b=e.target.closest("button[data-tab]");if(b){curTab=b.dataset.tab;show(true);}});
+// ---- engine 页签（搬自 engine_trend.py：fetch engine-trend.csv；按当前卡型过滤，无匹配则全显）----
+let ENG=[],ENG_OK=false;
+const ECOL={dinfer:"#1f77b4",vllm:"#ff7f0e"};
+function engLine(rates,series,yLabel,yMax){
+  const ds=Object.entries(series).map(([s,m])=>({label:s,data:rates.map(r=>m[r]??null),borderColor:ECOL[s]||"rgba(128,128,128,.6)",backgroundColor:ECOL[s],borderWidth:2,pointRadius:4,pointHoverRadius:6,spanGaps:true,tension:0}));
+  return {type:"line",data:{labels:rates.map(String),datasets:ds},options:{animation:false,responsive:true,interaction:{mode:"index",intersect:false},
+    plugins:{legend:{display:true,position:"bottom"},tooltip:{enabled:true}},
+    scales:{x:{title:{display:true,text:"到达率 req/s"},grid:{color:"rgba(128,128,128,.15)"}},y:{beginAtZero:true,suggestedMax:yMax,title:{display:true,text:yLabel},grid:{color:"rgba(128,128,128,.15)"}}}}};
+}
+function engineDraw(){
+  const tab=document.querySelector('.tabs button[data-tab="engine"]');
+  document.getElementById("eng-empty").hidden=ENG_OK; if(!ENG_OK) return;
+  let rows=ENG.filter(r=>r.gpu==curGpu); if(!rows.length) rows=ENG;
+  const byRound={};rows.forEach(r=>{(byRound[r.round]??={gpu:r.gpu,change:r.change,rows:[]}).rows.push(r)});
+  const rounds=Object.keys(byRound); if(!rounds.length) return;
+  const sel=document.getElementById("eng-round");const prev=rounds.includes(sel.value)?sel.value:rounds[rounds.length-1];
+  sel.innerHTML=rounds.map(r=>`<option ${r===prev?"selected":""}>${r}</option>`).join("");
+  sel.onchange=()=>engRound(byRound,sel.value);
+  engRound(byRound,prev);
+  const mg=rounds.map(r=>{const o={};byRound[r].rows.filter(x=>x.metric==="max_good_rate").forEach(x=>o[x.side]=+x.value);return o;});
+  upsert("c-max",{type:"bar",data:{labels:rounds,datasets:["dinfer","vllm"].map(s=>({label:s,data:mg.map(o=>o[s]??null),backgroundColor:ECOL[s],borderRadius:4,borderSkipped:"bottom",maxBarThickness:28}))},
+    options:{animation:false,responsive:true,plugins:{legend:{position:"bottom"}},scales:{y:{beginAtZero:true,title:{display:true,text:"req/s"}},x:{grid:{display:false}}}}});
+}
+function engRound(byRound,rk){
+  const R=byRound[rk];if(!R)return;
+  document.getElementById("eng-meta").textContent=`${R.gpu} · ${R.change||"（无改动说明）"}`;
+  const rates=[...new Set(R.rows.filter(x=>x.rate).map(x=>+x.rate))].sort((a,b)=>a-b);
+  const pick=m=>{const o={dinfer:{},vllm:{}};R.rows.filter(x=>x.metric===m).forEach(x=>o[x.side][+x.rate]=+x.value);for(const s in o)if(!Object.keys(o[s]).length)delete o[s];return o;};
+  const g=pick("goodput_rps");g.ideal=Object.fromEntries(rates.map(r=>[r,r]));
+  const cfg=engLine(rates,g,"req/s");const id=cfg.data.datasets.find(d=>d.label==="ideal");id.borderDash=[4,4];id.pointRadius=0;
+  upsert("c-goodput",cfg);
+  upsert("c-ttft",engLine(rates,pick("ttft_p99"),"ms"));
+  upsert("c-tpot",engLine(rates,pick("tpot_p99"),"ms"));
+  upsert("c-cache",engLine(rates,pick("cache_hit"),"命中率",1));
+  const M=["goodput_rps","request_rps","out_tps","ttft_p50","ttft_p99","ttft_max","tpot_p50","tpot_p99","tpot_max","cache_hit","completed","failed"];
+  const H=["goodput","req/s","out tok/s","TTFT p50","TTFT p99","TTFT max","TPOT p50","TPOT p99","TPOT max","cache hit","完成","失败"];
+  let h=`<table><tr><th class=l>rate</th><th class=l>端</th>${H.map(x=>`<th>${x}</th>`).join("")}</tr>`;
+  for(const r of rates)for(const s of ["dinfer","vllm"]){const rr=R.rows.filter(x=>x.side===s&&+x.rate===r);if(!rr.length)continue;const v=m=>{const x=rr.find(y=>y.metric===m);return x?(+x.value).toFixed(m.startsWith("cache")?3:(m==="completed"||m==="failed"||m==="out_tps")?0:m.includes("rps")?2:1):"-"};
+    h+=`<tr><td class="l">${r}</td><td class="l">${s}</td>${M.map(m=>`<td>${v(m)}</td>`).join("")}</tr>`}
+  document.getElementById("eng-tbl").innerHTML=h+"</table>";
+}
+async function engineRefresh(){
+  const tab=document.querySelector('.tabs button[data-tab="engine"]');
+  try{const r=await fetch("engine-trend.csv?ts="+Date.now(),{cache:"no-store"});if(!r.ok)throw 0;ENG=parseCSV(await r.text());ENG_OK=ENG.length>0;}catch(e){ENG_OK=false;}
+  tab.classList.toggle("off",!ENG_OK);tab.title=ENG_OK?"":"无 engine-trend.csv";
+  if(curTab==="engine") engineDraw();
+}
+// ---- probe 页签（搬自 probe_trend.py：fetch probe-trend.csv，长表 probe,date,gpu,model,group,metric,side,x,value,unit,note）----
+let PRB=[],PRB_OK=false,prbCharts=[];
+function probeRender(){
+  document.getElementById("probe-empty").hidden=PRB_OK; if(!PRB_OK) return;
+  const sel=document.getElementById("probe-sel");
+  let rows=PRB.filter(r=>r.gpu==curGpu); if(!rows.length) rows=PRB;
+  const probes=[...new Set(rows.map(r=>r.probe+"|"+r.date+"|"+r.gpu))];
+  const prev=probes.includes(sel.value)?sel.value:probes[probes.length-1];
+  sel.innerHTML=probes.map(p=>`<option value="${p}" ${p===prev?"selected":""}>${p.replace(/\|/g,"  ·  ")}</option>`).join("");
+  sel.onchange=probeRender;
+  if(!prev) return;
+  const [p,d,g]=prev.split("|");const rs=PRB.filter(r=>r.probe===p&&r.date===d&&r.gpu===g);
+  prbCharts.forEach(c=>{try{c.destroy();}catch(e){}});prbCharts=[];
+  const box=document.getElementById("probe-charts");box.innerHTML="";
+  for(const grp of [...new Set(rs.map(r=>r.group))]){const gr=rs.filter(r=>r.group===grp);const unit=(gr.find(r=>r.unit)||{}).unit||"";
+    const card=document.createElement("div");card.className="card";card.style.marginBottom="14px";
+    const h=document.createElement("h2");h.textContent=grp+(unit?"（"+unit+"）":"");card.appendChild(h);
+    const notes=gr.filter(r=>r.note).map(r=>r.x+" "+r.metric+" "+r.side+"："+r.note);
+    if(notes.length){const n=document.createElement("p");n.className="pnote";n.textContent=notes.join("；");card.appendChild(n)}
+    const div=document.createElement("div");div.className="pchart";const cv=document.createElement("canvas");div.appendChild(cv);card.appendChild(div);box.appendChild(card);
+    const xs=[...new Set(gr.map(r=>r.x))];const numeric=xs.every(x=>/^-?\d+(\.\d+)?$/.test(x));
+    const series=[...new Set(gr.map(r=>r.metric+"|"+r.side))];
+    const ds=series.map((sv,i)=>{const [m,side]=sv.split("|");const pts=gr.filter(r=>r.metric===m&&r.side===side);
+      const c=ECOL[side]||"hsl("+(i*47%360)+",60%,45%)";
+      return numeric?{label:m+" "+side,data:pts.map(r=>({x:+r.x,y:+r.value})),borderColor:c,backgroundColor:c,borderDash:side==="vllm"?[6,4]:[],tension:0,pointRadius:4,showLine:true}
+                    :{label:m+" "+side,data:xs.map(x=>{const r=pts.find(q=>q.x===x);return r?+r.value:null}),backgroundColor:c,borderColor:c}});
+    prbCharts.push(new Chart(cv,{type:numeric?"line":"bar",data:numeric?{datasets:ds}:{labels:xs,datasets:ds},
+      options:{animation:false,responsive:true,maintainAspectRatio:false,interaction:{mode:"nearest",intersect:false},
+        scales:numeric?{x:{type:"linear",title:{display:true,text:"x（"+grp+"）"}},y:{title:{display:true,text:unit},beginAtZero:true}}:{y:{title:{display:true,text:unit},beginAtZero:true}},
+        plugins:{legend:{position:"bottom"},tooltip:{callbacks:{label:c=>c.dataset.label+": "+(c.parsed.y??c.raw)+" "+unit}}}}}));}
+}
+async function probeRefresh(){
+  const tab=document.querySelector('.tabs button[data-tab="probe"]');
+  try{const r=await fetch("probe-trend.csv?ts="+Date.now(),{cache:"no-store"});if(!r.ok)throw 0;PRB=parseCSV(await r.text()).filter(r=>r.probe&&r.value!=="");PRB_OK=PRB.length>0;}catch(e){PRB_OK=false;}
+  tab.classList.toggle("off",!PRB_OK);tab.title=PRB_OK?"":"无 probe-trend.csv";
+  if(curTab==="probe") probeRender();
+}
+document.querySelectorAll(".gpus").forEach(b=>b.addEventListener("click",()=>{if(curTab==="engine")engineDraw();if(curTab==="probe")probeRender();}));
 window.addEventListener("hashchange",()=>{parseHash();if(ALL.length){rebuild();}show(false);});
 parseHash();
 async function refresh(){try{const t=await (await fetch("perf-trend.csv?ts="+Date.now(),{cache:"no-store"})).text();build(parseCSV(t));}catch(e){document.getElementById("updated").textContent=" 读取 CSV 失败: "+e;}}
-refresh();setInterval(refresh,10000);
+async function refreshAll(){await refresh();await engineRefresh();await probeRefresh();}
+refreshAll();setInterval(refreshAll,10000);
 </script></body></html>
