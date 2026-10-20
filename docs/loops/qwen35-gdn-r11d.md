@@ -186,3 +186,39 @@ v' = M·( β⊙v − (β·2^g_last)·(kg·hᵀ) )
 ## 下一步
 
 (2)(3)(4) 三个 GEMM + 接 C ABI。都是里程碑 1 已验模式的重复，风险低。
+
+---
+
+## 里程碑 2 的设计抉择（2026-10-21 06:0x，未落地）
+
+写完整 ho 之前算了三笔账，结论是先记下来，避免下一轮重走：
+
+### ① `o = o1·dec + Aq·v'` 的 dec 缩放
+
+mma.sync 版是「算完 `q·hᵀ` 再乘 dec」。tcgen05 下累加器在 TMEM，原地缩放要 `ld`+`st` 一整片。
+**更好：把 dec 折进 A 操作数**——`(q⊙dec)·hᵀ` 与 `(q·hᵀ)⊙dec` 数学等价（dec 是按 token 的，正好是 q 的行）。
+代价是 q 多一次 bf16 舍入（相对误差仍 ~2⁻⁸），换来 (2)(3) 能在同一个累加器上连续累加、中间不取回。
+
+### ② `h = glast·h + v'ᵀ·kg` 的 glast 缩放（真正的难点）
+
+h 若常驻 TMEM，每 chunk 要 `ld → ×glast → st` 一次 128 列，**128 个 chunk 累计可能吃掉整个预算**
+（目标 150 µs，这个往返按每 chunk ~1 µs 就是 128 µs）。
+
+**决定：h 留在寄存器（f32 主本），TMEM 只做四个 GEMM 的累加器。**
+- (4) 算进临时累加器 → `ld` 一次 → `h_reg = glast·h_reg + tmp`（缩放免费）
+- 每 chunk 开头把 `h_reg` 转 bf16 写 smem 当 B 操作数（本来就要写）
+- 代价：BV=128 时 h 要 **128 个 f32/线程**（V=128 行 × K=128 列 / 128 线程）。加其余约 180 regs，仍 < 255。
+  这也正是 mma.sync 版 BV 卡在 64 的原因（BV=128 要 ~300 regs 且是 mma fragment 布局）；
+  走 tcgen05 后 h 不再需要 fragment 布局，只要平铺 f32，才装得下。
+
+### ③ (4) 的 A 操作数转置
+
+`v'ᵀ·kg` 要 A = v'ᵀ（M=v、K=token）。v' 在 smem 里是 `[token][v]`，v 连续 → 对 A 来说是 **MN-major**，
+用 `make_instr_desc_bf16(..., a_mn=true, ...)` + `mn_major_128b_desc(lbo, sbo)` 当转置视图用，
+与 r12a 在 attn 里对 V 的做法相同（`qwen35-tcgen05.md`：`idesc_o = make_instr_desc_bf16(kBQ, kD, false, b_mn=true)`）。
+
+## 当前状态
+
+- 里程碑 1（GEMM(1) + TMEM/swizzle/取回全链路）：**完成，数值 rel 1.2e-4，REG 26**
+- 里程碑 2（四个 GEMM + h 寄存器主本 + 接 C ABI）：**设计完成，未落码**
+- 接线依赖 `kernels.h` / `ffi.rs` / `ops.rs` / `build.rs`，r12a 正在改这几个文件，需等它提交后再动
