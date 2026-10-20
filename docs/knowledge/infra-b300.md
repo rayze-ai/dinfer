@@ -19,5 +19,5 @@
 
 ## 趋势面板（本机 :8090，`scripts/dev/trend_server.sh`）
 - 服务根是 `test/`：`index.html`（所有模型 × 卡型总览，`bench_index.py` 从各 `test/<model>/perf-trend.json` 生成）→ `<model>/perf-trend.html#<model>/<gpu>/single`。
-- `bench_compare.sh` 跑完 `bench_trend.py` 后顺带重生成 `index.html`；但 bench 在远端（B300 / 4090）跑时生成的是远端的 index，**pull 回本机后要在本机再跑一次 `python3 -I scripts/dev/bench_index.py`**，否则本机 index 停在旧日期（2026-10-20 发现 index 只有 qwen3 / 10-19）。
+- 远端跑的 `bench_trend.py` 只看到那台卡的 bench 目录（4090 上生成的 qwen3 趋势没有 B300 4 轮；B300 上生成的没有 4090）；**权威的 `perf-trend.*` 与 `index.html` 以本机全树生成为准**：pull 回 bench 目录后跑 `scripts/dev/trend_rebuild.sh`（所有模型 + index），再 commit。2026-10-20 两次踩：index 只有 qwen3/4090、qwen3 缺 B300 行。
 - 重启服务按监听 PID 杀（`ss -ltnp | grep :8090`），不要 `pkill -f` 模式——模式会匹配到执行命令的 shell 自己。
