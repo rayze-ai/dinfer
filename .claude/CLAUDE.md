@@ -4,7 +4,7 @@
 
 ## 开场必做
 
-1. 读 `docs/progress.md` 顶部"当前状态"区，弄清上次做到哪、下一步是什么。
+1. 读 `docs/knowledge/README.md`（提炼后的方法与规则索引，按主题；开工前读对应页），再读 `docs/progress.md` 顶部"当前状态"区，弄清上次做到哪、下一步是什么。
 2. `git status --short` 核对工作区是否与交接区一致。
 3. 用几行向用户复述现状，再动手。
 
@@ -24,7 +24,8 @@
 | `docs/requirements.md` | 需求与验收口径 |
 | `docs/design.md` | 整体设计、关键决策；`design-<model>.md` 每模型一份 |
 | `docs/progress.md` | 进度：顶部交接区 + 按日期日志 |
-| `docs/pitfalls.md` | 踩坑：现象 / 根因 / 解法 / 避免 |
+| `docs/pitfalls.md` | 踩坑：现象 / 根因 / 解法 / 避免（按时间堆；可复用的判断提炼进 knowledge） |
+| `docs/knowledge/` | **知识库**：按主题提炼的判断 + 为什么 + 怎么用 + 证据（perf-method / kernel-rules / model-onboarding / executor-common / subagent-ops / infra-b300）；每页 ≤ 120 行，过时的删 |
 | `docs/loops/<feature>.md` | 需反复调试功能的环境-观察-停止条件 |
 | `test/<model>/YYYY-MM-DD/` | 按模型、按日期归档的测试结果与每轮改进记录（用户 2026-10-16 要求：每一轮验证与改进都要记进去）；GLM 线历史在 `test/2026-10-1x/` |
 | `scripts/verify/` | 验证脚本，exit 0 = 通过 |
@@ -58,7 +59,7 @@ rm -f target/.rustc_info.json                     # cargo 报 "failed to run rus
 ## 收功（每次结束前）
 
 用户说"收功 / 收尾 / 今天到这"，或长会话即将压缩、准备关机迁移时，执行 `/project-skill wrap`：
-更新 `docs/progress.md`（重写交接区 + 追加日志）、`docs/pitfalls.md`、归档 `test/<model>/YYYY-MM-DD/`、必要时回写本文件。
+更新 `docs/progress.md`（重写交接区 + 追加日志）、`docs/pitfalls.md`、**把本次 loop 里可复用的教训提炼进 `docs/knowledge/` 对应页（用户 2026-10-20：知识要落地，不要重启就丢）**、归档 `test/<model>/YYYY-MM-DD/`、必要时回写本文件。
 
 ## 反复调试类功能
 
