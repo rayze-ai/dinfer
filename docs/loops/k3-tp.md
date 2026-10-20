@@ -31,3 +31,7 @@
   - 坑 1：`QUIET` 用了进程级 `static AtomicBool`，rank 1 置 true 把 rank 0 也静默 → 看不到每层数字、dump 目录为空。改 `thread_local!`（commit 见下）。
   - 坑 2：`pkill -f "while pgrep"` 会匹配并杀掉发出它的 ssh shell 自身（命令行含同一字串）→ 后续命令没执行。启动器写成文件 `scripts/dev/k3_b300_tp_launch.sh` 再 `bash` 跑。
   - 判断：tp2 对 HF 的链式 logits 掉 1e-3 待看 dump 直接对比（tp2 vs 单卡 ≥ 0.9998 才是本 loop 的停止条件）；对 HF 的门槛 TP 下放到 0.998（test 内注释说明）。
+- 第 2 轮结果（11:06，归档 `test/kimik3/2026-10-20/tp2/`）：
+  - **tp2 serve 冒烟 exit 0**（`smoke5_tp2/`）：`--layers 5 --tp 2` GPU 2,3；两 rank 装载 11.7 s、NCCL comm ready、startup 16.1 s；流式 chat 66 chunks finish=length；c1 ×8 **TPOT 9.65 ms**（p50 9.31）TTFT 217 ms；c8 ×16 TPOT 25.2 ms TTFT 1234 ms（单卡 smoke5：c1 12.5 / c8 42.7 ms → tp2 快 1.3× / 1.7×；5 层无语义，只记录）。
+  - **tp2 model_parity**（`tp2_summary.log`）：隔离 5 层对 HF cos 0.999983–0.999991 **全过**（与单卡同量级）；链式 layer4 0.998632 / final 0.998493（单卡 0.998576 / 0.998386，持平）；**链式 logits 对 HF 0.998254（单卡 0.999897）**、**decode-vs-prefill 0.998350（单卡 0.999975）**、decode logits 对 HF 0.999796；top-1 全一致（30530）。
+  - **tp2 vs 单卡直接对比**（`compare_single_vs_tp2.txt`，`k3_tp_compare.py`）：iso0（dense，纯 TP）0.9999931 ✓；iso1–4（MoE）0.99977 / 0.99992 / 0.99997 / 0.99993（门槛 0.9999，iso1 不过）；chain 逐层累积 0.99999→0.99992→0.99972→0.99935→0.99862；logits_last 0.99819、decode_logits 0.99976，top-1 同。**判断：纯 TP 层（dense + KDA）近逐位（7e-6），漂移来自 MoE 层（2e-4 级），且 decode 路径比 prefill 更差 → 下一轮先拿 single×2 看 kernel 自身确定性，再 dump 路由 id / expert_sum / routed_out 定位是路由平局、acc 求和还是 shared 部分和 bf16 双舍入。**

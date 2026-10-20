@@ -1,0 +1,14 @@
+  chain0         cos 0.9999931  max_abs 1.953e-03
+  chain1         cos 0.9999163  max_abs 3.174e-03
+  chain2         cos 0.9997196  max_abs 1.221e-02  <-- FAIL
+  chain3         cos 0.9993545  max_abs 1.953e-02  <-- FAIL
+  chain4         cos 0.9986240  max_abs 3.735e-02  <-- FAIL
+  decode_logits  cos 0.9997617  max_abs 1.875e-01  top-1 30530 vs 30530  <-- FAIL
+  final          cos 0.9983933  max_abs 4.512e-01  <-- FAIL
+  iso0           cos 0.9999931  max_abs 1.953e-03
+  iso1           cos 0.9997668  max_abs 8.179e-03  <-- FAIL
+  iso2           cos 0.9999234  max_abs 1.562e-02
+  iso3           cos 0.9999705  max_abs 7.812e-03
+  iso4           cos 0.9999286  max_abs 2.051e-02
+  logits_last    cos 0.9981871  max_abs 5.000e-01  top-1 30530 vs 30530  <-- FAIL
+RESULT FAIL

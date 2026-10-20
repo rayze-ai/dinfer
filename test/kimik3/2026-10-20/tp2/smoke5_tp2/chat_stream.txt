@@ -1,0 +1,134 @@
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":" Ring"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"赶集"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":" Capitol"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":" Sullivan"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"acja"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"去向"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"iates"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":" swell"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"本身就是一个"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":" шы"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"是否与"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"瘦了"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"自贸"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"ARN"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":" mental"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"也罢"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":" ey"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"腔"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"眼神"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"phones"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":" serial"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"禹"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"(xs"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"做朋友"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":" mk"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"136"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"奥古"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"ajaan"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"(DEFAULT"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"_in"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":" Els"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"叔叔阿姨"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"被誉为"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"ların"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"起跑线上"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"元代"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"argument"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"其他地方"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"Receive"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"atis"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"Want"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"DU"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"中表示"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":" citizen"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"打滚"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"准备了"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"葛"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":" pass"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"joint"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"右边的"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"想清楚"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"riers"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":" Ph"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"senal"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"胎"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"已经有"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"可怜"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":" VIDEO"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"真正做到"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":" heirs"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":" bland"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"leen"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"年底"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":" (...)"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6ad6da8b0001","object":"chat.completion.chunk","created":1792465547,"model":"kimi-k3","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}
+
+data: [DONE]
+

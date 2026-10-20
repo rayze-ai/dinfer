@@ -1,0 +1,46 @@
+
+==> 启动 dinfer（前 5 层，GPU 2,3，tp 2，:8014）
+startup_wall_s=16.1
+[2m2026-10-20T03:05:31.020217Z[0m [33m WARN[0m [2mdinfer_kimik3::service[0m[2m:[0m kimik3: TRUNCATED MODEL —— 只装前 5/93 层，输出无语义，仅用于流程冒烟 [3mn_layers[0m[2m=[0m5 [3mtotal_layers[0m[2m=[0m93
+[2m2026-10-20T03:05:31.020247Z[0m [32m INFO[0m [2mdinfer_kimik3::service[0m[2m:[0m kimik3: single-stream executor（decode CUDA graph lazy per bucket；no TP / EP / PD / MTP yet） [3mcuda_graphs[0m[2m=[0mtrue [3mchunked_prefill[0m[2m=[0mtrue 
+[2m2026-10-20T03:05:31.808719Z[0m [32m INFO[0m [2mdinfer_kimik3::model[0m[2m:[0m kimik3: TP/EP 分片装载 [3mrank[0m[2m=[0m1 [3mworld[0m[2m=[0m2
+[2m2026-10-20T03:05:31.808793Z[0m [32m INFO[0m [2mdinfer_kimik3::model[0m[2m:[0m kimik3: TP/EP 分片装载 [3mrank[0m[2m=[0m0 [3mworld[0m[2m=[0m2
+[2m2026-10-20T03:05:31.809304Z[0m [33m WARN[0m [2mdinfer_kimik3::model[0m[2m:[0m kimik3: TRUNCATED MODEL（只装前 5 层 + 顶层；输出无语义，只用于流程冒烟 / 对拍） [3mn_layers[0m[2m=[0m5 [3mtotal[0m[2m=[0m93
+[2m2026-10-20T03:05:31.809297Z[0m [33m WARN[0m [2mdinfer_kimik3::model[0m[2m:[0m kimik3: TRUNCATED MODEL（只装前 5 层 + 顶层；输出无语义，只用于流程冒烟 / 对拍） [3mn_layers[0m[2m=[0m5 [3mtotal[0m[2m=[0m93
+[2m2026-10-20T03:05:43.553241Z[0m [32m INFO[0m [2mdinfer_kimik3::service[0m[2m:[0m kimik3 model loaded（权重 + 激活 + KV 合计；激活估算 = max_tokens × hidden × bf16 × ~16 份） [3mrank[0m[2m=[0m1 [3mn_layers[0m[2m=[0m5 [3msecs
+[2m2026-10-20T03:05:43.872306Z[0m [32m INFO[0m [2mdinfer_kimik3::service[0m[2m:[0m kimik3 model loaded（权重 + 激活 + KV 合计；激活估算 = max_tokens × hidden × bf16 × ~16 份） [3mrank[0m[2m=[0m0 [3mn_layers[0m[2m=[0m5 [3msecs
+[2m2026-10-20T03:05:45.299163Z[0m [32m INFO[0m [2mdinfer_kimik3::executor[0m[2m:[0m kimik3 tp: NCCL comm ready [3mrank[0m[2m=[0m0 [3mworld[0m[2m=[0m2
+[2m2026-10-20T03:05:45.299167Z[0m [32m INFO[0m [2mdinfer_kimik3::executor[0m[2m:[0m kimik3 tp: NCCL comm ready [3mrank[0m[2m=[0m1 [3mworld[0m[2m=[0m2
+[2m2026-10-20T03:05:45.299820Z[0m [32m INFO[0m [2mdinfer_kimik3::service[0m[2m:[0m kimik3 eos [3meos[0m[2m=[0m[163586] [3meos_name[0m[2m=[0m["<|end_of_msg|>"]
+[2m2026-10-20T03:05:45.299941Z[0m [32m INFO[0m [2mdinfer_kimik3::service[0m[2m:[0m kimik3: TP/EP lockstep executor（rank 0 = engine 线程） [3mtp[0m[2m=[0m2
+[2m2026-10-20T03:05:45.300144Z[0m [32m INFO[0m [2mdinfer_kimik3::service[0m[2m:[0m kimik3 engine started [3mmodel[0m[2m=[0mkimi-k3 [3mmax_model_len[0m[2m=[0m4096 [3mnum_blocks[0m[2m=[0m4097 [3mkv_tokens[0m[2m=[0m65552 [3mnum_slots[0m
+[2m2026-10-20T03:05:45.300152Z[0m [32m INFO[0m [2mdinfer_kimik3::service[0m[2m:[0m startup timing [3mmodel_load_ms[0m[2m=[0m14279 [3mtotal_ms[0m[2m=[0m14280
+
+==> /v1/models
+['kimi-k3']
+
+==> 流式 chat 一条（内容乱是预期）
+chunks=66 finish=length reasoning_chars=256 content_chars=0 err=None
+reasoning[:120]= ' Ring赶集 Capitol Sullivanacja去向iates swell本身就是一个 шы是否与瘦了自贸ARN mental也罢 ey腔眼神phones serial禹(xs做朋友 mk136奥古ajaan(DEFAULT_in '
+content[:120]= ''
+
+==> /metrics
+metrics_lines=162
+
+==> bench c1 ×8（p128 o128，只记录）
+== dinfer http://127.0.0.1:8014 model=kimi-k3 concurrency=1 requests=8 (8 ok, 0 failed) in 11.54s
+   throughput: 0.69 req/s   88.7 output tok/s   258.1 total tok/s
+   TTFT     mean   217.47  p50   217.53  p90   219.48  p99   220.67  max   220.67  (ms)
+   TPOT     mean     9.65  p50     9.31  p90     9.34  p99    12.29  max    12.29  (ms)
+
+==> bench c8 ×16（混批 / 槽归还）
+== dinfer http://127.0.0.1:8014 model=kimi-k3 concurrency=8 requests=16 (16 ok, 0 failed) in 8.86s
+   throughput: 1.81 req/s   231.1 output tok/s   672.8 total tok/s
+   TTFT     mean  1233.86  p50  1370.94  p90  1385.27  p99  1385.33  max  1385.33  (ms)
+   TPOT     mean    25.16  p50    24.09  p90    33.01  p99    33.05  max    33.05  (ms)
+
+==> 日志检查
+2, 50082 MiB
+3, 50082 MiB
+
+smoke_rc=0
