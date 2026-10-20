@@ -22,3 +22,15 @@
 - c32 ttft_p50_ms dinfer：n=32（脚本 max(c×4,16)）
 - c32 out_tok_per_s dinfer：n=32（脚本 max(c×4,16)）
 - c32 completed dinfer：n=32（脚本 max(c×4,16)）
+
+## probe_c6_tp8_2（2026-10-20，B300）
+
+### c6_closed_loop（ms）
+
+| x | completed dinfer | out_tok_per_s dinfer | out_tok_per_s vllm | tpot_p50_ms dinfer | tpot_p50_ms vllm | ttft_p50_ms dinfer | ttft_p50_ms vllm |
+|---|---|---|---|---|---|---|---|
+| c1 | 16 | 5.50 | 98.73 | 169.13 | 8.70 | 1810.27 | 192.59 |
+| c8 | 32 | 23.12 | 502.98 | 263.28 | 13.09 | 10881.14 | 368.42 |
+| c32 | 128 | 40.62 | 1432.39 | 623.74 | 19.15 | 21732.56 | 420.56 |
+
+- c1 tpot_p50_ms dinfer：第三轮：ActScratch f3962d7 + thread_local 08fd4ec，预算 2048，graph 关；smoke 三条 greedy 乱文待查
