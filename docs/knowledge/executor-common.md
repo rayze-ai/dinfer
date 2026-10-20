@@ -13,5 +13,11 @@
 - 图捕获体内不得有 H2D / 分配 / 同步 / 跨流等待：graph 会把 host 指针记进去，重放读已释放内存 → `row_gather` 越界（`compute-sanitizer` 直接指到行；`CUDA_LAUNCH_BLOCKING` 只指下一个同步点）。
 - executor 自持非默认流 + `disable_event_tracking`，cuBLASLt 句柄在该流上建（默认流不能 capture）。
 
+## 接入经验（K3 C-4b，2026-10-20）
+- 接 `DecodeGraphs` 前先 `grep -nE 'dtoh|synchronize' ` 整条 forward 路径：捕获体内任何同步 D2H 在 capture 下读到 0，表现是 **host 侧形状断言**（如 `LatentMoe: pairs 0 ≠ t·K`），错误信息完全不提 graph。K3 的 MoE tile 计划在 host 展平、AttnRes host softmax 都是这种 → graph 默认关直到 GPU 侧 tile 计划 + AttnRes 融合。
+- `StateSlotTable` 容量留 1 个"废纸篓"槽给图捕获 / padding 行（qwen35 第 2 轮同做法），活请求的槽不被假 plan 碰。
+- 需要装载前定大小的缓存（K3 MLA latent cache 在 `MlaLayer::load` 分配）不能按剩余显存算块数，用 `max_num_seqs × max_model_len / block_size` 上限。
+- 三个模型的采样流水（温度 / top-k / top-p / 惩罚 / logprobs 上传 + fused sample）仍是三份同文 → 下一个公共件候选 `exec::Sampler`。
+
 ## 下一步（design.md §14.5）
 任务图抽象：模型 crate 声明层结构 → 公共层生成图 → 同一张图可喂 megakernel 或退化成逐 kernel launch。`DecodeGraphs` 的闭包捕获体是它的前身。
