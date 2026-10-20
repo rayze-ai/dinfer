@@ -19,6 +19,7 @@
 | decode GEMM 效率上限 | HBM 72–76%（`gate_up` 58 µs = 356 MB），与 vLLM 同档，不再是差距来源 | — | loop 5G |
 
 - **GDN chunk prefill（r10，B300 实测）**：wy 单 kernel（点积 → 分块三角逆 → u/w 两 GEMM）**8 warp + bf16 中间量 + 16 B 向量装载**，8×1024 532 → 360 µs（fla 三 kernel 合计 334）；ho（串行 chunk 链）**BV 按 `base_blocks·(V/BV)` 能否铺满 `sm × 2` 选 64 / 32**（block 多 64 赢 19%，单长序列 64 输 18%），498 → 308（fla 332）。ho 的 B 操作数 ldmatrix 化、svT bank 冲突都**不动时钟**——ho 是 ILP / 并行度型，不是 smem 型。单长序列（192 block < 148 SM × 2）仍差 fla 15%，要 chunk 级并行的 o kernel（r11）。
+- **形状分叉不翻默认，进 ArchProfile 按形状选档**（r10 第 6–7 轮）：BV=64 在 8×1024 赢 19%、在 1×8192 输 18%，若按"平均"翻默认两头都亏；正确做法是找到分叉的**物理量**（这里是 `base_blocks·(V/BV)` 能否铺满 `sm × 常驻 block 数`）写成 `ArchProfile::xxx_for(arch, 形状…)` 的规则 + 单测两边各一例，kernel 保留两档特化、零数值。分叉量找不到物理解释时才走启动自调优。
 - **寄存器预取（PF=1）的收益不稳**：bf16 中间量后 B300 1×8192 从退 → 赢 25%，wy 改 16 B 写后又被抹平（L2 命中态变了）。这类"随邻居 kernel 变"的选项不要写死进 ArchProfile 分档，走启动自调优。
 
 ## 在哪张卡上迭代（用户 2026-10-20，r9 教训）
