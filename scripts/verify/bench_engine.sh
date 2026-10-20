@@ -52,6 +52,11 @@ for part in sys.argv[1].split(","):
 print("\n".join(map(str,sorted(o))))' "$1" 2>/dev/null | sort; }
 overlap() { comm -12 <(expand "$1") <(expand "$2") | tr '\n' ' '; }
 CPUS_D=$(cpus_of_port "$A"); CPUS_V="?"; [ -n "$B" ] && CPUS_V=$(cpus_of_port "$B")
+# vLLM 跑在容器里时端口的 socket 属主在 host 看不到 → 退回按进程名找（EngineCore / vllm serve），读其 Cpus_allowed_list
+if [ "$CPUS_V" = "?" ] && [ -n "$B" ]; then
+  vp=$(pgrep -f "EngineCore|vllm serve|vllm.entrypoints" 2>/dev/null | head -1)
+  [ -n "$vp" ] && CPUS_V="$(grep -E '^Cpus_allowed_list' /proc/$vp/status 2>/dev/null | awk '{print $2}')(容器 pid $vp)"
+fi
 OV=""; for c in "$CPUS_D" "$CPUS_V"; do if [ "$c" != "?" ] && [ -n "$(overlap "$c" "$BENCH_CPUS")" ]; then OV="⚠ 压测核与服务核重叠：$(overlap "$c" "$BENCH_CPUS")"; fi; done
 
 MD="$OUT/summary.md"
