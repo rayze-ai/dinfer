@@ -899,10 +899,15 @@ __global__ void __launch_bounds__(kHoWarps * 32) ho_mma_kernel(
       for (int ks = 0; ks < KSTEP_K; ++ks) {
         uint32_t a[4];
         ldsm_x4(a, a_base + (lane & 15) * KS + ks * 16 + (lane >> 4) * 8);
+        // r10 第 5 轮：B 操作数 h16 [v][k] 用 ldmatrix.x4 一次取两列 tile 的 (k0, k0+8) 四片，替代 4 条 lds_u32
+        //（B300 ncu：ho smem 管线 77%）。lane 0-7/8-15 → tile n 的 k 低/高半，16-23/24-31 → tile n+1。
+        static_assert(NT_V % 2 == 0, "ldsm_x4 一次两列 tile");
 #pragma unroll
-        for (int n = 0; n < NT_V; ++n) {
-          const bf16* hb = sh16 + (n * 8 + g) * KS + ks * 16 + 2 * t4;
-          mma16816(wacc[n], a, lds_u32(hb), lds_u32(hb + 8));
+        for (int n = 0; n < NT_V; n += 2) {
+          uint32_t b[4];
+          ldsm_x4(b, sh16 + ((n + (lane >> 4)) * 8 + (lane & 7)) * KS + ks * 16 + ((lane >> 3) & 1) * 8);
+          mma16816(wacc[n], a, b[0], b[1]);
+          mma16816(wacc[n + 1], a, b[2], b[3]);
         }
       }
       const int i0 = warp * 16 + g, i1 = i0 + 8;
@@ -939,10 +944,15 @@ __global__ void __launch_bounds__(kHoWarps * 32) ho_mma_kernel(
       for (int ks = 0; ks < KSTEP_K; ++ks) {
         uint32_t a[4];
         ldsm_x4(a, a_base + (lane & 15) * KS + ks * 16 + (lane >> 4) * 8);
+        // r10 第 5 轮：B 操作数 h16 [v][k] 用 ldmatrix.x4 一次取两列 tile 的 (k0, k0+8) 四片，替代 4 条 lds_u32
+        //（B300 ncu：ho smem 管线 77%）。lane 0-7/8-15 → tile n 的 k 低/高半，16-23/24-31 → tile n+1。
+        static_assert(NT_V % 2 == 0, "ldsm_x4 一次两列 tile");
 #pragma unroll
-        for (int n = 0; n < NT_V; ++n) {
-          const bf16* hb = sh16 + (n * 8 + g) * KS + ks * 16 + 2 * t4;
-          mma16816(oacc[n], a, lds_u32(hb), lds_u32(hb + 8));
+        for (int n = 0; n < NT_V; n += 2) {
+          uint32_t b[4];
+          ldsm_x4(b, sh16 + ((n + (lane >> 4)) * 8 + (lane & 7)) * KS + ks * 16 + ((lane >> 3) & 1) * 8);
+          mma16816(oacc[n], a, b[0], b[1]);
+          mma16816(oacc[n + 1], a, b[2], b[3]);
         }
       }
       const int i0 = warp * 16 + g, i1 = i0 + 8;
@@ -1174,10 +1184,15 @@ __global__ void __launch_bounds__(kHoWarps * 32) ho_hpass_kernel(
       for (int ks = 0; ks < KSTEP_K; ++ks) {
         uint32_t a[4];
         ldsm_x4(a, a_base + (lane & 15) * KS + ks * 16 + (lane >> 4) * 8);
+        // r10 第 5 轮：B 操作数 h16 [v][k] 用 ldmatrix.x4 一次取两列 tile 的 (k0, k0+8) 四片，替代 4 条 lds_u32
+        //（B300 ncu：ho smem 管线 77%）。lane 0-7/8-15 → tile n 的 k 低/高半，16-23/24-31 → tile n+1。
+        static_assert(NT_V % 2 == 0, "ldsm_x4 一次两列 tile");
 #pragma unroll
-        for (int n = 0; n < NT_V; ++n) {
-          const bf16* hb = sh16 + (n * 8 + g) * KS + ks * 16 + 2 * t4;
-          mma16816(wacc[n], a, lds_u32(hb), lds_u32(hb + 8));
+        for (int n = 0; n < NT_V; n += 2) {
+          uint32_t b[4];
+          ldsm_x4(b, sh16 + ((n + (lane >> 4)) * 8 + (lane & 7)) * KS + ks * 16 + ((lane >> 3) & 1) * 8);
+          mma16816(wacc[n], a, b[0], b[1]);
+          mma16816(wacc[n + 1], a, b[2], b[3]);
         }
       }
       const int i0 = warp * 16 + g, i1 = i0 + 8;
