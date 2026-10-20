@@ -55,6 +55,8 @@ pub struct ServeOptions {
     pub enable_prefix_caching: bool,
     /// decode 行不占 token 预算（见 SchedulerConfig）。默认开。
     pub decode_exempt_from_budget: bool,
+    /// 单条 prefill 每步最多 token（0 = 不限）；vLLM `long_prefill_token_threshold`
+    pub long_prefill_token_threshold: u32,
     /// KV host tier 容量（GiB pinned 内存）；0 = 关。
     pub kv_host_gib: f64,
     /// PD 分离角色（design §10.3）：single / prefill / decode。
@@ -117,6 +119,7 @@ impl Default for ServeOptions {
             enable_chunked_prefill: true,
             enable_prefix_caching: true,
             decode_exempt_from_budget: true,
+            long_prefill_token_threshold: 0,
             kv_host_gib: 0.0,
             role: PdRoleOpt::Single,
             kv_port: 0,
@@ -387,7 +390,7 @@ impl Qwen3Service {
                 max_num_seqs: opt.max_num_seqs,
                 max_num_batched_tokens: opt.max_num_batched_tokens,
                 enable_chunked_prefill: opt.enable_chunked_prefill,
-                long_prefill_token_threshold: 0,
+                long_prefill_token_threshold: opt.long_prefill_token_threshold,
                 decode_exempt_from_budget: opt.decode_exempt_from_budget,
             },
             CacheConfig {

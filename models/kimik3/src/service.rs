@@ -44,6 +44,8 @@ pub struct ServeOptions {
     pub enable_chunked_prefill: bool,
     pub enable_prefix_caching: bool,
     pub decode_exempt_from_budget: bool,
+    /// 单条 prefill 每步最多 token（0 = 不限）；vLLM `long_prefill_token_threshold`
+    pub long_prefill_token_threshold: u32,
     pub device: usize,
     pub enable_cuda_graph: bool,
     /// 只装前 N 层（None = `KIMIK3_LAYERS` 环境变量，再无 = 全部）。**冒烟用**。
@@ -68,6 +70,7 @@ impl Default for ServeOptions {
             enable_chunked_prefill: true,
             enable_prefix_caching: false,
             decode_exempt_from_budget: true,
+            long_prefill_token_threshold: 0,
             device: 0,
             enable_cuda_graph: true,
             layers: None,
@@ -228,7 +231,7 @@ impl KimiK3Service {
                 max_num_seqs: opt.max_num_seqs,
                 max_num_batched_tokens: opt.max_num_batched_tokens,
                 enable_chunked_prefill: opt.enable_chunked_prefill,
-                long_prefill_token_threshold: 0,
+                long_prefill_token_threshold: opt.long_prefill_token_threshold,
                 decode_exempt_from_budget: opt.decode_exempt_from_budget,
             },
             CacheConfig {
