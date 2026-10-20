@@ -363,3 +363,18 @@
 - 6019 ttft_p50_ms vllm：vLLM 容器 :8013 同时段
 - 1k-6k slope_us_per_token dinfer：池开切步；8n 池关 47.5
 - 1k-6k slope_us_per_token vllm：三点拟合，固定 40.6 ms
+
+## probe_prefill_5（2026-10-20，B300）
+
+### ttft_len（ms）
+
+| x | engine_steps_per_request dinfer | ttft_min_ms dinfer | ttft_p50_ms dinfer |
+|---|---|---|---|
+| 3009 | 1 |  | 142.5 |
+| 6019 | 1 | 284.7 | 291.8 |
+
+- 3009 ttft_p50_ms dinfer：r8b 单发 1 次（池开 119 槽）
+- 6019 ttft_p50_ms dinfer：r8b 5 次中位（284.7 289.6 291.8 292.3 291.8；池开 119 槽）
+- 6019 ttft_min_ms dinfer：r8b
+- 3009 engine_steps_per_request dinfer：r8b /metrics engine_steps_total 差值（r8 池开为 3）
+- 6019 engine_steps_per_request dinfer：r8b /metrics engine_steps_total 差值（r8 池开为 6）

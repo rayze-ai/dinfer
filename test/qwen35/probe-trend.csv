@@ -1182,3 +1182,8 @@ probe_prefill_4,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,vllm,3009,138.6,ms,v
 probe_prefill_4,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,vllm,6019,260.0,ms,vLLM 容器 :8013 同时段
 probe_prefill_4,2026-10-20,B300,qwen35,ttft_len,slope_us_per_token,dinfer,1k-6k,57.9,us/token,池开切步；8n 池关 47.5
 probe_prefill_4,2026-10-20,B300,qwen35,ttft_len,slope_us_per_token,vllm,1k-6k,35.8,us/token,三点拟合，固定 40.6 ms
+probe_prefill_5,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,dinfer,3009,142.5,ms,r8b 单发 1 次（池开 119 槽）
+probe_prefill_5,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,dinfer,6019,291.8,ms,r8b 5 次中位（284.7 289.6 291.8 292.3 291.8；池开 119 槽）
+probe_prefill_5,2026-10-20,B300,qwen35,ttft_len,ttft_min_ms,dinfer,6019,284.7,ms,r8b
+probe_prefill_5,2026-10-20,B300,qwen35,ttft_len,engine_steps_per_request,dinfer,3009,1,steps,r8b /metrics engine_steps_total 差值（r8 池开为 3）
+probe_prefill_5,2026-10-20,B300,qwen35,ttft_len,engine_steps_per_request,dinfer,6019,1,steps,r8b /metrics engine_steps_total 差值（r8 池开为 6）
