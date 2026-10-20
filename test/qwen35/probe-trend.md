@@ -21,6 +21,24 @@
 - 1x4096 chain_us dinfer：r10 第 1 轮：aq/u/w/kg f32→bf16，ho uint4 直载；B300-50 GPU 7 target_r10；默认路径（ArchProfile）
 - 1x8192 chain_us dinfer：r10 第 1 轮：aq/u/w/kg f32→bf16，ho uint4 直载；B300-50 GPU 7 target_r10；默认路径（ArchProfile）
 
+## probe_gdn_r10_2（2026-10-20，B300）
+
+### gdn_scale（us）
+
+| x | chain_us dinfer | conv_rows0_us dinfer | conv_rows128_us dinfer | conv_rows16_us dinfer | conv_rows256_us dinfer | conv_rows32_us dinfer | conv_rows64_us dinfer | conv_rows8_us dinfer | ho_bv16_us dinfer | ho_bv16pf_us dinfer | ho_bv16pfsp_us dinfer | ho_bv16sp_us dinfer | ho_bv32_us dinfer | ho_bv32pf_us dinfer | ho_bv32pfsp_us dinfer | ho_bv32sp_us dinfer | ho_legacy_us dinfer | prep_us dinfer | wy_legacy_us dinfer | wy_serial_us dinfer | wy_us dinfer |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1x1024 | 178 | 488 | 115 | 38 | 218 | 41 | 62 | 37 | 70 | 78 | 89 | 109 | 65 | 66 | 114 | 100 | 790 | 18 | 421 | 111 | 76 |
+| 8x1024 | 967 | 811 | 310 | 220 | 320 | 221 | 248 | 249 | 541 | 544 | 624 | 723 | 410 | 378 | 634 | 543 | 5020 | 82 | 2931 | 657 | 505 |
+| 32x128 | 535 | 218 | 172 | 128 | 301 | 137 | 169 | 137 | 317 | 325 | 346 | 386 | 230 | 221 | 343 | 302 | 2510 | 43 | 1486 | 359 | 272 |
+| 1x4096 | 576 | 3067 | 162 | 122 | 296 | 133 | 160 | 131 | 320 | 390 | 351 | 440 | 352 | 264 | 459 | 396 | 3303 | 42 | 1488 | 359 | 272 |
+| 1x8192 | 1103 | 6160 | 307 | 220 | 314 | 221 | 245 | 249 | 633 | 775 | 684 | 866 | 690 | 520 | 900 | 778 | 6626 | 82 | 2918 | 657 | 505 |
+
+- 1x1024 chain_us dinfer：r10 第 2 轮：ArchProfile Sm100 开 ho 寄存器预取（默认路径 = bv32pf）；B300-50 GPU 7
+- 8x1024 chain_us dinfer：r10 第 2 轮：ArchProfile Sm100 开 ho 寄存器预取（默认路径 = bv32pf）；B300-50 GPU 7
+- 32x128 chain_us dinfer：r10 第 2 轮：ArchProfile Sm100 开 ho 寄存器预取（默认路径 = bv32pf）；B300-50 GPU 7
+- 1x4096 chain_us dinfer：r10 第 2 轮：ArchProfile Sm100 开 ho 寄存器预取（默认路径 = bv32pf）；B300-50 GPU 7
+- 1x8192 chain_us dinfer：r10 第 2 轮：ArchProfile Sm100 开 ho 寄存器预取（默认路径 = bv32pf）；B300-50 GPU 7
+
 ## probe_gdn_r9_0（2026-10-20，3090）
 
 ### gdn_scale（us）
