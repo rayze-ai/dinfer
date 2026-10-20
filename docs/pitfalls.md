@@ -835,3 +835,9 @@
 - **现象**：`sudo ncu -k regex:gqa_fa --launch-skip 16 --launch-count 1 … dinfer serve` 装到 layer 24 报 `CUDA_ERROR_OUT_OF_MEMORY`，GPU 本来空（288 GB）。
 - **根因**：ncu 为 kernel replay 维护内存快照 / 影子分配，`-k` 过滤只决定哪些 kernel 被**采**，被 ncu 接管的进程所有 cudaMalloc 都带额外开销；52 GB 权重 + 17 GB 快照池 + ncu 影子超过显存。
 - **解法**：ncu 只包**微基准**（`gdn_parity`/`gqa_fa_bench` 这类几百 MB 的 `cargo test --ignored`），不包 serve；serve 级用 nsys（`q35_nsys_prefill.sh` / `q35_nsys_decode.sh`）看 kernel 时间分布，再用微基准复现同形状给 ncu。另：`sudo -n ncu` 无 PATH，用绝对路径 `/usr/local/cuda-13.1/bin/ncu`。
+
+## `bench_compare.sh` 用 `./target/release/bench` + 脚本内 `./target/release/dinfer`：远端 `CARGO_TARGET_DIR` 一换，测的就是旧二进制（2026-10-21，B300 合并门禁）
+
+- **现象**：r11a 合并后跑四组门禁与 6 K TTFT，数字与合并前**一字不差**（103 / 743 / 2257 / 578、284.3 vs 284.9），而 r11a 微基准明明 6 K 单层 2040 → 1558 µs、16 层应省 ~7.7 ms。查 `ls --time-style` 才发现实际跑的 `dinfer` 是 18:34 的旧构建，新编译的躺在 `$CARGO_TARGET_DIR/release/dinfer`（22:57）。
+- **根因**：B300 上各线用 `CARGO_TARGET_DIR=/data/yaochen/infer/target_*` 分目录构建，但 `scripts/verify/bench_compare.sh` 里 `BENCH=./target/release/bench` 是相对仓目录写死的；服务端二进制也常被写成 `./target/release/dinfer`。仓目录下的 `target/` 是别人早先的构建，`ls` 看不出来，数字看起来"完全合理"。
+- **解法 / 避免**：① 起服务与压测端一律用**绝对** `$CARGO_TARGET_DIR/release/{dinfer,bench}`；② 启动脚本里加前置断言 `[ "$BIN" -nt crates/kernels/cuda/<改过的文件> ] || exit 1`，并把 `bin=… <时间> src=… <时间>` 打进日志；③ 判据：本轮改动在微基准上有可量化收益，端到端却 0 变化 → **先怀疑跑错了二进制**，再怀疑归因。
