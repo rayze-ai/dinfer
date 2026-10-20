@@ -53,7 +53,7 @@ th:first-child,td:first-child,td.change,th.change,td.l,th.l{text-align:left}
 <section class="page" id="page-other" hidden><div class="base" id="base-other"></div><div class="grid" id="grid-other"></div><div class="card" style="margin-top:14px"><div id="table-other"></div></div></section>
 
 <script>
-const KNOWN_GPUS=["B300"], DEFAULT_GPU="B300", MODEL="qwen35";
+const KNOWN_GPUS=["B300", "3090"], DEFAULT_GPU="B300", MODEL="qwen35";
 const GROUPS=["c1","c8","c32","c8-long"], COLORS=["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd","#8c564b"];
 const CATS=["pd","tp","dp","other"];
 const HINT={single:"基线 = vLLM v0.31.0 单卡（同机同配置）。比值 = dinfer out tok/s ÷ vLLM；虚线 1.0 = 追平。TTFT/TPOT 越低越好。只含 benchN 主线轮次。",

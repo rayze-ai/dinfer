@@ -47,6 +47,54 @@
   "kind": "single"
  },
  {
+  "dir": "test/qwen35/2026-10-19/bench_b300_vllm1",
+  "label": "bench_b300_vllm1",
+  "date": "2026-10-19",
+  "groups": {
+   "c1_p128_o128": {
+    "tps": NaN,
+    "ttft": NaN,
+    "tpot": NaN,
+    "vllm_tps": 95.11136287658543,
+    "vllm_ttft": 44.778286,
+    "vllm_tpot": 10.242102362204726,
+    "ratio": NaN
+   },
+   "c8_p128_o128": {
+    "tps": NaN,
+    "ttft": NaN,
+    "tpot": NaN,
+    "vllm_tps": 674.5713028553542,
+    "vllm_ttft": 98.818698,
+    "vllm_tpot": 11.15125705511811,
+    "ratio": NaN
+   },
+   "c32_p128_o128": {
+    "tps": NaN,
+    "ttft": NaN,
+    "tpot": NaN,
+    "vllm_tps": 2148.2348871429517,
+    "vllm_ttft": 263.48454100000004,
+    "vllm_tpot": 12.871443984251968,
+    "ratio": NaN
+   },
+   "c8_p1024_o128": {
+    "tps": NaN,
+    "ttft": NaN,
+    "tpot": NaN,
+    "vllm_tps": 556.7740216096797,
+    "vllm_ttft": 412.57768599999997,
+    "vllm_tpot": 11.198605653543307,
+    "ratio": NaN
+   }
+  },
+  "gpu": "B300",
+  "change": "Qwen3.5-27B bf16 vLLM nightly 单卡基线（B300-50 GPU 7，/data/models/Qwen/Qwen3.8-27B，dinfer 侧未实现）",
+  "baseline_only": true,
+  "has_vllm": true,
+  "kind": "single"
+ },
+ {
   "dir": "test/qwen35/2026-10-19/bench_b300_2",
   "label": "bench_b300_2",
   "date": "2026-10-19",
