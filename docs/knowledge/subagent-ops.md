@@ -42,3 +42,10 @@
 - **判断**：`timeout N bash chain.sh`（serve → smoke → 多组 bench → stop）的 N 要按"装载 + 全部组"的实测上界给，或者**不包 serve**（serve 单独起、bench 每组各自 `timeout`）。C-6 第三轮 1800 s 把 25 min 装载 + 四组 bench 的链截在第四组（c8-long，一组 10 min+），serve 被连带杀掉，只能重装 25 min 单独补。
 - **怎么用**：每组 bench 落盘后立刻可用（json 独立），链的超时只保护单组；装载慢的模型（K3 93 层 tp8 ≈ 1500 s）把 serve 放 tmux 常驻、链只管 bench。
 - **证据**：`docs/loops/k3-serve.md` 3j（"c8-long 链上 1800 s 超时未落，单独补跑中"）；B300 `bootstrap/k3_c6_tp8_2/serve.log` 止于正常 step mix、无错误。
+
+## 远端 `test/` 下有本机没有的目录（尤其容器 root 写的）会让 push 报错退出（2026-10-20 b17 链）
+
+- **判断**：`remote_b300.sh push` 带 `--delete`，远端 `test/` 下任何本机没有的目录都会被尝试删除；容器以 root 写的（参考 .npy）删不掉 → rsync 报 Permission denied 并以非 0 退出，`push && 后续` 的链就断在这里，但代码其实已传到。
+- **为什么**：K3 24 层参考由容器生成到远端 `test/kimik3/2026-10-20/model24/`（root 属主），本机没有 → 下一次 push 想删它失败 → bench_b300_17 链没编译就退了，白等一轮装载。
+- **怎么用**：参考 / 产物生成到远端后**立刻 pull 回本机**（决定是否进仓库另说，至少本机要有同名目录），push 才幂等；链式脚本里 push 后不要用 `&&` 串关键步骤，或 `push || true` 再检查代码是否到位。
+- **证据**：`docs/progress.md` 2026-10-20 b17 两次失败条目。
