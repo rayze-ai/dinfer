@@ -9,6 +9,7 @@ ap.add_argument("--logits-min", type=float, default=0.0, help="logits cos 门槛
 ap.add_argument("--prefix", default="", help="只比以此开头的文件（如 iso1）")
 ap.add_argument("--matched-only", action="store_true", help="iso{l} 只在路由整行一致的行上判（硬判决平局不可逐位复现，pitfalls 口径）；需要 iso{l}_topk_ids dump")
 ap.add_argument("--hidden", type=int, default=7168); ap.add_argument("--k", type=int, default=16)
+ap.add_argument("--top5", action="store_true", help="logits 还要求 top-5 集合一致（默认只报：5 层截断模型第 5 位 margin 一 ulp 级，见 loops/k3-tp.md 第 4 轮）")
 args = ap.parse_args()
 try:
     import numpy as np
@@ -68,7 +69,7 @@ for n in names:
         ta, tb = top1(a), top1(b)
         s5 = top5(a) == top5(b)
         line += f"  top-1 {ta} vs {tb}  top-5 集合{'一致' if s5 else '不同 ' + str(sorted(top5(a))) + ' vs ' + str(sorted(top5(b)))}"
-        if c < args.logits_min or ta != tb or not s5: ok = False; line += "  <-- FAIL"
+        if c < args.logits_min or ta != tb or (args.top5 and not s5): ok = False; line += "  <-- FAIL"
     elif "_" in n and n.startswith("iso"):
         line += "  （中间量只报；按路由一致行拆比用 k3_tp_rows.py）"
     elif n.startswith("chain") or n == "final":

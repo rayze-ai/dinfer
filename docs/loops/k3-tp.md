@@ -46,7 +46,7 @@
   - **`K3_TP=2` model_parity exit 0**（TP 口径门槛：隔离对 HF cos ≥ 0.999 不变；链式 logits / decode 对 HF ≥ 0.998；decode-vs-prefill ≥ 0.998）。
   - **按主会话口径拆行（tp2 与单卡各自 topk_ids 完全相同的行）**：`expert_sum` 一致行 cos **0.999993 / 0.999992 / 0.999991 / 0.999989**，max_abs 4.9e-4（bf16 1 ulp，值域 0.146）→ **分片 grouped GEMM + acc all-reduce 正确**；不一致行 5 / 2 / 1 / 2（/31），全是 top-16 末位 margin ≤ 4e-3 的平局翻转（`rows_*.txt` 列了每行两边各选的专家与最小权重）。
   - iso 各层（路由一致行）tp2 vs 单卡 **0.999992–0.999995**（≥ 0.9999 ✓）；iso0（dense，纯 TP）0.999993。
-  - 对 HF logits **top-1 一致**（30530，单卡 / tp2 / decode 全同）；top-5 前 4 同，第 5 位 7.34 vs 7.38 级平局（单卡 49880、tp2 127420 / decode 66326）——单卡自身两次也在此位波动（见下一条 single vs single3）。
+  - 对 HF logits **top-1 一致**（30530，单卡 / tp2 / decode 全同）；**top-5 前 4 同，第 5 位不同**：HF / 单卡 49880（7.375 / 7.312），tp2 prefill 127420（7.344）、tp2 decode 66326（7.375），margin ≤ 0.06（bf16 logits 一 ulp 0.03）。**更正**：单卡自身两次（single vs single3）top-5 集合一致（logits cos 0.99997），所以第 5 位差异是 tp2 特有的——来源仍是上游平局行翻转（5 层截断模型 logits 本身无语义，第 5 位分差 0.03 在噪声里，但按主会话"top-5 集合一致"口径算**未满足**，如实记）。
   - 结论：**TP + EP 机制对拍通过**；tp2 与单卡的全部差异 = bf16 一次 all-reduce 舍入 → MoE 路由平局翻转（硬判决不可逐位复现，pitfalls 既有口径）。
   - 未做 / TODO：① `moe_scatter_add_f32` 原子加顺序使单卡自身不逐位（single vs single3 chain4 0.99918），改按行归约两边都受益；② EP v1 两次 all-reduce（acc f32 + shared bf16）可合并成一次；③ all-to-all 分发（大 batch 时省通信字节）；④ lm_head 列切 + all-gather；⑤ `TP_REDUCE_F32` 实验证明无收益，开关可删。
-- **停止条件判定**（按主会话 11:16 口径）：iso 各层 ≥ 0.9999 ✓；路由一致行 expert_sum ≤ 1 ulp ✓；logits top-1 一致 ✓；top-5 集合 **前 4 一致、第 5 位平局**（单卡自身两次亦然，作口径注记而非失败）；链式只报。**C-5 完成。**
+- **停止条件判定**（按主会话 11:16 口径）：iso 各层（路由一致行）≥ 0.9999 ✓；路由一致行 expert_sum ≤ 1 ulp ✓；logits top-1 一致 ✓；**top-5 集合：前 4 一致、第 5 位不同（margin 0.03–0.06，一 ulp 级）✗**；链式只报。机制层面（分片 GEMM / all-reduce / EP 专家段）已证明正确；top-5 第 5 位是 5 层截断模型上的平局，建议 C-6 全模型 / 真文本生成时再看 top-5（`k3_tp_compare.py --top5` 开判）。**C-5 机制完成，top-5 口径留 C-6。**
