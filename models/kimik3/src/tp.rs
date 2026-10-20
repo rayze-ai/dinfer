@@ -53,6 +53,11 @@ impl TpExecutor {
                         }
                         while let Ok(Msg::Step(mut st)) = rx.recv() {
                             let r = ex.forward_sample(&st.plan, &mut st.generated, &mut st.drafts);
+                            if let Err(e) = &r {
+                                // 必须当场打：rank 0 可能正卡在本步某层的 all-reduce 等本 rank，永远走不到 join 读这个 Err
+                                //（C-6 2026-10-20：3 个 rank 出错静默退出，其余 5 个在 NCCL 里自旋，日志空白）。
+                                tracing::error!(rank = i + 1, err = format!("{e:#}"), "kimik3 tp worker: 本步 forward 失败，其它 rank 会在集合通信处等死");
+                            }
                             if dtx.send(r).is_err() {
                                 break;
                             }
@@ -100,6 +105,9 @@ impl ModelExecutor for TpExecutor {
     fn forward_sample(&mut self, plan: &BatchPlan, generated: &mut Vec<Vec<u32>>, drafts: &mut Vec<Vec<u32>>) -> Result<()> {
         self.broadcast(plan, generated, drafts)?;
         let r0 = self.rank0.forward_sample(plan, generated, drafts);
+        if let Err(e) = &r0 {
+            tracing::error!(rank = 0, err = format!("{e:#}"), "kimik3 tp rank 0: 本步 forward 失败");
+        }
         self.join()?;
         r0
     }
