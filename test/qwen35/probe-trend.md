@@ -396,3 +396,20 @@
 - 6019 ttft_min_ms dinfer：r8b
 - 3009 engine_steps_per_request dinfer：r8b /metrics engine_steps_total 差值（r8 池开为 3）
 - 6019 engine_steps_per_request dinfer：r8b /metrics engine_steps_total 差值（r8 池开为 6）
+
+## probe_prefill_6（2026-10-20，B300）
+
+### ttft_len（ms）
+
+| x | slope_us_per_token dinfer | slope_us_per_token vllm | ttft_p50_ms dinfer | ttft_p50_ms vllm |
+|---|---|---|---|---|
+| 510 |  |  | 27.5 |  |
+| 1021 |  |  | 50.3 | 83.4 |
+| 2029 |  |  | 94.5 |  |
+| 3009 |  |  | 138.1 | 139.0 |
+| 4059 |  |  | 188.5 |  |
+| 6019 |  |  | 283.9 | 260.6 |
+| 1k-6k | 46.4 | 35.9 |  |  |
+
+- 6019 ttft_p50_ms dinfer：合体 cb7ee9a（r8b + r10 r1–4），默认池开，6 K 1 步
+- 1k-6k slope_us_per_token dinfer：r9 前 51.5；8n 池关 47.5；8p 池开切步 57.9

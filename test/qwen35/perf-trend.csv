@@ -215,3 +215,15 @@ bench_b300_17,2026-10-20,第 10 轮：r8 GDN 状态按块缓存（prefix cache �
 bench_b300_17,2026-10-20,第 10 轮：r8 GDN 状态按块缓存（prefix cache 重开）+ r9 GDN chunk 三段（wy 分块逆 / ho 装载重写 / 按卡分档）+ thread_local 修复 + 装载骨架公共件,c8-long,out_tok_per_s,570.154,557.286,1.023,0.8,higher,main,B300,vllm,dinfer,qwen35
 bench_b300_17,2026-10-20,第 10 轮：r8 GDN 状态按块缓存（prefix cache 重开）+ r9 GDN chunk 三段（wy 分块逆 / ho 装载重写 / 按卡分档）+ thread_local 修复 + 装载骨架公共件,c8-long,ttft_p50_ms,434.377,404.037,1.075,4.4,lower,main,B300,vllm,dinfer,qwen35
 bench_b300_17,2026-10-20,第 10 轮：r8 GDN 状态按块缓存（prefix cache 重开）+ r9 GDN chunk 三段（wy 分块逆 / ho 装载重写 / 按卡分档）+ thread_local 修复 + 装载骨架公共件,c8-long,tpot_p50_ms,10.706,11.252,0.952,-0.3,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_18,2026-10-20,第 11 轮：r8b（kernel 沿 chunk 边界写 GDN 快照，调度不切步）+ r10 第 1–4 轮（中间量 bf16 / Sm100 ho 预取 / wy 8 warp / 向量装载）合体,c1,out_tok_per_s,102.181,93.940,1.088,-0.2,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_18,2026-10-20,第 11 轮：r8b（kernel 沿 chunk 边界写 GDN 快照，调度不切步）+ r10 第 1–4 轮（中间量 bf16 / Sm100 ho 预取 / wy 8 warp / 向量装载）合体,c1,ttft_p50_ms,16.619,46.710,0.356,5.4,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_18,2026-10-20,第 11 轮：r8b（kernel 沿 chunk 边界写 GDN 快照，调度不切步）+ r10 第 1–4 轮（中间量 bf16 / Sm100 ho 预取 / wy 8 warp / 向量装载）合体,c1,tpot_p50_ms,9.730,10.361,0.939,-0.3,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_18,2026-10-20,第 11 轮：r8b（kernel 沿 chunk 边界写 GDN 快照，调度不切步）+ r10 第 1–4 轮（中间量 bf16 / Sm100 ho 预取 / wy 8 warp / 向量装载）合体,c8,out_tok_per_s,743.649,672.192,1.106,0.1,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_18,2026-10-20,第 11 轮：r8b（kernel 沿 chunk 边界写 GDN 快照，调度不切步）+ r10 第 1–4 轮（中间量 bf16 / Sm100 ho 预取 / wy 8 warp / 向量装载）合体,c8,ttft_p50_ms,70.404,98.271,0.716,3.3,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_18,2026-10-20,第 11 轮：r8b（kernel 沿 chunk 边界写 GDN 快照，调度不切步）+ r10 第 1–4 轮（中间量 bf16 / Sm100 ho 预取 / wy 8 warp / 向量装载）合体,c8,tpot_p50_ms,10.272,11.203,0.917,-0.1,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_18,2026-10-20,第 11 轮：r8b（kernel 沿 chunk 边界写 GDN 快照，调度不切步）+ r10 第 1–4 轮（中间量 bf16 / Sm100 ho 预取 / wy 8 warp / 向量装载）合体,c32,out_tok_per_s,2250.039,2147.852,1.048,0.4,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_18,2026-10-20,第 11 轮：r8b（kernel 沿 chunk 边界写 GDN 快照，调度不切步）+ r10 第 1–4 轮（中间量 bf16 / Sm100 ho 预取 / wy 8 warp / 向量装载）合体,c32,ttft_p50_ms,160.540,261.511,0.614,33.8,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_18,2026-10-20,第 11 轮：r8b（kernel 沿 chunk 边界写 GDN 快照，调度不切步）+ r10 第 1–4 轮（中间量 bf16 / Sm100 ho 预取 / wy 8 warp / 向量装载）合体,c32,tpot_p50_ms,13.050,12.923,1.010,-4.6,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_18,2026-10-20,第 11 轮：r8b（kernel 沿 chunk 边界写 GDN 快照，调度不切步）+ r10 第 1–4 轮（中间量 bf16 / Sm100 ho 预取 / wy 8 warp / 向量装载）合体,c8-long,out_tok_per_s,577.009,558.225,1.034,1.2,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_18,2026-10-20,第 11 轮：r8b（kernel 沿 chunk 边界写 GDN 快照，调度不切步）+ r10 第 1–4 轮（中间量 bf16 / Sm100 ho 预取 / wy 8 warp / 向量装载）合体,c8-long,ttft_p50_ms,413.259,403.787,1.023,4.9,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_18,2026-10-20,第 11 轮：r8b（kernel 沿 chunk 边界写 GDN 快照，调度不切步）+ r10 第 1–4 轮（中间量 bf16 / Sm100 ho 预取 / wy 8 warp / 向量装载）合体,c8-long,tpot_p50_ms,10.722,11.245,0.954,-0.2,lower,main,B300,vllm,dinfer,qwen35

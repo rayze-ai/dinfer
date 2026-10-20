@@ -1,0 +1,1 @@
+第 11 轮：r8b（kernel 沿 chunk 边界写 GDN 快照，调度不切步）+ r10 第 1–4 轮（中间量 bf16 / Sm100 ho 预取 / wy 8 warp / 向量装载）合体
