@@ -1,0 +1,42 @@
+# Qwen3.5 r11a：全注意力 prefill kernel（`gqa_fa_v5_kernel<PAGED,256,NBUF>`，D=256）在 B300 上提效
+
+> 状态：**进行中（2026-10-20 21:3x 开工）**。起点（engine-gap 9e，B300 GPU 2 nsys）：16 层合计 T=1 K 1.6 ms（101 µs/层）/ 3 K 9.7（506 µs/层）/ 6 K **32.6（2.04 ms/层 = 0.22 PFLOP/s ≈ B300 bf16 10%）**。目标：6 K 单层 ≤ 700 µs（≈30% 峰值，16 层省 ~22 ms），3 K 省 ~5 ms；用户 2026-10-20 "全面超过 vLLM 1.2×"，6 K TTFT 277 → ≤ 217。
+
+## 环境
+
+- **出数：B300-50 GPU 4**（`CUDA_VISIBLE_DEVICES=4`，`CARGO_TARGET_DIR=/data/yaochen/infer/target_r11a`，构建 `taskset -c 64-79`、运行 `taskset -c 48-55`；`source /data/yaochen/infer/env.sh`，`CUDA_ARCHS=103`）。GPU 0/1 常驻、2/3 主会话、5–7 留用，**都不碰**。
+- **3090 本机只跑 parity + 编译**（knowledge/kernel-rules：性能改动在 B300 定去留）。
+- 同步：子代理不 `push`；改动文件 `B300_TAG=50 remote_b300.sh put` 单文件到远端同路径（开工前 9 个相关文件 md5 已核对与本机 dev `f90aaea` 一致）。产物落远端 `bootstrap/r11a/`，本机 `pull` 回 `test/qwen35/2026-10-20/probe_attn_r11a_N/`。
+- 远端一键：`bash /data/yaochen/infer/bootstrap/r11a/r11a_b300.sh <轮> ["ENV=val" …]` → build / `gqa_fa_bench` 默认 + 变体 / ncu（`sudo -n ncu --set full`，抓 T=6019 那一次 launch）。本机 `scripts/dev/r11a_b300.sh` 是它的源。
+- 微基准：`crates/kernels/tests/gqa_fa_bench.rs`（`#[ignore]`，T ∈ {1024, 3009, 6019}，H=24 / Hkv=4 / D=256，单请求 causal，`q_stride = (H+2Hkv)·D` 与模型同）→ `scripts/dev/gqa_bench_to_probe.py` → probe.csv（group `attn_scale`，metric `fa_us` / `tflops`）→ `probe_trend.py --root test/qwen35`。
+- 对手口径：vLLM 同模型 6 K TTFT 260 ms 里 attn 估 ~15 ms（FA3 级 30–40% 峰值）。
+
+## 文件归属
+
+`crates/kernels/cuda/gqa.cu`（v5 kernel 与分发）、`crates/kernels/src/arch.rs` 的 `gqa_*`、`crates/kernels/tests/gqa_fa_bench.rs`、`scripts/dev/{gqa_bench_to_probe.py,r11a_b300.sh}`。对拍沿用 `crates/kernels/tests/ops_parity.rs` 的 `parity_gqa_prefill_qwen35` / `parity_gqa_paged_qwen35`（`scripts/verify/ops_parity.sh`）。**不动 `models/qwen35`、不改 `docs/progress.md`**。
+
+## 候选改法（先 ncu 再定序，不猜）
+
+1. GQA 打包：同一 KV 头的 6 个 q 头合在一个 block 共享 K/V tile（K/V smem 装载 ÷6）。
+2. O 按 D 切两半（两组 warp 各 128 维，softmax 统计量共享 / 或各算一遍 S），让寄存器回到 D=128 档、TILE 回 64、occupancy 回 2 block/SM。
+3. 8 warp（BQ=128）摊 K/V tile 装载与 `__syncthreads`。
+4. causal 对角 tile 的 mask 分支 / 对角 tile 单独处理。
+5. NBUF=2（smem 68 KB）在 B300（227 KB smem）是否真开。
+
+## 硬性规则
+
+- kernel 内不写卡型 / 形状调优数值；tile / warp / NBUF 的选择走 `ArchProfile`（按 cc），环境变量只做覆盖；`#if __CUDA_ARCH__` 禁止在 kernel 体内。
+- 旧 kernel（v5 现结构）保留为回退。
+- 每轮：3090 `ops_parity.sh` gqa 项过（`parity_gqa_prefill_qwen35` / `parity_gqa_paged_qwen35`），B300 GPU 4 `gqa_fa_bench` 三形状进 `probe_attn_r11a_N/probe.csv`，commit 不 push，本页轮次表一行。
+
+## 停止条件（机器可判定）
+
+- B300 `gqa_fa_bench` **T=6019 fa_us ≤ 700**（单层；16 层 ≈ 11 ms）；
+- 3090 + B300 `ops_parity` gqa 项全过（精度门限沿用 `ops_parity_ref.py`）；
+- 迭代上限 8 轮；卡住 2 轮没进展停下回报主会话。
+
+## 轮次
+
+| 轮 | 改动 | B300 GPU 4 `gqa_fa_bench` T=1024 / 3009 / 6019（µs，括号 TFLOP/s） | parity（3090） | ncu 定性 / 结论 |
+|---|---|---|---|---|
+| 0 | 基线（`gqa_fa_v5<false,256,1>`：4 warp × 16 行，TILE 32，Q 在寄存器；dev `f90aaea`）`probe_attn_r11a_0` | **91 (142) / 527 (211) / 1818 (245)**；NBUF=2 变体 99 / 565 / 1917（更慢，1 block/SM） | 沿用 | ncu（T=6019，`--set full`）：**255 reg/thread 且有 spill**（875 KB local）、Block Limit Registers 2 → 理论占用 12.5%（8 warp/SM）、Eligible 0.59 / Issued 0.44 warp/scheduler、No Eligible 56%、**Tensor pipe 45%（最高管线）**、DRAM 0.57% / L2 19% / L2 hit 98%、Mem Pipes 16%。结论：**延迟型**——寄存器爆满限占用 + 每 warp 串行依赖链；**不是带宽**（GQA 打包 K/V ÷6 的方向不成立，K/V 已全在 L2）。微基准 1818 vs serve nsys 2040 µs/层，口径接近，之后以微基准为准 |

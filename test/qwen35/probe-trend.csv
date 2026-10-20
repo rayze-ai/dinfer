@@ -1,4 +1,16 @@
 probe,date,gpu,model,group,metric,side,x,value,unit,note
+probe_attn_r11a_0,2026-10-20,B300,qwen35,attn_scale,fa_us,dinfer,1024,91,us,r11a 第 0 轮基线：gqa_fa_v5<256> TILE 32 NBUF 1；B300-50 GPU 4；ncu 255 reg 有 spill、2 block/SM、tensor pipe 45%、DRAM 0.6%
+probe_attn_r11a_0,2026-10-20,B300,qwen35,attn_scale,tflops,dinfer,1024,142.1,TFLOP/s,
+probe_attn_r11a_0,2026-10-20,B300,qwen35,attn_scale,fa_us,dinfer,3009,527,us,
+probe_attn_r11a_0,2026-10-20,B300,qwen35,attn_scale,tflops,dinfer,3009,211.1,TFLOP/s,
+probe_attn_r11a_0,2026-10-20,B300,qwen35,attn_scale,fa_us,dinfer,6019,1818,us,
+probe_attn_r11a_0,2026-10-20,B300,qwen35,attn_scale,tflops,dinfer,6019,244.9,TFLOP/s,
+probe_attn_r11a_0,2026-10-20,B300,qwen35,attn_scale,fa_nbuf2_us,dinfer,1024,99,us,
+probe_attn_r11a_0,2026-10-20,B300,qwen35,attn_scale,tflops_nbuf2,dinfer,1024,129.8,TFLOP/s,
+probe_attn_r11a_0,2026-10-20,B300,qwen35,attn_scale,fa_nbuf2_us,dinfer,3009,565,us,
+probe_attn_r11a_0,2026-10-20,B300,qwen35,attn_scale,tflops_nbuf2,dinfer,3009,196.8,TFLOP/s,
+probe_attn_r11a_0,2026-10-20,B300,qwen35,attn_scale,fa_nbuf2_us,dinfer,6019,1917,us,
+probe_attn_r11a_0,2026-10-20,B300,qwen35,attn_scale,tflops_nbuf2,dinfer,6019,232.2,TFLOP/s,
 probe_gdn_r10_1,2026-10-20,B300,qwen35,gdn_scale,chain_us,dinfer,1x1024,185,us,r10 第 1 轮：aq/u/w/kg f32→bf16，ho uint4 直载；B300-50 GPU 7 target_r10；默认路径（ArchProfile）
 probe_gdn_r10_1,2026-10-20,B300,qwen35,gdn_scale,prep_us,dinfer,1x1024,18,us,
 probe_gdn_r10_1,2026-10-20,B300,qwen35,gdn_scale,wy_legacy_us,dinfer,1x1024,421,us,

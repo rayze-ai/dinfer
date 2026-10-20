@@ -3,6 +3,18 @@
 > 探针测量（TTFT-长度 / kernel 分解 / 微基准伸缩 / 第三方对照），与 perf-trend（四组闭环）、engine-trend（开环泊松）并列。
 > 数据源 `test/<model>/<日期>/probe_*/probe.csv`；本文件与 `probe-trend.{csv,html}` 由 `scripts/dev/probe_trend.py` 生成。
 
+## probe_attn_r11a_0（2026-10-20，B300）
+
+### attn_scale（us）
+
+| x | fa_nbuf2_us dinfer | fa_us dinfer | tflops dinfer | tflops_nbuf2 dinfer |
+|---|---|---|---|---|
+| 1024 | 99 | 91 | 142.1 | 129.8 |
+| 3009 | 565 | 527 | 211.1 | 196.8 |
+| 6019 | 1917 | 1818 | 244.9 | 232.2 |
+
+- 1024 fa_us dinfer：r11a 第 0 轮基线：gqa_fa_v5<256> TILE 32 NBUF 1；B300-50 GPU 4；ncu 255 reg 有 spill、2 block/SM、tensor pipe 45%、DRAM 0.6%
+
 ## probe_gdn_r10_1（2026-10-20，B300）
 
 ### gdn_scale（us）
