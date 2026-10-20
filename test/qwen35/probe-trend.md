@@ -140,6 +140,24 @@
 - 1x4096 chain_us dinfer：r9 第 6 轮：B300-50 GPU 6 sm_103 首次复测（r5 代码，默认门限还是 3090 的：ho bv16 / conv rows128）；chunk_qwen parity 过，decode_b32 bv0_legacy 失败待查是否既有
 - 1x8192 chain_us dinfer：r9 第 6 轮：B300-50 GPU 6 sm_103 首次复测（r5 代码，默认门限还是 3090 的：ho bv16 / conv rows128）；chunk_qwen parity 过，decode_b32 bv0_legacy 失败待查是否既有
 
+## probe_gdn_r9_7（2026-10-20，B300）
+
+### gdn_scale（us）
+
+| x | chain_us dinfer | conv_rows0_us dinfer | conv_rows128_us dinfer | conv_rows16_us dinfer | conv_rows256_us dinfer | conv_rows32_us dinfer | conv_rows64_us dinfer | conv_rows8_us dinfer | ho_bv16_us dinfer | ho_bv16pf_us dinfer | ho_bv16pfsp_us dinfer | ho_bv16sp_us dinfer | ho_bv32_us dinfer | ho_bv32pf_us dinfer | ho_bv32pfsp_us dinfer | ho_bv32sp_us dinfer | ho_legacy_us dinfer | prep_us dinfer | wy_legacy_us dinfer | wy_serial_us dinfer | wy_us dinfer |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1x1024 | 208 | 486 | 114 | 38 | 217 | 41 | 62 | 37 | 115 | 142 | 132 | 166 | 87 | 115 | 106 | 133 | 851 | 18 | 434 | 136 | 102 |
+| 8x1024 | 1109 | 809 | 310 | 219 | 320 | 222 | 247 | 250 | 694 | 755 | 792 | 984 | 498 | 648 | 672 | 642 | 5092 | 82 | 2957 | 685 | 532 |
+| 32x128 | 593 | 218 | 172 | 127 | 300 | 136 | 166 | 138 | 403 | 418 | 455 | 503 | 265 | 350 | 366 | 348 | 2523 | 43 | 1503 | 371 | 283 |
+| 1x4096 | 660 | 3063 | 162 | 122 | 296 | 132 | 161 | 131 | 459 | 549 | 510 | 640 | 334 | 442 | 405 | 511 | 3385 | 43 | 1503 | 372 | 283 |
+| 1x8192 | 1271 | 6158 | 309 | 219 | 316 | 221 | 247 | 249 | 943 | 1086 | 1001 | 1265 | 659 | 875 | 792 | 1004 | 6926 | 82 | 2956 | 684 | 533 |
+
+- 1x1024 chain_us dinfer：r9 第 7 轮：B300-50 GPU 6，新 ArchProfile 门限（ho bv 恒 32、conv Sm100 8 块/SM → rows16/32）；默认路径数
+- 8x1024 chain_us dinfer：r9 第 7 轮：B300-50 GPU 6，新 ArchProfile 门限（ho bv 恒 32、conv Sm100 8 块/SM → rows16/32）；默认路径数
+- 32x128 chain_us dinfer：r9 第 7 轮：B300-50 GPU 6，新 ArchProfile 门限（ho bv 恒 32、conv Sm100 8 块/SM → rows16/32）；默认路径数
+- 1x4096 chain_us dinfer：r9 第 7 轮：B300-50 GPU 6，新 ArchProfile 门限（ho bv 恒 32、conv Sm100 8 块/SM → rows16/32）；默认路径数
+- 1x8192 chain_us dinfer：r9 第 7 轮：B300-50 GPU 6，新 ArchProfile 门限（ho bv 恒 32、conv Sm100 8 块/SM → rows16/32）；默认路径数
+
 ## probe_prefill_1（2026-10-20，B300）
 
 ### ttft_len（ms）
