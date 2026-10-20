@@ -55,4 +55,5 @@
 - **有效的改法**：① Q 从寄存器搬到 smem（v5 的 255 reg + spill → 244 无 spill），使 TILE 32 → 64，每 tile 固定开销减半（−9%）；② softmax 指数走 SFU `ex2.approx`（−5.7%）。
 - **负结果（别再试）**：K/V 双缓冲（B300 smem 翻倍 → 1 block/SM）；提高占用（v7 warp 对分工 12.5 → 25% 反而慢 9%）；8 warp（三次）；O 重缩放按 alpha 跳过（分支打断 mma 流水）。共性：**占用与访存都不是瓶颈**（DRAM < 1%、L2 hit 98%、4 warp/SM 就到 mma 峰值），瓶颈是 mma.sync 自身的发射率和 QK→softmax→PV 的无重叠串行链。
 - **下一步（未做，需单独立项）**：`gqa_fa_tcgen05_sm100.cu`——tcgen05.mma 走 TMEM，Ampere 式逐 warp mma 换成 warpgroup 级单发射，理论可到 1 PF+ 量级；工程量 = UMMA 描述符 + TMEM 分配 + smem 布局（K/V 需 128 B swizzle），且必须留在 `*_sm100.cu` 分文件里（CLAUDE.md 多卡型规则）。估计 2–3 天，收益 attn 6 K 25 → 10 ms（全 TTFT 6 K 省 ~15 ms，缺口 60 ms 的 1/4）。
-- **未验**：B300 上 `bench_compare` 四组 + 单发 TTFT（主会话跑；预期 6 K TTFT 277 → ~269、3 K −1.7 ms、1 K −0.4 ms）；sm8x 上 v6 未测（默认仍 v5，cfg 3432 在 3090 parity 过但未出性能数）。
+- **端到端验证（主会话 2026-10-21）**：B300 四组门禁 `bench_merge_21b` **104 / 745 / 2271 / 579**（1.10/1.11/1.06/1.04×），与 `bench_b300_20`（103/744/2251/579）持平、无退化。单发 TTFT 1 K / 3 K / 6 K = **49.0 / 139.8 / 281.7 ms**（合并前 284.9），斜率 51.7 → **46.5 µs/token**。**但 6 K 只拿回 3.2 ms，是微基准预示（−7.7 ms）的 42%** → attn 在真实 prefill 步里的份额小于 9e 的静态分解（9e 是 32.6/277 = 12%，其中 16 层 × 2.04 ms），待 `mns` nsys 复分解确认（怀疑：6 K 单发被切成多个 prefill 步 / chunk，每步的 attn tile 更小、v6 的 TILE=64 优势摊不开）。
+- **未验**：sm8x 上 v6（默认仍 v5，cfg 3432 在 3090 parity 过但未出性能数）；4090 门禁（待主会话）。
