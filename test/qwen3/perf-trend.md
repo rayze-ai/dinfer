@@ -125,6 +125,14 @@
 | | | | c32 | vllm | dinfer | 9412 (+17%) | 22.1 (+73%) | 3.19 (+5%) |
 | bench_common1 | 2026-10-20 | executor 公共件抽取（AsyncResultRing / DecodeGraphs / PlanBuffers，行为不变） | c8-long | vllm | vllm（基线） | 1885 | 70.3 | 3.75 |
 | | | | c8-long | vllm | dinfer | 2024 (+7%) | 40.4 (+43%) | 3.63 (+3%) |
+| bench_r7gate | 2026-10-20 | 第 7 轮公共 trait（take_step_phases / phases 字段）回归门禁 | c1 | vllm | vllm（基线） | 446 | 17.5 | 2.12 |
+| | | | c1 | vllm | dinfer | 566 (+27%) | 3.8 (+78%) | 1.75 (+17%) |
+| bench_r7gate | 2026-10-20 | 第 7 轮公共 trait（take_step_phases / phases 字段）回归门禁 | c8 | vllm | vllm（基线） | 2875 | 35.4 | 2.54 |
+| | | | c8 | vllm | dinfer | 3450 (+20%) | 7.6 (+79%) | 2.24 (+12%) |
+| bench_r7gate | 2026-10-20 | 第 7 轮公共 trait（take_step_phases / phases 字段）回归门禁 | c32 | vllm | vllm（基线） | 8235 | 76.9 | 3.33 |
+| | | | c32 | vllm | dinfer | 9445 (+15%) | 22.5 (+71%) | 3.18 (+4%) |
+| bench_r7gate | 2026-10-20 | 第 7 轮公共 trait（take_step_phases / phases 字段）回归门禁 | c8-long | vllm | vllm（基线） | 1881 | 68.3 | 3.77 |
+| | | | c8-long | vllm | dinfer | 2015 (+7%) | 39.1 (+43%) | 3.68 (+2%) |
 | poisson1 | 2026-10-17 | 首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15 | r8 | vllm | vllm（基线） | 1066 | 22.6 | 3.21 |
 | | | | r8 | vllm | dinfer_xs1 | 1065 (-0%) | 15.2 (+33%) | 3.12 (+3%) |
 | | | | r8 | vllm | dinfer_xs0 | 1065 (-0%) | 15.1 (+33%) | 3.17 (+1%) |

@@ -491,6 +491,26 @@ bench_common1,2026-10-20,executor 公共件抽取（AsyncResultRing / DecodeGrap
 bench_common1,2026-10-20,executor 公共件抽取（AsyncResultRing / DecodeGraphs / PlanBuffers，行为不变）,c8-long,ttft_p99_ms,89.010,98.202,0.906,,lower,other,4090,vllm,dinfer,qwen3
 bench_common1,2026-10-20,executor 公共件抽取（AsyncResultRing / DecodeGraphs / PlanBuffers，行为不变）,c8-long,tpot_p50_ms,3.634,3.750,0.969,,lower,other,4090,vllm,dinfer,qwen3
 bench_common1,2026-10-20,executor 公共件抽取（AsyncResultRing / DecodeGraphs / PlanBuffers，行为不变）,c8-long,failed,0.000,0.000,,,lower,other,4090,vllm,dinfer,qwen3
+bench_r7gate,2026-10-20,第 7 轮公共 trait（take_step_phases / phases 字段）回归门禁,c1,out_tok_per_s,565.773,446.164,1.268,,higher,other,4090,vllm,dinfer,qwen3
+bench_r7gate,2026-10-20,第 7 轮公共 trait（take_step_phases / phases 字段）回归门禁,c1,ttft_p50_ms,3.810,17.516,0.217,,lower,other,4090,vllm,dinfer,qwen3
+bench_r7gate,2026-10-20,第 7 轮公共 trait（take_step_phases / phases 字段）回归门禁,c1,ttft_p99_ms,8.684,19.963,0.435,,lower,other,4090,vllm,dinfer,qwen3
+bench_r7gate,2026-10-20,第 7 轮公共 trait（take_step_phases / phases 字段）回归门禁,c1,tpot_p50_ms,1.749,2.119,0.826,,lower,other,4090,vllm,dinfer,qwen3
+bench_r7gate,2026-10-20,第 7 轮公共 trait（take_step_phases / phases 字段）回归门禁,c1,failed,0.000,0.000,,,lower,other,4090,vllm,dinfer,qwen3
+bench_r7gate,2026-10-20,第 7 轮公共 trait（take_step_phases / phases 字段）回归门禁,c8,out_tok_per_s,3450.162,2874.608,1.200,,higher,other,4090,vllm,dinfer,qwen3
+bench_r7gate,2026-10-20,第 7 轮公共 trait（take_step_phases / phases 字段）回归门禁,c8,ttft_p50_ms,7.612,35.429,0.215,,lower,other,4090,vllm,dinfer,qwen3
+bench_r7gate,2026-10-20,第 7 轮公共 trait（take_step_phases / phases 字段）回归门禁,c8,ttft_p99_ms,14.815,39.554,0.375,,lower,other,4090,vllm,dinfer,qwen3
+bench_r7gate,2026-10-20,第 7 轮公共 trait（take_step_phases / phases 字段）回归门禁,c8,tpot_p50_ms,2.242,2.545,0.881,,lower,other,4090,vllm,dinfer,qwen3
+bench_r7gate,2026-10-20,第 7 轮公共 trait（take_step_phases / phases 字段）回归门禁,c8,failed,0.000,0.000,,,lower,other,4090,vllm,dinfer,qwen3
+bench_r7gate,2026-10-20,第 7 轮公共 trait（take_step_phases / phases 字段）回归门禁,c32,out_tok_per_s,9444.705,8234.854,1.147,,higher,other,4090,vllm,dinfer,qwen3
+bench_r7gate,2026-10-20,第 7 轮公共 trait（take_step_phases / phases 字段）回归门禁,c32,ttft_p50_ms,22.528,76.880,0.293,,lower,other,4090,vllm,dinfer,qwen3
+bench_r7gate,2026-10-20,第 7 轮公共 trait（take_step_phases / phases 字段）回归门禁,c32,ttft_p99_ms,48.041,82.904,0.579,,lower,other,4090,vllm,dinfer,qwen3
+bench_r7gate,2026-10-20,第 7 轮公共 trait（take_step_phases / phases 字段）回归门禁,c32,tpot_p50_ms,3.183,3.331,0.955,,lower,other,4090,vllm,dinfer,qwen3
+bench_r7gate,2026-10-20,第 7 轮公共 trait（take_step_phases / phases 字段）回归门禁,c32,failed,0.000,0.000,,,lower,other,4090,vllm,dinfer,qwen3
+bench_r7gate,2026-10-20,第 7 轮公共 trait（take_step_phases / phases 字段）回归门禁,c8-long,out_tok_per_s,2015.264,1880.821,1.071,,higher,other,4090,vllm,dinfer,qwen3
+bench_r7gate,2026-10-20,第 7 轮公共 trait（take_step_phases / phases 字段）回归门禁,c8-long,ttft_p50_ms,39.053,68.298,0.572,,lower,other,4090,vllm,dinfer,qwen3
+bench_r7gate,2026-10-20,第 7 轮公共 trait（take_step_phases / phases 字段）回归门禁,c8-long,ttft_p99_ms,87.249,96.864,0.901,,lower,other,4090,vllm,dinfer,qwen3
+bench_r7gate,2026-10-20,第 7 轮公共 trait（take_step_phases / phases 字段）回归门禁,c8-long,tpot_p50_ms,3.682,3.773,0.976,,lower,other,4090,vllm,dinfer,qwen3
+bench_r7gate,2026-10-20,第 7 轮公共 trait（take_step_phases / phases 字段）回归门禁,c8-long,failed,0.000,0.000,,,lower,other,4090,vllm,dinfer,qwen3
 poisson1,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r8,out_tok_per_s,1065.027,1066.343,0.999,,higher,other,4090,vllm,dinfer_xs1,qwen3
 poisson1,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r8,ttft_p50_ms,15.182,22.622,0.671,,lower,other,4090,vllm,dinfer_xs1,qwen3
 poisson1,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r8,ttft_p99_ms,38.981,49.074,0.794,,lower,other,4090,vllm,dinfer_xs1,qwen3
