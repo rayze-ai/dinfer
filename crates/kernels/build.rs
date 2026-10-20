@@ -18,6 +18,8 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rustc-check-cfg=cfg(no_nvcc_stub)");
+    println!("cargo:rustc-check-cfg=cfg(mega_sm100)");
+    println!("cargo:rerun-if-env-changed=MEGA_SM100_DEV");
 
     if env::var_os("CARGO_FEATURE_NO_NVCC").is_some() {
         println!("cargo:rustc-cfg=no_nvcc_stub");
@@ -32,6 +34,14 @@ fn main() {
     }
 
     let archs = env::var("CUDA_ARCHS").unwrap_or_else(|_| "86,89,90".into());
+    // Blackwell 专用文件（`*_sm100.cu` 且声明只在 sm100 有意义的）只在目标含 sm_100 / sm_103 时编；
+    // 其它卡用 ffi.rs 的 stub（返回 cudaErrorNotSupported）。MEGA_SM100_DEV=1 在开发机（sm86）也编，只做对拍。
+    let has_sm100 = archs.split(',').any(|a| matches!(a.trim(), "100" | "100a" | "103" | "103a"))
+        || env::var_os("MEGA_SM100_DEV").is_some();
+    if has_sm100 {
+        println!("cargo:rustc-cfg=mega_sm100");
+    }
+    let sm100_only = ["mega_sm100"];
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let profile = env::var("PROFILE").unwrap_or_default();
     let opt = if profile == "release" { "-O3" } else { "-O2" };
@@ -40,6 +50,10 @@ fn main() {
     for entry in std::fs::read_dir("cuda").expect("cuda/ dir") {
         let src = entry.unwrap().path();
         if src.extension().is_none_or(|e| e != "cu") {
+            continue;
+        }
+        let stem = src.file_stem().unwrap().to_string_lossy().to_string();
+        if sm100_only.contains(&stem.as_str()) && !has_sm100 {
             continue;
         }
         let obj = out_dir.join(format!("{}.o", src.file_stem().unwrap().to_string_lossy()));

@@ -902,6 +902,71 @@ extern "C" {
     ) -> i32;
 }
 
+/// `kernels.h` 的 `MegaLayerArgs`（mega_sm100.cu，Qwen3.5 GDN 层 decode 单 kernel 实验）。字段顺序 / 类型必须与 C 一致。
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct MegaLayerArgs {
+    pub res: *const c_void,
+    pub norm_w: *const c_void,
+    pub post_norm_w: *const c_void,
+    pub in_w: *const c_void,
+    pub conv_w: *const c_void,
+    pub a_log: *const f32,
+    pub dt_bias: *const f32,
+    pub gnorm_w: *const c_void,
+    pub out_w: *const c_void,
+    pub gate_up_w: *const c_void,
+    pub down_w: *const c_void,
+    pub conv_state: *mut c_void,
+    pub rec_state: *mut c_void,
+    pub state_indices: *const i32,
+    pub xn: *mut c_void,
+    pub qkvzab: *mut c_void,
+    pub conv_out: *mut c_void,
+    pub o: *mut c_void,
+    pub n: *mut c_void,
+    pub h2: *mut c_void,
+    pub xn2: *mut c_void,
+    pub gu: *mut c_void,
+    pub act: *mut c_void,
+    pub d: *mut c_void,
+    pub partial: *mut f32,
+    pub counters: *mut i32,
+    pub info: *mut i32,
+    pub batch: i64,
+    pub hidden: i64,
+    pub inter: i64,
+    pub heads_k: i64,
+    pub heads_v: i64,
+    pub k_dim: i64,
+    pub v_dim: i64,
+    pub width: i64,
+    pub state_stride_tok: i64,
+    pub eps: f32,
+    pub scale: f32,
+    pub groups: i64,
+    pub unroll: i64,
+    pub stages: i64,
+    pub ctas_per_sm: i64,
+    pub splits_in: i64,
+    pub splits_out: i64,
+    pub splits_gu: i64,
+    pub splits_down: i64,
+}
+
+/// cudaErrorNotSupported：mega kernel 未编入（CUDA_ARCHS 无 100/103 且无 MEGA_SM100_DEV）或 no-nvcc。
+pub const CUDA_ERROR_NOT_SUPPORTED: i32 = 801;
+
+#[cfg(all(not(no_nvcc_stub), mega_sm100))]
+extern "C" {
+    pub fn mega_gdn_layer_decode_sm100(a: *const MegaLayerArgs, stream: cudaStream_t) -> i32;
+}
+#[cfg(not(all(not(no_nvcc_stub), mega_sm100)))]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn mega_gdn_layer_decode_sm100(_a: *const MegaLayerArgs, _s: cudaStream_t) -> i32 {
+    CUDA_ERROR_NOT_SUPPORTED
+}
+
 #[cfg(no_nvcc_stub)]
 mod stubs {
     use super::*;

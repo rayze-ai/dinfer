@@ -320,6 +320,36 @@ int dsa_row_vis_i32(const int32_t* seq_lens, const int32_t* cu_seqlens_q, int32_
 int gemm_small_m_bf16(const void* a, const void* w, const void* bias, void* out, float* partial, int64_t m,
                       int64_t n, int64_t k, int64_t splits, cudaStream_t stream);
 
+// ---- Qwen3.5 GDN 层 decode 的单 persistent kernel（实验，mega_sm100.cu；只在 CUDA_ARCHS 含 100/103 时编入）。
+// 全部指针为 device 指针；形状 / 调优数值全部由 host 给。counters 长度 = 12 + 四个 GEMV 的 tile 数之和（Rust `MegaScratch::new` 算），
+// 首次使用前清零一次，之后 kernel 自复位；partial 为 f32，长度 ≥ max_splits · batch · max(N)。
+// info（可空）回填 [grid, occupancy, smem_bytes]（host 侧 pinned 或 device 均可，launch 前同步写）。
+typedef struct MegaLayerArgs {
+  const void* res;           // [B, hidden] bf16，残差，原位更新
+  const void* norm_w;        // [hidden]
+  const void* post_norm_w;   // [hidden]
+  const void* in_w;          // [in_row, hidden]  in_row = conv_dim + HV·V + 2·HV
+  const void* conv_w;        // [conv_dim, width]
+  const float* a_log;        // [HV]
+  const float* dt_bias;      // [HV]
+  const void* gnorm_w;       // [V]
+  const void* out_w;         // [hidden, HV·V]
+  const void* gate_up_w;     // [2·inter, hidden]
+  const void* down_w;        // [hidden, inter]
+  void* conv_state;          // [slots, conv_dim, width-1] bf16
+  void* rec_state;           // [slots, HV, V, K] f32（state_stride_tok = HV·V·K）
+  const int32_t* state_indices;  // [B] 或 NULL（恒等）
+  void* xn; void* qkvzab; void* conv_out; void* o; void* n; void* h2; void* xn2; void* gu; void* act; void* d;  // 中间量
+  float* partial;
+  int32_t* counters;
+  int32_t* info;
+  int64_t batch, hidden, inter, heads_k, heads_v, k_dim, v_dim, width, state_stride_tok;
+  float eps, scale;
+  int64_t groups, unroll, stages, ctas_per_sm;              // 结构参数（ArchProfile）
+  int64_t splits_in, splits_out, splits_gu, splits_down;    // split-K 份数（host 按 SM 数算）
+} MegaLayerArgs;
+int mega_gdn_layer_decode_sm100(const MegaLayerArgs* a, cudaStream_t stream);
+
 #ifdef __cplusplus
 }
 #endif

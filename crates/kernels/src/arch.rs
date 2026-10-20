@@ -151,6 +151,31 @@ impl ArchProfile {
         Self { arch, cc, sm_count, cublaslt_workspace_bytes, gemm_tune }
     }
 
+    /// mega kernel 结构参数：Sm100（B300，228 KB smem）用 4 组 · 3 级流水；sm8x（99 KB）只放得下 2 组 · 2 级。
+    /// 数值来源：docs/loops/mega-sm100.md 记录表。
+    pub fn mega_params(&self) -> MegaParams {
+        let mut p = match self.arch {
+            Arch::Sm100 => MegaParams { groups: 4, unroll: 4, stages: 3, ctas_per_sm: 1 },
+            Arch::Sm8x | Arch::Sm90 => MegaParams { groups: 2, unroll: 4, stages: 2, ctas_per_sm: 1 },
+        };
+        if let Ok(s) = std::env::var("MEGA_PARAMS") {
+            for kv in s.split(',') {
+                if let Some((k, v)) = kv.split_once('=') {
+                    if let Ok(v) = v.trim().parse::<usize>() {
+                        match k.trim() {
+                            "groups" => p.groups = v,
+                            "unroll" => p.unroll = v,
+                            "stages" => p.stages = v,
+                            "ctas" => p.ctas_per_sm = v,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        p
+    }
+
     /// `gdn_recurrent` decode 寄存器版 kernel 的默认变体（第 7 轮）。3090 实测见 `docs/loops/qwen35-perf.md` 第 7 行；
     /// Sm100 的默认待 B300 实测后定（先与 Sm8x 一致，`GDN_DECODE_VARIANT=` 覆盖对比）。
     pub fn gdn_decode_variant(&self) -> GdnDecodeVariant {
@@ -265,6 +290,35 @@ impl ArchProfile {
         v.sort_unstable();
         v.dedup();
         v
+    }
+}
+
+/// Qwen3.5 GDN 层 decode 单 persistent kernel（mega_sm100.cu）的结构参数。都是"按卡给"的数值，kernel 内不写。
+/// `MEGA_PARAMS=groups=4,unroll=4,stages=3,ctas=1` 覆盖（实验用）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MegaParams {
+    /// 每 warp 的 8 行 N 组数（GEMV tile = 8 warp · groups · 8 行）。
+    pub groups: usize,
+    /// 每流水 stage 的 32 列 K 块数。
+    pub unroll: usize,
+    /// cp.async 流水深度（smem = stages · (tile + A 块)）。
+    pub stages: usize,
+    /// 每 SM 常驻 CTA 数上限（0 = 用 occupancy 查询值）。
+    pub ctas_per_sm: usize,
+}
+
+impl MegaParams {
+    /// GEMV tile 的 N 行数（与 kernel 的 kWarps·G·8 同式；kernel 侧复核）。
+    pub fn tile_n(&self) -> usize {
+        8 * self.groups * 8
+    }
+    /// split-K 份数：任务数 = tiles · splits 尽量填满一波常驻 CTA（floor，避免第二波只有零头），
+    /// 且每 split 至少一个流水 stage（k / (32·unroll) 个 stage）。
+    pub fn splits_for(&self, sm_count: usize, n: usize, k: usize) -> usize {
+        let grid = sm_count * self.ctas_per_sm.max(1);
+        let tiles = n.div_ceil(self.tile_n());
+        let total = k / (32 * self.unroll);
+        (grid / tiles.max(1)).clamp(1, total.max(1))
     }
 }
 

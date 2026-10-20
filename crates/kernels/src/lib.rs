@@ -11,11 +11,12 @@ pub mod arch;
 pub mod ffi;
 pub mod gemm;
 pub mod ops;
+pub mod mega;
 pub mod opset;
 
 pub use cudarc;
 pub use device::{Device, Graph, Stream, Event, TimingEvent, PinnedUploader, PinnedSlot, HostArena, PinnedPool, PinnedBuf};
-pub use arch::{Arch, ArchProfile, GemmTuneParams};
+pub use arch::{Arch, ArchProfile, GemmTuneParams, MegaParams};
 pub use gemm::{Gemm, GemmPlan, GemmTuneEntry, GemmTuneReport};
 pub use opset::{Act, Attention, DefaultOps, Norm, OpSet, QkvPost};
 pub use half::bf16;
