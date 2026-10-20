@@ -57,6 +57,24 @@
 - 1x4096 chain_us dinfer：r10 第 3 轮：wy 8 warp（Sm100 默认 Mma8）；B300-50 GPU 7
 - 1x8192 chain_us dinfer：r10 第 3 轮：wy 8 warp（Sm100 默认 Mma8）；B300-50 GPU 7
 
+## probe_gdn_r10_4（2026-10-20，B300）
+
+### gdn_scale（us）
+
+| x | chain_us dinfer | conv_rows0_us dinfer | conv_rows128_us dinfer | conv_rows16_us dinfer | conv_rows256_us dinfer | conv_rows32_us dinfer | conv_rows64_us dinfer | conv_rows8_us dinfer | ho_bv16_us dinfer | ho_bv16pf_us dinfer | ho_bv16pfsp_us dinfer | ho_bv16sp_us dinfer | ho_bv32_us dinfer | ho_bv32pf_us dinfer | ho_bv32pfsp_us dinfer | ho_bv32sp_us dinfer | ho_legacy_us dinfer | prep_us dinfer | wy_legacy_us dinfer | wy_mma8_us dinfer | wy_serial_us dinfer | wy_us dinfer |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1x1024 | 148 | 487 | 114 | 38 | 218 | 40 | 63 | 38 | 72 | 79 | 97 | 117 | 64 | 65 | 85 | 113 | 785 | 18 | 420 | 57 | 92 | 60 |
+| 8x1024 | 822 | 810 | 311 | 221 | 319 | 221 | 248 | 249 | 548 | 548 | 653 | 760 | 373 | 380 | 573 | 570 | 5006 | 82 | 2926 | 360 | 509 | 372 |
+| 32x128 | 452 | 218 | 171 | 128 | 301 | 136 | 167 | 137 | 326 | 324 | 360 | 399 | 213 | 221 | 323 | 309 | 2501 | 42 | 1487 | 187 | 275 | 194 |
+| 1x4096 | 494 | 3064 | 162 | 122 | 296 | 131 | 164 | 131 | 329 | 391 | 380 | 473 | 252 | 267 | 336 | 461 | 3290 | 44 | 1488 | 187 | 276 | 194 |
+| 1x8192 | 963 | 6172 | 309 | 219 | 316 | 221 | 246 | 249 | 643 | 785 | 744 | 929 | 497 | 524 | 659 | 904 | 6617 | 82 | 2924 | 360 | 509 | 371 |
+
+- 1x1024 chain_us dinfer：r10 第 4 轮：wy stage 16 B 向量装载 + kg 16 B 写；B300-50 GPU 7，合并树（r8b 已并入）
+- 8x1024 chain_us dinfer：r10 第 4 轮：wy stage 16 B 向量装载 + kg 16 B 写；B300-50 GPU 7，合并树（r8b 已并入）
+- 32x128 chain_us dinfer：r10 第 4 轮：wy stage 16 B 向量装载 + kg 16 B 写；B300-50 GPU 7，合并树（r8b 已并入）
+- 1x4096 chain_us dinfer：r10 第 4 轮：wy stage 16 B 向量装载 + kg 16 B 写；B300-50 GPU 7，合并树（r8b 已并入）
+- 1x8192 chain_us dinfer：r10 第 4 轮：wy stage 16 B 向量装载 + kg 16 B 写；B300-50 GPU 7，合并树（r8b 已并入）
+
 ## probe_gdn_r9_0（2026-10-20，3090）
 
 ### gdn_scale（us）
