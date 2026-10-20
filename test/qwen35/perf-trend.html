@@ -301,6 +301,7 @@ function probeRender(){
     const notes=sr.filter(r=>r.note&&chosen.has(r.metric)).map(r=>r.probe+" "+r.metric+" "+r.side+"："+r.note);
     const cv=card(shape+(unit?"（"+unit+"）":""),notes);
     const series=[...new Set(sr.filter(r=>chosen.has(r.metric)).map(r=>r.metric+"|"+r.side))];
+    if(!series.length){box.removeChild(box.lastChild);continue;}  // 该形状没有已勾选 metric 的数据：不留空卡片
     const ds=series.map((sv,i)=>{const [m,side]=sv.split("|");const c=color(side,i);
       return {label:m+" "+side,data:rounds.map(rd=>{const r=sr.find(q=>q.metric===m&&q.side===side&&q.probe===rd);return r?+r.value:null}),borderColor:c,backgroundColor:c,borderDash:side==="vllm"?[6,4]:[],tension:0,pointRadius:4,spanGaps:true};});
     prbCharts.push(new Chart(cv,{type:"line",data:{labels:rounds,datasets:ds},options:lineOpt("轮次")}));}

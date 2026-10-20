@@ -429,7 +429,8 @@ h1{font-size:18px;margin:0 0 4px}.sub{color:var(--muted);margin-bottom:12px}
 .tabs button.on{color:var(--fg);border-color:var(--line);background:var(--card);font-weight:600}
 .tabs button[hidden]{display:none}
 .tabs button.off{opacity:.45;cursor:not-allowed}
-.pchart{height:320px;margin:8px 0 18px}.pnote{color:var(--muted);font-size:12.5px;margin:0 0 6px}
+.pchart{height:300px}.pnote{color:var(--muted);font-size:12.5px;margin:0 0 6px}
+.pmetrics{margin-top:6px;display:flex;flex-wrap:wrap;gap:2px 12px;font-size:12.5px}.pmetrics label{white-space:nowrap;cursor:pointer}.pmetrics label.dim{color:var(--muted)}
 .page[hidden]{display:none}
 .base{padding:6px 10px;margin-bottom:12px;border-left:3px solid var(--acc);background:var(--card);font-size:13px}
 .empty{padding:24px;text-align:center;color:var(--muted)}
@@ -481,9 +482,11 @@ th:first-child,td:first-child,td.change,th.change,td.l,th.l{text-align:left}
 <div class="empty" id="eng-empty" hidden>本目录没有 engine-trend.csv</div>
 </section>
 <section class="page" id="page-probe" hidden>
-<div class="base">探针测量（TTFT-长度曲线 / kernel 分解 / 微基准伸缩 / 第三方 kernel 对照）。probe <select id="probe-sel"></select>
- <span style="float:right"><a href="probe-trend.md">md</a> · <a href="probe-trend.csv">csv</a></span><br><span class="updated">dinfer 蓝实线 / vLLM 橙虚线；x 数值 → 折线，类别 → 分组柱。</span></div>
-<div id="probe-charts"></div>
+<div class="base">探针（TTFT-长度 / kernel 分解 / 微基准伸缩 / 第三方 kernel 对照）。group <select id="probe-sel"></select>
+ <span style="float:right"><a href="probe-trend.md">md</a> · <a href="probe-trend.csv">csv</a></span><br>
+ <span class="updated">口径同 single：x = 轮次（probe id，按日期再按名字），每个形状一张卡片，线 = 各 metric 随轮次变化；dinfer 实线 / vLLM 虚线。</span>
+ <div class="pmetrics" id="probe-metrics"></div></div>
+<div class="grid" id="probe-charts"></div>
 <div class="empty" id="probe-empty" hidden>本目录没有 probe-trend.csv</div>
 </section>
 
@@ -660,34 +663,62 @@ async function engineRefresh(){
 }
 // ---- probe 页签（搬自 probe_trend.py：fetch probe-trend.csv，长表 probe,date,gpu,model,group,metric,side,x,value,unit,note）----
 let PRB=[],PRB_OK=false,prbCharts=[];
+const PRB_SEL={};  // group → Set(metric) 当前勾选；首次按默认规则
+function natKey(x){return x.split(/(\d+)/).map(t=>/^\d+$/.test(t)?t.padStart(8,"0"):t).join("");}
+function probeDefault(rows,rounds){
+  // 默认：chain_us / prep_us / wy_us + ho_* 与 conv_* 两个家族里"最新一轮值最小"的各一个（任一形状、dinfer 侧）
+  const ms=[...new Set(rows.map(r=>r.metric))];const pick=new Set(["chain_us","prep_us","wy_us"].filter(m=>ms.includes(m)));
+  for(const fam of ["ho_","conv_"]){const cands=ms.filter(m=>m.startsWith(fam));if(!cands.length)continue;
+    let best=null,bv=Infinity;for(const m of cands){for(let i=rounds.length-1;i>=0&&best!==m;i--){const vs=rows.filter(r=>r.metric===m&&r.probe===rounds[i]&&r.side==="dinfer").map(r=>+r.value);if(vs.length){const v=Math.min(...vs);if(v<bv){bv=v;best=m;}break;}}}
+    if(best)pick.add(best);}
+  if(!pick.size)ms.forEach(m=>pick.add(m));
+  return pick;
+}
 function probeRender(){
   document.getElementById("probe-empty").hidden=PRB_OK; if(!PRB_OK) return;
   const sel=document.getElementById("probe-sel");
   let rows=PRB.filter(r=>r.gpu==curGpu); if(!rows.length) rows=PRB;
-  const probes=[...new Set(rows.map(r=>r.probe+"|"+r.date+"|"+r.gpu))];
-  const prev=probes.includes(sel.value)?sel.value:probes[probes.length-1];
-  sel.innerHTML=probes.map(p=>`<option value="${p}" ${p===prev?"selected":""}>${p.replace(/\|/g,"  ·  ")}</option>`).join("");
+  const groups=[...new Set(rows.map(r=>r.group))];
+  const grp=groups.includes(sel.value)?sel.value:groups[0];
+  sel.innerHTML=groups.map(g=>`<option value="${g}" ${g===grp?"selected":""}>${g}</option>`).join("");
   sel.onchange=probeRender;
-  if(!prev) return;
-  const [p,d,g]=prev.split("|");const rs=PRB.filter(r=>r.probe===p&&r.date===d&&r.gpu===g);
   prbCharts.forEach(c=>{try{c.destroy();}catch(e){}});prbCharts=[];
-  const box=document.getElementById("probe-charts");box.innerHTML="";
-  for(const grp of [...new Set(rs.map(r=>r.group))]){const gr=rs.filter(r=>r.group===grp);const unit=(gr.find(r=>r.unit)||{}).unit||"";
-    const card=document.createElement("div");card.className="card";card.style.marginBottom="14px";
-    const h=document.createElement("h2");h.textContent=grp+(unit?"（"+unit+"）":"");card.appendChild(h);
-    const notes=gr.filter(r=>r.note).map(r=>r.x+" "+r.metric+" "+r.side+"："+r.note);
-    if(notes.length){const n=document.createElement("p");n.className="pnote";n.textContent=notes.join("；");card.appendChild(n)}
-    const div=document.createElement("div");div.className="pchart";const cv=document.createElement("canvas");div.appendChild(cv);card.appendChild(div);box.appendChild(card);
+  const box=document.getElementById("probe-charts");box.innerHTML="";const mbox=document.getElementById("probe-metrics");mbox.innerHTML="";
+  if(!grp) return;
+  const gr=rows.filter(r=>r.group===grp);const unit=(gr.find(r=>r.unit)||{}).unit||"";
+  const rounds=[...new Set(gr.map(r=>r.probe))].sort((a,b)=>{const da=(gr.find(r=>r.probe===a)||{}).date||"",db=(gr.find(r=>r.probe===b)||{}).date||"";return da<db?-1:da>db?1:natKey(a)<natKey(b)?-1:natKey(a)>natKey(b)?1:0;});
+  const metrics=[...new Set(gr.map(r=>r.metric))];
+  const lineOpt=(xTitle,xScale)=>({animation:false,responsive:true,maintainAspectRatio:false,interaction:{mode:"nearest",intersect:false},
+    scales:{x:Object.assign({title:{display:true,text:xTitle},grid:{color:"rgba(128,128,128,.15)"}},xScale||{}),y:{title:{display:true,text:unit},beginAtZero:true,grid:{color:"rgba(128,128,128,.15)"}}},
+    plugins:{legend:{position:"bottom"},tooltip:{callbacks:{label:c=>c.dataset.label+": "+(c.parsed.y??c.raw)+" "+unit}}}});
+  const color=(side,i)=>side==="dinfer"?`hsl(${(210+i*37)%360},65%,45%)`:`hsl(${(30+i*37)%360},80%,50%)`;
+  const card=(title,notes)=>{const c=document.createElement("div");c.className="card";const h=document.createElement("h2");h.textContent=title;c.appendChild(h);
+    if(notes&&notes.length){const n=document.createElement("p");n.className="pnote";n.textContent=notes.join("；");c.appendChild(n)}
+    const d=document.createElement("div");d.className="pchart";const cv=document.createElement("canvas");d.appendChild(cv);c.appendChild(d);box.appendChild(c);return cv;};
+  if(rounds.length<=1){
+    // 单轮 group（如 ttft_len / kernel_1k）：退化为 x = CSV 的 x 列（长度 / kernel 名）的折线
     const xs=[...new Set(gr.map(r=>r.x))];const numeric=xs.every(x=>/^-?\d+(\.\d+)?$/.test(x));
-    const series=[...new Set(gr.map(r=>r.metric+"|"+r.side))];
-    const ds=series.map((sv,i)=>{const [m,side]=sv.split("|");const pts=gr.filter(r=>r.metric===m&&r.side===side);
-      const c=ECOL[side]||"hsl("+(i*47%360)+",60%,45%)";
-      return numeric?{label:m+" "+side,data:pts.map(r=>({x:+r.x,y:+r.value})),borderColor:c,backgroundColor:c,borderDash:side==="vllm"?[6,4]:[],tension:0,pointRadius:4,showLine:true}
-                    :{label:m+" "+side,data:xs.map(x=>{const r=pts.find(q=>q.x===x);return r?+r.value:null}),backgroundColor:c,borderColor:c}});
-    prbCharts.push(new Chart(cv,{type:numeric?"line":"bar",data:numeric?{datasets:ds}:{labels:xs,datasets:ds},
-      options:{animation:false,responsive:true,maintainAspectRatio:false,interaction:{mode:"nearest",intersect:false},
-        scales:numeric?{x:{type:"linear",title:{display:true,text:"x（"+grp+"）"}},y:{title:{display:true,text:unit},beginAtZero:true}}:{y:{title:{display:true,text:unit},beginAtZero:true}},
-        plugins:{legend:{position:"bottom"},tooltip:{callbacks:{label:c=>c.dataset.label+": "+(c.parsed.y??c.raw)+" "+unit}}}}}));}
+    const notes=gr.filter(r=>r.note).map(r=>r.x+" "+r.metric+" "+r.side+"："+r.note);
+    const cv=card(grp+(unit?"（"+unit+"）":"")+" · "+(rounds[0]||""),notes);
+    const ds=[...new Set(gr.map(r=>r.metric+"|"+r.side))].map((sv,i)=>{const [m,side]=sv.split("|");const pts=gr.filter(r=>r.metric===m&&r.side===side);const c=color(side,i);
+      return numeric?{label:m+" "+side,data:pts.map(r=>({x:+r.x,y:+r.value})).sort((a,b)=>a.x-b.x),borderColor:c,backgroundColor:c,borderDash:side==="vllm"?[6,4]:[],tension:0,pointRadius:4,showLine:true,spanGaps:true}
+                    :{label:m+" "+side,data:xs.map(x=>{const r=pts.find(q=>q.x===x);return r?+r.value:null}),borderColor:c,backgroundColor:c,borderDash:side==="vllm"?[6,4]:[],tension:0,pointRadius:4,spanGaps:true};});
+    prbCharts.push(new Chart(cv,{type:"line",data:numeric?{datasets:ds}:{labels:xs,datasets:ds},options:lineOpt(numeric?"x（"+grp+"）":grp,numeric?{type:"linear"}:{})}));
+    return;
+  }
+  // 多轮 group：metric 勾选框 + 每个形状一张卡片，x = 轮次
+  if(!PRB_SEL[grp]) PRB_SEL[grp]=probeDefault(gr,rounds);
+  const chosen=PRB_SEL[grp];
+  metrics.forEach(m=>{const l=document.createElement("label");const cb=document.createElement("input");cb.type="checkbox";cb.checked=chosen.has(m);cb.onchange=()=>{cb.checked?chosen.add(m):chosen.delete(m);probeRender();};l.appendChild(cb);l.appendChild(document.createTextNode(" "+m));l.classList.toggle("dim",!chosen.has(m));mbox.appendChild(l);});
+  const shapes=[...new Set(gr.map(r=>r.x))].sort((a,b)=>natKey(a)<natKey(b)?-1:1);
+  for(const shape of shapes){const sr=gr.filter(r=>r.x===shape);
+    const notes=sr.filter(r=>r.note&&chosen.has(r.metric)).map(r=>r.probe+" "+r.metric+" "+r.side+"："+r.note);
+    const cv=card(shape+(unit?"（"+unit+"）":""),notes);
+    const series=[...new Set(sr.filter(r=>chosen.has(r.metric)).map(r=>r.metric+"|"+r.side))];
+    if(!series.length){box.removeChild(box.lastChild);continue;}  // 该形状没有已勾选 metric 的数据：不留空卡片
+    const ds=series.map((sv,i)=>{const [m,side]=sv.split("|");const c=color(side,i);
+      return {label:m+" "+side,data:rounds.map(rd=>{const r=sr.find(q=>q.metric===m&&q.side===side&&q.probe===rd);return r?+r.value:null}),borderColor:c,backgroundColor:c,borderDash:side==="vllm"?[6,4]:[],tension:0,pointRadius:4,spanGaps:true};});
+    prbCharts.push(new Chart(cv,{type:"line",data:{labels:rounds,datasets:ds},options:lineOpt("轮次")}));}
 }
 async function probeRefresh(){
   const tab=document.querySelector('.tabs button[data-tab="probe"]');
