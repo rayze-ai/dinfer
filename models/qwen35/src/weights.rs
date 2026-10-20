@@ -177,11 +177,12 @@ pub fn gate_src_row(h: usize, head_dim: usize) -> usize {
     h * 2 * head_dim + head_dim
 }
 
-/// 拼 `[q(H·D) | k(Hkv·D) | v(Hkv·D)]` 的融合 qkv 权重 `[(H + 2Hkv)·D, hidden]`，`qmul = 1` 路径。
-/// TP：`tp = Some((rank, world))` 时按头切——本 rank 拿 `H/world` 个 q 头与 `Hkv/world` 个 kv 头。
+/// 拼融合 qkv 权重：有输出门（`attn_output_gate`）时 `[q(H·D) | gate(H·D) | k(Hkv·D) | v(Hkv·D)]`（`qmul = 2`，
+/// `qkv_post_ext` 的行布局），无门时 `[q | k | v]`（`qmul = 1`）。
+/// TP：`tp = (rank, world)` 时按头切——本 rank 拿 `H/world` 个 q 头（含各自的 gate）与 `Hkv/world` 个 kv 头。
 ///
-/// 输出门单独一条 GEMM（`load_gate`），不塞进 qkv 行里：`qkv_post_ext(qmul=2)` 的 gate 段在行内偏移固定、
-/// 每行有 stride，attention 之后要用 `mul_sigmoid` 就得按行搬——拆成两条紧凑 GEMM 省掉这一步（FLOPs 相同）。
+/// 第 9 轮改回单 GEMM（vLLM `qkv_proj` 同做法，第 3 轮曾拆成 qkv + gate 两条紧凑 GEMM 以省一次按行读）：
+/// attention 之后 `mul_sigmoid_rows` 直接按行距读 gate 段，不搬；省一次 GEMM launch + 一次 A 读。
 pub fn load_qkv(
     stream: &Stream,
     src: &WeightSource,
@@ -202,49 +203,29 @@ pub fn load_qkv(
     let v = t.load_bf16(stream, src, &format!("{p}.v_proj.weight"))?;
     ensure!(q.shape == [h_all * 2 * d, hidden], "q_proj shape {:?}（期望 [{}, {hidden}]）", q.shape, h_all * 2 * d);
     ensure!(k.shape == [hk_all * d, hidden] && v.shape == k.shape, "k/v_proj shape {:?} {:?}", k.shape, v.shape);
-    let row = (h + 2 * hk) * d;
+    let qmul = if cfg.attn_output_gate { 2 } else { 1 };
+    let row = (h * qmul + 2 * hk) * d;
     let mut w = Tensor::<bf16>::zeros(stream, &[row, hidden])?;
     let m = stream.inner_arc();
-    // q：本 rank 的头 = [rank·h, (rank+1)·h)，源行按 per-head 交错取（第 hh 头 q 段起点 = hh·2D）
+    // q：本 rank 的头 = [rank·h, (rank+1)·h)，源行按 per-head 交错取（第 hh 头 q 段起点 = hh·2D，gate 段紧跟其后）
     for hh in 0..h {
-        let src_row = q_src_row(rank * h + hh, d);
         let n = d * hidden;
+        let src_row = q_src_row(rank * h + hh, d);
         let mut dst = w.data.slice_mut(hh * d * hidden..hh * d * hidden + n);
         m.memcpy_dtod(&q.data.slice(src_row * hidden..src_row * hidden + n), &mut dst)?;
+        if qmul == 2 {
+            let g_row = gate_src_row(rank * h + hh, d);
+            let dst_row = (h + hh) * d;
+            let mut dst = w.data.slice_mut(dst_row * hidden..dst_row * hidden + n);
+            m.memcpy_dtod(&q.data.slice(g_row * hidden..g_row * hidden + n), &mut dst)?;
+        }
     }
     // k / v：按 kv 头切
-    for (dst_head, part) in [(h, &k), (h + hk, &v)] {
+    for (dst_head, part) in [(h * qmul, &k), (h * qmul + hk, &v)] {
         let lo = rank * hk * d * hidden;
         let n = hk * d * hidden;
         let mut dst = w.data.slice_mut(dst_head * d * hidden..dst_head * d * hidden + n);
         m.memcpy_dtod(&part.data.slice(lo..lo + n), &mut dst)?;
-    }
-    stream.synchronize()?;
-    Linear::new(w, None)
-}
-
-/// 输出门权重 `[H·D, hidden]`：从 `q_proj` 的 per-head 交织里取 gate 段（与 `load_qkv` 的 q 段互补）。
-pub fn load_gate(
-    stream: &Stream,
-    src: &WeightSource,
-    t: &Table,
-    layer: usize,
-    cfg: &Qwen35Config,
-    tp: (usize, usize),
-) -> Result<Linear> {
-    let (rank, world) = tp;
-    let (h_all, d) = (cfg.num_attention_heads as usize, cfg.head_dim as usize);
-    ensure!(cfg.attn_output_gate, "load_gate: attn_output_gate = false");
-    let h = h_all / world;
-    let hidden = cfg.hidden_size as usize;
-    let q = t.load_bf16(stream, src, &format!("layers.{layer}.self_attn.q_proj.weight"))?;
-    let mut w = Tensor::<bf16>::zeros(stream, &[h * d, hidden])?;
-    let m = stream.inner_arc();
-    for hh in 0..h {
-        let src_row = gate_src_row(rank * h + hh, d);
-        let n = d * hidden;
-        let mut dst = w.data.slice_mut(hh * d * hidden..hh * d * hidden + n);
-        m.memcpy_dtod(&q.data.slice(src_row * hidden..src_row * hidden + n), &mut dst)?;
     }
     stream.synchronize()?;
     Linear::new(w, None)

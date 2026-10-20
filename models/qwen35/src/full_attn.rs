@@ -2,8 +2,8 @@
 //! → 写 paged KV → GQA(D=256, GROUP 6) → `out *= sigmoid(gate)` → o_proj。
 //!
 //! 与 Qwen3 的差异（`docs/design-qwen35.md` §1.1 "扩模板"）：
-//! - q_proj 输出是 per-head 交错的 `[q(D) | gate(D)]`，装载时已拆成两条紧凑 GEMM（`weights::load_qkv` / `load_gate`）；
-//!   本文件的行布局回到 `qmul = 1` 的 `[q | k | v]`。
+//! - q_proj 输出是 per-head 交错的 `[q(D) | gate(D)]`，装载时重排成一条融合 GEMM `[q(H·D) | gate(H·D) | k | v]`
+//!   （`weights::load_qkv`，`qmul = 2`，第 9 轮；attention 后 `mul_sigmoid_rows` 按行距读 gate 段）。
 //! - `qkv_post_ext`：`rope_dim = 64`、`norm_beta = 1.0`（`q_norm/k_norm` 是 zero-centered，`w + 1`）。
 //! - attention 之后、o_proj 之前 `out *= sigmoid(gate)`（vLLM `qwen3_next.py`）。
 use crate::config::Qwen35Config;
@@ -34,8 +34,8 @@ pub struct AttnMeta<'a> {
 }
 
 pub struct FullAttention {
-    qkv: Linear,   // [q(H·D) | k | v] → [(H + 2Hkv)·D, hidden]
-    gate: Linear,  // [H·D, hidden]
+    qkv: Linear, // [q(H·D) | gate(H·D) | k | v] → [(2H + 2Hkv)·D, hidden]（无输出门时无 gate 段）
+    qmul: usize, // 2 = 有 gate 段
     o_proj: Linear,
     q_norm: Tensor<bf16>, // [D]，zero-centered（kernel 里 +1）
     k_norm: Tensor<bf16>,
@@ -59,10 +59,9 @@ impl FullAttention {
         let (h, hk, d) =
             (cfg.num_attention_heads as usize, cfg.num_key_value_heads as usize, cfg.head_dim as usize);
         let hidden = cfg.hidden_size as usize;
+        let qmul = if cfg.attn_output_gate { 2 } else { 1 };
         let qkv = crate::weights::load_qkv(stream, src, t, layer, cfg, tp)?;
-        ensure!(qkv.out_features == (h + 2 * hk) * d, "qkv out {} != {}", qkv.out_features, (h + 2 * hk) * d);
-        let gate = crate::weights::load_gate(stream, src, t, layer, cfg, tp)?;
-        ensure!(gate.out_features == h * d, "gate out {} != {}", gate.out_features, h * d);
+        ensure!(qkv.out_features == (h * qmul + 2 * hk) * d, "qkv out {} != {}", qkv.out_features, (h * qmul + 2 * hk) * d);
         let o_proj = t.linear(stream, src, &format!("layers.{layer}.self_attn.o_proj.weight"), Some((1, (rank, world))))?;
         ensure!(o_proj.in_features == h * d && o_proj.out_features == hidden, "o_proj shape {:?}", o_proj.w.shape);
         let q_norm = t.load_bf16(stream, src, &format!("layers.{layer}.self_attn.q_norm.weight"))?;
@@ -70,7 +69,7 @@ impl FullAttention {
         ensure!(q_norm.numel() == d && k_norm.numel() == d, "q/k_norm {} {}", q_norm.numel(), k_norm.numel());
         Ok(Self {
             qkv,
-            gate,
+            qmul,
             o_proj,
             q_norm,
             k_norm,
@@ -81,7 +80,7 @@ impl FullAttention {
     #[allow(clippy::too_many_arguments)]
     /// 本层所有 Linear（GEMM 自调优用）。
     pub fn linears(&self) -> Vec<(&'static str, &Linear)> {
-        vec![("attn.qkv", &self.qkv), ("attn.gate", &self.gate), ("attn.o_proj", &self.o_proj)]
+        vec![("attn.qkv", &self.qkv), ("attn.o_proj", &self.o_proj)]
     }
 
     pub fn forward<O: OpSet>(
@@ -109,9 +108,11 @@ impl FullAttention {
         );
         debug_assert_eq!(self.world, 1, "qwen35: TP 未实现");
         let eps = cfg.rms_norm_eps;
-        let qkv_w = (h + 2 * hk) * d;
+        let qmul = self.qmul;
+        let qkv_w = (h * qmul + 2 * hk) * d;
         let rope_dim = cfg.rope_dim() as usize;
-        // 1. qkv = x · W^T → [t, (H+2Hkv)·D]（q | k | v）
+        // 1. qkv = x · W^T → [t, (H·qmul+2Hkv)·D]（q | gate | k | v；gate 段 qkv_post 不碰）
+        ensure!(sc.qkv.numel() >= t * qkv_w, "attn: qkv 缓冲 < t × {qkv_w}");
         gemm.forward_bf16(&x.data, &self.qkv.w.data, None, &mut sc.qkv.data, t, qkv_w, cfg.hidden_size as usize)?;
         // 2. per-head RMSNorm（zero-centered）+ partial RoPE（原地）+ K/V 写 paged cache
         // `qkv_post_ext` 是 ops.rs 的自由函数（QkvPost trait 只有 Qwen3 的旧签名）；Qwen3.5 需要 partial RoPE +
@@ -132,14 +133,14 @@ impl FullAttention {
             rope_dim,
             eps,
             1.0, // zero-centered
-            1,   // qmul = 1（gate 已拆成独立 GEMM）
+            qmul,
             kv.block_size,
         )?;
-        // 3. GQA：q 从第 0 列起、k 从 H·D、v 从 (H+Hkv)·D，行跨度 qkv_w
+        // 3. GQA：q 从第 0 列起、k 从 H·qmul·D、v 从 (H·qmul+Hkv)·D，行跨度 qkv_w
         let scale = (d as f32).powf(-0.5);
         let q_view = sc.qkv.data.slice(..);
-        let k_view = sc.qkv.data.slice(h * d..);
-        let v_view = sc.qkv.data.slice((h + hk) * d..);
+        let k_view = sc.qkv.data.slice(h * qmul * d..);
+        let v_view = sc.qkv.data.slice((h * qmul + hk) * d..);
         match meta.mode {
             BatchMode::Prefill => ops.attn().prefill(
                 stream,
@@ -195,9 +196,11 @@ impl FullAttention {
                 qkv_w,
             )?,
         }
-        // 4. 输出门：attn *= sigmoid(gate)
-        self.gate.forward_rows(gemm, x, &mut sc.z, t)?;
-        k::mul_sigmoid_bf16(stream, &mut sc.o.data, &sc.z.data, t * h * d)?;
+        // 4. 输出门：attn *= sigmoid(gate)，gate 段在 qkv 行内 [H·D, 2H·D)，按行距 qkv_w 读
+        if qmul == 2 {
+            let gate_view = sc.qkv.data.slice(h * d..);
+            k::mul_sigmoid_rows_bf16(stream, &mut sc.o.data, &gate_view, t, h * d, qkv_w)?;
+        }
         // 5. o_proj
         self.o_proj.forward_rows(gemm, &sc.o, out, t)
     }

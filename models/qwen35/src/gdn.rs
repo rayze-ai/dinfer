@@ -84,10 +84,10 @@ impl Default for GdnChunkWorkspace {
 }
 
 pub struct GdnLayer {
-    in_qkv: Linear,
-    in_z: Linear,
-    in_a: Linear,
-    in_b: Linear,
+    /// 融合投影 `[qkv(conv_dim) | z(HV·V) | a(HV) | b(HV)]`，行宽 `in_row`（第 9 轮，vLLM `in_proj_qkvz` 同做法）：
+    /// 一次 GEMM 读 A 一遍，下游 conv1d / gate / gated_rmsnorm 按列段 + 行距读，不拷贝。
+    in_proj: Linear,
+    in_row: usize,
     conv_w: Tensor<bf16>, // [conv_dim, width]
     a_log: Tensor<f32>,   // [HV]
     dt_bias: Tensor<f32>, // [HV]
@@ -117,14 +117,29 @@ impl GdnLayer {
         let conv_dim = 2 * h * kd + hv * vd;
         let hidden = cfg.hidden_size as usize;
 
-        let in_qkv = t.linear(stream, src, &format!("{p}.in_proj_qkv.weight"), None)?;
-        ensure!(in_qkv.w.shape == [conv_dim, hidden], "in_proj_qkv shape {:?}", in_qkv.w.shape);
-        let in_z = t.linear(stream, src, &format!("{p}.in_proj_z.weight"), None)?;
-        ensure!(in_z.w.shape == [hv * vd, hidden], "in_proj_z shape {:?}", in_z.w.shape);
-        let a = t.linear(stream, src, &format!("{p}.in_proj_a.weight"), None)?;
-        let b = t.linear(stream, src, &format!("{p}.in_proj_b.weight"), None)?;
-        ensure!(a.w.shape == [hv, hidden] && b.w.shape == [hv, hidden], "in_proj_a/b shape {:?} {:?}", a.w.shape, b.w.shape);
-        let (in_a, in_b) = (a, b);
+        // 四个投影按行拼成一个权重（TP 时每段各自按头切后再拼；本 crate 目前 world == 1）
+        let in_qkv = t.load_bf16(stream, src, &format!("{p}.in_proj_qkv.weight"))?;
+        ensure!(in_qkv.shape == [conv_dim, hidden], "in_proj_qkv shape {:?}", in_qkv.shape);
+        let in_z = t.load_bf16(stream, src, &format!("{p}.in_proj_z.weight"))?;
+        ensure!(in_z.shape == [hv * vd, hidden], "in_proj_z shape {:?}", in_z.shape);
+        let in_a = t.load_bf16(stream, src, &format!("{p}.in_proj_a.weight"))?;
+        let in_b = t.load_bf16(stream, src, &format!("{p}.in_proj_b.weight"))?;
+        ensure!(in_a.shape == [hv, hidden] && in_b.shape == [hv, hidden], "in_proj_a/b shape {:?} {:?}", in_a.shape, in_b.shape);
+        let in_row = conv_dim + hv * vd + 2 * hv;
+        let mut w = Tensor::<bf16>::zeros(stream, &[in_row, hidden])?;
+        {
+            let m = stream.inner_arc();
+            let mut off = 0usize;
+            for part in [&in_qkv, &in_z, &in_a, &in_b] {
+                let n = part.numel();
+                let mut dst = w.data.slice_mut(off..off + n);
+                m.memcpy_dtod(&part.data, &mut dst)?;
+                off += n;
+            }
+            stream.synchronize()?;
+        }
+        drop((in_qkv, in_z, in_a, in_b));
+        let in_proj = Linear::new(w, None)?;
         let conv_w = crate::weights::load_conv1d(stream, src, t, layer, conv_dim, width)?;
         let a_log = t.load_f32(stream, src, &format!("{p}.A_log"))?;
         let dt_bias = t.load_f32(stream, src, &format!("{p}.dt_bias"))?;
@@ -143,10 +158,8 @@ impl GdnLayer {
         };
         let _ = max_tokens; // 激活缓冲改为全模型共享（`crate::scratch::ActScratch`），不再按层预分配
         Ok(Self {
-            in_qkv,
-            in_z,
-            in_a,
-            in_b,
+            in_proj,
+            in_row,
             conv_w,
             a_log,
             dt_bias,
@@ -184,7 +197,7 @@ impl GdnLayer {
     #[allow(clippy::too_many_arguments)]
     /// 本层所有 Linear（GEMM 自调优用）。
     pub fn linears(&self) -> Vec<(&'static str, &Linear)> {
-        vec![("gdn.in_proj_qkv", &self.in_qkv), ("gdn.in_proj_z", &self.in_z), ("gdn.in_proj_a", &self.in_a), ("gdn.in_proj_b", &self.in_b), ("gdn.out_proj", &self.out_proj)]
+        vec![("gdn.in_proj", &self.in_proj), ("gdn.out_proj", &self.out_proj)]
     }
 
     pub fn forward(
@@ -208,32 +221,38 @@ impl GdnLayer {
         ensure!(t <= abuf.max_tokens, "gdn: {t} tokens > max {}", abuf.max_tokens);
         ensure!(meta.state_indices.numel() >= meta.num_reqs, "gdn: state_indices");
 
-        // 1. 三个投影
-        self.in_qkv.forward_rows(gemm, x, &mut abuf.qkv, t)?;
-        self.in_z.forward_rows(gemm, x, &mut abuf.z, t)?;
-        self.in_a.forward_rows(gemm, x, &mut abuf.a, t)?;
-        self.in_b.forward_rows(gemm, x, &mut abuf.b, t)?;
+        // 1. 融合投影：abuf.qkv[t, in_row] = [qkv | z | a | b]；下游按列段 + 行距 in_row 读
+        let row = self.in_row;
+        ensure!(row == conv_dim + hv * vd + 2 * hv && abuf.qkv.numel() >= t * row, "gdn: in_proj 行宽 / 缓冲");
+        self.in_proj.forward_rows(gemm, x, &mut abuf.qkv, t)?;
+        let (z_off, a_off, b_off) = (conv_dim, conv_dim + hv * vd, conv_dim + hv * vd + hv);
+        let x_qkv = abuf.qkv.data.slice(..);
+        let z_view = abuf.qkv.data.slice(z_off..);
+        let a_view = abuf.qkv.data.slice(a_off..);
+        let b_view = abuf.qkv.data.slice(b_off..);
 
-        // 2. 短卷积（decode 单 token 走 update，其余走 varlen prefill）
+        // 2. 短卷积（decode 单 token 走 update，其余走 varlen prefill）；输出紧凑 [t, conv_dim]
         let single = meta.mode == BatchMode::Decode && meta.num_reqs == t;
         if single {
-            k::gdn_conv1d_update(
+            k::gdn_conv1d_update_strided(
                 stream,
-                &abuf.qkv.data,
+                &x_qkv,
                 &self.conv_w.data,
                 &mut abuf.conv.data,
                 &mut self.state.conv.data,
                 Some(&meta.state_indices.data),
                 meta.num_reqs,
                 conv_dim,
+                row,
                 width,
                 width - 1,
                 k::GdnAct::Silu,
             )?;
         } else {
-            k::gdn_conv1d_prefill(
+            let rows = k::gdn_conv_rows(stream, t, conv_dim, width, width - 1);
+            k::gdn_conv1d_prefill_strided(
                 stream,
-                &abuf.qkv.data,
+                &x_qkv,
                 &self.conv_w.data,
                 &mut abuf.conv.data,
                 &mut self.state.conv.data,
@@ -243,24 +262,27 @@ impl GdnLayer {
                 meta.num_reqs,
                 t,
                 conv_dim,
+                row,
                 width,
                 width - 1,
                 k::GdnAct::Silu,
+                rows,
             )?;
         }
 
         // 3. gate / beta（decode 走 recurrent kernel 内 fused-gate 现算，省一个 launch；prefill 预算好给 chunk 用）
         if !single {
-            k::gdn_gate(
+            k::gdn_gate_strided(
                 stream,
-                &abuf.a.data,
-                &abuf.b.data,
+                &a_view,
+                &b_view,
                 &self.a_log.data,
                 &self.dt_bias.data,
                 &mut abuf.g.data,
                 &mut abuf.beta.data,
                 t,
                 hv,
+                row,
             )?;
         }
 
@@ -293,17 +315,18 @@ impl GdnLayer {
             )?;
         } else {
             let (g, beta, a_raw, b_raw) = if single {
-                (None, None, Some(&abuf.a.data), Some(&abuf.b.data))
+                (None, None, Some(&a_view), Some(&b_view))
             } else {
                 (Some(&abuf.g.data), Some(&abuf.beta.data), None, None)
             };
-            k::gdn_recurrent(
+            k::gdn_recurrent_strided(
                 stream,
                 &abuf.conv.data,
                 g,
                 beta,
                 a_raw,
                 b_raw,
+                row,
                 &self.a_log.data,
                 &self.dt_bias.data,
                 &mut abuf.o.data,
@@ -317,20 +340,25 @@ impl GdnLayer {
                 kd,
                 vd,
                 scale,
+                None,
+                None,
+                None,
             )?;
         }
 
-        // 5. 输出门 + RMSNorm（z 门，silu）
-        k::gdn_gated_rmsnorm(
+        // 5. 输出门 + RMSNorm（z 门，silu）；z 是融合输出的列段，行距 in_row
+        k::gdn_gated_rmsnorm_strided(
             stream,
             &abuf.o.data,
             &self.norm_w.data,
-            &abuf.z.data,
+            &z_view,
             &mut abuf.n.data,
             t * hv,
             vd,
             cfg.rms_norm_eps,
             k::GdnAct::Silu,
+            hv,
+            row,
         )?;
 
         // 6. out_proj
