@@ -19,5 +19,12 @@
 - 需要装载前定大小的缓存（K3 MLA latent cache 在 `MlaLayer::load` 分配）不能按剩余显存算块数，用 `max_num_seqs × max_model_len / block_size` 上限。
 - 三个模型的采样流水（温度 / top-k / top-p / 惩罚 / logprobs 上传 + fused sample）仍是三份同文 → 下一个公共件候选 `exec::Sampler`。
 
+## PlanBuffers 上传规则与四段计时（engine-gap 第 7 轮，2026-10-20）
+- **每步小输入的 H2D 不是瓶颈**：B300 engine 负载稳态每 decode 步 ~17 次 pageable `cuMemcpyHtoDAsync`（4 B–128 KB，最大项 block_table = nb × max_blocks × 4）合计 GPU 30 µs + host 50 µs，< 0.5%。`PinnedUploader` 打包版（1 次 H2D + N 次 D2D 散开）host 调用数不减反增，默认关是对的；想真正少到 1 次要把所有 plan 列放进**一块**设备 arena（图地址固定不变），收益 < 0.3%，暂不做。
+- 上传规则：列按实际 `nb`（桶）行写，不按 `max_rows`；block_table 必须保持 `max_blocks` 行距（kernel 以它为 stride、图里固定），只能少传行不能少传列；padding 行 slot=-1 不写 KV、GDN slot 指废纸篓。
+- **四段计时**：`ModelExecutor::take_step_phases()`（默认 None）→ `ModelRunnerOutput.phases` → `/metrics` 的 `engine_step_phase_{upload,launch,wait}_{prefill,decode,mixed}_seconds`。upload = 状态 slot 处理 + plan / 采样 H2D；launch = forward + 采样入队（eager 时含 kernel launch、**工作区分配、kernel 懒加载**）；wait = 等 GPU（同步 D2H 或 async ring `finish`）。qwen35 已接；qwen3 的 `account()` 仍只打日志，接法同 qwen35 `set_phases`。
+- **prefill 步 host 空转的三个来源与解法**（qwen35）：按需增长的 chunk 工作区 free+alloc（`GdnChunkWorkspace::with_capacity` 启动一次按 `max_tokens`，`KdaChunkPlan::fill` 复用设备缓冲）；prefill kernel 首次使用的 `cuLibraryLoadData`（启动 `warmup_prefill` 两条 65 token 假请求，slot=-1 / 临时 GDN slot / 不写 prev_chosen）；首次图捕获（默认全桶预捕获，`GRAPH_CAPTURE=lazy` 回退）。
+- nsys 按步分类用 `scripts/dev/nsys_steps_sqlite.py`（稳态窗口 = 最后一次 ≥ 8 MB H2D 之后），不要用按 csv 切步的旧脚本。
+
 ## 下一步（design.md §14.5）
 任务图抽象：模型 crate 声明层结构 → 公共层生成图 → 同一张图可喂 megakernel 或退化成逐 kernel launch。`DecodeGraphs` 的闭包捕获体是它的前身。

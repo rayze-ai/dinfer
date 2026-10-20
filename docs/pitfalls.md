@@ -768,3 +768,15 @@
 - 根因：`vllm bench serve`（Python）在 vLLM 容器里跑，rate 8 时 CPU 229–410%、192–322 线程；dinfer / vLLM / 压测端都没钉核（128 核 2 NUMA 全开放），dinfer 的异步调度线程被抢。两个工具对同一 vLLM 服务测 TTFT p99 差 15%。
 - 解法：三方 `taskset` 隔离（dinfer 0-31、bench 96-127），Rust `bench`（CPU 0.3 s / 64 req）作主口径；隔离后 dinfer TPOT 23.3 / vLLM 16.9（差 1.4×，这才是引擎差距）。
 - 避免：CLAUDE.md 硬性规则"测试程序本身要可信"五条；`bench_engine.sh` 自动钉核 + 写 CPU 集合进 summary。
+
+## nsys 按 sample kernel 切步会把加载期的 memcpy 摊进"decode 步"（2026-10-20，engine-gap 第 6→7 轮）
+- 现象：按 `cuda_gpu_trace` csv 以 sample kernel 为界切步后，"decode 步 H2D 17.9 次 × 336 µs = 31%"。
+- 根因：权重装载（178 MB × 192 等 852 次 H2D、5.8 s）、自调优、图捕获期间的 memcpy 被归到第一批"步"里，再求平均——分母是步数、分子含加载期。稳态真值：每步 17 次 × 1.7 µs。
+- 解法：`scripts/dev/nsys_steps_sqlite.py` 直接读 sqlite，稳态窗口 = 最后一次 ≥ 8 MB H2D 之后；memcpy 按 `correlationId` 关联 RUNTIME 行看 host 侧耗时；GPU 空档叠 host API 归因。
+- 避免：任何"次数 ÷ 步数"的指标先确认窗口不含加载期；跨步平均前看字节直方图（336 µs 一次而 4 B–128 KB 的拷贝本就不可能）。
+
+## `pkill -f "dinfer serve"` 会连 `nsys profile ... dinfer serve` 一起杀，没有 .nsys-rep（2026-10-20）
+- 现象：bench 跑完、`nsys export` 报找不到文件，`/tmp/x.sqlite` 0 字节。
+- 根因：nsys 的命令行包含被跟踪程序的全部参数，`pkill -f` 模式同时匹配 nsys 自身；nsys 被 SIGINT 后不落盘。
+- 解法：`pgrep -x dinfer` + 读 `/proc/<pid>/cmdline` 匹配端口，只给 dinfer 发 SIGINT；等 `nsys profile` 进程自然退出。见 `scripts/dev/b300_engine2_ab.sh`。
+
