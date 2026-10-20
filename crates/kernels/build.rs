@@ -46,29 +46,53 @@ fn main() {
     let profile = env::var("PROFILE").unwrap_or_default();
     let opt = if profile == "release" { "-O3" } else { "-O2" };
 
-    let mut objs = Vec::new();
-    for entry in std::fs::read_dir("cuda").expect("cuda/ dir") {
-        let src = entry.unwrap().path();
-        if src.extension().is_none_or(|e| e != "cu") {
-            continue;
+    // 收集源文件（排序，保证 .a 内对象顺序稳定）
+    let mut srcs: Vec<PathBuf> = std::fs::read_dir("cuda")
+        .expect("cuda/ dir")
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "cu"))
+        .filter(|p| {
+            let stem = p.file_stem().unwrap().to_string_lossy();
+            has_sm100 || !sm100_only.contains(&stem.as_ref())
+        })
+        .collect();
+    srcs.sort();
+    let arch_flags: Vec<String> = archs
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|a| format!("-gencode=arch=compute_{a},code=sm_{a}"))
+        .collect();
+    // 并行 nvcc（2026-10-20，用户："构建慢？"）：之前 23 个 .cu × 3 arch 串行 ≈ 2 min / 轮，r10 每轮都付。
+    // 并发数 = cargo 给的 NUM_JOBS（受 -j 约束）或 nproc，上限 = 文件数；nvcc 自身单线程，并行无共享状态。
+    let jobs = env::var("NUM_JOBS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .or_else(|| std::thread::available_parallelism().ok().map(|n| n.get()))
+        .unwrap_or(4)
+        .clamp(1, srcs.len().max(1));
+    let objs: Vec<PathBuf> = srcs.iter().map(|src| out_dir.join(format!("{}.o", src.file_stem().unwrap().to_string_lossy()))).collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let nvcc_s = nvcc.clone();
+    std::thread::scope(|sc| {
+        for _ in 0..jobs {
+            sc.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if i >= srcs.len() {
+                    break;
+                }
+                let (src, obj) = (&srcs[i], &objs[i]);
+                let mut cmd = Command::new(&nvcc_s);
+                cmd.args(["-c", "-std=c++17", opt, "--expt-relaxed-constexpr", "-Xcompiler", "-fPIC", "-I", "cuda"]);
+                if profile != "release" {
+                    cmd.arg("-lineinfo");
+                }
+                cmd.args(&arch_flags);
+                cmd.arg("-o").arg(obj).arg(src);
+                run(&mut cmd, src);
+            });
         }
-        let stem = src.file_stem().unwrap().to_string_lossy().to_string();
-        if sm100_only.contains(&stem.as_str()) && !has_sm100 {
-            continue;
-        }
-        let obj = out_dir.join(format!("{}.o", src.file_stem().unwrap().to_string_lossy()));
-        let mut cmd = Command::new(&nvcc);
-        cmd.args(["-c", "-std=c++17", opt, "--expt-relaxed-constexpr", "-Xcompiler", "-fPIC", "-I", "cuda"]);
-        if profile != "release" {
-            cmd.arg("-lineinfo");
-        }
-        for a in archs.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-            cmd.arg(format!("-gencode=arch=compute_{a},code=sm_{a}"));
-        }
-        cmd.arg("-o").arg(&obj).arg(&src);
-        run(&mut cmd, &src);
-        objs.push(obj);
-    }
+    });
     assert!(!objs.is_empty(), "no .cu files under cuda/");
 
     // 只归档，不编译：cc 在没有源文件时直接把 .o 打成 libdinfer_kernels.a。
