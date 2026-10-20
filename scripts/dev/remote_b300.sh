@@ -7,6 +7,10 @@ set -euo pipefail
 JUMP_HOST="${JUMP_HOST:-111.48.159.177}"
 JUMP_PORT="${JUMP_PORT:-2222}"
 # 多台 B300：B300_TAG=50 → 凭据 ~/.ssh/jms_b300_50_{user,pass}、socket cm_b300_50（2026-10-19 第二台 ppio-5 172.16.3.50）
+# 用户 2026-10-20：**不要占用 .225（无 TAG 的第一台）**。未设 B300_TAG 直接拒绝，避免子代理 / 旧脚本误连。
+if [ -z "${B300_TAG:-}" ]; then
+  echo "remote_b300.sh: 必须设 B300_TAG（当前只允许 50；第一台 .225 用户禁止占用，2026-10-20）" >&2; exit 3
+fi
 TAG="${B300_TAG:+_$B300_TAG}"
 CM="$HOME/.ssh/cm_b300$TAG"
 REMOTE_ROOT="${REMOTE_ROOT:-/data/yaochen/infer}"   # 用户约束（2026-10-19）：远程只能用这个目录（B300-50 上先 sudo mkdir+chown）
