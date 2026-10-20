@@ -160,6 +160,31 @@
 - 1x1024 wy_us dinfer：B300 GPU 6 sm_103（engine-gap 8e / 8g）
 - 1x1024 chain_us vllm：fla chunk_gated_delta_rule 含 l2norm（engine-gap 8d）
 
+## probe_gdn_r9_0b300（2026-10-20，B300）
+
+### gdn_scale（us）
+
+| x | chain_us dinfer | conv_us dinfer | fla_chunk_gdr_us vllm | ho_us dinfer | wy_us dinfer |
+|---|---|---|---|---|---|
+| 1x1024 | 311 | 41 | 359 | 160 | 134 |
+| 8x1024 | 1662 | 222 |  | 664 | 912 |
+| 32x128 | 845 |  |  |  |  |
+| 1x3009 |  |  | 349 |  |  |
+| 1x8192 |  |  | 853 |  |  |
+
+- 1x1024 chain_us dinfer：gdn_chunk_bench GPU 6 sm_103；prep 18 / wy 134 / ho bv16 160 / conv rows32 41；r9 起点（第 5A 轮 mma 版）B300 基线，原误放在 probe_prefill_1
+- 8x1024 chain_us dinfer：wy 912 / ho bv32 664 / conv rows32 222（5.3× 线性涨）；r9 起点（第 5A 轮 mma 版）B300 基线，原误放在 probe_prefill_1
+- 32x128 chain_us dinfer：wy 461 / ho bv32 341 / conv 137；r9 起点（第 5A 轮 mma 版）B300 基线，原误放在 probe_prefill_1
+- 1x1024 wy_us dinfer：r9 起点（第 5A 轮 mma 版）B300 基线，原误放在 probe_prefill_1
+- 8x1024 wy_us dinfer：r9 起点（第 5A 轮 mma 版）B300 基线，原误放在 probe_prefill_1
+- 1x1024 ho_us dinfer：bv16；r9 起点（第 5A 轮 mma 版）B300 基线，原误放在 probe_prefill_1
+- 8x1024 ho_us dinfer：bv32；r9 起点（第 5A 轮 mma 版）B300 基线，原误放在 probe_prefill_1
+- 1x1024 conv_us dinfer：rows32；r9 起点（第 5A 轮 mma 版）B300 基线，原误放在 probe_prefill_1
+- 8x1024 conv_us dinfer：rows32；r9 起点（第 5A 轮 mma 版）B300 基线，原误放在 probe_prefill_1
+- 1x1024 fla_chunk_gdr_us vllm：vLLM 容器 third_party fla chunk_gated_delta_rule 同形状 HV48 K=V=128 含 l2norm 50 次均值；早期 fla 单 kernel 总时 benchmark，正式分解见 probe_gdn_r9_8
+- 1x3009 fla_chunk_gdr_us vllm：早期 fla 单 kernel 总时 benchmark，正式分解见 probe_gdn_r9_8
+- 1x8192 fla_chunk_gdr_us vllm：1 K→8 K 只 2.4×；早期 fla 单 kernel 总时 benchmark，正式分解见 probe_gdn_r9_8
+
 ## probe_gdn_r9_1（2026-10-20，3090）
 
 ### gdn_scale（us）
@@ -344,26 +369,6 @@
 - silu_and_mul step_ms dinfer：64 × 22 µs
 - other step_ms dinfer：qkv_post / mul_sigmoid / gate / splitKreduce / argmax
 - total_kernel step_ms dinfer：span 62.2；851 kernel/步；H2D 3 次 5 µs
-
-### gdn_scale（us）
-
-| x | chain_us dinfer | conv_us dinfer | fla_chunk_gdr_us vllm | ho_us dinfer | wy_us dinfer |
-|---|---|---|---|---|---|
-| 1x1024 | 311 | 41 | 359 | 160 | 134 |
-| 8x1024 | 1662 | 222 |  | 664 | 912 |
-| 32x128 | 845 |  |  |  |  |
-| 1x3009 |  |  | 349 |  |  |
-| 1x8192 |  |  | 853 |  |  |
-
-- 1x1024 chain_us dinfer：gdn_chunk_bench GPU 6 sm_103；prep 18 / wy 134 / ho bv16 160 / conv rows32 41
-- 8x1024 chain_us dinfer：wy 912 / ho bv32 664 / conv rows32 222（5.3× 线性涨）
-- 32x128 chain_us dinfer：wy 461 / ho bv32 341 / conv 137
-- 1x1024 ho_us dinfer：bv16
-- 8x1024 ho_us dinfer：bv32
-- 1x1024 conv_us dinfer：rows32
-- 8x1024 conv_us dinfer：rows32
-- 1x1024 fla_chunk_gdr_us vllm：vLLM 容器 third_party fla chunk_gated_delta_rule 同形状 HV48 K=V=128 含 l2norm 50 次均值
-- 1x8192 fla_chunk_gdr_us vllm：1 K→8 K 只 2.4×
 
 ## probe_prefill_2（2026-10-20，B300）
 

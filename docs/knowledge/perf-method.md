@@ -65,7 +65,7 @@
 
 - **判断**：任何性能测量都要进 CSV 并由脚本生成页面，页面刷新可见；只写 loop 表行视为未完成。三类：`perf-trend`（四组闭环，`bench_compare.sh`）、`engine-trend`（开环泊松 / SLO goodput，`engine_trend.py`）、`probe-trend`（TTFT-长度曲线、kernel 分解、微基准伸缩、第三方 kernel 对照，`probe_trend.py`，输入 `test/<model>/<日期>/probe_*/probe.csv` 长表）。`test/index.html` 每模型一行链到三页。
 - **为什么**：2026-10-20 engine-gap 8c–8g 四组探针测量只写了 markdown 表行，用户看页面发现没有；形状不同不是不进 CSV 的理由，长表（group/metric/side/x/value）能装任何探针。
-- **怎么用**：探针开始前先建 `probe_<名>/probe.csv` 写表头，每拿到一组数就追加一行，结束跑 `python3 scripts/dev/probe_trend.py --root test/<model> && python3 scripts/dev/bench_index.py`，commit 生成物。
+- **怎么用**：探针开始前先建 `probe_<名>/probe.csv` 写表头，**一个目录只放一个对比项**（kernel 微基准 / 单发 TTFT-长度 / kernel 分解各自成目录，group 名分别用 `gdn_scale`-类 / `ttft_len` / `kernel_1k`，页面按 group 名归类），每拿到一组数就追加一行，结束跑 `python3 scripts/dev/probe_trend.py --root test/<model> && python3 scripts/dev/bench_index.py`，commit 生成物。
 - **证据**：`docs/loops/engine-gap.md` 8h；`test/qwen35/2026-10-20/probe_prefill_1/`。
 
 ## 9. 调度策略改动必测"单发长 prompt 的 prefill 步数"（2026-10-20 r8 切步）

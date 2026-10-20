@@ -68,7 +68,7 @@ th:first-child,td:first-child,td.change,th.change,td.l,th.l{text-align:left}
 <div class="empty" id="eng-empty" hidden>本目录没有 engine-trend.csv</div>
 </section>
 <section class="page" id="page-probe" hidden>
-<div class="base">探针（TTFT-长度 / kernel 分解 / 微基准伸缩 / 第三方 kernel 对照）。group <select id="probe-sel"></select>
+<div class="base">探针。对比项 <select id="probe-kind"></select> · group <select id="probe-sel"></select>（三类对比项互不可比：kernel 微基准 = GDN chunk 三段 µs vs vLLM fla；单发 TTFT = 按 prompt 长度 ms vs vLLM 服务；kernel 分解 = 一步 prefill 各 kernel ms）
  <span style="float:right"><a href="probe-trend.md">md</a> · <a href="probe-trend.csv">csv</a></span><br>
  <span class="updated">口径同 single：x = 轮次（probe id，按日期再按名字），每个形状一张卡片，线 = 各 metric 随轮次变化；dinfer 实线 / vLLM 虚线。</span>
  <div class="pmetrics" id="probe-metrics"></div></div>
@@ -264,6 +264,12 @@ function probeRender(){
   document.getElementById("probe-empty").hidden=PRB_OK; if(!PRB_OK) return;
   const sel=document.getElementById("probe-sel");
   let rows=PRB.filter(r=>r.gpu==curGpu); if(!rows.length) rows=PRB;
+  // 对比项（用户 2026-10-20："probe_prefill_1 不是一个对比项吧"）：按 group 名归三类，先选类再选 group，避免 kernel 微基准与 TTFT 曲线混在一个选择器
+  const KIND=g=>/^gdn_|_scale$|_us$/.test(g)?"kernel 微基准（µs，vs fla）":/ttft|slope/.test(g)?"单发 TTFT-长度（ms，vs vLLM 服务）":/kernel_1k|breakdown|分解/.test(g)?"kernel 分解（一步 prefill）":"其它";
+  const ksel=document.getElementById("probe-kind");const kinds=[...new Set(rows.map(r=>KIND(r.group)))];
+  const kind=kinds.includes(ksel.value)?ksel.value:kinds[0];
+  ksel.innerHTML=kinds.map(k=>`<option value="${k}" ${k===kind?"selected":""}>${k}</option>`).join("");ksel.onchange=()=>{sel.value="";probeRender();};
+  rows=rows.filter(r=>KIND(r.group)===kind);
   const groups=[...new Set(rows.map(r=>r.group))];
   const grp=groups.includes(sel.value)?sel.value:groups[0];
   sel.innerHTML=groups.map(g=>`<option value="${g}" ${g===grp?"selected":""}>${g}</option>`).join("");

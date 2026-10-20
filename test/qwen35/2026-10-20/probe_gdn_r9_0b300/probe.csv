@@ -1,0 +1,13 @@
+probe,date,gpu,model,group,metric,side,x,value,unit,note
+probe_gdn_r9_0b300,2026-10-20,B300,qwen35,gdn_scale,chain_us,dinfer,1x1024,311,us,gdn_chunk_bench GPU 6 sm_103；prep 18 / wy 134 / ho bv16 160 / conv rows32 41；r9 起点（第 5A 轮 mma 版）B300 基线，原误放在 probe_prefill_1
+probe_gdn_r9_0b300,2026-10-20,B300,qwen35,gdn_scale,chain_us,dinfer,8x1024,1662,us,wy 912 / ho bv32 664 / conv rows32 222（5.3× 线性涨）；r9 起点（第 5A 轮 mma 版）B300 基线，原误放在 probe_prefill_1
+probe_gdn_r9_0b300,2026-10-20,B300,qwen35,gdn_scale,chain_us,dinfer,32x128,845,us,wy 461 / ho bv32 341 / conv 137；r9 起点（第 5A 轮 mma 版）B300 基线，原误放在 probe_prefill_1
+probe_gdn_r9_0b300,2026-10-20,B300,qwen35,gdn_scale,wy_us,dinfer,1x1024,134,us,r9 起点（第 5A 轮 mma 版）B300 基线，原误放在 probe_prefill_1
+probe_gdn_r9_0b300,2026-10-20,B300,qwen35,gdn_scale,wy_us,dinfer,8x1024,912,us,r9 起点（第 5A 轮 mma 版）B300 基线，原误放在 probe_prefill_1
+probe_gdn_r9_0b300,2026-10-20,B300,qwen35,gdn_scale,ho_us,dinfer,1x1024,160,us,bv16；r9 起点（第 5A 轮 mma 版）B300 基线，原误放在 probe_prefill_1
+probe_gdn_r9_0b300,2026-10-20,B300,qwen35,gdn_scale,ho_us,dinfer,8x1024,664,us,bv32；r9 起点（第 5A 轮 mma 版）B300 基线，原误放在 probe_prefill_1
+probe_gdn_r9_0b300,2026-10-20,B300,qwen35,gdn_scale,conv_us,dinfer,1x1024,41,us,rows32；r9 起点（第 5A 轮 mma 版）B300 基线，原误放在 probe_prefill_1
+probe_gdn_r9_0b300,2026-10-20,B300,qwen35,gdn_scale,conv_us,dinfer,8x1024,222,us,rows32；r9 起点（第 5A 轮 mma 版）B300 基线，原误放在 probe_prefill_1
+probe_gdn_r9_0b300,2026-10-20,B300,qwen35,gdn_scale,fla_chunk_gdr_us,vllm,1x1024,359,us,vLLM 容器 third_party fla chunk_gated_delta_rule 同形状 HV48 K=V=128 含 l2norm 50 次均值；早期 fla 单 kernel 总时 benchmark，正式分解见 probe_gdn_r9_8
+probe_gdn_r9_0b300,2026-10-20,B300,qwen35,gdn_scale,fla_chunk_gdr_us,vllm,1x3009,349,us,早期 fla 单 kernel 总时 benchmark，正式分解见 probe_gdn_r9_8
+probe_gdn_r9_0b300,2026-10-20,B300,qwen35,gdn_scale,fla_chunk_gdr_us,vllm,1x8192,853,us,1 K→8 K 只 2.4×；早期 fla 单 kernel 总时 benchmark，正式分解见 probe_gdn_r9_8
