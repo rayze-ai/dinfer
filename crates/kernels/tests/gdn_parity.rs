@@ -530,10 +530,12 @@ fn gdn_chunk_wy_mma_vs_legacy() {
         ops::gdn_chunk_prep(&st, &dm, &dg, &dcu, &plan, &mut sc, t, h, hv, k, v, scale).unwrap();
         ops::gdn_chunk_wy_with(&st, &dm, &dbeta, &dcu, &plan, &mut sc, t, h, hv, k, v, how).unwrap();
         st.synchronize().unwrap();
-        let aq: Vec<f32> = st.dtoh_sync_copy(&sc.aq).unwrap();
-        let u: Vec<f32> = st.dtoh_sync_copy(&sc.u).unwrap();
-        let w: Vec<f32> = st.dtoh_sync_copy(&sc.w).unwrap();
-        let kg: Vec<f32> = st.dtoh_sync_copy(&sc.kg).unwrap();
+        // r10：scratch 中间量是 bf16，比较前升 f32
+        let up = |v: Vec<bf16>| -> Vec<f32> { v.into_iter().map(f32::from).collect() };
+        let aq = up(st.dtoh_sync_copy(&sc.aq).unwrap());
+        let u = up(st.dtoh_sync_copy(&sc.u).unwrap());
+        let w = up(st.dtoh_sync_copy(&sc.w).unwrap());
+        let kg = up(st.dtoh_sync_copy(&sc.kg).unwrap());
         outs.push((aq, u, w, kg));
     }
     let (a0, u0, w0, k0) = &outs[0];

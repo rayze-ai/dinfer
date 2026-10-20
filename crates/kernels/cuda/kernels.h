@@ -244,16 +244,17 @@ int gdn_gated_rmsnorm(const void* x, const void* w, const void* z, void* out, in
 int gdn_chunk_prep(const void* mixed_qkv, const float* g, void* qn, void* kn, float* gc, const int* cu_seqlens,
                    const int* chunk_tab, int64_t total, int64_t num_chunks, int64_t H, int64_t HV, int64_t K,
                    int64_t V, int64_t bt, float scale, cudaStream_t stream);
+// r10：aq / u / w / kg 为 bf16（void* 传）。
 int gdn_chunk_wy(const void* qn, const void* kn, const void* mixed_qkv, const float* gc, const float* beta,
-                 float* aq, float* u, float* w, float* kg, const int* cu_seqlens, const int* chunk_tab,
+                 void* aq, void* u, void* w, void* kg, const int* cu_seqlens, const int* chunk_tab,
                  int64_t num_chunks, int64_t H, int64_t HV, int64_t K, int64_t V, int64_t bt, int64_t wy_mode, cudaStream_t stream);
-int gdn_chunk_ho(const void* qn, const float* gc, const float* aq, const float* u, const float* w, const float* kg,
+int gdn_chunk_ho(const void* qn, const float* gc, const void* aq, const void* u, const void* w, const void* kg,
                  void* out, void* state, const int* cu_seqlens, const int* cu_nt, const int* chunk_off,
                  const int* state_indices, int64_t state_stride_tok, int64_t num_seqs, int64_t H, int64_t HV,
                  int64_t K, int64_t V, int64_t bt, int64_t ho_bv, cudaStream_t stream);
 // r9（docs/loops/qwen35-gdn-r9.md）：prefetch 0/1 = 寄存器预取下一 chunk；split ≠ 0 = h-pass + o-pass 两段（值 > 1 为 o-pass V 分片 VT ∈ {64,32,16}），
 // h16 bf16 [num_chunks, HV, V, K]（每 chunk 入口状态）、v16 bf16 [T, HV, V]（v'）为中间缓冲（调用方分配）。
-int gdn_chunk_ho_v2(const void* qn, const float* gc, const float* aq, const float* u, const float* w, const float* kg,
+int gdn_chunk_ho_v2(const void* qn, const float* gc, const void* aq, const void* u, const void* w, const void* kg,
                     void* h16, void* v16, void* out, void* state, const int* cu_seqlens, const int* cu_nt,
                     const int* chunk_off, const int* chunk_tab, const int* state_indices, int64_t state_stride_tok,
                     int64_t num_seqs, int64_t num_chunks, int64_t H, int64_t HV, int64_t K, int64_t V, int64_t bt,
