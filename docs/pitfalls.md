@@ -804,3 +804,10 @@
 - **现象**：r8 在 B300 跑完 engine bench，compare 跑到第 2 组时远端 `test/qwen35/2026-10-20/engine_r8/` 整目录消失；同时出现 r9 的 probe 目录。
 - **根因**：`push` = rsync `--delete`，远端有、推送方本机没有的目录一律删。两个子代理各自本机工作区不含对方的新目录。10-20 上午 K3 refs 目录同款事故已记一次。
 - **解法 / 避免**：**子代理禁止 push**，代码同步发消息让主会话推（主会话工作区含全部 commit）；子代理只能 `put` 单文件；远端产物一律先落 `/tmp` 或 `bootstrap/`，由主会话 `pull` 回本机 `test/`，不要直接写远端 `test/`。写进 `knowledge/subagent-ops.md`。
+
+## 2026-10-20 `k3_model.sh` 的 cargo test 在 DUMP 为空时根本没跑（exit 仍 0）
+
+- **现象**：乱文取证跑 `K3_SKIP_GEN=1 k3_model.sh`，`/tmp/k3_model.log` 只有 70 字节：`line 34: RUST_LOG=info: command not found`；脚本 `rc=${PIPESTATUS[0]}` 取的是这条失败命令的 127，但外层 grep 管道吞掉后看起来像"没输出"，上游调用方按 exit 判就会误判。
+- **根因**：`${DUMP:+KIMIK3_DUMP="$DUMP"} RUST_LOG=info cargo …` 在 DUMP 为空时第一个词展开为空串，bash 把下一个词 `RUST_LOG=info` 当**命令名**而不是赋值前缀。C-3 / C-5 时都设了 DUMP 或没走这条分支，所以当时的 `test result: ok` 是真的。
+- **解法**：`env VAR=… ${DUMP:+…} RUST_LOG=info cargo …`（`env` 后的词全按变量赋值解析，空词无害）；脚本末尾加 `grep -q "^test result: ok" $LOG || rc=1`，让"没跑"显式失败。用户 2026-10-20：修复即可，不单独重跑（装载太久）。
+- **避免**：shell 里条件展开的环境变量前缀一律用 `env`；验证脚本的 exit 必须由"产物存在 / 结果行存在"兜底，不能只信管道 rc。
