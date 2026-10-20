@@ -235,6 +235,7 @@ impl Qwen3Executor {
         if enable_graphs && graph_capture_eager() {
             ex.capture_decode_graphs()?;
         }
+        ex.graphs.report_startup(None);
         // 跨流 prefill/decode 并行（Q3-j）：XSTREAM=0 关。副流一套资源在图捕获之后分配。
         if std::env::var("XSTREAM").map(|v| v != "0").unwrap_or(true) {
             let t0 = std::time::Instant::now();
@@ -301,6 +302,11 @@ impl Qwen3Executor {
 
     pub fn num_graphs(&self) -> usize {
         self.graphs.len()
+    }
+
+    /// 启动期自报：(graph 捕获秒, warmup 秒)，给 `StartupTimer::done`。
+    pub fn startup_phases(&self) -> (f64, f64) {
+        (self.graphs.capture_secs(), 0.0)
     }
 
     // ---------------------------------------------------------------- 上传

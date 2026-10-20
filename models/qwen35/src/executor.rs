@@ -104,6 +104,8 @@ pub struct Qwen35Executor {
     gdn_chunk_enabled: bool,
     /// decode 图（按 batch 桶，懒捕获；公共件）。
     graphs: DecodeGraphs,
+    /// 启动 warmup prefill 耗时（秒），给 `StartupTimer::done`。
+    warmup_secs: f64,
     pub graph_steps: u64,
     pub eager_steps: u64,
     /// 递归状态快照（design §15.7）：恢复 / 保存次数。
@@ -183,6 +185,7 @@ impl Qwen35Executor {
             last_phases: None,
             skip_prev_chosen: false,
             sync_stash: None,
+            warmup_secs: 0.0,
         };
         // GDN chunk 工作区启动一次按上限分配（engine-gap 第 7 轮：按需增长在 engine 负载下 43 次 cuMemAllocAsync
         // 共 431 ms 全落在 prefill 步里）。`GDN_CHUNK_PREALLOC=0` 回到按需增长；分配失败也回退（只打 warn）。
@@ -200,16 +203,24 @@ impl Qwen35Executor {
         // 启动 warmup 一次 prefill（含 chunk 路径）：预载 prefill kernel（cuLibraryLoadData 懒加载在 engine 负载下
         // 148 ms 落在首个 prefill 步）。`WARMUP=0` 关。
         if std::env::var("WARMUP").as_deref() != Ok("0") {
+            let t_w = std::time::Instant::now();
             if let Err(e) = ex.warmup_prefill() {
                 tracing::warn!(err = %e, "qwen35: warmup prefill failed (ignored)");
             }
+            ex.warmup_secs = t_w.elapsed().as_secs_f64();
         }
         // decode 图：qwen35 默认启动时全桶捕获（engine 负载下首次捕获 7 桶 × 10 ms 落在服务期）；
         // `GRAPH_CAPTURE=lazy` 回到懒捕获。
         if ex.graphs.enabled() && (graph_capture_eager() || std::env::var("GRAPH_CAPTURE").as_deref() != Ok("lazy")) {
             ex.capture_decode_graphs()?;
         }
+        ex.graphs.report_startup(None);
         Ok(ex)
+    }
+
+    /// 启动期自报：(graph 捕获秒, warmup 秒)，给 `StartupTimer::done`。
+    pub fn startup_phases(&self) -> (f64, f64) {
+        (self.graphs.capture_secs(), self.warmup_secs)
     }
 
     /// 启动 warmup：两条 65 token 的假请求走一次 prefill（GDN chunk 三段 + 全注意力 prefill + GEMM 大 M 路径），

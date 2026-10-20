@@ -6,11 +6,13 @@
 | `DecodeGraphs` | 按 batch 桶懒捕获 / 全捕获 CUDA graph | `ensure(n, body)` / `get(n)` / `capture_all(body)`；`body(nb, CapturePhase::{Prepare, Body})`——**Prepare 在捕获外做 H2D**，Body 只 launch | 捕获体闭包（上传假 plan → forward_device → sample_device_fixed） |
 | `StateSlotTable` | 递归状态槽分配（请求 → slot），`release(finished)` + LRU 兜底 | `begin_step(req_ids) -> fresh` / `indices` / `release` | 清零 fresh slot 的状态 |
 | `kv::StateSnapshotPool`（core，scheduler 持有） | 递归状态**快照**槽（design §15.7）：键 = 对齐位置的块 hash → 快照槽，LRU + pin；scheduler 据此发 `BatchPlan.recurrent_resume / recurrent_snapshot (req, 槽)` | executor 只做两件事：forward 前 `restore(槽 → 活槽)` + `has_init=1`；本步 kernel 之后 `save(活槽 → 槽)`（同流 dtod，图外） | 快照区显存（每槽 = 全部递归层状态）、`save/restore` 实现、`load` 从预算扣快照区 |
+| `load::LoadProgress` / `StartupTimer`（2026-10-20，r9 遗留） | **装载骨架也是公共件**：逐层计时 / `mem_info` 显存增量 / GB/s / `layer=l/n` 进度 / `model loaded` 汇总；服务启动三段 `startup done model_load_ms / graph_capture_ms / warmup_ms / engine_ms / total_ms`（graph / warmup 由 `DecodeGraphs::capture_secs` + executor 自报并从模型段扣掉） | `LoadProgress::new(tp)` → `timed(what, ‖ …)`（顶层张量）→ `load_layers(stream, n, ‖l‖ Ok((layer, kind)))` → `finish()`；`StartupTimer::start()` / `model_loaded()` / `done(graph_secs, warmup_secs)`；`DecodeGraphs::report_startup(reason)` 打 `decode graphs captured/disabled` 一行 | 装层闭包（开分片 / 建表 / `XxxLayer::load_tp`）+ 一个 `&'static str` 标签（`kda/moe`、`gdn`、`mla+idx/moe`…）；模型名不进 `crates/` |
 | `PlanBuffers` | plan 上传到固定地址缓冲 + pad 到桶（graph 重放只换内容不换地址） | `upload(stream, uploader, plan, pad_to)`、`gather_inflight`、`save_chosen` | 模型特有列（GDN 的 state_idx / has_init）之后追加 |
 
 ## 规则
 - 新模型 executor **直接用这四件**，不复制 qwen3 / qwen35 的内联实现（kimik3 已接 `StateSlotTable`，`DecodeGraphs` / `AsyncResultRing` 等 C-4b 做 executor 时接）。
 - 发现 qwen3 里有、别的模型没有的性能机制 → 先抽公共件再接。
+- 启动日志（装载每层一行 + 汇总、`decode graphs captured` 一行、`startup done` 一行）只由 `load.rs` / `exec.rs` 打，模型 crate 不再各写 `Instant` + `mem_info` 差（2026-10-20 四模型各有一份、字段还不一致，kimik3 `fb8886e` 加的 GB/s、done=l/n 已收进公共件）。想看某模型独有阶段（qwen3 的 tokenizer / cuda_init）可另打一行，但不要重复三段。
 - 图捕获体内不得有 H2D / 分配 / 同步 / 跨流等待：graph 会把 host 指针记进去，重放读已释放内存 → `row_gather` 越界（`compute-sanitizer` 直接指到行；`CUDA_LAUNCH_BLOCKING` 只指下一个同步点）。
 - executor 自持非默认流 + `disable_event_tracking`，cuBLASLt 句柄在该流上建（默认流不能 capture）。
 

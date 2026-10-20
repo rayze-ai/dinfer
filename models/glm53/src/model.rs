@@ -8,6 +8,7 @@ use anyhow::{ensure, Context, Result};
 use dinfer_kernels as k;
 use dinfer_layers::mla::AttnMeta;
 use dinfer_layers::mla::SparseCtx;
+use dinfer_layers::LoadProgress;
 use dinfer_layers::{
     bf16, Embedding, Gemm, Indexer, IndexerConfig, IndexerKv, Linear, MlaAttention, MlaConfig, Mlp, Moe,
     MoeConfig, PagedKv, RmsNorm, RopeStyle, Stream, Tensor, WeightSource,
@@ -154,17 +155,18 @@ impl Glm53Model {
         let mla = Self::mla_config(&cfg);
         let has_moe = cfg.first_k_dense_replace < cfg.num_hidden_layers;
         let moe = if has_moe { Some(Self::moe_config(&cfg)?) } else { None };
-        let embed = Embedding::load(stream, src, "model.embed_tokens")?;
+        let mut prog = LoadProgress::new((0, 1));
+        let embed = prog.timed("embed_tokens", || Embedding::load(stream, src, "model.embed_tokens"))?;
         let max_seq = num_blocks * block_size;
         let idx_cfg = Self::indexer_config(&cfg, max_seq);
         if cfg.dsa {
             ensure!(cfg.has_indexer(0), "DSA: layer 0 must be a full indexer layer");
         }
-        let mut layers = Vec::with_capacity(cfg.num_hidden_layers as usize);
-        let mut kv = Vec::with_capacity(cfg.num_hidden_layers as usize);
-        for l in 0..cfg.num_hidden_layers {
+        let n_layers = cfg.num_hidden_layers as usize;
+        let layers = prog.load_layers(stream, n_layers, |l| {
+            let l = l as u32;
             let p = format!("model.layers.{l}");
-            layers.push(DecoderLayer {
+            let layer = DecoderLayer {
                 input_norm: RmsNorm::load(stream, src, &format!("{p}.input_layernorm"), cfg.rms_norm_eps)?,
                 attn: MlaAttention::load(stream, src, &format!("{p}.self_attn"), mla.clone(), max_tokens)
                     .with_context(|| format!("layer {l} attn"))?,
@@ -200,11 +202,22 @@ impl Glm53Model {
                             .with_context(|| format!("layer {l} moe"))?,
                     ))
                 },
-            });
+            };
+            let kind = match (layer.indexer.is_some(), l < cfg.first_k_dense_replace) {
+                (true, true) => "mla+idx/dense",
+                (true, false) => "mla+idx/moe",
+                (false, true) => "mla/dense",
+                (false, false) => "mla/moe",
+            };
+            Ok((layer, kind))
+        })?;
+        let mut kv = Vec::with_capacity(n_layers);
+        for _ in 0..n_layers {
             kv.push(PagedKv::new(stream, num_blocks, block_size, mla.entry())?);
         }
-        let norm = RmsNorm::load(stream, src, "model.norm", cfg.rms_norm_eps)?;
-        let lm_head = Linear::load(stream, src, "lm_head")?;
+        let norm = prog.timed("norm", || RmsNorm::load(stream, src, "model.norm", cfg.rms_norm_eps))?;
+        let lm_head = prog.timed("lm_head", || Linear::load(stream, src, "lm_head"))?;
+        prog.finish();
         let h = cfg.hidden_size as usize;
         let v = cfg.vocab_size as usize;
         Ok(Self {

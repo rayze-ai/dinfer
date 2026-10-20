@@ -15,6 +15,7 @@ use dinfer_core::runner::BatchMode;
 use dinfer_kernels as k;
 use dinfer_layers::{bf16, Embedding, Gemm, Linear, OpSet, RmsNorm, Rope, RopeStyle, Stream, Tensor, WeightSource};
 use dinfer_layers::Norm as _;
+use dinfer_layers::LoadProgress;
 
 /// 一步 forward 的描述（executor 上传后的设备张量）。
 pub struct Forward<'a> {
@@ -170,7 +171,7 @@ impl<O: OpSet> Qwen35Model<O> {
         }
         let mut cfg = cfg;
         let _ = &mut cfg;
-        let t_load0 = std::time::Instant::now();
+        let mut prog = LoadProgress::new(tp);
         let table = Table::open(src)?;
         let hidden = cfg.hidden_size as usize;
         let (h, hk, d) = (
@@ -178,19 +179,17 @@ impl<O: OpSet> Qwen35Model<O> {
             cfg.num_key_value_heads as usize,
             cfg.head_dim as usize,
         );
-        let embed = table.embedding(stream, src, "embed_tokens.weight")?;
+        let embed = prog.timed("embed_tokens", || table.embedding(stream, src, "embed_tokens.weight"))?;
         let n = cfg.num_hidden_layers as usize;
         ensure!(cfg.layer_types.len() == n, "layer_types {} != num_hidden_layers {n}", cfg.layer_types.len());
-        let mut layers = Vec::with_capacity(n);
-        for l in 0..n {
-            layers.push(
-                DecoderLayer::load(stream, src, &table, l, &cfg, max_tokens, num_slots, tp)
-                    .with_context(|| format!("layer {l}"))?,
-            );
-        }
-        tracing::info!(layers = n, ms = t_load0.elapsed().as_millis() as u64, "load timing: decoder layers");
-        let norm = table.rmsnorm(stream, src, "norm.weight", cfg.rms_norm_eps)?;
-        let lm_head = Linear::new(table.load_bf16(stream, src, "lm_head.weight")?, None)?;
+        let mut layers = prog.load_layers(stream, n, |l| {
+            let layer = DecoderLayer::load(stream, src, &table, l, &cfg, max_tokens, num_slots, tp)
+                .with_context(|| format!("layer {l}"))?;
+            let kind = if layer.attn.is_full() { "full_attn" } else { "gdn" };
+            Ok((layer, kind))
+        })?;
+        let norm = prog.timed("norm", || table.rmsnorm(stream, src, "norm.weight", cfg.rms_norm_eps))?;
+        let lm_head = prog.timed("lm_head", || Linear::new(table.load_bf16(stream, src, "lm_head.weight")?, None))?;
         ensure!(
             lm_head.out_features == cfg.vocab_size as usize && lm_head.in_features == hidden,
             "lm_head shape {:?}（期望 [{}, {hidden}]）；tie_word_embeddings = {}",
@@ -200,6 +199,7 @@ impl<O: OpSet> Qwen35Model<O> {
         );
         let rope = Rope::new(stream, cfg.rope_dim() as usize, cfg.max_position_embeddings as usize, cfg.rope_theta(), RopeStyle::Neox)?;
         stream.synchronize()?;
+        prog.finish();
 
         let v = cfg.vocab_size as usize;
         let hidden_t = Tensor::zeros(stream, &[max_tokens, hidden])?;

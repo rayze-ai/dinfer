@@ -8,6 +8,7 @@
 
 pub mod exec;
 pub mod indexer;
+pub mod load;
 pub mod mla;
 pub mod moe;
 pub mod nn;
@@ -17,6 +18,7 @@ pub mod weights_fp8;
 
 pub use dinfer_kernels::{bf16, Device, Gemm, RopeStyle, Stream, Event, TimingEvent, PinnedUploader, PinnedSlot, PinnedPool, PinnedBuf, Act, Attention, DefaultOps, Norm, OpSet, QkvPost, HostArena};
 pub use exec::{async_sched_enabled, CapturePhase, decode_capture_plan, graph_buckets, graph_capture_eager, AsyncResultRing, DecodeGraphs, PlanBuffers, StateSlotTable, Ticket};
+pub use load::{LoadProgress, LoadStatsSummary, MemProbe, StartupTimer, StartupTiming};
 pub use indexer::{Indexer, IndexerConfig, IndexerKv, IndexerMeta};
 pub use mla::{MlaAttention, MlaConfig, PagedKv};
 pub use moe::{Moe, MoeConfig};

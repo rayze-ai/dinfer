@@ -111,11 +111,38 @@ pub struct DecodeGraphs {
     max_rows: usize,
     /// 捕获用的流（图在哪条流上捕获就只能在哪条流上 launch；`Stream` 是 Arc 句柄，clone 便宜）。
     stream: Stream,
+    /// 累计捕获耗时（秒；eager 全捕获 + lazy 首捕获都计），给 `StartupTimer::done` 的 graph_capture 段。
+    capture_secs: f64,
+    /// `capture_all` 是否已跑过（`report_startup` 据此判 eager / lazy）。
+    captured_all: bool,
 }
 
 impl DecodeGraphs {
     pub fn new(stream: &Stream, enabled: bool, max_rows: usize) -> Self {
-        Self { graphs: Vec::new(), enabled, max_rows, stream: stream.clone() }
+        Self { graphs: Vec::new(), enabled, max_rows, stream: stream.clone(), capture_secs: 0.0, captured_all: false }
+    }
+
+    /// 迄今捕获总耗时（秒）。
+    pub fn capture_secs(&self) -> f64 {
+        self.capture_secs
+    }
+
+    /// 启动期一行汇总（四模型统一格式，在 `Executor::new` 末尾调一次）：
+    /// - 关：`decode graphs disabled reason=…`（`reason` 由模型 executor 给，None = 命令行 / NO_GRAPH 关）；
+    /// - eager（已 `capture_all`）：`decode graphs captured buckets=[…] n=… secs=… mode=eager`；
+    /// - lazy：`decode graphs captured buckets=[…] n=0 secs=0 mode=lazy`，之后每桶首捕获各打一行 `decode graph captured`。
+    pub fn report_startup(&self, disabled_reason: Option<&str>) {
+        if !self.enabled {
+            tracing::info!(reason = disabled_reason.unwrap_or("--no-cuda-graph / NO_GRAPH"), "decode graphs disabled");
+            return;
+        }
+        tracing::info!(
+            buckets = ?self.buckets(),
+            n = self.graphs.len(),
+            secs = format!("{:.2}", self.capture_secs),
+            mode = if self.captured_all { "eager" } else { "lazy" },
+            "decode graphs captured"
+        );
     }
 
     pub fn enabled(&self) -> bool {
@@ -156,20 +183,22 @@ impl DecodeGraphs {
 
     /// 启动时一次捕获全部桶。
     pub fn capture_all(&mut self, mut body: impl FnMut(usize, CapturePhase) -> Result<()>) -> Result<()> {
-        let t0 = std::time::Instant::now();
-        let buckets = self.buckets();
-        for &nb in &buckets {
+        for nb in self.buckets() {
             if self.graphs.iter().any(|g| g.batch == nb) {
                 continue;
             }
-            self.capture(nb, &mut body)?;
+            self.capture_inner(nb, &mut body, false)?;
         }
-        tracing::info!(buckets = ?buckets, elapsed_ms = t0.elapsed().as_millis() as u64, "cuda graphs captured for decode");
+        self.captured_all = true;
         Ok(())
     }
 
-    /// 捕获一个桶：Prepare → Body 预热 → 同步 → capture(Body)。
-    pub fn capture(&mut self, nb: usize, mut body: impl FnMut(usize, CapturePhase) -> Result<()>) -> Result<()> {
+    /// 捕获一个桶（lazy 首捕获入口，打一行 `decode graph captured bucket=… secs=…`）：Prepare → Body 预热 → 同步 → capture(Body)。
+    pub fn capture(&mut self, nb: usize, body: impl FnMut(usize, CapturePhase) -> Result<()>) -> Result<()> {
+        self.capture_inner(nb, body, true)
+    }
+
+    fn capture_inner(&mut self, nb: usize, mut body: impl FnMut(usize, CapturePhase) -> Result<()>, log: bool) -> Result<()> {
         let t0 = std::time::Instant::now();
         let stream = self.stream.clone();
         body(nb, CapturePhase::Prepare).context("graph capture: prepare")?;
@@ -183,7 +212,11 @@ impl DecodeGraphs {
         self.graphs.push(DecodeGraph { batch: nb, graph });
         self.graphs.sort_by_key(|g| g.batch);
         stream.synchronize()?;
-        tracing::info!(bucket = nb, elapsed_ms = t0.elapsed().as_millis() as u64, "cuda graph captured (decode)");
+        let secs = t0.elapsed().as_secs_f64();
+        self.capture_secs += secs;
+        if log {
+            tracing::info!(bucket = nb, secs = format!("{secs:.3}"), "decode graph captured");
+        }
         Ok(())
     }
 }

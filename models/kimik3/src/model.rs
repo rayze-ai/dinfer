@@ -13,7 +13,7 @@ use crate::layer::{Attn, AttnRes, KimiDecoderLayer, LayerBudget, StepMeta};
 use crate::weights::{shards_for_layer, shards_for_top, KdaShapes, Shard, Table, LM_HEAD};
 use anyhow::{ensure, Result};
 use dinfer_kernels::ops as k;
-use dinfer_layers::{bf16, Gemm, Linear, RmsNorm, Stream, Tensor, WeightSource};
+use dinfer_layers::{bf16, Gemm, Linear, LoadProgress, RmsNorm, Stream, Tensor, WeightSource};
 use std::path::Path;
 
 pub struct KimiK3Model {
@@ -80,7 +80,7 @@ impl KimiK3Model {
         shard: Shard,
     ) -> Result<Self> {
         ensure!(n_layers >= 1 && n_layers <= cfg.num_hidden_layers as usize, "n_layers {n_layers}");
-        let t_load = std::time::Instant::now();
+        let mut prog = LoadProgress::new((shard.rank, shard.world));
         if !shard.is_single() {
             tracing::info!(rank = shard.rank, world = shard.world, n_layers, "kimik3: TP/EP 分片装载开始");
         }
@@ -103,22 +103,17 @@ impl KimiK3Model {
         // 顶层
         let top = WeightSource::open_files(&shards_for_top(dir)?)?;
         let tt = Table::from_names(&top.names().collect::<Vec<_>>())?;
-        let embed = tt.load_bf16(stream, &top, "embed_tokens.weight")?;
+        let embed = prog.timed("embed_tokens", || tt.load_bf16(stream, &top, "embed_tokens.weight"))?;
         ensure!(embed.shape == [vocab, hidden], "embed_tokens shape {:?}", embed.shape);
-        let norm = tt.rmsnorm(stream, &top, "norm.weight", cfg.rms_norm_eps)?;
-        let lm_head = Linear::new(top.load_bf16(stream, LM_HEAD)?, None)?;
+        let norm = prog.timed("norm", || tt.rmsnorm(stream, &top, "norm.weight", cfg.rms_norm_eps))?;
+        let lm_head = prog.timed("lm_head", || Linear::new(top.load_bf16(stream, LM_HEAD)?, None))?;
         ensure!(lm_head.w.shape == [vocab, hidden], "lm_head shape {:?}", lm_head.w.shape);
         let output_res = if cfg.attn_res_block_size.is_some() {
-            Some(AttnRes::load_output(stream, &top, &tt, cfg)?)
+            Some(prog.timed("output_res", || AttnRes::load_output(stream, &top, &tt, cfg))?)
         } else {
             None
         };
         drop(top);
-        tracing::info!(
-            rank = shard.rank,
-            secs = format!("{:.1}", t_load.elapsed().as_secs_f32()),
-            "kimik3 top loaded (embed / norm / lm_head / output_res)"
-        );
 
         // 全模型共享一套 per-token 激活缓冲（原先每层各一套，预算 16384 时一层 ≈ 13 GB，93 层 tp8 必 OOM，见 scratch.rs / k3-serve 3b）。
         let act = ActScratch::new(stream, cfg, tm, shard)?;
@@ -128,48 +123,20 @@ impl KimiK3Model {
             "kimik3: activation scratch bytes={act_bytes} (max_tokens={tm}, world={})",
             shard.world
         );
-        // 逐层（每层一片，装完即释放 mmap）
-        let mut layers = Vec::with_capacity(n_layers);
-        let t_layers = std::time::Instant::now();
-        let mut layers_bytes: u64 = 0;
-        for l in 0..n_layers {
-            let t0 = std::time::Instant::now();
-            let (free0, _) = stream.mem_info()?;
+        // 逐层（每层一片，装完即释放 mmap）；计时 / 显存增量 / 进度日志由 `LoadProgress` 公共件做
+        let layers = prog.load_layers(stream, n_layers, |l| {
             let src = WeightSource::open_files(&shards_for_layer(dir, l)?)?;
             let table = Table::from_names(&src.names().collect::<Vec<_>>())?;
             let layer = KimiDecoderLayer::load_tp(stream, &src, &table, l, cfg, budget, shard)?;
-            stream.synchronize()?;
-            let (free1, _) = stream.mem_info()?;
-            let secs = t0.elapsed().as_secs_f64();
-            let bytes = free0.saturating_sub(free1) as u64;
-            layers_bytes += bytes;
-            // gb = 该层占的显存（含激活外的权重 + 缓冲），gbs = 装载速率（显存增量 / 秒；mmap 读盘 + H2D + 分片切片的合速）
-            tracing::info!(
-                layer = l,
-                kind = if cfg.is_kda_layer(l as u32) { "kda" } else { "mla" },
-                ffn = if cfg.is_moe_layer(l as u32) { "moe" } else { "dense" },
-                secs = format!("{:.1}", secs),
-                gb = format!("{:.2}", bytes as f64 / 1e9),
-                gbs = format!("{:.2}", bytes as f64 / 1e9 / secs.max(1e-6)),
-                done = format!("{}/{n_layers}", l + 1),
-                "kimik3 layer loaded"
-            );
-            layers.push(layer);
-        }
-        {
-            let ls = t_layers.elapsed().as_secs_f64();
-            let total = t_load.elapsed().as_secs_f64();
-            tracing::info!(
-                rank = shard.rank,
-                world = shard.world,
-                n_layers,
-                layers_secs = format!("{:.1}", ls),
-                layers_gb = format!("{:.2}", layers_bytes as f64 / 1e9),
-                avg_gbs = format!("{:.2}", layers_bytes as f64 / 1e9 / ls.max(1e-6)),
-                total_secs = format!("{:.1}", total),
-                "kimik3 model loaded（整体装载耗时；total 含顶层 + 激活缓冲，不含 KV / 引擎启动）"
-            );
-        }
+            let kind = match (cfg.is_kda_layer(l as u32), cfg.is_moe_layer(l as u32)) {
+                (true, true) => "kda/moe",
+                (true, false) => "kda/dense",
+                (false, true) => "mla/moe",
+                (false, false) => "mla/dense",
+            };
+            Ok((layer, kind))
+        })?;
+        prog.finish();
         let z = |s: &Stream| Tensor::<bf16>::zeros(s, &[tm, hidden]);
         let mut blocks = Vec::with_capacity(max_blocks);
         for _ in 0..max_blocks {

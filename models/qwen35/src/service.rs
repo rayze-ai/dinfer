@@ -82,7 +82,7 @@ pub struct Qwen35Service {
 
 impl Qwen35Service {
     pub fn start(opt: ServeOptions, served_name: String) -> Result<Self> {
-        let t_start = std::time::Instant::now();
+        let mut t_startup = dinfer_layers::StartupTimer::start();
         let model_dir = Path::new(&opt.model_dir);
         let tok_dir = opt.tokenizer_dir.as_deref().map(Path::new).unwrap_or(model_dir);
         let tok_dir_owned = tok_dir.to_path_buf();
@@ -151,7 +151,8 @@ impl Qwen35Service {
             need,
             num_blocks
         );
-        let t_model = t_start.elapsed();
+        t_startup.model_loaded();
+        let startup_phases = exec.startup_phases();
 
         let (tok, tmpl) = tok_thread.join().map_err(|_| anyhow::anyhow!("tokenizer thread panicked"))??;
         let tok = Arc::new(tok);
@@ -211,11 +212,7 @@ impl Qwen35Service {
             gdn_snapshots = num_snapshots,
             "qwen35 engine started"
         );
-        tracing::info!(
-            model_load_ms = t_model.as_millis() as u64,
-            total_ms = t_start.elapsed().as_millis() as u64,
-            "startup timing"
-        );
+        t_startup.done(startup_phases.0, startup_phases.1);
         Ok(Self { tok, tmpl, handle, name: served_name, max_model_len: opt.max_model_len, defaults, _engine: jh })
     }
 

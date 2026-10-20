@@ -156,9 +156,11 @@ impl KimiK3Executor {
         //（接 GPU 侧 tile 计划 + AttnRes 融合 kernel 后翻回默认开；见 docs/loops/k3-serve.md TODO）。`NO_GRAPH` 仍强制关。
         let force_on = std::env::var("K3_GRAPH").is_ok_and(|v| v == "1");
         let graphs_on = enable_graphs && force_on && std::env::var("NO_GRAPH").is_err();
-        if enable_graphs && !force_on {
-            tracing::info!("kimik3: decode CUDA graph 默认关（LatentMoe / AttnRes 体内有 D2H，待 GPU 侧 tile 计划）；K3_GRAPH=1 强制开");
-        }
+        let graphs_reason = if enable_graphs && !force_on {
+            Some("LatentMoe / AttnRes 体内有 D2H，待 GPU 侧 tile 计划；K3_GRAPH=1 强制开")
+        } else {
+            None
+        };
         let graphs = DecodeGraphs::new(&stream, graphs_on, rows);
         let async_ring = AsyncResultRing::new(&stream, 2, rows)?;
         let logits = Tensor::zeros(&stream, &[rows * v])?;
@@ -199,7 +201,13 @@ impl KimiK3Executor {
         if ex.graphs.enabled() && graph_capture_eager() {
             ex.capture_decode_graphs()?;
         }
+        ex.graphs.report_startup(graphs_reason);
         Ok(ex)
+    }
+
+    /// 启动期自报：(graph 捕获秒, warmup 秒)，给 `StartupTimer::done`。
+    pub fn startup_phases(&self) -> (f64, f64) {
+        (self.graphs.capture_secs(), 0.0)
     }
 
     /// TP rank（单卡 0）。

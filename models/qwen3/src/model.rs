@@ -14,6 +14,7 @@ use dinfer_layers::{
 };
 // 算子 trait 方法要在作用域内才能通过 `self.ops.norm().xxx()` 调用；匿名引入避免与本文件的 Attention 结构体重名
 use dinfer_layers::{Act as _, Attention as _, Norm as _, QkvPost as _};
+use dinfer_layers::LoadProgress;
 
 /// 一层的 paged K/V cache：[num_blocks, block_size, kv_heads, 2, head_dim] bf16。
 pub struct PagedKv {
@@ -423,17 +424,13 @@ impl<O: OpSet> Qwen3Model<O> {
         let (hk, d) = (cfg.num_key_value_heads as usize, cfg.head_dim as usize);
         let t_load0 = std::time::Instant::now();
         let wall = |what: &str| tracing::info!(at_ms = t_load0.elapsed().as_millis() as u64, "load timing: wall after {what}");
-        let t_first = std::time::Instant::now();
-        let embed = Embedding::load(stream, src, "model.embed_tokens")?;
-        tracing::info!(
-            first_tensor_ms = t_first.elapsed().as_millis() as u64,
-            "load timing: first tensor (includes lazy CUDA context / module load)"
-        );
-        let mut layers = Vec::with_capacity(cfg.num_hidden_layers as usize);
-        for l in 0..cfg.num_hidden_layers {
+        let mut prog = LoadProgress::new(tp);
+        // 首个张量含懒 CUDA context / 模块加载，单独一行（`loaded what=embed_tokens`）
+        let embed = prog.timed("embed_tokens", || Embedding::load(stream, src, "model.embed_tokens"))?;
+        let layers = prog.load_layers(stream, cfg.num_hidden_layers as usize, |l| {
             let tl = std::time::Instant::now();
             let p = format!("model.layers.{l}");
-            layers.push(DecoderLayer {
+            let layer = DecoderLayer {
                 input_norm: RmsNorm::load(stream, src, &format!("{p}.input_layernorm"), cfg.rms_norm_eps)?,
                 attn: Attention::load(stream, src, &format!("{p}.self_attn"), &cfg, max_tokens, tp)
                     .with_context(|| format!("layer {l} attn"))?,
@@ -450,9 +447,10 @@ impl<O: OpSet> Qwen3Model<O> {
                     load_phase::add(load_phase::MLP, tm);
                     m
                 },
-            });
+            };
             load_phase::add(load_phase::LAYER_TOTAL, tl);
-        }
+            Ok((layer, "attn/dense"))
+        })?;
         wall("layers loop");
         {
             let a = load_phase::take();
@@ -468,7 +466,7 @@ impl<O: OpSet> Qwen3Model<O> {
                 "load timing: per-layer phases (sum over layers)"
             );
         }
-        let norm = RmsNorm::load(stream, src, "model.norm", cfg.rms_norm_eps)?;
+        let norm = prog.timed("norm", || RmsNorm::load(stream, src, "model.norm", cfg.rms_norm_eps))?;
         // lm_head：默认复制（design §13.2）。开关 `LMHEAD_COLSPLIT=1`（loop b-nvlink B2）：world > 1 且文件里有独立
         // `lm_head.weight` 时按 vocab（输出维，dim 0）切，各 rank 只算自己那段 logits，采样前 all_gather（`lm_head_logits`）。
         // 文件无 lm_head.weight（纯 tied）时不切：embed 表要整份做 gather，再切一份 lm_head 等于多占 1/world 的 embed
@@ -502,6 +500,7 @@ impl<O: OpSet> Qwen3Model<O> {
             tracing::info!(rank, world, vocab = v, vocab_local, "lm_head colsplit enabled (LMHEAD_COLSPLIT=1)");
         }
         wall("norm + lm_head");
+        prog.finish();
         let t_rope = std::time::Instant::now();
         let rope =
             Rope::new(stream, d, cfg.max_position_embeddings as usize, cfg.rope_theta, RopeStyle::Neox)?;

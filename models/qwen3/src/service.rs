@@ -156,6 +156,7 @@ pub struct Qwen3Service {
 impl Qwen3Service {
     pub fn start(opt: ServeOptions, served_name: String) -> Result<Self> {
         let t_start = std::time::Instant::now();
+        let mut t_startup = dinfer_layers::StartupTimer::start();
         let model_dir = Path::new(&opt.model_dir);
         let tok_dir = opt.tokenizer_dir.as_deref().map(Path::new).unwrap_or(model_dir);
         // tokenizer（BPE 合并表 ~0.4 s）与 CUDA 初始化 / 权重加载无依赖 → 另起线程并行（启动 loop 第 5 轮）
@@ -285,6 +286,8 @@ impl Qwen3Service {
             num_blocks
         );
         let t_model = t_start.elapsed();
+        t_startup.model_loaded();
+        let startup_phases = exec.startup_phases();
         let num_graphs = exec.num_graphs();
         let mut exec = exec;
         let host_slots = if opt.kv_host_gib > 0.0 { exec.enable_host_tier(opt.kv_host_gib)? } else { 0 };
@@ -439,15 +442,14 @@ impl Qwen3Service {
             cuda_graphs = num_graphs,
             "qwen3 engine started"
         );
-        // 加载各阶段耗时（用户要求记录，看是否值得优化）：tokenizer+模板 / CUDA 初始化 / 权重+scratch+KV / executor+engine
+        // 启动阶段细分（qwen3 独有：tokenizer+模板 / CUDA 初始化）；四模型统一的三段在下面 `startup done`
         tracing::info!(
             tokenizer_ms = t_tok.as_millis() as u64,
             cuda_init_ms = (t_cuda - t_tok).as_millis() as u64,
-            model_load_ms = (t_model - t_cuda).as_millis() as u64,
-            engine_ms = (t_start.elapsed() - t_model).as_millis() as u64,
-            total_ms = t_start.elapsed().as_millis() as u64,
-            "startup timing"
+            model_phase_ms = (t_model - t_cuda).as_millis() as u64,
+            "startup timing (qwen3 extra phases)"
         );
+        t_startup.done(startup_phases.0, startup_phases.1);
         let grammar = Arc::new(
             dinfer_guided::GrammarFactory::new(tok.inner(), tok.eos_ids(), cfg.vocab_size as usize)
                 .context("guided: grammar factory")?,

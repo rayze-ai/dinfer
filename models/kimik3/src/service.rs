@@ -100,7 +100,7 @@ fn parse_dialect(s: &str) -> Result<Dialect> {
 
 impl KimiK3Service {
     pub fn start(opt: ServeOptions, served_name: String) -> Result<Self> {
-        let t_start = std::time::Instant::now();
+        let mut t_startup = dinfer_layers::StartupTimer::start();
         let model_dir = Path::new(&opt.model_dir);
         let tok_dir = opt.tokenizer_dir.as_deref().map(Path::new).unwrap_or(model_dir).to_path_buf();
         let dialect = parse_dialect(&opt.chat_dialect)?;
@@ -216,7 +216,8 @@ impl KimiK3Service {
         for jh in other_ranks {
             others.push(jh.join().map_err(|_| anyhow::anyhow!("tp load thread panicked"))??);
         }
-        let t_model = t_start.elapsed();
+        t_startup.model_loaded();
+        let startup_phases = exec0.startup_phases();
 
         let tok = Arc::new(tok_thread.join().map_err(|_| anyhow::anyhow!("tokenizer thread panicked"))??);
         anyhow::ensure!(tc.vocab_size as usize >= tok.vocab_size(), "model vocab {} < tokenizer {}", tc.vocab_size, tok.vocab_size());
@@ -265,11 +266,7 @@ impl KimiK3Service {
             truncated = n_layers < total_layers,
             "kimik3 engine started"
         );
-        tracing::info!(
-            model_load_ms = t_model.as_millis() as u64,
-            total_ms = t_start.elapsed().as_millis() as u64,
-            "startup timing"
-        );
+        t_startup.done(startup_phases.0, startup_phases.1);
         Ok(Self { tok, dialect, handle, name: served_name, max_model_len: opt.max_model_len, defaults, _engine: jh })
     }
 

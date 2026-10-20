@@ -66,6 +66,7 @@ pub struct Glm53Service {
 
 impl Glm53Service {
     pub fn start(opt: ServeOptions, served_name: String) -> Result<Self> {
+        let mut t_startup = dinfer_layers::StartupTimer::start();
         let model_dir = Path::new(&opt.model_dir);
         let tok_dir = opt.tokenizer_dir.as_deref().map(Path::new).unwrap_or(model_dir);
         let tok = Arc::new(
@@ -115,6 +116,7 @@ impl Glm53Service {
             None
         };
         let exec = Glm53Executor::new(s.clone(), gemm, model, mtp)?;
+        t_startup.model_loaded();
         let runner = Runner::new(exec, opt.block_size as usize);
 
         let params = engine::scheduler_params(
@@ -138,6 +140,7 @@ impl Glm53Service {
         let sched = Scheduler::new(params, groups, opt.num_blocks);
         let (handle, jh) = engine::spawn(sched, runner);
         tracing::info!(model = %served_name, max_model_len = opt.max_model_len, num_blocks = opt.num_blocks, mtp = opt.mtp, "glm53 engine started");
+        t_startup.done(0.0, 0.0); // glm53 executor 无 decode graph / warmup
         Ok(Self {
             tok,
             tmpl,
