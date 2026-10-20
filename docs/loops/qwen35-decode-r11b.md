@@ -38,3 +38,4 @@
 | 轮 | 改动 | 微基准 M=8/32（in_proj / gate_up / down / qkv_gate / out_proj TB/s） | bench（c1 / c8 / c32 / c8-long TPOT ms；tok/s ×vLLM） | 结论 |
 |---|---|---|---|---|
 | 0 | 基线 = bench_b300_19（`70736cc`） | lt：6.0/6.3 · 6.6/6.5 · 5.5/5.4 · 5.9/6.1 · 6.6/6.4；small_m 1.7/0.46 | 9.7 / 10.3 / 13.1 / 10.7；1.09 / 1.11 / 1.04 / 1.04 | GEMM 全部 ~6 TB/s，无单点；换 tensor-core 小 M kernel |
+| 1 | **tensor-core `small_m_mma` 初版**（每 warp 16 行 W 直读 16 B、置换 K、A smem pad 16 B、`#pragma unroll 4`、split-K 最后 block 归约）`0047c09`；parity 10/10（3090） | mma M=8/32：4.4/3.0 · 5.4/3.7 · 4.1/2.8 · 3.9/2.6 · 4.3/2.2（lt 不变 ~6.2）；全部形状仍选 lt | 未 bench | 比 FMA 版快 2.5–7×，但远低于 lt：M=32 时 smem B 片段读是瓶颈（pad 16 B 下 128-bit 装载 2 路 bank 冲突）+ 每 warp 在途只 2 × 16 B，unroll 被 `__syncthreads` 分块排空。第 2 轮：W 寄存器预取环 4 级跨 TK 连续 + pad 64 B |
