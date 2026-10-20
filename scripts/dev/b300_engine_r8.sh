@@ -8,11 +8,20 @@
 # 远端运行（在 /data/yaochen/infer/dinfer 下，先 source ../env.sh）。GPU 0/1 常驻不碰。
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-GPU="${GPU:-5}"; PORT="${PORT:-8412}"; M="${M:-/data/models/Qwen/Qwen3.8-27B}"; BIN=./target/release/dinfer
+GPU="${GPU:-5}"; PORT="${PORT:-8412}"; M="${M:-/data/models/Qwen/Qwen3.8-27B}"
+# 独立 target 目录：C-6 的 kimik3 二进制在 target/release，不能被 qwen35 feature 覆盖（主会话 2026-10-20 要求）
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/yaochen/infer/target_qwen35}"
+BIN="$CARGO_TARGET_DIR/release/dinfer"; BENCH_BIN="$CARGO_TARGET_DIR/release/bench"
 URL="http://127.0.0.1:$PORT"
+# bench_engine.sh / bench_compare.sh 写死 ./target/release/bench（本轮不改它们）；bench 二进制与模型 feature 无关，
+# 把独立 target 里编出的 bench 拷过去（同内容则不动）。
+sync_bench() {
+  if ! cmp -s "$BENCH_BIN" ./target/release/bench; then cp -f "$BENCH_BIN" ./target/release/bench; echo "bench binary synced from $BENCH_BIN"; fi
+}
 case "${1:-}" in
   build)
-    cargo build --release --features qwen35 -p dinfer -p dinfer-bench ${JOBS:+-j $JOBS} 2>&1 | grep -E "^error|warning: unused|Finished" | head -20 ;;
+    taskset -c "${BUILD_CPUS:-64-95}" cargo build --release --features qwen35 -p dinfer -p dinfer-bench -j "${JOBS:-16}" 2>&1 | grep -E "^error|warning: unused|Finished" | head -20
+    ls -la "$BIN" "$BENCH_BIN" | cut -c1-120 ;;
   serve)
     shift
     pgrep -f -- "dinfer serve .*--port $PORT" >/dev/null && { echo "already serving on :$PORT"; exit 0; }
@@ -24,10 +33,12 @@ case "${1:-}" in
     grep -E "snapshot pool|engine started|kv / gdn" /tmp/r8_serve_$PORT.log | cut -c1-220 ;;
   engine)
     OUT="${2:?OUT}"; CH="${3:-r8 GDN 状态按块缓存}"
+    sync_bench
     RATES="${RATES:-4 8}" REQS="${REQS:-64}" BENCH_CPUS="${BENCH_CPUS:-96-127}" PREFIX_REPEAT="${PREFIX_REPEAT:-0.5}" ALLOW_EOS=1 \
       SLO_TTFT=500 SLO_TPOT=20 VLLM_URL= SERVE_URL="$URL" bash scripts/verify/bench_engine.sh "$OUT" "$CH" ;;
   compare)
     OUT="${2:?OUT}"; CH="${3:-r8 GDN 状态按块缓存}"
+    sync_bench
     VLLM_URL= SERVE_URL="$URL" bash scripts/verify/bench_compare.sh "$OUT" "$CH" ;;
   stop)
     pkill -INT -f -- "dinfer serve .*--port $PORT" || true
