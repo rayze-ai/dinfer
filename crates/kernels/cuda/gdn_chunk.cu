@@ -432,16 +432,24 @@ struct WySmem {
   static constexpr int bytes = elems16 * 2 + 2 * BT * 4 + 16 * 16 * 4;  // + sgc / sb + sT（分块逆的 16×16 f32 临时）
 };
 
-template <int BT, int K, int TRI>
-__global__ void __launch_bounds__(kWyWarps * 32) wy_mma_kernel(
+// r10 第 3 轮：NW = 4 / 8 warp 两档（B300 ncu：延迟型，每 scheduler 可发射 warp 0.53，加 warp 掩延迟）。
+// NW=8：点积阶段 8 warp 各持 16 行 × 一半列 tile；对角块逆 4 warp 做、另 4 warp 空转一次 16 步；u/w 阶段 8 warp 各 16 行 × 一半列。
+template <int BT, int K, int TRI, int NW>
+__global__ void __launch_bounds__(NW * 32) wy_mma_kernel(
     const bf16* __restrict__ qn, const bf16* __restrict__ kn, const bf16* __restrict__ mixed, const float* __restrict__ gc,
     const float* __restrict__ beta, bf16* __restrict__ aq_out, bf16* __restrict__ u_out, bf16* __restrict__ w_out,
     bf16* __restrict__ kg_out, const int* __restrict__ cu_seqlens, const int* __restrict__ chunk_tab, int H, int HV,
     int K_rt, int V, int group) {
   using S = WySmem<BT, K>;
-  constexpr int KS = S::KS, TS = S::TS, CS = S::CS, NW = kWyWarps;
+  constexpr int KS = S::KS, TS = S::TS, CS = S::CS;
   constexpr int NT_T = BT / 8, KSTEP_K = K / 16, KSTEP_T = BT / 16;
-  static_assert(BT / 16 == NW, "BT=64 → 4 warp 各一个 16 行 tile");
+  static_assert(NW == BT / 16 || NW == BT / 8, "NW ∈ {BT/16, BT/8}：每 warp 一个 16 行 tile × 全部列 / 一半列");
+  constexpr int CSPLIT = NW / (BT / 16);           // 1 或 2：列 tile 分几份
+  constexpr int NT_TW = NT_T / CSPLIT;             // 点积阶段每 warp 的列 tile 数
+  constexpr int NT_SW = (kWyStageCols / 8) / CSPLIT;  // u/w 阶段每 warp 的列 tile 数
+  static_assert(NT_SW % 2 == 0, "ldsm_x4_t 一次取两列 tile");
+  const int wrow = (threadIdx.x >> 5) % (BT / 16);  // 本 warp 的 16 行 tile
+  const int wcol = (threadIdx.x >> 5) / (BT / 16);  // 本 warp的列半区（CSPLIT=1 时恒 0）
   (void)K_rt;
 
   const int c = blockIdx.x, hv = blockIdx.y, h = hv / group;
@@ -484,32 +492,32 @@ __global__ void __launch_bounds__(kWyWarps * 32) wy_mma_kernel(
 
   // ---- 1) 点积
   {
-    float accA[NT_T][4], accQ[NT_T][4];
+    float accA[NT_TW][4], accQ[NT_TW][4];
 #pragma unroll
-    for (int n = 0; n < NT_T; ++n)
+    for (int n = 0; n < NT_TW; ++n)
 #pragma unroll
       for (int e = 0; e < 4; ++e) { accA[n][e] = 0.f; accQ[n][e] = 0.f; }
 #pragma unroll
     for (int ks = 0; ks < KSTEP_K; ++ks) {
       uint32_t ak[4], aq[4];
-      ldsm_x4(ak, sK + (warp * 16 + (lane & 15)) * KS + ks * 16 + (lane >> 4) * 8);
-      ldsm_x4(aq, sQ + (warp * 16 + (lane & 15)) * KS + ks * 16 + (lane >> 4) * 8);
+      ldsm_x4(ak, sK + (wrow * 16 + (lane & 15)) * KS + ks * 16 + (lane >> 4) * 8);
+      ldsm_x4(aq, sQ + (wrow * 16 + (lane & 15)) * KS + ks * 16 + (lane >> 4) * 8);
 #pragma unroll
-      for (int n = 0; n < NT_T; ++n) {
-        const bf16* kb = sK + (n * 8 + g) * KS + ks * 16 + 2 * t4;
+      for (int n = 0; n < NT_TW; ++n) {
+        const bf16* kb = sK + ((wcol * NT_TW + n) * 8 + g) * KS + ks * 16 + 2 * t4;
         const uint32_t b0 = lds_u32(kb), b1 = lds_u32(kb + 8);
         mma16816(accA[n], ak, b0, b1);
         mma16816(accQ[n], aq, b0, b1);
       }
     }
-    const int i0 = warp * 16 + g, i1 = i0 + 8;
+    const int i0 = wrow * 16 + g, i1 = i0 + 8;
     bf16* aqc = aq_out + ((long)c * HV + hv) * BT * BT;
     __syncthreads();  // sM 覆盖 sK / sQ：所有 warp 的点积读完
 #pragma unroll
-    for (int n = 0; n < NT_T; ++n) {
+    for (int n = 0; n < NT_TW; ++n) {
 #pragma unroll
       for (int e = 0; e < 4; ++e) {
-        const int i = (e < 2) ? i0 : i1, j = n * 8 + 2 * t4 + (e & 1);
+        const int i = (e < 2) ? i0 : i1, j = (wcol * NT_TW + n) * 8 + 2 * t4 + (e & 1);
         float a = 0.f, q = 0.f;
         if (i < len && j <= i) {
           const float decay = exp2f(sgc[i] - sgc[j]);
@@ -526,7 +534,7 @@ __global__ void __launch_bounds__(kWyWarps * 32) wy_mma_kernel(
   // ---- 2) M = (I+A)⁻¹
   if (TRI == 0) {
     // 64 步原地前代（第 5A 轮）：线程 tid < BT 各持一列，每步两次 __syncthreads
-    static_assert(BT <= kWyWarps * 32, "前代每列一个线程");
+    static_assert(BT <= NW * 32, "前代每列一个线程");
     for (int i = 0; i < BT; ++i) {
       float acc = 0.f;
       if (tid < BT) {
@@ -547,8 +555,8 @@ __global__ void __launch_bounds__(kWyWarps * 32) wy_mma_kernel(
     //   还是原值、M_kj（k < i）已算好，所以能原地。乘法是 16³ fp32 FMA（每线程 32 次），S 经 sT 中转。
     //   数值：全 fp32（与 64 步版同口径，只是结合顺序不同）；最后统一写 bf16 影子。
     constexpr int NB = BT / 16;
-    static_assert(NB == NW, "对角块数 = warp 数");
-    {
+    static_assert(NB <= NW, "对角块数 ≤ warp 数");
+    if (warp < NB) {
       const int r0 = warp * 16;
       for (int i = 0; i < 16; ++i) {
         float acc = 0.f;
@@ -563,8 +571,10 @@ __global__ void __launch_bounds__(kWyWarps * 32) wy_mma_kernel(
     }
     __syncthreads();
     // 每线程 2 个输出元素：e ∈ {0,1}，(r, cc) = ((tid·2+e) / 16, (tid·2+e) % 16)
-    static_assert(16 * 16 == 2 * kWyWarps * 32, "16×16 块 = 每线程 2 元素");
-    const int r_a = (tid * 2) / 16, c_a = (tid * 2) % 16, c_b = c_a + 1;
+    // 16×16 块 = 256 元素：NW=4 每线程 2 个相邻元素；NW=8 每线程 1 个（第二个元素由 EPT 关掉）
+    constexpr int EPT = 256 / (NW * 32);
+    static_assert(EPT == 1 || EPT == 2, "16×16 块按 NW 分 1 或 2 元素/线程");
+    const int r_a = (tid * EPT) / 16, c_a = (tid * EPT) % 16, c_b = (EPT == 2) ? c_a + 1 : c_a;
     for (int j = 0; j < NB; ++j) {
       for (int i = j + 1; i < NB; ++i) {
         // S = Σ_{k=j}^{i-1} A_ik · M_kj  （k = j 时 A_ij 是原值；k > j 时 M_kj 已就位）
@@ -576,11 +586,11 @@ __global__ void __launch_bounds__(kWyWarps * 32) wy_mma_kernel(
           for (int t = 0; t < 16; ++t) {
             const float a = arow[t];
             s0 += a * mcol[t * BT + c_a];
-            s1 += a * mcol[t * BT + c_b];
+            if (EPT == 2) s1 += a * mcol[t * BT + c_b];
           }
         }
         sT[r_a * 16 + c_a] = s0;
-        sT[r_a * 16 + c_b] = s1;
+        if (EPT == 2) sT[r_a * 16 + c_b] = s1;
         __syncthreads();
         // M_ij = −M_ii · S
         float m0 = 0.f, m1 = 0.f;
@@ -590,12 +600,12 @@ __global__ void __launch_bounds__(kWyWarps * 32) wy_mma_kernel(
           for (int t = 0; t < 16; ++t) {
             const float m = mrow[t];
             m0 += m * sT[t * 16 + c_a];
-            m1 += m * sT[t * 16 + c_b];
+            if (EPT == 2) m1 += m * sT[t * 16 + c_b];
           }
         }
         __syncthreads();  // sT 读完、且本块 A_ij 的读（上面 S 的 k=j 项）已结束
         sM[(i * 16 + r_a) * BT + j * 16 + c_a] = -m0;
-        sM[(i * 16 + r_a) * BT + j * 16 + c_b] = -m1;
+        if (EPT == 2) sM[(i * 16 + r_a) * BT + j * 16 + c_b] = -m1;
         __syncthreads();
       }
     }
@@ -638,28 +648,28 @@ __global__ void __launch_bounds__(kWyWarps * 32) wy_mma_kernel(
         sts_u32(stage + i * CS + j, pack_bf16x2(x0, x1));
       }
       __syncthreads();
-      float acc[kWyStageCols / 8][4];
+      float acc[NT_SW][4];
 #pragma unroll
-      for (int n = 0; n < kWyStageCols / 8; ++n) { acc[n][0] = acc[n][1] = acc[n][2] = acc[n][3] = 0.f; }
+      for (int n = 0; n < NT_SW; ++n) { acc[n][0] = acc[n][1] = acc[n][2] = acc[n][3] = 0.f; }
 #pragma unroll
       for (int ks = 0; ks < KSTEP_T; ++ks) {
         uint32_t a[4];
-        ldsm_x4(a, sM16 + (warp * 16 + (lane & 15)) * TS + ks * 16 + (lane >> 4) * 8);
+        ldsm_x4(a, sM16 + (wrow * 16 + (lane & 15)) * TS + ks * 16 + (lane >> 4) * 8);
 #pragma unroll
-        for (int n = 0; n < kWyStageCols / 8; n += 2) {
+        for (int n = 0; n < NT_SW; n += 2) {
           uint32_t b[4];
-          ldsm_x4_t(b, stage + (ks * 16 + (lane & 15)) * CS + n * 8 + (lane >> 4) * 8);
+          ldsm_x4_t(b, stage + (ks * 16 + (lane & 15)) * CS + (wcol * NT_SW + n) * 8 + (lane >> 4) * 8);
           mma16816(acc[n], a, b[0], b[1]);
           mma16816(acc[n + 1], a, b[2], b[3]);
         }
       }
-      const int i0 = warp * 16 + g, i1 = i0 + 8;
+      const int i0 = wrow * 16 + g, i1 = i0 + 8;
       bf16* outp = pass == 0 ? u_out : w_out;
       const int ocols = pass == 0 ? V : K;
       // r10 第 1 轮：u / w 直接落 bf16（fla 同口径；ho 装进 smem 时本来就转 bf16），写量减半
 #pragma unroll
-      for (int n = 0; n < kWyStageCols / 8; ++n) {
-        const int j = c0 + n * 8 + 2 * t4;
+      for (int n = 0; n < NT_SW; ++n) {
+        const int j = c0 + (wcol * NT_SW + n) * 8 + 2 * t4;
         if (j >= c0 + bw) continue;
         if (i0 < len) *reinterpret_cast<uint32_t*>(outp + ((row0 + i0) * HV + hv) * ocols + j) = pack_bf16x2(acc[n][0], acc[n][1]);
         if (i1 < len) *reinterpret_cast<uint32_t*>(outp + ((row0 + i1) * HV + hv) * ocols + j) = pack_bf16x2(acc[n][2], acc[n][3]);
@@ -1354,19 +1364,20 @@ int gdn_chunk_wy(const void* qn, const void* kn, const void* mixed_qkv, const fl
   dim3 grid((unsigned)num_chunks, (unsigned)HV);
   if (bt != 64) return err(cudaErrorInvalidValue);
   constexpr int BT = 64;
-  // wy_mode 1 → tensor core 版 + 分块三角逆（r9 第 3 轮）；2 → tensor core 版 + 64 步前代（第 5A 轮）；0 → 老 fp32 版
-  if (wy_mode == 1 || wy_mode == 2) {
+  // wy_mode 1 → tensor core 版 + 分块三角逆（r9 第 3 轮，4 warp）；2 → tensor core 版 + 64 步前代（第 5A 轮）；
+  // 3 → 分块三角逆 + 8 warp（r10 第 3 轮）；0 → 老 fp32 版
+  if (wy_mode == 1 || wy_mode == 2 || wy_mode == 3) {
     if (V % 8 != 0) return err(cudaErrorInvalidValue);
-#define LAUNCH_WY_MMA1(KK, TRI)                                                                                 \
-  {                                                                                                             \
-    constexpr int smem = WySmem<BT, KK>::bytes;                                                                 \
-    if (const int rc = set_smem(reinterpret_cast<const void*>(&wy_mma_kernel<BT, KK, TRI>), smem)) return rc;   \
-    wy_mma_kernel<BT, KK, TRI><<<grid, kWyWarps * 32, smem, stream>>>(                                          \
-        static_cast<const bf16*>(qn), static_cast<const bf16*>(kn), static_cast<const bf16*>(mixed_qkv), gc,    \
-        beta, aq, u, w, kg, cu_seqlens, chunk_tab, (int)H, (int)HV, (int)K, (int)V, group);                     \
+#define LAUNCH_WY_MMA1(KK, TRI, NWW)                                                                                 \
+  {                                                                                                                  \
+    constexpr int smem = WySmem<BT, KK>::bytes;                                                                      \
+    if (const int rc = set_smem(reinterpret_cast<const void*>(&wy_mma_kernel<BT, KK, TRI, NWW>), smem)) return rc;   \
+    wy_mma_kernel<BT, KK, TRI, NWW><<<grid, NWW * 32, smem, stream>>>(                                               \
+        static_cast<const bf16*>(qn), static_cast<const bf16*>(kn), static_cast<const bf16*>(mixed_qkv), gc,         \
+        beta, aq, u, w, kg, cu_seqlens, chunk_tab, (int)H, (int)HV, (int)K, (int)V, group);                          \
   }
 #define LAUNCH_WY_MMA(KK) \
-  { if (wy_mode == 1) LAUNCH_WY_MMA1(KK, 1) else LAUNCH_WY_MMA1(KK, 0) }
+  { if (wy_mode == 1) LAUNCH_WY_MMA1(KK, 1, kWyWarps) else if (wy_mode == 3) LAUNCH_WY_MMA1(KK, 1, 2 * kWyWarps) else LAUNCH_WY_MMA1(KK, 0, kWyWarps) }
     if (K == 128) { LAUNCH_WY_MMA(128) } else if (K == 64) { LAUNCH_WY_MMA(64) } else if (K == 256) { LAUNCH_WY_MMA(256) } else return err(cudaErrorInvalidValue);
 #undef LAUNCH_WY_MMA
 #undef LAUNCH_WY_MMA1

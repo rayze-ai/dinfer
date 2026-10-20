@@ -525,7 +525,7 @@ fn gdn_chunk_wy_mma_vs_legacy() {
     let plan = ops::KdaChunkPlan::new(&st, &cu, BT).unwrap();
     let scale = (k as f32).powf(-0.5);
     let mut outs = vec![];
-    for how in [ops::GdnChunkWy::Legacy, ops::GdnChunkWy::Mma, ops::GdnChunkWy::MmaSerial] {
+    for how in [ops::GdnChunkWy::Legacy, ops::GdnChunkWy::Mma, ops::GdnChunkWy::MmaSerial, ops::GdnChunkWy::Mma8] {
         let mut sc = ops::GdnChunkScratch::new(&st, t, h, hv, k, v, plan.num_chunks, BT).unwrap();
         ops::gdn_chunk_prep(&st, &dm, &dg, &dcu, &plan, &mut sc, t, h, hv, k, v, scale).unwrap();
         ops::gdn_chunk_wy_with(&st, &dm, &dbeta, &dcu, &plan, &mut sc, t, h, hv, k, v, how).unwrap();
@@ -554,7 +554,7 @@ fn gdn_chunk_wy_mma_vs_legacy() {
         worst.0
     };
     // Mma（分块逆）与 MmaSerial（64 步）都对老 fp32 版
-    for (name, (a1, u1, w1, k1)) in [("mma", &outs[1]), ("mma_serial", &outs[2])] {
+    for (name, (a1, u1, w1, k1)) in [("mma", &outs[1]), ("mma_serial", &outs[2]), ("mma8", &outs[3])] {
         println!("  -- {name}");
         let ea = cmp("aq", a0, a1, plan.num_chunks * hv, BT * BT);
         let eu = cmp("u", u0, u1, n_tok, v);
@@ -634,6 +634,7 @@ fn bench_case(st: &Stream, nseq: usize, len: usize, h: usize, hv: usize, k: usiz
     let us_wy0 = time_us(st, iters, || ops::gdn_chunk_wy_with(st, &dm, &beta, &dcu, &plan, &mut sc, t, h, hv, k, v, ops::GdnChunkWy::Legacy).unwrap());
     let us_wy = time_us(st, iters, || ops::gdn_chunk_wy_with(st, &dm, &beta, &dcu, &plan, &mut sc, t, h, hv, k, v, ops::GdnChunkWy::Mma).unwrap());
     let us_wy64 = time_us(st, iters, || ops::gdn_chunk_wy_with(st, &dm, &beta, &dcu, &plan, &mut sc, t, h, hv, k, v, ops::GdnChunkWy::MmaSerial).unwrap());
+    let us_wy8 = time_us(st, iters, || ops::gdn_chunk_wy_with(st, &dm, &beta, &dcu, &plan, &mut sc, t, h, hv, k, v, ops::GdnChunkWy::Mma8).unwrap());
     // ho 变体：bv0 老 fp32；bv16 / bv32 融合 mma；bv16pf / bv32pf 寄存器预取（r9 第 1 轮）
     let mut ho = vec![];
     // + sp = 两段版（r9 第 2 轮）
@@ -661,8 +662,8 @@ fn bench_case(st: &Stream, nseq: usize, len: usize, h: usize, hv: usize, k: usiz
         conv.push((rows, time_us(st, iters, || ops::gdn_conv1d_prefill_with(st, &dm, &dw, &mut cout, &mut cst, &dcu, None, None, nseq, t, row, width, width - 1, GdnAct::Silu, rows).unwrap())));
     }
 
-    println!("  [{nseq}×{len}] 顺序 {:.0} µs | chunk 全链 {:.0} µs（{:.1}x）| prep {:.0} | wy old {:.0} mma {:.0} mma64 {:.0} | ho {} | conv {}",
-        us_seq, us_chunk, us_seq / us_chunk, us_prep, us_wy0, us_wy, us_wy64,
+    println!("  [{nseq}×{len}] 顺序 {:.0} µs | chunk 全链 {:.0} µs（{:.1}x）| prep {:.0} | wy old {:.0} mma {:.0} mma64 {:.0} mma8 {:.0} | ho {} | conv {}",
+        us_seq, us_chunk, us_seq / us_chunk, us_prep, us_wy0, us_wy, us_wy64, us_wy8,
         ho.iter().map(|(name, u)| format!("{name}={u:.0}")).collect::<Vec<_>>().join(" "),
         conv.iter().map(|(r, u)| format!("rows{r}={u:.0}")).collect::<Vec<_>>().join(" "));
     if nseq == 1 {

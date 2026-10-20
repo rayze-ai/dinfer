@@ -263,6 +263,16 @@ impl ArchProfile {
         Self::gdn_chunk_ho_prefetch_for(Arch::Sm8x, ho_bv)
     }
 
+    /// chunk prefill `wy`（tensor core 版）的 block warp 数（r10 第 3 轮）。B300 ncu（8×1024）：每 scheduler 可发射 warp 0.53、
+    /// 64% 周期无可发射、DRAM 6%、smem / regs 都只限到 5 block/SM —— 延迟型，加 warp 掩 smem 依赖链；Sm100 取 8。
+    /// Sm8x 待实测（3090 smem 限 2 block/SM，8 warp 可能反而降占用），先保持 4。
+    pub fn gdn_chunk_wy_warps_for(arch: Arch) -> usize {
+        match arch {
+            Arch::Sm100 => 8,
+            Arch::Sm8x | Arch::Sm90 => 4,
+        }
+    }
+
     pub fn gdn_chunk_ho_prefetch_for(arch: Arch, ho_bv: usize) -> bool {
         if ho_bv == 0 {
             return false;

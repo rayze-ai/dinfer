@@ -3664,6 +3664,8 @@ pub enum GdnChunkWy {
     Legacy,
     Mma,
     MmaSerial,
+    /// r10 第 3 轮：分块三角逆 + 8 warp（B300 ncu：wy 延迟型，加 warp 掩 smem 依赖链）。
+    Mma8,
 }
 
 impl GdnChunkWy {
@@ -3671,6 +3673,7 @@ impl GdnChunkWy {
         match self {
             Self::Legacy => 0,
             Self::Mma => 1,
+            Self::Mma8 => 3,
             Self::MmaSerial => 2,
         }
     }
@@ -3683,13 +3686,20 @@ impl From<bool> for GdnChunkWy {
 }
 
 /// 默认 wy 实现：K ∈ {64,128,256} 且 V % 8 == 0 才有 tensor core 版，否则老 fp32。
-fn gdn_chunk_wy_default(k_dim: usize, v_dim: usize) -> GdnChunkWy {
+fn gdn_chunk_wy_default(stream: &Stream, k_dim: usize, v_dim: usize) -> GdnChunkWy {
     use std::sync::OnceLock;
     static OVER: OnceLock<Option<GdnChunkWy>> = OnceLock::new();
+    static ARCH: OnceLock<crate::arch::Arch> = OnceLock::new();
+    let arch = *ARCH.get_or_init(|| {
+        let sm = stream.device().sm_count().unwrap_or(1);
+        stream.device().compute_capability().map(|cc| crate::arch::ArchProfile::for_cc(cc, sm).arch).unwrap_or(crate::arch::Arch::Sm8x)
+    });
     let over = *OVER.get_or_init(|| {
         let o = match std::env::var("GDN_CHUNK_WY").as_deref() {
             Ok("legacy") => Some(GdnChunkWy::Legacy),
             Ok("serial") => Some(GdnChunkWy::MmaSerial),
+            Ok("mma4") => Some(GdnChunkWy::Mma),
+            Ok("mma8") => Some(GdnChunkWy::Mma8),
             _ => None,
         };
         if o.is_some() {
@@ -3700,7 +3710,7 @@ fn gdn_chunk_wy_default(k_dim: usize, v_dim: usize) -> GdnChunkWy {
     if !(matches!(k_dim, 64 | 128 | 256) && v_dim % 8 == 0) {
         return GdnChunkWy::Legacy;
     }
-    over.unwrap_or(GdnChunkWy::Mma)
+    over.unwrap_or(if crate::arch::ArchProfile::gdn_chunk_wy_warps_for(arch) == 8 { GdnChunkWy::Mma8 } else { GdnChunkWy::Mma })
 }
 
 /// conv1d prefill 的按 token 分块行数：默认 `ArchProfile::gdn_conv_rows`；`CONV_PREFILL=legacy` 回老 kernel（返回 0）；
@@ -3929,7 +3939,7 @@ pub fn gdn_chunk_wy(
     k_dim: usize,
     v_dim: usize,
 ) -> Result<()> {
-    let how = gdn_chunk_wy_default(k_dim, v_dim);
+    let how = gdn_chunk_wy_default(stream, k_dim, v_dim);
     gdn_chunk_wy_with(
         stream, mixed_qkv, beta, cu_seqlens, plan, sc, tokens, heads_k, heads_v, k_dim, v_dim, how,
     )
