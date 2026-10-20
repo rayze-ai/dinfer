@@ -22,6 +22,8 @@ pub enum EngineEvent {
     /// 紧跟 `Tokens` 之后（仅请求了 logprobs 时）：与该批 token 平行的 logprobs。
     Logprobs(Vec<crate::sampler::TokenLogprobs>),
     Finished(FinishReason),
+    /// 随首批 `Tokens` 之前发一次：首次调度时 prefix cache 命中的 prompt token 数（`usage.prompt_tokens_details.cached_tokens`）。
+    PrefixCached(u32),
     /// 引擎内部错误（该请求终止）。
     Error(String),
 }
@@ -349,6 +351,9 @@ impl<E: ModelExecutor> Engine<E> {
         self.metrics.step_update.observe(t_exec.elapsed().as_secs_f64());
         for (i, (rid, toks, finish)) in results.iter().enumerate() {
             let Some(tx) = self.outs.get(&rid) else { continue };
+            if let Some(n) = results.items[i].num_cached_tokens {
+                let _ = tx.send(EngineEvent::PrefixCached(n));
+            }
             if !toks.is_empty() {
                 let _ = tx.send(EngineEvent::Tokens(toks.to_vec()));
                 if let Some(pd) = self.pd.as_mut() {

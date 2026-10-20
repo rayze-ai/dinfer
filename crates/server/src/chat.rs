@@ -265,6 +265,14 @@ pub(crate) struct ChoiceState {
     pub(crate) prompt_lp: Vec<(u32, TokenLogprobs)>,
     /// 该 choice 已产出 tool_call → finish_reason 报 "tool_calls"（OpenAI / vLLM 口径）。
     saw_tool_call: bool,
+    /// 引擎报的 prefix cache 命中 token 数（`EngineEvent::PrefixCached`）；None = 没报。
+    pub(crate) cached_tokens: Option<u32>,
+}
+
+/// 多个 choice 汇成一个 `usage.prompt_tokens_details.cached_tokens`：同一 prompt 的 n 个 choice 取最大（vLLM 取首个 choice）；
+/// 多 prompt（completions）由调用方按 prompt 分组后相加。全部没报 → None。
+pub(crate) fn cached_tokens_of(states: &[ChoiceState]) -> Option<u32> {
+    states.iter().filter_map(|s| s.cached_tokens).max()
 }
 
 /// 多个 choice 的事件汇到一个 channel：(choice index, event)。
@@ -333,6 +341,7 @@ pub(crate) fn submit_choices(
                 ids: Vec::new(),
                 prompt_lp: Vec::new(),
                 saw_tool_call: false,
+                cached_tokens: None,
             });
             if !sp.skip_special_tokens {
                 states.last_mut().unwrap().out.set_skip_special_tokens(false);
@@ -433,6 +442,7 @@ pub(crate) async fn consume(
                     }
                 }
             }
+            EngineEvent::PrefixCached(n) => st.cached_tokens = Some(n),
             EngineEvent::Finished(f) => end = Some(finish_reason_str(f)),
             EngineEvent::Error(m) => return Err(m),
         }
@@ -636,11 +646,7 @@ pub async fn chat_completions(State(be): State<Backend>, Json(req): Json<ChatCom
                 let completion: u32 = states.iter().map(|s| s.completion).sum();
                 let mut c = chunk(&id, created, &model, 0, Delta::default(), None, None);
                 c.choices.clear();
-                c.usage = Some(Usage {
-                    prompt_tokens: prompt_len,
-                    completion_tokens: completion,
-                    total_tokens: prompt_len + completion,
-                });
+                c.usage = Some(Usage::new(prompt_len, completion, cached_tokens_of(&states)));
                 let _ = send(&c);
             }
             let _ = tx.send(Event::default().data("[DONE]"));
@@ -695,11 +701,7 @@ pub async fn chat_completions(State(be): State<Backend>, Json(req): Json<ChatCom
         created,
         model,
         choices,
-        usage: Usage {
-            prompt_tokens: prompt_len,
-            completion_tokens: completion,
-            total_tokens: prompt_len + completion,
-        },
+        usage: Usage::new(prompt_len, completion, cached_tokens_of(&states)),
         prompt_token_ids: return_ids.then_some(prompt.ids),
         token_ids,
         prompt_logprobs,

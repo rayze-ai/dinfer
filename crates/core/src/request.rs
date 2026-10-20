@@ -36,6 +36,9 @@ pub struct Request {
 
     /// 已经算过 KV 的 token 数（含 prefix cache 命中、含异步调度的乐观推进）。
     pub num_computed_tokens: u32,
+    /// 首次调度时由 prefix cache（GPU 块 + host tier）命中的 prompt token 数；对外报 `usage.prompt_tokens_details.cached_tokens`
+    /// （vLLM `RequestOutput.num_cached_tokens` 同义）。
+    pub num_cached_tokens: u32,
     /// 异步调度：已调度但采样结果未回的 token 数。
     pub num_output_placeholders: u32,
     /// 当前 step 的 draft token（投机解码）。
@@ -69,6 +72,7 @@ impl Request {
             all_token_ids: prompt_ids,
             num_prompt_tokens,
             num_computed_tokens: 0,
+            num_cached_tokens: 0,
             num_output_placeholders: 0,
             spec_ids: Vec::new(),
             block_hashes: BlockHasher::default(),

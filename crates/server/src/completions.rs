@@ -6,7 +6,7 @@
 //! 流式 chunk `object = "text_completion"`，`stream_options.include_usage` 时最后补一个只有 `usage` 的 chunk。
 
 use crate::backend::ChatBackend;
-use crate::chat::{async_stream_lite, check_model, consume, err, sampling_from, submit_choices, truncate_prompt, MAX_N};
+use crate::chat::{async_stream_lite, cached_tokens_of, check_model, consume, err, sampling_from, submit_choices, truncate_prompt, MAX_N};
 use crate::openai::*;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -230,11 +230,7 @@ pub async fn completions(State(be): State<Backend>, Json(req): Json<CompletionRe
                 let completion: u32 = states.iter().map(|s| s.completion).sum();
                 let mut c = mk(0, String::new(), None, None);
                 c.choices.clear();
-                c.usage = Some(Usage {
-                    prompt_tokens,
-                    completion_tokens: completion,
-                    total_tokens: prompt_tokens + completion,
-                });
+                c.usage = Some(Usage::new(prompt_tokens, completion, cached_sum(&states, n as usize)));
                 let _ = send(&c);
             }
             let _ = tx.send(Event::default().data("[DONE]"));
@@ -299,11 +295,13 @@ pub async fn completions(State(be): State<Backend>, Json(req): Json<CompletionRe
         created,
         model,
         choices,
-        usage: Some(Usage {
-            prompt_tokens,
-            completion_tokens: completion,
-            total_tokens: prompt_tokens + completion,
-        }),
+        usage: Some(Usage::new(prompt_tokens, completion, cached_sum(&states, n as usize))),
     })
     .into_response()
+}
+
+/// 多 prompt 的 cached_tokens：choice 按 prompt 分组（每 prompt n 个），组内取最大、组间相加；全没报 → None。
+fn cached_sum(states: &[crate::chat::ChoiceState], n: usize) -> Option<u32> {
+    let per: Vec<Option<u32>> = states.chunks(n.max(1)).map(cached_tokens_of).collect();
+    per.iter().any(|x| x.is_some()).then(|| per.iter().flatten().sum())
 }

@@ -137,6 +137,25 @@ pub struct Usage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    /// OpenAI / vLLM：`{"cached_tokens": N}`，prefix cache 命中的 prompt token 数；引擎没报（如 PD import 侧）时省略。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct PromptTokensDetails {
+    pub cached_tokens: u32,
+}
+
+impl Usage {
+    pub fn new(prompt_tokens: u32, completion_tokens: u32, cached_tokens: Option<u32>) -> Self {
+        Self {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens + completion_tokens,
+            prompt_tokens_details: cached_tokens.map(|c| PromptTokensDetails { cached_tokens: c }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

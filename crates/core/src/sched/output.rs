@@ -90,6 +90,8 @@ pub struct StepItem {
     tok_start: u32,
     tok_len: u32,
     pub finish: Option<FinishReason>,
+    /// 只在产出该请求首个输出 token 的步为 `Some`：首次调度时 prefix cache 命中的 prompt token 数。
+    pub num_cached_tokens: Option<u32>,
 }
 
 impl StepResults {
@@ -100,7 +102,7 @@ impl StepResults {
     pub fn push(&mut self, req_id: RequestId, toks: &[u32], finish: Option<FinishReason>) {
         let tok_start = self.tokens.len() as u32;
         self.tokens.extend_from_slice(toks);
-        self.items.push(StepItem { req_id, tok_start, tok_len: toks.len() as u32, finish });
+        self.items.push(StepItem { req_id, tok_start, tok_len: toks.len() as u32, finish, num_cached_tokens: None });
     }
     /// 带 logprobs 的 push：`lps` 与 `toks` 平行（可短于 toks：缺的记 None）。
     pub fn push_with_logprobs(

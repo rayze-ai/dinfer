@@ -411,6 +411,10 @@ impl Scheduler {
                 let r = &mut s.req;
                 let rid = r.id;
                 let was_preempted = r.status == RequestStatus::Preempted;
+                if r.num_computed_tokens == 0 && !was_preempted {
+                    // 首次调度：prefix cache 命中数（GPU 块 + host tier）= 本步不用算的 prompt token 数
+                    r.num_cached_tokens = num_computed;
+                }
                 r.status = RequestStatus::Running;
                 r.num_computed_tokens = num_computed;
                 self.running.push(slot);
@@ -557,6 +561,10 @@ impl Scheduler {
                     results.push_with_logprobs(rid, &generated[..n_used], lp, finish)
                 }
                 _ => results.push(rid, &generated[..n_used], finish),
+            }
+            // 首个输出 token 所在的步：把 prefix cache 命中数带给 server（usage.prompt_tokens_details.cached_tokens）
+            if n_used > 0 && before_len == r.num_prompt_tokens() {
+                results.items.last_mut().unwrap().num_cached_tokens = Some(r.num_cached_tokens);
             }
         }
         self.p.eos_token_ids = eos;
