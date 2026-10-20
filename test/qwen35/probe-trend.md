@@ -129,6 +129,24 @@
 - 1x4096 chain_us dinfer：r10 第 7 轮：ArchProfile 按 block 铺满选 BV 64/32（Sm100）；默认路径；B300-50 GPU 7
 - 1x8192 chain_us dinfer：r10 第 7 轮：ArchProfile 按 block 铺满选 BV 64/32（Sm100）；默认路径；B300-50 GPU 7
 
+## probe_gdn_r10_8（2026-10-20，B300）
+
+### gdn_scale（us）
+
+| x | chain_us dinfer | conv_rows0_us dinfer | conv_rows128_us dinfer | conv_rows16_us dinfer | conv_rows256_us dinfer | conv_rows32_us dinfer | conv_rows64_us dinfer | conv_rows8_us dinfer | ho_bv16_us dinfer | ho_bv16pf_us dinfer | ho_bv16pfsp_us dinfer | ho_bv16sp_us dinfer | ho_bv32_us dinfer | ho_bv32pf_us dinfer | ho_bv32pfsp_us dinfer | ho_bv32sp_us dinfer | ho_bv64_us dinfer | ho_bv64pf_us dinfer | ho_legacy_us dinfer | prep_us dinfer | wy_legacy_us dinfer | wy_mma8_us dinfer | wy_serial_us dinfer | wy_us dinfer |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1x1024 | 147 | 486 | 114 | 38 | 218 | 40 | 63 | 37 | 74 | 76 | 106 | 112 | 63 | 65 | 85 | 102 | 59 | 65 | 786 | 18 | 421 | 57 | 93 | 60 |
+| 8x1024 | 769 | 810 | 312 | 220 | 320 | 222 | 247 | 250 | 508 | 550 | 700 | 738 | 382 | 384 | 576 | 555 | 308 | 328 | 5012 | 82 | 2924 | 360 | 508 | 371 |
+| 32x128 | 421 | 218 | 171 | 128 | 301 | 137 | 167 | 138 | 305 | 324 | 375 | 392 | 216 | 222 | 325 | 303 | 180 | 190 | 2496 | 43 | 1486 | 187 | 276 | 194 |
+| 1x4096 | 495 | 3065 | 162 | 122 | 296 | 132 | 162 | 131 | 362 | 394 | 421 | 448 | 256 | 267 | 338 | 409 | 302 | 318 | 3289 | 42 | 1487 | 187 | 276 | 194 |
+| 1x8192 | 967 | 6162 | 307 | 220 | 314 | 221 | 247 | 249 | 726 | 790 | 828 | 884 | 504 | 523 | 661 | 797 | 595 | 632 | 6598 | 82 | 2922 | 360 | 509 | 370 |
+
+- 1x1024 chain_us dinfer：r10 第 8 轮：Sm8x wy 8 warp（B300 默认不变，回归确认）；B300-50 GPU 7
+- 8x1024 chain_us dinfer：r10 第 8 轮：Sm8x wy 8 warp（B300 默认不变，回归确认）；B300-50 GPU 7
+- 32x128 chain_us dinfer：r10 第 8 轮：Sm8x wy 8 warp（B300 默认不变，回归确认）；B300-50 GPU 7
+- 1x4096 chain_us dinfer：r10 第 8 轮：Sm8x wy 8 warp（B300 默认不变，回归确认）；B300-50 GPU 7
+- 1x8192 chain_us dinfer：r10 第 8 轮：Sm8x wy 8 warp（B300 默认不变，回归确认）；B300-50 GPU 7
+
 ## probe_gdn_r9_0（2026-10-20，3090）
 
 ### gdn_scale（us）
