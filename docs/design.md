@@ -726,3 +726,25 @@ B300 单 GDN 层 decode，基线 = 现路径 11 kernel + 自调优 GEMM + CUDA g
 对拍全程通过（1 ulp）。9 组参数扫描无一更好。**结论**：① persistent kernel 1 CTA/SM 的占用输给各自最优配置的独立 GEMM kernel（手写 GEMV 4.5 TB/s vs cuBLASLt splitK 6+）；② 小算子（conv / norm / add）铺到 148 个 CTA 上变成延迟链，不如独立 kernel 的小 grid；③ **§14.1 高估了边界效应**：graph 内 kernel 边界只占步时间 ~17%，不是 3.8 ms / 37%，消掉它抵不过前两项损失。
 
 **对 §14 路线的修正**：A（整步 megakernel）在"每阶段效率 ≥ 独立 kernel"这个前提下才成立，当前手写 GEMV 做不到；路线顺序改为 **B（NVFP4 权重，减字节是确定收益）→ C（K3 MoE 融合，MoE 层算子多且小、融合收益比稠密层大）→ A 重估**（若 B 之后 GEMV 字节减 4×，边界效应占比会上升，A 的条件可能变化）。14.5 的"任务图抽象"仍有价值（统一模型描述、新旧路径共用），但不再以 megakernel 为第一消费者。
+
+## 15. 引擎层面的比较（2026-10-20，用户："我们是从引擎层面，你是模型层面"）
+
+### 15.1 为什么前面的口径不够
+`bench_compare.sh` 四组是闭环固定并发 + 固定长度 + `ignore_eos`：每步 batch 几乎恒定、prefill 与 decode 天然错开（Q3-j 跨流实验已证实：4000 步只 18 步混批）、prefix cache 只命中模板前缀、无尾部压力。它量的是 kernel + graph + 自调优，调度器、抢占、prefix cache、尾部、容量全被抹平。Qwen3.5 的 1.10× 是这个口径下的数字。
+
+### 15.2 引擎层面的差距在哪（待量）
+| 维度 | dinfer 现状 | vLLM 现状 | 预判 |
+|---|---|---|---|
+| prefix cache（递归模型） | GDN / KDA 强制关（状态不可按块复用） | `mamba_cache_mode=align`，命中粒度 1536 | **多轮负载下我们 TTFT 会明显落后**，是最大的已知差距 |
+| 调度 | chunked prefill + decode 预算豁免 + async 两段式；预算 16384 对齐 | 同类 | 需看泊松下的 p99 |
+| 抢占 / 恢复 | KV 抢占重算；GDN 状态丢失即重算 | 同类 + 状态快照 | 长上下文饱和时看 |
+| 尾部 | 未量 | 未量 | — |
+| 容量（SLO 下 req/s） | 未量 | 未量 | 这是首要数字 |
+| 多卡 | TP 功能过（qwen3 / kimik3 tp2） | tp8 成熟 | K3 的口径 |
+| 长跑稳定性 | 未量 | — | — |
+
+### 15.3 做法
+1. `bins/bench` 补 `--output-len-mix`、`--slo-ttft-ms/--slo-tpot-ms` → 输出 goodput；不 `ignore_eos` 模式。
+2. `scripts/verify/bench_engine.sh <OUT> "改动"`：到达率扫描（如 2/4/8/12/16/24 req/s），长度混合 + 前缀复用 0.5，两边各最佳配置，出表（goodput / p50 / p99 / cache hit）+ 曲线进 `test/<model>/engine-trend.*`。
+3. 首轮：Qwen3.5-27B B300 单卡（vLLM 开 prefix cache + 它的默认最佳；我们 prefix cache 关），拿到第一组引擎数字——预期多轮前缀负载下我们落后，这就把"GDN 状态按块缓存"（§11 待做）变成引擎层面的第一优先级，而不是继续下钻 kernel。
+4. 之后 K3 tp8（C-6）直接用此口径。

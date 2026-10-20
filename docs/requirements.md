@@ -45,3 +45,20 @@ glm53: glm53的具体模型实现
 - 暂无高端卡：GLM-5.3 / Kimi-K3 真权重验收挂起，已完成部分（GLM-5.3 全链路在 tiny fixture 上通过 P0–P6）记为阶段性成果。
 - 新增 **Qwen/Qwen3-0.6B** 作为主流程验证模型（本机 3090 可跑真权重）：真权重端到端、采样、性能、PD 分离都在它上做。
 - kimik3 / glm53 / qwen3 三个模型 crate 地位相同：`core + server + 一个模型 crate`。详见 design.md §5b。
+
+## 验收口径 v2：引擎层面（用户 2026-10-20："我要的是引擎层面测超越"，替换上面四组闭环 bench 作为"超越 vLLM"的判定）
+
+上面"同卡同权重、固定并发、固定长度、ignore_eos"的四组是**模型层面**（kernel 竞速），只是必要条件。引擎层面的比较口径：
+
+1. **负载**：开环泊松到达（`bench --request-rate`），prompt / 输出长度按分布抽样（短 128 / 中 1024 / 长 4096 混合，输出 128–512 混合，不 `ignore_eos`），**多轮对话带共享前缀**（`--prefix-repeat`，前缀复用比例 0.3–0.6），到达率从低扫到饱和。
+2. **两边各自最佳配置**（写进报告）：vLLM 开 prefix cache、FP8 KV、投机解码等它支持的；dinfer 同理。不用 nightly 默认。
+3. **指标**（每个到达率一行）：
+   - **goodput**：满足 SLO（TTFT p99 ≤ 500 ms 且 TPOT p99 ≤ 20 ms，可按模型调）的请求数 / s；**SLO 下最大 req/s** 是首要数字。
+   - TTFT / TPOT 的 p50 / **p99** 随到达率的曲线（尾部，不是均值）。
+   - prefix cache 命中率（两边各自上报），多轮负载下的 TTFT 差。
+   - 饱和点之后的行为（排队增长、拒绝 / 超时）。
+4. **长跑**：固定到达率 1 h，显存 / 内存 / TPOT p99 不漂移；客户端断连、超长请求不影响其他请求。
+5. **多卡**：TP / PD 下 goodput 的扩展效率（K3 只能 tp8，用这个口径）。
+6. **判定**：同 SLO 下 dinfer 的最大 req/s ≥ vLLM，且 p99 曲线不劣，长跑无漂移 → 引擎层面超越。四组闭环 bench 继续作为每轮性能改动的回归门禁，不再作为"超越"的判定。
+
+工具：`bins/bench`（已有 `--request-rate` / `--prompt-len-mix` / `--prefix-repeat`；要加 `--output-len-mix`、`--slo-ttft/--slo-tpot` 算 goodput、不 ignore_eos 模式）；`scripts/verify/bench_engine.sh` 扫到达率出表；vLLM 侧的 `vllm bench serve`（`vllm/benchmarks/serve.py`，有 `--goodput`、`--burstiness`、sharegpt / random 数据集）作为第三方口径交叉验证。
