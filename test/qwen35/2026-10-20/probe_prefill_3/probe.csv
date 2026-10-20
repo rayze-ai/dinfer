@@ -1,0 +1,12 @@
+probe,date,gpu,model,group,metric,side,x,value,unit,note
+probe_prefill_3,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,dinfer_nosnap,510,28.0,ms,
+probe_prefill_3,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,dinfer_nosnap,1021,52.1,ms,
+probe_prefill_3,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,dinfer_nosnap,2029,96.7,ms,
+probe_prefill_3,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,dinfer_nosnap,3009,143.3,ms,
+probe_prefill_3,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,dinfer_nosnap,4059,192.3,ms,
+probe_prefill_3,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,dinfer_nosnap,6019,290.5,ms,bbdf147 无池不切步 + r9 kernel；6 K 步数 1
+probe_prefill_3,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,dinfer,1021,51.9,ms,
+probe_prefill_3,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,dinfer,3009,163.7,ms,
+probe_prefill_3,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,dinfer,6019,347.5,ms,默认池开 119 槽，6 K 仍 6 步（已知权衡，r8b 消）
+probe_prefill_3,2026-10-20,B300,qwen35,ttft_len,slope_us_per_token,dinfer_nosnap,1k-6k,47.5,us/token,r9 前 51.5；目标 45
+probe_prefill_3,2026-10-20,B300,qwen35,ttft_len,slope_us_per_token,dinfer,1k-6k,59.3,us/token,池开切步，3 点拟合

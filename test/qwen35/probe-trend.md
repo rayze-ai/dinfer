@@ -257,3 +257,22 @@
 - 1021 ttft_p50_ms dinfer_legacy_kernel：GDN_CHUNK_WY=legacy GDN_CHUNK_HO_BV=0（r9 前 kernel）+ 池关 + 切步
 - 3009 ttft_p50_ms dinfer_legacy_kernel：GDN_CHUNK_WY=legacy GDN_CHUNK_HO_BV=0（r9 前 kernel）+ 池关 + 切步
 - 6019 ttft_p50_ms dinfer_legacy_kernel：GDN_CHUNK_WY=legacy GDN_CHUNK_HO_BV=0（r9 前 kernel）+ 池关 + 切步
+
+## probe_prefill_3（2026-10-20，B300）
+
+### ttft_len（ms）
+
+| x | slope_us_per_token dinfer | slope_us_per_token dinfer_nosnap | ttft_p50_ms dinfer | ttft_p50_ms dinfer_nosnap |
+|---|---|---|---|---|
+| 510 |  |  |  | 28.0 |
+| 1021 |  |  | 51.9 | 52.1 |
+| 2029 |  |  |  | 96.7 |
+| 3009 |  |  | 163.7 | 143.3 |
+| 4059 |  |  |  | 192.3 |
+| 6019 |  |  | 347.5 | 290.5 |
+| 1k-6k | 59.3 | 47.5 |  |  |
+
+- 6019 ttft_p50_ms dinfer_nosnap：bbdf147 无池不切步 + r9 kernel；6 K 步数 1
+- 6019 ttft_p50_ms dinfer：默认池开 119 槽，6 K 仍 6 步（已知权衡，r8b 消）
+- 1k-6k slope_us_per_token dinfer_nosnap：r9 前 51.5；目标 45
+- 1k-6k slope_us_per_token dinfer：池开切步，3 点拟合
