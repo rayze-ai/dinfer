@@ -1879,6 +1879,20 @@ probe_prefill_7,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,vllm,3009,138.0,ms,
 probe_prefill_7,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,vllm,6019,260.6,ms,
 probe_prefill_7,2026-10-20,B300,qwen35,ttft_len,slope_us_per_token,dinfer,1k-6k,46.7,us/token,b18 46.4；r9 前 51.5
 probe_prefill_7,2026-10-20,B300,qwen35,ttft_len,slope_us_per_token,vllm,1k-6k,36.0,us/token,
+probe_flashinfer_gdn,2026-10-21,B300,qwen35,gdn_scale,fi_total_us,vllm,1x1024,49,us,FlashInfer gdn_prefill（vLLM B300 实际路径）；容器 vllm/vllm-openai:nightly + GPU 4；torch.profiler 20 次均值
+probe_flashinfer_gdn,2026-10-21,B300,qwen35,gdn_scale,fi_main_us,vllm,1x1024,42,us,主 kernel kernel_cutlass_*GatedDeltaNet_Chunked*（84.4%），其余 4 个 copy/fill/exp 2-3 µs
+probe_flashinfer_gdn,2026-10-21,B300,qwen35,gdn_scale,fi_total_us,vllm,8x1024,156,us,
+probe_flashinfer_gdn,2026-10-21,B300,qwen35,gdn_scale,fi_main_us,vllm,8x1024,142,us,91.0%
+probe_flashinfer_gdn,2026-10-21,B300,qwen35,gdn_scale,fi_total_us,vllm,1x8192,253,us,
+probe_flashinfer_gdn,2026-10-21,B300,qwen35,gdn_scale,fi_main_us,vllm,1x8192,242,us,95.8%
+probe_flashinfer_gdn,2026-10-21,B300,qwen35,gdn_scale,chain_us,dinfer,1x1024,208,us,r10 收口（wy+ho+conv+prep 全链）
+probe_flashinfer_gdn,2026-10-21,B300,qwen35,gdn_scale,chain_us,dinfer,8x1024,770,us,
+probe_flashinfer_gdn,2026-10-21,B300,qwen35,gdn_scale,chain_us,dinfer,1x8192,969,us,
+probe_flashinfer_gdn,2026-10-21,B300,qwen35,gdn_scale,speedup_x,dinfer,8x1024,4.9,x,dinfer chain / FlashInfer total（同一 B300、同 HV=48 K=V=128）
+probe_flashinfer_gdn,2026-10-21,B300,qwen35,gdn_scale,speedup_x,dinfer,1x8192,3.8,x,
+probe_flashinfer_gdn,2026-10-21,B300,qwen35,gdn_scale,speedup_x,dinfer,1x1024,4.2,x,
+probe_flashinfer_gdn,2026-10-21,B300,qwen35,gdn_scale,step_gap_us,dinfer,6k,52000,us,engine-gap 9e：48 层 GDN 合计 52 ms（占 6 K prefill 277 ms 的 19%）
+probe_flashinfer_gdn,2026-10-21,B300,qwen35,gdn_scale,step_gap_us,dinfer,6k_if_fi,12000,us,若换成 FlashInfer 口径（253 µs × 48 层）→ 6 K TTFT 可省 ~40 ms
 probe_merge_ttft,2026-10-21,B300,qwen35,ttft_len,ttft_p50_ms,dinfer,1021,49.0,ms,r11 合并（r11a gqa v6 cfg3464 + r11b small_m_mma 候选）；绝对路径二进制 target_merge
 probe_merge_ttft,2026-10-21,B300,qwen35,ttft_len,ttft_p50_ms,dinfer,3009,139.8,ms,
 probe_merge_ttft,2026-10-21,B300,qwen35,ttft_len,ttft_p50_ms,dinfer,6019,281.7,ms,合并前 bench19 口径 284.9（−3.2 ms；r11a 微基准预示 −7.7）

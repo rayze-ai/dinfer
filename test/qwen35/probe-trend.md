@@ -568,6 +568,27 @@
 - 6019 ttft_p50_ms dinfer：第 12 轮合体定稿（r8b + r10 全 8 轮，2b0cc54），6 K 1 步
 - 1k-6k slope_us_per_token dinfer：b18 46.4；r9 前 51.5
 
+## probe_flashinfer_gdn（2026-10-21，B300）
+
+### gdn_scale（us）
+
+| x | chain_us dinfer | fi_main_us vllm | fi_total_us vllm | speedup_x dinfer | step_gap_us dinfer |
+|---|---|---|---|---|---|
+| 1x1024 | 208 | 42 | 49 | 4.2 |  |
+| 8x1024 | 770 | 142 | 156 | 4.9 |  |
+| 1x8192 | 969 | 242 | 253 | 3.8 |  |
+| 6k |  |  |  |  | 52000 |
+| 6k_if_fi |  |  |  |  | 12000 |
+
+- 1x1024 fi_total_us vllm：FlashInfer gdn_prefill（vLLM B300 实际路径）；容器 vllm/vllm-openai:nightly + GPU 4；torch.profiler 20 次均值
+- 1x1024 fi_main_us vllm：主 kernel kernel_cutlass_*GatedDeltaNet_Chunked*（84.4%），其余 4 个 copy/fill/exp 2-3 µs
+- 8x1024 fi_main_us vllm：91.0%
+- 1x8192 fi_main_us vllm：95.8%
+- 1x1024 chain_us dinfer：r10 收口（wy+ho+conv+prep 全链）
+- 8x1024 speedup_x dinfer：dinfer chain / FlashInfer total（同一 B300、同 HV=48 K=V=128）
+- 6k step_gap_us dinfer：engine-gap 9e：48 层 GDN 合计 52 ms（占 6 K prefill 277 ms 的 19%）
+- 6k_if_fi step_gap_us dinfer：若换成 FlashInfer 口径（253 µs × 48 层）→ 6 K TTFT 可省 ~40 ms
+
 ## probe_merge_ttft（2026-10-21，B300）
 
 ### ttft_len（ms）

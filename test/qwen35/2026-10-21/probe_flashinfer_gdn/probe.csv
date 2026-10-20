@@ -1,0 +1,15 @@
+probe,date,gpu,model,group,metric,side,x,value,unit,note
+probe_flashinfer_gdn,2026-10-21,B300,qwen35,gdn_scale,fi_total_us,vllm,1x1024,49,us,FlashInfer gdn_prefill（vLLM B300 实际路径）；容器 vllm/vllm-openai:nightly + GPU 4；torch.profiler 20 次均值
+probe_flashinfer_gdn,2026-10-21,B300,qwen35,gdn_scale,fi_main_us,vllm,1x1024,42,us,主 kernel kernel_cutlass_*GatedDeltaNet_Chunked*（84.4%），其余 4 个 copy/fill/exp 2-3 µs
+probe_flashinfer_gdn,2026-10-21,B300,qwen35,gdn_scale,fi_total_us,vllm,8x1024,156,us,
+probe_flashinfer_gdn,2026-10-21,B300,qwen35,gdn_scale,fi_main_us,vllm,8x1024,142,us,91.0%
+probe_flashinfer_gdn,2026-10-21,B300,qwen35,gdn_scale,fi_total_us,vllm,1x8192,253,us,
+probe_flashinfer_gdn,2026-10-21,B300,qwen35,gdn_scale,fi_main_us,vllm,1x8192,242,us,95.8%
+probe_flashinfer_gdn,2026-10-21,B300,qwen35,gdn_scale,chain_us,dinfer,1x1024,208,us,r10 收口（wy+ho+conv+prep 全链）
+probe_flashinfer_gdn,2026-10-21,B300,qwen35,gdn_scale,chain_us,dinfer,8x1024,770,us,
+probe_flashinfer_gdn,2026-10-21,B300,qwen35,gdn_scale,chain_us,dinfer,1x8192,969,us,
+probe_flashinfer_gdn,2026-10-21,B300,qwen35,gdn_scale,speedup_x,dinfer,8x1024,4.9,x,dinfer chain / FlashInfer total（同一 B300、同 HV=48 K=V=128）
+probe_flashinfer_gdn,2026-10-21,B300,qwen35,gdn_scale,speedup_x,dinfer,1x8192,3.8,x,
+probe_flashinfer_gdn,2026-10-21,B300,qwen35,gdn_scale,speedup_x,dinfer,1x1024,4.2,x,
+probe_flashinfer_gdn,2026-10-21,B300,qwen35,gdn_scale,step_gap_us,dinfer,6k,52000,us,engine-gap 9e：48 层 GDN 合计 52 ms（占 6 K prefill 277 ms 的 19%）
+probe_flashinfer_gdn,2026-10-21,B300,qwen35,gdn_scale,step_gap_us,dinfer,6k_if_fi,12000,us,若换成 FlashInfer 口径（253 µs × 48 层）→ 6 K TTFT 可省 ~40 ms
