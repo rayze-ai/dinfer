@@ -1,0 +1,31 @@
+
+running 1 test
+==PROF== Connected to process 1104250 (/data/yaochen/infer/target_r10/release/deps/gdn_parity-77a11007109a8dd9)
+  [1×1024] 顺序 22391 µs | chunk 全链 417 µs（53.7x）| prep 114 | wy old 433 mma 88 mma64 105 mma8 85 | ho bv0=800 bv16=163 bv32=158 bv16pf=160 bv32pf=157 bv16sp=147 bv32sp=143 bv16pfsp=144 bv32pfsp=138 | conv rows0=496 rows8=67 rows16=67 rows32=67 rows64=75 rows128=125 rows256=228
+==PROF== Profiling "ho_mma_kernel": 0%....50%....100% - 4 passes
+  [8×1024] 顺序 102479 µs | chunk 全链 885 µs（115.7x）| prep 112 | wy old 2940 mma 383 mma64 521 mma8 372 | ho bv0=5016 bv16=522 bv32=394 bv16pf=562 bv32pf=404 bv16sp=752 bv32sp=569 bv16pfsp=713 bv32pfsp=587 | conv rows0=819 rows8=259 rows16=230 rows32=231 rows64=256 rows128=323 rows256=329
+  [32×128] 顺序 51051 µs | chunk 全链 489 µs（104.4x）| prep 111 | wy old 1502 mma 206 mma64 287 mma8 199 | ho bv0=2512 bv16=319 bv32=229 bv16pf=338 bv32pf=236 bv16sp=407 bv32sp=316 bv16pfsp=388 bv32pfsp=338 | conv rows0=228 rows8=147 rows16=137 rows32=145 rows64=177 rows128=182 rows256=310
+  [1×4096] 顺序 90373 µs | chunk 全链 533 µs（169.7x）| prep 110 | wy old 1500 mma 207 mma64 288 mma8 199 | ho bv0=3302 bv16=378 bv32=269 bv16pf=403 bv32pf=280 bv16sp=464 bv32sp=421 bv16pfsp=435 bv32pfsp=352 | conv rows0=3081 rows8=141 rows16=131 rows32=141 rows64=171 rows128=172 rows256=305
+  [1×8192] 顺序 180782 µs | chunk 全链 994 µs（182.0x）| prep 113 | wy old 2940 mma 383 mma64 520 mma8 372 | ho bv0=6614 bv16=738 bv32=517 bv16pf=801 bv32pf=538 bv16sp=897 bv32sp=815 bv16pfsp=842 bv32pfsp=674 | conv rows0=6170 rows8=258 rows16=229 rows32=232 rows64=257 rows128=319 rows256=324
+test gdn_chunk_bench ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 6.38s
+
+==PROF== Disconnected from process 1104250
+[1104250] gdn_parity-77a11007109a8dd9@127.0.0.1
+  void <unnamed>::ho_mma_kernel<64, 32, 128, 1>(const __nv_bfloat16 *, const float *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, __nv_bfloat16 *, float *, const int *, const int *, const int *, const int *, long, int, int, int, int, const int *, const int *, const int *, float *) (4, 48, 8)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 10.3
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                               Metric Unit Metric Value
+    ------------------------------------------------------------------------- ----------- ------------
+    gpu__time_duration.sum                                                             us       618.30
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                    272933
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         0.22
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         1.18
+    smsp__average_warps_issue_stalled_mio_throttle_per_issue_active.ratio            inst         0.62
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         1.54
+    smsp__inst_executed.sum                                                          inst    105879552
+    smsp__inst_executed_op_ldsm.sum                                                  inst      7471104
+    smsp__inst_executed_op_shared_ld.sum                                             inst      3440640
+    ------------------------------------------------------------------------- ----------- ------------
+

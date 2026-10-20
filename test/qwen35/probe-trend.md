@@ -75,6 +75,24 @@
 - 1x4096 chain_us dinfer：r10 第 4 轮：wy stage 16 B 向量装载 + kg 16 B 写；B300-50 GPU 7，合并树（r8b 已并入）
 - 1x8192 chain_us dinfer：r10 第 4 轮：wy stage 16 B 向量装载 + kg 16 B 写；B300-50 GPU 7，合并树（r8b 已并入）
 
+## probe_gdn_r10_5（2026-10-20，B300）
+
+### gdn_scale（us）
+
+| x | chain_us dinfer | conv_rows0_us dinfer | conv_rows128_us dinfer | conv_rows16_us dinfer | conv_rows256_us dinfer | conv_rows32_us dinfer | conv_rows64_us dinfer | conv_rows8_us dinfer | ho_bv16_us dinfer | ho_bv16pf_us dinfer | ho_bv16pfsp_us dinfer | ho_bv16sp_us dinfer | ho_bv32_us dinfer | ho_bv32pf_us dinfer | ho_bv32pfsp_us dinfer | ho_bv32sp_us dinfer | ho_legacy_us dinfer | prep_us dinfer | wy_legacy_us dinfer | wy_mma8_us dinfer | wy_serial_us dinfer | wy_us dinfer |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1x1024 | 147 | 487 | 115 | 39 | 218 | 41 | 62 | 38 | 74 | 77 | 105 | 112 | 63 | 65 | 85 | 102 | 786 | 18 | 421 | 57 | 92 | 60 |
+| 8x1024 | 833 | 808 | 310 | 221 | 319 | 222 | 246 | 250 | 509 | 549 | 700 | 741 | 384 | 389 | 575 | 555 | 5005 | 82 | 2924 | 360 | 509 | 372 |
+| 32x128 | 453 | 218 | 172 | 128 | 301 | 135 | 169 | 137 | 305 | 324 | 374 | 393 | 217 | 222 | 324 | 302 | 2497 | 42 | 1485 | 187 | 275 | 195 |
+| 1x4096 | 497 | 3065 | 162 | 123 | 295 | 132 | 164 | 131 | 369 | 394 | 420 | 450 | 256 | 268 | 338 | 409 | 3294 | 43 | 1486 | 187 | 276 | 194 |
+| 1x8192 | 966 | 6174 | 308 | 219 | 315 | 221 | 248 | 249 | 720 | 804 | 828 | 880 | 504 | 525 | 661 | 802 | 6615 | 82 | 2923 | 360 | 508 | 371 |
+
+- 1x1024 chain_us dinfer：r10 第 5 轮：ho h16 B 操作数 ldmatrix.x4；B300-50 GPU 7
+- 8x1024 chain_us dinfer：r10 第 5 轮：ho h16 B 操作数 ldmatrix.x4；B300-50 GPU 7
+- 32x128 chain_us dinfer：r10 第 5 轮：ho h16 B 操作数 ldmatrix.x4；B300-50 GPU 7
+- 1x4096 chain_us dinfer：r10 第 5 轮：ho h16 B 操作数 ldmatrix.x4；B300-50 GPU 7
+- 1x8192 chain_us dinfer：r10 第 5 轮：ho h16 B 操作数 ldmatrix.x4；B300-50 GPU 7
+
 ## probe_gdn_r9_0（2026-10-20，3090）
 
 ### gdn_scale（us）
