@@ -6,7 +6,10 @@ set -u
 tag=$1; BIN=${2:-./target/release/dinfer}; GPU=${GPU:-5}; PORT=${PORT:-8412}
 M=/data/models/Qwen/Qwen3.8-27B
 source /data/yaochen/infer/env.sh; unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
-for p in $(pgrep -x dinfer); do grep -qz -- "--port $PORT" /proc/$p/cmdline 2>/dev/null && kill -KILL $p; done; sleep 1
+# 按端口找服务进程（二进制可能改名，如 dinfer_r7_base），排除 nsys 自身
+serve_pids() { for p in $(pgrep -f -- "--port $PORT"); do case "$(readlink /proc/$p/exe 2>/dev/null)" in *nsys*|*bash*|*ssh*) ;; *) echo $p;; esac; done; }
+for p in $(serve_pids); do kill -KILL $p; done; sleep 1
+ss -ltn 2>/dev/null | grep -q ":$PORT " && { echo "port $PORT still busy"; exit 3; }
 export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=$GPU RUST_LOG=info
 taskset -c 32-63 nsys profile -t cuda --cuda-graph-trace=node -o /tmp/r7_$tag --force-overwrite true \
   $BIN serve --model $M --served-model-name Qwen3.8-27B --host 127.0.0.1 --port $PORT \
@@ -20,8 +23,8 @@ taskset -c 96-127 ./target/release/bench --url http://127.0.0.1:$PORT --model Qw
 echo BENCH_EXIT=$?
 curl -s 127.0.0.1:$PORT/metrics >/tmp/r7_${tag}.metrics.after
 # 只给 dinfer 进程发 SIGINT（`pkill -f` 会连 nsys 一起杀 → 没有 .nsys-rep）；nsys 等被跟踪进程退出后落盘
-for p in $(pgrep -x dinfer); do grep -qz -- "--port $PORT" /proc/$p/cmdline 2>/dev/null && kill -INT $p; done
-for i in $(seq 1 180); do pgrep -f "nsys profile.*r7_$tag" >/dev/null || break; sleep 1; done
+for p in $(serve_pids); do kill -INT $p; done
+for i in $(seq 1 180); do [ -n "$(serve_pids)" ] || pgrep -f "nsys profile.*-o /tmp/r7_$tag " >/dev/null || break; sleep 1; done
 sleep 2
 nsys export --type sqlite --force-overwrite true -o /tmp/r7_$tag.sqlite /tmp/r7_$tag.nsys-rep >/dev/null 2>&1 && echo SQLITE_OK
 python3 /data/yaochen/infer/bootstrap/nsys_steps_sqlite.py /tmp/r7_$tag.sqlite 6 >/tmp/r7_${tag}_steps.txt 2>&1
