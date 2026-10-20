@@ -57,6 +57,25 @@ tp6 不可用（视觉塔 4096 维列切不整除）。`test/kimik3/2026-10-19/b
 vLLM 的融合规则（`model.py:1110` `packed_modules_mapping`）：`gate_up_proj=[gate,up]`、`in_proj_qkvgfab=[q,k,v,b,f_a]`、`conv1d=[q,k,v conv]`、`fused_qkv_a_g_proj=[q_a, kv_a_with_mqa, g]`、专家 `w13=[w1,w3]`。
 
 
+### 1.5 Tokenizer 特殊 token 表（C-4a，`tokenizer_config.json::added_tokens_decoder`，2026-10-20）
+
+ranks 163584 条（`tiktoken.model`）→ 特殊 token 空间 `[163584, 163840)` 共 256 个；有名 16 个，其余 `<|reserved_token_{i}|>`（`tokenization_kimi.py` 的命名规则）。
+eos = `<|end_of_msg|>` 163586（`generation_config.json` / `config.json`），`[EOS]` 163585 **不是**生成终止符；BOS 不自动前置。
+
+| id | 名 | 用途 |
+|---|---|---|
+| 163584 | `[BOS]` | bos_token（模板不前置） |
+| 163585 | `[EOS]` | eos_token 名义值（不用于停止） |
+| 163586 | `<|end_of_msg|>` | **消息结束 = 生成停止** |
+| 163587 / 163588 / 163589 | `<|open|>` / `<|close|>` / `<|sep|>` | XTML 结构标记（`special=false` 但在 tiktoken special 表内，`allow_special` 段编成 id） |
+| 163590 / 163591 | `[start_header_id]` / `[end_header_id]` | 旧格式遗留 |
+| 163593 | `[EOT]` | 旧格式遗留 |
+| 163602–163605 | `<|media_begin|>` `<|media_content|>` `<|media_end|>` `<|media_pad|>` | 视觉：`<|media_pad|>` = `media_placeholder_token_id`（C-6 后） |
+| 163649 | `<osagent_mode>` | agent 模式开关 |
+| 163838 / 163839 | `[UNK]` / `[PAD]` | unk / pad |
+
+`allow_special` 语义：结构段 `true`（`allowed_special="all"`），用户 / 工具文本与属性值 `false`（`disallowed_special=()`，`<|open|>` 字样 → 3 个普通 token）。长文本 400k 字符窗口 + 25k 连续（非）空白 run 切分后再 BPE（影响边界，已复刻）。渲染方言（`Dialect::{Hf,Serving}`）、解析器状态机与采纳台账见 `docs/loops/k3-chat.md`。
+
 ### 1.6 参考 `/data/code/llm-cache-prediction`（用户 2026-10-20 指定；采纳口径，不搬代码）
 
 该项目是网关侧 K3 前缀缓存命中率测算 sidecar（纯 CPU Rust），其 `crates/kimik3/{tokenizer.rs,xtml.rs,pyjson.rs}` 已与 vLLM 服务端逐 token 对齐过 100+ 轮，`docs/kimik3/{README,other}.md` 记了四处对齐偏差。对 dinfer 的价值与取舍：
@@ -84,9 +103,9 @@ kimik3/src/
   latent_moe.rs  down_proj → router ∥ → experts(mxfp4, situ) → norm → up_proj(+shared 残差)
   vision/        MoonViT3d、PatchMergerV2、图像预处理（kimi_k3_vision_processing.py 移植）、token 数公式
   mtp.rs         KimiK3Mtp（DraftModel）
-  tokenizer.rs   tiktoken BPE + 自定义 pat_str + 256 特殊 token
-  xtml.rs        encoding_k3.py 移植：build_chat_segments → EncodeSegment{text, allow_special}
-  parser.rs      思考段 / 工具调用流式解析（对照 vllm/parser/kimi_k3.py、reasoning/kimi_k3_reasoning_parser.py、tool_parsers/kimi_k3_tool_parser.py；格式见 §1.4b）
+  tokenizer.rs   tiktoken BPE + 自定义 pat_str + 256 特殊 token（C-4a ✅，fancy-regex；增量 detokenize）
+  xtml.rs        encoding_k3.py 移植：build_chat_segments → Segment{text, allow_special}（C-4a ✅，Dialect::{Hf,Serving}）
+  parser.rs      思考段 / 工具调用流式解析（C-4a ✅；对照 vllm/parser/kimi_k3.py、reasoning/kimi_k3_reasoning_parser.py、tool_parsers/kimi_k3_tool_parser.py；格式见 §1.4b）
   weights.rs     名字映射与融合规则（见 2.1）；MXFP4 专家权重按 [E, 2*I, H/2] 打包
 ```
 
