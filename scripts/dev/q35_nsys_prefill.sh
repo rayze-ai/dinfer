@@ -36,9 +36,9 @@ curl -s -m 3 127.0.0.1:$port/v1/models | grep -oE '"id":"[^"]+"' | head -1 || { 
 # 配合 --cuda-flush-interval=1000 周期 flush。
 taskset -c 100-103 python3 -I scripts/dev/ttft_probe.py $port 1 146 >/dev/null 2>&1
 for w in $lengths; do
-  taskset -c 100-103 python3 -I scripts/dev/ttft_probe.py $port 5 $w 2>&1 | tail -1
+  taskset -c 100-103 python3 -I scripts/dev/ttft_probe.py $port 10 $w 2>&1 | tail -1
 done
-sleep 12  # 让最后一次 flush 跑完（3 s 不够：6 K 五步被截，engine-gap 9b）
+sleep 20  # CUPTI 活动缓冲要填满或超时才 flush：3 条请求 0 kernel、5 条 6 K 只录 0.68 s（9b）；三长度各 10 次 + 20 s 稳妥
 
 # SIGINT 发给 nsys 本身（不是 serve），它才会 flush 报告
 np=$(pgrep -x nsys | head -1)
