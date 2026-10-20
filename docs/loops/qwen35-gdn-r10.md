@@ -71,3 +71,5 @@
 - A）**h16 的 B 读改 ldmatrix.x4**（`sh16` 按 [v][k] 行主序，mma B 需 col-major [k][v]：用 `ldsm_x4_t` 从 [v][k] 转置取），每 ks 步 4 条 lds_u32 ×NT_V → 1 条 ldsm_x4 / 2 tile；smem 事务减 ~4×。改 kernel 体内 (1)(2) 两处 B 读，不碰 smem 布局 / snap / 入口。
 - B）cp.async 双缓冲 + 8 warp（改法 2）：regs 已 242，再加 8 warp 的 oacc/wacc 只会溢出；双缓冲 smem 75 → 130 KB 把占用压到 1 block/SM。**B300 上 B 不划算，先做 A**。
 - 第 4 轮 bv32（无预取）反超 bv32pf 的现象与此一致：PF 的寄存器预取把 regs 顶到 242 → 2 block/SM；无预取版 regs 更少可能 3 block/SM，掩延迟反而更好。等 ncu 的 hpass / bv32 无 PF 行再定预取默认。
+
+ho_mma 原始计数（第 4 轮代码，8×1024 launch，`r10_ncu_ho3.txt`，第 5 轮对照基线）：inst 112.8 M，其中 **shared_ld 16.0 M**（lds_u32，B 操作数 h16 + sdec/sb 等）、ldsm 4.3 M、shared_st 6.1 M；每发射停顿（周期）：wait 1.40 / short_scoreboard 1.13 / long_scoreboard 1.02 / **mio_throttle 0.92** / not_selected 0.22 / barrier 0.20；smem bank 冲突：ld 0.29 M、**st 0.73 M**（svT 转置写 + sh16 写）。第 5 轮（B 读改 ldmatrix）预期：shared_ld 16 M → ~4 M、mio_throttle 与 short_scoreboard 下降；st 冲突不动（第 6 轮候选：svT 行跨 / swizzle）。
