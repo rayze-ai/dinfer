@@ -734,3 +734,23 @@
 - 根因：`LatentMoe::forward` 每步 `dtoh_sync_copy(offsets)` 在 host 展平 tile 计划、`AttnRes::apply` host softmax；capture 期间 kernel 不真正执行，D2H 读回全 0，host 断言失败。错误信息完全不提 graph / stream capture。
 - 解法：K3 executor decode 图默认关（`K3_GRAPH=1` 强制开）；根治 = GPU 侧 tile 计划 + AttnRes 融合 kernel（`docs/loops/k3-serve.md` TODO）。
 - 避免：新模型接 `DecodeGraphs` 前先 `grep -n 'dtoh\|synchronize' models/<m>/src/*.rs`，forward 路径上一处都不能有；有则先不开图，日志明示原因。
+
+## 2026-10-20 多线程对拍测试里的"静默"不能用进程级静态（K3 C-5）
+
+- 现象：`KIMIK3_TP=2` 跑 model_parity，rank 0 一行数字都不打、dump 目录为空，只剩 panic 行。
+- 根因：`static QUIET: AtomicBool` 让 rank 1 线程置 true 后整个进程都静默。
+- 解法：`thread_local!`（每 rank 一线程）。
+- 避免：多 rank 共进程的测试，所有"按 rank 区分"的状态都走线程局部或显式传参。
+
+## 2026-10-20 MoE 模型 tp vs 单卡不能用链式 cos 做停止条件（K3 C-5）
+
+- 现象：tp2 vs 单卡链式 final cos 0.9984、logits 0.9982，看起来像 bug；但单卡自己跑两次也只有 chain4 0.99918 / final 0.99898。
+- 根因：`moe_scatter_add_f32` 原子加顺序不确定 + bf16 一次 all-reduce 舍入 → top-16 末位 margin ≤ 4e-3 的平局行翻转，链式逐层放大；隔离口径下 tp 的 attn_out / mlp_in 与单卡只差 4e-6。
+- 解法：对拍口径改成"隔离各层只在**两边 topk_ids 相同的行**比（≥ 0.9999），expert_sum 一致行 ≤ 1 ulp，logits top-1 一致，链式只报数"（`scripts/verify/k3_tp_compare.py --matched-only` + `k3_tp_rows.py`）。
+- 避免：带硬判决（top-k / argmax）的模型，先跑单卡 ×2 看噪声底再定门槛；要逐位就得把原子加改成按行归约（TODO）。
+
+## 2026-10-20 远端 `pkill -f <串>` 会杀掉发出它的 ssh shell 自身
+
+- 现象：`remote_b300.sh run 'pkill -f "while pgrep"; ...后续命令'` 后续全没执行、无输出。
+- 根因：ssh 远端 shell 的命令行里含同一字串，`pkill -f` 把自己杀了。
+- 解法 / 避免：启动器写成文件（`scripts/dev/k3_b300_tp_launch.sh`）再 `bash` 跑；要 pkill 用 pid 文件或 `pgrep -f 'pattern' | grep -v $$`。

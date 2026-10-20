@@ -1,0 +1,41 @@
+  chain0             cos 0.9999931  max_abs 1.953e-03  （链式只报：单卡自身两次 chain4 ≈ 0.9992，见 loops/k3-tp.md 第 3 轮）
+  chain1             cos 0.9999163  max_abs 3.174e-03  （链式只报：单卡自身两次 chain4 ≈ 0.9992，见 loops/k3-tp.md 第 3 轮）
+  chain2             cos 0.9997196  max_abs 1.221e-02  （链式只报：单卡自身两次 chain4 ≈ 0.9992，见 loops/k3-tp.md 第 3 轮）
+  chain3             cos 0.9994141  max_abs 2.002e-02  （链式只报：单卡自身两次 chain4 ≈ 0.9992，见 loops/k3-tp.md 第 3 轮）
+  chain4             cos 0.9987904  max_abs 4.669e-02  （链式只报：单卡自身两次 chain4 ≈ 0.9992，见 loops/k3-tp.md 第 3 轮）
+  decode_logits      cos 0.9997414  max_abs 2.031e-01  top-1 30530 vs 30530  top-5 集合不同 [11239, 30530, 33573, 49880, 69931] vs [11239, 30530, 33573, 66326, 69931]  <-- FAIL
+  final              cos 0.9985568  max_abs 5.039e-01  （链式只报：单卡自身两次 chain4 ≈ 0.9992，见 loops/k3-tp.md 第 3 轮）
+  iso0               cos 0.9999931  max_abs 1.953e-03
+  iso1               cos 0.9999917  max_abs 1.953e-03  （路由一致 26/31 行）
+  iso1_attn_normed 长度不同 380928 vs 190464
+  iso1_attn_out      cos 0.9999957  max_abs 9.766e-04  （中间量只报；按路由一致行拆比用 k3_tp_rows.py）
+  iso1_expert_sum    cos 0.9996120  max_abs 5.554e-03  （中间量只报；按路由一致行拆比用 k3_tp_rows.py）
+  iso1_mlp_in        cos 0.9999945  max_abs 6.250e-02  （中间量只报；按路由一致行拆比用 k3_tp_rows.py）
+  iso1_routed_out    cos 0.9992561  max_abs 8.179e-03  （中间量只报；按路由一致行拆比用 k3_tp_rows.py）
+  iso1_topk_ids      路由整行一致 26/31
+  iso1_topk_w        max_abs 3.700e-02（只报）
+  iso2               cos 0.9999946  max_abs 7.812e-03  （路由一致 29/31 行）
+  iso2_attn_normed 长度不同 380928 vs 190464
+  iso2_attn_out      cos 0.9999960  max_abs 1.953e-03  （中间量只报；按路由一致行拆比用 k3_tp_rows.py）
+  iso2_expert_sum    cos 0.9993618  max_abs 9.766e-03  （中间量只报；按路由一致行拆比用 k3_tp_rows.py）
+  iso2_mlp_in        cos 0.9999969  max_abs 6.250e-02  （中间量只报；按路由一致行拆比用 k3_tp_rows.py）
+  iso2_routed_out    cos 0.9991145  max_abs 1.045e-02  （中间量只报；按路由一致行拆比用 k3_tp_rows.py）
+  iso2_topk_ids      路由整行一致 29/31
+  iso2_topk_w        max_abs 8.352e-02（只报）
+  iso3               cos 0.9999930  max_abs 7.812e-03  （路由一致 30/31 行）
+  iso3_attn_out      cos 0.9999960  max_abs 3.906e-03  （中间量只报；按路由一致行拆比用 k3_tp_rows.py）
+  iso3_expert_sum    cos 0.9999558  max_abs 2.563e-03  （中间量只报；按路由一致行拆比用 k3_tp_rows.py）
+  iso3_mlp_in        cos 0.9999973  max_abs 3.125e-02  （中间量只报；按路由一致行拆比用 k3_tp_rows.py）
+  iso3_routed_out    cos 0.9998411  max_abs 6.958e-03  （中间量只报；按路由一致行拆比用 k3_tp_rows.py）
+  iso3_topk_ids      路由整行一致 30/31
+  iso3_topk_w        max_abs 4.328e-02（只报）
+  iso4               cos 0.9999918  max_abs 3.906e-03  （路由一致 29/31 行）
+  iso4_attn_normed 长度不同 380928 vs 190464
+  iso4_attn_out      cos 0.9999959  max_abs 3.906e-03  （中间量只报；按路由一致行拆比用 k3_tp_rows.py）
+  iso4_expert_sum    cos 0.9996454  max_abs 1.068e-02  （中间量只报；按路由一致行拆比用 k3_tp_rows.py）
+  iso4_mlp_in        cos 0.9999959  max_abs 3.125e-02  （中间量只报；按路由一致行拆比用 k3_tp_rows.py）
+  iso4_routed_out    cos 0.9996914  max_abs 2.051e-02  （中间量只报；按路由一致行拆比用 k3_tp_rows.py）
+  iso4_topk_ids      路由整行一致 29/31
+  iso4_topk_w        max_abs 5.656e-02（只报）
+  logits_last        cos 0.9981658  max_abs 4.766e-01  top-1 30530 vs 30530  top-5 集合不同 [11239, 30530, 33573, 49880, 69931] vs [11239, 30530, 33573, 69931, 127420]  <-- FAIL
+RESULT FAIL

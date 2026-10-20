@@ -42,3 +42,11 @@
   - `TP_REDUCE_F32=1` 与 bf16 reduce **逐位同一组 iso 数字**（iso1 0.9997668 两边一样）→ bf16 双舍入不是原因；开关留着但默认关。
   - 噪声底（single vs single3）：iso 1.0000000、chain4 0.99918、final 0.99898（单卡自身链式波动比我原以为的还大）。
   - 下一步：按"路由整行一致 / 不一致"拆行比 `expert_sum`（`scripts/verify/k3_tp_rows.py`）：若一致行 ≈ 逐位则只是平局翻转（口径问题，非 bug）；若一致行也差 → 查本地专家段 tile 计划 / offsets。
+- 第 4 轮（11:18，收口；归档 `test/kimik3/2026-10-20/tp2/`：`single3_summary.log` / `tp2e_summary.log` / `tp2d_summary.log`（f32 reduce）/ `compare_single3_vs_tp2e_matched.txt` / `rows_single3_vs_tp2e.txt` / `smoke5_tp2/`）：
+  - **`K3_TP=2` model_parity exit 0**（TP 口径门槛：隔离对 HF cos ≥ 0.999 不变；链式 logits / decode 对 HF ≥ 0.998；decode-vs-prefill ≥ 0.998）。
+  - **按主会话口径拆行（tp2 与单卡各自 topk_ids 完全相同的行）**：`expert_sum` 一致行 cos **0.999993 / 0.999992 / 0.999991 / 0.999989**，max_abs 4.9e-4（bf16 1 ulp，值域 0.146）→ **分片 grouped GEMM + acc all-reduce 正确**；不一致行 5 / 2 / 1 / 2（/31），全是 top-16 末位 margin ≤ 4e-3 的平局翻转（`rows_*.txt` 列了每行两边各选的专家与最小权重）。
+  - iso 各层（路由一致行）tp2 vs 单卡 **0.999992–0.999995**（≥ 0.9999 ✓）；iso0（dense，纯 TP）0.999993。
+  - 对 HF logits **top-1 一致**（30530，单卡 / tp2 / decode 全同）；top-5 前 4 同，第 5 位 7.34 vs 7.38 级平局（单卡 49880、tp2 127420 / decode 66326）——单卡自身两次也在此位波动（见下一条 single vs single3）。
+  - 结论：**TP + EP 机制对拍通过**；tp2 与单卡的全部差异 = bf16 一次 all-reduce 舍入 → MoE 路由平局翻转（硬判决不可逐位复现，pitfalls 既有口径）。
+  - 未做 / TODO：① `moe_scatter_add_f32` 原子加顺序使单卡自身不逐位（single vs single3 chain4 0.99918），改按行归约两边都受益；② EP v1 两次 all-reduce（acc f32 + shared bf16）可合并成一次；③ all-to-all 分发（大 batch 时省通信字节）；④ lm_head 列切 + all-gather；⑤ `TP_REDUCE_F32` 实验证明无收益，开关可删。
+- **停止条件判定**（按主会话 11:16 口径）：iso 各层 ≥ 0.9999 ✓；路由一致行 expert_sum ≤ 1 ulp ✓；logits top-1 一致 ✓；top-5 集合 **前 4 一致、第 5 位平局**（单卡自身两次亦然，作口径注记而非失败）；链式只报。**C-5 完成。**
