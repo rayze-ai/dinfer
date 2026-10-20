@@ -62,3 +62,10 @@ glm53: glm53的具体模型实现
 6. **判定**：同 SLO 下 dinfer 的最大 req/s ≥ vLLM，且 p99 曲线不劣，长跑无漂移 → 引擎层面超越。四组闭环 bench 继续作为每轮性能改动的回归门禁，不再作为"超越"的判定。
 
 工具：`bins/bench`（已有 `--request-rate` / `--prompt-len-mix` / `--prefix-repeat`；要加 `--output-len-mix`、`--slo-ttft/--slo-tpot` 算 goodput、不 ignore_eos 模式）；`scripts/verify/bench_engine.sh` 扫到达率出表；vLLM 侧的 `vllm bench serve`（`vllm/benchmarks/serve.py`，有 `--goodput`、`--burstiness`、sharegpt / random 数据集）作为第三方口径交叉验证。
+
+### 验收 v2 补充：测试程序自身的准确性与资源占用（用户 2026-10-20）
+- **压测端开销可见且隔离**：bench 报自己的 CPU 时间 / 峰值 RSS / 线程数 / CPU 集合；`taskset` 钉到与被测服务不重叠的核；两边服务的 CPU 集合也写进报告。压测端 CPU 占用 > 1 核或与服务共核 → 该轮数据作废。
+- **计时口径自校验**：bench 内置假 SSE 服务做 `--self-check`，报 TTFT / TPOT 测量误差；时间戳在收到字节时打，JSON 解析在后；TTFT = 首个带内容 chunk（两边服务的 role chunk 都随首 token 发）。
+- **第三方交叉**：同 rate 同 seed 下与 `vllm bench serve` 的 p50 / p99 差 ≤ 10%，否则先查工具再查引擎。
+- **客户端 vs 服务端对账**：服务自报指标（dinfer `/metrics`、vLLM `vllm:*` 直方图）与客户端测量放同一张表；差值 = 网络 + 工具开销，应 < 1 ms 且两边一致。
+- 预生成 prompt，发送期不做重活；压测工具与被测服务不同容器 / 不同 NUMA 更好。

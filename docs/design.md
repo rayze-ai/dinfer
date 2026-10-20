@@ -759,3 +759,11 @@ B300 单 GDN 层 decode，基线 = 现路径 11 kernel + 自调优 GEMM + CUDA g
 | 8 | vLLM | 5.07 | **5.07** | 1319 | 93 / 154 | 16.6 / 19.4 |
 
 **结论：引擎层面我们明显落后**（goodput 1.25 vs 2.84、0.35 vs 5.07），和四组闭环的 1.10× 完全是两回事——用户的判断是对的。两处要查：① dinfer TTFT 5 ms 不可能（1024 token prefill 至少几十 ms），应是 server 先发了一个空 role delta 被工具当首 token，**测量伪像**，要改成首个带内容 chunk 才发（与 vLLM 一致）；② **TPOT 真差**：rate 8 时 29.5 / 45.2 vs 16.6 / 19.4，而四组闭环 c8 是 10.2 vs 11.2——差在负载形态：长度分布宽（512–1536 in、128–384 out）+ 请求交错到达 → 混批步多、decode 批不整、chunk prefill 插入频繁；vLLM 的 prefix cache 命中 512 前缀也把它的 prefill 砍了一半。下一步：dinfer 侧 `/metrics` 的 prefill / decode / mixed 步分布 + nsys 这类负载，定位是调度策略（预算 16384 一步吞掉大 prefill 把 decode 卡住 → TPOT 尾部）还是 prefix cache 缺失。
+
+### 15.5 测试程序本身的准确性（用户 2026-10-20："测试程序的准确性、测试程序占用资源的影响"）
+
+§15.4 的首个数据点就撞上了两个工具问题：① dinfer 在请求接受时发空 role chunk → 工具把它当首 token，TTFT 5 ms 伪像（已修：随首 token 发）；② 一次重编漏 `--features` 编出 K3 分支二进制，bench 对着起不来的服务空跑出 goodput 0.00（`bench_engine.sh` 启动前要核 `/v1/models` id）。所以引擎层面的每一组数字都要带"工具可信度"证据：
+- 压测端在哪跑、吃多少 CPU：`vllm bench serve` 是 Python（tokenizer + SSE 解析 + 每 chunk 打时间戳），在 vLLM 容器里跑时与 vLLM 进程共核；我们的 Rust `bench` 轻得多但也要钉核并上报 `getrusage`。实测见 `docs/loops/engine-gap.md`。
+- 口径：TTFT 首个带内容 chunk；时间戳在字节到达时打；`ignore_eos` 与否两边一致；两边服务的 SSE 首 chunk 语义一致。
+- 交叉：同一负载用两个独立工具（我们的 `bench` 与 `vllm bench serve`）各测一遍，p50/p99 差 ≤ 10% 才算工具可信。
+- 对账：客户端测的 TTFT/TPOT 与服务端自报（dinfer `/metrics`、vLLM `vllm:*`）同表；dinfer 的 `engine_step_execute_*` 在 async 下含 `finish` 等待，不是 GPU 步时间，报表要注明。
