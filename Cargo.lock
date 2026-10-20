@@ -675,10 +675,12 @@ dependencies = [
  "dinfer-core",
  "dinfer-kernels",
  "dinfer-layers",
+ "dinfer-server",
  "fancy-regex",
  "npyz",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]
