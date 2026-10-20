@@ -155,3 +155,34 @@ v' = M·( β⊙v − (β·2^g_last)·(kg·hᵀ) )
 ### 工作方式（2026-10-21 用户定）
 
 本地 `/data/code/dinfer` 写 → `B300_TAG=50 scripts/dev/remote_b300.sh put` 单文件 → B300 上 `nvcc -arch=sm_103a` 秒级语法检查 → `cargo` + `gdn_parity`。**每轮必须传过去编**。
+
+---
+
+## 里程碑 1（2026-10-21 05:4x，主会话自己写）
+
+**目标**：先把 tcgen05 在这套数据布局下的全部未知点验掉，不写完整 kernel。
+新文件 `crates/kernels/cuda/gdn_ho_sm100.cu`，只实现四个 GEMM 中的 **(1) wh = w·hᵀ**。
+
+**结果**（B300-50 GPU 4，`nvcc -gencode=arch=compute_103a,code=sm_103a`）：
+- 编译过；`cuobjdump -res-usage`：**REG 26 / STACK 0 / LOCAL 0**（对比 mma.sync 版 ho 的 239）
+- 数值：`out[0][0] = 4.404658` vs CPU `4.405192` → **rel 1.2e-4**（bf16 输入 + K=128 累加的正常量级）
+
+**验证过的映射（后续轮直接用）**：
+- `tcgen05.alloc.cta_group::1` 分 128 列给 `[BT=64, V=128]` 累加器；`tcgen05.ld.sync.aligned.32x32b.x4` 取回，
+  warp w 读 lane 32w..32w+31（128 线程 4 warp 恰好覆盖 128 lane）
+- smem 128 B swizzle：`phys = row*8 + ((k>>3) ^ (row&7))`，A=[BT,64]、B=[V,64]，MN 在前、K 连续
+- K 轴分块：**第 kb 块的字节偏移是 `kb * rows * 64 * 2`，不是 `kb * 128`**（A 和 B 的块跨度不同，要分开算）
+- `make_instr_desc_bf16(M=BT, N=V, a_mn=false, b_mn=false)` + `k_major_128b_desc`
+
+## 踩到的两个坑（都花了轮次，记下来）
+
+1. **smem 布局的元素/字节混算**：`off_tmem = (off_out*2 + out_bytes + 127) & ~127` —— `off_out` 是 bf16 元素偏移，
+   `*2` 是字节，再加一个 `out_bytes` 就重复算了。后果是 `tmem_slot` 指到 smem 外，`*tmem_slot` 读到垃圾，
+   MMA 写到非法 TMEM 列，**输出全 0 且 `cudaGetLastError()` 返回 no error**。
+   教训：**全 0 且无报错 = 大概率是元数据（TMEM 指针 / 描述符）指错，不是计算错**。先单独验证装载/取回通路。
+2. **`tcgen05.ld` 是 warp 级指令**，不能让 `if (tid < N)` 只放部分线程进去（同一 warp 内会分歧）。
+   正确做法：全部线程参与取回，再由 caller 按行号决定写不写。
+
+## 下一步
+
+(2)(3)(4) 三个 GEMM + 接 C ABI。都是里程碑 1 已验模式的重复，风险低。
