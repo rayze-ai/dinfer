@@ -108,6 +108,8 @@ pub struct GemmTuneParams {
     pub small_m_wave_targets: Vec<usize>,
     /// tensor-core 小 M kernel 每 block warp 数候选（每 warp 16 行 N）；split-K 候选沿用 `small_m_wave_targets`。
     pub small_m_mma_warps: Vec<usize>,
+    /// tensor-core 小 M kernel 每 warp 的 W 条数（8 行一条）候选：条数越多 smem 读量越少（1/R），寄存器 / 在途字节越多。
+    pub small_m_mma_stripes: Vec<usize>,
     /// 每个候选的计时次数（取平均）；首次先预热 1 次。
     pub timing_iters: usize,
     /// split-K 工作区上限（字节）：候选的 partial 超过它就不参与。
@@ -148,6 +150,7 @@ impl ArchProfile {
                 Arch::Sm90 | Arch::Sm100 => vec![1, 2, 4, 8],
             },
             small_m_mma_warps: vec![4, 8],
+            small_m_mma_stripes: vec![2, 4, 8],
             timing_iters: 5,
             split_workspace_max_bytes: 64 << 20,
         };
@@ -446,9 +449,10 @@ mod tests {
         for a in [Arch::Sm8x, Arch::Sm90, Arch::Sm100] {
             let c = ArchProfile::gqa_prefill_cfg_for(a);
             if c != 0 {
-                let (nw, tile) = (c / 100, c % 100);
-                assert!([4, 8].contains(&nw) && [32, 64].contains(&tile), "{a:?} cfg {c}");
-                let smem = (nw * 16 + 2 * tile) * (256 + 8) * 2;
+                let (ver, nw, tile) = (c / 1000, c % 1000 / 100, c % 100);
+                assert!(ver <= 1 && [4, 8].contains(&nw) && [32, 64].contains(&tile), "{a:?} cfg {c}");
+                let bq = if ver == 1 { nw * 8 } else { nw * 16 };
+                let smem = (bq + 2 * tile) * (256 + 8) * 2 + if ver == 1 { nw / 2 * (16 * (tile + 8) * 2 + 128) } else { 0 };
                 let cap = if a == Arch::Sm8x { 99 * 1024 } else { 227 * 1024 };
                 assert!(smem <= cap, "{a:?} cfg {c} smem {smem} > {cap}");
             }

@@ -518,7 +518,234 @@ static int v6_launch(int max_q, int heads, int num_reqs, cudaStream_t stream, co
                                                                        max_blocks, skip_single);
   return (int)cudaGetLastError();
 }
-// cfg = NW·100 + TILE（调用方 / ArchProfile 给）：0 = v5 旧路径；D=256 支持 {432, 464, 832, 864}；D=128 一律 v5。
+// ---- v7（r11a 第 2 轮）：warp 对分工 ----
+// 第 1 轮 ncu：v6 464 仍 246 reg → 2 block × 4 warp = 8 warp/SM，Eligible < 0.5，延迟型；D=256 时单 warp 持 16 行 × 256 维 O
+// 就要 128 寄存器，占用上不去。v7 让 **两个 warp 共担同 16 行**：各算一半 key 的 S / 部分 max，经 smem 交换 max 后用同一 m
+// 算 P，P 写 smem 供对方取 A 片，PV 各只算自己那一半 D（O 64 寄存器）。`__launch_bounds__(NW·32, 2)` 压到 ≤128 reg，
+// 8 warp block（4 对）× 2 block/SM = 16 warp/SM。代价：Q 的 A 片两 warp 各读一遍、P 多一次 smem 往返。
+// 对内同步用 named barrier（id = 1 + 对号，64 线程），与 block 级 `__syncthreads`（barrier 0）不冲突。
+__device__ __forceinline__ void bar_named(int id, int nthreads) {
+  asm volatile("bar.sync %0, %1;\n" ::"r"(id), "r"(nthreads));
+}
+__device__ __forceinline__ float ex2_approx(float x) {
+  float y;
+  asm("ex2.approx.ftz.f32 %0, %1;\n" : "=f"(y) : "f"(x));
+  return y;
+}
+template <int NW, int TILE>
+struct V7Cfg {
+  static_assert(NW % 2 == 0, "v7 warp 成对");
+  static constexpr int NP = NW / 2, BQ = NP * 16, THREADS = NW * 32, PLD = TILE + 8;
+  static constexpr size_t smem_bytes(int D) {
+    return (size_t)(BQ + 2 * TILE) * (D + 8) * 2 + (size_t)NP * 16 * PLD * 2 + (size_t)NP * 32 * 4;
+  }
+};
+template <bool PAGED, int D, int NW, int TILE>
+__global__ void __launch_bounds__(NW * 32, 2) gqa_fa_v7_kernel(
+    const bf16* __restrict__ q, const bf16* __restrict__ k, const bf16* __restrict__ v, const bf16* __restrict__ cache,
+    const int32_t* __restrict__ block_table, const int32_t* __restrict__ seq_lens, const int32_t* __restrict__ cu_seqlens,
+    bf16* __restrict__ out, int H, int Hkv, float scale_log2, int q_stride, int kv_stride, int block_size, int max_blocks,
+    int skip_single) {
+  using C = V7Cfg<NW, TILE>;
+  constexpr int NP = C::NP, BQ = C::BQ, THREADS = C::THREADS, PLD = C::PLD, LDS = D + 8;
+  constexpr int HK = TILE / 2, SFRAG = HK / 8;   // 本 warp 的 key 数 / S 片段数
+  constexpr int HD = D / 2, OF = HD / 8;         // 本 warp 的 D 半 / O 片段数
+  constexpr int U = D / 8, LOGU = v5_log2(U);
+  constexpr int QITERS = BQ * U / THREADS, KITERS = TILE * U / THREADS;
+  static_assert(QITERS * THREADS == BQ * U && KITERS * THREADS == TILE * U, "v7 装载整除");
+  extern __shared__ __align__(128) unsigned char v7_smem[];
+  bf16* sQ = reinterpret_cast<bf16*>(v7_smem);
+  bf16* sK = sQ + (size_t)BQ * LDS;
+  bf16* sV = sK + (size_t)TILE * LDS;
+  bf16* sP = sV + (size_t)TILE * LDS;                      // [NP][16][PLD]
+  float* sM = reinterpret_cast<float*>(sP + (size_t)NP * 16 * PLD);  // [NP][2 半][16 行]
+  const int b = blockIdx.z, h = blockIdx.y;
+  const int group = H / Hkv, hk = h / group;
+  const int q0 = cu_seqlens[b], q_len = cu_seqlens[b + 1] - q0;
+  if (PAGED && skip_single && q_len == 1) return;
+  const int q_base = (gridDim.x - 1 - blockIdx.x) * BQ;
+  if (q_base >= q_len) return;
+  const int seq_len = PAGED ? seq_lens[b] : q_len;
+  const int hist = seq_len - q_len;
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, cq = (lane & 3) * 2;
+  const int pair = warp >> 1, hf = warp & 1;
+  const int row_a = q_base + pair * 16 + g, row_b = row_a + 8;
+  const bool live_a = row_a < q_len, live_b = row_b < q_len;
+  const int32_t* bt = PAGED ? block_table + (int64_t)b * max_blocks : nullptr;
+#pragma unroll
+  for (int i = 0; i < QITERS; ++i) {
+    const int c = tid + THREADS * i, j = c >> LOGU, d8 = (c & (U - 1)) * 8;
+    const int row = q_base + j;
+    const bf16* pq = q + (int64_t)(q0 + min(row, q_len - 1)) * q_stride + (int64_t)h * D + d8;
+    cp_async16(sQ + j * LDS + d8, pq, row < q_len ? 16 : 0);
+  }
+  auto load_tile = [&](int tile) {
+    const int k0 = tile * TILE;
+    const int kn = min(TILE, seq_len - k0);
+#pragma unroll
+    for (int i = 0; i < KITERS; ++i) {
+      const int c = tid + THREADS * i, j = c >> LOGU, d8 = (c & (U - 1)) * 8;
+      const bf16 *pk, *pv;
+      int bytes = 0;
+      if (j < kn) {
+        bytes = 16;
+        if (PAGED) {
+          const int pos = k0 + j;
+          const int64_t blk = bt[pos / block_size];
+          const bf16* base = cache + slot_off(blk * block_size + pos % block_size, Hkv, D) + (int64_t)hk * 2 * D;
+          pk = base + d8;
+          pv = base + D + d8;
+        } else {
+          const int64_t t = q0 + k0 + j;
+          pk = k + t * kv_stride + (int64_t)hk * D + d8;
+          pv = v + t * kv_stride + (int64_t)hk * D + d8;
+        }
+      } else {
+        pk = pv = k ? k : cache;
+      }
+      cp_async16(sK + j * LDS + d8, pk, bytes);
+      cp_async16(sV + j * LDS + d8, pv, bytes);
+    }
+    cp_async_commit();
+  };
+  load_tile(0);
+  float o[OF][4];
+#pragma unroll
+  for (int i = 0; i < OF; ++i) { o[i][0] = o[i][1] = o[i][2] = o[i][3] = 0.f; }
+  float m_a = -INFINITY, m_b = -INFINITY, l_a = 0.f, l_b = 0.f;
+  const int vis_a = hist + row_a, vis_b = hist + row_b;
+  const int last_key = hist + min(q_base + BQ - 1, q_len - 1);
+  const int n_tiles = last_key / TILE + 1;
+  const int pair_min_vis = hist + q_base + pair * 16;
+  const int pair_max_vis = hist + min(q_base + pair * 16 + 15, q_len - 1);
+  const bf16* sQw = sQ + (pair * 16) * LDS;
+  bf16* sPp = sP + (size_t)pair * 16 * PLD;
+  float* sMp = sM + pair * 32;
+  const int bar_id = 1 + pair;
+  for (int tile = 0; tile < n_tiles; ++tile) {
+    const int k0 = tile * TILE;
+    cp_async_wait_all();
+    __syncthreads();
+    if (k0 <= pair_max_vis) {  // 两 warp 同判（按行），named barrier 配对不乱
+      const int kh = k0 + hf * HK;
+      float sacc[SFRAG][4];
+#pragma unroll
+      for (int nt = 0; nt < SFRAG; ++nt) { sacc[nt][0] = sacc[nt][1] = sacc[nt][2] = sacc[nt][3] = 0.f; }
+#pragma unroll
+      for (int kk2 = 0; kk2 < D / 32; ++kk2) {
+        uint32_t qa[8];
+        ldsm_x4(qa, sQw + (lane & 15) * LDS + kk2 * 32 + 8 * (lane >> 4));
+        ldsm_x4(qa + 4, sQw + (lane & 15) * LDS + kk2 * 32 + 16 + 8 * (lane >> 4));
+#pragma unroll
+        for (int nt = 0; nt < SFRAG; ++nt) {
+          uint32_t bk[4];
+          ldsm_x4(bk, sK + (hf * HK + nt * 8 + (lane & 7)) * LDS + kk2 * 32 + 8 * (lane >> 3));
+          mma16816(sacc[nt], qa, bk[0], bk[1]);
+          mma16816(sacc[nt], qa + 4, bk[2], bk[3]);
+        }
+      }
+      const bool need_mask = (k0 + TILE - 1 > pair_min_vis);
+      float mx_a = -INFINITY, mx_b = -INFINITY;
+#pragma unroll
+      for (int nt = 0; nt < SFRAG; ++nt) {
+        const int key = kh + nt * 8 + cq;
+#pragma unroll
+        for (int e = 0; e < 2; ++e) {
+          float sa = sacc[nt][e] * scale_log2, sb = sacc[nt][2 + e] * scale_log2;
+          if (need_mask) {
+            if (key + e > vis_a) sa = -INFINITY;
+            if (key + e > vis_b) sb = -INFINITY;
+          }
+          sacc[nt][e] = sa; sacc[nt][2 + e] = sb;
+          mx_a = fmaxf(mx_a, sa); mx_b = fmaxf(mx_b, sb);
+        }
+      }
+      mx_a = fmaxf(mx_a, __shfl_xor_sync(0xffffffffu, mx_a, 1)); mx_a = fmaxf(mx_a, __shfl_xor_sync(0xffffffffu, mx_a, 2));
+      mx_b = fmaxf(mx_b, __shfl_xor_sync(0xffffffffu, mx_b, 1)); mx_b = fmaxf(mx_b, __shfl_xor_sync(0xffffffffu, mx_b, 2));
+      if ((lane & 3) == 0) { sMp[hf * 16 + g] = mx_a; sMp[hf * 16 + g + 8] = mx_b; }
+      bar_named(bar_id, 64);
+      mx_a = fmaxf(mx_a, sMp[(hf ^ 1) * 16 + g]); mx_b = fmaxf(mx_b, sMp[(hf ^ 1) * 16 + g + 8]);
+      float alpha_a = 1.f, alpha_b = 1.f;
+      if (mx_a != -INFINITY) { const float mn = fmaxf(m_a, mx_a); alpha_a = ex2_approx(m_a - mn); m_a = mn; }
+      if (mx_b != -INFINITY) { const float mn = fmaxf(m_b, mx_b); alpha_b = ex2_approx(m_b - mn); m_b = mn; }
+      float ps_a = 0.f, ps_b = 0.f;
+#pragma unroll
+      for (int nt = 0; nt < SFRAG; ++nt) {
+#pragma unroll
+        for (int e = 0; e < 2; ++e) {
+          const float pa = (sacc[nt][e] == -INFINITY) ? 0.f : ex2_approx(sacc[nt][e] - m_a);
+          const float pb = (sacc[nt][2 + e] == -INFINITY) ? 0.f : ex2_approx(sacc[nt][2 + e] - m_b);
+          sacc[nt][e] = pa; sacc[nt][2 + e] = pb; ps_a += pa; ps_b += pb;
+        }
+      }
+      l_a = l_a * alpha_a + ps_a; l_b = l_b * alpha_b + ps_b;
+#pragma unroll
+      for (int nt = 0; nt < OF; ++nt) { o[nt][0] *= alpha_a; o[nt][1] *= alpha_a; o[nt][2] *= alpha_b; o[nt][3] *= alpha_b; }
+#pragma unroll
+      for (int nt = 0; nt < SFRAG; ++nt) {
+        *reinterpret_cast<uint32_t*>(sPp + g * PLD + hf * HK + nt * 8 + cq) = pack_bf16x2(sacc[nt][0], sacc[nt][1]);
+        *reinterpret_cast<uint32_t*>(sPp + (g + 8) * PLD + hf * HK + nt * 8 + cq) = pack_bf16x2(sacc[nt][2], sacc[nt][3]);
+      }
+      bar_named(bar_id, 64);
+#pragma unroll
+      for (int j = 0; j < TILE / 16; ++j) {
+        uint32_t pa[4];
+        ldsm_x4(pa, sPp + (lane & 15) * PLD + j * 16 + 8 * (lane >> 4));
+#pragma unroll
+        for (int nt2 = 0; nt2 < HD / 16; ++nt2) {
+          uint32_t bv[4];
+          ldsm_x4_t(bv, sV + (j * 16 + 8 * ((lane >> 3) & 1) + (lane & 7)) * LDS + hf * HD + nt2 * 16 + 8 * (lane >> 4));
+          mma16816(o[2 * nt2], pa, bv[0], bv[1]);
+          mma16816(o[2 * nt2 + 1], pa, bv[2], bv[3]);
+        }
+      }
+    }
+    if (tile + 1 < n_tiles) {
+      __syncthreads();
+      load_tile(tile + 1);
+    }
+  }
+  l_a += __shfl_xor_sync(0xffffffffu, l_a, 1); l_a += __shfl_xor_sync(0xffffffffu, l_a, 2);
+  l_b += __shfl_xor_sync(0xffffffffu, l_b, 1); l_b += __shfl_xor_sync(0xffffffffu, l_b, 2);
+  if ((lane & 3) == 0) { sMp[hf * 16 + g] = l_a; sMp[hf * 16 + g + 8] = l_b; }
+  bar_named(bar_id, 64);
+  l_a += sMp[(hf ^ 1) * 16 + g]; l_b += sMp[(hf ^ 1) * 16 + g + 8];
+  const float inv_a = l_a > 0.f ? 1.f / l_a : 0.f, inv_b = l_b > 0.f ? 1.f / l_b : 0.f;
+  if (live_a) {
+    bf16* op = out + ((int64_t)(q0 + row_a) * H + h) * D + hf * HD + cq;
+#pragma unroll
+    for (int nt = 0; nt < OF; ++nt)
+      *reinterpret_cast<uint32_t*>(op + nt * 8) = pack_bf16x2(o[nt][0] * inv_a, o[nt][1] * inv_a);
+  }
+  if (live_b) {
+    bf16* op = out + ((int64_t)(q0 + row_b) * H + h) * D + hf * HD + cq;
+#pragma unroll
+    for (int nt = 0; nt < OF; ++nt)
+      *reinterpret_cast<uint32_t*>(op + nt * 8) = pack_bf16x2(o[nt][2] * inv_b, o[nt][3] * inv_b);
+  }
+}
+template <bool PAGED, int D, int NW, int TILE>
+static int v7_launch(int max_q, int heads, int num_reqs, cudaStream_t stream, const bf16* q, const bf16* k, const bf16* v,
+                     const bf16* cache, const int32_t* bt, const int32_t* seq_lens, const int32_t* cu, bf16* out, int H,
+                     int Hkv, float scale_log2, int q_stride, int kv_stride, int block_size, int max_blocks,
+                     int skip_single) {
+  constexpr int BQ = V7Cfg<NW, TILE>::BQ;
+  const size_t smem = V7Cfg<NW, TILE>::smem_bytes(D);
+  static int attr = 0;
+  if (attr == 0) {
+    attr = cudaFuncSetAttribute(gqa_fa_v7_kernel<PAGED, D, NW, TILE>, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                (int)smem) == cudaSuccess ? 1 : -1;
+    if (attr < 0) (void)cudaGetLastError();
+  }
+  if (attr < 0) return (int)cudaErrorInvalidConfiguration;
+  dim3 grid((unsigned)((max_q + BQ - 1) / BQ), (unsigned)heads, (unsigned)num_reqs);
+  gqa_fa_v7_kernel<PAGED, D, NW, TILE><<<grid, NW * 32, smem, stream>>>(q, k, v, cache, bt, seq_lens, cu, out, H, Hkv,
+                                                                       scale_log2, q_stride, kv_stride, block_size,
+                                                                       max_blocks, skip_single);
+  return (int)cudaGetLastError();
+}
+// cfg = 版本·1000 + NW·100 + TILE（调用方 / ArchProfile 给）：0 = v5 旧路径；版本 0 = v6（Q 进 smem）、1 = v7（warp 对分工）；
+// D=256 支持 NW ∈ {4, 8} × TILE ∈ {32, 64}；D=128 一律 v5。
 template <bool PAGED>
 static int v6_dispatch(int cfg, int max_q, int heads, int num_reqs, cudaStream_t stream, const bf16* q, const bf16* k,
                        const bf16* v, const bf16* cache, const int32_t* bt, const int32_t* seq_lens, const int32_t* cu,
@@ -528,14 +755,23 @@ static int v6_dispatch(int cfg, int max_q, int heads, int num_reqs, cudaStream_t
   case NW * 100 + TILE:                                                                                           \
     return v6_launch<PAGED, 256, NW, TILE>(max_q, heads, num_reqs, stream, q, k, v, cache, bt, seq_lens, cu, out, H, \
                                            Hkv, scale_log2, q_stride, kv_stride, block_size, max_blocks, skip_single);
+#define V7_CASE(NW, TILE)                                                                                         \
+  case 1000 + NW * 100 + TILE:                                                                                    \
+    return v7_launch<PAGED, 256, NW, TILE>(max_q, heads, num_reqs, stream, q, k, v, cache, bt, seq_lens, cu, out, H, \
+                                           Hkv, scale_log2, q_stride, kv_stride, block_size, max_blocks, skip_single);
   switch (cfg) {
     V6_CASE(4, 32)
     V6_CASE(4, 64)
     V6_CASE(8, 32)
     V6_CASE(8, 64)
+    V7_CASE(4, 32)
+    V7_CASE(4, 64)
+    V7_CASE(8, 32)
+    V7_CASE(8, 64)
     default: return (int)cudaErrorInvalidValue;
   }
 #undef V6_CASE
+#undef V7_CASE
 }
 constexpr float LOG2E_F = 1.4426950408889634f;
 // 通用慢路径（任意 D ≤ MAX_D）：旧参考实现，每 (req, q_head) 一个 block 逐 query 行三遍扫 key。对拍 fixture（D=32）走这里。

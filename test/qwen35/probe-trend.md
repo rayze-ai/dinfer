@@ -27,6 +27,18 @@
 
 - 1024 fa_us dinfer：r11a 第 1 轮：v6（Q 进 smem、NW/TILE 模板化、block 反序）cfg 464 = 4 warp × tile 64；B300-50 GPU 4
 
+## probe_attn_r11a_2（2026-10-20，B300）
+
+### attn_scale（us）
+
+| x | fa_cfg1432_us dinfer | fa_cfg1464_us dinfer | fa_cfg1832_us dinfer | fa_cfg1864_us dinfer | fa_us dinfer | tflops dinfer | tflops_cfg1432 dinfer | tflops_cfg1464 dinfer | tflops_cfg1832 dinfer | tflops_cfg1864 dinfer |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1024 | 106 | 91 | 102 | 90 | 83 | 155.3 | 121.1 | 142.1 | 126.1 | 142.7 |
+| 3009 | 700 | 577 | 609 | 528 | 481 | 231.2 | 158.8 | 192.8 | 182.6 | 210.7 |
+| 6019 | 2615 | 2078 | 2143 | 1802 | 1650 | 269.9 | 170.2 | 214.2 | 207.7 | 247.0 |
+
+- 1024 fa_us dinfer：r11a 第 2 轮：v6 cfg 464 复现（默认路径）；同轮 v7 warp 对分工 1864/1832/1464/1432 全更慢
+
 ## probe_gdn_r10_1（2026-10-20，B300）
 
 ### gdn_scale（us）
