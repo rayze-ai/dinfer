@@ -171,6 +171,42 @@ kimik3/src/
 KV cache：每 token latent `[kv_c(512) | k_pe(64)]` bf16 = 1152 B，paged `[num_blocks, block_size, 576]`，每层独立（`MlaLayer.kv`）。
 scale `192^-0.5`。顶层：`embed_tokens [163840, 7168]`、`norm [7168]`、`output_attn_res_proj [1, 7168]`、`output_attn_res_norm [7168]`、`lm_head [163840, 7168]` 全在 `model-00094-of-000096`（`weights::shards_for_top`）。
 
+### 2.4 多卡切分表（C-5，TP + EP，2026-10-20；口径 = vLLM `kimi_k3.py` / `kimi_linear.py` 的 tp 切法，EP 实现不同）
+
+一进程多线程 lockstep（design.md §13.1）；`world` = tp 组大小，每 rank 一张卡。**world=1 时所有路径与单卡逐位相同**（无通信调用）。
+实现：`weights::Shard{rank, world}` 贯穿 `KdaLayer / MlaLayer / LatentMoe / KimiDecoderLayer / KimiK3Model` 的 `load_tp`；通信点在 `layer.rs::forward`（attention / dense 的 all-reduce）与 `latent_moe.rs::forward`（两次）；`Comm` 由 executor 持有，经 `StepMeta.comm` 传下去。
+
+| 模块 | 张量 | 切法 | 每 rank 字节（bf16） | 通信 |
+|---|---|---|---|---|
+| KDA | `q/k/v/g_proj [12288,7168]` | **行切**（按头：rank 持 96/world 个头 × 128） | 4 × 176.2 MB / w | — |
+| | `f_a_proj [128,7168]` | 复制 | 1.8 MB | — |
+| | `f_b_proj [12288,128]`、`dt_bias [12288]`、`{q,k,v}_conv1d [12288,4]`、`b_proj [96,7168]`、`A_log [96]` | 行切（头） | (3.1+0.05+0.3+1.4) MB / w | — |
+| | `o_norm [128]` | 复制（逐 head_dim） | 256 B | — |
+| | `o_proj [7168,12288]` | **列切**（输入列按头） | 176.2 MB / w | 输出部分和 → **all-reduce ①**（bf16 t×7168） |
+| | 递归状态 / conv 状态 | 每 rank 只存自己的头：rec `[slots, 96/w, 128, 128]` f32、conv `[slots, 12288/w, 3]` | 6.5 MB / w / slot | — |
+| MLA | `q_a_proj [1536,7168]`、`kv_a_proj_with_mqa [576,7168]`、`q_a/kv_a_layernorm` | 复制（低秩很小） | 30.3 MB | — |
+| | `g_proj [12288,7168]`（fused 的第三段） | 行切（头） | 176.2 MB / w | — |
+| | `q_b_proj [18432,1536]`、`kv_b_proj [24576,512]`（及拆出的 `W_UK^T` / `W_UV`） | 行切（头，每头 192 / 256 行连续） | (56.6+25.2+25.2) MB / w | — |
+| | `o_proj [7168,12288]` | 列切（头） | 176.2 MB / w | all-reduce ①（同上） |
+| | latent KV cache `[blocks, bs, 576]` | **复制**（每 rank 自己写同样的 latent） | 1152 B / token | — |
+| MoE (EP) | `gate [896,7168]`、`e_score_correction_bias` | 复制（路由每 rank 全量算，结果一致） | 12.9 MB | — |
+| | `routed_expert_down_proj [3584,7168]`、`up_proj [7168,3584]`、`routed_expert_norm` | 复制 | 102.8 MB | — |
+| | 专家 `w13 / w2` MXFP4 packed | **按专家 id 均分**：rank r 持 `[r·896/w, (r+1)·896/w)`；分桶仍按全 896 算，本 rank 只 gather / GEMM / scatter 自己区间的 (token, k) 对 | 15.72 GB / w | 加权和 `acc` f32 `[t,3584]` → **all-reduce ②**（f32，norm 之前；norm 非线性，不能放到 norm 之后） |
+| | `shared_experts.{gate,up} [6144,7168]`、`down [7168,6144]` | TP 列 / 行切（`Mlp::load_tp`） | 264 MB / w | down 输出部分和 → **all-reduce ③**（bf16 t×7168），再加（各 rank 一致的）routed `yup` |
+| 稠密层 0 | `mlp.{gate,up,down}` | TP 列 / 行切 | 1.45 GB / w | all-reduce（bf16 t×7168） |
+| AttnRes | `*_res_proj [1,7168]`、`*_res_norm [7168]`、`output_attn_res_*` | 复制 | ~29 KB / 层 | —（host softmax 各 rank 同） |
+| 顶层 | `embed_tokens`、`norm`、`lm_head [163840,7168]` | **复制**（先求对；lm_head 列切 + all-gather 留 v2） | 2×2.35 GB | — |
+
+每层通信次数：KDA/MLA + MoE 层 **3 次**（① bf16 t×7168、② f32 t×3584、③ bf16 t×7168）；稠密层 2 次。
+v2 可省：②③ 合并成一次 f32 all-reduce（`[acc | shared_partial]` 拼接）；vLLM 的 all-to-all / DeepEP 分发留 v2（design.md §13.4）。
+EP v1 不需要 all-gather：TP 下隐状态本来每 rank 全量，直接本地路由 + 本地专家 + all-reduce。
+
+每 rank 显存（权重，不含激活 / KV）：
+- 每层：KDA 层 attention `885.6/w + 1.8` MB；MLA 层 attention `459.4/w + 30.3` MB；MoE `15720/w + 264/w + 115.7` MB；稠密层 0 MLP `1453/w` MB；顶层 4.70 GB。
+- **world=8 全模型 93 层**：69×112.5 MB + 24×87.7 MB + 92×2.114 GB + 0.18 GB + 4.70 GB ≈ **209 GB / 卡**（B300 288 GB，剩 ~79 GB 给 KV / KDA 状态 / 激活）→ 8 卡能放 93 层。
+- world=2 前 5 层（0 dense、1/2/4 KDA+MoE、3 MLA+MoE）≈ 39.9 GB / 卡（单卡 ~74.6 GB 权重；smoke5 单卡实测 85.5 GB 含激活 / KV）。
+- KDA 状态 / slot：6.5 MB / w；MLA latent cache 复制 1152 B / token / 层。
+
 ## 3. 模型特有的风险 / 待定
 
 - **KDA kernel 移植量大**：vLLM 的 KDA 是 Triton（`third_party/flash_linear_attention/ops/kda.py` ~1500 行 + K3 私有 `kda.py` 1372 行 + `kda_metadata.py` 752 行）。两条路：手写 CUDA；或用 Triton AOT 编译成 PTX 嵌入 Rust（保留算法，省掉翻译）。P7 开始前定。

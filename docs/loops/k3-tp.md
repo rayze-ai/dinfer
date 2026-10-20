@@ -1,0 +1,24 @@
+# K3 C-5：多卡切分 TP + EP（tp2 × 前 5 层对拍 + serve 冒烟）
+
+## 目标
+`models/kimik3` 接 `(rank, world)` 分片装载 + 通信点，world=1 逐位不变；B300 GPU 2–3 tp2 × 前 5 层：`model_parity` 与单卡同一套 HF refs 对拍，再 `--tp 2` serve 冒烟。切分表 `docs/design-kimik3.md` §2.4。
+
+## 环境
+- B300-50（`B300_TAG=50 scripts/dev/remote_b300.sh run ...`）；`source /data/yaochen/infer/env.sh`；NCCL 2.30.3 在 `/usr/lib/x86_64-linux-gnu/libnccl.so.2`（系统自带，不用拷）。
+- GPU：`CUDA_DEVICE_ORDER=PCI_BUS_ID`，**只用 2–3**（0/1 Qwen3.5 常驻，4–7 另一子代理）。
+- 权重 `/data/models/moonshotai/Kimi-K3`；refs `test/kimik3/2026-10-20/model/`（已在远端）。
+- 生成物放 `$R/bootstrap/k3tp/`。
+
+## 观察方法
+1. 单卡基线：`K3_SKIP_GEN=1 scripts/verify/k3_model.sh`（GPU 2）→ 隔离 cos / 链式 cos / logits cos / top-1。
+2. tp2：`K3_SKIP_GEN=1 K3_TP=2 K3_GPU=2,3 scripts/verify/k3_model.sh`（测试内 `KIMIK3_TP=2` → 每 rank 一线程，`Device::new(rank)` + `Comm::init`；只 rank 0 比对）。
+3. 两份结果对比：隔离口径每层 cos 与单卡差 ≤ 1e-4（即对 HF 都 ≥ 0.999），logits cos ≥ 0.9998，top-1 一致；`KIMIK3_DUMP=dir` 把本机各层输出写 .npy，tp2 vs 单卡直接 cos ≥ 0.9999。
+4. serve：`dinfer serve --model ... --layers 5 --tp 2 --device 2 --port 8014`，流式一条 + c1 bench 8 条（`scripts/verify/k3_smoke.sh` 若有，否则 curl）。
+
+## 停止条件
+- `k3_model.sh`（world=1）exit 0 不退化；`K3_TP=2` exit 0；tp2 vs 单卡逐层 cos ≥ 0.9999，logits cos ≥ 0.9998，top-1 同。
+- `--tp 2` serve 流式一条正常收尾 + 8 条 c1 bench 不报错。
+- 四 feature 构建过；`cargo test -p dinfer-kimik3` 过。
+- 迭代上限：对拍 5 轮。
+
+## 记录
