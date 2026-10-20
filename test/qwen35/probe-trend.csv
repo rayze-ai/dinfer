@@ -723,6 +723,16 @@ probe_gdn_r9_7,2026-10-20,B300,qwen35,gdn_scale,conv_rows32_us,dinfer,1x8192,221
 probe_gdn_r9_7,2026-10-20,B300,qwen35,gdn_scale,conv_rows64_us,dinfer,1x8192,247,us,
 probe_gdn_r9_7,2026-10-20,B300,qwen35,gdn_scale,conv_rows128_us,dinfer,1x8192,309,us,
 probe_gdn_r9_7,2026-10-20,B300,qwen35,gdn_scale,conv_rows256_us,dinfer,1x8192,316,us,
+probe_gdn_r9_7,2026-10-20,B300,qwen35,gdn_scale,chain_us,vllm,1x1024,360,us,vLLM fla chunk_gated_delta_rule（nightly 0.26.1rc1 / torch 2.13 cu130，B300 GPU 6 容器，50 次均值）；chain_us 含 l2norm = vLLM 实际路径，chain_nol2_us 不含 ≈ 可比 dinfer wy+ho
+probe_gdn_r9_7,2026-10-20,B300,qwen35,gdn_scale,chain_nol2_us,vllm,1x1024,289,us,
+probe_gdn_r9_7,2026-10-20,B300,qwen35,gdn_scale,chain_us,vllm,8x1024,745,us,
+probe_gdn_r9_7,2026-10-20,B300,qwen35,gdn_scale,chain_nol2_us,vllm,8x1024,684,us,
+probe_gdn_r9_7,2026-10-20,B300,qwen35,gdn_scale,chain_us,vllm,32x128,410,us,
+probe_gdn_r9_7,2026-10-20,B300,qwen35,gdn_scale,chain_nol2_us,vllm,32x128,380,us,
+probe_gdn_r9_7,2026-10-20,B300,qwen35,gdn_scale,chain_us,vllm,1x4096,447,us,
+probe_gdn_r9_7,2026-10-20,B300,qwen35,gdn_scale,chain_nol2_us,vllm,1x4096,416,us,
+probe_gdn_r9_7,2026-10-20,B300,qwen35,gdn_scale,chain_us,vllm,1x8192,853,us,
+probe_gdn_r9_7,2026-10-20,B300,qwen35,gdn_scale,chain_nol2_us,vllm,1x8192,792,us,
 probe_prefill_1,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,dinfer,510,30.0,ms,单发 max_tokens=1 换 seed 5 次中位；dinfer :8012 GPU 0
 probe_prefill_1,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,vllm,510,44.7,ms,vLLM :8013 GPU 1 容器 nightly
 probe_prefill_1,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,dinfer,1021,55.5,ms,
