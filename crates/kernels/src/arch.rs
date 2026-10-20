@@ -282,11 +282,11 @@ impl ArchProfile {
 
     /// chunk prefill `wy`（tensor core 版）的 block warp 数（r10 第 3 轮）。B300 ncu（8×1024）：每 scheduler 可发射 warp 0.53、
     /// 64% 周期无可发射、DRAM 6%、smem / regs 都只限到 5 block/SM —— 延迟型，加 warp 掩 smem 依赖链；Sm100 取 8。
-    /// Sm8x 待实测（3090 smem 限 2 block/SM，8 warp 可能反而降占用），先保持 4。
+    /// Sm8x 也取 8（r10 第 8 轮）：3090 bench 五形状 mma8 全快于 mma（8×1024 1712 → 1387、1×8192 1711 → 1382，−19%；
+    /// 1×1024 237 → 192），smem 不变所以占用不降。Sm90 无实测，跟 Sm8x。
     pub fn gdn_chunk_wy_warps_for(arch: Arch) -> usize {
         match arch {
-            Arch::Sm100 => 8,
-            Arch::Sm8x | Arch::Sm90 => 4,
+            Arch::Sm100 | Arch::Sm8x | Arch::Sm90 => 8,
         }
     }
 
@@ -414,6 +414,13 @@ impl MegaParams {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gdn_chunk_wy_warps_is_8_on_all_measured_archs() {
+        for a in [Arch::Sm8x, Arch::Sm90, Arch::Sm100] {
+            assert_eq!(ArchProfile::gdn_chunk_wy_warps_for(a), 8);
+        }
+    }
+
     #[test]
     fn gdn_chunk_ho_bv_sm100_picks_64_only_when_blocks_fill_sms() {
         // B300：148 SM × 2 block；8×1024 有 8 seq × 48 hv = 384 base_blocks → ×2 片 = 768 ≥ 296 → 64
