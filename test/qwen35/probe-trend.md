@@ -490,3 +490,20 @@
 
 - 6019 ttft_p50_ms dinfer：合体 cb7ee9a（r8b + r10 r1–4），默认池开，6 K 1 步
 - 1k-6k slope_us_per_token dinfer：r9 前 51.5；8n 池关 47.5；8p 池开切步 57.9
+
+## probe_prefill_7（2026-10-20，B300）
+
+### ttft_len（ms）
+
+| x | slope_us_per_token dinfer | slope_us_per_token vllm | ttft_p50_ms dinfer | ttft_p50_ms vllm |
+|---|---|---|---|---|
+| 510 |  |  | 27.1 |  |
+| 1021 |  |  | 50.1 | 82.8 |
+| 2029 |  |  | 93.9 |  |
+| 3009 |  |  | 139.5 | 138.0 |
+| 4059 |  |  | 189.3 |  |
+| 6019 |  |  | 284.9 | 260.6 |
+| 1k-6k | 46.7 | 36.0 |  |  |
+
+- 6019 ttft_p50_ms dinfer：第 12 轮合体定稿（r8b + r10 全 8 轮，2b0cc54），6 K 1 步
+- 1k-6k slope_us_per_token dinfer：b18 46.4；r9 前 51.5
