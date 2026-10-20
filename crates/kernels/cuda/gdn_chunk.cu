@@ -423,6 +423,7 @@ constexpr int kWyStageCols = 64;  // u / w 阶段按 64 列一片
 template <int BT, int K>
 struct WySmem {
   static constexpr int KS = K + 8, TS = BT + 8, CS = kWyStageCols + 8;
+  static_assert((CS * 2) % 16 == 0 && kWyStageCols % 8 == 0, "stage 行跨 / 列数要 16 B 对齐（r10 第 4 轮向量装载）");
   static constexpr int off_k = 0;                              // [BT][KS] bf16 kn；1) 之后 sK∪sQ 复用为 sM f32 [BT][BT]（r9 第 3 轮）
   static constexpr int off_q = off_k + BT * KS;                // [BT][KS] bf16 qn；2) 之后复用为 stage [BT][CS]
   static constexpr int q_elems = (BT * KS > BT * CS) ? BT * KS : BT * CS;
@@ -625,27 +626,35 @@ __global__ void __launch_bounds__(NW * 32) wy_mma_kernel(
     for (int c0 = 0; c0 < cols; c0 += kWyStageCols) {
       const int bw = min(kWyStageCols, cols - c0);
       __syncthreads();  // 上一片 stage 读完
-      for (int idx = tid; idx < BT * (kWyStageCols / 2); idx += NW * 32) {
-        const int i = idx / (kWyStageCols / 2), j = (idx % (kWyStageCols / 2)) * 2;
-        float x0 = 0.f, x1 = 0.f;
+      // r10 第 4 轮：stage 装载 16 B 向量（8 列/线程；V、K 都是 8 的倍数，bw 亦然），kg 也按 16 B 写。
+      // 原先每线程 2 列 × 2 B 标量读 —— ncu 短记分板 36%，装载指令数是 mma 的 4×。
+      for (int idx = tid; idx < BT * (kWyStageCols / 8); idx += NW * 32) {
+        const int i = idx / (kWyStageCols / 8), j = (idx % (kWyStageCols / 8)) * 8;
+        uint4 out = make_uint4(0, 0, 0, 0);
         if (i < len && j < bw) {
+          uint4 raw;
+          float scale, dk = 0.f;
           if (pass == 0) {
-            const bf16* vp = vbase + (row0 + i) * qkv_row + c0 + j;
-            x0 = sb[i] * to_f32(vp[0]);
-            x1 = (j + 1 < bw) ? sb[i] * to_f32(vp[1]) : 0.f;
+            raw = *reinterpret_cast<const uint4*>(vbase + (row0 + i) * qkv_row + c0 + j);
+            scale = sb[i];
           } else {
-            const long r = (row0 + i) * kstride + (long)h * K + c0 + j;
-            const float k0 = to_f32(kn[r]), k1 = (j + 1 < bw) ? to_f32(kn[r + 1]) : 0.f;
-            const float e = exp2f(sgc[i]);
-            x0 = sb[i] * k0 * e;
-            x1 = sb[i] * k1 * e;
-            const float dk = exp2f(glast - sgc[i]);
-            bf16* kgp = kg_out + ((row0 + i) * HV + hv) * K + c0 + j;
-            kgp[0] = to_bf16(k0 * dk);
-            if (j + 1 < bw) kgp[1] = to_bf16(k1 * dk);
+            raw = *reinterpret_cast<const uint4*>(kn + (row0 + i) * kstride + (long)h * K + c0 + j);
+            scale = sb[i] * exp2f(sgc[i]);
+            dk = exp2f(glast - sgc[i]);
           }
+          const __nv_bfloat162* r2 = reinterpret_cast<const __nv_bfloat162*>(&raw);
+          uint32_t* o = reinterpret_cast<uint32_t*>(&out);
+          uint4 kgv;
+          uint32_t* kgo = reinterpret_cast<uint32_t*>(&kgv);
+#pragma unroll
+          for (int e = 0; e < 4; ++e) {
+            const float k0 = to_f32(r2[e].x), k1 = to_f32(r2[e].y);
+            o[e] = pack_bf16x2(scale * k0, scale * k1);
+            kgo[e] = pack_bf16x2(k0 * dk, k1 * dk);
+          }
+          if (pass == 1) *reinterpret_cast<uint4*>(kg_out + ((row0 + i) * HV + hv) * K + c0 + j) = kgv;
         }
-        sts_u32(stage + i * CS + j, pack_bf16x2(x0, x1));
+        *reinterpret_cast<uint4*>(stage + i * CS + j) = out;
       }
       __syncthreads();
       float acc[NT_SW][4];
