@@ -27,3 +27,9 @@
 - **判断**：4090 ×8 不是独占机，root 会临时在任意卡起 vLLM（`--port 8000/8200`，20 GB+）。我们的 dinfer 按 `utilization 0.9` 自动算 KV 块数，被占时块数骤降（9900 → 902）、首请求 OOM，bench 看起来是"我们挂了"。
 - **怎么用**：bench 链 serve 起来后读启动日志 `num_blocks`，低于基线 10% 直接 abort（`bench_compare` 前置）；`nvidia-smi --query-compute-apps` 看非 dinfer / 非 vllm-qwen3 容器的进程；GPU 0 被占就换 3–7（都空），把 `CUDA_VISIBLE_DEVICES` 写进链。
 - **证据**：`docs/progress.md` 2026-10-20 4090 门禁第三次 OOM。
+
+## 两台 B300 只用 `B300_TAG=50`；无 TAG 的旧连接会"alive 但 run 空"（2026-10-20）
+
+- **判断**：`remote_b300.sh status` 的 alive 只看 ControlMaster 进程在，JumpServer 侧会话失效后 run 仍 rc=0、stdout 0 字节。2026-10-19 起所有工作都在 TAG=50（host-172-16-3-50，8 × B300，有 nerdctl 容器、口径与 vLLM 对齐）。
+- **怎么用**：子代理 brief 里写死 `export B300_TAG=50`；`run 'hostname'` 返回空就是会话失效，不要以为是远端卡；旧 memory "TAG=50 无容器、口径不同"已过时。
+- **证据**：`docs/progress.md` 2026-10-20 r8b 条目。
