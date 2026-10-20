@@ -230,15 +230,15 @@
 
 ### ttft_len（ms）
 
-| x | slope_us_per_token dinfer | ttft_p50_ms dinfer |
-|---|---|---|
-| 510 |  | 28.4 |
-| 1021 |  | 52.0 |
-| 2029 |  | 107.0 |
-| 3009 |  | 163.0 |
-| 4059 |  | 223.6 |
-| 6019 |  | 349.1 |
-| 1k-6k | 58.3 |  |
+| x | slope_us_per_token dinfer | ttft_p50_ms dinfer | ttft_p50_ms dinfer_legacy_kernel | ttft_p50_ms dinfer_nosnap |
+|---|---|---|---|---|
+| 510 |  | 28.4 |  | 28.7 |
+| 1021 |  | 52.0 | 63.6 | 52.3 |
+| 2029 |  | 107.0 |  | 106.9 |
+| 3009 |  | 163.0 | 198.5 | 163.1 |
+| 4059 |  | 223.6 |  | 223.7 |
+| 6019 |  | 349.1 | 426.1 | 346.3 |
+| 1k-6k | 58.3 |  |  |  |
 
 - 510 ttft_p50_ms dinfer：r8+r9 合入后二进制（1873e55），snapshot 默认开（10% KV 预算）；同口径复测 probe_prefill_1
 - 1021 ttft_p50_ms dinfer：r8+r9 合入后二进制（1873e55），snapshot 默认开（10% KV 预算）；同口径复测 probe_prefill_1
@@ -247,3 +247,12 @@
 - 4059 ttft_p50_ms dinfer：r8+r9 合入后二进制（1873e55），snapshot 默认开（10% KV 预算）；同口径复测 probe_prefill_1
 - 6019 ttft_p50_ms dinfer：r8+r9 合入后二进制（1873e55），snapshot 默认开（10% KV 预算）；同口径复测 probe_prefill_1
 - 1k-6k slope_us_per_token dinfer：r9 前 51.5（probe_prefill_1 重拟合）；变差，6 K +35 ms，疑 r8 每 1024 对齐边界存快照
+- 510 ttft_p50_ms dinfer_nosnap：--gdn-snapshot-gib 0，池关但 1024 对齐切步仍在
+- 1021 ttft_p50_ms dinfer_nosnap：--gdn-snapshot-gib 0，池关但 1024 对齐切步仍在
+- 2029 ttft_p50_ms dinfer_nosnap：--gdn-snapshot-gib 0，池关但 1024 对齐切步仍在
+- 3009 ttft_p50_ms dinfer_nosnap：--gdn-snapshot-gib 0，池关但 1024 对齐切步仍在
+- 4059 ttft_p50_ms dinfer_nosnap：--gdn-snapshot-gib 0，池关但 1024 对齐切步仍在
+- 6019 ttft_p50_ms dinfer_nosnap：--gdn-snapshot-gib 0，池关但 1024 对齐切步仍在
+- 1021 ttft_p50_ms dinfer_legacy_kernel：GDN_CHUNK_WY=legacy GDN_CHUNK_HO_BV=0（r9 前 kernel）+ 池关 + 切步
+- 3009 ttft_p50_ms dinfer_legacy_kernel：GDN_CHUNK_WY=legacy GDN_CHUNK_HO_BV=0（r9 前 kernel）+ 池关 + 切步
+- 6019 ttft_p50_ms dinfer_legacy_kernel：GDN_CHUNK_WY=legacy GDN_CHUNK_HO_BV=0（r9 前 kernel）+ 池关 + 切步
