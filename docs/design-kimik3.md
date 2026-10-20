@@ -207,6 +207,7 @@ EP v1 不需要 all-gather：TP 下隐状态本来每 rank 全量，直接本地
 - **world=8 全模型 93 层**：69×112.5 MB + 24×87.7 MB + 92×2.114 GB + 0.18 GB + 4.70 GB ≈ **209 GB / 卡**（B300 288 GB，剩 ~79 GB 给 KV / KDA 状态 / 激活）→ 8 卡能放 93 层。
 - world=2 前 5 层（0 dense、1/2/4 KDA+MoE、3 MLA+MoE）≈ 39.9 GB / 卡（单卡 ~74.6 GB 权重；smoke5 单卡实测 85.5 GB 含激活 / KV）。
 - KDA 状态 / slot：6.5 MB / w；MLA latent cache 复制 1152 B / token / 层。
+- **激活 scratch 全模型一套**（`scratch.rs::ActScratch`，2026-10-20，k3-serve 3c）：≈ 0.70 MB / token（tp8），**预算 2048 ≈ 1.4 GiB、16384 ≈ 11 GiB / 卡**（world=1 16384 ≈ 19.6 GiB）；其中 MoE `[T·16, latent / 2·Im / Im]` 四块占 ~70%，按"全部 pair 落本 rank"开，EP 不能缩。不再按层数乘（原每层各一套：16384 时 ≈ 13 GB/层）。
 
 ## 3. 模型特有的风险 / 待定
 

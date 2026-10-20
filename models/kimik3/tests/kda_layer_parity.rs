@@ -16,6 +16,8 @@
 use dinfer_core::runner::BatchMode;
 use dinfer_kimik3::config::KimiK3Config;
 use dinfer_kimik3::kda::{KdaChunkWorkspace, KdaLayer, KdaMeta};
+use dinfer_kimik3::scratch::ActScratch;
+use dinfer_kimik3::weights::Shard;
 use dinfer_kimik3::weights::{shards_for_layer, KdaShapes, Table};
 use dinfer_layers::{bf16, Device, Gemm, Stream, Tensor, WeightSource};
 use std::cell::RefCell;
@@ -75,6 +77,7 @@ struct Env {
     s: Stream,
     gemm: Gemm,
     layer: KdaLayer,
+    act: ActScratch,
     sh: KdaShapes,
 }
 
@@ -92,11 +95,12 @@ fn load(t_max: usize) -> Option<Env> {
     let t0 = std::time::Instant::now();
     let src = WeightSource::open_files(&files).unwrap();
     let table = Table::from_names(&src.names().collect::<Vec<_>>()).unwrap();
-    let layer = KdaLayer::load(&s, &src, &table, LAYER, &cfg.text_config, t_max, 2).unwrap();
+    let layer = KdaLayer::load(&s, &src, &table, LAYER, &cfg.text_config, 2).unwrap();
+    let act = ActScratch::new(&s, &cfg.text_config, t_max, Shard::SINGLE).unwrap();
     s.synchronize().unwrap();
     println!("  装载 {:.1} s", t0.elapsed().as_secs_f32());
     let sh = KdaShapes::new(&cfg.text_config);
-    Some(Env { s, gemm, layer, sh })
+    Some(Env { s, gemm, layer, act, sh })
 }
 
 /// 一次 forward：`x [t, hidden]` bf16 → y f32。`mode` / `cu` 决定 prefill 还是 decode。
@@ -120,10 +124,10 @@ fn run(e: &mut Env, x: &[bf16], t: usize, mode: BatchMode, use_chunk: bool) -> (
         mode,
         chunk: if use_chunk { Some(&ws) } else { None },
     };
-    e.layer.forward(s, &e.gemm, t, &x, &meta, &mut out).unwrap();
+    e.layer.forward(s, &e.gemm, t, &x, &meta, &mut e.act.kda, &mut out).unwrap();
     s.synchronize().unwrap();
     let y = out.to_vec_f32(s).unwrap();
-    let n = e.layer.last_normed().to_vec_f32(s).unwrap();
+    let n = e.act.kda.n.to_vec_f32(s).unwrap();
     (y, n[..t * e.sh.proj()].to_vec())
 }
 

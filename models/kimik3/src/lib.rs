@@ -14,6 +14,7 @@ pub mod layer;
 pub mod mla;
 pub mod model;
 pub mod parser;
+pub mod scratch;
 pub mod service;
 pub mod tokenizer;
 pub mod tp;

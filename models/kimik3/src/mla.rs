@@ -21,6 +21,7 @@
 //! ```
 //! 性能项（后补）：吸收路径每 head 一次小 GEMM（96 × 2 次），GLM 线同样待 batched GEMM。
 use crate::config::KimiLinearConfig;
+pub use crate::scratch::MlaScratch;
 use crate::weights::{Shard, Table};
 use anyhow::{ensure, Result};
 use dinfer_core::runner::BatchMode;
@@ -71,25 +72,6 @@ pub struct MlaLayer {
     rope: usize,
     v_dim: usize,
     scale: f32,
-    max_tokens: usize,
-    // scratch（按 max_tokens）
-    fused_out: Tensor<bf16>,
-    q_c_raw: Tensor<bf16>,
-    q_c: Tensor<bf16>,
-    q: Tensor<bf16>,
-    kv_c_raw: Tensor<bf16>,
-    kv_c: Tensor<bf16>,
-    k_pe: Tensor<bf16>,
-    gate: Tensor<bf16>,
-    latent: Tensor<bf16>,
-    kv_full: Tensor<bf16>,
-    k_full: Tensor<bf16>,
-    v_full: Tensor<bf16>,
-    attn_out: Tensor<bf16>,
-    q_lat: Tensor<bf16>,
-    o_lat: Tensor<bf16>,
-    head_in: Tensor<bf16>,
-    head_out: Tensor<bf16>,
 }
 
 impl MlaLayer {
@@ -101,11 +83,10 @@ impl MlaLayer {
         t: &Table,
         layer: usize,
         cfg: &KimiLinearConfig,
-        max_tokens: usize,
         num_blocks: usize,
         block_size: usize,
     ) -> Result<Self> {
-        Self::load_tp(stream, src, t, layer, cfg, max_tokens, num_blocks, block_size, Shard::SINGLE)
+        Self::load_tp(stream, src, t, layer, cfg, num_blocks, block_size, Shard::SINGLE)
     }
 
     /// TP（design-kimik3 §2.4）：q 头按 rank 均分——`g_proj` / `q_b` / `kv_b`（及拆出的 W_UK^T / W_UV）按头行切，`o_proj` 列切
@@ -117,7 +98,6 @@ impl MlaLayer {
         t: &Table,
         layer: usize,
         cfg: &KimiLinearConfig,
-        max_tokens: usize,
         num_blocks: usize,
         block_size: usize,
         shard: Shard,
@@ -183,7 +163,6 @@ impl MlaLayer {
             w_uv.push(Tensor::from_f32(stream, uv, &[v_dim, kv_lora])?);
         }
         let entry = kv_lora + rope;
-        let tm = max_tokens;
         Ok(Self {
             fused,
             q_a_norm,
@@ -207,24 +186,6 @@ impl MlaLayer {
             rope,
             v_dim,
             scale: ((nope + rope) as f32).powf(-0.5),
-            max_tokens,
-            fused_out: Tensor::zeros(stream, &[tm, wide])?,
-            q_c_raw: Tensor::zeros(stream, &[tm, q_lora])?,
-            q_c: Tensor::zeros(stream, &[tm, q_lora])?,
-            q: Tensor::zeros(stream, &[tm, heads, nope + rope])?,
-            kv_c_raw: Tensor::zeros(stream, &[tm, kv_lora])?,
-            kv_c: Tensor::zeros(stream, &[tm, kv_lora])?,
-            k_pe: Tensor::zeros(stream, &[tm, rope])?,
-            gate: Tensor::zeros(stream, &[tm, heads * v_dim])?,
-            latent: Tensor::zeros(stream, &[tm, entry])?,
-            kv_full: Tensor::zeros(stream, &[tm, heads, nope + v_dim])?,
-            k_full: Tensor::zeros(stream, &[tm, heads, nope + rope])?,
-            v_full: Tensor::zeros(stream, &[tm, heads, v_dim])?,
-            attn_out: Tensor::zeros(stream, &[tm, heads, v_dim])?,
-            q_lat: Tensor::zeros(stream, &[tm, heads, entry])?,
-            o_lat: Tensor::zeros(stream, &[tm, heads, kv_lora])?,
-            head_in: Tensor::zeros(stream, &[tm, kv_lora.max(nope)])?,
-            head_out: Tensor::zeros(stream, &[tm, kv_lora.max(v_dim)])?,
         })
     }
 
@@ -234,6 +195,7 @@ impl MlaLayer {
 
     /// `x[:t]`（input_layernorm 之后）→ `out[:t]`。`slot_mapping[i]`：第 i 个 token 的 latent 写入 cache 的槽位（-1 跳过）。
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn forward(
         &mut self,
         stream: &Stream,
@@ -242,6 +204,7 @@ impl MlaLayer {
         x: &Tensor<bf16>,
         slot_mapping: &Tensor<i64>,
         meta: &MlaMeta<'_>,
+        sc: &mut MlaScratch,
         out: &mut Tensor<bf16>,
     ) -> Result<()> {
         let (h, nope, rope, kv_lora, v_dim, q_lora, hidden) =
@@ -249,16 +212,16 @@ impl MlaLayer {
         let qk = nope + rope;
         let entry = kv_lora + rope;
         let wide = q_lora + entry + h * v_dim;
-        ensure!(t <= self.max_tokens, "mla: {t} tokens > max {}", self.max_tokens);
+        ensure!(t <= sc.fused_out.shape[0] && sc.fused_out.shape[1] == wide, "mla: {t} tokens > max {} / scratch wide", sc.fused_out.shape[0]);
         ensure!(x.numel() >= t * hidden && out.numel() >= t * hidden, "mla: x/out 不足 {t} 行");
         ensure!(slot_mapping.numel() >= t, "mla: slot_mapping");
 
         // 1. fused：[q_c_raw | kv_c_raw | k_pe | g]
-        self.fused.forward_rows(gemm, x, &mut self.fused_out, t)?;
+        self.fused.forward_rows(gemm, x, &mut sc.fused_out, t)?;
         k::copy_cols_bf16(
             stream,
-            &self.fused_out.data,
-            &mut self.q_c_raw.data,
+            &sc.fused_out.data,
+            &mut sc.q_c_raw.data,
             t,
             wide,
             0,
@@ -268,8 +231,8 @@ impl MlaLayer {
         )?;
         k::copy_cols_bf16(
             stream,
-            &self.fused_out.data,
-            &mut self.kv_c_raw.data,
+            &sc.fused_out.data,
+            &mut sc.kv_c_raw.data,
             t,
             wide,
             q_lora,
@@ -279,8 +242,8 @@ impl MlaLayer {
         )?;
         k::copy_cols_bf16(
             stream,
-            &self.fused_out.data,
-            &mut self.k_pe.data,
+            &sc.fused_out.data,
+            &mut sc.k_pe.data,
             t,
             wide,
             q_lora + kv_lora,
@@ -290,8 +253,8 @@ impl MlaLayer {
         )?;
         k::copy_cols_bf16(
             stream,
-            &self.fused_out.data,
-            &mut self.gate.data,
+            &sc.fused_out.data,
+            &mut sc.gate.data,
             t,
             wide,
             q_lora + entry,
@@ -302,30 +265,30 @@ impl MlaLayer {
         // 2. 两个 a_layernorm
         k::rmsnorm_bf16_n(
             stream,
-            &self.q_c_raw.data,
+            &sc.q_c_raw.data,
             &self.q_a_norm.w.data,
-            &mut self.q_c.data,
+            &mut sc.q_c.data,
             t,
             q_lora,
             self.q_a_norm.eps,
         )?;
         k::rmsnorm_bf16_n(
             stream,
-            &self.kv_c_raw.data,
+            &sc.kv_c_raw.data,
             &self.kv_a_norm.w.data,
-            &mut self.kv_c.data,
+            &mut sc.kv_c.data,
             t,
             kv_lora,
             self.kv_a_norm.eps,
         )?;
         // 3. q = q_b(q_c)：[t, H, nope + rope]，不旋转
-        self.q_b.forward_rows(gemm, &self.q_c, &mut self.q, t)?;
+        self.q_b.forward_rows(gemm, &sc.q_c, &mut sc.q, t)?;
         // 4. latent = [kv_c | k_pe] → paged cache
-        k::copy_cols_bf16(stream, &self.kv_c.data, &mut self.latent.data, t, kv_lora, 0, entry, 0, kv_lora)?;
-        k::copy_cols_bf16(stream, &self.k_pe.data, &mut self.latent.data, t, rope, 0, entry, kv_lora, rope)?;
+        k::copy_cols_bf16(stream, &sc.kv_c.data, &mut sc.latent.data, t, kv_lora, 0, entry, 0, kv_lora)?;
+        k::copy_cols_bf16(stream, &sc.k_pe.data, &mut sc.latent.data, t, rope, 0, entry, kv_lora, rope)?;
         k::mla_cache_write_bf16(
             stream,
-            &self.latent.data,
+            &sc.latent.data,
             &mut self.kv.cache.data,
             &slot_mapping.data,
             t,
@@ -335,11 +298,11 @@ impl MlaLayer {
         // 5. attention
         match meta.mode {
             BatchMode::Prefill => {
-                self.kv_b.forward_rows(gemm, &self.kv_c, &mut self.kv_full, t)?;
+                self.kv_b.forward_rows(gemm, &sc.kv_c, &mut sc.kv_full, t)?;
                 k::copy_head_cols_bf16(
                     stream,
-                    &self.kv_full.data,
-                    &mut self.k_full.data,
+                    &sc.kv_full.data,
+                    &mut sc.k_full.data,
                     t,
                     h,
                     nope + v_dim,
@@ -348,11 +311,11 @@ impl MlaLayer {
                     0,
                     nope,
                 )?;
-                k::bcast_kpe_bf16(stream, &self.k_pe.data, &mut self.k_full.data, t, h, qk, nope, rope)?;
+                k::bcast_kpe_bf16(stream, &sc.k_pe.data, &mut sc.k_full.data, t, h, qk, nope, rope)?;
                 k::copy_head_cols_bf16(
                     stream,
-                    &self.kv_full.data,
-                    &mut self.v_full.data,
+                    &sc.kv_full.data,
+                    &mut sc.v_full.data,
                     t,
                     h,
                     nope + v_dim,
@@ -363,10 +326,10 @@ impl MlaLayer {
                 )?;
                 k::mla_prefill_bf16(
                     stream,
-                    &self.q.data,
-                    &self.k_full.data,
-                    &self.v_full.data,
-                    &mut self.attn_out.data,
+                    &sc.q.data,
+                    &sc.k_full.data,
+                    &sc.v_full.data,
+                    &mut sc.attn_out.data,
                     &meta.cu_seqlens.data,
                     None,
                     meta.num_reqs,
@@ -378,15 +341,15 @@ impl MlaLayer {
                 )?;
             }
             BatchMode::Decode => {
-                self.absorbed_q(stream, gemm, t)?;
+                self.absorbed_q(stream, gemm, t, sc)?;
                 k::mla_decode_bf16(
                     stream,
-                    &self.q_lat.data,
+                    &sc.q_lat.data,
                     &self.kv.cache.data,
                     &meta.block_table.data,
                     &meta.seq_lens.data,
                     None,
-                    &mut self.o_lat.data,
+                    &mut sc.o_lat.data,
                     t,
                     h,
                     entry,
@@ -395,19 +358,19 @@ impl MlaLayer {
                     meta.max_blocks,
                     self.scale,
                 )?;
-                self.absorbed_o(stream, gemm, t)?;
+                self.absorbed_o(stream, gemm, t, sc)?;
             }
             BatchMode::Paged => {
-                self.absorbed_q(stream, gemm, t)?;
+                self.absorbed_q(stream, gemm, t, sc)?;
                 k::mla_prefill_paged_bf16(
                     stream,
-                    &self.q_lat.data,
+                    &sc.q_lat.data,
                     &self.kv.cache.data,
                     &meta.block_table.data,
                     &meta.seq_lens.data,
                     &meta.cu_seqlens.data,
                     None,
-                    &mut self.o_lat.data,
+                    &mut sc.o_lat.data,
                     meta.num_reqs,
                     t,
                     h,
@@ -417,33 +380,33 @@ impl MlaLayer {
                     meta.max_blocks,
                     self.scale,
                 )?;
-                self.absorbed_o(stream, gemm, t)?;
+                self.absorbed_o(stream, gemm, t, sc)?;
             }
         }
         // 6. 输出门 + o_proj
-        k::mul_sigmoid_bf16(stream, &mut self.attn_out.data, &self.gate.data, t * h * v_dim)?;
-        self.o_proj.forward_rows(gemm, &self.attn_out, out, t)
+        k::mul_sigmoid_bf16(stream, &mut sc.attn_out.data, &sc.gate.data, t * h * v_dim)?;
+        self.o_proj.forward_rows(gemm, &sc.attn_out, out, t)
     }
 
     /// 吸收路径：q_lat[t, H, entry] = [q_nope[h] · W_UK_h | q_pe[h]]（每 head 一次小 GEMM）。
-    fn absorbed_q(&mut self, stream: &Stream, gemm: &Gemm, t: usize) -> Result<()> {
+    fn absorbed_q(&self, stream: &Stream, gemm: &Gemm, t: usize, sc: &mut MlaScratch) -> Result<()> {
         let (h, nope, rope, kv_lora) = (self.heads, self.nope, self.rope, self.kv_lora);
         let (qk, entry) = (nope + rope, kv_lora + rope);
         for hh in 0..h {
-            k::gather_head_bf16(stream, &self.q.data, &mut self.head_in.data, t, h, qk, hh, 0, nope)?;
+            k::gather_head_bf16(stream, &sc.q.data, &mut sc.head_in.data, t, h, qk, hh, 0, nope)?;
             gemm.forward_bf16(
-                &self.head_in.data,
+                &sc.head_in.data,
                 &self.w_uk_t[hh].data,
                 None,
-                &mut self.head_out.data,
+                &mut sc.head_out.data,
                 t,
                 kv_lora,
                 nope,
             )?;
             k::scatter_head_bf16(
                 stream,
-                &self.head_out.data,
-                &mut self.q_lat.data,
+                &sc.head_out.data,
+                &mut sc.q_lat.data,
                 t,
                 h,
                 entry,
@@ -451,11 +414,11 @@ impl MlaLayer {
                 0,
                 kv_lora,
             )?;
-            k::gather_head_bf16(stream, &self.q.data, &mut self.head_in.data, t, h, qk, hh, nope, rope)?;
+            k::gather_head_bf16(stream, &sc.q.data, &mut sc.head_in.data, t, h, qk, hh, nope, rope)?;
             k::scatter_head_bf16(
                 stream,
-                &self.head_in.data,
-                &mut self.q_lat.data,
+                &sc.head_in.data,
+                &mut sc.q_lat.data,
                 t,
                 h,
                 entry,
@@ -468,13 +431,13 @@ impl MlaLayer {
     }
 
     /// 吸收路径：attn_out[t, H, v] = o_lat[h] · W_UV_h^T。
-    fn absorbed_o(&mut self, stream: &Stream, gemm: &Gemm, t: usize) -> Result<()> {
+    fn absorbed_o(&self, stream: &Stream, gemm: &Gemm, t: usize, sc: &mut MlaScratch) -> Result<()> {
         let (h, kv_lora, v_dim) = (self.heads, self.kv_lora, self.v_dim);
         for hh in 0..h {
             k::gather_head_bf16(
                 stream,
-                &self.o_lat.data,
-                &mut self.head_in.data,
+                &sc.o_lat.data,
+                &mut sc.head_in.data,
                 t,
                 h,
                 kv_lora,
@@ -483,18 +446,18 @@ impl MlaLayer {
                 kv_lora,
             )?;
             gemm.forward_bf16(
-                &self.head_in.data,
+                &sc.head_in.data,
                 &self.w_uv[hh].data,
                 None,
-                &mut self.head_out.data,
+                &mut sc.head_out.data,
                 t,
                 v_dim,
                 kv_lora,
             )?;
             k::scatter_head_bf16(
                 stream,
-                &self.head_out.data,
-                &mut self.attn_out.data,
+                &sc.head_out.data,
+                &mut sc.attn_out.data,
                 t,
                 h,
                 v_dim,
@@ -506,15 +469,4 @@ impl MlaLayer {
         Ok(())
     }
 
-    // ---- 对拍 / 调试用中间量（上一步，前 t 行有效）----
-    /// o_proj 之前、门之后的 [t, H·v]。
-    pub fn last_attn_pre(&self) -> &Tensor<bf16> {
-        &self.attn_out
-    }
-    pub fn last_q(&self) -> &Tensor<bf16> {
-        &self.q
-    }
-    pub fn last_latent(&self) -> &Tensor<bf16> {
-        &self.latent
-    }
 }

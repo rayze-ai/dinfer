@@ -8,6 +8,7 @@
 //! （与 torch 参考里 `num_hidden_layers = N` 的截断模型同口径）。
 //! 装载按层打开分片（`weights::shards_for_layer`，每层恰好一片 16 GB），顶层张量在 `shards_for_top`。
 use crate::config::KimiLinearConfig;
+use crate::scratch::ActScratch;
 use crate::layer::{Attn, AttnRes, KimiDecoderLayer, LayerBudget, StepMeta};
 use crate::weights::{shards_for_layer, shards_for_top, KdaShapes, Shard, Table, LM_HEAD};
 use anyhow::{ensure, Result};
@@ -17,6 +18,8 @@ use std::path::Path;
 
 pub struct KimiK3Model {
     pub layers: Vec<KimiDecoderLayer>,
+    /// 全模型共享的一套激活缓冲（`scratch.rs`），forward 时 `&mut` 借给每层 / output_res。
+    pub act: ActScratch,
     embed: Tensor<bf16>, // [vocab, hidden]
     norm: RmsNorm,
     output_res: Option<AttnRes>,
@@ -105,12 +108,20 @@ impl KimiK3Model {
         let lm_head = Linear::new(top.load_bf16(stream, LM_HEAD)?, None)?;
         ensure!(lm_head.w.shape == [vocab, hidden], "lm_head shape {:?}", lm_head.w.shape);
         let output_res = if cfg.attn_res_block_size.is_some() {
-            Some(AttnRes::load_output(stream, &top, &tt, cfg, tm, max_blocks)?)
+            Some(AttnRes::load_output(stream, &top, &tt, cfg)?)
         } else {
             None
         };
         drop(top);
 
+        // 全模型共享一套 per-token 激活缓冲（原先每层各一套，预算 16384 时一层 ≈ 13 GB，93 层 tp8 必 OOM，见 scratch.rs / k3-serve 3b）。
+        let act = ActScratch::new(stream, cfg, tm, shard)?;
+        let act_bytes = ActScratch::bytes(cfg, tm, shard);
+        tracing::info!(
+            gib = format!("{:.2}", act_bytes as f64 / (1u64 << 30) as f64),
+            "kimik3: activation scratch bytes={act_bytes} (max_tokens={tm}, world={})",
+            shard.world
+        );
         // 逐层（每层一片，装完即释放 mmap）
         let mut layers = Vec::with_capacity(n_layers);
         for l in 0..n_layers {
@@ -138,6 +149,7 @@ impl KimiK3Model {
         }
         Ok(Self {
             layers,
+            act,
             embed,
             norm,
             output_res,
@@ -236,12 +248,12 @@ impl KimiK3Model {
             self.layer_out.clear();
         }
         for i in 0..self.layers.len() {
-            let Self { layers, x, y, blocks, n_blocks, .. } = self;
+            let Self { layers, act, x, y, blocks, n_blocks, .. } = self;
             let layer = &mut layers[i];
             let writer = layer.writes_block();
             {
                 let bl: Vec<&Tensor<bf16>> = blocks[..*n_blocks].iter().collect();
-                layer.forward(stream, gemm, t, x, &bl, meta, y)?;
+                layer.forward(stream, gemm, t, x, &bl, meta, act, y)?;
             }
             if writer {
                 ensure!(*n_blocks < blocks.len(), "块残差超过 {}", blocks.len());
@@ -256,10 +268,11 @@ impl KimiK3Model {
             }
         }
         // output_attn_res：候选 = 全部块 ∪ {x}
-        let final_in = if let Some(res) = self.output_res.as_mut() {
+        let final_in = if let Some(res) = self.output_res.as_ref() {
             let mut cands: Vec<&Tensor<bf16>> = self.blocks[..self.n_blocks].iter().collect();
             cands.push(&self.x);
-            res.apply(stream, gemm, t, &cands, 0, &mut self.res_out)?;
+            let rs = self.act.res.as_mut().ok_or_else(|| anyhow::anyhow!("model: output_attn_res 但 scratch 无 res"))?;
+            res.apply(stream, gemm, t, &cands, 0, rs, &mut self.act.acc, &mut self.res_out)?;
             &self.res_out
         } else {
             &self.x

@@ -18,8 +18,9 @@
 //! 零填充，装载只取前 96（`weights::load_a_log`）。
 //!
 //! 待办（里程碑 C-2+）：六条投影 GEMM 融合成 vLLM 的 `in_proj_qkvgfab`（一次 GEMM 再按列切）；
-//! 激活缓冲改全模型共享（现在每层一套，`max_tokens` 大时占内存）；TP 按头切。
+//! TP 按头切。（激活缓冲已改全模型共享一套：`scratch.rs::KdaScratch`，2026-10-20。）
 use crate::config::KimiLinearConfig;
+pub use crate::scratch::KdaScratch;
 use crate::weights::{self, KdaShapes, Shard, Table};
 use anyhow::{ensure, Result};
 use dinfer_core::runner::BatchMode;
@@ -109,34 +110,19 @@ pub struct KdaLayer {
     sh: KdaShapes,
     lower_bound: Option<f32>,
     eps: f32,
-    // 激活缓冲（[T, ·]）
-    q_buf: Tensor<bf16>,
-    k_buf: Tensor<bf16>,
-    v_buf: Tensor<bf16>,
-    qc_buf: Tensor<bf16>,
-    kc_buf: Tensor<bf16>,
-    vc_buf: Tensor<bf16>,
-    g2_buf: Tensor<bf16>,  // g_proj(x)，输出门
-    fa_buf: Tensor<bf16>,  // [T, K]
-    g1_buf: Tensor<bf16>,  // f_b(f_a(x))，raw gate
-    b_buf: Tensor<bf16>,   // [T, H]
-    beta_buf: Tensor<f32>, // [T, H]
-    o_buf: Tensor<bf16>,
-    n_buf: Tensor<bf16>,
 }
 
 impl KdaLayer {
-    /// 装载第 `layer` 层（必须是 KDA 层）。`max_tokens` 决定激活缓冲，`num_slots` 决定状态表大小。
+    /// 装载第 `layer` 层（必须是 KDA 层）。`num_slots` 决定状态表大小；激活缓冲由调用方的 `ActScratch` 借入。
     pub fn load(
         stream: &Stream,
         src: &WeightSource,
         t: &Table,
         layer: usize,
         cfg: &KimiLinearConfig,
-        max_tokens: usize,
         num_slots: usize,
     ) -> Result<Self> {
-        Self::load_tp(stream, src, t, layer, cfg, max_tokens, num_slots, Shard::SINGLE)
+        Self::load_tp(stream, src, t, layer, cfg, num_slots, Shard::SINGLE)
     }
 
     /// TP（design-kimik3 §2.4）：96 头按 rank 均分；q/k/v/g/f_b/b/conv/A_log/dt_bias 按头行切，`o_proj` 列切（输出是部分和，
@@ -148,7 +134,6 @@ impl KdaLayer {
         t: &Table,
         layer: usize,
         cfg: &KimiLinearConfig,
-        max_tokens: usize,
         num_slots: usize,
         shard: Shard,
     ) -> Result<Self> {
@@ -200,7 +185,6 @@ impl KdaLayer {
             ],
             rec: Tensor::zeros(stream, &[num_slots, h, kd, kd])?,
         };
-        let tt = max_tokens;
         Ok(Self {
             q_proj,
             k_proj,
@@ -217,19 +201,6 @@ impl KdaLayer {
             state,
             lower_bound: cfg.linear_attn_config.gate_lower_bound,
             eps: cfg.rms_norm_eps,
-            q_buf: Tensor::zeros(stream, &[tt, proj])?,
-            k_buf: Tensor::zeros(stream, &[tt, proj])?,
-            v_buf: Tensor::zeros(stream, &[tt, proj])?,
-            qc_buf: Tensor::zeros(stream, &[tt, proj])?,
-            kc_buf: Tensor::zeros(stream, &[tt, proj])?,
-            vc_buf: Tensor::zeros(stream, &[tt, proj])?,
-            g2_buf: Tensor::zeros(stream, &[tt, proj])?,
-            fa_buf: Tensor::zeros(stream, &[tt, kd])?,
-            g1_buf: Tensor::zeros(stream, &[tt, proj])?,
-            b_buf: Tensor::zeros(stream, &[tt, h])?,
-            beta_buf: Tensor::zeros(stream, &[tt, h])?,
-            o_buf: Tensor::zeros(stream, &[tt, proj])?,
-            n_buf: Tensor::zeros(stream, &[tt, proj])?,
             sh,
         })
     }
@@ -255,6 +226,7 @@ impl KdaLayer {
     }
 
     /// `x: [t, hidden]`（已过 `input_layernorm`）→ `out: [t, hidden]`。
+    #[allow(clippy::too_many_arguments)]
     pub fn forward(
         &mut self,
         stream: &Stream,
@@ -262,11 +234,12 @@ impl KdaLayer {
         t: usize,
         x: &Tensor<bf16>,
         meta: &KdaMeta<'_>,
+        sc: &mut KdaScratch,
         out: &mut Tensor<bf16>,
     ) -> Result<()> {
         let (h, kd, width) = (self.sh.heads, self.sh.head_dim, self.sh.width);
         let proj = self.sh.proj();
-        ensure!(t <= self.q_buf.shape[0], "kda: {t} tokens > max {}", self.q_buf.shape[0]);
+        ensure!(t <= sc.q.shape[0] && sc.q.shape[1] == proj, "kda: {t} tokens > max {} / scratch proj", sc.q.shape[0]);
         ensure!(meta.state_indices.numel() >= meta.num_reqs, "kda: state_indices");
         ensure!(
             x.numel() >= t * self.sh.hidden && out.numel() >= t * self.sh.hidden,
@@ -274,19 +247,19 @@ impl KdaLayer {
         );
 
         // 1. 投影（q/k/v/g 各 7168→12288；f_a 7168→128 → f_b 128→12288；b 7168→96）
-        self.q_proj.forward_rows(gemm, x, &mut self.q_buf, t)?;
-        self.k_proj.forward_rows(gemm, x, &mut self.k_buf, t)?;
-        self.v_proj.forward_rows(gemm, x, &mut self.v_buf, t)?;
-        self.g_proj.forward_rows(gemm, x, &mut self.g2_buf, t)?;
-        self.f_a.forward_rows(gemm, x, &mut self.fa_buf, t)?;
-        self.f_b.forward_rows(gemm, &self.fa_buf, &mut self.g1_buf, t)?;
-        self.b_proj.forward_rows(gemm, x, &mut self.b_buf, t)?;
-        k::bf16_to_f32_n(stream, &self.b_buf.data, &mut self.beta_buf.data, t * h)?;
+        self.q_proj.forward_rows(gemm, x, &mut sc.q, t)?;
+        self.k_proj.forward_rows(gemm, x, &mut sc.k, t)?;
+        self.v_proj.forward_rows(gemm, x, &mut sc.v, t)?;
+        self.g_proj.forward_rows(gemm, x, &mut sc.g2, t)?;
+        self.f_a.forward_rows(gemm, x, &mut sc.fa, t)?;
+        self.f_b.forward_rows(gemm, &sc.fa, &mut sc.g1, t)?;
+        self.b_proj.forward_rows(gemm, x, &mut sc.b, t)?;
+        k::bf16_to_f32_n(stream, &sc.b.data, &mut sc.beta.data, t * h)?;
 
         // 2. 三个短卷积（decode 单 token 走 update，其余走 varlen prefill）
         let single = meta.mode == BatchMode::Decode && meta.num_reqs == t;
-        let srcs = [&self.q_buf, &self.k_buf, &self.v_buf];
-        let dsts = [&mut self.qc_buf, &mut self.kc_buf, &mut self.vc_buf];
+        let srcs = [&sc.q, &sc.k, &sc.v];
+        let dsts = [&mut sc.qc, &mut sc.kc, &mut sc.vc];
         for (i, (src, dst)) in srcs.into_iter().zip(dsts).enumerate() {
             if single {
                 k::kda_conv1d_update(
@@ -326,32 +299,32 @@ impl KdaLayer {
             let mut ws = meta.chunk.unwrap().borrow_mut();
             let ws = &mut *ws;
             let plan = ws.plan.as_ref().ok_or_else(|| anyhow::anyhow!("kda: chunk workspace 未 prepare"))?;
-            let sc = ws.scratch.as_mut().ok_or_else(|| anyhow::anyhow!("kda: chunk scratch 未分配"))?;
+            let cs = ws.scratch.as_mut().ok_or_else(|| anyhow::anyhow!("kda: chunk scratch 未分配"))?;
             ensure!(plan.num_seqs == meta.num_reqs && ws.tokens == t, "kda: chunk plan 与本步不符");
             k::kda_chunk_prep(
                 stream,
-                &self.qc_buf.data,
-                &self.kc_buf.data,
-                &self.g1_buf.data,
-                &self.beta_buf.data,
+                &sc.qc.data,
+                &sc.kc.data,
+                &sc.g1.data,
+                &sc.beta.data,
                 &self.a_log.data,
                 &self.dt_bias.data,
                 &meta.cu_seqlens.data,
                 plan,
-                sc,
+                cs,
                 t,
                 h,
                 kd,
                 scale,
                 self.lower_bound,
             )?;
-            k::kda_chunk_wy(stream, &self.vc_buf.data, &meta.cu_seqlens.data, plan, sc, t, h, kd)?;
+            k::kda_chunk_wy(stream, &sc.vc.data, &meta.cu_seqlens.data, plan, cs, t, h, kd)?;
             k::kda_chunk_ho(
                 stream,
                 &meta.cu_seqlens.data,
                 plan,
-                sc,
-                &mut self.o_buf.data,
+                cs,
+                &mut sc.o.data,
                 &mut self.state.rec.data,
                 Some(&meta.state_indices.data),
                 t,
@@ -361,14 +334,14 @@ impl KdaLayer {
         } else {
             k::kda_recurrent(
                 stream,
-                &self.qc_buf.data,
-                &self.kc_buf.data,
-                &self.vc_buf.data,
-                &self.g1_buf.data,
-                &self.beta_buf.data,
+                &sc.qc.data,
+                &sc.kc.data,
+                &sc.vc.data,
+                &sc.g1.data,
+                &sc.beta.data,
                 &self.a_log.data,
                 &self.dt_bias.data,
-                &mut self.o_buf.data,
+                &mut sc.o.data,
                 &mut self.state.rec.data,
                 &meta.cu_seqlens.data,
                 Some(&meta.state_indices.data),
@@ -383,23 +356,19 @@ impl KdaLayer {
         // 4. o_norm：RMSNorm(o)·w·sigmoid(g2)
         k::kda_gated_rmsnorm(
             stream,
-            &self.o_buf.data,
+            &sc.o.data,
             &self.norm_w.data,
-            &self.g2_buf.data,
-            &mut self.n_buf.data,
+            &sc.g2.data,
+            &mut sc.n.data,
             t * h,
             kd,
             self.eps,
         )?;
 
         // 5. o_proj
-        self.o_proj.forward_rows(gemm, &self.n_buf, out, t)
+        self.o_proj.forward_rows(gemm, &sc.n, out, t)
     }
 
-    /// 对拍 / 调试用：上一步 `o_norm` 的输出 `[t, H·K]`（`o_proj` 之前）。
-    pub fn last_normed(&self) -> &Tensor<bf16> {
-        &self.n_buf
-    }
 }
 
 /// 请求 → slot 分配表：公共件 `dinfer_layers::exec::StateSlotTable`（qwen35 GDN 与 kimik3 KDA 同一套）。

@@ -14,6 +14,8 @@ use dinfer_kimik3::config::KimiK3Config;
 use dinfer_kimik3::kda::{KdaChunkWorkspace, KdaMeta};
 use dinfer_kimik3::layer::{Attn, Ffn, KimiDecoderLayer, LayerBudget, StepMeta};
 use dinfer_kimik3::mla::MlaMeta;
+use dinfer_kimik3::scratch::ActScratch;
+use dinfer_kimik3::weights::Shard;
 use dinfer_kimik3::weights::{shards_for_layer, KdaShapes, Table};
 use dinfer_layers::{bf16, Device, Gemm, Stream, Tensor, WeightSource};
 use std::cell::RefCell;
@@ -126,6 +128,7 @@ fn layer1_real_weights() {
         LayerBudget { max_tokens: t, num_slots: 1, kv_blocks: 1, block_size: 16 },
     )
     .unwrap();
+    let mut act = ActScratch::new(&s, tc, t, Shard::SINGLE).unwrap();
     s.synchronize().unwrap();
     let (free1, _) = s.mem_info().unwrap();
     println!("  装载 {:.1} s，显存 +{:.2} GB", t0.elapsed().as_secs_f32(), (free0 - free1) as f64 / 1e9);
@@ -174,13 +177,13 @@ fn layer1_real_weights() {
         comm: None,
     };
 
-    let run = |layer: &mut KimiDecoderLayer, out: &mut Tensor<bf16>| {
+    let mut run = |layer: &mut KimiDecoderLayer, out: &mut Tensor<bf16>| {
         match &mut layer.attn {
             Attn::Kda(k) => k.reset_slot(&s, 0).unwrap(),
             Attn::Mla(_) => panic!("第 1 层应是 KDA 层"),
         }
         let t0 = std::time::Instant::now();
-        layer.forward(&s, &gemm, t, &xd, &[&b0d], &meta, out).unwrap();
+        layer.forward(&s, &gemm, t, &xd, &[&b0d], &meta, &mut act, out).unwrap();
         s.synchronize().unwrap();
         t0.elapsed().as_secs_f32() * 1e3
     };
@@ -194,11 +197,11 @@ fn layer1_real_weights() {
     let (_, m_ref) = npy_f32(&refs, "m.npy");
     let (_, mn_ref) = npy_f32(&refs, "mn.npy");
     let (_, out_ref) = npy_f32(&refs, "out.npy");
-    let (rel_h, cos_h) = compare("attn 门 h vs HF", &rows(layer.last_attn_in(), &s, n), &h_ref);
-    let (rel_a, cos_a) = compare("attn out vs fla", &rows(layer.last_attn_out(), &s, n), &a_ref);
-    compare("prefix p vs HF", &rows(layer.last_prefix_sum(), &s, n), &p_ref);
-    let (rel_m, cos_m) = compare("mlp 门 m vs HF", &rows(layer.last_mlp_gate_out(), &s, n), &m_ref);
-    compare("post_norm mn vs HF", &rows(layer.last_mlp_in(), &s, n), &mn_ref);
+    let (rel_h, cos_h) = compare("attn 门 h vs HF", &rows(&act.h_in, &s, n), &h_ref);
+    let (rel_a, cos_a) = compare("attn out vs fla", &rows(&act.a, &s, n), &a_ref);
+    compare("prefix p vs HF", &rows(&act.p, &s, n), &p_ref);
+    let (rel_m, cos_m) = compare("mlp 门 m vs HF", &rows(&act.m, &s, n), &m_ref);
+    compare("post_norm mn vs HF", &rows(&act.mn, &s, n), &mn_ref);
 
     // MoE 子块
     let Ffn::LatentMoe(moe) = &layer.ffn else { panic!("第 1 层应是 MoE 层") };
@@ -212,8 +215,8 @@ fn layer1_real_weights() {
     let (_, ymoe_ref) = npy_f32(&refs, "y_moe.npy");
     println!("== MoE 子块");
     let (rel_lg, cos_lg) =
-        compare("router logits vs HF", &moe.last_logits(&s, t).unwrap(), &logits_ref[..t * e]);
-    let (ids, _w) = moe.last_routing(&s, t).unwrap();
+        compare("router logits vs HF", &moe.last_logits(&s, &act.ffn, t).unwrap(), &logits_ref[..t * e]);
+    let (ids, _w) = moe.last_routing(&s, &act.ffn, t).unwrap();
     let thresh = 2e-3f32;
     let (mut decidable, mut hit_rows, mut hit_pairs, mut total_pairs) = (0usize, 0usize, 0usize, 0usize);
     let mut matched = Vec::new(); // 路由整行一致的 token
@@ -246,9 +249,9 @@ fn layer1_real_weights() {
         matched.iter().flat_map(|&i| v[i * w..(i + 1) * w].iter().cloned()).collect()
     };
     let latent = moe.experts.latent;
-    let ysum_got = rows(moe.last_expert_sum(), &s, t * latent);
-    let yr_got = rows(moe.last_routed_out(), &s, n);
-    let ym_got = rows(layer.last_mlp_out(), &s, n);
+    let ysum_got = rows(&act.ffn.ysum, &s, t * latent);
+    let yr_got = rows(&act.ffn.yup, &s, n);
+    let ym_got = rows(&act.y, &s, n);
     compare("ysum（全部行）", &ysum_got, &ysum_ref);
     compare("routed up（全部行）", &yr_got, &yrouted_ref);
     compare("MoE out（全部行）", &ym_got, &ymoe_ref);
