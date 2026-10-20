@@ -200,9 +200,7 @@ impl Attention {
         // 共享缓冲比本层宽是安全的（只用前缀），但**不能**从 `numel / t` 反推行宽。
         let qkv_w = (h + 2 * hk) * d;
         ensure!(
-            t <= sc.max_tokens
-                && sc.qkv.numel() >= t * qkv_w
-                && sc.attn.numel() >= t * h * d,
+            t <= sc.max_tokens && sc.qkv.numel() >= t * qkv_w && sc.attn.numel() >= t * h * d,
             "attn: t={t} 超过共享激活缓冲 (max_tokens={}, qkv={} < {} / attn={} < {})",
             sc.max_tokens,
             sc.qkv.numel(),

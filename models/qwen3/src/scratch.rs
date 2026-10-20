@@ -32,7 +32,8 @@ impl ActScratch {
     /// 各缓冲的列数（本 rank 的 cfg：TP 后头数 / inter 已除）。
     /// 返回 (qkv 行宽, attn 行宽, gate_up 行宽, act 行宽)，顺序同 `bytes` 的求和顺序。
     fn cols(cfg: &Qwen3Config) -> (usize, usize, usize, usize) {
-        let (h, hk, d) = (cfg.num_attention_heads as usize, cfg.num_key_value_heads as usize, cfg.head_dim as usize);
+        let (h, hk, d) =
+            (cfg.num_attention_heads as usize, cfg.num_key_value_heads as usize, cfg.head_dim as usize);
         let inter = cfg.intermediate_size as usize;
         ((h + 2 * hk) * d, h * d, 2 * inter, inter)
     }
