@@ -6,7 +6,7 @@
 - 更新日期：2026-10-20 23:0x +0800。**qwen35 今日收口**（第 12 轮合体定稿 = r8b 不切步 + r10 全 8 轮；`7d7947a`）。
 - **对 vLLM 的四个口径（B300 GPU 0 vs GPU 1，engine-gap 8y）**：四组闭环 tok/s **1.09 / 1.11 / 1.04 / 1.04×**；6 K 单发 TTFT **284.9 ms / 1 步** vs 260.6（落后 9%，早上 33%），3 K 持平、1 K 领先 40%；engine rate 8 goodput **3.21 vs 2.87（+12%）**、TTFT p99 86 vs 164、TPOT p99 19.6 vs 18.1、cache 0.81；4090 公共件门禁最差 +1.6%。
 - **今天两条主线**：r8（GDN 状态按块快照，重开 prefix cache）→ r8b（kernel 沿 chunk 边界写快照、调度不切步）；r10（GDN chunk kernel 8 轮，8×1024 全链 1109 → **770 µs**，不含 conv 反超 fla 26%）。全部调优数值在 `ArchProfile`，kernel 体内零常量。
-- **进行中：无**。无后台任务、两个子代理已结束、无未 push commit（`origin/dev` = 本地）、worktree 已清。B300 GPU 0 dinfer `:8012`（tmux q35，合体定稿二进制）+ GPU 1 vLLM `:8013` 常驻可复用，GPU 2–7 空。
+- **进行中（23:1x）**：用户新目标 **全面超 vLLM 1.2×**（engine-gap 8z 折算：c32 / c8-long 各要 +15.7%，3 K TTFT 再降 21%、6 K 再降 31%）。r11 第一步 nsys 6 K prefill 分解 **被工具阻塞**：nsys 四种方式抓 serve 都 0 kernel，同环境抓微基准正常 → serve 进程 CUPTI 注入失败（12:00 前二进制可抓，之后不行，怀疑装载公共件 / thread_local / 多线程 ctx）。B300 :8012 常驻已恢复（我 `pkill -x dinfer` 误杀过一次）。下一步二选一：① 二分 commit 找 nsys 失效点；② executor 加 CUDA event 按层分段计时（不依赖 nsys，顺带成为长期工具）。
 - **下一步（开工直接做这 6 条）**：
   1. **r11 第一件事：nsys 分解 6 K prefill**。r10 第 5–8 轮 kernel 822→770（−6%）没折到 TTFT（283.9 → 284.9），说明 GDN chunk 已非大头，剩余 ~24 ms 在哪必须实测，别猜。
   2. conv 221 µs 只用 7% 带宽（r10 记的 r11 首选段）。
