@@ -550,7 +550,8 @@ fn gdn_chunk_bench() {
     let (dev, st) = dev();
     let _ = dev;
     let (h, hv, k, v) = (16usize, 48usize, 128usize, 128usize);
-    for (nseq, len) in [(1usize, 1024usize), (8, 1024), (32, 128)] {
+    // r9（docs/loops/qwen35-gdn-r9.md）加 1×4096 / 1×8192：单长序列是 ho 串行最差情形
+    for (nseq, len) in [(1usize, 1024usize), (8, 1024), (32, 128), (1, 4096), (1, 8192)] {
         bench_case(&st, nseq, len, h, hv, k, v);
     }
 }
