@@ -33,6 +33,7 @@ fn make(n: u64, pc: bool) -> (Scheduler, ModelRunnerOutput) {
         drafts: vec![Vec::new(); n as usize],
         logprobs: vec![],
         mode: None,
+        phases: None,
     };
     s.update_from_output(&o, &mro);
     (s, mro)
