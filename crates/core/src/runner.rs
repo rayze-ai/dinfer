@@ -117,7 +117,21 @@ impl BatchPlan {
 /// `forward_sample_pair` 的返回：(decode 批的 logprobs, prefill 批的 logprobs)，各与对应 plan 的 req_ids 平行。
 pub type PairLogprobs = (Vec<Vec<TokenLogprobs>>, Vec<Vec<TokenLogprobs>>);
 
+/// executor 一步的 host 侧分段（engine-gap 第 7 轮）：upload = 上传 plan / 采样参数（含状态 slot 处理）；
+/// launch = forward + 采样入队（eager 时含所有 kernel launch、工作区分配、懒加载）；wait = 等 GPU 结果（同步步的
+/// D2H 或 async ring 的 `finish`）。单位秒。
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct StepPhases {
+    pub upload: f64,
+    pub launch: f64,
+    pub wait: f64,
+}
+
 pub trait ModelExecutor {
+    /// 上一步（forward_sample 或 finish 刚返回的那步）的分段计时；不支持的 executor 返回 None。
+    fn take_step_phases(&mut self) -> Option<StepPhases> {
+        None
+    }
     fn forward_sample(
         &mut self,
         plan: &BatchPlan,
@@ -402,6 +416,7 @@ impl<E: ModelExecutor> Runner<E> {
             drafts: Vec::with_capacity(pending.req_ids.len()),
             logprobs: Vec::with_capacity(pending.req_ids.len()),
             mode: Some(self.plan.mode),
+            phases: self.exec.take_step_phases(),
         };
         let mut lps = match pending.lps_override {
             Some(l) => l,

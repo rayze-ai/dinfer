@@ -346,6 +346,17 @@ impl<E: ModelExecutor> Engine<E> {
                 BatchMode::Paged => &self.metrics.step_execute_mixed,
             };
             h.observe((t_exec - t_sched).as_secs_f64());
+            if let Some(ph) = mro.phases {
+                let mi = match mode {
+                    BatchMode::Prefill => 0,
+                    BatchMode::Decode => 1,
+                    BatchMode::Paged => 2,
+                };
+                let hs = &self.metrics.step_phase[mi];
+                hs[0].observe(ph.upload);
+                hs[1].observe(ph.launch);
+                hs[2].observe(ph.wait);
+            }
         }
         self.record_step(so, &results, t_step);
         self.metrics.step_update.observe(t_exec.elapsed().as_secs_f64());

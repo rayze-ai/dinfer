@@ -73,6 +73,8 @@ pub struct ModelRunnerOutput {
     pub logprobs: Vec<Vec<crate::sampler::TokenLogprobs>>,
     /// 本步 plan 的 BatchMode（纯 prefill / 纯 decode / 混批），供引擎按模式分桶 step 时长；默认 None。
     pub mode: Option<crate::runner::BatchMode>,
+    /// executor 的 host 侧分段（upload / launch / wait）；不支持时 None。
+    pub phases: Option<crate::runner::StepPhases>,
 }
 
 /// `update_from_output` 的结果：扁平 token 缓冲 + 每请求一条记录（零小对象分配）。

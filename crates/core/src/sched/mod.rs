@@ -672,6 +672,7 @@ mod tests {
             drafts: vec![Vec::new(); toks.len()],
             logprobs: vec![],
             mode: None,
+            phases: None,
         };
         let r = s.update_from_output(&o, &mro);
         (o, r)
@@ -833,6 +834,7 @@ mod tests {
                 drafts: vec![Vec::new(); 1],
                 logprobs: vec![],
                 mode: None,
+                phases: None,
             },
         );
         s.add_request(req(2, 40, 1));
@@ -869,6 +871,7 @@ mod tests {
                 drafts: vec![Vec::new(); 1],
                 logprobs: vec![],
                 mode: None,
+                phases: None,
             },
         );
         assert_eq!(s.request(1).unwrap().num_output_placeholders, 3);
@@ -881,6 +884,7 @@ mod tests {
                 drafts: vec![Vec::new(); 1],
                 logprobs: vec![],
                 mode: None,
+                phases: None,
             },
         );
         let r = s.request(1).unwrap();

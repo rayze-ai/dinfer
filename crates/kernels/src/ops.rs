@@ -2665,9 +2665,8 @@ pub struct KdaChunkPlan {
 }
 
 impl KdaChunkPlan {
-    /// 按 `cu_seqlens` 切块。`bt` 必须是 kernel 支持的块大小（当前 64）。
-    pub fn new(stream: &Stream, cu_seqlens: &[i32], bt: usize) -> Result<Self> {
-        ensure!(bt > 0 && cu_seqlens.len() >= 2, "kda_chunk plan: bt/cu_seqlens");
+    /// host 侧切块表：(chunk_tab, cu_nt, chunk_off)。
+    fn tables(cu_seqlens: &[i32], bt: usize) -> (Vec<i32>, Vec<i32>, Vec<i32>) {
         let num_seqs = cu_seqlens.len() - 1;
         let mut tab = Vec::new();
         let mut nt = Vec::with_capacity(num_seqs);
@@ -2683,15 +2682,58 @@ impl KdaChunkPlan {
             }
         }
         off.push(tab.len() as i32 / 2);
+        (tab, nt, off)
+    }
+
+    /// 按 `cu_seqlens` 切块。`bt` 必须是 kernel 支持的块大小（当前 64）。
+    pub fn new(stream: &Stream, cu_seqlens: &[i32], bt: usize) -> Result<Self> {
+        ensure!(bt > 0 && cu_seqlens.len() >= 2, "kda_chunk plan: bt/cu_seqlens");
+        let (tab, nt, off) = Self::tables(cu_seqlens, bt);
         let num_chunks = tab.len() / 2;
         Ok(Self {
             chunk_tab: stream.htod_copy(tab)?,
             cu_nt: stream.htod_copy(nt)?,
             chunk_off: stream.htod_copy(off)?,
             num_chunks,
-            num_seqs,
+            num_seqs: cu_seqlens.len() - 1,
             bt,
         })
+    }
+
+    /// 预分配容量（`max_chunks` 块 / `max_seqs` 序列），表内容为空；之后每步 `fill`。
+    pub fn with_capacity(stream: &Stream, max_chunks: usize, max_seqs: usize, bt: usize) -> Result<Self> {
+        ensure!(bt > 0, "kda_chunk plan: bt");
+        Ok(Self {
+            chunk_tab: stream.alloc_zeros::<i32>((2 * max_chunks).max(2))?,
+            cu_nt: stream.alloc_zeros::<i32>(max_seqs.max(1))?,
+            chunk_off: stream.alloc_zeros::<i32>(max_seqs + 1)?,
+            num_chunks: 0,
+            num_seqs: 0,
+            bt,
+        })
+    }
+
+    /// 复用设备缓冲重填切块表（engine-gap 第 7 轮：每 prefill 步省 3 次 cuMemAlloc）；容量不够时就地重分配。
+    pub fn fill(&mut self, stream: &Stream, cu_seqlens: &[i32]) -> Result<()> {
+        ensure!(cu_seqlens.len() >= 2, "kda_chunk plan: cu_seqlens");
+        let (tab, nt, off) = Self::tables(cu_seqlens, self.bt);
+        if tab.len() > self.chunk_tab.len() {
+            self.chunk_tab = stream.alloc_zeros::<i32>(tab.len())?;
+        }
+        if nt.len() > self.cu_nt.len() {
+            self.cu_nt = stream.alloc_zeros::<i32>(nt.len())?;
+        }
+        if off.len() > self.chunk_off.len() {
+            self.chunk_off = stream.alloc_zeros::<i32>(off.len())?;
+        }
+        self.num_chunks = tab.len() / 2;
+        self.num_seqs = cu_seqlens.len() - 1;
+        if !tab.is_empty() {
+            stream.htod_into(&tab, &mut self.chunk_tab)?;
+        }
+        stream.htod_into(&nt, &mut self.cu_nt)?;
+        stream.htod_into(&off, &mut self.chunk_off)?;
+        Ok(())
     }
 }
 

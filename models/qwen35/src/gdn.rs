@@ -53,12 +53,46 @@ impl GdnChunkWorkspace {
         Self { plan: None, scratch: None, tokens: 0, bt: Self::BT }
     }
 
-    /// 每步一次：按 host 侧 `cu_seqlens` 重建切块表，缓冲不够就按本步形状重分（只增不减）。
+    /// 启动一次按上限分配（engine-gap 第 7 轮）：`max_tokens` 个 token、`max_seqs` 条序列的最坏块数
+    /// （每条序列最多多出一个不满的块）。之后 `prepare` 只重填切块表，不再 free + alloc。
+    /// 字节数：`scratch_bytes(cfg, max_tokens, max_seqs)`。
+    pub fn with_capacity(stream: &Stream, cfg: &Qwen35Config, max_tokens: usize, max_seqs: usize) -> Result<Self> {
+        let bt = Self::BT;
+        let h = cfg.linear_num_key_heads as usize;
+        let hv = cfg.linear_num_value_heads as usize;
+        let (kd, vd) = (cfg.linear_key_head_dim as usize, cfg.linear_value_head_dim as usize);
+        let max_chunks = Self::max_chunks(max_tokens, max_seqs);
+        let scratch = k::ops::GdnChunkScratch::new(stream, max_tokens.max(1), h, hv, kd, vd, max_chunks.max(1), bt)?;
+        let plan = k::ops::KdaChunkPlan::with_capacity(stream, max_chunks, max_seqs.max(1), bt)?;
+        Ok(Self { plan: Some(plan), scratch: Some(scratch), tokens: 0, bt })
+    }
+
+    fn max_chunks(max_tokens: usize, max_seqs: usize) -> usize {
+        max_tokens.div_ceil(Self::BT) + max_seqs
+    }
+
+    /// `with_capacity` 会占用的设备字节数（供日志 / 预算核对）。
+    pub fn scratch_bytes(cfg: &Qwen35Config, max_tokens: usize, max_seqs: usize) -> usize {
+        let h = cfg.linear_num_key_heads as usize;
+        let hv = cfg.linear_num_value_heads as usize;
+        let (kd, vd) = (cfg.linear_key_head_dim as usize, cfg.linear_value_head_dim as usize);
+        let t = max_tokens.max(1);
+        let c = Self::max_chunks(max_tokens, max_seqs).max(1);
+        // qn/kn bf16 [T,H,K] ×2；gc f32 [T,HV]；aq f32 [C,HV,BT,BT]；u f32 [T,HV,V]；w/kg f32 [T,HV,K] ×2
+        2 * (t * h * kd * 2) + t * hv * 4 + c * hv * Self::BT * Self::BT * 4 + t * hv * vd * 4 + 2 * (t * hv * kd * 4)
+    }
+
+    /// 每步一次：按 host 侧 `cu_seqlens` 重填切块表；缓冲不够才按本步形状重分（只增不减；
+    /// `with_capacity` 分配过的正常不会触发）。
     pub fn prepare(&mut self, stream: &Stream, cu_seqlens: &[i32], cfg: &Qwen35Config) -> Result<()> {
-        let plan = k::ops::KdaChunkPlan::new(stream, cu_seqlens, self.bt)?;
+        match self.plan.as_mut() {
+            Some(plan) => plan.fill(stream, cu_seqlens)?,
+            None => self.plan = Some(k::ops::KdaChunkPlan::new(stream, cu_seqlens, self.bt)?),
+        }
+        let num_chunks = self.plan.as_ref().map_or(0, |p| p.num_chunks);
         let tokens = (*cu_seqlens.last().unwrap_or(&0)).max(0) as usize;
         let need_realloc = match &self.scratch {
-            Some(sc) => !sc.fits(tokens, plan.num_chunks),
+            Some(sc) => !sc.fits(tokens, num_chunks),
             None => true,
         };
         if need_realloc {
@@ -67,12 +101,14 @@ impl GdnChunkWorkspace {
             let (kd, vd) = (cfg.linear_key_head_dim as usize, cfg.linear_value_head_dim as usize);
             let old = self.scratch.as_ref().map_or((0, 0), |s| (s.tokens, s.num_chunks));
             let cap_t = tokens.max(old.0);
-            let cap_c = plan.num_chunks.max(old.1);
+            let cap_c = num_chunks.max(old.1);
+            if old != (0, 0) {
+                tracing::debug!(tokens, num_chunks, old_tokens = old.0, old_chunks = old.1, "gdn chunk workspace: 重分配（预分配容量不够）");
+            }
             self.scratch = None; // 先释放旧的再分新的
             self.scratch = Some(k::ops::GdnChunkScratch::new(stream, cap_t, h, hv, kd, vd, cap_c, self.bt)?);
         }
         self.tokens = tokens;
-        self.plan = Some(plan);
         Ok(())
     }
 }

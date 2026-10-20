@@ -19,7 +19,7 @@
 use crate::model::{Forward, ModelScratch, Qwen35Model};
 use crate::layer::StepMeta;
 use anyhow::{ensure, Context, Result};
-use dinfer_core::runner::{BatchMode, BatchPlan, ModelExecutor};
+use dinfer_core::runner::{BatchMode, BatchPlan, ModelExecutor, StepPhases};
 use dinfer_core::sampler::{SampleBatch, TokenLogprobs};
 use dinfer_kernels as k;
 use dinfer_layers::exec::{async_sched_enabled, decode_capture_plan, graph_capture_eager, AsyncResultRing, CapturePhase, DecodeGraphs, PlanBuffers, StateSlotTable, Ticket};
@@ -108,7 +108,10 @@ pub struct Qwen35Executor {
     pub eager_steps: u64,
     /// 异步调度：pinned 槽环 + 在飞票据（engine 先 begin n+1 再 finish n，最多 2 在飞）。
     async_ring: AsyncResultRing,
-    async_inflight: std::collections::VecDeque<Ticket>,
+    /// 在飞票据 + 该步的 (t0, t_launch, t_wait)（四段计时，engine-gap 第 7 轮）。
+    async_inflight: std::collections::VecDeque<(Ticket, std::time::Instant, std::time::Instant, std::time::Instant)>,
+    /// 上一步的分段计时（runner 在 finish / forward_sample 后取走）。
+    last_phases: Option<StepPhases>,
     /// 当前 plan 是否是插队 prefill（采样后不写 prev_chosen）。enqueue 时从 plan 读入。
     skip_prev_chosen: bool,
     /// 同步 begin/finish 兜底（runner 默认实现用）。
@@ -172,13 +175,77 @@ impl Qwen35Executor {
             eager_steps: 0,
             async_ring,
             async_inflight: std::collections::VecDeque::with_capacity(2),
+            last_phases: None,
             skip_prev_chosen: false,
             sync_stash: None,
         };
-        if ex.graphs.enabled() && graph_capture_eager() {
+        // GDN chunk 工作区启动一次按上限分配（engine-gap 第 7 轮：按需增长在 engine 负载下 43 次 cuMemAllocAsync
+        // 共 431 ms 全落在 prefill 步里）。`GDN_CHUNK_PREALLOC=0` 回到按需增长；分配失败也回退（只打 warn）。
+        if ex.gdn_chunk_enabled && std::env::var("GDN_CHUNK_PREALLOC").as_deref() != Ok("0") {
+            let (mt, ms) = (ex.model.max_tokens, ex.model.num_slots);
+            let bytes = crate::gdn::GdnChunkWorkspace::scratch_bytes(&ex.model.cfg, mt, ms);
+            match crate::gdn::GdnChunkWorkspace::with_capacity(&ex.stream, &ex.model.cfg, mt, ms) {
+                Ok(ws) => {
+                    tracing::info!(max_tokens = mt, max_seqs = ms, mib = bytes >> 20, "qwen35: gdn chunk workspace preallocated");
+                    ex.gdn_chunk = Some(ws);
+                }
+                Err(e) => tracing::warn!(err = %e, mib = bytes >> 20, "qwen35: gdn chunk workspace prealloc failed; falling back to on-demand growth"),
+            }
+        }
+        // 启动 warmup 一次 prefill（含 chunk 路径）：预载 prefill kernel（cuLibraryLoadData 懒加载在 engine 负载下
+        // 148 ms 落在首个 prefill 步）。`WARMUP=0` 关。
+        if std::env::var("WARMUP").as_deref() != Ok("0") {
+            if let Err(e) = ex.warmup_prefill() {
+                tracing::warn!(err = %e, "qwen35: warmup prefill failed (ignored)");
+            }
+        }
+        // decode 图：qwen35 默认启动时全桶捕获（engine 负载下首次捕获 7 桶 × 10 ms 落在服务期）；
+        // `GRAPH_CAPTURE=lazy` 回到懒捕获。
+        if ex.graphs.enabled() && (graph_capture_eager() || std::env::var("GRAPH_CAPTURE").as_deref() != Ok("lazy")) {
             ex.capture_decode_graphs()?;
         }
         Ok(ex)
+    }
+
+    /// 启动 warmup：两条 65 token 的假请求走一次 prefill（GDN chunk 三段 + 全注意力 prefill + GEMM 大 M 路径），
+    /// 结果丢弃；slot=-1 不写 KV、GDN 状态落在临时 slot 并随后释放、不写 prev_chosen。预算不够时跳过。
+    fn warmup_prefill(&mut self) -> Result<()> {
+        let per = crate::gdn::GdnChunkWorkspace::BT + 1;
+        let nreq = (self.model.max_tokens / per).min(2).min(self.model.max_logits_rows).min(self.model.num_slots);
+        let t = per * nreq;
+        if nreq == 0 {
+            tracing::info!(max_tokens = self.model.max_tokens, "qwen35: warmup prefill skipped (budget too small)");
+            return Ok(());
+        }
+        let t0 = std::time::Instant::now();
+        let mut p = BatchPlan::default();
+        p.req_ids = (0..nreq as u64).map(|i| u64::MAX - 1 - i).collect();
+        p.num_tokens = vec![per as u32; nreq];
+        p.input_ids = vec![0; t];
+        p.positions = (0..nreq).flat_map(|_| 0..per as i32).collect();
+        p.slot_mapping = vec![-1; t];
+        p.cu_seqlens = (0..=nreq as i32).map(|i| i * per as i32).collect();
+        p.seq_lens = vec![per as i32; nreq];
+        p.block_table = vec![0; nreq * 8];
+        p.max_blocks = 8;
+        p.logits_rows = (1..=nreq as i32).map(|i| i * per as i32 - 1).collect();
+        p.logits_row_start = (0..=nreq).collect();
+        p.spec_tokens = vec![Vec::new(); nreq];
+        p.next_known = vec![-1; nreq];
+        p.mode = BatchMode::Prefill;
+        p.skip_prev_chosen = true;
+        p.sample.clear();
+        for _ in 0..nreq {
+            p.sample.push(&dinfer_core::sample::SamplingParams { temperature: 0.0, ..Default::default() }, 0, &[0], 1);
+        }
+        let trace = std::mem::replace(&mut self.model.trace, false);
+        let r = self.enqueue(&p).and_then(|(n, _)| self.collect(n));
+        self.model.trace = trace;
+        self.slots.release(&p.req_ids);
+        r?;
+        self.stream.synchronize()?;
+        tracing::info!(tokens = t, ms = t0.elapsed().as_millis() as u64, "qwen35: warmup prefill done");
+        Ok(())
     }
 
     /// GDN 状态的废纸篓 slot（GdnState 比 `num_slots` 多分的那一个）。
@@ -187,7 +254,7 @@ impl Qwen35Executor {
     }
 
     /// 上传 plan 并执行一步（不取结果）。
-    fn enqueue(&mut self, plan: &BatchPlan) -> Result<usize> {
+    fn enqueue(&mut self, plan: &BatchPlan) -> Result<(usize, std::time::Instant)> {
         self.skip_prev_chosen = plan.skip_prev_chosen;
         let n = plan.num_reqs();
         let t = plan.total_tokens();
@@ -245,10 +312,12 @@ impl Qwen35Executor {
             self.ensure_graph(n)?;
         }
         let use_graph = graph_eligible && self.graphs.get(n).is_some();
+        let t_launch;
         if use_graph {
             let nb = self.graphs.get(n).unwrap().0;
             self.upload_plan(plan, &state_idx, &has_init, nb)?;
             self.upload_sampling(sb, nb)?;
+            t_launch = std::time::Instant::now();
             self.graphs.get(n).unwrap().1.launch().context("launch decode graph")?;
             self.last_logprobs = vec![Vec::new(); n];
             if self.graph_steps == 0 || self.model.trace {
@@ -257,6 +326,7 @@ impl Qwen35Executor {
             self.graph_steps += 1;
         } else {
             self.upload_plan(plan, &state_idx, &has_init, n)?;
+            t_launch = std::time::Instant::now();
             let max_seqlen = plan.num_tokens.iter().copied().max().unwrap_or(0).max(1) as usize;
             self.forward_device(plan, &req_ids, t, n, nrows, max_seqlen)?;
             self.sample_eager(sb, nrows)?;
@@ -267,7 +337,16 @@ impl Qwen35Executor {
         }
         self.last_rows = nrows;
         self.steps += 1;
-        Ok(nrows)
+        Ok((nrows, t_launch))
+    }
+
+    fn set_phases(&mut self, t0: std::time::Instant, t_launch: std::time::Instant, t_wait: std::time::Instant) {
+        let t_end = std::time::Instant::now();
+        self.last_phases = Some(StepPhases {
+            upload: (t_launch - t0).as_secs_f64(),
+            launch: (t_wait - t_launch).as_secs_f64(),
+            wait: (t_end - t_wait).as_secs_f64(),
+        });
     }
 
     /// 把 plan 写进固定地址缓冲；batch 维补到 `nb`（padding 行：token 0、pos 0、slot=-1 不写 KV、seq_len=1、
@@ -546,18 +625,25 @@ impl ModelExecutor for Qwen35Executor {
 
     /// 异步第一段：上传 + 入队 + 异步 D2H（不等 GPU）。runner 只对 `async_eligible` 的 plan 调用（纯 decode）。
     fn begin(&mut self, plan: &BatchPlan) -> Result<()> {
+        let t0 = std::time::Instant::now();
         self.stream.bind_ctx()?;
-        let n = self.enqueue(plan).context("qwen35 enqueue (async)")?;
+        let (n, t_launch) = self.enqueue(plan).context("qwen35 enqueue (async)")?;
+        let t_wait = std::time::Instant::now();
         let ticket = self.async_ring.enqueue(&self.stream, &self.buf.chosen.data, n)?;
-        self.async_inflight.push_back(ticket);
+        self.async_inflight.push_back((ticket, t0, t_launch, t_wait));
         Ok(())
     }
 
     fn finish(&mut self, generated: &mut Vec<Vec<u32>>, drafts: &mut Vec<Vec<u32>>) -> Result<()> {
-        let ticket = self.async_inflight.pop_front().context("executor finish without begin")?;
+        let (ticket, t0, t_launch, t_wait) = self.async_inflight.pop_front().context("executor finish without begin")?;
         let chosen = self.async_ring.wait(ticket)?;
+        self.set_phases(t0, t_launch, t_wait);
         push_tokens(generated, drafts, &chosen);
         Ok(())
+    }
+
+    fn take_step_phases(&mut self) -> Option<StepPhases> {
+        self.last_phases.take()
     }
 
     fn stash_sync_result(&mut self, g: Vec<Vec<u32>>, d: Vec<Vec<u32>>) {
@@ -577,8 +663,10 @@ impl ModelExecutor for Qwen35Executor {
         // 引擎线程 != 构建线程：cudarc 的流/上下文对象不会自动把 ctx 绑到新线程，首个 kernel/cuBLASLt 调用会报
         // CUDA_ERROR_INVALID_CONTEXT（B300-50 真权重首请求复现；qwen3 走 record_timing 顺带绑上）。每步绑一次很便宜。
         self.stream.bind_ctx()?;
-        let nrows = self.enqueue(plan).context("qwen35 enqueue")?;
+        let (nrows, t_launch) = self.enqueue(plan).context("qwen35 enqueue")?;
+        let t_wait = std::time::Instant::now();
         let chosen = self.collect(nrows)?;
+        self.set_phases(t0, t_launch, t_wait);
         push_tokens(generated, drafts, &chosen);
         tracing::trace!(rows = nrows, ms = t0.elapsed().as_millis() as u64, "qwen35 step");
         Ok(())

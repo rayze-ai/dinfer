@@ -100,7 +100,13 @@ pub struct Metrics {
     pub step_execute_decode: Histogram,
     pub step_execute_mixed: Histogram,
     pub step_update: Histogram,
+    /// executor host 侧分段（engine-gap 第 7 轮）：`[mode][phase]`，mode = prefill / decode / mixed，
+    /// phase = upload / launch / wait（见 `runner::StepPhases`）。只有 executor 实现 `take_step_phases` 才有数据。
+    pub step_phase: [[Histogram; 3]; 3],
 }
+
+pub const STEP_PHASE_MODES: [&str; 3] = ["prefill", "decode", "mixed"];
+pub const STEP_PHASE_NAMES: [&str; 3] = ["upload", "launch", "wait"];
 
 impl Default for Histogram {
     fn default() -> Self {
@@ -121,6 +127,7 @@ impl Metrics {
             step_execute_decode: Histogram::new(STEP_BUCKETS),
             step_execute_mixed: Histogram::new(STEP_BUCKETS),
             step_update: Histogram::new(STEP_BUCKETS),
+            step_phase: std::array::from_fn(|_| std::array::from_fn(|_| Histogram::new(STEP_BUCKETS))),
             ..Default::default()
         }
     }
@@ -263,6 +270,15 @@ impl Metrics {
             &format!("{prefix}engine_step_update_seconds"),
             "Output update + dispatch time per step.",
         );
+        for (mi, mode) in STEP_PHASE_MODES.iter().enumerate() {
+            for (pi, phase) in STEP_PHASE_NAMES.iter().enumerate() {
+                self.step_phase[mi][pi].render(
+                    &mut o,
+                    &format!("{prefix}engine_step_phase_{phase}_{mode}_seconds"),
+                    &format!("Executor host-side {phase} time per step, plan mode = {mode} (upload = plan/sampling H2D, launch = forward+sample enqueue, wait = GPU result wait)."),
+                );
+            }
+        }
         o
     }
 }
