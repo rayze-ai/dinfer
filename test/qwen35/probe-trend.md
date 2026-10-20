@@ -225,3 +225,25 @@
 - 8x1024 conv_us dinfer：rows32
 - 1x1024 fla_chunk_gdr_us vllm：vLLM 容器 third_party fla chunk_gated_delta_rule 同形状 HV48 K=V=128 含 l2norm 50 次均值
 - 1x8192 fla_chunk_gdr_us vllm：1 K→8 K 只 2.4×
+
+## probe_prefill_2（2026-10-20，B300）
+
+### ttft_len（ms）
+
+| x | slope_us_per_token dinfer | ttft_p50_ms dinfer |
+|---|---|---|
+| 510 |  | 28.4 |
+| 1021 |  | 52.0 |
+| 2029 |  | 107.0 |
+| 3009 |  | 163.0 |
+| 4059 |  | 223.6 |
+| 6019 |  | 349.1 |
+| 1k-6k | 58.3 |  |
+
+- 510 ttft_p50_ms dinfer：r8+r9 合入后二进制（1873e55），snapshot 默认开（10% KV 预算）；同口径复测 probe_prefill_1
+- 1021 ttft_p50_ms dinfer：r8+r9 合入后二进制（1873e55），snapshot 默认开（10% KV 预算）；同口径复测 probe_prefill_1
+- 2029 ttft_p50_ms dinfer：r8+r9 合入后二进制（1873e55），snapshot 默认开（10% KV 预算）；同口径复测 probe_prefill_1
+- 3009 ttft_p50_ms dinfer：r8+r9 合入后二进制（1873e55），snapshot 默认开（10% KV 预算）；同口径复测 probe_prefill_1
+- 4059 ttft_p50_ms dinfer：r8+r9 合入后二进制（1873e55），snapshot 默认开（10% KV 预算）；同口径复测 probe_prefill_1
+- 6019 ttft_p50_ms dinfer：r8+r9 合入后二进制（1873e55），snapshot 默认开（10% KV 预算）；同口径复测 probe_prefill_1
+- 1k-6k slope_us_per_token dinfer：r9 前 51.5（probe_prefill_1 重拟合）；变差，6 K +35 ms，疑 r8 每 1024 对齐边界存快照

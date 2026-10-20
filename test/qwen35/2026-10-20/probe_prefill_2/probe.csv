@@ -1,0 +1,8 @@
+probe,date,gpu,model,group,metric,side,x,value,unit,note
+probe_prefill_2,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,dinfer,510,28.4,ms,r8+r9 合入后二进制（1873e55），snapshot 默认开（10% KV 预算）；同口径复测 probe_prefill_1
+probe_prefill_2,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,dinfer,1021,52.0,ms,r8+r9 合入后二进制（1873e55），snapshot 默认开（10% KV 预算）；同口径复测 probe_prefill_1
+probe_prefill_2,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,dinfer,2029,107.0,ms,r8+r9 合入后二进制（1873e55），snapshot 默认开（10% KV 预算）；同口径复测 probe_prefill_1
+probe_prefill_2,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,dinfer,3009,163.0,ms,r8+r9 合入后二进制（1873e55），snapshot 默认开（10% KV 预算）；同口径复测 probe_prefill_1
+probe_prefill_2,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,dinfer,4059,223.6,ms,r8+r9 合入后二进制（1873e55），snapshot 默认开（10% KV 预算）；同口径复测 probe_prefill_1
+probe_prefill_2,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,dinfer,6019,349.1,ms,r8+r9 合入后二进制（1873e55），snapshot 默认开（10% KV 预算）；同口径复测 probe_prefill_1
+probe_prefill_2,2026-10-20,B300,qwen35,ttft_len,slope_us_per_token,dinfer,1k-6k,58.3,us/token,r9 前 51.5（probe_prefill_1 重拟合）；变差，6 K +35 ms，疑 r8 每 1024 对齐边界存快照
