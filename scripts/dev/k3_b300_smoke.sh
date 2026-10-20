@@ -2,6 +2,7 @@
 # B300：Kimi-K3 前 N 层 serve 冒烟（docs/loops/k3-serve.md）。启动 dinfer（前 N 层）→ /v1/models、/metrics、流式 chat 一条 → bench c1 ×8 →
 # 收集日志。exit 0 = 全部步骤通过（内容乱是预期，只看流程）。在远端直接跑：
 #   K3_LAYERS=5 K3_GPU=2 PORT=8014 bash scripts/dev/k3_b300_smoke.sh
+#   TP（C-5）：K3_GPU=2,3 K3_TP=2 bash scripts/dev/k3_b300_smoke.sh   （→ `--tp 2`，用 CUDA_VISIBLE_DEVICES 里的前 tp 张卡；产物目录加 _tp2）
 # 产物：$OUT（默认 /data/yaochen/infer/bootstrap/k3serve/smoke${K3_LAYERS}）：serve.log / models.json / metrics.txt / chat_stream.txt /
 #       bench_c1.json / bench_c8.json / summary.txt。拷回仓库 test/kimik3/<日期>/smoke<N>/。
 set -uo pipefail
@@ -12,7 +13,8 @@ LAYERS="${K3_LAYERS:-5}"
 GPU="${K3_GPU:-2}"
 PORT="${PORT:-8014}"
 MODEL="${K3_MODEL:-/data/models/moonshotai/Kimi-K3}"
-OUT="${OUT:-/data/yaochen/infer/bootstrap/k3serve/smoke${LAYERS}}"
+TP="${K3_TP:-1}"
+OUT="${OUT:-/data/yaochen/infer/bootstrap/k3serve/smoke${LAYERS}$([ "$TP" != 1 ] && echo "_tp$TP")}"
 MAX_SEQS="${MAX_SEQS:-16}"
 BUDGET="${BUDGET:-2048}"
 URL="http://127.0.0.1:$PORT"
@@ -25,11 +27,11 @@ fail() { printf 'FAIL: %s\n' "$*" | tee -a "$OUT/summary.txt"; rc=1; }
 # 残留进程
 pkill -f "dinfer serve .*--port $PORT" 2>/dev/null && sleep 2
 
-step "启动 dinfer（前 $LAYERS 层，GPU $GPU，:$PORT）"
+step "启动 dinfer（前 $LAYERS 层，GPU $GPU，tp $TP，:$PORT）"
 export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$GPU" RUST_LOG="${RUST_LOG:-info}"
 T0=$(date +%s.%N)
 nohup target/release/dinfer serve --model "$MODEL" --layers "$LAYERS" --port "$PORT" \
-  --max-num-seqs "$MAX_SEQS" --max-num-batched-tokens "$BUDGET" --max-model-len 4096 "$@" > "$OUT/serve.log" 2>&1 < /dev/null &
+  --max-num-seqs "$MAX_SEQS" --max-num-batched-tokens "$BUDGET" --max-model-len 4096 --tp "$TP" "$@" > "$OUT/serve.log" 2>&1 < /dev/null &
 SPID=$!
 for i in $(seq 1 240); do
   curl -sf -m 2 "$URL/health" > /dev/null 2>&1 && break
@@ -39,7 +41,7 @@ done
 T1=$(date +%s.%N)
 curl -sf -m 2 "$URL/health" > /dev/null 2>&1 || { fail "health 超时（480 s）"; tail -20 "$OUT/serve.log" | cut -c1-200; kill "$SPID"; exit 1; }
 printf 'startup_wall_s=%.1f\n' "$(echo "$T1 - $T0" | bc)" | tee -a "$OUT/summary.txt"
-grep -E 'TRUNCATED|model loaded|engine started|startup timing|kimik3 eos|single-stream' "$OUT/serve.log" | cut -c1-260 | tee -a "$OUT/summary.txt"
+grep -E 'TRUNCATED|model loaded|engine started|startup timing|kimik3 eos|single-stream|TP/EP|NCCL comm' "$OUT/serve.log" | cut -c1-260 | tee -a "$OUT/summary.txt"
 grep -q 'TRUNCATED' "$OUT/serve.log" || fail "日志没有 TRUNCATED MODEL 标记"
 
 step "/v1/models"
