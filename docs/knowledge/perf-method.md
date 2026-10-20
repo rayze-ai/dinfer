@@ -35,6 +35,7 @@
 | 新 kernel 微基准 4×，bench 持平 | B300 与 3090 不同 | 分发条件 `tokens == num_seqs` 因缓冲推断永不成立 | loop 4b/4c |
 | 卡空却报 OOM | GPU 编号错 | 每层激活缓冲 × 预算 16384 = 170 GB | pitfalls "nsys 起服务 OOM" |
 | 某 kernel 次数/步异常高 | 分发 bug | nsys 把 warmup 段算进来 | loop 9 疑点 1 |
+| decode 步 31% 是 H2D memcpy | 上传路径有问题 | 切步脚本把**加载期权重 H2D** 摊进了 decode 步；稳态每步 H2D < 0.5% | engine-gap 6c |
 
 ## 7. 引擎层面 vs 模型层面，以及测试程序本身（用户 2026-10-20）
 - **模型层面**（四组闭环、固定长度、ignore_eos）量 kernel + graph；**引擎层面**（泊松 + 长度分布 + 多轮前缀 + 不 ignore_eos）量调度 / prefix cache / 尾部 / 容量，口径 `requirements.md` 验收 v2 / `design.md` §15。Qwen3.5 四组 1.10× 时引擎层面 goodput 只有 vLLM 的 0.07–0.44×——两者可以完全脱节，**只报引擎层面的 goodput / p99 给用户**。
@@ -56,5 +57,5 @@
 
 ## 9. 引擎口径基线与归因链（Qwen3.5-27B B300，2026-10-20，`engine_1`）
 - 基线：goodput dinfer 1.73 / 1.92 / 1.40 / 0.57 vs vLLM 1.72 / 2.55 / 3.06 / 3.14（rate 2/4/8/12，SLO 500/20）；rate 2 持平、≥ 4 落后、SLO 下最大 req/s ≈ 2 vs ≥ 12。同一时刻四组闭环是 1.10×——两口径可以完全脱节。
-- 归因链（每步一个工具）：① 客户端 TPOT 23 ≈ `/metrics` decode 步均值 23（含 async 等待）→ TPOT 由 decode 步节拍决定；② nsys 纯 decode 步 span 13–19 ms → 差在 GPU 之外或 GPU 上的非 kernel 项；③ nsys 按步分类 `nsys_mixed.py`：decode 步 31% 是 `[CUDA memcpy H2D]` 18 次 × 336 µs（闭环时 16 × 1 µs）→ 随在飞数 × 块数增长的上传；prefill 步 GPU 只忙 27% → host 空转。④ 切片（`long_prefill_token_threshold`）把 mixed 步变小但总量不变、TPOT 不动 → 排除"mixed 步是主因"。
+- 归因链（每步一个工具）：① 客户端 TPOT 23 ≈ `/metrics` decode 步均值 23（含 async 等待）→ TPOT 由 decode 步节拍决定；② nsys 纯 decode 步 span 13–19 ms → 差在 GPU 之外或 GPU 上的非 kernel 项；③ nsys 按步分类 `nsys_mixed.py` **必须先切稳态窗口**（最后一次大 H2D 之后），否则加载期拷贝摊进步里（6c 误读）；稳态下 decode 步 ≈ kernel 之和 → 差在 kernel；prefill 步 GPU 只忙 27% → host 空转（alloc / 懒加载 / 首捕获 / 同步 D2H）。④ 切片（`long_prefill_token_threshold`）把 mixed 步变小但总量不变、TPOT 不动 → 排除"mixed 步是主因"。
 - 教训：闭环 bench 的短 prompt / 固定并发把"随长度 / 在飞数增长的 host 成本"全藏住了；引擎口径下先看 memcpy / memset / host 空转，再看 kernel。
