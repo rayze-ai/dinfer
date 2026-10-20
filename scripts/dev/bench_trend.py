@@ -47,7 +47,7 @@ def read_gpu(d):
 
 def category(label, change=""):
     # benchN（4090 主线）与 bench_<卡型>_N（如 bench_b300_1，别的卡上的主线 dinfer vs vLLM）都是 single；bench_tp2 / bench_dp2 走下面的 tp / dp
-    if re.fullmatch(r"bench\d*", label) or (re.fullmatch(r"bench_[a-z0-9]+_\d+", label) and not re.search(r"_(tp|dp)\d*_", label)):
+    if re.fullmatch(r"bench\d*", label) or (re.fullmatch(r"bench_[a-z0-9]+_(vllm)?\d+", label) and not re.search(r"_(tp|dp)\d*_", label)):
         return "single"
     s = (label + " " + change).lower()
     if label.startswith("ab_pd") or re.search(r"\bpd\b|pd 分离|pd1", s):
@@ -67,7 +67,16 @@ def load_round(d):
     for g in GROUPS:
         fa, fb = os.path.join(d, f"dinfer_{g}.json"), os.path.join(d, f"vllm_{g}.json")
         if not os.path.exists(fa):
-            return None
+            # 只有 vLLM 的轮（基线先行，dinfer 侧还没有该模型：如 K3 的 bench_b300_vllm1）→ kind=baseline，dinfer 列 NaN
+            if not os.path.exists(fb):
+                return None
+            r["baseline_only"] = True
+            x = {"tps": NAN, "ttft": NAN, "tpot": NAN, "vllm_tps": NAN, "vllm_ttft": NAN, "vllm_tpot": NAN, "ratio": NAN}
+            b = json.load(open(fb))
+            x.update({"vllm_tps": b["output_token_throughput_tps"], "vllm_ttft": b["ttft_ms"]["p50"], "vllm_tpot": b["tpot_ms"]["p50"]})
+            r["groups"][g] = x
+            has_v = True
+            continue
         a = json.load(open(fa))
         x = {"tps": a["output_token_throughput_tps"], "ttft": a["ttft_ms"]["p50"], "tpot": a["tpot_ms"]["p50"],
              "vllm_tps": NAN, "vllm_ttft": NAN, "vllm_tpot": NAN, "ratio": NAN}
@@ -78,14 +87,14 @@ def load_round(d):
             has_v = True
         r["groups"][g] = x
     r["has_vllm"] = has_v
-    r["kind"] = category(r["label"], r["change"])
+    r["kind"] = "baseline" if r.get("baseline_only") else category(r["label"], r["change"])
     return r
 
 
 def round_key(d):
     # benchN（数字轮次）或 bench_<tag>（如 bench_tp2 / bench_dp2，多卡轮次）；带 tag 的排在同日数字轮之后
     b = os.path.basename(d)
-    m = re.search(r"bench(\d*)$", b) or re.fullmatch(r"bench_[a-z0-9]+_(\d+)", b)
+    m = re.search(r"bench(\d*)$", b) or re.fullmatch(r"bench_[a-z0-9]+_(?:vllm)?(\d+)", b)
     if m:
         return (os.path.basename(os.path.dirname(d)), 0, int(m.group(1) or 0), "")
     return (os.path.basename(os.path.dirname(d)), 1, 0, b)

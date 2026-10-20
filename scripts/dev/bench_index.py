@@ -25,11 +25,17 @@ for jf in sorted(glob.glob(os.path.join(ROOT, "*", "perf-trend.json"))):
         for g, short in GROUPS:
             m = last.get("groups", {}).get(g) or {}
             tpot, vt = m.get("tpot"), m.get("vllm_tpot")
-            if tpot is None:
+            isnan = lambda v: v is None or (isinstance(v, float) and v != v)
+            if isnan(tpot) and not isnan(vt):
+                cells.append(f"<span class=r>vLLM {vt:.2f}</span>"); continue   # 只有 vLLM 基线（dinfer 侧未就位）
+            if isnan(tpot):
                 cells.append("—"); continue
-            ratio = f" <span class=r>({vt/tpot:.2f}×)</span>" if vt else ""
+            ratio = f" <span class=r>({vt/tpot:.2f}×)</span>" if vt and not isnan(vt) else ""
             cells.append(f"{tpot:.2f}{ratio}")
-        rows.append((model, gpu, len(rs), last.get("label", ""), last.get("date", ""), cells, last.get("change", "")))
+        chg = last.get("change", "")
+        if last.get("kind") == "baseline":
+            chg = "【仅 vLLM 基线，dinfer 侧未就位】" + chg
+        rows.append((model, gpu, len(rs), last.get("label", ""), last.get("date", ""), cells, chg))
 
 def td(x): return f"<td>{x}</td>"
 body = "\n".join(
