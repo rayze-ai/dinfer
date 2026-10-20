@@ -133,6 +133,14 @@
 | | | | c32 | vllm | dinfer | 9445 (+15%) | 22.5 (+71%) | 3.18 (+4%) |
 | bench_r7gate | 2026-10-20 | 第 7 轮公共 trait（take_step_phases / phases 字段）回归门禁 | c8-long | vllm | vllm（基线） | 1881 | 68.3 | 3.77 |
 | | | | c8-long | vllm | dinfer | 2015 (+7%) | 39.1 (+43%) | 3.68 (+2%) |
+| bench_r8bgate | 2026-10-20 | 第 11 轮 r8b（scheduler 不切步 + PlanBuffers snap 列）+ r10 kernel 公共件回归门禁（qwen3 不走 GDN） | c1 | vllm | vllm（基线） | 446 | 18.2 | 2.12 |
+| | | | c1 | vllm | dinfer | 564 (+27%) | 4.2 (+77%) | 1.75 (+17%) |
+| bench_r8bgate | 2026-10-20 | 第 11 轮 r8b（scheduler 不切步 + PlanBuffers snap 列）+ r10 kernel 公共件回归门禁（qwen3 不走 GDN） | c8 | vllm | vllm（基线） | 2878 | 35.9 | 2.55 |
+| | | | c8 | vllm | dinfer | 3407 (+18%) | 13.5 (+62%) | 2.25 (+12%) |
+| bench_r8bgate | 2026-10-20 | 第 11 轮 r8b（scheduler 不切步 + PlanBuffers snap 列）+ r10 kernel 公共件回归门禁（qwen3 不走 GDN） | c32 | vllm | vllm（基线） | 8230 | 76.1 | 3.33 |
+| | | | c32 | vllm | dinfer | 9185 (+12%) | 23.0 (+70%) | 3.23 (+3%) |
+| bench_r8bgate | 2026-10-20 | 第 11 轮 r8b（scheduler 不切步 + PlanBuffers snap 列）+ r10 kernel 公共件回归门禁（qwen3 不走 GDN） | c8-long | vllm | vllm（基线） | 1897 | 67.8 | 3.75 |
+| | | | c8-long | vllm | dinfer | 2006 (+6%) | 33.7 (+50%) | 3.74 (+0%) |
 | bench_r8gate | 2026-10-20 | 第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐 + 抢占丢 token 修）公共 scheduler/kv 回归门禁 | c1 | vllm | vllm（基线） | 446 | 17.4 | 2.12 |
 | | | | c1 | vllm | dinfer | 566 (+27%) | 3.8 (+78%) | 1.75 (+17%) |
 | bench_r8gate | 2026-10-20 | 第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐 + 抢占丢 token 修）公共 scheduler/kv 回归门禁 | c8 | vllm | vllm（基线） | 2873 | 36.1 | 2.55 |
