@@ -7,7 +7,7 @@
 - 多卡编号：`CUDA_DEVICE_ORDER=PCI_BUS_ID`（无害且稳定）；但"卡空却 OOM"先怀疑自己的分配（见 perf-method 误读表）。
 - 容器：`nerdctl -n k8s.io`，vLLM `vllm/vllm-openai:nightly`（0.26.1rc1），`--net host`，用完 `rm -f`；K3 vLLM 只能 tp8 独占 8 卡（tp6 视觉塔 4096/6 不整除），init 624 s。
 - Qwen3.5 bench 口径：GPU 0 dinfer `:8012`（tmux `q35`，`GRAPH_CAPTURE=eager --max-num-batched-tokens 16384`）、GPU 1 vLLM `:8013`（容器 `vllm-qwen35-b300`，`vllm_nerdctl.sh run 1 8013 1`）；`bench_compare.sh test/qwen35/<日期>/bench_b300_N "改动"` → pull 目录 + `perf-trend.*` → commit。
-- nsys：GPU 4–7，端口 8412，`--gpu-memory-utilization 0.9`，`--cuda-graph-trace=node`；分析脚本 `$R/bootstrap/nsys_steps.py`；旧 `.sqlite` 存在时加 `--force-export=true`。
+- nsys：GPU 4–7，端口 8412，`--gpu-memory-utilization 0.9`，`--cuda-graph-trace=node`；分析脚本 `$R/bootstrap/nsys_steps.py` / `nsys_mixed.py`（**先切稳态窗口**）；旧 `.sqlite` 存在时加 `--force-export=true`。**结束方式**：对 serve 进程 `kill -INT`，nsys 随之退出并写报告；`--kill=sigint` 在这版 nsys 不是合法选项（打印 usage、serve 没起、报告 5 KB 空壳——2026-10-20 浪费一轮）；`pkill -f` 模式会误杀 nsys 自身丢 .nsys-rep。
 - 容器写进 bind mount 的文件属 root，`push --delete` 会 Permission denied → `sudo chown`。
 
 ## 4090（`scripts/dev/remote4090.sh`）
