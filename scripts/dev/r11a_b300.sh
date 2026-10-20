@@ -24,7 +24,7 @@ done
 if [ "${NCU:-1}" = 1 ]; then
   echo "== ncu $(date +%T)"
   sudo -n env GQA_BENCH_ITERS=1 ${NCU_VAR:-} CUDA_VISIBLE_DEVICES=4 LD_LIBRARY_PATH="$LD_LIBRARY_PATH" \
-    taskset -c 48-55 /usr/local/cuda-13.1/bin/ncu --target-processes all -k regex:gqa_fa --launch-skip 4 --launch-count 1 \
+    taskset -c 48-55 /usr/local/cuda-13.1/bin/ncu --target-processes all -k regex:${NCU_K:-gqa_fa_v6} --launch-skip ${NCU_SKIP:-4} --launch-count 1 \
     --set full "$BIN" --ignored --nocapture > "$OUT/r${ROUND}_ncu.txt" 2>&1
   grep -E 'Duration|Registers Per Thread|Achieved Occupancy|Theoretical Occupancy|Block Limit|Eligible Warps|Issued Warp|No Eligible|DRAM Throughput|L2 Cache Throughput|Compute \(SM\) Throughput|Memory Throughput|Shared Memory Configuration Size|Dynamic Shared|Waves Per SM|Grid Size|Block Size|Executed Ipc Active|Stall' "$OUT/r${ROUND}_ncu.txt" | sed 's/  */ /g' | head -60
 fi

@@ -54,7 +54,32 @@ fn bench_t(st: &Stream, t: usize, h: usize, hk: usize, d: usize, iters: usize) {
     });
     // causal：QK^T 与 PV 各 T²/2 · D 次乘加 → 2·T²·D·H FLOP
     let flop = 2.0 * (t as f64) * (t as f64) * (d as f64) * (h as f64);
-    println!("[attn T={t}] fa_us={us:.0} tflops={:.1}", flop / us / 1e6);
+    // 自对拍（B300 无 torch）：与 v5 旧路径（cfg 0，3090 ops_parity 已过）逐元素比，bf16 输出链一 ulp ≈ 4e-3·|x|
+    let cfg = std::env::var("GQA_PREFILL_CFG").ok().and_then(|s| s.parse::<i32>().ok()).unwrap_or(-1);
+    let mut diff = String::new();
+    if cfg != 0 {
+        let mut out_ref = st.alloc_zeros::<bf16>(t * h * d).unwrap();
+        let rc = unsafe {
+            dinfer_kernels::ffi::gqa_prefill_bf16(
+                st.ptr(&qv) as *const _, st.ptr(&kv) as *const _, st.ptr(&vv) as *const _,
+                st.ptr_mut(&mut out_ref) as *mut _, st.ptr(&dcu) as *const i32, 1, t as i64, h as i64, hk as i64, d as i64, scale,
+                w as i64, w as i64, 0, st.raw() as _,
+            )
+        };
+        assert_eq!(rc, 0, "v5 ref launch");
+        let a = st.dtoh_sync_copy(&out).unwrap();
+        let b = st.dtoh_sync_copy(&out_ref).unwrap();
+        let (mut mx, mut dot, mut na, mut nb) = (0f32, 0f64, 0f64, 0f64);
+        for (x, y) in a.iter().zip(b.iter()) {
+            let (x, y) = (x.to_f32(), y.to_f32());
+            mx = mx.max((x - y).abs());
+            dot += (x * y) as f64; na += (x * x) as f64; nb += (y * y) as f64;
+        }
+        let cos = dot / (na.sqrt() * nb.sqrt()).max(1e-30);
+        diff = format!(" vs_v5_maxabs={mx:.4} cos={cos:.7}");
+        assert!(cos > 0.9999, "v6 cfg {cfg} 与 v5 偏离：cos {cos}");
+    }
+    println!("[attn T={t}] fa_us={us:.0} tflops={:.1}{diff}", flop / us / 1e6);
 }
 
 #[test]

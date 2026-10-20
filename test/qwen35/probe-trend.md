@@ -15,6 +15,18 @@
 
 - 1024 fa_us dinfer：r11a 第 0 轮基线：gqa_fa_v5<256> TILE 32 NBUF 1；B300-50 GPU 4；ncu 255 reg 有 spill、2 block/SM、tensor pipe 45%、DRAM 0.6%
 
+## probe_attn_r11a_1（2026-10-20，B300）
+
+### attn_scale（us）
+
+| x | fa_cfg0_us dinfer | fa_cfg432_us dinfer | fa_cfg832_us dinfer | fa_cfg864_us dinfer | fa_us dinfer | tflops dinfer | tflops_cfg0 dinfer | tflops_cfg432 dinfer | tflops_cfg832 dinfer | tflops_cfg864 dinfer |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1024 | 91 | 88 | 107 | 97 | 83 | 154.5 | 142.0 | 146.2 | 121.0 | 133.3 |
+| 3009 | 524 | 534 | 634 | 561 | 482 | 230.9 | 212.5 | 208.5 | 175.5 | 198.5 |
+| 6019 | 1815 | 1870 | 2197 | 1916 | 1645 | 270.6 | 245.2 | 238.1 | 202.6 | 232.4 |
+
+- 1024 fa_us dinfer：r11a 第 1 轮：v6（Q 进 smem、NW/TILE 模板化、block 反序）cfg 464 = 4 warp × tile 64；B300-50 GPU 4
+
 ## probe_gdn_r10_1（2026-10-20，B300）
 
 ### gdn_scale（us）

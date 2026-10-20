@@ -320,6 +320,223 @@ static int v5_dispatch(int head_dim, dim3 grid, cudaStream_t stream, const bf16*
   }
   return (int)cudaErrorInvalidValue;
 }
+// ---- v6（r11a，2026-10-20，docs/loops/qwen35-attn-r11a.md）：D=256 专用，Q 进 smem，NW / TILE 模板化 ----
+// 与 v5 的差别：① Q 不再常驻寄存器（D=256 时 v5 Q 64 + O 128 + S 寄存器 = 255 且 spill），每 tile 从 smem ldmatrix 取 Q 的
+// A 片（smem 读量 +12.5%，换回 TILE 64 与无 spill）；② block 的 warp 数 NW 与 TILE 由调用方给（ArchProfile 按卡选，
+// 环境变量只做覆盖），sm_103 227 KB smem 装得下 8 warp × TILE 64（Q 67.6 KB + K/V 67.6 KB）；③ causal 负载：blockIdx.x
+// 反序（行号大的 block 先发，尾波不再被最重的 block 拖）；④ 整 warp 不可见的 tile 跳过 mma（只参与同步）。
+// 单缓冲（v5 NBUF=2 在两卡都更慢；B300 上 occupancy 由寄存器限 1–2 block/SM，双缓冲收益待 ncu 再定）。
+template <int NW, int TILE>
+struct V6Cfg {
+  static constexpr int BQ = NW * 16, THREADS = NW * 32;
+};
+template <bool PAGED, int D, int NW, int TILE>
+__global__ void __launch_bounds__(NW * 32) gqa_fa_v6_kernel(
+    const bf16* __restrict__ q, const bf16* __restrict__ k, const bf16* __restrict__ v, const bf16* __restrict__ cache,
+    const int32_t* __restrict__ block_table, const int32_t* __restrict__ seq_lens, const int32_t* __restrict__ cu_seqlens,
+    bf16* __restrict__ out, int H, int Hkv, float scale_log2, int q_stride, int kv_stride, int block_size, int max_blocks,
+    int skip_single) {
+  constexpr int BQ = V6Cfg<NW, TILE>::BQ, THREADS = V6Cfg<NW, TILE>::THREADS, LDS = D + 8;
+  constexpr int SFRAG = TILE / 8, OF = D / 8, U = D / 8, LOGU = v5_log2(U);
+  constexpr int QITERS = BQ * U / THREADS, KITERS = TILE * U / THREADS;
+  static_assert(QITERS * THREADS == BQ * U && KITERS * THREADS == TILE * U, "v6 装载整除");
+  extern __shared__ __align__(128) unsigned char v6_smem[];
+  bf16* sQ = reinterpret_cast<bf16*>(v6_smem);
+  bf16* sK = sQ + (size_t)BQ * LDS;
+  bf16* sV = sK + (size_t)TILE * LDS;
+  const int b = blockIdx.z, h = blockIdx.y;
+  const int group = H / Hkv, hk = h / group;
+  const int q0 = cu_seqlens[b], q_len = cu_seqlens[b + 1] - q0;
+  if (PAGED && skip_single && q_len == 1) return;
+  // 反序：gridDim.x-1-blockIdx.x → 行号最大（key 最多）的 block 先发
+  const int q_base = (gridDim.x - 1 - blockIdx.x) * BQ;
+  if (q_base >= q_len) return;
+  const int seq_len = PAGED ? seq_lens[b] : q_len;
+  const int hist = seq_len - q_len;
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, cq = (lane & 3) * 2;
+  const int row_a = q_base + warp * 16 + g, row_b = row_a + 8;
+  const bool live_a = row_a < q_len, live_b = row_b < q_len;
+  const int32_t* bt = PAGED ? block_table + (int64_t)b * max_blocks : nullptr;
+  // Q tile → smem（越界行零填充；q 行跨度 q_stride）
+#pragma unroll
+  for (int i = 0; i < QITERS; ++i) {
+    const int c = tid + THREADS * i, j = c >> LOGU, d8 = (c & (U - 1)) * 8;
+    const int row = q_base + j;
+    const bf16* pq = q + (int64_t)(q0 + min(row, q_len - 1)) * q_stride + (int64_t)h * D + d8;
+    cp_async16(sQ + j * LDS + d8, pq, row < q_len ? 16 : 0);
+  }
+  auto load_tile = [&](int tile) {
+    const int k0 = tile * TILE;
+    const int kn = min(TILE, seq_len - k0);
+#pragma unroll
+    for (int i = 0; i < KITERS; ++i) {
+      const int c = tid + THREADS * i, j = c >> LOGU, d8 = (c & (U - 1)) * 8;
+      const bf16 *pk, *pv;
+      int bytes = 0;
+      if (j < kn) {
+        bytes = 16;
+        if (PAGED) {
+          const int pos = k0 + j;
+          const int64_t blk = bt[pos / block_size];
+          const bf16* base = cache + slot_off(blk * block_size + pos % block_size, Hkv, D) + (int64_t)hk * 2 * D;
+          pk = base + d8;
+          pv = base + D + d8;
+        } else {
+          const int64_t t = q0 + k0 + j;
+          pk = k + t * kv_stride + (int64_t)hk * D + d8;
+          pv = v + t * kv_stride + (int64_t)hk * D + d8;
+        }
+      } else {
+        pk = pv = k ? k : cache;
+      }
+      cp_async16(sK + j * LDS + d8, pk, bytes);
+      cp_async16(sV + j * LDS + d8, pv, bytes);
+    }
+    cp_async_commit();
+  };
+  load_tile(0);  // 与 Q 同一 commit 组
+  float o[OF][4];
+#pragma unroll
+  for (int i = 0; i < OF; ++i) { o[i][0] = o[i][1] = o[i][2] = o[i][3] = 0.f; }
+  float m_a = -INFINITY, m_b = -INFINITY, l_a = 0.f, l_b = 0.f;
+  const int vis_a = hist + row_a, vis_b = hist + row_b;
+  const int last_key = hist + min(q_base + BQ - 1, q_len - 1);
+  const int n_tiles = last_key / TILE + 1;
+  const int warp_min_vis = hist + q_base + warp * 16;
+  const int warp_max_vis = hist + min(q_base + warp * 16 + 15, q_len - 1);
+  const bf16* sQw = sQ + (warp * 16) * LDS;
+  for (int tile = 0; tile < n_tiles; ++tile) {
+    const int k0 = tile * TILE;
+    cp_async_wait_all();
+    __syncthreads();
+    if (k0 <= warp_max_vis) {  // 整 warp 不可见的 tile 只参与同步
+      float sacc[SFRAG][4];
+#pragma unroll
+      for (int nt = 0; nt < SFRAG; ++nt) { sacc[nt][0] = sacc[nt][1] = sacc[nt][2] = sacc[nt][3] = 0.f; }
+#pragma unroll
+      for (int kk2 = 0; kk2 < D / 32; ++kk2) {
+        uint32_t qa[8];
+        // A 片（16 行 × 32 维）：x4 = {行0-7 列0-7, 行8-15 列0-7, 行0-7 列8-15, 行8-15 列8-15}，再 +16 列一组
+        ldsm_x4(qa, sQw + (lane & 15) * LDS + kk2 * 32 + 8 * (lane >> 4));
+        ldsm_x4(qa + 4, sQw + (lane & 15) * LDS + kk2 * 32 + 16 + 8 * (lane >> 4));
+#pragma unroll
+        for (int nt = 0; nt < SFRAG; ++nt) {
+          uint32_t bk[4];
+          ldsm_x4(bk, sK + (nt * 8 + (lane & 7)) * LDS + kk2 * 32 + 8 * (lane >> 3));
+          mma16816(sacc[nt], qa, bk[0], bk[1]);
+          mma16816(sacc[nt], qa + 4, bk[2], bk[3]);
+        }
+      }
+      const bool need_mask = (k0 + TILE - 1 > warp_min_vis);
+      float mx_a = -INFINITY, mx_b = -INFINITY;
+#pragma unroll
+      for (int nt = 0; nt < SFRAG; ++nt) {
+        const int key = k0 + nt * 8 + cq;
+#pragma unroll
+        for (int e = 0; e < 2; ++e) {
+          float sa = sacc[nt][e] * scale_log2, sb = sacc[nt][2 + e] * scale_log2;
+          if (need_mask) {
+            if (key + e > vis_a) sa = -INFINITY;
+            if (key + e > vis_b) sb = -INFINITY;
+          }
+          sacc[nt][e] = sa; sacc[nt][2 + e] = sb;
+          mx_a = fmaxf(mx_a, sa); mx_b = fmaxf(mx_b, sb);
+        }
+      }
+      mx_a = fmaxf(mx_a, __shfl_xor_sync(0xffffffffu, mx_a, 1)); mx_a = fmaxf(mx_a, __shfl_xor_sync(0xffffffffu, mx_a, 2));
+      mx_b = fmaxf(mx_b, __shfl_xor_sync(0xffffffffu, mx_b, 1)); mx_b = fmaxf(mx_b, __shfl_xor_sync(0xffffffffu, mx_b, 2));
+      float alpha_a = 1.f, alpha_b = 1.f;
+      if (mx_a != -INFINITY) { const float mn = fmaxf(m_a, mx_a); alpha_a = exp2f(m_a - mn); m_a = mn; }
+      if (mx_b != -INFINITY) { const float mn = fmaxf(m_b, mx_b); alpha_b = exp2f(m_b - mn); m_b = mn; }
+      float ps_a = 0.f, ps_b = 0.f;
+#pragma unroll
+      for (int nt = 0; nt < SFRAG; ++nt) {
+#pragma unroll
+        for (int e = 0; e < 2; ++e) {
+          const float pa = (sacc[nt][e] == -INFINITY) ? 0.f : exp2f(sacc[nt][e] - m_a);
+          const float pb = (sacc[nt][2 + e] == -INFINITY) ? 0.f : exp2f(sacc[nt][2 + e] - m_b);
+          sacc[nt][e] = pa; sacc[nt][2 + e] = pb; ps_a += pa; ps_b += pb;
+        }
+      }
+      l_a = l_a * alpha_a + ps_a; l_b = l_b * alpha_b + ps_b;
+#pragma unroll
+      for (int nt = 0; nt < OF; ++nt) { o[nt][0] *= alpha_a; o[nt][1] *= alpha_a; o[nt][2] *= alpha_b; o[nt][3] *= alpha_b; }
+#pragma unroll
+      for (int j = 0; j < TILE / 16; ++j) {
+        uint32_t pa[4];
+        pa[0] = pack_bf16x2(sacc[2 * j][0], sacc[2 * j][1]);
+        pa[1] = pack_bf16x2(sacc[2 * j][2], sacc[2 * j][3]);
+        pa[2] = pack_bf16x2(sacc[2 * j + 1][0], sacc[2 * j + 1][1]);
+        pa[3] = pack_bf16x2(sacc[2 * j + 1][2], sacc[2 * j + 1][3]);
+#pragma unroll
+        for (int nt2 = 0; nt2 < D / 16; ++nt2) {
+          uint32_t bv[4];
+          ldsm_x4_t(bv, sV + (j * 16 + 8 * ((lane >> 3) & 1) + (lane & 7)) * LDS + nt2 * 16 + 8 * (lane >> 4));
+          mma16816(o[2 * nt2], pa, bv[0], bv[1]);
+          mma16816(o[2 * nt2 + 1], pa, bv[2], bv[3]);
+        }
+      }
+    }
+    if (tile + 1 < n_tiles) {
+      __syncthreads();  // 单缓冲：全 block 算完才能覆盖
+      load_tile(tile + 1);
+    }
+  }
+  l_a += __shfl_xor_sync(0xffffffffu, l_a, 1); l_a += __shfl_xor_sync(0xffffffffu, l_a, 2);
+  l_b += __shfl_xor_sync(0xffffffffu, l_b, 1); l_b += __shfl_xor_sync(0xffffffffu, l_b, 2);
+  const float inv_a = l_a > 0.f ? 1.f / l_a : 0.f, inv_b = l_b > 0.f ? 1.f / l_b : 0.f;
+  if (live_a) {
+    bf16* op = out + ((int64_t)(q0 + row_a) * H + h) * D + cq;
+#pragma unroll
+    for (int nt = 0; nt < OF; ++nt)
+      *reinterpret_cast<uint32_t*>(op + nt * 8) = pack_bf16x2(o[nt][0] * inv_a, o[nt][1] * inv_a);
+  }
+  if (live_b) {
+    bf16* op = out + ((int64_t)(q0 + row_b) * H + h) * D + cq;
+#pragma unroll
+    for (int nt = 0; nt < OF; ++nt)
+      *reinterpret_cast<uint32_t*>(op + nt * 8) = pack_bf16x2(o[nt][2] * inv_b, o[nt][3] * inv_b);
+  }
+}
+template <bool PAGED, int D, int NW, int TILE>
+static int v6_launch(int max_q, int heads, int num_reqs, cudaStream_t stream, const bf16* q, const bf16* k, const bf16* v,
+                     const bf16* cache, const int32_t* bt, const int32_t* seq_lens, const int32_t* cu, bf16* out, int H,
+                     int Hkv, float scale_log2, int q_stride, int kv_stride, int block_size, int max_blocks,
+                     int skip_single) {
+  constexpr int BQ = V6Cfg<NW, TILE>::BQ, LDS = D + 8;
+  const size_t smem = (size_t)(BQ + 2 * TILE) * LDS * 2;
+  static int attr = 0;  // 0 未设 / 1 成功 / -1 失败（smem 超卡上限）
+  if (attr == 0) {
+    attr = cudaFuncSetAttribute(gqa_fa_v6_kernel<PAGED, D, NW, TILE>, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                (int)smem) == cudaSuccess ? 1 : -1;
+    if (attr < 0) (void)cudaGetLastError();
+  }
+  if (attr < 0) return (int)cudaErrorInvalidConfiguration;
+  dim3 grid((unsigned)((max_q + BQ - 1) / BQ), (unsigned)heads, (unsigned)num_reqs);
+  gqa_fa_v6_kernel<PAGED, D, NW, TILE><<<grid, NW * 32, smem, stream>>>(q, k, v, cache, bt, seq_lens, cu, out, H, Hkv,
+                                                                       scale_log2, q_stride, kv_stride, block_size,
+                                                                       max_blocks, skip_single);
+  return (int)cudaGetLastError();
+}
+// cfg = NW·100 + TILE（调用方 / ArchProfile 给）：0 = v5 旧路径；D=256 支持 {432, 464, 832, 864}；D=128 一律 v5。
+template <bool PAGED>
+static int v6_dispatch(int cfg, int max_q, int heads, int num_reqs, cudaStream_t stream, const bf16* q, const bf16* k,
+                       const bf16* v, const bf16* cache, const int32_t* bt, const int32_t* seq_lens, const int32_t* cu,
+                       bf16* out, int H, int Hkv, float scale_log2, int q_stride, int kv_stride, int block_size,
+                       int max_blocks, int skip_single) {
+#define V6_CASE(NW, TILE)                                                                                         \
+  case NW * 100 + TILE:                                                                                           \
+    return v6_launch<PAGED, 256, NW, TILE>(max_q, heads, num_reqs, stream, q, k, v, cache, bt, seq_lens, cu, out, H, \
+                                           Hkv, scale_log2, q_stride, kv_stride, block_size, max_blocks, skip_single);
+  switch (cfg) {
+    V6_CASE(4, 32)
+    V6_CASE(4, 64)
+    V6_CASE(8, 32)
+    V6_CASE(8, 64)
+    default: return (int)cudaErrorInvalidValue;
+  }
+#undef V6_CASE
+}
 constexpr float LOG2E_F = 1.4426950408889634f;
 // 通用慢路径（任意 D ≤ MAX_D）：旧参考实现，每 (req, q_head) 一个 block 逐 query 行三遍扫 key。对拍 fixture（D=32）走这里。
 __global__ void gqa_prefill_ref_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k, const bf16* __restrict__ v,
@@ -845,12 +1062,17 @@ extern "C" int gqa_cache_write_bf16(const void* k, const void* v, void* cache, c
 
 extern "C" int gqa_prefill_bf16(const void* q, const void* k, const void* v, void* out, const int32_t* cu_seqlens,
                                 int64_t num_reqs, int64_t max_seqlen, int64_t heads, int64_t kv_heads, int64_t head_dim,
-                                float scale, int64_t q_stride, int64_t kv_stride, cudaStream_t stream) {
+                                float scale, int64_t q_stride, int64_t kv_stride, int cfg, cudaStream_t stream) {
   if (q_stride <= 0) q_stride = heads * head_dim;
   if (kv_stride <= 0) kv_stride = kv_heads * head_dim;
   if (num_reqs <= 0) return 0;
   if (heads <= 0 || kv_heads <= 0 || head_dim <= 0 || head_dim > MAX_D || heads % kv_heads != 0 || max_seqlen <= 0)
     return err(cudaErrorInvalidValue);
+  if (head_dim == 256 && cfg != 0)
+    return v6_dispatch<false>(cfg, (int)max_seqlen, (int)heads, (int)num_reqs, stream, static_cast<const bf16*>(q),
+                              static_cast<const bf16*>(k), static_cast<const bf16*>(v), nullptr, nullptr, nullptr,
+                              cu_seqlens, static_cast<bf16*>(out), (int)heads, (int)kv_heads, scale * LOG2E_F,
+                              (int)q_stride, (int)kv_stride, 0, 0, 0);
   if (head_dim == 128 || head_dim == 256) {
     const int bq = head_dim == 128 ? V5Cfg<128>::BQ : V5Cfg<256>::BQ;
     dim3 grid((unsigned)((max_seqlen + bq - 1) / bq), (unsigned)heads, (unsigned)num_reqs);
@@ -870,12 +1092,17 @@ extern "C" int gqa_prefill_bf16(const void* q, const void* k, const void* v, voi
 extern "C" int gqa_paged_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens,
                               const int32_t* cu_seqlens_q, void* out, int64_t num_reqs, int64_t max_q_len, int64_t heads,
                               int64_t kv_heads, int64_t head_dim, int64_t block_size, int64_t max_blocks, float scale,
-                              int64_t q_stride, int skip_single, cudaStream_t stream) {
+                              int64_t q_stride, int skip_single, int cfg, cudaStream_t stream) {
   if (q_stride <= 0) q_stride = heads * head_dim;
   if (num_reqs <= 0) return 0;
   if (head_dim <= 0 || head_dim > MAX_D || heads <= 0 || kv_heads <= 0 || heads % kv_heads != 0 || block_size <= 0 ||
       max_q_len <= 0)
     return err(cudaErrorInvalidValue);
+  if (head_dim == 256 && cfg != 0)
+    return v6_dispatch<true>(cfg, (int)max_q_len, (int)heads, (int)num_reqs, stream, static_cast<const bf16*>(q), nullptr,
+                             nullptr, static_cast<const bf16*>(cache), block_table, seq_lens, cu_seqlens_q,
+                             static_cast<bf16*>(out), (int)heads, (int)kv_heads, scale * LOG2E_F, (int)q_stride, 0,
+                             (int)block_size, (int)max_blocks, skip_single);
   if (head_dim == 128 || head_dim == 256) {
     const int bq = head_dim == 128 ? V5Cfg<128>::BQ : V5Cfg<256>::BQ;
     dim3 grid((unsigned)((max_q_len + bq - 1) / bq), (unsigned)heads, (unsigned)num_reqs);

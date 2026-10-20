@@ -290,11 +290,12 @@ impl ArchProfile {
     /// 全注意力 prefill / chunked-prefill kernel（`gqa.cu`，D=256）的结构：warp 数·100 + tile key 数；0 = v5 旧路径。
     /// r11a（docs/loops/qwen35-attn-r11a.md）：v5 在 D=256 时 Q 64 + O 128 寄存器 → 255 reg 且 spill、2 block/SM，
     /// B300 6 K 单层 1818 µs（mma.sync 峰值 575 TF 的 43%）。v6 把 Q 放 smem，sm_103 227 KB 装得下 8 warp × tile 64
-    /// （Q 67.6 KB + K/V 67.6 KB）；sm8x 99 KB 只装得下 4 warp × tile 32（67.6 KB），3090 实测待定前沿用 v5。
+    /// （Q 67.6 KB + K/V 67.6 KB），但第 1 轮实测 864/832 更慢（单 block 8 warp 全体同步 + 576 block 3.9 波尾部），
+    /// **464（4 warp × tile 64，101 KB，2 block/SM）6 K 1818 → 1645 µs** 为默认；sm8x 99 KB 只装得下 432，3090 实测待定前沿用 v5。
     /// `GQA_PREFILL_CFG` 环境变量只做覆盖（微基准 / 对拍扫变体）。
     pub fn gqa_prefill_cfg_for(arch: Arch) -> i32 {
         match arch {
-            Arch::Sm100 => 864,
+            Arch::Sm100 => 464,
             Arch::Sm90 => 464,
             Arch::Sm8x => 0,
         }
