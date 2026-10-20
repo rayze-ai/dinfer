@@ -42,6 +42,8 @@ pub struct StepMeta<'a> {
     pub max_seqlen: usize,
     /// GDN chunk prefill 的共享工作区（`None` = 顺序递归）。
     pub gdn_chunk: Option<&'a std::cell::RefCell<crate::gdn::GdnChunkWorkspace>>,
+    /// GDN 递归状态边界快照表（r8b；`None` = 本步无快照）。
+    pub gdn_snapshot: Option<crate::gdn::GdnSnapshotMeta<'a>>,
 }
 
 impl<'a> StepMeta<'a> {
@@ -64,6 +66,7 @@ impl<'a> StepMeta<'a> {
             num_reqs: self.num_reqs,
             mode: self.mode,
             chunk: self.gdn_chunk,
+            snapshot: self.gdn_snapshot,
         }
     }
 }

@@ -790,6 +790,57 @@ extern "C" {
     ) -> i32;
 
     // ---- GDN（gdn.cu）----
+    /// r8b：v2 + 快照表（`snap_off == null` = 无快照）；`snap_state` 与 `state` 同布局（槽 stride = state_stride_tok）。
+    pub fn gdn_chunk_ho_v3(
+        qn: *const c_void,
+        gc: *const f32,
+        aq: *const c_void,
+        u: *const c_void,
+        w: *const c_void,
+        kg: *const c_void,
+        h16: *mut c_void,
+        v16: *mut c_void,
+        out: *mut c_void,
+        state: *mut c_void,
+        cu_seqlens: *const i32,
+        cu_nt: *const i32,
+        chunk_off: *const i32,
+        chunk_tab: *const i32,
+        state_indices: *const i32,
+        state_stride_tok: i64,
+        num_seqs: i64,
+        num_chunks: i64,
+        h: i64,
+        hv: i64,
+        k: i64,
+        v: i64,
+        bt: i64,
+        ho_bv: i64,
+        prefetch: i64,
+        split: i64,
+        snap_off: *const i32,
+        snap_pos: *const i32,
+        snap_slot: *const i32,
+        snap_state: *mut c_void,
+        stream: cudaStream_t,
+    ) -> i32;
+    /// r8b：短卷积状态的边界快照（在 `gdn_conv1d_prefill` 覆盖活槽之前调用）。
+    pub fn gdn_conv_snapshot(
+        x: *const c_void,
+        conv_state: *const c_void,
+        snap_state: *mut c_void,
+        cu_seqlens: *const i32,
+        state_indices: *const i32,
+        has_initial: *const i32,
+        snap_off: *const i32,
+        snap_pos: *const i32,
+        snap_slot: *const i32,
+        num_seqs: i64,
+        dim: i64,
+        state_len: i64,
+        x_stride: i64,
+        stream: cudaStream_t,
+    ) -> i32;
     pub fn gdn_conv1d_prefill(
         x: *const c_void,
         w: *const c_void,
@@ -1056,6 +1107,8 @@ mod stubs {
     stub!(gdn_chunk_wy(qn: *const c_void, kn: *const c_void, mq: *const c_void, gc: *const f32, be: *const f32, aq: *mut f32, u: *mut f32, w: *mut f32, kg: *mut f32, cu: *const i32, ct: *const i32, nc: i64, h: i64, hv: i64, k: i64, v: i64, bt: i64, wy_mode: i64, s: cudaStream_t));
     stub!(gdn_chunk_ho(qn: *const c_void, gc: *const f32, aq: *const f32, u: *const f32, w: *const f32, kg: *const f32, o: *mut c_void, st: *mut c_void, cu: *const i32, nt: *const i32, co: *const i32, si: *const i32, sst: i64, ns: i64, h: i64, hv: i64, k: i64, v: i64, bt: i64, ho_bv: i64, s: cudaStream_t));
     stub!(gdn_chunk_ho_v2(qn: *const c_void, gc: *const f32, aq: *const f32, u: *const f32, w: *const f32, kg: *const f32, h16: *mut c_void, v16: *mut c_void, o: *mut c_void, st: *mut c_void, cu: *const i32, nt: *const i32, co: *const i32, ct: *const i32, si: *const i32, sst: i64, ns: i64, nc: i64, h: i64, hv: i64, k: i64, v: i64, bt: i64, ho_bv: i64, pf: i64, split: i64, s: cudaStream_t));
+    stub!(gdn_chunk_ho_v3(qn: *const c_void, gc: *const f32, aq: *const f32, u: *const f32, w: *const f32, kg: *const f32, h16: *mut c_void, v16: *mut c_void, o: *mut c_void, st: *mut c_void, cu: *const i32, nt: *const i32, co: *const i32, ct: *const i32, si: *const i32, sst: i64, ns: i64, nc: i64, h: i64, hv: i64, k: i64, v: i64, bt: i64, ho_bv: i64, pf: i64, split: i64, so: *const i32, sp: *const i32, ss: *const i32, sstate: *mut c_void, s: cudaStream_t));
+    stub!(gdn_conv_snapshot(x: *const c_void, cs: *const c_void, ss: *mut c_void, cu: *const i32, si: *const i32, hi: *const i32, so: *const i32, sp: *const i32, sl: *const i32, ns: i64, d: i64, slen: i64, xs: i64, s: cudaStream_t));
     stub!(gdn_conv1d_prefill(x: *const c_void, w: *const c_void, o: *mut c_void, cs: *mut c_void, cu: *const i32, si: *const i32, hi: *const i32, ns: i64, d: i64, wd: i64, sl: i64, a: i32, total: i64, rpb: i64, xs: i64, s: cudaStream_t));
     stub!(gdn_conv1d_update(x: *const c_void, w: *const c_void, o: *mut c_void, cs: *mut c_void, si: *const i32, b: i64, d: i64, wd: i64, sl: i64, a: i32, xs: i64, s: cudaStream_t));
     stub!(gdn_gate(a: *const c_void, b: *const c_void, al: *const f32, db: *const f32, g: *mut f32, be: *mut f32, t: i64, h: i64, d: i32, abs: i64, s: cudaStream_t));

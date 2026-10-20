@@ -77,6 +77,18 @@ pub struct GdnMeta<'a> {
     pub mode: BatchMode,
     /// chunk prefill 的共享工作区；`None` = 本步走顺序递归（decode / 回退）。
     pub chunk: Option<&'a RefCell<GdnChunkWorkspace>>,
+    /// 递归状态边界快照表（design §15.7 r8b；`None` = 本步无快照）：序列 i 的条目在 `pos / slot[off[i]..off[i+1])`，
+    /// `pos` = 相对该序列段首的 token 偏移。chunk prefill kernel 在 chunk 边界写 rec 状态；conv 状态由
+    /// `gdn_conv_snapshot_strided` 在短卷积之前写。只在 chunk 路径有效（顺序递归路径遇到它报错）。
+    pub snapshot: Option<GdnSnapshotMeta<'a>>,
+}
+
+/// 见 `GdnMeta::snapshot`。
+#[derive(Clone, Copy)]
+pub struct GdnSnapshotMeta<'a> {
+    pub off: &'a Tensor<i32>,
+    pub pos: &'a Tensor<i32>,
+    pub slot: &'a Tensor<i32>,
 }
 
 /// chunk prefill 的切块表 + 中间缓冲，全模型 48 层共用一份（每层串行，无重入）。
@@ -323,6 +335,26 @@ impl GdnLayer {
 
         // 2. 短卷积（decode 单 token 走 update，其余走 varlen prefill）；输出紧凑 [t, conv_dim]
         let single = meta.mode == BatchMode::Decode && meta.num_reqs == t;
+        // r8b：边界快照先写 conv 状态（要在 conv1d_prefill 覆盖活槽之前；从原始输入行 + 入口状态取）
+        if let Some(sn) = meta.snapshot.as_ref() {
+            let sc_snap = self.state.snap_conv.as_mut().ok_or_else(|| anyhow::anyhow!("gdn: 快照区未分配"))?;
+            k::gdn_conv_snapshot_strided(
+                stream,
+                &x_qkv,
+                &self.state.conv.data,
+                &mut sc_snap.data,
+                &meta.cu_seqlens.data,
+                Some(&meta.state_indices.data),
+                Some(&meta.has_initial.data),
+                &sn.off.data,
+                &sn.pos.data,
+                &sn.slot.data,
+                meta.num_reqs,
+                conv_dim,
+                row,
+                width - 1,
+            )?;
+        }
         if single {
             k::gdn_conv1d_update_strided(
                 stream,
@@ -389,7 +421,16 @@ impl GdnLayer {
             tracing::trace!(t, num_reqs = meta.num_reqs, chunks = plan.num_chunks, "gdn prefill: chunk 路径");
             k::gdn_chunk_prep(stream, &abuf.conv.data, &abuf.g.data, &meta.cu_seqlens.data, plan, sc, t, h, hv, kd, vd, scale)?;
             k::gdn_chunk_wy(stream, &abuf.conv.data, &abuf.beta.data, &meta.cu_seqlens.data, plan, sc, t, h, hv, kd, vd)?;
-            k::gdn_chunk_ho(
+            let snap = match meta.snapshot.as_ref() {
+                Some(sn) => Some(k::ops::GdnSnapshot {
+                    off: &sn.off.data,
+                    pos: &sn.pos.data,
+                    slot: &sn.slot.data,
+                    state: &mut self.state.snap_rec.as_mut().ok_or_else(|| anyhow::anyhow!("gdn: 快照区未分配"))?.data,
+                }),
+                None => None,
+            };
+            k::gdn_chunk_ho_snap(
                 stream,
                 &meta.cu_seqlens.data,
                 plan,
@@ -402,8 +443,10 @@ impl GdnLayer {
                 hv,
                 kd,
                 vd,
+                snap,
             )?;
         } else {
+            ensure!(meta.snapshot.is_none(), "gdn: 边界快照只支持 chunk prefill 路径（GDN_PREFILL=recurrent 不支持步内快照）");
             let (g, beta, a_raw, b_raw) = if single {
                 (None, None, Some(&a_view), Some(&b_view))
             } else {

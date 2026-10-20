@@ -347,6 +347,14 @@ pub struct PlanBuffers {
     /// 异步调度：`ids[i] = prev_chosen[gather_idx[i]]`（gather_idx < 0 的行用 host 上传的值）。
     pub gather_idx: Tensor<i32>,  // [max_tokens]
     pub prev_chosen: Tensor<i32>, // [max_rows]
+    /// 递归状态快照表（design §15.7 r8b；来自 `BatchPlan.recurrent_snapshot`）：请求 i 的快照条目在
+    /// `snap_pos / snap_slot[snap_off[i] .. snap_off[i+1])`；`snap_pos` = 对齐位置相对该请求本步段首的 token 偏移
+    /// （kernel 在 chunk 边界 == 该偏移时把状态写到 `snap_slot` 槽）。无快照的步 `snap_off` 全 0。
+    pub snap_off: Tensor<i32>,  // [max_rows + 1]
+    pub snap_pos: Tensor<i32>,  // [snap_cap]
+    pub snap_slot: Tensor<i32>, // [snap_cap]
+    /// 本步上传的快照条目数（host 侧镜像，供 executor 决定是否把表交给 kernel）。
+    pub snap_count: usize,
 }
 
 impl PlanBuffers {
@@ -365,6 +373,11 @@ impl PlanBuffers {
             max_blocks: max_blocks.max(1),
             gather_idx: Tensor::<i32>::from_vec(s, vec![-1; mt], &[mt])?,
             prev_chosen: z32(rows)?,
+            snap_off: z32(rows + 1)?,
+            // 快照条目上界：每请求至少 1 条 + 每 16 token 1 条（粒度不会小于 KV 块 16）
+            snap_pos: z32(rows + mt / 16)?,
+            snap_slot: z32(rows + mt / 16)?,
+            snap_count: 0,
         })
     }
 
@@ -424,6 +437,32 @@ impl PlanBuffers {
             bt[r * mb..r * mb + plan.max_blocks].copy_from_slice(&plan.block_table[r * plan.max_blocks..(r + 1) * plan.max_blocks]);
         }
         up.push(s, &bt, &mut self.bt.data)?;
+        // 递归状态快照表（r8b）：按请求分段；位置换成相对本步段首的偏移。padding 行无条目。
+        let mut off = vec![0i32; nb + 1];
+        let mut spos: Vec<i32> = Vec::new();
+        let mut sslot: Vec<i32> = Vec::new();
+        if !plan.recurrent_snapshot.is_empty() {
+            for (i, &rid) in plan.req_ids.iter().enumerate() {
+                let first_pos = plan.positions[plan.cu_seqlens[i] as usize];
+                for &(r, pos, slot) in &plan.recurrent_snapshot {
+                    if r == rid {
+                        let rel = pos as i32 - first_pos;
+                        ensure!(rel > 0 && rel as u32 <= plan.num_tokens[i], "recurrent_snapshot pos {pos} outside req {rid} segment");
+                        spos.push(rel);
+                        sslot.push(slot as i32);
+                    }
+                }
+                off[i + 1] = spos.len() as i32;
+            }
+            for i in n..nb {
+                off[i + 1] = off[i];
+            }
+            ensure!(spos.len() <= self.snap_pos.numel(), "recurrent_snapshot entries {} > buffer {}", spos.len(), self.snap_pos.numel());
+            up.push(s, &spos, &mut self.snap_pos.data)?;
+            up.push(s, &sslot, &mut self.snap_slot.data)?;
+        }
+        self.snap_count = spos.len();
+        up.push(s, &off, &mut self.snap_off.data)?;
         Ok((tt, nb, nrows))
     }
 

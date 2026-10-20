@@ -711,6 +711,7 @@ pub fn scheduler_params(
         eos_token_ids,
         recurrent_snapshot_tokens: 0,
         recurrent_snapshot_slots: 0,
+        recurrent_snapshot_chunk: 0,
     }
 }
 
@@ -769,6 +770,7 @@ mod pd_tests {
             eos_token_ids: vec![],
             recurrent_snapshot_tokens: 0,
             recurrent_snapshot_slots: 0,
+            recurrent_snapshot_chunk: 0,
         };
         let g = vec![GroupInfo { spec: KvCacheSpec::Mla { block_size: 16, head_size: 64, dtype_bytes: 2 }, block_size: 16 }];
         Scheduler::new(p, g, 64)

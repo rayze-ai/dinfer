@@ -56,8 +56,9 @@ pub struct SchedulerOutput {
     /// 递归状态按块缓存（design §15.7）：本步 forward **之前** 要从快照槽恢复进活槽的请求 (req, 快照槽)。
     /// 该请求本步 `positions` 从对齐位置起、`has_initial = 1`。
     pub recurrent_resume: Vec<(RequestId, u32)>,
-    /// 本步 forward **之后** 要把活槽状态保存到快照槽的请求 (req, 快照槽)：本步末尾恰好落在对齐位置。
-    pub recurrent_snapshot: Vec<(RequestId, u32)>,
+    /// 本步要把递归状态保存到快照槽的 (req, 对齐位置 token 数, 快照槽)：对齐位置落在本步 `[computed, computed + num_new]`
+    /// 内（含末尾）。一步可跨多个对齐点、登记多个槽（r8b：由 prefill kernel 在 chunk 边界顺带写出，调度不再切步）。
+    pub recurrent_snapshot: Vec<(RequestId, u32, u32)>,
 }
 
 impl SchedulerOutput {

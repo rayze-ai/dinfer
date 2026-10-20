@@ -108,6 +108,7 @@ fn prefill(e: &mut Env, prompt: &[i32]) -> Vec<f32> {
             max_blocks: NUM_BLOCKS,
             max_seqlen: t,
             gdn_chunk: ws.as_ref(),
+            gdn_snapshot: None,
         },
         logits_rows: &rows,
         t,
@@ -219,6 +220,7 @@ fn run_engine_cfg(
         eos_token_ids: vec![],
         recurrent_snapshot_tokens: snapshot_grain,
         recurrent_snapshot_slots: if snapshot_grain > 0 { num_snapshots } else { 0 },
+        recurrent_snapshot_chunk: 64,
     };
     let g = vec![GroupInfo {
         spec: KvCacheSpec::FullAttention {
@@ -438,6 +440,7 @@ fn golden_chunked_teacher_forced() {
                 max_blocks: NUM_BLOCKS,
                 max_seqlen: n,
                 gdn_chunk: ws.as_ref(),
+                gdn_snapshot: None,
             },
             logits_rows: &rows,
             t: n,
@@ -480,6 +483,7 @@ fn golden_chunked_teacher_forced() {
                 max_blocks: NUM_BLOCKS,
                 max_seqlen: 1,
                 gdn_chunk: None,
+                gdn_snapshot: None,
             },
             logits_rows: &rows,
             t: 1,
@@ -573,6 +577,7 @@ fn step_forward(e: &mut Env, ids: &[i32], pos0: usize, slot: i32, has_init: bool
             max_blocks: NUM_BLOCKS,
             max_seqlen: n,
             gdn_chunk: ws.as_ref(),
+            gdn_snapshot: None,
         },
         logits_rows: &rows,
         t: n,
@@ -732,4 +737,33 @@ fn golden_mixed_hit_and_preempt() {
     let n2 = compare_greedy("Q (fresh, mixed)", &out[2], &wq, &sq, v);
     // tiny 随机权重平局多：每条至少 2 个可判定步（分叉只允许发生在平局步，compare_greedy 已断言）
     assert!(n0 >= 2 && n1 >= 2 && n2 >= 2, "too few decisive steps: {n0} / {n1} / {n2}");
+}
+
+/// r8b：快照由 chunk prefill kernel 在 chunk 边界顺带写出、调度不切步。粒度 64 = kernel chunk：120 token 的 prompt
+/// 一步算完（跨对齐点 64，不切步；该快照由 ho kernel 在 chunk 1 末、conv 快照 kernel 在短卷积前写出，不是步末 dtod）；
+/// 同 prompt 第二次命中 64 从该快照续算，输出 = 教师强制参考且与第一次逐字同。`saves == 1 && hits == 64` 证明第一次
+/// 没有在 64 切步（切步的话 r8 口径下仍 saves 1，但 `test/` 里 `GOLDEN_TRACE=1` 可看到 sched [(1,120)] 一步）。
+/// 跨多个对齐点的一步在 tiny 的 max_tokens 128 下放不下，由 B300 engine 口径（1024 粒度、6 K 单发）覆盖。
+#[test]
+#[ignore]
+fn golden_kernel_boundary_snapshot_one_step() {
+    let p = long_prompt(120);
+    let gen = 10usize;
+    let (want, steps, v) = {
+        let mut e = load();
+        let v = e.cfg.vocab_size as usize;
+        let (w, s) = reference_greedy(&mut e, &p, gen);
+        (w, s, v)
+    };
+    let e = load_snap(4, NUM_BLOCKS);
+    let overlap = std::env::var("ASYNC_SCHED").map(|x| x != "0").unwrap_or(true);
+    // 预算 128 ≥ 120：第一条请求一步 prefill 完（跨 64）
+    let (out, hits, restores, saves, _) = run_engine_cfg(e, &[vec![p.clone()], vec![p.clone()]], gen as u32, 128, overlap, 64, NUM_BLOCKS);
+    assert_eq!(saves, 1, "one-step prefill of 120 tokens must register the snapshot at 64 (saves {saves})");
+    assert_eq!(hits, 64, "second request hits 64 (KV hit 119 → 112 → align 64)");
+    assert_eq!(restores, 1);
+    let n1 = compare_greedy("first (one-step prefill, kernel-written snapshot)", &out[0], &want, &steps, v);
+    let n2 = compare_greedy("second (resume @64 from kernel-written snapshot)", &out[1], &want, &steps, v);
+    assert!(n1 >= 3 && n2 >= 3, "too few decisive steps: {n1} / {n2}");
+    assert_eq!(out[0], out[1], "same prompt, same greedy output with and without the prefix hit");
 }
