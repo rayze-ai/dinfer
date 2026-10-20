@@ -3,7 +3,7 @@
 <!-- ===== 当前状态（交接区）：每次收功整体重写，保持 ≤ 20 行 ===== -->
 ## 当前状态
 
-- 更新日期：2026-10-20 10:4x（机器时钟）。Qwen3.5 1.10/1.10/1.03/1.01× vLLM（里程碑 6）。**megakernel 第 1 轮（aacdd8d）：基线 146/158/190 µs/层 vs mega 188/215/339 → 0.78/0.74/0.56×（对拍过），第 2 轮结构改中（OCC=2、GDN 跨 tile cp.async、conv ILP、add/silu 融进 GEMV 尾声）。K3 C-5（e02ffc7）TP+EP 分片装载与通信点已 commit，对拍进行中。** 两子代理均活跃，主会话统一 push。
+- 更新日期：2026-10-20 11:0x（机器时钟）。Qwen3.5 1.10/1.10/1.03/1.01× vLLM。**B300-50 token 过期，已向用户要**；K3 C-5（5 commit，tp2 对拍待 B300）与 megakernel 第 2 轮（本机编译中，B300 计时待 token）都卡在 token。趋势面板 index.html 404 + 缺 qwen35 已修（服务 test/ 根 + 重生成）。
 - **2026-10-20 第 8 轮（子代理）：executor 公共件抽取已做**——`crates/layers/src/exec.rs`（`AsyncResultRing` / `DecodeGraphs` / `StateSlotTable` / `PlanBuffers`，接口表见 design §"已做：executor 公共件抽取"）；qwen3 接回 4090 `test/qwen3/2026-10-20/bench_common1` 四组 vs bench25 +0/+1/+0/+1%（门禁过）；**qwen35 已接 async scheduling**（`ASYNC_SCHED` 默认开），golden 6/6 含两条 engine 口径 overlap 测试；kimik3 `kda::SlotTable` 改 re-export。待：B300 `bench_b300_15`（主会话）、kimik3 有 executor 后接 `DecodeGraphs`。
 - 总览：Qwen3-0.6B 线 Q1–Q5 阶段性完成（Q3 四组 ≥ vLLM；Q4 PD / Q5 TP 功能通过，细节见 `docs/design.md` §10/§13 与 10-18 日志）；GLM 线 P0–P6 通过、真权重挂起；B300 单卡 B4 调优进行中（`docs/loops/b4-sm100.md`，c1/c8/c32 已追平或超越，c8-long 落后 38%）。
 - **Qwen3.5-27B（`models/qwen35`）里程碑 5 完成（2026-10-19，B300-50 GPU 0，`docs/loops/qwen35-model.md` 第 10–20 轮）**：真权重 bf16 52 GB 加载 7–8 s；3 条 greedy prompt 与 vLLM 逐字一致。修了 3 个真权重才暴露的 bug：① 引擎线程未绑 CUDA ctx（`forward_sample` 加 `bind_ctx`）；② **HF `Qwen3_5RMSNorm` 是 zero-centered `(1+w)`**（input/post/final norm 加载时 `1+w`；tiny golden 之前全 1 权重是盲区，已随机化 + seed 8）；③ prefix cache 命中让 GDN 递归状态从零起（强制关；真支持要按块缓存状态）+ `SlotTable::release`（`BatchPlan.finished_req_ids` 新字段）。
