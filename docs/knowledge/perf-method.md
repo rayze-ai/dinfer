@@ -53,3 +53,8 @@
 3. **TPOT − 纯 decode 步 span = 步间开销**：engine2 里 23.8 − 13.2 = 10 ms/token，全在混批步（52 × 125 ms 占 decode 墙钟 32%）。
 4. **先看混批步是否比"纯 prefill + 纯 decode"之和还贵**：我们 mixed 125 > 70 + 13，说明混批路径本身有额外成本（eager 不走 graph、两种 attention 都 launch、自调优桶按总 M 命中），这是引擎实现问题，不是负载不可避免。
 5. 读 vLLM 源码核机制时要看**默认路径**：`throttle_prefills` 只在 DP 子类生效，单卡默认 False——差点把一个不存在的机制当成差距来源。
+
+## 9. 引擎口径基线与归因链（Qwen3.5-27B B300，2026-10-20，`engine_1`）
+- 基线：goodput dinfer 1.73 / 1.92 / 1.40 / 0.57 vs vLLM 1.72 / 2.55 / 3.06 / 3.14（rate 2/4/8/12，SLO 500/20）；rate 2 持平、≥ 4 落后、SLO 下最大 req/s ≈ 2 vs ≥ 12。同一时刻四组闭环是 1.10×——两口径可以完全脱节。
+- 归因链（每步一个工具）：① 客户端 TPOT 23 ≈ `/metrics` decode 步均值 23（含 async 等待）→ TPOT 由 decode 步节拍决定；② nsys 纯 decode 步 span 13–19 ms → 差在 GPU 之外或 GPU 上的非 kernel 项；③ nsys 按步分类 `nsys_mixed.py`：decode 步 31% 是 `[CUDA memcpy H2D]` 18 次 × 336 µs（闭环时 16 × 1 µs）→ 随在飞数 × 块数增长的上传；prefill 步 GPU 只忙 27% → host 空转。④ 切片（`long_prefill_token_threshold`）把 mixed 步变小但总量不变、TPOT 不动 → 排除"mixed 步是主因"。
+- 教训：闭环 bench 的短 prompt / 固定并发把"随长度 / 在飞数增长的 host 成本"全藏住了；引擎口径下先看 memcpy / memset / host 空转，再看 kernel。
