@@ -14,6 +14,7 @@ import sqlite3, sys, collections, bisect
 
 PRE = ("wy_", "ho_", "conv1d_prefill", "gqa_fa", "prep_kernel")
 DEC = ("recurrent_decode", "gqa_decode", "conv1d_update")
+IDLE_MS = 10  # 步内空档超过它视为无请求空闲（不计入 span）
 
 def main():
     path = sys.argv[1]
@@ -52,9 +53,17 @@ def main():
         cnt = collections.Counter(); tot = collections.Counter()
         mem = collections.Counter(); memt = collections.Counter()
         gaps = []
+        spans = []; idle_n = 0; idle_t = 0
         for i, s in enumerate(ss):
             a, b = s[0][0], s[-1][1]
-            span += b - a
+            # 步内 > IDLE_MS 的空档 = 无请求空闲（sample 之后的尾 kernel 被归到下一步，使下一步"跨过"空闲期），
+            # 不算 span；单独计数
+            sp = b - a
+            for j in range(1, len(s)):
+                g = s[j][0] - s[j - 1][1]
+                if g > IDLE_MS * 1e6:
+                    sp -= g; idle_n += 1; idle_t += g
+            span += sp; spans.append(sp)
             for k in s:
                 nm = k[2].split("<")[0][:46]
                 busy += k[1] - k[0]; cnt[nm] += 1; tot[nm] += k[1] - k[0]
@@ -72,8 +81,10 @@ def main():
         gaps.sort()
         g50 = gaps[len(gaps) // 2] / 1e3 if gaps else 0
         g99 = gaps[int(len(gaps) * 0.99)] / 1e3 if gaps else 0
-        print(f"[{tag}] steps={n} span_ms={span / n / 1e6:.2f} kernel_sum_ms={busy / n / 1e6:.2f} kernels/step={sum(cnt.values()) / n:.0f} "
-              f"gap_to_next_us p50={g50:.0f} p99={g99:.0f}")
+        spans.sort()
+        print(f"[{tag}] steps={n} span_ms={span / n / 1e6:.2f} (p50 {spans[n // 2] / 1e6:.2f}, p90 {spans[int(n * 0.9)] / 1e6:.2f}) "
+              f"kernel_sum_ms={busy / n / 1e6:.2f} kernels/step={sum(cnt.values()) / n:.0f} gap_to_next_us p50={g50:.0f} p99={g99:.0f}"
+              + (f"; excluded {idle_n} idle gaps >{IDLE_MS}ms = {idle_t / 1e6:.0f} ms" if idle_n else ""))
         print("   memcpy/step: " + ", ".join(f"{k} {mem[k] / n:.1f}x {memt[k] / n / 1e3:.0f}us" for k in sorted(mem)))
         for nm, d in tot.most_common(top):
             print(f"  {d / n / 1e3:7.0f}us {cnt[nm] / n:6.1f}/step {d / cnt[nm] / 1e3:7.1f}us {nm}")
