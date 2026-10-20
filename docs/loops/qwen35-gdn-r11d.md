@@ -80,3 +80,51 @@ FlashInfer 的做法也不是在 chunk 维并行——它的 grid 同样是 `(V/
 | 轮 | 改动 | B300 1×1024 / 8×1024 / 1×8192 全链（µs） | parity | 结论 |
 |---|---|---|---|---|
 | 0 | 基线 r10 | 208 / 769 / 967 | 过 | 起点；经 r11a/r11b 同口径复测 |
+
+## 设计定稿（2026-10-21，第一版子代理推导，已核对）
+
+**第一版用字面的 `u` / `w` 两段形式**（不改代数），先让数值对上；省 FLOP 的版本留到第二轮。
+
+### 每 block = `(V/BV, HV, seq)`，串行走 chunk
+
+`BV=64`、`BT=64`、`K=128`。`h` 全程在寄存器（沿用 `ho_mma_kernel` 的 `hacc[H_TILES][4]`）。
+
+### smem 预算（98 KB → 2 block/SM）
+
+| 区域 | 大小 | 说明 |
+|---|---|---|
+| `sM` f32 `[BT][BT]` | 16.4 KB | 逆矩阵；**算完之后与 `sKg` 同址复用** |
+| `sM16` bf16 `[BT][TS]` | 9.2 KB | M 的 bf16 影子；**`v'` 算完后被 `sAq` 覆盖** |
+| `sAq` / `sU` / `sW` / `sQ` / `sK` | — | 按 `WySmem` 现有布局搬 |
+| 合计 | **98 KB** | B300 smem 227 KB，2 block/SM |
+
+`accQ`（即 `Aq`）**全程留在寄存器**（16 regs），到需要落 smem 时才写。
+
+### warp 分工
+
+**8 warp**（`wy` 在 B300 上是延迟型，4 warp 不够）。`ho` 的 `o` / `wh` 相位按 `wcol` 拆列半区，`h` tile 从 16 个/warp 降到 8 个/warp。
+
+### 已被否决的代数简化（第二轮再试，不是第一版）
+
+不做 `w = M(β⊙k e^gc)` 和 `u = M(β⊙v)` 两个 GEMM，改算：
+
+```
+v' = M·( β⊙v − (β·2^g_last)·(kg·hᵀ) )
+```
+
+数学等价（`w·h = M(β k e^gc) h`），省掉 17.4 KB 的 `sw`，MAC 从 1.31 M 降到 786 K（−40%）。
+
+**陷阱**：`exp(gc)` 与 `exp(g_last)·exp(g_last−gc)` 差一个 `exp(g_last)` 因子，这里最容易错位。**等价性只认对拍不认推导**；对不上就永久放弃这条，不 debug 代数。
+
+**第二处代价**：`kg·hᵀ` 里 `h` 在寄存器且是 mma fragment 布局，当 B 操作数用不了，必须先写 bf16 镜像进 smem（`HoSmem::off_h16`）。那笔 16.4 KB 的寄存器→smem 搬运要算进预算；若它成瓶颈，退路仍是字面的 `w·h`（`w` 已在 smem，直接当 A 操作数）。
+
+### 落地清单
+
+1. `crates/kernels/cuda/gdn_chunk.cu`：`gdn_chunk_fused_kernel` + launcher + C ABI `gdn_chunk_fused`
+2. `crates/kernels/src/{ops.rs,ffi.rs,arch.rs}` + `cuda/kernels.h`：`ArchProfile::gdn_chunk_fused()`（Sm100 默认 true，Sm8x/Sm90 默认 false）+ `GDN_CHUNK_FUSED` 覆盖
+3. `crates/kernels/tests/gdn_parity.rs`：新 case，fused 输出 vs `wy(Mma)+ho(bv64)` 输出，同输入对齐
+4. **旧路径一行不改**（`gdn_chunk_wy_with` / `gdn_chunk_ho_with` / `gdn_chunk_prep`）
+
+### 工作方式（2026-10-21 用户定）
+
+本地 `/data/code/dinfer` 写 → `B300_TAG=50 scripts/dev/remote_b300.sh put` 单文件 → B300 上 `nvcc -arch=sm_103a` 秒级语法检查 → `cargo` + `gdn_parity`。**每轮必须传过去编**。
