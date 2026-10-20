@@ -3,19 +3,17 @@
 <!-- ===== 当前状态（交接区）：每次收功整体重写，保持 ≤ 20 行 ===== -->
 ## 当前状态
 
-- 更新日期：2026-10-21 01:4x +0800。**目标（用户 2026-10-20）：qwen35 全面超过 vLLM 1.2×**。基线 b19：四组 1.09 / 1.11 / 1.04 / 1.04×；6 K TTFT 284.9 vs 260.6；engine rate 8 goodput 3.21 vs 2.87。
-- **1.2× 缺口折算（engine-gap 8z）**：四组 tok/s 要 113 / 807 / 2577 / 669（c32 / c8-long 各 +15.7%）；TTFT 3 K ≤ 115（−21%）、6 K ≤ 217（−31%）；engine goodput ≥ 3.44。
-- **分解已完成（engine-gap 9a–9g，nsys 三脚本 + 两分析脚本已入库）**：prefill 6 K 277 ms = GEMM 169（61%，85% 峰值**封顶**）/ GDN 52（19%）/ attn 32.6（12%，**10% 峰值，二次项**）/ 小算子 20；3 K 138 = GEMM 90 / GDN 28 / attn 9.7 / 其它 11；c32 decode 12.40 ms = GEMM 8.2（82% 带宽）+ GDN 1.0 + attn 0.44 + 小算子 0.6 + gap 0.56；c8-long 10.58 ms = GEMM 7.9（M=8 的 `64x8` tile 只 **2.6 TB/s**、`128x8` 6.2）+ 小算子 0.75。
-- **子代理状态（都只 commit 不 push，主会话统一推）**：
-  - **r11a attn prefill —— 已收口（2026-10-21，7 轮）**：B300 默认路径 cfg 3464 = v6（Q 进 smem、tile 64）+ SFU `ex2.approx`，6 K 单层 **2040 → 1558 µs（−24%，286 TF）**、3 K 506 → 454、1 K 101 → 78；16 层 attn 32.6 → ~25 ms。**700 µs 目标物理不可达**：`mma_peak` 实测 mma.sync 峰值 575 TF，700 µs 需 636 TF；mma.sync 路线 ~50% 就是顶，再进只能换 tcgen05（TMEM + UMMA，另一个 `*_sm100.cu`，估 2–3 天换 25 → ~10 ms）。负结果已记：K/V 双缓冲 2212、v7 warp 对分工 1802、8 warp 1792–2197。
-  - **qwen3 激活缓冲改全模型一套**（第三个子代理，2026-10-21 派出；loop `docs/loops/qwen3-actscratch.md`，已 commit `4c75466`；本机 3090 GPU 0，不占 B300；禁改 r11b 工作区那六个 kernels 文件）：照 qwen35 `scratch.rs` 复刻 `ActScratch`，`Mlp::load_tp(...,0,...)` + `forward_with_scratch`；目标 16384 预算下激活从 ≈14 GB 降到 ≈0.5 GB、`num_blocks` 不降反升。
-  - **r11b decode GEMM —— 已收口（2026-10-21，物理关闭）**：B300 流式读实测上限 **5.9–6.3 TB/s**（不是标称 8），cuBLASLt 6.0–6.6 已贴顶，自写 tensor-core 小 M kernel 5 轮最好 5.2 未超过 lt，PDL 只 0.7%。bench_b300_20 无退化（c1/c8/c32/c8-long TPOT 9.6/10.3/12.5/10.7，tok/s ×vLLM 1.09/1.11/1.05/1.04），已 push（`b1ba1d7`）。同时纠正 9f/9g 两处误读：`64x8` 2.6 TB/s 是 gate_up 另一个 M 桶而非 in_proj（in_proj 实为 5.9 TB/s），decode 侧**没有坏形状**，剩余 2.5 ms/步只能靠减 kernel 数（ramp/tail 2–3 µs/个小 kernel），并进 mega 线。
-
-- **r11 两线已合并并验完（2026-10-21 01:0x）**：3090 ops_parity 123/123 行（27 算子 / 81 case）过；B300 `bench_merge_21b` 四组 **104 / 745 / 2271 / 579**（1.10/1.11/1.06/1.04×，与 bench_20 持平无退化）；单发 TTFT 1K/3K/6K = **49.0 / 139.8 / 281.7 ms**，斜率 **51.7 → 46.5 µs/token**。**但 6 K 只拿回 3.2 ms（微基准预示 −7.7 的 42%）**，正在做同二进制 `GQA_PREFILL_CFG=0 vs 3464` 的 A/B 定位差额去向。
-- **本轮踩坑两个（都已进 pitfalls）**：① `CARGO_TARGET_DIR` 与脚本里写死的 `./target/release/*` 不一致 → 第一批数字跑的是 18:34 旧二进制，已作废重跑；脚本已加 `BENCH_BIN` / `DINFER_BIN` 覆盖。② nsys 默认 CUPTI buffer 只装得下 ~1.2 s，6 K 请求全落在窗口外 → 分解必须确认窗口覆盖到目标请求（先发预热再发目标，或按 kernel 名在报告里核 count）。
-- **下一步**：① A/B 结果出来后更新 r11a loop 与 engine-gap；② 4090 门禁（`bench_compare.sh` 四组，注意看自调优有没有选 `small_mma`）；③ 未派：**r11c GDN 对齐 fla**（6 K 省 ~19 ms）、glm53 也改 ActScratch（第五例）、**build.rs 默认 arch 按本机卡探测**。
-- **B300 卡位**：0 常驻 dinfer `:8012`（tmux q35）/ 1 vLLM `:8013`（容器 vllm-qwen35-b300）/ 2–3 主会话 / 4 r11a / 5 r11b / 6–7 留。**硬约束**：`B300_TAG=50` 必带（脚本强制），**.225 禁占**，子代理禁止 `push`（只 `put`）、产物落 `bootstrap/`，杀进程按端口 `pkill -f "…--port N\b"` 不用全局 `-x dinfer`（会杀常驻）。
-- 探针入库：`scripts/dev/{ttft_probe.py, q35_nsys_prefill.sh, q35_nsys_decode.sh, nsys_prefill_by_len.py, nsys_steps_sqlite.py}`；页面 `test/index.html`（perf / engine / probe 三页签）。
+- 更新日期：2026-10-21 03:0x +0800。**目标（用户 2026-10-20）：qwen35 全面超过 vLLM 1.2×**。四组闭环已追平（1.10/1.11/1.06/1.04×），剩余缺口在 6 K TTFT 与 engine goodput。
+- **用户 2026-10-21 决定：不再推倒重来，在现有方案上合并** —— GEMM（prefill 61%，80–85% 峰值）封顶不动；attn 保 r11a v6；**只换 GDN 一段**，后面再接 tcgen05。
+- **两条线已派出（2026-10-21 03:0x）**：
+  - **r11d（GPU 4）**：`docs/loops/qwen35-gdn-r11d.md`。把 `wy` 并入 `ho` 的 chunk 循环，aq/u/w/kg **不落显存**（8 K 省 350 MB 写 + 350 MB 读 ≈ 117 µs + 3 次 launch）。目标 8×1024 ≤ 300 µs / 1×8192 ≤ 450 / 1×1024 ≤ 110 / 32×128 ≤ 250。**关键纠正**：不是"A/B/C 三段"——那正是 r9 第 2 轮的 `bv32sp`，B300 已证全输（8×1024 555 vs 融合 382、1×8192 797 vs 504），不要再走。
+  - **r12a（GPU 5）**：`docs/loops/qwen35-tcgen05.md`。先把 `umma_peak` 工具链自证（tcgen05/TMEM/128B swizzle/描述符/mbarrier），**硬门槛 ≥ 900 TF/s**（1.5× mma.sync 575），过了才移植 attn 到 `gqa_fa_sm100.cu`（目标 T=6019 ≤ 800 µs）。
+- **r11d 基线（r10 收口，B300）**：全链 1×1024 **208** / 8×1024 **769** / 32×128 421 / 1×8192 **967** µs；分段 prep 82 + wy 371 + ho 308 = 761（8 K）。FlashInfer 对手：49 / 156 / 253（4.2× / 4.9× / 3.8×）。
+- **子代理远端目录**：`/data/yaochen/infer/dinfer_r11d`（GPU 4，target_r11d）、`dinfer_tc05`（GPU 5，target_r12a），都是 `dev` HEAD 的完整拷贝，md5 已核对。**两个子代理都不 push**，主会话统一推。
+- **B300 卡位**：0 常驻 `:8012` / 1 vLLM `:8013` / 2–3 主会话 / **4 r11d** / **5 r12a** / 6–7 留。**硬约束**：`B300_TAG=50` 必带（脚本强制），**.225 禁占**，子代理禁止 `push`（只 `put`）。
+- **B300 token**：2026-10-21 03:26 过期（用户已给新 token，`~/.ssh/jms_b300_50_{user,pass}` 已更新）。
+- **下一步**：等两条线首轮回报；随后 ① 4090 门禁（r11 合并的，看自调优有没有选 `small_m`）② 6 K attn 端到端差额定位（A/B 显示 v5 vs v6 无差异，微基准预示 −7.7 ms 只拿到 3.2）③ glm53 ActScratch（第五例）④ build.rs 默认 arch 按本机卡探测。
+- 页面：`test/index.html`（perf / engine / probe 三页签）；探针 `scripts/dev/{ttft_probe.py,q35_nsys_*.sh,nsys_*.py}`。
 - K3 挂起（TODO 五条在 `docs/loops/k3-serve.md` 末行）；Qwen3-0.6B Q1–Q5 完成；GLM P0–P6 通过、真权重挂起。
 
 ## 2026-10-18
