@@ -3,13 +3,14 @@
 <!-- ===== 当前状态（交接区）：每次收功整体重写，保持 ≤ 20 行 ===== -->
 ## 当前状态
 
-- 更新日期：2026-10-21 00:2x +0800。**目标（用户 2026-10-20）：qwen35 全面超过 vLLM 1.2×**。基线 b19：四组 1.09 / 1.11 / 1.04 / 1.04×；6 K TTFT 284.9 vs 260.6；engine rate 8 goodput 3.21 vs 2.87。
+- 更新日期：2026-10-21 01:0x +0800。**目标（用户 2026-10-20）：qwen35 全面超过 vLLM 1.2×**。基线 b19：四组 1.09 / 1.11 / 1.04 / 1.04×；6 K TTFT 284.9 vs 260.6；engine rate 8 goodput 3.21 vs 2.87。
 - **1.2× 缺口折算（engine-gap 8z）**：四组 tok/s 要 113 / 807 / 2577 / 669（c32 / c8-long 各 +15.7%）；TTFT 3 K ≤ 115（−21%）、6 K ≤ 217（−31%）；engine goodput ≥ 3.44。
 - **分解已完成（engine-gap 9a–9g，nsys 三脚本 + 两分析脚本已入库）**：prefill 6 K 277 ms = GEMM 169（61%，85% 峰值**封顶**）/ GDN 52（19%）/ attn 32.6（12%，**10% 峰值，二次项**）/ 小算子 20；3 K 138 = GEMM 90 / GDN 28 / attn 9.7 / 其它 11；c32 decode 12.40 ms = GEMM 8.2（82% 带宽）+ GDN 1.0 + attn 0.44 + 小算子 0.6 + gap 0.56；c8-long 10.58 ms = GEMM 7.9（M=8 的 `64x8` tile 只 **2.6 TB/s**、`128x8` 6.2）+ 小算子 0.75。
-- **两个子代理在跑（都只 commit 不 push，主会话统一推）**：
+- **三个子代理在跑（都只 commit 不 push，主会话统一推）**：
   - **r11a attn prefill**（GPU **4**，:8041，`target_r11a`，loop `docs/loops/qwen35-attn-r11a.md`）：目标 6 K 单层 2.04 ms → ≤ 700 µs；第 0 轮 `gqa_fa_bench` 微基准 + loop 页已 commit（`45c3b6a`，已 push），正在 ncu 微基准拿起点。**ncu 只能包微基准**（包 27B serve 装载第 24 层 OOM，pitfalls）。
+  - **qwen3 激活缓冲改全模型一套**（第三个子代理，2026-10-21 派出；loop `docs/loops/qwen3-actscratch.md`，已 commit `4c75466`；本机 3090 GPU 0，不占 B300；禁改 r11b 工作区那六个 kernels 文件）：照 qwen35 `scratch.rs` 复刻 `ActScratch`，`Mlp::load_tp(...,0,...)` + `forward_with_scratch`；目标 16384 预算下激活从 ≈14 GB 降到 ≈0.5 GB、`num_blocks` 不降反升。
   - **r11b decode GEMM + 小算子**（GPU **5**，:8051，`target_r11b`，loop `docs/loops/qwen35-decode-r11b.md`）：目标 c32 TPOT ≤ 11.31、c8-long ≤ 9.26；改法 = M ∈ {8,32} 的 GEMM tile 自调优（每个 ≥ 7 TB/s）+ rmsnorm/silu 融合进 GEMM prologue + splitKreduce；工作区在改 `gemm_small_m.cu` / `arch.rs` / `ops.rs` / 两个测试（**未 commit，主会话别动**）。
-- **下一步（子代理回报后）**：① 合两侧改动（可能撞 `ops.rs` / `arch.rs`）→ 3090 parity + golden → B300 全四口径（`bench_b300_20+` / 6 K 六长度 / engine rate 4,8）+ 4090 门禁；② 未派：**r11c GDN 对齐 fla**（6 K 省 ~19 ms：ho 单长序列串行链 + conv 带宽 7%）、**qwen3 per-layer 激活缓冲改全模型一套**（第三例，16384 预算下 14 GB 挤掉 KV）、**build.rs 默认 arch 按本机卡探测**（23 s vs 2 min）。
+- **下一步（子代理回报后）**：① 合两侧改动（可能撞 `ops.rs` / `arch.rs`）→ 3090 parity + golden → B300 全四口径（`bench_b300_20+` / 6 K 六长度 / engine rate 4,8）+ 4090 门禁；② 未派：**r11c GDN 对齐 fla**（6 K 省 ~19 ms：ho 单长序列串行链 + conv 带宽 7%）、~~qwen3 per-layer 激活缓冲改全模型一套~~（**已派子代理**，见上）、**build.rs 默认 arch 按本机卡探测**（23 s vs 2 min）。
 - **B300 卡位**：0 常驻 dinfer `:8012`（tmux q35）/ 1 vLLM `:8013`（容器 vllm-qwen35-b300）/ 2–3 主会话 / 4 r11a / 5 r11b / 6–7 留。**硬约束**：`B300_TAG=50` 必带（脚本强制），**.225 禁占**，子代理禁止 `push`（只 `put`）、产物落 `bootstrap/`，杀进程按端口 `pkill -f "…--port N\b"` 不用全局 `-x dinfer`（会杀常驻）。
 - 探针入库：`scripts/dev/{ttft_probe.py, q35_nsys_prefill.sh, q35_nsys_decode.sh, nsys_prefill_by_len.py, nsys_steps_sqlite.py}`；页面 `test/index.html`（perf / engine / probe 三页签）。
 - K3 挂起（TODO 五条在 `docs/loops/k3-serve.md` 末行）；Qwen3-0.6B Q1–Q5 完成；GLM P0–P6 通过、真权重挂起。
