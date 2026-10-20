@@ -31,7 +31,8 @@ constexpr int kWarps = 8;
 constexpr int kThreads = kWarps * 32;
 constexpr int kChunkK = 32;  // 一个 K 块 = 两条 m16n8k16 = 每 lane 16 B（8 个 bf16）
 constexpr int kStageCount = 11;
-constexpr int kGdnRows = 4;  // 每 warp 的状态行数（BV = kWarps · kGdnRows = 32，与 ArchProfile Sm100 的 gdn_decode_bv 一致）
+constexpr int kGdnRows = 16;  // 每 warp 的状态行数：16 行 × 16 B/lane 一次发 16 个向量读（8 KB/warp 在飞），任务 = (seq, hv) 整个 V=128
+// 第 1 轮用 4 行（BV=32，与独立 kernel 同）：B=32 6144 个小任务在 148 个常驻 CTA 上串行 41 波、每波一次状态读延迟，409 µs。
 constexpr int kGdnBv = kWarps * kGdnRows;
 constexpr int kMaxPipe = 4;
 
@@ -80,13 +81,24 @@ __device__ __forceinline__ void red_release_gpu_add(int* p, int v) {
   asm volatile("red.release.gpu.global.add.s32 [%0], %1;\n" ::"l"(p), "r"(v) : "memory");
 }
 
+__device__ __forceinline__ unsigned long long gtimer() {
+  unsigned long long t;
+  asm volatile("mov.u64 %0, %%globaltimer;\n" : "=l"(t));
+  return t;
+}
+__shared__ unsigned long long s_wait_end;  // prof：本任务依赖等待结束时刻（thread 0 写 / 读）
+
 // 等上一阶段全部完成（stage 0 无依赖）。只 thread 0 自旋，其余在 barrier 等。
 __device__ __forceinline__ void wait_stage(const Params& p, int stage) {
-  if (stage == 0) return;
+  if (stage == 0) {
+    if (p.a.prof && threadIdx.x == 0) s_wait_end = gtimer();
+    return;
+  }
   if (threadIdx.x == 0) {
     const int need = p.count[stage - 1];
     const int* flag = p.ready + (stage - 1);
     while (ld_acquire_gpu(flag) < need) __nanosleep(40);
+    if (p.a.prof) s_wait_end = gtimer();
   }
   __syncthreads();
 }
@@ -494,6 +506,8 @@ __global__ void __launch_bounds__(kThreads, 1) mega_layer_kernel(const Params p)
     int stage = 0;
     while (task >= p.start[stage + 1]) ++stage;
     const int shard = task - p.start[stage];
+    unsigned long long t0 = 0;
+    if (p.a.prof) t0 = gtimer();
     switch (stage) {
       case S_INPROJ: gemv_task<MB, G, U>(p, p.gemv[0], shard, stage, smem); break;
       case S_OUTPROJ: gemv_task<MB, G, U>(p, p.gemv[1], shard, stage, smem); break;
@@ -517,6 +531,14 @@ __global__ void __launch_bounds__(kThreads, 1) mega_layer_kernel(const Params p)
       default: break;
     }
     signal_stage(p, stage);
+    if (p.a.prof && threadIdx.x == 0) {  // prof[stage][4] = {~min_start, max_end, Σwait, Σbusy}（ns，globaltimer）
+      const unsigned long long t1 = gtimer();
+      unsigned long long* q = p.a.prof + stage * 4;
+      atomicMax(q, ~t0);
+      atomicMax(q + 1, t1);
+      atomicAdd(q + 2, s_wait_end - t0);
+      atomicAdd(q + 3, t1 - s_wait_end);
+    }
   }
   // 全部 CTA 收工后由最后一个把 ready / done 清零：下次 launch（含 graph 重放）不需要 host memset。
   __syncthreads();

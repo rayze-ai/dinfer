@@ -933,6 +933,7 @@ pub struct MegaLayerArgs {
     pub partial: *mut f32,
     pub counters: *mut i32,
     pub info: *mut i32,
+    pub prof: *mut u64,
     pub batch: i64,
     pub hidden: i64,
     pub inter: i64,

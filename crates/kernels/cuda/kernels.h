@@ -343,6 +343,7 @@ typedef struct MegaLayerArgs {
   float* partial;
   int32_t* counters;
   int32_t* info;
+  unsigned long long* prof;  // 可空：[11][4] = {~min_start, max_end, Σwait, Σbusy}（ns），host 清零后读
   int64_t batch, hidden, inter, heads_k, heads_v, k_dim, v_dim, width, state_stride_tok;
   float eps, scale;
   int64_t groups, unroll, stages, ctas_per_sm;              // 结构参数（ArchProfile）

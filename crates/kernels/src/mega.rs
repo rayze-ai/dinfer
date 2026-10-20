@@ -68,7 +68,23 @@ pub struct MegaScratch {
     counters: CudaSlice<i32>,
     /// kernel host 侧回填 [grid, occupancy, smem_bytes]（launch 时同步写，host 内存）。
     pub info: Box<[i32; 3]>,
+    /// 阶段计时（globaltimer ns）：`profile = true` 时 kernel 写 `prof[stage][4] = {~min_start, max_end, Σwait, Σbusy}`。
+    pub profile: bool,
+    prof: CudaSlice<u64>,
 }
+
+/// 一个阶段的 prof 读数（µs）。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StageProf {
+    pub start_us: f64,
+    pub end_us: f64,
+    pub wait_us: f64,
+    pub busy_us: f64,
+}
+
+pub const MEGA_STAGES: usize = 11;
+pub const MEGA_STAGE_NAMES: [&str; MEGA_STAGES] =
+    ["rmsnorm", "in_proj", "conv", "gdn", "gated_norm", "out_proj", "add_norm", "gate_up", "silu", "down", "add"];
 
 impl MegaScratch {
     pub fn new(stream: &Stream, sh: &MegaShape, max_batch: usize, params: MegaParams, sm_count: usize) -> Result<Self> {
@@ -103,7 +119,30 @@ impl MegaScratch {
             partial: stream.alloc_zeros(partial.max(1))?,
             counters: stream.alloc_zeros(12 + tiles)?,
             info: Box::new([0; 3]),
+            profile: false,
+            prof: stream.alloc_zeros(MEGA_STAGES * 4)?,
         })
+    }
+
+    pub fn reset_prof(&mut self, stream: &Stream) -> Result<()> {
+        stream.memset_zeros_n(&mut self.prof, MEGA_STAGES * 4)
+    }
+
+    /// 读阶段计时（相对最早阶段起点，µs）。只在 eager 单次 launch 后读有意义。
+    pub fn read_prof(&self, stream: &Stream) -> Result<Vec<StageProf>> {
+        let raw = stream.dtoh_sync_copy(&self.prof)?;
+        let base = (0..MEGA_STAGES).map(|s| !raw[s * 4]).min().unwrap_or(0);
+        Ok((0..MEGA_STAGES)
+            .map(|s| {
+                let st = !raw[s * 4];
+                StageProf {
+                    start_us: st.saturating_sub(base) as f64 * 1e-3,
+                    end_us: raw[s * 4 + 1].saturating_sub(base) as f64 * 1e-3,
+                    wait_us: raw[s * 4 + 2] as f64 * 1e-3,
+                    busy_us: raw[s * 4 + 3] as f64 * 1e-3,
+                }
+            })
+            .collect())
     }
 }
 
@@ -161,6 +200,7 @@ pub fn mega_gdn_layer_decode(
         partial: stream.ptr_mut(&mut sc.partial) as *mut f32,
         counters: stream.ptr_mut(&mut sc.counters) as *mut i32,
         info: sc.info.as_mut_ptr(),
+        prof: if sc.profile { stream.ptr_mut(&mut sc.prof) as *mut u64 } else { std::ptr::null_mut() },
         batch: batch as i64,
         hidden: hid as i64,
         inter: inter as i64,

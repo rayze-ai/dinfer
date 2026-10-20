@@ -178,6 +178,25 @@ fn mega_gdn_layer_decode_parity_and_timing() {
             println!("B={b}: parity res cos={cos_res:.6} max_rel={rel_res:.3e} | rec cos={cos_rec:.6} max_rel={rel_rec:.3e} | conv cos={cos_conv:.6} max_rel={rel_conv:.3e}");
         }
 
+        if std::env::var("MEGA_PROF").is_ok() {
+            // 阶段计时：对拍读完后再 eager 跑一次（状态再推一步，不影响计时口径），读 prof
+            sc.profile = true;
+            sc.reset_prof(&s).unwrap();
+            mega_gdn_layer_decode(&s, &sh, &w, &mut sc, &mut res_m, &mut conv_m, &mut rec_m, None, b).unwrap();
+            s.synchronize().unwrap();
+            sc.profile = false;
+            let pr = sc.read_prof(&s).unwrap();
+            let grid = sc.info[0] as f64;
+            println!("B={b}: stage      start→end (us)   span   Σwait/grid  Σbusy/grid   (Σbusy/span/grid = 占用率)");
+            for (i, q) in pr.iter().enumerate() {
+                let span = q.end_us - q.start_us;
+                println!(
+                    "  {:<10} {:>7.1}→{:>7.1} {:>7.1} {:>10.1} {:>10.1}   {:>5.2}",
+                    dinfer_kernels::mega::MEGA_STAGE_NAMES[i], q.start_us, q.end_us, span, q.wait_us / grid, q.busy_us / grid,
+                    q.busy_us / grid / span.max(1e-9)
+                );
+            }
+        }
         // ---- 计时：两边都进 graph，重放 iters 次
         reset(&s, &mut res_b, &mut conv_b, &mut rec_b);
         s.begin_capture().unwrap();
