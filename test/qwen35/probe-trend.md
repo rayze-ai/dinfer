@@ -39,6 +39,24 @@
 - 1x4096 chain_us dinfer：r10 第 2 轮：ArchProfile Sm100 开 ho 寄存器预取（默认路径 = bv32pf）；B300-50 GPU 7
 - 1x8192 chain_us dinfer：r10 第 2 轮：ArchProfile Sm100 开 ho 寄存器预取（默认路径 = bv32pf）；B300-50 GPU 7
 
+## probe_gdn_r10_3（2026-10-20，B300）
+
+### gdn_scale（us）
+
+| x | chain_us dinfer | conv_rows0_us dinfer | conv_rows128_us dinfer | conv_rows16_us dinfer | conv_rows256_us dinfer | conv_rows32_us dinfer | conv_rows64_us dinfer | conv_rows8_us dinfer | ho_bv16_us dinfer | ho_bv16pf_us dinfer | ho_bv16pfsp_us dinfer | ho_bv16sp_us dinfer | ho_bv32_us dinfer | ho_bv32pf_us dinfer | ho_bv32pfsp_us dinfer | ho_bv32sp_us dinfer | ho_legacy_us dinfer | prep_us dinfer | wy_legacy_us dinfer | wy_mma8_us dinfer | wy_serial_us dinfer | wy_us dinfer |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1x1024 | 161 | 487 | 114 | 39 | 218 | 41 | 62 | 37 | 70 | 79 | 89 | 109 | 65 | 65 | 114 | 99 | 791 | 18 | 422 | 65 | 111 | 76 |
+| 8x1024 | 898 | 809 | 311 | 220 | 319 | 222 | 247 | 250 | 542 | 545 | 624 | 726 | 408 | 377 | 633 | 543 | 5018 | 82 | 2926 | 435 | 656 | 506 |
+| 32x128 | 494 | 217 | 172 | 129 | 301 | 137 | 169 | 138 | 318 | 325 | 345 | 386 | 231 | 221 | 343 | 302 | 2502 | 42 | 1488 | 229 | 358 | 273 |
+| 1x4096 | 534 | 3063 | 163 | 122 | 295 | 132 | 164 | 131 | 322 | 392 | 351 | 440 | 350 | 264 | 458 | 396 | 3302 | 43 | 1486 | 229 | 360 | 271 |
+| 1x8192 | 1034 | 6173 | 308 | 219 | 316 | 220 | 247 | 249 | 634 | 782 | 683 | 865 | 692 | 521 | 901 | 778 | 6649 | 82 | 2926 | 435 | 657 | 506 |
+
+- 1x1024 chain_us dinfer：r10 第 3 轮：wy 8 warp（Sm100 默认 Mma8）；B300-50 GPU 7
+- 8x1024 chain_us dinfer：r10 第 3 轮：wy 8 warp（Sm100 默认 Mma8）；B300-50 GPU 7
+- 32x128 chain_us dinfer：r10 第 3 轮：wy 8 warp（Sm100 默认 Mma8）；B300-50 GPU 7
+- 1x4096 chain_us dinfer：r10 第 3 轮：wy 8 warp（Sm100 默认 Mma8）；B300-50 GPU 7
+- 1x8192 chain_us dinfer：r10 第 3 轮：wy 8 warp（Sm100 默认 Mma8）；B300-50 GPU 7
+
 ## probe_gdn_r9_0（2026-10-20，3090）
 
 ### gdn_scale（us）
