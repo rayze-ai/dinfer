@@ -112,7 +112,8 @@ int gqa_cache_write_bf16(const void* k, const void* v, void* cache, const int64_
                          int64_t kv_heads, int64_t head_dim, int64_t block_size, cudaStream_t stream);
 // q_stride / kv_stride：每 token 行的元素跨度（0 = 紧凑 heads·D / kv_heads·D）；允许直接读 qkv GEMM 输出。
 // head_dim ∈ {128, 256} 走 tensor-core tile kernel；其他 D ≤ 256 走通用慢路径。
-// cfg（r11a）：D=256 的 kernel 结构选择 = 版本·1000 + warp 数·100 + tile key 数（版本 0 = v6 Q 进 smem、1 = v7 warp 对分工；
+// cfg（r11a）：D=256 的 kernel 结构选择 = 版本·1000 + warp 数·100 + tile key 数（版本 0 = v6 Q 进 smem、1 = v7 warp 对分工、
+// 2 = v6 + K/V 双缓冲、3 = v6 + SFU ex2.approx；
 // NW ∈ {4,8} × TILE ∈ {32,64}），0 = v5 旧路径
 // （4 warp、tile 32、Q 在寄存器）。数值由 Rust 侧 ArchProfile 按卡给；D=128 忽略 cfg。
 int gqa_prefill_bf16(const void* q, const void* k, const void* v, void* out, const int32_t* cu_seqlens, int64_t num_reqs,
@@ -330,7 +331,7 @@ int dsa_row_vis_i32(const int32_t* seq_lens, const int32_t* cu_seqlens_q, int32_
 // 小 M bf16 GEMM（decode）：out[M,N] = a[M,K]·w[N,K]^T (+bias)；splits>1 时需 partial[splits,M,N] f32。见 gemm_small_m.cu。
 int gemm_small_m_bf16(const void* a, const void* w, const void* bias, void* out, float* partial, int64_t m,
                       int64_t n, int64_t k, int64_t splits, cudaStream_t stream);
-// tensor-core 版（r11b）：K % 32 == 0，warps ∈ {4,8}，stripes（每 warp 的 8 行 W 条数）∈ {1,2,4,8}；
+// tensor-core 版（r11b）：K % 128 == 0，warps ∈ {4,8}，stripes（每 warp 的 8 行 W 条数）∈ {1,2,4}；
 // splits>1 时 partial[splits,M,N] f32 + counters[ceil(N/8)] int（初值 0，自复位），归约在 kernel 内由最后到达的 warp 做。
 int gemm_small_m_mma_bf16(const void* a, const void* w, const void* bias, void* out, float* partial, int* counters,
                           int64_t m, int64_t n, int64_t k, int64_t splits, int64_t warps, int64_t stripes,

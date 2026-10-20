@@ -994,6 +994,7 @@ extern "C" {
         k: i64,
         splits: i64,
         warps: i64,
+        stripes: i64,
         stream: cudaStream_t,
     ) -> i32;
 }
@@ -1130,7 +1131,7 @@ mod stubs {
     stub!(gdn_gate(a: *const c_void, b: *const c_void, al: *const f32, db: *const f32, g: *mut f32, be: *mut f32, t: i64, h: i64, d: i32, abs: i64, s: cudaStream_t));
     stub!(gdn_recurrent(mq: *const c_void, g: *const f32, be: *const f32, ar: *const c_void, br: *const c_void, al: *const f32, db: *const f32, o: *mut c_void, st: *mut c_void, cu: *const i32, si: *const i32, ns: i64, hk: i64, hv: i64, k: i64, v: i64, gp: i64, sc: f32, sst: i64, fg: i32, vs: i64, dbv: i64, dv: i32, dg: i64, abs: i64, s: cudaStream_t));
     stub!(gemm_small_m_bf16(a: *const c_void, w: *const c_void, b: *const c_void, o: *mut c_void, p: *mut f32, m: i64, n: i64, k: i64, sp: i64, s: cudaStream_t));
-    stub!(gemm_small_m_mma_bf16(a: *const c_void, w: *const c_void, b: *const c_void, o: *mut c_void, p: *mut f32, c: *mut i32, m: i64, n: i64, k: i64, sp: i64, wp: i64, s: cudaStream_t));
+    stub!(gemm_small_m_mma_bf16(a: *const c_void, w: *const c_void, b: *const c_void, o: *mut c_void, p: *mut f32, c: *mut i32, m: i64, n: i64, k: i64, sp: i64, wp: i64, st: i64, s: cudaStream_t));
     stub!(gdn_gated_rmsnorm(x: *const c_void, w: *const c_void, z: *const c_void, o: *mut c_void, r: i64, hd: i64, e: f32, a: i32, h: i64, zs: i64, s: cudaStream_t));
     stub!(f32_add_to_bf16(a: *const f32, o: *mut c_void, n: i64, s: cudaStream_t));
     stub!(gather_blocks_bf16_to_f32(x: *const c_void, y: *mut f32, nb: i64, r: i64, c: i64, s: cudaStream_t));

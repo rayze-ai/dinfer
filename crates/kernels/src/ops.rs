@@ -70,8 +70,8 @@ pub fn gemm_small_m_bf16(
     )
 }
 
-/// tensor-core 小 M GEMM（r11b）：同 `gemm_small_m_bf16` 语义，K % 32 == 0，`warps` ∈ {4, 8}。
-/// splits > 1 时 `partial` ≥ splits·m·n 个 f32、`counters` ≥ ceil(n/16) 个 i32（初值 0，kernel 自复位）。
+/// tensor-core 小 M GEMM（r11b）：同 `gemm_small_m_bf16` 语义，K % 128 == 0，`warps` ∈ {4, 8}，`stripes`（每 warp 8 行 W 条数）∈ {1,2,4}。
+/// splits > 1 时 `partial` ≥ splits·m·n 个 f32、`counters` ≥ ceil(n/8) 个 i32（初值 0，kernel 自复位）。
 #[allow(clippy::too_many_arguments)]
 pub fn gemm_small_m_mma_bf16(
     stream: &Stream,
@@ -86,9 +86,11 @@ pub fn gemm_small_m_mma_bf16(
     k: usize,
     splits: usize,
     warps: usize,
+    stripes: usize,
 ) -> Result<()> {
-    ensure!(m >= 1 && m <= 32 && k % 32 == 0, "gemm_small_m_mma: m={m} (1..=32) k={k} (32 的倍数)");
+    ensure!(m >= 1 && m <= 32 && k % 128 == 0, "gemm_small_m_mma: m={m} (1..=32) k={k} (128 的倍数)");
     ensure!(warps == 4 || warps == 8, "gemm_small_m_mma: warps={warps}");
+    ensure!(matches!(stripes, 1 | 2 | 4), "gemm_small_m_mma: stripes={stripes}");
     ensure!(a.len() >= m * k && w.len() == n * k && out.len() >= m * n, "gemm_small_m_mma: 形状");
     if let Some(b) = bias {
         ensure!(b.len() == n, "gemm_small_m_mma: bias.len {} != n {n}", b.len());
@@ -96,7 +98,7 @@ pub fn gemm_small_m_mma_bf16(
     let (pp, pc) = if splits > 1 {
         let (Some(p), Some(c)) = (partial, counters) else { bail!("gemm_small_m_mma: splits > 1 需要 partial + counters") };
         ensure!(p.len() >= splits * m * n, "gemm_small_m_mma: partial.len {} < {}", p.len(), splits * m * n);
-        ensure!(c.len() >= n.div_ceil(16), "gemm_small_m_mma: counters.len {} < {}", c.len(), n.div_ceil(16));
+        ensure!(c.len() >= n.div_ceil(8), "gemm_small_m_mma: counters.len {} < {}", c.len(), n.div_ceil(8));
         (stream.ptr_mut(p) as *mut f32, stream.ptr_mut(c) as *mut i32)
     } else {
         (std::ptr::null_mut(), std::ptr::null_mut())
@@ -108,7 +110,7 @@ pub fn gemm_small_m_mma_bf16(
     // SAFETY: 指针来自有效 CudaSlice，长度已校验；stream 同 context。
     check(
         unsafe {
-            ffi::gemm_small_m_mma_bf16(pa, pw, pb, po, pp, pc, m as i64, n as i64, k as i64, splits as i64, warps as i64, stream.raw() as ffi::cudaStream_t)
+            ffi::gemm_small_m_mma_bf16(pa, pw, pb, po, pp, pc, m as i64, n as i64, k as i64, splits as i64, warps as i64, stripes as i64, stream.raw() as ffi::cudaStream_t)
         },
         "gemm_small_m_mma_bf16",
     )

@@ -150,7 +150,7 @@ impl ArchProfile {
                 Arch::Sm90 | Arch::Sm100 => vec![1, 2, 4, 8],
             },
             small_m_mma_warps: vec![4, 8],
-            small_m_mma_stripes: vec![2, 4, 8],
+            small_m_mma_stripes: vec![1, 2, 4],
             timing_iters: 5,
             split_workspace_max_bytes: 64 << 20,
         };
@@ -450,9 +450,10 @@ mod tests {
             let c = ArchProfile::gqa_prefill_cfg_for(a);
             if c != 0 {
                 let (ver, nw, tile) = (c / 1000, c % 1000 / 100, c % 100);
-                assert!(ver <= 1 && [4, 8].contains(&nw) && [32, 64].contains(&tile), "{a:?} cfg {c}");
+                assert!(ver <= 3 && [4, 8].contains(&nw) && [32, 64].contains(&tile), "{a:?} cfg {c}");
                 let bq = if ver == 1 { nw * 8 } else { nw * 16 };
-                let smem = (bq + 2 * tile) * (256 + 8) * 2 + if ver == 1 { nw / 2 * (16 * (tile + 8) * 2 + 128) } else { 0 };
+                let nbuf = if ver == 2 { 2 } else { 1 };  // 版本 3 = v6 + SFU exp2
+                let smem = (bq + 2 * nbuf * tile) * (256 + 8) * 2 + if ver == 1 { nw / 2 * (16 * (tile + 8) * 2 + 128) } else { 0 };
                 let cap = if a == Arch::Sm8x { 99 * 1024 } else { 227 * 1024 };
                 assert!(smem <= cap, "{a:?} cfg {c} smem {smem} > {cap}");
             }

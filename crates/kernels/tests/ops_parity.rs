@@ -410,22 +410,24 @@ fn parity_gemm_small_m() {
 #[ignore]
 fn parity_gemm_small_m_mma() {
     let (_d, s) = dev();
-    // (m, n, k, splits, warps, bias)：覆盖 M_TILE 8/16/32、非 2 幂 M、非 16 倍数 N（48、5000）、split-K 内归约、两种 warps、bias。
+    // (m, n, k, splits, warps, stripes, bias)：覆盖 M_TILE 8/16/32、非 2 幂 M、非 8 倍数 N（48、5000）、split-K 内归约、
+    // warps 4/8 × stripes 1/2/4、bias。
     let hid = 5120usize;
-    let cases: [(usize, usize, usize, usize, usize, bool); 10] = [
-        (1, 34816, hid, 1, 4, false),
-        (8, 16480, hid, 1, 8, false),
-        (8, hid, 17408, 6, 4, true),
-        (3, 6144, hid, 2, 8, true),
-        (32, 48, hid, 5, 4, false),
-        (16, 16480, hid, 2, 4, false),
-        (31, hid, 6144, 3, 8, true),
-        (32, 34816, hid, 1, 8, false),
-        (5, 5000, 2048, 4, 4, false),
-        (9, 48, 1024, 32, 4, true),
+    let cases: [(usize, usize, usize, usize, usize, usize, bool); 11] = [
+        (1, 34816, hid, 1, 4, 4, false),
+        (8, 16480, hid, 1, 8, 4, false),
+        (8, hid, 17408, 6, 4, 2, true),
+        (3, 6144, hid, 2, 8, 1, true),
+        (32, 48, hid, 5, 4, 1, false),
+        (16, 16480, hid, 2, 4, 4, false),
+        (31, hid, 6144, 3, 8, 2, true),
+        (32, 34816, hid, 1, 8, 4, false),
+        (5, 5000, 2048, 4, 4, 4, false),
+        (9, 48, 1024, 32, 4, 2, true),
+        (12, 5000, 4096, 3, 8, 4, true),
     ];
-    for (ci, &(m, n, k, splits, warps, bias)) in cases.iter().enumerate() {
-        let c = Case::new("gemm_small_m", &format!("mma_m{m}_n{n}_k{k}_s{splits}w{warps}{}", if bias { "_bias" } else { "" }));
+    for (ci, &(m, n, k, splits, warps, stripes, bias)) in cases.iter().enumerate() {
+        let c = Case::new("gemm_small_m", &format!("mma_m{m}_n{n}_k{k}_s{splits}w{warps}r{stripes}{}", if bias { "_bias" } else { "" }));
         let mut r = Rng::new(790 + ci as u64);
         let a = r.normals_bf16(m * k, 1.0);
         let w = r.normals_bf16(n * k, (1.0 / k as f32).sqrt());
@@ -435,10 +437,10 @@ fn parity_gemm_small_m_mma() {
         let db = s.htod_copy(b.clone()).unwrap();
         let mut out = s.alloc_zeros::<bf16>(m * n).unwrap();
         let mut partial = s.alloc_zeros::<f32>(splits * m * n).unwrap();
-        let mut ctr = s.alloc_zeros::<i32>(n.div_ceil(16)).unwrap();
+        let mut ctr = s.alloc_zeros::<i32>(n.div_ceil(8)).unwrap();
         // 连跑两次：验证计数器自复位（第二次结果仍正确）
         for _ in 0..2 {
-            dinfer_kernels::gemm_small_m_mma_bf16(&s, &da, &dw, bias.then_some(&db), &mut out, Some(&mut partial), Some(&mut ctr), m, n, k, splits, warps).unwrap();
+            dinfer_kernels::gemm_small_m_mma_bf16(&s, &da, &dw, bias.then_some(&db), &mut out, Some(&mut partial), Some(&mut ctr), m, n, k, splits, warps, stripes).unwrap();
         }
         let ctr_h = s.dtoh_sync_copy(&ctr).unwrap();
         assert!(ctr_h.iter().all(|&v| v == 0), "counters 未自复位: {:?}", &ctr_h[..ctr_h.len().min(8)]);

@@ -82,16 +82,16 @@ fn gemm_small_m_bench() {
             let chosen = match row.chosen {
                 GemmPlan::LtAlgo(_) => "lt".to_string(),
                 GemmPlan::SmallM { splits } => format!("small_m(s{splits})"),
-                GemmPlan::SmallMma { splits, warps } => format!("mma(s{splits}w{warps})"),
+                GemmPlan::SmallMma { splits, warps, stripes } => format!("mma(s{splits}w{warps}r{stripes})"),
             };
             let (mma_us, mma_gb) = match row.mma_us {
                 Some(u) => (format!("{u:8.1}"), format!("{:5.0}", row.gbps(u))),
                 None => ("       -".into(), "    -".into()),
             };
             println!(
-                "{:<4} {:<16} {:>6} {:>6} | {:8.1} {:5.0} | {:8.1} {:5.0} {:<26} | {} {} {:>4} | {} {} s{}w{} | {} | {}",
+                "{:<4} {:<16} {:>6} {:>6} | {:8.1} {:5.0} | {:8.1} {:5.0} {:<26} | {} {} {:>4} | {} {} s{}w{}r{} | {} | {}",
                 m, name, n, k, row.lt_default_us, row.gbps(row.lt_default_us), row.lt_best_us, row.gbps(row.lt_best_us),
-                row.lt_best_desc, sm_us, sm_gb, row.small_m_splits, mma_us, mma_gb, row.mma_splits, row.mma_warps, bucket_us, chosen
+                row.lt_best_desc, sm_us, sm_gb, row.small_m_splits, mma_us, mma_gb, row.mma_splits, row.mma_warps, row.mma_stripes, bucket_us, chosen
             );
         }
         drop(dw);

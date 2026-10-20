@@ -1,0 +1,37 @@
+warning: dinfer-kernels@0.1.0: nvcc[cuda/gqa_decode_v3.cu]: cuda/gqa_decode_v3.cu(35): warning #177-D: function "<unnamed>::cp16" was declared but never referenced
+warning: dinfer-kernels@0.1.0: nvcc[cuda/gqa_decode_v3.cu]:   __attribute__((device)) __inline__ __attribute__((always_inline)) void cp16(void* smem, const void* gmem) {
+warning: dinfer-kernels@0.1.0: nvcc[cuda/gqa_decode_v3.cu]:                                                                          ^
+warning: dinfer-kernels@0.1.0: nvcc[cuda/gqa_decode_v3.cu]: Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.06s
+     Running tests/gemm_small_m.rs (/data/yaochen/infer/target_r11b/release/deps/gemm_small_m-c80ca122726383a6)
+
+running 1 test
+GPU cc=(10, 3) sm=148 arch=Sm100 lt_candidates=8 split candidates(wave targets)=[1, 2, 4, 8]
+M    shape                 N      K |   lt_def  GB/s |  lt_best  GB/s algo                       |  small_m  GB/s  spl |      mma us GB/s cfg | bucket us | chosen
+8    gdn.in_proj       16480   5120 |     27.7  6083 |     27.7  6083 #0 id=66 tile=393 splitk=1 |     95.9  1760    1 |     43.8  3850 s3w8 |         = | lt
+32   gdn.in_proj       16480   5120 |     28.2  5985 |     27.3  6187 #3 id=66 tile=13 splitk=1  |    349.4   483    1 |     63.1  2675 s3w8 |         = | lt
+8    gdn.in_proj_qkv   10240   5120 |     18.7  5621 |     16.4  6405 #2 id=66 tile=448 splitk=5 |     63.9  1641    1 |     29.9  3508 s4w8 |         = | lt
+32   gdn.in_proj_qkv   10240   5120 |     18.0  5824 |     18.0  5824 #0 id=66 tile=134 splitk=1 |    229.4   457    1 |     42.4  2473 s4w4 |         = | lt
+8    gdn.in_proj_z      6144   5120 |     10.0  6273 |      8.8  7129 #2 id=66 tile=393 splitk=3 |     37.9  1662    1 |     16.6  3793 s7w8 |         = | lt
+32   gdn.in_proj_z      6144   5120 |      9.6  6536 |      9.0  6967 #1 id=66 tile=16 splitk=3  |    138.9   453    1 |     28.6  2196 s4w4 |         = | lt
+8    gdn.in_proj_a        48   5120 |     10.3    48 |     10.3    48 #0 id=21 tile=15 splitk=16 |      6.5    76   13 |     13.2    37 s148w8 |         = | small_m(s13)
+32   gdn.in_proj_a        48   5120 |     10.4    47 |      9.5    52 #2 id=66 tile=12 splitk=5  |      9.3    53   13 |     35.6    14 s148w4 |         = | small_m(s13)
+8    gdn.out_proj       5120   6144 |     10.3  6125 |      9.6  6541 #6 id=66 tile=449 splitk=5 |     36.9  1707    1 |     14.3  4385 s8w4 |         = | lt
+32   gdn.out_proj       5120   6144 |     10.2  6144 |     10.0  6269 #1 id=66 tile=16 splitk=3  |    138.0   456    1 |     25.4  2476 s8w4 |         = | lt
+8    attn.qkv_gate     14336   5120 |     27.6  5311 |     24.4  6025 #3 id=66 tile=395 splitk=1 |     85.2  1723    1 |     41.0  3584 s3w8 |         = | lt
+32   attn.qkv_gate     14336   5120 |     24.8  5925 |     24.6  5970 #3 id=66 tile=13 splitk=1  |    310.8   472    1 |     61.8  2374 s3w8 |         = | lt
+8    attn.qkv           8192   5120 |      8.6  9731 |      8.6  9731 #0 id=66 tile=10 splitk=1  |     48.3  1735    1 |     23.5  3570 s5w4 |         = | lt
+32   attn.qkv           8192   5120 |      8.8  9498 |      8.8  9498 #0 id=66 tile=13 splitk=1  |    178.2   471    1 |     37.3  2251 s5w4 |         = | lt
+8    attn.gate          6144   5120 |     10.8  5834 |      8.6  7303 #2 id=66 tile=393 splitk=3 |     37.7  1670    1 |     16.6  3794 s7w8 |         = | lt
+32   attn.gate          6144   5120 |      9.7  6519 |      9.2  6841 #1 id=66 tile=16 splitk=3  |    138.9   453    1 |     28.7  2194 s4w4 |         = | lt
+8    attn.o_proj        5120   6144 |      9.5  6647 |      9.0  6987 #1 id=66 tile=393 splitk=3 |     36.9  1707    1 |     14.7  4267 s8w8 |         = | lt
+32   attn.o_proj        5120   6144 |     10.5  5990 |      9.6  6541 #1 id=66 tile=16 splitk=3  |    138.5   454    1 |     25.5  2463 s8w4 |         = | lt
+8    mlp.gate_up       34816   5120 |     56.5  6308 |     53.8  6625 #3 id=66 tile=10 splitk=1  |    185.9  1918    1 |     85.2  4185 s3w8 |         = | lt
+32   mlp.gate_up       34816   5120 |     57.5  6195 |     54.7  6521 #5 id=66 tile=13 splitk=1  |    719.0   496    1 |    121.2  2941 s3w8 |         = | lt
+8    mlp.down           5120  17408 |     33.0  5401 |     32.0  5578 #2 id=66 tile=448 splitk=5 |    113.5  1571    1 |     49.6  3596 s8w8 |         = | lt
+32   mlp.down           5120  17408 |     34.2  5211 |     33.6  5307 #2 id=66 tile=451 splitk=5 |    395.5   451    1 |     70.0  2545 s8w4 |         = | lt
+test gemm_small_m_bench ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 3.31s
+
+UBENCH_DONE

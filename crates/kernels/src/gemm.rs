@@ -40,7 +40,7 @@ pub enum GemmPlan {
     /// 自写小 M kernel，split-K 份数。
     SmallM { splits: usize },
     /// 自写 tensor-core 小 M kernel（r11b）：split-K 份数 + 每 block warp 数（归约在 kernel 内）。
-    SmallMma { splits: usize, warps: usize },
+    SmallMma { splits: usize, warps: usize, stripes: usize },
 }
 
 /// 自调优输入：一个形状（N, K）和它的真实权重（计时用真权重，避免再分配一份）。
@@ -71,6 +71,7 @@ pub struct GemmTuneRow {
     pub mma_us: Option<f32>,
     pub mma_splits: usize,
     pub mma_warps: usize,
+    pub mma_stripes: usize,
     pub chosen: GemmPlan,
 }
 
@@ -118,7 +119,7 @@ impl GemmTuneReport {
                         let what = match r.chosen {
                             GemmPlan::LtAlgo(_) => format!("lt[{}]", r.lt_best_desc),
                             GemmPlan::SmallM { splits } => format!("small_m(s{splits})"),
-                            GemmPlan::SmallMma { splits, warps } => format!("mma(s{splits}w{warps})"),
+                            GemmPlan::SmallMma { splits, warps, stripes } => format!("mma(s{splits}w{warps}r{stripes})"),
                         };
                         format!("m{}={} {:.0}us({:+.0}%)", r.m, what, r.chosen_us(), (r.chosen_us() / r.lt_default_us - 1.0) * 100.0)
                     })
@@ -250,13 +251,13 @@ impl Gemm {
                 drop(guard);
                 self.run_lt_default(a, w, bias, out, m, n, k)
             }
-            Some(GemmPlan::SmallMma { splits, warps }) => {
+            Some(GemmPlan::SmallMma { splits, warps, stripes }) => {
                 let mut pg = self.partial.lock().unwrap();
                 let mut cg = self.counters.lock().unwrap();
                 let fits = splits <= 1
-                    || (pg.as_ref().is_some_and(|p| p.len() >= splits * m * n) && cg.as_ref().is_some_and(|c| c.len() >= n.div_ceil(16)));
+                    || (pg.as_ref().is_some_and(|p| p.len() >= splits * m * n) && cg.as_ref().is_some_and(|c| c.len() >= n.div_ceil(8)));
                 if fits {
-                    return ops::gemm_small_m_mma_bf16(&self.stream, a, w, bias, out, pg.as_mut(), cg.as_mut(), m, n, k, splits, warps);
+                    return ops::gemm_small_m_mma_bf16(&self.stream, a, w, bias, out, pg.as_mut(), cg.as_mut(), m, n, k, splits, warps, stripes);
                 }
                 drop(pg);
                 drop(cg);
@@ -333,13 +334,13 @@ impl Gemm {
                 }
                 self.time_us(iters, || ops::gemm_small_m_bf16(&self.stream, a_scratch, w, bias, out_scratch, Some(&mut *partial_scratch), m, n, k, splits)).map(Some)
             }
-            GemmPlan::SmallMma { splits, warps } => {
-                if m > self.profile.gemm_tune.small_m_max || k % 32 != 0 || splits * m * n > partial_scratch.len() {
+            GemmPlan::SmallMma { splits, warps, stripes } => {
+                if m > self.profile.gemm_tune.small_m_max || k % 128 != 0 || splits * m * n > partial_scratch.len() {
                     return Ok(None);
                 }
-                let mut ctr = self.stream.alloc_zeros::<i32>(n.div_ceil(16))?;
+                let mut ctr = self.stream.alloc_zeros::<i32>(n.div_ceil(8))?;
                 self.time_us(iters, || {
-                    ops::gemm_small_m_mma_bf16(&self.stream, a_scratch, w, bias, out_scratch, Some(&mut *partial_scratch), Some(&mut ctr), m, n, k, splits, warps)
+                    ops::gemm_small_m_mma_bf16(&self.stream, a_scratch, w, bias, out_scratch, Some(&mut *partial_scratch), Some(&mut ctr), m, n, k, splits, warps, stripes)
                 })
                 .map(Some)
             }
@@ -559,25 +560,29 @@ impl Gemm {
         let mut mma_us = None;
         let mut mma_splits = 0;
         let mut mma_warps = 0;
-        if m <= tp.small_m_max && k % 32 == 0 {
-            let mut ctr = self.stream.alloc_zeros::<i32>(n.div_ceil(16))?;
+        let mut mma_stripes = 0;
+        if m <= tp.small_m_max && k % 128 == 0 {
+            let mut ctr = self.stream.alloc_zeros::<i32>(n.div_ceil(8))?;
             for &wp in &tp.small_m_mma_warps {
-                let blocks = n.div_ceil(16 * wp);
-                for s in self.profile.small_m_split_candidates(blocks, k) {
-                    let s = s.min((k / 32).max(1));
-                    if s > 1 && (s * m * n > partial_scratch.len() || s * m * n * 4 > tp.split_workspace_max_bytes) {
-                        continue;
-                    }
-                    // 个别配置 launch 失败（资源）就跳过，不让整个自调优失败
-                    let Ok(us) = self.time_us(iters, || {
-                        ops::gemm_small_m_mma_bf16(&self.stream, a_scratch, w, bias, out_scratch, Some(&mut *partial_scratch), Some(&mut ctr), m, n, k, s, wp)
-                    }) else {
-                        continue;
-                    };
-                    if mma_us.is_none_or(|best| us < best) {
-                        mma_us = Some(us);
-                        mma_splits = s;
-                        mma_warps = wp;
+                for &rs in &tp.small_m_mma_stripes {
+                    let blocks = n.div_ceil(8 * rs * wp);
+                    for s in self.profile.small_m_split_candidates(blocks, k) {
+                        let s = s.min((k / 128).max(1));
+                        if s > 1 && (s * m * n > partial_scratch.len() || s * m * n * 4 > tp.split_workspace_max_bytes) {
+                            continue;
+                        }
+                        // 个别配置 launch 失败（资源）就跳过，不让整个自调优失败
+                        let Ok(us) = self.time_us(iters, || {
+                            ops::gemm_small_m_mma_bf16(&self.stream, a_scratch, w, bias, out_scratch, Some(&mut *partial_scratch), Some(&mut ctr), m, n, k, s, wp, rs)
+                        }) else {
+                            continue;
+                        };
+                        if mma_us.is_none_or(|best| us < best) {
+                            mma_us = Some(us);
+                            mma_splits = s;
+                            mma_warps = wp;
+                            mma_stripes = rs;
+                        }
                     }
                 }
             }
@@ -592,7 +597,7 @@ impl Gemm {
         };
         if let Some(mu) = mma_us {
             if mu < best_so_far {
-                chosen = GemmPlan::SmallMma { splits: mma_splits, warps: mma_warps };
+                chosen = GemmPlan::SmallMma { splits: mma_splits, warps: mma_warps, stripes: mma_stripes };
             }
         }
         Ok(GemmTuneRow {
@@ -608,6 +613,7 @@ impl Gemm {
             mma_us,
             mma_splits,
             mma_warps,
+            mma_stripes,
             chosen,
         })
     }
@@ -638,7 +644,7 @@ impl Gemm {
                     GemmPlan::SmallM { splits } => need_partial = need_partial.max(splits * m * e.n),
                     GemmPlan::SmallMma { splits, .. } if splits > 1 => {
                         need_partial = need_partial.max(splits * m * e.n);
-                        need_counters = need_counters.max(e.n.div_ceil(16));
+                        need_counters = need_counters.max(e.n.div_ceil(8));
                     }
                     _ => {}
                 }

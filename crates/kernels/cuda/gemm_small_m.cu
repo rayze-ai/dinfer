@@ -122,18 +122,20 @@ void launch(const bf16* a, const bf16* w, const bf16* bias, bf16* out, float* pa
 
 
 // ============================================================================================
-// tensor-core 小 M kernel（r11b，docs/loops/qwen35-decode-r11b.md）：C^T[N,M] = W[N,K]·A^T，mma.m16n8k16 bf16。
+// tensor-core 小 M kernel（r11b，docs/loops/qwen35-decode-r11b.md）：C[M,N] = A[M,K]·W[N,K]^T，mma.m16n8k16 bf16。
 // 为什么：FMA 版每 16 B 权重要 M×8 条 FMA + 转换，M=8/32 时算力型（1.7 / 0.46 TB/s）；cuBLASLt 对这些形状停在 ~6 TB/s。
-// 结构：每 warp 负责 W 的 16 行（mma 的 "A" 操作数 = W 片段，直接 16 B 向量读 global，K 维按 lane 置换——
-// 置换对 A、B 一致即可，K 只是归约维；不走 smem / ldmatrix）；激活 A[M,K] 按 TK 分块进 smem（行 pad 16 B 分散 bank），
-// 作 mma 的 "B" 操作数（n8 tile = 8 行激活），M ≤ 32 → 1–4 个 n8 tile 复用同一 W 片段。
-// split-K：blockIdx.y 负责 K 的一段；splits > 1 时 partial[splits,M,N] f32 + 每 N-tile 一个计数器，
-// **最后到达的 block 归约**（__threadfence + atomicAdd，自复位，CUDA graph 安全），不再有独立 reduce kernel。
-// 调优数值 splits / warps 由 host 给（ArchProfile 候选 + 启动自调优），kernel 不猜。限制：K % 32 == 0。
-constexpr int kMmaTk = 1024;  // 每次放进 smem 的激活列数（M_TILE ≤ 16；32 行时减半，静态 smem 保持 ~33 KB < 48 KB）
-constexpr int kMmaPad = 8;    // 行 pad（bf16 个数 = 16 B）：相邻行错 4 bank
+// 结构（第 3 轮定稿；第 1/2 轮把 W 当 mma "A" 操作数、激活走 smem 当 "B"，smem 读量 = W 读量，M=32 时卡在 smem 带宽 3–4 TB/s）：
+//   - 激活 A[M,K] 当 mma 的 "A"（m16，M ≤ 16 一组、32 两组），按 TK 分块进 smem，每 32 列 chunk 每 lane 读 2 × 16 B 到寄存器；
+//   - W 当 mma 的 "B"（n8 = W 的 8 行），**直接 16 B 向量读 global，不经 smem**；每 warp 负责 R 条 8 行 stripe，
+//     同一份 A 寄存器片段复用 R 次 → smem 读量 = W 的 1/R；
+//   - K 维按 lane 置换（lane t 持列 [t·8, t·8+8)，前 4 列给第 1 条 mma、后 4 列给第 2 条），A / B 一致即可，K 只是归约维。
+// split-K：blockIdx.y 负责 K 的一段；splits > 1 时 partial[splits,M,N] f32 + 每 stripe（8 行 N）一个计数器，
+// **最后到达的 warp 归约**（__threadfence + atomicAdd，自复位，CUDA graph 安全），不再有独立 reduce kernel。
+// 调优数值 splits / warps / stripes 由 host 给（ArchProfile 候选 + 启动自调优），kernel 不猜。限制：K % 32 == 0。
+constexpr int kMmaBatch = 4;  // 每轮一起发出的 32 列 chunk 数（K 段按 32·kMmaBatch 对齐，host 保证）
+constexpr int kMmaPad = 8;  // 行 pad 16 B：保持每行 16 B 对齐（8 lane 相位读同一行 128 B 连续，天然无 bank 冲突）
 template <int M_TILE>
-constexpr int mma_tk() { return M_TILE <= 16 ? kMmaTk : kMmaTk / 2; }
+constexpr int mma_tk() { return M_TILE <= 16 ? 1024 : 512; }  // 分块列数：smem 行数 = m16 组 × 16（M=8 也 16 行），≈ 33 KB
 
 __device__ __forceinline__ void mma16816_bf16(float* c, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3,
                                               uint32_t b0, uint32_t b1) {
@@ -142,124 +144,169 @@ __device__ __forceinline__ void mma16816_bf16(float* c, uint32_t a0, uint32_t a1
                : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
 }
 
-// grid = (ceil(N / (16·WARPS)), splits)，block = 32·WARPS。
-template <int M_TILE, int WARPS>
+// grid = (ceil(N / (8·R·WARPS)), splits)，block = 32·WARPS。
+template <int M_TILE, int WARPS, int R>
 __global__ void __launch_bounds__(32 * WARPS) small_m_mma_kernel(const bf16* __restrict__ a, const bf16* __restrict__ w,
                                                                  const bf16* __restrict__ bias, bf16* __restrict__ out,
                                                                  float* __restrict__ partial, int* __restrict__ counters,
                                                                  int m, int n, int k, int k_per_split, int splits) {
   static_assert(M_TILE == 8 || M_TILE == 16 || M_TILE == 32, "M_TILE");
-  constexpr int MT = M_TILE / 8;  // n8 tile 数
+  constexpr int MG = (M_TILE + 15) / 16;  // m16 组数（M=8 一组只用前 8 行）
   constexpr int TK = mma_tk<M_TILE>();
-  __shared__ __align__(16) bf16 a_tile[M_TILE][TK + kMmaPad];
+  constexpr int ROWS = MG * 16;
+  __shared__ __align__(16) bf16 a_tile[ROWS][TK + kMmaPad];
   const int warp = threadIdx.x >> 5;
   const int lane = threadIdx.x & 31;
   const int g = lane >> 2, t = lane & 3;
-  const int n0 = (blockIdx.x * WARPS + warp) * 16;  // 本 warp 的 W 行起点（可能越界：仍参与 __syncthreads）
+  const int n0 = (blockIdx.x * WARPS + warp) * (8 * R);  // 本 warp 的 W 行起点（可能越界：仍参与 __syncthreads）
   const int k_begin = blockIdx.y * k_per_split;
   const int k_end = min(k, k_begin + k_per_split);
 
-  float acc[MT][4];
+  float acc[R][MG][4];
 #pragma unroll
-  for (int i = 0; i < MT; ++i) acc[i][0] = acc[i][1] = acc[i][2] = acc[i][3] = 0.f;
+  for (int r = 0; r < R; ++r)
+#pragma unroll
+    for (int i = 0; i < MG; ++i) acc[r][i][0] = acc[r][i][1] = acc[r][i][2] = acc[r][i][3] = 0.f;
 
   const bool active = n0 < n;
-  // 越界行 clamp 到最后一行（读到的值不写出；避免 n 非 16 倍数时越界读）
-  const bf16* w0 = w + (long)min(n0 + g, n - 1) * k;
-  const bf16* w1 = w + (long)min(n0 + g + 8, n - 1) * k;
+  // stripe r 的 lane 读 W 行 (n0 + 8r + g)，列偏移 t·8；越界行 clamp（读到的值不写出）
+  const bf16* wp[R];
+#pragma unroll
+  for (int r = 0; r < R; ++r) wp[r] = w + (long)min(n0 + 8 * r + g, n - 1) * k + t * 8;
 
   for (int k0 = k_begin; k0 < k_end; k0 += TK) {
     const int kt = min(TK, k_end - k0);  // 本段列数（32 的倍数）
-    for (int idx = threadIdx.x; idx < M_TILE * (TK / 8); idx += 32 * WARPS) {
-      const int r = idx / (TK / 8), c8 = idx % (TK / 8);
-      if (r < m && c8 * 8 < kt)
-        *reinterpret_cast<uint4*>(&a_tile[r][c8 * 8]) = *reinterpret_cast<const uint4*>(a + (long)r * k + k0 + c8 * 8);
+    // 行 ≥ m 的 smem 不读（寄存器会读到残留值，但对应输出列不写出；算进 mma 不影响别的列）
+    for (int idx = threadIdx.x; idx < ROWS * (TK / 8); idx += 32 * WARPS) {
+      const int rr = idx / (TK / 8), c8 = idx % (TK / 8);
+      if (rr < m && c8 * 8 < kt)
+        *reinterpret_cast<uint4*>(&a_tile[rr][c8 * 8]) = *reinterpret_cast<const uint4*>(a + (long)rr * k + k0 + c8 * 8);
     }
     __syncthreads();
     if (active) {
-      // 每 32 列一个 chunk：lane 读 W 行 g / g+8 的 8 列 [kk + t·8, +8)；A 同样 8 列 → 两次 m16n8k16（前 4 列 / 后 4 列）
-#pragma unroll 4
-      for (int kk = 0; kk < kt; kk += 32) {
-        const uint4 wv0 = *reinterpret_cast<const uint4*>(w0 + k0 + kk + t * 8);
-        const uint4 wv1 = *reinterpret_cast<const uint4*>(w1 + k0 + kk + t * 8);
+      // 每轮 kMmaBatch 个 32 列 chunk：先把 R × kMmaBatch 条 16 B W 装载全部发出（在途 R·kMmaBatch·512 B/warp），再做 mma。
+      // 第 3 轮每轮只 1 chunk（R KB 在途）停在 4–5 TB/s：HBM 延迟 × 8 TB/s 需要每 SM ≥ ~45 KB 在途。
+      for (int c = 0; c < kt; c += 32 * kMmaBatch) {
+        uint4 wv[R][kMmaBatch];
 #pragma unroll
-        for (int i = 0; i < MT; ++i) {
-          const uint4 av = *reinterpret_cast<const uint4*>(&a_tile[i * 8 + g][kk + t * 8]);
-          mma16816_bf16(acc[i], wv0.x, wv1.x, wv0.y, wv1.y, av.x, av.y);
-          mma16816_bf16(acc[i], wv0.z, wv1.z, wv0.w, wv1.w, av.z, av.w);
+        for (int j = 0; j < kMmaBatch; ++j)
+#pragma unroll
+          for (int r = 0; r < R; ++r) wv[r][j] = __ldg(reinterpret_cast<const uint4*>(wp[r] + k0 + c + j * 32));
+#pragma unroll
+        for (int j = 0; j < kMmaBatch; ++j) {
+          const int cc = c + j * 32;
+          // A 片段：行 g / g+8（每组），列 [cc + t·8, +8)
+          uint4 av0[MG], av1[MG];
+#pragma unroll
+          for (int i = 0; i < MG; ++i) {
+            av0[i] = *reinterpret_cast<const uint4*>(&a_tile[i * 16 + g][cc + t * 8]);
+            av1[i] = *reinterpret_cast<const uint4*>(&a_tile[i * 16 + g + 8][cc + t * 8]);
+          }
+#pragma unroll
+          for (int r = 0; r < R; ++r)
+#pragma unroll
+            for (int i = 0; i < MG; ++i) {
+              mma16816_bf16(acc[r][i], av0[i].x, av1[i].x, av0[i].y, av1[i].y, wv[r][j].x, wv[r][j].y);
+              mma16816_bf16(acc[r][i], av0[i].z, av1[i].z, av0[i].w, av1[i].w, wv[r][j].z, wv[r][j].w);
+            }
         }
       }
     }
     __syncthreads();
   }
   if (!active) return;
-  // D 片段：c0/c1 → (行 g, 列 2t/2t+1)，c2/c3 → (行 g+8, 同列)。行 = N 索引，列 = M 索引。
-  const int nr0 = n0 + g, nr1 = n0 + g + 8;
+  // D 片段：c0/c1 → (M 行 g, N 列 2t/2t+1)，c2/c3 → (M 行 g+8, 同列)；N 列 = n0 + 8r + 2t (+1)
   if (splits <= 1) {
 #pragma unroll
-    for (int i = 0; i < MT; ++i) {
-      const int mc = i * 8 + 2 * t;
-      const float b0 = bias && nr0 < n ? to_f32(bias[nr0]) : 0.f;
-      const float b1 = bias && nr1 < n ? to_f32(bias[nr1]) : 0.f;
-      if (nr0 < n) {
-        if (mc < m) out[(long)mc * n + nr0] = to_bf16(acc[i][0] + b0);
-        if (mc + 1 < m) out[(long)(mc + 1) * n + nr0] = to_bf16(acc[i][1] + b0);
-      }
-      if (nr1 < n) {
-        if (mc < m) out[(long)mc * n + nr1] = to_bf16(acc[i][2] + b1);
-        if (mc + 1 < m) out[(long)(mc + 1) * n + nr1] = to_bf16(acc[i][3] + b1);
+    for (int r = 0; r < R; ++r) {
+      const int nc = n0 + 8 * r + 2 * t;
+      if (nc >= n) continue;
+      const bool two = nc + 1 < n;
+      const float b0 = bias ? to_f32(bias[nc]) : 0.f;
+      const float b1 = bias && two ? to_f32(bias[nc + 1]) : 0.f;
+#pragma unroll
+      for (int i = 0; i < MG; ++i) {
+        const int m0 = i * 16 + g, m1 = m0 + 8;
+        if (m0 < m) {
+          out[(long)m0 * n + nc] = to_bf16(acc[r][i][0] + b0);
+          if (two) out[(long)m0 * n + nc + 1] = to_bf16(acc[r][i][1] + b1);
+        }
+        if (m1 < m) {
+          out[(long)m1 * n + nc] = to_bf16(acc[r][i][2] + b0);
+          if (two) out[(long)m1 * n + nc + 1] = to_bf16(acc[r][i][3] + b1);
+        }
       }
     }
     return;
   }
   float* p = partial + (long)blockIdx.y * m * n;
 #pragma unroll
-  for (int i = 0; i < MT; ++i) {
-    const int mc = i * 8 + 2 * t;
-    if (nr0 < n) {
-      if (mc < m) p[(long)mc * n + nr0] = acc[i][0];
-      if (mc + 1 < m) p[(long)(mc + 1) * n + nr0] = acc[i][1];
-    }
-    if (nr1 < n) {
-      if (mc < m) p[(long)mc * n + nr1] = acc[i][2];
-      if (mc + 1 < m) p[(long)(mc + 1) * n + nr1] = acc[i][3];
+  for (int r = 0; r < R; ++r) {
+    const int nc = n0 + 8 * r + 2 * t;
+    if (nc >= n) continue;
+    const bool two = nc + 1 < n;
+#pragma unroll
+    for (int i = 0; i < MG; ++i) {
+      const int m0 = i * 16 + g, m1 = m0 + 8;
+      if (m0 < m) {
+        p[(long)m0 * n + nc] = acc[r][i][0];
+        if (two) p[(long)m0 * n + nc + 1] = acc[r][i][1];
+      }
+      if (m1 < m) {
+        p[(long)m1 * n + nc] = acc[r][i][2];
+        if (two) p[(long)m1 * n + nc + 1] = acc[r][i][3];
+      }
     }
   }
-  // 最后到达的 block 归约本 warp 的 16 行 × m 列（每 warp 一个计数器，warp 内 lane 0 投票）
   __threadfence();
-  int* ctr = counters + (long)blockIdx.x * WARPS + warp;
+  // 每 stripe 一个计数器（index = N 行 / 8）；最后到达的 warp 归约该 stripe 的 8 行 × m 列
+  int* ctr = counters + n0 / 8;
   int last = 0;
-  if (lane == 0) last = (atomicAdd(ctr, 1) == splits - 1);
-  last = __shfl_sync(0xffffffffu, last, 0);
-  if (!last) return;
-  __threadfence();
-  // 16 行 × m 列 = 最多 512 个元素，32 lane 各 16 个：lane 负责列 (lane & 15)、行组 (lane >> 4)
-  const int row_lo = n0 + (lane & 15);
-  if (row_lo < n) {
-    const float b = bias ? to_f32(bias[row_lo]) : 0.f;
-    for (int mc = lane >> 4; mc < m; mc += 2) {
-      float v = b;
-      for (int s = 0; s < splits; ++s) v += __ldcg(partial + ((long)s * m + mc) * n + row_lo);
-      out[(long)mc * n + row_lo] = to_bf16(v);
-    }
+  if (lane < R) {
+    const int ns = n0 + 8 * lane;
+    if (ns < n) last = (atomicAdd(ctr + lane, 1) == splits - 1);
   }
-  if (lane == 0) *ctr = 0;  // 自复位：下一次 launch / graph 重放前计数器回零
+  const unsigned mask = __ballot_sync(0xffffffffu, last);
+  if (mask == 0) return;
+  __threadfence();
+  for (int r = 0; r < R; ++r) {
+    if (!((mask >> r) & 1u)) continue;
+    const int nr = n0 + 8 * r + (lane & 7);
+    if (nr < n) {
+      const float b = bias ? to_f32(bias[nr]) : 0.f;
+      for (int mc = lane >> 3; mc < m; mc += 4) {
+        float v = b;
+        for (int sp = 0; sp < splits; ++sp) v += __ldcg(partial + ((long)sp * m + mc) * n + nr);
+        out[(long)mc * n + nr] = to_bf16(v);
+      }
+    }
+    if (lane == 0) ctr[r] = 0;  // 自复位：下一次 launch / graph 重放前计数器回零
+  }
 }
 
-template <int M_TILE, int WARPS>
+template <int M_TILE, int WARPS, int R>
 void launch_mma(const bf16* a, const bf16* w, const bf16* bias, bf16* out, float* partial, int* counters, int m,
                 int n, int k, int splits, int k_per_split, cudaStream_t stream) {
-  dim3 grid((unsigned)((n + 16 * WARPS - 1) / (16 * WARPS)), (unsigned)splits);
-  small_m_mma_kernel<M_TILE, WARPS><<<grid, 32 * WARPS, 0, stream>>>(a, w, bias, out, partial, counters, m, n, k,
-                                                                     k_per_split, splits);
+  dim3 grid((unsigned)((n + 8 * R * WARPS - 1) / (8 * R * WARPS)), (unsigned)splits);
+  small_m_mma_kernel<M_TILE, WARPS, R><<<grid, 32 * WARPS, 0, stream>>>(a, w, bias, out, partial, counters, m, n, k,
+                                                                        k_per_split, splits);
+}
+template <int M_TILE, int WARPS>
+void launch_mma_r(int stripes, const bf16* a, const bf16* w, const bf16* bias, bf16* out, float* partial, int* counters,
+                  int m, int n, int k, int splits, int k_per_split, cudaStream_t stream) {
+  switch (stripes) {
+    case 1: launch_mma<M_TILE, WARPS, 1>(a, w, bias, out, partial, counters, m, n, k, splits, k_per_split, stream); break;
+    case 2: launch_mma<M_TILE, WARPS, 2>(a, w, bias, out, partial, counters, m, n, k, splits, k_per_split, stream); break;
+    default: launch_mma<M_TILE, WARPS, 4>(a, w, bias, out, partial, counters, m, n, k, splits, k_per_split, stream); break;
+  }
 }
 template <int M_TILE>
-void launch_mma_w(int warps, const bf16* a, const bf16* w, const bf16* bias, bf16* out, float* partial, int* counters,
-                  int m, int n, int k, int splits, int k_per_split, cudaStream_t stream) {
+void launch_mma_w(int warps, int stripes, const bf16* a, const bf16* w, const bf16* bias, bf16* out, float* partial,
+                  int* counters, int m, int n, int k, int splits, int k_per_split, cudaStream_t stream) {
   if (warps == 8)
-    launch_mma<M_TILE, 8>(a, w, bias, out, partial, counters, m, n, k, splits, k_per_split, stream);
+    launch_mma_r<M_TILE, 8>(stripes, a, w, bias, out, partial, counters, m, n, k, splits, k_per_split, stream);
   else
-    launch_mma<M_TILE, 4>(a, w, bias, out, partial, counters, m, n, k, splits, k_per_split, stream);
+    launch_mma_r<M_TILE, 4>(stripes, a, w, bias, out, partial, counters, m, n, k, splits, k_per_split, stream);
 }
 }  // namespace
 
@@ -294,29 +341,32 @@ int gemm_small_m_bf16(const void* a, const void* w, const void* bias, void* out,
   return last_err();
 }
 
-// tensor-core 版入口：K % 32 == 0，M ≤ 32，warps ∈ {4, 8}；splits > 1 时 partial[splits,M,N] f32 与
-// counters[ceil(N/16)] int（调用方保证初值 0；kernel 自复位）。见 small_m_mma_kernel。
+// tensor-core 版入口：K % 128 == 0，M ≤ 32，warps ∈ {4, 8}，stripes ∈ {1,2,4}；splits > 1 时 partial[splits,M,N] f32 与
+// counters[ceil(N/8)] int（调用方保证初值 0；kernel 自复位）。见 small_m_mma_kernel。
 int gemm_small_m_mma_bf16(const void* a, const void* w, const void* bias, void* out, float* partial, int* counters,
-                          int64_t m, int64_t n, int64_t k, int64_t splits, int64_t warps, cudaStream_t stream) {
-  if (m <= 0 || m > 32 || n <= 0 || k <= 0 || k % 32 != 0 || splits <= 0) return 1;
+                          int64_t m, int64_t n, int64_t k, int64_t splits, int64_t warps, int64_t stripes,
+                          cudaStream_t stream) {
+  constexpr int64_t kAlign = 32 * kMmaBatch;  // 128
+  if (m <= 0 || m > 32 || n <= 0 || k <= 0 || k % kAlign != 0 || splits <= 0) return 1;
   if (warps != 4 && warps != 8) return 1;
+  if (stripes != 1 && stripes != 2 && stripes != 4) return 1;
   if (splits > 1 && (!partial || !counters)) return 1;
-  // 每段 32 的倍数，份数 ≤ k/32
+  // 每段 128 的倍数，份数 ≤ k/128
   int64_t sp = splits;
-  int64_t per = ((k / 32 + sp - 1) / sp) * 32;
+  int64_t per = ((k / kAlign + sp - 1) / sp) * kAlign;
   sp = (k + per - 1) / per;
   if (sp <= 1) { sp = 1; per = k; }
   const bf16* A = static_cast<const bf16*>(a);
   const bf16* W = static_cast<const bf16*>(w);
   const bf16* B = static_cast<const bf16*>(bias);
   bf16* O = static_cast<bf16*>(out);
-  const int mi = (int)m, ni = (int)n, ki = (int)k, si = (int)sp, pi = (int)per, wi = (int)warps;
+  const int mi = (int)m, ni = (int)n, ki = (int)k, si = (int)sp, pi = (int)per, wi = (int)warps, ri = (int)stripes;
   if (m <= 8)
-    launch_mma_w<8>(wi, A, W, B, O, partial, counters, mi, ni, ki, si, pi, stream);
+    launch_mma_w<8>(wi, ri, A, W, B, O, partial, counters, mi, ni, ki, si, pi, stream);
   else if (m <= 16)
-    launch_mma_w<16>(wi, A, W, B, O, partial, counters, mi, ni, ki, si, pi, stream);
+    launch_mma_w<16>(wi, ri, A, W, B, O, partial, counters, mi, ni, ki, si, pi, stream);
   else
-    launch_mma_w<32>(wi, A, W, B, O, partial, counters, mi, ni, ki, si, pi, stream);
+    launch_mma_w<32>(wi, ri, A, W, B, O, partial, counters, mi, ni, ki, si, pi, stream);
   return (int)cudaGetLastError();
 }
 
