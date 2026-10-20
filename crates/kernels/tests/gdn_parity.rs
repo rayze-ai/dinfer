@@ -460,7 +460,7 @@ fn chunk_case(dir: &str, k: usize, v: usize, h: usize, hv: usize) {
     // 容差放宽到 out 2e-3 / state rel 1e-2（fla 同口径；参考是 fp32 顺序递归）。
     // (wy 实现, ho bv, ho 预取, out 容差, state rel 容差)：老 fp32 全链；新 ho（预取 / 不预取，r9 第 1 轮）；新 wy + 新 ho（默认路径）
     // 第 7 列 split：两段版 h-pass + o-pass（r9 第 2 轮；仅 K=V=128 / 64 有 o-pass 特化，其余形状跳过）
-    let split_ok = matches!((k, v), (128, 128) | (64, 64) | (128, 64));
+    let split_ok = matches!(k, 64 | 128 | 256) && v % 16 == 0;
     for (wy, bv, pf, split, tol_o, tol_s) in [
         (false, 0usize, false, false, 5e-4f32, 5e-3f32),
         (false, 16, false, false, 2e-3, 1e-2),
@@ -655,7 +655,7 @@ fn bench_case(st: &Stream, nseq: usize, len: usize, h: usize, hv: usize, k: usiz
     let mut cout = st.alloc_uninit::<bf16>(t * row).unwrap();
     let mut cst = st.alloc_zeros::<bf16>(nseq * row * (width - 1)).unwrap();
     let mut conv = vec![];
-    for rows in [0usize, 32, 64, 128, 256] {
+    for rows in [0usize, 8, 16, 32, 64, 128, 256] {
         conv.push((rows, time_us(st, iters, || ops::gdn_conv1d_prefill_with(st, &dm, &dw, &mut cout, &mut cst, &dcu, None, None, nseq, t, row, width, width - 1, GdnAct::Silu, rows).unwrap())));
     }
 

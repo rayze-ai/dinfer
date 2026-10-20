@@ -288,9 +288,19 @@ impl ArchProfile {
         num_chunks >= GDN_CHUNK_HO_SPLIT_MIN_CHUNKS * num_seqs && num_chunks * heads_v >= sm_count
     }
 
+    /// 两段版 o-pass 的 V 分片 VT（r9 第 4 轮）：smem = h 分片 [VT][K] + q [BT][K] + Aq + v' [BT][VT]。3090 实测 VT=128
+    /// （78 KB，1 block/SM，8 warp）比 VT=64（49 KB，2 block/SM）快 10%（q / Aq 只装一次）。取能整除 V 的最大档；都不整除返回 0。
+    pub fn gdn_chunk_opass_vt(v_dim: usize) -> usize {
+        const GDN_CHUNK_OPASS_VT_CANDIDATES: [usize; 4] = [128, 64, 32, 16];
+        GDN_CHUNK_OPASS_VT_CANDIDATES.iter().copied().find(|&vt| v_dim % vt == 0).unwrap_or(0)
+    }
+
     /// conv1d prefill 按 token 分块的块行数：block 数 = `ceil(tokens / rows) · ceil(dim / 2048)`（256 线程 × 8 通道），
     /// 取最大的仍能铺 ≥ `GDN_CONV_WAVES` 波 SM 的档（行多 → halo 重读占比小、块内串行链长；行少 → 反之），
     /// 都铺不满取最小档；下限 width-1（kernel 要求块 ≥ halo）。
+    /// r9 第 4 轮 3090 实测：改成 6 block/SM（档位加 16 / 8）反而慢（1×1024 73 → 105、8×1024 441 → 513 µs：行少则每块固定
+    /// 开销——序列二分、含 bos 块的 conv_state 读写——占比大）；rows256 在 8×1024 已 336 MB / 426 µs = 84% 带宽。保持 2 波规则；
+    /// B300 222 µs 只有 7% 带宽，那是 kernel 结构（每线程串行 load→FMA→store 链）问题，不是行数，待 B300 单独做。
     pub fn gdn_conv_rows(sm_count: usize, tokens: usize, dim: usize, width: usize) -> usize {
         const GDN_CONV_ROWS_CANDIDATES: [usize; 4] = [256, 128, 64, 32];
         const GDN_CONV_WAVES: usize = 2;
@@ -408,6 +418,10 @@ mod tests {
         // 两段版默认关（3090 不赢，待 B300）；32×128（每序列 2 chunk）任何情况不拆
         assert!(!ArchProfile::gdn_chunk_ho_split(82, 1, 16, 48));
         assert!(!ArchProfile::gdn_chunk_ho_split(82, 32, 64, 48));
+        assert_eq!(ArchProfile::gdn_chunk_opass_vt(128), 128);
+        assert_eq!(ArchProfile::gdn_chunk_opass_vt(192), 64);
+        assert_eq!(ArchProfile::gdn_chunk_opass_vt(96), 32);
+        assert_eq!(ArchProfile::gdn_chunk_opass_vt(40), 0);
     }
 
     #[test]

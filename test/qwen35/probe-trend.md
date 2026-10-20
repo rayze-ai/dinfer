@@ -88,6 +88,42 @@
 - 1x4096 chain_us dinfer：r9 第 3 轮：wy 分块三角逆（16×16 对角块 warp 内前代 + 非对角 fp32 乘）+ sM f32 复用 sK∪sQ 省 16 KB smem；wy_serial 列 = 64 步前代回退
 - 1x8192 chain_us dinfer：r9 第 3 轮：wy 分块三角逆（16×16 对角块 warp 内前代 + 非对角 fp32 乘）+ sM f32 复用 sK∪sQ 省 16 KB smem；wy_serial 列 = 64 步前代回退
 
+## probe_gdn_r9_4（2026-10-20，3090）
+
+### gdn_scale（us）
+
+| x | chain_us dinfer | conv_rows0_us dinfer | conv_rows128_us dinfer | conv_rows16_us dinfer | conv_rows256_us dinfer | conv_rows32_us dinfer | conv_rows64_us dinfer | conv_rows8_us dinfer | ho_bv16_us dinfer | ho_bv16pf_us dinfer | ho_bv16pfsp_us dinfer | ho_bv16sp_us dinfer | ho_bv32_us dinfer | ho_bv32pf_us dinfer | ho_bv32pfsp_us dinfer | ho_bv32sp_us dinfer | ho_legacy_us dinfer | prep_us dinfer | wy_legacy_us dinfer | wy_serial_us dinfer | wy_us dinfer |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1x1024 | 579 | 552 | 133 | 84 | 249 | 73 | 77 | 105 | 348 | 441 | 344 | 354 | 275 | 442 | 358 | 335 | 2947 | 32 | 1202 | 339 | 276 |
+| 8x1024 | 3852 | 1021 | 441 | 591 | 426 | 513 | 465 | 764 | 2689 | 3475 | 2909 | 2863 | 1959 | 3127 | 2516 | 2497 | 18713 | 173 | 9320 | 2273 | 1904 |
+| 32x128 | 2272 | 448 | 237 | 310 | 308 | 269 | 248 | 394 | 1409 | 1854 | 1513 | 1506 | 1167 | 1935 | 1398 | 1348 | 9271 | 93 | 4643 | 1221 | 1008 |
+| 1x4096 | 2123 | 2326 | 227 | 303 | 287 | 260 | 236 | 389 | 1388 | 1743 | 1443 | 1471 | 1038 | 1738 | 1436 | 1414 | 12057 | 93 | 4637 | 1217 | 1002 |
+| 1x8192 | 4144 | 4729 | 436 | 592 | 426 | 512 | 462 | 765 | 2808 | 3550 | 3011 | 3044 | 2075 | 3563 | 3003 | 2954 | 24244 | 177 | 9444 | 2284 | 1914 |
+
+- 1x1024 chain_us dinfer：r9 第 4 轮 A：o-pass VT=64（2 block/SM）+ conv 6 block/SM 档位（rows8/16 列）——两者 3090 都退化，见 loop 页；*sp 列是 VT=64 的数
+- 8x1024 chain_us dinfer：r9 第 4 轮 A：o-pass VT=64（2 block/SM）+ conv 6 block/SM 档位（rows8/16 列）——两者 3090 都退化，见 loop 页；*sp 列是 VT=64 的数
+- 32x128 chain_us dinfer：r9 第 4 轮 A：o-pass VT=64（2 block/SM）+ conv 6 block/SM 档位（rows8/16 列）——两者 3090 都退化，见 loop 页；*sp 列是 VT=64 的数
+- 1x4096 chain_us dinfer：r9 第 4 轮 A：o-pass VT=64（2 block/SM）+ conv 6 block/SM 档位（rows8/16 列）——两者 3090 都退化，见 loop 页；*sp 列是 VT=64 的数
+- 1x8192 chain_us dinfer：r9 第 4 轮 A：o-pass VT=64（2 block/SM）+ conv 6 block/SM 档位（rows8/16 列）——两者 3090 都退化，见 loop 页；*sp 列是 VT=64 的数
+
+## probe_gdn_r9_5（2026-10-20，3090）
+
+### gdn_scale（us）
+
+| x | chain_us dinfer | conv_rows0_us dinfer | conv_rows128_us dinfer | conv_rows16_us dinfer | conv_rows256_us dinfer | conv_rows32_us dinfer | conv_rows64_us dinfer | conv_rows8_us dinfer | ho_bv16_us dinfer | ho_bv16pf_us dinfer | ho_bv16pfsp_us dinfer | ho_bv16sp_us dinfer | ho_bv32_us dinfer | ho_bv32pf_us dinfer | ho_bv32pfsp_us dinfer | ho_bv32sp_us dinfer | ho_legacy_us dinfer | prep_us dinfer | wy_legacy_us dinfer | wy_serial_us dinfer | wy_us dinfer |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1x1024 | 654 | 550 | 133 | 85 | 248 | 75 | 77 | 105 | 348 | 441 | 326 | 337 | 273 | 441 | 316 | 317 | 3012 | 33 | 1365 | 375 | 302 |
+| 8x1024 | 3842 | 1041 | 442 | 590 | 427 | 510 | 463 | 767 | 2667 | 3482 | 2508 | 2489 | 1892 | 3137 | 2129 | 2112 | 18598 | 173 | 9265 | 2283 | 1908 |
+| 32x128 | 2252 | 439 | 238 | 311 | 309 | 267 | 249 | 392 | 1406 | 1899 | 1387 | 1351 | 1141 | 1918 | 1248 | 1198 | 9340 | 93 | 4658 | 1225 | 1013 |
+| 1x4096 | 2126 | 2370 | 228 | 303 | 282 | 259 | 236 | 390 | 1371 | 1712 | 1321 | 1369 | 1035 | 1784 | 1305 | 1305 | 11994 | 93 | 4614 | 1219 | 1003 |
+| 1x8192 | 4137 | 4762 | 436 | 593 | 424 | 514 | 462 | 764 | 2771 | 3640 | 2690 | 2700 | 2053 | 3590 | 2678 | 2587 | 24176 | 173 | 9446 | 2290 | 1910 |
+
+- 1x1024 chain_us dinfer：r9 第 5 轮（3090 收口）：o-pass VT=128 为首选档（8 warp）、conv 回 2 波规则；默认路径 = wy Mma(分块逆) + ho 融合 bv32 PF=0
+- 8x1024 chain_us dinfer：r9 第 5 轮（3090 收口）：o-pass VT=128 为首选档（8 warp）、conv 回 2 波规则；默认路径 = wy Mma(分块逆) + ho 融合 bv32 PF=0
+- 32x128 chain_us dinfer：r9 第 5 轮（3090 收口）：o-pass VT=128 为首选档（8 warp）、conv 回 2 波规则；默认路径 = wy Mma(分块逆) + ho 融合 bv32 PF=0
+- 1x4096 chain_us dinfer：r9 第 5 轮（3090 收口）：o-pass VT=128 为首选档（8 warp）、conv 回 2 波规则；默认路径 = wy Mma(分块逆) + ho 融合 bv32 PF=0
+- 1x8192 chain_us dinfer：r9 第 5 轮（3090 收口）：o-pass VT=128 为首选档（8 warp）、conv 回 2 波规则；默认路径 = wy Mma(分块逆) + ho 融合 bv32 PF=0
+
 ## probe_prefill_1（2026-10-20，B300）
 
 ### ttft_len（ms）

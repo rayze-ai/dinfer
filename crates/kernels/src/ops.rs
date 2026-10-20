@@ -4015,7 +4015,7 @@ fn gdn_chunk_ho_split(stream: &Stream, bv: usize, num_seqs: usize, num_chunks: u
     use std::sync::OnceLock;
     static OVER: OnceLock<Option<bool>> = OnceLock::new();
     static SM: OnceLock<usize> = OnceLock::new();
-    if bv == 0 || !matches!((k_dim, v_dim), (128, 128) | (64, 64) | (128, 64)) {
+    if bv == 0 || !matches!(k_dim, 64 | 128 | 256) || crate::arch::ArchProfile::gdn_chunk_opass_vt(v_dim) == 0 {
         return false;
     }
     let over = *OVER.get_or_init(|| {
@@ -4102,7 +4102,7 @@ pub fn gdn_chunk_ho_with(
                 plan.bt as i64,
                 how.bv as i64,
                 (how.bv != 0 && how.prefetch) as i64,
-                (how.bv != 0 && how.split) as i64,
+                if how.bv != 0 && how.split { crate::arch::ArchProfile::gdn_chunk_opass_vt(v_dim) as i64 } else { 0 },
                 stream.raw() as _,
             )
         },

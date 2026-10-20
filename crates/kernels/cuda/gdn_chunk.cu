@@ -1207,34 +1207,35 @@ __global__ void __launch_bounds__(kHoWarps * 32) ho_hpass_kernel(
   }
 }
 
-// o-pass：每 block 一个 (chunk, v 头)，warp 数 = (BT/16)·(V/VW)，每 warp 持 16 行 token × VW 列 v。
-// VW 由 V 定（V ≤ 64 → 整个 V 一组；否则 64 列一组），线程数 ≤ 512；不是调优参数而是 tile 结构。
-template <int BT, int K, int V>
+// o-pass：每 block 一个 (chunk, v 头, VT 列 V 分片)，每 warp 持 16 行 token × 64 列 v（VT=128 → 8 warp；VT ≤ 64 → 4 warp）。
+// VT 由 host 按 V 选（ArchProfile::gdn_chunk_opass_vt）。3090 实测（r9 第 4 轮）VT=128（78 KB smem，1 block/SM）比 VT=64
+// （49 KB，2 block/SM）快 10%：q / Aq 只装一次 > occupancy。
+template <int BT, int K, int VT>
 struct OpSmem {
-  static constexpr int KS = K + 8, TS = BT + 8, VS = V + 8;
-  static constexpr int off_h = 0;                 // [V][KS]  bf16 h_c（[v][k]）
-  static constexpr int off_q = off_h + V * KS;    // [BT][KS]
-  static constexpr int off_aq = off_q + BT * KS;  // [BT][TS]
-  static constexpr int off_v = off_aq + BT * TS;  // [BT][VS]  v'（行主序，B 操作数走 ldmatrix.trans）
+  static constexpr int KS = K + 8, TS = BT + 8, VS = VT + 8;
+  static constexpr int off_h = 0;                  // [VT][KS] bf16 h_c 分片（[v][k]）
+  static constexpr int off_q = off_h + VT * KS;    // [BT][KS]
+  static constexpr int off_aq = off_q + BT * KS;   // [BT][TS]
+  static constexpr int off_v = off_aq + BT * TS;   // [BT][VS]  v' 分片（行主序，B 操作数走 ldmatrix.trans）
   static constexpr int elems = off_v + BT * VS;
   static constexpr int bytes = elems * 2 + BT * 4;  // + sdec
-  static constexpr int VW = (V <= 64) ? V : 64;
-  static constexpr int NWARPS = (BT / 16) * (V / VW);
+  static constexpr int VW = (VT <= 64) ? VT : 64;     // 每 warp 持的 v 列数（mma 累加器 ≤ 8 个 tile）
+  static constexpr int NWARPS = (BT / 16) * (VT / VW);  // VT=128 → 8 warp（两个 64 列组），VT ≤ 64 → 4 warp
 };
 
-template <int BT, int K, int V>
-__global__ void __launch_bounds__(OpSmem<BT, K, V>::NWARPS * 32) ho_opass_kernel(
+template <int BT, int K, int VT>
+__global__ void __launch_bounds__(OpSmem<BT, K, VT>::NWARPS * 32) ho_opass_kernel(
     const bf16* __restrict__ qn, const float* __restrict__ gc, const float* __restrict__ aq, const bf16* __restrict__ h16,
     const bf16* __restrict__ v16, bf16* __restrict__ out, const int* __restrict__ cu_seqlens,
-    const int* __restrict__ chunk_tab, int H, int HV, int group) {
-  using S = OpSmem<BT, K, V>;
-  constexpr int KS = S::KS, TS = S::TS, VS = S::VS, VW = S::VW, NW = S::NWARPS;
+    const int* __restrict__ chunk_tab, int H, int HV, int V, int group) {
+  using S = OpSmem<BT, K, VT>;
+  constexpr int KS = S::KS, TS = S::TS, VS = S::VS, NW = S::NWARPS, VW = S::VW;
   constexpr int NT = VW / 8, KSTEP_K = K / 16, KSTEP_T = BT / 16;
-  static_assert(V % VW == 0 && VW % 16 == 0 && BT % 16 == 0 && K % 16 == 0, "tile 形状");
+  static_assert(VT % VW == 0 && VW % 16 == 0 && BT % 16 == 0 && K % 16 == 0 && NT % 2 == 0, "tile 形状");
 
-  const int c = blockIdx.x, hv = blockIdx.y, h = hv / group;
+  const int c = blockIdx.x, hv = blockIdx.y, v0 = blockIdx.z * VT, h = hv / group;
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, t4 = lane & 3;
-  const int mt = warp % (BT / 16), vg = warp / (BT / 16);
+  const int mt = warp % (BT / 16), vb = (warp / (BT / 16)) * VW;  // 行 tile / 本 warp 的 v 列起点（块内）
   const int seq = chunk_tab[2 * c], ci = chunk_tab[2 * c + 1];
   const int bos = cu_seqlens[seq], eos = cu_seqlens[seq + 1];
   const int len = min(BT, eos - bos - ci * BT);
@@ -1251,8 +1252,8 @@ __global__ void __launch_bounds__(OpSmem<BT, K, V>::NWARPS * 32) ho_opass_kernel
 
   for (int i = tid; i < BT; i += NW * 32) sdec[i] = (i < len) ? exp2f(gc[(row0 + i) * HV + hv]) : 0.f;
   {
-    const bf16* hc = h16 + ((long)c * HV + hv) * V * K;
-    for (int idx = tid; idx < V * (K / 8); idx += NW * 32) {
+    const bf16* hc = h16 + (((long)c * HV + hv) * V + v0) * K;
+    for (int idx = tid; idx < VT * (K / 8); idx += NW * 32) {
       const int vr = idx / (K / 8), k8 = (idx % (K / 8)) * 8;
       *reinterpret_cast<uint4*>(sh + vr * KS + k8) = *reinterpret_cast<const uint4*>(hc + (long)vr * K + k8);
     }
@@ -1263,10 +1264,10 @@ __global__ void __launch_bounds__(OpSmem<BT, K, V>::NWARPS * 32) ho_opass_kernel
     if (i < len) qv = *reinterpret_cast<const uint4*>(qn + (row0 + i) * kstride + (long)h * K + k8);
     *reinterpret_cast<uint4*>(sq + i * KS + k8) = qv;
   }
-  for (int idx = tid; idx < BT * (V / 8); idx += NW * 32) {
-    const int i = idx / (V / 8), v8 = (idx % (V / 8)) * 8;
+  for (int idx = tid; idx < BT * (VT / 8); idx += NW * 32) {
+    const int i = idx / (VT / 8), v8 = (idx % (VT / 8)) * 8;
     uint4 vv = make_uint4(0, 0, 0, 0);
-    if (i < len) vv = *reinterpret_cast<const uint4*>(v16 + ((row0 + i) * HV + hv) * V + v8);
+    if (i < len) vv = *reinterpret_cast<const uint4*>(v16 + ((row0 + i) * HV + hv) * V + v0 + v8);
     *reinterpret_cast<uint4*>(sv + i * VS + v8) = vv;
   }
   {
@@ -1284,7 +1285,6 @@ __global__ void __launch_bounds__(OpSmem<BT, K, V>::NWARPS * 32) ho_opass_kernel
   float oacc[NT][4];
 #pragma unroll
   for (int n = 0; n < NT; ++n) { oacc[n][0] = oacc[n][1] = oacc[n][2] = oacc[n][3] = 0.f; }
-  const int vbase = vg * VW;
   // o1 = q·hᵀ：A = sq 行 tile mt，B = sh [v][k]（col-major B，直接 32 位读）
 #pragma unroll
   for (int ks = 0; ks < KSTEP_K; ++ks) {
@@ -1292,7 +1292,7 @@ __global__ void __launch_bounds__(OpSmem<BT, K, V>::NWARPS * 32) ho_opass_kernel
     ldsm_x4(a, sq + (mt * 16 + (lane & 15)) * KS + ks * 16 + (lane >> 4) * 8);
 #pragma unroll
     for (int n = 0; n < NT; ++n) {
-      const bf16* hb = sh + (vbase + n * 8 + g) * KS + ks * 16 + 2 * t4;
+      const bf16* hb = sh + (vb + n * 8 + g) * KS + ks * 16 + 2 * t4;
       mma16816(oacc[n], a, lds_u32(hb), lds_u32(hb + 8));
     }
   }
@@ -1310,14 +1310,14 @@ __global__ void __launch_bounds__(OpSmem<BT, K, V>::NWARPS * 32) ho_opass_kernel
 #pragma unroll
     for (int n = 0; n < NT; n += 2) {
       uint32_t b[4];
-      ldsm_x4_t(b, sv + (ks * 16 + (lane & 15)) * VS + vbase + n * 8 + (lane >> 4) * 8);
+      ldsm_x4_t(b, sv + (ks * 16 + (lane & 15)) * VS + vb + n * 8 + (lane >> 4) * 8);
       mma16816(oacc[n], a, b[0], b[1]);
       mma16816(oacc[n + 1], a, b[2], b[3]);
     }
   }
 #pragma unroll
   for (int n = 0; n < NT; ++n) {
-    const int vv = vbase + n * 8 + 2 * t4;
+    const int vv = v0 + vb + n * 8 + 2 * t4;
     if (i0 < len)
       *reinterpret_cast<uint32_t*>(out + ((row0 + i0) * HV + hv) * V + vv) = pack_bf16x2(oacc[n][0], oacc[n][1]);
     if (i1 < len)
@@ -1472,7 +1472,7 @@ static int ho_split(const void* qn, const float* gc, const float* aq, const floa
                     bf16* h16, bf16* v16, void* out, void* state, const int* cu_seqlens, const int* cu_nt,
                     const int* chunk_off, const int* chunk_tab, const int* state_indices, int64_t state_stride_tok,
                     int64_t num_seqs, int64_t num_chunks, int64_t H, int64_t HV, int64_t K, int64_t V, int64_t bt,
-                    int64_t ho_bv, int64_t prefetch, cudaStream_t stream) {
+                    int64_t ho_bv, int64_t prefetch, int64_t opass_vt, cudaStream_t stream) {
   if (num_seqs <= 0 || H <= 0 || HV <= 0 || HV % H != 0 || K <= 0 || V <= 0) return err(cudaErrorInvalidValue);
   if (bt != 64 || !(ho_bv == 16 || ho_bv == 32) || V % ho_bv != 0) return err(cudaErrorInvalidValue);
   constexpr int BT = 64;
@@ -1499,19 +1499,21 @@ static int ho_split(const void* qn, const float* gc, const float* aq, const floa
     if (const int rc = last_err()) return rc;
   }
   {
-    dim3 grid((unsigned)num_chunks, (unsigned)HV);
-#define LAUNCH_OP(KK, VV)                                                                                     \
+    // o-pass 的 V 分片 VT：host 给（opass_vt ∈ {64, 32, 16}，整除 V）
+    if (!(opass_vt == 128 || opass_vt == 64 || opass_vt == 32 || opass_vt == 16) || V % opass_vt != 0) return err(cudaErrorInvalidValue);
+    dim3 grid((unsigned)num_chunks, (unsigned)HV, (unsigned)(V / opass_vt));
+#define LAUNCH_OP(KK, VT)                                                                                     \
   {                                                                                                           \
-    using S = OpSmem<BT, KK, VV>;                                                                             \
-    if (const int rc = set_smem(reinterpret_cast<const void*>(&ho_opass_kernel<BT, KK, VV>), S::bytes)) return rc; \
-    ho_opass_kernel<BT, KK, VV><<<grid, S::NWARPS * 32, S::bytes, stream>>>(                                   \
+    using S = OpSmem<BT, KK, VT>;                                                                             \
+    if (const int rc = set_smem(reinterpret_cast<const void*>(&ho_opass_kernel<BT, KK, VT>), S::bytes)) return rc; \
+    ho_opass_kernel<BT, KK, VT><<<grid, S::NWARPS * 32, S::bytes, stream>>>(                                   \
         static_cast<const bf16*>(qn), gc, aq, h16, v16, static_cast<bf16*>(out), cu_seqlens, chunk_tab, (int)H, \
-        (int)HV, group);                                                                                      \
+        (int)HV, (int)V, group);                                                                              \
   }
-    if (K == 128 && V == 128) { LAUNCH_OP(128, 128) }
-    else if (K == 64 && V == 64) { LAUNCH_OP(64, 64) }
-    else if (K == 128 && V == 64) { LAUNCH_OP(128, 64) }
-    else return err(cudaErrorInvalidValue);
+#define LAUNCH_OP_K(KK) \
+  { if (opass_vt == 128) LAUNCH_OP(KK, 128) else if (opass_vt == 64) LAUNCH_OP(KK, 64) else if (opass_vt == 32) LAUNCH_OP(KK, 32) else LAUNCH_OP(KK, 16) }
+    if (K == 128) { LAUNCH_OP_K(128) } else if (K == 64) { LAUNCH_OP_K(64) } else if (K == 256) { LAUNCH_OP_K(256) } else return err(cudaErrorInvalidValue);
+#undef LAUNCH_OP_K
 #undef LAUNCH_OP
   }
   return last_err();
@@ -1525,7 +1527,7 @@ int gdn_chunk_ho(const void* qn, const float* gc, const float* aq, const float* 
                   num_seqs, H, HV, K, V, bt, ho_bv, 0, stream);
 }
 
-// r9：prefetch = 寄存器预取（0/1）；split = 1 走 h-pass + o-pass 两段（第 2 轮，h16 / v16 为中间缓冲）。
+// r9：prefetch = 寄存器预取（0/1）；split ≠ 0 走 h-pass + o-pass 两段（第 2 轮，h16 / v16 为中间缓冲），值 > 1 即 o-pass 的 V 分片 VT。
 int gdn_chunk_ho_v2(const void* qn, const float* gc, const float* aq, const float* u, const float* w, const float* kg,
                     void* h16, void* v16, void* out, void* state, const int* cu_seqlens, const int* cu_nt,
                     const int* chunk_off, const int* chunk_tab, const int* state_indices, int64_t state_stride_tok,
@@ -1533,9 +1535,11 @@ int gdn_chunk_ho_v2(const void* qn, const float* gc, const float* aq, const floa
                     int64_t ho_bv, int64_t prefetch, int64_t split, cudaStream_t stream) {
   if (split != 0) {
     if (!h16 || !v16 || !chunk_tab || num_chunks <= 0) return err(cudaErrorInvalidValue);
+    // split > 1 = o-pass 的 V 分片 VT（64 / 32 / 16）；split == 1 兼容旧语义 = 整 V 一片（≤ 64）或 64
+    const int64_t vt = split > 1 ? split : (V <= 64 ? V : 64);
     return ho_split(qn, gc, aq, u, w, kg, static_cast<bf16*>(h16), static_cast<bf16*>(v16), out, state, cu_seqlens,
                     cu_nt, chunk_off, chunk_tab, state_indices, state_stride_tok, num_seqs, num_chunks, H, HV, K, V,
-                    bt, ho_bv, prefetch, stream);
+                    bt, ho_bv, prefetch, vt, stream);
   }
   return ho_fused(qn, gc, aq, u, w, kg, out, state, cu_seqlens, cu_nt, chunk_off, state_indices, state_stride_tok,
                   num_seqs, H, HV, K, V, bt, ho_bv, prefetch, stream);

@@ -251,7 +251,7 @@ int gdn_chunk_ho(const void* qn, const float* gc, const float* aq, const float* 
                  void* out, void* state, const int* cu_seqlens, const int* cu_nt, const int* chunk_off,
                  const int* state_indices, int64_t state_stride_tok, int64_t num_seqs, int64_t H, int64_t HV,
                  int64_t K, int64_t V, int64_t bt, int64_t ho_bv, cudaStream_t stream);
-// r9（docs/loops/qwen35-gdn-r9.md）：prefetch 0/1 = 寄存器预取下一 chunk；split 1 = h-pass + o-pass 两段，
+// r9（docs/loops/qwen35-gdn-r9.md）：prefetch 0/1 = 寄存器预取下一 chunk；split ≠ 0 = h-pass + o-pass 两段（值 > 1 为 o-pass V 分片 VT ∈ {64,32,16}），
 // h16 bf16 [num_chunks, HV, V, K]（每 chunk 入口状态）、v16 bf16 [T, HV, V]（v'）为中间缓冲（调用方分配）。
 int gdn_chunk_ho_v2(const void* qn, const float* gc, const float* aq, const float* u, const float* w, const float* kg,
                     void* h16, void* v16, void* out, void* state, const int* cu_seqlens, const int* cu_nt,
