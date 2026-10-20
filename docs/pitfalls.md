@@ -791,3 +791,10 @@
 - 现象：`ASYNC_SCHED=0 scripts/verify/qwen35_golden.sh` 里 `golden_greedy_overlap` / `golden_two_requests_overlap` 报 "overlap requested but no step went through the async path"。
 - 根因：这两个 case 强制 `overlap = true` 并断言至少一步走了异步路径，但 executor 的 `async_sched_enabled()` 读同一个环境变量 → 关掉后不可能有异步步。
 - 解法 / 避免：新 case（prefix hit / multi-turn / mixed）都按 `ASYNC_SCHED` 决定 overlap，两种模式都过；`*_overlap` 两个只在默认（异步）模式有意义，`ASYNC_SCHED=0` 时跳过它们看另外 8 个。
+
+## 2026-10-20 多线程 TP 下 `cudaFuncSetAttribute` 的 static 缓存只对一张卡生效（K3 C-6 卡死）
+
+- **现象**：K3 全 93 层 tp8 首请求 prefill 过、decode 第一步永不返回；5 张卡 100%、3 张 0%；日志空白。加 worker 出错日志后：4 个 rank `kda_recurrent failed: cudaError 1`（InvalidValue），其余 rank 在该层 all-reduce 等死。单卡 / tp2 × 5 层全过。
+- **根因**：`kda.cu` 等 6 处用函数内 `static` 变量缓存"动态 smem 上限已设"（`cudaFuncSetAttribute(MaxDynamicSharedMemorySize)`），而该属性**按设备（当前 ctx）生效**。一进程多线程 TP、每线程一张卡并发首次调用：先到者设完就把 static 标已设，其余卡没设，动态 smem > 48 KB 的 launch 直接 InvalidValue。static 还不是线程安全的。
+- **解法**：缓存改 `thread_local`（每 rank 线程 = 一张卡，一份缓存），`common.cuh` 提供统一 `set_smem_once(fn, bytes)`；或缓存键加 `cudaGetDevice`。TP worker / rank0 forward 出错当场 `tracing::error`（`models/kimik3/src/tp.rs`），否则 rank 0 卡在集合通信永远读不到 Err。
+- **避免**：kernel host 侧凡 `static` 缓存与设备 / ctx 相关的状态（func attribute、occupancy 查询、cuBLAS handle）一律 `thread_local` 或按 device 键；新多卡路径先用 tp≥4 × 小层数冒烟（tp2 碰不到的并发撞车 tp8 会碰到）；`grep -n 'static int' crates/kernels/cuda/*.cu` 进 PR 自查。
