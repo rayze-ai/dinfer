@@ -90,6 +90,8 @@ eos = `<|end_of_msg|>` 163586（`generation_config.json` / `config.json`），`[
 
 **结论**：它解决的是"和 vLLM 字节一致地算 token 与命中"，与我们 C-4a 的目标完全重合，它踩过的四处偏差是我们最该借的；命中粒度 1536 的事实直接影响 Qwen3.5 / K3 重开 prefix cache 的设计。
 
+**C-4a 核实的修正（2026-10-20）**：我们的基线 vLLM `de8291e` 对 K3 **没有** Rust renderer——`renderers/kimi_k3.py` 直接调 HF `apply_chat_template`（Python `encoding_k3.py`），且 `chat_utils.py:2158` 保留消息 `name`；llm-cache-prediction 对齐的"服务端 Rust renderer"是 Moonshot 线上部署。所以 `models/kimik3/src/xtml.rs` 做成 `Dialect::{Hf, Serving}`，**默认 Hf**（与基线 vLLM 一致、本机可用 transformers 复核），`Serving` 复刻那三处差异（声明路径浮点塌整、字串参数重序列化、丢 `name`），两方言 golden 各 35 case 全过。
+
 ## 2. crate 模块
 
 
