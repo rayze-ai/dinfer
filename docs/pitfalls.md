@@ -822,3 +822,10 @@
 - **现象**：B300 合体测试链一发就 exit 143、输出只有 `HEAD=`；ff 失败没察觉 + 链自杀两件事叠在一起，白等一轮。
 - **根因**：`remote_b300.sh run '<一长串含 "dinfer serve" 的脚本>'` 远端是 `bash -c "<整段>"`，它自己的 cmdline 就含 `dinfer serve`，`pkill -f` 把包装进程杀了。
 - **解法 / 避免**：杀 serve 一律 `pkill -x dinfer`（按进程名精确匹配）；链里任何 `pkill -f` 的 pattern 不能出现在链自身文本里。另：golden（`--test-threads=1`）不要与 `cargo build` 并发跑——同 GPU 抢资源时 1/11 偶发失败，单跑 / 复跑都过。
+
+## 2026-10-20 nsys 抓 dinfer serve 的三个坑（四次空报告）
+
+- **现象**：`nsys profile … dinfer serve` 四次报告 0 kernel 或 0 字节，同环境抓 `gdn_parity` 微基准正常。
+- **根因**：① `kill -INT <serve>` 只杀子进程，nsys 没收到信号不写报告（SIGINT 要发给 **nsys 进程**）；② CUPTI 活动缓冲没填满不 flush，只发 3–5 条请求时缓冲里的 kernel 在进程被杀时丢失（`--cuda-flush-interval=1000` 不保证），要发够请求（三长度各 10 次）并在 SIGINT 前 `sleep 20`；③ nsys 收 SIGINT 后先建 0 字节 `.nsys-rep` 再异步写入几十秒，"等文件出现"就 `tmux kill-session` 会把它杀在半路——要等 `pgrep -x nsys` 退出。
+- **解法**：`scripts/dev/q35_nsys_prefill.sh` 已含三条；分析用 `nsys export -t sqlite` + `scripts/dev/nsys_prefill_by_len.py <sqlite> 0`（逐步）/ `3 16`（聚簇）。
+- **避免**：nsys 脚本收尾固定三步：发够请求 → sleep 20 → `kill -INT $(pgrep -x nsys)` → 等 nsys 退出 → 再清 serve。另：实验里**不要用全局 `pkill -x dinfer`**，会杀掉 GPU 0 常驻 `:8012`（今天误杀两次），按端口 `pkill -f "dinfer serve .*--port N\b"`。

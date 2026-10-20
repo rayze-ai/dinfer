@@ -45,6 +45,8 @@ np=$(pgrep -x nsys | head -1)
 [ -z "$np" ] && np=$(pgrep -f '^nsys profile' | head -1)
 echo "nsys pid=$np → SIGINT"
 [ -n "$np" ] && kill -INT "$np"
-for i in $(seq 1 120); do sleep 1; [ -f /tmp/q35_$tag.nsys-rep ] && break; done
+# 等 nsys 进程**退出**（它先建 0 字节 .nsys-rep 再花几十秒写入；只等文件出现会拿到空文件 → 9d）
+for i in $(seq 1 300); do sleep 1; pgrep -x nsys >/dev/null || break; done
+sleep 2
 ls -la /tmp/q35_$tag.nsys-rep 2>/dev/null | cut -c25- || { echo "报告未生成"; tmux capture-pane -pt nsprof 2>/dev/null | tail -8; }
 pkill -f "dinfer serve .*--port $port\b" 2>/dev/null; tmux kill-session -t nsprof 2>/dev/null
