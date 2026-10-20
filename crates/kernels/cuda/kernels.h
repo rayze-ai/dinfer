@@ -370,6 +370,11 @@ typedef struct MegaLayerArgs {
 } MegaLayerArgs;
 int mega_gdn_layer_decode_sm100(const MegaLayerArgs* a, cudaStream_t stream);
 
+// ---- tcgen05 工具链探针（umma_peak_sm100.cu，r12a；只在 CUDA_ARCHS 含 100/103 时编入）----
+// M=128 N=256，K = 64 * k_iters；c: [128, 256] f32。
+int umma_peak_launch(const void* a, const void* b, void* c, int64_t k_iters, int64_t blocks, int64_t check,
+                     cudaStream_t stream);
+
 #ifdef __cplusplus
 }
 #endif

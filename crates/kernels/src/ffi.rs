@@ -1067,6 +1067,20 @@ pub unsafe fn mega_gdn_layer_decode_sm100(_a: *const MegaLayerArgs, _s: cudaStre
     CUDA_ERROR_NOT_SUPPORTED
 }
 
+/// tcgen05 工具链探针（`umma_peak_sm100.cu`，r12a）：M=128 N=256、K = 64·k_iters 的最小 UMMA GEMM。
+/// 未编入（CUDA_ARCHS 无 100/103 或 no-nvcc）时返回 CUDA_ERROR_NOT_SUPPORTED。
+#[cfg(all(not(no_nvcc_stub), mega_sm100))]
+extern "C" {
+    pub fn umma_peak_launch(a: *const c_void, b: *const c_void, c: *mut c_void, k_iters: i64, blocks: i64,
+                            check: i64, stream: cudaStream_t) -> i32;
+}
+#[cfg(not(all(not(no_nvcc_stub), mega_sm100)))]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn umma_peak_launch(_a: *const c_void, _b: *const c_void, _c: *mut c_void, _k: i64, _b2: i64,
+                               _ck: i64, _s: cudaStream_t) -> i32 {
+    CUDA_ERROR_NOT_SUPPORTED
+}
+
 #[cfg(no_nvcc_stub)]
 mod stubs {
     use super::*;

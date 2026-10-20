@@ -41,7 +41,7 @@ fn main() {
     if has_sm100 {
         println!("cargo:rustc-cfg=mega_sm100");
     }
-    let sm100_only = ["mega_sm100"];
+    let sm100_only = ["mega_sm100", "gqa_fa_sm100", "umma_peak_sm100"];
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let profile = env::var("PROFILE").unwrap_or_default();
     let opt = if profile == "release" { "-O3" } else { "-O2" };
@@ -61,7 +61,15 @@ fn main() {
         .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|a| format!("-gencode=arch=compute_{a},code=sm_{a}"))
+        .map(|a| {
+            // tcgen05 等 Blackwell 架构专用指令只在 `a` 变体里可用（compute_103a / sm_103a）。
+            // sm_103a 的 cubin 只能跑在 sm_103 上，与 sm_103 的可运行范围相同，故对含 100/103 的目标全局换。
+            let code = match a {
+                "100" | "103" => format!("{a}a"),
+                _ => a.to_string(),
+            };
+            format!("-gencode=arch=compute_{code},code=sm_{code}")
+        })
         .collect();
     // 并行 nvcc（2026-10-20，用户："构建慢？"）：之前 23 个 .cu × 3 arch 串行 ≈ 2 min / 轮，r10 每轮都付。
     // 并发数 = cargo 给的 NUM_JOBS（受 -j 约束）或 nproc，上限 = 文件数；nvcc 自身单线程，并行无共享状态。
