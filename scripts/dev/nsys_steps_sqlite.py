@@ -106,7 +106,7 @@ def main():
         "select a.start,a.end,s.value from CUPTI_ACTIVITY_KIND_RUNTIME a join StringIds s on a.nameId=s.id where a.start>? and a.end-a.start>100000 order by a.start",
         (t0,),
     ).fetchall()
-    att = collections.Counter(); attn = collections.Counter()
+    att = collections.Counter(); attn = collections.Counter(); trel = {}
     starts = [a[0] for a in api]
     for gs, ge in gaps:
         i = bisect.bisect_left(starts, gs - 500_000_000)
@@ -115,8 +115,11 @@ def main():
             ov = min(e, ge) - max(s, gs)
             if ov > 0 and not nme.startswith(("cuEventSynchronize", "cuStreamSynchronize", "cuMemcpyDtoH")):
                 att[nme] += ov; attn[nme] += 1
+                lo, hi = trel.get(nme, (s, s)); trel[nme] = (min(lo, s), max(hi, s))
             i += 1
-    print("  host API overlapping idle gaps (ms, n): " + ", ".join(f"{k} {v / 1e6:.0f}/{attn[k]}" for k, v in att.most_common(6)))
+    # t 为相对窗口起点的秒：全落在服务 listening 之前（启动 warmup / 预捕获）的不算服务期空转
+    print("  host API overlapping idle gaps (ms/n @t_rel_s first..last): "
+          + ", ".join(f"{k} {v / 1e6:.0f}/{attn[k]} @{(trel[k][0] - t0) / 1e9:.1f}..{(trel[k][1] - t0) / 1e9:.1f}" for k, v in att.most_common(5)))
 
 if __name__ == "__main__":
     main()
