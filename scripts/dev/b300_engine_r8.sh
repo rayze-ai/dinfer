@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# r8（design §15.7 GDN 状态按块缓存）B300 验收驱动：GPU 5、端口 8412、dinfer 钉 32-63 核、压测钉 96-127 核。
+# r8（design §15.7 GDN 状态按块缓存）B300 验收驱动：GPU 5、端口 8412、dinfer 钉 0-31 核、压测钉 96-127 核（r9 用 GPU 6 + 32-47/64-95）。
 #   bash scripts/dev/b300_engine_r8.sh build            # 远端 release 构建（带 feature；-j 可用 JOBS 限）
 #   bash scripts/dev/b300_engine_r8.sh serve [extra]    # 起 dinfer :8412（GPU 5），等 /v1/models 就绪；extra 追加 serve 参数
 #   bash scripts/dev/b300_engine_r8.sh engine OUT "改动一句话"   # bench_engine.sh 单端（VLLM_URL=），rate 4/8，REQS 64
@@ -26,7 +26,7 @@ case "${1:-}" in
     shift
     pgrep -f -- "dinfer serve .*--port $PORT" >/dev/null && { echo "already serving on :$PORT"; exit 0; }
     export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=$GPU RUST_LOG=info
-    nohup taskset -c 32-63 $BIN serve --model $M --served-model-name Qwen3.8-27B --host 127.0.0.1 --port $PORT \
+    nohup taskset -c "${SERVE_CPUS:-0-31}" $BIN serve --model $M --served-model-name Qwen3.8-27B --host 127.0.0.1 --port $PORT \
       --max-model-len 8192 --max-num-seqs 64 --max-num-batched-tokens 16384 "$@" >/tmp/r8_serve_$PORT.log 2>&1 &
     for _ in $(seq 1 240); do curl -s -m 2 "$URL/v1/models" >/dev/null && break; sleep 1; done
     curl -s -m 2 "$URL/v1/models" >/dev/null || { echo "dinfer :$PORT did not come up"; tail -20 /tmp/r8_serve_$PORT.log; exit 1; }
