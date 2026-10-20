@@ -1,4 +1,35 @@
 round,date,gpu,change,side,rate,metric,value
+2026-10-20/engine_merge,2026-10-20,B300,第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径,dinfer,4.0,goodput_rps,2.3669
+2026-10-20/engine_merge,2026-10-20,B300,第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径,dinfer,4.0,request_rps,2.3669
+2026-10-20/engine_merge,2026-10-20,B300,第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径,dinfer,4.0,out_tps,956.2289
+2026-10-20/engine_merge,2026-10-20,B300,第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径,dinfer,4.0,ttft_p50,51.3878
+2026-10-20/engine_merge,2026-10-20,B300,第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径,dinfer,4.0,ttft_p90,89.4675
+2026-10-20/engine_merge,2026-10-20,B300,第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径,dinfer,4.0,ttft_p99,244.1173
+2026-10-20/engine_merge,2026-10-20,B300,第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径,dinfer,4.0,ttft_max,248.4178
+2026-10-20/engine_merge,2026-10-20,B300,第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径,dinfer,4.0,ttft_1st_p50,51.3848
+2026-10-20/engine_merge,2026-10-20,B300,第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径,dinfer,4.0,tpot_p50,13.8643
+2026-10-20/engine_merge,2026-10-20,B300,第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径,dinfer,4.0,tpot_p90,15.0504
+2026-10-20/engine_merge,2026-10-20,B300,第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径,dinfer,4.0,tpot_p99,16.6445
+2026-10-20/engine_merge,2026-10-20,B300,第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径,dinfer,4.0,tpot_max,17.0109
+2026-10-20/engine_merge,2026-10-20,B300,第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径,dinfer,4.0,cache_hit,0.4697
+2026-10-20/engine_merge,2026-10-20,B300,第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径,dinfer,4.0,completed,64.0000
+2026-10-20/engine_merge,2026-10-20,B300,第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径,dinfer,4.0,failed,0.0000
+2026-10-20/engine_merge,2026-10-20,B300,第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径,dinfer,8.0,goodput_rps,3.1185
+2026-10-20/engine_merge,2026-10-20,B300,第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径,dinfer,8.0,request_rps,3.1185
+2026-10-20/engine_merge,2026-10-20,B300,第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径,dinfer,8.0,out_tps,1244.9543
+2026-10-20/engine_merge,2026-10-20,B300,第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径,dinfer,8.0,ttft_p50,49.8756
+2026-10-20/engine_merge,2026-10-20,B300,第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径,dinfer,8.0,ttft_p90,68.3323
+2026-10-20/engine_merge,2026-10-20,B300,第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径,dinfer,8.0,ttft_p99,77.0775
+2026-10-20/engine_merge,2026-10-20,B300,第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径,dinfer,8.0,ttft_max,83.5410
+2026-10-20/engine_merge,2026-10-20,B300,第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径,dinfer,8.0,ttft_1st_p50,49.8710
+2026-10-20/engine_merge,2026-10-20,B300,第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径,dinfer,8.0,tpot_p50,15.4959
+2026-10-20/engine_merge,2026-10-20,B300,第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径,dinfer,8.0,tpot_p90,17.7313
+2026-10-20/engine_merge,2026-10-20,B300,第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径,dinfer,8.0,tpot_p99,19.0488
+2026-10-20/engine_merge,2026-10-20,B300,第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径,dinfer,8.0,tpot_max,19.1507
+2026-10-20/engine_merge,2026-10-20,B300,第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径,dinfer,8.0,cache_hit,0.8150
+2026-10-20/engine_merge,2026-10-20,B300,第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径,dinfer,8.0,completed,64.0000
+2026-10-20/engine_merge,2026-10-20,B300,第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径,dinfer,8.0,failed,0.0000
+2026-10-20/engine_merge,2026-10-20,B300,第 11 轮合体 r8b+r10（kernel 边界快照不切步 + GDN chunk 四轮）engine 口径,dinfer,,max_good_rate,8.00
 2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,4.0,goodput_rps,2.2516
 2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,4.0,request_rps,2.4424
 2026-10-20/engine_r8b,2026-10-20,B300,r8b kernel 沿 chunk 边界写快照、调度不切步,dinfer,4.0,out_tps,1084.2946

@@ -1,0 +1,384 @@
+# HELP dinfer:num_requests_running Number of requests in model execution batches.
+# TYPE dinfer:num_requests_running gauge
+dinfer:num_requests_running 0
+# HELP dinfer:num_requests_waiting Number of requests waiting to be processed.
+# TYPE dinfer:num_requests_waiting gauge
+dinfer:num_requests_waiting 0
+# HELP dinfer:kv_cache_usage_perc KV-cache usage. 1 means 100 percent usage.
+# TYPE dinfer:kv_cache_usage_perc gauge
+dinfer:kv_cache_usage_perc 0
+# HELP dinfer:prompt_tokens_total Number of prefill tokens processed.
+# TYPE dinfer:prompt_tokens_total counter
+dinfer:prompt_tokens_total 315189
+# HELP dinfer:generation_tokens_total Number of generation tokens processed.
+# TYPE dinfer:generation_tokens_total counter
+dinfer:generation_tokens_total 79597
+# HELP dinfer:num_preemptions_total Cumulative number of preemption from the engine.
+# TYPE dinfer:num_preemptions_total counter
+dinfer:num_preemptions_total 0
+# HELP dinfer:prefix_cache_queries_total Prefix cache queries, in terms of number of queried tokens.
+# TYPE dinfer:prefix_cache_queries_total counter
+dinfer:prefix_cache_queries_total 314810
+# HELP dinfer:prefix_cache_hits_total Prefix cache hits, in terms of number of cached tokens.
+# TYPE dinfer:prefix_cache_hits_total counter
+dinfer:prefix_cache_hits_total 97280
+# HELP dinfer:host_tier_hits_total KV host tier prefix hits, in blocks.
+# TYPE dinfer:host_tier_hits_total counter
+dinfer:host_tier_hits_total 0
+# HELP dinfer:host_tier_fetch_blocks_total Blocks fetched host->GPU.
+# TYPE dinfer:host_tier_fetch_blocks_total counter
+dinfer:host_tier_fetch_blocks_total 0
+# HELP dinfer:host_tier_offload_blocks_total Blocks offloaded GPU->host.
+# TYPE dinfer:host_tier_offload_blocks_total counter
+dinfer:host_tier_offload_blocks_total 0
+# HELP dinfer:pd_export_total PD: requests whose KV was exported (prefill side).
+# TYPE dinfer:pd_export_total counter
+dinfer:pd_export_total 0
+# HELP dinfer:pd_export_slot_total PD: exports written directly into the peer shared slot region (shm / cuda-ipc).
+# TYPE dinfer:pd_export_slot_total counter
+dinfer:pd_export_slot_total 0
+# HELP dinfer:pd_import_total PD: requests whose KV was imported (decode side).
+# TYPE dinfer:pd_import_total counter
+dinfer:pd_import_total 0
+# HELP dinfer:pd_fallback_total PD: decode-side requests that fell back to local prefill.
+# TYPE dinfer:pd_fallback_total counter
+dinfer:pd_fallback_total 0
+# HELP dinfer:spec_draft_total Speculative decoding: draft tokens proposed.
+# TYPE dinfer:spec_draft_total counter
+dinfer:spec_draft_total 0
+# HELP dinfer:spec_accepted_total Speculative decoding: draft tokens accepted.
+# TYPE dinfer:spec_accepted_total counter
+dinfer:spec_accepted_total 0
+# HELP dinfer:engine_steps_total Number of engine steps executed.
+# TYPE dinfer:engine_steps_total counter
+dinfer:engine_steps_total 8870
+# HELP dinfer:request_success_total Count of successfully processed requests.
+# TYPE dinfer:request_success_total counter
+dinfer:request_success_total{finished_reason="stop"} 1
+dinfer:request_success_total{finished_reason="length"} 378
+dinfer:request_success_total{finished_reason="abort"} 0
+# HELP dinfer:time_to_first_token_seconds Histogram of time to first token in seconds.
+# TYPE dinfer:time_to_first_token_seconds histogram
+dinfer:time_to_first_token_seconds_bucket{le="0.001"} 0
+dinfer:time_to_first_token_seconds_bucket{le="0.005"} 0
+dinfer:time_to_first_token_seconds_bucket{le="0.01"} 0
+dinfer:time_to_first_token_seconds_bucket{le="0.02"} 27
+dinfer:time_to_first_token_seconds_bucket{le="0.04"} 107
+dinfer:time_to_first_token_seconds_bucket{le="0.06"} 179
+dinfer:time_to_first_token_seconds_bucket{le="0.08"} 204
+dinfer:time_to_first_token_seconds_bucket{le="0.1"} 209
+dinfer:time_to_first_token_seconds_bucket{le="0.25"} 345
+dinfer:time_to_first_token_seconds_bucket{le="0.5"} 379
+dinfer:time_to_first_token_seconds_bucket{le="0.75"} 379
+dinfer:time_to_first_token_seconds_bucket{le="1"} 379
+dinfer:time_to_first_token_seconds_bucket{le="2.5"} 379
+dinfer:time_to_first_token_seconds_bucket{le="5"} 379
+dinfer:time_to_first_token_seconds_bucket{le="7.5"} 379
+dinfer:time_to_first_token_seconds_bucket{le="10"} 379
+dinfer:time_to_first_token_seconds_bucket{le="20"} 379
+dinfer:time_to_first_token_seconds_bucket{le="40"} 379
+dinfer:time_to_first_token_seconds_bucket{le="80"} 379
+dinfer:time_to_first_token_seconds_bucket{le="+Inf"} 379
+dinfer:time_to_first_token_seconds_sum 37.707192
+dinfer:time_to_first_token_seconds_count 379
+# HELP dinfer:time_per_output_token_seconds Histogram of time per output token in seconds.
+# TYPE dinfer:time_per_output_token_seconds histogram
+dinfer:time_per_output_token_seconds_bucket{le="0.001"} 1614
+dinfer:time_per_output_token_seconds_bucket{le="0.0025"} 1614
+dinfer:time_per_output_token_seconds_bucket{le="0.005"} 1614
+dinfer:time_per_output_token_seconds_bucket{le="0.0075"} 1614
+dinfer:time_per_output_token_seconds_bucket{le="0.01"} 5356
+dinfer:time_per_output_token_seconds_bucket{le="0.015"} 71931
+dinfer:time_per_output_token_seconds_bucket{le="0.02"} 76957
+dinfer:time_per_output_token_seconds_bucket{le="0.025"} 77007
+dinfer:time_per_output_token_seconds_bucket{le="0.03"} 77332
+dinfer:time_per_output_token_seconds_bucket{le="0.04"} 77930
+dinfer:time_per_output_token_seconds_bucket{le="0.05"} 78646
+dinfer:time_per_output_token_seconds_bucket{le="0.075"} 78976
+dinfer:time_per_output_token_seconds_bucket{le="0.1"} 79098
+dinfer:time_per_output_token_seconds_bucket{le="0.15"} 79178
+dinfer:time_per_output_token_seconds_bucket{le="0.2"} 79178
+dinfer:time_per_output_token_seconds_bucket{le="0.3"} 79214
+dinfer:time_per_output_token_seconds_bucket{le="0.5"} 79218
+dinfer:time_per_output_token_seconds_bucket{le="1"} 79218
+dinfer:time_per_output_token_seconds_bucket{le="+Inf"} 79218
+dinfer:time_per_output_token_seconds_sum 1052.323098
+dinfer:time_per_output_token_seconds_count 79218
+# HELP dinfer:e2e_request_latency_seconds Histogram of end to end request latency in seconds.
+# TYPE dinfer:e2e_request_latency_seconds histogram
+dinfer:e2e_request_latency_seconds_bucket{le="0.3"} 31
+dinfer:e2e_request_latency_seconds_bucket{le="0.5"} 31
+dinfer:e2e_request_latency_seconds_bucket{le="0.8"} 31
+dinfer:e2e_request_latency_seconds_bucket{le="1"} 31
+dinfer:e2e_request_latency_seconds_bucket{le="1.5"} 91
+dinfer:e2e_request_latency_seconds_bucket{le="2"} 290
+dinfer:e2e_request_latency_seconds_bucket{le="2.5"} 311
+dinfer:e2e_request_latency_seconds_bucket{le="5"} 311
+dinfer:e2e_request_latency_seconds_bucket{le="10"} 362
+dinfer:e2e_request_latency_seconds_bucket{le="15"} 379
+dinfer:e2e_request_latency_seconds_bucket{le="20"} 379
+dinfer:e2e_request_latency_seconds_bucket{le="30"} 379
+dinfer:e2e_request_latency_seconds_bucket{le="40"} 379
+dinfer:e2e_request_latency_seconds_bucket{le="50"} 379
+dinfer:e2e_request_latency_seconds_bucket{le="60"} 379
+dinfer:e2e_request_latency_seconds_bucket{le="120"} 379
+dinfer:e2e_request_latency_seconds_bucket{le="240"} 379
+dinfer:e2e_request_latency_seconds_bucket{le="+Inf"} 379
+dinfer:e2e_request_latency_seconds_sum 1090.069642
+dinfer:e2e_request_latency_seconds_count 379
+# HELP dinfer:engine_step_seconds Histogram of engine step wall time in seconds.
+# TYPE dinfer:engine_step_seconds histogram
+dinfer:engine_step_seconds_bucket{le="0.001"} 0
+dinfer:engine_step_seconds_bucket{le="0.002"} 0
+dinfer:engine_step_seconds_bucket{le="0.005"} 0
+dinfer:engine_step_seconds_bucket{le="0.01"} 55
+dinfer:engine_step_seconds_bucket{le="0.02"} 3832
+dinfer:engine_step_seconds_bucket{le="0.05"} 8740
+dinfer:engine_step_seconds_bucket{le="0.1"} 8838
+dinfer:engine_step_seconds_bucket{le="0.2"} 8856
+dinfer:engine_step_seconds_bucket{le="0.5"} 8870
+dinfer:engine_step_seconds_bucket{le="1"} 8870
+dinfer:engine_step_seconds_bucket{le="2"} 8870
+dinfer:engine_step_seconds_bucket{le="+Inf"} 8870
+dinfer:engine_step_seconds_sum 204.993149
+dinfer:engine_step_seconds_count 8870
+# HELP dinfer:engine_step_schedule_seconds Scheduler time per step.
+# TYPE dinfer:engine_step_schedule_seconds histogram
+dinfer:engine_step_schedule_seconds_bucket{le="0.001"} 8870
+dinfer:engine_step_schedule_seconds_bucket{le="0.002"} 8870
+dinfer:engine_step_schedule_seconds_bucket{le="0.005"} 8870
+dinfer:engine_step_schedule_seconds_bucket{le="0.01"} 8870
+dinfer:engine_step_schedule_seconds_bucket{le="0.02"} 8870
+dinfer:engine_step_schedule_seconds_bucket{le="0.05"} 8870
+dinfer:engine_step_schedule_seconds_bucket{le="0.1"} 8870
+dinfer:engine_step_schedule_seconds_bucket{le="0.2"} 8870
+dinfer:engine_step_schedule_seconds_bucket{le="0.5"} 8870
+dinfer:engine_step_schedule_seconds_bucket{le="1"} 8870
+dinfer:engine_step_schedule_seconds_bucket{le="2"} 8870
+dinfer:engine_step_schedule_seconds_bucket{le="+Inf"} 8870
+dinfer:engine_step_schedule_seconds_sum 0.010321
+dinfer:engine_step_schedule_seconds_count 8870
+# HELP dinfer:engine_step_execute_seconds Runner execute (H2D + GPU + D2H) time per step.
+# TYPE dinfer:engine_step_execute_seconds histogram
+dinfer:engine_step_execute_seconds_bucket{le="0.001"} 0
+dinfer:engine_step_execute_seconds_bucket{le="0.002"} 0
+dinfer:engine_step_execute_seconds_bucket{le="0.005"} 0
+dinfer:engine_step_execute_seconds_bucket{le="0.01"} 55
+dinfer:engine_step_execute_seconds_bucket{le="0.02"} 3832
+dinfer:engine_step_execute_seconds_bucket{le="0.05"} 8740
+dinfer:engine_step_execute_seconds_bucket{le="0.1"} 8838
+dinfer:engine_step_execute_seconds_bucket{le="0.2"} 8856
+dinfer:engine_step_execute_seconds_bucket{le="0.5"} 8870
+dinfer:engine_step_execute_seconds_bucket{le="1"} 8870
+dinfer:engine_step_execute_seconds_bucket{le="2"} 8870
+dinfer:engine_step_execute_seconds_bucket{le="+Inf"} 8870
+dinfer:engine_step_execute_seconds_sum 204.972779
+dinfer:engine_step_execute_seconds_count 8870
+# HELP dinfer:engine_step_execute_prefill_seconds Runner execute time per step, plan mode = prefill (mixed = chunked prefill + decode).
+# TYPE dinfer:engine_step_execute_prefill_seconds histogram
+dinfer:engine_step_execute_prefill_seconds_bucket{le="0.001"} 0
+dinfer:engine_step_execute_prefill_seconds_bucket{le="0.002"} 0
+dinfer:engine_step_execute_prefill_seconds_bucket{le="0.005"} 0
+dinfer:engine_step_execute_prefill_seconds_bucket{le="0.01"} 0
+dinfer:engine_step_execute_prefill_seconds_bucket{le="0.02"} 24
+dinfer:engine_step_execute_prefill_seconds_bucket{le="0.05"} 45
+dinfer:engine_step_execute_prefill_seconds_bucket{le="0.1"} 65
+dinfer:engine_step_execute_prefill_seconds_bucket{le="0.2"} 75
+dinfer:engine_step_execute_prefill_seconds_bucket{le="0.5"} 81
+dinfer:engine_step_execute_prefill_seconds_bucket{le="1"} 81
+dinfer:engine_step_execute_prefill_seconds_bucket{le="2"} 81
+dinfer:engine_step_execute_prefill_seconds_bucket{le="+Inf"} 81
+dinfer:engine_step_execute_prefill_seconds_sum 5.677841
+dinfer:engine_step_execute_prefill_seconds_count 81
+# HELP dinfer:engine_step_execute_decode_seconds Runner execute time per step, plan mode = decode (mixed = chunked prefill + decode).
+# TYPE dinfer:engine_step_execute_decode_seconds histogram
+dinfer:engine_step_execute_decode_seconds_bucket{le="0.001"} 0
+dinfer:engine_step_execute_decode_seconds_bucket{le="0.002"} 0
+dinfer:engine_step_execute_decode_seconds_bucket{le="0.005"} 0
+dinfer:engine_step_execute_decode_seconds_bucket{le="0.01"} 25
+dinfer:engine_step_execute_decode_seconds_bucket{le="0.02"} 3766
+dinfer:engine_step_execute_decode_seconds_bucket{le="0.05"} 8537
+dinfer:engine_step_execute_decode_seconds_bucket{le="0.1"} 8543
+dinfer:engine_step_execute_decode_seconds_bucket{le="0.2"} 8543
+dinfer:engine_step_execute_decode_seconds_bucket{le="0.5"} 8543
+dinfer:engine_step_execute_decode_seconds_bucket{le="1"} 8543
+dinfer:engine_step_execute_decode_seconds_bucket{le="2"} 8543
+dinfer:engine_step_execute_decode_seconds_bucket{le="+Inf"} 8543
+dinfer:engine_step_execute_decode_seconds_sum 186.362531
+dinfer:engine_step_execute_decode_seconds_count 8543
+# HELP dinfer:engine_step_execute_mixed_seconds Runner execute time per step, plan mode = mixed (mixed = chunked prefill + decode).
+# TYPE dinfer:engine_step_execute_mixed_seconds histogram
+dinfer:engine_step_execute_mixed_seconds_bucket{le="0.001"} 0
+dinfer:engine_step_execute_mixed_seconds_bucket{le="0.002"} 0
+dinfer:engine_step_execute_mixed_seconds_bucket{le="0.005"} 0
+dinfer:engine_step_execute_mixed_seconds_bucket{le="0.01"} 0
+dinfer:engine_step_execute_mixed_seconds_bucket{le="0.02"} 3
+dinfer:engine_step_execute_mixed_seconds_bucket{le="0.05"} 119
+dinfer:engine_step_execute_mixed_seconds_bucket{le="0.1"} 191
+dinfer:engine_step_execute_mixed_seconds_bucket{le="0.2"} 199
+dinfer:engine_step_execute_mixed_seconds_bucket{le="0.5"} 207
+dinfer:engine_step_execute_mixed_seconds_bucket{le="1"} 207
+dinfer:engine_step_execute_mixed_seconds_bucket{le="2"} 207
+dinfer:engine_step_execute_mixed_seconds_bucket{le="+Inf"} 207
+dinfer:engine_step_execute_mixed_seconds_sum 12.54502
+dinfer:engine_step_execute_mixed_seconds_count 207
+# HELP dinfer:engine_step_update_seconds Output update + dispatch time per step.
+# TYPE dinfer:engine_step_update_seconds histogram
+dinfer:engine_step_update_seconds_bucket{le="0.001"} 8870
+dinfer:engine_step_update_seconds_bucket{le="0.002"} 8870
+dinfer:engine_step_update_seconds_bucket{le="0.005"} 8870
+dinfer:engine_step_update_seconds_bucket{le="0.01"} 8870
+dinfer:engine_step_update_seconds_bucket{le="0.02"} 8870
+dinfer:engine_step_update_seconds_bucket{le="0.05"} 8870
+dinfer:engine_step_update_seconds_bucket{le="0.1"} 8870
+dinfer:engine_step_update_seconds_bucket{le="0.2"} 8870
+dinfer:engine_step_update_seconds_bucket{le="0.5"} 8870
+dinfer:engine_step_update_seconds_bucket{le="1"} 8870
+dinfer:engine_step_update_seconds_bucket{le="2"} 8870
+dinfer:engine_step_update_seconds_bucket{le="+Inf"} 8870
+dinfer:engine_step_update_seconds_sum 0.005692
+dinfer:engine_step_update_seconds_count 8870
+# HELP dinfer:engine_step_phase_upload_prefill_seconds Executor host-side upload time per step, plan mode = prefill (upload = plan/sampling H2D, launch = forward+sample enqueue, wait = GPU result wait).
+# TYPE dinfer:engine_step_phase_upload_prefill_seconds histogram
+dinfer:engine_step_phase_upload_prefill_seconds_bucket{le="0.001"} 79
+dinfer:engine_step_phase_upload_prefill_seconds_bucket{le="0.002"} 81
+dinfer:engine_step_phase_upload_prefill_seconds_bucket{le="0.005"} 81
+dinfer:engine_step_phase_upload_prefill_seconds_bucket{le="0.01"} 81
+dinfer:engine_step_phase_upload_prefill_seconds_bucket{le="0.02"} 81
+dinfer:engine_step_phase_upload_prefill_seconds_bucket{le="0.05"} 81
+dinfer:engine_step_phase_upload_prefill_seconds_bucket{le="0.1"} 81
+dinfer:engine_step_phase_upload_prefill_seconds_bucket{le="0.2"} 81
+dinfer:engine_step_phase_upload_prefill_seconds_bucket{le="0.5"} 81
+dinfer:engine_step_phase_upload_prefill_seconds_bucket{le="1"} 81
+dinfer:engine_step_phase_upload_prefill_seconds_bucket{le="2"} 81
+dinfer:engine_step_phase_upload_prefill_seconds_bucket{le="+Inf"} 81
+dinfer:engine_step_phase_upload_prefill_seconds_sum 0.030986
+dinfer:engine_step_phase_upload_prefill_seconds_count 81
+# HELP dinfer:engine_step_phase_launch_prefill_seconds Executor host-side launch time per step, plan mode = prefill (upload = plan/sampling H2D, launch = forward+sample enqueue, wait = GPU result wait).
+# TYPE dinfer:engine_step_phase_launch_prefill_seconds histogram
+dinfer:engine_step_phase_launch_prefill_seconds_bucket{le="0.001"} 2
+dinfer:engine_step_phase_launch_prefill_seconds_bucket{le="0.002"} 2
+dinfer:engine_step_phase_launch_prefill_seconds_bucket{le="0.005"} 70
+dinfer:engine_step_phase_launch_prefill_seconds_bucket{le="0.01"} 79
+dinfer:engine_step_phase_launch_prefill_seconds_bucket{le="0.02"} 81
+dinfer:engine_step_phase_launch_prefill_seconds_bucket{le="0.05"} 81
+dinfer:engine_step_phase_launch_prefill_seconds_bucket{le="0.1"} 81
+dinfer:engine_step_phase_launch_prefill_seconds_bucket{le="0.2"} 81
+dinfer:engine_step_phase_launch_prefill_seconds_bucket{le="0.5"} 81
+dinfer:engine_step_phase_launch_prefill_seconds_bucket{le="1"} 81
+dinfer:engine_step_phase_launch_prefill_seconds_bucket{le="2"} 81
+dinfer:engine_step_phase_launch_prefill_seconds_bucket{le="+Inf"} 81
+dinfer:engine_step_phase_launch_prefill_seconds_sum 0.316846
+dinfer:engine_step_phase_launch_prefill_seconds_count 81
+# HELP dinfer:engine_step_phase_wait_prefill_seconds Executor host-side wait time per step, plan mode = prefill (upload = plan/sampling H2D, launch = forward+sample enqueue, wait = GPU result wait).
+# TYPE dinfer:engine_step_phase_wait_prefill_seconds histogram
+dinfer:engine_step_phase_wait_prefill_seconds_bucket{le="0.001"} 0
+dinfer:engine_step_phase_wait_prefill_seconds_bucket{le="0.002"} 0
+dinfer:engine_step_phase_wait_prefill_seconds_bucket{le="0.005"} 0
+dinfer:engine_step_phase_wait_prefill_seconds_bucket{le="0.01"} 0
+dinfer:engine_step_phase_wait_prefill_seconds_bucket{le="0.02"} 28
+dinfer:engine_step_phase_wait_prefill_seconds_bucket{le="0.05"} 50
+dinfer:engine_step_phase_wait_prefill_seconds_bucket{le="0.1"} 65
+dinfer:engine_step_phase_wait_prefill_seconds_bucket{le="0.2"} 75
+dinfer:engine_step_phase_wait_prefill_seconds_bucket{le="0.5"} 81
+dinfer:engine_step_phase_wait_prefill_seconds_bucket{le="1"} 81
+dinfer:engine_step_phase_wait_prefill_seconds_bucket{le="2"} 81
+dinfer:engine_step_phase_wait_prefill_seconds_bucket{le="+Inf"} 81
+dinfer:engine_step_phase_wait_prefill_seconds_sum 5.328487
+dinfer:engine_step_phase_wait_prefill_seconds_count 81
+# HELP dinfer:engine_step_phase_upload_decode_seconds Executor host-side upload time per step, plan mode = decode (upload = plan/sampling H2D, launch = forward+sample enqueue, wait = GPU result wait).
+# TYPE dinfer:engine_step_phase_upload_decode_seconds histogram
+dinfer:engine_step_phase_upload_decode_seconds_bucket{le="0.001"} 8543
+dinfer:engine_step_phase_upload_decode_seconds_bucket{le="0.002"} 8543
+dinfer:engine_step_phase_upload_decode_seconds_bucket{le="0.005"} 8543
+dinfer:engine_step_phase_upload_decode_seconds_bucket{le="0.01"} 8543
+dinfer:engine_step_phase_upload_decode_seconds_bucket{le="0.02"} 8543
+dinfer:engine_step_phase_upload_decode_seconds_bucket{le="0.05"} 8543
+dinfer:engine_step_phase_upload_decode_seconds_bucket{le="0.1"} 8543
+dinfer:engine_step_phase_upload_decode_seconds_bucket{le="0.2"} 8543
+dinfer:engine_step_phase_upload_decode_seconds_bucket{le="0.5"} 8543
+dinfer:engine_step_phase_upload_decode_seconds_bucket{le="1"} 8543
+dinfer:engine_step_phase_upload_decode_seconds_bucket{le="2"} 8543
+dinfer:engine_step_phase_upload_decode_seconds_bucket{le="+Inf"} 8543
+dinfer:engine_step_phase_upload_decode_seconds_sum 0.28284
+dinfer:engine_step_phase_upload_decode_seconds_count 8543
+# HELP dinfer:engine_step_phase_launch_decode_seconds Executor host-side launch time per step, plan mode = decode (upload = plan/sampling H2D, launch = forward+sample enqueue, wait = GPU result wait).
+# TYPE dinfer:engine_step_phase_launch_decode_seconds histogram
+dinfer:engine_step_phase_launch_decode_seconds_bucket{le="0.001"} 8538
+dinfer:engine_step_phase_launch_decode_seconds_bucket{le="0.002"} 8539
+dinfer:engine_step_phase_launch_decode_seconds_bucket{le="0.005"} 8543
+dinfer:engine_step_phase_launch_decode_seconds_bucket{le="0.01"} 8543
+dinfer:engine_step_phase_launch_decode_seconds_bucket{le="0.02"} 8543
+dinfer:engine_step_phase_launch_decode_seconds_bucket{le="0.05"} 8543
+dinfer:engine_step_phase_launch_decode_seconds_bucket{le="0.1"} 8543
+dinfer:engine_step_phase_launch_decode_seconds_bucket{le="0.2"} 8543
+dinfer:engine_step_phase_launch_decode_seconds_bucket{le="0.5"} 8543
+dinfer:engine_step_phase_launch_decode_seconds_bucket{le="1"} 8543
+dinfer:engine_step_phase_launch_decode_seconds_bucket{le="2"} 8543
+dinfer:engine_step_phase_launch_decode_seconds_bucket{le="+Inf"} 8543
+dinfer:engine_step_phase_launch_decode_seconds_sum 0.034817
+dinfer:engine_step_phase_launch_decode_seconds_count 8543
+# HELP dinfer:engine_step_phase_wait_decode_seconds Executor host-side wait time per step, plan mode = decode (upload = plan/sampling H2D, launch = forward+sample enqueue, wait = GPU result wait).
+# TYPE dinfer:engine_step_phase_wait_decode_seconds histogram
+dinfer:engine_step_phase_wait_decode_seconds_bucket{le="0.001"} 0
+dinfer:engine_step_phase_wait_decode_seconds_bucket{le="0.002"} 0
+dinfer:engine_step_phase_wait_decode_seconds_bucket{le="0.005"} 0
+dinfer:engine_step_phase_wait_decode_seconds_bucket{le="0.01"} 30
+dinfer:engine_step_phase_wait_decode_seconds_bucket{le="0.02"} 3782
+dinfer:engine_step_phase_wait_decode_seconds_bucket{le="0.05"} 8537
+dinfer:engine_step_phase_wait_decode_seconds_bucket{le="0.1"} 8543
+dinfer:engine_step_phase_wait_decode_seconds_bucket{le="0.2"} 8543
+dinfer:engine_step_phase_wait_decode_seconds_bucket{le="0.5"} 8543
+dinfer:engine_step_phase_wait_decode_seconds_bucket{le="1"} 8543
+dinfer:engine_step_phase_wait_decode_seconds_bucket{le="2"} 8543
+dinfer:engine_step_phase_wait_decode_seconds_bucket{le="+Inf"} 8543
+dinfer:engine_step_phase_wait_decode_seconds_sum 186.003072
+dinfer:engine_step_phase_wait_decode_seconds_count 8543
+# HELP dinfer:engine_step_phase_upload_mixed_seconds Executor host-side upload time per step, plan mode = mixed (upload = plan/sampling H2D, launch = forward+sample enqueue, wait = GPU result wait).
+# TYPE dinfer:engine_step_phase_upload_mixed_seconds histogram
+dinfer:engine_step_phase_upload_mixed_seconds_bucket{le="0.001"} 190
+dinfer:engine_step_phase_upload_mixed_seconds_bucket{le="0.002"} 199
+dinfer:engine_step_phase_upload_mixed_seconds_bucket{le="0.005"} 207
+dinfer:engine_step_phase_upload_mixed_seconds_bucket{le="0.01"} 207
+dinfer:engine_step_phase_upload_mixed_seconds_bucket{le="0.02"} 207
+dinfer:engine_step_phase_upload_mixed_seconds_bucket{le="0.05"} 207
+dinfer:engine_step_phase_upload_mixed_seconds_bucket{le="0.1"} 207
+dinfer:engine_step_phase_upload_mixed_seconds_bucket{le="0.2"} 207
+dinfer:engine_step_phase_upload_mixed_seconds_bucket{le="0.5"} 207
+dinfer:engine_step_phase_upload_mixed_seconds_bucket{le="1"} 207
+dinfer:engine_step_phase_upload_mixed_seconds_bucket{le="2"} 207
+dinfer:engine_step_phase_upload_mixed_seconds_bucket{le="+Inf"} 207
+dinfer:engine_step_phase_upload_mixed_seconds_sum 0.08632
+dinfer:engine_step_phase_upload_mixed_seconds_count 207
+# HELP dinfer:engine_step_phase_launch_mixed_seconds Executor host-side launch time per step, plan mode = mixed (upload = plan/sampling H2D, launch = forward+sample enqueue, wait = GPU result wait).
+# TYPE dinfer:engine_step_phase_launch_mixed_seconds histogram
+dinfer:engine_step_phase_launch_mixed_seconds_bucket{le="0.001"} 78
+dinfer:engine_step_phase_launch_mixed_seconds_bucket{le="0.002"} 78
+dinfer:engine_step_phase_launch_mixed_seconds_bucket{le="0.005"} 166
+dinfer:engine_step_phase_launch_mixed_seconds_bucket{le="0.01"} 173
+dinfer:engine_step_phase_launch_mixed_seconds_bucket{le="0.02"} 207
+dinfer:engine_step_phase_launch_mixed_seconds_bucket{le="0.05"} 207
+dinfer:engine_step_phase_launch_mixed_seconds_bucket{le="0.1"} 207
+dinfer:engine_step_phase_launch_mixed_seconds_bucket{le="0.2"} 207
+dinfer:engine_step_phase_launch_mixed_seconds_bucket{le="0.5"} 207
+dinfer:engine_step_phase_launch_mixed_seconds_bucket{le="1"} 207
+dinfer:engine_step_phase_launch_mixed_seconds_bucket{le="2"} 207
+dinfer:engine_step_phase_launch_mixed_seconds_bucket{le="+Inf"} 207
+dinfer:engine_step_phase_launch_mixed_seconds_sum 0.812917
+dinfer:engine_step_phase_launch_mixed_seconds_count 207
+# HELP dinfer:engine_step_phase_wait_mixed_seconds Executor host-side wait time per step, plan mode = mixed (upload = plan/sampling H2D, launch = forward+sample enqueue, wait = GPU result wait).
+# TYPE dinfer:engine_step_phase_wait_mixed_seconds histogram
+dinfer:engine_step_phase_wait_mixed_seconds_bucket{le="0.001"} 0
+dinfer:engine_step_phase_wait_mixed_seconds_bucket{le="0.002"} 0
+dinfer:engine_step_phase_wait_mixed_seconds_bucket{le="0.005"} 0
+dinfer:engine_step_phase_wait_mixed_seconds_bucket{le="0.01"} 0
+dinfer:engine_step_phase_wait_mixed_seconds_bucket{le="0.02"} 9
+dinfer:engine_step_phase_wait_mixed_seconds_bucket{le="0.05"} 129
+dinfer:engine_step_phase_wait_mixed_seconds_bucket{le="0.1"} 193
+dinfer:engine_step_phase_wait_mixed_seconds_bucket{le="0.2"} 199
+dinfer:engine_step_phase_wait_mixed_seconds_bucket{le="0.5"} 207
+dinfer:engine_step_phase_wait_mixed_seconds_bucket{le="1"} 207
+dinfer:engine_step_phase_wait_mixed_seconds_bucket{le="2"} 207
+dinfer:engine_step_phase_wait_mixed_seconds_bucket{le="+Inf"} 207
+dinfer:engine_step_phase_wait_mixed_seconds_sum 11.64054
+dinfer:engine_step_phase_wait_mixed_seconds_count 207
