@@ -10,6 +10,7 @@ pub mod latent_moe;
 pub mod layer;
 pub mod mla;
 pub mod model;
+pub mod parser;
 pub mod tokenizer;
 pub mod weights;
 pub mod xtml;
