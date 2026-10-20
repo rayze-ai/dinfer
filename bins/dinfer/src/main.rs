@@ -106,6 +106,12 @@ enum Cmd {
         /// n-gram 最长匹配长度
         #[arg(long, default_value_t = 4)]
         ngram_max: usize,
+        /// 只装前 N 层（kimik3；冒烟用，输出无语义；也可 KIMIK3_LAYERS=N）
+        #[arg(long)]
+        layers: Option<usize>,
+        /// 聊天渲染方言（kimik3）：hf（默认，基线 vLLM 的 HF 模板路径）| serving（Moonshot 线上 Rust renderer 口径）
+        #[arg(long, default_value = "hf")]
+        chat_dialect: String,
     },
     /// PD 分离入口（design §10.3）：收 OpenAI 请求 → 打 prefill 实例出首 token + 导出 KV → 打 decode 实例接力。
     /// 任一侧失败退化为 decode 实例单机跑（不丢请求）。无鉴权。
@@ -192,9 +198,44 @@ async fn main() -> Result<()> {
             num_speculative_tokens,
             ngram_min,
             ngram_max,
+            layers,
+            chat_dialect,
         } => {
             let name = served_model_name.unwrap_or_else(|| model_name().to_string());
             let addr = format!("{host}:{port}");
+            #[cfg(not(feature = "kimik3"))]
+            let _ = (layers, &chat_dialect);
+            #[cfg(feature = "kimik3")]
+            {
+                let _ = (
+                    &role, kv_port, &peer, pd_wait_ms, pd_pool_bufs, &kv_transport, kv_slots, tp, dp, mtp,
+                    &speculative, num_speculative_tokens, ngram_min, ngram_max, kv_host_gib,
+                );
+                let opt = dinfer_kimik3::service::ServeOptions {
+                    model_dir: model,
+                    tokenizer_dir: tokenizer,
+                    max_model_len,
+                    max_num_seqs,
+                    max_num_batched_tokens,
+                    num_blocks,
+                    block_size,
+                    gpu_memory_utilization,
+                    enable_chunked_prefill: true,
+                    enable_prefix_caching: !no_prefix_caching,
+                    decode_exempt_from_budget: !no_decode_exempt,
+                    device,
+                    enable_cuda_graph: !no_cuda_graph,
+                    layers,
+                    chat_dialect,
+                };
+                let name = name.clone();
+                let svc = tokio::task::spawn_blocking(move || {
+                    dinfer_kimik3::service::KimiK3Service::start(opt, name)
+                })
+                .await??;
+                tracing::info!(%addr, "dinfer serving (no auth; bind to localhost unless fronted by a gateway)");
+                dinfer_server::serve(&addr, std::sync::Arc::new(svc)).await?;
+            }
             #[cfg(feature = "glm53")]
             {
                 let _ = (gpu_memory_utilization, no_prefix_caching, no_cuda_graph, &speculative, num_speculative_tokens, ngram_min, ngram_max); // glm53：固定 num_blocks，prefix cache / graph 待接
@@ -298,7 +339,7 @@ async fn main() -> Result<()> {
                 tracing::info!(%addr, "dinfer serving (no auth; bind to localhost unless fronted by a gateway)");
                 dinfer_server::serve(&addr, std::sync::Arc::new(svc)).await?;
             }
-            #[cfg(not(any(feature = "glm53", feature = "qwen3", feature = "qwen35")))]
+            #[cfg(not(any(feature = "kimik3", feature = "glm53", feature = "qwen3", feature = "qwen35")))]
             {
                 let _ = (
                     &addr,
@@ -320,7 +361,7 @@ async fn main() -> Result<()> {
                     ngram_max,
                 );
                 anyhow::bail!(
-                    "serve for model `{name}` is not implemented yet (build with --features glm53, qwen3 or qwen35)"
+                    "serve for model `{name}` is not implemented yet (build with --features kimik3, glm53, qwen3 or qwen35)"
                 );
             }
         }
