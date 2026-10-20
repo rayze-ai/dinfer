@@ -21,3 +21,9 @@
 - 服务根是 `test/`：`index.html`（所有模型 × 卡型总览，`bench_index.py` 从各 `test/<model>/perf-trend.json` 生成）→ `<model>/perf-trend.html#<model>/<gpu>/single`。
 - 远端跑的 `bench_trend.py` 只看到那台卡的 bench 目录（4090 上生成的 qwen3 趋势没有 B300 4 轮；B300 上生成的没有 4090）；**权威的 `perf-trend.*` 与 `index.html` 以本机全树生成为准**：pull 回 bench 目录后跑 `scripts/dev/trend_rebuild.sh`（所有模型 + index），再 commit。2026-10-20 两次踩：index 只有 qwen3/4090、qwen3 缺 B300 行。
 - 重启服务按监听 PID 杀（`ss -ltnp | grep :8090`），不要 `pkill -f` 模式——模式会匹配到执行命令的 shell 自己。
+
+## 4090 测试机是共享的：bench 前核 KV 块数 / 外来进程（2026-10-20）
+
+- **判断**：4090 ×8 不是独占机，root 会临时在任意卡起 vLLM（`--port 8000/8200`，20 GB+）。我们的 dinfer 按 `utilization 0.9` 自动算 KV 块数，被占时块数骤降（9900 → 902）、首请求 OOM，bench 看起来是"我们挂了"。
+- **怎么用**：bench 链 serve 起来后读启动日志 `num_blocks`，低于基线 10% 直接 abort（`bench_compare` 前置）；`nvidia-smi --query-compute-apps` 看非 dinfer / 非 vllm-qwen3 容器的进程；GPU 0 被占就换 3–7（都空），把 `CUDA_VISIBLE_DEVICES` 写进链。
+- **证据**：`docs/progress.md` 2026-10-20 4090 门禁第三次 OOM。
