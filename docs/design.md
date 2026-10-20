@@ -802,3 +802,18 @@ B300 单 GDN 层 decode，基线 = 现路径 11 kernel + 自调优 GEMM + CUDA g
 **验收（engine 口径）**：`bench_engine.sh` prefix-repeat 0.5 下 dinfer cache hit ≥ 0.4，rate 4 TTFT p99 从 291 → ≤ 150，goodput ≥ vLLM；闭环四组不退化；golden 加"命中后续算 = 全量 prefill"对拍（同 prompt 两次，第二次 logits 逐位或 ≤ 1 ulp）。
 
 **优先级**：高于 prefill kernel 微调——同样 1024 token，命中省掉的是整段 prefill，kernel 微调省的是 10–20%。
+
+**engine_2（第 7 轮二进制：warmup + 全桶预捕获 + GdnChunkWorkspace 一次分配；同配置、不同 seed）**：
+
+| rate | 端 | goodput (good/64) | TTFT p50 / p99 | TPOT p50 / p99 |
+|---|---|---|---|---|
+| 2 | dinfer | 1.29 (64) | 86 / 272 | 13.3 / 14.8 |
+| 2 | vLLM | 1.28 (64) | 72 / 243 | 12.7 / 14.1 |
+| 4 | dinfer | 1.96 (62) | 98 / 291 | 15.9 / 20.0 |
+| 4 | vLLM | 2.05 (64) | 69 / 117 | 13.8 / 15.2 |
+| 8 | dinfer | 1.32 (31) | 126 / 402 | 20.9 / 31.4 |
+| 8 | vLLM | 2.87 (64) | 100 / 164 | 15.4 / 18.1 |
+| 12 | dinfer | 1.20 (25) | 170 / 432 | 22.0 / 40.4 |
+| 12 | vLLM | 3.25 (63) | 96 / 157 | 16.0 / 19.8 |
+
+对 engine_1：rate 4 goodput 1.92 → 1.96、TPOT p99 27.1 → 20.0、TTFT p99 507 → 291；rate 8 TTFT p99 550 → 402、TPOT p99 34 → 31；rate 12 goodput 0.57 → 1.20、TTFT p99 931 → 432。**一次性开销清零只修了尾部，稳态差距（rate ≥ 8 TPOT p99 31–40 vs 18–20）不变**——这部分是 prefill 步工作量（无 prefix cache + prefill kernel）让 decode 等待，§15.7 的状态按块缓存是下一轮。

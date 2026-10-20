@@ -1,0 +1,1 @@
+第 7 轮：GdnChunkWorkspace 一次分配 + warmup 预载 + graph 全桶预捕获 + 四段计时（host 空转清零）
