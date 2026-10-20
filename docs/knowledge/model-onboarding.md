@@ -14,7 +14,7 @@
 - 聊天渲染参照物：**基线 vLLM 的实际路径**（K3 在 `de8291e` 直接调 HF python，保留 `name`；Moonshot 线上 Rust renderer 则丢 `name`、浮点 serde 化）→ 做成方言开关，默认与基线一致。
 
 ## 递归状态模型（GDN / KDA / Mamba）的额外项
-- prefix cache 默认**关**：命中后 scheduler 从 position > 0 喂 prompt，全注意力能复用 KV，递归状态没有按块快照 → 从零起、结果错（Qwen3.5 c8-long 86 条告警）。真支持要像 vLLM `mamba_cache_mode=align`：状态快照粒度 = 注意力 block 的整数倍，由 KV 页配平决定（K3 实测 1536 = 12×128）。
+- prefix cache 要配合**递归状态按块缓存**（design §15.7，2026-10-20 已做，qwen35 已接）：命中长度对齐到 `SchedulerParams.recurrent_snapshot_tokens`（qwen35 默认 1024；K3 建议 1536），对齐位置的状态从 `kv::StateSnapshotPool` 的快照槽恢复（executor 读 `BatchPlan.recurrent_resume`，forward 前 dtod 进活槽、`has_initial = 1`），步末落在对齐点的请求按 `BatchPlan.recurrent_snapshot` 把活槽存进快照槽。新递归模型接入清单：① 状态结构体加快照区 + `save/restore_snapshot`（同流 dtod）；② `load` 从显存预算里扣快照区（qwen35：`snapshot_bytes`，默认 KV 预算 10%，每快照 = 全部递归层状态字节）；③ executor `enqueue` 两处各 ≤ 10 行（见 `models/qwen35/src/executor.rs` "递归状态按块缓存"）；④ service 把粒度 / 槽数填进 `SchedulerParams`，粒度 0 = 关 prefix cache；⑤ golden 加"同 prompt 两次 / 多轮 / 混批+抢占"三个 case（模板 `golden_parity.rs::run_engine_cfg`）。粒度 0 时一切回到旧行为，非递归模型不受影响。
 - 状态槽表要在请求结束时归还（`BatchPlan.finished_req_ids` → `StateSlotTable::release`），LRU 兜底会误淘汰分块 prefill 中途不在场的活请求。
 - 激活缓冲全模型一套（`ActScratch`），不要每层一套：预算 16384 时每层一套 = 170 GB。
 

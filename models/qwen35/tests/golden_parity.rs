@@ -180,7 +180,24 @@ fn run_engine(e: Env, prompts: &[Vec<i32>], gen: u32, budget: u32) -> Vec<Vec<u3
 /// `overlap`：照 engine 的异步流水——`begin(n+1)` 在 `finish(n)` 之前（scheduler `async_scheduling` 用 placeholder），
 /// 步 n+1 的输入 token 在设备上从 `prev_chosen` gather；false = `Runner::execute`（finish 后再调度）。
 fn run_engine_mode(e: Env, prompts: &[Vec<i32>], gen: u32, budget: u32, overlap: bool) -> Vec<Vec<u32>> {
-    let exec = Qwen35Executor::new(e.s.clone(), e.gemm, e.model, NUM_BLOCKS).unwrap();
+    let stages: Vec<Vec<Vec<i32>>> = vec![prompts.to_vec()];
+    run_engine_cfg(e, &stages, gen, budget, overlap, 0, NUM_BLOCKS).0
+}
+
+/// 递归快照（design §15.7）口径的 engine 驱动：`stages[k]` 是第 k 批一起提交的 prompt（前一批**全部完成**后再提交下一批，
+/// 让后一批能命中前一批留下的 KV 块 + GDN 快照）；`snapshot_grain > 0` 开 prefix cache + 快照（槽数 = 模型快照区）。
+/// 返回（按提交顺序的输出，scheduler prefix cache 命中 token 数，executor 快照恢复次数，快照保存次数，抢占次数）。
+fn run_engine_cfg(
+    e: Env,
+    stages: &[Vec<Vec<i32>>],
+    gen: u32,
+    budget: u32,
+    overlap: bool,
+    snapshot_grain: u32,
+    num_blocks: usize,
+) -> (Vec<Vec<u32>>, u64, u64, u64, usize) {
+    let num_snapshots = e.model.num_snapshots as u32;
+    let exec = Qwen35Executor::new(e.s.clone(), e.gemm, e.model, num_blocks).unwrap();
     let mut runner = Runner::new(exec, BLOCK);
     let params = SchedulerParams {
         sched: SchedulerConfig {
@@ -190,13 +207,18 @@ fn run_engine_mode(e: Env, prompts: &[Vec<i32>], gen: u32, budget: u32, overlap:
             long_prefill_token_threshold: 0,
             decode_exempt_from_budget: false,
         },
-        cache: CacheConfig { block_size: BLOCK as u32, enable_prefix_caching: false, ..Default::default() },
+        cache: CacheConfig {
+            block_size: BLOCK as u32,
+            hash_block_size: BLOCK as u32,
+            enable_prefix_caching: snapshot_grain > 0,
+            ..Default::default()
+        },
         max_model_len: 512,
         num_spec_tokens: 0,
         async_scheduling: overlap,
         eos_token_ids: vec![],
-        recurrent_snapshot_tokens: 0,
-        recurrent_snapshot_slots: 0,
+        recurrent_snapshot_tokens: snapshot_grain,
+        recurrent_snapshot_slots: if snapshot_grain > 0 { num_snapshots } else { 0 },
     };
     let g = vec![GroupInfo {
         spec: KvCacheSpec::FullAttention {
@@ -207,16 +229,33 @@ fn run_engine_mode(e: Env, prompts: &[Vec<i32>], gen: u32, budget: u32, overlap:
         },
         block_size: BLOCK as u32,
     }];
-    let mut sched = Scheduler::new(params, g, NUM_BLOCKS as u32);
+    let mut sched = Scheduler::new(params, g, num_blocks as u32);
     let sp = SamplingParams { max_tokens: gen, temperature: 0.0, ..Default::default() };
-    for (i, p) in prompts.iter().enumerate() {
-        sched.add_request(Request::new(i as u64 + 1, p.iter().map(|&x| x as u32).collect(), sp.clone(), 0));
-    }
-    let mut out = vec![Vec::new(); prompts.len()];
+    let total: usize = stages.iter().map(|s| s.len()).sum();
+    let mut next_id = 1u64;
+    let mut stage_iter = stages.iter();
+    let mut submit = |sched: &mut Scheduler, batch: &[Vec<i32>]| {
+        for p in batch {
+            sched.add_request(Request::new(next_id, p.iter().map(|&x| x as u32).collect(), sp.clone(), 0));
+            next_id += 1;
+        }
+    };
+    submit(&mut sched, stage_iter.next().unwrap());
+    let mut out = vec![Vec::new(); total];
+    let mut preempted = 0usize;
     let mut steps = 0;
     let mut async_steps = 0;
     let mut pending: Option<(dinfer_core::sched::SchedulerOutput, dinfer_core::runner::Pending)> = None;
-    while sched.has_requests() || pending.is_some() {
+    loop {
+        if !sched.has_requests() && pending.is_none() {
+            match stage_iter.next() {
+                Some(batch) => {
+                    submit(&mut sched, batch);
+                    continue;
+                }
+                None => break,
+            }
+        }
         // engine 同序：有在飞步 n 时先 schedule + begin n+1，再 finish n；n+1 若是同步步（prefill）begin 已跑完
         let (so, mro) = match pending.take() {
             Some((so_n, pend_n)) => {
@@ -251,26 +290,40 @@ fn run_engine_mode(e: Env, prompts: &[Vec<i32>], gen: u32, budget: u32, overlap:
                 (so, runner.finish(pend).unwrap())
             }
         };
+        preempted += so.preempted_req_ids.len();
+        if std::env::var("GOLDEN_TRACE").is_ok() {
+            eprintln!(
+                "step {steps}: sched {:?} new {:?} cached {:?} resume {:?} snap {:?} preempted {:?} sampled {:?}",
+                so.num_scheduled_tokens,
+                so.new_reqs.iter().map(|n| (n.req_id, n.num_computed_tokens, n.resume_from.map(|x| x.0))).collect::<Vec<_>>(),
+                so.cached_reqs.req_ids.iter().zip(&so.cached_reqs.resumed).zip(&so.cached_reqs.num_computed_tokens).map(|((r, re), c)| (*r, *re, *c)).collect::<Vec<_>>(),
+                so.recurrent_resume,
+                so.recurrent_snapshot,
+                so.preempted_req_ids,
+                mro.sampled
+            );
+        }
         let res = sched.update_from_output(&so, &mro);
         for (rid, toks, _) in res.iter() {
             out[rid as usize - 1].extend_from_slice(toks);
         }
         steps += 1;
-        assert!(steps < 10 * gen as usize + 20, "runaway");
+        assert!(steps < 10 * gen as usize * total + 40, "runaway");
     }
     if overlap {
         assert!(async_steps > 0, "overlap requested but no step went through the async path");
         eprintln!("qwen35: engine overlap: {async_steps} async steps");
     }
     let (g, e) = (runner.exec.graph_steps, runner.exec.eager_steps);
-    eprintln!("qwen35: engine {steps} steps for {} prompts × {gen}; graph steps {g}, eager steps {e}", prompts.len());
+    eprintln!("qwen35: engine {steps} steps for {total} prompts × {gen}; graph steps {g}, eager steps {e}");
     // decode 步必须真走了图重放（NO_GRAPH 时全 eager）；两条路径 golden 都要过
     if std::env::var("NO_GRAPH").is_ok() {
         assert_eq!(g, 0, "NO_GRAPH set but graph steps > 0");
     } else {
         assert!(g > 0, "no decode step went through the cuda graph");
     }
-    out
+    let (_, hits) = sched.prefix_cache_stats();
+    (out, hits, runner.exec.snapshot_restores, runner.exec.snapshot_saves, preempted)
 }
 
 /// 异步流水（engine 口径：begin n+1 在 finish n 之前，设备侧 gather 在飞 token）下 greedy 与 golden 一致。
@@ -465,4 +518,218 @@ fn golden_two_requests() {
     let n1 = compare_greedy("a (concurrent, chunked)", &out[0], &w1, &l1, v);
     let n2 = compare_greedy("b (concurrent)", &out[1], &w2, &l2, v);
     assert!(n1 + n2 >= 1, "too few comparable steps: {n1} / {n2}");
+}
+
+// ---------------------------------------------------------------- 递归状态按块缓存（design §15.7）
+
+/// 带快照区的 tiny 模型（`snapshots` 个槽；`blocks` 个 KV 块）。
+fn load_snap(snapshots: usize, blocks: usize) -> Env {
+    let dev = Device::new(0).unwrap();
+    let s = dev.default_stream();
+    let gemm = Gemm::new(&s).unwrap();
+    let dir = golden_dir().join("tiny");
+    let cfg = Qwen35Config::from_json(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
+    let src = WeightSource::open_dir(&dir).unwrap();
+    let bytes = <Qwen35Model>::gdn_state_bytes_per_slot(&cfg) * snapshots;
+    let model: Qwen35Model = Qwen35Model::load_with_budget(&s, &src, cfg.clone(), 128, 128, Some(blocks), BLOCK, 8, (0, 1), 0.9, 0, Some(bytes))
+        .unwrap();
+    assert_eq!(model.num_snapshots, snapshots);
+    Env { s, gemm, cfg, model }
+}
+
+/// 一步 forward（单请求，slot / has_init / 位置区间显式），返回 `rows` 行 logits。
+#[allow(clippy::too_many_arguments)]
+fn step_forward(e: &mut Env, ids: &[i32], pos0: usize, slot: i32, has_init: bool, mode: BatchMode, all_rows: bool) -> Vec<f32> {
+    let n = ids.len();
+    let v = e.cfg.vocab_size as usize;
+    let s = e.s.clone();
+    let idt = Tensor::from_vec(&s, ids.to_vec(), &[n]).unwrap();
+    let posv = Tensor::from_vec(&s, (pos0 as i32..(pos0 + n) as i32).collect(), &[n]).unwrap();
+    let slots = Tensor::from_vec(&s, (pos0 as i64..(pos0 + n) as i64).collect(), &[n]).unwrap();
+    let cu_host = vec![0i32, n as i32];
+    let ws = if n > 1 { chunk_ws(&s, &e.model.cfg, &cu_host) } else { None };
+    let cu = Tensor::from_vec(&s, cu_host, &[2]).unwrap();
+    let bt = Tensor::from_vec(&s, (0..NUM_BLOCKS as i32).collect(), &[1, NUM_BLOCKS]).unwrap();
+    let seq = Tensor::from_vec(&s, vec![(pos0 + n) as i32], &[1]).unwrap();
+    let rows_host: Vec<i32> = if all_rows { (0..n as i32).collect() } else { vec![n as i32 - 1] };
+    let nrows = rows_host.len();
+    let rows = Tensor::from_vec(&s, rows_host, &[nrows]).unwrap();
+    let state = Tensor::from_vec(&s, vec![slot], &[1]).unwrap();
+    let hi = Tensor::from_vec(&s, vec![i32::from(has_init)], &[1]).unwrap();
+    let mut logits = Tensor::<f32>::zeros(&s, &[nrows, v]).unwrap();
+    let req_ids = [1u64];
+    let f = Forward {
+        input_ids: &idt,
+        positions: &posv,
+        slot_mapping: &slots,
+        meta: dinfer_qwen35::layer::StepMeta {
+            mode,
+            cu_seqlens: &cu,
+            seq_lens: &seq,
+            block_table: &bt,
+            state_indices: &state,
+            has_initial: &hi,
+            num_reqs: 1,
+            max_blocks: NUM_BLOCKS,
+            max_seqlen: n,
+            gdn_chunk: ws.as_ref(),
+        },
+        logits_rows: &rows,
+        t: n,
+        rows: nrows,
+        req_ids: &req_ids,
+    };
+    e.model.forward(&s, &e.gemm, &f, &mut logits).unwrap();
+    logits.to_vec(&s).unwrap()
+}
+
+/// 把 a / b / c 三条 golden prompt 拼成一条 ≥ 2 个 block 的长 prompt（tiny 词表内的 token，确定性）。
+fn long_prompt(min_len: usize) -> Vec<i32> {
+    let (_, a) = npy_i32("prompt_a.npy");
+    let (_, b) = npy_i32("prompt_b.npy");
+    let (_, c) = npy_i32("prompt_c.npy");
+    let mut p = Vec::new();
+    let mut k = 0usize;
+    while p.len() < min_len {
+        let src = [&a, &b, &c][k % 3];
+        // 轮换 + 平移，避免完全周期重复
+        p.extend(src.iter().map(|&t| (t + k as i32) % 64));
+        k += 1;
+    }
+    p.truncate(min_len);
+    p
+}
+
+/// 教师强制参考：整段 prefill `prompt`，再逐 token greedy decode `gen` 步；返回 (greedy token, 每步 logits 行)。
+/// 用 slot 0、单请求、与 `golden_chunked_teacher_forced` 相同的 kernel 路径。
+fn reference_greedy(e: &mut Env, prompt: &[i32], gen: usize) -> (Vec<i32>, Vec<f32>) {
+    let v = e.cfg.vocab_size as usize;
+    e.model.reset_slots(&e.s, &[0]).unwrap();
+    let first = step_forward(e, prompt, 0, 0, false, BatchMode::Prefill, false);
+    let mut toks = vec![argmax(&first) as i32];
+    let mut steps = first;
+    let mut pos = prompt.len();
+    for _ in 1..gen {
+        let l = step_forward(e, &[*toks.last().unwrap()], pos, 0, true, BatchMode::Decode, false);
+        toks.push(argmax(&l) as i32);
+        steps.extend_from_slice(&l);
+        pos += 1;
+    }
+    assert_eq!(steps.len(), gen * v);
+    (toks, steps)
+}
+
+/// 模型级：对齐点保存 / 恢复快照后续算 = 同一活槽直接续算（逐位相同），且与整段 prefill 的末行一致（MAX_ABS 内）。
+#[test]
+#[ignore]
+fn snapshot_save_restore_bitwise() {
+    let mut e = load_snap(2, NUM_BLOCKS);
+    let v = e.cfg.vocab_size as usize;
+    let p = long_prompt(40);
+    let (head, tail) = p.split_at(32);
+    // 路径 A：slot 0 算 0..32 → 快照槽 1 → slot 0 继续 32..40
+    e.model.reset_slots(&e.s, &[0, 1]).unwrap();
+    let _ = step_forward(&mut e, head, 0, 0, false, BatchMode::Prefill, false);
+    e.model.save_snapshots(&e.s, &[(0, 1)]).unwrap();
+    let a = step_forward(&mut e, tail, 32, 0, true, BatchMode::Paged, true);
+    // 路径 B：快照槽 1 → slot 1（另一个活槽），从 32 续算
+    e.model.restore_snapshots(&e.s, &[(1, 1)]).unwrap();
+    let b = step_forward(&mut e, tail, 32, 1, true, BatchMode::Paged, true);
+    assert_eq!(a.len(), b.len());
+    let diff = a.iter().zip(&b).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
+    assert_eq!(diff, 0, "restore-from-snapshot must be bitwise identical to continuing in place ({diff} / {} differ)", a.len());
+    // 与整段 prefill 的对应行比（chunk 切分不同，数值不逐位，但在 golden 口径内）
+    e.model.reset_slots(&e.s, &[0]).unwrap();
+    let full = step_forward(&mut e, &p, 0, 0, false, BatchMode::Prefill, true);
+    let n = check_rows("snapshot-resume vs full prefill (rows 32..40)", &b, &full[32 * v..], v);
+    assert!(n >= 1);
+    eprintln!("qwen35: snapshot save/restore bitwise OK ({} logits), {n} decisive rows vs full prefill", a.len());
+}
+
+/// engine 级（同 prompt 两次）：第二次命中 prefix cache，对齐到 32 从快照续算；输出 = 教师强制参考（非平局步逐个一致）；
+/// 并断言真的发生了命中 / 恢复 / 保存。`ASYNC_SCHED=0` 时同步路径也过（overlap = false）。
+#[test]
+#[ignore]
+fn golden_prefix_hit_resumes_from_snapshot() {
+    let v: usize;
+    let p = long_prompt(40);
+    let gen = 12usize;
+    let (want, steps) = {
+        let mut e = load();
+        v = e.cfg.vocab_size as usize;
+        reference_greedy(&mut e, &p, gen)
+    };
+    let overlap = std::env::var("ASYNC_SCHED").map(|x| x != "0").unwrap_or(true);
+    let e = load_snap(4, NUM_BLOCKS);
+    let stages = vec![vec![p.clone()], vec![p.clone()]];
+    let (out, hits, restores, saves, _) = run_engine_cfg(e, &stages, gen as u32, 64, overlap, 32, NUM_BLOCKS);
+    assert_eq!(hits, 32, "second request must hit 32 aligned tokens (KV hit 39 → align 32)");
+    assert!(saves >= 1, "first request must save a snapshot at 32 (saves {saves})");
+    assert_eq!(restores, 1, "second request must restore exactly one snapshot");
+    let n1 = compare_greedy("first (full prefill)", &out[0], &want, &steps, v);
+    let n2 = compare_greedy("second (resume @32)", &out[1], &want, &steps, v);
+    assert!(n1 >= 4 && n2 >= 4, "too few decisive steps: {n1} / {n2}");
+    assert_eq!(out[0], out[1], "same prompt, same greedy output with and without the prefix hit");
+}
+
+/// 多轮：先 A（40），再 A+B（56）：命中 A 的 32 对齐点，续算 8 + 16 个新 token；输出 = A+B 的教师强制参考。
+#[test]
+#[ignore]
+fn golden_multi_turn_resume() {
+    let a = long_prompt(40);
+    let ab = long_prompt(56);
+    assert_eq!(&ab[..40], &a[..]);
+    let gen = 10usize;
+    let (want, steps, v) = {
+        let mut e = load();
+        let v = e.cfg.vocab_size as usize;
+        let (w, s) = reference_greedy(&mut e, &ab, gen);
+        (w, s, v)
+    };
+    let e = load_snap(4, NUM_BLOCKS);
+    let overlap = std::env::var("ASYNC_SCHED").map(|x| x != "0").unwrap_or(true);
+    let (out, hits, restores, _, _) = run_engine_cfg(e, &[vec![a], vec![ab]], gen as u32, 64, overlap, 32, NUM_BLOCKS);
+    assert_eq!(hits, 32, "A+B hits A's 32-aligned prefix");
+    assert_eq!(restores, 1);
+    let n = compare_greedy("A+B (resume @32)", &out[1], &want, &steps, v);
+    assert!(n >= 3, "too few decisive steps: {n}");
+}
+
+/// 混批 + 命中 + 抢占重算：第 2 批 = [命中 P 的请求, 新 prompt Q] 同时提交（混批）；KV 池只有 8 块 → 两条 40+ 的请求
+/// 跑 decode 时抢占，被抢占者重排后再命中自己留下的前缀 + 快照续算。三条的输出都要 = 各自的教师强制参考。
+#[test]
+#[ignore]
+fn golden_mixed_hit_and_preempt() {
+    let p = long_prompt(40);
+    let q: Vec<i32> = long_prompt(84)[40..].to_vec(); // 与 p 无共同前缀（long_prompt 的另一段）
+    assert_ne!(&q[..BLOCK], &p[..BLOCK], "first KV block must differ (no prefix hit for Q)");
+    let gen = 14usize;
+    let (wp, sp_, wq, sq, v) = {
+        let mut e = load();
+        let v = e.cfg.vocab_size as usize;
+        let (wp, sp_) = reference_greedy(&mut e, &p, gen);
+        let (wq, sq) = reference_greedy(&mut e, &q, gen);
+        (wp, sp_, wq, sq, v)
+    };
+    // 8 块 = 128 token：p (40+14) + q (44+14) = 112 ≤ 128 装得下但 block 粒度下 4+4 块 + 命中块共享……用 7 块逼出抢占
+    let blocks = 7usize;
+    let e = load_snap(4, blocks);
+    let grain = std::env::var("GOLDEN_GRAIN").ok().and_then(|x| x.parse().ok()).unwrap_or(32u32);
+    let overlap = std::env::var("ASYNC_SCHED").map(|x| x != "0").unwrap_or(true);
+    let (out, hits, restores, saves, preempted) =
+        run_engine_cfg(e, &[vec![p.clone()], vec![p.clone(), q.clone()]], gen as u32, 64, overlap, grain, blocks);
+    if grain == 0 {
+        let n2 = compare_greedy("Q (fresh, mixed, no prefix cache)", &out[2], &wq, &sq, v);
+        eprintln!("qwen35: grain 0 variant: preempted {preempted}, Q decisive {n2}");
+        return;
+    }
+    eprintln!("qwen35: mixed: hits {hits} restores {restores} saves {saves} preempted {preempted}");
+    assert!(hits >= 32, "second P must hit (hits {hits})");
+    assert!(restores >= 1);
+    assert!(preempted >= 1, "expected at least one preemption with {blocks} blocks");
+    let n0 = compare_greedy("P (first)", &out[0], &wp, &sp_, v);
+    let n1 = compare_greedy("P (hit, mixed with Q)", &out[1], &wp, &sp_, v);
+    let n2 = compare_greedy("Q (fresh, mixed)", &out[2], &wq, &sq, v);
+    // tiny 随机权重平局多：每条至少 2 个可判定步（分叉只允许发生在平局步，compare_greedy 已断言）
+    assert!(n0 >= 2 && n1 >= 2 && n2 >= 2, "too few decisive steps: {n0} / {n1} / {n2}");
 }

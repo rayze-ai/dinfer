@@ -633,8 +633,31 @@ impl Scheduler {
         for (idx, &rid) in mro.req_ids.iter().enumerate() {
             let Some(&slot) = self.id_to_slot.get(&rid) else { continue };
             let r = &mut self.slab[slot].as_mut().unwrap().req;
+            if r.status == RequestStatus::Preempted {
+                // 异步调度：步 n 在飞时 schedule(n+1) 抢占了它（placeholders 已清零、块已 free），步 n 的结果现在才到。
+                // runner 的 token_ids 已经追加了这个 token（恢复后从它之后续算），scheduler 也必须追加，否则两边序列
+                // 差 1 → 恢复后位置错位、输出错（2026-10-20 golden mixed+preempt case 抓到：ref 第 8 个 token 丢失）。
+                // vLLM `_update_from_output` 同样对非 running 请求照常 append。
+                let generated = &mro.sampled[idx];
+                let mut finish = None;
+                for &tok in generated {
+                    r.append_output(tok);
+                    if let Some(f) = check_stop(r, &eos, max_model_len) {
+                        finish = Some(f);
+                        break;
+                    }
+                }
+                if !generated.is_empty() {
+                    results.push(rid, generated, finish);
+                }
+                if let Some(f) = finish {
+                    r.status = RequestStatus::Finished(f);
+                    stopped.push(slot);
+                }
+                continue;
+            }
             if r.status != RequestStatus::Running {
-                continue; // 已被抢占 / 完成
+                continue; // 已完成
             }
             let generated = &mro.sampled[idx];
 
@@ -1059,6 +1082,42 @@ mod tests {
         s.add_request(req(3, 40, 1));
         let o = s.schedule();
         assert_eq!(o.num_scheduled_tokens, vec![(2, 8), (3, 8)], "both capped at threshold");
+    }
+
+    /// 异步调度 + 抢占：步 n 在飞时 schedule(n+1) 抢占了请求 2，步 n 的采样结果到达时仍要追加进请求 2（runner 已追加）。
+    #[test]
+    fn async_preempted_request_keeps_in_flight_token() {
+        // 4 块 × 16 = 64 token；两个 30-token 请求各 2 块；decode 各长到 32 要第 3 块 → 只能给一个，另一个被抢占
+        let (mut p, g, b) = params(8, 1000, 4);
+        p.async_scheduling = true;
+        let mut s = Scheduler::new(p, g, b);
+        s.add_request(req(1, 30, 100));
+        s.add_request(req(2, 30, 100));
+        let o1 = s.schedule(); // prefill 30 + 30（各 2 块；第 2 块剩 2 格）
+        assert_eq!(o1.num_scheduled_tokens.len(), 2);
+        let mro = |toks: Vec<Vec<u32>>| ModelRunnerOutput {
+            req_ids: vec![1, 2],
+            sampled: toks,
+            drafts: vec![Vec::new(); 2],
+            logprobs: vec![],
+            mode: None,
+            phases: None,
+        };
+        s.update_from_output(&o1, &mro(vec![vec![10], vec![20]]));
+        let o2 = s.schedule(); // decode 31（在飞）
+        s.update_from_output(&o2, &mro(vec![vec![11], vec![21]]));
+        let o3 = s.schedule(); // decode 32（在飞）：各自第 2 块的最后一格
+        // o4：位置 33 要第 3 块 → 池空 → 抢占末尾请求 2（此时 o3 的结果还没回）
+        let o4 = s.schedule();
+        assert_eq!(o4.num_scheduled_tokens, vec![(1, 1)], "req 2 preempted");
+        assert_eq!(s.request(2).unwrap().status, RequestStatus::Preempted);
+        // o3 的结果到：请求 2 的 token 22 必须进它的序列
+        let r3 = s.update_from_output(&o3, &mro(vec![vec![12], vec![22]]));
+        assert_eq!(r3.items.len(), 2, "both requests produce a token for step 3");
+        let r = s.request(2).unwrap();
+        assert_eq!(r.output_ids(), &[20, 21, 22], "in-flight token of the preempted request is kept");
+        assert_eq!(r.num_computed_tokens, 0);
+        assert_eq!(r.num_output_placeholders, 0);
     }
 
     #[test]

@@ -581,6 +581,7 @@ finish, stash_sync_result}` 与 pinned 原语 `PinnedSlot` 本来就是公共的
 | 2026-10-20 | 采用（口径） | `/data/code/llm-cache-prediction`（用户指定参考）：K3 渲染参照物是 vLLM 服务端 Rust renderer 而非 HF python（浮点 / tool 参数 / name 字段 / thinking 对象四处偏差）；tiktoken 400k/25k 切分；vLLM K3 前缀命中粒度 1536 = 12×128（mamba align 下状态快照在注意力 block 配平边界） | K3 C-4a golden 按服务端语义生成；递归模型 prefix cache 设计按 block 配平粒度 | 避免重踩 4 处偏差；prefix cache 粒度不再拍脑袋 |
 | 2026-10-20 | 采用 | vLLM `qwen3_next.py` 的 `in_proj_qkvz`（GDN 四投影一条 GEMM）与 `qkv_proj`（q/gate/k/v 一条 GEMM）：`models/qwen35` 第 9 轮改为融合 `in_proj [qkv|z|a|b]` 与 `qkv [q|gate|k|v]`，下游 kernel 按列段 + 行距读（`x_stride / ab_stride / z_stride / mul_sigmoid_rows`），不拷贝 | 每层 GEMM GDN 5→2、attn 3→2，B=32 一步少 160 次 launch（含 96 次 splitK reduce）；撤回里程碑 4 的"两条紧凑 GEMM"决定（当时为省一次按行搬，现在 kernel 直接带 stride） |
 | 2026-10-20 | 采用（口径）/ 改进（实现） | vLLM `kimi_k3.py` / `kimi_linear.py` 的 tp 切分口径（KDA/MLA 按头、MLA q_a/kv_a 与 latent cache 复制、MoE 按专家 EP、shared/dense MLP 列/行切）；vLLM EP 用 all-to-all / DeepEP 分发 token | K3 C-5 `models/kimik3` **EP v1 不做 all-to-all 也不做 all-gather**：TP 下隐状态每 rank 本来全量，各 rank 本地全量路由 → 只 gather / grouped GEMM / scatter 自己专家段的 (token,k) 对 → 加权和 `acc` f32 一次 all-reduce（norm 之前）；shared experts 部分和再一次 all-reduce。每层 3 次通信（attn bf16 / acc f32 / shared bf16），world=8 每卡 ≈ 209 GB 权重（design-kimik3 §2.4）。先求对；all-to-all（省掉重复路由 + 大 batch 下减少通信字节）留 v2 |
+| 2026-10-20 | 采用（做法）/ 改进（粒度可配 + 池独立） | vLLM `mamba_cache_mode=align`：递归层状态只在"block 对齐"位置缓存（`MambaManager.last_state_block_idx`），`find_longest_cache_hit` 按 `cache_hit_alignment_tokens`（各 group block_size 的 LCM，K3 配平出 1536）截断命中 | r8 §15.7：`SchedulerParams.recurrent_snapshot_tokens`（默认 1024，可配）对齐命中 + prefill chunk 边界落在对齐点；快照放独立 `kv::StateSnapshotPool`（键 = 块 hash、LRU、pin），不占 KV 块、槽数按显存预算（`--gdn-snapshot-gib`，默认 KV 预算 10%）；无快照时命中作废整段重算而非出错。收益见 §15.7 实测 |
 
 ## 12. 整体功能待办路线图（2026-10-18 盘点，不分模型）
 
@@ -802,6 +803,14 @@ B300 单 GDN 层 decode，基线 = 现路径 11 kernel + 自调优 GEMM + CUDA g
 **验收（engine 口径）**：`bench_engine.sh` prefix-repeat 0.5 下 dinfer cache hit ≥ 0.4，rate 4 TTFT p99 从 291 → ≤ 150，goodput ≥ vLLM；闭环四组不退化；golden 加"命中后续算 = 全量 prefill"对拍（同 prompt 两次，第二次 logits 逐位或 ≤ 1 ulp）。
 
 **优先级**：高于 prefill kernel 微调——同样 1024 token，命中省掉的是整段 prefill，kernel 微调省的是 10–20%。
+
+**已实现（2026-10-20，r8 子代理；commit 9c5fa65 / c2ce023 / 第 4 步）**：
+- core：`SchedulerParams.recurrent_snapshot_tokens / _slots`；waiting 路径命中长度 `aligned = hit / g * g`，对齐点块 hash `block_hashes[aligned/hbs-1]` 查 `kv::StateSnapshotPool`，命中 → `NewRequestData.resume_from` + `SchedulerOutput.recurrent_resume(req, 槽)`，未命中 → 命中作废从 0 算（`snapshot_resume_misses`）；`cap_to_snapshot_grain` 让 running / waiting 两路的 prefill chunk 边界落在对齐点；步末恰在对齐点且 hash 未登记 → `insert` + `recurrent_snapshot(req, 槽)`；本步 resume / 新登记的槽 pin 到下一次 `schedule()`。
+- 池 `crates/core/src/kv/snapshot.rs`：键 → 槽、LRU、pin、统计（hits / misses / evictions）；全 pin 时 insert 返回 None（放弃本次快照）。
+- qwen35：`GdnState.snap_{conv,rec}`（`alloc_snapshots`，`save_snapshot` / `restore_snapshot` 同流 dtod）；`load_with_budget(.., snapshot_bytes)` 先于 KV 块数从同一预算扣（None = 10%）；executor `enqueue`：`plan.recurrent_resume` → forward 前快照→活槽、`has_init=1`、不清零；`plan.recurrent_snapshot` → 本步 kernel（图 / eager）之后活槽→快照槽。`service.rs` 不再强制关 prefix cache：`--gdn-snapshot-tokens`（默认 1024）> 0 即开。
+- 没做 chunk kernel 中途吐状态：用"调度让 chunk 边界落在对齐点"替代（一条 1024–1536 的 prompt 多一步 prefill；命中请求的剩余段不跨对齐点时不多步）。decode 跨对齐点不快照（设计第 3 条）。
+- golden（3090，tiny，`models/qwen35/tests/golden_parity.rs`）：`snapshot_save_restore_bitwise`（快照→另一活槽续算与原槽续算 **逐位相同**，与整段 prefill 对应行在 MAX_ABS 内）、`golden_prefix_hit_resumes_from_snapshot`（同 prompt 两次：命中 32、恢复 1、保存 ≥ 1，两次输出一致且 = 教师强制参考）、`golden_multi_turn_resume`（A → A+B 命中 32 续算）、`golden_mixed_hit_and_preempt`（7 块池逼出抢占：命中 + 新请求混批 + 抢占恢复三条都 = 参考）；原 6 case 不退化；`ASYNC_SCHED=0` 下 8/10（两个 `*_overlap` 本就只在异步模式有意义，见 pitfalls）。顺手抓到并修了一个既有 bug：异步调度下被抢占请求的在飞 token 被 scheduler 丢掉（pitfalls）。
+- B300 engine_r8 实测：**待 GPU 5（C-6 期间 B300 独占）**。
 
 **engine_2（第 7 轮二进制：warmup + 全桶预捕获 + GdnChunkWorkspace 一次分配；同配置、不同 seed）**：
 

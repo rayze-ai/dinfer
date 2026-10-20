@@ -780,3 +780,14 @@
 - 根因：nsys 的命令行包含被跟踪程序的全部参数，`pkill -f` 模式同时匹配 nsys 自身；nsys 被 SIGINT 后不落盘。
 - 解法：`pgrep -x dinfer` + 读 `/proc/<pid>/cmdline` 匹配端口，只给 dinfer 发 SIGINT；等 `nsys profile` 进程自然退出。见 `scripts/dev/b300_engine2_ab.sh`。
 
+
+## 异步调度下被抢占请求的在飞 token 被 scheduler 丢掉（2026-10-20，r8 golden 混批+抢占 case 抓到）
+- 现象：Qwen3.5 tiny golden `golden_mixed_hit_and_preempt`：被抢占再恢复的请求 Q 从第 8 个输出 token 起与教师强制参考分叉（非平局，gap 0.34）；trace 看恢复步 `num_new` 比预期少 1（51 vs 52）。
+- 根因：异步调度时步 n 在飞，`schedule(n+1)` 抢占了请求（`reset_for_preemption` 清 placeholders / computed、free 块）；步 n 的 `ModelRunnerOutput` 到达时 `update_from_output` 对 `status != Running` 直接 `continue`，采样 token 没进 scheduler 的序列；而 runner `finish` 已把它追加进 `token_ids`。两边差 1 → 恢复后 scheduler 按短 1 的长度喂 token，位置错位、输出错。prefix cache 关着也会发生（任何异步 + 抢占的负载），只是以前没有 case 覆盖。
+- 解法：`update_from_output` 对 `Preempted` 请求照常 `append_output` + `check_stop`（vLLM `_update_from_output` 同样不区分状态），单测 `async_preempted_request_keeps_in_flight_token`。
+- 避免：涉及"请求状态机 × 异步在飞结果"的分支，先想"结果到达时请求可能已不是 Running"；golden 要有一个**逼出抢占**的 case（小块池 + 两条长请求），而不是只测顺利路径。
+
+## ASYNC_SCHED=0 下 `*_overlap` golden case 必失败是预期（2026-10-20）
+- 现象：`ASYNC_SCHED=0 scripts/verify/qwen35_golden.sh` 里 `golden_greedy_overlap` / `golden_two_requests_overlap` 报 "overlap requested but no step went through the async path"。
+- 根因：这两个 case 强制 `overlap = true` 并断言至少一步走了异步路径，但 executor 的 `async_sched_enabled()` 读同一个环境变量 → 关掉后不可能有异步步。
+- 解法 / 避免：新 case（prefix hit / multi-turn / mixed）都按 `ASYNC_SCHED` 决定 overlap，两种模式都过；`*_overlap` 两个只在默认（异步）模式有意义，`ASYNC_SCHED=0` 时跳过它们看另外 8 个。
