@@ -42,7 +42,7 @@ r9 子代理两次 `remote_b300.sh push`（rsync `--delete`）把 B300 远端 `t
 - 两段版：`ho_hpass<64,32,128,PF=0>` 93 / 721 + `ho_opass<64,128,128>` 36 / 289 —— **h-pass 单独就比融合版慢**（721 vs 659），说明 B300 上 ho 的瓶颈不是"每 chunk 四个乘法太多"，而是**每 block 串行走 128 个 chunk 的延迟链本身**：每 chunk 约 5 µs = 装载（全局 → smem，无预取）+ 4 次 `__syncthreads` + mma 发射延迟，148 SM 只有 192 个 block、每 SM 1–2 个 block、4 warp，**掩不住延迟**。fla 的 chunk_fwd_h 也是串行扫 chunk，但 num_warps 2–4、BV 32/64 由 autotune 选、num_stages 2–4 做软件流水，同一条串行链每 chunk 更短。
 - wy：fla 把 wy 拆成 4 个小 kernel（kkt 点积 → solve_tril 分块逆 → recompute_w_u → 各自 autotune BK/BV/num_warps），中间量 A / Ai / w / u 全 **bf16**；我们一个 kernel 做完，中间量 aq / u / w / kg 全 **f32**（写 2× 字节，ho 再读 2×），1×8192 下 aq 100 MB + u/w/kg 各 200 MB。3090 上这是带宽，B300 上是 L2 / HBM 延迟。
 
-**下一轮（r10）该怎么做（都在 B300 上迭代，3090 只跑 parity）**
+**下一轮（r10）该怎么做（用户 2026-10-20 定规：验证全在 B300，不用 3090 的视角写代码；多卡型 × 多 case 才算验过；3090 只跑 parity）**
 1. 中间量 f32 → bf16（aq / u / w / kg；fla 同口径，parity 容差已经是 bf16 级）：wy 写量减半、ho 读量减半，预计 ho 1×8192 659 → ~450。
 2. ho 串行链每 chunk 延迟：真正的 cp.async 双缓冲（smem 两份，不是寄存器预取；B300 smem 227 KB 装得下两份 75 KB），4 warp → 8 warp 分 V 列，减少 `__syncthreads` 次数（装载与 (2) 合并一次）。目标每 chunk 5 → 3 µs。
 3. wy 的 (I+A)⁻¹ 非对角块 fp32 标量乘 → mma（16×16×16 刚好一条 m16n8k16 ×2）。
