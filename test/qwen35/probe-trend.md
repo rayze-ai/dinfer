@@ -3,6 +3,24 @@
 > 探针测量（TTFT-长度 / kernel 分解 / 微基准伸缩 / 第三方对照），与 perf-trend（四组闭环）、engine-trend（开环泊松）并列。
 > 数据源 `test/<model>/<日期>/probe_*/probe.csv`；本文件与 `probe-trend.{csv,html}` 由 `scripts/dev/probe_trend.py` 生成。
 
+## probe_gdn_r10_1（2026-10-20，B300）
+
+### gdn_scale（us）
+
+| x | chain_us dinfer | conv_rows0_us dinfer | conv_rows128_us dinfer | conv_rows16_us dinfer | conv_rows256_us dinfer | conv_rows32_us dinfer | conv_rows64_us dinfer | conv_rows8_us dinfer | ho_bv16_us dinfer | ho_bv16pf_us dinfer | ho_bv16pfsp_us dinfer | ho_bv16sp_us dinfer | ho_bv32_us dinfer | ho_bv32pf_us dinfer | ho_bv32pfsp_us dinfer | ho_bv32sp_us dinfer | ho_legacy_us dinfer | prep_us dinfer | wy_legacy_us dinfer | wy_serial_us dinfer | wy_us dinfer |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1x1024 | 185 | 488 | 114 | 39 | 218 | 41 | 62 | 37 | 70 | 78 | 89 | 110 | 65 | 66 | 114 | 100 | 789 | 18 | 421 | 111 | 76 |
+| 8x1024 | 988 | 809 | 310 | 221 | 320 | 222 | 247 | 249 | 542 | 543 | 622 | 725 | 405 | 379 | 633 | 543 | 5021 | 82 | 2931 | 656 | 505 |
+| 32x128 | 544 | 218 | 172 | 127 | 301 | 137 | 168 | 137 | 317 | 325 | 346 | 386 | 230 | 221 | 343 | 302 | 2512 | 42 | 1485 | 359 | 272 |
+| 1x4096 | 661 | 3065 | 162 | 122 | 296 | 132 | 161 | 131 | 321 | 387 | 351 | 439 | 352 | 263 | 458 | 395 | 3306 | 43 | 1488 | 359 | 272 |
+| 1x8192 | 1271 | 6161 | 308 | 219 | 314 | 221 | 247 | 248 | 634 | 769 | 683 | 865 | 690 | 520 | 899 | 777 | 6638 | 82 | 2921 | 657 | 505 |
+
+- 1x1024 chain_us dinfer：r10 第 1 轮：aq/u/w/kg f32→bf16，ho uint4 直载；B300-50 GPU 7 target_r10；默认路径（ArchProfile）
+- 8x1024 chain_us dinfer：r10 第 1 轮：aq/u/w/kg f32→bf16，ho uint4 直载；B300-50 GPU 7 target_r10；默认路径（ArchProfile）
+- 32x128 chain_us dinfer：r10 第 1 轮：aq/u/w/kg f32→bf16，ho uint4 直载；B300-50 GPU 7 target_r10；默认路径（ArchProfile）
+- 1x4096 chain_us dinfer：r10 第 1 轮：aq/u/w/kg f32→bf16，ho uint4 直载；B300-50 GPU 7 target_r10；默认路径（ArchProfile）
+- 1x8192 chain_us dinfer：r10 第 1 轮：aq/u/w/kg f32→bf16，ho uint4 直载；B300-50 GPU 7 target_r10；默认路径（ArchProfile）
+
 ## probe_gdn_r9_0（2026-10-20，3090）
 
 ### gdn_scale（us）

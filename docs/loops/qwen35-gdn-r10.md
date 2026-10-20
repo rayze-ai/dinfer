@@ -38,3 +38,4 @@
 | 轮 | 改动 | B300 GPU 7：1×1024 / 8×1024 / 1×8192（prep / wy / ho / conv / chain µs） | parity（3090） | 结论 |
 |---|---|---|---|---|
 | 0 | 基线 = r9 第 7 轮（`probe_gdn_r9_7`，GPU 6） | 18/102/87/38/208 · 82/532/498/219/1109 · 82/533/659/221/1271 | 14/14 | fla：wy 334 / ho 332 / 440 |
+| 1 | **aq / u / w / kg f32 → bf16**（`GdnChunkScratch` 四字段、wy 存 pack、ho / hpass fetch 改 uint4 直载省 pack，opass aq 直拷，legacy 两 kernel 跟改；C 入口按 kernels.h 约定 void*）`d2cc649` | 18/76/65/39/**185** · 82/505/405/221/**988** · 82/505/690(bv32pf **520**)/219/**1271** | 15/15（3090 + B300） | 8×1024 chain −11%（wy −5%、ho −19%）；1×8192 默认 bv32 反而 659→690，但 **bv32pf 520**（r9_7 为 685）：bf16 把 PF 的寄存器开销减半，预取从"全形状退"翻成"长形状赢 25%"。wy 只降 5% → wy 的 ~200 µs 差不在写量，在 u/w 两 GEMM 的 stage 装载 / M·stage 算力（下一轮看 ncu）。**第 2 轮：`ArchProfile::gdn_chunk_ho_prefetch` 在 sm_100 开 PF**（kernel 不变，只改选档）+ hpass 双缓冲 |
