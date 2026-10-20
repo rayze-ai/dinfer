@@ -1,35 +1,4 @@
 round,date,gpu,change,side,rate,metric,value
-2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,4.0,goodput_rps,2.1495
-2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,4.0,request_rps,2.2552
-2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,4.0,out_tps,819.4338
-2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,4.0,ttft_p50,59.4029
-2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,4.0,ttft_p90,171.8918
-2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,4.0,ttft_p99,401.0162
-2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,4.0,ttft_max,416.5801
-2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,4.0,ttft_1st_p50,59.3991
-2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,4.0,tpot_p50,14.8146
-2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,4.0,tpot_p90,17.1491
-2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,4.0,tpot_p99,20.4219
-2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,4.0,tpot_max,21.5411
-2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,4.0,cache_hit,0.3477
-2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,4.0,completed,64.0000
-2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,4.0,failed,0.0000
-2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,8.0,goodput_rps,3.0431
-2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,8.0,request_rps,3.0431
-2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,8.0,out_tps,1109.8795
-2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,8.0,ttft_p50,60.0241
-2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,8.0,ttft_p90,88.0754
-2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,8.0,ttft_p99,103.6901
-2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,8.0,ttft_max,104.2983
-2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,8.0,ttft_1st_p50,60.0207
-2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,8.0,tpot_p50,15.6981
-2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,8.0,tpot_p90,18.3594
-2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,8.0,tpot_p99,18.8368
-2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,8.0,tpot_max,18.9655
-2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,8.0,cache_hit,0.8072
-2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,8.0,completed,64.0000
-2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,8.0,failed,0.0000
-2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,,max_good_rate,8.00
 2026-10-20/engine_smoke,2026-10-20,3090,引擎口径工具冒烟（tiny 全词表 qwen35，3090，仅 dinfer）,dinfer,4.0,goodput_rps,3.8154
 2026-10-20/engine_smoke,2026-10-20,3090,引擎口径工具冒烟（tiny 全词表 qwen35，3090，仅 dinfer）,dinfer,4.0,request_rps,3.8154
 2026-10-20/engine_smoke,2026-10-20,3090,引擎口径工具冒烟（tiny 全词表 qwen35，3090，仅 dinfer）,dinfer,4.0,out_tps,122.0918
@@ -297,3 +266,34 @@ round,date,gpu,change,side,rate,metric,value
 2026-10-20/engine_2,2026-10-20,B300,第 7 轮：GdnChunkWorkspace 一次分配 + warmup 预载 + graph 全桶预捕获 + 四段计时（host 空转清零）,vllm,12.0,completed,64.0000
 2026-10-20/engine_2,2026-10-20,B300,第 7 轮：GdnChunkWorkspace 一次分配 + warmup 预载 + graph 全桶预捕获 + 四段计时（host 空转清零）,vllm,12.0,failed,0.0000
 2026-10-20/engine_2,2026-10-20,B300,第 7 轮：GdnChunkWorkspace 一次分配 + warmup 预载 + graph 全桶预捕获 + 四段计时（host 空转清零）,vllm,,max_good_rate,12.00
+2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,4.0,goodput_rps,2.1495
+2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,4.0,request_rps,2.2552
+2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,4.0,out_tps,819.4338
+2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,4.0,ttft_p50,59.4029
+2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,4.0,ttft_p90,171.8918
+2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,4.0,ttft_p99,401.0162
+2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,4.0,ttft_max,416.5801
+2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,4.0,ttft_1st_p50,59.3991
+2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,4.0,tpot_p50,14.8146
+2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,4.0,tpot_p90,17.1491
+2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,4.0,tpot_p99,20.4219
+2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,4.0,tpot_max,21.5411
+2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,4.0,cache_hit,0.3477
+2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,4.0,completed,64.0000
+2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,4.0,failed,0.0000
+2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,8.0,goodput_rps,3.0431
+2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,8.0,request_rps,3.0431
+2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,8.0,out_tps,1109.8795
+2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,8.0,ttft_p50,60.0241
+2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,8.0,ttft_p90,88.0754
+2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,8.0,ttft_p99,103.6901
+2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,8.0,ttft_max,104.2983
+2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,8.0,ttft_1st_p50,60.0207
+2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,8.0,tpot_p50,15.6981
+2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,8.0,tpot_p90,18.3594
+2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,8.0,tpot_p99,18.8368
+2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,8.0,tpot_max,18.9655
+2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,8.0,cache_hit,0.8072
+2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,8.0,completed,64.0000
+2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,8.0,failed,0.0000
+2026-10-20/engine_r8,2026-10-20,B300,r8 GDN 状态按块缓存（--gdn-snapshot-tokens 1024，快照池 119 槽 17 GiB；第二跑，第一跑产物目录被外部清掉）,dinfer,,max_good_rate,8.00

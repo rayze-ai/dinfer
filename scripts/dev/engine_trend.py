@@ -65,7 +65,7 @@ def load_round(d):
 
 
 def round_key(r):
-    m = re.search(r"engine_?(\d*)$", r["label"])
+    m = re.search(r"engine_?r?(\d*)$", r["label"])  # engine_2 / engine_r8 都按尾数排
     return (r["date"], int(m.group(1) or 0) if m else 0, r["label"])
 
 

@@ -824,7 +824,7 @@ B300 单 GDN 层 decode，基线 = 现路径 11 kernel + 自调优 GEMM + CUDA g
   - rate 8：goodput 1.32 → **2.99（> vLLM 2.87）**，TTFT p99 402 → **117（< vLLM 164）**，cache hit 0.806（> vLLM 0.699：我们对齐粒度 1024 ≤ 共享前缀 1024 词 ≈ 1.2k token，vLLM 的 align 粒度更粗）。验收 "cache hit ≥ 0.4、rate 4 TTFT p99 ≤ 150、goodput ≥ vLLM" 三条：cache ✅、goodput ✅（4 / 8 都 ≥ vLLM）、**rate 4 p99 ❌（432）**——拆开看：命中请求（30 条，prompt p50 1233）TTFT p50 61.6 / max 182；p99 的 7 条全是**冷** 4.8k prompt（cached 0，TTFT 363–439），即 4k prefill 单步 ~400 ms（engine-gap 8e 的 "GDN 大 T 线性涨"），与本轮无关、与 rate 8 的 p99 117 不矛盾（rate 8 随机 seed 下冷 4.8k 条少）。下一步是 4k prefill 的 chunk 并行（r9 wy/ho）。
   - 正确性：serve 全程 0 条 "slot 被复用给带历史的请求"（engine_2 之前 86 条）；同 prompt 两次 smoke 第二次 `cached_tokens` 5120/5887、输出逐字相同；抢占 0。
   - 成本：快照区 17 GiB（可用 `--gdn-snapshot-gib` 调；每 1024 token 的快照 147 MB，119 槽覆盖 119 个不同的 1k 对齐前缀）；KV 块数 158685（engine_2 为 ~176k，少 10%）。
-  - 产物：`test/qwen35/2026-10-20/engine_r8/`（第一跑产物目录在远端被外部清掉，表中数字来自第一跑 summary 的原始行；第二跑重出产物 + engine-trend）。
+  - 产物：`test/qwen35/2026-10-20/engine_r8/`（第二跑；第一跑产物目录被 r9 的 `remote_b300.sh push`（rsync --delete）清掉，表中数字是第一跑 summary 原始行）。**第二跑复现**（同配置、新 seed）：rate 4 goodput 2.15、TTFT p50/p99 59.4/401.0、cache 0.348；rate 8 goodput **3.04**、TTFT p50/p99 **60.0/103.7**、TPOT p99 18.8、cache 0.807——两跑一致；rate 4 p99 仍是冷 4.8k prompt 的 prefill。`test/qwen35/engine-trend.{csv,md,html}`：max good rate dinfer 4 → **8** req/s（vLLM 12）。
 
 **engine_2（第 7 轮二进制：warmup + 全桶预捕获 + GdnChunkWorkspace 一次分配；同配置、不同 seed）**：
 
