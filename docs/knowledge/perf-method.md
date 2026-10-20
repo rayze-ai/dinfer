@@ -60,3 +60,10 @@
 - 归因链（每步一个工具）：① 客户端 TPOT 23 ≈ `/metrics` decode 步均值 23（含 async 等待）→ TPOT 由 decode 步节拍决定；② nsys 纯 decode 步 span 13–19 ms → 差在 GPU 之外或 GPU 上的非 kernel 项；③ nsys 按步分类 `nsys_mixed.py` **必须先切稳态窗口**（最后一次大 H2D 之后），否则加载期拷贝摊进步里（6c 误读）；稳态下 decode 步 ≈ kernel 之和 → 差在 kernel；prefill 步 GPU 只忙 27% → host 空转（alloc / 懒加载 / 首捕获 / 同步 D2H）。④ 切片（`long_prefill_token_threshold`）把 mixed 步变小但总量不变、TPOT 不动 → 排除"mixed 步是主因"。
 - 教训：闭环 bench 的短 prompt / 固定并发把"随长度 / 在飞数增长的 host 成本"全藏住了；引擎口径下先看 memcpy / memset / host 空转，再看 kernel。
 - **第 7 轮收口（2026-10-20）**：按 correlationId 关联 RUNTIME↔MEMCPY 后，"H2D 31%"（加载期拷贝摊入）、"步间 8 ms host 空转"（= 等别人的 prefill/mixed 步）两条都被证伪；四段计时（`engine_step_phase_{upload,launch,wait}_{mode}`）显示 decode upload 0.06 / launch 0.9 ms，**host 侧已无可观空转**；服务期一次性开销（kernel 懒加载 71 ms + 首捕获 35 ms + alloc）用 warmup + 全桶预捕获 + 一次分配清零。**引擎口径的剩余差距回到 kernel**：decode 步 11.6 ms（与闭环同）、1024-token prefill ≈ 100 ms kernel（vLLM 更快 + prefix cache 命中），decode 请求在等这些步。教训：引擎口径下"GPU 忙 / 不忙"要用稳态窗口 + 按 correlationId 的 API↔GPU 关联判，切步脚本的粗分类只能当线索。
+
+## 8. 三类趋势表，测量必落其一（用户 2026-10-20）
+
+- **判断**：任何性能测量都要进 CSV 并由脚本生成页面，页面刷新可见；只写 loop 表行视为未完成。三类：`perf-trend`（四组闭环，`bench_compare.sh`）、`engine-trend`（开环泊松 / SLO goodput，`engine_trend.py`）、`probe-trend`（TTFT-长度曲线、kernel 分解、微基准伸缩、第三方 kernel 对照，`probe_trend.py`，输入 `test/<model>/<日期>/probe_*/probe.csv` 长表）。`test/index.html` 每模型一行链到三页。
+- **为什么**：2026-10-20 engine-gap 8c–8g 四组探针测量只写了 markdown 表行，用户看页面发现没有；形状不同不是不进 CSV 的理由，长表（group/metric/side/x/value）能装任何探针。
+- **怎么用**：探针开始前先建 `probe_<名>/probe.csv` 写表头，每拿到一组数就追加一行，结束跑 `python3 scripts/dev/probe_trend.py --root test/<model> && python3 scripts/dev/bench_index.py`，commit 生成物。
+- **证据**：`docs/loops/engine-gap.md` 8h；`test/qwen35/2026-10-20/probe_prefill_1/`。

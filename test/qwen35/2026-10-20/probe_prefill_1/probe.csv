@@ -1,0 +1,41 @@
+probe,date,gpu,model,group,metric,side,x,value,unit,note
+probe_prefill_1,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,dinfer,510,30.0,ms,单发 max_tokens=1 换 seed 5 次中位；dinfer :8012 GPU 0
+probe_prefill_1,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,vllm,510,44.7,ms,vLLM :8013 GPU 1 容器 nightly
+probe_prefill_1,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,dinfer,1021,55.5,ms,
+probe_prefill_1,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,vllm,1021,86.7,ms,
+probe_prefill_1,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,dinfer,2029,104.7,ms,
+probe_prefill_1,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,vllm,2029,105.1,ms,拐点
+probe_prefill_1,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,dinfer,3009,155.2,ms,
+probe_prefill_1,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,vllm,3009,141.6,ms,
+probe_prefill_1,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,dinfer,4059,210.2,ms,
+probe_prefill_1,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,vllm,4059,186.5,ms,
+probe_prefill_1,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,dinfer,6019,313.8,ms,
+probe_prefill_1,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,vllm,6019,259.7,ms,
+probe_prefill_1,2026-10-20,B300,qwen35,ttft_len,ttft_p50_repeat_ms,dinfer,1021,55.4,ms,同 prompt 重复第 2–5 次（无 prefix cache 不变）
+probe_prefill_1,2026-10-20,B300,qwen35,ttft_len,ttft_p50_repeat_ms,vllm,1021,44.7,ms,同 prompt 重复第 2–5 次（prefix cache 命中）
+probe_prefill_1,2026-10-20,B300,qwen35,ttft_len,slope_us_per_token,dinfer,1k-6k,51.7,us/token,1 K→6 K 线性拟合
+probe_prefill_1,2026-10-20,B300,qwen35,ttft_len,slope_us_per_token,vllm,1k-6k,34.6,us/token,
+probe_prefill_1,2026-10-20,B300,qwen35,kernel_1k,step_ms,dinfer,gemm,34.8,ms,q35_mix.sqlite 稳态 11 个纯 prefill 步均值（T≈1024）；nvjet 17 种 ≈257 次；≈1.6 PFLOP/s = 70% 峰值
+probe_prefill_1,2026-10-20,B300,qwen35,kernel_1k,step_ms,dinfer,gdn_wy_mma,8.08,ms,48 层 × 168 µs
+probe_prefill_1,2026-10-20,B300,qwen35,kernel_1k,step_ms,dinfer,gdn_ho_mma,8.05,ms,48 层 × 168 µs
+probe_prefill_1,2026-10-20,B300,qwen35,kernel_1k,step_ms,dinfer,conv1d_prefill,2.30,ms,48 × 48 µs
+probe_prefill_1,2026-10-20,B300,qwen35,kernel_1k,step_ms,dinfer,gqa_fa_v5,1.95,ms,16 层 × 122 µs
+probe_prefill_1,2026-10-20,B300,qwen35,kernel_1k,step_ms,dinfer,rmsnorm,1.42,ms,129 × 11 µs
+probe_prefill_1,2026-10-20,B300,qwen35,kernel_1k,step_ms,dinfer,silu_and_mul,1.41,ms,64 × 22 µs
+probe_prefill_1,2026-10-20,B300,qwen35,kernel_1k,step_ms,dinfer,gated_rmsnorm,0.69,ms,
+probe_prefill_1,2026-10-20,B300,qwen35,kernel_1k,step_ms,dinfer,cumsum,0.58,ms,
+probe_prefill_1,2026-10-20,B300,qwen35,kernel_1k,step_ms,dinfer,norm,0.49,ms,
+probe_prefill_1,2026-10-20,B300,qwen35,kernel_1k,step_ms,dinfer,other,0.5,ms,qkv_post / mul_sigmoid / gate / splitKreduce / argmax
+probe_prefill_1,2026-10-20,B300,qwen35,kernel_1k,step_ms,dinfer,total_kernel,60.3,ms,span 62.2；851 kernel/步；H2D 3 次 5 µs
+probe_prefill_1,2026-10-20,B300,qwen35,gdn_scale,chain_us,dinfer,1x1024,311,us,gdn_chunk_bench GPU 6 sm_103；prep 18 / wy 134 / ho bv16 160 / conv rows32 41
+probe_prefill_1,2026-10-20,B300,qwen35,gdn_scale,chain_us,dinfer,8x1024,1662,us,wy 912 / ho bv32 664 / conv rows32 222（5.3× 线性涨）
+probe_prefill_1,2026-10-20,B300,qwen35,gdn_scale,chain_us,dinfer,32x128,845,us,wy 461 / ho bv32 341 / conv 137
+probe_prefill_1,2026-10-20,B300,qwen35,gdn_scale,wy_us,dinfer,1x1024,134,us,
+probe_prefill_1,2026-10-20,B300,qwen35,gdn_scale,wy_us,dinfer,8x1024,912,us,
+probe_prefill_1,2026-10-20,B300,qwen35,gdn_scale,ho_us,dinfer,1x1024,160,us,bv16
+probe_prefill_1,2026-10-20,B300,qwen35,gdn_scale,ho_us,dinfer,8x1024,664,us,bv32
+probe_prefill_1,2026-10-20,B300,qwen35,gdn_scale,conv_us,dinfer,1x1024,41,us,rows32
+probe_prefill_1,2026-10-20,B300,qwen35,gdn_scale,conv_us,dinfer,8x1024,222,us,rows32
+probe_prefill_1,2026-10-20,B300,qwen35,gdn_scale,fla_chunk_gdr_us,vllm,1x1024,359,us,vLLM 容器 third_party fla chunk_gated_delta_rule 同形状 HV48 K=V=128 含 l2norm 50 次均值
+probe_prefill_1,2026-10-20,B300,qwen35,gdn_scale,fla_chunk_gdr_us,vllm,1x3009,349,us,
+probe_prefill_1,2026-10-20,B300,qwen35,gdn_scale,fla_chunk_gdr_us,vllm,1x8192,853,us,1 K→8 K 只 2.4×

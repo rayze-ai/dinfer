@@ -1,0 +1,35 @@
+test gdn_chunk_bench ...   [1×1024] 顺序 22339 µs | chunk 全链 311 µs（71.8x）| prep 18 | wy old 433 mma 134 | ho bv0=851 bv16=160 bv32=163 | conv rows0=486 rows32=41 rows64=63 rows128=114 rows256=217
+  [8×1024] 顺序 102197 µs | chunk 全链 1662 µs（61.5x）| prep 82 | wy old 2961 mma 912 | ho bv0=5093 bv16=1059 bv32=664 | conv rows0=808 rows32=222 rows64=248 rows128=309 rows256=321
+  [32×128] 顺序 46897 µs | chunk 全链 845 µs（55.5x）| prep 42 | wy old 1503 mma 461 | ho bv0=2520 bv16=567 bv32=341 | conv rows0=218 rows32=137 rows64=166 rows128=172 rows256=301
+[prefill] steps=11 span_ms=62.15 (p50 62.01, p90 93.40) kernel_sum_ms=60.26 kernels/step=851 gap_to_next_us p50=1579 p99=3076
+   memcpy/step: H2D 3.0x 5us
+    13229us   45.1/step   293.4us nvjet_sm103_tst_128x256_64x6_2x1_2cta_v_bz_TNT
+     8078us   48.0/step   168.3us wy_mma_kernel
+     8053us   48.0/step   167.8us ho_mma_kernel
+     3187us   30.5/step   104.3us nvjet_sm103_tst_128x192_64x7_2x1_2cta_v_bz_TNT
+     2737us   20.4/step   134.4us nvjet_sm103_tst_256x128_64x5_2x1_2cta_v_bz_TNT
+     2494us   11.6/step   214.3us nvjet_sm103_tst_256x160_64x5_2x4f_2cta_h_bz_TN
+     2297us   48.0/step    47.9us conv1d_prefill_blocked_kernel
+     2275us   11.6/step   195.5us nvjet_sm103_tst_256x144_64x5_4x1_2cta_v_bz_TNT
+     2062us   17.5/step   118.2us nvjet_sm103_tst_256x176_64x4_2x1_2cta_v_bz_TNT
+     1946us   16.0/step   121.6us gqa_fa_v5_kernel
+     1787us   13.1/step   136.5us nvjet_sm103_tst_256x128_64x5_2x2f_2cta_h_bz_TN
+     1713us   23.3/step    73.6us nvjet_sm103_tst_256x136_64x4_1x2_h_bz_TNT
+     1444us   23.3/step    62.0us nvjet_sm103_tst_192x128_64x6_2x1_2cta_v_bz_TNT
+     1415us  129.0/step    11.0us rmsnorm_vec_kernel
+     1411us   64.0/step    22.0us silu_and_mul_vec_kernel
+      868us    4.4/step   199.0us nvjet_sm103_tst_256x240_64x4_2x2f_2cta_h_bz_TN
+      817us   11.6/step    70.2us nvjet_sm103_tst_256x96_64x4_1x2_h_bz_TNT
+      694us   48.0/step    14.5us gated_rmsnorm_warp_kernel
+      582us   48.0/step    12.1us cumsum_kernel
+      579us    8.7/step    66.3us nvjet_sm103_tst_128x160_64x8_2x2f_2cta_h_bz_TN
+      494us   48.0/step    10.3us norm_kernel
+      452us   11.6/step    38.8us nvjet_sm103_tst_256x96_64x5_2x2_2cta_h_bz_spli
+      404us   11.6/step    34.8us nvjet_sm103_tst_256x96_64x5_2x2_2cta_h_bz_TNT
+      365us    1.0/step   365.3us nvjet_sm103_tst_192x8_64x8_2x1_v_bz_TNT
+      231us   11.6/step    19.9us nvjet_sm103_tst_128x64_64x10_4x1_2cta_v_bz_TNT
+      208us   16.0/step    13.0us qkv_post_kernel
+      141us   16.0/step     8.8us mul_sigmoid_rows_kernel
+      128us   48.0/step     2.7us gate_kernel
+      111us   11.6/step     9.6us splitKreduce_kernel
+       20us    1.0/step    20.3us argmax_kernel
