@@ -516,7 +516,7 @@ impl<O: OpSet> Qwen3Model<O> {
             zeros_n = z_n,
             zeros_mib = z_bytes / (1 << 20),
             zeros_ms = z_us / 1000,
-            "load timing: per-layer activation buffers (should be 0: 共享 ActScratch，见下一条)"
+            "load timing: per-layer zeros in load = 只剩 qkv/gate_up 权重拼接（激活缓冲已全模型共享，见下一条）"
         );
         tracing::info!(
             tensors = ls.tensors,

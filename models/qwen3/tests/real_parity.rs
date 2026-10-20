@@ -145,6 +145,66 @@ fn real_prefill_logits_match_hf() {
     assert!((t - ties) * 5 >= t * 4, "too many near-tie argmax flips: {ties}/{t}");
 }
 
+/// 共享激活缓冲（`ActScratch`）主套 / 副套互换的正确性：同一批 forward 分别用主套、副套、以及
+/// "主套→换入副套→forward→换回" 跑，logits 必须逐位相同。这是 XSTREAM 跨流并行（`ModelScratch.act`
+/// 与 `swap_scratch`）的确定性回归——HTTP 端到端 greedy 输出受批组成影响，不能当判据。
+#[test]
+#[ignore]
+fn real_scratch_swap_is_bitwise_identical() {
+    let mut e = load(512);
+    let (_, prompt) = npy_i32("prompt_ids.npy");
+    let t = prompt.len();
+    let v = e.cfg.vocab_size as usize;
+    let s = e.s.clone();
+    let ids = Tensor::from_vec(&s, prompt.clone(), &[t]).unwrap();
+    let pos = Tensor::from_vec(&s, (0..t as i32).collect(), &[t]).unwrap();
+    let slots = Tensor::from_vec(&s, (0..t as i64).collect(), &[t]).unwrap();
+    let cu = Tensor::from_vec(&s, vec![0i32, t as i32], &[2]).unwrap();
+    let bt = Tensor::from_vec(&s, (0..NUM_BLOCKS as i32).collect(), &[1, NUM_BLOCKS]).unwrap();
+    let seq = Tensor::from_vec(&s, vec![t as i32], &[1]).unwrap();
+    let rows = Tensor::from_vec(&s, (0..t as i32).collect(), &[t]).unwrap();
+    let meta = AttnMeta {
+        mode: BatchMode::Prefill,
+        cu_seqlens: &cu,
+        seq_lens: &seq,
+        block_table: &bt,
+        num_reqs: 1,
+        max_seqlen: t,
+        max_blocks: NUM_BLOCKS,
+    };
+    let run = |model: &mut Qwen3Model, gemm: &Gemm| {
+        let mut logits = Tensor::<f32>::zeros(&s, &[t, v]).unwrap();
+        let f = Forward {
+            input_ids: &ids,
+            positions: &pos,
+            slot_mapping: &slots,
+            meta: AttnMeta { ..meta },
+            logits_rows: &rows,
+            t,
+            rows: t,
+        };
+        model.forward(&s, gemm, &f, &mut logits).unwrap();
+        logits.to_vec(&s).unwrap()
+    };
+    // 1. 主套
+    let a = run(&mut e.model, &e.gemm);
+    // 2. 原样再跑一次（确认 forward 本身可复现，否则下面的判据没有意义）
+    let a2 = run(&mut e.model, &e.gemm);
+    assert_eq!(a, a2, "同一套 scratch 两次 forward 不逐位相同：判据失效（GPU 非确定性 kernel？）");
+    // 3. 换入副套 → forward → 换回
+    let mut alt = e.model.alloc_scratch(&s).unwrap();
+    e.model.swap_scratch(&mut alt);
+    let b = run(&mut e.model, &e.gemm);
+    e.model.swap_scratch(&mut alt);
+    let diff = a.iter().zip(&b).filter(|(x, y)| x != y).count();
+    let worst = max_abs(&a, &b);
+    eprintln!("q1: scratch swap: {diff}/{} logits 元素不同, max abs {worst:.6e}", a.len());
+    assert_eq!(diff, 0, "副套 forward 与主套不逐位一致（diff {diff}, max abs {worst}）");
+    // 4. 换回后主套仍能用同样结果（验证 swap 把缓冲换回了正确的一对）
+    let c = run(&mut e.model, &e.gemm);
+    assert_eq!(a, c, "换回主套后 forward 结果变了");
+}
+
 /// Scheduler + Runner + Executor 跑 n 条请求，返回每条的输出 token。
 fn run_engine(e: Env, prompts: &[Vec<i32>], gen: u32, budget: u32) -> Vec<Vec<u32>> {
     let exec = Qwen3Executor::new(e.s.clone(), e.gemm, e.model).unwrap();
