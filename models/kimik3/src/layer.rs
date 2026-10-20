@@ -42,6 +42,31 @@ pub struct StepMeta<'a> {
     pub comm: Option<&'a Comm>,
 }
 
+/// bf16 部分和的 all-reduce。默认直接 bf16 all-reduce（NCCL 内部 f32 累加、落回 bf16 一次舍入；与 qwen3 TP 同）。
+/// `TP_REDUCE_F32=1`（实验，docs/loops/k3-tp.md 第 3 轮）：先升 f32 再 all-reduce 再降 bf16，通信字节 ×2，用来判定 bf16 双舍入
+/// 对 tp 漂移的贡献。`scratch` 需 ≥ n 个 f32。
+pub fn all_reduce_partial_bf16(
+    stream: &Stream,
+    comm: &Comm,
+    buf: &mut Tensor<bf16>,
+    n: usize,
+    scratch: &mut Tensor<f32>,
+) -> Result<()> {
+    static F32: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let f32_mode = *F32.get_or_init(|| std::env::var("TP_REDUCE_F32").map(|v| v == "1").unwrap_or(false));
+    if !f32_mode {
+        return dinfer_kernels::comm::all_reduce_bf16(comm, &mut buf.data, n);
+    }
+    ensure!(scratch.numel() >= n, "all_reduce_partial_bf16: scratch {} < {n}", scratch.numel());
+    k::bf16_to_f32_n(stream, &buf.data, &mut scratch.data, n)?;
+    {
+        let mut v = scratch.data.slice_mut(..n);
+        comm.all_reduce_sum(&mut v, n)?;
+    }
+    stream.memset_zeros_n(&mut buf.data, n)?;
+    k::f32_add_to_bf16_n(stream, &scratch.data, &mut buf.data, n)
+}
+
 /// 装载时的缓冲 / cache 容量。
 #[derive(Clone, Copy, Debug)]
 pub struct LayerBudget {
@@ -233,6 +258,8 @@ pub struct KimiDecoderLayer {
     m: Tensor<bf16>,    // AttnRes(mlp 门) 输出
     mn: Tensor<bf16>,   // post_attention_layernorm 输出
     y: Tensor<bf16>,    // mlp 输出
+    /// TP all-reduce 的 f32 scratch（`TP_REDUCE_F32`；world=1 时不分配）
+    red_f32: Option<Tensor<f32>>,
 }
 
 impl KimiDecoderLayer {
@@ -310,6 +337,7 @@ impl KimiDecoderLayer {
             m: z(stream)?,
             mn: z(stream)?,
             y: z(stream)?,
+            red_f32: if shard.is_single() { None } else { Some(Tensor::zeros(stream, &[max_tokens, hidden])?) },
         })
     }
 
@@ -364,7 +392,8 @@ impl KimiDecoderLayer {
         }
         // all-reduce ①：o_proj 列切的部分和（TP）
         if let Some(c) = meta.comm {
-            dinfer_kernels::comm::all_reduce_bf16(c, &mut self.a.data, n).context("layer attn all-reduce")?;
+            let sc = self.red_f32.as_mut().ok_or_else(|| anyhow::anyhow!("layer: comm 但模型按 world=1 装载"))?;
+            all_reduce_partial_bf16(stream, c, &mut self.a, n, sc).context("layer attn all-reduce")?;
         }
         // 3. prefix_sum：写块层 p = a；否则 p = x + a
         if writer {
@@ -401,7 +430,8 @@ impl KimiDecoderLayer {
                 mlp.forward(stream, gemm, &self.act, t, &self.mn, &mut self.y)?;
                 // 稠密层 down 行切的部分和（TP）
                 if let Some(c) = meta.comm {
-                    dinfer_kernels::comm::all_reduce_bf16(c, &mut self.y.data, n).context("layer dense all-reduce")?;
+                    let sc = self.red_f32.as_mut().ok_or_else(|| anyhow::anyhow!("layer: comm 但模型按 world=1 装载"))?;
+                    all_reduce_partial_bf16(stream, c, &mut self.y, n, sc).context("layer dense all-reduce")?;
                 }
             }
         }

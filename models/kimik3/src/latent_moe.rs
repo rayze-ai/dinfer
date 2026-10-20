@@ -249,6 +249,8 @@ pub struct LatentMoe {
     e_lo: usize,
     /// 本 rank 专家段的 offsets（`[E_local+1]`，相对本段起点）；world=1 时就是全量 offsets 的拷贝（同一地址语义）。
     offsets_local: Tensor<i32>,
+    /// shared 部分和 all-reduce 的 f32 scratch（`TP_REDUCE_F32`；world=1 不分配）
+    red_f32: Option<Tensor<f32>>,
     buckets: k::MoeBuckets,
     offsets_host: Vec<i32>,
     tile_bm: usize,
@@ -352,6 +354,7 @@ impl LatentMoe {
             offsets_host: vec![0; e + 1],
             e_lo,
             offsets_local: Tensor::zeros(stream, &[e_hi - e_lo + 1])?,
+            red_f32: if shard.is_single() { None } else { Some(Tensor::zeros(stream, &[max_tokens, hidden])?) },
             tile_bm: 16,
             tile_bn: 64,
             logits: Tensor::zeros(stream, &[max_tokens, e])?,
@@ -533,7 +536,8 @@ impl LatentMoe {
         if let Some(sh) = &mut self.shared {
             sh.forward(stream, gemm, &self.act, t, x, out)?;
             if let Some(c) = comm {
-                dinfer_kernels::comm::all_reduce_bf16(c, &mut out.data, t * h).context("LatentMoe shared all-reduce")?;
+                let sc = self.red_f32.as_mut().ok_or_else(|| anyhow::anyhow!("LatentMoe: comm 但按 world=1 装载"))?;
+                crate::layer::all_reduce_partial_bf16(stream, c, out, t * h, sc).context("LatentMoe shared all-reduce")?;
             }
             k::add_inplace_bf16_n(stream, &self.yup.data, &mut out.data, t * h)?;
         } else {
