@@ -136,7 +136,15 @@ impl KimiK3Executor {
         let (mt, rows, v) = (model.max_tokens(), model.max_rows(), model.vocab());
         let slots = StateSlotTable::new(model.num_slots() - 1);
         let buf = StepBuffers::alloc(&stream, mt, rows, max_blocks)?;
-        let graphs = DecodeGraphs::new(&stream, enable_graphs && std::env::var("NO_GRAPH").is_err(), rows);
+        // decode 图：K3 的 LatentMoe（每步 D2H 读 offsets 展平 tile 计划）与 AttnRes（host softmax）体内有同步 D2H，
+        // 不能进 capture（B300 冒烟第 1 轮：`graph capture: body: LatentMoe: pairs 0 ≠ t·K`）。默认关，`K3_GRAPH=1` 强制开
+        //（接 GPU 侧 tile 计划 + AttnRes 融合 kernel 后翻回默认开；见 docs/loops/k3-serve.md TODO）。`NO_GRAPH` 仍强制关。
+        let force_on = std::env::var("K3_GRAPH").is_ok_and(|v| v == "1");
+        let graphs_on = enable_graphs && force_on && std::env::var("NO_GRAPH").is_err();
+        if enable_graphs && !force_on {
+            tracing::info!("kimik3: decode CUDA graph 默认关（LatentMoe / AttnRes 体内有 D2H，待 GPU 侧 tile 计划）；K3_GRAPH=1 强制开");
+        }
+        let graphs = DecodeGraphs::new(&stream, graphs_on, rows);
         let async_ring = AsyncResultRing::new(&stream, 2, rows)?;
         let logits = Tensor::zeros(&stream, &[rows * v])?;
         let work = Tensor::zeros(&stream, &[rows * v])?;
