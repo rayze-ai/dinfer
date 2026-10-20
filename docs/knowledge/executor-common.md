@@ -29,5 +29,12 @@
 - **prefill 步 host 空转的三个来源与解法**（qwen35）：按需增长的 chunk 工作区 free+alloc（`GdnChunkWorkspace::with_capacity` 启动一次按 `max_tokens`，`KdaChunkPlan::fill` 复用设备缓冲）；prefill kernel 首次使用的 `cuLibraryLoadData`（启动 `warmup_prefill` 两条 65 token 假请求，slot=-1 / 临时 GDN slot / 不写 prev_chosen）；首次图捕获（默认全桶预捕获，`GRAPH_CAPTURE=lazy` 回退）。
 - nsys 按步分类用 `scripts/dev/nsys_steps_sqlite.py`（稳态窗口 = 最后一次 ≥ 8 MB H2D 之后），不要用按 csv 切步的旧脚本。
 
+## per-token 激活缓冲：全模型一套（ActScratch，四例已落地三例）
+- **判断**：任何在层 `load` 里 `Tensor::zeros(&[max_tokens, 列数])` 的东西，先问"层间会同时存活吗"。层在同一条流上串行，层 i 的中间量在层 i+1 开始前已消费完 → **全模型只需一套**；按层数 × 预算爆炸（qwen3 28 层 × 16400 token × 30 KB ≈ 13.7 GiB，16384 预算直接 OOM；qwen35 64 层 ≈ 180 GB）。
+- **怎么用**：模型 crate 里 `scratch.rs::ActScratch { … , max_tokens }` + `cols(cfg)`（列宽从**本 rank 的** cfg 推，TP 后已除）+ `bytes(cfg, t)`（分配前算，进启动日志）+ `new(stream, cfg, t)`；`ModelScratch.act` 给副流第二套，`swap_scratch` 就是一次 `mem::swap`。`Mlp` 走 `load_tp(…, 0, …)` + `forward_with_scratch`（`max_tokens == 0` 不分配，已有路径）。
+- **陷阱**：共享块往往比单层逻辑行宽**宽**。GEMM 的 `ld = n`、`qkv_post` 逐行原地写、attention 的 `q_stride` 三者都必须是本层行宽，**不能**从 `numel / 行数` 反推；加 `numel ≥ t × 行宽` 断言。缓冲更宽是安全的（kernel 只读前缀）。
+- **证据**：qwen35 / kimik3 / qwen3 三例（`models/*/scratch.rs`），qwen3 改前 16384 预算 3/3 OOM、改后 3/3 起来且 `num_blocks` 3050 → 10808（`test/qwen3/2026-10-21/actscratch.md`）。glm53 同构未改。
+- **验证**：副套正确性用 `real_parity::real_scratch_swap_is_bitwise_identical`（主套 / 副套 / 换回，logits 逐位比）；**别用 HTTP greedy**，同二进制连跑两次就有 6/12 输出不同。
+
 ## 下一步（design.md §14.5）
 任务图抽象：模型 crate 声明层结构 → 公共层生成图 → 同一张图可喂 megakernel 或退化成逐 kernel launch。`DecodeGraphs` 的闭包捕获体是它的前身。
