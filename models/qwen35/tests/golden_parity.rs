@@ -174,6 +174,12 @@ fn golden_prefill_logits() {
 }
 
 fn run_engine(e: Env, prompts: &[Vec<i32>], gen: u32, budget: u32) -> Vec<Vec<u32>> {
+    run_engine_mode(e, prompts, gen, budget, false)
+}
+
+/// `overlap`：照 engine 的异步流水——`begin(n+1)` 在 `finish(n)` 之前（scheduler `async_scheduling` 用 placeholder），
+/// 步 n+1 的输入 token 在设备上从 `prev_chosen` gather；false = `Runner::execute`（finish 后再调度）。
+fn run_engine_mode(e: Env, prompts: &[Vec<i32>], gen: u32, budget: u32, overlap: bool) -> Vec<Vec<u32>> {
     let exec = Qwen35Executor::new(e.s.clone(), e.gemm, e.model, NUM_BLOCKS).unwrap();
     let mut runner = Runner::new(exec, BLOCK);
     let params = SchedulerParams {
@@ -187,7 +193,7 @@ fn run_engine(e: Env, prompts: &[Vec<i32>], gen: u32, budget: u32) -> Vec<Vec<u3
         cache: CacheConfig { block_size: BLOCK as u32, enable_prefix_caching: false, ..Default::default() },
         max_model_len: 512,
         num_spec_tokens: 0,
-        async_scheduling: false,
+        async_scheduling: overlap,
         eos_token_ids: vec![],
     };
     let g = vec![GroupInfo {
@@ -206,15 +212,52 @@ fn run_engine(e: Env, prompts: &[Vec<i32>], gen: u32, budget: u32) -> Vec<Vec<u3
     }
     let mut out = vec![Vec::new(); prompts.len()];
     let mut steps = 0;
-    while sched.has_requests() {
-        let so = sched.schedule();
-        let mro = runner.execute(&so).unwrap();
+    let mut async_steps = 0;
+    let mut pending: Option<(dinfer_core::sched::SchedulerOutput, dinfer_core::runner::Pending)> = None;
+    while sched.has_requests() || pending.is_some() {
+        // engine 同序：有在飞步 n 时先 schedule + begin n+1，再 finish n；n+1 若是同步步（prefill）begin 已跑完
+        let (so, mro) = match pending.take() {
+            Some((so_n, pend_n)) => {
+                let mut next = None;
+                if sched.has_requests() {
+                    let so_next = sched.schedule();
+                    let pend_next = runner.begin(&so_next).unwrap();
+                    if runner.last_begin_was_async() {
+                        next = Some((so_next, pend_next));
+                    } else {
+                        let mro_next = runner.finish(pend_next).unwrap();
+                        let res = sched.update_from_output(&so_next, &mro_next);
+                        for (rid, toks, _) in res.iter() {
+                            out[rid as usize - 1].extend_from_slice(toks);
+                        }
+                        steps += 1;
+                    }
+                }
+                let mro_n = runner.finish(pend_n).unwrap();
+                pending = next;
+                (so_n, mro_n)
+            }
+            None => {
+                let so = sched.schedule();
+                let pend = runner.begin(&so).unwrap();
+                if overlap && runner.last_begin_was_async() {
+                    async_steps += 1;
+                    pending = Some((so, pend));
+                    continue;
+                }
+                (so, runner.finish(pend).unwrap())
+            }
+        };
         let res = sched.update_from_output(&so, &mro);
         for (rid, toks, _) in res.iter() {
             out[rid as usize - 1].extend_from_slice(toks);
         }
         steps += 1;
         assert!(steps < 10 * gen as usize + 20, "runaway");
+    }
+    if overlap {
+        assert!(async_steps > 0, "overlap requested but no step went through the async path");
+        eprintln!("qwen35: engine overlap: {async_steps} async steps");
     }
     let (g, e) = (runner.exec.graph_steps, runner.exec.eager_steps);
     eprintln!("qwen35: engine {steps} steps for {} prompts × {gen}; graph steps {g}, eager steps {e}", prompts.len());
@@ -225,6 +268,20 @@ fn run_engine(e: Env, prompts: &[Vec<i32>], gen: u32, budget: u32) -> Vec<Vec<u3
         assert!(g > 0, "no decode step went through the cuda graph");
     }
     out
+}
+
+/// 异步流水（engine 口径：begin n+1 在 finish n 之前，设备侧 gather 在飞 token）下 greedy 与 golden 一致。
+#[test]
+#[ignore]
+fn golden_greedy_overlap() {
+    let e = load();
+    let v = e.cfg.vocab_size as usize;
+    let (_, prompt) = npy_i32("prompt_a.npy");
+    let (_, want) = npy_i32("expect_greedy_a.npy");
+    let (_, steps) = npy_f32("expect_step_logits_a.npy");
+    let out = run_engine_mode(e, &[prompt], want.len() as u32, 128, true);
+    let n = compare_greedy("greedy a (async overlap)", &out[0], &want, &steps, v);
+    assert!(n >= 1, "too few comparable greedy steps: {n}");
 }
 
 /// 逐步比 greedy token：非平局步（ref top-2 gap > TIE_GAP）必须一致；平局步跳过不计。
