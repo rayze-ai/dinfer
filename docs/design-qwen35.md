@@ -137,14 +137,14 @@ tests/           golden_parity.rs（tiny golden：4 个用例，`scripts/verify/
 | `lm_head.weight` | 独立 `lm_head` | `tie_word_embeddings false` |
 
 拼接顺序：kernel 支持 `[q(H·D) | gate(H·D) | k | v]`（`qkv_post_ext(qmul=2)` 只处理 q/k/v 段，gate 段由 `mul_sigmoid_bf16`
-在 attention **之后**消费），但**模型侧改用两条紧凑 GEMM**（`qkv [q|k|v]` + 独立 `gate`，`qmul = 1`）——FLOPs 相同、
-少一次按行搬运，见 §2.2。
+在 attention **之后**消费）。里程碑 4 曾拆成两条紧凑 GEMM（`qkv [q|k|v]` + 独立 `gate`）；**性能第 9 轮改回一条融合 GEMM**
+（`qmul = 2`，`mul_sigmoid_rows` 按行距读 gate 段，不搬），见 §2.2。
 
 ## 2.2 实现决定（里程碑 4，2026-10-19，与 vLLM 对照后落定）
 
 | 项 | 决定 | 原因 |
 |---|---|---|
-| q_proj 输出门 | **拆成两条紧凑 GEMM**（`qkv [q|k|v]` + 独立 `gate`），不用 `qkv_post_ext(qmul=2)` 的行内 gate 段 | 行内 gate 段带 stride，attention 之后要 `mul_sigmoid` 就得按行搬一次；两条紧凑 GEMM 的 FLOPs 相同、少一次搬运。kernel 的 `qmul=2` 路径仍保留（对拍用） |
+| q_proj 输出门 | **一条融合 GEMM `[q|gate|k|v]`（`qmul=2`）**（性能第 9 轮，撤回里程碑 4 的"两条紧凑 GEMM"） | 里程碑 4 拆两条是为省一次按行搬；第 9 轮给 `mul_sigmoid_rows` 加行距参数直接读 gate 段，不搬 → 省一次 GEMM launch + 一次 A 读（与 vLLM `qkv_proj` 一致）。同理 GDN 的 `in_proj_qkv/z/a/b` 融合成 `in_proj [16480, 5120]`，conv1d / gate / gated_rmsnorm 按列段 + 行距读 |
 | `qkv_post_ext` | `rope_dim = 64`、`norm_beta = 1.0`（`q_norm/k_norm` zero-centered） | 与 HF `Qwen3_5RMSNorm((1 + w))` 一致 |
 | GDN 状态 | crate 内 `SlotTable`（`RequestId → slot`）+ 每层 `conv [slots, 10240, 3]` bf16 / `rec [slots, 48, 128, 128]` f32；"首 token 位置 == 0" 的请求清零 | 不改 core 的 KV group；slot 复用发生在"本步不在场且最久未见"的请求上 |
 | GDN prefill | 逐 token 顺序递归（与 chunk 形式数值等价） | 里程碑 4 先对拍；chunk 形式是 perf 项 |

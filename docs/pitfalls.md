@@ -720,3 +720,10 @@
 - 现象：`DecodeGraphs` 第一版把"上传假 plan + 采样参数 + forward + 采样"整个当捕获体（预热一次、capture 内再跑一次），qwen35 golden 第一步 decode 就 `CUDA_ERROR_ILLEGAL_ADDRESS`；`compute-sanitizer` 指到 `row_gather_i32_kernel` 读 `prev[g]` 越界；NO_GRAPH 下全过；ASYNC_SCHED 开关无关。
 - 根因：capture 内的 `cuMemcpyHtoDAsync`（pageable 源）被记成 memcpy 节点，**源地址是那个临时 `Vec` 的 host 指针**；重放时 Vec 早已释放，`gather_idx` / `ids` 被填成垃圾 → gather 越界。原来两个 executor 的 `capture_bucket` 都是上传在 `begin_capture` 之前、只把 forward + sample 进图，抽公共件时把顺序合掉了。
 - 解法 / 避免：捕获闭包分 `CapturePhase::Prepare`（capture 外，一次）/ `CapturePhase::Body`（预热 + capture 内）；**任何进图的代码路径里不能有 host → device 拷贝**（固定地址缓冲的内容在图外换）。定位手段：`compute-sanitizer --tool memcheck <test binary> <name> --ignored`，比 `CUDA_LAUNCH_BLOCKING` 直接（异步错误只会在下一次同步点冒出来，backtrace 指向 `dtoh_sync` / `wait_read` 没有信息量）。
+
+## nsys kernel 汇总"次数 ÷ 步数"要先确认 trace 覆盖的步：把 M=1 warmup 的 small_m 当成 M=32 的 bug（2026-10-20，Qwen35 perf 第 8d/9 轮）
+
+- 现象：c32 decode 的 nsys 汇总里 `small_m_kernel<1>` 57192 次 × 16.2 µs，按 ~600 步除得"96 次/步 = 48 层 × in_proj_a/b"，于是认为 M=32 的 in_proj_a/b 错选了 M_TILE=1 的 small_m（预期省 1 ms/步）。
+- 根因：`b300_nsys_decode.sh` 抓的是**整个 serve 进程**，含 bench 的 warmup 2 条串行请求（M=1，256 步）、128 条请求收尾时的小批段、自调优与 graph 捕获预热；M=1 步里 in_proj_qkv/z/a/b、attn.qkv/gate、out_proj、gate_up、down 的 m1 行自调优全选 small_m，这些 launch 全是 `small_m_kernel<1>`，16.2 µs 是混合均值。代码上 `small_m_kernel<1>` 只在 `m == 1` 实例化，`m > small_m_max` 在 Rust / C 两侧都直接拒绝，M=32 不可能走到。
+- 解法：不改代码；第 9 轮改 GEMM 合并（in_proj_a/b 不再单独存在）。
+- 避免：nsys 汇总先找一个**每步固定次数、与 M 无关**的 kernel（如 `recurrent_decode`：48 次/步）反推步数，再除；或只用 `--capture-range` 抓纯 decode 段。按模板实参（`<1>`）认 M 时先查 host 分发代码。
