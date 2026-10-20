@@ -30,8 +30,9 @@ fn gqa_umma_prof() {
     st.synchronize().unwrap();
     let p = st.dtoh_sync_copy(&prof).unwrap();
     let tot: u64 = p[0] + p[1] + p[2] + p[3];
-    println!("[prof] 细分: PV发射={:.0}% 等装+QK+预装={:.0}%（占 pv+load 段）",
-        100.0 * p[5] as f64 / (p[5] + p[6]).max(1) as f64, 100.0 * p[6] as f64 / (p[5] + p[6]).max(1) as f64);
+    let seg = (p[5] + p[6] + p[7]).max(1) as f64;
+    println!("[prof] pv+load 细分: PV发射={:.0}% 等K/V={:.0}% QK发射={:.0}%",
+        100.0 * p[5] as f64 / seg, 100.0 * p[6] as f64 / seg, 100.0 * p[7] as f64 / seg);
     println!("[prof] qk_wait={:.0}% softmax={:.0}% rescale={:.0}% pv+load={:.0}% tiles={}",
         100.0 * p[0] as f64 / tot as f64, 100.0 * p[1] as f64 / tot as f64,
         100.0 * p[2] as f64 / tot as f64, 100.0 * p[3] as f64 / tot as f64, p[4] / 3);

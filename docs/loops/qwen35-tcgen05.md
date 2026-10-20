@@ -79,3 +79,19 @@ attn 是干净目标：纯 GEMM + softmax，无跨 chunk 串行依赖，已有 r
 | 0 | 基线 v6（cfg 3464） | 575（mma.sync） | 78 / 454 / 1558 | 过 | 起点 |
 | 1 | **工具链自证**：`umma.cuh`（TMEM 分配 / 128 B swizzle 描述符 / UMMA 指令描述符 / `tcgen05.ld` / mbarrier）+ `umma_peak_sm100.cu`（M=128 N=256 K=64 循环，8 深度 mbarrier 流水）+ `tests/umma_peak.rs`。build.rs：`sm100_only` 加两项、arch 旗标 100/103 全局换 `a` 变体 | **2236**（148 block = 1 CTA/SM，两次一致 2236.0 / 2236.5；296 block 2243.7 / 2233.4；592 block 1809） | — | — | **门槛 900 过**（目标 2.25 PF 的 99.4%）。正确性两处都验：check 模式 k=192 cos=1.0 rel=4.0e-7；峰值模式 4096 轮同块累加 cos=0.99999999（证明 MMA 全执行，不是排空不彻底） |
 | 2 | **attn 移植 WIP**：`gqa_fa_sm100.cu`（BQ=128 / NKI=64 / 每线程一行），QK+PV 走 UMMA、S 与 O 在 TMEM、softmax 在寄存器、P 写 smem 当 A；`cfg >= 5000` 分发，默认仍 3464 | — | **651 / 1691 / 5158**（v6：78 / 454 / 1558） | 过（cos 0.9999995，v5 对拍） | **慢 3.3×，未达目标**。插桩：qk_wait 2% / softmax 22% / rescale 5% / **pv+load 72%**（其中"等 K/V 装载"占该段 91%）；每 tile 每 SM 实测 13.5 µs vs 理想 0.56 µs（24×） |
+| 3 | **合并 K/V 访存**（相邻线程读同一 key 的相邻片，而非相邻 key）：5158 → 3311（−36%）。插桩变化决定性：**等 K/V 从 91% → 3%**，`pv+load` 段的瓶颈换成 **QK 发射 67%** | — | **442 / 1118 / 3311** | 过（cos 0.9999995） | 装载延迟已解决；仍是 v6 的 2–5.7× 慢。每 tile 8.9 µs vs 理想 0.56（16×）。**主会话判定：3 轮内没进 3000 µs，1 CTA/SM 这条路走不通 → attn 停，转 GDN** |
+
+## 踩坑（r12a 实测，接手先看这一节）
+
+| 现象 | 根因 | 解法 |
+|---|---|---|
+| 输出全错 / `Invalid __shared__ write ... out of bounds` | `Layout::kv_one` 是**字节数**却当 `bf16*` 的步长用（`sP + slot * Layout::p_one`），偏移放大 2× 越界 | 所有布局偏移一律字节；指针换算显式 `/2`（`kKvSlotElems`）。`compute-sanitizer --tool memcheck` 直接指到行号 |
+| 测试挂住不动（>60 s 无输出） | `__syncthreads_or` / `__syncthreads` 放进了 `if (tile > 0)` 之类的条件分支 → 部分线程少一次 barrier，与后面的 `__syncthreads()` 错配 | 全 block barrier 必须无条件执行；用 `const bool need = (cond) && __syncthreads_or(x)` 让 barrier 提到条件外 |
+| 数字与基线**一模一样**（tcgen05 被静默跳过） | `gqa.cu` 里的 `extern "C" __attribute__((weak))` 桩 + 真实现的 strong 符号：归档里 `gqa_fa_sm100.o` 排在 `gqa.o` **之后**时，链接器取先看到的弱定义。函数指针常量同样不可靠 | 用 build.rs 传的 host 侧宏分叉（`-DMEGA_SM100` → `GQA_UMMA_RC(...)` 调真实现，否则返回 InvalidValue 回退）。不是 `#if __CUDA_ARCH__`，不在 kernel 体内，合规 |
+| UMMA 读到旧的 P（数值轻微偏） | 普通 `st.shared` 写 P 之后没过渡到 async proxy | 写 P 之后、发 PV 之前必须 `fence.proxy.async.shared::cta` |
+| 加载看起来"带宽不够" | 实际是**延迟受限**：单 CTA、装载链并发请求太少。K/V 全量只有 24.7 MB（T=6019/Hkv=4/D=256），全在 L2，不是 HBM 问题 | 先查每条装载链的 outstanding 请求数，再看要不要 TMA 多级流水 |
+
+### 另一条：UMMA 的 K 跨度必须等于 swizzle atom
+128 B swizzle 下一个 atom 在 K 轴上是 64 个 bf16，而 `make_umma_desc<Major::K>` 要求 `LBO = 0`（K 轴只有 1 个 atom）。
+所以 D=256 的点积必须**按 64 列切成 4 块**、每块单独发一组 MMA，不能在 K 轴上跨块。同理 MN-major（PV 的 V）
+用 LBO 跨 MN 块、SBO 跨 k-atom（8 行 × 128 B）。

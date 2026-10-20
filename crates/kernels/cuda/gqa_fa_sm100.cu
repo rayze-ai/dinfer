@@ -125,37 +125,36 @@ __global__ void __launch_bounds__(kThreads) gqa_fa_umma_kernel(
     cp_commit();
   }
 
-  // K/V tile 装载：每线程负责 1 个 key（tid&63），前后两半点线程分担 4 个维度块。
+  // K/V tile 装载（合并访存，见函数体内注释）。
   auto load_kv = [&](int tile, int slot) {
     const int k0 = tile * kNKI;
-    const int key0 = tid & 63;
-    const int half = tid >> 6;
-    const int pos = k0 + key0;
-    const bool live = pos < seq_len;
-    const bf16 *pk, *pv;
-    if (PAGED) {
-      const int64_t blk = bt[pos / block_size];
-      const bf16* base = cache + (((int64_t)(blk * block_size + pos % block_size)) * Hkv + hk) * 2 * kD;
-      pk = base;
-      pv = base + kD;
-    } else {
-      const int64_t t = q0 + (live ? pos : 0);
-      pk = k + t * kv_stride + (int64_t)hk * kD;
-      pv = v + t * kv_stride + (int64_t)hk * kD;
-    }
     bf16* kt = sK + (size_t)slot * kKvSlotElems;
     bf16* vt = sV + (size_t)slot * kKvSlotElems;
+    // **合并访存**：一个 key 的 256 维 = 32 个 16 B 片，让**相邻线程读相邻的片**（同一行内连续 256 B），
+    // 而不是相邻线程读相邻的 key（相隔 kv_stride=16 KB，每个 16 B 请求独占一条 cache line → L2 流量放大 8×）。
+    // 每 tile: 64 key × 32 片 = 2048 片 / 128 线程 = 16 片/线程。
 #pragma unroll
-    for (int c = 0; c < kDChunks; ++c) {
-      if (((c + half) & 1) != 0) continue;  // 两半交替负责块
-      const int bytes = live ? 16 : 0;
-      bf16* kc = kt + (size_t)c * kOneElems;
-      bf16* vc = vt + (size_t)c * kOneElems;
-#pragma unroll
-      for (int p = 0; p < 8; ++p) {
-        stage16(kc, key0, p, pk + c * 64 + p * 8, bytes);
-        stage16(vc, key0, p, pv + c * 64 + p * 8, bytes);
+    for (int i = 0; i < 16; ++i) {
+      const int idx = tid + kThreads * i;      // 0..2047
+      const int key = idx >> 5;                // 每 key 32 片
+      const int pg = idx & 31;                 // 片号 0..31 = 4 个 64 维块 × 8 片
+      const int c = pg >> 3, p = pg & 7;
+      const int pos = k0 + key;
+      const bool live = pos < seq_len;
+      const bf16 *pk, *pv;
+      if (PAGED) {
+        const int64_t blk = bt[pos / block_size];
+        const bf16* base = cache + (((int64_t)(blk * block_size + pos % block_size)) * Hkv + hk) * 2 * kD;
+        pk = base;
+        pv = base + kD;
+      } else {
+        const int64_t t = q0 + (live ? pos : 0);
+        pk = k + t * kv_stride + (int64_t)hk * kD;
+        pv = v + t * kv_stride + (int64_t)hk * kD;
       }
+      const int bytes = live ? 16 : 0;
+      stage16(kt + (size_t)c * kOneElems, key, p, pk + pg * 8, bytes);
+      stage16(vt + (size_t)c * kOneElems, key, p, pv + pg * 8, bytes);
     }
   };
 
@@ -312,15 +311,22 @@ __global__ void __launch_bounds__(kThreads) gqa_fa_umma_kernel(
     __syncthreads();
 
     unsigned long long t3 = (prof && tid == 0) ? clock64() : 0;
-    // ---- 流水：发 PV(tile) → 发 QK(tile+1)（K/V(tile+1) 已装好）→ 等 PV(tile) → 装 tile+2 ----
-    // 只有 2 个 K/V 槽：tile 用 slot、tile+1 用 slot^1。所以 tile+2 只能进 slot，
-    // 而 slot 正被 PV(tile) 读 → 必须等 PV(tile) 完成。等待放在发完 QK(tile+1) 之后，
-    // 这样 PV(tile) 与 QK(tile+1) 的 MMA 在执行期重叠，等的只是两者的尾巴。
+    // ---- 流水：发 PV(tile) → 等 K/V(tile+1) → 发 QK(tile+1) → 等 PV(tile) → 装 tile+2 ----
+    unsigned long long p0 = (prof && tid == 0) ? clock64() : 0;
     pv(slot, tile == 0);
+    unsigned long long p1 = (prof && tid == 0) ? clock64() : 0;
     if (tile + 1 < n_tiles) {
-      asm volatile("cp.async.wait_group 0;\n" ::);  // 等 K/V(tile+1)（上一轮已发）
+      asm volatile("cp.async.wait_group 0;\n" ::);
       __syncthreads();
+      unsigned long long p2 = (prof && tid == 0) ? clock64() : 0;
       qk(slot ^ 1);
+      if (prof && tid == 0) {
+        atomicAdd(&prof[5], p1 - p0);   // PV 发射
+        atomicAdd(&prof[6], p2 - p1);   // 等 K/V
+        atomicAdd(&prof[7], clock64() - p2);  // QK 发射
+      }
+    } else if (prof && tid == 0) {
+      atomicAdd(&prof[5], p1 - p0);
     }
     if (tile + 2 < n_tiles) {
       umma::mbar_wait(bar + 1, phase_b);
@@ -329,7 +335,6 @@ __global__ void __launch_bounds__(kThreads) gqa_fa_umma_kernel(
       load_kv(tile + 2, slot);
       cp_commit();
     } else if (tile + 1 < n_tiles) {
-      // 收尾：仍要等 PV(tile)，否则下一轮 rescale 会与它竞争。
       umma::mbar_wait(bar + 1, phase_b);
       phase_b ^= 1;
       umma::fence_after_sync();
