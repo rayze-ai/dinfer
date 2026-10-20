@@ -5,6 +5,7 @@
 | `AsyncResultRing` | 两槽 pinned D2H + 票据 FIFO，让 runner 的 `begin/finish` 两段式真正重叠 | `new(stream, depth, rows)`、`enqueue(stream, chosen, n) -> Ticket`、`wait(Ticket)`；`async_sched_enabled()` 读 `ASYNC_SCHED` | `supports_async` 返回 true；`begin` = enqueue + ring.enqueue；`finish` = ring.wait + 组装 |
 | `DecodeGraphs` | 按 batch 桶懒捕获 / 全捕获 CUDA graph | `ensure(n, body)` / `get(n)` / `capture_all(body)`；`body(nb, CapturePhase::{Prepare, Body})`——**Prepare 在捕获外做 H2D**，Body 只 launch | 捕获体闭包（上传假 plan → forward_device → sample_device_fixed） |
 | `StateSlotTable` | 递归状态槽分配（请求 → slot），`release(finished)` + LRU 兜底 | `begin_step(req_ids) -> fresh` / `indices` / `release` | 清零 fresh slot 的状态 |
+| `kv::StateSnapshotPool`（core，scheduler 持有） | 递归状态**快照**槽（design §15.7）：键 = 对齐位置的块 hash → 快照槽，LRU + pin；scheduler 据此发 `BatchPlan.recurrent_resume / recurrent_snapshot (req, 槽)` | executor 只做两件事：forward 前 `restore(槽 → 活槽)` + `has_init=1`；本步 kernel 之后 `save(活槽 → 槽)`（同流 dtod，图外） | 快照区显存（每槽 = 全部递归层状态）、`save/restore` 实现、`load` 从预算扣快照区 |
 | `PlanBuffers` | plan 上传到固定地址缓冲 + pad 到桶（graph 重放只换内容不换地址） | `upload(stream, uploader, plan, pad_to)`、`gather_inflight`、`save_chosen` | 模型特有列（GDN 的 state_idx / has_init）之后追加 |
 
 ## 规则
