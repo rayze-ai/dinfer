@@ -17,7 +17,6 @@ use dinfer_core::runner::BatchMode;
 use dinfer_kernels as k;
 use std::cell::RefCell;
 use dinfer_layers::{bf16, Gemm, Linear, Stream, Tensor, WeightSource};
-use std::collections::HashMap;
 
 /// 一格状态（第 `l` 层的状态张量）。
 pub struct GdnState {
@@ -341,103 +340,5 @@ impl GdnLayer {
     }
 }
 
-/// 请求 → slot 分配表。`RequestId` 首次出现分一个 slot（调用方负责清零该 slot 的状态）；
-/// slot 不够时按"本步不在场且最久未见"的顺序回收。
-pub struct SlotTable {
-    slots: HashMap<u64, usize>,
-    last_seen: HashMap<u64, u64>,
-    free: Vec<usize>,
-    cap: usize,
-    step: u64,
-}
-
-impl SlotTable {
-    pub fn new(cap: usize) -> Self {
-        Self { slots: HashMap::new(), last_seen: HashMap::new(), free: (0..cap).rev().collect(), cap, step: 0 }
-    }
-
-    pub fn cap(&self) -> usize {
-        self.cap
-    }
-
-    /// 请求结束（finish / abort）：归还 slot。不调用它也能工作（LRU 回收兜底），但兜底只能淘汰"本步不在场"的请求——
-    /// 分块 prefill / 被抢占的活请求也可能不在场，会被误当受害者（2026-10-19 B300 c8-long bench 87 条 slot 复用告警）。
-    pub fn release(&mut self, req_ids: &[u64]) {
-        for r in req_ids {
-            if let Some(s) = self.slots.remove(r) {
-                self.last_seen.remove(r);
-                self.free.push(s);
-            }
-        }
-    }
-
-    /// 开始一步：返回本步新分配的 slot（调用方需清零）。
-    pub fn begin_step(&mut self, req_ids: &[u64]) -> Result<Vec<usize>> {
-        self.step += 1;
-        let mut fresh = Vec::new();
-        for &r in req_ids {
-            if self.slots.contains_key(&r) {
-                self.last_seen.insert(r, self.step);
-                continue;
-            }
-            let s = match self.free.pop() {
-                Some(s) => s,
-                None => {
-                    // 回收：本步不在场、且最久未见的请求
-                    let victim = self
-                        .last_seen
-                        .iter()
-                        .filter(|(id, _)| !req_ids.contains(id))
-                        .min_by_key(|(_, &st)| st)
-                        .map(|(id, _)| *id);
-                    match victim {
-                        Some(v) => {
-                            let s = self.slots.remove(&v).expect("victim slot");
-                            self.last_seen.remove(&v);
-                            tracing::debug!(req = v, slot = s, "qwen35: GDN slot 回收");
-                            s
-                        }
-                        None => anyhow::bail!(
-                            "qwen35: GDN slot 用尽（cap {}，本步 {} 请求）；提高 max_num_seqs 预算",
-                            self.cap,
-                            req_ids.len()
-                        ),
-                    }
-                }
-            };
-            self.slots.insert(r, s);
-            self.last_seen.insert(r, self.step);
-            fresh.push(s);
-        }
-        Ok(fresh)
-    }
-
-    /// 本步每请求的 slot（按 `req_ids` 顺序）。
-    pub fn indices(&self, req_ids: &[u64]) -> Vec<i32> {
-        req_ids.iter().map(|r| *self.slots.get(r).expect("slot assigned in begin_step") as i32).collect()
-    }
-
-    pub fn len(&self) -> usize {
-        self.slots.len()
-    }
-    pub fn is_empty(&self) -> bool {
-        self.slots.is_empty()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::SlotTable;
-
-    #[test]
-    fn slot_table_allocates_and_recycles() {
-        let mut t = SlotTable::new(2);
-        assert_eq!(t.begin_step(&[1, 2]).unwrap(), vec![0, 1]);
-        assert_eq!(t.indices(&[2, 1]), vec![1, 0]);
-        // 2 号不在场 → 被回收给 3（复用 2 的 slot 1）
-        assert_eq!(t.begin_step(&[1, 3]).unwrap(), vec![1]);
-        assert_eq!(t.indices(&[3, 1]), vec![1, 0]);
-        // 两个都在场且要新 slot → 报错
-        assert!(t.begin_step(&[1, 3, 4]).is_err());
-    }
-}
+/// 请求 → slot 分配表：公共件 `dinfer_layers::exec::StateSlotTable`（qwen35 GDN 与 kimik3 KDA 同一套）。
+pub use dinfer_layers::exec::StateSlotTable as SlotTable;

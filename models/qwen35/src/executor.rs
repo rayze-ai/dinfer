@@ -4,6 +4,10 @@
 //! logprobs / mask 的步，按 batch 桶（`graph_buckets`）懒捕获一次，之后只换固定地址缓冲的内容再 `Graph::launch`。
 //! 图内 = `forward_device`（64 层）+ `sample_device_fixed`（融合采样 kernel，温度 / top-k / top-p 都是设备缓冲参数）；
 //! 其余步（prefill / 混批 / 惩罚 / logprobs）eager。还没有跨流 pair / KV host tier / PD 分离 / TP 通信。
+//!
+//! 异步调度（性能 loop 第 8 轮，与 Qwen3 同一套公共件 `dinfer_layers::exec`）：纯 decode 步走 `begin`（上传 + 入队 +
+//! 异步 D2H 到 pinned 槽，不等 GPU）/ `finish`（等上一票）；在飞的 token 行由图内 `row_gather` 从 `prev_chosen` 取。
+//! `ASYNC_SCHED=0` 关。
 //! 采样流水与 Qwen3 同序：penalties → temperature → min_p → top_k/top_p → 多项式采样（greedy 行 argmax）→ logprobs。
 //!
 //! GDN 状态与图：recurrent / conv1d_update kernel 对每一行都读写 `state[state_indices[i]]`，所以捕获用的假 plan
@@ -12,41 +16,24 @@
 //!
 //! GDN 状态：每步按 `RequestId` 分 slot（`SlotTable`）；**本步首个 token 位置为 0 的请求**当作从头开始
 //! （新请求 / 被抢占后重算），清零它的 conv + 递推状态，`has_initial = 0`；其余 `has_initial = 1`。
-use crate::gdn::SlotTable;
 use crate::model::{Forward, ModelScratch, Qwen35Model};
 use crate::layer::StepMeta;
 use anyhow::{ensure, Context, Result};
 use dinfer_core::runner::{BatchMode, BatchPlan, ModelExecutor};
 use dinfer_core::sampler::{SampleBatch, TokenLogprobs};
 use dinfer_kernels as k;
-use dinfer_kernels::Graph;
+use dinfer_layers::exec::{async_sched_enabled, decode_capture_plan, graph_capture_eager, AsyncResultRing, CapturePhase, DecodeGraphs, PlanBuffers, StateSlotTable, Ticket};
 use dinfer_layers::{Gemm, PinnedUploader, Stream, Tensor};
 
-/// CUDA graph 的 batch 桶（与 Qwen3 同：2 的幂 + 上限）。
-pub fn graph_buckets(max_rows: usize) -> Vec<usize> {
-    let mut v: Vec<usize> = [1usize, 2, 4, 8, 16, 32, 64, 128, 256].into_iter().filter(|&b| b < max_rows).collect();
-    v.push(max_rows);
-    v
-}
-
-struct DecodeGraph {
-    batch: usize,
-    graph: Graph,
-}
+pub use dinfer_layers::exec::graph_buckets;
 
 /// 固定地址的每 step 输入缓冲。
 struct StepBuffers {
-    ids: Tensor<i32>,   // [max_tokens]
-    pos: Tensor<i32>,   // [max_tokens]
-    slots: Tensor<i64>, // [max_tokens]
-    rows: Tensor<i32>,  // [max_rows]
-    cu: Tensor<i32>,    // [max_rows + 1]
-    seq: Tensor<i32>,   // [max_rows]
-    bt: Tensor<i32>,    // [max_rows * max_blocks]
-    /// GDN：每请求的 slot 与"是否有历史状态"。
+    /// plan 列（ids / pos / slot_mapping / rows / cu / seq / block_table + 异步 gather）：公共件 `PlanBuffers`。
+    plan: PlanBuffers,
+    /// GDN：每请求的 slot 与"是否有历史状态"（模型特有列，`upload_plan` 在公共列之后追加）。
     state_idx: Tensor<i32>, // [max_rows]
     has_init: Tensor<i32>,  // [max_rows]
-    max_blocks: usize,
     // 采样列
     temperature: Tensor<f32>,
     temp01: Tensor<f32>,
@@ -73,16 +60,9 @@ impl StepBuffers {
         let z32 = |n: usize| Tensor::<i32>::zeros(s, &[n.max(1)]);
         let zf = |n: usize| Tensor::<f32>::zeros(s, &[n.max(1)]);
         Ok(Self {
-            ids: z32(mt)?,
-            pos: z32(mt)?,
-            slots: Tensor::<i64>::zeros(s, &[mt.max(1)])?,
-            rows: z32(rows)?,
-            cu: z32(rows + 1)?,
-            seq: z32(rows)?,
-            bt: z32(rows * max_blocks)?,
+            plan: PlanBuffers::alloc(s, mt, rows, max_blocks)?,
             state_idx: z32(rows)?,
             has_init: z32(rows)?,
-            max_blocks,
             temperature: zf(rows)?,
             temp01: zf(rows)?,
             top_k: z32(rows)?,
@@ -109,7 +89,7 @@ pub struct Qwen35Executor {
     pub stream: Stream,
     pub gemm: Gemm,
     pub model: Qwen35Model,
-    pub slots: SlotTable,
+    pub slots: StateSlotTable,
     logits: Tensor<f32>,
     work: Tensor<f32>,
     raw: Tensor<f32>,
@@ -122,11 +102,17 @@ pub struct Qwen35Executor {
     /// GDN chunk prefill 的共享工作区（48 层共用；按需增长）。`GDN_PREFILL=recurrent` 时关闭。
     gdn_chunk: Option<crate::gdn::GdnChunkWorkspace>,
     gdn_chunk_enabled: bool,
-    /// decode 图（按 batch 桶，懒捕获）。
-    graphs: Vec<DecodeGraph>,
-    graphs_enabled: bool,
+    /// decode 图（按 batch 桶，懒捕获；公共件）。
+    graphs: DecodeGraphs,
     pub graph_steps: u64,
     pub eager_steps: u64,
+    /// 异步调度：pinned 槽环 + 在飞票据（engine 先 begin n+1 再 finish n，最多 2 在飞）。
+    async_ring: AsyncResultRing,
+    async_inflight: std::collections::VecDeque<Ticket>,
+    /// 当前 plan 是否是插队 prefill（采样后不写 prev_chosen）。enqueue 时从 plan 读入。
+    skip_prev_chosen: bool,
+    /// 同步 begin/finish 兜底（runner 默认实现用）。
+    sync_stash: Option<(Vec<Vec<u32>>, Vec<Vec<u32>>)>,
 }
 
 impl Qwen35Executor {
@@ -159,8 +145,10 @@ impl Qwen35Executor {
             tracing::info!("gemm autotune: off (GEMM_TUNE=off)");
         }
         let (mt, rows, v) = (model.max_tokens, model.max_logits_rows, model.cfg.vocab_size as usize);
-        let slots = SlotTable::new(model.num_slots);
+        let slots = StateSlotTable::new(model.num_slots);
         let buf = StepBuffers::alloc(&stream, mt, rows, max_blocks)?;
+        let graphs = DecodeGraphs::new(&stream, enable_graphs && std::env::var("NO_GRAPH").is_err(), rows);
+        let async_ring = AsyncResultRing::new(&stream, 2, rows)?;
         let logits = Tensor::zeros(&stream, &[rows * v])?;
         let work = Tensor::zeros(&stream, &[rows * v])?;
         let raw = Tensor::zeros(&stream, &[rows * v])?;
@@ -179,12 +167,15 @@ impl Qwen35Executor {
             alt: None,
             gdn_chunk: None,
             gdn_chunk_enabled: !matches!(std::env::var("GDN_PREFILL").as_deref(), Ok("recurrent")),
-            graphs: Vec::new(),
-            graphs_enabled: enable_graphs && std::env::var("NO_GRAPH").is_err(),
+            graphs,
             graph_steps: 0,
             eager_steps: 0,
+            async_ring,
+            async_inflight: std::collections::VecDeque::with_capacity(2),
+            skip_prev_chosen: false,
+            sync_stash: None,
         };
-        if ex.graphs_enabled && std::env::var("GRAPH_CAPTURE").is_ok_and(|v| v == "eager") {
+        if ex.graphs.enabled() && graph_capture_eager() {
             ex.capture_decode_graphs()?;
         }
         Ok(ex)
@@ -197,13 +188,14 @@ impl Qwen35Executor {
 
     /// 上传 plan 并执行一步（不取结果）。
     fn enqueue(&mut self, plan: &BatchPlan) -> Result<usize> {
+        self.skip_prev_chosen = plan.skip_prev_chosen;
         let n = plan.num_reqs();
         let t = plan.total_tokens();
         let nrows = plan.logits_rows.len();
         ensure!(t <= self.model.max_tokens, "batch of {t} tokens > max_tokens {}", self.model.max_tokens);
         ensure!(nrows <= self.model.max_logits_rows, "rows {nrows} > max_logits_rows");
         ensure!(nrows >= n && plan.sample.num_rows() == nrows, "rows {nrows} / sample {}", plan.sample.num_rows());
-        ensure!(plan.max_blocks <= self.buf.max_blocks, "block_table {} > buffer {}", plan.max_blocks, self.buf.max_blocks);
+        ensure!(plan.max_blocks <= self.buf.plan.max_blocks, "block_table {} > buffer {}", plan.max_blocks, self.buf.plan.max_blocks);
         ensure!(!plan.sample.any_mask, "qwen35 executor: guided decoding 未接（里程碑 4 不做）");
 
         if self.model.trace {
@@ -252,12 +244,12 @@ impl Qwen35Executor {
         if graph_eligible {
             self.ensure_graph(n)?;
         }
-        let use_graph = graph_eligible && self.graph_for(n).is_some();
+        let use_graph = graph_eligible && self.graphs.get(n).is_some();
         if use_graph {
-            let nb = self.graph_for(n).unwrap().batch;
+            let nb = self.graphs.get(n).unwrap().0;
             self.upload_plan(plan, &state_idx, &has_init, nb)?;
             self.upload_sampling(sb, nb)?;
-            self.graph_for(n).unwrap().graph.launch().context("launch decode graph")?;
+            self.graphs.get(n).unwrap().1.launch().context("launch decode graph")?;
             self.last_logprobs = vec![Vec::new(); n];
             if self.graph_steps == 0 || self.model.trace {
                 tracing::info!(n, bucket = nb, "qwen35: decode step via cuda graph");
@@ -282,41 +274,7 @@ impl Qwen35Executor {
     /// block 0、GDN slot = 废纸篓）。非图路径 `nb == n`。
     fn upload_plan(&mut self, plan: &BatchPlan, state_idx: &[i32], has_init: &[i32], nb: usize) -> Result<()> {
         let s = &self.stream;
-        let n = plan.num_reqs();
-        let t = plan.total_tokens();
-        let pad = nb - n;
-        let tt = t + pad;
-        self.buf.up.reset_step();
-        let mut ids = plan.input_ids.clone();
-        let mut pos = plan.positions.clone();
-        let mut slots = plan.slot_mapping.clone();
-        ids.resize(tt, 0);
-        pos.resize(tt, 0);
-        slots.resize(tt, -1);
-        self.buf.up.push(s, &ids, &mut self.buf.ids.data)?;
-        self.buf.up.push(s, &pos, &mut self.buf.pos.data)?;
-        self.buf.up.push(s, &slots, &mut self.buf.slots.data)?;
-        let mut rows = plan.logits_rows.clone();
-        for i in 0..pad {
-            rows.push((t + i) as i32);
-        }
-        self.buf.up.push(s, &rows, &mut self.buf.rows.data)?;
-        let mut cu = plan.cu_seqlens.clone();
-        for i in n..nb {
-            cu.push(cu[i] + 1);
-        }
-        self.buf.up.push(s, &cu, &mut self.buf.cu.data)?;
-        let mut seq = plan.seq_lens.clone();
-        seq.resize(nb, 1);
-        self.buf.up.push(s, &seq, &mut self.buf.seq.data)?;
-        let mb = self.buf.max_blocks;
-        let mut bt = vec![0i32; nb * mb];
-        for r in 0..n {
-            for j in 0..plan.max_blocks {
-                bt[r * mb + j] = plan.block_table[r * plan.max_blocks + j];
-            }
-        }
-        self.buf.up.push(s, &bt, &mut self.buf.bt.data)?;
+        let (_tt, nb, _nrows) = self.buf.plan.upload(s, &mut self.buf.up, plan, nb)?;
         let mut si = state_idx.to_vec();
         si.resize(nb, self.scratch_slot());
         self.buf.up.push(s, &si, &mut self.buf.state_idx.data)?;
@@ -330,6 +288,8 @@ impl Qwen35Executor {
     /// forward（固定缓冲、显式形状）。decode 纯批时可被 capture：期间不分配 / 不 D2H / 不同步（trace 关掉）。
     fn forward_device(&mut self, plan: &BatchPlan, req_ids: &[u64], t: usize, n: usize, nrows: usize, max_seqlen: usize) -> Result<()> {
         let s = &self.stream;
+        // 异步调度：ids[i] = prev_chosen[gather_idx[i]]（gather_idx<0 的行不动）。进图；非异步步全 -1 等于空操作。
+        self.buf.plan.gather_inflight(s, t)?;
         // GDN chunk prefill 工作区：只有 prefill 步（有请求本步 > 1 token）才建表；GDN_PREFILL=recurrent 回退。
         let gdn_chunk = if t > n && self.gdn_chunk_enabled {
             let mut ws = self.gdn_chunk.take().unwrap_or_default();
@@ -340,22 +300,22 @@ impl Qwen35Executor {
         };
         let meta = StepMeta {
             mode: plan.mode,
-            cu_seqlens: &self.buf.cu,
-            seq_lens: &self.buf.seq,
-            block_table: &self.buf.bt,
+            cu_seqlens: &self.buf.plan.cu,
+            seq_lens: &self.buf.plan.seq,
+            block_table: &self.buf.plan.bt,
             state_indices: &self.buf.state_idx,
             has_initial: &self.buf.has_init,
             num_reqs: n,
-            max_blocks: self.buf.max_blocks,
+            max_blocks: self.buf.plan.max_blocks,
             max_seqlen,
             gdn_chunk: gdn_chunk.as_ref(),
         };
         let f = Forward {
-            input_ids: &self.buf.ids,
-            positions: &self.buf.pos,
-            slot_mapping: &self.buf.slots,
+            input_ids: &self.buf.plan.ids,
+            positions: &self.buf.plan.pos,
+            slot_mapping: &self.buf.plan.slots,
             meta,
-            logits_rows: &self.buf.rows,
+            logits_rows: &self.buf.plan.rows,
             t,
             rows: nrows,
             req_ids,
@@ -373,95 +333,61 @@ impl Qwen35Executor {
         let s = &self.stream;
         let v = self.model.cfg.vocab_size as usize;
         s.dtod_copy_n(&self.logits.data, &mut self.work.data, nb * v)?;
-        let StepBuffers { chosen, temperature, min_p, top_k, top_p, temp01, seeds, offsets, .. } = &mut self.buf;
+        let StepBuffers { chosen, temperature, min_p, top_k, top_p, temp01, seeds, offsets, plan, .. } = &mut self.buf;
         let mut wv = self.work.data.slice_mut(..nb * v);
         let mut ch = chosen.data.slice_mut(..nb);
         k::sample_fused_f32(
             s, &mut wv, &temperature.data, &min_p.data, &top_k.data, &top_p.data, &temp01.data, &seeds.data,
             &offsets.data, &mut ch, nb, v,
-        )
+        )?;
+        // 异步调度：保存本步采样给下一步 gather（图内；非异步时无害）
+        plan.save_chosen(s, &chosen.data, nb)
+    }
+
+    /// 采样后把 chosen 存到 prev_chosen 供下一步 gather；插队 prefill 步（skip_prev_chosen）不写。
+    fn save_prev_chosen(&mut self, nrows: usize) -> Result<()> {
+        if self.skip_prev_chosen {
+            return Ok(());
+        }
+        let StepBuffers { chosen, plan, .. } = &mut self.buf;
+        plan.save_chosen(&self.stream, &chosen.data, nrows)
     }
 
     // ---------------------------------------------------------------- CUDA graph
 
-    /// 捕获用的假 decode plan（slot=-1 不写 KV、seq_len=1、温度 0；GDN slot 全部指废纸篓）。
-    #[allow(clippy::field_reassign_with_default)]
-    fn capture_plan(nb: usize) -> BatchPlan {
-        let mut p = BatchPlan::default();
-        p.req_ids = (0..nb as u64).collect();
-        p.num_tokens = vec![1; nb];
-        p.input_ids = vec![0; nb];
-        p.positions = vec![0; nb];
-        p.slot_mapping = vec![-1; nb];
-        p.cu_seqlens = (0..=nb as i32).collect();
-        p.seq_lens = vec![1; nb];
-        p.block_table = vec![0; nb];
-        p.max_blocks = 1;
-        p.logits_rows = (0..nb as i32).collect();
-        p.logits_row_start = (0..=nb).collect();
-        p.spec_tokens = vec![Vec::new(); nb];
-        p.next_known = vec![-1; nb];
-        p.mode = BatchMode::Decode;
-        p.sample.clear();
-        for _ in 0..nb {
-            p.sample.push(&dinfer_core::sample::SamplingParams { temperature: 0.0, ..Default::default() }, 0, &[0], 1);
+    /// 捕获体：`Prepare` 上传假 plan（GDN slot 全部指废纸篓）+ 采样参数（capture 外）；`Body` = forward + 采样。
+    fn capture_body(&mut self, nb: usize, phase: CapturePhase) -> Result<()> {
+        let p = decode_capture_plan(nb);
+        match phase {
+            CapturePhase::Prepare => {
+                let si = vec![self.scratch_slot(); nb];
+                let hi = vec![1i32; nb];
+                self.upload_plan(&p, &si, &hi, nb)?;
+                self.upload_sampling(&p.sample, nb)
+            }
+            CapturePhase::Body => {
+                let trace = std::mem::replace(&mut self.model.trace, false);
+                let r = self.forward_device(&p, &p.req_ids, nb, nb, nb, 1).and_then(|_| self.sample_device_fixed(nb));
+                self.model.trace = trace;
+                r
+            }
         }
-        p
-    }
-
-    /// 捕获一个 batch 桶的 decode 图：先 eager 预热一次（cuBLASLt 启发式 / 模块加载在 capture 外），再捕获。
-    fn capture_bucket(&mut self, nb: usize) -> Result<()> {
-        let t0 = std::time::Instant::now();
-        let p = Self::capture_plan(nb);
-        let si = vec![self.scratch_slot(); nb];
-        let hi = vec![1i32; nb];
-        let trace = std::mem::replace(&mut self.model.trace, false);
-        let r = (|| -> Result<Graph> {
-            self.upload_plan(&p, &si, &hi, nb)?;
-            self.upload_sampling(&p.sample, nb)?;
-            self.forward_device(&p, &p.req_ids, nb, nb, nb, 1)?;
-            self.sample_device_fixed(nb)?;
-            self.stream.synchronize()?;
-            self.stream.begin_capture()?;
-            let r = self
-                .forward_device(&p, &p.req_ids, nb, nb, nb, 1)
-                .context("capture: forward")
-                .and_then(|_| self.sample_device_fixed(nb).context("capture: sample"));
-            let g = self.stream.end_capture();
-            r?;
-            g.with_context(|| format!("capture decode graph for batch {nb}"))
-        })();
-        self.model.trace = trace;
-        let graph = r?;
-        self.graphs.push(DecodeGraph { batch: nb, graph });
-        self.graphs.sort_by_key(|g| g.batch);
-        self.stream.synchronize()?;
-        tracing::info!(bucket = nb, elapsed_ms = t0.elapsed().as_millis() as u64, "qwen35: cuda graph captured (decode)");
-        Ok(())
     }
 
     /// 启动时一次捕获全部桶（GRAPH_CAPTURE=eager）。
     fn capture_decode_graphs(&mut self) -> Result<()> {
-        let t0 = std::time::Instant::now();
-        let buckets = graph_buckets(self.model.max_logits_rows);
-        for &nb in &buckets {
-            self.capture_bucket(nb)?;
-        }
-        tracing::info!(buckets = ?buckets, elapsed_ms = t0.elapsed().as_millis() as u64, "qwen35: cuda graphs captured for decode");
-        Ok(())
+        let mut graphs = std::mem::replace(&mut self.graphs, DecodeGraphs::new(&self.stream, false, 0));
+        let r = graphs.capture_all(|nb, ph| self.capture_body(nb, ph));
+        self.graphs = graphs;
+        r
     }
 
     /// 懒捕获：n 行 decode 需要的桶若还没有图，现在捕获。
     fn ensure_graph(&mut self, n: usize) -> Result<()> {
-        if !self.graphs_enabled || self.graph_for(n).is_some() {
-            return Ok(());
-        }
-        let Some(&nb) = graph_buckets(self.model.max_logits_rows).iter().find(|&&b| b >= n) else { return Ok(()) };
-        self.capture_bucket(nb)
-    }
-
-    fn graph_for(&self, n: usize) -> Option<&DecodeGraph> {
-        self.graphs.iter().find(|g| g.batch >= n)
+        let mut graphs = std::mem::replace(&mut self.graphs, DecodeGraphs::new(&self.stream, false, 0));
+        let r = graphs.ensure(n, |nb, ph| self.capture_body(nb, ph));
+        self.graphs = graphs;
+        r
     }
 
     fn collect(&mut self, n: usize) -> Result<Vec<i32>> {
@@ -523,10 +449,12 @@ impl Qwen35Executor {
             let mut ch = self.buf.chosen.data.slice_mut(..nrows);
             k::argmax_f32_n(&self.stream, &lg, &mut ch, nrows, v)?;
             self.last_logprobs = vec![Vec::new(); nrows];
+            self.save_prev_chosen(nrows)?;
             return Ok(());
         }
         self.upload_sampling(sb, nrows)?;
-        let s = &self.stream;
+        let s = self.stream.clone(); // Arc 句柄：下面还要 &mut self（save_prev_chosen）
+        let s = &s;
         s.dtod_copy_n(&self.logits.data, &mut self.work.data, nrows * v)?;
         if sb.max_logprobs.is_some() {
             s.dtod_copy_n(&self.logits.data, &mut self.raw.data, nrows * v)?;
@@ -576,6 +504,7 @@ impl Qwen35Executor {
                 k::argmax_f32_n(s, &wv, &mut ch, nrows, v)?;
             }
         }
+        self.save_prev_chosen(nrows)?;
         self.last_logprobs = vec![Vec::new(); nrows];
         if let Some(kmax) = sb.max_logprobs {
             let kmax = kmax as usize;
@@ -611,6 +540,33 @@ impl Qwen35Executor {
 }
 
 impl ModelExecutor for Qwen35Executor {
+    fn supports_async(&self) -> bool {
+        async_sched_enabled()
+    }
+
+    /// 异步第一段：上传 + 入队 + 异步 D2H（不等 GPU）。runner 只对 `async_eligible` 的 plan 调用（纯 decode）。
+    fn begin(&mut self, plan: &BatchPlan) -> Result<()> {
+        self.stream.bind_ctx()?;
+        let n = self.enqueue(plan).context("qwen35 enqueue (async)")?;
+        let ticket = self.async_ring.enqueue(&self.stream, &self.buf.chosen.data, n)?;
+        self.async_inflight.push_back(ticket);
+        Ok(())
+    }
+
+    fn finish(&mut self, generated: &mut Vec<Vec<u32>>, drafts: &mut Vec<Vec<u32>>) -> Result<()> {
+        let ticket = self.async_inflight.pop_front().context("executor finish without begin")?;
+        let chosen = self.async_ring.wait(ticket)?;
+        push_tokens(generated, drafts, &chosen);
+        Ok(())
+    }
+
+    fn stash_sync_result(&mut self, g: Vec<Vec<u32>>, d: Vec<Vec<u32>>) {
+        self.sync_stash = Some((g, d));
+    }
+    fn take_sync_result(&mut self) -> (Vec<Vec<u32>>, Vec<Vec<u32>>) {
+        self.sync_stash.take().unwrap_or_default()
+    }
+
     fn forward_sample(
         &mut self,
         plan: &BatchPlan,

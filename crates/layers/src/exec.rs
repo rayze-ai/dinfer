@@ -96,6 +96,14 @@ struct DecodeGraph {
     graph: Graph,
 }
 
+/// 捕获闭包的两个阶段：`Prepare` 在 capture 外（上传假 plan / 采样参数——H2D 不能进图：图会记下 host 指针，
+/// 重放时读已释放的 Vec），`Body` 进图（forward + 采样），预热一次再在 capture 内跑一次。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapturePhase {
+    Prepare,
+    Body,
+}
+
 /// decode 图表：按桶懒捕获，`get(n)` 取 ≥ n 行的最小桶图。
 pub struct DecodeGraphs {
     graphs: Vec<DecodeGraph>,
@@ -136,9 +144,9 @@ impl DecodeGraphs {
         self.graphs.iter().find(|g| g.batch >= n).map(|g| (g.batch, &g.graph))
     }
 
-    /// 懒捕获：启用且 n 行没有可用图时捕获其桶。`body(nb)` 是进图的工作（上传假 plan + forward + 采样），
-    /// 会被调用两次：一次预热（cuBLASLt 启发式 / 模块加载在 capture 外完成），一次在 capture 内。
-    pub fn ensure(&mut self, n: usize, body: impl FnMut(usize) -> Result<()>) -> Result<()> {
+    /// 懒捕获：启用且 n 行没有可用图时捕获其桶。`body(nb, phase)`：`Prepare` 一次（capture 外），`Body` 两次
+    ///（预热：cuBLASLt 启发式 / 模块加载在 capture 外完成；再一次在 capture 内）。
+    pub fn ensure(&mut self, n: usize, body: impl FnMut(usize, CapturePhase) -> Result<()>) -> Result<()> {
         if !self.enabled || self.get(n).is_some() {
             return Ok(());
         }
@@ -147,7 +155,7 @@ impl DecodeGraphs {
     }
 
     /// 启动时一次捕获全部桶。
-    pub fn capture_all(&mut self, mut body: impl FnMut(usize) -> Result<()>) -> Result<()> {
+    pub fn capture_all(&mut self, mut body: impl FnMut(usize, CapturePhase) -> Result<()>) -> Result<()> {
         let t0 = std::time::Instant::now();
         let buckets = self.buckets();
         for &nb in &buckets {
@@ -160,14 +168,15 @@ impl DecodeGraphs {
         Ok(())
     }
 
-    /// 捕获一个桶：预热 → 同步 → capture。
-    pub fn capture(&mut self, nb: usize, mut body: impl FnMut(usize) -> Result<()>) -> Result<()> {
+    /// 捕获一个桶：Prepare → Body 预热 → 同步 → capture(Body)。
+    pub fn capture(&mut self, nb: usize, mut body: impl FnMut(usize, CapturePhase) -> Result<()>) -> Result<()> {
         let t0 = std::time::Instant::now();
         let stream = self.stream.clone();
-        body(nb).context("graph capture: warmup")?;
+        body(nb, CapturePhase::Prepare).context("graph capture: prepare")?;
+        body(nb, CapturePhase::Body).context("graph capture: warmup")?;
         stream.synchronize()?;
         stream.begin_capture()?;
-        let r = body(nb).context("graph capture: body");
+        let r = body(nb, CapturePhase::Body).context("graph capture: body");
         let g = stream.end_capture();
         r?;
         let graph = g.with_context(|| format!("capture decode graph for batch {nb}"))?;

@@ -21,7 +21,7 @@ use anyhow::{ensure, Context, Result};
 use dinfer_core::runner::{BatchMode, BatchPlan, ModelExecutor, PairLogprobs};
 use dinfer_core::sampler::{SampleBatch, TokenLogprobs};
 use dinfer_kernels as k;
-use dinfer_layers::exec::{async_sched_enabled, decode_capture_plan, graph_capture_eager, AsyncResultRing, DecodeGraphs, PlanBuffers, Ticket};
+use dinfer_layers::exec::{async_sched_enabled, decode_capture_plan, graph_capture_eager, AsyncResultRing, CapturePhase, DecodeGraphs, PlanBuffers, Ticket};
 use dinfer_layers::{Gemm, Stream, Tensor, Event, TimingEvent, PinnedUploader, HostArena, PinnedPool, PinnedBuf};
 
 /// 固定地址的每 step 输入缓冲。
@@ -489,19 +489,25 @@ impl Qwen3Executor {
 
     // ---------------------------------------------------------------- CUDA graph
 
-    /// 捕获体（上传假 plan + forward + 采样），`DecodeGraphs` 预热一次再在 capture 内跑一次。
-    fn capture_body(&mut self, nb: usize) -> Result<()> {
-        let p = decode_capture_plan(nb);
-        self.upload_plan(&p, nb)?;
-        self.upload_sampling(&p.sample, nb)?;
-        self.forward_device(BatchMode::Decode, nb, nb, nb, 1)?;
-        self.sample_device_fixed(nb)
+    /// 捕获体：`Prepare` 上传假 plan + 采样参数（capture 外）；`Body` = forward + 采样（预热一次，再在 capture 内一次）。
+    fn capture_body(&mut self, nb: usize, phase: CapturePhase) -> Result<()> {
+        match phase {
+            CapturePhase::Prepare => {
+                let p = decode_capture_plan(nb);
+                self.upload_plan(&p, nb)?;
+                self.upload_sampling(&p.sample, nb)
+            }
+            CapturePhase::Body => {
+                self.forward_device(BatchMode::Decode, nb, nb, nb, 1)?;
+                self.sample_device_fixed(nb)
+            }
+        }
     }
 
     /// 启动时一次捕获全部桶（GRAPH_CAPTURE=eager）。
     fn capture_decode_graphs(&mut self) -> Result<()> {
         let mut graphs = std::mem::replace(&mut self.graphs, DecodeGraphs::new(&self.stream, false, 0));
-        let r = graphs.capture_all(|nb| self.capture_body(nb));
+        let r = graphs.capture_all(|nb, ph| self.capture_body(nb, ph));
         self.graphs = graphs;
         r
     }
@@ -512,7 +518,7 @@ impl Qwen3Executor {
             return Ok(());
         }
         let mut graphs = std::mem::replace(&mut self.graphs, DecodeGraphs::new(&self.stream, false, 0));
-        let r = graphs.ensure(n, |nb| self.capture_body(nb));
+        let r = graphs.ensure(n, |nb, ph| self.capture_body(nb, ph));
         self.graphs = graphs;
         r
     }
