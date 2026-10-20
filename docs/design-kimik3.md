@@ -109,6 +109,10 @@ kimik3/src/
   xtml.rs        encoding_k3.py 移植：build_chat_segments → Segment{text, allow_special}（C-4a ✅，Dialect::{Hf,Serving}）
   parser.rs      思考段 / 工具调用流式解析（C-4a ✅；对照 vllm/parser/kimi_k3.py、reasoning/kimi_k3_reasoning_parser.py、tool_parsers/kimi_k3_tool_parser.py；格式见 §1.4b）
   weights.rs     名字映射与融合规则（见 2.1）；MXFP4 专家权重按 [E, 2*I, H/2] 打包
+  executor.rs    KimiK3Executor: ModelExecutor（C-4b ✅）：直接用 dinfer_layers::exec 四公共件（PlanBuffers / StateSlotTable / DecodeGraphs / AsyncResultRing）；
+                 KDA 槽（+1 废纸篓）、MLA paged latent（slot_mapping / block_table 公共列）、KDA chunk 工作区按步 prepare、采样流水同 Qwen3
+  service.rs     ServeOptions + KimiK3Service::start + impl ChatBackend（C-4b ✅）：前 N 层（--layers / KIMIK3_LAYERS，冒烟）、KvCacheSpec::Mla、
+                 render = xtml（--chat-dialect hf|serving）、输出流 bytes 增量 detokenize（特殊 token 不跳）→ OutputParser；见 docs/loops/k3-serve.md
 ```
 
 ### 2.1 KDA 层权重表（B300 真分片 header 核对，2026-10-19，第 1 层 `model-00002-of-000096`）
