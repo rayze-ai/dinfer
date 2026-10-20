@@ -222,7 +222,8 @@ async fn main() -> Result<()> {
                 let _ = (
                     &role, kv_port, &peer, pd_wait_ms, pd_pool_bufs, &kv_transport, kv_slots, tp, dp, mtp,
                     &speculative, num_speculative_tokens, ngram_min, ngram_max, kv_host_gib,
-                , gdn_snapshot_tokens, gdn_snapshot_gib);
+                    gdn_snapshot_tokens, gdn_snapshot_gib,
+                );
                 let opt = dinfer_kimik3::service::ServeOptions {
                     model_dir: model,
                     tokenizer_dir: tokenizer,
