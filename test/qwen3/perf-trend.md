@@ -133,6 +133,14 @@
 | | | | c32 | vllm | dinfer | 9445 (+15%) | 22.5 (+71%) | 3.18 (+4%) |
 | bench_r7gate | 2026-10-20 | 第 7 轮公共 trait（take_step_phases / phases 字段）回归门禁 | c8-long | vllm | vllm（基线） | 1881 | 68.3 | 3.77 |
 | | | | c8-long | vllm | dinfer | 2015 (+7%) | 39.1 (+43%) | 3.68 (+2%) |
+| bench_r8gate | 2026-10-20 | 第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐 + 抢占丢 token 修）公共 scheduler/kv 回归门禁 | c1 | vllm | vllm（基线） | 446 | 17.4 | 2.12 |
+| | | | c1 | vllm | dinfer | 566 (+27%) | 3.8 (+78%) | 1.75 (+17%) |
+| bench_r8gate | 2026-10-20 | 第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐 + 抢占丢 token 修）公共 scheduler/kv 回归门禁 | c8 | vllm | vllm（基线） | 2873 | 36.1 | 2.55 |
+| | | | c8 | vllm | dinfer | 3446 (+20%) | 7.5 (+79%) | 2.25 (+12%) |
+| bench_r8gate | 2026-10-20 | 第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐 + 抢占丢 token 修）公共 scheduler/kv 回归门禁 | c32 | vllm | vllm（基线） | 8269 | 73.7 | 3.32 |
+| | | | c32 | vllm | dinfer | 9424 (+14%) | 22.5 (+69%) | 3.18 (+4%) |
+| bench_r8gate | 2026-10-20 | 第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐 + 抢占丢 token 修）公共 scheduler/kv 回归门禁 | c8-long | vllm | vllm（基线） | 1906 | 67.5 | 3.75 |
+| | | | c8-long | vllm | dinfer | 2005 (+5%) | 39.0 (+42%) | 3.68 (+2%) |
 | poisson1 | 2026-10-17 | 首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15 | r8 | vllm | vllm（基线） | 1066 | 22.6 | 3.21 |
 | | | | r8 | vllm | dinfer_xs1 | 1065 (-0%) | 15.2 (+33%) | 3.12 (+3%) |
 | | | | r8 | vllm | dinfer_xs0 | 1065 (-0%) | 15.1 (+33%) | 3.17 (+1%) |

@@ -1,0 +1,1 @@
+第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐 + 抢占丢 token 修）公共 scheduler/kv 回归门禁

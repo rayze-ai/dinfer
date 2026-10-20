@@ -511,6 +511,26 @@ bench_r7gate,2026-10-20,第 7 轮公共 trait（take_step_phases / phases 字段
 bench_r7gate,2026-10-20,第 7 轮公共 trait（take_step_phases / phases 字段）回归门禁,c8-long,ttft_p99_ms,87.249,96.864,0.901,,lower,other,4090,vllm,dinfer,qwen3
 bench_r7gate,2026-10-20,第 7 轮公共 trait（take_step_phases / phases 字段）回归门禁,c8-long,tpot_p50_ms,3.682,3.773,0.976,,lower,other,4090,vllm,dinfer,qwen3
 bench_r7gate,2026-10-20,第 7 轮公共 trait（take_step_phases / phases 字段）回归门禁,c8-long,failed,0.000,0.000,,,lower,other,4090,vllm,dinfer,qwen3
+bench_r8gate,2026-10-20,第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐 + 抢占丢 token 修）公共 scheduler/kv 回归门禁,c1,out_tok_per_s,566.083,446.240,1.269,,higher,other,4090,vllm,dinfer,qwen3
+bench_r8gate,2026-10-20,第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐 + 抢占丢 token 修）公共 scheduler/kv 回归门禁,c1,ttft_p50_ms,3.849,17.435,0.221,,lower,other,4090,vllm,dinfer,qwen3
+bench_r8gate,2026-10-20,第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐 + 抢占丢 token 修）公共 scheduler/kv 回归门禁,c1,ttft_p99_ms,4.292,19.428,0.221,,lower,other,4090,vllm,dinfer,qwen3
+bench_r8gate,2026-10-20,第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐 + 抢占丢 token 修）公共 scheduler/kv 回归门禁,c1,tpot_p50_ms,1.749,2.119,0.825,,lower,other,4090,vllm,dinfer,qwen3
+bench_r8gate,2026-10-20,第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐 + 抢占丢 token 修）公共 scheduler/kv 回归门禁,c1,failed,0.000,0.000,,,lower,other,4090,vllm,dinfer,qwen3
+bench_r8gate,2026-10-20,第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐 + 抢占丢 token 修）公共 scheduler/kv 回归门禁,c8,out_tok_per_s,3446.070,2872.985,1.199,,higher,other,4090,vllm,dinfer,qwen3
+bench_r8gate,2026-10-20,第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐 + 抢占丢 token 修）公共 scheduler/kv 回归门禁,c8,ttft_p50_ms,7.544,36.129,0.209,,lower,other,4090,vllm,dinfer,qwen3
+bench_r8gate,2026-10-20,第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐 + 抢占丢 token 修）公共 scheduler/kv 回归门禁,c8,ttft_p99_ms,15.115,38.391,0.394,,lower,other,4090,vllm,dinfer,qwen3
+bench_r8gate,2026-10-20,第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐 + 抢占丢 token 修）公共 scheduler/kv 回归门禁,c8,tpot_p50_ms,2.246,2.549,0.881,,lower,other,4090,vllm,dinfer,qwen3
+bench_r8gate,2026-10-20,第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐 + 抢占丢 token 修）公共 scheduler/kv 回归门禁,c8,failed,0.000,0.000,,,lower,other,4090,vllm,dinfer,qwen3
+bench_r8gate,2026-10-20,第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐 + 抢占丢 token 修）公共 scheduler/kv 回归门禁,c32,out_tok_per_s,9423.788,8269.497,1.140,,higher,other,4090,vllm,dinfer,qwen3
+bench_r8gate,2026-10-20,第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐 + 抢占丢 token 修）公共 scheduler/kv 回归门禁,c32,ttft_p50_ms,22.521,73.714,0.306,,lower,other,4090,vllm,dinfer,qwen3
+bench_r8gate,2026-10-20,第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐 + 抢占丢 token 修）公共 scheduler/kv 回归门禁,c32,ttft_p99_ms,47.706,78.496,0.608,,lower,other,4090,vllm,dinfer,qwen3
+bench_r8gate,2026-10-20,第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐 + 抢占丢 token 修）公共 scheduler/kv 回归门禁,c32,tpot_p50_ms,3.184,3.317,0.960,,lower,other,4090,vllm,dinfer,qwen3
+bench_r8gate,2026-10-20,第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐 + 抢占丢 token 修）公共 scheduler/kv 回归门禁,c32,failed,0.000,0.000,,,lower,other,4090,vllm,dinfer,qwen3
+bench_r8gate,2026-10-20,第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐 + 抢占丢 token 修）公共 scheduler/kv 回归门禁,c8-long,out_tok_per_s,2004.527,1906.488,1.051,,higher,other,4090,vllm,dinfer,qwen3
+bench_r8gate,2026-10-20,第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐 + 抢占丢 token 修）公共 scheduler/kv 回归门禁,c8-long,ttft_p50_ms,38.993,67.499,0.578,,lower,other,4090,vllm,dinfer,qwen3
+bench_r8gate,2026-10-20,第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐 + 抢占丢 token 修）公共 scheduler/kv 回归门禁,c8-long,ttft_p99_ms,86.039,93.256,0.923,,lower,other,4090,vllm,dinfer,qwen3
+bench_r8gate,2026-10-20,第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐 + 抢占丢 token 修）公共 scheduler/kv 回归门禁,c8-long,tpot_p50_ms,3.679,3.751,0.981,,lower,other,4090,vllm,dinfer,qwen3
+bench_r8gate,2026-10-20,第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐 + 抢占丢 token 修）公共 scheduler/kv 回归门禁,c8-long,failed,0.000,0.000,,,lower,other,4090,vllm,dinfer,qwen3
 poisson1,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r8,out_tok_per_s,1065.027,1066.343,0.999,,higher,other,4090,vllm,dinfer_xs1,qwen3
 poisson1,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r8,ttft_p50_ms,15.182,22.622,0.671,,lower,other,4090,vllm,dinfer_xs1,qwen3
 poisson1,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r8,ttft_p99_ms,38.981,49.074,0.794,,lower,other,4090,vllm,dinfer_xs1,qwen3
