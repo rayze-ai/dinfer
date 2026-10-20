@@ -1,0 +1,1 @@
+第 8 轮：executor 公共件（dinfer_layers::exec）+ qwen35 接 async scheduling（两槽 pinned D2H 流水）
