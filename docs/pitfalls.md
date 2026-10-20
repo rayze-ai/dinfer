@@ -829,3 +829,9 @@
 - **根因**：① `kill -INT <serve>` 只杀子进程，nsys 没收到信号不写报告（SIGINT 要发给 **nsys 进程**）；② CUPTI 活动缓冲没填满不 flush，只发 3–5 条请求时缓冲里的 kernel 在进程被杀时丢失（`--cuda-flush-interval=1000` 不保证），要发够请求（三长度各 10 次）并在 SIGINT 前 `sleep 20`；③ nsys 收 SIGINT 后先建 0 字节 `.nsys-rep` 再异步写入几十秒，"等文件出现"就 `tmux kill-session` 会把它杀在半路——要等 `pgrep -x nsys` 退出。
 - **解法**：`scripts/dev/q35_nsys_prefill.sh` 已含三条；分析用 `nsys export -t sqlite` + `scripts/dev/nsys_prefill_by_len.py <sqlite> 0`（逐步）/ `3 16`（聚簇）。
 - **避免**：nsys 脚本收尾固定三步：发够请求 → sleep 20 → `kill -INT $(pgrep -x nsys)` → 等 nsys 退出 → 再清 serve。另：实验里**不要用全局 `pkill -x dinfer`**，会杀掉 GPU 0 常驻 `:8012`（今天误杀两次），按端口 `pkill -f "dinfer serve .*--port N\b"`。
+
+## 2026-10-20 ncu 包 27B serve 进程：装载第 24 层 CUDA OOM
+
+- **现象**：`sudo ncu -k regex:gqa_fa --launch-skip 16 --launch-count 1 … dinfer serve` 装到 layer 24 报 `CUDA_ERROR_OUT_OF_MEMORY`，GPU 本来空（288 GB）。
+- **根因**：ncu 为 kernel replay 维护内存快照 / 影子分配，`-k` 过滤只决定哪些 kernel 被**采**，被 ncu 接管的进程所有 cudaMalloc 都带额外开销；52 GB 权重 + 17 GB 快照池 + ncu 影子超过显存。
+- **解法**：ncu 只包**微基准**（`gdn_parity`/`gqa_fa_bench` 这类几百 MB 的 `cargo test --ignored`），不包 serve；serve 级用 nsys（`q35_nsys_prefill.sh` / `q35_nsys_decode.sh`）看 kernel 时间分布，再用微基准复现同形状给 ncu。另：`sudo -n ncu` 无 PATH，用绝对路径 `/usr/local/cuda-13.1/bin/ncu`。
