@@ -841,3 +841,9 @@
 - **现象**：r11a 合并后跑四组门禁与 6 K TTFT，数字与合并前**一字不差**（103 / 743 / 2257 / 578、284.3 vs 284.9），而 r11a 微基准明明 6 K 单层 2040 → 1558 µs、16 层应省 ~7.7 ms。查 `ls --time-style` 才发现实际跑的 `dinfer` 是 18:34 的旧构建，新编译的躺在 `$CARGO_TARGET_DIR/release/dinfer`（22:57）。
 - **根因**：B300 上各线用 `CARGO_TARGET_DIR=/data/yaochen/infer/target_*` 分目录构建，但 `scripts/verify/bench_compare.sh` 里 `BENCH=./target/release/bench` 是相对仓目录写死的；服务端二进制也常被写成 `./target/release/dinfer`。仓目录下的 `target/` 是别人早先的构建，`ls` 看不出来，数字看起来"完全合理"。
 - **解法 / 避免**：① 起服务与压测端一律用**绝对** `$CARGO_TARGET_DIR/release/{dinfer,bench}`；② 启动脚本里加前置断言 `[ "$BIN" -nt crates/kernels/cuda/<改过的文件> ] || exit 1`，并把 `bin=… <时间> src=… <时间>` 打进日志；③ 判据：本轮改动在微基准上有可量化收益，端到端却 0 变化 → **先怀疑跑错了二进制**，再怀疑归因。
+
+## nsys 默认 CUPTI 缓冲只装得下 ~1.2 s：目标请求落在窗口外，分解出来的是启动段（2026-10-21，r11 合并后 6 K prefill）
+
+- **现象**：用 `q35_nsys_prefill.sh` 式流程抓 6 K 单发 prefill，`nsys export` 出的报告里 `gqa_fa_v6_kernel` 只有 16 次、每次 7.7 µs（那是 1 K 预热请求的 16 层），GDN 只有 2.8 ms，整份报告 span **1.16 s**——真实 6 K prefill 一步就该 277 ms、16 层 attn 各 1.5 ms 以上，全都不在里面。同时报告里 `small_m_mma_kernel` 4968 次共 460 ms，看着像"推理路径退化"，其实是**启动自调优**试跑所有候选。
+- **根因**：CUPTI 的 `--cuda-flush-interval` 只决定"多久写一次"，不决定"能装多久"；默认容量下 B300 上个把秒就满了，早段被覆盖/丢弃。启动 + 1 K 预热已经吃掉 1.1 s，6 K 那批自然没进去。`--cuda-buffer-size` **不是合法选项**（`unrecognised option`）。
+- **解法 / 避免**：① 抓报告前先 `nsys stats` 或 sqlite 查 `min(start)/max(end)` 的 span，确认覆盖到目标请求的绝对时间；② 用「按 kernel 名的 count」做自检——16 层模型跑一步 6 K，`gqa_fa_*` 就该是 16 次且每次 ~1.5 ms，count 或单次时长对不上就是抓错了窗口；③ 自调优的候选试跑会污染分解，按时间分桶（`t+0.0s … t+1.1s`）把启动段与推理段切开再统计，或 `RUST_LOG` 里先读 `gemm autotune done` 的耗时。④ 报告里出现"某 kernel 几千次、总量惊人"时，先查是不是自调优。
