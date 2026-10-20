@@ -159,6 +159,18 @@
 - 1x8192 chain_us dinfer：r9 第 7 轮：B300-50 GPU 6，新 ArchProfile 门限（ho bv 恒 32、conv Sm100 8 块/SM → rows16/32）；默认路径数
 - 1x1024 chain_us vllm：vLLM fla chunk_gated_delta_rule（nightly 0.26.1rc1 / torch 2.13 cu130，B300 GPU 6 容器，50 次均值）；chain_us 含 l2norm = vLLM 实际路径，chain_nol2_us 不含 ≈ 可比 dinfer wy+ho
 
+## probe_gdn_r9_8（2026-10-20，B300）
+
+### gdn_scale（us）
+
+| x | fla_cumsum_nol2_us vllm | fla_cumsum_us vllm | fla_fill_nol2_us vllm | fla_fill_us vllm | fla_fwd_h_nol2_us vllm | fla_fwd_h_us vllm | fla_fwd_o_nol2_us vllm | fla_fwd_o_us vllm | fla_kkt_nol2_us vllm | fla_kkt_us vllm | fla_l2norm_us vllm | fla_total_nol2_us vllm | fla_total_us vllm | fla_tril_merge_nol2_us vllm | fla_tril_merge_us vllm | fla_wu_nol2_us vllm | fla_wu_us vllm |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1x1024 | 3 | 3 | 3 | 3 | 32 | 32 | 24 | 24 | 8 | 8 | 11 | 117 | 128 | 32 | 32 | 15 | 15 |
+| 8x1024 | 6 | 6 | 14 | 14 | 165 | 165 | 167 | 167 | 46 | 47 | 59 | 685 | 746 | 189 | 189 | 98 | 98 |
+| 1x8192 | 6 | 6 | 14 | 14 | 273 | 273 | 167 | 167 | 46 | 47 | 59 | 793 | 853 | 189 | 189 | 98 | 98 |
+
+- 1x1024 fla_total_us vllm：fla per-kernel 分解：B300-50 GPU 6，vllm/vllm-openai:nightly 容器，torch.profiler 20 次均值，HV48 K=V128
+
 ## probe_prefill_1（2026-10-20，B300）
 
 ### ttft_len（ms）
@@ -276,3 +288,24 @@
 - 6019 ttft_p50_ms dinfer：默认池开 119 槽，6 K 仍 6 步（已知权衡，r8b 消）
 - 1k-6k slope_us_per_token dinfer_nosnap：r9 前 51.5；目标 45
 - 1k-6k slope_us_per_token dinfer：池开切步，3 点拟合
+
+## probe_prefill_4（2026-10-20，B300）
+
+### ttft_len（ms）
+
+| x | slope_us_per_token dinfer | slope_us_per_token vllm | ttft_p50_ms dinfer | ttft_p50_ms vllm |
+|---|---|---|---|---|
+| 510 |  |  | 28.2 |  |
+| 1021 |  |  | 52.3 | 83.0 |
+| 2029 |  |  | 107.4 |  |
+| 3009 |  |  | 163.1 | 138.6 |
+| 4059 |  |  | 223.7 |  |
+| 6019 |  |  | 346.8 | 260.0 |
+| 1k-6k | 57.9 | 35.8 |  |  |
+
+- 6019 ttft_p50_ms dinfer：b17 二进制（r8+r9+公共件），默认池开 119 槽，6 K 6 步
+- 1021 ttft_p50_ms vllm：vLLM 容器 :8013 同时段
+- 3009 ttft_p50_ms vllm：vLLM 容器 :8013 同时段
+- 6019 ttft_p50_ms vllm：vLLM 容器 :8013 同时段
+- 1k-6k slope_us_per_token dinfer：池开切步；8n 池关 47.5
+- 1k-6k slope_us_per_token vllm：三点拟合，固定 40.6 ms

@@ -1,0 +1,12 @@
+probe,date,gpu,model,group,metric,side,x,value,unit,note
+probe_prefill_4,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,dinfer,510,28.2,ms,
+probe_prefill_4,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,dinfer,1021,52.3,ms,
+probe_prefill_4,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,dinfer,2029,107.4,ms,
+probe_prefill_4,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,dinfer,3009,163.1,ms,
+probe_prefill_4,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,dinfer,4059,223.7,ms,
+probe_prefill_4,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,dinfer,6019,346.8,ms,b17 二进制（r8+r9+公共件），默认池开 119 槽，6 K 6 步
+probe_prefill_4,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,vllm,1021,83.0,ms,vLLM 容器 :8013 同时段
+probe_prefill_4,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,vllm,3009,138.6,ms,vLLM 容器 :8013 同时段
+probe_prefill_4,2026-10-20,B300,qwen35,ttft_len,ttft_p50_ms,vllm,6019,260.0,ms,vLLM 容器 :8013 同时段
+probe_prefill_4,2026-10-20,B300,qwen35,ttft_len,slope_us_per_token,dinfer,1k-6k,57.9,us/token,池开切步；8n 池关 47.5
+probe_prefill_4,2026-10-20,B300,qwen35,ttft_len,slope_us_per_token,vllm,1k-6k,35.8,us/token,三点拟合，固定 40.6 ms
