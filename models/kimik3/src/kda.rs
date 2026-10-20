@@ -75,7 +75,8 @@ impl KdaChunkWorkspace {
             let cap_t = tokens.max(self.cap_tokens);
             let cap_c = plan.num_chunks.max(self.cap_chunks);
             self.scratch = None;
-            self.scratch = Some(k::KdaChunkScratch::new(stream, cap_t, sh.heads, sh.head_dim, cap_c, self.bt)?);
+            self.scratch =
+                Some(k::KdaChunkScratch::new(stream, cap_t, sh.heads, sh.head_dim, cap_c, self.bt)?);
             self.cap_tokens = cap_t;
             self.cap_chunks = cap_c;
         }
@@ -115,11 +116,11 @@ pub struct KdaLayer {
     qc_buf: Tensor<bf16>,
     kc_buf: Tensor<bf16>,
     vc_buf: Tensor<bf16>,
-    g2_buf: Tensor<bf16>,    // g_proj(x)，输出门
-    fa_buf: Tensor<bf16>,    // [T, K]
-    g1_buf: Tensor<bf16>,    // f_b(f_a(x))，raw gate
-    b_buf: Tensor<bf16>,     // [T, H]
-    beta_buf: Tensor<f32>,   // [T, H]
+    g2_buf: Tensor<bf16>,  // g_proj(x)，输出门
+    fa_buf: Tensor<bf16>,  // [T, K]
+    g1_buf: Tensor<bf16>,  // f_b(f_a(x))，raw gate
+    b_buf: Tensor<bf16>,   // [T, H]
+    beta_buf: Tensor<f32>, // [T, H]
     o_buf: Tensor<bf16>,
     n_buf: Tensor<bf16>,
 }
@@ -241,7 +242,10 @@ impl KdaLayer {
         let proj = self.sh.proj();
         ensure!(t <= self.q_buf.shape[0], "kda: {t} tokens > max {}", self.q_buf.shape[0]);
         ensure!(meta.state_indices.numel() >= meta.num_reqs, "kda: state_indices");
-        ensure!(x.numel() >= t * self.sh.hidden && out.numel() >= t * self.sh.hidden, "kda: x/out 不足 {t} 行");
+        ensure!(
+            x.numel() >= t * self.sh.hidden && out.numel() >= t * self.sh.hidden,
+            "kda: x/out 不足 {t} 行"
+        );
 
         // 1. 投影（q/k/v/g 各 7168→12288；f_a 7168→128 → f_b 128→12288；b 7168→96）
         self.q_proj.forward_rows(gemm, x, &mut self.q_buf, t)?;
@@ -351,7 +355,16 @@ impl KdaLayer {
         }
 
         // 4. o_norm：RMSNorm(o)·w·sigmoid(g2)
-        k::kda_gated_rmsnorm(stream, &self.o_buf.data, &self.norm_w.data, &self.g2_buf.data, &mut self.n_buf.data, t * h, kd, self.eps)?;
+        k::kda_gated_rmsnorm(
+            stream,
+            &self.o_buf.data,
+            &self.norm_w.data,
+            &self.g2_buf.data,
+            &mut self.n_buf.data,
+            t * h,
+            kd,
+            self.eps,
+        )?;
 
         // 5. o_proj
         self.o_proj.forward_rows(gemm, &self.n_buf, out, t)

@@ -85,7 +85,10 @@ fn load(t_max: usize) -> Option<Env> {
     let s = dev.default_stream();
     let gemm = Gemm::new(&s).unwrap();
     let files = shards_for_layer(&dir, LAYER).unwrap();
-    println!("  第 {LAYER} 层分片：{:?}", files.iter().map(|f| f.file_name().unwrap().to_string_lossy().to_string()).collect::<Vec<_>>());
+    println!(
+        "  第 {LAYER} 层分片：{:?}",
+        files.iter().map(|f| f.file_name().unwrap().to_string_lossy().to_string()).collect::<Vec<_>>()
+    );
     let t0 = std::time::Instant::now();
     let src = WeightSource::open_files(&files).unwrap();
     let table = Table::from_names(&src.names().collect::<Vec<_>>()).unwrap();

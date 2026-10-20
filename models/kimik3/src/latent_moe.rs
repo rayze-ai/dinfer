@@ -34,13 +34,23 @@ pub struct Situ {
 impl Situ {
     pub fn from_config(cfg: &KimiLinearConfig) -> Result<Self> {
         ensure!(cfg.hidden_act == "situ", "hidden_act={} 不是 situ", cfg.hidden_act);
-        Ok(Self { beta: cfg.activation_situ_beta.unwrap_or(1.0), linear_beta: cfg.activation_situ_linear_beta })
+        Ok(Self {
+            beta: cfg.activation_situ_beta.unwrap_or(1.0),
+            linear_beta: cfg.activation_situ_linear_beta,
+        })
     }
 }
 
 impl Act for Situ {
     /// 名字沿用 trait（gate|up 拼接布局相同），语义是 situ 而不是 silu。
-    fn silu_and_mul(&self, stream: &Stream, x: &CudaSlice<bf16>, out: &mut CudaSlice<bf16>, tokens: usize, inter: usize) -> Result<()> {
+    fn silu_and_mul(
+        &self,
+        stream: &Stream,
+        x: &CudaSlice<bf16>,
+        out: &mut CudaSlice<bf16>,
+        tokens: usize,
+        inter: usize,
+    ) -> Result<()> {
         k::situ_and_mul_bf16_n(stream, x, out, tokens, inter, self.beta, self.linear_beta)
     }
 }
@@ -62,7 +72,15 @@ pub struct ExpertPack {
 
 impl ExpertPack {
     /// 从 `layers.{l}.block_sparse_moe.experts.{e}.w{1,2,3}.weight_{packed,scale}` 装载（HF 每专家分开存；这里拼成大张量）。
-    pub fn load(stream: &Stream, src: &WeightSource, t: &Table, prefix: &str, num_experts: usize, latent: usize, inter: usize) -> Result<Self> {
+    pub fn load(
+        stream: &Stream,
+        src: &WeightSource,
+        t: &Table,
+        prefix: &str,
+        num_experts: usize,
+        latent: usize,
+        inter: usize,
+    ) -> Result<Self> {
         let group = quant_group(src, t, &format!("{prefix}.experts.0.w1"), latent)?;
         let (w13_n, w13_k, w2_n, w2_k) = (2 * inter, latent, latent, inter);
         let w13_pk = w13_n * w13_k / 2;
@@ -143,8 +161,16 @@ pub struct RouterCfg {
 
 impl RouterCfg {
     pub fn from_config(cfg: &KimiLinearConfig) -> Result<Self> {
-        ensure!(cfg.moe_router_activation_func == "sigmoid", "router {} 未实现（kernel 只做 sigmoid）", cfg.moe_router_activation_func);
-        ensure!(cfg.num_expert_group <= 1 || cfg.num_expert_group <= cfg.topk_group, "分组路由（n_group>{}）未实现", cfg.topk_group);
+        ensure!(
+            cfg.moe_router_activation_func == "sigmoid",
+            "router {} 未实现（kernel 只做 sigmoid）",
+            cfg.moe_router_activation_func
+        );
+        ensure!(
+            cfg.num_expert_group <= 1 || cfg.num_expert_group <= cfg.topk_group,
+            "分组路由（n_group>{}）未实现",
+            cfg.topk_group
+        );
         ensure!(cfg.topk_method == "noaux_tc", "topk_method {} 未实现", cfg.topk_method);
         Ok(Self {
             num_experts: cfg.num_experts as usize,
@@ -156,16 +182,28 @@ impl RouterCfg {
 }
 
 /// CPU 参考路由（单测 / 对拍用；与 `moe.cu::route_kernel` 同口径）：返回 `(ids[t*K], w[t*K])`。
-pub fn route_cpu(logits: &[f32], bias: Option<&[f32]>, tokens: usize, cfg: &RouterCfg) -> (Vec<i32>, Vec<f32>) {
+pub fn route_cpu(
+    logits: &[f32],
+    bias: Option<&[f32]>,
+    tokens: usize,
+    cfg: &RouterCfg,
+) -> (Vec<i32>, Vec<f32>) {
     let (e, kk) = (cfg.num_experts, cfg.topk);
     let mut ids = Vec::with_capacity(tokens * kk);
     let mut ws = Vec::with_capacity(tokens * kk);
     for t in 0..tokens {
         let sc: Vec<f32> = logits[t * e..(t + 1) * e].iter().map(|l| 1.0 / (1.0 + (-l).exp())).collect();
-        let mut choice: Vec<f32> = sc.iter().enumerate().map(|(i, s)| s + bias.map_or(0.0, |b| b[i])).collect();
+        let mut choice: Vec<f32> =
+            sc.iter().enumerate().map(|(i, s)| s + bias.map_or(0.0, |b| b[i])).collect();
         let mut sel = Vec::with_capacity(kk);
         for _ in 0..kk {
-            let (best, _) = choice.iter().enumerate().fold((0usize, f32::NEG_INFINITY), |acc, (i, &v)| if v > acc.1 { (i, v) } else { acc });
+            let (best, _) = choice.iter().enumerate().fold((0usize, f32::NEG_INFINITY), |acc, (i, &v)| {
+                if v > acc.1 {
+                    (i, v)
+                } else {
+                    acc
+                }
+            });
             sel.push(best);
             choice[best] = f32::NEG_INFINITY;
         }
@@ -183,11 +221,11 @@ pub struct LatentMoe {
     pub router: RouterCfg,
     pub hidden: usize,
     pub act: Situ,
-    gate: Linear,            // [E, hidden] bf16
+    gate: Linear,              // [E, hidden] bf16
     bias: Option<Tensor<f32>>, // e_score_correction_bias [E]
-    down: Linear,            // routed_expert_down_proj [latent, hidden]
-    up: Linear,              // routed_expert_up_proj [hidden, latent]
-    norm: Option<RmsNorm>,   // routed_expert_norm [latent]
+    down: Linear,              // routed_expert_down_proj [latent, hidden]
+    up: Linear,                // routed_expert_up_proj [hidden, latent]
+    norm: Option<RmsNorm>,     // routed_expert_norm [latent]
     pub experts: ExpertPack,
     shared: Option<Mlp>,
     buckets: k::MoeBuckets,
@@ -198,25 +236,33 @@ pub struct LatentMoe {
     logits: Tensor<f32>,
     topk_ids: Tensor<i32>,
     topk_w: Tensor<f32>,
-    z: Tensor<bf16>,      // [T, latent] down_proj 输出
-    zg: Tensor<bf16>,     // [T·K, latent] gather
-    gu: Tensor<bf16>,     // [T·K, 2·inter]
-    a: Tensor<bf16>,      // [T·K, inter]
-    yg: Tensor<bf16>,     // [T·K, latent]
-    acc: Tensor<f32>,     // [T, latent]
-    ysum: Tensor<bf16>,   // [T, latent] 加权和（norm 前）
-    yn: Tensor<bf16>,     // [T, latent] norm 后
-    yup: Tensor<bf16>,    // [T, hidden] up_proj 输出（routed 部分）
+    z: Tensor<bf16>,    // [T, latent] down_proj 输出
+    zg: Tensor<bf16>,   // [T·K, latent] gather
+    gu: Tensor<bf16>,   // [T·K, 2·inter]
+    a: Tensor<bf16>,    // [T·K, inter]
+    yg: Tensor<bf16>,   // [T·K, latent]
+    acc: Tensor<f32>,   // [T, latent]
+    ysum: Tensor<bf16>, // [T, latent] 加权和（norm 前）
+    yn: Tensor<bf16>,   // [T, latent] norm 后
+    yup: Tensor<bf16>,  // [T, hidden] up_proj 输出（routed 部分）
 }
 
 impl LatentMoe {
     /// `layer` 必须是 MoE 层。`max_tokens` 决定激活缓冲。
-    pub fn load(stream: &Stream, src: &WeightSource, t: &Table, layer: usize, cfg: &KimiLinearConfig, max_tokens: usize) -> Result<Self> {
+    pub fn load(
+        stream: &Stream,
+        src: &WeightSource,
+        t: &Table,
+        layer: usize,
+        cfg: &KimiLinearConfig,
+        max_tokens: usize,
+    ) -> Result<Self> {
         ensure!(cfg.is_moe_layer(layer as u32), "第 {layer} 层不是 MoE 层");
         let router = RouterCfg::from_config(cfg)?;
         let act = Situ::from_config(cfg)?;
         let hidden = cfg.hidden_size as usize;
-        let latent = cfg.routed_expert_hidden_size.context("routed_expert_hidden_size（latent MoE）缺失")? as usize;
+        let latent =
+            cfg.routed_expert_hidden_size.context("routed_expert_hidden_size（latent MoE）缺失")? as usize;
         let inter = cfg.moe_intermediate_size as usize;
         let p = format!("layers.{layer}.block_sparse_moe");
         let e = router.num_experts;
@@ -244,8 +290,18 @@ impl LatentMoe {
         };
         let experts = ExpertPack::load(stream, src, t, &p, e, latent, inter)?;
         let shared = if cfg.num_shared_experts > 0 {
-            let m = Mlp::load(stream, src, &format!("{}{p}.shared_experts", crate::weights::LM_PREFIX), max_tokens)?;
-            ensure!(m.inter == inter * cfg.num_shared_experts as usize, "shared_experts inter {} ≠ {}×{inter}", m.inter, cfg.num_shared_experts);
+            let m = Mlp::load(
+                stream,
+                src,
+                &format!("{}{p}.shared_experts", crate::weights::LM_PREFIX),
+                max_tokens,
+            )?;
+            ensure!(
+                m.inter == inter * cfg.num_shared_experts as usize,
+                "shared_experts inter {} ≠ {}×{inter}",
+                m.inter,
+                cfg.num_shared_experts
+            );
             Some(m)
         } else {
             None
@@ -289,7 +345,14 @@ impl LatentMoe {
     }
 
     /// `out[:t] = MoE(x[:t])`（覆盖写）。`x` 已过 `post_attention_layernorm`。
-    pub fn forward(&mut self, stream: &Stream, gemm: &Gemm, t: usize, x: &Tensor<bf16>, out: &mut Tensor<bf16>) -> Result<()> {
+    pub fn forward(
+        &mut self,
+        stream: &Stream,
+        gemm: &Gemm,
+        t: usize,
+        x: &Tensor<bf16>,
+        out: &mut Tensor<bf16>,
+    ) -> Result<()> {
         let (h, e, kk) = (self.hidden, self.router.num_experts, self.router.topk);
         let (latent, inter, group) = (self.experts.latent, self.experts.inter, self.experts.group);
         ensure!(t <= self.z.shape[0], "LatentMoe: {t} tokens > max {}", self.z.shape[0]);
@@ -316,8 +379,17 @@ impl LatentMoe {
         let pairs = self.offsets_host[e] as usize;
         ensure!(pairs == t * kk, "LatentMoe: pairs {pairs} ≠ t·K");
         // 3. gather 全部 (token, k) 行 → grouped GEMM w13 → situ → grouped GEMM w2
-        k::moe_gather_bf16(stream, &self.z.data, &mut self.zg.data, &self.buckets.sorted_tok, 0, pairs, latent)?;
-        let tiles13 = k::Mxfp4GemmTiles::new(stream, &self.offsets_host, 2 * inter, self.tile_bm, self.tile_bn)?;
+        k::moe_gather_bf16(
+            stream,
+            &self.z.data,
+            &mut self.zg.data,
+            &self.buckets.sorted_tok,
+            0,
+            pairs,
+            latent,
+        )?;
+        let tiles13 =
+            k::Mxfp4GemmTiles::new(stream, &self.offsets_host, 2 * inter, self.tile_bm, self.tile_bn)?;
         k::mxfp4_gemm_grouped(
             stream,
             &self.zg.data,
@@ -330,7 +402,15 @@ impl LatentMoe {
             2 * inter,
             group,
         )?;
-        k::situ_and_mul_bf16_n(stream, &self.gu.data, &mut self.a.data, pairs, inter, self.act.beta, self.act.linear_beta)?;
+        k::situ_and_mul_bf16_n(
+            stream,
+            &self.gu.data,
+            &mut self.a.data,
+            pairs,
+            inter,
+            self.act.beta,
+            self.act.linear_beta,
+        )?;
         let tiles2 = k::Mxfp4GemmTiles::new(stream, &self.offsets_host, latent, self.tile_bm, self.tile_bn)?;
         k::mxfp4_gemm_grouped(
             stream,
@@ -435,7 +515,8 @@ mod tests {
     fn situ_matches_reference_formula() {
         // 公式自检（kernel 与此同式）：beta=4, linear_beta=25
         let (beta, lb) = (4.0f32, 25.0f32);
-        let situ = |g: f32, u: f32| beta * (g / beta).tanh() * (1.0 / (1.0 + (-g).exp())) * (lb * (u / lb).tanh());
+        let situ =
+            |g: f32, u: f32| beta * (g / beta).tanh() * (1.0 / (1.0 + (-g).exp())) * (lb * (u / lb).tanh());
         assert!((situ(0.0, 1.0)).abs() < 1e-7);
         assert!((situ(1.0, 1.0) - 4.0 * (0.25f32).tanh() * 0.7310586 * 25.0 * (0.04f32).tanh()).abs() < 1e-5);
         // 大 gate 饱和到 beta·up'

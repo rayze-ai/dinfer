@@ -109,12 +109,23 @@ fn layer1_real_weights() {
     let s = dev.default_stream();
     let gemm = Gemm::new(&s).unwrap();
     let files = shards_for_layer(&dir, LAYER).unwrap();
-    println!("  第 {LAYER} 层分片：{:?}", files.iter().map(|f| f.file_name().unwrap().to_string_lossy().to_string()).collect::<Vec<_>>());
+    println!(
+        "  第 {LAYER} 层分片：{:?}",
+        files.iter().map(|f| f.file_name().unwrap().to_string_lossy().to_string()).collect::<Vec<_>>()
+    );
     let t0 = std::time::Instant::now();
     let src = WeightSource::open_files(&files).unwrap();
     let table = Table::from_names(&src.names().collect::<Vec<_>>()).unwrap();
     let (free0, _) = s.mem_info().unwrap();
-    let mut layer = KimiDecoderLayer::load(&s, &src, &table, LAYER, tc, LayerBudget { max_tokens: t, num_slots: 1, kv_blocks: 1, block_size: 16 }).unwrap();
+    let mut layer = KimiDecoderLayer::load(
+        &s,
+        &src,
+        &table,
+        LAYER,
+        tc,
+        LayerBudget { max_tokens: t, num_slots: 1, kv_blocks: 1, block_size: 16 },
+    )
+    .unwrap();
     s.synchronize().unwrap();
     let (free1, _) = s.mem_info().unwrap();
     println!("  装载 {:.1} s，显存 +{:.2} GB", t0.elapsed().as_secs_f32(), (free0 - free1) as f64 / 1e9);
@@ -139,10 +150,28 @@ fn layer1_real_weights() {
     let hi = Tensor::from_vec(&s, vec![0i32], &[1]).unwrap();
     let ws = RefCell::new(KdaChunkWorkspace::new());
     ws.borrow_mut().prepare(&s, &cu_host, &sh).unwrap();
-    let kda = KdaMeta { cu_seqlens: &cu, state_indices: &si, has_initial: &hi, num_reqs: 1, mode: BatchMode::Prefill, chunk: Some(&ws) };
+    let kda = KdaMeta {
+        cu_seqlens: &cu,
+        state_indices: &si,
+        has_initial: &hi,
+        num_reqs: 1,
+        mode: BatchMode::Prefill,
+        chunk: Some(&ws),
+    };
     // 第 1 层是 KDA 层，MLA 侧 meta 只是占位
     let slots = Tensor::from_vec(&s, vec![-1i64; t], &[t]).unwrap();
-    let meta = StepMeta { kda, mla: MlaMeta { mode: BatchMode::Prefill, cu_seqlens: &cu, block_table: &si, seq_lens: &si, num_reqs: 1, max_blocks: 0 }, slot_mapping: &slots };
+    let meta = StepMeta {
+        kda,
+        mla: MlaMeta {
+            mode: BatchMode::Prefill,
+            cu_seqlens: &cu,
+            block_table: &si,
+            seq_lens: &si,
+            num_reqs: 1,
+            max_blocks: 0,
+        },
+        slot_mapping: &slots,
+    };
 
     let run = |layer: &mut KimiDecoderLayer, out: &mut Tensor<bf16>| {
         match &mut layer.attn {
@@ -181,7 +210,8 @@ fn layer1_real_weights() {
     let (_, yrouted_ref) = npy_f32(&refs, "yrouted.npy");
     let (_, ymoe_ref) = npy_f32(&refs, "y_moe.npy");
     println!("== MoE 子块");
-    let (rel_lg, cos_lg) = compare("router logits vs HF", &moe.last_logits(&s, t).unwrap(), &logits_ref[..t * e]);
+    let (rel_lg, cos_lg) =
+        compare("router logits vs HF", &moe.last_logits(&s, t).unwrap(), &logits_ref[..t * e]);
     let (ids, _w) = moe.last_routing(&s, t).unwrap();
     let thresh = 2e-3f32;
     let (mut decidable, mut hit_rows, mut hit_pairs, mut total_pairs) = (0usize, 0usize, 0usize, 0usize);
@@ -211,7 +241,9 @@ fn layer1_real_weights() {
         matched.len()
     );
     // 路由在平局行选了不同专家 → 该行专家输出按定义不同（硬判决不可逐位复现），MoE 子块的数值容差只在路由一致的行上判。
-    let sel = |v: &[f32], w: usize| -> Vec<f32> { matched.iter().flat_map(|&i| v[i * w..(i + 1) * w].iter().cloned()).collect() };
+    let sel = |v: &[f32], w: usize| -> Vec<f32> {
+        matched.iter().flat_map(|&i| v[i * w..(i + 1) * w].iter().cloned()).collect()
+    };
     let latent = moe.experts.latent;
     let ysum_got = rows(moe.last_expert_sum(), &s, t * latent);
     let yr_got = rows(moe.last_routed_out(), &s, n);

@@ -56,7 +56,7 @@ pub struct MlaLayer {
     q_a_norm: RmsNorm,
     q_b: Linear, // [H·(nope+rope), q_lora]
     kv_a_norm: RmsNorm,
-    kv_b: Linear, // [H·(nope+v), kv_lora]（prefill 用）
+    kv_b: Linear,   // [H·(nope+v), kv_lora]（prefill 用）
     o_proj: Linear, // [hidden, H·v]
     /// 每 head W_UK^T：GEMM 权重 [kv_lora, nope]（decode：q_nope → q_lat）
     w_uk_t: Vec<Tensor<bf16>>,
@@ -95,7 +95,16 @@ pub struct MlaLayer {
 impl MlaLayer {
     /// 装载第 `layer` 层（必须是 MLA 层）。`num_blocks × block_size` 决定本层 KV cache 容量。
     #[allow(clippy::too_many_arguments)]
-    pub fn load(stream: &Stream, src: &WeightSource, t: &Table, layer: usize, cfg: &KimiLinearConfig, max_tokens: usize, num_blocks: usize, block_size: usize) -> Result<Self> {
+    pub fn load(
+        stream: &Stream,
+        src: &WeightSource,
+        t: &Table,
+        layer: usize,
+        cfg: &KimiLinearConfig,
+        max_tokens: usize,
+        num_blocks: usize,
+        block_size: usize,
+    ) -> Result<Self> {
         ensure!(!cfg.is_kda_layer(layer as u32), "第 {layer} 层是 KDA 层，不是 MLA");
         ensure!(cfg.mla_use_nope, "只支持 mla_use_nope=True（K3）");
         ensure!(cfg.mla_use_output_gate, "只支持 mla_use_output_gate=True（K3）");
@@ -103,7 +112,8 @@ impl MlaLayer {
         let heads = cfg.num_attention_heads as usize;
         let q_lora = cfg.q_lora_rank.ok_or_else(|| anyhow::anyhow!("q_lora_rank 缺失"))? as usize;
         let kv_lora = cfg.kv_lora_rank as usize;
-        let (nope, rope, v_dim) = (cfg.qk_nope_head_dim as usize, cfg.qk_rope_head_dim as usize, cfg.v_head_dim as usize);
+        let (nope, rope, v_dim) =
+            (cfg.qk_nope_head_dim as usize, cfg.qk_rope_head_dim as usize, cfg.v_head_dim as usize);
         let p = format!("layers.{layer}.self_attn");
 
         // fused = [q_a_proj ; kv_a_proj_with_mqa ; g_proj]（行拼接；文件是 bf16，经 f32 往返无损）
@@ -161,7 +171,12 @@ impl MlaLayer {
             o_proj,
             w_uk_t,
             w_uv,
-            kv: PagedKv { cache: Tensor::zeros(stream, &[num_blocks, block_size, entry])?, num_blocks, block_size, entry },
+            kv: PagedKv {
+                cache: Tensor::zeros(stream, &[num_blocks, block_size, entry])?,
+                num_blocks,
+                block_size,
+                entry,
+            },
             heads,
             hidden,
             q_lora,
@@ -197,8 +212,18 @@ impl MlaLayer {
 
     /// `x[:t]`（input_layernorm 之后）→ `out[:t]`。`slot_mapping[i]`：第 i 个 token 的 latent 写入 cache 的槽位（-1 跳过）。
     #[allow(clippy::too_many_arguments)]
-    pub fn forward(&mut self, stream: &Stream, gemm: &Gemm, t: usize, x: &Tensor<bf16>, slot_mapping: &Tensor<i64>, meta: &MlaMeta<'_>, out: &mut Tensor<bf16>) -> Result<()> {
-        let (h, nope, rope, kv_lora, v_dim, q_lora, hidden) = (self.heads, self.nope, self.rope, self.kv_lora, self.v_dim, self.q_lora, self.hidden);
+    pub fn forward(
+        &mut self,
+        stream: &Stream,
+        gemm: &Gemm,
+        t: usize,
+        x: &Tensor<bf16>,
+        slot_mapping: &Tensor<i64>,
+        meta: &MlaMeta<'_>,
+        out: &mut Tensor<bf16>,
+    ) -> Result<()> {
+        let (h, nope, rope, kv_lora, v_dim, q_lora, hidden) =
+            (self.heads, self.nope, self.rope, self.kv_lora, self.v_dim, self.q_lora, self.hidden);
         let qk = nope + rope;
         let entry = kv_lora + rope;
         let wide = q_lora + entry + h * v_dim;
@@ -208,27 +233,127 @@ impl MlaLayer {
 
         // 1. fused：[q_c_raw | kv_c_raw | k_pe | g]
         self.fused.forward_rows(gemm, x, &mut self.fused_out, t)?;
-        k::copy_cols_bf16(stream, &self.fused_out.data, &mut self.q_c_raw.data, t, wide, 0, q_lora, 0, q_lora)?;
-        k::copy_cols_bf16(stream, &self.fused_out.data, &mut self.kv_c_raw.data, t, wide, q_lora, kv_lora, 0, kv_lora)?;
-        k::copy_cols_bf16(stream, &self.fused_out.data, &mut self.k_pe.data, t, wide, q_lora + kv_lora, rope, 0, rope)?;
-        k::copy_cols_bf16(stream, &self.fused_out.data, &mut self.gate.data, t, wide, q_lora + entry, h * v_dim, 0, h * v_dim)?;
+        k::copy_cols_bf16(
+            stream,
+            &self.fused_out.data,
+            &mut self.q_c_raw.data,
+            t,
+            wide,
+            0,
+            q_lora,
+            0,
+            q_lora,
+        )?;
+        k::copy_cols_bf16(
+            stream,
+            &self.fused_out.data,
+            &mut self.kv_c_raw.data,
+            t,
+            wide,
+            q_lora,
+            kv_lora,
+            0,
+            kv_lora,
+        )?;
+        k::copy_cols_bf16(
+            stream,
+            &self.fused_out.data,
+            &mut self.k_pe.data,
+            t,
+            wide,
+            q_lora + kv_lora,
+            rope,
+            0,
+            rope,
+        )?;
+        k::copy_cols_bf16(
+            stream,
+            &self.fused_out.data,
+            &mut self.gate.data,
+            t,
+            wide,
+            q_lora + entry,
+            h * v_dim,
+            0,
+            h * v_dim,
+        )?;
         // 2. 两个 a_layernorm
-        k::rmsnorm_bf16_n(stream, &self.q_c_raw.data, &self.q_a_norm.w.data, &mut self.q_c.data, t, q_lora, self.q_a_norm.eps)?;
-        k::rmsnorm_bf16_n(stream, &self.kv_c_raw.data, &self.kv_a_norm.w.data, &mut self.kv_c.data, t, kv_lora, self.kv_a_norm.eps)?;
+        k::rmsnorm_bf16_n(
+            stream,
+            &self.q_c_raw.data,
+            &self.q_a_norm.w.data,
+            &mut self.q_c.data,
+            t,
+            q_lora,
+            self.q_a_norm.eps,
+        )?;
+        k::rmsnorm_bf16_n(
+            stream,
+            &self.kv_c_raw.data,
+            &self.kv_a_norm.w.data,
+            &mut self.kv_c.data,
+            t,
+            kv_lora,
+            self.kv_a_norm.eps,
+        )?;
         // 3. q = q_b(q_c)：[t, H, nope + rope]，不旋转
         self.q_b.forward_rows(gemm, &self.q_c, &mut self.q, t)?;
         // 4. latent = [kv_c | k_pe] → paged cache
         k::copy_cols_bf16(stream, &self.kv_c.data, &mut self.latent.data, t, kv_lora, 0, entry, 0, kv_lora)?;
         k::copy_cols_bf16(stream, &self.k_pe.data, &mut self.latent.data, t, rope, 0, entry, kv_lora, rope)?;
-        k::mla_cache_write_bf16(stream, &self.latent.data, &mut self.kv.cache.data, &slot_mapping.data, t, entry, self.kv.block_size)?;
+        k::mla_cache_write_bf16(
+            stream,
+            &self.latent.data,
+            &mut self.kv.cache.data,
+            &slot_mapping.data,
+            t,
+            entry,
+            self.kv.block_size,
+        )?;
         // 5. attention
         match meta.mode {
             BatchMode::Prefill => {
                 self.kv_b.forward_rows(gemm, &self.kv_c, &mut self.kv_full, t)?;
-                k::copy_head_cols_bf16(stream, &self.kv_full.data, &mut self.k_full.data, t, h, nope + v_dim, 0, qk, 0, nope)?;
+                k::copy_head_cols_bf16(
+                    stream,
+                    &self.kv_full.data,
+                    &mut self.k_full.data,
+                    t,
+                    h,
+                    nope + v_dim,
+                    0,
+                    qk,
+                    0,
+                    nope,
+                )?;
                 k::bcast_kpe_bf16(stream, &self.k_pe.data, &mut self.k_full.data, t, h, qk, nope, rope)?;
-                k::copy_head_cols_bf16(stream, &self.kv_full.data, &mut self.v_full.data, t, h, nope + v_dim, nope, v_dim, 0, v_dim)?;
-                k::mla_prefill_bf16(stream, &self.q.data, &self.k_full.data, &self.v_full.data, &mut self.attn_out.data, &meta.cu_seqlens.data, None, meta.num_reqs, t, h, qk, v_dim, self.scale)?;
+                k::copy_head_cols_bf16(
+                    stream,
+                    &self.kv_full.data,
+                    &mut self.v_full.data,
+                    t,
+                    h,
+                    nope + v_dim,
+                    nope,
+                    v_dim,
+                    0,
+                    v_dim,
+                )?;
+                k::mla_prefill_bf16(
+                    stream,
+                    &self.q.data,
+                    &self.k_full.data,
+                    &self.v_full.data,
+                    &mut self.attn_out.data,
+                    &meta.cu_seqlens.data,
+                    None,
+                    meta.num_reqs,
+                    t,
+                    h,
+                    qk,
+                    v_dim,
+                    self.scale,
+                )?;
             }
             BatchMode::Decode => {
                 self.absorbed_q(stream, gemm, t)?;
@@ -284,10 +409,38 @@ impl MlaLayer {
         let (qk, entry) = (nope + rope, kv_lora + rope);
         for hh in 0..h {
             k::gather_head_bf16(stream, &self.q.data, &mut self.head_in.data, t, h, qk, hh, 0, nope)?;
-            gemm.forward_bf16(&self.head_in.data, &self.w_uk_t[hh].data, None, &mut self.head_out.data, t, kv_lora, nope)?;
-            k::scatter_head_bf16(stream, &self.head_out.data, &mut self.q_lat.data, t, h, entry, hh, 0, kv_lora)?;
+            gemm.forward_bf16(
+                &self.head_in.data,
+                &self.w_uk_t[hh].data,
+                None,
+                &mut self.head_out.data,
+                t,
+                kv_lora,
+                nope,
+            )?;
+            k::scatter_head_bf16(
+                stream,
+                &self.head_out.data,
+                &mut self.q_lat.data,
+                t,
+                h,
+                entry,
+                hh,
+                0,
+                kv_lora,
+            )?;
             k::gather_head_bf16(stream, &self.q.data, &mut self.head_in.data, t, h, qk, hh, nope, rope)?;
-            k::scatter_head_bf16(stream, &self.head_in.data, &mut self.q_lat.data, t, h, entry, hh, kv_lora, rope)?;
+            k::scatter_head_bf16(
+                stream,
+                &self.head_in.data,
+                &mut self.q_lat.data,
+                t,
+                h,
+                entry,
+                hh,
+                kv_lora,
+                rope,
+            )?;
         }
         Ok(())
     }
@@ -296,9 +449,37 @@ impl MlaLayer {
     fn absorbed_o(&mut self, stream: &Stream, gemm: &Gemm, t: usize) -> Result<()> {
         let (h, kv_lora, v_dim) = (self.heads, self.kv_lora, self.v_dim);
         for hh in 0..h {
-            k::gather_head_bf16(stream, &self.o_lat.data, &mut self.head_in.data, t, h, kv_lora, hh, 0, kv_lora)?;
-            gemm.forward_bf16(&self.head_in.data, &self.w_uv[hh].data, None, &mut self.head_out.data, t, v_dim, kv_lora)?;
-            k::scatter_head_bf16(stream, &self.head_out.data, &mut self.attn_out.data, t, h, v_dim, hh, 0, v_dim)?;
+            k::gather_head_bf16(
+                stream,
+                &self.o_lat.data,
+                &mut self.head_in.data,
+                t,
+                h,
+                kv_lora,
+                hh,
+                0,
+                kv_lora,
+            )?;
+            gemm.forward_bf16(
+                &self.head_in.data,
+                &self.w_uv[hh].data,
+                None,
+                &mut self.head_out.data,
+                t,
+                v_dim,
+                kv_lora,
+            )?;
+            k::scatter_head_bf16(
+                stream,
+                &self.head_out.data,
+                &mut self.attn_out.data,
+                t,
+                h,
+                v_dim,
+                hh,
+                0,
+                v_dim,
+            )?;
         }
         Ok(())
     }

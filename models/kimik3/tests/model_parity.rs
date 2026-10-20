@@ -117,7 +117,11 @@ fn model_first_layers_real_weights() {
     let mut model = KimiK3Model::load(&s, &dir, tc, n_layers, budget).unwrap();
     s.synchronize().unwrap();
     let (free1, _) = s.mem_info().unwrap();
-    println!("  装载前 {n_layers} 层 + 顶层：{:.1} s，显存 +{:.2} GB", t0.elapsed().as_secs_f32(), (free0 - free1) as f64 / 1e9);
+    println!(
+        "  装载前 {n_layers} 层 + 顶层：{:.1} s，显存 +{:.2} GB",
+        t0.elapsed().as_secs_f32(),
+        (free0 - free1) as f64 / 1e9
+    );
     model.trace = true;
 
     // meta：单请求
@@ -127,7 +131,13 @@ fn model_first_layers_real_weights() {
     let block_table = Tensor::from_vec(&s, bt, &[1, kv_blocks]).unwrap();
     let mut logits = Tensor::<f32>::zeros(&s, &[t, vocab]).unwrap();
 
-    let run = |model: &mut KimiK3Model, ids_d: &Tensor<i32>, n: usize, pos0: usize, mode: BatchMode, logits: &mut Tensor<f32>| -> f32 {
+    let run = |model: &mut KimiK3Model,
+               ids_d: &Tensor<i32>,
+               n: usize,
+               pos0: usize,
+               mode: BatchMode,
+               logits: &mut Tensor<f32>|
+     -> f32 {
         let cu_host = vec![0i32, n as i32];
         let cu = Tensor::from_vec(&s, cu_host.clone(), &[2]).unwrap();
         let hi = Tensor::from_vec(&s, vec![i32::from(mode == BatchMode::Decode)], &[1]).unwrap();
@@ -140,8 +150,22 @@ fn model_first_layers_real_weights() {
             ws.borrow_mut().prepare(&s, &cu_host, &sh).unwrap();
         }
         let meta = StepMeta {
-            kda: KdaMeta { cu_seqlens: &cu, state_indices: &si, has_initial: &hi, num_reqs: 1, mode, chunk: if use_chunk { Some(&ws) } else { None } },
-            mla: MlaMeta { mode, cu_seqlens: &cu, block_table: &block_table, seq_lens: &seq_lens, num_reqs: 1, max_blocks: kv_blocks },
+            kda: KdaMeta {
+                cu_seqlens: &cu,
+                state_indices: &si,
+                has_initial: &hi,
+                num_reqs: 1,
+                mode,
+                chunk: if use_chunk { Some(&ws) } else { None },
+            },
+            mla: MlaMeta {
+                mode,
+                cu_seqlens: &cu,
+                block_table: &block_table,
+                seq_lens: &seq_lens,
+                num_reqs: 1,
+                max_blocks: kv_blocks,
+            },
             slot_mapping: &slot_mapping,
         };
         if mode == BatchMode::Prefill {
@@ -159,7 +183,13 @@ fn model_first_layers_real_weights() {
 
     let n = t * hidden;
     let (_, emb_ref) = npy_f32(&refs, "embed.npy");
-    let kind_of = |l: usize| format!("{}+{}", if tc.is_kda_layer(l as u32) { "kda" } else { "mla" }, if tc.is_moe_layer(l as u32) { "moe" } else { "dense" });
+    let kind_of = |l: usize| {
+        format!(
+            "{}+{}",
+            if tc.is_kda_layer(l as u32) { "kda" } else { "mla" },
+            if tc.is_moe_layer(l as u32) { "moe" } else { "dense" }
+        )
+    };
 
     // ===== 1. 隔离口径：每层喂 HF 输入 =====
     println!("== 隔离口径：每层喂 HF 输入（in{{l}}），块残差 = HF in0；MoE 层只在路由一致行判");
@@ -176,8 +206,22 @@ fn model_first_layers_real_weights() {
         let ws = RefCell::new(KdaChunkWorkspace::new());
         ws.borrow_mut().prepare(&s, &cu_host, &sh).unwrap();
         let meta = StepMeta {
-            kda: KdaMeta { cu_seqlens: &cu, state_indices: &si, has_initial: &hi, num_reqs: 1, mode: BatchMode::Prefill, chunk: Some(&ws) },
-            mla: MlaMeta { mode: BatchMode::Prefill, cu_seqlens: &cu, block_table: &block_table, seq_lens: &seq_lens, num_reqs: 1, max_blocks: kv_blocks },
+            kda: KdaMeta {
+                cu_seqlens: &cu,
+                state_indices: &si,
+                has_initial: &hi,
+                num_reqs: 1,
+                mode: BatchMode::Prefill,
+                chunk: Some(&ws),
+            },
+            mla: MlaMeta {
+                mode: BatchMode::Prefill,
+                cu_seqlens: &cu,
+                block_table: &block_table,
+                seq_lens: &seq_lens,
+                num_reqs: 1,
+                max_blocks: kv_blocks,
+            },
             slot_mapping: &slot_mapping,
         };
         let mut out = Tensor::<bf16>::zeros(&s, &[t, hidden]).unwrap();
@@ -216,10 +260,20 @@ fn model_first_layers_real_weights() {
                 ((0..t).collect::<Vec<_>>(), 0, 0)
             };
             let (rel_all, cos_all) = compare(&format!("layer {l} [{kind}] 全部行"), &got, &want);
-            let sel = |v: &[f32]| -> Vec<f32> { matched.iter().flat_map(|&i| v[i * hidden..(i + 1) * hidden].iter().cloned()).collect() };
-            let (rel, cos) = if matched.len() < t { compare(&format!("layer {l} 路由一致 {} 行", matched.len()), &sel(&got), &sel(&want)) } else { (rel_all, cos_all) };
+            let sel = |v: &[f32]| -> Vec<f32> {
+                matched.iter().flat_map(|&i| v[i * hidden..(i + 1) * hidden].iter().cloned()).collect()
+            };
+            let (rel, cos) = if matched.len() < t {
+                compare(&format!("layer {l} 路由一致 {} 行", matched.len()), &sel(&got), &sel(&want))
+            } else {
+                (rel_all, cos_all)
+            };
             if total_pairs > 0 {
-                println!("      top-16 pair 级 {hit_pairs}/{total_pairs}（{:.2}%），路由整行一致 {}/{t}", 100.0 * hit_pairs as f64 / total_pairs as f64, matched.len());
+                println!(
+                    "      top-16 pair 级 {hit_pairs}/{total_pairs}（{:.2}%），路由整行一致 {}/{t}",
+                    100.0 * hit_pairs as f64 / total_pairs as f64,
+                    matched.len()
+                );
             }
             iso.push((l, kind, rel, cos, matched.len()));
         }
@@ -295,7 +349,10 @@ fn model_first_layers_real_weights() {
 fn tracing_subscriber_init() -> Result<(), ()> {
     // RUST_LOG=info 时打印每层装载时间 / 显存（model.rs 的 tracing::info!）
     if std::env::var("RUST_LOG").is_ok() {
-        tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).try_init().map_err(|_| ())
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .try_init()
+            .map_err(|_| ())
     } else {
         Ok(())
     }

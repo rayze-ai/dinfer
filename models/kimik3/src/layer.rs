@@ -74,20 +74,54 @@ pub struct AttnRes {
 
 impl AttnRes {
     /// `max_blocks`：模型里块残差最多几个（93 层 / 12 = 8）；候选行数 R ≤ max_blocks + 1。
-    pub fn load(stream: &Stream, src: &WeightSource, t: &Table, layer: usize, cfg: &KimiLinearConfig, max_tokens: usize, max_blocks: usize) -> Result<Self> {
+    pub fn load(
+        stream: &Stream,
+        src: &WeightSource,
+        t: &Table,
+        layer: usize,
+        cfg: &KimiLinearConfig,
+        max_tokens: usize,
+        max_blocks: usize,
+    ) -> Result<Self> {
         let p = format!("layers.{layer}.");
-        Self::load_named(stream, src, t, cfg, max_tokens, max_blocks, &format!("{p}self_attention_res"), &format!("{p}mlp_res"))
+        Self::load_named(
+            stream,
+            src,
+            t,
+            cfg,
+            max_tokens,
+            max_blocks,
+            &format!("{p}self_attention_res"),
+            &format!("{p}mlp_res"),
+        )
     }
 
     /// 模型级 `output_attn_res_{proj,norm}`（只有一个门，两个槽位装同一组权重，`apply(which=0)`）。
-    pub fn load_output(stream: &Stream, src: &WeightSource, t: &Table, cfg: &KimiLinearConfig, max_tokens: usize, max_blocks: usize) -> Result<Self> {
+    pub fn load_output(
+        stream: &Stream,
+        src: &WeightSource,
+        t: &Table,
+        cfg: &KimiLinearConfig,
+        max_tokens: usize,
+        max_blocks: usize,
+    ) -> Result<Self> {
         Self::load_named(stream, src, t, cfg, max_tokens, max_blocks, "output_attn_res", "output_attn_res")
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn load_named(stream: &Stream, src: &WeightSource, t: &Table, cfg: &KimiLinearConfig, max_tokens: usize, max_blocks: usize, attn_key: &str, mlp_key: &str) -> Result<Self> {
+    fn load_named(
+        stream: &Stream,
+        src: &WeightSource,
+        t: &Table,
+        cfg: &KimiLinearConfig,
+        max_tokens: usize,
+        max_blocks: usize,
+        attn_key: &str,
+        mlp_key: &str,
+    ) -> Result<Self> {
         let hidden = cfg.hidden_size as usize;
-        let block_size = cfg.attn_res_block_size.ok_or_else(|| anyhow::anyhow!("attn_res_block_size 缺失"))? as usize;
+        let block_size =
+            cfg.attn_res_block_size.ok_or_else(|| anyhow::anyhow!("attn_res_block_size 缺失"))? as usize;
         let proj = |key: &str| -> Result<Linear> {
             let l = t.linear(stream, src, &format!("{key}_proj.weight"))?;
             ensure!(l.w.shape == [1, hidden], "{key}_proj: shape {:?}", l.w.shape);
@@ -118,9 +152,18 @@ impl AttnRes {
     }
 
     /// `out[:t] = Σ_r softmax_r(s)_r · cands[r]`，`cands` 的最后一项是 prefix_sum。`which`：0 = attention 门，1 = mlp 门。
-    pub fn apply(&mut self, stream: &Stream, gemm: &Gemm, t: usize, cands: &[&Tensor<bf16>], which: usize, out: &mut Tensor<bf16>) -> Result<()> {
+    pub fn apply(
+        &mut self,
+        stream: &Stream,
+        gemm: &Gemm,
+        t: usize,
+        cands: &[&Tensor<bf16>],
+        which: usize,
+        out: &mut Tensor<bf16>,
+    ) -> Result<()> {
         let _ = gemm;
-        let (proj, norm) = if which == 0 { (&self.attn_proj, &self.attn_norm) } else { (&self.mlp_proj, &self.mlp_norm) };
+        let (proj, norm) =
+            if which == 0 { (&self.attn_proj, &self.attn_norm) } else { (&self.mlp_proj, &self.mlp_norm) };
         let r_n = cands.len();
         let hidden = norm.hidden;
         let tm = self.nrm.shape[0];
@@ -152,7 +195,18 @@ impl AttnRes {
         // 3. acc = Σ_r p_r · v_r（复用 scatter_add：tok=i，k=r，权重表 probs[i·R + r]）
         stream.memset_zeros_n(&mut self.acc.data, t * hidden)?;
         for (r, v) in cands.iter().enumerate() {
-            k::moe_scatter_add_f32(stream, &v.data, &mut self.acc.data, &self.ident.data, &self.kidx.data, &self.probs.data, r * tm, t, r_n, hidden)?;
+            k::moe_scatter_add_f32(
+                stream,
+                &v.data,
+                &mut self.acc.data,
+                &self.ident.data,
+                &self.kidx.data,
+                &self.probs.data,
+                r * tm,
+                t,
+                r_n,
+                hidden,
+            )?;
         }
         stream.memset_zeros_n(&mut out.data, t * hidden)?;
         k::f32_add_to_bf16_n(stream, &self.acc.data, &mut out.data, t * hidden)
@@ -169,18 +223,25 @@ pub struct KimiDecoderLayer {
     act: Situ,
     hidden: usize,
     // 激活缓冲 [T, hidden]
-    h_in: Tensor<bf16>,  // AttnRes(attention 门) 输出
-    hn: Tensor<bf16>,    // input_layernorm 输出
-    a: Tensor<bf16>,     // attention 输出
-    p: Tensor<bf16>,     // prefix_sum（残差）
-    m: Tensor<bf16>,     // AttnRes(mlp 门) 输出
-    mn: Tensor<bf16>,    // post_attention_layernorm 输出
-    y: Tensor<bf16>,     // mlp 输出
+    h_in: Tensor<bf16>, // AttnRes(attention 门) 输出
+    hn: Tensor<bf16>,   // input_layernorm 输出
+    a: Tensor<bf16>,    // attention 输出
+    p: Tensor<bf16>,    // prefix_sum（残差）
+    m: Tensor<bf16>,    // AttnRes(mlp 门) 输出
+    mn: Tensor<bf16>,   // post_attention_layernorm 输出
+    y: Tensor<bf16>,    // mlp 输出
 }
 
 impl KimiDecoderLayer {
     /// （KDA | MLA）× （Dense | latent MoE）+ 可选 AttnRes。
-    pub fn load(stream: &Stream, src: &WeightSource, t: &Table, layer: usize, cfg: &KimiLinearConfig, b: LayerBudget) -> Result<Self> {
+    pub fn load(
+        stream: &Stream,
+        src: &WeightSource,
+        t: &Table,
+        layer: usize,
+        cfg: &KimiLinearConfig,
+        b: LayerBudget,
+    ) -> Result<Self> {
         let hidden = cfg.hidden_size as usize;
         let max_tokens = b.max_tokens;
         let attn = if cfg.is_kda_layer(layer as u32) {
@@ -197,7 +258,8 @@ impl KimiDecoderLayer {
             Ffn::Dense(m)
         };
         let attn_res = if cfg.attn_res_block_size.is_some() {
-            let max_blocks = (cfg.num_hidden_layers as usize).div_ceil(cfg.attn_res_block_size.unwrap() as usize);
+            let max_blocks =
+                (cfg.num_hidden_layers as usize).div_ceil(cfg.attn_res_block_size.unwrap() as usize);
             Some(AttnRes::load(stream, src, t, layer, cfg, max_tokens, max_blocks)?)
         } else {
             None
@@ -210,7 +272,12 @@ impl KimiDecoderLayer {
             ffn,
             attn_res,
             input_norm: t.rmsnorm(stream, src, &format!("{p}.input_layernorm.weight"), cfg.rms_norm_eps)?,
-            post_norm: t.rmsnorm(stream, src, &format!("{p}.post_attention_layernorm.weight"), cfg.rms_norm_eps)?,
+            post_norm: t.rmsnorm(
+                stream,
+                src,
+                &format!("{p}.post_attention_layernorm.weight"),
+                cfg.rms_norm_eps,
+            )?,
             act,
             hidden,
             h_in: z(stream)?,
@@ -230,7 +297,16 @@ impl KimiDecoderLayer {
 
     /// `x[:t]`（上一层 prefix_sum）、`blocks`（已写入的块残差，每个 `[≥t, hidden]`）→ `out[:t]`。
     #[allow(clippy::too_many_arguments)]
-    pub fn forward(&mut self, stream: &Stream, gemm: &Gemm, t: usize, x: &Tensor<bf16>, blocks: &[&Tensor<bf16>], meta: &StepMeta<'_>, out: &mut Tensor<bf16>) -> Result<()> {
+    pub fn forward(
+        &mut self,
+        stream: &Stream,
+        gemm: &Gemm,
+        t: usize,
+        x: &Tensor<bf16>,
+        blocks: &[&Tensor<bf16>],
+        meta: &StepMeta<'_>,
+        out: &mut Tensor<bf16>,
+    ) -> Result<()> {
         let h = self.hidden;
         ensure!(t <= self.hn.shape[0], "layer: {t} > max_tokens");
         ensure!(x.numel() >= t * h && out.numel() >= t * h, "layer: x/out");
@@ -248,10 +324,20 @@ impl KimiDecoderLayer {
         }
         let h_src = if use_res_in { &self.h_in } else { x };
         // 2. attention
-        k::rmsnorm_bf16_n(stream, &h_src.data, &self.input_norm.w.data, &mut self.hn.data, t, h, self.input_norm.eps)?;
+        k::rmsnorm_bf16_n(
+            stream,
+            &h_src.data,
+            &self.input_norm.w.data,
+            &mut self.hn.data,
+            t,
+            h,
+            self.input_norm.eps,
+        )?;
         match &mut self.attn {
             Attn::Kda(kda) => kda.forward(stream, gemm, t, &self.hn, &meta.kda, &mut self.a)?,
-            Attn::Mla(mla) => mla.forward(stream, gemm, t, &self.hn, meta.slot_mapping, &meta.mla, &mut self.a)?,
+            Attn::Mla(mla) => {
+                mla.forward(stream, gemm, t, &self.hn, meta.slot_mapping, &meta.mla, &mut self.a)?
+            }
         }
         // 3. prefix_sum：写块层 p = a；否则 p = x + a
         if writer {
@@ -273,7 +359,15 @@ impl KimiDecoderLayer {
             &self.p
         };
         // 5. mlp
-        k::rmsnorm_bf16_n(stream, &m_src.data, &self.post_norm.w.data, &mut self.mn.data, t, h, self.post_norm.eps)?;
+        k::rmsnorm_bf16_n(
+            stream,
+            &m_src.data,
+            &self.post_norm.w.data,
+            &mut self.mn.data,
+            t,
+            h,
+            self.post_norm.eps,
+        )?;
         match &mut self.ffn {
             Ffn::LatentMoe(moe) => moe.forward(stream, gemm, t, &self.mn, &mut self.y)?,
             Ffn::Dense(mlp) => mlp.forward(stream, gemm, &self.act, t, &self.mn, &mut self.y)?,

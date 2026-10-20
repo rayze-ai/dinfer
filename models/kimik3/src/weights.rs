@@ -165,7 +165,14 @@ pub fn shards_for_prefix(dir: &Path, pre: &str) -> Result<Vec<PathBuf>> {
 }
 
 /// `{q,k,v}_conv1d.weight [dim, 1, width]`（F32）→ bf16 `[dim, width]`。
-pub fn load_conv1d(stream: &Stream, src: &WeightSource, t: &Table, key: &str, dim: usize, width: usize) -> Result<Tensor<bf16>> {
+pub fn load_conv1d(
+    stream: &Stream,
+    src: &WeightSource,
+    t: &Table,
+    key: &str,
+    dim: usize,
+    width: usize,
+) -> Result<Tensor<bf16>> {
     let mut w = t.load_bf16(stream, src, key)?;
     ensure!(w.numel() == dim * width, "{key}: [{dim}, 1, {width}] 不匹配：文件 {:?}", w.shape);
     w.reshape(&[dim, width])?;
@@ -173,7 +180,13 @@ pub fn load_conv1d(stream: &Stream, src: &WeightSource, t: &Table, key: &str, di
 }
 
 /// `A_log`：文件 `[128]`（按 head_dim 填充），只取前 `heads` 个（vLLM `a_log_weight_loader` 同样 `narrow`）。
-pub fn load_a_log(stream: &Stream, src: &WeightSource, t: &Table, key: &str, heads: usize) -> Result<Tensor<f32>> {
+pub fn load_a_log(
+    stream: &Stream,
+    src: &WeightSource,
+    t: &Table,
+    key: &str,
+    heads: usize,
+) -> Result<Tensor<f32>> {
     let (shape, mut v) = t.load_f32_host(src, key)?;
     ensure!(v.len() >= heads, "{key}: {shape:?} 少于头数 {heads}");
     ensure!(v[heads..].iter().all(|x| *x == 0.0), "{key}: 第 {heads} 项之后应为 0 填充");
@@ -231,7 +244,10 @@ mod tests {
     fn strips_prefix_and_skips_vision() {
         let t = Table::from_names(&header()).unwrap();
         assert_eq!(t.name("embed_tokens.weight").unwrap(), "language_model.model.embed_tokens.weight");
-        assert_eq!(t.name("layers.1.self_attn.A_log").unwrap(), "language_model.model.layers.1.self_attn.A_log");
+        assert_eq!(
+            t.name("layers.1.self_attn.A_log").unwrap(),
+            "language_model.model.layers.1.self_attn.A_log"
+        );
         assert_eq!(t.name("lm_head.weight").unwrap(), LM_HEAD);
         assert!(!t.contains("vision_tower.encoder.blocks.0.attn.qkv.weight"));
         assert!(!t.contains("mm_projector.proj.weight"));
