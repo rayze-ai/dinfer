@@ -85,3 +85,31 @@ r9 子代理两次 `remote_b300.sh push`（rsync `--delete`）把 B300 远端 `t
 - `/metrics` 未加 startup gauge（现无相关 gauge，不强求）。
 - 验证：见下方"验证结果"（3090 本机 CPU 部分，四 feature 编译 / clippy / 单测）。
 - 验证结果（3090 本机，不碰 GPU）：`cargo build --release --features {qwen3,qwen35,glm53,kimik3} -p dinfer` 四个全过；`cargo clippy` 四 feature 无新告警（命中的 `models/qwen35` 三条、`qwen3` 两条 unused import 都在未改动的行上，预先存在）；`cargo test -p dinfer-layers` 8 过（含 load.rs 新增 3 条：显存累计 + 每层 sync 计数 / `sync_per_layer(false)` + 错误传播 / `StartupTimer::split` 扣减算术）；`cargo test -p dinfer-kimik3` 26 过；`cargo test -p dinfer-qwen35` 12 过；`q1.sh` 的 CPU 段 `cargo test -p dinfer-qwen3` 11 过。GPU 侧（真日志样例、每层 sync 对装载总时长的影响）等 B300 / 4090 释放后在下一次 serve 启动顺手看，不单开任务。
+
+## fla 分解（2026-10-20 17:1x，B300-50 GPU 6，`scripts/dev/fla_prof.py`，`probe_gdn_r9_8`）
+
+vLLM 容器 `vllm/vllm-openai:nightly`（torch 2.13 cu130）内 `chunk_gated_delta_rule` torch.profiler 20 次均值，按 kernel 聚合（µs/call）：
+
+| 形状 | l2norm ×2 | kkt | tril_merge | wu（recompute_w_u） | fwd_h | fwd_o | cumsum+fill | **总** |
+|---|---|---|---|---|---|---|---|---|
+| 1×1024 | 11 | 8 | 32 | 15 | 32 | 24 | 6 | **128**（不含 l2norm 117） |
+| 8×1024 | 59 | 47 | 189 | 98 | 165 | 167 | 20 | **746**（685） |
+| 1×8192 | 59 | 47 | 189 | 98 | **273** | 167 | 20 | **853**（793） |
+
+与 dinfer 默认路径（`probe_gdn_r9_7`，同卡）逐段对照——fla 的 kkt + tril_merge + wu 对应我们的 wy（点积 / 三角逆 / u·w），fwd_h + fwd_o 对应 ho，l2norm + cumsum 对应 prep：
+
+| 形状 | 段 | dinfer | fla | 差 |
+|---|---|---|---|---|
+| 8×1024 | prep | 82 | 79 | 持平 |
+| 8×1024 | wy | 532 | 334 | **1.6×** |
+| 8×1024 | ho | 498 | 332 | **1.5×** |
+| 1×8192 | wy | 533 | 334 | **1.6×** |
+| 1×8192 | ho | 659 | 440 | **1.5×** |
+| 8×1024 / 1×8192 | conv | 219 / 221 | —（fla 不含；vLLM 另走 `causal_conv1d`） | 口径外 |
+
+结论：
+1. **"长形状慢 1.5×"是 wy 与 ho 各贡献一半**（wy 1.6×、ho 1.5×），prep 已持平；不是某一段独慢。
+2. **r9 轮次表里"chain vs fla 745 / 853"是错配口径**：dinfer chain 含 conv 219 µs，fla 总数不含 conv。扣掉 conv 后 8×1024 为 890 vs 746（1.19×）、1×8192 为 1050 vs 853（1.23×）。要公平比全链，vLLM 侧还得加 `causal_conv1d_fn` 的 kernel（r10 第 1 轮顺手测）。停止条件 "8×1024 全链 ≤ 800" 若按 fla 口径应是 "不含 conv ≤ 746"。
+3. fla 自己也撞串行链：fwd_h 8×1024 → 1×8192 从 165 到 273（1.65×），我们的 ho 是 498 → 659（1.32×），**伸缩比 fla 好、起点高 50%**——说明我们 ho 每 chunk 的固定开销（装载 f32 w / kg / aq 再转 bf16、4 次 `__syncthreads`）比 fla 大，而不是并行度策略更差。fwd_o 在 fla 是全并行独立 kernel（167 恒定），我们融合在 ho 里跟着串行链走，1×8192 时这部分等于白等。
+4. fla 最大单 kernel 是 tril_merge 189（分块逆拼 64×64，bf16 中间量）；我们的 wy 三角逆已融合、不单独计时，wy 多出的 ~200 µs 在 u / w 两个 GEMM 阶段——它们写 f32（u 200 MB + w 200 MB + kg 200 MB + aq 100 MB @1×8192），fla 全 bf16 写一半。
+5. 对 r10 的指向：第 1 轮 **aq / u / w / kg f32 → bf16**（wy 写量 −50%、ho 装载量 −50% 且省掉寄存器 f32→bf16 转换）同时命中 wy 与 ho 两段；第 2 轮 ho 拆出 o 全并行（fla 的 fwd_o 模式，但 h 用 bf16 h16 已有）+ h-pass 双缓冲。

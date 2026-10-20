@@ -733,7 +733,7 @@ probe_gdn_r9_7,2026-10-20,B300,qwen35,gdn_scale,chain_us,vllm,1x4096,447,us,
 probe_gdn_r9_7,2026-10-20,B300,qwen35,gdn_scale,chain_nol2_us,vllm,1x4096,416,us,
 probe_gdn_r9_7,2026-10-20,B300,qwen35,gdn_scale,chain_us,vllm,1x8192,853,us,
 probe_gdn_r9_7,2026-10-20,B300,qwen35,gdn_scale,chain_nol2_us,vllm,1x8192,792,us,
-probe_gdn_r9_8,2026-10-20,B300,qwen35,gdn_scale,fla_total_us,vllm,1x1024,128,us,fla per-kernel 分解：B300-50 GPU 6，vllm/vllm-openai:nightly 容器，torch.profiler 20 次均值，HV48 K=V128
+probe_gdn_r9_8,2026-10-20,B300,qwen35,gdn_scale,fla_total_us,vllm,1x1024,128,us,"fla per-kernel 分解：B300-50 GPU 6，vllm/vllm-openai:nightly 容器，torch.profiler 20 次均值，HV48 K=V128；对照见 loops/qwen35-gdn-r9.md ""fla 分解"""
 probe_gdn_r9_8,2026-10-20,B300,qwen35,gdn_scale,fla_fwd_h_us,vllm,1x1024,32,us,
 probe_gdn_r9_8,2026-10-20,B300,qwen35,gdn_scale,fla_tril_merge_us,vllm,1x1024,32,us,
 probe_gdn_r9_8,2026-10-20,B300,qwen35,gdn_scale,fla_fwd_o_us,vllm,1x1024,24,us,

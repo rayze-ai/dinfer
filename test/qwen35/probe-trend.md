@@ -169,7 +169,7 @@
 | 8x1024 | 6 | 6 | 14 | 14 | 165 | 165 | 167 | 167 | 46 | 47 | 59 | 685 | 746 | 189 | 189 | 98 | 98 |
 | 1x8192 | 6 | 6 | 14 | 14 | 273 | 273 | 167 | 167 | 46 | 47 | 59 | 793 | 853 | 189 | 189 | 98 | 98 |
 
-- 1x1024 fla_total_us vllm：fla per-kernel 分解：B300-50 GPU 6，vllm/vllm-openai:nightly 容器，torch.profiler 20 次均值，HV48 K=V128
+- 1x1024 fla_total_us vllm：fla per-kernel 分解：B300-50 GPU 6，vllm/vllm-openai:nightly 容器，torch.profiler 20 次均值，HV48 K=V128；对照见 loops/qwen35-gdn-r9.md "fla 分解"
 
 ## probe_prefill_1（2026-10-20，B300）
 
