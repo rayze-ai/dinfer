@@ -50,8 +50,8 @@ fn gemm_small_m_bench() {
     let mut out = s.alloc_zeros::<bf16>(m_max * n_max).unwrap();
     let mut partial = s.alloc_zeros::<f32>(p.gemm_tune.split_workspace_max_bytes / 4).unwrap();
     println!(
-        "{:<4} {:<16} {:>6} {:>6} | {:>8} {:>5} | {:>8} {:>5} {:<26} | {:>8} {:>5} {:>4} | {:>9} | chosen",
-        "M", "shape", "N", "K", "lt_def", "GB/s", "lt_best", "GB/s", "algo", "small_m", "GB/s", "spl", "bucket us"
+        "{:<4} {:<16} {:>6} {:>6} | {:>8} {:>5} | {:>8} {:>5} {:<26} | {:>8} {:>5} {:>4} | {:>20} | {:>9} | chosen",
+        "M", "shape", "N", "K", "lt_def", "GB/s", "lt_best", "GB/s", "algo", "small_m", "GB/s", "spl", "mma us GB/s cfg", "bucket us"
     );
     for (name, n, k) in &shapes {
         let mut x = 0x9e3779b97f4a7c15u64;
@@ -82,11 +82,16 @@ fn gemm_small_m_bench() {
             let chosen = match row.chosen {
                 GemmPlan::LtAlgo(_) => "lt".to_string(),
                 GemmPlan::SmallM { splits } => format!("small_m(s{splits})"),
+                GemmPlan::SmallMma { splits, warps } => format!("mma(s{splits}w{warps})"),
+            };
+            let (mma_us, mma_gb) = match row.mma_us {
+                Some(u) => (format!("{u:8.1}"), format!("{:5.0}", row.gbps(u))),
+                None => ("       -".into(), "    -".into()),
             };
             println!(
-                "{:<4} {:<16} {:>6} {:>6} | {:8.1} {:5.0} | {:8.1} {:5.0} {:<26} | {} {} {:>4} | {} | {}",
+                "{:<4} {:<16} {:>6} {:>6} | {:8.1} {:5.0} | {:8.1} {:5.0} {:<26} | {} {} {:>4} | {} {} s{}w{} | {} | {}",
                 m, name, n, k, row.lt_default_us, row.gbps(row.lt_default_us), row.lt_best_us, row.gbps(row.lt_best_us),
-                row.lt_best_desc, sm_us, sm_gb, row.small_m_splits, bucket_us, chosen
+                row.lt_best_desc, sm_us, sm_gb, row.small_m_splits, mma_us, mma_gb, row.mma_splits, row.mma_warps, bucket_us, chosen
             );
         }
         drop(dw);

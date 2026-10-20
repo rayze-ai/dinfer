@@ -39,6 +39,8 @@ pub enum GemmPlan {
     LtAlgo(sys::cublasLtMatmulAlgo_t),
     /// 自写小 M kernel，split-K 份数。
     SmallM { splits: usize },
+    /// 自写 tensor-core 小 M kernel（r11b）：split-K 份数 + 每 block warp 数（归约在 kernel 内）。
+    SmallMma { splits: usize, warps: usize },
 }
 
 /// 自调优输入：一个形状（N, K）和它的真实权重（计时用真权重，避免再分配一份）。
@@ -65,6 +67,10 @@ pub struct GemmTuneRow {
     /// 小 M kernel 最快者（M 超过上限或 K 不对齐则 None）
     pub small_m_us: Option<f32>,
     pub small_m_splits: usize,
+    /// tensor-core 小 M kernel 最快者（M 超上限或 K % 32 != 0 则 None）
+    pub mma_us: Option<f32>,
+    pub mma_splits: usize,
+    pub mma_warps: usize,
     pub chosen: GemmPlan,
 }
 
@@ -77,6 +83,7 @@ impl GemmTuneRow {
         match self.chosen {
             GemmPlan::LtAlgo(_) => self.lt_best_us,
             GemmPlan::SmallM { .. } => self.small_m_us.unwrap_or(f32::INFINITY),
+            GemmPlan::SmallMma { .. } => self.mma_us.unwrap_or(f32::INFINITY),
         }
     }
 }
@@ -111,6 +118,7 @@ impl GemmTuneReport {
                         let what = match r.chosen {
                             GemmPlan::LtAlgo(_) => format!("lt[{}]", r.lt_best_desc),
                             GemmPlan::SmallM { splits } => format!("small_m(s{splits})"),
+                            GemmPlan::SmallMma { splits, warps } => format!("mma(s{splits}w{warps})"),
                         };
                         format!("m{}={} {:.0}us({:+.0}%)", r.m, what, r.chosen_us(), (r.chosen_us() / r.lt_default_us - 1.0) * 100.0)
                     })
@@ -162,6 +170,8 @@ pub struct Gemm {
     default_algos: Mutex<HashMap<Key, sys::cublasLtMatmulAlgo_t>>,
     /// split-K 的 partial 工作区（自调优后按所选 plan 的最大需要分配；forward 内不分配，便于 graph 捕获）
     partial: Mutex<Option<CudaSlice<f32>>>,
+    /// tensor-core kernel split-K 的每 N-tile 到达计数器（自调优后按最大 ceil(N/16) 分配；kernel 自复位，常为 0）
+    counters: Mutex<Option<CudaSlice<i32>>>,
 }
 
 // SAFETY: cublasLt 句柄按 NVIDIA 文档可跨线程使用；其余字段自身 Send/Sync（Mutex 包着可变状态）。
@@ -196,6 +206,7 @@ impl Gemm {
             plans: Mutex::new(HashMap::new()),
             default_algos: Mutex::new(HashMap::new()),
             partial: Mutex::new(None),
+            counters: Mutex::new(None),
         })
     }
 
@@ -239,6 +250,18 @@ impl Gemm {
                 drop(guard);
                 self.run_lt_default(a, w, bias, out, m, n, k)
             }
+            Some(GemmPlan::SmallMma { splits, warps }) => {
+                let mut pg = self.partial.lock().unwrap();
+                let mut cg = self.counters.lock().unwrap();
+                let fits = splits <= 1
+                    || (pg.as_ref().is_some_and(|p| p.len() >= splits * m * n) && cg.as_ref().is_some_and(|c| c.len() >= n.div_ceil(16)));
+                if fits {
+                    return ops::gemm_small_m_mma_bf16(&self.stream, a, w, bias, out, pg.as_mut(), cg.as_mut(), m, n, k, splits, warps);
+                }
+                drop(pg);
+                drop(cg);
+                self.run_lt_default(a, w, bias, out, m, n, k)
+            }
             Some(GemmPlan::LtAlgo(algo)) => {
                 let d = self.make_descs(m, n, k, bias.map(|b| self.stream.ptr(b)))?;
                 self.run_lt(&d, &algo, a, w, out)
@@ -262,7 +285,7 @@ impl Gemm {
         // 这里只兜底 small_m（对任意 m ≤ 桶都正确）。
         if m <= self.profile.gemm_tune.small_m_max {
             let bucket = m.next_power_of_two();
-            if let Some(p @ GemmPlan::SmallM { .. }) = plans.get(&Key { m: bucket, n, k, bias }) {
+            if let Some(p @ (GemmPlan::SmallM { .. } | GemmPlan::SmallMma { .. })) = plans.get(&Key { m: bucket, n, k, bias }) {
                 return Some(*p);
             }
         }
@@ -309,6 +332,16 @@ impl Gemm {
                     return Ok(None);
                 }
                 self.time_us(iters, || ops::gemm_small_m_bf16(&self.stream, a_scratch, w, bias, out_scratch, Some(&mut *partial_scratch), m, n, k, splits)).map(Some)
+            }
+            GemmPlan::SmallMma { splits, warps } => {
+                if m > self.profile.gemm_tune.small_m_max || k % 32 != 0 || splits * m * n > partial_scratch.len() {
+                    return Ok(None);
+                }
+                let mut ctr = self.stream.alloc_zeros::<i32>(n.div_ceil(16))?;
+                self.time_us(iters, || {
+                    ops::gemm_small_m_mma_bf16(&self.stream, a_scratch, w, bias, out_scratch, Some(&mut *partial_scratch), Some(&mut ctr), m, n, k, splits, warps)
+                })
+                .map(Some)
             }
         }
     }
@@ -522,10 +555,46 @@ impl Gemm {
                 }
             }
         }
-        let chosen = match small_m_us {
+        // tensor-core 小 M kernel：候选 = warps（ArchProfile）× split-K（同 small_m 的波数目标，按 16·warps 行/block 算 block 数）
+        let mut mma_us = None;
+        let mut mma_splits = 0;
+        let mut mma_warps = 0;
+        if m <= tp.small_m_max && k % 32 == 0 {
+            let mut ctr = self.stream.alloc_zeros::<i32>(n.div_ceil(16))?;
+            for &wp in &tp.small_m_mma_warps {
+                let blocks = n.div_ceil(16 * wp);
+                for s in self.profile.small_m_split_candidates(blocks, k) {
+                    let s = s.min((k / 32).max(1));
+                    if s > 1 && (s * m * n > partial_scratch.len() || s * m * n * 4 > tp.split_workspace_max_bytes) {
+                        continue;
+                    }
+                    // 个别配置 launch 失败（资源）就跳过，不让整个自调优失败
+                    let Ok(us) = self.time_us(iters, || {
+                        ops::gemm_small_m_mma_bf16(&self.stream, a_scratch, w, bias, out_scratch, Some(&mut *partial_scratch), Some(&mut ctr), m, n, k, s, wp)
+                    }) else {
+                        continue;
+                    };
+                    if mma_us.is_none_or(|best| us < best) {
+                        mma_us = Some(us);
+                        mma_splits = s;
+                        mma_warps = wp;
+                    }
+                }
+            }
+        }
+        let mut chosen = match small_m_us {
             Some(su) if su < lt_best.0 => GemmPlan::SmallM { splits: small_m_splits },
             _ => GemmPlan::LtAlgo(cands[lt_best.1].algo),
         };
+        let best_so_far = match chosen {
+            GemmPlan::SmallM { .. } => small_m_us.unwrap_or(f32::INFINITY),
+            _ => lt_best.0,
+        };
+        if let Some(mu) = mma_us {
+            if mu < best_so_far {
+                chosen = GemmPlan::SmallMma { splits: mma_splits, warps: mma_warps };
+            }
+        }
         Ok(GemmTuneRow {
             name: name.to_string(),
             m,
@@ -536,6 +605,9 @@ impl Gemm {
             lt_best_desc: format!("#{} {}", lt_best.1, Self::algo_desc(&cands[lt_best.1].algo)),
             small_m_us,
             small_m_splits,
+            mma_us,
+            mma_splits,
+            mma_warps,
             chosen,
         })
     }
@@ -557,12 +629,18 @@ impl Gemm {
         let mut partial_scratch = self.stream.alloc_zeros::<f32>(tp.split_workspace_max_bytes / 4)?;
         self.stream.synchronize()?;
         let mut need_partial = 0usize;
+        let mut need_counters = 0usize;
         let mut plans = HashMap::new();
         for e in entries {
             for &m in &tp.m_buckets {
                 let row = self.tune_shape(&e.name, m, e.n, e.k, e.w, e.bias, &a_scratch, &mut out_scratch, &mut partial_scratch)?;
-                if let GemmPlan::SmallM { splits } = row.chosen {
-                    need_partial = need_partial.max(splits * m * e.n);
+                match row.chosen {
+                    GemmPlan::SmallM { splits } => need_partial = need_partial.max(splits * m * e.n),
+                    GemmPlan::SmallMma { splits, .. } if splits > 1 => {
+                        need_partial = need_partial.max(splits * m * e.n);
+                        need_counters = need_counters.max(e.n.div_ceil(16));
+                    }
+                    _ => {}
                 }
                 plans.insert(Key { m, n: e.n, k: e.k, bias: e.bias.is_some() }, row.chosen);
                 report.rows.push(row);
@@ -582,8 +660,8 @@ impl Gemm {
                 let bucket = m.next_power_of_two();
                 let Some(&bp) = plans.get(&Key { m: bucket, n: e.n, k: e.k, bias: key_bias }) else { continue };
                 let plan = match bp {
-                    GemmPlan::SmallM { .. } if m <= tp.small_m_max => Some(bp),
-                    GemmPlan::SmallM { .. } => None,
+                    GemmPlan::SmallM { .. } | GemmPlan::SmallMma { .. } if m <= tp.small_m_max => Some(bp),
+                    GemmPlan::SmallM { .. } | GemmPlan::SmallMma { .. } => None,
                     GemmPlan::LtAlgo(algo) => {
                         let d = self.make_descs(m, e.n, e.k, e.bias.map(|b| self.stream.ptr(b)))?;
                         self.algo_valid_for(&d, &algo).then_some(bp)
@@ -601,6 +679,9 @@ impl Gemm {
         report.borrowed = borrowed;
         report.rejected = rejected;
         drop(partial_scratch);
+        if need_counters > 0 {
+            *self.counters.lock().unwrap() = Some(self.stream.alloc_zeros::<i32>(need_counters)?);
+        }
         if need_partial > 0 {
             *self.partial.lock().unwrap() = Some(self.stream.alloc_zeros::<f32>(need_partial)?);
             report.partial_bytes = need_partial * 4;

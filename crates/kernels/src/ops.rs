@@ -70,6 +70,50 @@ pub fn gemm_small_m_bf16(
     )
 }
 
+/// tensor-core 小 M GEMM（r11b）：同 `gemm_small_m_bf16` 语义，K % 32 == 0，`warps` ∈ {4, 8}。
+/// splits > 1 时 `partial` ≥ splits·m·n 个 f32、`counters` ≥ ceil(n/16) 个 i32（初值 0，kernel 自复位）。
+#[allow(clippy::too_many_arguments)]
+pub fn gemm_small_m_mma_bf16(
+    stream: &Stream,
+    a: &CudaSlice<bf16>,
+    w: &CudaSlice<bf16>,
+    bias: Option<&CudaSlice<bf16>>,
+    out: &mut CudaSlice<bf16>,
+    partial: Option<&mut CudaSlice<f32>>,
+    counters: Option<&mut CudaSlice<i32>>,
+    m: usize,
+    n: usize,
+    k: usize,
+    splits: usize,
+    warps: usize,
+) -> Result<()> {
+    ensure!(m >= 1 && m <= 32 && k % 32 == 0, "gemm_small_m_mma: m={m} (1..=32) k={k} (32 的倍数)");
+    ensure!(warps == 4 || warps == 8, "gemm_small_m_mma: warps={warps}");
+    ensure!(a.len() >= m * k && w.len() == n * k && out.len() >= m * n, "gemm_small_m_mma: 形状");
+    if let Some(b) = bias {
+        ensure!(b.len() == n, "gemm_small_m_mma: bias.len {} != n {n}", b.len());
+    }
+    let (pp, pc) = if splits > 1 {
+        let (Some(p), Some(c)) = (partial, counters) else { bail!("gemm_small_m_mma: splits > 1 需要 partial + counters") };
+        ensure!(p.len() >= splits * m * n, "gemm_small_m_mma: partial.len {} < {}", p.len(), splits * m * n);
+        ensure!(c.len() >= n.div_ceil(16), "gemm_small_m_mma: counters.len {} < {}", c.len(), n.div_ceil(16));
+        (stream.ptr_mut(p) as *mut f32, stream.ptr_mut(c) as *mut i32)
+    } else {
+        (std::ptr::null_mut(), std::ptr::null_mut())
+    };
+    let pa = stream.ptr(a) as *const c_void;
+    let pw = stream.ptr(w) as *const c_void;
+    let pb = bias.map_or(std::ptr::null(), |b| stream.ptr(b) as *const c_void);
+    let po = stream.ptr_mut(out) as *mut c_void;
+    // SAFETY: 指针来自有效 CudaSlice，长度已校验；stream 同 context。
+    check(
+        unsafe {
+            ffi::gemm_small_m_mma_bf16(pa, pw, pb, po, pp, pc, m as i64, n as i64, k as i64, splits as i64, warps as i64, stream.raw() as ffi::cudaStream_t)
+        },
+        "gemm_small_m_mma_bf16",
+    )
+}
+
 /// out = a + b（fp32）。P0 自检。
 pub fn add_f32(
     stream: &Stream,
@@ -1789,11 +1833,27 @@ pub fn gqa_prefill_bf16<
                 scale,
                 q_stride as i64,
                 kv_stride as i64,
+                gqa_prefill_cfg(stream),
                 stream.raw() as _,
             )
         },
         "gqa_prefill_bf16",
     )
+}
+
+/// D=256 全注意力 prefill kernel 结构（`ArchProfile::gqa_prefill_cfg_for`），`GQA_PREFILL_CFG` 覆盖；进程内只算一次。
+fn gqa_prefill_cfg(stream: &Stream) -> i32 {
+    use std::sync::OnceLock;
+    static CFG: OnceLock<i32> = OnceLock::new();
+    *CFG.get_or_init(|| {
+        if let Some(v) = std::env::var("GQA_PREFILL_CFG").ok().and_then(|s| s.trim().parse::<i32>().ok()) {
+            tracing::info!(cfg = v, "gqa prefill cfg 由环境变量覆盖");
+            return v;
+        }
+        let cc = stream.device().compute_capability().unwrap_or((8, 0));
+        let sm = stream.device().sm_count().unwrap_or(1);
+        crate::arch::ArchProfile::gqa_prefill_cfg_for(crate::arch::ArchProfile::for_cc(cc, sm).arch)
+    })
 }
 
 /// 从 paged cache 读的 attention：decode（q_len = 1）与带历史 chunked prefill 统一。q: [Tq, heads, D]，out 同形。
@@ -1851,6 +1911,7 @@ pub fn gqa_paged_bf16<Q: DevicePtr<bf16> + ?Sized>(
                 scale,
                 q_stride as i64,
                 skip_single as i32,
+                gqa_prefill_cfg(stream),
                 stream.raw() as _,
             )
         },

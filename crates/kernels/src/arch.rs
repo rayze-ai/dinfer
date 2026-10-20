@@ -106,6 +106,8 @@ pub struct GemmTuneParams {
     pub lt_candidates: usize,
     /// 小 M kernel split-K 的候选：block 总数 ≈ 目标倍数 × SM 数，每个倍数一个候选（去重）。
     pub small_m_wave_targets: Vec<usize>,
+    /// tensor-core 小 M kernel 每 block warp 数候选（每 warp 16 行 N）；split-K 候选沿用 `small_m_wave_targets`。
+    pub small_m_mma_warps: Vec<usize>,
     /// 每个候选的计时次数（取平均）；首次先预热 1 次。
     pub timing_iters: usize,
     /// split-K 工作区上限（字节）：候选的 partial 超过它就不参与。
@@ -145,6 +147,7 @@ impl ArchProfile {
                 Arch::Sm8x => vec![1, 2, 4],
                 Arch::Sm90 | Arch::Sm100 => vec![1, 2, 4, 8],
             },
+            small_m_mma_warps: vec![4, 8],
             timing_iters: 5,
             split_workspace_max_bytes: 64 << 20,
         };
@@ -284,6 +287,19 @@ impl ArchProfile {
     /// 64% 周期无可发射、DRAM 6%、smem / regs 都只限到 5 block/SM —— 延迟型，加 warp 掩 smem 依赖链；Sm100 取 8。
     /// Sm8x 也取 8（r10 第 8 轮）：3090 bench 五形状 mma8 全快于 mma（8×1024 1712 → 1387、1×8192 1711 → 1382，−19%；
     /// 1×1024 237 → 192），smem 不变所以占用不降。Sm90 无实测，跟 Sm8x。
+    /// 全注意力 prefill / chunked-prefill kernel（`gqa.cu`，D=256）的结构：warp 数·100 + tile key 数；0 = v5 旧路径。
+    /// r11a（docs/loops/qwen35-attn-r11a.md）：v5 在 D=256 时 Q 64 + O 128 寄存器 → 255 reg 且 spill、2 block/SM，
+    /// B300 6 K 单层 1818 µs（mma.sync 峰值 575 TF 的 43%）。v6 把 Q 放 smem，sm_103 227 KB 装得下 8 warp × tile 64
+    /// （Q 67.6 KB + K/V 67.6 KB）；sm8x 99 KB 只装得下 4 warp × tile 32（67.6 KB），3090 实测待定前沿用 v5。
+    /// `GQA_PREFILL_CFG` 环境变量只做覆盖（微基准 / 对拍扫变体）。
+    pub fn gqa_prefill_cfg_for(arch: Arch) -> i32 {
+        match arch {
+            Arch::Sm100 => 864,
+            Arch::Sm90 => 464,
+            Arch::Sm8x => 0,
+        }
+    }
+
     pub fn gdn_chunk_wy_warps_for(arch: Arch) -> usize {
         match arch {
             Arch::Sm100 | Arch::Sm8x | Arch::Sm90 => 8,
@@ -425,6 +441,17 @@ mod tests {
     fn gdn_chunk_ho_bv_sm100_picks_64_only_when_blocks_fill_sms() {
         // B300：148 SM × 2 block；8×1024 有 8 seq × 48 hv = 384 base_blocks → ×2 片 = 768 ≥ 296 → 64
         assert_eq!(ArchProfile::gdn_chunk_ho_bv_for(Arch::Sm100, 148, 384, 128, 128), 64);
+        // gqa v6 cfg 编码 = warp·100 + tile，且 smem 不超该卡上限（Sm100 227 KB / Sm8x 99 KB）
+        for a in [Arch::Sm8x, Arch::Sm90, Arch::Sm100] {
+            let c = ArchProfile::gqa_prefill_cfg_for(a);
+            if c != 0 {
+                let (nw, tile) = (c / 100, c % 100);
+                assert!([4, 8].contains(&nw) && [32, 64].contains(&tile), "{a:?} cfg {c}");
+                let smem = (nw * 16 + 2 * tile) * (256 + 8) * 2;
+                let cap = if a == Arch::Sm8x { 99 * 1024 } else { 227 * 1024 };
+                assert!(smem <= cap, "{a:?} cfg {c} smem {smem} > {cap}");
+            }
+        }
         // 1×8192：1 × 48 = 48 base_blocks → 96 < 296 → 32
         assert_eq!(ArchProfile::gdn_chunk_ho_bv_for(Arch::Sm100, 148, 48, 128, 128), 32);
         // K ≠ 128 无 64 特化；Sm8x 不开 64
