@@ -3632,7 +3632,11 @@ fn gdn_chunk_ho_bv(stream: &Stream, base_blocks: usize, k_dim: usize, v_dim: usi
         }
     }
     let sm = *SM.get_or_init(|| stream.device().sm_count().unwrap_or(1));
-    crate::arch::ArchProfile::gdn_chunk_ho_bv(sm, base_blocks, k_dim, v_dim)
+    static ARCH: OnceLock<crate::arch::Arch> = OnceLock::new();
+    let arch = *ARCH.get_or_init(|| {
+        stream.device().compute_capability().map(|cc| crate::arch::ArchProfile::for_cc(cc, sm).arch).unwrap_or(crate::arch::Arch::Sm8x)
+    });
+    crate::arch::ArchProfile::gdn_chunk_ho_bv_for(arch, sm, base_blocks, k_dim, v_dim)
 }
 
 /// chunk prefill `ho` 是否寄存器预取：默认 `ArchProfile::gdn_chunk_ho_prefetch(bv)`；`GDN_CHUNK_HO_PREFETCH=0|1` 覆盖。

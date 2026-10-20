@@ -246,10 +246,27 @@ impl ArchProfile {
     /// 形状上都快于 16（B300 1×1024 498 vs 694、1×8192 660 vs 946 µs；装载 q / w / kg 的重读少一半 > block 数翻倍），
     /// 不再按"铺满 N 波"选小档。K ∉ {64,128,256} 或 V 不被任何档整除返回 0（调用方回老 kernel）。
     pub fn gdn_chunk_ho_bv(sm_count: usize, base_blocks: usize, k_dim: usize, v_dim: usize) -> usize {
+        Self::gdn_chunk_ho_bv_for(Arch::Sm8x, sm_count, base_blocks, k_dim, v_dim)
+    }
+
+    /// 按卡型 + 形状选 BV（r10 第 6–7 轮，B300 GPU 7 实测）：
+    /// - Sm100 多了 **64 档**（每 warp 8 个 h tile、o / w 各 8 条独立 mma 链，ILP ×2；仅 K=128 有特化）：block 多时赢
+    ///   （8×1024：1536 → 768 block，ho 382 → 308 µs，−19%），block 少时输（1×8192：192 → 96 block，504 → 595）——
+    ///   ILP 翻倍抵不过有活的 SM 数减半。所以 64 只在 `base_blocks · (V/64) ≥ sm_count · GDN_CHUNK_HO_BLOCKS_PER_SM`
+    ///   （每 SM 至少铺满常驻 block 数，regs 239 / smem 86 KB 都限 2）时取，否则回 32。
+    /// - Sm8x / Sm90：保持 [32, 16]（3090 smem 限 2 block/SM、BV=64 未实测）。
+    pub fn gdn_chunk_ho_bv_for(arch: Arch, sm_count: usize, base_blocks: usize, k_dim: usize, v_dim: usize) -> usize {
         const GDN_CHUNK_HO_BV_CANDIDATES: [usize; 2] = [32, 16];
-        let _ = (sm_count, base_blocks);
+        const GDN_CHUNK_HO_BLOCKS_PER_SM: usize = 2;
         if !matches!(k_dim, 64 | 128 | 256) {
             return 0;
+        }
+        if matches!(arch, Arch::Sm100)
+            && k_dim == 128
+            && v_dim % 64 == 0
+            && base_blocks * (v_dim / 64) >= sm_count.max(1) * GDN_CHUNK_HO_BLOCKS_PER_SM
+        {
+            return 64;
         }
         GDN_CHUNK_HO_BV_CANDIDATES.iter().copied().find(|&bv| v_dim % bv == 0).unwrap_or(0)
     }
@@ -397,6 +414,18 @@ impl MegaParams {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gdn_chunk_ho_bv_sm100_picks_64_only_when_blocks_fill_sms() {
+        // B300：148 SM × 2 block；8×1024 有 8 seq × 48 hv = 384 base_blocks → ×2 片 = 768 ≥ 296 → 64
+        assert_eq!(ArchProfile::gdn_chunk_ho_bv_for(Arch::Sm100, 148, 384, 128, 128), 64);
+        // 1×8192：1 × 48 = 48 base_blocks → 96 < 296 → 32
+        assert_eq!(ArchProfile::gdn_chunk_ho_bv_for(Arch::Sm100, 148, 48, 128, 128), 32);
+        // K ≠ 128 无 64 特化；Sm8x 不开 64
+        assert_eq!(ArchProfile::gdn_chunk_ho_bv_for(Arch::Sm100, 148, 384, 64, 128), 32);
+        assert_eq!(ArchProfile::gdn_chunk_ho_bv_for(Arch::Sm8x, 82, 384, 128, 128), 32);
+        assert_eq!(ArchProfile::gdn_chunk_ho_bv(82, 384, 128, 128), 32);
+    }
+
     use super::{Arch, ArchProfile};
 
     #[test]
