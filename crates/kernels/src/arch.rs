@@ -100,7 +100,7 @@ impl RmsnormLayout {
 pub struct GemmTuneParams {
     /// 参与自调优的 M 桶（与 decode CUDA graph 的 batch 桶一致）。
     pub m_buckets: Vec<usize>,
-    /// 走自写小 M kernel 的 M 上限（kernel 的 M_TILE 最大 8）。
+    /// 走自写小 M kernel 的 M 上限（kernel 的 M_TILE 最大 32；第 9 轮从 8 提到 32：M≥16 时让它与 Lt 的 splitK+reduce 比）。
     pub small_m_max: usize,
     /// cuBLASLt 启发式候选数（`cublasLtMatmulAlgoGetHeuristic` 的 requestedAlgoCount）。
     pub lt_candidates: usize,
@@ -138,7 +138,7 @@ impl ArchProfile {
         let cublaslt_workspace_bytes = if cc.0 >= 9 { 32 << 20 } else { 4 << 20 };
         let gemm_tune = GemmTuneParams {
             m_buckets: vec![1, 2, 4, 8, 16, 32, 64],
-            small_m_max: 8,
+            small_m_max: 32,
             lt_candidates: 8,
             // 小卡（3090 82 SM）1–4 波就够；大卡（B300 148 SM）小 N 形状需要更多 block 才能把 HBM 喂满
             small_m_wave_targets: match arch {
@@ -270,7 +270,7 @@ impl ArchProfile {
 
 #[cfg(test)]
 mod tests {
-    use super::ArchProfile;
+    use super::{Arch, ArchProfile};
 
     #[test]
     fn gdn_decode_bv_tiers() {

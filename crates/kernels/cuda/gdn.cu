@@ -48,7 +48,7 @@ __global__ void conv1d_prefill_kernel(const bf16* __restrict__ x, const bf16* __
                                       const int* __restrict__ cu_seqlens,
                                       const int* __restrict__ state_indices,
                                       const int* __restrict__ has_initial, int dim, int width,
-                                      int state_len, int dim_per_block, int act) {
+                                      int state_len, int dim_per_block, int act, long x_stride) {
   const int seq = blockIdx.x;
   const int d = blockIdx.y * dim_per_block + threadIdx.x;
   if (d >= dim) return;
@@ -70,7 +70,7 @@ __global__ void conv1d_prefill_kernel(const bf16* __restrict__ x, const bf16* __
   }
 
   for (int t = 0; t < len; ++t) {
-    const float xt = to_f32(x[((long)(bos + t)) * dim + d]);
+    const float xt = to_f32(x[((long)(bos + t)) * x_stride + d]);
     float acc = ww[width - 1] * xt;
     for (int j = 0; j < width - 1; ++j) acc += ww[j] * hist[j];
     out[((long)(bos + t)) * dim + d] = to_bf16(act_f(acc, act));
@@ -117,7 +117,7 @@ template <int EPT, int W>
 __global__ void __launch_bounds__(256) conv1d_prefill_blocked_kernel(
     const bf16* __restrict__ x, const bf16* __restrict__ w, bf16* __restrict__ out, bf16* __restrict__ conv_state,
     const int* __restrict__ cu_seqlens, const int* __restrict__ state_indices, const int* __restrict__ has_initial,
-    int num_seqs, int dim, int total, int rows_per_block, int act) {
+    int num_seqs, int dim, int total, int rows_per_block, int act, long x_stride) {
   constexpr int H = W - 1;  // 历史长度 = state_len
   static_assert(H >= 1, "width >= 2");
   const int d0 = (blockIdx.y * 256 + threadIdx.x) * EPT;
@@ -134,10 +134,10 @@ __global__ void __launch_bounds__(256) conv1d_prefill_blocked_kernel(
 
   auto load_x = [&](float* f, int row) {
     if (EPT == 8) {
-      ld_bf16x8(f, x + (long)row * dim + d0);
+      ld_bf16x8(f, x + (long)row * x_stride + d0);
     } else {
 #pragma unroll
-      for (int e = 0; e < EPT; ++e) f[e] = to_f32(x[(long)row * dim + d0 + e]);
+      for (int e = 0; e < EPT; ++e) f[e] = to_f32(x[(long)row * x_stride + d0 + e]);
     }
   };
 
@@ -233,7 +233,7 @@ __global__ void __launch_bounds__(256) conv1d_prefill_blocked_kernel(
 __global__ void conv1d_update_kernel(const bf16* __restrict__ x, const bf16* __restrict__ w,
                                      bf16* __restrict__ out, bf16* __restrict__ conv_state,
                                      const int* __restrict__ state_indices, int batch, int dim,
-                                     int width, int state_len, int act) {
+                                     int width, int state_len, int act, long x_stride) {
   const int b = blockIdx.x;
   const int d = blockIdx.y * blockDim.x + threadIdx.x;
   if (d >= dim) return;
@@ -243,7 +243,7 @@ __global__ void conv1d_update_kernel(const bf16* __restrict__ x, const bf16* __r
   bf16* st = conv_state + ((long)slot * dim + d) * state_len;
   float acc = 0.f;
   for (int j = 0; j < width - 1; ++j) acc += to_f32(w[d * width + j]) * to_f32(st[j]);
-  const float xt = to_f32(x[(long)b * dim + d]);
+  const float xt = to_f32(x[(long)b * x_stride + d]);
   acc += to_f32(w[d * width + width - 1]) * xt;
   out[(long)b * dim + d] = to_bf16(act_f(acc, act));
   for (int j = 0; j + 1 < state_len; ++j) st[j] = st[j + 1];
@@ -255,14 +255,15 @@ __global__ void conv1d_update_kernel(const bf16* __restrict__ x, const bf16* __r
 __global__ void gate_kernel(const bf16* __restrict__ a, const bf16* __restrict__ b,
                             const float* __restrict__ a_log, const float* __restrict__ dt_bias,
                             float* __restrict__ g_out, float* __restrict__ beta_out, long total,
-                            int heads, int do_beta) {
+                            int heads, int do_beta, long ab_stride) {
   const long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= total) return;
   const int hv = (int)(i % heads);
+  const long src = (i / heads) * ab_stride + hv;  // a/b 可以是融合 in_proj 输出 [T, row] 的列段（行距 ab_stride）
   const float A = __expf(a_log[hv]);
-  const float x = to_f32(a[i]) + dt_bias[hv];
+  const float x = to_f32(a[src]) + dt_bias[hv];
   g_out[i] = -A * softplus_f(x);
-  if (do_beta) beta_out[i] = sigmoid_f(to_f32(b[i]));
+  if (do_beta) beta_out[i] = sigmoid_f(to_f32(b[src]));
 }
 
 // ---------------------------------------------------------------- 递归核心（prefill + decode）
@@ -278,7 +279,7 @@ __global__ void recurrent_kernel(const bf16* __restrict__ mixed, const float* __
                                  bf16* __restrict__ out, float* __restrict__ state,
                                  const int* __restrict__ cu_seqlens,
                                  const int* __restrict__ state_indices, int H, int HV, int K, int V,
-                                 int group, float scale, long state_stride_tok) {
+                                 int group, float scale, long state_stride_tok, long ab_stride) {
   extern __shared__ float smem[];
   // V 维切 gridDim.z 份：本 block 只负责状态的 [v0, v0+Vb) 行（各行递推互不依赖；q/k 归一化每块重复算，很便宜）。
   const int Vb = V / (int)gridDim.z;
@@ -330,8 +331,8 @@ __global__ void recurrent_kernel(const bf16* __restrict__ mixed, const float* __
     float g, beta;
     if (FUSE_GATE) {
       const float A = __expf(a_log[hv]);
-      g = -A * softplus_f(to_f32(a_raw[row * HV + hv]) + dt_bias[hv]);
-      beta = sigmoid_f(to_f32(b_raw[row * HV + hv]));
+      g = -A * softplus_f(to_f32(a_raw[row * ab_stride + hv]) + dt_bias[hv]);
+      beta = sigmoid_f(to_f32(b_raw[row * ab_stride + hv]));
     } else {
       g = gt;
       beta = bt;
@@ -466,6 +467,7 @@ struct DecodeArgs {
   int H, HV, K, V, group;
   float scale;
   long state_stride_tok;
+  long ab_stride;  // a_raw/b_raw 的行距（独立缓冲 = HV；融合 in_proj 列段 = in_proj 行宽）
 };
 
 // 一个 warp 对一个 (seq, v 头, ROWS 行) 的全部 token 递推；状态 r 进来是旧值、出去是新值（调用方负责装 / 存）。
@@ -515,8 +517,8 @@ __device__ __forceinline__ void decode_tile_body(const DecodeArgs& a, float (&r)
     float g, beta;
     if (FUSE_GATE) {
       const float A = __expf(a.a_log[hv]);
-      g = -A * softplus_f(to_f32(a.a_raw[row * a.HV + hv]) + a.dt_bias[hv]);
-      beta = sigmoid_f(to_f32(a.b_raw[row * a.HV + hv]));
+      g = -A * softplus_f(to_f32(a.a_raw[row * a.ab_stride + hv]) + a.dt_bias[hv]);
+      beta = sigmoid_f(to_f32(a.b_raw[row * a.ab_stride + hv]));
     } else {
       g = a.g_in[row * a.HV + hv];
       beta = a.beta_in[row * a.HV + hv];
@@ -738,9 +740,10 @@ int launch_recurrent_decode_bv(int bv, bool fused, int variant, int num_seqs, co
 // y[t,hv,d] = rmsnorm(o[t,hv,:], w, eps) · act(z[t,hv,d])，一个 (token, v 头) 一行。
 __global__ void gated_rmsnorm_kernel(const bf16* __restrict__ x, const bf16* __restrict__ w,
                                      const bf16* __restrict__ z, bf16* __restrict__ out,
-                                     int head_dim, float eps, int act) {
+                                     int head_dim, float eps, int act, int heads, long z_stride) {
   const long row = blockIdx.x;
   const bf16* xr = x + row * head_dim;
+  const bf16* zr = z + (row / heads) * z_stride + (row % heads) * head_dim;
   float ss = 0.f;
   for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
     const float v = to_f32(xr[d]);
@@ -749,7 +752,7 @@ __global__ void gated_rmsnorm_kernel(const bf16* __restrict__ x, const bf16* __r
   const float s = block_reduce_sum<256>(ss);
   const float rstd = rsqrtf(s / head_dim + eps);
   for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
-    const float v = to_f32(xr[d]) * rstd * to_f32(w[d]) * act_f(to_f32(z[row * head_dim + d]), act);
+    const float v = to_f32(xr[d]) * rstd * to_f32(w[d]) * act_f(to_f32(zr[d]), act);
     out[row * head_dim + d] = to_bf16(v);
   }
 }
@@ -764,13 +767,15 @@ __global__ void __launch_bounds__(kGatedWarps * 32) gated_rmsnorm_warp_kernel(co
                                                                               const bf16* __restrict__ w,
                                                                               const bf16* __restrict__ z,
                                                                               bf16* __restrict__ out, long rows,
-                                                                              float eps, int act) {
+                                                                              float eps, int act, int heads,
+                                                                              long z_stride) {
   constexpr int D = DPL * 32;
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
   const long row = (long)blockIdx.x * kGatedWarps + warp;
   if (row >= rows) return;
   const bf16* xr = x + row * D;
-  const bf16* zr = z + row * D;
+  // z 可以是融合 in_proj 输出里的列段：行 = (token, v 头)，token 行距 z_stride（紧凑时 = heads·D）
+  const bf16* zr = z + (row / heads) * z_stride + (row % heads) * D;
   float xv[DPL], zv[DPL], wv[DPL];
   float ss = 0.f;
 #pragma unroll
@@ -803,7 +808,7 @@ extern "C" {
 int gdn_conv1d_prefill(const void* x, const void* w, void* out, void* conv_state,
                        const int* cu_seqlens, const int* state_indices, const int* has_initial,
                        int64_t num_seqs, int64_t dim, int64_t width, int64_t state_len, int act,
-                       int64_t total, int64_t rows_per_block, cudaStream_t stream) {
+                       int64_t total, int64_t rows_per_block, int64_t x_stride, cudaStream_t stream) {
   if (num_seqs <= 0) return 0;
   const int per_block = 256;
   // rows_per_block == 0 → 老版（每 (seq, 通道) 串行扫 T）
@@ -812,7 +817,7 @@ int gdn_conv1d_prefill(const void* x, const void* w, void* out, void* conv_state
     dim3 grid((unsigned)num_seqs, (unsigned)((dim + per_block - 1) / per_block));
     conv1d_prefill_kernel<<<grid, per_block, 0, stream>>>(
         (const bf16*)x, (const bf16*)w, (bf16*)out, (bf16*)conv_state, cu_seqlens, state_indices,
-        has_initial, (int)dim, (int)width, (int)state_len, per_block, act);
+        has_initial, (int)dim, (int)width, (int)state_len, per_block, act, (long)x_stride);
     return last_err();
   }
   const int ept = (dim % 8 == 0) ? 8 : 1;
@@ -821,7 +826,7 @@ int gdn_conv1d_prefill(const void* x, const void* w, void* out, void* conv_state
 #define LAUNCH_CONV(E, W)                                                                                    \
   conv1d_prefill_blocked_kernel<E, W><<<grid, per_block, 0, stream>>>(                                       \
       (const bf16*)x, (const bf16*)w, (bf16*)out, (bf16*)conv_state, cu_seqlens, state_indices, has_initial, \
-      (int)num_seqs, (int)dim, (int)total, (int)rows_per_block, act);
+      (int)num_seqs, (int)dim, (int)total, (int)rows_per_block, act, (long)x_stride);
   if (ept == 8) {
     if (width == 4) { LAUNCH_CONV(8, 4) } else if (width == 3) { LAUNCH_CONV(8, 3) } else { LAUNCH_CONV(8, 2) }
   } else {
@@ -833,22 +838,22 @@ int gdn_conv1d_prefill(const void* x, const void* w, void* out, void* conv_state
 
 int gdn_conv1d_update(const void* x, const void* w, void* out, void* conv_state,
                       const int* state_indices, int64_t batch, int64_t dim, int64_t width,
-                      int64_t state_len, int act, cudaStream_t stream) {
+                      int64_t state_len, int act, int64_t x_stride, cudaStream_t stream) {
   if (batch <= 0) return 0;
   const int per_block = 256;
   dim3 grid((unsigned)batch, (unsigned)((dim + per_block - 1) / per_block));
   conv1d_update_kernel<<<grid, per_block, 0, stream>>>((const bf16*)x, (const bf16*)w, (bf16*)out,
                                             (bf16*)conv_state, state_indices, (int)batch, (int)dim,
-                                            (int)width, (int)state_len, act);
+                                            (int)width, (int)state_len, act, (long)x_stride);
   return last_err();
 }
 
 int gdn_gate(const void* a, const void* b, const float* a_log, const float* dt_bias, float* g_out,
-             float* beta_out, int64_t total, int64_t heads, int do_beta, cudaStream_t stream) {
+             float* beta_out, int64_t total, int64_t heads, int do_beta, int64_t ab_stride, cudaStream_t stream) {
   if (total <= 0) return 0;
   const long blocks = (long)((total + kBlock - 1) / kBlock);
   gate_kernel<<<(unsigned)blocks, kBlock, 0, stream>>>((const bf16*)a, (const bf16*)b, a_log, dt_bias, g_out,
-                                            beta_out, (long)total, (int)heads, do_beta);
+                                            beta_out, (long)total, (int)heads, do_beta, (long)ab_stride);
   return last_err();
 }
 
@@ -861,7 +866,7 @@ int gdn_recurrent(const void* mixed_qkv, const float* g, const float* beta, cons
                   void* state, const int* cu_seqlens, const int* state_indices, int64_t num_seqs,
                   int64_t H, int64_t HV, int64_t K, int64_t V, int64_t group, float scale,
                   int64_t state_stride_tok, int fused_gate, int64_t vsplit, int64_t decode_bv,
-                  int decode_variant, int64_t decode_grid, cudaStream_t stream) {
+                  int decode_variant, int64_t decode_grid, int64_t ab_stride, cudaStream_t stream) {
   if (num_seqs <= 0) return 0;
   if (decode_bv > 0) {
     if (V % decode_bv != 0 || (K != 64 && K != 128)) return (int)cudaErrorInvalidValue;
@@ -884,6 +889,7 @@ int gdn_recurrent(const void* mixed_qkv, const float* g, const float* beta, cons
     a.group = (int)group;
     a.scale = scale;
     a.state_stride_tok = (long)state_stride_tok;
+    a.ab_stride = (long)ab_stride;
     const bool fused = fused_gate != 0;
     if (K == 128) {
       return launch_recurrent_decode_bv<4>((int)decode_bv, fused, decode_variant, (int)num_seqs, a, (int)decode_grid,
@@ -907,7 +913,7 @@ int gdn_recurrent(const void* mixed_qkv, const float* g, const float* beta, cons
     recurrent_kernel<kBlock, true><<<grid, kBlock, smem, stream>>>(
         (const bf16*)mixed_qkv, g, beta, (const bf16*)a_raw, (const bf16*)b_raw, a_log, dt_bias,
         (bf16*)out, (float*)state, cu_seqlens, state_indices, (int)H, (int)HV, (int)K, (int)V,
-        (int)group, scale, (long)state_stride_tok);
+        (int)group, scale, (long)state_stride_tok, (long)ab_stride);
   } else {
     if (smem_set_plain < smem) {
       if (const int rc = set_smem((const void*)recurrent_kernel<kBlock, false>, smem)) return rc;
@@ -916,20 +922,20 @@ int gdn_recurrent(const void* mixed_qkv, const float* g, const float* beta, cons
     recurrent_kernel<kBlock, false><<<grid, kBlock, smem, stream>>>(
         (const bf16*)mixed_qkv, g, beta, (const bf16*)a_raw, (const bf16*)b_raw, a_log, dt_bias,
         (bf16*)out, (float*)state, cu_seqlens, state_indices, (int)H, (int)HV, (int)K, (int)V,
-        (int)group, scale, (long)state_stride_tok);
+        (int)group, scale, (long)state_stride_tok, (long)ab_stride);
   }
   return last_err();
 }
 
 int gdn_gated_rmsnorm(const void* x, const void* w, const void* z, void* out, int64_t rows,
-                      int64_t head_dim, float eps, int act, cudaStream_t stream) {
+                      int64_t head_dim, float eps, int act, int64_t heads, int64_t z_stride, cudaStream_t stream) {
   if (rows <= 0) return 0;
   const unsigned wgrid = (unsigned)((rows + kGatedWarps - 1) / kGatedWarps);
 #define GATED_WARP_CASE(DPL)                                                                                   \
   case DPL * 32:                                                                                               \
     gated_rmsnorm_warp_kernel<DPL><<<wgrid, kGatedWarps * 32, 0, stream>>>((const bf16*)x, (const bf16*)w,     \
                                                                            (const bf16*)z, (bf16*)out, (long)rows, \
-                                                                           eps, act);                          \
+                                                                           eps, act, (int)heads, (long)z_stride); \
     return last_err();
   switch (head_dim) {
     GATED_WARP_CASE(1)
@@ -940,7 +946,7 @@ int gdn_gated_rmsnorm(const void* x, const void* w, const void* z, void* out, in
   }
 #undef GATED_WARP_CASE
   gated_rmsnorm_kernel<<<(unsigned)rows, 256, 0, stream>>>((const bf16*)x, (const bf16*)w, (const bf16*)z,
-                                                (bf16*)out, (int)head_dim, eps, act);
+                                                (bf16*)out, (int)head_dim, eps, act, (int)heads, (long)z_stride);
   return last_err();
 }
 

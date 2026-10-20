@@ -25,11 +25,15 @@ fn gemm_small_m_bench() {
         .filter(|v: &Vec<usize>| !v.is_empty())
         .unwrap_or_else(|| vec![1]);
     let hid = 5120usize;
+    // 第 9 轮：GDN 四投影融合成 in_proj [qkv 10240 | z 6144 | a 48 | b 48] = 16480，全注意力 qkv+gate 融合成 14336；
+    // 旧的分开形状保留作对照（in_proj_a 独立 N=48 是 M=32 时 splitK+reduce 的典型）。
     let mut shapes: Vec<(&str, usize, usize)> = vec![
+        ("gdn.in_proj", 16480, hid),
         ("gdn.in_proj_qkv", 10240, hid),
         ("gdn.in_proj_z", 6144, hid),
         ("gdn.in_proj_a", 48, hid),
         ("gdn.out_proj", hid, 6144),
+        ("attn.qkv_gate", 14336, hid),
         ("attn.qkv", 8192, hid),
         ("attn.gate", 6144, hid),
         ("attn.o_proj", hid, 6144),

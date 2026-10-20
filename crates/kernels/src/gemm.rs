@@ -2,7 +2,7 @@
 //!
 //! 两条实现路径，按 (M, N, K, 有无 bias) 查自调优表选：
 //! 1. cuBLASLt：默认每次调用让启发式选 algo（与 cudarc `CudaBlasLT::matmul` 等价）；自调优后用表里实测最快的 algo。
-//! 2. 自写小 M kernel（`cuda/gemm_small_m.cu`，M ≤ 8，纯访存型，split-K 份数由表给）。
+//! 2. 自写小 M kernel（`cuda/gemm_small_m.cu`，M ≤ 32，纯访存型，split-K 份数由表给）。
 //!
 //! 表由 `Gemm::autotune(entries)` 在模型加载后、CUDA graph 捕获前填一次（每个形状 × M 桶，各候选实测几次取最快）；
 //! 没调优过的形状走 cuBLASLt 默认。`GEMM_TUNE=off` 关掉自调优（全部走默认，回到旧行为）。

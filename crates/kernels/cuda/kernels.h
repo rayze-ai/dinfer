@@ -48,6 +48,8 @@ int rope_bf16(void* q, void* k, const int32_t* positions, const float* cos_sin, 
 int silu_and_mul_bf16(const void* x, void* out, int64_t tokens, int64_t inter, cudaStream_t stream);
 // 输出门（Qwen3.5 attn_output_gate）：x *= sigmoid(gate)，原地逐元素。n 必须是 8 的倍数。
 int mul_sigmoid_bf16(void* x, const void* gate, int64_t n, cudaStream_t stream);
+// 行式：x 紧凑 [rows, cols]，gate 是 [rows, gate_stride] 的列段（融合 qkv+gate 输出的 gate 段）；cols / gate_stride 是 8 的倍数。
+int mul_sigmoid_rows_bf16(void* x, const void* gate, int64_t rows, int64_t cols, int64_t gate_stride, cudaStream_t stream);
 // SituAndMul（Kimi-K3 situ 激活）：out = beta·tanh(g/beta)·sigmoid(g) · (linear_beta>0 ? linear_beta·tanh(u/linear_beta) : u)，
 // g = x[:, :inter]，u = x[:, inter:]；beta / linear_beta 是模型参数（host 传）。
 int situ_and_mul_bf16(const void* x, void* out, int64_t tokens, int64_t inter, float beta, float linear_beta,
@@ -212,13 +214,14 @@ int kda_chunk_ho(const void* qn, const float* gc, const float* aq, const float* 
 int gdn_conv1d_prefill(const void* x, const void* w, void* out, void* conv_state,
                        const int* cu_seqlens, const int* state_indices, const int* has_initial,
                        int64_t num_seqs, int64_t dim, int64_t width, int64_t state_len, int act,
-                       int64_t total, int64_t rows_per_block, cudaStream_t stream);
+                       int64_t total, int64_t rows_per_block, int64_t x_stride, cudaStream_t stream);
+// x 的行距 x_stride（紧凑 = dim；融合 in_proj 输出的 qkv 列段 = in_proj 行宽），out 紧凑 [T, dim]。
 int gdn_conv1d_update(const void* x, const void* w, void* out, void* conv_state,
                       const int* state_indices, int64_t batch, int64_t dim, int64_t width,
-                      int64_t state_len, int act);
+                      int64_t state_len, int act, int64_t x_stride, cudaStream_t stream);
 // 逐 v 头标量的 gate / beta：g = -exp(A_log[hv])·softplus(a+dt_bias)，beta = sigmoid(b)（f32 输出）。
 int gdn_gate(const void* a, const void* b, const float* a_log, const float* dt_bias, float* g_out,
-             float* beta_out, int64_t total, int64_t heads, int do_beta);
+             float* beta_out, int64_t total, int64_t heads, int do_beta, int64_t ab_stride, cudaStream_t stream);
 // 递归核心：mixed_qkv [T, 2·H·K + HV·V] bf16（q|k|v 平铺），out [T, HV, V] bf16，
 // state [slots, HV, V, K] f32（原地更新）。fused_gate=1 时 g/beta 由 raw a/b 现算，忽略 g/beta 入口。
 int gdn_recurrent(const void* mixed_qkv, const float* g, const float* beta, const void* a_raw,
@@ -226,10 +229,11 @@ int gdn_recurrent(const void* mixed_qkv, const float* g, const float* beta, cons
                   void* state, const int* cu_seqlens, const int* state_indices, int64_t num_seqs,
                   int64_t H, int64_t HV, int64_t K, int64_t V, int64_t group, float scale,
                   int64_t state_stride_tok, int fused_gate, int64_t vsplit, int64_t decode_bv,
-                  int decode_variant, int64_t decode_grid, cudaStream_t stream);
+                  int decode_variant, int64_t decode_grid, int64_t ab_stride, cudaStream_t stream);
 // 输出门 + RMSNorm：y[t,hv,d] = rmsnorm(o[t,hv,:], w, eps) · act(z[t,hv,d])，w 为 [head_dim]。
+// z 的行 = (token, v 头)：token 行距 z_stride（紧凑 = heads·head_dim），heads = 每 token 的头数（rows = T·heads）。
 int gdn_gated_rmsnorm(const void* x, const void* w, const void* z, void* out, int64_t rows,
-                      int64_t head_dim, float eps, int act);
+                      int64_t head_dim, float eps, int act, int64_t heads, int64_t z_stride, cudaStream_t stream);
 // ---- GDN chunk 形式 prefill（gdn_chunk.cu，规格 docs/loops/qwen35-perf.md 第 1 轮）----
 // 与 kda_chunk 同三段结构；输入沿用 gdn_recurrent 的 mixed_qkv 与 gdn_gate 的 g/beta。中间量由调用方分配：
 //   qn/kn   bf16 [T, H, K]        （q 已乘 scale，k 已 l2norm）

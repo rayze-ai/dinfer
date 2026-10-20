@@ -309,6 +309,7 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
     pub fn mul_sigmoid_bf16(x: *mut c_void, gate: *const c_void, n: i64, stream: cudaStream_t) -> i32;
+    pub fn mul_sigmoid_rows_bf16(x: *mut c_void, gate: *const c_void, rows: i64, cols: i64, gate_stride: i64, stream: cudaStream_t) -> i32;
     pub fn situ_and_mul_bf16(
         x: *const c_void,
         out: *mut c_void,
@@ -775,6 +776,7 @@ extern "C" {
         act: i32,
         total: i64,
         rows_per_block: i64,
+        x_stride: i64,
         stream: cudaStream_t,
     ) -> i32;
     pub fn gdn_conv1d_update(
@@ -788,6 +790,7 @@ extern "C" {
         width: i64,
         state_len: i64,
         act: i32,
+        x_stride: i64,
         stream: cudaStream_t,
     ) -> i32;
     pub fn gdn_gate(
@@ -800,6 +803,7 @@ extern "C" {
         total: i64,
         heads: i64,
         do_beta: i32,
+        ab_stride: i64,
         stream: cudaStream_t,
     ) -> i32;
     pub fn gdn_recurrent(
@@ -827,6 +831,7 @@ extern "C" {
         decode_bv: i64,
         decode_variant: i32,
         decode_grid: i64,
+        ab_stride: i64,
         stream: cudaStream_t,
     ) -> i32;
     pub fn gdn_gated_rmsnorm(
@@ -838,6 +843,8 @@ extern "C" {
         head_dim: i64,
         eps: f32,
         act: i32,
+        heads: i64,
+        z_stride: i64,
         stream: cudaStream_t,
     ) -> i32;
     pub fn mxfp4_dequant_bf16(
@@ -912,6 +919,7 @@ mod stubs {
     stub!(rope_bf16(q: *mut c_void, k: *mut c_void, p: *const i32, cs: *const f32, t: i64, qh: i64, kh: i64, hd: i64, rd: i64, n: i32, s: cudaStream_t));
     stub!(silu_and_mul_bf16(x: *const c_void, o: *mut c_void, t: i64, i: i64, s: cudaStream_t));
     stub!(mul_sigmoid_bf16(x: *mut c_void, g: *const c_void, n: i64, s: cudaStream_t));
+    stub!(mul_sigmoid_rows_bf16(x: *mut c_void, g: *const c_void, r: i64, c: i64, gs: i64, s: cudaStream_t));
     stub!(situ_and_mul_bf16(x: *const c_void, o: *mut c_void, t: i64, i: i64, b: f32, lb: f32, s: cudaStream_t));
     stub!(qkv_post_ext_bf16(q: *mut c_void, wq: *const c_void, wk: *const c_void, p: *const i32, cs: *const f32, c: *mut c_void, sm: *const i64, t: i64, h: i64, hk: i64, hd: i64, rd: i64, e: f32, nb: f32, qm: i64, bs: i64, s: cudaStream_t));
     stub!(embedding_bf16(ids: *const i32, tb: *const c_void, o: *mut c_void, t: i64, h: i64, v: i64, s: cudaStream_t));
@@ -950,12 +958,12 @@ mod stubs {
     stub!(gdn_chunk_prep(mq: *const c_void, g: *const f32, qn: *mut c_void, kn: *mut c_void, gc: *mut f32, cu: *const i32, ct: *const i32, t: i64, nc: i64, h: i64, hv: i64, k: i64, v: i64, bt: i64, sc: f32, s: cudaStream_t));
     stub!(gdn_chunk_wy(qn: *const c_void, kn: *const c_void, mq: *const c_void, gc: *const f32, be: *const f32, aq: *mut f32, u: *mut f32, w: *mut f32, kg: *mut f32, cu: *const i32, ct: *const i32, nc: i64, h: i64, hv: i64, k: i64, v: i64, bt: i64, wy_mode: i64, s: cudaStream_t));
     stub!(gdn_chunk_ho(qn: *const c_void, gc: *const f32, aq: *const f32, u: *const f32, w: *const f32, kg: *const f32, o: *mut c_void, st: *mut c_void, cu: *const i32, nt: *const i32, co: *const i32, si: *const i32, sst: i64, ns: i64, h: i64, hv: i64, k: i64, v: i64, bt: i64, ho_bv: i64, s: cudaStream_t));
-    stub!(gdn_conv1d_prefill(x: *const c_void, w: *const c_void, o: *mut c_void, cs: *mut c_void, cu: *const i32, si: *const i32, hi: *const i32, ns: i64, d: i64, wd: i64, sl: i64, a: i32, total: i64, rpb: i64, s: cudaStream_t));
-    stub!(gdn_conv1d_update(x: *const c_void, w: *const c_void, o: *mut c_void, cs: *mut c_void, si: *const i32, b: i64, d: i64, wd: i64, sl: i64, a: i32));
-    stub!(gdn_gate(a: *const c_void, b: *const c_void, al: *const f32, db: *const f32, g: *mut f32, be: *mut f32, t: i64, h: i64, d: i32));
-    stub!(gdn_recurrent(mq: *const c_void, g: *const f32, be: *const f32, ar: *const c_void, br: *const c_void, al: *const f32, db: *const f32, o: *mut c_void, st: *mut c_void, cu: *const i32, si: *const i32, ns: i64, hk: i64, hv: i64, k: i64, v: i64, gp: i64, sc: f32, sst: i64, fg: i32, vs: i64, dbv: i64, dv: i32, dg: i64));
+    stub!(gdn_conv1d_prefill(x: *const c_void, w: *const c_void, o: *mut c_void, cs: *mut c_void, cu: *const i32, si: *const i32, hi: *const i32, ns: i64, d: i64, wd: i64, sl: i64, a: i32, total: i64, rpb: i64, xs: i64, s: cudaStream_t));
+    stub!(gdn_conv1d_update(x: *const c_void, w: *const c_void, o: *mut c_void, cs: *mut c_void, si: *const i32, b: i64, d: i64, wd: i64, sl: i64, a: i32, xs: i64, s: cudaStream_t));
+    stub!(gdn_gate(a: *const c_void, b: *const c_void, al: *const f32, db: *const f32, g: *mut f32, be: *mut f32, t: i64, h: i64, d: i32, abs: i64, s: cudaStream_t));
+    stub!(gdn_recurrent(mq: *const c_void, g: *const f32, be: *const f32, ar: *const c_void, br: *const c_void, al: *const f32, db: *const f32, o: *mut c_void, st: *mut c_void, cu: *const i32, si: *const i32, ns: i64, hk: i64, hv: i64, k: i64, v: i64, gp: i64, sc: f32, sst: i64, fg: i32, vs: i64, dbv: i64, dv: i32, dg: i64, abs: i64, s: cudaStream_t));
     stub!(gemm_small_m_bf16(a: *const c_void, w: *const c_void, b: *const c_void, o: *mut c_void, p: *mut f32, m: i64, n: i64, k: i64, sp: i64, s: cudaStream_t));
-    stub!(gdn_gated_rmsnorm(x: *const c_void, w: *const c_void, z: *const c_void, o: *mut c_void, r: i64, hd: i64, e: f32, a: i32));
+    stub!(gdn_gated_rmsnorm(x: *const c_void, w: *const c_void, z: *const c_void, o: *mut c_void, r: i64, hd: i64, e: f32, a: i32, h: i64, zs: i64, s: cudaStream_t));
     stub!(f32_add_to_bf16(a: *const f32, o: *mut c_void, n: i64, s: cudaStream_t));
     stub!(gather_blocks_bf16_to_f32(x: *const c_void, y: *mut f32, nb: i64, r: i64, c: i64, s: cudaStream_t));
     stub!(add_inplace_bf16(x: *const c_void, y: *mut c_void, n: i64, s: cudaStream_t));

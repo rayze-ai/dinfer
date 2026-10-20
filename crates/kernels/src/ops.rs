@@ -5,7 +5,7 @@
 use crate::device::Stream;
 use crate::ffi;
 use anyhow::{bail, ensure, Result};
-use cudarc::driver::{CudaSlice, DevicePtr, DevicePtrMut};
+use cudarc::driver::{CudaSlice, CudaView, DevicePtr, DevicePtrMut};
 use half::bf16;
 use std::ffi::c_void;
 
@@ -31,7 +31,7 @@ pub fn gemm_small_m_bf16(
     k: usize,
     splits: usize,
 ) -> Result<()> {
-    ensure!(m <= 8 && k % 8 == 0, "gemm_small_m: m={m} (≤8) k={k} (8 的倍数)");
+    ensure!(m <= 32 && k % 8 == 0, "gemm_small_m: m={m} (≤32) k={k} (8 的倍数)");
     ensure!(a.len() >= m * k && w.len() == n * k && out.len() >= m * n, "gemm_small_m: 形状");
     if let Some(b) = bias {
         ensure!(b.len() == n, "gemm_small_m: bias.len {} != n {n}", b.len());
@@ -2113,6 +2113,34 @@ pub fn mul_sigmoid_bf16(
     )
 }
 
+/// 行式输出门：`x` 紧凑 `[rows, cols]`，`gate` 是 `[rows, gate_stride]` 缓冲的列段视图（融合 qkv+gate GEMM 输出里的
+/// gate 段，第 9 轮）。`cols`、`gate_stride` 为 8 的倍数。
+pub fn mul_sigmoid_rows_bf16(
+    stream: &Stream,
+    x: &mut CudaSlice<bf16>,
+    gate: &CudaView<'_, bf16>,
+    rows: usize,
+    cols: usize,
+    gate_stride: usize,
+) -> Result<()> {
+    ensure!(cols % 8 == 0 && gate_stride % 8 == 0 && gate_stride >= cols, "mul_sigmoid_rows: cols/gate_stride");
+    ensure!(x.len() >= rows * cols, "mul_sigmoid_rows: x");
+    ensure!(rows == 0 || gate.len() >= (rows - 1) * gate_stride + cols, "mul_sigmoid_rows: gate");
+    check(
+        unsafe {
+            ffi::mul_sigmoid_rows_bf16(
+                stream.ptr_mut(x) as *mut c_void,
+                stream.ptr(gate) as *const c_void,
+                rows as i64,
+                cols as i64,
+                gate_stride as i64,
+                stream.raw() as _,
+            )
+        },
+        "mul_sigmoid_rows_bf16",
+    )
+}
+
 // ---------------------------------------------------------------------------
 // 采样（Q2）：penalties / temperature / min_p / logprobs；与 topk_topp_mask_f32 / sample_f32 组成 vLLM 顺序
 // ---------------------------------------------------------------------------
@@ -2965,11 +2993,52 @@ pub fn gdn_conv1d_prefill_with(
     act: GdnAct,
     rows_per_block: usize,
 ) -> Result<()> {
+    gdn_conv1d_prefill_strided(
+        stream,
+        &x.slice(..),
+        w,
+        out,
+        conv_state,
+        cu_seqlens,
+        state_indices,
+        has_initial,
+        num_seqs,
+        tokens,
+        dim,
+        dim,
+        width,
+        state_len,
+        act,
+        rows_per_block,
+    )
+}
+
+/// `x` 带行距版：`x` 是 `[tokens, x_stride]` 缓冲的列段视图（融合 in_proj 输出里的 qkv 段，第 9 轮），`out` 紧凑 `[tokens, dim]`。
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_conv1d_prefill_strided(
+    stream: &Stream,
+    x: &CudaView<'_, bf16>,
+    w: &CudaSlice<bf16>,
+    out: &mut CudaSlice<bf16>,
+    conv_state: &mut CudaSlice<bf16>,
+    cu_seqlens: &CudaSlice<i32>,
+    state_indices: Option<&CudaSlice<i32>>,
+    has_initial: Option<&CudaSlice<i32>>,
+    num_seqs: usize,
+    tokens: usize,
+    dim: usize,
+    x_stride: usize,
+    width: usize,
+    state_len: usize,
+    act: GdnAct,
+    rows_per_block: usize,
+) -> Result<()> {
     ensure!(width >= 1 && width <= 8, "gdn_conv1d_prefill: width {width} 超出 [1,8]");
-    ensure!(x.len() >= tokens * dim, "gdn_conv1d_prefill: x 容量 < tokens·dim");
+    ensure!(x_stride >= dim, "gdn_conv1d_prefill: x_stride {x_stride} < dim {dim}");
+    ensure!(tokens == 0 || x.len() >= (tokens - 1) * x_stride + dim, "gdn_conv1d_prefill: x 容量 < tokens 行");
     ensure!(state_len >= width.saturating_sub(1), "gdn_conv1d_prefill: state_len {state_len} < width-1");
     ensure!(cu_seqlens.len() >= num_seqs + 1, "gdn_conv1d_prefill: cu_seqlens");
-    ensure!(w.len() >= dim * width && out.len() >= x.len(), "gdn_conv1d_prefill: w/out");
+    ensure!(w.len() >= dim * width && out.len() >= tokens * dim, "gdn_conv1d_prefill: w/out");
     ensure!(conv_state.len() >= state_len, "gdn_conv1d_prefill: conv_state");
     let psi = state_indices.map_or(std::ptr::null(), |s| stream.ptr(s) as *const i32);
     let phi = has_initial.map_or(std::ptr::null(), |s| stream.ptr(s) as *const i32);
@@ -2991,6 +3060,7 @@ pub fn gdn_conv1d_prefill_with(
                 act.code(),
                 tokens as i64,
                 rows_per_block as i64,
+                x_stride as i64,
                 stream.raw() as ffi::cudaStream_t,
             )
         },
@@ -3013,9 +3083,30 @@ pub fn gdn_conv1d_update(
     state_len: usize,
     act: GdnAct,
 ) -> Result<()> {
+    gdn_conv1d_update_strided(stream, &x.slice(..), w, out, conv_state, state_indices, batch, dim, dim, width, state_len, act)
+}
+
+/// `x` 带行距版（`x` 是 `[batch, x_stride]` 的列段视图），`out` 紧凑 `[batch, dim]`。
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_conv1d_update_strided(
+    stream: &Stream,
+    x: &CudaView<'_, bf16>,
+    w: &CudaSlice<bf16>,
+    out: &mut CudaSlice<bf16>,
+    conv_state: &mut CudaSlice<bf16>,
+    state_indices: Option<&CudaSlice<i32>>,
+    batch: usize,
+    dim: usize,
+    x_stride: usize,
+    width: usize,
+    state_len: usize,
+    act: GdnAct,
+) -> Result<()> {
     ensure!(width >= 1 && width <= 8, "gdn_conv1d_update: width {width} 超出 [1,8]");
     ensure!(state_len >= width.saturating_sub(1), "gdn_conv1d_update: state_len");
-    ensure!(x.len() >= batch * dim && out.len() >= batch * dim, "gdn_conv1d_update: x/out");
+    ensure!(x_stride >= dim, "gdn_conv1d_update: x_stride {x_stride} < dim {dim}");
+    ensure!(batch == 0 || x.len() >= (batch - 1) * x_stride + dim, "gdn_conv1d_update: x");
+    ensure!(out.len() >= batch * dim, "gdn_conv1d_update: out");
     ensure!(w.len() >= dim * width, "gdn_conv1d_update: w");
     let psi = state_indices.map_or(std::ptr::null(), |s| stream.ptr(s) as *const i32);
     // SAFETY: 容量已校验；槽号由调度器保证 < state 槽数。
@@ -3032,6 +3123,7 @@ pub fn gdn_conv1d_update(
                 width as i64,
                 state_len as i64,
                 act.code(),
+                x_stride as i64,
                 stream.raw() as ffi::cudaStream_t,
             )
         },
@@ -3052,9 +3144,28 @@ pub fn gdn_gate(
     tokens: usize,
     heads_v: usize,
 ) -> Result<()> {
+    gdn_gate_strided(stream, &a.slice(..), &b.slice(..), a_log, dt_bias, g_out, beta_out, tokens, heads_v, heads_v)
+}
+
+/// `a`/`b` 带行距版：`[tokens, ab_stride]` 缓冲的列段视图（融合 in_proj 输出的 a / b 段）。
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_gate_strided(
+    stream: &Stream,
+    a: &CudaView<'_, bf16>,
+    b: &CudaView<'_, bf16>,
+    a_log: &CudaSlice<f32>,
+    dt_bias: &CudaSlice<f32>,
+    g_out: &mut CudaSlice<f32>,
+    beta_out: &mut CudaSlice<f32>,
+    tokens: usize,
+    heads_v: usize,
+    ab_stride: usize,
+) -> Result<()> {
     let n = tokens * heads_v;
     ensure!(a_log.len() >= heads_v && dt_bias.len() >= heads_v, "gdn_gate: a_log/dt_bias");
-    ensure!(a.len() >= n && b.len() >= n, "gdn_gate: a/b");
+    ensure!(ab_stride >= heads_v, "gdn_gate: ab_stride {ab_stride} < heads_v {heads_v}");
+    let need = if tokens == 0 { 0 } else { (tokens - 1) * ab_stride + heads_v };
+    ensure!(a.len() >= need && b.len() >= need, "gdn_gate: a/b");
     ensure!(g_out.len() >= n && beta_out.len() >= n, "gdn_gate: outputs");
     // SAFETY: 容量已校验。
     check(
@@ -3069,6 +3180,7 @@ pub fn gdn_gate(
                 n as i64,
                 heads_v as i64,
                 1,
+                ab_stride as i64,
                 stream.raw() as ffi::cudaStream_t,
             )
         },
@@ -3208,6 +3320,62 @@ pub fn gdn_recurrent_variant(
     decode_variant: Option<crate::arch::GdnDecodeVariant>,
     decode_grid: Option<usize>,
 ) -> Result<()> {
+    let (av, bv) = (a_raw.map(|s| s.slice(..)), b_raw.map(|s| s.slice(..)));
+    gdn_recurrent_strided(
+        stream,
+        mixed_qkv,
+        g,
+        beta,
+        av.as_ref(),
+        bv.as_ref(),
+        heads_v,
+        a_log,
+        dt_bias,
+        out,
+        state,
+        cu_seqlens,
+        state_indices,
+        num_seqs,
+        tokens,
+        heads_k,
+        heads_v,
+        k_dim,
+        v_dim,
+        scale,
+        decode_bv,
+        decode_variant,
+        decode_grid,
+    )
+}
+
+/// `a_raw`/`b_raw` 带行距版（fused gate 的 decode 路径读融合 in_proj 输出的 a / b 列段，行距 `ab_stride`）。
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_recurrent_strided(
+    stream: &Stream,
+    mixed_qkv: &CudaSlice<bf16>,
+    g: Option<&CudaSlice<f32>>,
+    beta: Option<&CudaSlice<f32>>,
+    a_raw: Option<&CudaView<'_, bf16>>,
+    b_raw: Option<&CudaView<'_, bf16>>,
+    ab_stride: usize,
+    a_log: &CudaSlice<f32>,
+    dt_bias: &CudaSlice<f32>,
+    out: &mut CudaSlice<bf16>,
+    state: &mut CudaSlice<f32>,
+    cu_seqlens: &CudaSlice<i32>,
+    state_indices: Option<&CudaSlice<i32>>,
+    num_seqs: usize,
+    tokens: usize,
+    heads_k: usize,
+    heads_v: usize,
+    k_dim: usize,
+    v_dim: usize,
+    scale: f32,
+    decode_bv: Option<usize>,
+    decode_variant: Option<crate::arch::GdnDecodeVariant>,
+    decode_grid: Option<usize>,
+) -> Result<()> {
+    ensure!(ab_stride >= heads_v, "gdn_recurrent: ab_stride {ab_stride} < heads_v {heads_v}");
     ensure!(
         heads_k > 0 && heads_v % heads_k == 0,
         "gdn_recurrent: heads_v {heads_v} 不能被 heads_k {heads_k} 整除"
@@ -3242,7 +3410,8 @@ pub fn gdn_recurrent_variant(
     }
     if fused {
         ensure!(a_raw.is_some() && b_raw.is_some(), "gdn_recurrent: fused_gate 需要 a_raw/b_raw");
-        ensure!(a_raw.unwrap().len() >= tokens * heads_v, "gdn_recurrent: a_raw");
+        let need = if tokens == 0 { 0 } else { (tokens - 1) * ab_stride + heads_v };
+        ensure!(a_raw.unwrap().len() >= need && b_raw.unwrap().len() >= need, "gdn_recurrent: a_raw/b_raw");
     } else {
         ensure!(beta.is_some(), "gdn_recurrent: 非 fused 路径需要 beta");
         ensure!(
@@ -3292,6 +3461,7 @@ pub fn gdn_recurrent_variant(
                 decode_bv as i64,
                 variant.code(),
                 grid as i64,
+                ab_stride as i64,
                 stream.raw() as ffi::cudaStream_t,
             )
         },
@@ -3439,7 +3609,7 @@ fn gdn_chunk_wy_mma(k_dim: usize, v_dim: usize) -> bool {
 
 /// conv1d prefill 的按 token 分块行数：默认 `ArchProfile::gdn_conv_rows`；`CONV_PREFILL=legacy` 回老 kernel（返回 0）；
 /// `CONV_PREFILL_ROWS=<n>` 覆盖。
-fn gdn_conv_rows(stream: &Stream, tokens: usize, dim: usize, width: usize, state_len: usize) -> usize {
+pub fn gdn_conv_rows(stream: &Stream, tokens: usize, dim: usize, width: usize, state_len: usize) -> usize {
     use std::sync::OnceLock;
     static MODE: OnceLock<(bool, Option<usize>)> = OnceLock::new();
     static SM: OnceLock<usize> = OnceLock::new();
@@ -3491,9 +3661,31 @@ pub fn gdn_gated_rmsnorm(
     eps: f32,
     act: GdnAct,
 ) -> Result<()> {
+    gdn_gated_rmsnorm_strided(stream, x, w, &z.slice(..), out, rows, head_dim, eps, act, 1, head_dim)
+}
+
+/// `z` 带行距版：`rows = tokens·heads`，`z` 是 `[tokens, z_stride]` 缓冲的列段视图（融合 in_proj 输出的 z 段），
+/// 第 (t, hv) 行的 z 在 `z[t·z_stride + hv·head_dim ..]`。紧凑时 `heads = 1, z_stride = head_dim`（等价于老接口）。
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_gated_rmsnorm_strided(
+    stream: &Stream,
+    x: &CudaSlice<bf16>,
+    w: &CudaSlice<bf16>,
+    z: &CudaView<'_, bf16>,
+    out: &mut CudaSlice<bf16>,
+    rows: usize,
+    head_dim: usize,
+    eps: f32,
+    act: GdnAct,
+    heads: usize,
+    z_stride: usize,
+) -> Result<()> {
     ensure!(w.len() >= head_dim, "gdn_gated_rmsnorm: w");
+    ensure!(heads >= 1 && rows % heads == 0 && z_stride >= heads * head_dim, "gdn_gated_rmsnorm: heads/z_stride");
+    let tokens = rows / heads;
+    let need_z = if tokens == 0 { 0 } else { (tokens - 1) * z_stride + heads * head_dim };
     ensure!(
-        x.len() >= rows * head_dim && z.len() >= rows * head_dim && out.len() >= rows * head_dim,
+        x.len() >= rows * head_dim && z.len() >= need_z && out.len() >= rows * head_dim,
         "gdn_gated_rmsnorm: x/z/out"
     );
     // SAFETY: 容量已校验。
@@ -3508,6 +3700,8 @@ pub fn gdn_gated_rmsnorm(
                 head_dim as i64,
                 eps,
                 act.code(),
+                heads as i64,
+                z_stride as i64,
                 stream.raw() as ffi::cudaStream_t,
             )
         },

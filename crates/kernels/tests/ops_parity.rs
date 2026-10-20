@@ -354,15 +354,19 @@ fn parity_gemm() {
 #[ignore]
 fn parity_gemm_small_m() {
     let (_d, s) = dev();
-    // (m, n, k, splits, bias)：Qwen3.5-27B 真形状（hidden 5120）+ M∈{1,4,8}；splits 覆盖不切 / 切；一例带 bias。
+    // (m, n, k, splits, bias)：Qwen3.5-27B 真形状（hidden 5120）+ M∈{1,3,4,8,16,32}（第 9 轮加 M_TILE 16/32）；
+    // splits 覆盖不切 / 切；一例带 bias。
     let hid = 5120usize;
-    let cases: [(usize, usize, usize, usize, bool); 6] = [
+    let cases: [(usize, usize, usize, usize, bool); 9] = [
         (1, 34816, hid, 1, false), // mlp.gate_up
         (1, 48, hid, 16, false),   // gdn.in_proj_a（小 N 必须 split 才能铺满）
         (4, hid, 6144, 4, false),  // gdn.out_proj / attn.o_proj
-        (8, 10240, hid, 2, false), // gdn.in_proj_qkv
+        (8, 10240, hid, 2, false), // gdn.in_proj_qkv（旧形状）
         (8, hid, 17408, 8, true),  // mlp.down + bias
         (3, 6144, hid, 1, true),   // 非 2 的幂 M（M_TILE=4 只算 3 行）+ bias
+        (32, 48, hid, 5, false),   // in_proj_a/b 独立时 M=32（M_TILE=32，TK=512）+ splitK
+        (16, 16480, hid, 1, false), // gdn 融合 in_proj [qkv|z|a|b]，M_TILE=16 不切
+        (31, hid, 6144, 2, true),  // out_proj M=31（M_TILE=32 只算 31 行）+ splitK + bias
     ];
     for (ci, &(m, n, k, splits, bias)) in cases.iter().enumerate() {
         let c = Case::new(

@@ -126,6 +126,39 @@ extern "C" int embedding_bf16(const int32_t* ids, const void* table, void* out, 
   return last_err();
 }
 
+// 行式版：x 紧凑 [rows, cols]，gate 是 [rows, gate_stride] 缓冲的列段（融合 qkv+gate GEMM 输出里的 gate 段，第 9 轮）。
+// cols / gate_stride 都是 8 的倍数（16 B 向量）。
+__global__ void __launch_bounds__(SM_THREADS) mul_sigmoid_rows_kernel(bf16* __restrict__ x, const bf16* __restrict__ gate,
+                                                                    int64_t nvec, int cols8, int64_t gate_stride) {
+  const int64_t i = (int64_t)blockIdx.x * SM_THREADS + threadIdx.x;
+  if (i >= nvec) return;
+  const int64_t r = i / cols8, c8 = i % cols8;
+  uint4* xp = reinterpret_cast<uint4*>(x) + i;
+  const uint4 ga = *reinterpret_cast<const uint4*>(gate + r * gate_stride + c8 * 8);
+  uint4 xa = *xp;
+  const __nv_bfloat162* gp = reinterpret_cast<const __nv_bfloat162*>(&ga);
+  __nv_bfloat162* xh = reinterpret_cast<__nv_bfloat162*>(&xa);
+#pragma unroll
+  for (int c = 0; c < 4; ++c) {
+    const float2 g = __bfloat1622float2(gp[c]);
+    const float2 v = __bfloat1622float2(xh[c]);
+    const float s0 = 1.f / (1.f + __expf(-g.x)), s1 = 1.f / (1.f + __expf(-g.y));
+    xh[c] = __floats2bfloat162_rn(v.x * s0, v.y * s1);
+  }
+  *xp = xa;
+}
+
+extern "C" int mul_sigmoid_rows_bf16(void* x, const void* gate, int64_t rows, int64_t cols, int64_t gate_stride,
+                                     cudaStream_t stream) {
+  if (rows <= 0 || cols <= 0) return 0;
+  if (cols % 8 != 0 || gate_stride % 8 != 0 || gate_stride < cols) return err(cudaErrorInvalidValue);
+  const int64_t nvec = rows * (cols / 8);
+  const unsigned grid = (unsigned)((nvec + SM_THREADS - 1) / SM_THREADS);
+  mul_sigmoid_rows_kernel<<<grid, SM_THREADS, 0, stream>>>(static_cast<bf16*>(x), static_cast<const bf16*>(gate), nvec,
+                                                          (int)(cols / 8), gate_stride);
+  return last_err();
+}
+
 // 输出门：x *= sigmoid(gate)（原地），n 为元素数；n 必须是 8 的倍数且两个指针 16 B 对齐（调用方保证）。
 extern "C" int mul_sigmoid_bf16(void* x, const void* gate, int64_t n, cudaStream_t stream) {
   if (n <= 0) return 0;
