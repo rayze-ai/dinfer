@@ -35,9 +35,18 @@ print(re.sub(r"(&&|\|\||;)", "\n", c))' | while IFS= read -r SEG || [ -n "$SEG" 
       [ -n "${C:-}" ] && [ "$C" -gt 3000 ] && echo "DENY2"
       L=$(printf '%s' "$SEG" | grep -oE '(head|tail) +-?n? *-?[0-9]+' | grep -oE '[0-9]+$' | sort -n | tail -1)
       [ -n "${L:-}" ] && [ "$L" -gt 60 ] && ! printf '%s' "$SEG" | grep -qE 'cut -c' && echo "DENY2"
+      # sed -n 'A,Bp' 单次跨度 >150 行（2026-10-21）：子代理用 sed -n '1,1626p' 整文件读 gdn_chunk.cu，
+      # 74 次调用把上下文堆到 36 万 token，每轮响应从 15 s 退化到 99 s、80 次调用一行代码没写出来。
+      printf '%s' "$SEG" | python3 -I -c '
+import sys,re
+for a,b in re.findall(r"sed\s+-n\s+.\s*([0-9]+)\s*,\s*([0-9]+)\s*p", sys.stdin.read()):
+    if int(b)-int(a) > 150:
+        print("DENY3"); break
+'
     done > /tmp/claude_ctx_guard_${SID:-none}.seg
     grep -q DENY1 /tmp/claude_ctx_guard_${SID:-none}.seg && deny "上下文约束：cat / git diff / git show 每一段都必须经 head/tail/grep/cut 截断（或用 --stat/--name-only）。"
     grep -q DENY2 /tmp/claude_ctx_guard_${SID:-none}.seg && deny "上下文约束：单条命令截断上限 head -c 3000 / head|tail -n 60（超 60 行需配 cut -c）。多段拼接时每段都算，合计别超 8 KB；要看大文件分多次调用。"
+    grep -q DENY3 /tmp/claude_ctx_guard_${SID:-none}.seg && deny "上下文约束：sed -n 单次读取跨度上限 150 行。用 grep -n 先定位再看，或分多次小段读；整文件读会把上下文堆爆（2026-10-21 子代理实例：36 万 token、每轮 99 s、零产出）。"
     ;;
 esac
 if [ "$N" -ge 40 ] && [ $(( N % 10 )) -eq 0 ]; then
