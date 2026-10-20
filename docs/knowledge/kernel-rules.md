@@ -18,6 +18,9 @@
 | rmsnorm h ∈ (1024, 8192] | 1024 线程 × 1 向量（单次访存等待） | −4–8% | loop 7b / 7c |
 | decode GEMM 效率上限 | HBM 72–76%（`gate_up` 58 µs = 356 MB），与 vLLM 同档，不再是差距来源 | — | loop 5G |
 
+- **GDN chunk prefill（r10，B300 实测）**：wy 单 kernel（点积 → 分块三角逆 → u/w 两 GEMM）**8 warp + bf16 中间量 + 16 B 向量装载**，8×1024 532 → 360 µs（fla 三 kernel 合计 334）；ho（串行 chunk 链）**BV 按 `base_blocks·(V/BV)` 能否铺满 `sm × 2` 选 64 / 32**（block 多 64 赢 19%，单长序列 64 输 18%），498 → 308（fla 332）。ho 的 B 操作数 ldmatrix 化、svT bank 冲突都**不动时钟**——ho 是 ILP / 并行度型，不是 smem 型。单长序列（192 block < 148 SM × 2）仍差 fla 15%，要 chunk 级并行的 o kernel（r11）。
+- **寄存器预取（PF=1）的收益不稳**：bf16 中间量后 B300 1×8192 从退 → 赢 25%，wy 改 16 B 写后又被抹平（L2 命中态变了）。这类"随邻居 kernel 变"的选项不要写死进 ArchProfile 分档，走启动自调优。
+
 ## 在哪张卡上迭代（用户 2026-10-20，r9 教训）
 - **性能改动在 B300 上出数定去留**，3090 只跑 parity / 编译。r9 六轮 3090 迭代 + 两轮 B300 复测，B300 没超 vLLM：3090 撞带宽墙（conv 84% 带宽、两段版多搬 200 MB 输），B300 撞延迟 / 并行度墙（h-pass 单独 721 > 融合 659 µs，串行链每 chunk ~5 µs 掩不住），3090 上筛出的候选集不含 B300 要的改法。
 - **先看 B300 的 nsys / ncu 再写改法**，不从 3090 profile 推；"验过" = ≥ 2 卡型 × 全部 bench 形状进 probe.csv；`ArchProfile` 每个分档要有该卡的实测行。
