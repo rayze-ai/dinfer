@@ -953,6 +953,8 @@ pub struct MegaLayerArgs {
     pub splits_out: i64,
     pub splits_gu: i64,
     pub splits_down: i64,
+    pub gdn_hv: i64,
+    pub gdn_bufs: i64,
 }
 
 /// cudaErrorNotSupported：mega kernel 未编入（CUDA_ARCHS 无 100/103 且无 MEGA_SM100_DEV）或 no-nvcc。

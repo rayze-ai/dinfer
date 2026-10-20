@@ -84,13 +84,14 @@ pub struct StageProf {
 
 pub const MEGA_STAGES: usize = 11;
 pub const MEGA_STAGE_NAMES: [&str; MEGA_STAGES] =
-    ["rmsnorm", "in_proj", "conv", "gdn", "gated_norm", "out_proj", "add_norm", "gate_up", "silu", "down", "add"];
+    ["rmsnorm", "in_proj", "conv", "gdn", "gated_norm", "out_proj+add", "rmsnorm2", "gate_up+silu", "(silu)", "down+add", "(add)"];
 
 impl MegaScratch {
     pub fn new(stream: &Stream, sh: &MegaShape, max_batch: usize, params: MegaParams, sm_count: usize) -> Result<Self> {
         ensure!(max_batch >= 1 && max_batch <= 32, "mega: batch ≤ 32");
         let (hid, inter, in_row) = (sh.hidden, sh.inter, sh.in_row());
         let hvv = sh.heads_v * sh.v_dim;
+        // gate_up 的 tile 同时覆盖 gate 行与 up 行（kernel mode 2）：tile 数按 inter / (tile_n/2) = 2·inter / tile_n
         let gemvs = [(in_row, hid), (hid, hvv), (2 * inter, hid), (hid, inter)];
         let mut splits = [1usize; 4];
         let mut partial = 0usize;
@@ -220,6 +221,8 @@ pub fn mega_gdn_layer_decode(
         splits_out: sc.splits[1] as i64,
         splits_gu: sc.splits[2] as i64,
         splits_down: sc.splits[3] as i64,
+        gdn_hv: p.gdn_hv_for(sc.sm_count, batch, sh.heads_v) as i64,
+        gdn_bufs: p.gdn_bufs as i64,
     };
     // SAFETY: 所有指针来自存活的 CudaSlice，长度已校验；info 指向 sc 内 Box，kernel host 侧同步写。
     let rc = unsafe { ffi::mega_gdn_layer_decode_sm100(&args, stream.raw() as _) };

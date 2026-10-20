@@ -348,6 +348,8 @@ typedef struct MegaLayerArgs {
   float eps, scale;
   int64_t groups, unroll, stages, ctas_per_sm;              // 结构参数（ArchProfile）
   int64_t splits_in, splits_out, splits_gu, splits_down;    // split-K 份数（host 按 SM 数算）
+  int64_t gdn_hv;                                           // 每个 GDN 任务连续处理的 v 头数（host 按波数算）
+  int64_t gdn_bufs;                                         // GDN 状态 tile smem 缓冲数（1 / 2，按 smem 预算）
 } MegaLayerArgs;
 int mega_gdn_layer_decode_sm100(const MegaLayerArgs* a, cudaStream_t stream);
 

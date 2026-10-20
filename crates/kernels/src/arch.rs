@@ -155,8 +155,8 @@ impl ArchProfile {
     /// 数值来源：docs/loops/mega-sm100.md 记录表。
     pub fn mega_params(&self) -> MegaParams {
         let mut p = match self.arch {
-            Arch::Sm100 => MegaParams { groups: 4, unroll: 4, stages: 3, ctas_per_sm: 1 },
-            Arch::Sm8x | Arch::Sm90 => MegaParams { groups: 2, unroll: 4, stages: 2, ctas_per_sm: 1 },
+            Arch::Sm100 => MegaParams { groups: 4, unroll: 4, stages: 3, ctas_per_sm: 1, gdn_waves: 2, gdn_bufs: 2 },
+            Arch::Sm8x | Arch::Sm90 => MegaParams { groups: 2, unroll: 4, stages: 2, ctas_per_sm: 1, gdn_waves: 2, gdn_bufs: 1 },
         };
         if let Ok(s) = std::env::var("MEGA_PARAMS") {
             for kv in s.split(',') {
@@ -167,6 +167,8 @@ impl ArchProfile {
                             "unroll" => p.unroll = v,
                             "stages" => p.stages = v,
                             "ctas" => p.ctas_per_sm = v,
+                            "gdn_waves" => p.gdn_waves = v,
+                            "gdn_bufs" => p.gdn_bufs = v,
                             _ => {}
                         }
                     }
@@ -294,7 +296,7 @@ impl ArchProfile {
 }
 
 /// Qwen3.5 GDN 层 decode 单 persistent kernel（mega_sm100.cu）的结构参数。都是"按卡给"的数值，kernel 内不写。
-/// `MEGA_PARAMS=groups=4,unroll=4,stages=3,ctas=1` 覆盖（实验用）。
+/// `MEGA_PARAMS=groups=4,unroll=4,stages=3,ctas=1,gdn_waves=2` 覆盖（实验用）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MegaParams {
     /// 每 warp 的 8 行 N 组数（GEMV tile = 8 warp · groups · 8 行）。
@@ -303,8 +305,12 @@ pub struct MegaParams {
     pub unroll: usize,
     /// cp.async 流水深度（smem = stages · (tile + A 块)）。
     pub stages: usize,
-    /// 每 SM 常驻 CTA 数上限（0 = 用 occupancy 查询值）。
+    /// 每 SM 常驻 CTA 数（1 / 2，决定 launch_bounds 寄存器上限；实际再受 occupancy 查询约束）。
     pub ctas_per_sm: usize,
+    /// GDN 阶段任务数至少铺几波常驻 CTA（决定每任务连续处理的 v 头数 gdn_hv）。
+    pub gdn_waves: usize,
+    /// GDN 状态 tile 的 smem 缓冲数：2 = 跨 tile 双缓冲预取（64 KB × 2，需 ≥ 128 KB smem），1 = 单缓冲。
+    pub gdn_bufs: usize,
 }
 
 impl MegaParams {
@@ -314,6 +320,18 @@ impl MegaParams {
     }
     /// split-K 份数：任务数 = tiles · splits 尽量填满一波常驻 CTA（floor，避免第二波只有零头），
     /// 且每 split 至少一个流水 stage（k / (32·unroll) 个 stage）。
+    /// GDN 任务 = (seq, 连续 gdn_hv 个 v 头)：取能整除 heads_v 的最大 d，使 batch·heads_v/d ≥ gdn_waves·grid。
+    pub fn gdn_hv_for(&self, sm_count: usize, batch: usize, heads_v: usize) -> usize {
+        let grid = sm_count * self.ctas_per_sm.max(1);
+        let mut best = 1;
+        for d in 1..=heads_v {
+            if heads_v % d == 0 && batch * (heads_v / d) >= self.gdn_waves.max(1) * grid {
+                best = d;
+            }
+        }
+        best
+    }
+
     pub fn splits_for(&self, sm_count: usize, n: usize, k: usize) -> usize {
         let grid = sm_count * self.ctas_per_sm.max(1);
         let tiles = n.div_ceil(self.tile_n());
