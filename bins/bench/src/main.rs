@@ -1,5 +1,6 @@
 //! 服务压测（OpenAI `/v1/chat/completions`，流式）。对 dinfer 与 vLLM 用同一套口径，口径对齐 vLLM `benchmarks/serve.py`：
-//! - TTFT  = 收到第一个**带内容**的 chunk 的时刻 − 发请求时刻；
+//! - TTFT  = 收到第一个**带内容**的 chunk 的时刻 − 发请求时刻；另记 `ttft_first_chunk_ms` = 任意首个 SSE 事件（含空 role delta）
+//!   的时刻，这是 vLLM `bench serve` 的口径（它把空 role delta 当首 token → dinfer 侧会出 ~5 ms 伪像，design §15.4），只用于和第三方工具对账；
 //! - ITL   = 相邻两个带内容 chunk 的间隔（每个 chunk 一条）；
 //! - TPOT  = (请求总时延 − TTFT) / (输出 token 数 − 1)（输出 ≤ 1 token 的请求不计；goodput 判定时按 0 计，同 vLLM）；
 //! - 输出 token 数以服务端 `usage.completion_tokens`（`stream_options.include_usage`）为准，拿不到才退化为 chunk 数；
@@ -118,6 +119,8 @@ struct ReqResult {
     /// 多轮：第几轮（从 1 起）
     turn: u32,
     ttft_ms: f64,
+    /// 任意首个 SSE 数据事件（含空 role delta）的时刻 − 发请求时刻（vLLM bench serve 口径，对账用）
+    ttft_first_chunk_ms: f64,
     latency_ms: f64,
     itl_ms: Vec<f64>,
     /// 流式拼起来的回答全文（多轮下一轮要用；不进 JSON）
@@ -137,6 +140,7 @@ impl ReqResult {
             finish_reason: None,
             turn,
             ttft_ms: 0.0,
+            ttft_first_chunk_ms: 0.0,
             latency_ms: 0.0,
             itl_ms: vec![],
             text: String::new(),
@@ -158,6 +162,7 @@ struct ReqBrief {
     cached_tokens: Option<u32>,
     finish_reason: Option<String>,
     ttft_ms: f64,
+    ttft_first_chunk_ms: f64,
     tpot_ms: Option<f64>,
     latency_ms: f64,
     good: Option<bool>,
@@ -220,6 +225,8 @@ struct Summary {
     /// 回报了 cached_tokens 的完成请求数
     cached_reported: usize,
     ttft_ms: Pct,
+    /// 任意首 chunk 口径的 TTFT（vLLM bench serve 同义；对账用，不进 SLO）
+    ttft_first_chunk_ms: Pct,
     tpot_ms: Pct,
     itl_ms: Pct,
     latency_ms: Pct,
@@ -425,6 +432,9 @@ async fn one_request(
                     continue;
                 }
                 let Ok(j) = serde_json::from_str::<serde_json::Value>(d) else { continue };
+                if r.ttft_first_chunk_ms == 0.0 {
+                    r.ttft_first_chunk_ms = (now - t0).as_secs_f64() * 1e3;
+                }
                 if let Some(u) = j.get("usage").filter(|u| !u.is_null()) {
                     usage_out = u["completion_tokens"].as_u64().map(|x| x as u32);
                     r.prompt_tokens = u["prompt_tokens"].as_u64().unwrap_or(0) as u32;
@@ -618,6 +628,7 @@ fn summarize(a: &Args, model: String, results: &[ReqResult], dur: f64) -> Summar
             cached_tokens: r.cached_tokens,
             finish_reason: r.finish_reason.clone(),
             ttft_ms: r.ttft_ms,
+            ttft_first_chunk_ms: r.ttft_first_chunk_ms,
             tpot_ms: r.tpot_ms(),
             latency_ms: r.latency_ms,
             good: (r.ok && slo.enabled()).then(|| slo.is_good(r)),
@@ -647,6 +658,7 @@ fn summarize(a: &Args, model: String, results: &[ReqResult], dur: f64) -> Summar
         cached_tokens_mean: (!cached.is_empty()).then(|| cached_sum as f64 / cached.len() as f64),
         cached_reported: cached.len(),
         ttft_ms: pct(ok.iter().map(|r| r.ttft_ms).collect()),
+        ttft_first_chunk_ms: pct(ok.iter().map(|r| r.ttft_first_chunk_ms).collect()),
         tpot_ms: pct(tpots),
         itl_ms: pct(itls),
         latency_ms: pct(ok.iter().map(|r| r.latency_ms).collect()),
@@ -693,6 +705,7 @@ fn print_summary(s: &Summary) {
         )
     };
     row("TTFT", &s.ttft_ms);
+    row("TTFT1st", &s.ttft_first_chunk_ms);
     row("TPOT", &s.tpot_ms);
     row("ITL", &s.itl_ms);
     row("latency", &s.latency_ms);
@@ -828,6 +841,9 @@ async fn self_check() -> Result<()> {
     close(s.output_tokens_mean, 20.0, 0.0, "output_tokens (from usage)")?;
     close(s.prompt_tokens_mean, 17.0, 0.0, "prompt_tokens (from usage)")?;
     close(s.ttft_ms.p50, 50.0, 3.0, "TTFT p50")?;
+    if !(s.ttft_first_chunk_ms.p50 < 10.0) {
+        bail!("self-check FAILED: ttft_first_chunk p50 {:.2} (mock sends empty role delta at once, want < 10 ms)", s.ttft_first_chunk_ms.p50);
+    }
     close(s.tpot_ms.p50, 10.0, 1.0, "TPOT p50")?;
     close(s.itl_ms.p50, 10.0, 1.5, "ITL p50")?;
     close(s.latency_ms.p50, 50.0 + 19.0 * 10.0, 6.0, "latency p50")?;
