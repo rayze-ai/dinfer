@@ -22,3 +22,6 @@
 - 迭代上限：对拍 5 轮。
 
 ## 记录
+- 第 1 轮（代码，本机）：commit 77f8b91（§2.4 表 + 本 loop）、e02ffc7（分片 + 通信点 + tp executor + service/bin）、2ca2d29（model_parity KIMIK3_TP / KIMIK3_DUMP + k3_model.sh K3_TP + k3_tp_compare.py）。kimik3 bin 构建过、`cargo test -p dinfer-kimik3` 24 过、ref-tests `--no-run` 过。
+  - 设计取舍：EP v1 不 all-gather（TP 下隐状态已全量）；MoE 两次 all-reduce（acc f32 在 norm 前——norm 非线性不能后移；shared 部分和 bf16）；embed / lm_head 复制。v2 可把两次合成一次 f32 all-reduce（`[acc | shared]` 拼接）。
+  - 阻塞：B300 token 过期（`run` 无输出、`put` rsync code 12），已向主会话要新 token；待传文件列表见 progress。
