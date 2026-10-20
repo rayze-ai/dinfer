@@ -41,6 +41,9 @@ scripts/verify/p6.sh                              # GLM 线验收（含 p0–p5�
 cargo run -p dinfer --features glm53 -- serve --model test/tiny_glm_dsa_fullvocab --tokenizer /data/ref/models/glm53 --port 8011 [--mtp]
 kubectl apply -f scripts/dev/k8s/dev-pod.yaml     # 4090 开发 Pod（runtimeClassName: nvidia 必带）
 rm -f target/.rustc_info.json                     # cargo 报 "failed to run rustc to learn about target" 时（见 pitfalls）
+CUDA_ARCHS=86 cargo build --release -p dinfer-kernels   # 本机开发只编本卡 arch：23 s vs 默认 86,89,90 的 2 min（2026-10-20）
+scripts/dev/ttft_probe.py <port> 5 860            # 单发 TTFT（words 430≈1K / 860≈6K），钉核 100-103；探针结果进 probe_*/probe.csv
+python3 scripts/dev/probe_trend.py --root test/qwen35 && python3 scripts/dev/bench_index.py   # 探针 / 索引页重生成（页面 8090）
 ```
 
 ## 硬性规则
@@ -52,6 +55,7 @@ rm -f target/.rustc_info.json                     # cargo 报 "failed to run rus
 - `crates/` 只放模型无关代码：模型名 / token id / 模板变量名 / 模型路径出现在 `crates/` 即为错误，走 `ChatBackend` 钩子由 `models/<m>` 提供；模型相关测试放 `models/<m>/tests/`（用户 2026-10-19）。
 - 代码 / 脚本 / 环境变量 / C ABI 符号不带项目名前缀（`DINFER_*`、`dinfer_*`），项目可能改名；新代码前自查：`grep -rniE '\bdinfer_[a-z]|DINFER_' crates scripts | grep -v 'dinfer_[a-z0-9]*::'`（crate 名 `dinfer-xxx` 与 `use dinfer_xxx::` 是例外，大小写都查）。
 - 所有跨会话要记住的事写进文件并进 git，不要只留在对话里。
+- **子代理（2026-10-20）**：禁止 `remote_*.sh push`（rsync `--delete` 两次删掉别人的远端产物），要同步代码发消息给主会话；产物落 `/tmp` 或 `bootstrap/` 由主会话 pull；任何 GPU 动作前先问主会话；可失败步骤（merge / rebase / 编译）单独发一条看结果再推远端起长链；链内杀进程用 `pkill -x` / `pgrep -x`，不用 `-f`。
 - **目标是超越，不是重写**（用户 2026-10-17）：vLLM 做得对的直接采用，能改进的改进，两种情况都要在 `docs/design.md` §11 "采用 / 改进台账" 记一行（采用了什么、为什么、我们改了哪里、收益）。不为"不一样"而不一样。
 - **测试程序本身要可信（用户 2026-10-20）**：引擎层面 bench 必须 ① 三方（dinfer / vLLM / 压测端）`taskset` 到不重叠核组并写进报告；② 压测端上报自身 CPU 时间 / RSS / 线程数（Rust `bench` 作主口径，CPU < 1%；Python `vllm bench serve` rate 8 时吃 2–4 核、与被测共核会把 dinfer decode 步拖 2×，只做交叉）；③ 同负载与第三方工具 p50/p99 差 ≤ 10%；④ 客户端测量与服务端自报（`/metrics`）对账；⑤ 启动前核 `/v1/models` id（编错 feature 的二进制会让 bench 空跑出 0）。不满足任一条的数字作废。规格 `requirements.md` 验收 v2 补充 / `design.md` §15.5 / `knowledge/perf-method.md` §7。
 - **每轮性能改动必须进 CSV 趋势**（用户 2026-10-16 两次强调）：改动 → 4090 `bench_compare.sh test/qwen3/<日期>/benchN "改动一句话"`（写 `CHANGE`）→ 自动重生成 `test/qwen3/perf-trend.{csv,md,svg,html}`（每组 tok/s ×vLLM、TTFT、TPOT、相对上一轮 %）→ `pull` 回本机 commit。没有 bench 记录的改动视为未完成。
