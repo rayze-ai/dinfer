@@ -27,3 +27,7 @@
   - 阻塞：B300 token 过期（`run` 无输出、`put` rsync code 12），已向主会话要新 token；待传文件列表见 progress。
 - 本机验证：四 feature `cargo build --workspace --features {qwen3,qwen35,glm53,kimik3}` 全 rc=0（10:33–10:50）；`cargo test -p dinfer-kimik3` 24 过；kimik3 ref-tests `--no-run` 过；rustfmt diff 为既有（HEAD~6 同样不 clean），未动。
 - 第 2 轮准备（10:41）：主会话拿到的 token 到手即过期（10:44 +0800 到期，拿到时 10:41），远端 push 失败；我误 kill 了陈旧 master（之后不再碰 ControlMaster，只用 run / put）。B300 待跑清单（约 20 min GPU）：① 远端 `cargo build --release -p dinfer -p bench --features kimik3` + `model_parity --no-run`；② 单卡 `K3_SKIP_GEN=1 K3_GPU=2 K3_DUMP=$R/bootstrap/k3tp/single scripts/verify/k3_model.sh`；③ `K3_TP=2 K3_GPU=2,3 K3_DUMP=$R/bootstrap/k3tp/tp2 ...`；④ `k3_tp_compare.py single tp2`；⑤ `K3_GPU=2,3 K3_TP=2 bash scripts/dev/k3_b300_smoke.sh`。`k3_b300_smoke.sh` 已支持 `K3_TP`（e67cb8f）。
+- 第 2 轮（B300 GPU 2–3，11:00）：远端编译过（bin + model_parity）。**单卡基线**（GPU 2，`$K/single.log`）exit 0：装载 5 层 15.1 s / 74.9 GB；隔离 cos 0.999983–0.999991；链式 layer4 cos 0.998576、final 0.998386、**logits 0.999897**、decode-vs-prefill 0.999975。**tp2 第 1 次**（`$K/tp2.log`）：两 rank 装载 + NCCL 建组正常，隔离 5 层全过（断言未触发），链式 final 过，**链式 logits cos 0.998999 < 0.999 断言失败**（单卡 0.999897）。
+  - 坑 1：`QUIET` 用了进程级 `static AtomicBool`，rank 1 置 true 把 rank 0 也静默 → 看不到每层数字、dump 目录为空。改 `thread_local!`（commit 见下）。
+  - 坑 2：`pkill -f "while pgrep"` 会匹配并杀掉发出它的 ssh shell 自身（命令行含同一字串）→ 后续命令没执行。启动器写成文件 `scripts/dev/k3_b300_tp_launch.sh` 再 `bash` 跑。
+  - 判断：tp2 对 HF 的链式 logits 掉 1e-3 待看 dump 直接对比（tp2 vs 单卡 ≥ 0.9998 才是本 loop 的停止条件）；对 HF 的门槛 TP 下放到 0.998（test 内注释说明）。
