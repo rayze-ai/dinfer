@@ -1,0 +1,1 @@
+第 9 轮：GDN in_proj 四合一（N=16480）+ 全注意力 qkv|gate 合一（14336），每步少 160 launch；small_m M_TILE 16/32 入候选

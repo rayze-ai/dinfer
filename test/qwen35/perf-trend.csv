@@ -179,3 +179,15 @@ bench_b300_15,2026-10-19,第 8 轮：executor 公共件（dinfer_layers::exec）
 bench_b300_15,2026-10-19,第 8 轮：executor 公共件（dinfer_layers::exec）+ qwen35 接 async scheduling（两槽 pinned D2H 流水）,c8-long,out_tok_per_s,529.534,556.368,0.952,-0.3,higher,main,B300,vllm,dinfer,qwen35
 bench_b300_15,2026-10-19,第 8 轮：executor 公共件（dinfer_layers::exec）+ qwen35 接 async scheduling（两槽 pinned D2H 流水）,c8-long,ttft_p50_ms,458.118,412.065,1.112,-0.3,lower,main,B300,vllm,dinfer,qwen35
 bench_b300_15,2026-10-19,第 8 轮：executor 公共件（dinfer_layers::exec）+ qwen35 接 async scheduling（两槽 pinned D2H 流水）,c8-long,tpot_p50_ms,11.601,11.248,1.031,-0.1,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_16,2026-10-19,第 9 轮：GDN in_proj 四合一（N=16480）+ 全注意力 qkv|gate 合一（14336），每步少 160 launch；small_m M_TILE 16/32 入候选,c1,out_tok_per_s,103.774,94.473,1.098,8.3,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_16,2026-10-19,第 9 轮：GDN in_proj 四合一（N=16480）+ 全注意力 qkv|gate 合一（14336），每步少 160 launch；small_m M_TILE 16/32 入候选,c1,ttft_p50_ms,19.911,47.337,0.421,7.1,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_16,2026-10-19,第 9 轮：GDN in_proj 四合一（N=16480）+ 全注意力 qkv|gate 合一（14336），每步少 160 launch；small_m M_TILE 16/32 入候选,c1,tpot_p50_ms,9.553,10.295,0.928,7.6,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_16,2026-10-19,第 9 轮：GDN in_proj 四合一（N=16480）+ 全注意力 qkv|gate 合一（14336），每步少 160 launch；small_m M_TILE 16/32 入候选,c8,out_tok_per_s,740.516,672.022,1.102,8.8,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_16,2026-10-19,第 9 轮：GDN in_proj 四合一（N=16480）+ 全注意力 qkv|gate 合一（14336），每步少 160 launch；small_m M_TILE 16/32 入候选,c8,ttft_p50_ms,78.909,102.148,0.773,5.5,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_16,2026-10-19,第 9 轮：GDN in_proj 四合一（N=16480）+ 全注意力 qkv|gate 合一（14336），每步少 160 launch；small_m M_TILE 16/32 入候选,c8,tpot_p50_ms,10.233,11.196,0.914,8.3,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_16,2026-10-19,第 9 轮：GDN in_proj 四合一（N=16480）+ 全注意力 qkv|gate 合一（14336），每步少 160 launch；small_m M_TILE 16/32 入候选,c32,out_tok_per_s,2217.536,2147.162,1.033,5.5,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_16,2026-10-19,第 9 轮：GDN in_proj 四合一（N=16480）+ 全注意力 qkv|gate 合一（14336），每步少 160 launch；small_m M_TILE 16/32 入候选,c32,ttft_p50_ms,260.887,267.439,0.976,2.3,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_16,2026-10-19,第 9 轮：GDN in_proj 四合一（N=16480）+ 全注意力 qkv|gate 合一（14336），每步少 160 launch；small_m M_TILE 16/32 入候选,c32,tpot_p50_ms,12.465,12.897,0.966,5.8,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_16,2026-10-19,第 9 轮：GDN in_proj 四合一（N=16480）+ 全注意力 qkv|gate 合一（14336），每步少 160 launch；small_m M_TILE 16/32 入候选,c8-long,out_tok_per_s,565.380,557.775,1.014,6.8,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_16,2026-10-19,第 9 轮：GDN in_proj 四合一（N=16480）+ 全注意力 qkv|gate 合一（14336），每步少 160 launch；small_m M_TILE 16/32 入候选,c8-long,ttft_p50_ms,454.249,405.803,1.119,0.8,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_16,2026-10-19,第 9 轮：GDN in_proj 四合一（N=16480）+ 全注意力 qkv|gate 合一（14336），每步少 160 launch；small_m M_TILE 16/32 入候选,c8-long,tpot_p50_ms,10.674,11.242,0.949,8.0,lower,main,B300,vllm,dinfer,qwen35

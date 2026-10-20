@@ -82,6 +82,17 @@ prefill 问题解决（`gdn_chunk.cu`，3090 T=1024 顺序 41.5 → 4.2 ms）；
 
 第 1–7 轮累计：0.40 / 0.36 / 0.21 / 0.09× → 1.00 / 1.02 / 0.97 / 0.95×。剩余差距 = 同步调度每步 GPU 空闲 0.4–0.6 ms（第 8 轮 executor 公共件 + async，见 design.md 待办）。
 
+### 0.7 里程碑 6 达成：第 8–9 轮 async + GEMM 合并（`bench_b300_16`，2026-10-20）
+
+| 组 | dinfer TPOT | vLLM | dinfer TTFT | vLLM | 吞吐倍率 |
+|---|---|---|---|---|---|
+| c1 p128 | 9.6 ms | 10.3 | 20 ms | 47 | **1.10×** |
+| c8 p128 | 10.2 | 11.2 | 79 | 102 | **1.10×** |
+| c32 p128 | 12.5 | 12.9 | 261 | 267 | **1.03×** |
+| c8 p1024 | 10.7 | 11.2 | 454 | 406 | **1.01×** |
+
+9 轮累计（`docs/loops/qwen35-perf.md`）：chunk prefill → CUDA graph → GEMM 自调优 → `forward_rows` 修正 → GDN decode 寄存器 kernel → prefill mma 化 → ActScratch → async（公共件）→ GEMM 合并。四组全部 ≥ vLLM，greedy 始终逐字一致。下一档（1.1× 四组 / 质变）见 `design.md` §14。
+
 ## 1. 结构事实
 
 来源：B300 `/data/models/Qwen/Qwen3.8-27B/config.json`（`text_config`）+ 分片 header（bf16 52 GB / 18 分片；FP8 版 29 GB / 66 分片 `fmt e4m3` dynamic，抽样分片 header 解析失败，先用 bf16）。vLLM 参考 `vllm/model_executor/models/qwen3_5.py`（继承 `qwen3_next.py`），GDN 层 `vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py`。
