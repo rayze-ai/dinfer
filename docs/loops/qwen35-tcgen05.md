@@ -95,3 +95,33 @@ attn 是干净目标：纯 GEMM + softmax，无跨 chunk 串行依赖，已有 r
 128 B swizzle 下一个 atom 在 K 轴上是 64 个 bf16，而 `make_umma_desc<Major::K>` 要求 `LBO = 0`（K 轴只有 1 个 atom）。
 所以 D=256 的点积必须**按 64 列切成 4 块**、每块单独发一组 MMA，不能在 K 轴上跨块。同理 MN-major（PV 的 V）
 用 LBO 跨 MN 块、SBO 跨 k-atom（8 行 × 128 B）。
+
+---
+
+## 收口（2026-10-21 06:2x，2 步 / 4 轮）
+
+### 第一步（工具链自证）：**通过，超预期**
+- `umma_peak` = **2236 TF/s**（标称 2.25 PF/s 的 99.4%；门槛 900；mma.sync 实测 575）
+- 两道正确性：check 模式 cos=1.0；峰值模式 4096 轮同块累加 cos=0.99999999（排除"测的是排空"）
+- **负结果**：592 block（4 CTA/SM）掉到 1809 —— TMEM 分配竞争。**1 CTA/SM 就够喂满 tensor core**，不要为 occupancy 加第二块
+
+### 第二步（attn 移植）：跑通数值，**性能未达标，已停**
+- 442 / 1118 / **3311** µs（T=1024/3009/6019）vs v6 的 78 / 454 / 1558 → 5.7× / 2.5× / **2.1× 慢**
+- 数值全程 cos=0.9999995、maxabs 3.9e-3 / 7.8e-3（bf16 一 ulp）
+- 最后一轮找到真根因：**K/V 装载访存不合并**（相邻线程读相隔 16 KB 的行 → 每 16 B 独占一条 128 B line，L2 放大 8×）。
+  改成相邻线程读同一 key 的相邻 16 B 片后，"等 K/V" 从 91% → 3%，5158 → 3311（−36%）
+- 剩余瓶颈：QK 的 16 条 K=16 全累加到同一 TMEM 累加器 → 串行 → 每 16 条 commit + 等；
+  1 CTA/SM 只有一条发射流，填不满间隙（每 tile 8.9 µs vs 理想 0.56）
+
+### 判断：**attn 的 tcgen05 路线停止，转 GDN**
+- attn 只占 6 K prefill 的 12%（32.6 / 277 ms），做完美也只省 22 ms
+- GDN 占 19%（52 ms），且 chunk 内 GEMM 是 K 方向长、连续的（state/h/v 都在 smem），
+  不存在 attn 这种"短 K + 频繁 commit"的发射/依赖比问题 —— 正是 `umma_peak` 跑到 99.4% 的形状
+- **留下的资产**：`umma.cuh` 全套原语（描述符 / TMEM / mbarrier / `tcgen05.ld`-`st`）直接被 r11d 复用，不重写
+
+### 踩坑（已在上面「踩坑」节）
+
+### 交接
+- 默认 `GQA_PREFILL_CFG` 仍是 3464（v6），tcgen05 路径只有 `=5000` 才走，**对现有路径零影响**
+- `crates/kernels/tests/gqa_umma_prof.rs` 是 clock64 分段插桩，留给 GDN 线复用同一套手法
+- commits：`905daa3`（第一步）、`c6eec3d` / `3a09385` / `b745adb`（第二步），本地 dev，未 push
