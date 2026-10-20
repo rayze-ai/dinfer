@@ -72,3 +72,5 @@ FlashInfer 这套是 **CuTeDSL**（Python DSL → 运行时编译）。dinfer �
 | 轮 | 改动 | 结果 | 结论 |
 |---|---|---|---|
 | 0 | 量 FlashInfer 实际耗时（`fi_prof.py`，GPU 4） | 49 / 156 / 253 µs vs dinfer 208 / 770 / 969 | 3.8–4.9×，值得接 |
+| 1 | **AOT 可行性验证（A 路线打通）** | ① `CUTE_DSL_KEEP=CUBIN` + `CUTE_DSL_DUMP_DIR` → 落出独立 `.sm_103a.cubin`（**235 KB**）；② `cuobjdump -res-usage`：**168 regs、1 KB 静态 smem、STACK 8**，入口 `STO_ENTRY` 单符号；③ 纯 ctypes 走 CUDA driver：`cuModuleLoad` **rc=0**、`cuModuleGetFunction` **rc=0**、`cuFuncGetAttribute` → **MAX_THREADS=384 / NUM_REGS=168**。 | **A 路线成立**：不依赖 Python / TVM FFI 运行时，Rust 可 `cuModuleLoadData` 直接加载。剩余工作 = 参数块布局（`EIATTR_KPARAM_INFO` 可读出 offset/size，最大到 `0x438+8` ≈ **1 KB 参数块**）与 grid/TMEM 配置。 |
+| 2 | 参数块与 launch | 待做：从 `cuobjdump -elf` 的 kparam 表逐项对齐（q/k/v/gate/beta/out/cu_seqlens/state/scale/checkpoints/workspace + grid 常量），最小 driver 程序跑通并与 PyTorch 版逐位比对 | — |
