@@ -37,3 +37,8 @@
 - **为什么**：C-6 全 93 层 tp8 占 8 卡装载期间，r9 在 GPU 6 起了 `fla-prof` 容器跑 torch.profiler（2.3 GB），两次消息令停都晚于它的下一轮动作，最后主会话直接 `nerdctl rm -f` 才停住；若晚 5 分钟进 bench 计时，c32 / c8-long 数字作废。
 - **怎么用**：brief 模板加一句；主会话起独占测试前 `SendMessage` 广播所有活着的子代理；发现越界先 `nvidia-smi --query-compute-apps` 定位容器 / PID，直接停，不等确认。
 - **证据**：`docs/progress.md` 2026-10-20 C-6 第三轮条目。
+
+## 远端长链的超时（2026-10-20 K3 C-6 教训）
+- **判断**：`timeout N bash chain.sh`（serve → smoke → 多组 bench → stop）的 N 要按"装载 + 全部组"的实测上界给，或者**不包 serve**（serve 单独起、bench 每组各自 `timeout`）。C-6 第三轮 1800 s 把 25 min 装载 + 四组 bench 的链截在第四组（c8-long，一组 10 min+），serve 被连带杀掉，只能重装 25 min 单独补。
+- **怎么用**：每组 bench 落盘后立刻可用（json 独立），链的超时只保护单组；装载慢的模型（K3 93 层 tp8 ≈ 1500 s）把 serve 放 tmux 常驻、链只管 bench。
+- **证据**：`docs/loops/k3-serve.md` 3j（"c8-long 链上 1800 s 超时未落，单独补跑中"）；B300 `bootstrap/k3_c6_tp8_2/serve.log` 止于正常 step mix、无错误。
