@@ -282,7 +282,8 @@ int kda_recurrent(const void* q, const void* k, const void* v, const void* raw_g
                   int64_t state_stride_tok, float scale, float lower_bound, int use_lower_bound) {
   if (num_seqs <= 0 || heads <= 0 || head_dim <= 0) return err(cudaErrorInvalidValue);
   const int smem = (int)((head_dim * head_dim + 3 * head_dim) * sizeof(float));
-  static int smem_set = 0;
+  // thread_local：cudaFuncSetAttribute 按设备生效，一进程多线程 TP 每线程一张卡（pitfalls 2026-10-20 C-6 卡死）
+  static thread_local int smem_set = 0;
   if (smem_set < smem) {
     const int rc = set_smem(reinterpret_cast<const void*>(&recurrent_kernel), smem);
     if (rc != 0) return rc;

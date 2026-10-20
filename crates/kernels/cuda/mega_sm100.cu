@@ -665,7 +665,7 @@ int launch(Params& p, const MegaLayerArgs& a, cudaStream_t stream) {
   cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
   if ((int)smem > max_smem) MEGA_FAIL("smem %d > max %d (pipe %d G %d U %d MB %d)", (int)smem, max_smem, pipe, G, U, MB);
   auto kern = mega_layer_kernel<MB, G, U, OCC>;
-  static int smem_set = 0;
+  static thread_local int smem_set = 0;  // 按设备生效 → 每 rank 线程一份（pitfalls 2026-10-20）
   if (smem_set < (int)smem) {
     if (const int rc = err(cudaFuncSetAttribute((const void*)kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem)))
       return rc;

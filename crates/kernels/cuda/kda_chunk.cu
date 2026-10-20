@@ -405,7 +405,7 @@ __global__ void ho_kernel(const bf16* __restrict__ qn, const float* __restrict__
 }
 
 // 动态 shared 上限按 (kernel, 字节数) 记忆；换了特化必须重设，否则前一次的属性不生效。
-int smem_cache[4][2] = {{0, 0}, {0, 0}, {0, 0}, {0, 0}};
+thread_local int smem_cache[4][2] = {{0, 0}, {0, 0}, {0, 0}, {0, 0}};  // 按设备生效 → 每 rank 线程一份（pitfalls 2026-10-20）
 int set_smem(const void* fn, int bytes) {
   const intptr_t key = (intptr_t)fn;
   int slot = 0;

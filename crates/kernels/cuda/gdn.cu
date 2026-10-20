@@ -455,7 +455,7 @@ __global__ void __launch_bounds__(kDecodeWarps * 32) recurrent_decode_pipe_kerne
 template <typename Kern>
 int persistent_grid(Kern kern, int num_tiles, int decode_grid) {
   if (decode_grid > 0) return decode_grid < num_tiles ? decode_grid : num_tiles;
-  static int cached = 0;  // 每个模板实例一份
+  static thread_local int cached = 0;  // 每个模板实例一份；thread_local = 每张卡一份（SM 数 / occupancy 按设备）
   if (cached == 0) {
     int dev = 0, sms = 1, per_sm = 1;
     cudaGetDevice(&dev);
@@ -675,7 +675,7 @@ int gdn_recurrent(const void* mixed_qkv, const float* g, const float* beta, cons
   dim3 grid((unsigned)num_seqs, (unsigned)HV, (unsigned)vsplit);
   // cudaFuncSetAttribute 不能在 stream capture 期间调（CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED）：
   // 每个模板实例只在首次（capture 前的 eager 预热）设一次；smem 只随 (V, K) 变，同一模型内恒定。
-  static int smem_set_fused = 0, smem_set_plain = 0;
+  static thread_local int smem_set_fused = 0, smem_set_plain = 0;  // 按设备生效 → 每 rank 线程一份（pitfalls 2026-10-20）
   if (fused_gate) {
     if (smem_set_fused < smem) {
       if (const int rc = set_smem((const void*)recurrent_kernel<kBlock, true>, smem)) return rc;

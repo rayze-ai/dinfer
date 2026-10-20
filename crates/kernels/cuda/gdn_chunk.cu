@@ -15,8 +15,8 @@
 // 三个 kernel：
 //   chunk_prep   q/k 的 l2norm（q 乘 scale）→ qn/kn [T,H,K] bf16；块内 cumsum(g) → gc [T,HV]
 //   chunk_wy     A/Aq → M → u / w / kg（A 只在本 kernel 内用；Aq 写回给输出段）
-//   chunk_ho     跨 chunk 串行扫 h + 立即算 o
-// 数值口径：全部 fp32 累加（先求对；bf16 mma 以后再说）。
+//   chunk_ho     跨 chunk 串行扫 h + 立即算 o（融合版）；r9 起另有两段版 h-pass / o-pass（见 ho_hpass_kernel 注释）
+// 数值口径：老版全 fp32；mma 版 bf16 乘 fp32 累加（与 fla 同口径）。
 #include "common.cuh"
 #include "kernels.h"
 
@@ -909,9 +909,354 @@ __global__ void __launch_bounds__(kHoWarps * 32) ho_mma_kernel(
   }
 }
 
+// ================================================================ ho 两段版（r9 第 2 轮：h-pass + o-pass）
+// 融合版每 block 串行走整条序列的所有 chunk，单长序列只有 HV·V/BV 个 block（27B 形状 192 / 384），铺不满大卡且每 chunk
+// 四个矩阵乘串在一条延迟链上。拆成：
+//   h-pass  grid (V/BV, HV, nseq)：只做 v' = u − w·hᵀ 与 h ← h·glast + v'ᵀ·kg（两个乘法），每 chunk 把入口 h（bf16）写到
+//           h16 [num_chunks, HV, V, K]、v'（bf16）写到 v16 [T, HV, V]；smem 只放 h 影子 + w / kg（比融合版少 q / Aq），
+//           占用翻倍；仍串行但算量减半。
+//   o-pass  grid (num_chunks, HV)：全并行 o = (q·h_cᵀ)·dec + Aq·v'_c，每 block 读 h16 一块 + q / Aq / v'，纯 mma。
+// 数值口径与融合版相同：h / v' / Aq / q 参与 mma 时均为 bf16，fp32 累加（parity 容差同 2e-3 / 1e-2）。
+template <int BT, int BV, int K>
+struct HpSmem {
+  static constexpr int KS = K + 8, TS = BT + 8;
+  static constexpr int off_h16 = 0;                  // [BV][KS]
+  static constexpr int off_w = off_h16 + BV * KS;    // [BT][KS]
+  static constexpr int off_kg = off_w + BT * KS;     // [BT][KS]
+  static constexpr int off_vT = off_kg + BT * KS;    // [BV][TS]
+  static constexpr int elems = off_vT + BV * TS;
+  static constexpr int bytes = elems * 2 + BT * 4;   // + sdec[BT]
+};
+
+template <int BT, int BV, int K, int PF>
+__global__ void __launch_bounds__(kHoWarps * 32) ho_hpass_kernel(
+    const float* __restrict__ gc, const float* __restrict__ u, const float* __restrict__ w, const float* __restrict__ kg,
+    bf16* __restrict__ h16, bf16* __restrict__ v16, float* __restrict__ state, const int* __restrict__ cu_seqlens,
+    const int* __restrict__ cu_nt, const int* __restrict__ chunk_off, const int* __restrict__ state_indices,
+    int64_t state_stride_tok, int HV, int V) {
+  using S = HpSmem<BT, BV, K>;
+  constexpr int KS = S::KS, TS = S::TS, NW = kHoWarps;
+  constexpr int MT_V = BV / 16, NT_V = BV / 8, NT_K = K / 8, KSTEP_K = K / 16, KSTEP_T = BT / 16;
+  static_assert(BT % 16 == 0 && BV % 16 == 0 && K % 16 == 0 && BT / 16 == NW, "BT=64 → 4 warp 各持一个 16 行 tile");
+  static_assert((MT_V * NT_K) % (2 * NW) == 0, "h tile 对要能均分到 warp");
+  constexpr int H_TILES = MT_V * NT_K / NW;
+  constexpr int QV = BT * (K / 8) / (NW * 32);
+  constexpr int DV = (BT + NW * 32 - 1) / (NW * 32);
+  static_assert(BT * (K / 8) % (NW * 32) == 0, "装载向量数要整除线程数");
+
+  const int v0 = blockIdx.x * BV, hv = blockIdx.y, seq = blockIdx.z;
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, t4 = lane & 3;
+  auto h_tile = [&](int hi, int& mt, int& ntk) {
+    const int gp = warp + (hi >> 1) * NW;
+    mt = gp % MT_V;
+    ntk = (gp / MT_V) * 2 + (hi & 1);
+  };
+  const int slot = state_indices ? state_indices[seq] : seq;
+  const int bos = cu_seqlens[seq], eos = cu_seqlens[seq + 1];
+  const int len_seq = eos - bos;
+  if (len_seq <= 0 || slot < 0) return;
+  const int nt = cu_nt[seq];
+
+  extern __shared__ __align__(16) unsigned char smraw[];
+  bf16* sm16 = reinterpret_cast<bf16*>(smraw);
+  bf16* sh16 = sm16 + S::off_h16;
+  bf16* sw = sm16 + S::off_w;
+  bf16* skg = sm16 + S::off_kg;
+  bf16* svT = sm16 + S::off_vT;
+  float* sdec = reinterpret_cast<float*>(sm16 + S::elems);
+  float* hslot = state + (long)slot * state_stride_tok + (long)hv * V * K;
+
+  float hacc[H_TILES][4];
+#pragma unroll
+  for (int hi = 0; hi < H_TILES; ++hi) {
+    int mt, ntk;
+    h_tile(hi, mt, ntk);
+    const int vr = v0 + mt * 16 + g, kc = ntk * 8 + 2 * t4;
+    const float2 a = *reinterpret_cast<const float2*>(hslot + (long)vr * K + kc);
+    const float2 b = *reinterpret_cast<const float2*>(hslot + (long)(vr + 8) * K + kc);
+    hacc[hi][0] = a.x; hacc[hi][1] = a.y; hacc[hi][2] = b.x; hacc[hi][3] = b.y;
+    sts_u32(sh16 + (mt * 16 + g) * KS + kc, pack_bf16x2(a.x, a.y));
+    sts_u32(sh16 + (mt * 16 + g + 8) * KS + kc, pack_bf16x2(b.x, b.y));
+  }
+
+  float4 rw[QV][2], rg[QV][2];
+  float rd[DV];
+  auto fetch = [&](int ci) {
+    const int len = min(BT, len_seq - ci * BT);
+    const long row0 = bos + (long)ci * BT;
+#pragma unroll
+    for (int d = 0; d < DV; ++d) {
+      const int i = tid + d * NW * 32;
+      rd[d] = (i < BT && i < len) ? exp2f(gc[(row0 + i) * HV + hv]) : 0.f;
+    }
+#pragma unroll
+    for (int vv = 0; vv < QV; ++vv) {
+      const int idx = tid + vv * NW * 32;
+      const int i = idx / (K / 8), k8 = (idx % (K / 8)) * 8;
+      rw[vv][0] = rw[vv][1] = rg[vv][0] = rg[vv][1] = make_float4(0.f, 0.f, 0.f, 0.f);
+      if (i < len) {
+        const float* wr = w + ((row0 + i) * HV + hv) * K + k8;
+        const float* gr = kg + ((row0 + i) * HV + hv) * K + k8;
+        rw[vv][0] = *reinterpret_cast<const float4*>(wr);
+        rw[vv][1] = *reinterpret_cast<const float4*>(wr + 4);
+        rg[vv][0] = *reinterpret_cast<const float4*>(gr);
+        rg[vv][1] = *reinterpret_cast<const float4*>(gr + 4);
+      }
+    }
+  };
+  auto stage = [&]() {
+#pragma unroll
+    for (int d = 0; d < DV; ++d) {
+      const int i = tid + d * NW * 32;
+      if (i < BT) sdec[i] = rd[d];
+    }
+#pragma unroll
+    for (int vv = 0; vv < QV; ++vv) {
+      const int idx = tid + vv * NW * 32;
+      const int i = idx / (K / 8), k8 = (idx % (K / 8)) * 8;
+      *reinterpret_cast<uint4*>(sw + i * KS + k8) =
+          make_uint4(pack_bf16x2(rw[vv][0].x, rw[vv][0].y), pack_bf16x2(rw[vv][0].z, rw[vv][0].w),
+                     pack_bf16x2(rw[vv][1].x, rw[vv][1].y), pack_bf16x2(rw[vv][1].z, rw[vv][1].w));
+      *reinterpret_cast<uint4*>(skg + i * KS + k8) =
+          make_uint4(pack_bf16x2(rg[vv][0].x, rg[vv][0].y), pack_bf16x2(rg[vv][0].z, rg[vv][0].w),
+                     pack_bf16x2(rg[vv][1].x, rg[vv][1].y), pack_bf16x2(rg[vv][1].z, rg[vv][1].w));
+    }
+  };
+  if (PF && nt > 0) {
+    fetch(0);
+    stage();
+  }
+  __syncthreads();
+
+  for (int ci = 0; ci < nt; ++ci) {
+    const int c = chunk_off[seq] + ci;
+    const int len = min(BT, len_seq - ci * BT);
+    const long row0 = bos + (long)ci * BT;
+    const bool has_next = PF && ci + 1 < nt;
+    if (PF) {
+      if (has_next) fetch(ci + 1);
+    } else {
+      fetch(ci);
+      stage();
+      __syncthreads();
+    }
+
+    // 入口 h（bf16 影子）→ h16[c, hv, v0.., :]：16 B 向量拷
+    {
+      bf16* hc = h16 + (((long)c * HV + hv) * V + v0) * K;
+      for (int idx = tid; idx < BV * (K / 8); idx += NW * 32) {
+        const int vr = idx / (K / 8), k8 = (idx % (K / 8)) * 8;
+        *reinterpret_cast<uint4*>(hc + (long)vr * K + k8) = *reinterpret_cast<const uint4*>(sh16 + vr * KS + k8);
+      }
+    }
+
+    // v' = u − w·hᵀ → svT（bf16 转置）+ v16
+    {
+      float wacc[NT_V][4];
+#pragma unroll
+      for (int n = 0; n < NT_V; ++n) { wacc[n][0] = wacc[n][1] = wacc[n][2] = wacc[n][3] = 0.f; }
+      const bf16* a_base = sw + (warp * 16) * KS;
+#pragma unroll
+      for (int ks = 0; ks < KSTEP_K; ++ks) {
+        uint32_t a[4];
+        ldsm_x4(a, a_base + (lane & 15) * KS + ks * 16 + (lane >> 4) * 8);
+#pragma unroll
+        for (int n = 0; n < NT_V; ++n) {
+          const bf16* hb = sh16 + (n * 8 + g) * KS + ks * 16 + 2 * t4;
+          mma16816(wacc[n], a, lds_u32(hb), lds_u32(hb + 8));
+        }
+      }
+      const int i0 = warp * 16 + g, i1 = i0 + 8;
+#pragma unroll
+      for (int n = 0; n < NT_V; ++n) {
+        const int vv = n * 8 + 2 * t4;
+        float v00 = 0.f, v01 = 0.f, v10 = 0.f, v11 = 0.f;
+        if (i0 < len) {
+          const float2 x = *reinterpret_cast<const float2*>(u + ((row0 + i0) * HV + hv) * V + v0 + vv);
+          v00 = x.x - wacc[n][0]; v01 = x.y - wacc[n][1];
+          *reinterpret_cast<uint32_t*>(v16 + ((row0 + i0) * HV + hv) * V + v0 + vv) = pack_bf16x2(v00, v01);
+        }
+        if (i1 < len) {
+          const float2 x = *reinterpret_cast<const float2*>(u + ((row0 + i1) * HV + hv) * V + v0 + vv);
+          v10 = x.x - wacc[n][2]; v11 = x.y - wacc[n][3];
+          *reinterpret_cast<uint32_t*>(v16 + ((row0 + i1) * HV + hv) * V + v0 + vv) = pack_bf16x2(v10, v11);
+        }
+        svT[vv * TS + i0] = to_bf16(v00);
+        svT[(vv + 1) * TS + i0] = to_bf16(v01);
+        svT[vv * TS + i1] = to_bf16(v10);
+        svT[(vv + 1) * TS + i1] = to_bf16(v11);
+      }
+    }
+    __syncthreads();
+
+    // h = h·glast + v'ᵀ·kg
+    {
+      const float glast = sdec[len - 1];
+#pragma unroll
+      for (int hi = 0; hi < H_TILES; ++hi) {
+        hacc[hi][0] *= glast; hacc[hi][1] *= glast; hacc[hi][2] *= glast; hacc[hi][3] *= glast;
+      }
+#pragma unroll
+      for (int ks = 0; ks < KSTEP_T; ++ks) {
+        uint32_t afr[MT_V][4];
+#pragma unroll
+        for (int mt = 0; mt < MT_V; ++mt)
+          ldsm_x4(afr[mt], svT + (mt * 16 + (lane & 15)) * TS + ks * 16 + (lane >> 4) * 8);
+#pragma unroll
+        for (int hi = 0; hi < H_TILES; hi += 2) {
+          int mt, ntk;
+          h_tile(hi, mt, ntk);
+          uint32_t b[4];
+          ldsm_x4_t(b, skg + (ks * 16 + (lane & 15)) * KS + ntk * 8 + (lane >> 4) * 8);
+          mma16816(hacc[hi], afr[mt], b[0], b[1]);
+          mma16816(hacc[hi + 1], afr[mt], b[2], b[3]);
+        }
+      }
+    }
+    __syncthreads();  // svT / sh16 / sw / skg 读完
+#pragma unroll
+    for (int hi = 0; hi < H_TILES; ++hi) {
+      int mt, ntk;
+      h_tile(hi, mt, ntk);
+      const int kc = ntk * 8 + 2 * t4;
+      sts_u32(sh16 + (mt * 16 + g) * KS + kc, pack_bf16x2(hacc[hi][0], hacc[hi][1]));
+      sts_u32(sh16 + (mt * 16 + g + 8) * KS + kc, pack_bf16x2(hacc[hi][2], hacc[hi][3]));
+    }
+    if (has_next) stage();
+    __syncthreads();
+  }
+
+#pragma unroll
+  for (int hi = 0; hi < H_TILES; ++hi) {
+    int mt, ntk;
+    h_tile(hi, mt, ntk);
+    const int vr = v0 + mt * 16 + g, kc = ntk * 8 + 2 * t4;
+    *reinterpret_cast<float2*>(hslot + (long)vr * K + kc) = make_float2(hacc[hi][0], hacc[hi][1]);
+    *reinterpret_cast<float2*>(hslot + (long)(vr + 8) * K + kc) = make_float2(hacc[hi][2], hacc[hi][3]);
+  }
+}
+
+// o-pass：每 block 一个 (chunk, v 头)，warp 数 = (BT/16)·(V/VW)，每 warp 持 16 行 token × VW 列 v。
+// VW 由 V 定（V ≤ 64 → 整个 V 一组；否则 64 列一组），线程数 ≤ 512；不是调优参数而是 tile 结构。
+template <int BT, int K, int V>
+struct OpSmem {
+  static constexpr int KS = K + 8, TS = BT + 8, VS = V + 8;
+  static constexpr int off_h = 0;                 // [V][KS]  bf16 h_c（[v][k]）
+  static constexpr int off_q = off_h + V * KS;    // [BT][KS]
+  static constexpr int off_aq = off_q + BT * KS;  // [BT][TS]
+  static constexpr int off_v = off_aq + BT * TS;  // [BT][VS]  v'（行主序，B 操作数走 ldmatrix.trans）
+  static constexpr int elems = off_v + BT * VS;
+  static constexpr int bytes = elems * 2 + BT * 4;  // + sdec
+  static constexpr int VW = (V <= 64) ? V : 64;
+  static constexpr int NWARPS = (BT / 16) * (V / VW);
+};
+
+template <int BT, int K, int V>
+__global__ void __launch_bounds__(OpSmem<BT, K, V>::NWARPS * 32) ho_opass_kernel(
+    const bf16* __restrict__ qn, const float* __restrict__ gc, const float* __restrict__ aq, const bf16* __restrict__ h16,
+    const bf16* __restrict__ v16, bf16* __restrict__ out, const int* __restrict__ cu_seqlens,
+    const int* __restrict__ chunk_tab, int H, int HV, int group) {
+  using S = OpSmem<BT, K, V>;
+  constexpr int KS = S::KS, TS = S::TS, VS = S::VS, VW = S::VW, NW = S::NWARPS;
+  constexpr int NT = VW / 8, KSTEP_K = K / 16, KSTEP_T = BT / 16;
+  static_assert(V % VW == 0 && VW % 16 == 0 && BT % 16 == 0 && K % 16 == 0, "tile 形状");
+
+  const int c = blockIdx.x, hv = blockIdx.y, h = hv / group;
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, t4 = lane & 3;
+  const int mt = warp % (BT / 16), vg = warp / (BT / 16);
+  const int seq = chunk_tab[2 * c], ci = chunk_tab[2 * c + 1];
+  const int bos = cu_seqlens[seq], eos = cu_seqlens[seq + 1];
+  const int len = min(BT, eos - bos - ci * BT);
+  const long row0 = bos + (long)ci * BT;
+  const long kstride = (long)H * K;
+
+  extern __shared__ __align__(16) unsigned char smraw[];
+  bf16* sm16 = reinterpret_cast<bf16*>(smraw);
+  bf16* sh = sm16 + S::off_h;
+  bf16* sq = sm16 + S::off_q;
+  bf16* sAq = sm16 + S::off_aq;
+  bf16* sv = sm16 + S::off_v;
+  float* sdec = reinterpret_cast<float*>(sm16 + S::elems);
+
+  for (int i = tid; i < BT; i += NW * 32) sdec[i] = (i < len) ? exp2f(gc[(row0 + i) * HV + hv]) : 0.f;
+  {
+    const bf16* hc = h16 + ((long)c * HV + hv) * V * K;
+    for (int idx = tid; idx < V * (K / 8); idx += NW * 32) {
+      const int vr = idx / (K / 8), k8 = (idx % (K / 8)) * 8;
+      *reinterpret_cast<uint4*>(sh + vr * KS + k8) = *reinterpret_cast<const uint4*>(hc + (long)vr * K + k8);
+    }
+  }
+  for (int idx = tid; idx < BT * (K / 8); idx += NW * 32) {
+    const int i = idx / (K / 8), k8 = (idx % (K / 8)) * 8;
+    uint4 qv = make_uint4(0, 0, 0, 0);
+    if (i < len) qv = *reinterpret_cast<const uint4*>(qn + (row0 + i) * kstride + (long)h * K + k8);
+    *reinterpret_cast<uint4*>(sq + i * KS + k8) = qv;
+  }
+  for (int idx = tid; idx < BT * (V / 8); idx += NW * 32) {
+    const int i = idx / (V / 8), v8 = (idx % (V / 8)) * 8;
+    uint4 vv = make_uint4(0, 0, 0, 0);
+    if (i < len) vv = *reinterpret_cast<const uint4*>(v16 + ((row0 + i) * HV + hv) * V + v8);
+    *reinterpret_cast<uint4*>(sv + i * VS + v8) = vv;
+  }
+  {
+    const float* aqc = aq + ((long)c * HV + hv) * BT * BT;
+    for (int idx = tid; idx < BT * (BT / 8); idx += NW * 32) {
+      const int i = idx / (BT / 8), j8 = (idx % (BT / 8)) * 8;
+      const float4 a0 = *reinterpret_cast<const float4*>(aqc + i * BT + j8);
+      const float4 a1 = *reinterpret_cast<const float4*>(aqc + i * BT + j8 + 4);
+      *reinterpret_cast<uint4*>(sAq + i * TS + j8) =
+          make_uint4(pack_bf16x2(a0.x, a0.y), pack_bf16x2(a0.z, a0.w), pack_bf16x2(a1.x, a1.y), pack_bf16x2(a1.z, a1.w));
+    }
+  }
+  __syncthreads();
+
+  float oacc[NT][4];
+#pragma unroll
+  for (int n = 0; n < NT; ++n) { oacc[n][0] = oacc[n][1] = oacc[n][2] = oacc[n][3] = 0.f; }
+  const int vbase = vg * VW;
+  // o1 = q·hᵀ：A = sq 行 tile mt，B = sh [v][k]（col-major B，直接 32 位读）
+#pragma unroll
+  for (int ks = 0; ks < KSTEP_K; ++ks) {
+    uint32_t a[4];
+    ldsm_x4(a, sq + (mt * 16 + (lane & 15)) * KS + ks * 16 + (lane >> 4) * 8);
+#pragma unroll
+    for (int n = 0; n < NT; ++n) {
+      const bf16* hb = sh + (vbase + n * 8 + g) * KS + ks * 16 + 2 * t4;
+      mma16816(oacc[n], a, lds_u32(hb), lds_u32(hb + 8));
+    }
+  }
+  const int i0 = mt * 16 + g, i1 = i0 + 8;
+  const float d0 = sdec[i0], d1 = sdec[i1];
+#pragma unroll
+  for (int n = 0; n < NT; ++n) {
+    oacc[n][0] *= d0; oacc[n][1] *= d0; oacc[n][2] *= d1; oacc[n][3] *= d1;
+  }
+  // + Aq·v'：A = sAq 行 tile mt，B = sv [j][v] 行主序 → ldmatrix.trans
+#pragma unroll
+  for (int ks = 0; ks < KSTEP_T; ++ks) {
+    uint32_t a[4];
+    ldsm_x4(a, sAq + (mt * 16 + (lane & 15)) * TS + ks * 16 + (lane >> 4) * 8);
+#pragma unroll
+    for (int n = 0; n < NT; n += 2) {
+      uint32_t b[4];
+      ldsm_x4_t(b, sv + (ks * 16 + (lane & 15)) * VS + vbase + n * 8 + (lane >> 4) * 8);
+      mma16816(oacc[n], a, b[0], b[1]);
+      mma16816(oacc[n + 1], a, b[2], b[3]);
+    }
+  }
+#pragma unroll
+  for (int n = 0; n < NT; ++n) {
+    const int vv = vbase + n * 8 + 2 * t4;
+    if (i0 < len)
+      *reinterpret_cast<uint32_t*>(out + ((row0 + i0) * HV + hv) * V + vv) = pack_bf16x2(oacc[n][0], oacc[n][1]);
+    if (i1 < len)
+      *reinterpret_cast<uint32_t*>(out + ((row0 + i1) * HV + hv) * V + vv) = pack_bf16x2(oacc[n][2], oacc[n][3]);
+  }
+}
+
 // 动态 shared 上限按 (kernel, 字节数) 记忆；换了特化必须重设，否则前一次的属性不生效。
 constexpr int kSmemSlots = 16;
-int smem_cache[kSmemSlots][2] = {};
+thread_local int smem_cache[kSmemSlots][2] = {};  // 按设备生效 → 每 rank 线程一份（pitfalls 2026-10-20）
 int set_smem(const void* fn, int bytes) {
   const intptr_t key = (intptr_t)fn;
   int slot = 0;
@@ -1048,6 +1393,56 @@ static int ho_fused(const void* qn, const float* gc, const float* aq, const floa
   return last_err();
 }
 
+// 两段版：h-pass（BV ∈ {16,32}，prefetch 0/1）→ o-pass（(K, V) 特化：qwen35 128/128，另给 64/64、128/64）。
+static int ho_split(const void* qn, const float* gc, const float* aq, const float* u, const float* w, const float* kg,
+                    bf16* h16, bf16* v16, void* out, void* state, const int* cu_seqlens, const int* cu_nt,
+                    const int* chunk_off, const int* chunk_tab, const int* state_indices, int64_t state_stride_tok,
+                    int64_t num_seqs, int64_t num_chunks, int64_t H, int64_t HV, int64_t K, int64_t V, int64_t bt,
+                    int64_t ho_bv, int64_t prefetch, cudaStream_t stream) {
+  if (num_seqs <= 0 || H <= 0 || HV <= 0 || HV % H != 0 || K <= 0 || V <= 0) return err(cudaErrorInvalidValue);
+  if (bt != 64 || !(ho_bv == 16 || ho_bv == 32) || V % ho_bv != 0) return err(cudaErrorInvalidValue);
+  constexpr int BT = 64;
+  const int group = (int)(HV / H);
+  {
+    dim3 grid((unsigned)(V / ho_bv), (unsigned)HV, (unsigned)num_seqs);
+#define LAUNCH_HP1(BVV, KK, PF)                                                                                   \
+  {                                                                                                               \
+    constexpr int smem = HpSmem<BT, BVV, KK>::bytes;                                                              \
+    if (const int rc = set_smem(reinterpret_cast<const void*>(&ho_hpass_kernel<BT, BVV, KK, PF>), smem)) return rc; \
+    ho_hpass_kernel<BT, BVV, KK, PF><<<grid, kHoWarps * 32, smem, stream>>>(                                      \
+        gc, u, w, kg, h16, v16, static_cast<float*>(state), cu_seqlens, cu_nt, chunk_off, state_indices,          \
+        state_stride_tok, (int)HV, (int)V);                                                                       \
+  }
+#define LAUNCH_HP(BVV, KK) \
+  { if (prefetch) LAUNCH_HP1(BVV, KK, 1) else LAUNCH_HP1(BVV, KK, 0) }
+    if (ho_bv == 32) {
+      if (K == 128) { LAUNCH_HP(32, 128) } else if (K == 64) { LAUNCH_HP(32, 64) } else if (K == 256) { LAUNCH_HP(32, 256) } else return err(cudaErrorInvalidValue);
+    } else {
+      if (K == 128) { LAUNCH_HP(16, 128) } else if (K == 64) { LAUNCH_HP(16, 64) } else if (K == 256) { LAUNCH_HP(16, 256) } else return err(cudaErrorInvalidValue);
+    }
+#undef LAUNCH_HP
+#undef LAUNCH_HP1
+    if (const int rc = last_err()) return rc;
+  }
+  {
+    dim3 grid((unsigned)num_chunks, (unsigned)HV);
+#define LAUNCH_OP(KK, VV)                                                                                     \
+  {                                                                                                           \
+    using S = OpSmem<BT, KK, VV>;                                                                             \
+    if (const int rc = set_smem(reinterpret_cast<const void*>(&ho_opass_kernel<BT, KK, VV>), S::bytes)) return rc; \
+    ho_opass_kernel<BT, KK, VV><<<grid, S::NWARPS * 32, S::bytes, stream>>>(                                   \
+        static_cast<const bf16*>(qn), gc, aq, h16, v16, static_cast<bf16*>(out), cu_seqlens, chunk_tab, (int)H, \
+        (int)HV, group);                                                                                      \
+  }
+    if (K == 128 && V == 128) { LAUNCH_OP(128, 128) }
+    else if (K == 64 && V == 64) { LAUNCH_OP(64, 64) }
+    else if (K == 128 && V == 64) { LAUNCH_OP(128, 64) }
+    else return err(cudaErrorInvalidValue);
+#undef LAUNCH_OP
+  }
+  return last_err();
+}
+
 int gdn_chunk_ho(const void* qn, const float* gc, const float* aq, const float* u, const float* w, const float* kg,
                  void* out, void* state, const int* cu_seqlens, const int* cu_nt, const int* chunk_off,
                  const int* state_indices, int64_t state_stride_tok, int64_t num_seqs, int64_t H, int64_t HV,
@@ -1062,8 +1457,12 @@ int gdn_chunk_ho_v2(const void* qn, const float* gc, const float* aq, const floa
                     const int* chunk_off, const int* chunk_tab, const int* state_indices, int64_t state_stride_tok,
                     int64_t num_seqs, int64_t num_chunks, int64_t H, int64_t HV, int64_t K, int64_t V, int64_t bt,
                     int64_t ho_bv, int64_t prefetch, int64_t split, cudaStream_t stream) {
-  (void)h16; (void)v16; (void)chunk_tab; (void)num_chunks;
-  if (split != 0) return err(cudaErrorInvalidValue);
+  if (split != 0) {
+    if (!h16 || !v16 || !chunk_tab || num_chunks <= 0) return err(cudaErrorInvalidValue);
+    return ho_split(qn, gc, aq, u, w, kg, static_cast<bf16*>(h16), static_cast<bf16*>(v16), out, state, cu_seqlens,
+                    cu_nt, chunk_off, chunk_tab, state_indices, state_stride_tok, num_seqs, num_chunks, H, HV, K, V,
+                    bt, ho_bv, prefetch, stream);
+  }
   return ho_fused(qn, gc, aq, u, w, kg, out, state, cu_seqlens, cu_nt, chunk_off, state_indices, state_stride_tok,
                   num_seqs, H, HV, K, V, bt, ho_bv, prefetch, stream);
 }
