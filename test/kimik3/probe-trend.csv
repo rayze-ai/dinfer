@@ -48,3 +48,10 @@ probe_c6_tp8_2,2026-10-20,B300,kimik3,c6_closed_loop,completed,dinfer,c32,128,re
 probe_c6_tp8_2,2026-10-20,B300,kimik3,c6_closed_loop,tpot_p50_ms,vllm,c32,19.15,ms,
 probe_c6_tp8_2,2026-10-20,B300,kimik3,c6_closed_loop,ttft_p50_ms,vllm,c32,420.56,ms,
 probe_c6_tp8_2,2026-10-20,B300,kimik3,c6_closed_loop,out_tok_per_s,vllm,c32,1432.39,tok/s,
+probe_c6_tp8_2,2026-10-20,B300,kimik3,c6_closed_loop,tpot_p50_ms,dinfer,c8-long,1425.14,ms,单独补跑（新 serve，预算 2048）
+probe_c6_tp8_2,2026-10-20,B300,kimik3,c6_closed_loop,ttft_p50_ms,dinfer,c8-long,73366.32,ms,
+probe_c6_tp8_2,2026-10-20,B300,kimik3,c6_closed_loop,out_tok_per_s,dinfer,c8-long,3.96,tok/s,
+probe_c6_tp8_2,2026-10-20,B300,kimik3,c6_closed_loop,completed,dinfer,c8-long,32,req,
+probe_c6_tp8_2,2026-10-20,B300,kimik3,c6_closed_loop,tpot_p50_ms,vllm,c8-long,13.11,ms,
+probe_c6_tp8_2,2026-10-20,B300,kimik3,c6_closed_loop,ttft_p50_ms,vllm,c8-long,508.34,ms,
+probe_c6_tp8_2,2026-10-20,B300,kimik3,c6_closed_loop,out_tok_per_s,vllm,c8-long,469.43,tok/s,
