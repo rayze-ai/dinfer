@@ -1,6 +1,6 @@
 # Qwen3.5 r11b：decode 侧 1.2×（小 M GEMM 带宽 6.2 → ≥7 TB/s + split-K 归约融合 + 小算子）
 
-> 状态：**进行中（2026-10-20 开工）**。起点 engine-gap 9f/9g：c32 TPOT 12.54（GEMM 8.2 ms/步 = 69%）、c8-long 10.88（GEMM 7.9 = 73%）。
+> 状态：**停下回报（2026-10-20 22:3x，5 轮，GEMM 路线物理关闭）**。结论：B300（本机）bf16 流式读实测上限 5.9–6.3 TB/s（探针 `r11b/{probe,pdl}.cu`），不是 8；cuBLASLt 的 6.0–6.6 TB/s 已贴上限；自写 tensor-core kernel 4 轮最好 5.2 TB/s 未超 lt；PDL 只省 0.7%。c32 TPOT 12.5 / c8-long 10.7（bench_b300_20）与基线持平，**1.2× 目标（11.31 / 9.26）靠 GEMM 带宽不可达**。起点 engine-gap 9f/9g：c32 TPOT 12.54（GEMM 8.2 ms/步 = 69%）、c8-long 10.88（GEMM 7.9 = 73%）。
 
 ## 环境
 
@@ -43,3 +43,11 @@
 | 3 | **换角色**：激活当 mma "A"（smem → 寄存器，每 chunk 读一次），W 当 "B" 直读 global，每 warp R ∈ {1,2,4,8} 条 8 行 stripe（`stripes` 进 ArchProfile 候选 + 自调优）；最后到达 warp 归约每 stripe；parity 11/11 | mma M=8/32：3.9/2.8 · 4.9/3.7 · 3.5/2.5 · 3.7/2.5 · 3.8/2.0；全部选 r2 | — | 与第 1 轮持平：smem 不是瓶颈（r8 没比 r2 快） |
 | 4 | 每轮一起发出 4 个 32 列 chunk 的 W 装载（在途 R·2 KB/warp），K 段对齐 128，stripes 收到 {1,2,4}；parity 11/11 `（本 commit）` | mma M=8/32：4.2/3.0 · **5.2**/3.7 · 4.2/3.0 · 3.9/2.8 · 3.8/2.1 | — | M=8 gate_up 5.2 TB/s 仍 < lt 6.7。**探针（`r11b/probe.cu`，GPU 5）：纯流式读 356 MB（任意 grid / 行块 / 读模式）上限 6.3 TB/s；lt 的 6.6 已在该上限上**（lt 还少写 1 次 out）。即 B300 单个 ≤ 400 MB 的 kernel 读不到 8 TB/s：~7 µs 的 ramp + tail（lm_head 2.5 GB 才到 7.1）。**"每个 decode GEMM ≥ 7 TB/s"物理上达不到，GEMM 本身的空间只剩 lt 自身 ~0（ramp/tail 固定）。** 可拿的是 kernel 之间的 ramp/tail 重叠（PDL）和减 kernel 数（splitKreduce 106 次 → 0 已在本 kernel 内；小算子融合） |
 | 4b | 探针 2（`r11b/pdl.cu`）：64 × 169 MB 连发流式读，普通 launch / PDL（`programmaticStreamSerialization` + `griddepcontrol`）/ graph 两种 | 28.9 / 28.7 µs 每 kernel（5.83 / 5.87 TB/s）；graph 28.5 / 28.3（5.92 / 5.95） | — | **PDL 只省 0.7%**；连发无空隙也只 5.9 TB/s → B300（本机）bf16 流式读实际可达 ≈ 5.9–6.3 TB/s，不是 8。decode GEMM 的 6.0–6.6 TB/s **已是上限，GEMM 路线关闭**；"每 GEMM ≥7 TB/s"目标作废。连续两轮未超 lt，按规则停下回报 |
+| 5 | **端到端回归门禁** `bench_b300_20`（GPU 5 :8051 vs vLLM :8013 GPU 1；serve 钉 56-63、bench 钉 112-127；自调优 1082 ms，B300 全部形状仍选 lt / in_proj_a 选 small_m，mma 未被选中 → 路径与 bench_19 相同） | — | **9.6 / 10.3 / 12.5 / 10.7**（vLLM 10.4 / 11.2 / 12.9 / 11.2）；tok/s ×vLLM 1.09 / 1.11 / 1.05 / 1.04；TTFT c32 234 vs 260 | 与 bench_19（9.7 / 10.3 / 13.1 / 10.7）持平（c32 −0.6 ms 在轮间噪声内）；无退化。停止条件 c32 ≤ 11.31 / c8-long ≤ 9.26 **未达成**，GEMM 路线已到物理上限，停下回报 |
+
+## 结论与下一步（给主会话）
+
+1. **engine-gap 9f/9g 的两处误读**：① "in_proj `64x8` 2.6 TB/s" 是把 gate_up 的另一个 M 桶 tile（grid 544 = 34816/64）归到了 in_proj；in_proj 真实 28.5 µs = 5.9 TB/s；② "6.6 → 7.4 TB/s 省 0.8 ms" 以 HBM 标称 8 TB/s 为前提，实测本机 ≤ 400 MB 单 kernel 流式读上限 6.3、连发 5.9，lt 已在上限。decode GEMM 这条线**没有可拿的 1.2 ms**。
+2. 真正剩下的 decode 空间（按 9f 分解）：小算子 ~0.6–0.75 ms/步（rmsnorm 129 + silu 64 + gated 48 + conv1d 48 次）、splitKreduce 0.35–0.4（lt 的 split-K 归约 kernel）、recurrent_decode 0.99（c32）、步内 gap 0.56（c32）。合计 ~2.5 ms 上限，但每项都要融合进别的 kernel 才能拿到（小 kernel 的 ramp/tail 2–3 µs 是主要成本，不是算力），**这就是 mega kernel（`docs/loops/mega-sm100.md`）在做的事**，不是 GEMM 调优能做的。建议 r11b 的后续并进 mega 线，不再单独开 GEMM 轮。
+3. 本轮留下的可复用件：`gemm_small_m_mma_bf16`（tensor-core 小 M GEMM，K % 128，split-K kernel 内归约，parity 11/11）作为自调优候选常驻；在 B300 不被选中（慢 lt 20–30%），**在 4090（sm89，无 nvjet 小 M tile）可能会赢**，4090 门禁跑完看自调优日志里有没有 `mma(...)`——有则是 4090 侧的收益，无退化即可合入。
+4. 知识沉淀（待收功时进 `knowledge/perf-method.md`）："带宽型 kernel 的上限先用同形状纯流式读探针量，不用标称 HBM 算"；"nsys 按 grid 归类 GEMM 时要同时核 N/tile 与 count/步，同一形状在不同 M 桶会出现不同 tile 名"。

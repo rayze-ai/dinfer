@@ -1,40 +1,40 @@
 round,date,change,group,metric,dinfer,vllm,ratio_dinfer_over_vllm,delta_pct_vs_prev_round,better_is,kind,gpu,baseline,variant,model
-bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c1,out_tok_per_s,37.769,94.422,0.400,,higher,main,B300,vllm,dinfer,qwen35
-bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c1,ttft_p50_ms,322.769,47.314,6.822,,lower,main,B300,vllm,dinfer,qwen35
-bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c1,tpot_p50_ms,24.142,10.297,2.345,,lower,main,B300,vllm,dinfer,qwen35
-bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c8,out_tok_per_s,241.694,670.737,0.360,,higher,main,B300,vllm,dinfer,qwen35
-bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c8,ttft_p50_ms,349.187,101.104,3.454,,lower,main,B300,vllm,dinfer,qwen35
-bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c8,tpot_p50_ms,28.387,11.199,2.535,,lower,main,B300,vllm,dinfer,qwen35
-bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c32,out_tok_per_s,453.750,2138.844,0.212,,higher,main,B300,vllm,dinfer,qwen35
-bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c32,ttft_p50_ms,2200.053,263.671,8.344,,lower,main,B300,vllm,dinfer,qwen35
-bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c32,tpot_p50_ms,54.834,12.907,4.249,,lower,main,B300,vllm,dinfer,qwen35
-bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c8-long,out_tok_per_s,45.039,556.950,0.081,,higher,main,B300,vllm,dinfer,qwen35
-bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c8-long,ttft_p50_ms,7147.267,407.711,17.530,,lower,main,B300,vllm,dinfer,qwen35
-bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c8-long,tpot_p50_ms,118.984,11.244,10.582,,lower,main,B300,vllm,dinfer,qwen35
-bench_b300_vllm1,2026-10-19,Qwen3.5-27B bf16 vLLM nightly 单卡基线（B300-50 GPU 7，/data/models/Qwen/Qwen3.8-27B，dinfer 侧未实现）,c1,out_tok_per_s,nan,95.111,nan,nan,higher,main,B300,vllm,dinfer,qwen35
-bench_b300_vllm1,2026-10-19,Qwen3.5-27B bf16 vLLM nightly 单卡基线（B300-50 GPU 7，/data/models/Qwen/Qwen3.8-27B，dinfer 侧未实现）,c1,ttft_p50_ms,nan,44.778,nan,nan,lower,main,B300,vllm,dinfer,qwen35
-bench_b300_vllm1,2026-10-19,Qwen3.5-27B bf16 vLLM nightly 单卡基线（B300-50 GPU 7，/data/models/Qwen/Qwen3.8-27B，dinfer 侧未实现）,c1,tpot_p50_ms,nan,10.242,nan,nan,lower,main,B300,vllm,dinfer,qwen35
-bench_b300_vllm1,2026-10-19,Qwen3.5-27B bf16 vLLM nightly 单卡基线（B300-50 GPU 7，/data/models/Qwen/Qwen3.8-27B，dinfer 侧未实现）,c8,out_tok_per_s,nan,674.571,nan,nan,higher,main,B300,vllm,dinfer,qwen35
-bench_b300_vllm1,2026-10-19,Qwen3.5-27B bf16 vLLM nightly 单卡基线（B300-50 GPU 7，/data/models/Qwen/Qwen3.8-27B，dinfer 侧未实现）,c8,ttft_p50_ms,nan,98.819,nan,nan,lower,main,B300,vllm,dinfer,qwen35
-bench_b300_vllm1,2026-10-19,Qwen3.5-27B bf16 vLLM nightly 单卡基线（B300-50 GPU 7，/data/models/Qwen/Qwen3.8-27B，dinfer 侧未实现）,c8,tpot_p50_ms,nan,11.151,nan,nan,lower,main,B300,vllm,dinfer,qwen35
-bench_b300_vllm1,2026-10-19,Qwen3.5-27B bf16 vLLM nightly 单卡基线（B300-50 GPU 7，/data/models/Qwen/Qwen3.8-27B，dinfer 侧未实现）,c32,out_tok_per_s,nan,2148.235,nan,nan,higher,main,B300,vllm,dinfer,qwen35
-bench_b300_vllm1,2026-10-19,Qwen3.5-27B bf16 vLLM nightly 单卡基线（B300-50 GPU 7，/data/models/Qwen/Qwen3.8-27B，dinfer 侧未实现）,c32,ttft_p50_ms,nan,263.485,nan,nan,lower,main,B300,vllm,dinfer,qwen35
-bench_b300_vllm1,2026-10-19,Qwen3.5-27B bf16 vLLM nightly 单卡基线（B300-50 GPU 7，/data/models/Qwen/Qwen3.8-27B，dinfer 侧未实现）,c32,tpot_p50_ms,nan,12.871,nan,nan,lower,main,B300,vllm,dinfer,qwen35
-bench_b300_vllm1,2026-10-19,Qwen3.5-27B bf16 vLLM nightly 单卡基线（B300-50 GPU 7，/data/models/Qwen/Qwen3.8-27B，dinfer 侧未实现）,c8-long,out_tok_per_s,nan,556.774,nan,nan,higher,main,B300,vllm,dinfer,qwen35
-bench_b300_vllm1,2026-10-19,Qwen3.5-27B bf16 vLLM nightly 单卡基线（B300-50 GPU 7，/data/models/Qwen/Qwen3.8-27B，dinfer 侧未实现）,c8-long,ttft_p50_ms,nan,412.578,nan,nan,lower,main,B300,vllm,dinfer,qwen35
-bench_b300_vllm1,2026-10-19,Qwen3.5-27B bf16 vLLM nightly 单卡基线（B300-50 GPU 7，/data/models/Qwen/Qwen3.8-27B，dinfer 侧未实现）,c8-long,tpot_p50_ms,nan,11.199,nan,nan,lower,main,B300,vllm,dinfer,qwen35
-bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c1,out_tok_per_s,37.804,94.538,0.400,nan,higher,main,B300,vllm,dinfer,qwen35
-bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c1,ttft_p50_ms,318.872,46.235,6.897,nan,lower,main,B300,vllm,dinfer,qwen35
-bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c1,tpot_p50_ms,24.137,10.297,2.344,nan,lower,main,B300,vllm,dinfer,qwen35
-bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c8,out_tok_per_s,241.568,672.049,0.359,nan,higher,main,B300,vllm,dinfer,qwen35
-bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c8,ttft_p50_ms,349.027,99.683,3.501,nan,lower,main,B300,vllm,dinfer,qwen35
-bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c8,tpot_p50_ms,28.312,11.198,2.528,nan,lower,main,B300,vllm,dinfer,qwen35
-bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c32,out_tok_per_s,451.542,2149.246,0.210,nan,higher,main,B300,vllm,dinfer,qwen35
-bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c32,ttft_p50_ms,2331.578,265.208,8.792,nan,lower,main,B300,vllm,dinfer,qwen35
-bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c32,tpot_p50_ms,54.742,12.903,4.243,nan,lower,main,B300,vllm,dinfer,qwen35
-bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c8-long,out_tok_per_s,45.003,557.819,0.081,nan,higher,main,B300,vllm,dinfer,qwen35
-bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c8-long,ttft_p50_ms,7130.743,409.703,17.405,nan,lower,main,B300,vllm,dinfer,qwen35
-bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c8-long,tpot_p50_ms,119.170,11.245,10.598,nan,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_vllm1,2026-10-19,Qwen3.5-27B bf16 vLLM nightly 单卡基线（B300-50 GPU 7，/data/models/Qwen/Qwen3.8-27B，dinfer 侧未实现）,c1,out_tok_per_s,nan,95.111,nan,,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_vllm1,2026-10-19,Qwen3.5-27B bf16 vLLM nightly 单卡基线（B300-50 GPU 7，/data/models/Qwen/Qwen3.8-27B，dinfer 侧未实现）,c1,ttft_p50_ms,nan,44.778,nan,,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_vllm1,2026-10-19,Qwen3.5-27B bf16 vLLM nightly 单卡基线（B300-50 GPU 7，/data/models/Qwen/Qwen3.8-27B，dinfer 侧未实现）,c1,tpot_p50_ms,nan,10.242,nan,,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_vllm1,2026-10-19,Qwen3.5-27B bf16 vLLM nightly 单卡基线（B300-50 GPU 7，/data/models/Qwen/Qwen3.8-27B，dinfer 侧未实现）,c8,out_tok_per_s,nan,674.571,nan,,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_vllm1,2026-10-19,Qwen3.5-27B bf16 vLLM nightly 单卡基线（B300-50 GPU 7，/data/models/Qwen/Qwen3.8-27B，dinfer 侧未实现）,c8,ttft_p50_ms,nan,98.819,nan,,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_vllm1,2026-10-19,Qwen3.5-27B bf16 vLLM nightly 单卡基线（B300-50 GPU 7，/data/models/Qwen/Qwen3.8-27B，dinfer 侧未实现）,c8,tpot_p50_ms,nan,11.151,nan,,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_vllm1,2026-10-19,Qwen3.5-27B bf16 vLLM nightly 单卡基线（B300-50 GPU 7，/data/models/Qwen/Qwen3.8-27B，dinfer 侧未实现）,c32,out_tok_per_s,nan,2148.235,nan,,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_vllm1,2026-10-19,Qwen3.5-27B bf16 vLLM nightly 单卡基线（B300-50 GPU 7，/data/models/Qwen/Qwen3.8-27B，dinfer 侧未实现）,c32,ttft_p50_ms,nan,263.485,nan,,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_vllm1,2026-10-19,Qwen3.5-27B bf16 vLLM nightly 单卡基线（B300-50 GPU 7，/data/models/Qwen/Qwen3.8-27B，dinfer 侧未实现）,c32,tpot_p50_ms,nan,12.871,nan,,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_vllm1,2026-10-19,Qwen3.5-27B bf16 vLLM nightly 单卡基线（B300-50 GPU 7，/data/models/Qwen/Qwen3.8-27B，dinfer 侧未实现）,c8-long,out_tok_per_s,nan,556.774,nan,,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_vllm1,2026-10-19,Qwen3.5-27B bf16 vLLM nightly 单卡基线（B300-50 GPU 7，/data/models/Qwen/Qwen3.8-27B，dinfer 侧未实现）,c8-long,ttft_p50_ms,nan,412.578,nan,,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_vllm1,2026-10-19,Qwen3.5-27B bf16 vLLM nightly 单卡基线（B300-50 GPU 7，/data/models/Qwen/Qwen3.8-27B，dinfer 侧未实现）,c8-long,tpot_p50_ms,nan,11.199,nan,,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c1,out_tok_per_s,37.769,94.422,0.400,nan,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c1,ttft_p50_ms,322.769,47.314,6.822,nan,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c1,tpot_p50_ms,24.142,10.297,2.345,nan,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c8,out_tok_per_s,241.694,670.737,0.360,nan,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c8,ttft_p50_ms,349.187,101.104,3.454,nan,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c8,tpot_p50_ms,28.387,11.199,2.535,nan,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c32,out_tok_per_s,453.750,2138.844,0.212,nan,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c32,ttft_p50_ms,2200.053,263.671,8.344,nan,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c32,tpot_p50_ms,54.834,12.907,4.249,nan,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c8-long,out_tok_per_s,45.039,556.950,0.081,nan,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c8-long,ttft_p50_ms,7147.267,407.711,17.530,nan,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_1,2026-10-19,里程碑 5 首轮：真权重 e2e 通过（ctx 绑定 + zero-centered RMSNorm 修复），eager 单流无 CUDA graph,c8-long,tpot_p50_ms,118.984,11.244,10.582,nan,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c1,out_tok_per_s,37.804,94.538,0.400,0.1,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c1,ttft_p50_ms,318.872,46.235,6.897,1.2,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c1,tpot_p50_ms,24.137,10.297,2.344,0.0,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c8,out_tok_per_s,241.568,672.049,0.359,-0.1,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c8,ttft_p50_ms,349.027,99.683,3.501,0.0,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c8,tpot_p50_ms,28.312,11.198,2.528,0.3,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c32,out_tok_per_s,451.542,2149.246,0.210,-0.5,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c32,ttft_p50_ms,2331.578,265.208,8.792,-6.0,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c32,tpot_p50_ms,54.742,12.903,4.243,0.2,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c8-long,out_tok_per_s,45.003,557.819,0.081,-0.1,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c8-long,ttft_p50_ms,7130.743,409.703,17.405,0.2,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_2,2026-10-19,GDN slot 在请求结束时归还（修 c8-long 下活请求 slot 被淘汰）；其余同 bench_b300_1,c8-long,tpot_p50_ms,119.170,11.245,10.598,-0.2,lower,main,B300,vllm,dinfer,qwen35
 bench_b300_3,2026-10-19,强制关 prefix caching（GDN 状态不可按块复用）；slot 归还,c1,out_tok_per_s,37.841,94.521,0.400,0.1,higher,main,B300,vllm,dinfer,qwen35
 bench_b300_3,2026-10-19,强制关 prefix caching（GDN 状态不可按块复用）；slot 归还,c1,ttft_p50_ms,319.144,46.414,6.876,-0.1,lower,main,B300,vllm,dinfer,qwen35
 bench_b300_3,2026-10-19,强制关 prefix caching（GDN 状态不可按块复用）；slot 归还,c1,tpot_p50_ms,24.135,10.297,2.344,0.0,lower,main,B300,vllm,dinfer,qwen35
@@ -239,3 +239,15 @@ bench_b300_19,2026-10-20,第 12 轮：r10 收口（8 轮，ArchProfile Sm100 ho 
 bench_b300_19,2026-10-20,第 12 轮：r10 收口（8 轮，ArchProfile Sm100 ho BV 按形状 64/32、wy 全卡 8 warp、ho 预取开；8×1024 kernel 1109→770）+ r8b 不切步 合体定稿,c8-long,out_tok_per_s,578.145,557.250,1.037,0.2,higher,main,B300,vllm,dinfer,qwen35
 bench_b300_19,2026-10-20,第 12 轮：r10 收口（8 轮，ArchProfile Sm100 ho BV 按形状 64/32、wy 全卡 8 warp、ho 预取开；8×1024 kernel 1109→770）+ r8b 不切步 合体定稿,c8-long,ttft_p50_ms,409.490,405.243,1.010,0.9,lower,main,B300,vllm,dinfer,qwen35
 bench_b300_19,2026-10-20,第 12 轮：r10 收口（8 轮，ArchProfile Sm100 ho BV 按形状 64/32、wy 全卡 8 warp、ho 预取开；8×1024 kernel 1109→770）+ r8b 不切步 合体定稿,c8-long,tpot_p50_ms,10.715,11.250,0.952,0.1,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_20,2026-10-20,r11b 第 4 轮：GemmPlan::SmallMma 进自调优候选（B300 全部仍选 lt，路径不变；回归门禁）,c1,out_tok_per_s,103.030,94.092,1.095,0.4,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_20,2026-10-20,r11b 第 4 轮：GemmPlan::SmallMma 进自调优候选（B300 全部仍选 lt，路径不变；回归门禁）,c1,ttft_p50_ms,16.649,44.724,0.372,1.4,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_20,2026-10-20,r11b 第 4 轮：GemmPlan::SmallMma 进自调优候选（B300 全部仍选 lt，路径不变；回归门禁）,c1,tpot_p50_ms,9.647,10.360,0.931,0.4,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_20,2026-10-20,r11b 第 4 轮：GemmPlan::SmallMma 进自调优候选（B300 全部仍选 lt，路径不变；回归门禁）,c8,out_tok_per_s,744.485,672.792,1.107,0.2,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_20,2026-10-20,r11b 第 4 轮：GemmPlan::SmallMma 进自调优候选（B300 全部仍选 lt，路径不变；回归门禁）,c8,ttft_p50_ms,69.769,96.962,0.720,1.2,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_20,2026-10-20,r11b 第 4 轮：GemmPlan::SmallMma 进自调优候选（B300 全部仍选 lt，路径不变；回归门禁）,c8,tpot_p50_ms,10.262,11.202,0.916,0.1,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_20,2026-10-20,r11b 第 4 轮：GemmPlan::SmallMma 进自调优候选（B300 全部仍选 lt，路径不变；回归门禁）,c32,out_tok_per_s,2251.355,2150.157,1.047,1.1,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_20,2026-10-20,r11b 第 4 轮：GemmPlan::SmallMma 进自调优候选（B300 全部仍选 lt，路径不变；回归门禁）,c32,ttft_p50_ms,234.130,259.508,0.902,-39.4,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_20,2026-10-20,r11b 第 4 轮：GemmPlan::SmallMma 进自调优候选（B300 全部仍选 lt，路径不变；回归门禁）,c32,tpot_p50_ms,12.466,12.918,0.965,4.7,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_20,2026-10-20,r11b 第 4 轮：GemmPlan::SmallMma 进自调优候选（B300 全部仍选 lt，路径不变；回归门禁）,c8-long,out_tok_per_s,578.527,557.845,1.037,0.1,higher,main,B300,vllm,dinfer,qwen35
+bench_b300_20,2026-10-20,r11b 第 4 轮：GemmPlan::SmallMma 进自调优候选（B300 全部仍选 lt，路径不变；回归门禁）,c8-long,ttft_p50_ms,409.035,408.017,1.002,0.1,lower,main,B300,vllm,dinfer,qwen35
+bench_b300_20,2026-10-20,r11b 第 4 轮：GemmPlan::SmallMma 进自调优候选（B300 全部仍选 lt，路径不变；回归门禁）,c8-long,tpot_p50_ms,10.709,11.249,0.952,0.1,lower,main,B300,vllm,dinfer,qwen35
