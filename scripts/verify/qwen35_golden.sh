@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Qwen35 里程碑 4 验收：tiny golden 对拍（prefill logits / greedy / chunked 教师强制 / 双请求混批）。
+# Qwen35 里程碑 4 验收 + r8 递归快照：tiny golden 对拍（prefill logits / greedy / chunked 教师强制 / 双请求混批 / 快照逐位 / 同 prompt 两次命中 / 多轮 / 混批+抢占）。
 # 前置：GPU 可用（本机 3090 或 4090 GPU 7）；golden 已进仓库（test/qwen35/golden）。
 # 重生成 golden（要 torch）：/data/ref/venv-tf519/bin/python -I scripts/dev/make_qwen35_tiny.py test/qwen35/golden --gen 16 --seed 8
 # 用法：scripts/verify/qwen35_golden.sh [GPU=0]
