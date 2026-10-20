@@ -296,6 +296,19 @@ fn run_rank(rank: usize, world: usize, comm_id: Option<CommId>) {
             s.synchronize().unwrap();
             let got = rows(&out, &s, n);
             dump_f32(dump, &format!("iso{l}"), &got);
+            if let Ffn::LatentMoe(moe) = &layer.ffn {
+                // 定位 TP 漂移用：路由 id（f32 存）、专家加权和（norm/up 之前）、routed 输出（up 之后）
+                let (ids_g, w_g) = moe.last_routing(&s, t).unwrap();
+                dump_f32(dump, &format!("iso{l}_topk_ids"), &ids_g.iter().map(|&i| i as f32).collect::<Vec<_>>());
+                dump_f32(dump, &format!("iso{l}_topk_w"), &w_g);
+                dump_f32(dump, &format!("iso{l}_expert_sum"), &rows(moe.last_expert_sum(), &s, t * moe.last_expert_sum().shape[1]));
+                dump_f32(dump, &format!("iso{l}_routed_out"), &rows(moe.last_routed_out(), &s, n));
+                if let Attn::Kda(k) = &layer.attn {
+                    dump_f32(dump, &format!("iso{l}_attn_normed"), &rows(k.last_normed(), &s, t * k.last_normed().shape[1]));
+                }
+                dump_f32(dump, &format!("iso{l}_attn_out"), &rows(layer.last_attn_out(), &s, n));
+                dump_f32(dump, &format!("iso{l}_mlp_in"), &rows(layer.last_mlp_in(), &s, n));
+            }
             let kind = kind_of(l);
             // MoE：路由一致的行
             let (matched, hit_pairs, total_pairs) = if let Ffn::LatentMoe(moe) = &layer.ffn {
