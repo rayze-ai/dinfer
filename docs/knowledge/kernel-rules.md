@@ -23,6 +23,7 @@
 - **先看 B300 的 nsys / ncu 再写改法**，不从 3090 profile 推；"验过" = ≥ 2 卡型 × 全部 bench 形状进 probe.csv；`ArchProfile` 每个分档要有该卡的实测行。
 - 3090 上看不出的 B300 特性：smem 227 KB（双缓冲装得下）、HBM 延迟型（occupancy / 软件流水比减字节数更要紧）、148 SM（单序列 192 block 铺不满）。
 - **B300 上 ncu 要 `sudo -n /usr/local/cuda-13.1/bin/ncu ...`**（普通用户 ERR_NVGPUCTRPERM；nerdctl 已走 sudo -n 免密）。看三个数就够定方向：`Eligible Warps Per Scheduler`（< 1 = 延迟型，加 warp / 减依赖链）、`Block Limit Registers/Shared Mem`（哪个限占用）、`DRAM Throughput`（< 20% 就别再减字节）。 `--kernel-name regex:` 只匹配裸函数名（`ho_mma_kernel`），带模板参数的 `regex:"ho_mma_kernel<64, 32, 128, 1>"` 匹配不到任何 kernel（"No kernels were profiled"）；要选特化用 `--launch-skip/--launch-count` 定位，或 `--kernel-id ::regex:ho_mma_kernel:3`。r10 第 1 轮 bf16 中间量只换来 wy −5%，ncu 一看 DRAM 6%——"减写量"本来就不是 wy 的瓶颈（r10 loop 页第 3 轮前置）。
+- **"Mem Busy 77%" 不等于 smem 是瓶颈**（r10 第 5 轮）：把 ho 的 B 操作数 4×lds_u32 改 ldmatrix 后 shared_ld 指令 −79%、mio_throttle −33%，**时钟一个 µs 没动**——那 77% 是 mma 链空转时 smem 管线相对占比高的症状。改 kernel 前先看三个"产出"指标：`smsp__issue_active`（发射槽占用，ho 23%）、`sm__pipe_tensor_cycles_active`（tensor 管线，19%）、`sm__warps_active`（8.5%）；三个都低 = 并行度 / ILP 不够，减指令数没用，要加每 warp 的独立 mma 链（BV / tile 数）或每 SM 的 block 数。`--launch-skip` 要挑**真正慢的那个 launch**（1×8192 的 192 block 与 8×1024 的 3072 block 是两种病）。
 - **fla 对照要按 kernel 对段**（`scripts/dev/fla_prof.py`，torch.profiler 在 vLLM 容器里跑）：kkt+tril+wu ↔ wy、fwd_h+fwd_o ↔ ho、l2norm+cumsum ↔ prep，fla 不含 conv（vLLM 另走 causal_conv1d）。r9 的 "chain vs fla" 数把 conv 219 µs 算进了自己一侧。
 
 ## 数值口径
