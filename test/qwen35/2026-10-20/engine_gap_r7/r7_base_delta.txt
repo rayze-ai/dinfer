@@ -1,0 +1,5 @@
+steps P/D/M count (mean ms): 11 (70.6) / 1012 (23.8) / 36 (121.8)
+server TTFT mean/p50/p99 ms: 113.9/132.8/247.7 (n=50)
+server TPOT mean/p50/p99 ms: 20.5/15.2/155.7 (n=12750)
+server prefix cache: 0 queries
+preemptions: 0

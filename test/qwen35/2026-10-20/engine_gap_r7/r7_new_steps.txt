@@ -1,0 +1,18 @@
+steady window: 20.41 s (after last >=8MB H2D)
+[decode] steps=967 span_ms=11.60 (p50 9.96, p90 16.50) kernel_sum_ms=11.82 kernels/step=756 gap_to_next_us p50=95 p99=748
+   memcpy/step: D2D 1.9x 7us
+     2227us   40.2/step    55.3us nvjet_sm103_tst_64x8_64x16_2x1_v_bz_TNT
+     1143us   38.1/step    30.0us nvjet_sm103_tst_192x8_64x8_2x1_v_bz_splitK_TNT
+     1012us   37.3/step    27.1us nvjet_sm103_tst_128x24_64x11_4x1_v_bz_TNT
+[prefill] steps=12 span_ms=95.40 (p50 63.40, p90 97.62) kernel_sum_ms=78.94 kernels/step=1145 gap_to_next_us p50=1099 p99=3030; excluded 1 idle gaps >10ms = 79 ms
+   memcpy/step: D2D 16.0x 34us, H2D 3.9x 7us
+    12055us   41.3/step   291.7us nvjet_sm103_tst_128x256_64x6_2x1_2cta_v_bz_TNT
+     7565us   48.0/step   157.6us wy_mma_kernel
+     7429us   48.0/step   154.8us ho_mma_kernel
+[mixed] steps=26 span_ms=107.27 (p50 108.46, p90 157.95) kernel_sum_ms=106.64 kernels/step=871 gap_to_next_us p50=1118 p99=3018
+   memcpy/step: H2D 3.0x 5us
+    24460us   83.1/step   294.4us nvjet_sm103_tst_128x256_64x6_2x1_2cta_v_bz_TNT
+    17202us   48.0/step   358.4us wy_mma_kernel
+    15718us   48.0/step   327.5us ho_mma_kernel
+window busy 14959 ms / idle 5454 ms; gaps>0.3ms: 161 = 4773 ms
+  host API overlapping idle gaps (ms/n @t_rel_s first..last): cuLibraryLoadData 76/7 @0.6..1.1, cuGraphInstantiateWithFlags 38/7 @1.1..1.2, cuGraphLaunch 29/21 @5.6..17.6, cudaLaunchKernelExC_v11060 6/1 @0.6..0.6, cuMemAllocAsync 4/8 @1.1..1.1
