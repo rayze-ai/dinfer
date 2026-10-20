@@ -56,3 +56,8 @@
 - **为什么**：20:4x 合体测试第一次发：ff 失败（dev 有后加 commit）→ 我没看结果 → B300 / 4090 两条链用合并前代码起跑 → 10 分钟后才发现作废重发。同一轮 B300 链还被自己的 `pkill -f "dinfer serve"` 误杀（pattern 匹配包装 bash）。
 - **怎么用**：顺序严格为：① 本地 merge/rebase（单独发，看结果）→ ② 本地验证（build / 单测，可后台）→ ③ 远端 push 后 `grep` 一个只有新代码才有的符号确认到位 → ④ 起长链。链里杀进程用 `pkill -x <进程名>`。
 - **证据**：`docs/progress.md` 2026-10-20 合并条目；`docs/pitfalls.md` 同日 pkill 条。
+
+## 远端排队等前一个作业（r10，2026-10-20）
+- `ssh run 'until ! pgrep -f "gdn_parity"; do sleep 5; done; …'` **会匹配到自己**：`pgrep -f` 看整条命令行，而外层 `bash -c` 的命令行里就含 "gdn_parity"，于是永远不退出——两个后台作业各空转 20 min，GPU 7 全程空闲，表面看像"还在跑"。`pkill -f` 同理会把自己杀掉（整条链 exit 1、日志文件都没建）。
+- 正确做法：按**二进制路径**等（`pgrep -f "^/data/.../release/deps/gdn_parity-"`，锚定行首，bash -c 的命令行不会以它开头），或干脆不排队：一个后台作业把 build / parity / bench / ncu 串在同一条链里顺序跑。
+- 排队作业启动后 1–2 min 要回头看一次产物文件是否已建（`ls -la bootstrap/<log>`）；没建 = 还在等 = 多半自锁。
