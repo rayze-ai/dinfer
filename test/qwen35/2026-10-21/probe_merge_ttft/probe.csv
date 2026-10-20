@@ -1,0 +1,5 @@
+probe,date,gpu,model,group,metric,side,x,value,unit,note
+probe_merge_ttft,2026-10-21,B300,qwen35,ttft_len,ttft_p50_ms,dinfer,1021,49.0,ms,r11 合并（r11a gqa v6 cfg3464 + r11b small_m_mma 候选）；绝对路径二进制 target_merge
+probe_merge_ttft,2026-10-21,B300,qwen35,ttft_len,ttft_p50_ms,dinfer,3009,139.8,ms,
+probe_merge_ttft,2026-10-21,B300,qwen35,ttft_len,ttft_p50_ms,dinfer,6019,281.7,ms,合并前 bench19 口径 284.9（−3.2 ms；r11a 微基准预示 −7.7）
+probe_merge_ttft,2026-10-21,B300,qwen35,ttft_len,slope_us_per_token,dinfer,1k-6k,46.5,us/token,合并前 51.7

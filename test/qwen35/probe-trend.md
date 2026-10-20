@@ -567,3 +567,18 @@
 
 - 6019 ttft_p50_ms dinfer：第 12 轮合体定稿（r8b + r10 全 8 轮，2b0cc54），6 K 1 步
 - 1k-6k slope_us_per_token dinfer：b18 46.4；r9 前 51.5
+
+## probe_merge_ttft（2026-10-21，B300）
+
+### ttft_len（ms）
+
+| x | slope_us_per_token dinfer | ttft_p50_ms dinfer |
+|---|---|---|
+| 1021 |  | 49.0 |
+| 3009 |  | 139.8 |
+| 6019 |  | 281.7 |
+| 1k-6k | 46.5 |  |
+
+- 1021 ttft_p50_ms dinfer：r11 合并（r11a gqa v6 cfg3464 + r11b small_m_mma 候选）；绝对路径二进制 target_merge
+- 6019 ttft_p50_ms dinfer：合并前 bench19 口径 284.9（−3.2 ms；r11a 微基准预示 −7.7）
+- 1k-6k slope_us_per_token dinfer：合并前 51.7
