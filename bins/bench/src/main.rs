@@ -28,6 +28,13 @@
 //! 公平性：两边同 `--max-tokens`、`ignore_eos`（vLLM 扩展字段，dinfer 也接）让每个请求都生成满 max_tokens；
 //! 思考模式统一关（`chat_template_kwargs.enable_thinking=false`）。
 //!
+//! 测试程序自身的准确性与开销（用户 2026-10-20）：
+//! - 时间戳在**收到字节时**打（`resp.chunk()` 返回即取 `Instant::now()`，单调时钟），SSE 切分 / JSON 解析在其后；解析耗时另计入
+//!   `client.parse_ms_total`，不进 TTFT / ITL；
+//! - 所有 prompt / 到达间隔 / max_tokens 在发压前**一次预生成到内存**（`Plan`），发送期只做 HTTP + 解析；
+//! - JSON `client` 段：进程 CPU 时间（getrusage user+sys）、峰值 RSS、线程数、CPU 亲和集合、解析总耗时、运行墙钟 → 压测端占用 =
+//!   cpu_s / wall_s 个核；`bench_engine.sh` 用 taskset 把它钉到与服务进程不重叠的核。
+//!
 //! 工具自检：`bench --self-check` 用进程内 mock 服务（固定每 token 10 ms、TTFT 50 ms、cached_tokens 5/17）验证测得的
 //! TTFT / TPOT / token 数 / cache 命中率落在已知值内；跑真服务前先跑它。
 
@@ -123,6 +130,9 @@ struct ReqResult {
     ttft_first_chunk_ms: f64,
     latency_ms: f64,
     itl_ms: Vec<f64>,
+    /// 本请求客户端 SSE 切分 + JSON 解析总耗时（不进 TTFT / ITL；汇总进 client.parse_ms_total）
+    #[serde(skip)]
+    parse_ms: f64,
     /// 流式拼起来的回答全文（多轮下一轮要用；不进 JSON）
     #[serde(skip)]
     text: String,
@@ -143,6 +153,7 @@ impl ReqResult {
             ttft_first_chunk_ms: 0.0,
             latency_ms: 0.0,
             itl_ms: vec![],
+            parse_ms: 0.0,
             text: String::new(),
         }
     }
@@ -231,7 +242,95 @@ struct Summary {
     itl_ms: Pct,
     latency_ms: Pct,
     args: serde_json::Value,
+    /// 压测端自身开销（测试程序占用资源的影响）
+    client: ClientCost,
     requests: Vec<ReqBrief>,
+}
+
+/// 压测进程自身的开销快照：bench 结束时 getrusage(RUSAGE_SELF) − 开始时。
+#[derive(Debug, Serialize, Default, Clone)]
+struct ClientCost {
+    /// 发压期间进程 CPU 时间（user + sys，秒）；cpu_s / wall_s = 平均占用核数
+    cpu_user_s: f64,
+    cpu_sys_s: f64,
+    cpu_cores_avg: f64,
+    wall_s: f64,
+    /// 峰值 RSS（MiB，ru_maxrss）
+    max_rss_mib: f64,
+    threads: usize,
+    /// sched_getaffinity 的 CPU 集合（如 "0-7,16-23"）
+    cpus: String,
+    ncpus_allowed: usize,
+    /// SSE 切分 + JSON 解析的总耗时（ms，所有请求求和；不进 TTFT / ITL）
+    parse_ms_total: f64,
+    parse_ms_per_request: f64,
+}
+
+fn rusage() -> (f64, f64, f64) {
+    // (user s, sys s, maxrss MiB)
+    let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) };
+    let tv = |t: libc::timeval| t.tv_sec as f64 + t.tv_usec as f64 * 1e-6;
+    (tv(ru.ru_utime), tv(ru.ru_stime), ru.ru_maxrss as f64 / 1024.0)
+}
+
+/// sched_getaffinity → "0-7,16" 形式 + 个数。
+fn cpu_affinity() -> (String, usize) {
+    let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+    if unsafe { libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set) } != 0 {
+        return ("?".into(), 0);
+    }
+    let cpus: Vec<usize> = (0..libc::CPU_SETSIZE as usize).filter(|&i| unsafe { libc::CPU_ISSET(i, &set) }).collect();
+    (range_str(&cpus), cpus.len())
+}
+
+/// [0,1,2,5,6] → "0-2,5-6"
+fn range_str(v: &[usize]) -> String {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < v.len() {
+        let mut j = i;
+        while j + 1 < v.len() && v[j + 1] == v[j] + 1 {
+            j += 1;
+        }
+        out.push(if j > i { format!("{}-{}", v[i], v[j]) } else { v[i].to_string() });
+        i = j + 1;
+    }
+    out.join(",")
+}
+
+fn thread_count() -> usize {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| s.lines().find_map(|l| l.strip_prefix("Threads:").and_then(|v| v.trim().parse().ok())))
+        .unwrap_or(0)
+}
+
+struct CostStart {
+    user: f64,
+    sys: f64,
+    t0: Instant,
+}
+fn cost_start() -> CostStart {
+    let (user, sys, _) = rusage();
+    CostStart { user, sys, t0: Instant::now() }
+}
+fn cost_end(c: &CostStart, parse_ms_total: f64, n_requests: usize) -> ClientCost {
+    let (user, sys, rss) = rusage();
+    let wall = c.t0.elapsed().as_secs_f64();
+    let (cpus, n) = cpu_affinity();
+    ClientCost {
+        cpu_user_s: user - c.user,
+        cpu_sys_s: sys - c.sys,
+        cpu_cores_avg: if wall > 0.0 { (user - c.user + sys - c.sys) / wall } else { 0.0 },
+        wall_s: wall,
+        max_rss_mib: rss,
+        threads: thread_count(),
+        cpus,
+        ncpus_allowed: n,
+        parse_ms_total,
+        parse_ms_per_request: parse_ms_total / n_requests.max(1) as f64,
+    }
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -418,6 +517,7 @@ async fn one_request(
                 return r;
             }
         };
+        // 时间戳在收到字节的瞬间打；下面的切分 / 解析耗时计入 parse_ms，不进 TTFT / ITL
         let now = Instant::now();
         buf.push_str(&String::from_utf8_lossy(&chunk));
         // SSE：事件以空行分隔；每个事件一行 "data: ..."
@@ -467,6 +567,7 @@ async fn one_request(
                 }
             }
         }
+        r.parse_ms += now.elapsed().as_secs_f64() * 1e3;
     }
     r.latency_ms = t0.elapsed().as_secs_f64() * 1e3;
     r.output_tokens = usage_out.unwrap_or(chunks_with_content);
@@ -489,26 +590,55 @@ struct Gen {
     omix: Vec<(usize, f64)>,
 }
 
-/// 第 s 个会话：K 轮顺序请求。第 1 轮 prompt 由 (prefix_repeat / prompt_len_mix) 决定；第 k 轮 messages = 全部历史 + 新问题。
-/// 请求下标 idx = s*K + (k−1)，用于长度 / max_tokens 抽样，与单轮模式 K=1 时的 idx = s 一致。
-async fn run_session(client: &reqwest::Client, url: &str, model: &str, a: &Args, g: &Gen, s: usize) -> Vec<ReqResult> {
+/// 一个会话的预生成计划：K 轮的 user 文本与 max_tokens（发压期不再生成 prompt / 抽样）。
+#[derive(Clone, Debug)]
+struct SessionPlan {
+    users: Vec<String>,
+    max_tokens: Vec<u32>,
+}
+
+/// 预生成全部会话 + 泊松到达时刻（秒，相对 t0）。idx = s*K + (k−1)，与单轮模式 K=1 时 idx = s 一致。
+fn make_plan(a: &Args, g: &Gen, n_sessions: usize) -> (Vec<SessionPlan>, Vec<f64>) {
     let k_turns = a.multi_turn.max(1);
+    let mut sessions = Vec::with_capacity(n_sessions);
+    for s in 0..n_sessions {
+        let mut users = Vec::with_capacity(k_turns);
+        let mut mt = Vec::with_capacity(k_turns);
+        for k in 0..k_turns {
+            let idx = s * k_turns + k;
+            users.push(if k == 0 {
+                if is_prefix_repeat(a, idx) {
+                    make_prompt_shared_prefix(a.seed, idx, a.prompt_len)
+                } else {
+                    make_prompt(a.seed, idx, prompt_len_for(a, &g.mix, idx))
+                }
+            } else {
+                follow_up(a.seed, idx)
+            });
+            mt.push(max_tokens_for(a, &g.omix, idx));
+        }
+        sessions.push(SessionPlan { users, max_tokens: mt });
+    }
+    let mut arrivals = Vec::with_capacity(n_sessions);
+    if a.request_rate > 0.0 {
+        let session_rate = a.request_rate / k_turns as f64;
+        let mut t = 0.0;
+        for s in 0..n_sessions {
+            t += exp_interval_s(a.seed, s, session_rate);
+            arrivals.push(t);
+        }
+    }
+    (sessions, arrivals)
+}
+
+/// 第 s 个会话：K 轮顺序请求，第 k 轮 messages = 全部历史 + 预生成的新问题。
+async fn run_session(client: &reqwest::Client, url: &str, model: &str, a: &Args, plan: &SessionPlan) -> Vec<ReqResult> {
+    let k_turns = plan.users.len();
     let mut out = Vec::with_capacity(k_turns);
     let mut messages: Vec<serde_json::Value> = Vec::with_capacity(2 * k_turns);
     for k in 0..k_turns {
-        let idx = s * k_turns + k;
-        let user = if k == 0 {
-            if is_prefix_repeat(a, idx) {
-                make_prompt_shared_prefix(a.seed, idx, a.prompt_len)
-            } else {
-                make_prompt(a.seed, idx, prompt_len_for(a, &g.mix, idx))
-            }
-        } else {
-            follow_up(a.seed, idx)
-        };
-        messages.push(serde_json::json!({"role": "user", "content": user}));
-        let max_tokens = max_tokens_for(a, &g.omix, idx);
-        let r = one_request(client, url, model, &serde_json::Value::Array(messages.clone()), max_tokens, k as u32 + 1, a).await;
+        messages.push(serde_json::json!({"role": "user", "content": plan.users[k]}));
+        let r = one_request(client, url, model, &serde_json::Value::Array(messages.clone()), plan.max_tokens[k], k as u32 + 1, a).await;
         let ok = r.ok;
         let answer = r.text.clone();
         out.push(r);
@@ -551,26 +681,27 @@ async fn run(a: &Args) -> Result<Summary> {
     };
     let k_turns = a.multi_turn;
     let n_sessions = a.num_requests.div_ceil(k_turns);
+    // 预生成：prompt / max_tokens / 到达时刻全部在发压前算好并驻留内存
+    let (plan, arrivals) = make_plan(a, &g, n_sessions);
+    let plan = Arc::new(plan);
+    let cost = cost_start();
     let t0 = Instant::now();
     let mut handles = Vec::with_capacity(a.concurrency.max(n_sessions.min(4096)));
     if a.request_rate > 0.0 {
         // 开环：按泊松过程到达，每个会话独立任务，不等前一个完成。到达率按请求计 → 会话到达率 = R / K。
-        let session_rate = a.request_rate / k_turns as f64;
-        let mut t_next = 0.0f64;
         for s in 0..n_sessions {
-            t_next += exp_interval_s(a.seed, s, session_rate);
-            let wait = Duration::from_secs_f64(t_next).saturating_sub(t0.elapsed());
+            let wait = Duration::from_secs_f64(arrivals[s]).saturating_sub(t0.elapsed());
             if !wait.is_zero() {
                 tokio::time::sleep(wait).await;
             }
-            let (client, a, model, g) = (client.clone(), a.clone(), model.clone(), g.clone());
-            handles.push(tokio::spawn(async move { run_session(&client, &a.url, &model, &a, &g, s).await }));
+            let (client, a, model, plan) = (client.clone(), a.clone(), model.clone(), plan.clone());
+            handles.push(tokio::spawn(async move { run_session(&client, &a.url, &model, &a, &plan[s]).await }));
         }
     } else {
         // 闭环固定并发：worker 领会话
         let next = Arc::new(AtomicUsize::new(0));
         for _ in 0..a.concurrency {
-            let (client, a, model, next, g) = (client.clone(), a.clone(), model.clone(), next.clone(), g.clone());
+            let (client, a, model, next, plan) = (client.clone(), a.clone(), model.clone(), next.clone(), plan.clone());
             handles.push(tokio::spawn(async move {
                 let mut out = Vec::new();
                 loop {
@@ -578,7 +709,7 @@ async fn run(a: &Args) -> Result<Summary> {
                     if s >= n_sessions {
                         break;
                     }
-                    out.extend(run_session(&client, &a.url, &model, &a, &g, s).await);
+                    out.extend(run_session(&client, &a.url, &model, &a, &plan[s]).await);
                 }
                 out
             }));
@@ -589,7 +720,11 @@ async fn run(a: &Args) -> Result<Summary> {
         results.extend(h.await?);
     }
     let dur = t0.elapsed().as_secs_f64();
-    Ok(summarize(a, model, &results, dur))
+    let parse_total: f64 = results.iter().map(|r| r.parse_ms).sum();
+    let client_cost = cost_end(&cost, parse_total, results.len());
+    let mut s = summarize(a, model, &results, dur);
+    s.client = client_cost;
+    Ok(s)
 }
 
 /// 从每请求结果汇总（纯函数，单测用）。`num_requests` 以实际发出的条数为准（多轮会话中途失败会少发）。
@@ -668,6 +803,7 @@ fn summarize(a: &Args, model: String, results: &[ReqResult], dur: f64) -> Summar
             "output_len_mix": a.output_len_mix, "prefix_repeat": a.prefix_repeat, "multi_turn": a.multi_turn,
             "slo": slo, "num_requests_requested": a.num_requests,
         }),
+        client: ClientCost::default(),
         requests,
     }
 }
@@ -704,6 +840,11 @@ fn print_summary(s: &Summary) {
             p.mean, p.p50, p.p90, p.p99, p.max
         )
     };
+    let c = &s.client;
+    println!(
+        "   client: cpu {:.2}s (user {:.2} sys {:.2}) = {:.2} cores avg over {:.1}s wall; rss {:.0} MiB; {} threads; cpus {} ({}); parse {:.1} ms total / {:.3} ms per req",
+        c.cpu_user_s + c.cpu_sys_s, c.cpu_user_s, c.cpu_sys_s, c.cpu_cores_avg, c.wall_s, c.max_rss_mib, c.threads, c.cpus, c.ncpus_allowed, c.parse_ms_total, c.parse_ms_per_request
+    );
     row("TTFT", &s.ttft_ms);
     row("TTFT1st", &s.ttft_first_chunk_ms);
     row("TPOT", &s.tpot_ms);
@@ -840,6 +981,14 @@ async fn self_check() -> Result<()> {
     }
     close(s.output_tokens_mean, 20.0, 0.0, "output_tokens (from usage)")?;
     close(s.prompt_tokens_mean, 17.0, 0.0, "prompt_tokens (from usage)")?;
+    // 口径自校验：mock 的 TTFT 50 ms、ITL 10 ms 为已知真值 → 报测量误差（µs）。mock 用绝对时间表发送，
+    // 误差来源 = tokio 定时器粒度 + 本机回环 + 客户端收包；真服务上客户端口径的附加误差不会小于这个数。
+    let err_us = |got: f64, want: f64| (got - want) * 1e3;
+    println!(
+        "   measurement error vs mock truth: TTFT p50 {:+.0} µs (max {:+.0}), TPOT p50 {:+.0} µs, ITL p50 {:+.0} µs (p99 {:+.0}); parse {:.1} µs/req",
+        err_us(s.ttft_ms.p50, 50.0), err_us(s.ttft_ms.max, 50.0), err_us(s.tpot_ms.p50, 10.0), err_us(s.itl_ms.p50, 10.0), err_us(s.itl_ms.p99, 10.0),
+        s.client.parse_ms_per_request * 1e3
+    );
     close(s.ttft_ms.p50, 50.0, 3.0, "TTFT p50")?;
     if !(s.ttft_first_chunk_ms.p50 < 10.0) {
         bail!("self-check FAILED: ttft_first_chunk p50 {:.2} (mock sends empty role delta at once, want < 10 ms)", s.ttft_first_chunk_ms.p50);

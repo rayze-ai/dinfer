@@ -794,6 +794,20 @@ mod tests {
     }
 
     #[test]
+    fn num_cached_tokens_recorded_and_surfaced_on_first_output() {
+        let mut s = mk(8, 1000, 32);
+        s.add_request(req_same(1, 48, 1));
+        let (_, r1) = step(&mut s, &[(1, vec![2])]);
+        assert_eq!(r1.items[0].num_cached_tokens, Some(0), "冷请求首 token 的步报 cached=0");
+        s.add_request(req_same(2, 48, 2));
+        let (_, r2) = step(&mut s, &[(2, vec![3])]);
+        assert_eq!(s.request(2).unwrap().num_cached_tokens, 32);
+        assert_eq!(r2.items[0].num_cached_tokens, Some(32), "首个输出 token 的步带出命中数");
+        let (_, r3) = step(&mut s, &[(2, vec![4])]);
+        assert_eq!(r3.items[0].num_cached_tokens, None, "后续 decode 步不再带");
+    }
+
+    #[test]
     fn max_tokens_finishes_with_length() {
         let mut s = mk(8, 1000, 32);
         s.add_request(req(1, 4, 2));
