@@ -80,8 +80,9 @@ impl KimiK3Model {
         shard: Shard,
     ) -> Result<Self> {
         ensure!(n_layers >= 1 && n_layers <= cfg.num_hidden_layers as usize, "n_layers {n_layers}");
+        let t_load = std::time::Instant::now();
         if !shard.is_single() {
-            tracing::info!(rank = shard.rank, world = shard.world, "kimik3: TP/EP 分片装载");
+            tracing::info!(rank = shard.rank, world = shard.world, n_layers, "kimik3: TP/EP 分片装载开始");
         }
         if n_layers < cfg.num_hidden_layers as usize {
             tracing::warn!(
@@ -113,6 +114,11 @@ impl KimiK3Model {
             None
         };
         drop(top);
+        tracing::info!(
+            rank = shard.rank,
+            secs = format!("{:.1}", t_load.elapsed().as_secs_f32()),
+            "kimik3 top loaded (embed / norm / lm_head / output_res)"
+        );
 
         // 全模型共享一套 per-token 激活缓冲（原先每层各一套，预算 16384 时一层 ≈ 13 GB，93 层 tp8 必 OOM，见 scratch.rs / k3-serve 3b）。
         let act = ActScratch::new(stream, cfg, tm, shard)?;
@@ -124,6 +130,8 @@ impl KimiK3Model {
         );
         // 逐层（每层一片，装完即释放 mmap）
         let mut layers = Vec::with_capacity(n_layers);
+        let t_layers = std::time::Instant::now();
+        let mut layers_bytes: u64 = 0;
         for l in 0..n_layers {
             let t0 = std::time::Instant::now();
             let (free0, _) = stream.mem_info()?;
@@ -132,15 +140,35 @@ impl KimiK3Model {
             let layer = KimiDecoderLayer::load_tp(stream, &src, &table, l, cfg, budget, shard)?;
             stream.synchronize()?;
             let (free1, _) = stream.mem_info()?;
+            let secs = t0.elapsed().as_secs_f64();
+            let bytes = free0.saturating_sub(free1) as u64;
+            layers_bytes += bytes;
+            // gb = 该层占的显存（含激活外的权重 + 缓冲），gbs = 装载速率（显存增量 / 秒；mmap 读盘 + H2D + 分片切片的合速）
             tracing::info!(
                 layer = l,
                 kind = if cfg.is_kda_layer(l as u32) { "kda" } else { "mla" },
                 ffn = if cfg.is_moe_layer(l as u32) { "moe" } else { "dense" },
-                secs = format!("{:.1}", t0.elapsed().as_secs_f32()),
-                gb = format!("{:.2}", free0.saturating_sub(free1) as f64 / 1e9),
+                secs = format!("{:.1}", secs),
+                gb = format!("{:.2}", bytes as f64 / 1e9),
+                gbs = format!("{:.2}", bytes as f64 / 1e9 / secs.max(1e-6)),
+                done = format!("{}/{n_layers}", l + 1),
                 "kimik3 layer loaded"
             );
             layers.push(layer);
+        }
+        {
+            let ls = t_layers.elapsed().as_secs_f64();
+            let total = t_load.elapsed().as_secs_f64();
+            tracing::info!(
+                rank = shard.rank,
+                world = shard.world,
+                n_layers,
+                layers_secs = format!("{:.1}", ls),
+                layers_gb = format!("{:.2}", layers_bytes as f64 / 1e9),
+                avg_gbs = format!("{:.2}", layers_bytes as f64 / 1e9 / ls.max(1e-6)),
+                total_secs = format!("{:.1}", total),
+                "kimik3 model loaded（整体装载耗时；total 含顶层 + 激活缓冲，不含 KV / 引擎启动）"
+            );
         }
         let z = |s: &Stream| Tensor::<bf16>::zeros(s, &[tm, hidden]);
         let mut blocks = Vec::with_capacity(max_blocks);
