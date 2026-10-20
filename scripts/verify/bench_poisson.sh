@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # 开环泊松到达压测：dinfer（XSTREAM 开 / 关两种常驻配置，分别重启）vs vLLM，同 seed、同到达序列、长短混合 prompt。
+# 注：引擎层面口径（长度分布 / 不 ignore_eos / SLO goodput / cache hit）已由 scripts/verify/bench_engine.sh 接管（docs/loops/engine-bench.md）；本脚本只保留 XSTREAM 开关 A/B 用途。
 #   bash scripts/verify/bench_poisson.sh [OUT_DIR] ["改动一句话"]     # 在 4090 上跑
 # 环境：RATES（默认 "8 16 24" req/s）、REQS（每组请求数，默认 96）、MIX（默认 "128:0.5,1024:0.35,2048:0.15"）、OUT_TOK（默认 128）。
 # 结论看：同 rate 下 out tok/s、TTFT p50/p99、TPOT p50；XSTREAM 开 vs 关的 TPOT 差即跨流并行收益。

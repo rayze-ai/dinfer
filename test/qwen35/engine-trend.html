@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh"><head><meta charset="utf-8"><title>engine trend — qwen35</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+:root{--bg:#fcfcfb;--fg:#0b0b0b;--muted:#52514e;--card:#f3f3f1;--line:#e3e5e8;--s1:#2a78d6;--s2:#eb6834}
+@media (prefers-color-scheme: dark){:root:not([data-theme=light]){--bg:#1a1a19;--fg:#f0efec;--muted:#c3c2b7;--card:#232322;--line:#2f2f2d;--s1:#3987e5;--s2:#d95926}}
+:root[data-theme=dark]{--bg:#1a1a19;--fg:#f0efec;--muted:#c3c2b7;--card:#232322;--line:#2f2f2d;--s1:#3987e5;--s2:#d95926}
+body{margin:0;padding:16px;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,sans-serif}
+h1{font-size:18px;margin:0 0 4px}.sub{color:var(--muted);margin-bottom:12px;font-size:13px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0}
+select{font:inherit;padding:4px 8px;background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:6px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px}
+.card h2{font-size:14px;margin:0 0 6px;font-weight:600}
+table{border-collapse:collapse;width:100%;font-size:12.5px;margin-top:14px}th,td{border-bottom:1px solid var(--line);padding:4px 6px;text-align:right}
+th:first-child,td:first-child,td.l{text-align:left}.muted{color:var(--muted)}
+</style></head><body>
+<h1>engine trend — qwen35 <a href="../index.html" style="font-size:13px;font-weight:normal;margin-left:12px">← 全部模型索引</a></h1>
+<div class="sub">引擎层面口径（design §15）：泊松到达率扫描；goodput = 满足 SLO 的完成数/墙钟；SLO 下最大 req/s = good/completed ≥ 0.95 的最大到达率。数据 <code>engine-trend.csv</code>，每 10 s 重读。</div>
+<div class="row"><label>轮次 <select id="round"></select></label><span id="meta" class="muted"></span></div>
+<div class="grid">
+ <div class="card"><h2>goodput（req/s）vs 到达率</h2><canvas id="c-goodput"></canvas></div>
+ <div class="card"><h2>TTFT p99（ms）vs 到达率</h2><canvas id="c-ttft"></canvas></div>
+ <div class="card"><h2>TPOT p99（ms）vs 到达率</h2><canvas id="c-tpot"></canvas></div>
+ <div class="card"><h2>prefix cache 命中率 vs 到达率</h2><canvas id="c-cache"></canvas></div>
+ <div class="card" style="grid-column:1/-1"><h2>各轮 SLO 下最大 req/s</h2><canvas id="c-max"></canvas></div>
+</div>
+<div id="tbl"></div>
+<script>
+const COL={dinfer:getComputedStyle(document.documentElement).getPropertyValue('--s1').trim(),vllm:getComputedStyle(document.documentElement).getPropertyValue('--s2').trim()};
+const charts={};
+function parseCSV(t){const L=t.trim().split(/\r?\n/);const h=L.shift().split(",");return L.map(l=>{const c=[];let cur="",q=false;for(const ch of l){if(ch=='"'){q=!q}else if(ch==','&&!q){c.push(cur);cur=""}else cur+=ch}c.push(cur);const o={};h.forEach((k,i)=>o[k]=c[i]);return o;});}
+function upsert(id,cfg){if(charts[id]){charts[id].data=cfg.data;charts[id].options=cfg.options;charts[id].update();}else charts[id]=new Chart(document.getElementById(id),cfg);}
+function lineCfg(rates,series,yLabel,yMax){
+  const ds=Object.entries(series).map(([s,m])=>({label:s,data:rates.map(r=>m[r]??null),borderColor:COL[s],backgroundColor:COL[s],borderWidth:2,pointRadius:4,pointHoverRadius:6,spanGaps:true,tension:0}));
+  return {type:"line",data:{labels:rates.map(String),datasets:ds},options:{animation:false,responsive:true,interaction:{mode:"index",intersect:false},
+    plugins:{legend:{display:true,position:"bottom"},tooltip:{enabled:true}},
+    scales:{x:{title:{display:true,text:"到达率 req/s"},grid:{color:"rgba(128,128,128,.15)"}},y:{beginAtZero:true,suggestedMax:yMax,title:{display:true,text:yLabel},grid:{color:"rgba(128,128,128,.15)"}}}}};
+}
+function build(rows){
+  const byRound={};rows.forEach(r=>{(byRound[r.round]??={gpu:r.gpu,change:r.change,rows:[]}).rows.push(r)});
+  const rounds=Object.keys(byRound);
+  const sel=document.getElementById("round");const prev=sel.value||location.hash.slice(1)||rounds[rounds.length-1];
+  sel.innerHTML=rounds.map(r=>`<option ${r===prev?"selected":""}>${r}</option>`).join("");
+  sel.onchange=()=>{location.hash=sel.value;draw(byRound,sel.value)};
+  draw(byRound,sel.value);
+  // 各轮最大 req/s 柱图
+  const mg=rounds.map(r=>{const o={};byRound[r].rows.filter(x=>x.metric==="max_good_rate").forEach(x=>o[x.side]=+x.value);return o;});
+  upsert("c-max",{type:"bar",data:{labels:rounds,datasets:["dinfer","vllm"].map(s=>({label:s,data:mg.map(o=>o[s]??null),backgroundColor:COL[s],borderRadius:4,borderSkipped:"bottom",maxBarThickness:28}))},
+    options:{animation:false,responsive:true,plugins:{legend:{position:"bottom"}},scales:{y:{beginAtZero:true,title:{display:true,text:"req/s"}},x:{grid:{display:false}}}}});
+}
+function draw(byRound,rk){
+  const R=byRound[rk];if(!R)return;
+  document.getElementById("meta").textContent=`${R.gpu} · ${R.change||"（无改动说明）"}`;
+  const rates=[...new Set(R.rows.filter(x=>x.rate).map(x=>+x.rate))].sort((a,b)=>a-b);
+  const pick=m=>{const o={dinfer:{},vllm:{}};R.rows.filter(x=>x.metric===m).forEach(x=>o[x.side][+x.rate]=+x.value);for(const s in o)if(!Object.keys(o[s]).length)delete o[s];return o;};
+  const g=pick("goodput_rps");g.ideal=Object.fromEntries(rates.map(r=>[r,r]));
+  const cfg=lineCfg(rates,g,"req/s");cfg.data.datasets.find(d=>d.label==="ideal").borderDash=[4,4];cfg.data.datasets.find(d=>d.label==="ideal").borderColor="rgba(128,128,128,.6)";cfg.data.datasets.find(d=>d.label==="ideal").pointRadius=0;
+  upsert("c-goodput",cfg);
+  upsert("c-ttft",lineCfg(rates,pick("ttft_p99"),"ms"));
+  upsert("c-tpot",lineCfg(rates,pick("tpot_p99"),"ms"));
+  upsert("c-cache",lineCfg(rates,pick("cache_hit"),"命中率",1));
+  // 表
+  const M=["goodput_rps","request_rps","out_tps","ttft_p50","ttft_p99","ttft_max","tpot_p50","tpot_p99","tpot_max","cache_hit","completed","failed"];
+  const H=["goodput","req/s","out tok/s","TTFT p50","TTFT p99","TTFT max","TPOT p50","TPOT p99","TPOT max","cache hit","完成","失败"];
+  let h=`<table><tr><th>rate</th><th>端</th>${H.map(x=>`<th>${x}</th>`).join("")}</tr>`;
+  for(const r of rates)for(const s of ["dinfer","vllm"]){const rr=R.rows.filter(x=>x.side===s&&+x.rate===r);if(!rr.length)continue;const v=m=>{const x=rr.find(y=>y.metric===m);return x?(+x.value).toFixed(m.startsWith("cache")?3:(m==="completed"||m==="failed"||m==="out_tps")?0:m.includes("rps")?2:1):"-"};
+    h+=`<tr><td class="l">${r}</td><td class="l">${s}</td>${M.map(m=>`<td>${v(m)}</td>`).join("")}</tr>`}
+  document.getElementById("tbl").innerHTML=h+"</table>";
+}
+async function refresh(){try{const t=await (await fetch("engine-trend.csv?ts="+Date.now(),{cache:"no-store"})).text();build(parseCSV(t));}catch(e){console.error(e)}}
+refresh();setInterval(refresh,10000);
+</script></body></html>

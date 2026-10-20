@@ -39,3 +39,10 @@
 ## 7. 引擎层面 vs 模型层面，以及测试程序本身（用户 2026-10-20）
 - **模型层面**（四组闭环、固定长度、ignore_eos）量 kernel + graph；**引擎层面**（泊松 + 长度分布 + 多轮前缀 + 不 ignore_eos）量调度 / prefix cache / 尾部 / 容量，口径 `requirements.md` 验收 v2 / `design.md` §15。Qwen3.5 四组 1.10× 时引擎层面 goodput 只有 vLLM 的 0.07–0.44×——两者可以完全脱节，**只报引擎层面的 goodput / p99 给用户**。
 - **先怀疑工具再怀疑引擎**：首个引擎数据点里 TTFT 5 ms 是 server 提前发空 role chunk 的伪像；goodput 0.00 是编错 feature 的二进制。每轮必带：压测端 CPU 集合与 `getrusage`、`--self-check` 的计时误差、与第三方工具的交叉差、客户端 vs 服务端自报的对账。压测端与服务共核 / CPU > 1 核 → 数据作废。
+
+## 7. 引擎层面 vs 模型层面：两套口径，各管一件事（用户 2026-10-20）
+- **判断**：四组闭环（固定并发 / 固定长度 / ignore_eos，`bench_compare.sh`）是**模型层面**——量 kernel + graph + 自调优，每步 batch 恒定、prefill/decode 天然错开、prefix cache 只命中模板、无尾部。它只做每轮性能改动的**回归门禁**。"超越 vLLM" 的判定用**引擎层面**：泊松开环到达率扫描 + prompt / 输出长度分布 + 不 ignore_eos + 共享前缀 / 多轮，指标 = SLO 下 goodput（首要：**SLO 下最大 req/s**）、TTFT / TPOT 的 p99 / max、prefix cache 命中率、饱和后行为、长跑漂移（`bench_engine.sh` → `engine-trend.*`）。
+- **为什么**：Qwen3.5 四组 1.10× 的数字下，调度器 / 抢占 / prefix cache / 尾部 / 容量全被抹平；B300 首个 `vllm bench serve` 点（rate 8）TPOT p50/p99 29.5/45 vs vLLM 16.6/19.4——差距在尾部而非均值，闭环看不到。
+- **怎么用**：改 kernel → 跑四组门禁；改调度 / cache / 抢占 → 跑 `bench_engine.sh`，两边各自最佳配置写进 summary 头；两边同 seed（同到达序列）；先 `bench_engine_vllm_tool.sh` 对账一次（同 rate 同长度 p50/p99 差 < 10%）再信自己的数字。对账 TTFT 用 `ttft_first_chunk_ms`（vLLM 工具把 dinfer 的空 role delta 当首 token → ~5 ms 伪像）。
+- **误读**：goodput ≥ 0.95×名义 rate 判"扛住"会把短跑（每率 96 条）全好的点判掉——收尾长尾压低实际 req/s；用 good/completed ≥ 0.95。
+- 证据：`docs/design.md` §15；`docs/loops/engine-bench.md`；`test/qwen35/2026-10-20/engine_smoke`。
