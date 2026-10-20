@@ -30,6 +30,7 @@
 | 现象 | 错误结论 | 真因 | 证据 |
 |---|---|---|---|
 | 启动日志自调优 16 µs，TPOT 不变 | 自调优没命中 | 运行时 M 是缓冲行数 2112 | loop 3e |
+| "每步 ~900 kernel 的边界效应 = 3.8 ms"（§14.1） | megakernel 能拿回 1.4× | graph 下单层 11 kernel 基线离权重流下限只差 17%；边界效应被 graph 吃掉大半，megakernel 的占用代价反而更大 | loops/mega-sm100.md 结论 |
 | CUDA graph 零收益 | launch 不是瓶颈 | 对，但原因是 kernel 在算假 M | loop 2b/3e |
 | 新 kernel 微基准 4×，bench 持平 | B300 与 3090 不同 | 分发条件 `tokens == num_seqs` 因缓冲推断永不成立 | loop 4b/4c |
 | 卡空却报 OOM | GPU 编号错 | 每层激活缓冲 × 预算 16384 = 170 GB | pitfalls "nsys 起服务 OOM" |

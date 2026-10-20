@@ -43,4 +43,8 @@
 - **split-K 的 tile 信号量与 ready 计数器由 kernel 自复位**（最后到的任务 / 最后退出的 CTA 清零），graph 重放不需要 host memset。
 - cp.async `wait_group N`：第 i 轮顶部已提交 pipe-1+i 个 group，要 group i 完成须允许挂起 pipe-2 个（写成 pipe-1 时 pipe=2 等于不等，
   第一版全是垃圾但不报错——对拍是唯一的护栏）。
-- 结论（≥ 1.25× 是否成立）：见 loop 记录末行（B300 第 2 轮待跑）。
+- **结论（2026-10-20，2 轮 / B300）：单层 megakernel 不成立**——最好 0.91 / 0.82 / 0.59×（B=1/8/32），三档 < 1.10×。
+  原因按证据排序：(1) 常驻 grid 1 CTA/SM 的占用输给独立 GEMM kernel 的 4–8 block/SM（GEMV 5.1 vs 6.5 TB/s，B=32 mma 环 3.2）；
+  (2) 小算子在 148 个 CTA 上变延迟链（gdn B=1 span 15 µs、busy 2）；(3) graph 基线的边界效应只有 ~17%（147 µs vs 下限 ~120），
+  不够抵消 (1)(2)。依赖等待不是瓶颈（Σwait 10–30%）。**判断**：在"权重流下限 + graph"这个基线上，减 kernel 数的收益上限 ≈ 边界效应
+  占比，27B 级模型 < 20%，不值一次架构重写；质变要靶向字节（NVFP4）或算子融合本身（K3 MoE 路径）。证据：`docs/loops/mega-sm100.md`。
