@@ -30,3 +30,4 @@
 
 | 轮 | 改动 | B=1 / B=8 / B=32（基线 → 实验，ms/层，倍率） | 结论 |
 |---|---|---|---|
+| 0 | 结构落地（commit 38f103e）：11 阶段静态任务表 + ready 计数器；GEMV = cp.async.cg 流水 + mma.sync m16n8k16（A/B 同置换装载）+ split-K 自复位信号量；GDN 复用 gdn_decode.cuh | 3090 dev 模式（sm86，`MEGA_SM100_DEV=1`，groups=2/unroll=4/stages=2）：0.901→0.936 / 0.987→1.005 / 1.254→1.308，0.96 / 0.98 / 0.96×；对拍 res cos 0.999999 max_rel 5e-3（1 ulp），rec/conv 状态 cos 1.0 | 3090 是带宽下限（766 MB/层 ÷ 936 GB/s ≈ 0.82 ms），两边都贴着下限，看不出边界效应；数字只证明正确性。踩坑：cp.async `wait_group` 深度写成 pipe-1（应 pipe-2），pipe=2 时等于不等，第一版全是垃圾 |
