@@ -1474,7 +1474,7 @@ static int ho_fused(const void* qn, const float* gc, const bf16* aq, const bf16*
   constexpr int BT = 64;
   const int group = (int)(HV / H);
   // ho_bv ∈ {16, 32} → tensor core 版（K ∈ {64,128,256}，V 整除 ho_bv）；0 → 老 fp32 版
-  if (ho_bv == 16 || ho_bv == 32) {
+  if (ho_bv == 16 || ho_bv == 32 || ho_bv == 64) {
     if (V % ho_bv != 0) return err(cudaErrorInvalidValue);
     dim3 grid((unsigned)(V / ho_bv), (unsigned)HV, (unsigned)num_seqs);
 #define LAUNCH_HO_MMA1(BVV, KK, PF)                                                                               \
@@ -1488,7 +1488,10 @@ static int ho_fused(const void* qn, const float* gc, const bf16* aq, const bf16*
   }
 #define LAUNCH_HO_MMA(BVV, KK) \
   { if (prefetch) LAUNCH_HO_MMA1(BVV, KK, 1) else LAUNCH_HO_MMA1(BVV, KK, 0) }
-    if (ho_bv == 32) {
+    if (ho_bv == 64) {
+      // r10 第 6 轮：BV=64 每 warp 8 个 h tile、o / w 各 8 条独立 mma 链（B300 1×8192 ncu：tensor 19% / issue 23%，ILP 不够）
+      if (K == 128) { LAUNCH_HO_MMA(64, 128) } else return err(cudaErrorInvalidValue);
+    } else if (ho_bv == 32) {
       if (K == 128) { LAUNCH_HO_MMA(32, 128) } else if (K == 64) { LAUNCH_HO_MMA(32, 64) } else if (K == 256) { LAUNCH_HO_MMA(32, 256) } else return err(cudaErrorInvalidValue);
     } else {
       if (K == 128) { LAUNCH_HO_MMA(16, 128) } else if (K == 64) { LAUNCH_HO_MMA(16, 64) } else if (K == 256) { LAUNCH_HO_MMA(16, 256) } else return err(cudaErrorInvalidValue);

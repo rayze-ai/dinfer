@@ -3627,7 +3627,7 @@ fn gdn_chunk_ho_bv(stream: &Stream, base_blocks: usize, k_dim: usize, v_dim: usi
         return 0;
     }
     if let Some(bv) = over {
-        if matches!(bv, 16 | 32) && v_dim % bv == 0 {
+        if matches!(bv, 16 | 32 | 64) && v_dim % bv == 0 {
             return bv;
         }
     }

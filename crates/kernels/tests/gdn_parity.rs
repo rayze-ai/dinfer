@@ -467,6 +467,8 @@ fn chunk_case(dir: &str, k: usize, v: usize, h: usize, hv: usize) {
         (false, 32, false, false, 2e-3, 1e-2),
         (false, 16, true, false, 2e-3, 1e-2),
         (false, 32, true, false, 2e-3, 1e-2),
+        (true, 64, false, false, 2e-3, 1e-2),   // r10 第 6 轮：BV=64（仅 K=128 有特化）
+        (true, 64, true, false, 2e-3, 1e-2),
         (true, 32, false, false, 2e-3, 1e-2),
         (true, 16, true, false, 2e-3, 1e-2),
         (false, 16, false, true, 2e-3, 1e-2),
@@ -475,6 +477,9 @@ fn chunk_case(dir: &str, k: usize, v: usize, h: usize, hv: usize) {
         (true, 16, false, true, 2e-3, 1e-2),
     ] {
         if split && !split_ok {
+            continue;
+        }
+        if bv == 64 && !(k == 128 && v % 64 == 0) {
             continue;
         }
         let mut dstate = st.htod_copy(st_in.clone()).unwrap();
@@ -644,6 +649,8 @@ fn bench_case(st: &Stream, nseq: usize, len: usize, h: usize, hv: usize, k: usiz
         ("bv32", ops::GdnChunkHo { bv: 32, prefetch: false, split: false }),
         ("bv16pf", ops::GdnChunkHo { bv: 16, prefetch: true, split: false }),
         ("bv32pf", ops::GdnChunkHo { bv: 32, prefetch: true, split: false }),
+        ("bv64", ops::GdnChunkHo { bv: 64, prefetch: false, split: false }),
+        ("bv64pf", ops::GdnChunkHo { bv: 64, prefetch: true, split: false }),
         ("bv16sp", ops::GdnChunkHo { bv: 16, prefetch: false, split: true }),
         ("bv32sp", ops::GdnChunkHo { bv: 32, prefetch: false, split: true }),
         ("bv16pfsp", ops::GdnChunkHo { bv: 16, prefetch: true, split: true }),
