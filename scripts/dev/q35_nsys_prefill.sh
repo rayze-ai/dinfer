@@ -25,7 +25,7 @@ rm -f /tmp/q35_$tag.nsys-rep /tmp/q35_$tag.sqlite
 tmux kill-session -t nsprof 2>/dev/null
 tmux new-session -d -s nsprof -c "$PWD" "source /data/yaochen/infer/env.sh; CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=$gpu \
   nsys profile -t cuda --cuda-flush-interval=1000 -o /tmp/q35_$tag --force-overwrite true \
-  ./target/release/dinfer serve --model $M --served-model-name Qwen3.8-27B --host 127.0.0.1 --port $port \
+  ${DINFER_BIN:-./target/release/dinfer} serve --model $M --served-model-name Qwen3.8-27B --host 127.0.0.1 --port $port \
   --max-model-len 8192 --max-num-seqs 64 --max-num-batched-tokens 16384 > /tmp/q35_${tag}_serve.log 2>&1"
 
 for i in $(seq 1 240); do sleep 1; curl -s -m 2 127.0.0.1:$port/v1/models >/dev/null 2>&1 && break; done

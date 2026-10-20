@@ -12,7 +12,7 @@ OUT="${1:-test/qwen3/$(date +%F)/bench}"; mkdir -p "$OUT"
 # 卡型（进趋势表的 gpu 维度；bench_trend.py 没有该文件按 4090）：含 4090 → 4090，含 B300 → B300，其余取 name 去空格
 gpu_tag() { local n; n=$(nvidia-smi -i 0 --query-gpu=name --format=csv,noheader 2>/dev/null); case "$n" in *4090*) echo 4090;; *B300*) echo B300;; *) echo "${n// /}";; esac; }
 [ -n "$(gpu_tag)" ] && gpu_tag > "$OUT/GPU"
-BENCH=./target/release/bench
+BENCH="${BENCH_BIN:-./target/release/bench}"   # 远端分 target 目录时用 BENCH_BIN 指绝对路径（pitfalls 2026-10-21 旧二进制）
 # 每次运行换 seed（默认取当前秒）：prompt 不与历史轮次重复，两边都只命中聊天模板前缀的 prefix cache。固定 seed 会让常驻 vLLM 全命中、重启的 dinfer 冷启动，口径不公（pitfalls 2026-10-16）。
 SEED="${SEED:-$(date +%s)}"
 [ -x "$BENCH" ] || cargo build --release -p dinfer-bench
