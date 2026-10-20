@@ -816,3 +816,9 @@
 
 - **现象**：4090 `bench_r9gate` 前五次没出数：① `ps -o args` 抓到 bash 包装进程；② grep 日志抓到脚本模板串（`$R/models … "$@"`）；③④ GPU 0 被别人临时起的 vLLM 占 16–20 GB，KV 块 9900 → 708，首请求 OOM；⑤ 换空卡 GPU 3 仍只 3135 块——我起 serve 用了 `--max-num-batched-tokens 16384`，门禁口径是 2048，qwen3 每层各持激活缓冲随预算线性，14 GB 挤掉 KV。
 - **解法 / 避免**：门禁链写死启动参数（与上一轮门禁完全一致，不从进程 / 日志抓）；serve 起来后读 `num_blocks`，低于基线 10% 直接 abort；4090 是共享机，起测前 `nvidia-smi --query-compute-apps` 看外来进程，GPU 0 被占换 3–7。qwen3 的 per-layer 激活缓冲改全模型一套（qwen35 / kimik3 已修，第三个同款）记 TODO。
+
+## 2026-10-20 远端链里 `pkill -f "dinfer serve"` 会杀掉自己（pattern 匹配到包装 bash 的 cmdline）
+
+- **现象**：B300 合体测试链一发就 exit 143、输出只有 `HEAD=`；ff 失败没察觉 + 链自杀两件事叠在一起，白等一轮。
+- **根因**：`remote_b300.sh run '<一长串含 "dinfer serve" 的脚本>'` 远端是 `bash -c "<整段>"`，它自己的 cmdline 就含 `dinfer serve`，`pkill -f` 把包装进程杀了。
+- **解法 / 避免**：杀 serve 一律 `pkill -x dinfer`（按进程名精确匹配）；链里任何 `pkill -f` 的 pattern 不能出现在链自身文本里。另：golden（`--test-threads=1`）不要与 `cargo build` 并发跑——同 GPU 抢资源时 1/11 偶发失败，单跑 / 复跑都过。
