@@ -55,3 +55,19 @@
 结论：wy 不缺带宽、不缺占用槽位，缺**每 block 的并行 warp**和**更少的 smem 依赖链**。fla 把 wy 拆成 3 个 kernel 各自 autotune num_warps（kkt / wu 常用 8 warp）。第 3 轮改法：`kWyWarps` 4 → 8（u / w 阶段 8 warp 各持 64×64 片的 8 列 tile；点积阶段 8 warp 各 16 行 × 一半列；分块逆 4 对角块给 4 warp、另 4 warp 并行做非对角块的 S 累加），smem 不变。目标 505 → ≤ 400。
 | 3 | **wy 8 warp**（`wy_mma_kernel<BT,K,TRI,NW>`，点积 / u·w 阶段每 warp 16 行 × 一半列，对角块逆仍 4 warp；`GdnChunkWy::Mma8` = wy_mode 3；`ArchProfile::gdn_chunk_wy_warps_for(Sm100)=8`，Sm8x 仍 4）`7f3d6dc` | 18/65/65/39/**161** · 82/**435**/377/220/**898** · 82/435/521/219/**1034** | 14/15（decode_b32 同前擦线；mma8 与 4 warp 逐位一致） | wy 506 → 435（−14%，ncu 预判对：延迟型加 warp 有效）；8×1024 chain 967 → **898**、1×8192 1103 → **1034**。累计 r9_7 → r10_3：8×1024 **1109 → 898（−19%）**、1×8192 **1271 → 1034（−19%）**；不含 conv：678 vs fla 746（**已反超 9%**）、815 vs 853（反超 4%）。3090 上 mma8 也快 19%（1712 → 1387）但 Sm8x 默认暂不改（规则：B300 出数、3090 只跑 parity；若主会话想顺手开 4090 门禁再定）。wy 435 vs fla 334 仍差 30%：ncu 短记分板的另一半是 stage 装载 2 B 标量 → 第 4 轮 16 B 向量装载 |
 | 4 | **wy stage 装载 2 B 标量 → 16 B uint4**（8 列/线程，v / kn 读、stage 写、kg 写全部 16 B；smem 不变）`0a6f93a`；本轮起在 r8b 合并树（`cb7ee9a`）上出数 | 18/57/65/38/**148** · 82/**360**/380/221/**822** · 82/360/524/219/**963** | 4/4 chunk（B300）；3090 mma8 逐位同 4 warp | wy 435 → 360（−17%；两轮合计 506 → 360，−29%）；8×1024 chain 898 → **822**、1×8192 1034 → **963**。累计 r9_7 → r10_4：**8×1024 1109 → 822（−26%）、1×8192 1271 → 963（−24%）**；不含 conv 601 vs fla 746（**反超 19%**）、744 vs 853（反超 13%）。wy 360 vs fla 334 还差 8%。**异常**：ho 未改，但 bv32（无预取）从 692 → 497、373，反而比 bv32pf（524 / 380）快了——wy 的 16 B 写改变了 ho 读 w/kg 时的 L2 命中态，预取收益被抹平。第 2 轮"Sm100 开预取"的依据失效，但一次数据不翻档（规则：≥ 2 卡 × 全形状）；这正是改法 4"门限自调优"的用例——预取与否按启动时真实形状实测。下一轮：先看 ho ncu，再定 ho 双缓冲 vs 自调优 |
+
+### 第 5 轮前置：B300 ncu `ho_mma_kernel<64,32,128,PF=1>`（1×8192 默认路径，GPU 7，`probe_gdn_r10_4/ncu_ho_b300.txt`）
+
+| 指标 | 值 | 读法 |
+|---|---|---|
+| Duration | 615 µs（bench 524 含图外；ncu 的 clock 锁频偏高） | — |
+| DRAM / SM / **Mem Busy** | 11% / 31% / **77%** | 不是 HBM；Mem Busy 77% = **smem 管线**（ldmatrix / lds_u32 / sts），ho 是 smem 带宽型 |
+| 寄存器 | **242 / 线程** | PF=1 的 rq/rw/rg/ra 预取寄存器 + hacc[H_TILES][4] + oacc/wacc；255 上限边缘 |
+| 占用 | 理论 12.5% / 实际 12.1%（**2 block/SM**，regs 与 smem 75 KB 同时限 2） | 单 (seq, hv, V 片) 一个 block、每 SM 8 warp |
+| 可发射 warp / scheduler | 0.37，69% 周期无可发射 | 延迟 + smem 管线双重 |
+| grid | 1536 block（1×8192：1 seq × 48 hv × 4 V 片 × … = 192 block？实为 192×8 chunks 并行？）→ 5.19 波 | 1×8192 只有 192 个 (seq,hv,片) 串行链；ncu 这里采的是 32×128 形状的 launch（1536 = 32×48） |
+
+结论：ho 的瓶颈 = **smem 管线 77%**（四个 mma 的 B 操作数 h16 用 32 位 `lds_u32` 逐 lane 读 `[v][k]`，每次 mma 两条 lds；fla 用 Triton 的 `tl.dot` 走 ldmatrix 全程）+ 占用 12.5%。两条可选：
+- A）**h16 的 B 读改 ldmatrix.x4**（`sh16` 按 [v][k] 行主序，mma B 需 col-major [k][v]：用 `ldsm_x4_t` 从 [v][k] 转置取），每 ks 步 4 条 lds_u32 ×NT_V → 1 条 ldsm_x4 / 2 tile；smem 事务减 ~4×。改 kernel 体内 (1)(2) 两处 B 读，不碰 smem 布局 / snap / 入口。
+- B）cp.async 双缓冲 + 8 warp（改法 2）：regs 已 242，再加 8 warp 的 oacc/wacc 只会溢出；双缓冲 smem 75 → 130 KB 把占用压到 1 block/SM。**B300 上 B 不划算，先做 A**。
+- 第 4 轮 bv32（无预取）反超 bv32pf 的现象与此一致：PF 的寄存器预取把 regs 顶到 242 → 2 block/SM；无预取版 regs 更少可能 3 block/SM，掩延迟反而更好。等 ncu 的 hpass / bv32 无 PF 行再定预取默认。
