@@ -140,17 +140,25 @@ impl Scheduler {
     }
 
     /// r8b：一步可跨任意多个对齐点，快照由 prefill kernel 在 chunk 边界顺带写出（design §15.7 "r8b 实现"），
-    /// 调度**不再**按粒度切步。唯一例外：对齐点相对本步段首 `computed` 的偏移不是 kernel chunk 的倍数（上一步被
-    /// 预算截断在非对齐处）→ kernel 的 chunk 边界对不上该点，本步在第一个这样的对齐点结束（它成为段末，kernel 末态即快照）。
+    /// 调度**不再**按粒度切步。唯一例外：某个对齐点相对本步段首 `computed` 的偏移不是 kernel chunk 的倍数
+    /// （粒度本身不是 chunk 的倍数，或上一步被预算截断在非对齐处）→ kernel 的 chunk 边界对不上该点，本步在该对齐点
+    /// 结束（它成为段末，kernel 末态即快照）。粒度是 chunk 的倍数且段首对齐时永不切。
     #[inline]
     fn cap_to_snapshot_grain(&self, computed: u32, num_new: u32, num_prompt: u32) -> u32 {
         let g = self.p.recurrent_snapshot_tokens;
         let c = self.p.recurrent_snapshot_chunk;
-        if g == 0 || c == 0 || self.snapshots.is_none() || num_new <= 1 || computed >= num_prompt || computed % c == 0 {
+        if g == 0 || c == 0 || self.snapshots.is_none() || num_new <= 1 || computed >= num_prompt {
             return num_new;
         }
-        let next = (computed / g + 1) * g;
-        if next <= num_prompt && computed + num_new > next { next - computed } else { num_new }
+        let end = (computed + num_new).min(num_prompt);
+        let mut b = (computed / g + 1) * g;
+        while b < end {
+            if (b - computed) % c != 0 {
+                return b - computed;
+            }
+            b += g;
+        }
+        num_new
     }
 
     /// 本步 `(computed, computed_after]` 内落在 prompt 内的每个对齐点各登记一个快照槽（已有同 hash 的快照则不重写）：
@@ -990,6 +998,31 @@ mod tests {
         let mut pos: Vec<u32> = o.recurrent_snapshot.iter().map(|x| x.1).collect();
         pos.sort();
         assert_eq!(pos, vec![64, 128, 192, 256], "一步跨 4 个对齐点登记 4 槽");
+    }
+
+    #[test]
+    fn snapshot_grain_not_chunk_multiple_splits_at_each_grain() {
+        // 粒度 32 < chunk 64（golden tiny 的口径）：对齐点 32 相对段首 0 的偏移不是 64 的倍数 → 在 32 结束；
+        // 之后段首 32、下一对齐点 64 偏移 32 仍非倍数 → 再切。等价于 r8 的逐粒度切步（kernel 末态即快照）。
+        let (mut p, g, b) = params(8, 1000, 64);
+        p.recurrent_snapshot_tokens = 32;
+        p.recurrent_snapshot_slots = 4;
+        p.recurrent_snapshot_chunk = 64;
+        p.cache.enable_prefix_caching = true;
+        let mut s = Scheduler::new(p, g, b);
+        s.add_request(req_same(1, 100, 4));
+        let mro = ModelRunnerOutput {
+            req_ids: vec![1], sampled: vec![vec![]], drafts: vec![vec![]], logprobs: vec![], mode: None, phases: None,
+        };
+        for want in [32u32, 64, 96] {
+            let o = s.schedule();
+            assert_eq!(o.num_scheduled_tokens, vec![(1, 32)]);
+            assert_eq!(o.recurrent_snapshot.iter().map(|x| x.1).collect::<Vec<_>>(), vec![want]);
+            s.update_from_output(&o, &mro);
+        }
+        let o = s.schedule();
+        assert_eq!(o.num_scheduled_tokens, vec![(1, 4)]);
+        assert!(o.recurrent_snapshot.is_empty());
     }
 
     #[test]

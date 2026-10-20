@@ -256,13 +256,28 @@ __global__ void wy_kernel(const bf16* __restrict__ qn, const bf16* __restrict__ 
 // 每 block 一个 (序列, v 头, V 分片)。块在时间上串行；h 留 fp32 共享。
 // 共享布局把 K 维补 1 列（KPAD = K+1）避免按列访问时的 bank 冲突。
 // 顺序：qg·h → w·h（v'）→ o += Aq·v' → h 更新（kg），三段复用同一 [BT][KPAD] 缓冲。
+// r8b（design §15.7）：prefix cache 的递归状态快照由 ho 在 chunk 边界顺带写出。序列 seq 的快照条目在
+// snap_pos / snap_slot[snap_off[seq] .. snap_off[seq+1])，snap_pos = 相对段首 bos 的 token 偏移；chunk ci 的末尾
+// 相对偏移 == snap_pos[j] 时把 h（fp32 主本）多写一份到 snap_state 的 snap_slot[j] 槽（与末态回写同一代码路径）。
+// 返回该槽的 (hv 头) 基址，无匹配返回 nullptr。snap_off == nullptr = 本步无快照。
+__device__ __forceinline__ float* snap_target(const int* __restrict__ snap_off, const int* __restrict__ snap_pos,
+                                              const int* __restrict__ snap_slot, float* __restrict__ snap_state,
+                                              int64_t state_stride_tok, int seq, int hv, int V, int K, int chunk_end) {
+  if (!snap_off) return nullptr;
+  const int j0 = snap_off[seq], j1 = snap_off[seq + 1];
+  for (int j = j0; j < j1; ++j)
+    if (snap_pos[j] == chunk_end) return snap_state + (long)snap_slot[j] * state_stride_tok + (long)hv * V * K;
+  return nullptr;
+}
+
 template <int BT, int BV, int K>
 __global__ void ho_kernel(const bf16* __restrict__ qn, const float* __restrict__ gc, const bf16* __restrict__ aq,
                           const bf16* __restrict__ u, const bf16* __restrict__ w, const bf16* __restrict__ kg,
                           bf16* __restrict__ out, float* __restrict__ state, const int* __restrict__ cu_seqlens,
                           const int* __restrict__ cu_nt, const int* __restrict__ chunk_off,
                           const int* __restrict__ state_indices, int64_t state_stride_tok, int H, int HV, int V,
-                          int group) {
+                          int group, const int* __restrict__ snap_off, const int* __restrict__ snap_pos,
+                          const int* __restrict__ snap_slot, float* __restrict__ snap_state) {
   const int v0 = blockIdx.x * BV;
   const int hv = blockIdx.y;
   const int h = hv / group;
@@ -376,6 +391,13 @@ __global__ void ho_kernel(const bf16* __restrict__ qn, const float* __restrict__
       sh[idx] = acc;
     }
     __syncthreads();
+    // r8b：chunk 末尾落在快照对齐点 → h 多写一份到快照槽
+    if (float* sdst = snap_target(snap_off, snap_pos, snap_slot, snap_state, state_stride_tok, seq, hv, V, K, ci * BT + len)) {
+      for (int idx = tid; idx < BV * KPAD; idx += nb) {
+        const int vv = idx / KPAD, kk = idx % KPAD;
+        if (kk < K) sdst[(long)(v0 + vv) * K + kk] = sh[idx];
+      }
+    }
   }
 
   // 末态回写
@@ -716,7 +738,9 @@ __global__ void __launch_bounds__(kHoWarps * 32) ho_mma_kernel(
     const bf16* __restrict__ qn, const float* __restrict__ gc, const bf16* __restrict__ aq, const bf16* __restrict__ u,
     const bf16* __restrict__ w, const bf16* __restrict__ kg, bf16* __restrict__ out, float* __restrict__ state,
     const int* __restrict__ cu_seqlens, const int* __restrict__ cu_nt, const int* __restrict__ chunk_off,
-    const int* __restrict__ state_indices, int64_t state_stride_tok, int H, int HV, int V, int group) {
+    const int* __restrict__ state_indices, int64_t state_stride_tok, int H, int HV, int V, int group,
+    const int* __restrict__ snap_off, const int* __restrict__ snap_pos, const int* __restrict__ snap_slot,
+    float* __restrict__ snap_state) {
   using S = HoSmem<BT, BV, K>;
   constexpr int KS = S::KS, TS = S::TS, NW = kHoWarps;
   constexpr int MT_T = BT / 16, MT_V = BV / 16;        // 行 tile 数（o 的行 = token；h 的行 = v）
@@ -762,6 +786,17 @@ __global__ void __launch_bounds__(kHoWarps * 32) ho_mma_kernel(
 
   // h 主本 → 寄存器 tile。tile 号 hi ∈ [0, H_TILES)：全局 tile 序号 = warp + hi·NW，拆成 (mt, ntk)。
   float hacc[H_TILES][4];
+  // 寄存器 h → 全局 fp32（末态回写 / 快照写出共用）
+  auto store_h = [&](float* dst) {
+#pragma unroll
+    for (int hi = 0; hi < H_TILES; ++hi) {
+      int mt, ntk;
+      h_tile(hi, mt, ntk);
+      const int vr = v0 + mt * 16 + g, kc = ntk * 8 + 2 * t4;
+      *reinterpret_cast<float2*>(dst + (long)vr * K + kc) = make_float2(hacc[hi][0], hacc[hi][1]);
+      *reinterpret_cast<float2*>(dst + (long)(vr + 8) * K + kc) = make_float2(hacc[hi][2], hacc[hi][3]);
+    }
+  };
 #pragma unroll
   for (int hi = 0; hi < H_TILES; ++hi) {
     int mt, ntk;
@@ -973,19 +1008,15 @@ __global__ void __launch_bounds__(kHoWarps * 32) ho_mma_kernel(
       sts_u32(sh16 + (mt * 16 + g) * KS + kc, pack_bf16x2(hacc[hi][0], hacc[hi][1]));
       sts_u32(sh16 + (mt * 16 + g + 8) * KS + kc, pack_bf16x2(hacc[hi][2], hacc[hi][3]));
     }
+    // r8b：chunk 末尾落在快照对齐点 → h（fp32 主本）多写一份到快照槽
+    if (float* sdst = snap_target(snap_off, snap_pos, snap_slot, snap_state, state_stride_tok, seq, hv, V, K, ci * BT + len))
+      store_h(sdst);
     if (has_next) stage();  // sq / sw / skg / sAq / sdec 在 (4) 之前已读完
     __syncthreads();
   }
 
   // 末态回写 fp32
-#pragma unroll
-  for (int hi = 0; hi < H_TILES; ++hi) {
-    int mt, ntk;
-    h_tile(hi, mt, ntk);
-    const int vr = v0 + mt * 16 + g, kc = ntk * 8 + 2 * t4;
-    *reinterpret_cast<float2*>(hslot + (long)vr * K + kc) = make_float2(hacc[hi][0], hacc[hi][1]);
-    *reinterpret_cast<float2*>(hslot + (long)(vr + 8) * K + kc) = make_float2(hacc[hi][2], hacc[hi][3]);
-  }
+  store_h(hslot);
 }
 
 // ================================================================ ho 两段版（r9 第 2 轮：h-pass + o-pass）
@@ -1012,7 +1043,8 @@ __global__ void __launch_bounds__(kHoWarps * 32) ho_hpass_kernel(
     const float* __restrict__ gc, const bf16* __restrict__ u, const bf16* __restrict__ w, const bf16* __restrict__ kg,
     bf16* __restrict__ h16, bf16* __restrict__ v16, float* __restrict__ state, const int* __restrict__ cu_seqlens,
     const int* __restrict__ cu_nt, const int* __restrict__ chunk_off, const int* __restrict__ state_indices,
-    int64_t state_stride_tok, int HV, int V) {
+    int64_t state_stride_tok, int HV, int V, const int* __restrict__ snap_off, const int* __restrict__ snap_pos,
+    const int* __restrict__ snap_slot, float* __restrict__ snap_state) {
   using S = HpSmem<BT, BV, K>;
   constexpr int KS = S::KS, TS = S::TS, NW = kHoWarps;
   constexpr int MT_V = BV / 16, NT_V = BV / 8, NT_K = K / 8, KSTEP_K = K / 16, KSTEP_T = BT / 16;
@@ -1046,6 +1078,17 @@ __global__ void __launch_bounds__(kHoWarps * 32) ho_hpass_kernel(
   float* hslot = state + (long)slot * state_stride_tok + (long)hv * V * K;
 
   float hacc[H_TILES][4];
+  // 寄存器 h → 全局 fp32（末态回写 / 快照写出共用）
+  auto store_h = [&](float* dst) {
+#pragma unroll
+    for (int hi = 0; hi < H_TILES; ++hi) {
+      int mt, ntk;
+      h_tile(hi, mt, ntk);
+      const int vr = v0 + mt * 16 + g, kc = ntk * 8 + 2 * t4;
+      *reinterpret_cast<float2*>(dst + (long)vr * K + kc) = make_float2(hacc[hi][0], hacc[hi][1]);
+      *reinterpret_cast<float2*>(dst + (long)(vr + 8) * K + kc) = make_float2(hacc[hi][2], hacc[hi][3]);
+    }
+  };
 #pragma unroll
   for (int hi = 0; hi < H_TILES; ++hi) {
     int mt, ntk;
@@ -1193,18 +1236,14 @@ __global__ void __launch_bounds__(kHoWarps * 32) ho_hpass_kernel(
       sts_u32(sh16 + (mt * 16 + g) * KS + kc, pack_bf16x2(hacc[hi][0], hacc[hi][1]));
       sts_u32(sh16 + (mt * 16 + g + 8) * KS + kc, pack_bf16x2(hacc[hi][2], hacc[hi][3]));
     }
+    // r8b：chunk 末尾落在快照对齐点 → h（fp32 主本）多写一份到快照槽
+    if (float* sdst = snap_target(snap_off, snap_pos, snap_slot, snap_state, state_stride_tok, seq, hv, V, K, ci * BT + len))
+      store_h(sdst);
     if (has_next) stage();
     __syncthreads();
   }
 
-#pragma unroll
-  for (int hi = 0; hi < H_TILES; ++hi) {
-    int mt, ntk;
-    h_tile(hi, mt, ntk);
-    const int vr = v0 + mt * 16 + g, kc = ntk * 8 + 2 * t4;
-    *reinterpret_cast<float2*>(hslot + (long)vr * K + kc) = make_float2(hacc[hi][0], hacc[hi][1]);
-    *reinterpret_cast<float2*>(hslot + (long)(vr + 8) * K + kc) = make_float2(hacc[hi][2], hacc[hi][3]);
-  }
+  store_h(hslot);
 }
 
 // o-pass：每 block 一个 (chunk, v 头, VT 列 V 分片)，每 warp 持 16 行 token × 64 列 v（VT=128 → 8 warp；VT ≤ 64 → 4 warp）。
@@ -1413,7 +1452,8 @@ int gdn_chunk_wy(const void* qn, const void* kn, const void* mixed_qkv, const fl
 static int ho_fused(const void* qn, const float* gc, const bf16* aq, const bf16* u, const bf16* w, const bf16* kg,
                     void* out, void* state, const int* cu_seqlens, const int* cu_nt, const int* chunk_off,
                     const int* state_indices, int64_t state_stride_tok, int64_t num_seqs, int64_t H, int64_t HV,
-                    int64_t K, int64_t V, int64_t bt, int64_t ho_bv, int64_t prefetch, cudaStream_t stream) {
+                    int64_t K, int64_t V, int64_t bt, int64_t ho_bv, int64_t prefetch, const int* snap_off,
+                    const int* snap_pos, const int* snap_slot, float* snap_state, cudaStream_t stream) {
   if (num_seqs <= 0 || H <= 0 || HV <= 0 || HV % H != 0 || K <= 0 || V <= 0) return err(cudaErrorInvalidValue);
   if (bt != 64) return err(cudaErrorInvalidValue);
   constexpr int BT = 64;
@@ -1428,7 +1468,8 @@ static int ho_fused(const void* qn, const float* gc, const bf16* aq, const bf16*
     if (const int rc = set_smem(reinterpret_cast<const void*>(&ho_mma_kernel<BT, BVV, KK, PF>), smem)) return rc; \
     ho_mma_kernel<BT, BVV, KK, PF><<<grid, kHoWarps * 32, smem, stream>>>(                                        \
         static_cast<const bf16*>(qn), gc, aq, u, w, kg, static_cast<bf16*>(out), static_cast<float*>(state),      \
-        cu_seqlens, cu_nt, chunk_off, state_indices, state_stride_tok, (int)H, (int)HV, (int)V, group);           \
+        cu_seqlens, cu_nt, chunk_off, state_indices, state_stride_tok, (int)H, (int)HV, (int)V, group, snap_off,  \
+        snap_pos, snap_slot, snap_state);                                                                         \
   }
 #define LAUNCH_HO_MMA(BVV, KK) \
   { if (prefetch) LAUNCH_HO_MMA1(BVV, KK, 1) else LAUNCH_HO_MMA1(BVV, KK, 0) }
@@ -1451,7 +1492,8 @@ static int ho_fused(const void* qn, const float* gc, const bf16* aq, const bf16*
     if (const int rc = set_smem(reinterpret_cast<const void*>(&ho_kernel<BT, BV, KK>), smem)) return rc;  \
     ho_kernel<BT, BV, KK><<<grid, 256, smem, stream>>>(                                                   \
         static_cast<const bf16*>(qn), gc, aq, u, w, kg, static_cast<bf16*>(out), static_cast<float*>(state), \
-        cu_seqlens, cu_nt, chunk_off, state_indices, state_stride_tok, (int)H, (int)HV, (int)V, group);   \
+        cu_seqlens, cu_nt, chunk_off, state_indices, state_stride_tok, (int)H, (int)HV, (int)V, group,    \
+        snap_off, snap_pos, snap_slot, snap_state);                                                        \
   }
   if (K == 128) {
     LAUNCH_HO(128)
@@ -1471,7 +1513,8 @@ static int ho_split(const void* qn, const float* gc, const bf16* aq, const bf16*
                     bf16* h16, bf16* v16, void* out, void* state, const int* cu_seqlens, const int* cu_nt,
                     const int* chunk_off, const int* chunk_tab, const int* state_indices, int64_t state_stride_tok,
                     int64_t num_seqs, int64_t num_chunks, int64_t H, int64_t HV, int64_t K, int64_t V, int64_t bt,
-                    int64_t ho_bv, int64_t prefetch, int64_t opass_vt, cudaStream_t stream) {
+                    int64_t ho_bv, int64_t prefetch, int64_t opass_vt, const int* snap_off, const int* snap_pos,
+                    const int* snap_slot, float* snap_state, cudaStream_t stream) {
   if (num_seqs <= 0 || H <= 0 || HV <= 0 || HV % H != 0 || K <= 0 || V <= 0) return err(cudaErrorInvalidValue);
   if (bt != 64 || !(ho_bv == 16 || ho_bv == 32) || V % ho_bv != 0) return err(cudaErrorInvalidValue);
   constexpr int BT = 64;
@@ -1484,7 +1527,7 @@ static int ho_split(const void* qn, const float* gc, const bf16* aq, const bf16*
     if (const int rc = set_smem(reinterpret_cast<const void*>(&ho_hpass_kernel<BT, BVV, KK, PF>), smem)) return rc; \
     ho_hpass_kernel<BT, BVV, KK, PF><<<grid, kHoWarps * 32, smem, stream>>>(                                      \
         gc, u, w, kg, h16, v16, static_cast<float*>(state), cu_seqlens, cu_nt, chunk_off, state_indices,          \
-        state_stride_tok, (int)HV, (int)V);                                                                       \
+        state_stride_tok, (int)HV, (int)V, snap_off, snap_pos, snap_slot, snap_state);                            \
   }
 #define LAUNCH_HP(BVV, KK) \
   { if (prefetch) LAUNCH_HP1(BVV, KK, 1) else LAUNCH_HP1(BVV, KK, 0) }
@@ -1524,15 +1567,18 @@ int gdn_chunk_ho(const void* qn, const float* gc, const void* aq, const void* u,
                  int64_t K, int64_t V, int64_t bt, int64_t ho_bv, cudaStream_t stream) {
   return ho_fused(qn, gc, static_cast<const bf16*>(aq), static_cast<const bf16*>(u), static_cast<const bf16*>(w),
                   static_cast<const bf16*>(kg), out, state, cu_seqlens, cu_nt, chunk_off, state_indices, state_stride_tok,
-                  num_seqs, H, HV, K, V, bt, ho_bv, 0, stream);
+                  num_seqs, H, HV, K, V, bt, ho_bv, 0, nullptr, nullptr, nullptr, nullptr, stream);
 }
 
 // r9：prefetch = 寄存器预取（0/1）；split ≠ 0 走 h-pass + o-pass 两段（第 2 轮，h16 / v16 为中间缓冲），值 > 1 即 o-pass 的 V 分片 VT。
-int gdn_chunk_ho_v2(const void* qn, const float* gc, const void* aq_v, const void* u_v, const void* w_v, const void* kg_v,
+// r8b：snap_off == nullptr → 无快照；否则 snap_state 与 state 同布局（槽 stride = state_stride_tok），见 snap_target。
+// r10：aq / u / w / kg 为 bf16（入口收 void*，此处 cast）。
+int gdn_chunk_ho_v3(const void* qn, const float* gc, const void* aq_v, const void* u_v, const void* w_v, const void* kg_v,
                     void* h16, void* v16, void* out, void* state, const int* cu_seqlens, const int* cu_nt,
                     const int* chunk_off, const int* chunk_tab, const int* state_indices, int64_t state_stride_tok,
                     int64_t num_seqs, int64_t num_chunks, int64_t H, int64_t HV, int64_t K, int64_t V, int64_t bt,
-                    int64_t ho_bv, int64_t prefetch, int64_t split, cudaStream_t stream) {
+                    int64_t ho_bv, int64_t prefetch, int64_t split, const int* snap_off, const int* snap_pos,
+                    const int* snap_slot, void* snap_state, cudaStream_t stream) {
   const bf16 *aq = static_cast<const bf16*>(aq_v), *u = static_cast<const bf16*>(u_v), *w = static_cast<const bf16*>(w_v),
              *kg = static_cast<const bf16*>(kg_v);
   if (split != 0) {
@@ -1541,10 +1587,22 @@ int gdn_chunk_ho_v2(const void* qn, const float* gc, const void* aq_v, const voi
     const int64_t vt = split > 1 ? split : (V <= 64 ? V : 64);
     return ho_split(qn, gc, aq, u, w, kg, static_cast<bf16*>(h16), static_cast<bf16*>(v16), out, state, cu_seqlens,
                     cu_nt, chunk_off, chunk_tab, state_indices, state_stride_tok, num_seqs, num_chunks, H, HV, K, V,
-                    bt, ho_bv, prefetch, vt, stream);
+                    bt, ho_bv, prefetch, vt, snap_off, snap_pos, snap_slot, static_cast<float*>(snap_state), stream);
   }
   return ho_fused(qn, gc, aq, u, w, kg, out, state, cu_seqlens, cu_nt, chunk_off, state_indices, state_stride_tok,
-                  num_seqs, H, HV, K, V, bt, ho_bv, prefetch, stream);
+                  num_seqs, H, HV, K, V, bt, ho_bv, prefetch, snap_off, snap_pos, snap_slot,
+                  static_cast<float*>(snap_state), stream);
+}
+
+// 旧入口（无快照）：转 v3。
+int gdn_chunk_ho_v2(const void* qn, const float* gc, const void* aq, const void* u, const void* w, const void* kg,
+                    void* h16, void* v16, void* out, void* state, const int* cu_seqlens, const int* cu_nt,
+                    const int* chunk_off, const int* chunk_tab, const int* state_indices, int64_t state_stride_tok,
+                    int64_t num_seqs, int64_t num_chunks, int64_t H, int64_t HV, int64_t K, int64_t V, int64_t bt,
+                    int64_t ho_bv, int64_t prefetch, int64_t split, cudaStream_t stream) {
+  return gdn_chunk_ho_v3(qn, gc, aq, u, w, kg, h16, v16, out, state, cu_seqlens, cu_nt, chunk_off, chunk_tab,
+                         state_indices, state_stride_tok, num_seqs, num_chunks, H, HV, K, V, bt, ho_bv, prefetch, split,
+                         nullptr, nullptr, nullptr, nullptr, stream);
 }
 
 }  // extern "C"

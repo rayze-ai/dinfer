@@ -369,15 +369,27 @@ impl Qwen35Executor {
             self.eager_steps += 1;
         }
         if !plan.recurrent_snapshot.is_empty() {
-            let mut saves: Vec<(usize, usize)> = Vec::new();
-            for &(rid, snap) in &plan.recurrent_snapshot {
-                if let Some(i) = req_ids.iter().position(|r| *r == rid) {
-                    saves.push((state_idx[i] as usize, snap as usize));
+            if self.kernel_snapshot_path(plan, t, n) {
+                // r8b：已由 chunk prefill kernel 在 chunk 边界写出（conv 在短卷积前、rec 在 ho 内），这里只计数
+                self.snapshot_saves += plan.recurrent_snapshot.len() as u64;
+            } else {
+                // 回退（GDN_PREFILL=recurrent / 本步没走 chunk 路径）：只能保存步末状态 → 位置必须 == 段末
+                let mut saves: Vec<(usize, usize)> = Vec::new();
+                for &(rid, pos, snap) in &plan.recurrent_snapshot {
+                    if let Some(i) = req_ids.iter().position(|r| *r == rid) {
+                        let p0 = plan.cu_seqlens[i] as usize;
+                        let end = plan.positions[p0] as u32 + plan.num_tokens[i];
+                        anyhow::ensure!(
+                            pos == end,
+                            "qwen35: 快照位置 {pos} 在请求 {rid} 步内（段末 {end}）但本步未走 chunk prefill（GDN_PREFILL=recurrent？），步内快照只有 chunk kernel 能写"
+                        );
+                        saves.push((state_idx[i] as usize, snap as usize));
+                    }
                 }
+                // 图外、同流：排在本步全部 kernel（图重放或 eager）之后
+                self.model.save_snapshots(&self.stream, &saves)?;
+                self.snapshot_saves += saves.len() as u64;
             }
-            // 图外、同流：排在本步全部 kernel（图重放或 eager）之后
-            self.model.save_snapshots(&self.stream, &saves)?;
-            self.snapshot_saves += saves.len() as u64;
         }
         self.last_rows = nrows;
         self.steps += 1;
@@ -395,6 +407,11 @@ impl Qwen35Executor {
 
     /// 把 plan 写进固定地址缓冲；batch 维补到 `nb`（padding 行：token 0、pos 0、slot=-1 不写 KV、seq_len=1、
     /// block 0、GDN slot = 废纸篓）。非图路径 `nb == n`。
+    /// r8b：本步的递归快照是否由 chunk prefill kernel 在边界写出（与 `forward_device` 选 chunk 路径的条件一致）。
+    fn kernel_snapshot_path(&self, plan: &BatchPlan, t: usize, n: usize) -> bool {
+        !plan.recurrent_snapshot.is_empty() && t > n && self.gdn_chunk_enabled
+    }
+
     fn upload_plan(&mut self, plan: &BatchPlan, state_idx: &[i32], has_init: &[i32], nb: usize) -> Result<()> {
         let s = &self.stream;
         let (_tt, nb, _nrows) = self.buf.plan.upload(s, &mut self.buf.up, plan, nb)?;
@@ -421,6 +438,12 @@ impl Qwen35Executor {
         } else {
             None
         };
+        // r8b：快照表（已随 plan 上传到 PlanBuffers）交给 GDN 层，kernel 在 chunk 边界写快照槽
+        let gdn_snapshot = if gdn_chunk.is_some() && self.buf.plan.snap_count > 0 {
+            Some(crate::gdn::GdnSnapshotMeta { off: &self.buf.plan.snap_off, pos: &self.buf.plan.snap_pos, slot: &self.buf.plan.snap_slot })
+        } else {
+            None
+        };
         let meta = StepMeta {
             mode: plan.mode,
             cu_seqlens: &self.buf.plan.cu,
@@ -432,6 +455,7 @@ impl Qwen35Executor {
             max_blocks: self.buf.plan.max_blocks,
             max_seqlen,
             gdn_chunk: gdn_chunk.as_ref(),
+            gdn_snapshot,
         };
         let f = Forward {
             input_ids: &self.buf.plan.ids,

@@ -607,6 +607,51 @@ int gdn_conv1d_prefill(const void* x, const void* w, void* out, void* conv_state
   return last_err();
 }
 
+// r8b（design §15.7）：短卷积状态的边界快照。对序列 seq 的每个快照条目 j（snap_pos[j] = 相对段首的 token 偏移 p），
+// 把"算到 p 时的 conv 状态"= 原始输入行 [p-(W-1), p) 转置写到 snap_state[snap_slot[j]][d][·]；p < W-1 的几行从该序列
+// 本步**进入时**的 conv_state（has_initial 为 0 时视为 0）补。要在 conv1d_prefill 覆盖活槽之前调用。
+// grid (num_seqs, dim_blocks)，每线程一个通道 d；每序列条目数很小（≤ 本步 token / 粒度）。
+__global__ void conv_snapshot_kernel(const bf16* __restrict__ x, const bf16* __restrict__ conv_state,
+                                     bf16* __restrict__ snap_state, const int* __restrict__ cu_seqlens,
+                                     const int* __restrict__ state_indices, const int* __restrict__ has_initial,
+                                     const int* __restrict__ snap_off, const int* __restrict__ snap_pos,
+                                     const int* __restrict__ snap_slot, int dim, int state_len, long x_stride) {
+  const int seq = blockIdx.x;
+  const int d = blockIdx.y * blockDim.x + threadIdx.x;
+  if (d >= dim) return;
+  const int j0 = snap_off[seq], j1 = snap_off[seq + 1];
+  if (j0 >= j1) return;
+  const int slot = state_indices ? state_indices[seq] : seq;
+  const int bos = cu_seqlens[seq];
+  const bool init = slot >= 0 && (!has_initial || has_initial[seq]);
+  const bf16* st = init ? conv_state + ((long)slot * dim + d) * state_len : nullptr;
+  for (int j = j0; j < j1; ++j) {
+    const int p = snap_pos[j];
+    bf16* dst = snap_state + ((long)snap_slot[j] * dim + d) * state_len;
+    for (int k = 0; k < state_len; ++k) {
+      const int rel = p - state_len + k;  // 该状态列对应的相对 token 下标
+      bf16 v;
+      if (rel >= 0) v = x[((long)(bos + rel)) * x_stride + d];
+      else if (st) v = st[k + (state_len - p)];  // 入口状态里对应的更旧列：入口列 q 对应 rel = q - state_len
+      else v = to_bf16(0.f);
+      dst[k] = v;
+    }
+  }
+}
+
+extern "C" int gdn_conv_snapshot(const void* x, const void* conv_state, void* snap_state, const int* cu_seqlens,
+                                 const int* state_indices, const int* has_initial, const int* snap_off,
+                                 const int* snap_pos, const int* snap_slot, int64_t num_seqs, int64_t dim,
+                                 int64_t state_len, int64_t x_stride, cudaStream_t stream) {
+  if (num_seqs <= 0 || dim <= 0 || state_len <= 0) return 0;
+  const int per_block = 256;
+  dim3 grid((unsigned)num_seqs, (unsigned)((dim + per_block - 1) / per_block));
+  conv_snapshot_kernel<<<grid, per_block, 0, stream>>>((const bf16*)x, (const bf16*)conv_state, (bf16*)snap_state,
+                                                       cu_seqlens, state_indices, has_initial, snap_off, snap_pos,
+                                                       snap_slot, (int)dim, (int)state_len, (long)x_stride);
+  return last_err();
+}
+
 int gdn_conv1d_update(const void* x, const void* w, void* out, void* conv_state,
                       const int* state_indices, int64_t batch, int64_t dim, int64_t width,
                       int64_t state_len, int act, int64_t x_stride, cudaStream_t stream) {

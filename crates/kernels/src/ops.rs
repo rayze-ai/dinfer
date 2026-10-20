@@ -4009,23 +4009,144 @@ pub fn gdn_chunk_ho(
     k_dim: usize,
     v_dim: usize,
 ) -> Result<()> {
+    gdn_chunk_ho_snap(stream, cu_seqlens, plan, sc, out, state, state_indices, tokens, heads_k, heads_v, k_dim, v_dim, None)
+}
+
+/// 递归状态快照表（design §15.7 r8b）：序列 i 的条目在 `pos / slot[off[i]..off[i+1])`，`pos` = 相对该序列段首的
+/// token 偏移（必须落在 chunk 边界：是 BT 的倍数或 == 序列长度），kernel 在该 chunk 末把状态多写一份到 `state` 的 `slot` 槽。
+/// `state` 与活槽状态同布局（每槽 stride 相同）。
+pub struct GdnSnapshot<'a> {
+    pub off: &'a CudaSlice<i32>,
+    pub pos: &'a CudaSlice<i32>,
+    pub slot: &'a CudaSlice<i32>,
+    pub state: &'a mut CudaSlice<f32>,
+}
+
+/// `gdn_chunk_ho` + 可选的边界快照（r8b）。实现选择同 `gdn_chunk_ho`（ArchProfile / 环境变量）。
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_chunk_ho_snap(
+    stream: &Stream,
+    cu_seqlens: &CudaSlice<i32>,
+    plan: &KdaChunkPlan,
+    sc: &GdnChunkScratch,
+    out: &mut CudaSlice<bf16>,
+    state: &mut CudaSlice<f32>,
+    state_indices: Option<&CudaSlice<i32>>,
+    tokens: usize,
+    heads_k: usize,
+    heads_v: usize,
+    k_dim: usize,
+    v_dim: usize,
+    snap: Option<GdnSnapshot<'_>>,
+) -> Result<()> {
     let bv = gdn_chunk_ho_bv(stream, plan.num_seqs * heads_v, k_dim, v_dim);
     let pf = gdn_chunk_ho_prefetch(stream, bv);
     let split = gdn_chunk_ho_split(stream, bv, plan.num_seqs, plan.num_chunks, heads_v, k_dim, v_dim);
-    gdn_chunk_ho_with(
-        stream,
-        cu_seqlens,
-        plan,
-        sc,
-        out,
-        state,
-        state_indices,
-        tokens,
-        heads_k,
-        heads_v,
-        k_dim,
-        v_dim,
-        GdnChunkHo { bv, prefetch: pf, split },
+    let how = GdnChunkHo { bv, prefetch: pf, split };
+    let per_slot = heads_v * v_dim * k_dim;
+    ensure!(state.len() >= per_slot, "gdn_chunk_ho: state");
+    ensure!(out.len() >= tokens * heads_v * v_dim, "gdn_chunk_ho: out 容量");
+    ensure!(sc.fits(tokens, plan.num_chunks), "gdn_chunk_ho: scratch 容量");
+    let psi = state_indices.map_or(std::ptr::null(), |s| stream.ptr(s) as *const i32);
+    let (so, sp, ss, sst) = match snap {
+        Some(sn) => {
+            ensure!(sn.off.len() >= plan.num_seqs + 1, "gdn_chunk_ho: snap_off 长度");
+            ensure!(sn.state.len() >= per_slot, "gdn_chunk_ho: snap_state");
+            (
+                stream.ptr(sn.off) as *const i32,
+                stream.ptr(sn.pos) as *const i32,
+                stream.ptr(sn.slot) as *const i32,
+                stream.ptr_mut(sn.state) as *mut c_void,
+            )
+        }
+        None => (std::ptr::null(), std::ptr::null(), std::ptr::null(), std::ptr::null_mut()),
+    };
+    // SAFETY: 容量已校验；slot / 快照槽编号由调度器保证在各自槽数内。
+    check(
+        unsafe {
+            ffi::gdn_chunk_ho_v3(
+                stream.ptr(&sc.qn) as *const c_void,
+                stream.ptr(&sc.gc) as *const f32,
+                stream.ptr(&sc.aq) as *const f32,
+                stream.ptr(&sc.u) as *const f32,
+                stream.ptr(&sc.w) as *const f32,
+                stream.ptr(&sc.kg) as *const f32,
+                stream.ptr(&sc.h16) as *mut c_void,
+                stream.ptr(&sc.v16) as *mut c_void,
+                stream.ptr_mut(out) as *mut c_void,
+                stream.ptr_mut(state) as *mut c_void,
+                stream.ptr(cu_seqlens) as *const i32,
+                stream.ptr(&plan.cu_nt) as *const i32,
+                stream.ptr(&plan.chunk_off) as *const i32,
+                stream.ptr(&plan.chunk_tab) as *const i32,
+                psi,
+                per_slot as i64,
+                plan.num_seqs as i64,
+                plan.num_chunks as i64,
+                heads_k as i64,
+                heads_v as i64,
+                k_dim as i64,
+                v_dim as i64,
+                plan.bt as i64,
+                how.bv as i64,
+                (how.bv != 0 && how.prefetch) as i64,
+                if how.bv != 0 && how.split { crate::arch::ArchProfile::gdn_chunk_opass_vt(v_dim) as i64 } else { 0 },
+                so,
+                sp,
+                ss,
+                sst,
+                stream.raw() as _,
+            )
+        },
+        "gdn_chunk_ho_v3",
+    )
+}
+
+/// 短卷积状态的边界快照（r8b）：对每个快照条目把"算到该位置时"的 conv 状态（最后 W-1 个原始输入行，不足从入口状态补）
+/// 转置写到 `snap_state` 的槽。必须在 `gdn_conv1d_prefill_strided` 覆盖活槽之前调用。`x` 行距 `x_stride`。
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_conv_snapshot_strided(
+    stream: &Stream,
+    x: &CudaView<'_, bf16>,
+    conv_state: &CudaSlice<bf16>,
+    snap_state: &mut CudaSlice<bf16>,
+    cu_seqlens: &CudaSlice<i32>,
+    state_indices: Option<&CudaSlice<i32>>,
+    has_initial: Option<&CudaSlice<i32>>,
+    snap_off: &CudaSlice<i32>,
+    snap_pos: &CudaSlice<i32>,
+    snap_slot: &CudaSlice<i32>,
+    num_seqs: usize,
+    dim: usize,
+    x_stride: usize,
+    state_len: usize,
+) -> Result<()> {
+    ensure!(x_stride >= dim, "gdn_conv_snapshot: x_stride {x_stride} < dim {dim}");
+    ensure!(cu_seqlens.len() >= num_seqs + 1 && snap_off.len() >= num_seqs + 1, "gdn_conv_snapshot: cu_seqlens / snap_off");
+    ensure!(conv_state.len() >= dim * state_len && snap_state.len() >= dim * state_len, "gdn_conv_snapshot: state");
+    let psi = state_indices.map_or(std::ptr::null(), |s| stream.ptr(s) as *const i32);
+    let phi = has_initial.map_or(std::ptr::null(), |s| stream.ptr(s) as *const i32);
+    // SAFETY: 容量已校验；位置 / 槽号由调度侧保证。
+    check(
+        unsafe {
+            ffi::gdn_conv_snapshot(
+                stream.ptr(x) as *const c_void,
+                stream.ptr(conv_state) as *const c_void,
+                stream.ptr_mut(snap_state) as *mut c_void,
+                stream.ptr(cu_seqlens) as *const i32,
+                psi,
+                phi,
+                stream.ptr(snap_off) as *const i32,
+                stream.ptr(snap_pos) as *const i32,
+                stream.ptr(snap_slot) as *const i32,
+                num_seqs as i64,
+                dim as i64,
+                state_len as i64,
+                x_stride as i64,
+                stream.raw() as ffi::cudaStream_t,
+            )
+        },
+        "gdn_conv_snapshot",
     )
 }
 
