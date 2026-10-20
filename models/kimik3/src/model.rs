@@ -8,8 +8,8 @@
 //! （与 torch 参考里 `num_hidden_layers = N` 的截断模型同口径）。
 //! 装载按层打开分片（`weights::shards_for_layer`，每层恰好一片 16 GB），顶层张量在 `shards_for_top`。
 use crate::config::KimiLinearConfig;
-use crate::layer::{AttnRes, KimiDecoderLayer, LayerBudget, StepMeta};
-use crate::weights::{shards_for_layer, shards_for_top, Table, LM_HEAD};
+use crate::layer::{Attn, AttnRes, KimiDecoderLayer, LayerBudget, StepMeta};
+use crate::weights::{shards_for_layer, shards_for_top, KdaShapes, Table, LM_HEAD};
 use anyhow::{ensure, Result};
 use dinfer_kernels::ops as k;
 use dinfer_layers::{bf16, Gemm, Linear, RmsNorm, Stream, Tensor, WeightSource};
@@ -24,9 +24,12 @@ pub struct KimiK3Model {
     hidden: usize,
     vocab: usize,
     max_tokens: usize,
+    /// `normed` / `logits_bf16` 的行数（executor 只对采样行取 logits；`load` 时 = max_tokens）。
+    max_rows: usize,
+    kda_shapes: KdaShapes,
     // 激活
-    x: Tensor<bf16>,  // 当前 prefix_sum（层输入）
-    y: Tensor<bf16>,  // 层输出
+    x: Tensor<bf16>,           // 当前 prefix_sum（层输入）
+    y: Tensor<bf16>,           // 层输出
     blocks: Vec<Tensor<bf16>>, // 块残差（写块层的输入拷贝），容量 max_blocks
     n_blocks: usize,
     res_out: Tensor<bf16>,
@@ -38,12 +41,39 @@ pub struct KimiK3Model {
 }
 
 impl KimiK3Model {
-    /// 装载前 `n_layers` 层 + 顶层张量。`budget.max_tokens` 同时决定 logits 缓冲行数。
-    pub fn load(stream: &Stream, dir: &Path, cfg: &KimiLinearConfig, n_layers: usize, budget: LayerBudget) -> Result<Self> {
+    /// 装载前 `n_layers` 层 + 顶层张量。`budget.max_tokens` 同时决定 logits 缓冲行数（对拍用：每行都要 logits）。
+    pub fn load(
+        stream: &Stream,
+        dir: &Path,
+        cfg: &KimiLinearConfig,
+        n_layers: usize,
+        budget: LayerBudget,
+    ) -> Result<Self> {
+        Self::load_with_rows(stream, dir, cfg, n_layers, budget, budget.max_tokens)
+    }
+
+    /// 同 `load`，但 logits 缓冲只留 `max_rows` 行（服务用：每请求只采样 1 行，`forward_rows` 只对这些行做 norm + lm_head；
+    /// 全 token 行的 bf16 logits 在 16384 token 预算下是 5.3 GB，f32 再翻倍，没必要）。
+    pub fn load_with_rows(
+        stream: &Stream,
+        dir: &Path,
+        cfg: &KimiLinearConfig,
+        n_layers: usize,
+        budget: LayerBudget,
+        max_rows: usize,
+    ) -> Result<Self> {
         ensure!(n_layers >= 1 && n_layers <= cfg.num_hidden_layers as usize, "n_layers {n_layers}");
+        if n_layers < cfg.num_hidden_layers as usize {
+            tracing::warn!(
+                n_layers,
+                total = cfg.num_hidden_layers,
+                "kimik3: TRUNCATED MODEL（只装前 {n_layers} 层 + 顶层；输出无语义，只用于流程冒烟 / 对拍）"
+            );
+        }
         let hidden = cfg.hidden_size as usize;
         let vocab = cfg.vocab_size as usize;
         let tm = budget.max_tokens;
+        let max_rows = max_rows.clamp(1, tm);
         let max_blocks = match cfg.attn_res_block_size {
             Some(bs) => (cfg.num_hidden_layers as usize).div_ceil(bs as usize),
             None => 0,
@@ -57,7 +87,11 @@ impl KimiK3Model {
         let norm = tt.rmsnorm(stream, &top, "norm.weight", cfg.rms_norm_eps)?;
         let lm_head = Linear::new(top.load_bf16(stream, LM_HEAD)?, None)?;
         ensure!(lm_head.w.shape == [vocab, hidden], "lm_head shape {:?}", lm_head.w.shape);
-        let output_res = if cfg.attn_res_block_size.is_some() { Some(AttnRes::load_output(stream, &top, &tt, cfg, tm, max_blocks)?) } else { None };
+        let output_res = if cfg.attn_res_block_size.is_some() {
+            Some(AttnRes::load_output(stream, &top, &tt, cfg, tm, max_blocks)?)
+        } else {
+            None
+        };
         drop(top);
 
         // 逐层（每层一片，装完即释放 mmap）
@@ -94,13 +128,15 @@ impl KimiK3Model {
             hidden,
             vocab,
             max_tokens: tm,
+            max_rows,
+            kda_shapes: KdaShapes::new(cfg),
             x: z(stream)?,
             y: z(stream)?,
             blocks,
             n_blocks: 0,
             res_out: z(stream)?,
-            normed: z(stream)?,
-            logits_bf16: Tensor::zeros(stream, &[tm, vocab])?,
+            normed: Tensor::zeros(stream, &[max_rows, hidden])?,
+            logits_bf16: Tensor::zeros(stream, &[max_rows, vocab])?,
             trace: false,
             layer_out: Vec::new(),
         })
@@ -109,13 +145,73 @@ impl KimiK3Model {
     pub fn num_layers(&self) -> usize {
         self.layers.len()
     }
+    pub fn max_tokens(&self) -> usize {
+        self.max_tokens
+    }
+    pub fn max_rows(&self) -> usize {
+        self.max_rows
+    }
+    pub fn vocab(&self) -> usize {
+        self.vocab
+    }
+    pub fn kda_shapes(&self) -> &KdaShapes {
+        &self.kda_shapes
+    }
+    /// 全部 KDA 层的状态槽数（装载时 `LayerBudget::num_slots`）；没有 KDA 层时 0。
+    pub fn num_slots(&self) -> usize {
+        self.layers
+            .iter()
+            .find_map(|l| match &l.attn {
+                Attn::Kda(k) => Some(k.state.rec.shape[0]),
+                Attn::Mla(_) => None,
+            })
+            .unwrap_or(0)
+    }
+    /// 清零这些 slot 在**全部 KDA 层**的 conv + 递推状态（新请求 / 抢占重算）。图外、同流有序。
+    pub fn reset_slots(&mut self, stream: &Stream, slots: &[usize]) -> Result<()> {
+        for l in self.layers.iter_mut() {
+            if let Attn::Kda(k) = &mut l.attn {
+                for &s in slots {
+                    k.reset_slot(stream, s)?;
+                }
+            }
+        }
+        Ok(())
+    }
 
-    /// `ids[:t]` → `logits[:t, vocab]`（f32）。`meta` 由调用方按本步 batch 构造（KDA slot / MLA paged 两套都要给）。
-    /// 返回的 `hidden_final`（`self.normed`）是 norm 之后、lm_head 之前的 `[t, hidden]`。
-    pub fn forward(&mut self, stream: &Stream, gemm: &Gemm, t: usize, ids: &Tensor<i32>, meta: &StepMeta<'_>, logits: &mut Tensor<f32>) -> Result<()> {
+    /// `ids[:t]` → `logits[:t, vocab]`（f32）：每个 token 行都出 logits（对拍 / prompt_logprobs 用）。要求 `max_rows ≥ t`。
+    pub fn forward(
+        &mut self,
+        stream: &Stream,
+        gemm: &Gemm,
+        t: usize,
+        ids: &Tensor<i32>,
+        meta: &StepMeta<'_>,
+        logits: &mut Tensor<f32>,
+    ) -> Result<()> {
+        ensure!(t <= self.max_rows, "model::forward: {t} 行 > max_rows {}（用 forward_rows）", self.max_rows);
+        let rows = Tensor::from_vec(stream, (0..t as i32).collect(), &[t])?;
+        self.forward_rows(stream, gemm, t, ids, meta, &rows, t, logits)
+    }
+
+    /// `ids[:t]` → `logits[:nrows, vocab]`（f32），只对 `rows[:nrows]`（hidden 行号）做 norm + lm_head。
+    /// `meta` 由调用方按本步 batch 构造（KDA slot / MLA paged 两套都要给）。`self.normed` 是这些行 norm 之后的 `[nrows, hidden]`。
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_rows(
+        &mut self,
+        stream: &Stream,
+        gemm: &Gemm,
+        t: usize,
+        ids: &Tensor<i32>,
+        meta: &StepMeta<'_>,
+        rows: &Tensor<i32>,
+        nrows: usize,
+        logits: &mut Tensor<f32>,
+    ) -> Result<()> {
         let h = self.hidden;
         ensure!(t <= self.max_tokens, "model: {t} > max_tokens {}", self.max_tokens);
-        ensure!(ids.numel() >= t && logits.numel() >= t * self.vocab, "model: ids / logits");
+        ensure!(nrows <= self.max_rows && rows.numel() >= nrows, "model: {nrows} rows > max_rows {}", self.max_rows);
+        ensure!(ids.numel() >= t && logits.numel() >= nrows * self.vocab, "model: ids / logits");
         let n = t * h;
         k::embedding_bf16_n(stream, &ids.data, &self.embed.data, &mut self.x.data, t, h)?;
         self.n_blocks = 0;
@@ -151,9 +247,18 @@ impl KimiK3Model {
         } else {
             &self.x
         };
-        k::rmsnorm_bf16_n(stream, &final_in.data, &self.norm.w.data, &mut self.normed.data, t, h, self.norm.eps)?;
-        self.lm_head.forward_rows(gemm, &self.normed, &mut self.logits_bf16, t)?;
-        k::bf16_to_f32_n(stream, &self.logits_bf16.data, &mut logits.data, t * self.vocab)
+        k::gather_rmsnorm_bf16(
+            stream,
+            &final_in.data,
+            &rows.data,
+            &self.norm.w.data,
+            &mut self.normed.data,
+            nrows,
+            h,
+            self.norm.eps,
+        )?;
+        self.lm_head.forward_rows(gemm, &self.normed, &mut self.logits_bf16, nrows)?;
+        k::bf16_to_f32_n(stream, &self.logits_bf16.data, &mut logits.data, nrows * self.vocab)
     }
 
     /// 上一步最后一层之后、output_attn_res 之前的 prefix_sum（对拍 HF `hidden_states[-1]`）。
@@ -162,7 +267,11 @@ impl KimiK3Model {
     }
     /// 上一步 `output_attn_res` 的输出（无 AttnRes 时等于 `last_prefix_sum`）。
     pub fn last_res_out(&self) -> &Tensor<bf16> {
-        if self.output_res.is_some() { &self.res_out } else { &self.x }
+        if self.output_res.is_some() {
+            &self.res_out
+        } else {
+            &self.x
+        }
     }
     /// 上一步 norm 之后的隐状态。
     pub fn last_normed(&self) -> &Tensor<bf16> {
