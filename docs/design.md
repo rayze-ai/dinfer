@@ -782,3 +782,23 @@ B300 单 GDN 层 decode，基线 = 现路径 11 kernel + 自调优 GEMM + CUDA g
 | 12 | vLLM | **3.14** (55) | 3.66 | 115 / 167 | 16.3 / 21.9 |
 
 工具可信度：self-check TTFT +1.3 ms（mock 定时器）、TPOT −4 µs；两边服务端自报与客户端同表（见 summary）。**结论：rate 2 持平，rate ≥ 4 全面落后，差距随负载放大（SLO 下最大 req/s：dinfer ≈ 2，vLLM ≥ 12）。**TPOT p99 在 rate 4 就 27 vs 16，是 engine-gap 第 6 轮定位的 decode 步 H2D（31%）+ prefill 步 host 空转（GPU 27%）；TTFT p99 338–931 vs 130–167 同源。prefix cache 命中 dinfer 0（强制关）vs vLLM 7.5%。第 7 轮修 H2D / prefill host 后重跑 `engine_2`。
+
+### 15.7 递归状态按块缓存：GDN / KDA 模型重开 prefix cache（engine-gap 第 8 轮设计，2026-10-20）
+
+**为什么**：引擎口径下（§15.6）多轮负载 prefix-repeat 0.5，vLLM prefix cache 命中把 1024-token prefill 砍掉一半以上，dinfer 在 GDN 模型上强制关（状态不可按块复用，`models/qwen35/src/service.rs`）→ TTFT 与 prefill 步工作量都是 vLLM 的 2×，decode 请求跟着多等。这是 engine_1 里 rate ≥ 4 落后的最大单项。
+
+**vLLM 的做法（`mamba_cache_mode=align`，`v1/core/single_type_kv_cache_manager.py::MambaManager`、`kv_cache_utils.py:734–880`）**：递归层的状态只在"调度 block 对齐"的 token 位置快照一份（`last_state_block_idx`），`find_longest_cache_hit` 按对齐粒度（`cache_hit_alignment_tokens` = 所有 group block_size 的 LCM）截断命中长度；命中后 prefill 从对齐点续算，GDN backend 用 `has_initial_state` + `state_indices` 从命中块读初始状态。K3 实测对齐粒度 1536（页配平），Qwen3.5 应同类。
+
+**成本（Qwen3.5-27B）**：单层快照 = rec `[48,128,128]` f32 3.15 MB + conv 61 KB，48 层 **154 MB/快照**。8192 ctx：block 16 → 512 快照 79 GB/请求（不可行）；block 128 → 9.9 GB；**block 1024 → 8 快照 1.2 GB；1536 → 5 快照 0.8 GB**。KV 池 174 GiB 可以让出 ~20–40 GiB 给状态池（128–256 个快照，多轮负载下够用）。
+
+**dinfer 设计**：
+1. **粒度**：`gdn_snapshot_tokens` = 注意力 block_size 的整数倍，默认 1024（可调；vLLM 用 KV 页配平得出 1536，我们直接配置）。prefix cache 的命中长度向下对齐到该粒度（KV 块 hash 链不变，只是命中截断更粗；K3 同样）。
+2. **状态池**：`GdnState` 加一组"快照槽"（与活请求槽同布局，另一块显存，`StateSlotTable` 式分配 + LRU），键 = 对齐位置处的 KV 块 hash（已有 `kv/hash.rs` 链式 hash，天然带前缀语义）。
+3. **写**：prefill 跑过对齐位置时（chunk kernel 在 `cu_seqlens` 内按 1024 切片本来就有中间状态），把该层递归 + conv 状态 dtod 到快照槽；只在 prefill 步做，decode 不写（decode 跨对齐点时不快照，简化）。
+4. **读**：scheduler `get_computed_blocks` 命中 N 个 KV 块 → 对齐到 `gdn_snapshot_tokens` 得 `resume_pos`；executor 把该请求 `has_init=1`、`state_idx` 指向快照槽（或先 dtod 到活槽）、`positions` 从 `resume_pos` 起；全注意力层照常读已命中 KV 块。chunk kernel 已支持 `has_initial`。
+5. **淘汰**：快照槽 LRU；KV 块被淘汰时对应快照失效（hash 不匹配自然 miss）。
+6. **K3**：KDA 同结构（`kda.rs` 状态 `[96,128,128]` f32 ≈ 6.3 MB/层 × 69 层 = 435 MB/快照），粒度取 1536。
+
+**验收（engine 口径）**：`bench_engine.sh` prefix-repeat 0.5 下 dinfer cache hit ≥ 0.4，rate 4 TTFT p99 从 291 → ≤ 150，goodput ≥ vLLM；闭环四组不退化；golden 加"命中后续算 = 全量 prefill"对拍（同 prompt 两次，第二次 logits 逐位或 ≤ 1 ulp）。
+
+**优先级**：高于 prefill kernel 微调——同样 1024 token，命中省掉的是整段 prefill，kernel 微调省的是 10–20%。
