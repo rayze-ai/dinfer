@@ -811,3 +811,8 @@
 - **根因**：`${DUMP:+KIMIK3_DUMP="$DUMP"} RUST_LOG=info cargo …` 在 DUMP 为空时第一个词展开为空串，bash 把下一个词 `RUST_LOG=info` 当**命令名**而不是赋值前缀。C-3 / C-5 时都设了 DUMP 或没走这条分支，所以当时的 `test result: ok` 是真的。
 - **解法**：`env VAR=… ${DUMP:+…} RUST_LOG=info cargo …`（`env` 后的词全按变量赋值解析，空词无害）；脚本末尾加 `grep -q "^test result: ok" $LOG || rc=1`，让"没跑"显式失败。用户 2026-10-20：修复即可，不单独重跑（装载太久）。
 - **避免**：shell 里条件展开的环境变量前缀一律用 `env`；验证脚本的 exit 必须由"产物存在 / 结果行存在"兜底，不能只信管道 rc。
+
+## 2026-10-20 门禁 bench 六次才跑成：全是环境 / 口径，不是代码
+
+- **现象**：4090 `bench_r9gate` 前五次没出数：① `ps -o args` 抓到 bash 包装进程；② grep 日志抓到脚本模板串（`$R/models … "$@"`）；③④ GPU 0 被别人临时起的 vLLM 占 16–20 GB，KV 块 9900 → 708，首请求 OOM；⑤ 换空卡 GPU 3 仍只 3135 块——我起 serve 用了 `--max-num-batched-tokens 16384`，门禁口径是 2048，qwen3 每层各持激活缓冲随预算线性，14 GB 挤掉 KV。
+- **解法 / 避免**：门禁链写死启动参数（与上一轮门禁完全一致，不从进程 / 日志抓）；serve 起来后读 `num_blocks`，低于基线 10% 直接 abort；4090 是共享机，起测前 `nvidia-smi --query-compute-apps` 看外来进程，GPU 0 被占换 3–7。qwen3 的 per-layer 激活缓冲改全模型一套（qwen35 / kimik3 已修，第三个同款）记 TODO。

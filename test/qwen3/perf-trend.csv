@@ -531,6 +531,26 @@ bench_r8gate,2026-10-20,第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐
 bench_r8gate,2026-10-20,第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐 + 抢占丢 token 修）公共 scheduler/kv 回归门禁,c8-long,ttft_p99_ms,86.039,93.256,0.923,,lower,other,4090,vllm,dinfer,qwen3
 bench_r8gate,2026-10-20,第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐 + 抢占丢 token 修）公共 scheduler/kv 回归门禁,c8-long,tpot_p50_ms,3.679,3.751,0.981,,lower,other,4090,vllm,dinfer,qwen3
 bench_r8gate,2026-10-20,第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐 + 抢占丢 token 修）公共 scheduler/kv 回归门禁,c8-long,failed,0.000,0.000,,,lower,other,4090,vllm,dinfer,qwen3
+bench_r9gate,2026-10-20,第 9 轮 r9 GDN chunk kernel + thread_local + 装载骨架公共件 回归门禁（qwen3 不走 GDN，验公共件；GPU 3，预算 2048）,c1,out_tok_per_s,563.741,445.304,1.266,,higher,other,4090,vllm,dinfer,qwen3
+bench_r9gate,2026-10-20,第 9 轮 r9 GDN chunk kernel + thread_local + 装载骨架公共件 回归门禁（qwen3 不走 GDN，验公共件；GPU 3，预算 2048）,c1,ttft_p50_ms,3.973,18.102,0.219,,lower,other,4090,vllm,dinfer,qwen3
+bench_r9gate,2026-10-20,第 9 轮 r9 GDN chunk kernel + thread_local + 装载骨架公共件 回归门禁（qwen3 不走 GDN，验公共件；GPU 3，预算 2048）,c1,ttft_p99_ms,4.295,20.959,0.205,,lower,other,4090,vllm,dinfer,qwen3
+bench_r9gate,2026-10-20,第 9 轮 r9 GDN chunk kernel + thread_local + 装载骨架公共件 回归门禁（qwen3 不走 GDN，验公共件；GPU 3，预算 2048）,c1,tpot_p50_ms,1.755,2.119,0.828,,lower,other,4090,vllm,dinfer,qwen3
+bench_r9gate,2026-10-20,第 9 轮 r9 GDN chunk kernel + thread_local + 装载骨架公共件 回归门禁（qwen3 不走 GDN，验公共件；GPU 3，预算 2048）,c1,failed,0.000,0.000,,,lower,other,4090,vllm,dinfer,qwen3
+bench_r9gate,2026-10-20,第 9 轮 r9 GDN chunk kernel + thread_local + 装载骨架公共件 回归门禁（qwen3 不走 GDN，验公共件；GPU 3，预算 2048）,c8,out_tok_per_s,3434.623,2885.208,1.190,,higher,other,4090,vllm,dinfer,qwen3
+bench_r9gate,2026-10-20,第 9 轮 r9 GDN chunk kernel + thread_local + 装载骨架公共件 回归门禁（qwen3 不走 GDN，验公共件；GPU 3，预算 2048）,c8,ttft_p50_ms,9.131,35.199,0.259,,lower,other,4090,vllm,dinfer,qwen3
+bench_r9gate,2026-10-20,第 9 轮 r9 GDN chunk kernel + thread_local + 装载骨架公共件 回归门禁（qwen3 不走 GDN，验公共件；GPU 3，预算 2048）,c8,ttft_p99_ms,15.211,37.967,0.401,,lower,other,4090,vllm,dinfer,qwen3
+bench_r9gate,2026-10-20,第 9 轮 r9 GDN chunk kernel + thread_local + 装载骨架公共件 回归门禁（qwen3 不走 GDN，验公共件；GPU 3，预算 2048）,c8,tpot_p50_ms,2.253,2.541,0.887,,lower,other,4090,vllm,dinfer,qwen3
+bench_r9gate,2026-10-20,第 9 轮 r9 GDN chunk kernel + thread_local + 装载骨架公共件 回归门禁（qwen3 不走 GDN，验公共件；GPU 3，预算 2048）,c8,failed,0.000,0.000,,,lower,other,4090,vllm,dinfer,qwen3
+bench_r9gate,2026-10-20,第 9 轮 r9 GDN chunk kernel + thread_local + 装载骨架公共件 回归门禁（qwen3 不走 GDN，验公共件；GPU 3，预算 2048）,c32,out_tok_per_s,9296.349,8243.118,1.128,,higher,other,4090,vllm,dinfer,qwen3
+bench_r9gate,2026-10-20,第 9 轮 r9 GDN chunk kernel + thread_local + 装载骨架公共件 回归门禁（qwen3 不走 GDN，验公共件；GPU 3，预算 2048）,c32,ttft_p50_ms,23.194,75.501,0.307,,lower,other,4090,vllm,dinfer,qwen3
+bench_r9gate,2026-10-20,第 9 轮 r9 GDN chunk kernel + thread_local + 装载骨架公共件 回归门禁（qwen3 不走 GDN，验公共件；GPU 3，预算 2048）,c32,ttft_p99_ms,38.821,81.895,0.474,,lower,other,4090,vllm,dinfer,qwen3
+bench_r9gate,2026-10-20,第 9 轮 r9 GDN chunk kernel + thread_local + 装载骨架公共件 回归门禁（qwen3 不走 GDN，验公共件；GPU 3，预算 2048）,c32,tpot_p50_ms,3.247,3.327,0.976,,lower,other,4090,vllm,dinfer,qwen3
+bench_r9gate,2026-10-20,第 9 轮 r9 GDN chunk kernel + thread_local + 装载骨架公共件 回归门禁（qwen3 不走 GDN，验公共件；GPU 3，预算 2048）,c32,failed,0.000,0.000,,,lower,other,4090,vllm,dinfer,qwen3
+bench_r9gate,2026-10-20,第 9 轮 r9 GDN chunk kernel + thread_local + 装载骨架公共件 回归门禁（qwen3 不走 GDN，验公共件；GPU 3，预算 2048）,c8-long,out_tok_per_s,2011.568,1902.311,1.057,,higher,other,4090,vllm,dinfer,qwen3
+bench_r9gate,2026-10-20,第 9 轮 r9 GDN chunk kernel + thread_local + 装载骨架公共件 回归门禁（qwen3 不走 GDN，验公共件；GPU 3，预算 2048）,c8-long,ttft_p50_ms,39.750,67.499,0.589,,lower,other,4090,vllm,dinfer,qwen3
+bench_r9gate,2026-10-20,第 9 轮 r9 GDN chunk kernel + thread_local + 装载骨架公共件 回归门禁（qwen3 不走 GDN，验公共件；GPU 3，预算 2048）,c8-long,ttft_p99_ms,87.400,97.678,0.895,,lower,other,4090,vllm,dinfer,qwen3
+bench_r9gate,2026-10-20,第 9 轮 r9 GDN chunk kernel + thread_local + 装载骨架公共件 回归门禁（qwen3 不走 GDN，验公共件；GPU 3，预算 2048）,c8-long,tpot_p50_ms,3.679,3.747,0.982,,lower,other,4090,vllm,dinfer,qwen3
+bench_r9gate,2026-10-20,第 9 轮 r9 GDN chunk kernel + thread_local + 装载骨架公共件 回归门禁（qwen3 不走 GDN，验公共件；GPU 3，预算 2048）,c8-long,failed,0.000,0.000,,,lower,other,4090,vllm,dinfer,qwen3
 poisson1,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r8,out_tok_per_s,1065.027,1066.343,0.999,,higher,other,4090,vllm,dinfer_xs1,qwen3
 poisson1,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r8,ttft_p50_ms,15.182,22.622,0.671,,lower,other,4090,vllm,dinfer_xs1,qwen3
 poisson1,2026-10-17,"首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15",r8,ttft_p99_ms,38.981,49.074,0.794,,lower,other,4090,vllm,dinfer_xs1,qwen3

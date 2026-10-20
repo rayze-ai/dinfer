@@ -1,0 +1,1 @@
+第 9 轮 r9 GDN chunk kernel + thread_local + 装载骨架公共件 回归门禁（qwen3 不走 GDN，验公共件；GPU 3，预算 2048）

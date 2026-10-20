@@ -141,6 +141,14 @@
 | | | | c32 | vllm | dinfer | 9424 (+14%) | 22.5 (+69%) | 3.18 (+4%) |
 | bench_r8gate | 2026-10-20 | 第 8 轮 r8（GDN 状态按块缓存 + scheduler 对齐 + 抢占丢 token 修）公共 scheduler/kv 回归门禁 | c8-long | vllm | vllm（基线） | 1906 | 67.5 | 3.75 |
 | | | | c8-long | vllm | dinfer | 2005 (+5%) | 39.0 (+42%) | 3.68 (+2%) |
+| bench_r9gate | 2026-10-20 | 第 9 轮 r9 GDN chunk kernel + thread_local + 装载骨架公共件 回归门禁（qwen3 不走 GDN，验公共件；GPU 3，预算 2048） | c1 | vllm | vllm（基线） | 445 | 18.1 | 2.12 |
+| | | | c1 | vllm | dinfer | 564 (+27%) | 4.0 (+78%) | 1.76 (+17%) |
+| bench_r9gate | 2026-10-20 | 第 9 轮 r9 GDN chunk kernel + thread_local + 装载骨架公共件 回归门禁（qwen3 不走 GDN，验公共件；GPU 3，预算 2048） | c8 | vllm | vllm（基线） | 2885 | 35.2 | 2.54 |
+| | | | c8 | vllm | dinfer | 3435 (+19%) | 9.1 (+74%) | 2.25 (+11%) |
+| bench_r9gate | 2026-10-20 | 第 9 轮 r9 GDN chunk kernel + thread_local + 装载骨架公共件 回归门禁（qwen3 不走 GDN，验公共件；GPU 3，预算 2048） | c32 | vllm | vllm（基线） | 8243 | 75.5 | 3.33 |
+| | | | c32 | vllm | dinfer | 9296 (+13%) | 23.2 (+69%) | 3.25 (+2%) |
+| bench_r9gate | 2026-10-20 | 第 9 轮 r9 GDN chunk kernel + thread_local + 装载骨架公共件 回归门禁（qwen3 不走 GDN，验公共件；GPU 3，预算 2048） | c8-long | vllm | vllm（基线） | 1902 | 67.5 | 3.75 |
+| | | | c8-long | vllm | dinfer | 2012 (+6%) | 39.7 (+41%) | 3.68 (+2%) |
 | poisson1 | 2026-10-17 | 首轮开环泊松：xs1/xs0/vLLM × 8/16/24 req/s，mix 128:0.5,1024:0.35,2048:0.15 | r8 | vllm | vllm（基线） | 1066 | 22.6 | 3.21 |
 | | | | r8 | vllm | dinfer_xs1 | 1065 (-0%) | 15.2 (+33%) | 3.12 (+3%) |
 | | | | r8 | vllm | dinfer_xs0 | 1065 (-0%) | 15.1 (+33%) | 3.17 (+1%) |
