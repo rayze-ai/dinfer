@@ -140,7 +140,9 @@ impl Scheduler {
     #[inline]
     fn cap_to_snapshot_grain(&self, computed: u32, num_new: u32, num_prompt: u32) -> u32 {
         let g = self.p.recurrent_snapshot_tokens;
-        if g == 0 || num_new <= 1 || computed >= num_prompt {
+        // 没有快照池（slots = 0 / `--gdn-snapshot-gib 0`）就没有登记可做，切步只剩代价：6 K 单发 1 → 6 步，
+        // 每步 ~6 ms 固定开销 → TTFT +32 ms（engine-gap 8l）。有池时仍按粒度切（待 r8b：一步跨多对齐点、步内多次登记）。
+        if g == 0 || self.snapshots.is_none() || num_new <= 1 || computed >= num_prompt {
             return num_new;
         }
         let next = (computed / g + 1) * g;
@@ -1003,7 +1005,8 @@ mod tests {
 
     #[test]
     fn snapshot_hit_without_snapshot_recomputes_from_zero() {
-        // 池 0 槽：命中仍按粒度对齐，但没有快照 → 整段重算（KV 命中作废）
+        // 池 0 槽：命中仍按粒度对齐，但没有快照 → 整段重算（KV 命中作废）；且**不切步**（engine-gap 8l：
+        // 无池时切步只剩代价，6 K 单发 1 → 6 步 +32 ms TTFT）
         let mut s = mk_snap(64, 64, 0);
         s.add_request(req_same(1, 150, 1));
         let mro0 = ModelRunnerOutput {
@@ -1019,7 +1022,7 @@ mod tests {
         let o = s.schedule();
         assert_eq!(o.new_reqs[0].num_computed_tokens, 0);
         assert!(o.new_reqs[0].resume_from.is_none());
-        assert_eq!(o.num_scheduled_tokens, vec![(2, 64)], "从 0 起、chunk 仍切在对齐点");
+        assert_eq!(o.num_scheduled_tokens, vec![(2, 150)], "从 0 起、无池不切步，一步算完");
         assert_eq!(s.snapshot_stats().3, 1, "记一次命中无快照");
     }
 
