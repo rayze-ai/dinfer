@@ -46,3 +46,10 @@
 - **怎么用**：改 kernel → 跑四组门禁；改调度 / cache / 抢占 → 跑 `bench_engine.sh`，两边各自最佳配置写进 summary 头；两边同 seed（同到达序列）；先 `bench_engine_vllm_tool.sh` 对账一次（同 rate 同长度 p50/p99 差 < 10%）再信自己的数字。对账 TTFT 用 `ttft_first_chunk_ms`（vLLM 工具把 dinfer 的空 role delta 当首 token → ~5 ms 伪像）。
 - **误读**：goodput ≥ 0.95×名义 rate 判"扛住"会把短跑（每率 96 条）全好的点判掉——收尾长尾压低实际 req/s；用 good/completed ≥ 0.95。
 - 证据：`docs/design.md` §15；`docs/loops/engine-bench.md`；`test/qwen35/2026-10-20/engine_smoke`。
+
+## 8. 引擎层面差距的定位顺序（engine-gap 第 1–4 轮沉淀，2026-10-20）
+1. **先把工具做可信**（§7）：钉核、Rust bench、交叉、对账。前两轮数字因此作废。
+2. **步模式差值**：bench 前后抓 `/metrics` 的 `engine_step_execute_{prefill,decode,mixed}` count/sum 差 → 三种步的次数与均值；再用 nsys 按"步内 kernel 含 prefill / decode 标志"分类（`bootstrap/nsys_mixed.py`）拿 GPU 真实 span。两者对照：metrics 口径含 async 等待，nsys 是 GPU。
+3. **TPOT − 纯 decode 步 span = 步间开销**：engine2 里 23.8 − 13.2 = 10 ms/token，全在混批步（52 × 125 ms 占 decode 墙钟 32%）。
+4. **先看混批步是否比"纯 prefill + 纯 decode"之和还贵**：我们 mixed 125 > 70 + 13，说明混批路径本身有额外成本（eager 不走 graph、两种 attention 都 launch、自调优桶按总 M 命中），这是引擎实现问题，不是负载不可避免。
+5. 读 vLLM 源码核机制时要看**默认路径**：`throttle_prefills` 只在 DP 子类生效，单卡默认 False——差点把一个不存在的机制当成差距来源。
