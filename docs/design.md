@@ -767,3 +767,18 @@ B300 单 GDN 层 decode，基线 = 现路径 11 kernel + 自调优 GEMM + CUDA g
 - 口径：TTFT 首个带内容 chunk；时间戳在字节到达时打；`ignore_eos` 与否两边一致；两边服务的 SSE 首 chunk 语义一致。
 - 交叉：同一负载用两个独立工具（我们的 `bench` 与 `vllm bench serve`）各测一遍，p50/p99 差 ≤ 10% 才算工具可信。
 - 对账：客户端测的 TTFT/TPOT 与服务端自报（dinfer `/metrics`、vLLM `vllm:*`）同表；dinfer 的 `engine_step_execute_*` 在 async 下含 `finish` 等待，不是 GPU 步时间，报表要注明。
+
+### 15.6 引擎口径首轮正式数字（`engine_1`，2026-10-20 12:0x；Rust bench 钉核 96-127、dinfer 钉 0-31；mix 128/1024/4096 + out mix、prefix-repeat 0.5、allow-eos、SLO TTFT 500 / TPOT 20；`test/qwen35/2026-10-20/engine_1/`）
+
+| rate | 端 | goodput (good/64) | req/s | TTFT p50 / p99 | TPOT p50 / p99 |
+|---|---|---|---|---|---|
+| 2 | dinfer | **1.73** (64) | 1.73 | 85 / 338 | 13.5 / 16.6 |
+| 2 | vLLM | 1.72 (64) | 1.72 | 70 / 425 | 13.0 / 15.4 |
+| 4 | dinfer | 1.92 (49) | 2.50 | 96 / 507 | 16.6 / 27.1 |
+| 4 | vLLM | **2.55** (64) | 2.55 | 71 / 130 | 13.7 / 16.4 |
+| 8 | dinfer | 1.40 (29) | 3.10 | 141 / 550 | 20.4 / 34.0 |
+| 8 | vLLM | **3.06** (59) | 3.32 | 102 / 157 | 15.4 / 21.1 |
+| 12 | dinfer | 0.57 (11) | 3.31 | 466 / 931 | 21.0 / 42.5 |
+| 12 | vLLM | **3.14** (55) | 3.66 | 115 / 167 | 16.3 / 21.9 |
+
+工具可信度：self-check TTFT +1.3 ms（mock 定时器）、TPOT −4 µs；两边服务端自报与客户端同表（见 summary）。**结论：rate 2 持平，rate ≥ 4 全面落后，差距随负载放大（SLO 下最大 req/s：dinfer ≈ 2，vLLM ≥ 12）。**TPOT p99 在 rate 4 就 27 vs 16，是 engine-gap 第 6 轮定位的 decode 步 H2D（31%）+ prefill 步 host 空转（GPU 27%）；TTFT p99 338–931 vs 130–167 同源。prefix cache 命中 dinfer 0（强制关）vs vLLM 7.5%。第 7 轮修 H2D / prefill host 后重跑 `engine_2`。

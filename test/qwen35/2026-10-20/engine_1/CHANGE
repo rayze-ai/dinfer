@@ -1,0 +1,1 @@
+引擎口径首轮：钉核 Rust bench，rate 2/4/8/12，mix 128/1024/4096 + out mix，prefix-repeat 0.5，allow-eos，SLO 500/20
