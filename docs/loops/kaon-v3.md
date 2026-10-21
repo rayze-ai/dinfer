@@ -716,3 +716,25 @@ docker run --rm --entrypoint bash --gpus device=0 \
 
 **下一步**：`ops.rs` / `opset.rs` 包装 → 无权重 RMSNorm（`norm.cu` 的 `w == nullptr`）→
 `models/kaon3/{layer,model}.rs` → 窗口=0 回归与基线逐位一致 → 与 torch 参考对拍窗口=1024。
+
+## 阶段 3 继续（2026-10-21 深夜第二段）
+
+**已完成并编译通过**（`crates/kernels`，CUDA_ARCHS=120）：
+- `ops.rs` / `opset.rs`：`gqa_prefill_win_bf16` / `gqa_paged_win_bf16` 包装；`Attention` trait 加
+  `prefill_win` / `paged_win`，**默认实现直接 `bail!`**（后端不支持时炸掉，而不是静默忽略窗口）。
+- `norm.cu`：权重指针为空 = 无权重 RMSNorm（三个 kernel 全部处理），`ops::rmsnorm_bf16_noweight` +
+  `Norm::rmsnorm_noweight`。
+- `activation.cu`：`gelu_tanh_and_mul_bf16`（Gemma 系 `gelu_pytorch_tanh`；打包输入 `[tokens, 2·inter]`
+  与 silu 同布局），`Act::gelu_tanh_and_mul`。
+- `models/kaon3/src/layer.rs`：`QLinear`（Bf16/Fp8/NvFp4 三态 + `forward` 分派）、`Expert`、`Router`、
+  `Gemma4Layer::load`（7 个 norm、q/k/v/o、逐头 q_norm/k_norm、dense MLP、128 专家、layer_scalar）、
+  `ActBuf`、`Ropes`（两套 proportional/default）。
+  **还差 `Gemma4Layer::forward`**（结构见文件头注释）。
+
+**并行中（子代理）**：把 FP8 / NVFP4 GEMM 从 `models/kaon3/cuda/*.cu` 移植进 `crates/kernels`，
+交付 `Gemm::forward_fp8` / `Gemm::forward_nvfp4`（`layer.rs` 的 `QLinear::forward` 依赖它们）。
+子代理只改 `crates/kernels/**`，不动 `models/kaon3/src/*.rs`。
+
+**下一步**：① 子代理交付后跑 `kaon_gemm_parity`；② 补 `Gemma4Layer::forward`（双 norm 链 + 窗口 attention
++ dense ∥ MoE + layer_scalar）；③ `model.rs`（embed × sqrt(hidden) → 30 层 → final norm → tied lm_head
+→ softcap 30）；④ 窗口=0 回归；⑤ 对拍 torch 参考。
