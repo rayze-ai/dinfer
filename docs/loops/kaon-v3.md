@@ -605,3 +605,29 @@ out = Σ_e  expert_e(x) * w_e * per_expert_scale[e]
 | 部分 rope | `rope_bf16` 已有 `rope_dim ≤ head_dim` | 直接可用（full 层 `partial_rotary_factor=0.25` → rope_dim=128） |
 | attention scale | `scale` 参数已透传 | Gemma4 传 **1.0**（不是 1/sqrt(d)） |
 | q/k/v norm | `qkv_post_bf16` 是 DeepSeek 口径 | 需逐头 RMSNorm（q_norm/k_norm 带权重，v_norm 不带） |
+
+### 阶段 3 细化：滑窗要改的三处 mask（`crates/kernels/cuda/gqa.cu`）
+
+三个 kernel（v5 prefill、v6、v7 paged）结构一致，可见性都是**只有上界**：
+
+```c
+const int hist = seq_len - q_len;
+const int vis_a = hist + row_a, vis_b = hist + row_b;
+const int warp_min_vis = hist + q_base + warp * 16;
+...
+if (key + e > vis_a) sa = -INFINITY;
+```
+
+改成滑窗 = 加**下界** + 跳过窗口前的 tile：
+
+```c
+const int lo_a = vis_a - (window - 1), lo_b = vis_b - (window - 1);   // window<=0 → INT_MIN（全注意力）
+if (key + e > vis_a || key + e < lo_a) sa = -INFINITY;
+```
+
+plus：起始 tile `tile0 = max(0, (warp_min_vis - window + 1) / TILE)`，否则 25/30 层白读
+全部历史 K/V（prefill 复杂度仍是 O(T²)，滑窗的意义就没了）。decode 侧同理从
+`max(0, (seq_len - window) / block_size)` 个 block 起扫。
+
+**注意 v7 的 `pair_min_vis`**：它是成对 query 行的下界，`need_mask` 判定也要按
+`min(vis) - window + 1` 同时判断两端。
