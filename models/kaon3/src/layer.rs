@@ -192,13 +192,21 @@ impl Gemma4Layer {
 
         let dense = format!("{p}.mlp");
         let router_p = format!("{p}.router");
+        // per_expert_scale 每层一份 [E]；读一次，逐专家把该专家的系数折进 down 的全局 scale。
+        let pes = weights::per_expert_scales(src, &p)?;
+        ensure!(pes.len() == cfg.num_experts, "per_expert_scale 长度 {} != 专家数 {}", pes.len(), cfg.num_experts);
         let mut experts = Vec::with_capacity(cfg.num_experts);
         for e in 0..cfg.num_experts {
             let ep = format!("{p}.experts.{e}");
+            let mut down = QLinear::load(stream, src, &format!("{ep}.down_proj.weight"))?;
+            // 折法精确：非线性在 gate/up 之后，down 是线性 → down(x)·s == down_with_global_s(x)
+            if let QLinear::NvFp4 { global, .. } = &mut down {
+                *global *= pes[e];
+            }
             experts.push(Expert {
                 gate: QLinear::load(stream, src, &format!("{ep}.gate_proj.weight"))?,
                 up: QLinear::load(stream, src, &format!("{ep}.up_proj.weight"))?,
-                down: QLinear::load(stream, src, &format!("{ep}.down_proj.weight"))?,
+                down,
             });
         }
 

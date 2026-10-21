@@ -44,7 +44,7 @@ impl QWeight {
     }
 }
 
-fn read_f32_scalar(src: &WeightSource, name: &str) -> Result<f32> {
+pub(crate) fn read_f32_scalar(src: &WeightSource, name: &str) -> Result<f32> {
     let (info, b) = src.bytes(name).with_context(|| format!("缺少标量 {name}"))?;
     ensure!(info.dtype == "F32" && b.len() == 4, "{name}: 期望单个 F32，实际 {} / {} B",
             info.dtype, b.len());
@@ -118,6 +118,13 @@ pub fn load_linear(src: &WeightSource, stream: &Stream, name: &str) -> Result<QW
         }
         other => bail!("{name}: 不支持的 dtype {other}"),
     }
+}
+
+/// 读一层的 `per_expert_scale`（`[E]` BF16，每层一份）。
+pub fn per_expert_scales(src: &WeightSource, layer_prefix: &str) -> Result<Vec<f32>> {
+    let (shape, pes) = src.load_f32_host(&format!("{layer_prefix}.router.per_expert_scale"))?;
+    ensure!(!pes.is_empty(), "{layer_prefix}: per_expert_scale 为空（形状 {shape:?}）");
+    Ok(pes)
 }
 
 fn bytemuck_cast(b: &[u8]) -> &[u16] {
