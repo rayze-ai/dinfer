@@ -112,3 +112,38 @@ prefill 每层 5 个 GEMM（Qwen3.5-27B，hidden=5120）：
 
 vLLM 同条件 nsys profile（GPU 6、:8023、无 prefix cache），与 dinfer 的单次 6K
 请求逐 kernel 对比，定位那 7% 差在哪。
+
+## vLLM prefill 结构（同条件 profile，2026-10-21）
+
+容器 `vllm/vllm-openai:nightly`（0.32.1rc1），GPU 6，`:8023`，`--tensor-parallel-size 1`，
+nsys 以 `--entrypoint` 挂进容器。3 个 6K 随机 prompt。
+
+**窗口定位方法（不再靠猜）**：用 prefill 独有的 `flash_fwd_sm100` kernel 的起止时间框定 ——
+27 个 flash kernel，跨度 47842.7–49203.5 ms，窗口内 313 个 kernel、564.2 ms GPU busy。
+
+| 类别 | 时间 | 占比 | 次数 |
+|---|---|---|---|
+| **GEMM** | **526.1 ms** | **93.2%** | **131** |
+| elementwise | 21.7 ms | 3.8% | 104 |
+| norm | 9.8 ms | 1.7% | 52 |
+| rotary | 6.6 ms | 1.2% | 26 |
+
+**3 个请求只有 131 个 GEMM kernel，平均每个请求 44 个。** 这就是 vLLM 的结构：
+GEMM 极少、极大，几乎全部时间在 GEMM 上，其他都是零头。
+
+## dinfer 侧对应数据（待补）
+
+同窗口方法在 dinfer 上暂时失效：`conv1d_prefill_blocked` 只框出 23.7 ms（conv 阶段），
+`gqa_fa` 系列在 prefill 窗口里不出现（走的是别的 attention 实现）。
+定位 dinfer 的 prefill 窗口仍在做——改用 `GEMM_SHAPE_STATS` 直接按 shape 测，
+绕开窗口划分（窗口我已经错了很多次，不再依赖它）。
+
+## TTFT 三方（同一台机、随机 prompt、无缓存命中）
+
+| 端 | TTFT 中位 |
+|---|---|
+| dinfer | 280 ms |
+| vLLM（宿主机容器，0.26.1） | 262 ms |
+| vLLM（本容器，0.32.1） | **257.5 ms** |
+
+dinfer 慢 8.7%（对 0.32.1）/ 6.9%（对 0.26.1）。
