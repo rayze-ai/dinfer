@@ -426,11 +426,22 @@ impl<O: OpSet> Qwen35Model<O> {
             let n = trace_norm(stream, &self.hidden, &self.hidden, t, h)?;
             tracing::info!(norm = n.0, "qwen35 trace embed");
         }
-        // `LAYER_PROFILE=1`：分层分阶段墙钟计时（诊断 prefill 缺口用；只在 t 大时开，避免 decode 噪声）。
-        let lprof = std::env::var("LAYER_PROFILE").ok().as_deref() == Some("1") && t >= 256;
-        let (mut p_norm, mut p_attn, mut p_mlp, mut p_post) = (0f64, 0f64, 0f64, 0f64);
-        let mut tp0 = std::time::Instant::now();
+        // `LAYER_PROFILE=2`：分层分阶段的 **GPU 时间轴** 计时（CUDA 事件）。
+        // `=1` 是旧版 CPU 入队计时（只反映提交速度，不代表 GPU 做了什么）。
+        // 每层 5 个边界事件，64 层共 325 个；只在 t 大时开，避免 decode 噪声。
+        let lprofile = std::env::var("LAYER_PROFILE").ok();
+        let ev = if lprofile.as_deref() == Some("2") && t >= 256 {
+            Some(stream.new_timing_events(2 + self.layers.len() * 5)?)
+        } else {
+            None
+        };
+        if let Some(e) = &ev {
+            stream.record_timing(&e[0])?;
+        }
         for (li, layer) in self.layers.iter_mut().enumerate() {
+            if let Some(e) = &ev {
+                stream.record_timing(&e[1 + li * 5])?;
+            }
             if pending_mlp {
                 self.ops.norm().fused_add_rmsnorm(
                     stream,
@@ -453,7 +464,9 @@ impl<O: OpSet> Qwen35Model<O> {
                     eps,
                 )?;
             }
-            if lprof { p_norm += tp0.elapsed().as_secs_f64() * 1e3; tp0 = std::time::Instant::now(); }
+            if let Some(e) = &ev {
+                stream.record_timing(&e[2 + li * 5])?;
+            }
             layer.forward(
                 stream,
                 gemm,
@@ -470,7 +483,9 @@ impl<O: OpSet> Qwen35Model<O> {
                 &mut self.act,
                 &mut self.attn_out,
             )?;
-            if lprof { p_attn += tp0.elapsed().as_secs_f64() * 1e3; tp0 = std::time::Instant::now(); }
+            if let Some(e) = &ev {
+                stream.record_timing(&e[3 + li * 5])?;
+            }
             self.ops.norm().fused_add_rmsnorm(
                 stream,
                 &self.attn_out.data,
@@ -481,9 +496,13 @@ impl<O: OpSet> Qwen35Model<O> {
                 h,
                 eps,
             )?;
-            if lprof { p_post += tp0.elapsed().as_secs_f64() * 1e3; tp0 = std::time::Instant::now(); }
+            if let Some(e) = &ev {
+                stream.record_timing(&e[4 + li * 5])?;
+            }
             layer.mlp.forward_with_scratch(stream, gemm, self.ops.act(), t, &self.normed, &mut self.mlp_out, &mut self.act.gate_up, &mut self.act.act)?;
-            if lprof { p_mlp += tp0.elapsed().as_secs_f64() * 1e3; tp0 = std::time::Instant::now(); }
+            if let Some(e) = &ev {
+                stream.record_timing(&e[5 + li * 5])?;
+            }
             pending_mlp = true;
             if trace {
                 // 调试：最后一个 token 的残差（含本层 mlp 输出）范数，与 HF `output_hidden_states` 逐层对拍
@@ -491,9 +510,19 @@ impl<O: OpSet> Qwen35Model<O> {
                 tracing::info!(layer = li, kind = ?layer.kind(), norm = n.0, attn_out = n.1, "qwen35 trace");
             }
         }
-        if lprof {
-            let tot = p_norm + p_attn + p_post + p_mlp;
-            eprintln!("[layer-prof] t={t} layers={} total={tot:.2}ms | norm={p_norm:.1} attn={p_attn:.1} postnorm={p_post:.1} mlp={p_mlp:.1}",
+        if let Some(e) = &ev {
+            stream.record_timing(&e[1])?;
+            stream.synchronize()?;
+            let (mut p_norm, mut p_attn, mut p_post, mut p_mlp) = (0f32, 0f32, 0f32, 0f32);
+            for li in 0..self.layers.len() {
+                let b = 1 + li * 5;
+                p_norm += k::TimingEvent::elapsed_ms(&e[b], &e[b + 1])?;
+                p_attn += k::TimingEvent::elapsed_ms(&e[b + 1], &e[b + 2])?;
+                p_post += k::TimingEvent::elapsed_ms(&e[b + 2], &e[b + 3])?;
+                p_mlp += k::TimingEvent::elapsed_ms(&e[b + 3], &e[b + 4])?;
+            }
+            let tot = k::TimingEvent::elapsed_ms(&e[0], &e[1])?;
+            eprintln!("[gpu-prof] t={t} layers={} total={tot:.2}ms | norm={p_norm:.2} attn={p_attn:.2} postnorm={p_post:.2} mlp={p_mlp:.2}",
                 self.layers.len());
         }
         if pending_mlp {

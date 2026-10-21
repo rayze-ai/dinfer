@@ -151,6 +151,15 @@ impl Stream {
         // SAFETY: 默认 flags（带 timing）；Drop 时 destroy。
         Ok(TimingEvent(result::event::create(sys::CUevent_flags::CU_EVENT_DEFAULT)?))
     }
+    /// 批量创建计时事件（分层分段 profile：每层 5 个边界，64 层 = 325 个）。
+    pub fn new_timing_events(&self, n: usize) -> Result<Vec<TimingEvent>> {
+        let mut v = Vec::with_capacity(n);
+        for _ in 0..n {
+            v.push(self.new_timing_event()?);
+        }
+        Ok(v)
+    }
+
     pub fn record_timing(&self, ev: &TimingEvent) -> Result<()> {
         self.bind_ctx()?;
         // SAFETY: event / stream 都有效。

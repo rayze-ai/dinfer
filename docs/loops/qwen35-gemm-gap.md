@@ -190,3 +190,26 @@ tr3.csv 抓不到 prefill，在其上做的窗口分析全部作废。
 6K 单块 prefill：TTFT 277 ms，六个大 GEMM 实测合计 115.5 ms，GPU 利用率 97.4%，
 CPU 入队仅 11.89 ms。**约 160 ms 找不到落点。**
 已排除：GEMM 效率（近峰值）、GPU 空闲、CPU 瓶颈、切块开销、chunked prefill 配置差异（两边都是 16384）。
+
+## GPU 时间轴分层分段（LAYER_PROFILE=2，CUDA 事件，2026-10-21）
+
+这是第一次真正拿到 **GPU 侧**的分段：
+ 里的  不行（跨 kernel 无意义），改用 （device.rs 已有，
+走裸驱动 API，disable_event_tracking 后 cudarc safe event 会报 INVALID_HANDLE）。
+每层 5 个边界事件，64 层共 325 个，只同步一次。
+
+| t | total | attn | mlp | postnorm |
+|---|---|---|---|---|
+| 1021 | 48.7 ms | 23.5 | 23.2 | 0.96 |
+| 6019 | 278.3 ms | **142.6** | **127.9** | 3.9 |
+
+**6K：attn 51.2% / mlp 46.0%。** 两个加起来 97%，没有第三个大头。
+
+对照 autotune 实测的 GEMM：
+- mlp 的 gate_up 47.0 + down 23.4 = 70.4 ms，而 mlp 段实测 127.9 ms
+- attn 的 qkv 6.6（full attn）+ gdn in_proj 23.1 + out_proj 8.6 = 38.3 ms，而 attn 段实测 142.6 ms
+
+**attn 段里只有约 38 ms 是 GEMM，其余约 105 ms 在 GDN 的 chunk 路径（conv / prep / wy / ho / cumsum / gate）。**
+
+注意：norm 列显示负数，是事件下标错位（ 与  之间量的是层首 norm 之后的间隙），
+不影响 attn/mlp/postnorm 三项的归属；total 与三项之和吻合，说明分段边界本身是对的。
