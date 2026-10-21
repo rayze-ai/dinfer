@@ -43,6 +43,9 @@
 
 - K3 挂起（TODO 五条在 `docs/loops/k3-serve.md` 末行）；Qwen3-0.6B Q1–Q5 完成；GLM P0–P6 通过、真权重挂起。
 - 页面 `test/index.html`（perf / engine / probe 三页签）。
+- **知识库欠账**：`docs/knowledge/perf-method.md` 126 行（上限 120），且章节编号有两组重复的
+  7/8/9（2026-10-20 与 2026-10-21 各写了一遍）。CLAUDE.md 引用了「§7」，重排编号会打断指针，
+  下次整理时先确认所有 `§N` 引用再合并。
 
 ## 2026-10-21（Kaon-V3 / 5090）
 
