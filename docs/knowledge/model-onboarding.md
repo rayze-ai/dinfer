@@ -32,7 +32,10 @@
 读新模型 `config.json` 时，下面四项**必须去 vLLM 源码确认语义**，凭名字猜一定错：
 1. **`rope_parameters` 可以是「每种 layer_type 一套」**：Gemma4 里 full / sliding 分别有 theta 1e6 / 1e4，
    而且 `rope_type: "proportional"` 意味着 **inv_freq 的分母是 head_dim，不是 rotary_dim**
-   （旋转 128 维、分母 512）。我们的 `Rope` 要有独立的 `denom` 参数。
+   （分母 512），**而且配对也变了**：vLLM `gemma4_rope.py` 把 inv_freq 零频补齐到 head_dim/2 对、
+   整头 neox 旋转 → 非零频配对是 `(i, i+head_dim/2)`，不是"只转前 rotary_dim 维"的 `(i, i+rotary_dim/2)`。
+   `Rope` 要有 `denom` 和 `span` 两个独立参数（`Rope::with_span`）。**partial rotary 一律去读 rope 类的
+   `forward` / `_compute_inv_freq` 确认配对**，只看 config 字段会错两次（本项 2026-10-21 / 10-22 各错一次）。
 2. **`attention_k_eq_v` 可能只对部分层成立**：Gemma4 的 full 层没有 `v_proj`（K 权重兼作 V），
    但 sliding 层**有**独立 `v_proj`。按层类型分别处理，不能全局一个开关。
 3. **dense MLP 与 MoE 可以并联**：Gemma4 每层**无条件**执行 dense MLP，MoE 是另一条并行支路，

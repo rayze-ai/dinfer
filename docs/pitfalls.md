@@ -1,3 +1,13 @@
+## 2026-10-22 Gemma4 proportional RoPE：分母修了，配对还是错的
+
+- **现象**：Kaon-V3 30 层端到端跑通，但最后一行 top-5 与基线服务完全无交集。
+- **根因（之一）**：上一轮只把 inv_freq 分母改成 head_dim，仍按"只转前 128 维、配对 (i, i+64)"旋转；
+  vLLM `Gemma4RotaryEmbedding` 实际是 `rotary_dim = head_size`、inv_freq 零频补齐 → 整头 neox，配对 (i, i+256)。
+  torch 参考脚本 `kaon_forward.py` 同样写错（还把 `k_eq_v` 的 V 取成 norm+rope 之后的 K），所以拿它对拍发现不了。
+- **解法**：`rope_span_bf16` + `Rope::with_span(head_dim/2)`；参考脚本头注释列出待修项。
+- **避免**：参考实现与被测实现**不能出自同一次理解**；partial rotary 必须读 rope 类源码的配对方式；
+  端到端先拿基线服务的 `logprobs` + `return_tokens_as_token_ids` 做一次 top-k 对照，再信任自写参考。
+
 ## 2026-10-22 e4m3 次正规值公式多乘了 1/8，导致"缩放不生效"的假象
 
 - **现象**：NVFP4 对拍里 A 侧块缩放看起来没生效；同时手算锚点 `0x23` 解出 0.005859（正确值 0.171875）。
