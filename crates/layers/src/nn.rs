@@ -121,12 +121,30 @@ impl Rope {
         theta: f64,
         style: RopeStyle,
     ) -> Result<Self> {
+        Self::with_denom(stream, rope_dim, rope_dim, max_pos, theta, style)
+    }
+    /// `rope_dim` 维被旋转，但 inv_freq 用 `denom` 做分母。
+    ///
+    /// Gemma4 的 `rope_type=proportional`（`full_attention` 层）是这种情况：只旋转
+    /// `head_dim * partial_rotary_factor` = 128 维，而频率分母是 **head_dim** = 512
+    /// （vLLM `rotary_embedding/gemma4_rope.py`，HF `_compute_proportional_rope_parameters`）。
+    /// `denom == rope_dim` 时与 `new` 完全等价。
+    pub fn with_denom(
+        stream: &Stream,
+        rope_dim: usize,
+        denom: usize,
+        max_pos: usize,
+        theta: f64,
+        style: RopeStyle,
+    ) -> Result<Self> {
         ensure!(rope_dim % 2 == 0, "rope_dim must be even");
+        ensure!(denom >= rope_dim && denom % 2 == 0, "rope denom {denom} 必须 >= rope_dim 且为偶数");
         let half = rope_dim / 2;
         // 注：HF 在 bf16 模型里把 cos/sin cast 到 bf16 再逐项乘加；这里存 fp32 表、fp32 旋转。
         // 实测对 logits 的影响 ≤ 1 ULP（P3/P4/P5 对拍均用此表），不改。
         // 40960 × 128 的 cos/sin 在 host 单线程要 ~120 ms → 按位置分片多线程算（启动 loop 第 6 轮）。
-        let inv_freq: Vec<f64> = (0..half).map(|i| 1.0 / theta.powf(2.0 * i as f64 / rope_dim as f64)).collect();
+        let inv_freq: Vec<f64> =
+            (0..half).map(|i| 1.0 / theta.powf(2.0 * i as f64 / denom as f64)).collect();
         let mut table = vec![0f32; max_pos * rope_dim];
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 16);
         let rows_per = max_pos.div_ceil(threads).max(1);

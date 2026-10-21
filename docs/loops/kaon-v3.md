@@ -655,3 +655,29 @@ full: H=16, Hkv=2, D=512；sliding: H=16, Hkv=8, D=256；`rms_norm_eps=1e-6`；
 | `norm.cu` | `w == nullptr` 时乘 1（无权重 RMSNorm：v_norm / router 预处理） |
 | `nn.rs` | `RmsNormW::weightless()` 或 `rmsnorm_bf16` 收 `Option<&_>`；`Rope::new_with_denom` |
 | `models/kaon3/{config,layer,model}.rs` | Gemma4 层（双 norm、dense MLP ∥ MoE、layer_scalar）、滑窗窗口、softcap |
+
+### 阶段 3 进度：config + proportional RoPE 分母（已验证）
+
+- `models/kaon3/src/config.rs`：解析 `text_config`，按 `layer_types` 给每层
+  (head_dim, nkv, rope)；`rope_type=proportional` → 分母 = head_dim，`default` → 分母 = rope_dim。
+  单测 `config::tests::proportional_rope_full_layer_uses_head_dim_denom` 断言
+  full 层 `rope_dim=128 / denom=512`、sliding 层 `256/256`、K==V 只在 full 层、窗口 1024。
+- `crates/layers/src/nn.rs`：`Rope::with_denom(...)`（`new` 保持等价，即 denom = rope_dim）。
+- **远端起容器编译 + 跑测试的命令口径**（宿主机无 nvcc；`LIBRARY_PATH` 只解决链接，
+  **运行期还要 `LD_LIBRARY_PATH`**，否则 `libnccl.so.2: cannot open shared object file`）：
+
+```bash
+docker run --rm --entrypoint bash --gpus device=0 \
+  -v /hf_data/yaochen:/w -v /root/.cargo:/root/.cargo -v /root/.rustup:/root/.rustup -w /w/dinfer \
+  -e PATH=/root/.cargo/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/bin:/bin \
+  -e CUDA_ARCHS=120 -e CUDA_HOME=/usr/local/cuda \
+  -e https_proxy=http://172.17.0.1:1081 -e http_proxy=http://172.17.0.1:1081 \
+  image.paigpu.com/library/vllm-openai:...-cu130 \
+  -lc 'export LIBRARY_PATH=/tmp/stub
+        export LD_LIBRARY_PATH=$(dirname $(find / -name libnccl.so.2|head -1)):$(dirname $(find / -name libnvrtc.so.13|head -1)):$LD_LIBRARY_PATH
+        cargo test -p dinfer-kaon3 config::'
+```
+
+- **`--features no-nvcc` 在本机已坏**：`ffi.rs` 的 `stub!` 签名（24 个错误，`*const f32` vs
+  `*const c_void`）与 `ops.rs` 调用不匹配。与本次改动无关，**不要用它做本地 CPU 验证**；
+  一律远端 nvcc 编译。待修。
