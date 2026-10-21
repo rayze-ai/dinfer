@@ -3295,6 +3295,60 @@ pub fn gdn_gate_strided(
     )
 }
 
+/// gate + beta + 块内 cumsum 一次算完（prefill）。替代 `gdn_gate_strided` + `cumsum_kernel` 两次 launch，
+/// 对齐 vLLM FLA 的 `fused_kda_gate_chunk_cumsum`。
+///
+/// `a`/`b` 是融合 in_proj 输出里 `[T, ·]` 的两个列段（行距 `ab_stride`）；
+/// `g_out`/`beta_out`/`gc_out` 都是 `[T, heads_v]` f32；`gc` 已是 exp2 空间（乘了 1/ln2）。
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_gate_cumsum_strided(
+    stream: &Stream,
+    a: &CudaView<'_, bf16>,
+    b: &CudaView<'_, bf16>,
+    a_log: &CudaSlice<f32>,
+    dt_bias: &CudaSlice<f32>,
+    g_out: &mut CudaSlice<f32>,
+    beta_out: &mut CudaSlice<f32>,
+    gc_out: &mut CudaSlice<f32>,
+    cu_seqlens: &CudaSlice<i32>,
+    chunk_tab: &CudaSlice<i32>,
+    num_chunks: usize,
+    heads_v: usize,
+    bt: usize,
+    ab_stride: usize,
+) -> Result<()> {
+    ensure!(a_log.len() >= heads_v && dt_bias.len() >= heads_v, "gdn_gate_cumsum: a_log/dt_bias");
+    ensure!(bt == 64, "gdn_gate_cumsum: bt {bt} != 64（kernel 模板写死）");
+    let n = num_chunks * heads_v;
+    ensure!(g_out.len() >= n && beta_out.len() >= n && gc_out.len() >= n, "gdn_gate_cumsum: outputs");
+    if n == 0 {
+        return Ok(());
+    }
+    // SAFETY: 容量已校验。
+    check(
+        unsafe {
+            ffi::gdn_gate_cumsum(
+                stream.ptr(a) as *const c_void,
+                stream.ptr(b) as *const c_void,
+                stream.ptr(a_log) as *const f32,
+                stream.ptr(dt_bias) as *const f32,
+                stream.ptr_mut(g_out) as *mut f32,
+                stream.ptr_mut(beta_out) as *mut f32,
+                stream.ptr_mut(gc_out) as *mut f32,
+                stream.ptr(cu_seqlens) as *const i32,
+                stream.ptr(chunk_tab) as *const i32,
+                num_chunks as i64,
+                heads_v as i64,
+                bt as i64,
+                1,
+                ab_stride as i64,
+                stream.raw() as ffi::cudaStream_t,
+            )
+        },
+        "gdn_gate_cumsum",
+    )
+}
+
 /// GDN 递归核心（prefill 与 decode 同一条逐 token 路径）。
 /// `mixed_qkv`: `[T, 2·heads_k·k_dim + heads_v·v_dim]` bf16（q|k|v 平铺）；
 /// `out`: `[T, heads_v, v_dim]` bf16；`state`: `[num_slots, heads_v, v_dim, k_dim]` f32（原地更新）。
@@ -3957,6 +4011,7 @@ pub fn gdn_chunk_prep(
     k_dim: usize,
     v_dim: usize,
     scale: f32,
+    do_cumsum: bool,
 ) -> Result<()> {
     ensure!(
         heads_k > 0 && heads_v % heads_k == 0,
@@ -3986,6 +4041,7 @@ pub fn gdn_chunk_prep(
                 v_dim as i64,
                 plan.bt as i64,
                 scale,
+                if do_cumsum { 1 } else { 0 },
                 stream.raw() as _,
             )
         },

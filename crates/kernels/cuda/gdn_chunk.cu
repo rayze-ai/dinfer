@@ -1400,9 +1400,10 @@ int set_smem(const void* fn, int bytes) {
 
 extern "C" {
 
+// do_cumsum：gate 已由 `gdn_gate_cumsum` 融合算出（gc 就绪）时传 0，这里跳过 cumsum_kernel。
 int gdn_chunk_prep(const void* mixed_qkv, const float* g, void* qn, void* kn, float* gc, const int* cu_seqlens,
                    const int* chunk_tab, int64_t total, int64_t num_chunks, int64_t H, int64_t HV, int64_t K,
-                   int64_t V, int64_t bt, float scale, cudaStream_t stream) {
+                   int64_t V, int64_t bt, float scale, int do_cumsum, cudaStream_t stream) {
   if (total <= 0 || num_chunks <= 0 || H <= 0 || HV <= 0 || K <= 0 || K > 256 || bt <= 0)
     return err(cudaErrorInvalidValue);
   const long qkv_row = 2L * H * K + (long)HV * V;
@@ -1411,9 +1412,11 @@ int gdn_chunk_prep(const void* mixed_qkv, const float* g, void* qn, void* kn, fl
   norm_kernel<<<(unsigned)blocks, 256, 0, stream>>>(static_cast<const bf16*>(mixed_qkv), static_cast<bf16*>(qn),
                                                     static_cast<bf16*>(kn), (int)total, (int)H, (int)K, qkv_row,
                                                     scale);
-  const long n2 = num_chunks * HV;
-  cumsum_kernel<<<(unsigned)((n2 + 255) / 256), 256, 0, stream>>>(g, gc, cu_seqlens, chunk_tab, (int)num_chunks,
-                                                                   (int)HV, (int)bt);
+  if (do_cumsum) {
+    const long n2 = num_chunks * HV;
+    cumsum_kernel<<<(unsigned)((n2 + 255) / 256), 256, 0, stream>>>(g, gc, cu_seqlens, chunk_tab, (int)num_chunks,
+                                                                     (int)HV, (int)bt);
+  }
   return last_err();
 }
 

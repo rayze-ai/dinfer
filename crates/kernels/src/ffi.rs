@@ -715,6 +715,7 @@ extern "C" {
         v: i64,
         bt: i64,
         scale: f32,
+        do_cumsum: i32,
         stream: cudaStream_t,
     ) -> i32;
     pub fn gdn_chunk_wy(
@@ -884,6 +885,24 @@ extern "C" {
         beta_out: *mut f32,
         total: i64,
         heads: i64,
+        do_beta: i32,
+        ab_stride: i64,
+        stream: cudaStream_t,
+    ) -> i32;
+    /// gate + beta + 块内 cumsum 一次算完（prefill；替代 gdn_gate + cumsum 两次 launch）。
+    pub fn gdn_gate_cumsum(
+        a: *const c_void,
+        b: *const c_void,
+        a_log: *const f32,
+        dt_bias: *const f32,
+        g_out: *mut f32,
+        beta_out: *mut f32,
+        gc_out: *mut f32,
+        cu_seqlens: *const i32,
+        chunk_tab: *const i32,
+        num_chunks: i64,
+        hv: i64,
+        bt: i64,
         do_beta: i32,
         ab_stride: i64,
         stream: cudaStream_t,
@@ -1179,6 +1198,7 @@ mod stubs {
     stub!(gdn_conv1d_prefill(x: *const c_void, w: *const c_void, o: *mut c_void, cs: *mut c_void, cu: *const i32, si: *const i32, hi: *const i32, ns: i64, d: i64, wd: i64, sl: i64, a: i32, total: i64, rpb: i64, xs: i64, s: cudaStream_t));
     stub!(gdn_conv1d_update(x: *const c_void, w: *const c_void, o: *mut c_void, cs: *mut c_void, si: *const i32, b: i64, d: i64, wd: i64, sl: i64, a: i32, xs: i64, s: cudaStream_t));
     stub!(gdn_gate(a: *const c_void, b: *const c_void, al: *const f32, db: *const f32, g: *mut f32, be: *mut f32, t: i64, h: i64, d: i32, abs: i64, s: cudaStream_t));
+    stub!(gdn_gate_cumsum(a: *const c_void, b: *const c_void, al: *const f32, db: *const f32, g: *mut f32, be: *mut f32, gc: *mut f32, cu: *const i32, ct: *const i32, nc: i64, hv: i64, bt: i64, d: i32, abs: i64, s: cudaStream_t) -> i32);
     stub!(gdn_recurrent(mq: *const c_void, g: *const f32, be: *const f32, ar: *const c_void, br: *const c_void, al: *const f32, db: *const f32, o: *mut c_void, st: *mut c_void, cu: *const i32, si: *const i32, ns: i64, hk: i64, hv: i64, k: i64, v: i64, gp: i64, sc: f32, sst: i64, fg: i32, vs: i64, dbv: i64, dv: i32, dg: i64, abs: i64, s: cudaStream_t));
     stub!(gemm_small_m_bf16(a: *const c_void, w: *const c_void, b: *const c_void, o: *mut c_void, p: *mut f32, m: i64, n: i64, k: i64, sp: i64, s: cudaStream_t));
     stub!(gemm_small_m_mma_bf16(a: *const c_void, w: *const c_void, b: *const c_void, o: *mut c_void, p: *mut f32, c: *mut i32, m: i64, n: i64, k: i64, sp: i64, wp: i64, st: i64, s: cudaStream_t));

@@ -424,7 +424,7 @@ fn run_gdn_chunk(
     let mut out = st.alloc_uninit::<bf16>(tokens * hv * v).unwrap();
     let scale = (k as f32).powf(-0.5);
     ops::gdn_gate(st, a, b, a_log, dt_bias, &mut g, &mut beta, tokens, hv).unwrap();
-    ops::gdn_chunk_prep(st, mixed, &g, &dcu, &plan, &mut sc, tokens, h, hv, k, v, scale).unwrap();
+    ops::gdn_chunk_prep(st, mixed, &g, &dcu, &plan, &mut sc, tokens, h, hv, k, v, scale, true).unwrap();
     ops::gdn_chunk_wy_with(st, mixed, &beta, &dcu, &plan, &mut sc, tokens, h, hv, k, v, wy_mma).unwrap();
     ops::gdn_chunk_ho_with(st, &dcu, &plan, &sc, &mut out, state, None, tokens, h, hv, k, v, ho).unwrap();
     st.synchronize().unwrap();
@@ -532,7 +532,7 @@ fn gdn_chunk_wy_mma_vs_legacy() {
     let mut outs = vec![];
     for how in [ops::GdnChunkWy::Legacy, ops::GdnChunkWy::Mma, ops::GdnChunkWy::MmaSerial, ops::GdnChunkWy::Mma8] {
         let mut sc = ops::GdnChunkScratch::new(&st, t, h, hv, k, v, plan.num_chunks, BT).unwrap();
-        ops::gdn_chunk_prep(&st, &dm, &dg, &dcu, &plan, &mut sc, t, h, hv, k, v, scale).unwrap();
+        ops::gdn_chunk_prep(&st, &dm, &dg, &dcu, &plan, &mut sc, t, h, hv, k, v, scale, true).unwrap();
         ops::gdn_chunk_wy_with(&st, &dm, &dbeta, &dcu, &plan, &mut sc, t, h, hv, k, v, how).unwrap();
         st.synchronize().unwrap();
         // r10：scratch 中间量是 bf16，比较前升 f32
@@ -630,12 +630,12 @@ fn bench_case(st: &Stream, nseq: usize, len: usize, h: usize, hv: usize, k: usiz
     let mut sc = ops::GdnChunkScratch::new(st, t, h, hv, k, v, plan.num_chunks, BT).unwrap();
     let us_chunk = time_us(st, iters, || {
         ops::gdn_gate(st, &da, &db, &dal, &ddb, &mut g, &mut beta, t, hv).unwrap();
-        ops::gdn_chunk_prep(st, &dm, &g, &dcu, &plan, &mut sc, t, h, hv, k, v, scale).unwrap();
+        ops::gdn_chunk_prep(st, &dm, &g, &dcu, &plan, &mut sc, t, h, hv, k, v, scale, true).unwrap();
         ops::gdn_chunk_wy(st, &dm, &beta, &dcu, &plan, &mut sc, t, h, hv, k, v).unwrap();
         ops::gdn_chunk_ho(st, &dcu, &plan, &sc, &mut out, &mut state, None, t, h, hv, k, v).unwrap();
     });
     // 分 kernel
-    let us_prep = time_us(st, iters, || ops::gdn_chunk_prep(st, &dm, &g, &dcu, &plan, &mut sc, t, h, hv, k, v, scale).unwrap());
+    let us_prep = time_us(st, iters, || ops::gdn_chunk_prep(st, &dm, &g, &dcu, &plan, &mut sc, t, h, hv, k, v, scale, true).unwrap());
     let us_wy0 = time_us(st, iters, || ops::gdn_chunk_wy_with(st, &dm, &beta, &dcu, &plan, &mut sc, t, h, hv, k, v, ops::GdnChunkWy::Legacy).unwrap());
     let us_wy = time_us(st, iters, || ops::gdn_chunk_wy_with(st, &dm, &beta, &dcu, &plan, &mut sc, t, h, hv, k, v, ops::GdnChunkWy::Mma).unwrap());
     let us_wy64 = time_us(st, iters, || ops::gdn_chunk_wy_with(st, &dm, &beta, &dcu, &plan, &mut sc, t, h, hv, k, v, ops::GdnChunkWy::MmaSerial).unwrap());

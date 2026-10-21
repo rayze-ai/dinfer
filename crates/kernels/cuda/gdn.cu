@@ -242,6 +242,8 @@ __global__ void conv1d_update_kernel(const bf16* __restrict__ x, const bf16* __r
   st[state_len - 1] = to_bf16(xt);
 }
 
+constexpr float kRcpLn2 = 1.4426950408889634f;  // 1/ln2：gate 的累加在 exp2 空间做
+
 // ---------------------------------------------------------------- gate / beta（逐 v 头标量）
 // g[t,hv] = -exp(A_log[hv]) · softplus(a[t,hv] + dt_bias[hv]);  beta[t,hv] = sigmoid(b[t,hv])
 __global__ void gate_kernel(const bf16* __restrict__ a, const bf16* __restrict__ b,
@@ -256,6 +258,43 @@ __global__ void gate_kernel(const bf16* __restrict__ a, const bf16* __restrict__
   const float x = to_f32(a[src]) + dt_bias[hv];
   g_out[i] = -A * softplus_f(x);
   if (do_beta) beta_out[i] = sigmoid_f(to_f32(b[src]));
+}
+
+// ---------------------------------------------------------------- gate + beta + 块内 cumsum（对齐 vLLM FLA 的 fused_kda_gate_chunk_cumsum）
+// 原来 prefill 是两次 launch：`gdn_gate_strided`（写 g/beta）→ `cumsum_kernel`（读 g 写 gc）。
+// 融合后一次算出 g / beta / gc，省一次 launch 与一次 g 的全局往返。
+// 语义与两者串联逐位一致：
+//   g[t,hv]    = -exp(A_log[hv])·softplus(a[t,hv] + dt_bias[hv])
+//   beta[t,hv] = sigmoid(b[t,hv])
+//   gc[t,hv]   = (Σ_{t'<=t, 同 chunk} g[t',hv]) · RCP_LN2
+// 一个线程负责一个 (chunk, hv)，在 chunk 内按 token 串行（与 cumsum_kernel 的分工相同）。
+template <int BT>
+__global__ void gate_beta_cumsum_kernel(const bf16* __restrict__ a, const bf16* __restrict__ b,
+                                        const float* __restrict__ a_log, const float* __restrict__ dt_bias,
+                                        float* __restrict__ g_out, float* __restrict__ beta_out,
+                                        float* __restrict__ gc_out, const int* __restrict__ cu_seqlens,
+                                        const int* __restrict__ chunk_tab, int num_chunks, int HV,
+                                        int do_beta, long ab_stride) {
+  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= num_chunks * HV) return;
+  const int c = idx / HV, hv = idx % HV;
+  const int seq = chunk_tab[2 * c], ci = chunk_tab[2 * c + 1];
+  const int bos = cu_seqlens[seq], eos = cu_seqlens[seq + 1];
+  const int len = min(BT, eos - bos - ci * BT);
+  const long row0 = bos + (long)ci * BT;
+  const float A = __expf(a_log[hv]);
+  const float dtb = dt_bias[hv];
+  float acc = 0.f;
+  for (int t = 0; t < len; ++t) {
+    const long dst = (row0 + t) * HV + hv;
+    const long src = (row0 + t) * ab_stride + hv;
+    const float x = to_f32(a[src]) + dtb;
+    const float gv = -A * softplus_f(x);
+    g_out[dst] = gv;
+    if (do_beta) beta_out[dst] = sigmoid_f(to_f32(b[src]));
+    acc += gv;
+    gc_out[dst] = acc * kRcpLn2;
+  }
 }
 
 // ---------------------------------------------------------------- 递归核心（prefill + decode）
@@ -670,6 +709,21 @@ int gdn_gate(const void* a, const void* b, const float* a_log, const float* dt_b
   const long blocks = (long)((total + kBlock - 1) / kBlock);
   gate_kernel<<<(unsigned)blocks, kBlock, 0, stream>>>((const bf16*)a, (const bf16*)b, a_log, dt_bias, g_out,
                                             beta_out, (long)total, (int)heads, do_beta, (long)ab_stride);
+  return last_err();
+}
+
+// gate + beta + 块内 cumsum 一次算完（prefill；对齐 vLLM FLA 的 fused_kda_gate_chunk_cumsum）。
+// 替代 "gdn_gate + cumsum_kernel" 两次 launch。总核数 = num_chunks · HV。
+int gdn_gate_cumsum(const void* a, const void* b, const float* a_log, const float* dt_bias, float* g_out,
+                    float* beta_out, float* gc_out, const int* cu_seqlens, const int* chunk_tab,
+                    int64_t num_chunks, int64_t hv, int64_t bt, int do_beta, int64_t ab_stride,
+                    cudaStream_t stream) {
+  if (num_chunks <= 0 || hv <= 0 || bt <= 0 || bt > 64) return err(cudaErrorInvalidValue);
+  const long n = (long)num_chunks * hv;
+  const int nb = 256;
+  gate_beta_cumsum_kernel<64><<<(unsigned)((n + nb - 1) / nb), nb, 0, stream>>>(
+      static_cast<const bf16*>(a), static_cast<const bf16*>(b), a_log, dt_bias, g_out, beta_out, gc_out,
+      cu_seqlens, chunk_tab, (int)num_chunks, (int)hv, do_beta, (long)ab_stride);
   return last_err();
 }
 

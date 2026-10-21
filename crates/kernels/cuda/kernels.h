@@ -247,7 +247,12 @@ int gdn_gated_rmsnorm(const void* x, const void* w, const void* z, void* out, in
 //   chunk_tab / cu_nt / chunk_off 同 kda_chunk。bt 当前只支持 64；K ∈ {64,128,256}；V 是 16 的整数倍。
 int gdn_chunk_prep(const void* mixed_qkv, const float* g, void* qn, void* kn, float* gc, const int* cu_seqlens,
                    const int* chunk_tab, int64_t total, int64_t num_chunks, int64_t H, int64_t HV, int64_t K,
-                   int64_t V, int64_t bt, float scale, cudaStream_t stream);
+                   int64_t V, int64_t bt, float scale, int do_cumsum, cudaStream_t stream);
+/// gate + beta + 块内 cumsum 一次算完（prefill；替代 gdn_gate + cumsum 两次 launch）。
+int gdn_gate_cumsum(const void* a, const void* b, const float* a_log, const float* dt_bias, float* g_out,
+                    float* beta_out, float* gc_out, const int* cu_seqlens, const int* chunk_tab,
+                    int64_t num_chunks, int64_t hv, int64_t bt, int do_beta, int64_t ab_stride,
+                    cudaStream_t stream);
 // r10：aq / u / w / kg 为 bf16（void* 传）。
 int gdn_chunk_wy(const void* qn, const void* kn, const void* mixed_qkv, const float* gc, const float* beta,
                  void* aq, void* u, void* w, void* kg, const int* cu_seqlens, const int* chunk_tab,

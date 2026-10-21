@@ -393,7 +393,10 @@ impl GdnLayer {
         }
 
         // 3. gate / beta（decode 走 recurrent kernel 内 fused-gate 现算，省一个 launch；prefill 预算好给 chunk 用）
-        if !single {
+        //    chunk 路径把 gate/beta 与块内 cumsum 融进一次 launch（`gdn_gate_cumsum`，
+        //    对齐 vLLM FLA 的 fused_kda_gate_chunk_cumsum），所以这里只处理非 chunk 的 prefill。
+        let use_chunk = !single && t > meta.num_reqs && meta.chunk.is_some();
+        if !single && !use_chunk {
             k::gdn_gate_strided(
                 stream,
                 &a_view,
@@ -411,7 +414,6 @@ impl GdnLayer {
         // 4. delta rule 核心（q/k 的 l2norm 与 q 的 scale 在 kernel 内）：
         //    prefill 走 chunk 三段（prep → wy → ho），decode / 回退走逐 token 递归。两者数值等价（gdn_parity chunk case）。
         let scale = (kd as f32).powf(-0.5);
-        let use_chunk = !single && t > meta.num_reqs && meta.chunk.is_some();
         if use_chunk {
             let mut ws = meta.chunk.unwrap().borrow_mut();
             let ws = &mut *ws;
@@ -419,7 +421,24 @@ impl GdnLayer {
             let sc = ws.scratch.as_mut().ok_or_else(|| anyhow::anyhow!("gdn: chunk scratch 未分配"))?;
             ensure!(plan.num_seqs == meta.num_reqs && ws.tokens == t, "gdn: chunk plan 与本步不符");
             tracing::trace!(t, num_reqs = meta.num_reqs, chunks = plan.num_chunks, "gdn prefill: chunk 路径");
-            k::gdn_chunk_prep(stream, &abuf.conv.data, &abuf.g.data, &meta.cu_seqlens.data, plan, sc, t, h, hv, kd, vd, scale)?;
+            // gate + beta + 块内 cumsum 一次算完（gc 直接写进 scratch），prep 只做 q/k 的 norm。
+            k::gdn_gate_cumsum_strided(
+                stream,
+                &a_view,
+                &b_view,
+                &self.a_log.data,
+                &self.dt_bias.data,
+                &mut abuf.g.data,
+                &mut abuf.beta.data,
+                &mut sc.gc,
+                &meta.cu_seqlens.data,
+                &plan.chunk_tab,
+                plan.num_chunks,
+                hv,
+                plan.bt,
+                row,
+            )?;
+            k::gdn_chunk_prep(stream, &abuf.conv.data, &abuf.g.data, &meta.cu_seqlens.data, plan, sc, t, h, hv, kd, vd, scale, /*do_cumsum=*/false)?;
             k::gdn_chunk_wy(stream, &abuf.conv.data, &abuf.beta.data, &meta.cu_seqlens.data, plan, sc, t, h, hv, kd, vd)?;
             let snap = match meta.snapshot.as_ref() {
                 Some(sn) => Some(k::ops::GdnSnapshot {
