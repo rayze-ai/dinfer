@@ -586,3 +586,22 @@ out = Σ_e  expert_e(x) * w_e * per_expert_scale[e]
 - **1.2× 目标**：c1 ≥ 130 tok/s（TPOT ≤ 7.0 ms）、c8 ≥ 910、c32 ≥ 2714 tok/s
 
 结论：**空间存在且不小**，瓶颈是基线的 kernel 效率，不是硬件。
+
+## 阶段 3 开工勘察（2026-10-21 晚）
+
+**现状核对**（本地 / 远端 md5 一致，远端 `/hf_data/yaochen/dinfer` 只是 rsync 出来的树、无 `.git`）：
+阶段 1、2 的 CUDA 实现此前**只存在于远端 `/hf_data/yaochen/work/*.cu` 的独立探针**，未进
+`crates/kernels`。本轮已把 `nvfp4_batched.cu` / `fp8_v2.cu` / `fp8_gemm.cu` / `lo.cu` 等拉回
+`models/kaon3/cuda/` 作为对照，正式移植待阶段 3 内完成（按 arch 分文件、走 `ArchProfile`）。
+
+**阶段 3 需要补的缺口（对照 `crates/kernels` 现状）**：
+
+| 能力 | 现状 | 缺口 |
+|---|---|---|
+| 滑窗注意力 | `gqa.cu` 只有 causal 下界 0（`vis` 只封上界） | 加 `window` 参数：可见 key ∈ [row-win+1, row]；decode 侧按块起点跳过 |
+| full 层 `head_dim=512` | gqa v5/v6/v7 模板只实例化 **D ∈ {128,256}** | 5 层 full attention 的 D=512 需新结构（O 无法整块驻留寄存器），先正确后优化 |
+| 无权重 RMSNorm | `rmsnorm_bf16` 必带权重 | `v_norm`、router 预处理都是**无权重** RMSNorm |
+| FP8 / NVFP4 GEMM | `crates/kernels` 无；`crates/layers` 的 `load_bf16` 只认 block-quant | 从探针移植（`fp8_v2.cu` 292 TF/s、`nvfp4_batched.cu` 502 TF/s） |
+| 部分 rope | `rope_bf16` 已有 `rope_dim ≤ head_dim` | 直接可用（full 层 `partial_rotary_factor=0.25` → rope_dim=128） |
+| attention scale | `scale` 参数已透传 | Gemma4 传 **1.0**（不是 1/sqrt(d)） |
+| q/k/v norm | `qkv_post_bf16` 是 DeepSeek 口径 | 需逐头 RMSNorm（q_norm/k_norm 带权重，v_norm 不带） |
