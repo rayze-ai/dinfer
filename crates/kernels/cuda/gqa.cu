@@ -158,10 +158,10 @@ __global__ void __launch_bounds__(V4_THREADS) gqa_fa_v5_kernel(
   const int lo_a = window > 0 ? vis_a - window + 1 : INT_MIN;
   const int lo_b = window > 0 ? vis_b - window + 1 : INT_MIN;
   const int last_key = hist + min(q_base + BQ - 1, q_len - 1);
-  const int warp_lo_vis = window > 0 ? warp_min_vis - window + 1 : INT_MIN;
-  const int tile0 = warp_lo_vis > 0 ? warp_lo_vis / TILE : 0;
   const int n_tiles = last_key / TILE + 1;
   const int warp_min_vis = hist + q_base + warp * 16;
+  const int warp_lo_vis = window > 0 ? warp_min_vis - window + 1 : INT_MIN;
+  const int tile0 = warp_lo_vis > 0 ? warp_lo_vis / TILE : 0;
   const int32_t* bt = PAGED ? block_table + (int64_t)b * max_blocks : nullptr;
   // 装一个 tile 到缓冲 buf（cp.async，越界 key 零填充）：TILE key × (D/8) uint4，128 线程各 V5_ITERS 个
   auto load_tile = [&](int tile, int buf) {
@@ -420,11 +420,11 @@ __global__ void __launch_bounds__(NW * 32) gqa_fa_v6_kernel(
   const int lo_a = window > 0 ? vis_a - window + 1 : INT_MIN;
   const int lo_b = window > 0 ? vis_b - window + 1 : INT_MIN;
   const int last_key = hist + min(q_base + BQ - 1, q_len - 1);
-  const int warp_lo_vis = window > 0 ? warp_min_vis - window + 1 : INT_MIN;
-  const int tile0 = warp_lo_vis > 0 ? warp_lo_vis / TILE : 0;
   const int n_tiles = last_key / TILE + 1;
   const int warp_min_vis = hist + q_base + warp * 16;
   const int warp_max_vis = hist + min(q_base + warp * 16 + 15, q_len - 1);
+  const int warp_lo_vis = window > 0 ? warp_min_vis - window + 1 : INT_MIN;
+  const int tile0 = warp_lo_vis > 0 ? warp_lo_vis / TILE : 0;
   const bf16* sQw = sQ + (warp * 16) * LDS;
 #if GQA_PROFILE
   long long t_qk = 0, t_sm = 0, t_pv = 0;
@@ -554,7 +554,7 @@ template <bool PAGED, int D, int NW, int TILE, int NBUF = 1, bool FEXP = false>
 static int v6_launch(int max_q, int heads, int num_reqs, cudaStream_t stream, const bf16* q, const bf16* k, const bf16* v,
                      const bf16* cache, const int32_t* bt, const int32_t* seq_lens, const int32_t* cu, bf16* out, int H,
                      int Hkv, float scale_log2, int q_stride, int kv_stride, int block_size, int max_blocks,
-                     int skip_single) {
+                     int skip_single, int window) {
   constexpr int BQ = V6Cfg<NW, TILE>::BQ, LDS = D + 8;
   const size_t smem = (size_t)(BQ + 2 * NBUF * TILE) * LDS * 2;
   static int attr = 0;  // 0 未设 / 1 成功 / -1 失败（smem 超卡上限）
@@ -567,7 +567,7 @@ static int v6_launch(int max_q, int heads, int num_reqs, cudaStream_t stream, co
   dim3 grid((unsigned)((max_q + BQ - 1) / BQ), (unsigned)heads, (unsigned)num_reqs);
   gqa_fa_v6_kernel<PAGED, D, NW, TILE, NBUF, FEXP><<<grid, NW * 32, smem, stream>>>(q, k, v, cache, bt, seq_lens, cu, out, H, Hkv,
                                                                        scale_log2, q_stride, kv_stride, block_size,
-                                                                       max_blocks, skip_single);
+                                                                       max_blocks, skip_single, window);
   return (int)cudaGetLastError();
 }
 // ---- v7（r11a 第 2 轮）：warp 对分工 ----
@@ -655,6 +655,10 @@ __global__ void __launch_bounds__(NW * 32, 2) gqa_fa_v7_kernel(
     }
     cp_async_commit();
   };
+  const int pair_min_vis = hist + q_base + pair * 16;
+  const int pair_max_vis = hist + min(q_base + pair * 16 + 15, q_len - 1);
+  const int pair_lo_vis = window > 0 ? pair_min_vis - window + 1 : INT_MIN;
+  const int tile0 = pair_lo_vis > 0 ? pair_lo_vis / TILE : 0;
   load_tile(tile0);
   float o[OF][4];
 #pragma unroll
@@ -665,11 +669,7 @@ __global__ void __launch_bounds__(NW * 32, 2) gqa_fa_v7_kernel(
   const int lo_a = window > 0 ? vis_a - window + 1 : INT_MIN;
   const int lo_b = window > 0 ? vis_b - window + 1 : INT_MIN;
   const int last_key = hist + min(q_base + BQ - 1, q_len - 1);
-  const int warp_lo_vis = window > 0 ? warp_min_vis - window + 1 : INT_MIN;
-  const int tile0 = warp_lo_vis > 0 ? warp_lo_vis / TILE : 0;
   const int n_tiles = last_key / TILE + 1;
-  const int pair_min_vis = hist + q_base + pair * 16;
-  const int pair_max_vis = hist + min(q_base + pair * 16 + 15, q_len - 1);
   const bf16* sQw = sQ + (pair * 16) * LDS;
   bf16* sPp = sP + (size_t)pair * 16 * PLD;
   float* sMp = sM + pair * 32;
@@ -780,7 +780,7 @@ template <bool PAGED, int D, int NW, int TILE>
 static int v7_launch(int max_q, int heads, int num_reqs, cudaStream_t stream, const bf16* q, const bf16* k, const bf16* v,
                      const bf16* cache, const int32_t* bt, const int32_t* seq_lens, const int32_t* cu, bf16* out, int H,
                      int Hkv, float scale_log2, int q_stride, int kv_stride, int block_size, int max_blocks,
-                     int skip_single) {
+                     int skip_single, int window) {
   constexpr int BQ = V7Cfg<NW, TILE>::BQ;
   const size_t smem = V7Cfg<NW, TILE>::smem_bytes(D);
   static int attr = 0;
@@ -793,7 +793,7 @@ static int v7_launch(int max_q, int heads, int num_reqs, cudaStream_t stream, co
   dim3 grid((unsigned)((max_q + BQ - 1) / BQ), (unsigned)heads, (unsigned)num_reqs);
   gqa_fa_v7_kernel<PAGED, D, NW, TILE><<<grid, NW * 32, smem, stream>>>(q, k, v, cache, bt, seq_lens, cu, out, H, Hkv,
                                                                        scale_log2, q_stride, kv_stride, block_size,
-                                                                       max_blocks, skip_single);
+                                                                       max_blocks, skip_single, window);
   return (int)cudaGetLastError();
 }
 // cfg = 版本·1000 + NW·100 + TILE（调用方 / ArchProfile 给）：0 = v5 旧路径；版本 0 = v6（Q 进 smem）、1 = v7（warp 对分工）；
@@ -802,23 +802,23 @@ template <bool PAGED>
 static int v6_dispatch(int cfg, int max_q, int heads, int num_reqs, cudaStream_t stream, const bf16* q, const bf16* k,
                        const bf16* v, const bf16* cache, const int32_t* bt, const int32_t* seq_lens, const int32_t* cu,
                        bf16* out, int H, int Hkv, float scale_log2, int q_stride, int kv_stride, int block_size,
-                       int max_blocks, int skip_single) {
+                       int max_blocks, int skip_single, int window) {
 #define V6_CASE(NW, TILE)                                                                                         \
   case NW * 100 + TILE:                                                                                           \
     return v6_launch<PAGED, 256, NW, TILE>(max_q, heads, num_reqs, stream, q, k, v, cache, bt, seq_lens, cu, out, H, \
-                                           Hkv, scale_log2, q_stride, kv_stride, block_size, max_blocks, skip_single);
+                                           Hkv, scale_log2, q_stride, kv_stride, block_size, max_blocks, skip_single, window);
 #define V6B_CASE(NW, TILE)                                                                                        \
   case 2000 + NW * 100 + TILE:                                                                                    \
     return v6_launch<PAGED, 256, NW, TILE, 2>(max_q, heads, num_reqs, stream, q, k, v, cache, bt, seq_lens, cu, out, \
-                                              H, Hkv, scale_log2, q_stride, kv_stride, block_size, max_blocks, skip_single);
+                                              H, Hkv, scale_log2, q_stride, kv_stride, block_size, max_blocks, skip_single, window);
 #define V6F_CASE(NW, TILE)                                                                                        \
   case 3000 + NW * 100 + TILE:                                                                                    \
     return v6_launch<PAGED, 256, NW, TILE, 1, true>(max_q, heads, num_reqs, stream, q, k, v, cache, bt, seq_lens, cu, \
-                                                    out, H, Hkv, scale_log2, q_stride, kv_stride, block_size, max_blocks, skip_single);
+                                                    out, H, Hkv, scale_log2, q_stride, kv_stride, block_size, max_blocks, skip_single, window);
 #define V7_CASE(NW, TILE)                                                                                         \
   case 1000 + NW * 100 + TILE:                                                                                    \
     return v7_launch<PAGED, 256, NW, TILE>(max_q, heads, num_reqs, stream, q, k, v, cache, bt, seq_lens, cu, out, H, \
-                                           Hkv, scale_log2, q_stride, kv_stride, block_size, max_blocks, skip_single);
+                                           Hkv, scale_log2, q_stride, kv_stride, block_size, max_blocks, skip_single, window);
   switch (cfg) {
     V6_CASE(4, 32)
     V6_CASE(4, 64)
@@ -845,7 +845,7 @@ constexpr float LOG2E_F = 1.4426950408889634f;
 // 通用慢路径（任意 D ≤ MAX_D）：旧参考实现，每 (req, q_head) 一个 block 逐 query 行三遍扫 key。对拍 fixture（D=32）走这里。
 __global__ void gqa_prefill_ref_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k, const bf16* __restrict__ v,
                                        bf16* __restrict__ out, const int32_t* __restrict__ cu_seqlens, int H, int Hkv, int D,
-                                       float scale, int q_stride, int kv_stride) {
+                                       float scale, int q_stride, int kv_stride, int window) {
 
   const int req = blockIdx.x, h = blockIdx.y;
   const int hk = h / (H / Hkv);
@@ -860,10 +860,11 @@ __global__ void gqa_prefill_ref_kernel(const bf16* __restrict__ q, const bf16* _
     for (int d = threadIdx.x; d < D; d += GQ_BLOCK) s_q[d] = to_f32(qi[d]);
     __syncthreads();
     const int n = i + 1;
+    const int j0 = window > 0 ? max(0, n - window) : 0;  // 滑窗：更早的 key 不可见
     auto kptr = [&](int j) { return k + (int64_t)(start + j) * kv_stride + (int64_t)hk * D; };
     auto vptr = [&](int j) { return v + (int64_t)(start + j) * kv_stride + (int64_t)hk * D; };
     float lmax = -INFINITY;
-    for (int j = threadIdx.x; j < n; j += GQ_BLOCK) {
+    for (int j = j0 + threadIdx.x; j < n; j += GQ_BLOCK) {
       const bf16* kj = kptr(j);
       float s = 0.f;
       for (int d = 0; d < D; ++d) s += s_q[d] * to_f32(kj[d]);
@@ -871,7 +872,7 @@ __global__ void gqa_prefill_ref_kernel(const bf16* __restrict__ q, const bf16* _
     }
     const float m = block_reduce_max<GQ_BLOCK>(lmax);
     float lsum = 0.f;
-    for (int j = threadIdx.x; j < n; j += GQ_BLOCK) {
+    for (int j = j0 + threadIdx.x; j < n; j += GQ_BLOCK) {
       const bf16* kj = kptr(j);
       float s = 0.f;
       for (int d = 0; d < D; ++d) s += s_q[d] * to_f32(kj[d]);
@@ -886,7 +887,7 @@ __global__ void gqa_prefill_ref_kernel(const bf16* __restrict__ q, const bf16* _
     float acc[MAX_D / GQ_BLOCK + 1];
 #pragma unroll
     for (int c = 0; c < MAX_D / GQ_BLOCK + 1; ++c) acc[c] = 0.f;
-    for (int base = 0; base < n; base += GQ_BLOCK) {
+    for (int base = j0; base < n; base += GQ_BLOCK) {
       const int j = base + threadIdx.x;
       float p = 0.f;
       if (j < n) {
@@ -916,7 +917,7 @@ __global__ void gqa_prefill_ref_kernel(const bf16* __restrict__ q, const bf16* _
 __global__ void gqa_paged_kernel(const bf16* __restrict__ q, const bf16* __restrict__ cache,
                                  const int32_t* __restrict__ block_table, const int32_t* __restrict__ seq_lens,
                                  const int32_t* __restrict__ cu_seqlens_q, bf16* __restrict__ out, int H, int Hkv, int D,
-                                 int block_size, int max_blocks, float scale, int q_stride) {
+                                 int block_size, int max_blocks, float scale, int q_stride, int window) {
   const int b = blockIdx.x, h = blockIdx.y;
   const int hk = h / (H / Hkv);
   const int q0 = cu_seqlens_q[b], q1 = cu_seqlens_q[b + 1];
@@ -939,11 +940,12 @@ __global__ void gqa_paged_kernel(const bf16* __restrict__ q, const bf16* __restr
   for (int i = 0; i < q_len; ++i) {
     const int row = q0 + i;
     const int n = hist + i + 1;
+    const int j0 = window > 0 ? max(0, n - window) : 0;  // 滑窗下界
     const bf16* qi = q + (int64_t)row * q_stride + (int64_t)h * D;
     for (int d = threadIdx.x; d < D; d += GQ_BLOCK) s_q[d] = to_f32(qi[d]);
     __syncthreads();
     float lmax = -INFINITY;
-    for (int j = threadIdx.x; j < n; j += GQ_BLOCK) {
+    for (int j = j0 + threadIdx.x; j < n; j += GQ_BLOCK) {
       const bf16* kj = kptr(j);
       float s = 0.f;
       for (int d = 0; d < D; ++d) s += s_q[d] * to_f32(kj[d]);
@@ -951,7 +953,7 @@ __global__ void gqa_paged_kernel(const bf16* __restrict__ q, const bf16* __restr
     }
     const float m = block_reduce_max<GQ_BLOCK>(lmax);
     float lsum = 0.f;
-    for (int j = threadIdx.x; j < n; j += GQ_BLOCK) {
+    for (int j = j0 + threadIdx.x; j < n; j += GQ_BLOCK) {
       const bf16* kj = kptr(j);
       float s = 0.f;
       for (int d = 0; d < D; ++d) s += s_q[d] * to_f32(kj[d]);
@@ -966,7 +968,7 @@ __global__ void gqa_paged_kernel(const bf16* __restrict__ q, const bf16* __restr
     float acc[MAX_D / GQ_BLOCK + 1];
 #pragma unroll
     for (int c = 0; c < MAX_D / GQ_BLOCK + 1; ++c) acc[c] = 0.f;
-    for (int base = 0; base < n; base += GQ_BLOCK) {
+    for (int base = j0; base < n; base += GQ_BLOCK) {
       const int j = base + threadIdx.x;
       float p = 0.f;
       if (j < n) {
@@ -1380,9 +1382,9 @@ extern "C" int gqa_fa_umma_launch(int paged, int max_q, int heads, int num_reqs,
 #define GQA_UMMA_RC(paged, ...) ((void)(paged), (int)cudaErrorInvalidValue)
 #endif
 
-extern "C" int gqa_prefill_bf16(const void* q, const void* k, const void* v, void* out, const int32_t* cu_seqlens,
+static int gqa_prefill_impl(const void* q, const void* k, const void* v, void* out, const int32_t* cu_seqlens,
                                 int64_t num_reqs, int64_t max_seqlen, int64_t heads, int64_t kv_heads, int64_t head_dim,
-                                float scale, int64_t q_stride, int64_t kv_stride, int cfg, cudaStream_t stream) {
+                                float scale, int64_t q_stride, int64_t kv_stride, int cfg, int window, cudaStream_t stream) {
   if (q_stride <= 0) q_stride = heads * head_dim;
   if (kv_stride <= 0) kv_stride = kv_heads * head_dim;
   if (num_reqs <= 0) return 0;
@@ -1399,27 +1401,42 @@ extern "C" int gqa_prefill_bf16(const void* q, const void* k, const void* v, voi
     return v6_dispatch<false>(cfg, (int)max_seqlen, (int)heads, (int)num_reqs, stream, static_cast<const bf16*>(q),
                               static_cast<const bf16*>(k), static_cast<const bf16*>(v), nullptr, nullptr, nullptr,
                               cu_seqlens, static_cast<bf16*>(out), (int)heads, (int)kv_heads, scale * LOG2E_F,
-                              (int)q_stride, (int)kv_stride, 0, 0, 0);
+                              (int)q_stride, (int)kv_stride, 0, 0, 0, window);
   if (head_dim == 128 || head_dim == 256) {
     const int bq = head_dim == 128 ? V5Cfg<128>::BQ : V5Cfg<256>::BQ;
     dim3 grid((unsigned)((max_seqlen + bq - 1) / bq), (unsigned)heads, (unsigned)num_reqs);
     return v5_dispatch<false>(head_dim, grid, stream, static_cast<const bf16*>(q), static_cast<const bf16*>(k),
                               static_cast<const bf16*>(v), nullptr, nullptr, nullptr, cu_seqlens,
                               static_cast<bf16*>(out), (int)heads, (int)kv_heads, scale * LOG2E_F, (int)q_stride,
-                              (int)kv_stride, 0, 0, 0);
+                              (int)kv_stride, 0, 0, 0, window);
   }
   dim3 grid((unsigned)num_reqs, (unsigned)heads);
   gqa_prefill_ref_kernel<<<grid, GQ_BLOCK, 0, stream>>>(static_cast<const bf16*>(q), static_cast<const bf16*>(k),
                                                         static_cast<const bf16*>(v), static_cast<bf16*>(out), cu_seqlens,
                                                         (int)heads, (int)kv_heads, (int)head_dim, scale, (int)q_stride,
-                                                        (int)kv_stride);
+                                                        (int)kv_stride, window);
   return last_err();
 }
 
-extern "C" int gqa_paged_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens,
+// 滑窗入口：window <= 0 等价全注意力（旧符号行为不变）。
+extern "C" int gqa_prefill_win_bf16(const void* q, const void* k, const void* v, void* out, const int32_t* cu_seqlens,
+                                    int64_t num_reqs, int64_t max_seqlen, int64_t heads, int64_t kv_heads,
+                                    int64_t head_dim, float scale, int64_t q_stride, int64_t kv_stride, int cfg,
+                                    int window, cudaStream_t stream) {
+  return gqa_prefill_impl(q, k, v, out, cu_seqlens, num_reqs, max_seqlen, heads, kv_heads, head_dim, scale, q_stride,
+                          kv_stride, cfg, window, stream);
+}
+extern "C" int gqa_prefill_bf16(const void* q, const void* k, const void* v, void* out, const int32_t* cu_seqlens,
+                                int64_t num_reqs, int64_t max_seqlen, int64_t heads, int64_t kv_heads, int64_t head_dim,
+                                float scale, int64_t q_stride, int64_t kv_stride, int cfg, cudaStream_t stream) {
+  return gqa_prefill_impl(q, k, v, out, cu_seqlens, num_reqs, max_seqlen, heads, kv_heads, head_dim, scale, q_stride,
+                          kv_stride, cfg, 0, stream);
+}
+
+static int gqa_paged_impl(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens,
                               const int32_t* cu_seqlens_q, void* out, int64_t num_reqs, int64_t max_q_len, int64_t heads,
                               int64_t kv_heads, int64_t head_dim, int64_t block_size, int64_t max_blocks, float scale,
-                              int64_t q_stride, int skip_single, int cfg, cudaStream_t stream) {
+                              int64_t q_stride, int skip_single, int cfg, int window, cudaStream_t stream) {
   if (q_stride <= 0) q_stride = heads * head_dim;
   if (num_reqs <= 0) return 0;
   if (head_dim <= 0 || head_dim > MAX_D || heads <= 0 || kv_heads <= 0 || heads % kv_heads != 0 || block_size <= 0 ||
@@ -1436,21 +1453,37 @@ extern "C" int gqa_paged_bf16(const void* q, const void* cache, const int32_t* b
     return v6_dispatch<true>(cfg, (int)max_q_len, (int)heads, (int)num_reqs, stream, static_cast<const bf16*>(q), nullptr,
                              nullptr, static_cast<const bf16*>(cache), block_table, seq_lens, cu_seqlens_q,
                              static_cast<bf16*>(out), (int)heads, (int)kv_heads, scale * LOG2E_F, (int)q_stride, 0,
-                             (int)block_size, (int)max_blocks, skip_single);
+                             (int)block_size, (int)max_blocks, skip_single, window);
   if (head_dim == 128 || head_dim == 256) {
     const int bq = head_dim == 128 ? V5Cfg<128>::BQ : V5Cfg<256>::BQ;
     dim3 grid((unsigned)((max_q_len + bq - 1) / bq), (unsigned)heads, (unsigned)num_reqs);
     return v5_dispatch<true>(head_dim, grid, stream, static_cast<const bf16*>(q), nullptr, nullptr,
                              static_cast<const bf16*>(cache), block_table, seq_lens, cu_seqlens_q,
                              static_cast<bf16*>(out), (int)heads, (int)kv_heads, scale * LOG2E_F, (int)q_stride, 0,
-                             (int)block_size, (int)max_blocks, skip_single);
+                             (int)block_size, (int)max_blocks, skip_single, window);
   }
   dim3 grid((unsigned)num_reqs, (unsigned)heads);
   gqa_paged_kernel<<<grid, GQ_BLOCK, 0, stream>>>(static_cast<const bf16*>(q), static_cast<const bf16*>(cache),
                                                     block_table, seq_lens, cu_seqlens_q, static_cast<bf16*>(out),
                                                     (int)heads, (int)kv_heads, (int)head_dim, (int)block_size,
-                                                    (int)max_blocks, scale, (int)q_stride);
+                                                    (int)max_blocks, scale, (int)q_stride, window);
   return last_err();
+}
+
+extern "C" int gqa_paged_win_bf16(const void* q, const void* cache, const int32_t* block_table,
+                                  const int32_t* seq_lens, const int32_t* cu_seqlens_q, void* out, int64_t num_reqs,
+                                  int64_t max_q_len, int64_t heads, int64_t kv_heads, int64_t head_dim,
+                                  int64_t block_size, int64_t max_blocks, float scale, int64_t q_stride,
+                                  int skip_single, int cfg, int window, cudaStream_t stream) {
+  return gqa_paged_impl(q, cache, block_table, seq_lens, cu_seqlens_q, out, num_reqs, max_q_len, heads, kv_heads,
+                        head_dim, block_size, max_blocks, scale, q_stride, skip_single, cfg, window, stream);
+}
+extern "C" int gqa_paged_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens,
+                              const int32_t* cu_seqlens_q, void* out, int64_t num_reqs, int64_t max_q_len, int64_t heads,
+                              int64_t kv_heads, int64_t head_dim, int64_t block_size, int64_t max_blocks, float scale,
+                              int64_t q_stride, int skip_single, int cfg, cudaStream_t stream) {
+  return gqa_paged_impl(q, cache, block_table, seq_lens, cu_seqlens_q, out, num_reqs, max_q_len, heads, kv_heads,
+                        head_dim, block_size, max_blocks, scale, q_stride, skip_single, cfg, 0, stream);
 }
 
 // 每个有效 split 至少处理多少 key（kernel 内按 seq_len 算有效 splits）。默认 32：B300 kps 16/32/64 扫描（loop 第 4b 轮）

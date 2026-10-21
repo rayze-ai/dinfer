@@ -236,6 +236,25 @@ extern "C" {
         cfg: i32,
         stream: cudaStream_t,
     ) -> i32;
+    /// 滑窗变体（Kaon-V3 / Gemma4 滑窗层）：`window <= 0` = 全注意力。
+    pub fn gqa_prefill_win_bf16(
+        q: *const c_void,
+        k: *const c_void,
+        v: *const c_void,
+        out: *mut c_void,
+        cu_seqlens: *const i32,
+        num_reqs: i64,
+        max_seqlen: i64,
+        heads: i64,
+        kv_heads: i64,
+        head_dim: i64,
+        scale: f32,
+        q_stride: i64,
+        kv_stride: i64,
+        cfg: i32,
+        window: i32,
+        stream: cudaStream_t,
+    ) -> i32;
     pub fn gqa_paged_bf16(
         q: *const c_void,
         cache: *const c_void,
@@ -254,6 +273,27 @@ extern "C" {
         q_stride: i64,
         skip_single: i32,
         cfg: i32,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn gqa_paged_win_bf16(
+        q: *const c_void,
+        cache: *const c_void,
+        block_table: *const i32,
+        seq_lens: *const i32,
+        cu_seqlens_q: *const i32,
+        out: *mut c_void,
+        num_reqs: i64,
+        max_q_len: i64,
+        heads: i64,
+        kv_heads: i64,
+        head_dim: i64,
+        block_size: i64,
+        max_blocks: i64,
+        scale: f32,
+        q_stride: i64,
+        skip_single: i32,
+        cfg: i32,
+        window: i32,
         stream: cudaStream_t,
     ) -> i32;
     pub fn gqa_decode_bf16(

@@ -123,6 +123,14 @@ int gqa_paged_bf16(const void* q, const void* cache, const int32_t* block_table,
                    const int32_t* cu_seqlens_q, void* out, int64_t num_reqs, int64_t max_q_len, int64_t heads,
                    int64_t kv_heads, int64_t head_dim, int64_t block_size, int64_t max_blocks, float scale,
                    int64_t q_stride, int skip_single, int cfg, cudaStream_t stream);
+// 滑窗变体（Kaon-V3 / Gemma4 的 25 个 sliding_attention 层）：window <= 0 = 全注意力，与上面的旧符号等价。
+int gqa_prefill_win_bf16(const void* q, const void* k, const void* v, void* out, const int32_t* cu_seqlens,
+                         int64_t num_reqs, int64_t max_seqlen, int64_t heads, int64_t kv_heads, int64_t head_dim,
+                         float scale, int64_t q_stride, int64_t kv_stride, int cfg, int window, cudaStream_t stream);
+int gqa_paged_win_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens,
+                       const int32_t* cu_seqlens_q, void* out, int64_t num_reqs, int64_t max_q_len, int64_t heads,
+                       int64_t kv_heads, int64_t head_dim, int64_t block_size, int64_t max_blocks, float scale,
+                       int64_t q_stride, int skip_single, int cfg, int window, cudaStream_t stream);
 int gqa_decode_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens, void* out,
                     float* scratch, int64_t num_reqs, int64_t heads, int64_t kv_heads, int64_t head_dim,
                     int64_t block_size, int64_t max_blocks, float scale, int64_t q_stride, const int32_t* cu_seqlens_q, cudaStream_t stream);

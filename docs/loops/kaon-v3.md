@@ -682,7 +682,7 @@ docker run --rm --entrypoint bash --gpus device=0 \
   `*const c_void`）与 `ops.rs` 调用不匹配。与本次改动无关，**不要用它做本地 CPU 验证**；
   一律远端 nvcc 编译。待修。
 
-### 阶段 3 进度（续）：滑窗 kernel 改动写到一半，**当前 gqa.cu 不可编译**
+### 阶段 3 进度（续，2026-10-21 深夜）：滑窗 kernel **已编译通过**
 
 已完成（本次会话）：
 - 三个 kernel 形参加 `int window`：`gqa_fa_v5_kernel`(122)、`v6`(354)、`v7`(595)
@@ -701,3 +701,18 @@ docker run --rm --entrypoint bash --gpus device=0 \
    `gqa_paged_win_bf16` 包装（`opset.rs` 的 `Attention` trait 加带窗口的方法，默认转发不变体）
 5. decode 侧（`gqa_decode_v3.cu`）：从 `max(0,(seq_len-window)/block_size)` 起扫
 6. 远端容器编译 + 单测：窗口=0 时结果与改动前逐位一致（回归），窗口=W 时与 torch 参考一致
+
+#### 最新状态（本次会话结束时）
+
+- `crates/kernels/cuda/gqa.cu`：**v5 / v6 / v7 三个 tensor-core kernel + 两个参考 kernel 都有
+  `window` 参数**，`cargo build --release -p dinfer-kernels`（CUDA_ARCHS=120）**通过**。
+  实现要点：下界 `lo_a/lo_b`（`window<=0`→`INT_MIN`）、起始 tile `tile0` 跳读、
+  双缓冲索引改 `(tile-tile0)&1`、v7 用 `pair_min_vis` 推 `tile0`。
+- `crates/kernels/cuda/kernels.h` + `src/ffi.rs`：新增 `gqa_prefill_win_bf16` /
+  `gqa_paged_win_bf16`（旧符号 `window=0` 转发，行为不变）。**尚未编译验证**（下一轮第一条）。
+- 三个坑（已修正，下轮别重犯）：① 派生量必须声明在 `warp_min_vis` / `pair_min_vis` **之后**；
+  ② v7 的 `tile0` 要用 `pair_min_vis`，用 `warp_min_vis` 会未定义；③ `ffi.rs` 批量替换时
+  别把 `window` 误加到旧签名上。
+
+**下一步**：`ops.rs` / `opset.rs` 包装 → 无权重 RMSNorm（`norm.cu` 的 `w == nullptr`）→
+`models/kaon3/{layer,model}.rs` → 窗口=0 回归与基线逐位一致 → 与 torch 参考对拍窗口=1024。
