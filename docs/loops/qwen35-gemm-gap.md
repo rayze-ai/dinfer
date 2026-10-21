@@ -297,7 +297,7 @@ MLP_PROFILE=1 拆三层（GPU 事件，t=6019，64 层）：
 ## 撤回：改 autotune scratch 尺寸
 
 原假设「autotune 的 A 缓冲太小（786 KB，驻留 L2）」——**错**。
- 时 ，，
+`GEMM_TUNE_M=6019` 时 `m_max=6019`，`a_scratch = 6019 × 6144 × 2 = 74 MB`，
 早已是真实尺寸。改 scratch 不影响任何东西。
 
 ## 真实原因（最可能）：权重超出 L2
