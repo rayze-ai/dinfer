@@ -173,6 +173,8 @@ pub struct Gemm {
     partial: Mutex<Option<CudaSlice<f32>>>,
     /// tensor-core kernel split-K 的每 N-tile 到达计数器（自调优后按最大 ceil(N/16) 分配；kernel 自复位，常为 0）
     counters: Mutex<Option<CudaSlice<i32>>>,
+    /// 形状分布统计（`GEMM_SHAPE_STATS=1` 时开；只累加计数，不做时间测量，开销可忽略）
+    shape_stats: Option<Mutex<HashMap<(usize, usize, usize), u64>>>,
 }
 
 // SAFETY: cublasLt 句柄按 NVIDIA 文档可跨线程使用；其余字段自身 Send/Sync（Mutex 包着可变状态）。
@@ -181,6 +183,17 @@ unsafe impl Sync for Gemm {}
 
 impl Drop for Gemm {
     fn drop(&mut self) {
+        // `GEMM_SHAPE_STATS=1`：退出时按调用次数打印形状分布（诊断用，找 GEMM 形状热点）。
+        if let Some(st) = &self.shape_stats {
+            if let Ok(g) = st.lock() {
+                let mut v: Vec<_> = g.iter().map(|(k, c)| (*k, *c)).collect();
+                v.sort_by_key(|(_, c)| std::cmp::Reverse(*c));
+                eprintln!("[gemm-shape] {} distinct shapes, total {} calls", v.len(), v.iter().map(|(_, c)| c).sum::<u64>());
+                for ((m, n, k), c) in v.iter().take(40) {
+                    eprintln!("[gemm-shape] m={m:<6} n={n:<6} k={k:<6} calls={c}");
+                }
+            }
+        }
         // SAFETY: 句柄由 create_handle 创建，只销毁一次。
         unsafe {
             let _ = lt::destroy_handle(self.handle);
@@ -198,6 +211,8 @@ impl Gemm {
         let handle = lt_err(lt::create_handle(), "cublasLt create")?;
         let workspace = stream.alloc_zeros::<u8>(profile.cublaslt_workspace_bytes)?;
         let enabled = std::env::var("GEMM_TUNE").map_or(true, |v| v != "off" && v != "0");
+        let shape_stats = (std::env::var("GEMM_SHAPE_STATS").ok().as_deref() == Some("1"))
+            .then(|| Mutex::new(HashMap::new()));
         Ok(Self {
             handle,
             stream: stream.clone(),
@@ -208,6 +223,7 @@ impl Gemm {
             default_algos: Mutex::new(HashMap::new()),
             partial: Mutex::new(None),
             counters: Mutex::new(None),
+            shape_stats,
         })
     }
 
@@ -240,6 +256,17 @@ impl Gemm {
         }
         if m == 0 {
             return Ok(());
+        }
+        if let Some(st) = &self.shape_stats {
+            if let Ok(mut g) = st.lock() {
+                let e = g.entry((m, n, k)).or_insert(0);
+                *e += 1;
+                // 每个形状**首次**出现就打印一次：不需要等进程退出（serve 的 main 走 process::exit，
+                // 析构不会执行，Drop 里的 dump 永远是空的 —— 2026-10-21 实测）。
+                if *e == 1 {
+                    eprintln!("[gemm-shape] m={m:<6} n={n:<6} k={k:<6}");
+                }
+            }
         }
         match self.plan_for(m, n, k, bias.is_some()) {
             Some(GemmPlan::SmallM { splits }) => {
