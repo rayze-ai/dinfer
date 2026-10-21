@@ -27,7 +27,7 @@ __device__ __forceinline__ float e4m3_f(unsigned b) {
   const unsigned s = (b >> 7) & 1u, e = (b >> 3) & 15u, m = b & 7u;
   float v;
   if (e == 0) {
-    v = m * (1.f / 8.f) * (1.f / 64.f);  // 次正规：m/8 * 2^-6
+    v = m * (1.f / 8.f) * exp2f(-6.f);  // 次正规：m/8 * 2^-6（实测镜像：0x23 → 0.171875）
   } else if (e == 15 && m == 7) {
     v = 448.f;
   } else {
@@ -115,6 +115,8 @@ __global__ void __launch_bounds__(256) gemm_nvfp4_kernel(const bf16* __restrict_
         uint8_t sb8;
         quant16(A + static_cast<size_t>(gm < M ? gm : M - 1) * K + gk, ok, &pk, &sb8);
         *reinterpret_cast<uint2*>(&sA[r * RSA + bi * 8]) = pk;
+        // 硬件实测：scale 寄存器的第 i 个字节作用在该 lane 的 4 个元素上（16-块 4 个 lane 共享一个 sf），
+        // 所以把块 scale 复制到 4 个字节；不复制的话每块只有 1/4 的元素拿到缩放。
         reinterpret_cast<uint8_t*>(sfa)[r * NB16 + bi] = sb8;
       }
     }
