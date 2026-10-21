@@ -68,6 +68,11 @@ pub trait Attention {
 /// RMSNorm 及其融合变体。
 pub trait Norm {
     fn rmsnorm(&self, stream: &Stream, x: &CudaSlice<bf16>, w: &CudaSlice<bf16>, out: &mut CudaSlice<bf16>, tokens: usize, hidden: usize, eps: f32) -> Result<()>;
+    /// 无权重 RMSNorm：`out = x / rms(x)`（Gemma4 的 v_norm / router 预处理）。
+    fn rmsnorm_noweight(&self, stream: &Stream, x: &CudaSlice<bf16>, out: &mut CudaSlice<bf16>, tokens: usize, hidden: usize, eps: f32) -> Result<()> {
+        let _ = (stream, x, out, tokens, hidden, eps);
+        anyhow::bail!("当前后端不支持无权重 RMSNorm（rmsnorm_noweight）")
+    }
     /// res += x; out = rmsnorm(res) · w
     #[allow(clippy::too_many_arguments)]
     fn fused_add_rmsnorm(&self, stream: &Stream, x: &CudaSlice<bf16>, res: &mut CudaSlice<bf16>, w: &CudaSlice<bf16>, out: &mut CudaSlice<bf16>, tokens: usize, hidden: usize, eps: f32) -> Result<()>;
@@ -173,6 +178,10 @@ impl Attention for DefaultOps {
 }
 impl Norm for DefaultOps {
     #[inline]
+    #[inline]
+    fn rmsnorm_noweight(&self, stream: &Stream, x: &CudaSlice<bf16>, out: &mut CudaSlice<bf16>, _tokens: usize, hidden: usize, eps: f32) -> Result<()> {
+        ops::rmsnorm_bf16_noweight(stream, x, out, hidden, eps)
+    }
     fn rmsnorm(&self, stream: &Stream, x: &CudaSlice<bf16>, w: &CudaSlice<bf16>, out: &mut CudaSlice<bf16>, tokens: usize, hidden: usize, eps: f32) -> Result<()> {
         ops::rmsnorm_bf16_n(stream, x, w, out, tokens, hidden, eps)
     }

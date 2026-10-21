@@ -30,7 +30,8 @@ __global__ void __launch_bounds__(BLOCK) rmsnorm_vec_kernel(const bf16* __restri
     const int i = threadIdx.x + j * BLOCK;
     if (i < nvec) {
       uint4 xa = xr[i];
-      wa[j] = wv[i];
+      // w == nullptr → 无权重 RMSNorm（Gemma4 的 v_norm / router 预处理），权重当作 1.0
+      wa[j] = w ? wv[i] : make_uint4(0x3F803F80u, 0x3F803F80u, 0x3F803F80u, 0x3F803F80u);
       const __nv_bfloat162* xp = reinterpret_cast<const __nv_bfloat162*>(&xa);
       float2 f[4];
 #pragma unroll
@@ -135,7 +136,7 @@ __global__ void __launch_bounds__(kNormWarps * 32) rmsnorm_warp_kernel(const bf1
   for (int j = 0; j < VPL; ++j) {
     const int i = lane + j * 32;
     if (i < nvec) {
-      const uint4 wa = wv[i];
+      const uint4 wa = w ? wv[i] : make_uint4(0x3F803F80u, 0x3F803F80u, 0x3F803F80u, 0x3F803F80u);
       const __nv_bfloat162* wp = reinterpret_cast<const __nv_bfloat162*>(&wa);
       const __nv_bfloat162* xp = reinterpret_cast<const __nv_bfloat162*>(&xa[j]);
       uint4 ob;
@@ -177,7 +178,7 @@ __global__ void rmsnorm_kernel(const bf16* __restrict__ x, bf16* __restrict__ re
   // 第二遍：归一化并乘权重。
   const bf16* src = FUSED_ADD ? rr : xr;
   for (int i = threadIdx.x; i < hidden; i += BLOCK) {
-    orow[i] = to_bf16(to_f32(src[i]) * inv * to_f32(w[i]));
+    orow[i] = to_bf16(to_f32(src[i]) * inv * (w ? to_f32(w[i]) : 1.f));
   }
 }
 

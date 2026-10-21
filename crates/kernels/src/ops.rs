@@ -174,6 +174,39 @@ pub fn rmsnorm_bf16(
     )
 }
 
+/// 无权重 RMSNorm：`out = x / rms(x)`（Gemma4 的 `v_norm`、router 预处理）。
+///
+/// kernel 侧把空权重指针当作 1.0（`norm.cu`），所以不需要额外的 C 符号，传 `nullptr` 即可。
+#[allow(clippy::too_many_arguments)]
+pub fn rmsnorm_bf16_noweight(
+    stream: &Stream,
+    x: &CudaSlice<bf16>,
+    out: &mut CudaSlice<bf16>,
+    hidden: usize,
+    eps: f32,
+) -> Result<()> {
+    ensure!(hidden > 0 && x.len() % hidden == 0, "rmsnorm_noweight: x.len {} not multiple of hidden {hidden}", x.len());
+    ensure!(out.len() == x.len(), "rmsnorm_noweight: out 长度不符");
+    let tokens = (x.len() / hidden) as i64;
+    let (px, po) = (stream.ptr(x) as *const c_void, stream.ptr_mut(out) as *mut c_void);
+    // SAFETY: 指针与长度已校验；w 传空 → kernel 乘 1.0。
+    check(
+        unsafe {
+            ffi::rmsnorm_bf16(
+                px,
+                std::ptr::null(),
+                po,
+                tokens,
+                hidden as i64,
+                eps,
+                rmsnorm_layout(stream, tokens as usize, hidden, None),
+                stream.raw() as _,
+            )
+        },
+        "rmsnorm_bf16_noweight",
+    )
+}
+
 /// res += x; out = rmsnorm(res) * w。res 原位更新。
 pub fn fused_add_rmsnorm_bf16(
     stream: &Stream,
