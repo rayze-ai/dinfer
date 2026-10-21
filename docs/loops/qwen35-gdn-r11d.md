@@ -502,3 +502,35 @@ vLLM 侧没动，所以是单边配置变更 —— 整组数字作废。
 | c8-long | 563.9 | 558.3 | 1.01× |
 
 与 `bench_merge_21`（1.10 / 1.10 / 1.05 / 1.04×）一致，基线可用。
+
+## load 段（1613 µs 时占 60%）— 2026-10-21
+
+### 已定位
+`load` 段由**一串有依赖的全局读**构成，不是带宽问题：
+- `kg` 原样那份 `skg` 装进 smem 后**一次都没被读**（GEMM(4) 只用 `kgT`）→ 每 chunk 白读 16 KB，已删。
+- `kgT` 那趟从全局**逐元素**读 8192 次、每次 2 B → 改 `uint4` 合并读 + 8 次 smem 散射写。
+- `Aq` 的 cp.async 原来单独成组、**从未被 wait**，靠下一轮顺带冲刷 → 并入 q/w 的主 cp.async 组，只等一次。
+
+### 当前状态：**改动已写，未验证**
+B300 JumpServer token 2026-10-21 03:26 已过期，`Permission denied (password,publickey)`，
+本轮无法编译/对拍/计时。**下次拿到新 token 的第一件事**：
+
+```bash
+B300_TAG=50 scripts/dev/remote_b300.sh up
+# 本地 → 远端（rsync 走跳板不稳，用 ssh stdin 更可靠）
+B300_TAG=50 scripts/dev/remote_b300.sh run 'cat > /data/yaochen/infer/dinfer_r11d/crates/kernels/cuda/gdn_ho_sm100.cu' \
+  < crates/kernels/cuda/gdn_ho_sm100.cu
+# 语法/寄存器
+cd /data/yaochen/infer/dinfer_r11d/crates/kernels/cuda && \
+  nvcc -std=c++17 -O3 -gencode=arch=compute_103a,code=sm_103a -c gdn_ho_sm100.cu -o /tmp/gh.o -I.
+# 正确性（1×256，必须 0 误差）→ 计时（1×8192）
+nvcc -std=c++17 -O3 -gencode=arch=compute_103a,code=sm_103a /tmp/correct.cu gdn_ho_sm100.cu -o /tmp/correct7 -I.
+CUDA_VISIBLE_DEVICES=4 /tmp/correct7
+```
+
+**注意**：远端 `/tmp/correct.cu` 在本次会话中一度不存在（跑出了旧二进制的 `inf` 结果），
+`/tmp/prof1.cu` 在、`/tmp/correct.cu` 已重传。跑前先 `ls -la` 确认源码在，否则结果不可信。
+
+### 已加的细分计时
+`[ld] issue / wait / sync  us/chunk` —— `__pipeline_wait_prior(0)` 的阻塞、发射开销、
+`__syncthreads` 三者分开，用来确认 load 的 60% 到底卡在"发射"还是"等待"。

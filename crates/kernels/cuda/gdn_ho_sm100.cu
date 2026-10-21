@@ -196,7 +196,6 @@ __global__ void __launch_bounds__(kThreads) gdn_ho_umma_kernel(
   bf16* sh = sm16 + Smem::off_h;
   bf16* sq = sm16 + Smem::off_q;
   bf16* sw = sm16 + Smem::off_w;
-  bf16* skg = sm16 + Smem::off_kg;
   bf16* sAq = sm16 + Smem::off_aq;
   bf16* svp = sm16 + Smem::off_vp;
   bf16* svt = svp;  // 与 svp 同一块（内容相同）
@@ -286,39 +285,51 @@ __global__ void __launch_bounds__(kThreads) gdn_ho_umma_kernel(
     zero_pad_rows(sw + kb * (kM * 64), kBT, kM, tid);
   }
   zero_pad_rows(sAq, kBT, kM, tid);
+  // kgT 只有 token 行 < len 才有写；末块的 [len, kBT) 列要先清一次（B 的 K 维末尾补零）。
+  for (int i = tid; i < kK * kBT; i += kThreads) skgt[i] = dinfer::to_bf16(0.f);
   __syncthreads();
   // mbarrier 的 parity phase：每完成一次翻转。原代码三处都固定传 0，
   // chunk 1 起等的是尚未发生的到达 -> 读到上一轮/半成品数据（表现为每次运行结果都不同）。
   uint32_t ph0 = 0, ph1 = 0, ph3 = 0;
   long long t_load=0, t_g1=0, t_vp=0, t_g23=0, t_o=0, t_g4=0, t_hu=0;
+  long long t_issue=0, t_wait=0, t_sync=0;
   for (int ci = 0; ci < nt; ++ci) {
     const int len = min(kBT, len_seq - ci * kBT);
     const long row0 = bos + (long)ci * kBT;
     const long ubase = (row0 * vstride) + (long)hv * V;
 
     const long long _t0 = (tid == 0) ? clock64() : 0;
-    // 装载 q（按 h 段）、w / kg / Aq（按 hv 段）
+    long long _tl1 = _t0, _tl2 = _t0, _tl3 = _t0;
+    // 装载 q（按 h 段）、w、kgᵀ 全部走 cp.async 同一组；Aq 也进这一组，一起等一次。
+    const bf16* aqc = reinterpret_cast<const bf16*>(aq) + ((long)ci * HV + hv) * kBT * kBT;
     for (int kb = 0; kb < Smem::kblk; ++kb) {
       const int k0 = kb * 64;
       stage_tile_async(sq + kb * (kM * 64), qn + row0 * qstride + (long)h * kK + k0, len, (int)qstride, tid);
       stage_tile_async(sw + kb * (kM * 64), w + ubase + k0, len, (int)vstride, tid);
-      stage_tile_async(skg + kb * (kBT * 64), kg + ubase + k0, len, (int)vstride, tid);
-      // kgᵀ [K][token]：(4) 的 B 需要 K 维 = token 连续。
-      // 源 kg[token][K] 的 K 列 = kb*64 + kc，行 = 该 block 内第 tk 个 token。
-      for (int i = tid; i < kBT * 64; i += kThreads) {
-        const int tk = i >> 6, kc = i & 63;              // tk = token 行，kc = 该块内第几个 K
-        const int kk = kb * 64 + kc;                      // kgT 的行号（K 维）
-        const bf16 v = (tk < len) ? kg[(row0 + tk) * vstride + (long)hv * V + kk] : dinfer::to_bf16(0.f);
-        // kgT 行 = kk、列 = tk，128 B swizzle
-        const size_t koff = (size_t)(kk * 8 + ((tk >> 3) ^ (kk & 7))) * 8 + (tk & 7);
-        chk(&skgt[koff], smraw, Smem::bytes, "kgt", kk, tk);
-        skgt[koff] = v;
+      // kg 只以 kgᵀ（(4) 的 B）形式被用到，[BT][K] 原样那份没人读，不再装载。
+      // 源 kg[token][K] 的 8 个连续 bf16 沿 K，而 kgT 里连续的 8 个沿 token —— 是转置关系，
+      // 只能"全域合并读 + 8 次 smem 散射写"（smem 写便宜，全局读才是贵的那头）。
+      for (int i = tid; i < len * 8; i += kThreads) {
+        const int tk = i >> 3, c8 = (i & 7) * 8;
+        uint4 raw = *reinterpret_cast<const uint4*>(kg + (row0 + tk) * vstride + (long)hv * V + kb * 64 + c8);
+        const __nv_bfloat162* r2 = reinterpret_cast<const __nv_bfloat162*>(&raw);
+        for (int e = 0; e < 4; ++e) {
+          for (int h2 = 0; h2 < 2; ++h2) {
+            const int kk = kb * 64 + c8 + 2 * e + h2;
+            const bf16 v = h2 ? r2[e].y : r2[e].x;
+            skgt[(size_t)(kk * 8 + ((tk >> 3) ^ (kk & 7))) * 8 + (tk & 7)] = v;
+          }
+        }
       }
     }
+    stage_tile_async(sAq, aqc, len, kBT, tid);
+    if (tid == 0) _tl1 = clock64();
     __pipeline_commit();
     if (tid < kBT) sdec[tid] = (tid < len) ? exp2f(gc[(row0 + tid) * HV + hv]) : 0.f;
     __pipeline_wait_prior(0);
+    if (tid == 0) _tl2 = clock64();
     __syncthreads();
+    if (tid == 0) _tl3 = clock64();
     // dec 折进 q，但**在 smem 里原地乘**：cp.async 装载（快）+ smem 乘法（快），
     // 避免原来"全局读 + 逐元素浮点乘 + 逐元素写"的同步路径（实测 4.63 µs/chunk）。
     for (int kb2 = 0; kb2 < Smem::kblk; ++kb2) {
@@ -337,19 +348,6 @@ __global__ void __launch_bounds__(kThreads) gdn_ho_umma_kernel(
           o32[e] = *reinterpret_cast<const uint32_t*>(&v2);
         }
         *reinterpret_cast<uint4*>(p8) = out;
-      }
-    }
-    __syncthreads();
-    // Aq 装载时把 dec（按 token = 行）折进 A 侧：o = (q·hᵀ)·dec + Aq·v' 里 dec 只作用于第一项，
-    // 所以折进 q 而不是 Aq。见下方 (2) 的装载。
-    // Aq 的形状是 [num_chunks, HV, BT, BT]（每 chunk 一个 BT×BT），不是 [T, HV, V]。
-    {
-      // Aq 是 [num_chunks, HV, BT, BT]：一个 chunk 一个 BT×BT 矩阵，行跨度 = BT。
-      const bf16* aqc = reinterpret_cast<const bf16*>(aq) + ((long)ci * HV + hv) * kBT * kBT;
-      for (int i = tid; i < len * 8; i += kThreads) {
-        const int row = i >> 3, blk = i & 7;
-        const int phys = row * 8 + (blk ^ (row & 7));
-        __pipeline_memcpy_async(sAq + (size_t)phys * 8, aqc + row * kBT + blk * 8, 16);
       }
     }
     __syncthreads();
@@ -470,6 +468,7 @@ __global__ void __launch_bounds__(kThreads) gdn_ho_umma_kernel(
     umma::fence_proxy_async_shared();
     if (tid == 0) {
       const long long _t8 = clock64();
+      t_issue += _tl1-_t0; t_wait += _tl2-_tl1; t_sync += _tl3-_tl2;
       t_load += _t1-_t0; t_g1 += _t2-_t1; t_vp += _t3-_t2; t_g23 += _t4-_t3;
       t_o += _t5-_t4; t_g4 += _t6-_t5; t_hu += _t8-_t6;
     }
@@ -478,6 +477,8 @@ __global__ void __launch_bounds__(kThreads) gdn_ho_umma_kernel(
     const double tot = (double)(t_load+t_g1+t_vp+t_g23+t_o+t_g4+t_hu);
     printf("[prof] load %.0f%% g1 %.0f%% vp %.0f%% g23 %.0f%% o %.0f%% g4 %.0f%% hupd %.0f%% (%.2f us)\n",
       t_load*100/tot, t_g1*100/tot, t_vp*100/tot, t_g23*100/tot, t_o*100/tot, t_g4*100/tot, t_hu*100/tot, tot/1900.0);
+    printf("[ld] issue %.2f wait %.2f sync %.2f us/chunk\n",
+      t_issue/1900.0, t_wait/1900.0, t_sync/1900.0);
   }
 
   // 末态回写
