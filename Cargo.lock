@@ -652,6 +652,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "dinfer-kaon3"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "dinfer-core",
+ "dinfer-kernels",
+ "dinfer-layers",
+ "half",
+ "memmap2",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "dinfer-kernels"
 version = "0.1.0"
 dependencies = [
