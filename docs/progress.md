@@ -3,18 +3,61 @@
 <!-- ===== 当前状态（交接区）：每次收功整体重写，保持 ≤ 20 行 ===== -->
 ## 当前状态
 
-- 更新日期：2026-10-21 03:0x +0800。**目标（用户 2026-10-20）：qwen35 全面超过 vLLM 1.2×**。四组闭环已追平（1.10/1.11/1.06/1.04×），剩余缺口在 6 K TTFT 与 engine goodput。
-- **用户 2026-10-21 决定：不再推倒重来，在现有方案上合并** —— GEMM（prefill 61%，80–85% 峰值）封顶不动；attn 保 r11a v6；**只换 GDN 一段**，后面再接 tcgen05。
-- **两条线已派出（2026-10-21 03:0x）**：
-  - **r11d（GPU 4）**：`docs/loops/qwen35-gdn-r11d.md`。把 `wy` 并入 `ho` 的 chunk 循环，aq/u/w/kg **不落显存**（8 K 省 350 MB 写 + 350 MB 读 ≈ 117 µs + 3 次 launch）。目标 8×1024 ≤ 300 µs / 1×8192 ≤ 450 / 1×1024 ≤ 110 / 32×128 ≤ 250。**关键纠正**：不是"A/B/C 三段"——那正是 r9 第 2 轮的 `bv32sp`，B300 已证全输（8×1024 555 vs 融合 382、1×8192 797 vs 504），不要再走。
-  - **r12a（GPU 5）**：`docs/loops/qwen35-tcgen05.md`。先把 `umma_peak` 工具链自证（tcgen05/TMEM/128B swizzle/描述符/mbarrier），**硬门槛 ≥ 900 TF/s**（1.5× mma.sync 575），过了才移植 attn 到 `gqa_fa_sm100.cu`（目标 T=6019 ≤ 800 µs）。
-- **r11d 基线（r10 收口，B300）**：全链 1×1024 **208** / 8×1024 **769** / 32×128 421 / 1×8192 **967** µs；分段 prep 82 + wy 371 + ho 308 = 761（8 K）。FlashInfer 对手：49 / 156 / 253（4.2× / 4.9× / 3.8×）。
-- **子代理远端目录**：`/data/yaochen/infer/dinfer_r11d`（GPU 4，target_r11d）、`dinfer_tc05`（GPU 5，target_r12a），都是 `dev` HEAD 的完整拷贝，md5 已核对。**两个子代理都不 push**，主会话统一推。
-- **B300 卡位**：0 常驻 `:8012` / 1 vLLM `:8013` / 2–3 主会话 / **4 r11d** / **5 r12a** / 6–7 留。**硬约束**：`B300_TAG=50` 必带（脚本强制），**.225 禁占**，子代理禁止 `push`（只 `put`）。
-- **B300 token**：2026-10-21 03:26 过期（用户已给新 token，`~/.ssh/jms_b300_50_{user,pass}` 已更新）。
-- **下一步**：等两条线首轮回报；随后 ① 4090 门禁（r11 合并的，看自调优有没有选 `small_m`）② 6 K attn 端到端差额定位（A/B 显示 v5 vs v6 无差异，微基准预示 −7.7 ms 只拿到 3.2）③ glm53 ActScratch（第五例）④ build.rs 默认 arch 按本机卡探测。
-- 页面：`test/index.html`（perf / engine / probe 三页签）；探针 `scripts/dev/{ttft_probe.py,q35_nsys_*.sh,nsys_*.py}`。
+> 更新 2026-10-21 23:0x +0800。**本区按模型分节，每节只写该模型自己的交接内容；不要覆盖别人的分节。**
+
+### Kaon-V3（5090，进行中，阶段 1–2 完成）
+
+- 目标（用户 2026-10-21）：5090 **单卡**适配，性能 ≥ 基线容器 1.2×；**不反量化权重**。
+- **机器**：`host-172-16-20-59`（8×RTX 5090 32GB，sm_120），跳板 `jump.aicloud.paigod.work:2222`。
+  **token 一次性**（用户每次现给 → `~/.ssh/jms_5090_{user,pass}`，第一条命令必须直接
+  `scripts/dev/remote_5090.sh up`，不能先探活）。**GPU 7 跑基线 `kaon-vllm-pegaflow`（`:28067`）**，0–6 空闲。
+  工作目录 **`/hf_data/yaochen`**；**代理 `172.17.0.1:1081`**（`127.0.0.1:1081` 不通）。
+  宿主无 nvcc/rust，**全部在基线容器内编译**（`--entrypoint bash` 必带）。
+- **模型**：`/hf_data/hub/models--kaon-release--Kaon-V3-nvpf4-mixed`，Gemma4 MoE，30 层 / 128 专家 top-8 /
+  滑窗 1024 + 5 层全注意力；NVFP4 专家 + FP8 其余 + FP8 KV，16 GB。
+- **基线**：c1 TPOT 8.34 ms / 108 tok/s；c8 758；c32 2261；**6K TTFT 244.6 ms**（1.2× 线 203.8）。
+  ⚠️ 裸 prompt 输出退化，**bench 与对拍必须走 chat 模板**。
+- **已完成**：NVFP4 原生 MMA（必须 `-gencode=arch=compute_120a,code=sm_120a`）随机值 **bad=0**，
+  GEMM **502 TF/s**，decode 合并 8 专家 1930 GB/s；FP8 **292 TF/s**；权重加载器跑通真实 checkpoint，
+  专家 12.85 GB。**投影：FP8=280 + NVFP4=502 → 6K prefill ≈155 ms = 1.58×**。
+- **下一步**：阶段 3 Gemma4 层结构 + 滑窗注意力（语义全在 `docs/loops/kaon-v3.md`；torch 参考
+  `/hf_data/yaochen/work/kaon_forward.py` 已 30 层跑通）→ 阶段 4 MoE 路由 + 服务 → 阶段 5 对拍调优。
+
+### Qwen3.5-27B（B300，暂停）
+
+- 目标（用户 2026-10-20）：全面超 vLLM 1.2×。四组闭环 1.10/1.10/1.05/1.04×。
+- 用户 2026-10-21 决定：不推倒重来，GEMM 封顶不动，attn 保 r11a v6，只换 GDN 一段。
+- 两条线（r11d GDN tcgen05 / r12a attn tcgen05）状态与下一步见 **`docs/loops/qwen35-todo.md`**（14 条汇总）。
+- r11d 基线：1×1024 **208** / 8×1024 **769** / 32×128 421 / 1×8192 **967** µs。
+- **B300 卡位**：0 常驻 `:8012` / 1 vLLM `:8013` / 2–3 主会话 / 4 r11d / 5 r12a / 6–7 留。
+  **硬约束：`B300_TAG=50` 必带，`.225` 禁占**；token 过期后向用户要新的。
+- 子代理远端：`/data/yaochen/infer/dinfer_r11d`（GPU 4）、`dinfer_tc05`（GPU 5），都不 push。
+
+### 其他
+
 - K3 挂起（TODO 五条在 `docs/loops/k3-serve.md` 末行）；Qwen3-0.6B Q1–Q5 完成；GLM P0–P6 通过、真权重挂起。
+- 页面 `test/index.html`（perf / engine / probe 三页签）。
+
+## 2026-10-21（Kaon-V3 / 5090）
+
+- **环境**：新机器 8×RTX 5090（sm_120）。JumpServer token **一次性**，用过即废；第一条命令必须直接建
+  ControlMaster（`scripts/dev/remote_5090.sh up`），不能先探活。代理是 **`172.17.0.1:1081`**。
+  宿主机无 nvcc/rust，全部在基线容器内编译（`--entrypoint bash` 必带）。工作目录 `/hf_data/yaochen`。
+- **模型勘察**：Gemma4 MoE 多模态，30 层 / 128 专家 top-8 / 滑窗 1024 + 5 层全注意力 /
+  vocab 262144 tied；`MIXED_PRECISION` 量化（专家 NVFP4、其余 FP8、KV FP8），16 GB。
+  读 vLLM `gemma4.py` 1708 行核实语义，写进 `docs/loops/kaon-v3.md`。
+- **基线**：vLLM 0.28.0-pegaflow TP=1 `:28067`。c1 TPOT 8.34 ms / 108 tok/s；c8 758；c32 2261；
+  6K TTFT **244.6 ms**。发现裸 prompt 输出退化，必须走 chat 模板。
+- **阶段 1（NVFP4 GEMM）**：`kind::mxf4nvf4.block_scale` **只在 `compute_120a` 且必须显式 gencode**。
+  寄存器映射打通，随机值全矩阵 **bad=0**。吞吐 21 → 80 → 351 → **502 TF/s**（padding 后）。
+  decode 合并 8 专家一次 launch 达 **1930 GB/s**，30 层约 0.74 ms。
+- **阶段 2（FP8 GEMM + 加载器）**：FP8 e4m3 m16n8k32 在 sm_120/sm_120a 都可用，
+  ldmatrix + padding + cp.async 双缓冲把 **107 → 292 TF/s**。权重加载器跑通真实 checkpoint，
+  三种格式分派正确，专家总量 12.85 GB。
+- **投影**：FP8=280 + NVFP4=502 → 6K prefill ≈ 155 ms = 基线 **1.58×**，1.2× 纸面可达。
+- **未完成**：阶段 3（Gemma4 层结构 + 滑窗注意力）、阶段 4（MoE 路由 + 服务）、阶段 5（对拍 + 调优）。
+- **踩坑 4 条**（详见 `docs/pitfalls.md`）：NVFP4 的 K 是 `shape[1]*2`；对拍脚本参考侧未初始化导致
+  假结论；`-arch=sm_120a` 不生成 `a` PTX；容器缺 libnccl/libnvrtc 未版本化软链接。
 
 ## 2026-10-18
 
