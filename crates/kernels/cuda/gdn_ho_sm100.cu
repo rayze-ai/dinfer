@@ -196,6 +196,7 @@ __global__ void __launch_bounds__(kThreads) gdn_ho_umma_kernel(
   bf16* sh = sm16 + Smem::off_h;
   bf16* sq = sm16 + Smem::off_q;
   bf16* sw = sm16 + Smem::off_w;
+  bf16* skgn = sm16 + Smem::off_kg;  // kg 自然布局中转区（[BT][64]×kblk，16 KB）
   bf16* sAq = sm16 + Smem::off_aq;
   bf16* svp = sm16 + Smem::off_vp;
   bf16* svt = svp;  // 与 svp 同一块（内容相同）
@@ -292,7 +293,7 @@ __global__ void __launch_bounds__(kThreads) gdn_ho_umma_kernel(
   // chunk 1 起等的是尚未发生的到达 -> 读到上一轮/半成品数据（表现为每次运行结果都不同）。
   uint32_t ph0 = 0, ph1 = 0, ph3 = 0;
   long long t_load=0, t_g1=0, t_vp=0, t_g23=0, t_o=0, t_g4=0, t_hu=0;
-  long long t_issue=0, t_wait=0, t_sync=0;
+  long long t_issue=0, t_wait=0, t_sync=0, t_ktr=0, t_part[4]={0,0,0,0};
   for (int ci = 0; ci < nt; ++ci) {
     const int len = min(kBT, len_seq - ci * kBT);
     const long row0 = bos + (long)ci * kBT;
@@ -300,36 +301,75 @@ __global__ void __launch_bounds__(kThreads) gdn_ho_umma_kernel(
 
     const long long _t0 = (tid == 0) ? clock64() : 0;
     long long _tl1 = _t0, _tl2 = _t0, _tl3 = _t0;
+    long long _tk[4] = {0, 0, 0, 0};
     // 装载 q（按 h 段）、w、kgᵀ 全部走 cp.async 同一组；Aq 也进这一组，一起等一次。
     const bf16* aqc = reinterpret_cast<const bf16*>(aq) + ((long)ci * HV + hv) * kBT * kBT;
     for (int kb = 0; kb < Smem::kblk; ++kb) {
       const int k0 = kb * 64;
+      const long long _q0 = (tid == 0) ? clock64() : 0;
       stage_tile_async(sq + kb * (kM * 64), qn + row0 * qstride + (long)h * kK + k0, len, (int)qstride, tid);
+      if (tid == 0) _tk[0] += clock64() - _q0;
+      const long long _w0 = (tid == 0) ? clock64() : 0;
       stage_tile_async(sw + kb * (kM * 64), w + ubase + k0, len, (int)vstride, tid);
+      if (tid == 0) _tk[1] += clock64() - _w0;
       // kg 只以 kgᵀ（(4) 的 B）形式被用到，[BT][K] 原样那份没人读，不再装载。
       // 源 kg[token][K] 的 8 个连续 bf16 沿 K，而 kgT 里连续的 8 个沿 token —— 是转置关系，
       // 只能"全域合并读 + 8 次 smem 散射写"（smem 写便宜，全局读才是贵的那头）。
-      for (int i = tid; i < len * 8; i += kThreads) {
-        const int tk = i >> 3, c8 = (i & 7) * 8;
-        uint4 raw = *reinterpret_cast<const uint4*>(kg + (row0 + tk) * vstride + (long)hv * V + kb * 64 + c8);
-        const __nv_bfloat162* r2 = reinterpret_cast<const __nv_bfloat162*>(&raw);
-        for (int e = 0; e < 4; ++e) {
-          for (int h2 = 0; h2 < 2; ++h2) {
-            const int kk = kb * 64 + c8 + 2 * e + h2;
-            const bf16 v = h2 ? r2[e].y : r2[e].x;
-            skgt[(size_t)(kk * 8 + ((tk >> 3) ^ (kk & 7))) * 8 + (tk & 7)] = v;
-          }
-        }
-      }
+      const long long _k0t = (tid == 0) ? clock64() : 0;
+      // kg 只以 kgᵀ（(4) 的 B）形式被用到：[BT][K] 原样那份没人读。
+      // 但**不要**在装载路径里做转置写 —— 8 次散射 smem 写实测 558 us/chunk，
+      // 是 q/w 的 15 倍。这里跟 w 一样 cp.async 装成自然布局到 off_kg 中转区，
+      // 等 wait 之后再做块转置（8×8，每线程一个整块，8 读 + 8 写）。
+      stage_tile_async(skgn + kb * (kBT * 64), kg + ubase + k0, len, (int)vstride, tid);
+      if (tid == 0) _tk[2] += clock64() - _k0t;
     }
+    const long long _a0 = (tid == 0) ? clock64() : 0;
     stage_tile_async(sAq, aqc, len, kBT, tid);
-    if (tid == 0) _tl1 = clock64();
+    if (tid == 0) { _tk[3] += clock64() - _a0; _tl1 = clock64(); }
     __pipeline_commit();
     if (tid < kBT) sdec[tid] = (tid < len) ? exp2f(gc[(row0 + tid) * HV + hv]) : 0.f;
     __pipeline_wait_prior(0);
     if (tid == 0) _tl2 = clock64();
     __syncthreads();
     if (tid == 0) _tl3 = clock64();
+    // kgᵀ：源 kg[token][K] 的 8 个连续 bf16 沿 K，而 kgT 里连续的 8 个沿 token。
+    // 直接散射写要 8 次 2 B 写（558 us/chunk）。改成**寄存器内 8×8 块转置**：
+    // 每个线程持有一个完整 8 token × 8 K 的块（8 次 uint4 读 + 8 次 uint4 写），
+    // kgT 的排布保证同一块转置后在 smem 里也是 8 段连续的 16 B（见 off_kgt 布局）。
+    {
+      const long long _kt0 = (tid == 0) ? clock64() : 0;
+      for (int kb2 = 0; kb2 < Smem::kblk; ++kb2) {
+        for (int i = tid; i < kBT; i += kThreads) {
+          const int tg = i >> 3, cg = i & 7;
+          if (tg * 8 >= len) continue;
+          uint4 r[8];
+#pragma unroll
+          for (int q2 = 0; q2 < 8; ++q2) {
+            const int row = tg * 8 + q2;
+            const int phys = row * 8 + (cg ^ (row & 7));
+            r[q2] = *reinterpret_cast<const uint4*>(skgn + kb2 * (kBT * 64) + (size_t)phys * 8);
+          }
+          // 转置：w2[q2] 的第 k 个 bf16 = 原 (row tg*8+q2) 的第 (cg*8+k) 个
+#pragma unroll
+          for (int k8 = 0; k8 < 8; ++k8) {
+            uint4 o2;
+            uint32_t* o32 = reinterpret_cast<uint32_t*>(&o2);
+#pragma unroll
+            for (int q4 = 0; q4 < 4; ++q4) {
+              const uint32_t lo = reinterpret_cast<const uint32_t*>(&r[q4 * 2 + 0])[k8 >> 1];
+              const uint32_t hi = reinterpret_cast<const uint32_t*>(&r[q4 * 2 + 1])[k8 >> 1];
+              const int sh = (k8 & 1) * 16;
+              o32[q4] = ((lo >> sh) & 0xffffu) | (((hi >> sh) & 0xffffu) << 16);
+            }
+            const int kk = kb2 * 64 + cg * 8 + k8;
+            const int dphys = kk * 8 + (tg ^ (kk & 7));
+            // 只写 kgT 的 token 列块：目标行 kk、列 tg*8..tg*8+7
+            *reinterpret_cast<uint4*>(skgt + (size_t)dphys * 8) = o2;
+          }
+        }
+      }
+      if (tid == 0) t_ktr += clock64() - _kt0;
+    }
     // dec 折进 q，但**在 smem 里原地乘**：cp.async 装载（快）+ smem 乘法（快），
     // 避免原来"全局读 + 逐元素浮点乘 + 逐元素写"的同步路径（实测 4.63 µs/chunk）。
     for (int kb2 = 0; kb2 < Smem::kblk; ++kb2) {
@@ -469,6 +509,7 @@ __global__ void __launch_bounds__(kThreads) gdn_ho_umma_kernel(
     if (tid == 0) {
       const long long _t8 = clock64();
       t_issue += _tl1-_t0; t_wait += _tl2-_tl1; t_sync += _tl3-_tl2;
+      for (int z = 0; z < 4; ++z) t_part[z] += _tk[z];
       t_load += _t1-_t0; t_g1 += _t2-_t1; t_vp += _t3-_t2; t_g23 += _t4-_t3;
       t_o += _t5-_t4; t_g4 += _t6-_t5; t_hu += _t8-_t6;
     }
@@ -477,8 +518,9 @@ __global__ void __launch_bounds__(kThreads) gdn_ho_umma_kernel(
     const double tot = (double)(t_load+t_g1+t_vp+t_g23+t_o+t_g4+t_hu);
     printf("[prof] load %.0f%% g1 %.0f%% vp %.0f%% g23 %.0f%% o %.0f%% g4 %.0f%% hupd %.0f%% (%.2f us)\n",
       t_load*100/tot, t_g1*100/tot, t_vp*100/tot, t_g23*100/tot, t_o*100/tot, t_g4*100/tot, t_hu*100/tot, tot/1900.0);
-    printf("[ld] issue %.2f wait %.2f sync %.2f us/chunk\n",
-      t_issue/1900.0, t_wait/1900.0, t_sync/1900.0);
+    printf("[ld] issue %.2f wait %.2f sync %.2f | q %.2f w %.2f kgload %.2f aq %.2f kgtr %.2f us/chunk\n",
+      t_issue/1900.0, t_wait/1900.0, t_sync/1900.0,
+      t_part[0]/1900.0, t_part[1]/1900.0, t_part[2]/1900.0, t_part[3]/1900.0, t_ktr/1900.0);
   }
 
   // 末态回写
