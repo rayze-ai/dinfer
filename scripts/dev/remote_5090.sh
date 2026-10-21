@@ -7,7 +7,7 @@ set -euo pipefail
 JUMP_HOST="${JUMP_HOST:-jump.aicloud.paigod.work}"
 JUMP_PORT="${JUMP_PORT:-2222}"
 CM="$HOME/.ssh/cm_5090"
-REMOTE_ROOT="${REMOTE_ROOT:-/data/yaochen/infer}"
+REMOTE_ROOT="${REMOTE_ROOT:-/hf_data/yaochen}"
 REMOTE_DIR="${REMOTE_DIR:-$REMOTE_ROOT/dinfer}"
 cd "$(dirname "$0")/../.."
 USER_AT="$(tr -d '[:space:]' < "$HOME/.ssh/jms_5090_user")@$JUMP_HOST"

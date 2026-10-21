@@ -47,6 +47,7 @@
 | 0 | 连通 + 环境勘察 | 8×5090 确认，GPU 7 跑基线 | token 一次性（见卡点） |
 | 1 | 模型 / 基线勘察 | 见下「勘察结果」 | 架构 = Gemma4 MoE 多模态，量化 = MIXED(NVFP4 专家 + FP8 其余) |
 | 2 | 工具链打通 | **sm_120 编译通过**（dinfer-kernels 38 s） | 宿主机无 nvcc，容器内编；cargo 需走代理 |
+| 3 | 参考实现 | 30 层纯 torch 前向跑通，NVFP4 反量化验证 | 见下「参考实现」；与基线对拍未完成 |
 
 ## 勘察结果（2026-10-21，轮 1）
 
@@ -132,6 +133,30 @@ docker run --rm --entrypoint bash --gpus device=0 \
   -lc 'cargo build --release ...'
 ```
 注意：镜像的 entrypoint 是 `vllm`，**必须 `--entrypoint bash`**，否则参数被 vllm CLI 吞掉。
+
+## 参考实现（轮 3，`/hf_data/yaochen/work/kaon_forward.py`）
+
+纯 torch 版全量前向，用于钉死语义 + 作为 Rust 实现的基准。关键实现点（都已核实）：
+
+| 项 | 结论 |
+|---|---|
+| **K==V** | **只对 full_attention 层成立**（layer 5 无 `v_proj`；sliding 层 layer 0 有独立 `v_proj`，与 k_proj 数值不同，maxdiff 470） |
+| `v_norm` | **无权重参数**，但**仍要算 RMSNorm** |
+| `q_norm`/`k_norm` | 有权重，bf16，逐头（`head_dim` 维） |
+| V 线性/输出 | 层 0（sliding）：q[4096,2816] k[2048,2816] v[2048,2816] o[2816,4096]，即 NH=16×256、nkv=8×256；层 5（full）：q[8192,2816] k[1024,2816] o[2816,8192]，即 16×512、nkv=2×512 |
+| 权重落盘格式 | FP8 层是 `weight[F8_E4M3] + weight_scale[标量F32]`（per-tensor）；NVFP4 层是 `weight[U8] + weight_scale[F8_E4M3] + weight_scale_2[标量F32] + input_scale[标量F32]` |
+| NVFP4 布局 | `gate_proj: weight[704,1408]U8, scale[704,176]F8_E4M3` → cols=2816，**块 16**（2816/176）；`down: weight[2816,352], scale[2816,44]` → cols=704，块 16 |
+| router | `proj.weight` 是 **BF16**（不是 FP8）；`scale` BF16 [2816]；`per_expert_scale` BF16 [128] |
+| `layer_scalar` | BF16 [1] |
+| `embed_tokens` | BF16 [262144, 2816]，前向里乘 `sqrt(hidden_size)` |
+| PLE | `hidden_size_per_layer_input = 0` → **本模型不启用**，参考实现已跳过 |
+
+### 基线服务的行为陷阱（重要）
+
+- `/v1/completions` 裸 prompt **输出退化**（"HelloHelloHello"、logprob 呈 -1.3865/−1.7615 等差数列）
+  → Gemma4 只在 chat 模板下正常，**bench 与对拍都必须走 chat 模板**。
+- chat 路径 `logprobs=True, echo=True` 只返回生成部分，**拿不到 prompt 各位置的 logprobs**。
+  → 语义对拍改用：模板文本 → `/v1/completions` + `echo=True` + `logprobs`，取 prompt 最后位置 top-k。
 
 ## 卡点
 
