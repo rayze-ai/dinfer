@@ -268,7 +268,7 @@ impl Gemm {
                 m as i64,
                 n as i64,
                 k as i64,
-                self.stream.raw(),
+                self.stream.raw() as _,
             )
         };
         crate::ops::check(rc, "gemm_fp8_bf16")
@@ -309,7 +309,7 @@ impl Gemm {
                 m as i64,
                 n as i64,
                 k as i64,
-                self.stream.raw(),
+                self.stream.raw() as _,
             )
         };
         crate::ops::check(rc, "gemm_nvfp4_bf16")

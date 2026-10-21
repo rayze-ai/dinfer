@@ -24,7 +24,7 @@ use crate::config::KaonConfig;
 use crate::weights::{self, QWeight};
 use anyhow::{ensure, Result};
 use dinfer_kernels::{self as k, bf16, Gemm, Stream};
-use dinfer_layers::{OpSet, Rope, RopeStyle, Tensor, WeightSource};
+use dinfer_layers::{Act as _, Attention as _, Norm as _, OpSet, Rope, RopeStyle, Tensor, WeightSource};
 
 /// 一张量化线性层（权重常驻压缩态，GEMM 内反量化）。
 pub enum QLinear {
@@ -468,7 +468,7 @@ impl Gemma4Layer {
             Some(vp) => vp.forward(gemm, stream, &sc.norm, &mut sc.v, tokens)?,
             None => {
                 // k_eq_v：把 k 拷到 v（两份内容相同，attention 分别读）
-                k::ops::copy_i32_n(stream, &sc.k.data, &mut sc.v.data, tokens * nkv * d)?;
+                stream.dtod_copy_n(&sc.k.data, &mut sc.v.data, tokens * nkv * d)?;
             }
         }
 
@@ -518,10 +518,8 @@ impl Gemma4Layer {
                 ctx.max_blocks,
                 scale,
                 0,
-                match ctx.mode {
-                    dinfer_core::runner::BatchMode::Mixed => true,
-                    _ => false,
-                },
+                // 混批（Paged 且同一步里也有 prefill 行）时跳过单行请求；纯 decode 不跳。
+                matches!(ctx.mode, dinfer_core::runner::BatchMode::Paged),
                 self.window,
             )?,
         }
@@ -540,10 +538,10 @@ impl Gemma4Layer {
         rmsnorm_into(stream, ops, &sc.dense, &self.post_ff_norm_1, &mut sc.norm, h, tokens, eps)?;
 
         // ---- 8. MoE 支路（与 dense 并联）----
-        let moe_out = self.moe_branch(stream, gemm, ops, cfg, sc, tokens, eps)?;
+        self.moe_branch(stream, gemm, ops, cfg, sc, tokens, eps)?;
 
         // ---- 9. 两条支路相加 → post_ff_norm → 残差 → layer_scalar ----
-        k::ops::add_inplace_bf16_n(stream, &moe_out.data, &mut sc.norm.data, tokens * h)?;
+        k::ops::add_inplace_bf16_n(stream, &sc.y.data, &mut sc.norm.data, tokens * h)?;
         rmsnorm_into(stream, ops, &sc.norm, &self.post_ff_norm, &mut sc.h2, h, tokens, eps)?;
         k::ops::add_inplace_bf16_n(stream, &sc.h2.data, &mut sc.x.data, tokens * h)?;
         if self.layer_scalar != 1.0 {
@@ -568,7 +566,7 @@ impl Gemma4Layer {
         // router 输入：rmsnorm_no_weight(x) · hidden^-0.5 · scale[hidden]
         ops.norm().rmsnorm_noweight(stream, &sc.x.data, &mut sc.routed.data, tokens, h, eps)?;
         k::ops::scale_bf16_n(stream, &mut sc.routed.data, tokens * h, (h as f32).powf(-0.5))?;
-        k::ops::mul_bf16_n(stream, &mut sc.routed.data, &self.router.scale.data, tokens * h)?;
+        k::ops::mul_bf16_n(stream, &mut sc.routed.data, &self.router.scale.data, tokens, h)?;
 
         let e = cfg.num_experts;
         let kk = cfg.top_k;
@@ -597,7 +595,6 @@ impl Gemma4Layer {
         k::ops::moe_bucket(stream, &sc.topk_ids.data, &mut sc.buckets, tokens, kk)?;
         let offsets = stream.dtoh_sync_copy(&sc.buckets.offsets)?;
 
-        let scale_f32 = self.router.per_expert.data.to_vec_f32(stream)?;
         stream.memset_zeros_n(&mut sc.acc.data, tokens * h)?;
         for (eid, start, len) in k::ops::moe_expert_ranges(&offsets) {
             if len == 0 {
@@ -608,7 +605,7 @@ impl Gemma4Layer {
             ex.gate.forward(gemm, stream, &sc.xg, &mut sc.gate_up, len)?;
             ex.up.forward(gemm, stream, &sc.xg, &mut sc.act, len)?;
             ops.act().gelu_tanh_mul(stream, &sc.gate_up.data, &sc.act.data, &mut sc.gelu.data, len, cfg.moe_inter)?;
-            let g = Tensor { data: sc.gelu.data.slice(..len * cfg.moe_inter), shape: vec![len, cfg.moe_inter] };
+            let g = Tensor { data: sc.gelu.data.clone(), shape: vec![len.max(1), cfg.moe_inter] };
             ex.down.forward(gemm, stream, &g, &mut sc.yg, len)?;
             // per_expert_scale 已折进 down_proj 的全局 scale（见 weights::load），这里只按路由权重累加
             k::ops::moe_scatter_add_f32(
@@ -623,7 +620,6 @@ impl Gemma4Layer {
                 kk,
                 h,
             )?;
-            let _ = &scale_f32;
         }
         // acc（fp32）→ bf16，再做 post_feedforward_layernorm_2
         stream.memset_zeros_n(&mut sc.y.data, tokens * h)?;

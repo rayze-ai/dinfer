@@ -877,3 +877,30 @@ docker run --rm --entrypoint bash --gpus device=0 \
    （远端 cargo 走代理、本轮时间花在语义定位上）。
 3. 参考侧 e4m3 编码器还有 4/20011 例次正规进位不一致（`0x02` vs `0x0a` 型），不影响结论
    （kernel 用硬件 `__nv_cvt_float_to_fp8`，参考侧只在测试里）。
+
+## 阶段 3：FP8 / NVFP4 GEMM 移植进 crate（子代理，2026-10-21 夜 → 10-22 凌晨）
+
+**接口**：`Gemm::forward_fp8(a_bf16, w_u8, w_scale, out_bf16, m, n, k)`、
+`Gemm::forward_nvfp4(a_bf16, packed, scale, global, out_bf16, m, n, k)`；仅 `sm120` cfg 下链接，
+其它 arch 返回 `CUDA_ERROR_NOT_SUPPORTED` 由调用方回退。
+
+**数值**：FP8 `bad=0/16384` maxrel 3.8e-3；NVFP4 `bad=0/16384` maxrel 3.0e-3。
+权重块缩放用 0x30/0x38/0x40/0x3c 轮转，覆盖了探针从没测过的非 1.0 路径。
+
+**吞吐（5090，对照探针）**：
+
+| 实现 | 4096³ | 512×2816×2816 | 8×2816×2816 |
+|---|---|---|---|
+| FP8 探针 v2 | 292.6 TF/s | 179.8 | — |
+| FP8 移植 | **275.6（94%）** | 132.0（73%） | 3.4 |
+| NVFP4 探针 v5 | 502.1 | 328.9 | 8.8 |
+| NVFP4 移植 | 149.9（30%） | 104.2（32%） | 5.6 |
+
+**NVFP4 是唯一硬缺口**（30%）。已排除：A 侧量化（跳过仍 149.9）、scale 读法（固定 1.0 只到 169.9）、
+寄存器与 occupancy（59 vs 探针 48，均 0 spill）。**剩余嫌疑：block 内 smem 载入结构** ——
+移植版按 8 B 粒度写 `sA` 且多一路 scale 的 u32 写，bank 冲突未消；下一步换 16 B 粒度、按 v5 逐行 diff。
+
+**踩坑（本轮新增，已进 pitfalls.md）**：`common.cuh` 在 `namespace dinfer` 里；`__nv_cvt_float2_to_fp4x2`
+的签名是 `(float2, __NV_E2M1, cudaRoundNearest)`；**e4m3 次正规公式是 `m/8·2^-6`**，探针与参考侧都多乘了
+一个 1/8（`0x23` 被解成 0.005859 而非 0.171875）；`scale_vec::4X` 的 u32 四字节是 **4 个连续
+16-元素 k-block、lane 共享**。
