@@ -113,3 +113,95 @@ vllm serve <snapshot> --port 28067 --tensor-parallel-size 1 --pipeline-parallel-
 ## 卡点
 
 - **token 一次性**：每次拿到的 token 只能建一次连接。mux 断了就要新 token，所以要把"一次建成、长期复用"做对。
+
+## Gemma4 前向语义（读 vLLM `gemma4.py` 1708 行，2026-10-21）
+
+### 单层结构（`Gemma4DecoderLayer.forward`）
+
+```
+residual = x
+h = input_layernorm(residual)                    # 有权重
+h = self_attn(h)                                  # 内部顺序见下
+h = post_attention_layernorm(h)                   # 有权重，作用于 attn 输出
+h = h + residual                                  # ← 残差加在 attn 之后
+residual = h
+
+h = pre_feedforward_layernorm(h)                  # 有权重
+h = mlp(h)                                        # dense MLP，**无条件执行**
+h1 = post_feedforward_layernorm_1(h)
+h2 = moe(pre_feedforward_layernorm_2(residual), router(residual))
+h2 = post_feedforward_layernorm_2(h2)
+h = h1 + h2                                       # ← dense MLP 与 MoE 并联
+h = post_feedforward_layernorm(h)
+h = h + residual
+h = h * layer_scalar                              # ← 每层一个标量
+```
+
+**关键：dense MLP 和 MoE 是并联的两条支路，不是二选一。**
+
+### 注意力（`Gemma4Attention.forward`）
+
+```
+qkv = qkv_proj(h)                                 # k_eq_v 层：K 权重同时填 K 和 V 槽 → V == K
+q,k,v = split(qkv, [q_size, kv_size, kv_size])
+q = q_norm(q)                                     # RMSNorm(head_dim)，有权重，逐头
+k = k_norm(k)                                     # RMSNorm(head_dim)，有权重
+q,k = rope(positions, q, k)                       # is_neox_style=True
+v = v_norm(v)                                     # RMSNorm(head_dim)，**无权重**
+o = o_proj(attn(q,k,v))                           # scaling = 1.0（QK-norm 隐式承担）
+```
+
+- `scaling = 1.0`，不是 `1/sqrt(head_dim)`
+- sliding 层 `head_dim = 256`、`num_kv_heads = 8`；full 层 `head_dim = 512`、`num_kv_heads = 2`
+  （来自 `gemma4_layer_config`，即 `head_dim`/`global_head_dim` 与 `num_key_value_heads`/`num_global_key_value_heads`）
+- sliding 层窗口 1024；full 层无窗口
+- `attention_k_eq_v = true` → **K 与 V 是同一份权重**，加载时 K 权重复制到 V
+
+### MoE 路由（`Gemma4Router` + `Gemma4MoE`）
+
+```
+# router 输入预处理（只作用于路由，不作用于专家输入）
+r = rmsnorm_no_weight(x) * hidden_size**-0.5 * scale      # scale 是学出来的 [hidden]
+logits = proj(r)                                          # → fp32, [T, 128]
+
+# 路由
+p = softmax(logits, over ALL experts)
+topk = top8(p)                                            # 按 p 选
+w = p[topk] / sum(p[topk])                                # renormalize
+out = Σ_e  expert_e(x) * w_e * per_expert_scale[e]
+```
+
+**注意**：`per_expert_scale` 折进路由权重里（`Σ (expert * w * scale)`）。
+专家激活是 **`gelu_tanh`**（不是 silu）。
+
+### 其他
+
+- `final_logit_softcapping = 30.0`：`logits = tanh(logits/30) * 30`
+- `tie_word_embeddings = true`：embed 与 lm_head 共用
+- `hidden_size_per_layer_input = 0` → **PLE（Per-Layer Embedding）本模型不启用**，可跳过
+- `num_kv_shared_layers = 0` → **无 KV 共享**，可跳过
+- `use_double_wide_mlp = false` → dense MLP 宽度不翻倍
+- `embed_input_ids` 里有个 `normalizer` 标量（=`sqrt(hidden_size)`），embedding 后要乘
+
+## 权重显存账（决定实现路线）
+
+| 部分 | 参数量 | 存储 |
+|---|---|---|
+| 128 专家 × 30 层 × 3 矩阵 (704×2816) | **22.8 B** | NVFP4 = **11.4 GB** |
+| dense MLP × 30 (2112×2816×3) | 0.54 B | FP8 = 0.54 GB |
+| attention × 30 | 1.04 B | FP8 = 1.04 GB |
+| embed / lm_head（tied） | 0.74 B | bf16 = 1.48 GB |
+| **合计** | **~25 B** | **~14.5 GB**（与 16 GB 实测吻合） |
+
+**去量化成 bf16 = 约 48 GB，单张 5090（32 GB）放不下** → 必须保持压缩态、在 GEMM 内反量化。
+（除非用 TP=2 分摊到两张卡；基线是 TP=1，为可比性优先单卡。）
+
+### roofline（单卡 1.79 TB/s）
+
+- **c1 decode**：每 token 读 8/128×11.4 = 0.71 GB 专家 + 1.6 GB 固定 = **2.3 GB → 1.3 ms**
+  基线实测 TPOT **8.34 ms** → 基线只到 roofline 的 **16%**
+- **c32 decode**：32 token 覆盖约全部 128 专家 → 11.4 + 1.6 = **13 GB → 7.3 ms/step → 4380 tok/s**
+  基线实测 **2261 tok/s** → 只到 **52%**
+- **1.2× 目标**：c1 ≥ 130 tok/s（TPOT ≤ 7.0 ms）、c8 ≥ 910、c32 ≥ 2714 tok/s
+
+结论：**空间存在且不小**，瓶颈是基线的 kernel 效率，不是硬件。
