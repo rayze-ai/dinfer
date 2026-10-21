@@ -681,3 +681,23 @@ docker run --rm --entrypoint bash --gpus device=0 \
 - **`--features no-nvcc` 在本机已坏**：`ffi.rs` 的 `stub!` 签名（24 个错误，`*const f32` vs
   `*const c_void`）与 `ops.rs` 调用不匹配。与本次改动无关，**不要用它做本地 CPU 验证**；
   一律远端 nvcc 编译。待修。
+
+### 阶段 3 进度（续）：滑窗 kernel 改动写到一半，**当前 gqa.cu 不可编译**
+
+已完成（本次会话）：
+- 三个 kernel 形参加 `int window`：`gqa_fa_v5_kernel`(122)、`v6`(354)、`v7`(595)
+- 可见性加下界 `lo_a / lo_b`（`window<=0` → `INT_MIN`，全注意力等价）与三处 mask 判定
+- 起始 tile 跳读 `tile0 = max(0,(warp_min_vis-window+1)/TILE)`，循环与双缓冲 `buf` 改成
+  `(tile - tile0) & 1`；`load_tile(tile0,...)` 预取
+- `v5_launch` / `v5_dispatch` 形参与调用链已带 `window`
+
+**未完成（下一位接手点）**：
+1. `v6_launch`（形参 557）、`v6_dispatch`（形参 805 + 4 处 `v6_launch`/`v7_launch` 调用）、
+   `v7_launch`（形参 783）还没加 `window`；`v6_dispatch` 的 4 个宏调用点要补最后实参
+2. 导出函数 `gqa_prefill_bf16`(1371) / `gqa_paged_bf16`(1422)：**不改签名**，新增
+   `gqa_prefill_win_bf16(..., int window, ...)` / `gqa_paged_win_bf16(...)` 转发；旧函数传 `window=0`
+3. 通用慢路径 `gqa_paged_kernel`(900 行附近) 加窗口（`j` 的起点 `max(0, n-window)`）
+4. `kernels.h` 补两条新符号声明；`ffi.rs` 补两个 `extern`；`ops.rs` 补 `gqa_prefill_win_bf16` /
+   `gqa_paged_win_bf16` 包装（`opset.rs` 的 `Attention` trait 加带窗口的方法，默认转发不变体）
+5. decode 侧（`gqa_decode_v3.cu`）：从 `max(0,(seq_len-window)/block_size)` 起扫
+6. 远端容器编译 + 单测：窗口=0 时结果与改动前逐位一致（回归），窗口=W 时与 torch 参考一致

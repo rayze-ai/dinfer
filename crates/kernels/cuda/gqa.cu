@@ -119,7 +119,7 @@ __global__ void __launch_bounds__(V4_THREADS) gqa_fa_v5_kernel(
     const bf16* __restrict__ q, const bf16* __restrict__ k, const bf16* __restrict__ v, const bf16* __restrict__ cache,
     const int32_t* __restrict__ block_table, const int32_t* __restrict__ seq_lens, const int32_t* __restrict__ cu_seqlens,
     bf16* __restrict__ out, int H, int Hkv, float scale_log2, int q_stride, int kv_stride, int block_size, int max_blocks,
-    int skip_single) {
+    int skip_single, int window) {
   constexpr int TILE = V5_TILE<D>, LDS = V5_LDS<D>, BQ = V5Cfg<D>::BQ;
   constexpr int SFRAG = TILE / 8;   // S 的 mma C 片段数（每片段 8 个 key）
   constexpr int OF = D / 8;         // O 的 mma C 片段数（每片段 8 个维度）
@@ -154,7 +154,12 @@ __global__ void __launch_bounds__(V4_THREADS) gqa_fa_v5_kernel(
   for (int i = 0; i < OF; ++i) { o[i][0] = o[i][1] = o[i][2] = o[i][3] = 0.f; }
   float m_a = -INFINITY, m_b = -INFINITY, l_a = 0.f, l_b = 0.f;
   const int vis_a = hist + row_a, vis_b = hist + row_b;
+  // 滑窗（25/30 层）：key 还须 >= vis - window + 1；window<=0 = 全注意力（下界恒假）
+  const int lo_a = window > 0 ? vis_a - window + 1 : INT_MIN;
+  const int lo_b = window > 0 ? vis_b - window + 1 : INT_MIN;
   const int last_key = hist + min(q_base + BQ - 1, q_len - 1);
+  const int warp_lo_vis = window > 0 ? warp_min_vis - window + 1 : INT_MIN;
+  const int tile0 = warp_lo_vis > 0 ? warp_lo_vis / TILE : 0;
   const int n_tiles = last_key / TILE + 1;
   const int warp_min_vis = hist + q_base + warp * 16;
   const int32_t* bt = PAGED ? block_table + (int64_t)b * max_blocks : nullptr;
@@ -188,10 +193,10 @@ __global__ void __launch_bounds__(V4_THREADS) gqa_fa_v5_kernel(
     }
     cp_async_commit();
   };
-  load_tile(0, 0);
-  for (int tile = 0; tile < n_tiles; ++tile) {
+  load_tile(tile0, 0);
+  for (int tile = tile0; tile < n_tiles; ++tile) {
     const int k0 = tile * TILE;
-    const int buf = NBUF == 1 ? 0 : (tile & 1);
+    const int buf = NBUF == 1 ? 0 : ((tile - tile0) & 1);
     cp_async_wait_all();
     __syncthreads();  // 本 tile 对全 block 可见；上一 tile 的计算都已结束（NBUF=2 时才能安全覆盖另一缓冲）
     if (NBUF == 2 && tile + 1 < n_tiles) load_tile(tile + 1, buf ^ 1);
@@ -219,8 +224,8 @@ __global__ void __launch_bounds__(V4_THREADS) gqa_fa_v5_kernel(
       for (int e = 0; e < 2; ++e) {
         float sa = sacc[nt][e] * scale_log2, sb = sacc[nt][2 + e] * scale_log2;
         if (need_mask) {
-          if (key + e > vis_a) sa = -INFINITY;
-          if (key + e > vis_b) sb = -INFINITY;
+          if (key + e > vis_a || key + e < lo_a) sa = -INFINITY;
+          if (key + e > vis_b || key + e < lo_b) sb = -INFINITY;
         }
         sacc[nt][e] = sa; sacc[nt][2 + e] = sb;
         mx_a = fmaxf(mx_a, sa); mx_b = fmaxf(mx_b, sb);
@@ -289,7 +294,7 @@ static int v5_nbuf() {
 template <bool PAGED, int D, int NBUF>
 static int v5_launch(dim3 grid, cudaStream_t stream, const bf16* q, const bf16* k, const bf16* v, const bf16* cache,
                      const int32_t* bt, const int32_t* seq_lens, const int32_t* cu, bf16* out, int H, int Hkv,
-                     float scale_log2, int q_stride, int kv_stride, int block_size, int max_blocks, int skip_single) {
+                     float scale_log2, int q_stride, int kv_stride, int block_size, int max_blocks, int skip_single, int window) {
   const size_t smem = 2 * NBUF * V5_TILE_BYTES<D>;
   static bool attr = false;
   if (!attr && smem > 48 * 1024) {
@@ -300,7 +305,7 @@ static int v5_launch(dim3 grid, cudaStream_t stream, const bf16* q, const bf16* 
   }
   gqa_fa_v5_kernel<PAGED, D, NBUF><<<grid, V4_THREADS, smem, stream>>>(q, k, v, cache, bt, seq_lens, cu, out, H, Hkv,
                                                                       scale_log2, q_stride, kv_stride, block_size,
-                                                                      max_blocks, skip_single);
+                                                                      max_blocks, skip_single, window);
   return (int)cudaGetLastError();
 }
 // 按 (PAGED, D) 分发；NBUF 沿用全局开关。D ∉ {128, 256} 由调用方回退到通用慢路径。
@@ -308,16 +313,16 @@ template <bool PAGED>
 static int v5_dispatch(int head_dim, dim3 grid, cudaStream_t stream, const bf16* q, const bf16* k, const bf16* v,
                        const bf16* cache, const int32_t* bt, const int32_t* seq_lens, const int32_t* cu, bf16* out,
                        int H, int Hkv, float scale_log2, int q_stride, int kv_stride, int block_size, int max_blocks,
-                       int skip_single) {
+                       int skip_single, int window) {
   if (head_dim == 128) {
     auto f = v5_nbuf() == 1 ? v5_launch<PAGED, 128, 1> : v5_launch<PAGED, 128, 2>;
     return f(grid, stream, q, k, v, cache, bt, seq_lens, cu, out, H, Hkv, scale_log2, q_stride, kv_stride, block_size,
-             max_blocks, skip_single);
+             max_blocks, skip_single, window);
   }
   if (head_dim == 256) {
     auto f = v5_nbuf() == 1 ? v5_launch<PAGED, 256, 1> : v5_launch<PAGED, 256, 2>;
     return f(grid, stream, q, k, v, cache, bt, seq_lens, cu, out, H, Hkv, scale_log2, q_stride, kv_stride, block_size,
-             max_blocks, skip_single);
+             max_blocks, skip_single, window);
   }
   return (int)cudaErrorInvalidValue;
 }
@@ -346,7 +351,7 @@ __global__ void __launch_bounds__(NW * 32) gqa_fa_v6_kernel(
     const bf16* __restrict__ q, const bf16* __restrict__ k, const bf16* __restrict__ v, const bf16* __restrict__ cache,
     const int32_t* __restrict__ block_table, const int32_t* __restrict__ seq_lens, const int32_t* __restrict__ cu_seqlens,
     bf16* __restrict__ out, int H, int Hkv, float scale_log2, int q_stride, int kv_stride, int block_size, int max_blocks,
-    int skip_single) {
+    int skip_single, int window) {
   constexpr int BQ = V6Cfg<NW, TILE>::BQ, THREADS = V6Cfg<NW, TILE>::THREADS, LDS = D + 8;
   constexpr int SFRAG = TILE / 8, OF = D / 8, U = D / 8, LOGU = v5_log2(U);
   constexpr int QITERS = BQ * U / THREADS, KITERS = TILE * U / THREADS;
@@ -411,7 +416,12 @@ __global__ void __launch_bounds__(NW * 32) gqa_fa_v6_kernel(
   for (int i = 0; i < OF; ++i) { o[i][0] = o[i][1] = o[i][2] = o[i][3] = 0.f; }
   float m_a = -INFINITY, m_b = -INFINITY, l_a = 0.f, l_b = 0.f;
   const int vis_a = hist + row_a, vis_b = hist + row_b;
+  // 滑窗（25/30 层）：key 还须 >= vis - window + 1；window<=0 = 全注意力（下界恒假）
+  const int lo_a = window > 0 ? vis_a - window + 1 : INT_MIN;
+  const int lo_b = window > 0 ? vis_b - window + 1 : INT_MIN;
   const int last_key = hist + min(q_base + BQ - 1, q_len - 1);
+  const int warp_lo_vis = window > 0 ? warp_min_vis - window + 1 : INT_MIN;
+  const int tile0 = warp_lo_vis > 0 ? warp_lo_vis / TILE : 0;
   const int n_tiles = last_key / TILE + 1;
   const int warp_min_vis = hist + q_base + warp * 16;
   const int warp_max_vis = hist + min(q_base + warp * 16 + 15, q_len - 1);
@@ -419,9 +429,9 @@ __global__ void __launch_bounds__(NW * 32) gqa_fa_v6_kernel(
 #if GQA_PROFILE
   long long t_qk = 0, t_sm = 0, t_pv = 0;
 #endif
-  for (int tile = 0; tile < n_tiles; ++tile) {
+  for (int tile = tile0; tile < n_tiles; ++tile) {
     const int k0 = tile * TILE;
-    const int buf = NBUF == 1 ? 0 : (tile & 1);
+    const int buf = NBUF == 1 ? 0 : ((tile - tile0) & 1);
     cp_async_wait_all();  // NBUF=2 时下一 tile 已在算本 tile 时装好，这里只等它
     __syncthreads();      // 本 tile 对全 block 可见；NBUF=2 时上一 tile 的计算都已结束（另一缓冲才可覆盖）
     if (NBUF == 2 && tile + 1 < n_tiles) load_tile(tile + 1, buf ^ 1);
@@ -460,8 +470,8 @@ __global__ void __launch_bounds__(NW * 32) gqa_fa_v6_kernel(
         for (int e = 0; e < 2; ++e) {
           float sa = sacc[nt][e] * scale_log2, sb = sacc[nt][2 + e] * scale_log2;
           if (need_mask) {
-            if (key + e > vis_a) sa = -INFINITY;
-            if (key + e > vis_b) sb = -INFINITY;
+            if (key + e > vis_a || key + e < lo_a) sa = -INFINITY;
+            if (key + e > vis_b || key + e < lo_b) sb = -INFINITY;
           }
           sacc[nt][e] = sa; sacc[nt][2 + e] = sb;
           mx_a = fmaxf(mx_a, sa); mx_b = fmaxf(mx_b, sb);
@@ -582,7 +592,7 @@ __global__ void __launch_bounds__(NW * 32, 2) gqa_fa_v7_kernel(
     const bf16* __restrict__ q, const bf16* __restrict__ k, const bf16* __restrict__ v, const bf16* __restrict__ cache,
     const int32_t* __restrict__ block_table, const int32_t* __restrict__ seq_lens, const int32_t* __restrict__ cu_seqlens,
     bf16* __restrict__ out, int H, int Hkv, float scale_log2, int q_stride, int kv_stride, int block_size, int max_blocks,
-    int skip_single) {
+    int skip_single, int window) {
   using C = V7Cfg<NW, TILE>;
   constexpr int NP = C::NP, BQ = C::BQ, THREADS = C::THREADS, PLD = C::PLD, LDS = D + 8;
   constexpr int HK = TILE / 2, SFRAG = HK / 8;   // 本 warp 的 key 数 / S 片段数
@@ -645,13 +655,18 @@ __global__ void __launch_bounds__(NW * 32, 2) gqa_fa_v7_kernel(
     }
     cp_async_commit();
   };
-  load_tile(0);
+  load_tile(tile0);
   float o[OF][4];
 #pragma unroll
   for (int i = 0; i < OF; ++i) { o[i][0] = o[i][1] = o[i][2] = o[i][3] = 0.f; }
   float m_a = -INFINITY, m_b = -INFINITY, l_a = 0.f, l_b = 0.f;
   const int vis_a = hist + row_a, vis_b = hist + row_b;
+  // 滑窗（25/30 层）：key 还须 >= vis - window + 1；window<=0 = 全注意力（下界恒假）
+  const int lo_a = window > 0 ? vis_a - window + 1 : INT_MIN;
+  const int lo_b = window > 0 ? vis_b - window + 1 : INT_MIN;
   const int last_key = hist + min(q_base + BQ - 1, q_len - 1);
+  const int warp_lo_vis = window > 0 ? warp_min_vis - window + 1 : INT_MIN;
+  const int tile0 = warp_lo_vis > 0 ? warp_lo_vis / TILE : 0;
   const int n_tiles = last_key / TILE + 1;
   const int pair_min_vis = hist + q_base + pair * 16;
   const int pair_max_vis = hist + min(q_base + pair * 16 + 15, q_len - 1);
@@ -659,7 +674,7 @@ __global__ void __launch_bounds__(NW * 32, 2) gqa_fa_v7_kernel(
   bf16* sPp = sP + (size_t)pair * 16 * PLD;
   float* sMp = sM + pair * 32;
   const int bar_id = 1 + pair;
-  for (int tile = 0; tile < n_tiles; ++tile) {
+  for (int tile = tile0; tile < n_tiles; ++tile) {
     const int k0 = tile * TILE;
     cp_async_wait_all();
     __syncthreads();
@@ -690,8 +705,8 @@ __global__ void __launch_bounds__(NW * 32, 2) gqa_fa_v7_kernel(
         for (int e = 0; e < 2; ++e) {
           float sa = sacc[nt][e] * scale_log2, sb = sacc[nt][2 + e] * scale_log2;
           if (need_mask) {
-            if (key + e > vis_a) sa = -INFINITY;
-            if (key + e > vis_b) sb = -INFINITY;
+            if (key + e > vis_a || key + e < lo_a) sa = -INFINITY;
+            if (key + e > vis_b || key + e < lo_b) sb = -INFINITY;
           }
           sacc[nt][e] = sa; sacc[nt][2 + e] = sb;
           mx_a = fmaxf(mx_a, sa); mx_b = fmaxf(mx_b, sb);
