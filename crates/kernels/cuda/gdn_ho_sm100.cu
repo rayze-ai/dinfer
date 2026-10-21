@@ -120,15 +120,19 @@ __device__ __forceinline__ void stage_tile_pad_rows(bf16* dst, const bf16* src, 
   }
 }
 
+// 取回本线程所在 lane 的整行（warp w 覆盖 lane 32w..32w+31）。
+// **`tcgen05.ld` 是异步的**：全部发完再等一次即可。原来每 4 列就 `tcgen05.wait::ld` 一次，
+// 每 chunk 3 次取回 × 32 次等 = 96 次等待，是 61 µs/chunk 的主因（B300 实测）。
 __device__ __forceinline__ void tmem_get_row(float* dst, uint32_t tmem_c, int ncols, int tid) {
   const int warp = tid >> 5;
-  for (int c = 0; c < ncols; c += 4) {
-    uint32_t v[4];
-    umma::tmem_ld32_x4(umma::tmem_addr(tmem_c, warp, c), v);
-    umma::tmem_ld_wait();
+  // x32：一次取 32 列，128 列 = 4 条指令，最后统一等一次。
+  for (int c = 0; c < ncols; c += 32) {
+    uint32_t v[32];
+    umma::tmem_ld32_x32(umma::tmem_addr(tmem_c, warp, c), v);
 #pragma unroll
-    for (int e = 0; e < 4; ++e) dst[c + e] = __uint_as_float(v[e]);
+    for (int e = 0; e < 32; ++e) dst[c + e] = __uint_as_float(v[e]);
   }
+  umma::tmem_ld_wait();
 }
 
 // K-major 面板乘法：A=[rows_a, kK]、B=[rows_b, kK]，逐 64 列块累加。

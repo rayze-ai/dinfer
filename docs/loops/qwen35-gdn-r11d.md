@@ -369,3 +369,49 @@ UMMA 版 grid = `HV × seq`，**1×8192 时只有 48 个 block**，而 B300 有 
   Sm100 且 K=V=128 → true；Sm90/Sm8x → false；`GDN_HO_UMMA=0/1` 覆盖
 - `models/qwen35/src/gdn.rs` 调用点（有快照时回退 mma.sync）
 - `build.rs` 白名单加 `gdn_ho_sm100`
+
+---
+
+## 2026-10-21 10:xx 根因定位：是我的 kernel 结构，不是 tcgen05 本身
+
+用户批评后重查，前面「并行度不足」的结论**是错的**：
+
+FlashInfer 的 grid shape 是 `(B × H, 1, 1)` 或 persistent `(min(B*H, max_active_clusters), 1, 1)` ——
+1×8192 时同样是 48 个 CTA，**并行度和我的完全一样**。它跑 253 µs，我跑 7893 µs，
+同样的并行度差 **31 倍**，所以问题在我 kernel 内部效率（1.1% vs 它的 35%）。
+
+### 实测拆解（B300 GPU 4）
+
+| 项 | 实测 |
+|---|---|
+| 每 chunk 耗时 | **61.3 µs**（1×8192 → 7843 µs）|
+| `__syncthreads` | 0.019 µs/次 × 8 次/chunk = 0.15 µs |
+| `mbar commit+wait` | 0.050 µs/次 × 3 次/chunk = 0.15 µs |
+| 普通 ld/st 装载 144 KB | **6.73 µs/chunk** |
+| `cp.async` 装载同量 | **1.10 µs/chunk**（6× 快）|
+| `tcgen05.ld` 改单次等待 | 无改善（65 vs 61 µs）|
+
+**同步和 TMEM 取回都不是主因**（合计 < 1 µs）。装载 6.7 µs 也不是。剩下 ~54 µs 在别处。
+
+### FlashInfer 的真实结构（`gated_delta_net_chunked.py`）
+
+**12 个 warp（384 线程）按角色分工**，不是 4 warp 全串行：
+
+| warp | 角色 |
+|---|---|
+| 0–3 | compute_group_0（T-pairwise / kk_epi / qk_epi / inverse）|
+| 4–7 | compute_group_1（kv_decay_v / v·k·state / epi ops）|
+| 8 | mma 发射（前 6 个 GEMM）|
+| 9 | TMA 装载 q/k/v |
+| 10 | mma 发射（后 5 个 state/output GEMM）|
+| 11 | epilogue（存 O）+ 预取 gate/beta |
+
+- **两个独立的 MMA 发射 warp**（8 和 10），GEMM 队列始终有两条流在飞
+- 寄存器**按角色分配**：CG0 224 / CG1 256 / 其它 24–48
+- **mbarrier 流水，不用 `__syncthreads`**（除 TMEM alloc）
+- smem stage 数：q 2 / k 4 / v 3 / ainv 3 / qk 2 / o 2 / gate 5
+
+### 下一步
+
+按 12 warp + 双 MMA 发射 + mbarrier 流水重写 `gdn_ho_sm100.cu`。
+这是追平 FlashInfer 的必要结构，不是可选项。
