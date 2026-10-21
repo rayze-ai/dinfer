@@ -20,6 +20,7 @@
 // （a_mn=true）当转置视图用，与 r12a 对 V 的做法相同。
 //
 // 只在 CUDA_ARCHS 含 100/103 时编入（build.rs 的 sm100_only 白名单）。
+#include <cuda_pipeline.h>
 #include "common.cuh"
 #include <cstdio>
 #include "umma.cuh"
@@ -51,7 +52,7 @@ struct Smem {
   static constexpr int off_vp = off_aq + aq_elems;      // v' 当 B：[V][token]，K 维 = token 连续
   static constexpr int vp_elems = kV * 64;
   static constexpr int off_vt = off_vp + vp_elems;      // v'ᵀ [V][kM]（当 A，K 维 = token）
-  static constexpr int vt_elems = kV * 64;  // 只有 token 维 64 列，一个块
+  static constexpr int vt_elems = 0;  // 与 off_vp 共用（内容相同）
   static constexpr int off_kgt = off_vt + vt_elems;     // kgᵀ [K=128][token=64]（(4) 的 B，K 维 = token 连续）
   static constexpr int kgt_elems = kK * 64;
   static constexpr int bf16_elems = off_kgt + kgt_elems;
@@ -64,6 +65,7 @@ struct Smem {
   static constexpr int bytes = off_dec + kM * 4;
 };
 
+constexpr int kTmemH = 128;     // h 的 f32 主本（[V][K]，N=K=128 列）
 constexpr int kTmemAcc = 128;   // 工作累加器（N=V=128 列）
 
 __device__ __forceinline__ void stage_tile(bf16* dst, const bf16* src, int rows, int src_stride, int tid) {
@@ -76,12 +78,31 @@ __device__ __forceinline__ void stage_tile(bf16* dst, const bf16* src, int rows,
 }
 
 // q 装载时先乘 dec（按 token 行），使 (2) 直接产出 (q·hᵀ)·dec，与 (3) 能在同一累加器上连续累加。
-__device__ __forceinline__ void stage_q_dec(bf16* dst, const bf16* src, int rows, int src_stride, const float* dec,
-                                            int tid) {
-  for (int i = tid; i < kM * 8; i += kThreads) {
+// cp.async 版：与 stage_tile 同样的 128 B swizzle 目标，但用异步拷贝（实测比 ld/st 快 6×）。
+__device__ __forceinline__ void stage_tile_async(bf16* dst, const bf16* src, int rows, int src_stride, int tid) {
+  for (int i = tid; i < rows * 8; i += kThreads) {
     const int row = i >> 3, blk = i & 7;
     const int phys = row * 8 + (blk ^ (row & 7));
-    if (row >= rows) { *reinterpret_cast<uint4*>(dst + (size_t)phys * 8) = make_uint4(0, 0, 0, 0); continue; }
+    __pipeline_memcpy_async(dst + (size_t)phys * 8, src + (size_t)row * src_stride + blk * 8, 16);
+  }
+}
+
+// 补零行只需在 chunk 循环**外**写一次（它们永远是 0，每 chunk 重写纯属浪费装载带宽）。
+__device__ __forceinline__ void zero_pad_rows(bf16* dst, int rows, int rows_pad, int tid) {
+  for (int i = tid; i < rows_pad * 8; i += kThreads) {
+    const int row = i >> 3, blk = i & 7;
+    if (row >= rows) {
+      const int phys = row * 8 + (blk ^ (row & 7));
+      *reinterpret_cast<uint4*>(dst + (size_t)phys * 8) = make_uint4(0, 0, 0, 0);
+    }
+  }
+}
+
+__device__ __forceinline__ void stage_q_dec(bf16* dst, const bf16* src, int rows, int src_stride, const float* dec,
+                                            int tid) {
+  for (int i = tid; i < rows * 8; i += kThreads) {
+    const int row = i >> 3, blk = i & 7;
+    const int phys = row * 8 + (blk ^ (row & 7));
     const float d = dec[row];
     const uint4 raw = *reinterpret_cast<const uint4*>(src + (size_t)row * src_stride + blk * 8);
     const __nv_bfloat162* r2 = reinterpret_cast<const __nv_bfloat162*>(&raw);
@@ -178,7 +199,7 @@ __global__ void __launch_bounds__(kThreads) gdn_ho_umma_kernel(
   bf16* skg = sm16 + Smem::off_kg;
   bf16* sAq = sm16 + Smem::off_aq;
   bf16* svp = sm16 + Smem::off_vp;
-  bf16* svt = sm16 + Smem::off_vt;
+  bf16* svt = svp;  // 与 svp 同一块（内容相同）
   bf16* skgt = sm16 + Smem::off_kgt;
   uint32_t* tmem_slot = reinterpret_cast<uint32_t*>(smraw + Smem::off_tmem);
   uint64_t* bar = reinterpret_cast<uint64_t*>(smraw + Smem::off_bar);
@@ -200,11 +221,12 @@ __global__ void __launch_bounds__(kThreads) gdn_ho_umma_kernel(
   }
   __syncthreads();
   if (warp == 0) {
-    umma::tmem_alloc(tmem_slot, kTmemAcc);
+    umma::tmem_alloc(tmem_slot, kTmemH + kTmemAcc);
     umma::tmem_relinquish();
   }
   __syncthreads();
-  const uint32_t t_acc = *tmem_slot;
+  const uint32_t t_h = *tmem_slot;          // h 的 f32 主本（列 0..127）
+  const uint32_t t_acc = t_h + kTmemH;      // 工作累加器（列 128..255）
 
   // tcgen05 的 A 操作数 M 必须是 128（M=64 静默算错，见 knowledge/kernel-rules）。
   // 所以所有以 token 为 M 的矩阵都在 M 方向补零到 kM=128，结果只取前 len 行。
@@ -221,33 +243,66 @@ __global__ void __launch_bounds__(kThreads) gdn_ho_umma_kernel(
   // 128 线程各负责 V=128 的一行（myrow），只做 bf16 影子。
   const int myrow = warp * 32 + (tid & 31);
   float* hslot = state + (long)slot * state_stride_tok + (long)hv * V * kK;
-  auto stage_h = [&]() {
+  // segment 计时用
+  float hbuf[kK];
+  // 初值：全局 state -> 寄存器 -> TMEM + smem 影子
+  auto push_h = [&](const float* src) {
+    // 本线程负责 lane = myrow（V=128 一行），把 h 的整行写进 TMEM 的 lane myrow
+    uint32_t packed[32];
+    for (int c = 0; c < kK; c += 32) {
+#pragma unroll
+      for (int e = 0; e < 32; ++e) packed[e] = __float_as_uint(src[c + e]);
+      umma::tmem_st32_x32(umma::tmem_addr(t_h, warp, c), packed);
+    }
+    umma::tmem_st_wait();
+  };
+  auto pull_h = [&](float* dst) {
+    for (int c = 0; c < kK; c += 32) {
+      uint32_t v[32];
+      umma::tmem_ld32_x32(umma::tmem_addr(t_h, warp, c), v);
+#pragma unroll
+      for (int e = 0; e < 32; ++e) dst[c + e] = __uint_as_float(v[e]);
+    }
+    umma::tmem_ld_wait();
+  };
+  auto stage_h_from = [&](const float* src) {
     for (int kk = 0; kk < kK; ++kk) {
       const int kb = kk >> 6, kc = kk & 63;
       sh[kb * (kV * 64) + (size_t)(myrow * 8 + ((kc >> 3) ^ (myrow & 7))) * 8 + (kc & 7)] =
-          dinfer::to_bf16(hslot[(size_t)myrow * kK + kk]);
+          dinfer::to_bf16(src[kk]);
     }
   };
-  stage_h();
+  for (int kk = 0; kk < kK; ++kk) hbuf[kk] = hslot[(size_t)myrow * kK + kk];
+  push_h(hbuf);
+  stage_h_from(hbuf);
   __syncthreads();
 
   // 只留 hrow（f32 主本，128 个）+ tmp（四个 GEMM 的取回缓冲复用同一个，128 个）——
   // 四个独立数组会让寄存器爆到 255 + spill（实测 STACK 136）。
   float tmp[kK];
+  // 补零行只在循环外写一次：q / w / Aq 的 M 方向 [len, kM) 永远是 0。
+  for (int kb = 0; kb < Smem::kblk; ++kb) {
+    zero_pad_rows(sq + kb * (kM * 64), kBT, kM, tid);
+    zero_pad_rows(sw + kb * (kM * 64), kBT, kM, tid);
+  }
+  zero_pad_rows(sAq, kBT, kM, tid);
+  __syncthreads();
   // mbarrier 的 parity phase：每完成一次翻转。原代码三处都固定传 0，
   // chunk 1 起等的是尚未发生的到达 -> 读到上一轮/半成品数据（表现为每次运行结果都不同）。
   uint32_t ph0 = 0, ph1 = 0, ph3 = 0;
+  long long t_load=0, t_g1=0, t_vp=0, t_g23=0, t_o=0, t_g4=0, t_hu=0;
   for (int ci = 0; ci < nt; ++ci) {
     const int len = min(kBT, len_seq - ci * kBT);
     const long row0 = bos + (long)ci * kBT;
     const long ubase = (row0 * vstride) + (long)hv * V;
 
+    const long long _t0 = (tid == 0) ? clock64() : 0;
     // 装载 q（按 h 段）、w / kg / Aq（按 hv 段）
     for (int kb = 0; kb < Smem::kblk; ++kb) {
       const int k0 = kb * 64;
       stage_q_dec(sq + kb * (kM * 64), qn + row0 * qstride + (long)h * kK + k0, len, (int)qstride, sdec, tid);
-      stage_tile_pad(sw + kb * (kM * 64), w + ubase + k0, len, (int)vstride, tid);
-      stage_tile_pad_rows(skg + kb * (kBT * 64), kg + ubase + k0, len, (int)vstride, kBT, tid);
+      stage_tile_async(sw + kb * (kM * 64), w + ubase + k0, len, (int)vstride, tid);
+      stage_tile_async(skg + kb * (kBT * 64), kg + ubase + k0, len, (int)vstride, tid);
       // kgᵀ [K][token]：(4) 的 B 需要 K 维 = token 连续。
       // 源 kg[token][K] 的 K 列 = kb*64 + kc，行 = 该 block 内第 tk 个 token。
       for (int i = tid; i < kBT * 64; i += kThreads) {
@@ -260,7 +315,9 @@ __global__ void __launch_bounds__(kThreads) gdn_ho_umma_kernel(
         skgt[koff] = v;
       }
     }
+    __pipeline_commit();
     if (tid < kBT) sdec[tid] = (tid < len) ? exp2f(gc[(row0 + tid) * HV + hv]) : 0.f;
+    __pipeline_wait_prior(0);
     __syncthreads();
     // Aq 装载时把 dec（按 token = 行）折进 A 侧：o = (q·hᵀ)·dec + Aq·v' 里 dec 只作用于第一项，
     // 所以折进 q 而不是 Aq。见下方 (2) 的装载。
@@ -268,17 +325,15 @@ __global__ void __launch_bounds__(kThreads) gdn_ho_umma_kernel(
     {
       // Aq 是 [num_chunks, HV, BT, BT]：一个 chunk 一个 BT×BT 矩阵，行跨度 = BT。
       const bf16* aqc = reinterpret_cast<const bf16*>(aq) + ((long)ci * HV + hv) * kBT * kBT;
-      for (int i = tid; i < kM * 8; i += kThreads) {
+      for (int i = tid; i < len * 8; i += kThreads) {
         const int row = i >> 3, blk = i & 7;
         const int phys = row * 8 + (blk ^ (row & 7));
-        uint4 v = make_uint4(0, 0, 0, 0);
-        if (row < len) v = *reinterpret_cast<const uint4*>(aqc + row * kBT + blk * 8);
-        chk(sAq + (size_t)phys * 8, smraw, Smem::bytes, "aq", row, blk);
-        *reinterpret_cast<uint4*>(sAq + (size_t)phys * 8) = v;
+        __pipeline_memcpy_async(sAq + (size_t)phys * 8, aqc + row * kBT + blk * 8, 16);
       }
     }
     __syncthreads();
     umma::fence_proxy_async_shared();
+    const long long _t1 = (tid == 0) ? clock64() : 0;
 
     // ---- (1) wh = w·hᵀ → 取回 → v' = u − wh
     if (warp == 0 && umma::elect_one()) {
@@ -289,27 +344,25 @@ __global__ void __launch_bounds__(kThreads) gdn_ho_umma_kernel(
     ph0 ^= 1;
     umma::fence_after_sync();
     __syncthreads();
+    const long long _t2 = (tid == 0) ? clock64() : 0;
     tmem_get_row(tmp, t_acc, kV, tid);
     // 两份布局都写（各 16 KB，代价 ~0.1 µs），彻底绕开 MN-major 的不确定性：
     //   svp [BT][V]：(3) 里当 B，K 维 = token → K-major
     //   svt [V][BT]：(4) 里当 A，K 维 = token → K-major（就是 v'ᵀ 的显式转置）
     // v' 的 token 行 [0, len) 有效，[len, kBT) 必须置 0（否则 (3)(4) 读到上一 chunk 的残留）。
     // **token 维只有 kBT=64 列**：myrow 覆盖 0..127（V 的行），>63 的线程不能写（会越出 64 列）。
+    // wh 的整行只在 lane < kBT 的线程手里（tmp[128]），所以这一段的并行度受限于 64 个线程。
+    // 想再快需要把 wh 先落 smem 再全线程分摊 —— 但 store 量翻倍，实测不划算，保持现状。
     if (myrow < kBT) {
       const bf16* urow = (myrow < len) ? (u + (row0 + myrow) * vstride + (long)hv * V) : nullptr;
       for (int kc = 0; kc < kV; ++kc) {
         const float vp = urow ? (dinfer::to_f32(urow[kc]) - tmp[kc]) : 0.f;
-        const bf16 vb16 = dinfer::to_bf16(vp);
-        // svp / svt：[V][token]，行 = v(kc)、列 = token(myrow)，每行 64 列 = 128 B = 8 个 16 B 块
-        const size_t off = (size_t)(kc * 8 + (((myrow >> 3) ^ (kc & 7)))) * 8 + (myrow & 7);
-        chk(&svp[off], smraw, Smem::bytes, "svp", myrow, kc);
-        chk(&svt[off], smraw, Smem::bytes, "svt", myrow, kc);
-        svp[off] = vb16;
-        svt[off] = vb16;
+        svp[(size_t)(kc * 8 + (((myrow >> 3) ^ (kc & 7)))) * 8 + (myrow & 7)] = dinfer::to_bf16(vp);
       }
     }
     __syncthreads();
     umma::fence_proxy_async_shared();
+    const long long _t3 = (tid == 0) ? clock64() : 0;
 
     // ---- (2)+(3) o = (q⊙dec)·hᵀ + Aq·v'：两条 MMA 连续累加到同一累加器，中间不取回。
     if (warp == 0 && umma::elect_one()) {
@@ -329,12 +382,24 @@ __global__ void __launch_bounds__(kThreads) gdn_ho_umma_kernel(
     ph1 ^= 1;
     umma::fence_after_sync();
     __syncthreads();
+    const long long _t4 = (tid == 0) ? clock64() : 0;
     tmem_get_row(tmp, t_acc, kV, tid);
     if (myrow < len) {
       bf16* orow = out + (row0 + myrow) * vstride + (long)hv * V;
-      for (int kk = 0; kk < kV; ++kk) orow[kk] = dinfer::to_bf16(tmp[kk]);
+      // 向量写：8 个 bf16 = 16 B 一次。标量写 128 次是 30% 耗时的主因（每个都吃一次 store 延迟）。
+      for (int kk = 0; kk < kV; kk += 8) {
+        uint4 packed;
+        uint32_t* w32 = reinterpret_cast<uint32_t*>(&packed);
+#pragma unroll
+        for (int e = 0; e < 4; ++e) {
+          const __nv_bfloat162 v2 = __floats2bfloat162_rn(tmp[kk + 2 * e], tmp[kk + 2 * e + 1]);
+          w32[e] = *reinterpret_cast<const uint32_t*>(&v2);
+        }
+        *reinterpret_cast<uint4*>(orow + kk) = packed;
+      }
     }
     __syncthreads();
+    const long long _t5 = (tid == 0) ? clock64() : 0;
 
     // ---- (4) h = glast·h + v'ᵀ·kg
     // A = v'ᵀ（v' 的 MN-major 视图：M=V、K=BT），B = kg[BT, K] K-major。
@@ -359,19 +424,36 @@ __global__ void __launch_bounds__(kThreads) gdn_ho_umma_kernel(
     ph3 ^= 1;
     umma::fence_after_sync();
     __syncthreads();
+    const long long _t6 = (tid == 0) ? clock64() : 0;
     tmem_get_row(tmp, t_acc, kK, tid);
     const float glast = sdec[len - 1];
-    for (int kk = 0; kk < kK; ++kk) hslot[(size_t)myrow * kK + kk] = hslot[(size_t)myrow * kK + kk] * glast + tmp[kk];
+    // h 主本在 TMEM：[V][K] f32。缩放 + 累加全在寄存器里做，再一次性写回 TMEM 和 bf16 影子。
+    pull_h(hbuf);
+    for (int kk = 0; kk < kK; ++kk) hbuf[kk] = hbuf[kk] * glast + tmp[kk];
+    push_h(hbuf);
     __syncthreads();
-    stage_h();
+    stage_h_from(hbuf);
     __syncthreads();
     umma::fence_proxy_async_shared();
+    if (tid == 0) {
+      const long long _t8 = clock64();
+      t_load += _t1-_t0; t_g1 += _t2-_t1; t_vp += _t3-_t2; t_g23 += _t4-_t3;
+      t_o += _t5-_t4; t_g4 += _t6-_t5; t_hu += _t8-_t6;
+    }
+  }
+  if (tid == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
+    const double tot = (double)(t_load+t_g1+t_vp+t_g23+t_o+t_g4+t_hu);
+    printf("[prof] load %.0f%% g1 %.0f%% vp %.0f%% g23 %.0f%% o %.0f%% g4 %.0f%% hupd %.0f%% (%.2f us)\n",
+      t_load*100/tot, t_g1*100/tot, t_vp*100/tot, t_g23*100/tot, t_o*100/tot, t_g4*100/tot, t_hu*100/tot, tot/1900.0);
   }
 
   // 末态回写
+  // 末态：TMEM -> 全局 state（整条序列只写一次）
+  pull_h(hbuf);
+  for (int kk = 0; kk < kK; ++kk) hslot[(size_t)myrow * kK + kk] = hbuf[kk];
   umma::fence_before_sync();
   __syncthreads();
-  if (warp == 0) umma::tmem_dealloc(t_acc, kTmemAcc);
+  if (warp == 0) umma::tmem_dealloc(t_h, kTmemH + kTmemAcc);
 }
 
 }  // namespace
