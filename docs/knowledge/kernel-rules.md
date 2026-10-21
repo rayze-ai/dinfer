@@ -67,3 +67,25 @@
 - **为什么**：r9 wy kernel 把 sM 复用 sK∪sQ（72 → 56 KB）占了 2.2× 提速的大半，分块三角逆只再省 17–20%；ho 的 PF=1 预取在 3090 / 占满寄存器时全形状退化。两段版 ho（h-pass + o-pass）在 3090 比融合慢 10–30%，因为中间 h16 一写一读 201 MB @ 8K 吃带宽——这类"拆 kernel 换并行度"的改动收益随卡的带宽变，门限必须进 `ArchProfile` 按卡实测，不能按一张卡的结论定死。
 - **怎么用**：改 kernel 前 `nvcc --resource-usage` 记 smem / reg / occupancy；先做瘦身，再做算法；"预取 / 拆段"这类结构开关一律 `ArchProfile` 默认 + 环境变量覆盖，两卡各测后再定默认。
 - **证据**：`docs/loops/qwen35-gdn-r9.md` 轮次 1–5；`test/qwen35/2026-10-20/probe_gdn_r9_*`；commits ba23769 / 515ef0c / e78ccfe。
+
+## tcgen05（UMMA）在这套描述符构造下只支持 M=128（2026-10-21 r11d 实测）
+
+**判断**：用 `k_major_128b_desc`（LBO=0、SBO=1024B、128B swizzle）+ `make_instr_desc_bf16(m, ...)` 时，
+**M=64 会静默算错**：每 16 行里只有前 16 行有结果，其余为 0，且 `cudaGetLastError()` 返回 no error。
+
+**证据**（B300 GPU 4，身份矩阵 A × 全 1 的 B，期望输出全 1）：
+
+| M | 结果 |
+|---|---|
+| 64 | `good=4096 / 8192`，`out[0..15]` 对、`out[16..31]` 零、`out[32..47]` 对、`out[48..63]` 零 |
+| 128 | **`good=16384 / 16384`，零错** |
+
+试过调 SBO（128 / 256 / 512 / 1024 / 2048 B）**完全不影响结果** —— 说明 M 方向的寻址不走 SBO，
+M=64 的累加器在 TMEM 里不是「64 lane」而是别的组织，按 32-lane 取回只能拿到一半。
+
+**怎么用**：GDN / 任何 BT=64 的 chunk GEMM，**把 A 补零到 128 行、指令描述符写 M=128**，
+多算那一半零行。代价 2× FLOP，但 tcgen05 有 2236 TF/s，这点浪费远小于调描述符的时间。
+如果将来必须 M=64，照 CUTLASS `make_smem_layout_a` 的完整 canonical 布局生成（而不是手写 LBO/SBO）。
+
+**教训**：`maxabs` 大但 `out[0][0]` 对，不要当成「bf16 累积误差」放过——
+r11d 里程碑 1 就是这样把 `maxabs=12.94` 解释掉了，实际是 3/4 的行全错。
