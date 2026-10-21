@@ -354,6 +354,23 @@ A 的 t=0/1、v=0..31 线性偏移已打印（见 `/hf_data/yaochen/work/show_la
 - **但 720 次 GEMM launch × 2.2 µs = 1.6 ms > 1.02 ms 的数据时间**
   → decode 必须把 8 个专家合成一次 launch（N 方向堆叠），否则 launch 开销主导
 
+### 合并 launch 的实测（阶段 1 收尾）
+
+8 个专家按 N 方向堆叠成一次 kernel（`E*N = 22528` 列，grid 704 block）：
+
+| M | 时间 | 权重 | 带宽 |
+|---|---|---|---|
+| 1 | 8.2 µs | 15.86 MB | **1930 GB/s** |
+| 8 | 8.2 µs | 15.86 MB | 1929 GB/s |
+| 32 | 8.7 µs | 15.86 MB | 1825 GB/s |
+
+**超过持续 HBM 带宽 1458 GB/s**，因为 15.86 MB 部分命中 L2（5090 L2 大）。
+→ 每层 3 次 launch（gate/up/down），30 层约 **0.74 ms**，
+  对比 720 次独立 launch 的 1.6 ms，**减少一半以上**。
+
+**阶段 1 结论：NVFP4 原生 GEMM 可用、正确、不反量化，decode 路径 ~0.74 ms/前向
+（roofline 1.02 ms 内），prefill 路径 333–366 TF/s。**
+
 ## 卡点
 
 - **token 一次性**：每次拿到的 token 只能建一次连接。mux 断了就要新 token，所以要把"一次建成、长期复用"做对。
