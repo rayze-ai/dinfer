@@ -5,29 +5,38 @@
 
 > 更新 2026-10-21 23:0x +0800。**本区按模型分节，每节只写该模型自己的交接内容；不要覆盖别人的分节。**
 
-### Kaon-V3（5090，进行中，阶段 1–2 完成，阶段 3 进行中）
+### Kaon-V3（5090，阶段 1–2 完成，阶段 3 接近打通）
 
 - 目标（用户 2026-10-21）：5090 **单卡**适配，性能 ≥ 基线容器 1.2×；**不反量化权重**。
 - **机器**：`host-172-16-20-59`（8×RTX 5090 32GB，sm_120），跳板 `jump.aicloud.paigod.work:2222`。
-  **token 一次性**（用户每次现给 → `~/.ssh/jms_5090_{user,pass}`，第一条命令必须直接
-  `scripts/dev/remote_5090.sh up`，不能先探活）。**GPU 7 跑基线 `kaon-vllm-pegaflow`（`:28067`）**，0–6 空闲。
-  工作目录 **`/hf_data/yaochen`**；**代理 `172.17.0.1:1081`**。宿主无 nvcc/rust，**全部在基线容器内编译**
-  （`--entrypoint bash` 必带；`LIBRARY_PATH` + **`LD_LIBRARY_PATH`** 都要给，见 loop 文档命令块）。
-  **远端 `/hf_data/yaochen/dinfer` 是 rsync 树、无 `.git`**：改动一律本地写 → `put` 单文件 → 远端编。
-- **模型**：`/hf_data/hub/models--kaon-release--Kaon-V3-nvpf4-mixed/snapshots/*/`（**HF cache 布局，config 在 snapshots 下**），
-  Gemma4 MoE，30 层 / 128 专家 top-8 / 滑窗 1024 + 5 层全注意力（下标 5/11/17/23/29）。
+  **token 一次性**（用户现给 → `~/.ssh/jms_5090_{user,pass}`，第一条命令必须直接
+  `scripts/dev/remote_5090.sh up`，不能先探活）。**GPU 7 跑基线（`:28067`），绝不占用**；0–6 可用。
+  工作目录 **`/hf_data/yaochen`**，远端仓库 `/hf_data/yaochen/dinfer`（**rsync 树、无 `.git`**，
+  一律本地写 → `put` 单文件 → 远端编）。代理 `172.17.0.1:1081`。
+- **容器命令（每个新容器都要重做，`/tmp/stub` 不持久）**：`--entrypoint bash` 必带；
+  先
+  `mkdir -p /tmp/stub && ln -sf /usr/local/lib/python3.12/dist-packages/nvidia/nccl/lib/libnccl.so.2 /tmp/stub/libnccl.so && ln -sf /usr/local/lib/python3.12/dist-packages/nvidia/cu13/lib/libnvrtc.so.13 /tmp/stub/libnvrtc.so`
+  再 `export LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/nvidia/{nccl,cu13}/lib:$LD_LIBRARY_PATH`。
+  **不加这些 = 链接失败或运行期 127，而且会静默跑到旧二进制**（本轮踩过两次）。
+- **模型**：`/hf_data/hub/models--kaon-release--Kaon-V3-nvpf4-mixed/snapshots/e268bef1…/`
+  （**HF cache 布局**，config 在 `snapshots/*/` 下）。Gemma4 MoE，30 层 / 128 专家 top-8 /
+  滑窗 1024 + 5 层全注意力（下标 5/11/17/23/29）。容器要 `-v /hf_data/hub:/hf_data/hub:ro` 才能读到。
 - **基线**：c1 TPOT 8.34 ms / 108 tok/s；c8 758；c32 2261；6K TTFT 244.6 ms（1.2× 线 203.8）。
-- **已完成**：阶段 1 NVFP4 GEMM 502 TF/s（探针源码已拉回 `models/kaon3/cuda/`）；阶段 2 FP8 292 TF/s +
-  加载器跑通真实 checkpoint。**阶段 3（进行中）**：`models/kaon3/src/config.rs`（proportional RoPE 分母
-  = head_dim，单测已过）；`Rope::with_denom`；**gqa.cu v5/v6/v7 + 两个参考 kernel 的 `window` 参数已编译通过**；
-  `kernels.h`/`ffi.rs` 新增 `gqa_{prefill,paged}_win_bf16`。
-- **下一步**（按序，交接细节在 `docs/loops/kaon-v3.md` 末「最新状态」）：
-  ① `ops.rs`/`opset.rs` 窗口包装 → ② 无权重 RMSNorm（`norm.cu` `w==nullptr`）→
-  ③ `models/kaon3/{layer,model}.rs`（双 norm / dense MLP ∥ MoE / layer_scalar / softcap）→
-  ④ 窗口=0 回归逐位一致 → ⑤ 对拍 torch 参考（`/hf_data/yaochen/work/kaon_forward.py`）窗口=1024 →
-  ⑥ decode 侧滑窗（`gqa_decode_v3.cu`）→ ⑦ 阶段 4 服务。
-- **已知阻塞**：`--features no-nvcc` 在本分支已坏（`ffi.rs` stub 签名与 `ops.rs` 24 处不匹配），
-  本地 CPU 编不了，只能远端容器编。full 层 `head_dim=512` 现有 GQA 模板只有 D∈{128,256}，需新结构。
+- **已完成**：阶段 1 NVFP4 探针 502 TF/s；阶段 2 FP8 292 TF/s + 加载器。
+  **阶段 3**：`models/kaon3` 完整可编译（config / weights / layer / model / probe）；
+  gqa 五 kernel 滑窗；无权重 RMSNorm；gelu_tanh；`scale/mul_row/softcap` kernel；
+  FP8/NVFP4 GEMM 移植（`Gemm::forward_fp8` / `forward_nvfp4`，对拍 bad=0）；
+  `per_expert_scale` 折进专家 down 的全局 scale。**端到端探针前 5 层（滑窗层）已跑过**。
+- **下一步（按序）**：
+  ① **重跑 NVFP4 对拍**——子代理改了数据通路（A 侧预量化到 scratch），`bad=0` 必须重新确认；
+  ② **D=512 attention**：`gqa.cu` 的 `MAX_D=256` 挡住全注意力层，O 寄存器装不下，
+      需换结构（O 分半交不同 warp 经 smem 交换，或分两块算再拼）；
+  ③ 端到端跑通 30 层 → ④ 与 torch 参考（`/hf_data/yaochen/work/kaon_forward.py`）逐层对拍
+      （探针已有 `--dump-layer N`）→ ⑤ decode 侧滑窗（`gqa_decode_v3.cu`）→ ⑥ 阶段 4 服务。
+- **性能缺口**：NVFP4 移植 4096³ 260 TF/s（探针 509）；**512×2816×2816 只有 141（探针 330）**，
+  该形状是 Kaon 真实输入，根因是并行度（704 block / 148 SM），需改 tile 形状或 split-K。
+  根因已定位：block 内现场量化重复 N/BN 次（已改预量化），剩余是两路动态 smem scale 读的寄存器压力（48 reg）。
+- **已知阻塞**：`--features no-nvcc` 在本分支已坏（stub 签名 24 处不符），本地 CPU 编不了。
 
 ### Qwen3.5-27B（B300，暂停）
 
