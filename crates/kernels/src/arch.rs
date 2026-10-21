@@ -296,6 +296,12 @@ impl ArchProfile {
     ///   （每 SM 至少铺满常驻 block 数，regs 239 / smem 86 KB 都限 2）时取，否则回 32。
     /// - Sm8x / Sm90：保持 [32, 16]（3090 smem 限 2 block/SM、BV=64 未实测）。
     pub fn gdn_chunk_ho_bv_for(arch: Arch, sm_count: usize, base_blocks: usize, k_dim: usize, v_dim: usize) -> usize {
+        // `GDN_HO_BV=<n>` 覆盖（扫档 / 排障用；默认值仍由下面的规则给）。
+        if let Some(v) = std::env::var("GDN_HO_BV").ok().and_then(|v| v.parse::<usize>().ok()) {
+            if v > 0 && v_dim % v == 0 {
+                return v;
+            }
+        }
         const GDN_CHUNK_HO_BV_CANDIDATES: [usize; 2] = [32, 16];
         const GDN_CHUNK_HO_BLOCKS_PER_SM: usize = 2;
         if !matches!(k_dim, 64 | 128 | 256) {

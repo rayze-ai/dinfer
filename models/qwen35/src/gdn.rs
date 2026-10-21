@@ -333,6 +333,16 @@ impl GdnLayer {
         let a_view = abuf.qkv.data.slice(a_off..);
         let b_view = abuf.qkv.data.slice(b_off..);
 
+        // `GDN_PROFILE=1`：GDN 内部五个阶段的 GPU 时间（CUDA 事件）。
+        // 只在 chunk prefill 且 t 大时开；每层 6 个事件，用完即同步读。
+        let gprof = std::env::var("GDN_PROFILE").ok().as_deref() == Some("1")
+            && meta.mode != BatchMode::Decode
+            && t >= 256;
+        let gev = if gprof { Some(stream.new_timing_events(6)?) } else { None };
+        if let Some(e) = &gev {
+            stream.record_timing(&e[0])?;
+        }
+
         // 2. 短卷积（decode 单 token 走 update，其余走 varlen prefill）；输出紧凑 [t, conv_dim]
         let single = meta.mode == BatchMode::Decode && meta.num_reqs == t;
         // r8b：边界快照先写 conv 状态（要在 conv1d_prefill 覆盖活槽之前；从原始输入行 + 入口状态取）
@@ -392,6 +402,9 @@ impl GdnLayer {
             )?;
         }
 
+        if let Some(e) = &gev {
+            stream.record_timing(&e[1])?;
+        }
         // 3. gate / beta（decode 走 recurrent kernel 内 fused-gate 现算，省一个 launch；prefill 预算好给 chunk 用）
         //    chunk 路径把 gate/beta 与块内 cumsum 融进一次 launch（`gdn_gate_cumsum`，
         //    对齐 vLLM FLA 的 fused_kda_gate_chunk_cumsum），所以这里只处理非 chunk 的 prefill。
@@ -411,6 +424,9 @@ impl GdnLayer {
             )?;
         }
 
+        if let Some(e) = &gev {
+            stream.record_timing(&e[2])?;
+        }
         // 4. delta rule 核心（q/k 的 l2norm 与 q 的 scale 在 kernel 内）：
         //    prefill 走 chunk 三段（prep → wy → ho），decode / 回退走逐 token 递归。两者数值等价（gdn_parity chunk case）。
         let scale = (kd as f32).powf(-0.5);
@@ -439,7 +455,13 @@ impl GdnLayer {
                 row,
             )?;
             k::gdn_chunk_prep(stream, &abuf.conv.data, &abuf.g.data, &meta.cu_seqlens.data, plan, sc, t, h, hv, kd, vd, scale, /*do_cumsum=*/false)?;
+            if let Some(e) = &gev {
+                stream.record_timing(&e[3])?;
+            }
             k::gdn_chunk_wy(stream, &abuf.conv.data, &abuf.beta.data, &meta.cu_seqlens.data, plan, sc, t, h, hv, kd, vd)?;
+            if let Some(e) = &gev {
+                stream.record_timing(&e[4])?;
+            }
             let snap = match meta.snapshot.as_ref() {
                 Some(sn) => Some(k::ops::GdnSnapshot {
                     off: &sn.off.data,
@@ -492,6 +514,17 @@ impl GdnLayer {
                     vd,
                     snap,
                 )?;
+            }
+            if let Some(e) = &gev {
+                stream.record_timing(&e[5])?;
+                stream.synchronize()?;
+                let ms = |a: usize, b: usize| k::TimingEvent::elapsed_ms(&e[a], &e[b]).unwrap_or(0.0);
+                let (conv, gate, prep, wy, ho) =
+                    (ms(0, 1), ms(1, 2), ms(2, 3), ms(3, 4), ms(4, 5));
+                eprintln!(
+                    "[gdn-prof] t={t} | conv={conv:.3} gate={gate:.3} prep={prep:.3} wy={wy:.3} ho={ho:.3} total={:.3} ms",
+                    ms(0, 5)
+                );
             }
         } else {
             ensure!(meta.snapshot.is_none(), "gdn: 边界快照只支持 chunk prefill 路径（GDN_PREFILL=recurrent 不支持步内快照）");

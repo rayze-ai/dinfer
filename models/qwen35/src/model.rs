@@ -513,17 +513,29 @@ impl<O: OpSet> Qwen35Model<O> {
         if let Some(e) = &ev {
             stream.record_timing(&e[1])?;
             stream.synchronize()?;
-            let (mut p_norm, mut p_attn, mut p_post, mut p_mlp) = (0f32, 0f32, 0f32, 0f32);
+            // 事件槽：b+0 层首、b+1 norm 后、b+2 attn 后、b+3 postnorm 后、b+4 mlp 后。
+            // norm 段 = [b, b+1) 里除层首标记以外的部分，与 attn/mlp 同口径。
+            let (mut p_attn_gdn, mut p_attn_full, mut p_post, mut p_mlp) = (0f32, 0f32, 0f32, 0f32);
+            let mut n_gdn = 0usize;
+            let mut n_full = 0usize;
             for li in 0..self.layers.len() {
                 let b = 1 + li * 5;
-                p_norm += k::TimingEvent::elapsed_ms(&e[b], &e[b + 1])?;
-                p_attn += k::TimingEvent::elapsed_ms(&e[b + 1], &e[b + 2])?;
+                let a = k::TimingEvent::elapsed_ms(&e[b + 1], &e[b + 2])?;
+                if self.layers[li].kind() == "gdn" {
+                    p_attn_gdn += a;
+                    n_gdn += 1;
+                } else {
+                    p_attn_full += a;
+                    n_full += 1;
+                }
                 p_post += k::TimingEvent::elapsed_ms(&e[b + 2], &e[b + 3])?;
                 p_mlp += k::TimingEvent::elapsed_ms(&e[b + 3], &e[b + 4])?;
             }
             let tot = k::TimingEvent::elapsed_ms(&e[0], &e[1])?;
-            eprintln!("[gpu-prof] t={t} layers={} total={tot:.2}ms | norm={p_norm:.2} attn={p_attn:.2} postnorm={p_post:.2} mlp={p_mlp:.2}",
-                self.layers.len());
+            eprintln!(
+                "[gpu-prof] t={t} layers={} total={tot:.2}ms | attn_gdn={p_attn_gdn:.2}({n_gdn}层) attn_full={p_attn_full:.2}({n_full}层) mlp={p_mlp:.2} postnorm={p_post:.2}",
+                self.layers.len()
+            );
         }
         if pending_mlp {
             self.ops.norm().add_inplace(stream, &self.mlp_out.data, &mut self.hidden.data, t * h)?;
