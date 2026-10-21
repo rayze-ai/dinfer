@@ -738,3 +738,29 @@ docker run --rm --entrypoint bash --gpus device=0 \
 **下一步**：① 子代理交付后跑 `kaon_gemm_parity`；② 补 `Gemma4Layer::forward`（双 norm 链 + 窗口 attention
 + dense ∥ MoE + layer_scalar）；③ `model.rs`（embed × sqrt(hidden) → 30 层 → final norm → tied lm_head
 → softcap 30）；④ 窗口=0 回归；⑤ 对拍 torch 参考。
+
+### `Gemma4Layer::forward` 已写完（2026-10-21 深夜第三段）
+
+按 vLLM 的 `Gemma4DecoderLayer.forward` 实现，九步：input_norm → qkv 投影（K==V 层直接拷 k 到 v）
+→ 逐头 RMSNorm（q/k 带权重、v 无权重）→ RoPE（前 `rope_dim` 维）→ attention（`window` 传给
+`prefill_win`/`paged_win`，scale=1.0）→ o_proj + post_attn_norm + 残差 → dense MLP（gelu_tanh）
+→ **MoE 并联支路**（router 预处理 `rmsnorm_no_weight·h^-0.5·scale` → top-8 重归一 → 分桶 → 逐专家
+→ fp32 加权累加）→ 两支路相加 → post_ff_norm → 残差 → `layer_scalar`。
+
+**配套新增的算子**（都在 `crates/kernels`，已编译验证的部分见下）：
+- `scale_bf16`（逐元素乘标量，原地）——`layer_scalar`、router 的 `h^-0.5`；
+- `mul_row_bf16`（逐行乘向量）——`router.scale`；
+- `gelu_tanh_mul_bf16`（**双缓冲** gate/up）——Gemma 系激活。第一版写成了打包布局
+  `[tokens, 2·inter]`，但 `gate_proj`/`up_proj` 是两个独立 GEMM 输出，拼列要么多一次拷贝、
+  要么多一个 kernel，改成双缓冲更直接。
+- `MoE` 没复用 `crates/layers::Moe`：它只支持 bf16 专家（`Vec<Mlp>`），Kaon 的专家是 NVFP4
+  `QLinear`，所以在 `layer.rs` 里用 kernel 原语（`moe_gate_f32`/`moe_route_f32`/`moe_bucket`/
+  `moe_gather_bf16`/`moe_scatter_add_f32`）自己拼了一条。
+
+**`per_expert_scale` 的折法**：折进该专家 `down_proj` 的 NVFP4 全局 scale。
+理由：`gate/up` 的非线性在缩放**之前**，`down` 是线性的，`down(x)·s == down_s(x)` 精确成立，
+不需要额外的逐专家缩放 kernel（也避免了一次 128 项的路由权重乘）。**`weights.rs` 里还没实现这一步**，
+是接通前的 TODO。
+
+**待编译验证**：`forward` 依赖子代理交付的 `Gemm::forward_fp8` / `forward_nvfp4`，
+在此之前 `cargo build -p dinfer-kaon3` 必然在 `QLinear::forward` 处失败。
