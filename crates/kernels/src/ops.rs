@@ -306,6 +306,30 @@ pub fn rope_bf16(
     )
 }
 
+/// out = gelu_tanh(x[:, :inter]) * x[:, inter:]（Gemma 系 `gelu_pytorch_tanh`）。
+pub fn gelu_tanh_and_mul_bf16(
+    stream: &Stream,
+    x: &CudaSlice<bf16>,
+    out: &mut CudaSlice<bf16>,
+    tokens: usize,
+    inter: usize,
+) -> Result<()> {
+    ensure!(x.len() >= tokens * 2 * inter && out.len() >= tokens * inter, "gelu_tanh_and_mul: shape");
+    // SAFETY: 长度已校验。
+    check(
+        unsafe {
+            ffi::gelu_tanh_and_mul_bf16(
+                stream.ptr(x) as *const c_void,
+                stream.ptr_mut(out) as *mut c_void,
+                tokens as i64,
+                inter as i64,
+                stream.raw() as _,
+            )
+        },
+        "gelu_tanh_and_mul_bf16",
+    )
+}
+
 /// out = silu(x[:, :inter]) * x[:, inter:]。x: [tokens*2*inter]，out: [tokens*inter]。
 pub fn silu_and_mul_bf16(
     stream: &Stream,

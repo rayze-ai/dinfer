@@ -15,6 +15,34 @@ __global__ void silu_and_mul_kernel(const bf16* __restrict__ x, bf16* __restrict
   }
 }
 
+// gelu_tanh 版（Gemma 系 `hidden_act=gelu_pytorch_tanh`，Kaon-V3）：
+//   out = gelu_tanh(gate) * up，gelu_tanh(x) = 0.5·x·(1 + tanh(√(2/π)·(x + 0.044715·x³)))
+// 与 PyTorch 的 `F.gelu(approximate="tanh")` 同式；全部 f32 计算后再转回 bf16。
+__device__ __forceinline__ float gelu_tanh_f(float x) {
+  constexpr float kAlpha = 0.7978845608028654f;  // sqrt(2/pi)
+  return 0.5f * x * (1.f + tanhf(kAlpha * (x + 0.044715f * x * x * x)));
+}
+
+__global__ void gelu_tanh_and_mul_kernel(const bf16* __restrict__ x, bf16* __restrict__ out, int inter) {
+  const int64_t row = blockIdx.x;
+  const bf16* gate = x + row * 2 * inter;
+  const bf16* up = gate + inter;
+  bf16* o = out + row * inter;
+  for (int i = threadIdx.x; i < inter; i += blockDim.x) {
+    o[i] = to_bf16(gelu_tanh_f(to_f32(gate[i])) * to_f32(up[i]));
+  }
+}
+
+// x: [tokens, 2·inter]（前半 gate、后半 up，与 silu_and_mul_bf16 同布局），out: [tokens, inter]。
+extern "C" int gelu_tanh_and_mul_bf16(const void* x, void* out, int64_t tokens, int64_t inter,
+                                      cudaStream_t stream) {
+  if (tokens <= 0 || inter <= 0) return 0;
+  const int threads = inter < 256 ? (inter < 32 ? 32 : inter) : 256;
+  gelu_tanh_and_mul_kernel<<<(unsigned)tokens, threads, 0, stream>>>(static_cast<const bf16*>(x),
+                                                                   static_cast<bf16*>(out), (int)inter);
+  return last_err();
+}
+
 // SituAndMul（Kimi-K3 `hidden_act=situ`，HF modeling_kimi_linear.py::SituAndMul）：
 //   a = beta·tanh(gate/beta)·sigmoid(gate)；linear_beta>0 时 up ← linear_beta·tanh(up/linear_beta)；out = bf16(a·up)
 // 全部 f32 计算（HF 把 gate/up cast 到 f32 再算），beta / linear_beta 由 host 传（模型参数，不写死）。

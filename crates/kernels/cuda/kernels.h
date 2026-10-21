@@ -46,6 +46,8 @@ int rope_bf16(void* q, void* k, const int32_t* positions, const float* cos_sin, 
 // ---- 激活 ----
 // x: [tokens, 2*inter]，out: [tokens, inter]，out = silu(x[:, :inter]) * x[:, inter:]
 int silu_and_mul_bf16(const void* x, void* out, int64_t tokens, int64_t inter, cudaStream_t stream);
+// Gemma 系 gelu_tanh：x[.., 2·inter] → out[.., inter]（out = gelu_tanh(gate) * up）。
+int gelu_tanh_and_mul_bf16(const void* x, void* out, int64_t tokens, int64_t inter, cudaStream_t stream);
 // 输出门（Qwen3.5 attn_output_gate）：x *= sigmoid(gate)，原地逐元素。n 必须是 8 的倍数。
 int mul_sigmoid_bf16(void* x, const void* gate, int64_t n, cudaStream_t stream);
 // 行式：x 紧凑 [rows, cols]，gate 是 [rows, gate_stride] 的列段（融合 qkv+gate 输出的 gate 段）；cols / gate_stride 是 8 的倍数。

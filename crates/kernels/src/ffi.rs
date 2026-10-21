@@ -66,6 +66,14 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
 
+    pub fn gelu_tanh_and_mul_bf16(
+        x: *const c_void,
+        out: *mut c_void,
+        tokens: i64,
+        inter: i64,
+        stream: cudaStream_t,
+    ) -> i32;
+
     pub fn embedding_bf16(
         ids: *const i32,
         table: *const c_void,
