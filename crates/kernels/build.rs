@@ -100,6 +100,12 @@ fn main() {
                 if profile != "release" {
                     cmd.arg("-lineinfo");
                 }
+                // `GQA_PROFILE=1` 时编入 GQA kernel 内部的分段计时（clock64；诊断 prefill 用，
+                // 不设就完全不生成代码，零开销）。
+                if std::env::var("GQA_PROFILE").ok().as_deref() == Some("1") {
+                    cmd.arg("-DGQA_PROFILE=1");
+                    println!("cargo:rerun-if-env-changed=GQA_PROFILE");
+                }
                 cmd.args(&arch_flags);
                 cmd.arg("-o").arg(obj).arg(src);
                 run(&mut cmd, src);

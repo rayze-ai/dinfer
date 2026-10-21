@@ -11,6 +11,7 @@
 //   gqa_paged_bf16         从 paged cache 读：decode（每请求 1 行）与带历史 chunked prefill（任意 query 长）统一路径
 //                          D=128 同样走 flash 风格 tile kernel（读 paged cache），其他 D 走旧参考实现
 //   gqa_decode_bf16        纯 decode（每请求 1 行）split-K 版（Q3-b）：reqs × Hkv × 8 split 个 block + merge kernel
+#include <cstdio>
 #include <cstdlib>
 #include "common.cuh"
 #include <stdlib.h>
@@ -415,6 +416,9 @@ __global__ void __launch_bounds__(NW * 32) gqa_fa_v6_kernel(
   const int warp_min_vis = hist + q_base + warp * 16;
   const int warp_max_vis = hist + min(q_base + warp * 16 + 15, q_len - 1);
   const bf16* sQw = sQ + (warp * 16) * LDS;
+#if GQA_PROFILE
+  long long t_qk = 0, t_sm = 0, t_pv = 0;
+#endif
   for (int tile = 0; tile < n_tiles; ++tile) {
     const int k0 = tile * TILE;
     const int buf = NBUF == 1 ? 0 : (tile & 1);
@@ -424,6 +428,9 @@ __global__ void __launch_bounds__(NW * 32) gqa_fa_v6_kernel(
     const bf16* sKb = sK + (size_t)buf * TILE * LDS;
     const bf16* sVb = sV + (size_t)buf * TILE * LDS;
     if (k0 <= warp_max_vis) {  // 整 warp 不可见的 tile 只参与同步
+#if GQA_PROFILE
+      const long long _tp0 = clock64();
+#endif
       float sacc[SFRAG][4];
 #pragma unroll
       for (int nt = 0; nt < SFRAG; ++nt) { sacc[nt][0] = sacc[nt][1] = sacc[nt][2] = sacc[nt][3] = 0.f; }
@@ -441,6 +448,9 @@ __global__ void __launch_bounds__(NW * 32) gqa_fa_v6_kernel(
           mma16816(sacc[nt], qa + 4, bk[2], bk[3]);
         }
       }
+#if GQA_PROFILE
+      const long long _tp1 = clock64();
+#endif
       const bool need_mask = (k0 + TILE - 1 > warp_min_vis);
       float mx_a = -INFINITY, mx_b = -INFINITY;
 #pragma unroll
@@ -477,6 +487,9 @@ __global__ void __launch_bounds__(NW * 32) gqa_fa_v6_kernel(
 #pragma unroll
       for (int nt = 0; nt < OF; ++nt) { o[nt][0] *= alpha_a; o[nt][1] *= alpha_a; o[nt][2] *= alpha_b; o[nt][3] *= alpha_b; }
 #pragma unroll
+#if GQA_PROFILE
+      const long long _tp2 = clock64();
+#endif
       for (int j = 0; j < TILE / 16; ++j) {
         uint32_t pa[4];
         pa[0] = pack_bf16x2(sacc[2 * j][0], sacc[2 * j][1]);
@@ -491,12 +504,26 @@ __global__ void __launch_bounds__(NW * 32) gqa_fa_v6_kernel(
           mma16816(o[2 * nt2 + 1], pa, bv[2], bv[3]);
         }
       }
+#if GQA_PROFILE
+      if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 0) {
+        const long long _tp3 = clock64();
+        t_qk += _tp1 - _tp0; t_sm += _tp2 - _tp1; t_pv += _tp3 - _tp2;
+      }
+#endif
     }
     if (NBUF == 1 && tile + 1 < n_tiles) {
       __syncthreads();  // 单缓冲：全 block 算完才能覆盖
       load_tile(tile + 1, 0);
     }
   }
+#if GQA_PROFILE
+  if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 0) {
+    const long long tot = t_qk + t_sm + t_pv;
+    if (tot > 0)
+      printf("[gqa-prof] qk=%.1f%% softmax=%.1f%% pv=%.1f%% (%.2f us, q_len=%d)\n",
+             100.0 * t_qk / tot, 100.0 * t_sm / tot, 100.0 * t_pv / tot, tot / 1900.0, q_len);
+  }
+#endif
   l_a += __shfl_xor_sync(0xffffffffu, l_a, 1); l_a += __shfl_xor_sync(0xffffffffu, l_a, 2);
   l_b += __shfl_xor_sync(0xffffffffu, l_b, 1); l_b += __shfl_xor_sync(0xffffffffu, l_b, 2);
   const float inv_a = l_a > 0.f ? 1.f / l_a : 0.f, inv_b = l_b > 0.f ? 1.f / l_b : 0.f;

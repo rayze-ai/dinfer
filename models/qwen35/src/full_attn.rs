@@ -114,6 +114,13 @@ impl FullAttention {
         // 1. qkv = x · W^T → [t, (H·qmul+2Hkv)·D]（q | gate | k | v；gate 段 qkv_post 不碰）
         ensure!(sc.qkv.numel() >= t * qkv_w, "attn: qkv 缓冲 < t × {qkv_w}");
         gemm.forward_bf16(&x.data, &self.qkv.w.data, None, &mut sc.qkv.data, t, qkv_w, cfg.hidden_size as usize)?;
+        // `ATTN_PROFILE=1`：拆 qkv_post（norm+RoPE+写 KV）与 GQA 两段的 GPU 时间。
+        let aprof = std::env::var("ATTN_PROFILE").ok().as_deref() == Some("1") && t >= 256;
+        let aev = if aprof { Some(stream.new_timing_events(3)?) } else { None };
+        if let Some(e) = &aev {
+            stream.record_timing(&e[0])?;
+        }
+
         // 2. per-head RMSNorm（zero-centered）+ partial RoPE（原地）+ K/V 写 paged cache
         // `qkv_post_ext` 是 ops.rs 的自由函数（QkvPost trait 只有 Qwen3 的旧签名）；Qwen3.5 需要 partial RoPE +
         // zero-centered norm，直接调。
@@ -136,6 +143,9 @@ impl FullAttention {
             qmul,
             kv.block_size,
         )?;
+        if let Some(e) = &aev {
+            stream.record_timing(&e[1])?;
+        }
         // 3. GQA：q 从第 0 列起、k 从 H·qmul·D、v 从 (H·qmul+Hkv)·D，行跨度 qkv_w
         let scale = (d as f32).powf(-0.5);
         let q_view = sc.qkv.data.slice(..);
@@ -195,6 +205,17 @@ impl FullAttention {
                 scale,
                 qkv_w,
             )?,
+        }
+        if let Some(e) = &aev {
+            stream.record_timing(&e[2])?;
+            stream.synchronize()?;
+            let ms = |a: usize, b: usize| k::TimingEvent::elapsed_ms(&e[a], &e[b]).unwrap_or(0.0);
+            eprintln!(
+                "[attn-prof] t={t} qkvpost={:.3} gqa={:.3} total={:.3} ms",
+                ms(0, 1),
+                ms(1, 2),
+                ms(0, 2)
+            );
         }
         // 4. 输出门：attn *= sigmoid(gate)，gate 段在 qkv 行内 [H·D, 2H·D)，按行距 qkv_w 读
         if qmul == 2 {
