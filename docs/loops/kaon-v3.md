@@ -631,3 +631,27 @@ plus：起始 tile `tile0 = max(0, (warp_min_vis - window + 1) / TILE)`，否则
 
 **注意 v7 的 `pair_min_vis`**：它是成对 query 行的下界，`need_mask` 判定也要按
 `min(vis) - window + 1` 同时判断两端。
+
+### 阶段 3 规格定稿（2026-10-21 深夜）
+
+**RoPE 是 proportional，不是普通 partial**（`/data/ref/vllm/.../rotary_embedding/gemma4_rope.py`）：
+- full 层：`head_dim=512`，`partial_rotary_factor=0.25` → 旋转 **128 维**，但
+  **inv_freq 的分母是 head_dim=512**（`theta^(-2i/512)`，i<64），不是 `-2i/128`。
+  未旋转维 cos=1/sin=0（即旋转 128 维、其余 384 维原样）。
+- sliding 层：`head_dim=256`，theta=1e4，**全 256 维都转**（rope_type=default）。
+- 现有 `Rope::new(rope_dim, …, theta)` 的 inv_freq 用 `rope_dim` 做分母 → **需要加分母参数**
+  （默认 = rope_dim，保持既有模型不变）。
+
+**每层参数（`config.json` 实测）**：`layer_types` 5 full（下标 5/11/17/23/29）+ 25 sliding；
+full: H=16, Hkv=2, D=512；sliding: H=16, Hkv=8, D=256；`rms_norm_eps=1e-6`；
+`gelu_pytorch_tanh`；`final_logit_softcapping=30`；`attention_k_eq_v=true`。
+
+**改动清单**：
+
+| 文件 | 改动 |
+|---|---|
+| `gqa.cu` v5/v6/v7 | 加 `window` 参数：上界之外加**下界** `key < vis - window + 1`；起始 tile 跳读 |
+| `decode`（gqa_decode_v3.cu）| 从 `max(0,(seq_len-window)/block_size)` block 起扫 |
+| `norm.cu` | `w == nullptr` 时乘 1（无权重 RMSNorm：v_norm / router 预处理） |
+| `nn.rs` | `RmsNormW::weightless()` 或 `rmsnorm_bf16` 收 `Option<&_>`；`Rope::new_with_denom` |
+| `models/kaon3/{config,layer,model}.rs` | Gemma4 层（双 norm、dense MLP ∥ MoE、layer_scalar）、滑窗窗口、softcap |
