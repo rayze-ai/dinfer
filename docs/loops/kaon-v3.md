@@ -193,7 +193,69 @@ mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e
 - 基线走的正是这条路：`FlashInferB12xNvFp4LinearKernel`（**SM120+ 专用**，
   `Sm120BlockScaledDenseGemmKernel`），失败才回落 fbgemm/cutlass/emulation
 
-## NVFP4 MMA 数值验证进度（轮 4b，**未通过**）
+## NVFP4 MMA 数值验证（轮 5，**已通过，零误差**）
+
+**最终结论：`kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64` 在 sm_120a 上工作正常，
+随机值全矩阵对拍 `bad=0/128, maxabs=0.00000`。**
+
+### 正确的寄存器映射（实测，可直接照抄）
+
+A / B 在显存里按 **(M,K) / (N,K) 行主序、每字节两个 fp4（低半字节是偶数列）** 打包。
+每线程按下式取 32（A）/ 16（B）个值，`lin` 是在 **(M16,K64) 列主序**（即 `lin = m + 16*k`）
+下的一维下标：
+
+```cpp
+// A: 32 个值 -> 4 个 u32
+for (int v = 0; v < 32; ++v) {
+  int v0 = v % 8, v1 = (v / 8) % 2, v2 = v / 16;
+  int lin = 128*(t%4) + (t/4) + 16*v0 + 8*v1 + 512*v2;   // t = threadIdx.x
+  int m = lin % 16, kk = lin / 16;
+  uint8_t byte = A[(m*64 + kk) / 2];
+  unsigned nib = (kk % 2) ? ((byte >> 4) & 15) : (byte & 15);
+  a[v/8] |= (uint32_t)nib << (4 * (v % 8));
+}
+// B: 16 个值 -> 2 个 u32
+for (int v = 0; v < 16; ++v) {
+  int v0 = v % 8, v1 = v / 8;
+  int lin = 64*(t%4) + (t/4) + 8*v0 + 256*v1;
+  int n = lin % 8, kk = lin / 8;
+  uint8_t byte = B[(n*64 + kk) / 2];
+  unsigned nib = (kk % 2) ? ((byte >> 4) & 15) : (byte & 15);
+  b[v/8] |= (uint32_t)nib << (4 * (v % 8));
+}
+```
+
+**scale（`scale_vec::4X`）**：一个 32-bit 寄存器装 **4 个连续 k-block（各 16 个元素）的 e4m3 字节**，
+按 k 从小到大的顺序从低位排起：
+
+```cpp
+sa = (uint32_t)sfA[m*4+0] | ((uint32_t)sfA[m*4+1] << 8)
+   | ((uint32_t)sfA[m*4+2] << 16) | ((uint32_t)sfA[m*4+3] << 24);
+```
+
+其中 A 的线程→行映射：`m = (8*(t%2) + t/4) % 16`；B 的：`n = (t/4) % 8`。
+
+**输出（CLayout = SM80_16x8_Row）**：`r0 = t/4, cg = (t%4)*2`，
+`D[r0][cg]=d0, D[r0][cg+1]=d1, D[r0+8][cg]=d2, D[r0+8][cg+1]=d3`。
+
+### 指令形式（8 组操作数）
+
+```ptx
+mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3
+  {d0,d1,d2,d3}, {a0,a1,a2,a3}, {b0,b1}, {c0,c1,c2,c3},
+  {sa}, {bidA,tidA}, {sb}, {bidB,tidB};
+```
+
+`bid/tid` 用 0 即可（单 warp、单 tile 时）。
+
+### 走过的弯路（教训）
+
+前两轮得出「D 只是期望值的 1/4」，我据此判断是 `scale_vec::4X` 语义问题 —— **这个判断是错的**。
+真实原因是**探针脚本自己写错**：B 的初始化循环写成了 `Af[i] = ...`，`Bf` 从未赋值，
+所以「参考值」本身就是垃圾。教训：**对拍脚本的参考侧也要先自证**
+（全 1 探针期望值必须手算，不能从被打乱的数组里求）。
+
+## NVFP4 MMA 数值验证进度（轮 4b，已作废，保留过程）
 
 | 项 | 状态 |
 |---|---|
