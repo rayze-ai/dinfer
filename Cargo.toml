@@ -13,6 +13,7 @@ members = [
     "models/qwen35",
     "models/glm53",
     "models/kimik3",
+    "models/kaon3",
     # 可执行
     "bins/dinfer",
     "bins/bench",

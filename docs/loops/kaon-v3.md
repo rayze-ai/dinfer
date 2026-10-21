@@ -445,6 +445,52 @@ attention core 50 → 150+（可省 ~45 ms）。
 
 数值：v5/v6 都是 `bad=0/4096, maxabs=0`。
 
+## 阶段 2：权重加载器（已完成，跑通真实 checkpoint）
+
+新增 `models/kaon3` crate（`weights.rs` + `kaon3_probe` 探针），已加入 workspace。
+
+### 三种落盘格式的分派规则（`load_linear`）
+
+| 判定 | 格式 | 逻辑形状 |
+|---|---|---|
+| 存在 **2 维** `{name}_scale`（`[N, K/16]` F8_E4M3） | NVFP4 | `n = shape[0]`, **`k = shape[1] * 2`** |
+| `dtype == F8_E4M3` 且 scale 是标量 | FP8 per-tensor | `k = shape[1]` |
+| `dtype == BF16` | BF16 | 直读 |
+
+**关键陷阱**：NVFP4 的 `weight` 落盘列数是 **K/2**（每字节两个 fp4）。
+第一版我直接用 `shape[1]` 当 K 去校 scale，报
+`scale [704,176] 与 weight 704x1408 不匹配` —— 实际上 K=2816，`2816/16 = 176` 是对的。
+
+另外 `crates/layers` 现有的 `load_bf16` 只认 **block 量化 + `_scale_inv`** 约定，
+Kaon-V3 是 **per-tensor `weight_scale`**，因此不复用，新写分派。
+
+### 真实 checkpoint 探针结果（`kaon3_probe`）
+
+```
+tensors: 47632
+layers.0.experts.0.gate_proj   NVFP4 704x2816  packed 0.99MB + scale 0.12MB  global=9.74e-5
+layers.0.experts.0.down_proj   NVFP4 2816x704  packed 0.99MB + scale 0.12MB  global=1.75e-4
+layers.0.mlp.gate_proj         FP8   2112x2816  5.95MB  scale=7.50e-4
+layers.0.self_attn.q_proj      FP8   4096x2816  11.53MB scale=1.12e-3
+layers.0.router.proj           BF16  128x2816   0.72MB
+
+专家总量: 12.85 GB (packed 11.42 + scale 1.43)
+```
+
+与估算 11.4 GB 吻合；多出的 1.43 GB 是 scale（每 16 元素 1 字节）。
+
+### 构建环境补充
+
+容器里缺 `libnccl.so` / `libnvrtc.so` 的**未版本化符号链接**（只有 `.so.2` / `.so.13`）。
+解法：建 `/tmp/libstub` 软链接并设 `LIBRARY_PATH`：
+
+```bash
+mkdir -p /tmp/libstub
+ln -sf .../nvidia/nccl/lib/libnccl.so.2      /tmp/libstub/libnccl.so
+ln -sf .../nvidia/cu13/lib/libnvrtc.so.13    /tmp/libstub/libnvrtc.so
+export LIBRARY_PATH=/tmp/libstub
+```
+
 ## 卡点
 
 - **token 一次性**：每次拿到的 token 只能建一次连接。mux 断了就要新 token，所以要把"一次建成、长期复用"做对。
