@@ -24,6 +24,8 @@ pub struct RopeSpec {
     pub rope_dim: usize,
     /// inv_freq 的分母（proportional 时 = head_dim，default 时 = rope_dim）。
     pub denom: usize,
+    /// neox 配对跨度（proportional 时 = head_dim/2，default 时 = rope_dim/2），见 `Rope::with_span`。
+    pub span: usize,
     pub theta: f64,
 }
 
@@ -201,12 +203,14 @@ fn rope_spec(r: &RawConfig, kind: &str, head_dim: usize) -> Result<RopeSpec> {
         .ok_or_else(|| anyhow::anyhow!("config 缺 rope_parameters[{kind}]"))?;
     let rope_dim = ((head_dim as f64) * e.partial_rotary_factor).round() as usize;
     ensure!(rope_dim % 2 == 0 && rope_dim > 0 && rope_dim <= head_dim, "rope_dim {rope_dim} 非法");
-    let denom = match e.rope_type.as_str() {
-        "proportional" => head_dim,
-        "default" => rope_dim,
+    // proportional = vLLM `Gemma4RotaryEmbedding`：inv_freq 零频补齐到 head_dim/2 对、整头 neox 旋转，
+    // 所以非零频的配对是 (i, i + head_dim/2)，不是 (i, i + rope_dim/2)。
+    let (denom, span) = match e.rope_type.as_str() {
+        "proportional" => (head_dim, head_dim / 2),
+        "default" => (rope_dim, rope_dim / 2),
         other => anyhow::bail!("不支持的 rope_type {other}"),
     };
-    Ok(RopeSpec { rope_dim, denom, theta: e.rope_theta })
+    Ok(RopeSpec { rope_dim, denom, span, theta: e.rope_theta })
 }
 
 #[cfg(test)]
@@ -233,6 +237,8 @@ mod tests {
         let c = KaonConfig::from_json(json).unwrap();
         assert_eq!(c.rope_full.rope_dim, 128);
         assert_eq!(c.rope_full.denom, 512, "proportional 的分母是 head_dim，不是 rope_dim");
+        assert_eq!(c.rope_full.span, 256, "proportional 是整头 neox：配对 (i, i+head_dim/2)");
+        assert_eq!(c.rope_sliding.span, 128);
         assert_eq!(c.rope_sliding.rope_dim, 256);
         assert_eq!(c.rope_sliding.denom, 256);
         assert!(c.k_eq_v_at(1) && !c.k_eq_v_at(0), "K==V 只在 full 层");

@@ -27,12 +27,12 @@
   gqa 五 kernel 滑窗；无权重 RMSNorm；gelu_tanh；`scale/mul_row/softcap` kernel；
   FP8/NVFP4 GEMM 移植（`Gemm::forward_fp8` / `forward_nvfp4`，对拍 bad=0）；
   `per_expert_scale` 折进专家 down 的全局 scale。**端到端探针前 5 层（滑窗层）已跑过**。
-- **下一步（按序）**：
-  ① **重跑 NVFP4 对拍**——子代理改了数据通路（A 侧预量化到 scratch），`bad=0` 必须重新确认；
-  ② **D=512 attention**：`gqa.cu` 的 `MAX_D=256` 挡住全注意力层，O 寄存器装不下，
-      需换结构（O 分半交不同 warp 经 smem 交换，或分两块算再拼）；
-  ③ 端到端跑通 30 层 → ④ 与 torch 参考（`/hf_data/yaochen/work/kaon_forward.py`）逐层对拍
-      （探针已有 `--dump-layer N`）→ ⑤ decode 侧滑窗（`gqa_decode_v3.cu`）→ ⑥ 阶段 4 服务。
+- **2026-10-22 白天**：30 层端到端已跑通（`MAX_D` 提到 512 走慢路径）；修了 proportional RoPE 配对
+  （整头 neox，配对 (i, i+256)，`rope_span_bf16`）；**但 logits 与基线不符**（top-5 无交集，见 loop 文档末节）。
+  `scripts/dev/remote_5090.sh ctr '<cmd>'` 一条命令进容器编 / 跑。
+- **下一步（按序）**：① 修 torch 参考 `models/kaon3/ref/kaon_forward.py`（RoPE / k_eq_v 的 V 两处语义错，头注释已列）
+  → 逐层对拍找第一层发散（Rust `--dump-layer N`）；② NVFP4 对拍改写成 Rust GPU 测试并重跑；
+  ③ 高效 D=512 attention（慢路径当参照）；④ decode 侧滑窗（`gqa_decode_v3.cu`）；⑤ 阶段 4 服务。
 - **性能缺口**：NVFP4 移植 4096³ 260 TF/s（探针 509）；**512×2816×2816 只有 141（探针 330）**，
   该形状是 Kaon 真实输入，根因是并行度（704 block / 148 SM），需改 tile 形状或 split-K。
   根因已定位：block 内现场量化重复 N/BN 次（已改预量化），剩余是两路动态 smem scale 读的寄存器压力（48 reg）。

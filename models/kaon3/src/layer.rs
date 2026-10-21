@@ -271,7 +271,8 @@ impl Ropes {
                 cfg.max_pos,
                 cfg.rope_sliding.theta,
                 RopeStyle::Neox,
-            )?,
+            )?
+            .with_span(cfg.rope_sliding.span)?,
             full: Rope::with_denom(
                 stream,
                 cfg.rope_full.rope_dim,
@@ -279,7 +280,8 @@ impl Ropes {
                 cfg.max_pos,
                 cfg.rope_full.theta,
                 RopeStyle::Neox,
-            )?,
+            )?
+            .with_span(cfg.rope_full.span)?,
         })
     }
 }

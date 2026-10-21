@@ -58,6 +58,21 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
 
+    pub fn rope_span_bf16(
+        q: *mut c_void,
+        k: *mut c_void,
+        positions: *const i32,
+        cos_sin: *const f32,
+        tokens: i64,
+        q_heads: i64,
+        k_heads: i64,
+        head_dim: i64,
+        rope_dim: i64,
+        span: i64,
+        neox: i32,
+        stream: cudaStream_t,
+    ) -> i32;
+
     pub fn silu_and_mul_bf16(
         x: *const c_void,
         out: *mut c_void,
@@ -1229,6 +1244,7 @@ mod stubs {
     stub!(rmsnorm_bf16(x: *const c_void, w: *const c_void, o: *mut c_void, t: i64, h: i64, e: f32, l: i32, s: cudaStream_t));
     stub!(fused_add_rmsnorm_bf16(x: *const c_void, r: *mut c_void, w: *const c_void, o: *mut c_void, t: i64, h: i64, e: f32, l: i32, s: cudaStream_t));
     stub!(rope_bf16(q: *mut c_void, k: *mut c_void, p: *const i32, cs: *const f32, t: i64, qh: i64, kh: i64, hd: i64, rd: i64, n: i32, s: cudaStream_t));
+    stub!(rope_span_bf16(q: *mut c_void, k: *mut c_void, p: *const i32, cs: *const f32, t: i64, qh: i64, kh: i64, hd: i64, rd: i64, sp: i64, n: i32, s: cudaStream_t));
     stub!(silu_and_mul_bf16(x: *const c_void, o: *mut c_void, t: i64, i: i64, s: cudaStream_t));
     stub!(mul_sigmoid_bf16(x: *mut c_void, g: *const c_void, n: i64, s: cudaStream_t));
     stub!(mul_sigmoid_rows_bf16(x: *mut c_void, g: *const c_void, r: i64, c: i64, gs: i64, s: cudaStream_t));

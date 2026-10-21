@@ -42,6 +42,10 @@ int ar_oneshot_add_rmsnorm_bf16(void* rank_data, const void* const* signals, voi
 // positions: [tokens] i32。k 可为 nullptr（k_heads=0）。
 int rope_bf16(void* q, void* k, const int32_t* positions, const float* cos_sin, int64_t tokens, int64_t q_heads,
               int64_t k_heads, int64_t head_dim, int64_t rope_dim, int neox, cudaStream_t stream);
+// 同上，neox 配对改为 (i, i+span)，i < rope_dim/2；span = rope_dim/2 即 rope_bf16。
+// Gemma4 proportional RoPE（零频补齐到整头）= rope_dim 个非零频旋转、span = head_dim/2。
+int rope_span_bf16(void* q, void* k, const int32_t* positions, const float* cos_sin, int64_t tokens, int64_t q_heads,
+                   int64_t k_heads, int64_t head_dim, int64_t rope_dim, int64_t span, int neox, cudaStream_t stream);
 
 // ---- 激活 ----
 // x: [tokens, 2*inter]，out: [tokens, inter]，out = silu(x[:, :inter]) * x[:, inter:]

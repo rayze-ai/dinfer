@@ -22,7 +22,7 @@ using namespace dinfer;
 namespace {
 
 constexpr int GQ_BLOCK = 256;
-constexpr int MAX_D = 256;
+constexpr int MAX_D = 512;  // 通用慢路径上限；Gemma4 full 层 head_dim = 512
 
 __device__ __forceinline__ int64_t slot_off(int64_t slot, int kv_heads, int D) { return slot * kv_heads * 2 * D; }
 

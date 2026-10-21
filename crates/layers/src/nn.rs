@@ -108,6 +108,8 @@ impl RmsNorm {
 pub struct Rope {
     pub cos_sin: Tensor<f32>,
     pub rope_dim: usize,
+    /// neox 配对跨度：`(i, i + span)`。默认 `rope_dim/2`；见 [`Rope::with_span`]。
+    pub span: usize,
     pub style: RopeStyle,
 }
 
@@ -164,7 +166,15 @@ impl Rope {
                 });
             }
         });
-        Ok(Self { cos_sin: Tensor::from_vec(stream, table, &[max_pos, rope_dim])?, rope_dim, style })
+        Ok(Self { cos_sin: Tensor::from_vec(stream, table, &[max_pos, rope_dim])?, rope_dim, span: rope_dim / 2, style })
+    }
+    /// 改 neox 配对跨度。Gemma4 proportional RoPE 在 vLLM / HF 里是"inv_freq 零频补齐到 head_dim/2 对、
+    /// 整头 neox 旋转"，非零频只有前 `rope_dim/2` 对，配对是 `(i, i + head_dim/2)` —— 不是只转前
+    /// `rope_dim` 维的 `(i, i + rope_dim/2)`。等价实现：表仍只存 `rope_dim` 个频率，`span = head_dim/2`。
+    pub fn with_span(mut self, span: usize) -> Result<Self> {
+        ensure!(span >= self.rope_dim / 2, "rope span {span} < rope_dim/2 {}", self.rope_dim / 2);
+        self.span = span;
+        Ok(self)
     }
     /// 就地旋转 q[tokens, q_heads, head_dim] 与可选 k[tokens, k_heads, head_dim] 的前 rope_dim 维。
     #[allow(clippy::too_many_arguments)]
@@ -178,7 +188,7 @@ impl Rope {
         k_heads: usize,
         head_dim: usize,
     ) -> Result<()> {
-        k::rope_bf16(
+        k::rope_span_bf16(
             stream,
             &mut q.data,
             k.map(|t| &mut t.data),
@@ -188,6 +198,7 @@ impl Rope {
             k_heads,
             head_dim,
             self.rope_dim,
+            self.span,
             self.style,
         )
     }

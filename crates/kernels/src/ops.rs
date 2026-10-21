@@ -268,7 +268,30 @@ pub fn rope_bf16(
     rope_dim: usize,
     style: RopeStyle,
 ) -> Result<()> {
+    rope_span_bf16(stream, q, k, positions, cos_sin, q_heads, k_heads, head_dim, rope_dim, rope_dim / 2, style)
+}
+
+/// 同 [`rope_bf16`]，neox 配对改为 `(i, i + span)`（`i < rope_dim/2`）。`span = rope_dim/2` 即常规 partial RoPE；
+/// Gemma4 proportional（零频补齐到整头再按 neox 旋转）等价于 `span = head_dim/2`。
+#[allow(clippy::too_many_arguments)]
+pub fn rope_span_bf16(
+    stream: &Stream,
+    q: &mut CudaSlice<bf16>,
+    k: Option<&mut CudaSlice<bf16>>,
+    positions: &CudaSlice<i32>,
+    cos_sin: &CudaSlice<f32>,
+    q_heads: usize,
+    k_heads: usize,
+    head_dim: usize,
+    rope_dim: usize,
+    span: usize,
+    style: RopeStyle,
+) -> Result<()> {
     let tokens = positions.len();
+    ensure!(
+        span >= rope_dim / 2 && span + rope_dim / 2 <= head_dim,
+        "rope: span {span} 越界（rope_dim {rope_dim} / head_dim {head_dim}）"
+    );
     ensure!(q.len() == tokens * q_heads * head_dim, "rope: q shape mismatch");
     ensure!(rope_dim > 0 && rope_dim % 2 == 0 && rope_dim <= head_dim, "rope: bad rope_dim {rope_dim}");
     ensure!(cos_sin.len() % rope_dim == 0, "rope: cos_sin not multiple of rope_dim");
@@ -288,7 +311,7 @@ pub fn rope_bf16(
     // SAFETY: 指针与长度已校验；positions 越界由调用方保证 < cos_sin.len()/rope_dim。
     check(
         unsafe {
-            ffi::rope_bf16(
+            ffi::rope_span_bf16(
                 pq,
                 pk,
                 pp,
@@ -298,11 +321,12 @@ pub fn rope_bf16(
                 k_heads as i64,
                 head_dim as i64,
                 rope_dim as i64,
+                span as i64,
                 matches!(style, RopeStyle::Neox) as i32,
                 stream.raw() as _,
             )
         },
-        "rope_bf16",
+        "rope_span_bf16",
     )
 }
 

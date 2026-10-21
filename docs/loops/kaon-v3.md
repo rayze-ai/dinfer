@@ -958,3 +958,29 @@ docker run --rm --entrypoint bash --gpus device=0 \
 
 - 把 `sa`/`sb` 压进 32-bit 内联用的寄存器窗口，目标把 48 reg 压回 40 以下（每 SM 5–6 block）。
 - 512 形状单独给出 tile 变体（BN=32 或 split-K=2），按 `ArchProfile` 选。
+
+## 阶段 3：30 层打通 + RoPE 配对修正（2026-10-22 白天）
+
+- **NVFP4 对拍未重跑**（A 预量化后的 bad=0 仍待确认；远端 C 对拍 `work/kh.cu`/`final.cu` 未进仓库，计划改写成
+  `crates/kernels/tests/` 的 Rust GPU 测试）。
+- **proportional RoPE 配对错了（已修）**：vLLM `rotary_embedding/gemma4_rope.py` 把 `rotary_dim` 设成 `head_size`、
+  `inv_freq` 前 `rope_dim/2` 对 = `theta^(-2i/head_dim)`、其余零频 → 实际是**整头 neox 旋转，配对 (i, i+256)**，
+  不是"只转前 128 维、配对 (i, i+64)"。修法：`rope_span_bf16`（neox 配对 `(i, i+span)`）+ `Rope::with_span`，
+  `RopeSpec.span`（proportional = head_dim/2，default = rope_dim/2）；表仍只存 128 个频率。旧 `rope_bf16` 转发 span=rope_dim/2。
+- **torch 参考 `work/kaon_forward.py` 有两处语义错**（已入库 `models/kaon3/ref/`，头注释列明，**未修**）：
+  RoPE 同上；`k_eq_v` 层写成 `v = k`（norm+rope 之后），vLLM 是 `v = v_norm(原始 K 投影)`、无 RoPE。
+  Rust 侧 `layer.rs` 的 V 是对的（拷原始 K → 无权重 norm）。
+- **D=512**：`gqa.cu` 的 `MAX_D` 256 → 512，full 层走通用慢路径（`gqa_prefill_ref_kernel`，正确性用，O(T²) 无 tensor core）。
+- **30 层端到端跑通**：`kaon3_probe --forward 2 100..107`（T=9），一次前向 221.7 ms（首调），权重加载 2.1 s。
+- **与基线对不上**：同一 ids，基线 top-5 = `[45518, 1, 100, 106, 101]`（logprob −1.41/−1.66/−2.16/−2.29/−3.16），
+  我们 = `[35116, 243275, 124530, 109198, 242620]`（logit 18.9/18.0/17.8/17.4/17.1）。→ 需逐层对拍定位。
+  查法：`curl :28067/v1/completions` 带 `"prompt":[ids]`、`"logprobs":5`、`"return_tokens_as_token_ids":true`（模型名 `flowgpt_vllm`）。
+- **工具**：`scripts/dev/remote_5090.sh ctr '<cmd>'`（`GPU=n`，拒 7）把容器前置（stub 软链接 / LD_LIBRARY_PATH / 代理 / 挂载）收进脚本。
+
+### 下一步
+
+1. 修 `models/kaon3/ref/kaon_forward.py` 两处语义 + 路径，在容器里 `DEV=cuda` 跑（GPU 1），每层输出残差流前 8 个与范数；
+   Rust 侧 `--dump-layer N` 对照，找第一层发散处（注意 FP8/FP4 激活量化本身有误差，看量级突变）。
+2. 怀疑点（按先验）：FP8 激活没用 `input_scale`（kernel 直接 e4m3 饱和 ±448，Gemma 残差大）、norm 权重口径
+   （Gemma 的 `1+w` 与否要核 `gemma4.py` 的 RMSNorm 类）、embed normalizer 的 bf16 舍入、router 预处理、layer_scalar。
+3. 之后：NVFP4 Rust 对拍测试 → 高效 D=512 kernel（慢路径做参照）→ decode 滑窗。
