@@ -27,3 +27,18 @@
 - TP / EP 对拍的可达口径：隔离各层（两边 `topk_ids` 完全相同的行）cos ≥ 0.9999；路由一致行的 `expert_sum` ≤ bf16 1 ulp；对 HF 的 logits **top-1 一致**；链式 cos 与 top-5 只报数（tp2 实测 top-5 第 5 位因上游平局翻转不同，margin 一 ulp）。
 - 中间量定位顺序：attn_out → mlp_in（TP attention + all-reduce 是否对）→ expert_sum → routed_out（EP 路径）；`TP_REDUCE_F32=1` 开关可排除 bf16 双舍入。
 - 确定性 TODO：scatter_add 改按行归约（两边都受益）；之后链式门槛才有意义。
+
+## 四类"看着像标准实现其实不是"的配置项（Gemma4 实测，2026-10-21）
+读新模型 `config.json` 时，下面四项**必须去 vLLM 源码确认语义**，凭名字猜一定错：
+1. **`rope_parameters` 可以是「每种 layer_type 一套」**：Gemma4 里 full / sliding 分别有 theta 1e6 / 1e4，
+   而且 `rope_type: "proportional"` 意味着 **inv_freq 的分母是 head_dim，不是 rotary_dim**
+   （旋转 128 维、分母 512）。我们的 `Rope` 要有独立的 `denom` 参数。
+2. **`attention_k_eq_v` 可能只对部分层成立**：Gemma4 的 full 层没有 `v_proj`（K 权重兼作 V），
+   但 sliding 层**有**独立 `v_proj`。按层类型分别处理，不能全局一个开关。
+3. **dense MLP 与 MoE 可以并联**：Gemma4 每层**无条件**执行 dense MLP，MoE 是另一条并行支路，
+   两条输出相加后再过一次 `post_feedforward_layernorm`；再乘 `layer_scalar`。不是"二选一"。
+4. **RMSNorm 不一定有权重**：Gemma4 的 `v_norm` 与 router 预处理是无权重 RMSNorm；
+   我们 `rmsnorm_bf16` 必带 `w`，要加 `nullptr` 分支（乘 1）。
+
+**同类陷阱**：Gemma 系的 norm 是「attn 前一个 + attn 输出上一个」，残差加在 norm **之后**——
+层结构照抄 vLLM 的 `DecoderLayer.forward`，不要套 Qwen 的 `input_norm → attn → +res` 模板。

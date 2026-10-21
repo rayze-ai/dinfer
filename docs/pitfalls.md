@@ -1,3 +1,29 @@
+## 2026-10-21 派生量插在用到它的声明之前，nvcc 报 "identifier is undefined"
+
+- **现象**：给 gqa.cu 加滑窗时，`tile0` / `lo_a` 插到了 `warp_min_vis` 声明**之前**，
+  报 `cuda/gqa.cu(161): error: identifier "warp_min_vis" is undefined`（v6、v7 各一处）。
+- **根因**：`warp_min_vis` 原本在 `n_tiles` 之后才声明；我用"可见性块"做锚点插入，
+  新代码落在声明点之前。v7 更隐蔽：它**没有** `warp_min_vis`，只有 `pair_min_vis`。
+- **解法**：派生量统一插在 `warp_min_vis`（v7 用 `pair_min_vis`）声明之后；`tile0` 还要在 `load_tile(tile0)` 之前。
+- **避免**：改 kernel 时不要凭"看起来在一起"插代码——**先 grep 出目标变量的声明行号**，
+  按行号区间插入；v5/v6/v7 同名变量不同（`warp_min_vis` vs `pair_min_vis`），逐个确认。
+
+## 2026-10-21 容器里只给 LIBRARY_PATH 不够，运行期还要 LD_LIBRARY_PATH
+
+- **现象**：`cargo test` 链接通过，运行时
+  `error while loading shared libraries: libnccl.so.2: cannot open shared object file`（exit 127）。
+- **根因**：软链接目录只加进 `LIBRARY_PATH`（影响 ld），动态加载器不查它。
+- **解法**：`export LD_LIBRARY_PATH=$(dirname $(find / -name libnccl.so.2|head -1)):…:$LD_LIBRARY_PATH`。
+- **避免**：5090 基线容器里跑任何 dinfer 二进制 / 测试，两套路径都给（命令块见 `docs/loops/kaon-v3.md`）。
+
+## 2026-10-21 `--features no-nvcc` 在本分支已坏，别拿它做本地验证
+
+- **现象**：本地 `cargo build -p dinfer-kaon3 --features no-nvcc` 报 24 个错误，
+  `expected *const f32, found *const c_void`，指向 `ffi.rs` 的 `stub!` 宏与 `ops.rs` 调用不符。
+- **根因**：`stub!` 宏声明的参数类型与真实 FFI 签名早就漂移（`gdn_chunk_ho_v2` 等几处），没人走这条路所以没暴露。
+- **解法/避免**：本地 CPU 验证这条路当前不可用，**一律远端 nvcc 编译**；
+  修 stub 时按 `kernels.h` 逐条对齐，且要连带检查 `ops.rs` 的调用实参。
+
 ## 2026-10-21 对拍脚本的参考侧没初始化，得出"差 1/4"的假结论
 
 - **现象**：NVFP4 MMA 对拍连续两轮得到"D 恰好是期望值的 1/4"，据此判断是 `scale_vec::4X` 语义问题，白花两轮。

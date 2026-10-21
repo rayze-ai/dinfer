@@ -35,31 +35,8 @@
 - 参考侧 rmsnorm 的 bf16 落点要与 kernel 一致（乘权重**后**落 bf16）。
 - 运行时下标的寄存器数组会落 local memory（stack frame ≠ spill）：模板递归展开。
 
-## megakernel 第一阶段实测（`docs/loops/mega-sm100.md`，2026-10-20）
-- **第 1 轮：persistent kernel 慢于 11 kernel + graph 基线**（B300 单 GDN 层 decode：146/158/190 µs → 188/215/339 µs，0.78/0.74/0.56×）。基线口径公平（现路径也走 graph + 自调优 GEMM）。
-- 阶段 prof 显示的真因：① GEMV 阶段只到 4.5 TB/s（cuBLASLt 自调优的 splitK 算法 6+ TB/s）——persistent CTA 内手写 GEMV 的访存并行度不如专用 kernel；② GDN 递归阶段 B=32 80 µs（独立 kernel 32 µs）——任务粒度 / 占用被统一 grid 绑住；③ 依赖等待与小阶段（conv 16、add_norm 10 µs）叠加。
-- **结论先记为假设**：消掉 kernel 边界省的 ~2–3 µs/边界 × 11，抵不过每个阶段失去"各自最优 launch 配置"的损失；megakernel 要赢必须每阶段都达到独立 kernel 的效率（OCC / 每阶段任务粒度分开调），第 2 轮验证。vLLM 做不到这条路不等于这条路一定赢。
-
-## megakernel（单层 persistent kernel）实验学到的结构事实（2026-10-20，docs/loops/mega-sm100.md）
-- **常驻 grid 的占用是第一约束**：GEMV 分支（G=4 组 × MB=2 × 4 累加器 + 片段）把寄存器推到 170–255 → 1 CTA/SM = 8 warp/SM，
-  cp.async 流水本身够深（2–3 级 × 72 KB 在飞）但 B300 上只到 4.5 TB/s（基线 cuBLASLt 6.5）；要 2 CTA/SM 必须 `launch_bounds(…, 2)`
-  把寄存器压到 128（会 spill ~270 B），且 GDN 分支的寄存器也算在同一上限里。证据：loop 第 1 轮 prof（in_proj busy 57 GB/s/SM）。
-- **小任务在常驻 grid 上串行化**：独立 kernel 的 6144 个 GDN 小 block 靠高占用并行藏延迟；常驻 grid 只有 148 个 CTA，
-  同样的任务粒度变成 41 波 × 单次状态读延迟 = 80 µs（独立 kernel 32）。解法：任务变粗（每 warp 16 行、任务 = (seq, 若干 hv)）+
-  跨 tile cp.async 预取（smem 双缓冲，每 lane 只取自己要读的 16 B，warp 内无同步）。同理 conv 每线程多维必须先全读再算（15 → 0.5 µs）。
-- **先发权重流、再等依赖**真能把阶段屏障藏掉一部分（prof Σwait 占 busy 的 10–30%），但 B=1 的"小阶段链"
-  （conv → gdn → gated_norm → rmsnorm）每级 3–10 µs 串行，是 megakernel 相对 graph 基线的净损失来源；能融的融进 GEMV 尾声
-  （add / silu，省两级），不能融的（gdn、gated_norm）只能靠粗任务 + 预取。
-- **同一 kernel 内"读 → 被别的 SM 改 → 再读"的缓冲必须 `__ldcg`**（L1 不相干，kernel 边界才失效）：res、split-K partial、o/z。
-  权重 / 一次写一次读的中间量用普通读即可。
-- **split-K 的 tile 信号量与 ready 计数器由 kernel 自复位**（最后到的任务 / 最后退出的 CTA 清零），graph 重放不需要 host memset。
-- cp.async `wait_group N`：第 i 轮顶部已提交 pipe-1+i 个 group，要 group i 完成须允许挂起 pipe-2 个（写成 pipe-1 时 pipe=2 等于不等，
-  第一版全是垃圾但不报错——对拍是唯一的护栏）。
-- **结论（2026-10-20，2 轮 / B300）：单层 megakernel 不成立**——最好 0.91 / 0.82 / 0.59×（B=1/8/32），三档 < 1.10×。
-  原因按证据排序：(1) 常驻 grid 1 CTA/SM 的占用输给独立 GEMM kernel 的 4–8 block/SM（GEMV 5.1 vs 6.5 TB/s，B=32 mma 环 3.2）；
-  (2) 小算子在 148 个 CTA 上变延迟链（gdn B=1 span 15 µs、busy 2）；(3) graph 基线的边界效应只有 ~17%（147 µs vs 下限 ~120），
-  不够抵消 (1)(2)。依赖等待不是瓶颈（Σwait 10–30%）。**判断**：在"权重流下限 + graph"这个基线上，减 kernel 数的收益上限 ≈ 边界效应
-  占比，27B 级模型 < 20%，不值一次架构重写；质变要靶向字节（NVFP4）或算子融合本身（K3 MoE 路径）。证据：`docs/loops/mega-sm100.md`。
+## megakernel（单层 persistent kernel）
+结构事实（组数 / 流水级数 / CTAs per SM 的实测选择）与第一阶段数字见 **[megakernel.md](megakernel.md)**。
 
 ## smem 瘦身优先于算法改动；寄存器预取在 255 上限附近反伤（r9，2026-10-20）
 
@@ -106,29 +83,22 @@ chunk 0 正确（`tmp0 = 0.95790` 与参考一致），但 chunk 1 起等的是*
 **为什么容易漏**：只有跨多次到达（chunk 循环、stage 流水）时才会暴露；单次 kernel 永远看不出问题。
 而且它不报错、不崩溃，只是数值随机 —— 很容易被误判成"布局还不对"去改描述符。
 
-## Blackwell 低精度 MMA 的编译与布局（2026-10-21，5090/sm_120 实测）
+## Blackwell 低精度 MMA（sm_100/103/120）
+架构专用指令的 gencode、NVFP4/FP8 指令形式与寄存器布局、5090 实测吞吐与硬件常量，全部在 **[blackwell-mma.md](blackwell-mma.md)**。动 `crates/kernels` 里任何 sm_100+ 的 MMA 前先读它。
 
-**架构专用指令必须显式 gencode**：`-arch=sm_120a` 生成的 PTX 仍是 `compute_120`，
-`tcgen05` / `mxf4nvf4.block_scale` 会报 `not supported on .target`。
-写 `-gencode=arch=compute_120a,code=sm_120a`。sm_103 上块缩放 FP4 **不可用**，sm_120a 可用。
+## 给已有的 attention kernel 加滑窗（mask）时
+- **三件事一起改，少一件就退化**：① 可见性加**下界**（`key >= vis - window + 1`，用 `INT_MIN` 表示无窗口）；
+  ② **起始 tile 跳读** `tile0 = max(0,(min_vis-window+1)/TILE)`，否则滑窗层照样扫全部历史，
+  复杂度一点没降；③ 双缓冲索引改成 `(tile - tile0) & 1`，否则 `load_tile(tile0)` 预取的 tile 与循环首轮的
+  buf 不一致。
+- **参考 kernel 也要改**：`*_ref_kernel` 一般是三遍扫（max / sum / PV），起扫点从 0 换成
+  `j0 = max(0, n - window)`，三个循环都要换（少换一个就只错一部分）。
+- **新增入口而不是改旧签名**：加 `gqa_*_win_bf16(..., int window, ...)`，旧符号转发 `window=0`。
+  这样 Qwen3 / Qwen3.5 / GLM / K3 全部零改动、零回归风险，`opset.rs` 的 trait 再加带窗口的方法即可。
+- **证据**：2026-10-21 Kaon-V3 阶段 3（`docs/loops/kaon-v3.md`，commit 4af6379）。
 
-**NVFP4 块缩放 MMA**（`m16n8k64`，`scale_vec::4X`）：
-
-```ptx
-mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3
-  {d0,d1,d2,d3},{a0,a1,a2,a3},{b0,b1},{c0,c1,c2,c3},{sa},{bidA,tidA},{sb},{bidB,tidB};
-```
-
-- `.kind::` 与 `.block_scale` 在 `.m16n8k64` **之前**；scale 后要跟 `{bid,tid}` 两个 u16
-- A/B 每线程 4/2 个 u32，按列主序 `lin = m + 16*k` 取值，每组 8 个 nibble 沿 k 连续 → 可单条 u32 读
-- 一个 32-bit scale 装 **4 个 16-元素块的 e4m3 字节**，k 小到大从低位排
-- 输出同 SM80_16x8_Row
-
-**FP8 e4m3**（`m16n8k32`）在 sm_120 / sm_120a 都支持，标准 `ldmatrix.x4`(A) / `.x2`(B) 布局。
-
-**吞吐参考（5090 实测，非理论峰值）**：NVFP4 502 TF/s、FP8 292 TF/s（均含 ldmatrix + padding）。
-smem padding 16 B 对 NVFP4 有 **+43%**；同样的 cp.async 双缓冲在 NVFP4 上**反而 −38%**（occupancy），
-在 FP8 上 +173%。**双缓冲不是无条件的优化，要按 kernel 实测**。
-
-**硬件常量（5090，实测）**：空 kernel launch 2.2 µs；持续 HBM 读 **1458 GB/s**（标称 1790）；
-L2 命中可达 5159 GB/s。小矩阵 decode 往往是 launch 开销主导，应把多个专家/矩阵合并成一次 launch。
+## 改模板化 kernel（v5/v6/v7 这种多版本共存）时的定位方法
+- **不要凭"看起来在一起"插代码**：先用 `grep -n` 拿到目标变量**声明行号**，再按行号区间插入。
+  同一个概念在不同版本里变量名不同（v5/v6 用 `warp_min_vis`，v7 用 `pair_min_vis`），
+  用统一锚点批量替换一定会踩空。
+- 批量替换后先 `grep -c` 数命中数，再编译；nvcc 的 `identifier is undefined` 一次只报一处，来回很慢。

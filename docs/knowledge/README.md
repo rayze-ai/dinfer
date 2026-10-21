@@ -6,6 +6,8 @@
 |---|---|---|
 | [perf-method.md](perf-method.md) | 性能迭代方法论：先 profile 再优化、口径、门禁、常见误读 | 任何性能 loop 开工前 |
 | [kernel-rules.md](kernel-rules.md) | 写 / 改 CUDA kernel 的硬规则与已验证的结构选择（按卡型） | 动 `crates/kernels` 前 |
+| [blackwell-mma.md](blackwell-mma.md) | sm_100/103/120 低精度 MMA：gencode、NVFP4/FP8 指令与布局、实测吞吐 | 写 Blackwell MMA 前 |
+| [megakernel.md](megakernel.md) | persistent kernel 的结构事实（组数 / 流水 / CTAs per SM） | 做单层 persistent 前 |
 | [model-onboarding.md](model-onboarding.md) | 接新模型的方法与盲区清单（golden 怎么造、对拍口径、与 vLLM 的差异点） | 开新 `models/<m>` 前 |
 | [executor-common.md](executor-common.md) | executor 公共件（async / graph / 槽表 / plan 上传）用法，模型 crate 该剩什么 | 给模型接 executor 前 |
 | [subagent-ops.md](subagent-ops.md) | 多子代理并行作业：brief 模板、文件分工、远端共用目录、后台任务超时 | 派子代理前 |
