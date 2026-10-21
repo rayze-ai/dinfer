@@ -84,10 +84,25 @@ __device__ __forceinline__ void quant16(const bf16* src, bool valid, uint2* out8
   *out_s = sb8;
 }
 
+// A 的预量化：bf16 [m,k] → packed [m,k/2] + 块缩放 [m,k/16]（e4m3）。
+// 一个 16-元素块一个线程；权重侧同一套口径（scale = amax/6 的 e4m3，反量化后做 e2m1 就近舍入）。
+__global__ void __launch_bounds__(256) quantize_a_kernel(const bf16* __restrict__ A, uint8_t* __restrict__ P,
+                                                         uint8_t* __restrict__ S, int rows, int K) {
+  const int nb = K / 16;
+  const long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= (long)rows * nb) return;
+  const int r = (int)(idx / nb), bi = (int)(idx % nb);
+  uint2 pk;
+  uint8_t sb8;
+  quant16(A + (size_t)r * K + bi * 16, true, &pk, &sb8);
+  *reinterpret_cast<uint2*>(P + (size_t)r * (K / 2) + bi * 8) = pk;
+  S[(size_t)r * nb + bi] = sb8;
+}
+
 template <int BK>
-__global__ void __launch_bounds__(256) gemm_nvfp4_kernel(const bf16* __restrict__ A, const uint8_t* __restrict__ B,
-                                                         const uint8_t* __restrict__ S, bf16* __restrict__ D,
-                                                         int M, int N, int K, float global) {
+__global__ void __launch_bounds__(256) gemm_nvfp4_kernel(const uint8_t* __restrict__ A, const uint8_t* __restrict__ Sc,
+                                                         const uint8_t* __restrict__ B, const uint8_t* __restrict__ S,
+                                                         bf16* __restrict__ D, int M, int N, int K, float global) {
   constexpr int RSA = BK / 2 + PAD, RSB = BK / 2 + PAD;
   constexpr int NB16 = BK / 16;  // 每行 16 元素块数
   constexpr int NQ4 = BK / 64;   // 每行 scale 四元组数（= scale_vec::4X 的 u32 个数）
@@ -106,18 +121,22 @@ __global__ void __launch_bounds__(256) gemm_nvfp4_kernel(const bf16* __restrict_
 
   for (int kb = 0; kb < nk; ++kb) {
     {
-      // A 量化：每块 16 个 bf16 由一个线程处理（BM*NB16 块，块数随 BK 变，故用循环）
-      for (int i = tid; i < BM * NB16; i += blockDim.x) {
-        const int r = i / NB16, bi = i % NB16;
-        const int gm = m_blk + r, gk = kb * BK + bi * 16;
-        const bool ok = (gm < M) && (gk + 15 < K);
-        uint2 pk;
-        uint8_t sb8;
-        quant16(A + static_cast<size_t>(gm < M ? gm : M - 1) * K + gk, ok, &pk, &sb8);
-        *reinterpret_cast<uint2*>(&sA[r * RSA + bi * 8]) = pk;
-        // 硬件实测：scale 寄存器的第 i 个字节作用在该 lane 的 4 个元素上（16-块 4 个 lane 共享一个 sf），
-        // 所以把块 scale 复制到 4 个字节；不复制的话每块只有 1/4 的元素拿到缩放。
-        reinterpret_cast<uint8_t*>(sfa)[r * NB16 + bi] = sb8;
+      // A 已由 quantize_a 预量化成 [m, k/2] 字节（每行 K/2 字节，uint4 跨度同 B），这里只做 smem 搬运：
+      // 与探针同粒度（每线程一个 uint4），RSA 含 16 B padding。
+      const uint4* sa_src = reinterpret_cast<const uint4*>(A + static_cast<size_t>(m_blk) * (K / 2) + kb * (BK / 2));
+      for (int i = tid; i < (BM * BK / 2) / 16; i += blockDim.x) {
+        const int r = i / rb, c = i % rb;
+        const uint4 z = make_uint4(0x11, 0x11, 0x11, 0x11);
+        *reinterpret_cast<uint4*>(&sA[r * RSA + c * 16]) =
+            (m_blk + r < M) ? sa_src[static_cast<size_t>(r) * (K / 32) + c] : z;
+      }
+      // A 的块缩放：预量化输出 [m, k/16] 的 e4m3，按 4 个连续块打成 u32
+      for (int i = tid; i < BM * NQ4; i += blockDim.x) {
+        const int r = i / NQ4, q = i % NQ4;
+        sfa[r * NQ4 + q] =
+            (m_blk + r < M)
+                ? *reinterpret_cast<const uint32_t*>(Sc + static_cast<size_t>(m_blk + r) * (K / 16) + kb * NB16 + q * 4)
+                : 0x38383838u;
       }
     }
     {
@@ -200,16 +219,38 @@ extern "C" {
 
 int gemm_nvfp4_bf16(const void* a, const void* packed, const void* scale, float global, void* out, int64_t m, int64_t n,
                     int64_t k, cudaStream_t stream) {
+  static void* scratch = nullptr;
+  static size_t scratch_cap = 0;
+  static cudaStream_t scratch_stream = nullptr;
+  if (scratch_stream != nullptr && scratch_stream != stream) {
+    return static_cast<int>(cudaErrorInvalidValue);  // 单流语义：换流要重新分配，调用方保证同一 stream
+  }
+  scratch_stream = stream;
   if (m < 0 || n < 0 || k < 0 || k == 0) return static_cast<int>(cudaErrorInvalidValue);
   if (m == 0 || n == 0) return 0;
+  // A 只量化一次（就地按 block 重量化会重复 N/BN 次，4096³ 下 64×，实测正是 3.4× 慢的根因）
+  const size_t need = (size_t)m * (size_t)k / 2 + (size_t)m * (size_t)k / 16;
+  if (need > scratch_cap) {
+    if (scratch != nullptr) cudaFree(scratch);
+    if (cudaMalloc(&scratch, need) != cudaSuccess) { scratch = nullptr; scratch_cap = 0; return gemm_last_err(); }
+    scratch_cap = need;
+  }
+  uint8_t* pa = static_cast<uint8_t*>(scratch);
+  uint8_t* psa = pa + (size_t)m * (size_t)k / 2;
+  {
+    const long blocks = (long)m * (k / 16);
+    const unsigned g = (unsigned)((blocks + 255) / 256);
+    quantize_a_kernel<<<g, 256, 0, stream>>>(static_cast<const bf16*>(a), pa, psa, (int)m, (int)k);
+    if (const int e = gemm_last_err(); e != 0) return e;
+  }
   // 块缩放的 k-block 是 16，mma 是 k64：BK 取 128（K%128==0）否则 64（调用方保证 K%64==0）
   const dim3 grid((unsigned)((n + BN - 1) / BN), (unsigned)((m + BM - 1) / BM));
   if (k % 128 == 0) {
-    gemm_nvfp4_kernel<128><<<grid, 256, 0, stream>>>(static_cast<const bf16*>(a), static_cast<const uint8_t*>(packed),
+    gemm_nvfp4_kernel<128><<<grid, 256, 0, stream>>>(pa, psa, static_cast<const uint8_t*>(packed),
                                                      static_cast<const uint8_t*>(scale), static_cast<bf16*>(out),
                                                      (int)m, (int)n, (int)k, global);
   } else if (k % 64 == 0) {
-    gemm_nvfp4_kernel<64><<<grid, 256, 0, stream>>>(static_cast<const bf16*>(a), static_cast<const uint8_t*>(packed),
+    gemm_nvfp4_kernel<64><<<grid, 256, 0, stream>>>(pa, psa, static_cast<const uint8_t*>(packed),
                                                     static_cast<const uint8_t*>(scale), static_cast<bf16*>(out),
                                                     (int)m, (int)n, (int)k, global);
   } else {
