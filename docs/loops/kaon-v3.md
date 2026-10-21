@@ -46,6 +46,7 @@
 |---|---|---|---|
 | 0 | 连通 + 环境勘察 | 8×5090 确认，GPU 7 跑基线 | token 一次性（见卡点） |
 | 1 | 模型 / 基线勘察 | 见下「勘察结果」 | 架构 = Gemma4 MoE 多模态，量化 = MIXED(NVFP4 专家 + FP8 其余) |
+| 2 | 工具链打通 | **sm_120 编译通过**（dinfer-kernels 38 s） | 宿主机无 nvcc，容器内编；cargo 需走代理 |
 
 ## 勘察结果（2026-10-21，轮 1）
 
@@ -109,6 +110,28 @@ vllm serve <snapshot> --port 28067 --tensor-parallel-size 1 --pipeline-parallel-
 - **宿主机没有 nvcc / rustc / torch / pip**；只有 python3
 - 容器 `kaon-vllm-pegaflow` 里有 `nvcc 13.0`、`torch 2.13.0+cu130`
 - 128 核 / 503 GB 内存；`/` 439G（剩 332G）、`/hf_data` 1.4T（剩 1.3T）
+
+## 工具链（轮 2，已验证）
+
+| 项 | 结论 |
+|---|---|
+| 宿主机 | Ubuntu 22.04，gcc 11.4，**无 nvcc / 无 rust**，python3 无 torch |
+| Rust | 已装 `~/.cargo/bin`，**rustc 1.99.1**（stable） |
+| nvcc | **只在容器** `image.paigpu.com/library/vllm-openai:v0.28.0-pegaflow-pr455-51261c6-cu130` 里，CUDA 13.0（Ubuntu 24.04 基础镜像） |
+| **代理** | **`http://172.17.0.1:1081`**（用户提供；`127.0.0.1:1081` 不通，是 docker bridge IP）。rustup / crates.io 都必须走它 |
+| 工作目录 | **`/hf_data/yaochen`**（用户 2026-10-21 指定），仓库在 `/hf_data/yaochen/dinfer` |
+| sm_120 | **`nvcc -arch=sm_120` 编译通过**；`CUDA_ARCHS=120 cargo build --release -p dinfer-kernels` **38 s 通过** |
+
+**构建命令（宿主机跑，容器内编）**：
+```bash
+docker run --rm --entrypoint bash --gpus device=0 \
+  -v /hf_data/yaochen:/w -v /root/.cargo:/root/.cargo -v /root/.rustup:/root/.rustup \
+  -w /w/dinfer -e PATH=/root/.cargo/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/bin:/bin \
+  -e CUDA_ARCHS=120 -e https_proxy=http://172.17.0.1:1081 -e http_proxy=http://172.17.0.1:1081 \
+  image.paigpu.com/library/vllm-openai:v0.28.0-pegaflow-pr455-51261c6-cu130 \
+  -lc 'cargo build --release ...'
+```
+注意：镜像的 entrypoint 是 `vllm`，**必须 `--entrypoint bash`**，否则参数被 vllm CLI 吞掉。
 
 ## 卡点
 
