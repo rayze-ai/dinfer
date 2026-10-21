@@ -147,3 +147,22 @@ GEMM 极少、极大，几乎全部时间在 GEMM 上，其他都是零头。
 | vLLM（本容器，0.32.1） | **257.5 ms** |
 
 dinfer 慢 8.7%（对 0.32.1）/ 6.9%（对 0.26.1）。
+
+## prefill GEMM 直接实测（GEMM_TUNE_M=6019）
+
+| shape | 单次 | vs cuBLAS默认 | 层数 | 小计 |
+|---|---|---|---|---|
+| gdn.in_proj | 482 us | -0% | 48 | 23.1 ms |
+| gdn.out_proj | 180 us | -4% | 48 | 8.6 ms |
+| mlp.gate_up | 980 us | +0% | 48 | 47.0 ms |
+| mlp.down | 488 us | -13% | 48 | 23.4 ms |
+| attn.qkv | 410 us | -2% | 16 | 6.6 ms |
+| lm_head | 6826 us | +0% | 1 | 6.8 ms |
+| 合计 | | | | 115.5 ms |
+
+结论：
+1. prefill 大 GEMM 全部走 cuBLASLt，没走 small_m/small_mma。
+2. cuBLAS 已接近峰值：lm_head 15.3 TFLOP / 6.826 ms = 2242 TF/s（峰值约 2250）。
+
+缺口：GEMM 合计 115.5 ms，TTFT 277 ms，160 ms 不在这六个 GEMM 里。
+tr3.csv 抓不到 prefill，在其上做的窗口分析全部作废。

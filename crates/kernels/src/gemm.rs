@@ -667,7 +667,22 @@ impl Gemm {
             return Ok(report);
         }
         let tp = &self.profile.gemm_tune;
-        let m_max = tp.m_buckets.iter().copied().max().unwrap_or(1);
+        // `GEMM_TUNE_M=<逗号分隔>`：额外把指定的 M 纳入调优（诊断 prefill 的大 M ——
+        // `m_buckets` 只有 decode 的 1..64，prefill 的 M=6019 从来没被调过，
+        // 只能吃 cuBLAS 的默认启发式。设了之后 tune_shape 会给出该 M 上
+        // lt_default / lt_best / small_m / mma 四路的实测对比）。
+        let mut tp_buckets = tp.m_buckets.clone();
+        if let Ok(v) = std::env::var("GEMM_TUNE_M") {
+            for t in v.split(',') {
+                if let Ok(m) = t.trim().parse::<usize>() {
+                    if m > 0 && !tp_buckets.contains(&m) {
+                        tp_buckets.push(m);
+                    }
+                }
+            }
+            tp_buckets.sort_unstable();
+        }
+        let m_max = tp_buckets.iter().copied().max().unwrap_or(1);
         let k_max = entries.iter().map(|e| e.k).max().unwrap_or(0);
         let n_max = entries.iter().map(|e| e.n).max().unwrap_or(0);
         let a_scratch = self.stream.alloc_zeros::<bf16>(m_max * k_max)?;
@@ -678,7 +693,7 @@ impl Gemm {
         let mut need_counters = 0usize;
         let mut plans = HashMap::new();
         for e in entries {
-            for &m in &tp.m_buckets {
+            for &m in &tp_buckets {
                 let row = self.tune_shape(&e.name, m, e.n, e.k, e.w, e.bias, &a_scratch, &mut out_scratch, &mut partial_scratch)?;
                 match row.chosen {
                     GemmPlan::SmallM { splits } => need_partial = need_partial.max(splits * m * e.n),
@@ -699,8 +714,10 @@ impl Gemm {
         let mut rejected = 0usize;
         for e in entries {
             let key_bias = e.bias.is_some();
-            for m in 1..=m_max {
-                if tp.m_buckets.contains(&m) {
+            // 诊断模式（GEMM_TUNE_M 引入大 M）下不做非桶展开：1..=6019 会让 AlgoCheck 跑上万次。
+            let expand_max = if tp_buckets.len() == tp.m_buckets.len() { m_max } else { 0 };
+            for m in 1..=expand_max {
+                if tp_buckets.contains(&m) {
                     continue;
                 }
                 let bucket = m.next_power_of_two();
