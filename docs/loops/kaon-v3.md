@@ -967,7 +967,7 @@ docker run --rm --entrypoint bash --gpus device=0 \
   `inv_freq` 前 `rope_dim/2` 对 = `theta^(-2i/head_dim)`、其余零频 → 实际是**整头 neox 旋转，配对 (i, i+256)**，
   不是"只转前 128 维、配对 (i, i+64)"。修法：`rope_span_bf16`（neox 配对 `(i, i+span)`）+ `Rope::with_span`，
   `RopeSpec.span`（proportional = head_dim/2，default = rope_dim/2）；表仍只存 128 个频率。旧 `rope_bf16` 转发 span=rope_dim/2。
-- **torch 参考 `work/kaon_forward.py` 有两处语义错**（已入库 `models/kaon3/ref/`，头注释列明，**未修**）：
+- **torch 参考 `work/kaon_forward.py` 有两处语义错**（**已弃用**，用户 2026-10-22：Rust 实现，不用 Python 参考）：
   RoPE 同上；`k_eq_v` 层写成 `v = k`（norm+rope 之后），vLLM 是 `v = v_norm(原始 K 投影)`、无 RoPE。
   Rust 侧 `layer.rs` 的 V 是对的（拷原始 K → 无权重 norm）。
 - **D=512**：`gqa.cu` 的 `MAX_D` 256 → 512，full 层走通用慢路径（`gqa_prefill_ref_kernel`，正确性用，O(T²) 无 tensor core）。
@@ -979,8 +979,7 @@ docker run --rm --entrypoint bash --gpus device=0 \
 
 ### 下一步
 
-1. 修 `models/kaon3/ref/kaon_forward.py` 两处语义 + 路径，在容器里 `DEV=cuda` 跑（GPU 1），每层输出残差流前 8 个与范数；
-   Rust 侧 `--dump-layer N` 对照，找第一层发散处（注意 FP8/FP4 激活量化本身有误差，看量级突变）。
+1. 【作废，见下节 loop】原计划修 Python 参考做逐层对拍；改为 oracle = 基线服务 `prompt_logprobs`，Rust 探针比对。
 2. 怀疑点（按先验）：FP8 激活没用 `input_scale`（kernel 直接 e4m3 饱和 ±448，Gemma 残差大）、norm 权重口径
    （Gemma 的 `1+w` 与否要核 `gemma4.py` 的 RMSNorm 类）、embed normalizer 的 bf16 舍入、router 预处理、layer_scalar。
 3. 之后：NVFP4 Rust 对拍测试 → 高效 D=512 kernel（慢路径做参照）→ decode 滑窗。

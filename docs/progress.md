@@ -30,8 +30,8 @@
 - **2026-10-22 白天**：30 层端到端已跑通（`MAX_D` 提到 512 走慢路径）；修了 proportional RoPE 配对
   （整头 neox，配对 (i, i+256)，`rope_span_bf16`）；**但 logits 与基线不符**（top-5 无交集，见 loop 文档末节）。
   `scripts/dev/remote_5090.sh ctr '<cmd>'` 一条命令进容器编 / 跑。
-- **下一步（按序）**：① 修 torch 参考 `models/kaon3/ref/kaon_forward.py`（RoPE / k_eq_v 的 V 两处语义错，头注释已列）
-  → 逐层对拍找第一层发散（Rust `--dump-layer N`）；② NVFP4 对拍改写成 Rust GPU 测试并重跑；
+- **下一步（按序）**：① loop `kaon3-parity`：oracle = 基线服务 `prompt_logprobs`（curl 存文件），Rust 探针比对，不用 Python 参考
+  → 定位发散（T=1 隔离 attention / 逐项语义核对 / Rust kernel 测试）；② NVFP4 对拍改写成 Rust GPU 测试并重跑；
   ③ 高效 D=512 attention（慢路径当参照）；④ decode 侧滑窗（`gqa_decode_v3.cu`）；⑤ 阶段 4 服务。
 - **性能缺口**：NVFP4 移植 4096³ 260 TF/s（探针 509）；**512×2816×2816 只有 141（探针 330）**，
   该形状是 Kaon 真实输入，根因是并行度（704 block / 148 SM），需改 tile 形状或 split-K。

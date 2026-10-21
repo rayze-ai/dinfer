@@ -57,10 +57,11 @@ python3 scripts/dev/probe_trend.py --root test/qwen35 && python3 scripts/dev/ben
 - 所有跨会话要记住的事写进文件并进 git，不要只留在对话里。
 - **`docs/progress.md` 交接区按模型分节（用户 2026-10-21）**：每节只写该模型自己的内容，收功时**只改自己那一节**，不要整体重写覆盖别的模型。
 - **子代理（2026-10-20）**：**本地写 → `put` 单文件 → 远端编 / 跑**（用户 2026-10-21：本地有编辑器和 git diff，比 ssh heredoc 顺手；但本机 nvcc 12.4 编不了 sm_103a，**每一轮都必须传过去在 B300 上编译**，不许只写不编）。收口时列改动文件清单，由主会话 `pull` 回本机 commit。禁止 `remote_*.sh push`（rsync `--delete` 两次删掉别人的远端产物），要同步代码发消息给主会话；产物落 `/tmp` 或 `bootstrap/` 由主会话 pull；任何 GPU 动作前先问主会话；可失败步骤（merge / rebase / 编译）单独发一条看结果再推远端起长链；链内杀进程用 `pkill -x` / `pgrep -x`，不用 `-f`。
+- **Rust 实现、Rust 验证（用户 2026-10-22）**：不写 / 不入库 Python 参考实现，对拍以 vLLM 服务输出（`prompt_logprobs`）+ Rust GPU 测试为准；交接区定好的方案不擅自改。
 - **目标是超越，不是重写**（用户 2026-10-17）：vLLM 做得对的直接采用，能改进的改进，两种情况都要在 `docs/design.md` §11 "采用 / 改进台账" 记一行（采用了什么、为什么、我们改了哪里、收益）。不为"不一样"而不一样。
 - **测试程序本身要可信（用户 2026-10-20）**：引擎层面 bench 必须 ① 三方（dinfer / vLLM / 压测端）`taskset` 到不重叠核组并写进报告；② 压测端上报自身 CPU 时间 / RSS / 线程数（Rust `bench` 作主口径，CPU < 1%；Python `vllm bench serve` rate 8 时吃 2–4 核、与被测共核会把 dinfer decode 步拖 2×，只做交叉）；③ 同负载与第三方工具 p50/p99 差 ≤ 10%；④ 客户端测量与服务端自报（`/metrics`）对账；⑤ 启动前核 `/v1/models` id（编错 feature 的二进制会让 bench 空跑出 0）。不满足任一条的数字作废。规格 `requirements.md` 验收 v2 补充 / `design.md` §15.5 / `knowledge/perf-method.md` §7。
 - **每轮性能改动必须进 CSV 趋势**（用户 2026-10-16 两次强调）：改动 → 4090 `bench_compare.sh test/qwen3/<日期>/benchN "改动一句话"`（写 `CHANGE`）→ 自动重生成 `test/qwen3/perf-trend.{csv,md,svg,html}`（每组 tok/s ×vLLM、TTFT、TPOT、相对上一轮 %）→ `pull` 回本机 commit。没有 bench 记录的改动视为未完成。
-- 上下文纪律（已 **4 次** 撞 `Input is too long`，2026-10-16 起机器强制）：`.claude/settings.json` 设 `BASH_MAX_OUTPUT_LENGTH=8000`；`.claude/hooks/context_guard.sh`（PreToolUse）拒绝 Read >200 行不带 limit、拒绝不截断的 `cat`/`git diff`/`git show`，并在第 40 次工具调用起每 10 次提醒写记录 + commit。自律部分：Bash 输出一律 `grep`/`tail`/`cut -c1-200`，长任务日志 `tee /tmp` 只看摘要；每完成一个子块就写 loop 记录并 commit；**超过 60 次调用主动收功并建议 /clear**。
+- 上下文纪律（已 **4 次** 撞 `Input is too long`，2026-10-16 起机器强制）：`.claude/settings.json` 设 `BASH_MAX_OUTPUT_LENGTH=8000`；`.claude/hooks/context_guard.sh`（PreToolUse）拒绝 Read >200 行不带 limit、拒绝不截断的 `cat`/`git diff`/`git show`，并在第 40 次工具调用起每 10 次提醒写记录 + commit。自律部分：Bash 输出一律 `grep`/`tail`/`cut -c1-200`，长任务日志 `tee /tmp` 只看摘要；每完成一个子块就写 loop 记录并 commit；**loop 未达停止条件不停下、不中途问（用户 2026-10-22 覆盖旧的"60 次收功"）**：每完成一个子块写 loop 记录并 commit 后继续，上下文由系统自动压缩。
 
 ## 收功（每次结束前）
 
