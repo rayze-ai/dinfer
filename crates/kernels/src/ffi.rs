@@ -66,13 +66,16 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
 
-    pub fn gelu_tanh_and_mul_bf16(
-        x: *const c_void,
+    pub fn gelu_tanh_mul_bf16(
+        gate: *const c_void,
+        up: *const c_void,
         out: *mut c_void,
         tokens: i64,
         inter: i64,
         stream: cudaStream_t,
     ) -> i32;
+
+    pub fn mul_row_bf16(x: *mut c_void, w: *const c_void, rows: i64, cols: i64, stream: cudaStream_t) -> i32;
 
     pub fn embedding_bf16(
         ids: *const i32,
@@ -501,6 +504,8 @@ extern "C" {
         eps: f32,
         stream: cudaStream_t,
     ) -> i32;
+
+    pub fn scale_bf16(x: *mut c_void, n: i64, a: f32, stream: cudaStream_t) -> i32;
     pub fn dsa_index_score_f32(
         q: *const c_void,
         w: *const f32,

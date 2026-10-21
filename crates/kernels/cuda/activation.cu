@@ -23,23 +23,25 @@ __device__ __forceinline__ float gelu_tanh_f(float x) {
   return 0.5f * x * (1.f + tanhf(kAlpha * (x + 0.044715f * x * x * x)));
 }
 
-__global__ void gelu_tanh_and_mul_kernel(const bf16* __restrict__ x, bf16* __restrict__ out, int inter) {
+__global__ void gelu_tanh_mul_kernel(const bf16* __restrict__ gate, const bf16* __restrict__ up,
+                                   bf16* __restrict__ out, int inter) {
   const int64_t row = blockIdx.x;
-  const bf16* gate = x + row * 2 * inter;
-  const bf16* up = gate + inter;
+  const bf16* g = gate + row * inter;
+  const bf16* u = up + row * inter;
   bf16* o = out + row * inter;
   for (int i = threadIdx.x; i < inter; i += blockDim.x) {
-    o[i] = to_bf16(gelu_tanh_f(to_f32(gate[i])) * to_f32(up[i]));
+    o[i] = to_bf16(gelu_tanh_f(to_f32(g[i])) * to_f32(u[i]));
   }
 }
 
-// x: [tokens, 2·inter]（前半 gate、后半 up，与 silu_and_mul_bf16 同布局），out: [tokens, inter]。
-extern "C" int gelu_tanh_and_mul_bf16(const void* x, void* out, int64_t tokens, int64_t inter,
-                                      cudaStream_t stream) {
+// 双缓冲版（gate / up 分开存，避免调用方拼列）：out = gelu_tanh(gate) * up。
+extern "C" int gelu_tanh_mul_bf16(const void* gate, const void* up, void* out, int64_t tokens, int64_t inter,
+                                  cudaStream_t stream) {
   if (tokens <= 0 || inter <= 0) return 0;
   const int threads = inter < 256 ? (inter < 32 ? 32 : inter) : 256;
-  gelu_tanh_and_mul_kernel<<<(unsigned)tokens, threads, 0, stream>>>(static_cast<const bf16*>(x),
-                                                                   static_cast<bf16*>(out), (int)inter);
+  gelu_tanh_mul_kernel<<<(unsigned)tokens, threads, 0, stream>>>(static_cast<const bf16*>(gate),
+                                                               static_cast<const bf16*>(up),
+                                                               static_cast<bf16*>(out), (int)inter);
   return last_err();
 }
 

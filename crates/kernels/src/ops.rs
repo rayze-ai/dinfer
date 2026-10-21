@@ -306,27 +306,48 @@ pub fn rope_bf16(
     )
 }
 
-/// out = gelu_tanh(x[:, :inter]) * x[:, inter:]（Gemma 系 `gelu_pytorch_tanh`）。
-pub fn gelu_tanh_and_mul_bf16(
+/// out = gelu_tanh(gate) * up（Gemma 系 `gelu_pytorch_tanh`，双缓冲）。
+pub fn gelu_tanh_mul_bf16(
     stream: &Stream,
-    x: &CudaSlice<bf16>,
+    gate: &CudaSlice<bf16>,
+    up: &CudaSlice<bf16>,
     out: &mut CudaSlice<bf16>,
     tokens: usize,
     inter: usize,
 ) -> Result<()> {
-    ensure!(x.len() >= tokens * 2 * inter && out.len() >= tokens * inter, "gelu_tanh_and_mul: shape");
+    ensure!(gate.len() >= tokens * inter && up.len() >= tokens * inter && out.len() >= tokens * inter,
+            "gelu_tanh_mul: shape");
     // SAFETY: 长度已校验。
     check(
         unsafe {
-            ffi::gelu_tanh_and_mul_bf16(
-                stream.ptr(x) as *const c_void,
+            ffi::gelu_tanh_mul_bf16(
+                stream.ptr(gate) as *const c_void,
+                stream.ptr(up) as *const c_void,
                 stream.ptr_mut(out) as *mut c_void,
                 tokens as i64,
                 inter as i64,
                 stream.raw() as _,
             )
         },
-        "gelu_tanh_and_mul_bf16",
+        "gelu_tanh_mul_bf16",
+    )
+}
+
+/// 逐行乘向量：`x[r, j] *= w[j]`（router.scale 这种逐 hidden 缩放）。
+pub fn mul_bf16_n(stream: &Stream, x: &mut CudaSlice<bf16>, w: &CudaSlice<bf16>, rows: usize, cols: usize) -> Result<()> {
+    ensure!(x.len() >= rows * cols && w.len() >= cols, "mul_row: shape");
+    // SAFETY: 长度已校验。
+    check(
+        unsafe {
+            ffi::mul_row_bf16(
+                stream.ptr_mut(x) as *mut c_void,
+                stream.ptr(w) as *const c_void,
+                rows as i64,
+                cols as i64,
+                stream.raw() as _,
+            )
+        },
+        "mul_row_bf16",
     )
 }
 
@@ -1326,6 +1347,16 @@ pub fn add_inplace_bf16_n(
     let py = stream.ptr_mut(y) as *mut c_void;
     // SAFETY: 容量已校验。
     check(unsafe { ffi::add_inplace_bf16(px, py, n as i64, stream.raw() as _) }, "add_inplace_bf16")
+}
+
+/// bf16 原地乘标量：`x *= a`（前 `n` 个元素）。
+pub fn scale_bf16_n(stream: &Stream, x: &mut CudaSlice<bf16>, n: usize, a: f32) -> Result<()> {
+    ensure!(x.len() >= n, "scale_bf16: buffer");
+    // SAFETY: 长度已校验。
+    check(
+        unsafe { ffi::scale_bf16(stream.ptr_mut(x) as *mut c_void, n as i64, a, stream.raw() as _) },
+        "scale_bf16",
+    )
 }
 
 /// dst[r, :] = src[rows[r], :]

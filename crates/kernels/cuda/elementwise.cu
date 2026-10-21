@@ -51,6 +51,36 @@ __global__ void gather_rows_kernel(const bf16* __restrict__ src, bf16* __restric
   for (int i = threadIdx.x; i < width; i += blockDim.x) d[i] = s[i];
 }
 
+// 逐元素乘标量（bf16）：y = a·x。用于 layer_scalar 与 router 预处理的 hidden^-0.5。
+__global__ void scale_bf16_kernel(bf16* __restrict__ x, int64_t n, float a) {
+  int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
+  const int64_t stride = (int64_t)gridDim.x * blockDim.x;
+  for (; i < n; i += stride) x[i] = to_bf16(to_f32(x[i]) * a);
+}
+
+// 逐行乘向量：x[r, j] *= w[j]（router.scale、各类逐 hidden 缩放）。
+__global__ void mul_row_kernel(bf16* __restrict__ x, const bf16* __restrict__ w, int64_t rows, int64_t cols) {
+  const int64_t r = blockIdx.y, c = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
+  if (c >= cols) return;
+  bf16* p = x + r * cols + c;
+  *p = to_bf16(to_f32(*p) * to_f32(w[c]));
+}
+
+extern "C" int mul_row_bf16(void* x, const void* w, int64_t rows, int64_t cols, cudaStream_t stream) {
+  if (rows <= 0 || cols <= 0) return 0;
+  const dim3 grid((unsigned)((cols + 255) / 256), (unsigned)rows);
+  mul_row_kernel<<<grid, 256, 0, stream>>>(static_cast<bf16*>(x), static_cast<const bf16*>(w), rows, cols);
+  return last_err();
+}
+
+extern "C" int scale_bf16(void* x, int64_t n, float a, cudaStream_t stream) {
+  if (n <= 0) return 0;
+  const int threads = 256;
+  const int blocks = (int)min((int64_t)4096, (n + threads - 1) / threads);
+  scale_bf16_kernel<<<blocks, threads, 0, stream>>>(static_cast<bf16*>(x), n, a);
+  return last_err();
+}
+
 __global__ void bf16_to_f32_kernel(const bf16* __restrict__ x, float* __restrict__ y, int64_t n) {
   int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
   const int64_t stride = (int64_t)gridDim.x * blockDim.x;

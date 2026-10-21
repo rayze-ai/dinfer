@@ -92,10 +92,10 @@ pub trait QkvPost {
 /// 激活：out = silu(x[:, :inter]) * x[:, inter:]
 pub trait Act {
     fn silu_and_mul(&self, stream: &Stream, x: &CudaSlice<bf16>, out: &mut CudaSlice<bf16>, tokens: usize, inter: usize) -> Result<()>;
-    /// `out = gelu_tanh(x[:, :inter]) * x[:, inter:]`（Gemma 系）。默认报错，后端须显式支持。
-    fn gelu_tanh_and_mul(&self, stream: &Stream, x: &CudaSlice<bf16>, out: &mut CudaSlice<bf16>, tokens: usize, inter: usize) -> Result<()> {
-        let _ = (stream, x, out, tokens, inter);
-        anyhow::bail!("当前后端不支持 gelu_tanh_and_mul")
+    /// `out = gelu_tanh(gate) * up`（Gemma 系，双缓冲）。默认报错，后端须显式支持。
+    fn gelu_tanh_mul(&self, stream: &Stream, gate: &CudaSlice<bf16>, up: &CudaSlice<bf16>, out: &mut CudaSlice<bf16>, tokens: usize, inter: usize) -> Result<()> {
+        let _ = (stream, gate, up, out, tokens, inter);
+        anyhow::bail!("当前后端不支持 gelu_tanh_mul")
     }
 }
 
@@ -214,8 +214,8 @@ impl Act for DefaultOps {
     fn silu_and_mul(&self, stream: &Stream, x: &CudaSlice<bf16>, out: &mut CudaSlice<bf16>, tokens: usize, inter: usize) -> Result<()> {
         ops::silu_and_mul_bf16_n(stream, x, out, tokens, inter)
     }    #[inline]
-    fn gelu_tanh_and_mul(&self, stream: &Stream, x: &CudaSlice<bf16>, out: &mut CudaSlice<bf16>, tokens: usize, inter: usize) -> Result<()> {
-        ops::gelu_tanh_and_mul_bf16(stream, x, out, tokens, inter)
+    fn gelu_tanh_mul(&self, stream: &Stream, gate: &CudaSlice<bf16>, up: &CudaSlice<bf16>, out: &mut CudaSlice<bf16>, tokens: usize, inter: usize) -> Result<()> {
+        ops::gelu_tanh_mul_bf16(stream, gate, up, out, tokens, inter)
     }
 }
 impl OpSet for DefaultOps {

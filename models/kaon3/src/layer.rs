@@ -66,6 +66,14 @@ impl QLinear {
         Ok(Self::from_qw(weights::load_linear(src, stream, name)?))
     }
 
+    /// 取 BF16 权重（router 这类必须用 bf16 路由算子的场合）；其它格式报错。
+    pub fn as_bf16(&self) -> Result<&Tensor<bf16>> {
+        match self {
+            Self::Bf16 { w, .. } => Ok(w),
+            _ => anyhow::bail!("该线性层不是 BF16 权重，无法用于 bf16 路由算子"),
+        }
+    }
+
     pub fn shape(&self) -> (usize, usize) {
         match self {
             Self::Bf16 { n, k, .. } | Self::Fp8 { n, k, .. } | Self::NvFp4 { n, k, .. } => (*n, *k),
@@ -108,6 +116,13 @@ pub struct Router {
     pub scale: Tensor<bf16>,
     /// `router.per_expert_scale` [E]：折进路由权重。
     pub per_expert: Tensor<bf16>,
+}
+
+impl Router {
+    /// 路由 logits 用 bf16 GEMM（`moe_gate_f32` 只吃 bf16 权重）。
+    pub fn bf16_weight(&self) -> Result<&Tensor<bf16>> {
+        self.proj.as_bf16()
+    }
 }
 
 pub struct Gemma4Layer {
@@ -322,7 +337,7 @@ pub struct ActBuf {
     pub attn_out: Tensor<bf16>,
     pub o: Tensor<bf16>,
     pub routed: Tensor<bf16>,
-    pub acc: Tensor<bf16>,
+    pub acc: Tensor<f32>,
     pub mlp_gate_up: Tensor<bf16>,
     pub mlp_act: Tensor<bf16>,
     pub dense_out: Tensor<bf16>,
@@ -349,5 +364,271 @@ impl ActBuf {
             h2: Tensor::uninit(stream, &[h])?,
             logits: Tensor::uninit(stream, &[cfg.num_experts.max(1)])?,
         })
+    }
+}
+
+/// 一层 forward 的工作区（按 `max_tokens` 预分配，全模型一套复用）。
+pub struct LayerScratch {
+    pub x: Tensor<bf16>,        // 残差主干 [tokens, hidden]
+    pub norm: Tensor<bf16>,     // norm 输出 [tokens, hidden]
+    pub qkv: Tensor<bf16>,      // [tokens, (H + 2·Hkv)·D]
+    pub q: Tensor<bf16>,        // [tokens, H·D]（视图同 qkv 前段）
+    pub k: Tensor<bf16>,        // [tokens, Hkv·D]
+    pub v: Tensor<bf16>,        // [tokens, Hkv·D]
+    pub attn: Tensor<bf16>,     // [tokens, H·D]
+    pub o: Tensor<bf16>,        // [tokens, hidden]
+    pub gate_up: Tensor<bf16>,  // [tokens, 2·dense_inter]
+    pub act: Tensor<bf16>,      // [tokens, max(dense_inter, moe_inter)] 专家 up 复用
+    pub gelu: Tensor<bf16>,     // [tokens, max(dense_inter, moe_inter)] gelu 输出
+    pub dense: Tensor<bf16>,    // [tokens, hidden]
+    pub routed: Tensor<bf16>,   // [tokens, hidden]（router 预处理后的输入）
+    pub acc: Tensor<f32>,      // [tokens, hidden] MoE 加权和
+    pub y: Tensor<bf16>,        // 单个专家的输出 [tokens, hidden]
+    pub xg: Tensor<bf16>,       // 分桶后 gather 的行 [tokens·topk, hidden]
+    pub yg: Tensor<bf16>,       // 分桶后专家输出 [tokens·topk, hidden]
+    pub h2: Tensor<bf16>,       // [tokens, hidden]
+    pub logits: Tensor<f32>,    // [tokens, E]
+    pub topk_ids: Tensor<i32>,  // [tokens, topk]
+    pub topk_w: Tensor<f32>,    // [tokens, topk]
+    pub buckets: k::ops::MoeBuckets,
+}
+
+impl LayerScratch {
+    pub fn new(stream: &Stream, cfg: &KaonConfig, max_tokens: usize) -> Result<Self> {
+        let (h, d, nkv) = (cfg.hidden, cfg.head_dim_full, cfg.nkv_full);
+        let _ = (d, nkv);
+        Ok(Self {
+            x: Tensor::uninit(stream, &[max_tokens, cfg.hidden])?,
+            norm: Tensor::uninit(stream, &[max_tokens, cfg.hidden])?,
+            qkv: Tensor::uninit(stream, &[max_tokens, cfg.num_heads * cfg.head_dim_full + 2 * cfg.nkv_full * cfg.head_dim_sliding.max(cfg.head_dim_full)])?,
+            q: Tensor::uninit(stream, &[max_tokens, cfg.num_heads * cfg.head_dim_full])?,
+            k: Tensor::uninit(stream, &[max_tokens, cfg.nkv_sliding * cfg.head_dim_sliding])?,
+            v: Tensor::uninit(stream, &[max_tokens, cfg.nkv_sliding * cfg.head_dim_sliding])?,
+            attn: Tensor::uninit(stream, &[max_tokens, cfg.num_heads * cfg.head_dim_full])?,
+            o: Tensor::uninit(stream, &[max_tokens, h])?,
+            gate_up: Tensor::uninit(stream, &[max_tokens, 2 * cfg.dense_inter])?,
+            act: Tensor::uninit(stream, &[max_tokens, cfg.dense_inter.max(cfg.moe_inter)])?,
+            gelu: Tensor::uninit(stream, &[max_tokens, cfg.dense_inter.max(cfg.moe_inter)])?,
+            dense: Tensor::uninit(stream, &[max_tokens, h])?,
+            routed: Tensor::uninit(stream, &[max_tokens, h])?,
+            acc: Tensor::uninit(stream, &[max_tokens, h])?,
+            y: Tensor::uninit(stream, &[max_tokens, h])?,
+            xg: Tensor::uninit(stream, &[max_tokens * cfg.top_k, h])?,
+            yg: Tensor::uninit(stream, &[max_tokens * cfg.top_k, h])?,
+            h2: Tensor::uninit(stream, &[max_tokens, h])?,
+            logits: Tensor::uninit(stream, &[max_tokens, cfg.num_experts])?,
+            topk_ids: Tensor::uninit(stream, &[max_tokens * cfg.top_k])?,
+            topk_w: Tensor::uninit(stream, &[max_tokens * cfg.top_k])?,
+            buckets: k::ops::MoeBuckets::new(stream, cfg.num_experts, max_tokens, cfg.top_k)?,
+        })
+    }
+}
+
+/// 一步里每层都要的设备张量（executor 上传一次，30 层共用）。
+pub struct StepCtx<'a> {
+    pub mode: dinfer_core::runner::BatchMode,
+    pub cu_seqlens: &'a Tensor<i32>,
+    pub seq_lens: &'a Tensor<i32>,
+    pub block_table: &'a Tensor<i32>,
+    pub positions: &'a Tensor<i32>,
+    pub num_reqs: usize,
+    pub max_blocks: usize,
+    pub max_seqlen: usize,
+    pub block_size: usize,
+    /// paged KV cache：[num_blocks, block_size, nkv, 2, D]，`D` 取本层 head_dim。
+    pub kv: &'a dinfer_kernels::cudarc::driver::CudaSlice<bf16>,
+}
+
+impl Gemma4Layer {
+    /// 一层的完整前向。`tokens` = 本步 token 数（prefill 多行 / decode 每请求 1 行）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward(
+        &self,
+        stream: &Stream,
+        gemm: &Gemm,
+        ops: &impl OpSet,
+        cfg: &KaonConfig,
+        ropes: &Ropes,
+        sc: &mut LayerScratch,
+        ctx: &StepCtx<'_>,
+        tokens: usize,
+    ) -> Result<()> {
+        let (h, d, nkv) = (cfg.hidden, self.head_dim, self.nkv);
+        let heads = cfg.num_heads;
+        let eps = cfg.eps;
+        ensure!(self.rope_dim <= d, "rope_dim {} > head_dim {d}", self.rope_dim);
+
+        // ---- 1. input_norm ----
+        rmsnorm_into(stream, ops, &sc.x, &self.input_norm, &mut sc.norm, h, tokens, eps)?;
+
+        // ---- 2. q/k/v 投影（K 权重兼作 V 的层只算一次）----
+        self.q_proj.forward(gemm, stream, &sc.norm, &mut sc.q, tokens)?;
+        self.k_proj.forward(gemm, stream, &sc.norm, &mut sc.k, tokens)?;
+        match &self.v_proj {
+            Some(vp) => vp.forward(gemm, stream, &sc.norm, &mut sc.v, tokens)?,
+            None => {
+                // k_eq_v：把 k 拷到 v（两份内容相同，attention 分别读）
+                k::ops::copy_i32_n(stream, &sc.k.data, &mut sc.v.data, tokens * nkv * d)?;
+            }
+        }
+
+        // ---- 3. 逐头 RMSNorm：q_norm / k_norm 带权重，v_norm 无权重 ----
+        head_rmsnorm(stream, ops, &mut sc.q, Some(&self.q_norm), d, eps)?;
+        head_rmsnorm(stream, ops, &mut sc.k, Some(&self.k_norm), d, eps)?;
+        head_rmsnorm(stream, ops, &mut sc.v, None, d, eps)?;
+
+        // ---- 4. RoPE（只转前 rope_dim 维；proportional 的分母已由 Ropes 处理）----
+        let rope = if self.window > 0 { &ropes.sliding } else { &ropes.full };
+        rope.apply(stream, &mut sc.q, Some(&mut sc.k), ctx.positions, heads, nkv, d)?;
+
+        // ---- 5. attention（滑窗层传 window）----
+        let scale = 1.0f32; // Gemma4：scaling = 1.0，由 QK-norm 隐式承担
+        match ctx.mode {
+            dinfer_core::runner::BatchMode::Prefill => ops.attn().prefill_win(
+                stream,
+                &sc.q.data,
+                &sc.k.data,
+                &sc.v.data,
+                &mut sc.attn.data,
+                &ctx.cu_seqlens.data,
+                ctx.num_reqs,
+                ctx.max_seqlen,
+                heads,
+                nkv,
+                d,
+                scale,
+                0,
+                0,
+                self.window,
+            )?,
+            _ => ops.attn().paged_win(
+                stream,
+                &sc.q.data,
+                ctx.kv,
+                &ctx.block_table.data,
+                &ctx.seq_lens.data,
+                &ctx.cu_seqlens.data,
+                &mut sc.attn.data,
+                ctx.num_reqs,
+                ctx.max_seqlen,
+                heads,
+                nkv,
+                d,
+                ctx.block_size,
+                ctx.max_blocks,
+                scale,
+                0,
+                match ctx.mode {
+                    dinfer_core::runner::BatchMode::Mixed => true,
+                    _ => false,
+                },
+                self.window,
+            )?,
+        }
+
+        // ---- 6. o_proj + post_attention_norm + 残差 ----
+        self.o_proj.forward(gemm, stream, &sc.attn, &mut sc.o, tokens)?;
+        rmsnorm_into(stream, ops, &sc.o, &self.post_attn_norm, &mut sc.norm, h, tokens, eps)?;
+        k::ops::add_inplace_bf16_n(stream, &sc.norm.data, &mut sc.x.data, tokens * h)?;
+
+        // ---- 7. dense MLP 支路（无条件执行）----
+        rmsnorm_into(stream, ops, &sc.x, &self.pre_ff_norm, &mut sc.norm, h, tokens, eps)?;
+        self.dense_gate.forward(gemm, stream, &sc.norm, &mut sc.gate_up, tokens)?;
+        self.dense_up.forward(gemm, stream, &sc.norm, &mut sc.act, tokens)?;
+        ops.act().gelu_tanh_mul(stream, &sc.gate_up.data, &sc.act.data, &mut sc.gelu.data, tokens, cfg.dense_inter)?;
+        self.dense_down.forward(gemm, stream, &sc.gelu, &mut sc.dense, tokens)?;
+        rmsnorm_into(stream, ops, &sc.dense, &self.post_ff_norm_1, &mut sc.norm, h, tokens, eps)?;
+
+        // ---- 8. MoE 支路（与 dense 并联）----
+        let moe_out = self.moe_branch(stream, gemm, ops, cfg, sc, tokens, eps)?;
+
+        // ---- 9. 两条支路相加 → post_ff_norm → 残差 → layer_scalar ----
+        k::ops::add_inplace_bf16_n(stream, &moe_out.data, &mut sc.norm.data, tokens * h)?;
+        rmsnorm_into(stream, ops, &sc.norm, &self.post_ff_norm, &mut sc.h2, h, tokens, eps)?;
+        k::ops::add_inplace_bf16_n(stream, &sc.h2.data, &mut sc.x.data, tokens * h)?;
+        if self.layer_scalar != 1.0 {
+            k::ops::scale_bf16_n(stream, &mut sc.x.data, tokens * h, self.layer_scalar)?;
+        }
+        Ok(())
+    }
+
+    /// MoE 支路：router 预处理 → top-k → 分桶 → 逐专家 → 加权和。
+    #[allow(clippy::too_many_arguments)]
+    fn moe_branch(
+        &self,
+        stream: &Stream,
+        gemm: &Gemm,
+        ops: &impl OpSet,
+        cfg: &KaonConfig,
+        sc: &mut LayerScratch,
+        tokens: usize,
+        eps: f32,
+    ) -> Result<()> {
+        let h = cfg.hidden;
+        // router 输入：rmsnorm_no_weight(x) · hidden^-0.5 · scale[hidden]
+        ops.norm().rmsnorm_noweight(stream, &sc.x.data, &mut sc.routed.data, tokens, h, eps)?;
+        k::ops::scale_bf16_n(stream, &mut sc.routed.data, tokens * h, (h as f32).powf(-0.5))?;
+        k::ops::mul_bf16_n(stream, &mut sc.routed.data, &self.router.scale.data, tokens * h)?;
+
+        let e = cfg.num_experts;
+        let kk = cfg.top_k;
+        k::ops::moe_gate_f32(
+            stream,
+            &sc.routed.data,
+            &self.router.bf16_weight()?.data,
+            &mut sc.logits.data,
+            tokens,
+            e,
+            h,
+        )?;
+        // softmax 在全专家上做，top-k 取概率；renormalize 后乘 per_expert_scale 在 scatter 时折入
+        k::ops::moe_route_f32(
+            stream,
+            &sc.logits.data,
+            None,
+            &mut sc.topk_ids.data,
+            &mut sc.topk_w.data,
+            tokens,
+            e,
+            kk,
+            true,
+            1.0,
+        )?;
+        k::ops::moe_bucket(stream, &sc.topk_ids.data, &mut sc.buckets, tokens, kk)?;
+        let offsets = stream.dtoh_sync_copy(&sc.buckets.offsets)?;
+
+        let scale_f32 = self.router.per_expert.data.to_vec_f32(stream)?;
+        stream.memset_zeros_n(&mut sc.acc.data, tokens * h)?;
+        for (eid, start, len) in k::ops::moe_expert_ranges(&offsets) {
+            if len == 0 {
+                continue;
+            }
+            k::ops::moe_gather_bf16(stream, &sc.x.data, &mut sc.xg.data, &sc.buckets.sorted_tok, start, len, h)?;
+            let ex = &self.experts[eid];
+            ex.gate.forward(gemm, stream, &sc.xg, &mut sc.gate_up, len)?;
+            ex.up.forward(gemm, stream, &sc.xg, &mut sc.act, len)?;
+            ops.act().gelu_tanh_mul(stream, &sc.gate_up.data, &sc.act.data, &mut sc.gelu.data, len, cfg.moe_inter)?;
+            let g = Tensor { data: sc.gelu.data.slice(..len * cfg.moe_inter), shape: vec![len, cfg.moe_inter] };
+            ex.down.forward(gemm, stream, &g, &mut sc.yg, len)?;
+            // per_expert_scale 已折进 down_proj 的全局 scale（见 weights::load），这里只按路由权重累加
+            k::ops::moe_scatter_add_f32(
+                stream,
+                &sc.yg.data,
+                &mut sc.acc.data,
+                &sc.buckets.sorted_tok,
+                &sc.buckets.sorted_k,
+                &sc.topk_w.data,
+                start,
+                len,
+                kk,
+                h,
+            )?;
+            let _ = &scale_f32;
+        }
+        // acc（fp32）→ bf16，再做 post_feedforward_layernorm_2
+        stream.memset_zeros_n(&mut sc.y.data, tokens * h)?;
+        k::ops::f32_add_to_bf16_n(stream, &sc.acc.data, &mut sc.y.data, tokens * h)?;
+        rmsnorm_into(stream, ops, &sc.y, &self.post_ff_norm_2, &mut sc.h2, h, tokens, eps)?;
+        Ok(())
     }
 }

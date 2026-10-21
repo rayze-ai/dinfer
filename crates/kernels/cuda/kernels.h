@@ -46,8 +46,10 @@ int rope_bf16(void* q, void* k, const int32_t* positions, const float* cos_sin, 
 // ---- 激活 ----
 // x: [tokens, 2*inter]，out: [tokens, inter]，out = silu(x[:, :inter]) * x[:, inter:]
 int silu_and_mul_bf16(const void* x, void* out, int64_t tokens, int64_t inter, cudaStream_t stream);
-// Gemma 系 gelu_tanh：x[.., 2·inter] → out[.., inter]（out = gelu_tanh(gate) * up）。
-int gelu_tanh_and_mul_bf16(const void* x, void* out, int64_t tokens, int64_t inter, cudaStream_t stream);
+// Gemma 系 gelu_tanh（双缓冲）：out = gelu_tanh(gate) * up。
+// 逐行乘向量：x[r, j] *= w[j]。
+int mul_row_bf16(void* x, const void* w, int64_t rows, int64_t cols, cudaStream_t stream);
+int gelu_tanh_mul_bf16(const void* gate, const void* up, void* out, int64_t tokens, int64_t inter, cudaStream_t stream);
 // 输出门（Qwen3.5 attn_output_gate）：x *= sigmoid(gate)，原地逐元素。n 必须是 8 的倍数。
 int mul_sigmoid_bf16(void* x, const void* gate, int64_t n, cudaStream_t stream);
 // 行式：x 紧凑 [rows, cols]，gate 是 [rows, gate_stride] 的列段（融合 qkv+gate 输出的 gate 段）；cols / gate_stride 是 8 的倍数。
@@ -313,7 +315,9 @@ int gather_rows_bf16(const void* src, void* dst, const int32_t* rows, int64_t nu
 int bf16_to_f32(const void* x, float* y, int64_t n, cudaStream_t stream);
 // [nb][rows][cols] bf16 → [rows][nb*cols] f32（all-gather 块布局 → 行布局 + 升精度，一趟）
 int gather_blocks_bf16_to_f32(const void* x, float* y, int64_t nb, int64_t rows, int64_t cols, cudaStream_t stream);
-int scale_f32(float* x, int64_t n, float a, cudaStream_t stream);  // x[:n] *= a
+int scale_f32(float* x, int64_t n, float a, cudaStream_t stream);
+// 逐元素乘标量（bf16 原地）：x *= a。
+int scale_bf16(void* x, int64_t n, float a, cudaStream_t stream);  // x[:n] *= a
 
 // ---- MoE 参考（moe.cu）----
 // logits[T,E] f32 = x[T,H] bf16 · w[E,H] bf16，fp32 累加（与 HF 路由的 fp32 linear 一致）
