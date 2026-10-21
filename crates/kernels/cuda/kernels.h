@@ -49,6 +49,8 @@ int silu_and_mul_bf16(const void* x, void* out, int64_t tokens, int64_t inter, c
 // Gemma 系 gelu_tanh（双缓冲）：out = gelu_tanh(gate) * up。
 // 逐行乘向量：x[r, j] *= w[j]。
 int mul_row_bf16(void* x, const void* w, int64_t rows, int64_t cols, cudaStream_t stream);
+// logit softcapping：x = tanh(x/c)·c（bf16 原地）。
+int softcap_bf16(void* x, int64_t n, float c, cudaStream_t stream);
 int gelu_tanh_mul_bf16(const void* gate, const void* up, void* out, int64_t tokens, int64_t inter, cudaStream_t stream);
 // 输出门（Qwen3.5 attn_output_gate）：x *= sigmoid(gate)，原地逐元素。n 必须是 8 的倍数。
 int mul_sigmoid_bf16(void* x, const void* gate, int64_t n, cudaStream_t stream);

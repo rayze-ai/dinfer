@@ -333,6 +333,13 @@ pub fn gelu_tanh_mul_bf16(
     )
 }
 
+/// logit softcapping（Gemma 系）：`x = tanh(x/c)·c`，bf16 原地。
+pub fn softcap_bf16_n(stream: &Stream, x: &mut CudaSlice<bf16>, n: usize, c: f32) -> Result<()> {
+    ensure!(x.len() >= n, "softcap: buffer");
+    // SAFETY: 长度已校验。
+    check(unsafe { ffi::softcap_bf16(stream.ptr_mut(x) as *mut c_void, n as i64, c, stream.raw() as _) }, "softcap_bf16")
+}
+
 /// 逐行乘向量：`x[r, j] *= w[j]`（router.scale 这种逐 hidden 缩放）。
 pub fn mul_bf16_n(stream: &Stream, x: &mut CudaSlice<bf16>, w: &CudaSlice<bf16>, rows: usize, cols: usize) -> Result<()> {
     ensure!(x.len() >= rows * cols && w.len() >= cols, "mul_row: shape");

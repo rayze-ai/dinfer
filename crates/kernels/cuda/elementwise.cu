@@ -58,6 +58,24 @@ __global__ void scale_bf16_kernel(bf16* __restrict__ x, int64_t n, float a) {
   for (; i < n; i += stride) x[i] = to_bf16(to_f32(x[i]) * a);
 }
 
+// logit softcapping（Gemma 系）：x = tanh(x / c) · c。原地，bf16。
+__global__ void softcap_bf16_kernel(bf16* __restrict__ x, int64_t n, float c) {
+  int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
+  const int64_t stride = (int64_t)gridDim.x * blockDim.x;
+  for (; i < n; i += stride) {
+    const float v = to_f32(x[i]);
+    x[i] = to_bf16(c * tanhf(v / c));
+  }
+}
+
+extern "C" int softcap_bf16(void* x, int64_t n, float c, cudaStream_t stream) {
+  if (n <= 0 || c <= 0.f) return 0;
+  const int threads = 256;
+  const int blocks = (int)min((int64_t)4096, (n + threads - 1) / threads);
+  softcap_bf16_kernel<<<blocks, threads, 0, stream>>>(static_cast<bf16*>(x), n, c);
+  return last_err();
+}
+
 // 逐行乘向量：x[r, j] *= w[j]（router.scale、各类逐 hidden 缩放）。
 __global__ void mul_row_kernel(bf16* __restrict__ x, const bf16* __restrict__ w, int64_t rows, int64_t cols) {
   const int64_t r = blockIdx.y, c = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;

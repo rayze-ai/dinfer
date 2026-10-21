@@ -443,8 +443,12 @@ pub struct StepCtx<'a> {
     pub max_blocks: usize,
     pub max_seqlen: usize,
     pub block_size: usize,
-    /// paged KV cache：[num_blocks, block_size, nkv, 2, D]，`D` 取本层 head_dim。
+    /// 本层的 paged KV cache：[num_blocks, block_size, nkv, 2, D]，`D` 取本层 head_dim。
     pub kv: &'a dinfer_kernels::cudarc::driver::CudaSlice<bf16>,
+    /// 本步 token 的 cache 槽位（写 KV 用）。
+    pub slot_mapping: &'a Tensor<i64>,
+    /// 同一份 cache 的可变视图（写 KV 用；attention 只读用 `kv`）。
+    pub kv_mut: &'a mut dinfer_kernels::cudarc::driver::CudaSlice<bf16>,
 }
 
 impl Gemma4Layer {
@@ -458,7 +462,7 @@ impl Gemma4Layer {
         cfg: &KaonConfig,
         ropes: &Ropes,
         sc: &mut LayerScratch,
-        ctx: &StepCtx<'_>,
+        ctx: &mut StepCtx<'_>,
         tokens: usize,
     ) -> Result<()> {
         let (h, d, nkv) = (cfg.hidden, self.head_dim, self.nkv);
@@ -488,6 +492,19 @@ impl Gemma4Layer {
         // ---- 4. RoPE（只转前 rope_dim 维；proportional 的分母已由 Ropes 处理）----
         let rope = if self.window > 0 { &ropes.sliding } else { &ropes.full };
         rope.apply(stream, &mut sc.q, Some(&mut sc.k), ctx.positions, heads, nkv, d)?;
+
+        // ---- 4b. 写本层 paged KV（每层 head_dim / nkv 不同）----
+        k::ops::gqa_cache_write_bf16(
+            stream,
+            &sc.k.data,
+            &sc.v.data,
+            &mut *ctx.kv_mut,
+            &ctx.slot_mapping.data,
+            tokens,
+            nkv,
+            d,
+            ctx.block_size,
+        )?;
 
         // ---- 5. attention（滑窗层传 window）----
         let scale = 1.0f32; // Gemma4：scaling = 1.0，由 QK-norm 隐式承担

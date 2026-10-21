@@ -2,4 +2,5 @@
 //! 设计见 `docs/loops/kaon-v3.md`。
 pub mod config;
 pub mod layer;
+pub mod model;
 pub mod weights;

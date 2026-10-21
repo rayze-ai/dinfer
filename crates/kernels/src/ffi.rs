@@ -77,6 +77,8 @@ extern "C" {
 
     pub fn mul_row_bf16(x: *mut c_void, w: *const c_void, rows: i64, cols: i64, stream: cudaStream_t) -> i32;
 
+    pub fn softcap_bf16(x: *mut c_void, n: i64, c: f32, stream: cudaStream_t) -> i32;
+
     pub fn embedding_bf16(
         ids: *const i32,
         table: *const c_void,
