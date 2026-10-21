@@ -289,7 +289,27 @@ fn mlp_forward(
     let hidden = gate_up.in_features;
     ensure!(x.numel() >= tokens * hidden && out.numel() >= tokens * hidden, "Mlp: buffer too small");
     ensure!(gate_up_buf.numel() >= tokens * 2 * inter && act_buf.numel() >= tokens * inter, "Mlp: tokens > max_tokens");
+    // `MLP_PROFILE=1`：拆 gate_up GEMM / silu_and_mul / down GEMM 三段（GPU 事件）。
+    let mp = std::env::var("MLP_PROFILE").ok().as_deref() == Some("1") && tokens >= 256;
+    let mev = if mp { Some(stream.new_timing_events(4)?) } else { None };
+    if let Some(e) = &mev {
+        stream.record_timing(&e[0])?;
+    }
     gemm.forward_bf16(&x.data, &gate_up.w.data, None, &mut gate_up_buf.data, tokens, 2 * inter, hidden)?;
+    if let Some(e) = &mev {
+        stream.record_timing(&e[1])?;
+    }
     act.silu_and_mul(stream, &gate_up_buf.data, &mut act_buf.data, tokens, inter)?;
-    gemm.forward_bf16(&act_buf.data, &down.w.data, None, &mut out.data, tokens, hidden, inter)
+    if let Some(e) = &mev {
+        stream.record_timing(&e[2])?;
+    }
+    gemm.forward_bf16(&act_buf.data, &down.w.data, None, &mut out.data, tokens, hidden, inter)?;
+    if let Some(e) = &mev {
+        stream.record_timing(&e[3])?;
+        stream.synchronize()?;
+        let ms = |a: usize, b: usize| k::TimingEvent::elapsed_ms(&e[a], &e[b]).unwrap_or(0.0);
+        eprintln!("[mlp-prof] t={tokens} gate_up={:.3} silu={:.3} down={:.3} total={:.3} ms",
+            ms(0,1), ms(1,2), ms(2,3), ms(0,3));
+    }
+    Ok(())
 }
