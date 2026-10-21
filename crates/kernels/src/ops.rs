@@ -1789,7 +1789,7 @@ pub fn gqa_cache_write_bf16(
 
 /// 无历史 causal prefill。q: [T, heads, D]，k/v: [T, kv_heads, D]，out: [T, heads, D]。
 #[allow(clippy::too_many_arguments)]
-pub fn gqa_prefill_bf16<
+fn gqa_prefill_impl<
     Q: DevicePtr<bf16> + ?Sized,
     K: DevicePtr<bf16> + ?Sized,
     V: DevicePtr<bf16> + ?Sized,
@@ -1809,6 +1809,7 @@ pub fn gqa_prefill_bf16<
     // 每 token 行的元素跨度；0 = 紧凑（heads·D / kv_heads·D）。传 qkv GEMM 输出时为 (H+2Hkv)·D。
     q_stride: usize,
     kv_stride: usize,
+    window: usize,
 ) -> Result<()> {
     ensure!(cu_seqlens.len() > num_reqs, "gqa_prefill: cu_seqlens");
     ensure!(max_seqlen > 0, "gqa_prefill: max_seqlen");
@@ -1821,7 +1822,7 @@ pub fn gqa_prefill_bf16<
     // SAFETY: 调用方保证 q/k/v/out 覆盖 cu_seqlens 的总 token 数。
     check(
         unsafe {
-            ffi::gqa_prefill_bf16(
+            ffi::gqa_prefill_win_bf16(
                 pq,
                 pk,
                 pv,
@@ -1836,11 +1837,63 @@ pub fn gqa_prefill_bf16<
                 q_stride as i64,
                 kv_stride as i64,
                 gqa_prefill_cfg(stream),
+                window as i32,
                 stream.raw() as _,
             )
         },
         "gqa_prefill_bf16",
     )
+}
+/// 无滑窗 prefill（`window = 0`）。带窗口的版本见 [`gqa_prefill_win_bf16`]。
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_prefill_bf16<
+    Q: DevicePtr<bf16> + ?Sized,
+    K: DevicePtr<bf16> + ?Sized,
+    V: DevicePtr<bf16> + ?Sized,
+>(
+    stream: &Stream,
+    q: &Q,
+    k: &K,
+    v: &V,
+    out: &mut CudaSlice<bf16>,
+    cu_seqlens: &CudaSlice<i32>,
+    num_reqs: usize,
+    max_seqlen: usize,
+    heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    scale: f32,
+    q_stride: usize,
+    kv_stride: usize,
+) -> Result<()> {
+    gqa_prefill_impl(stream, q, k, v, out, cu_seqlens, num_reqs, max_seqlen, heads, kv_heads, head_dim, scale, q_stride, kv_stride, 0)
+}
+
+/// 带滑窗的 prefill（Gemma4 的 sliding 层）：每行 query 只能看到 `[pos - window + 1, pos]`。
+/// `window = 0` 等价全注意力。
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_prefill_win_bf16<
+    Q: DevicePtr<bf16> + ?Sized,
+    K: DevicePtr<bf16> + ?Sized,
+    V: DevicePtr<bf16> + ?Sized,
+>(
+    stream: &Stream,
+    q: &Q,
+    k: &K,
+    v: &V,
+    out: &mut CudaSlice<bf16>,
+    cu_seqlens: &CudaSlice<i32>,
+    num_reqs: usize,
+    max_seqlen: usize,
+    heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    scale: f32,
+    q_stride: usize,
+    kv_stride: usize,
+    window: usize,
+) -> Result<()> {
+    gqa_prefill_impl(stream, q, k, v, out, cu_seqlens, num_reqs, max_seqlen, heads, kv_heads, head_dim, scale, q_stride, kv_stride, window)
 }
 
 /// D=256 全注意力 prefill kernel 结构（`ArchProfile::gqa_prefill_cfg_for`），`GQA_PREFILL_CFG` 覆盖；进程内只算一次。
@@ -1862,7 +1915,7 @@ fn gqa_prefill_cfg(stream: &Stream) -> i32 {
 
 /// 从 paged cache 读的 attention：decode（q_len = 1）与带历史 chunked prefill 统一。q: [Tq, heads, D]，out 同形。
 #[allow(clippy::too_many_arguments)]
-pub fn gqa_paged_bf16<Q: DevicePtr<bf16> + ?Sized>(
+fn gqa_paged_impl<Q: DevicePtr<bf16> + ?Sized>(
     stream: &Stream,
     q: &Q,
     cache: &CudaSlice<bf16>,
@@ -1881,6 +1934,7 @@ pub fn gqa_paged_bf16<Q: DevicePtr<bf16> + ?Sized>(
     q_stride: usize,
     // 混批：跳过 q_len==1 的请求（它们由 gqa_decode_bf16 处理）。
     skip_single: bool,
+    window: usize,
 ) -> Result<()> {
     ensure!(
         block_table.len() >= num_reqs * max_blocks && seq_lens.len() >= num_reqs,
@@ -1898,7 +1952,7 @@ pub fn gqa_paged_bf16<Q: DevicePtr<bf16> + ?Sized>(
     // SAFETY: 容量已校验；block_table 内 id < num_blocks 由调度器保证。
     check(
         unsafe {
-            ffi::gqa_paged_bf16(
+            ffi::gqa_paged_win_bf16(
                 pq,
                 pc,
                 pbt,
@@ -1916,11 +1970,60 @@ pub fn gqa_paged_bf16<Q: DevicePtr<bf16> + ?Sized>(
                 q_stride as i64,
                 skip_single as i32,
                 gqa_prefill_cfg(stream),
+                window as i32,
                 stream.raw() as _,
             )
         },
         "gqa_paged_bf16",
     )
+}
+/// 无滑窗 paged attention（`window = 0`）。带窗口的版本见 [`gqa_paged_win_bf16`]。
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_paged_bf16<Q: DevicePtr<bf16> + ?Sized>(
+    stream: &Stream,
+    q: &Q,
+    cache: &CudaSlice<bf16>,
+    block_table: &CudaSlice<i32>,
+    seq_lens: &CudaSlice<i32>,
+    cu_seqlens_q: &CudaSlice<i32>,
+    out: &mut CudaSlice<bf16>,
+    num_reqs: usize,
+    max_q_len: usize,
+    heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    block_size: usize,
+    max_blocks: usize,
+    scale: f32,
+    q_stride: usize,
+    skip_single: bool,
+) -> Result<()> {
+    gqa_paged_impl(stream, q, cache, block_table, seq_lens, cu_seqlens_q, out, num_reqs, max_q_len, heads, kv_heads, head_dim, block_size, max_blocks, scale, q_stride, skip_single, 0)
+}
+
+/// 带滑窗的 paged attention：可见 key ∈ `[pos - window + 1, pos]`；`window = 0` 等价全注意力。
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_paged_win_bf16<Q: DevicePtr<bf16> + ?Sized>(
+    stream: &Stream,
+    q: &Q,
+    cache: &CudaSlice<bf16>,
+    block_table: &CudaSlice<i32>,
+    seq_lens: &CudaSlice<i32>,
+    cu_seqlens_q: &CudaSlice<i32>,
+    out: &mut CudaSlice<bf16>,
+    num_reqs: usize,
+    max_q_len: usize,
+    heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    block_size: usize,
+    max_blocks: usize,
+    scale: f32,
+    q_stride: usize,
+    skip_single: bool,
+    window: usize,
+) -> Result<()> {
+    gqa_paged_impl(stream, q, cache, block_table, seq_lens, cu_seqlens_q, out, num_reqs, max_q_len, heads, kv_heads, head_dim, block_size, max_blocks, scale, q_stride, skip_single, window)
 }
 
 /// 纯 decode（每请求 1 行）split-K attention（D ∈ {128, 256}）。q: [B, heads, D]，out 同形；`scratch` ≥ `gqa_decode_scratch_len`。
