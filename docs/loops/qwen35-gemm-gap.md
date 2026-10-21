@@ -232,3 +232,20 @@ q_len=6019 时单次约 246 us。**两个 mma 合计 86%，softmax 只占 14%** 
 从来没成功过」被隐藏了很久。首次运行抓到 4 个缺失文件，补齐后 169/169 齐备。
 
 **构建带 sm100 前必须先跑这个脚本**（1 秒，exit 1 = 有缺失并打印清单）。
+
+## sm100 干净基线（2026-10-21 定稿）
+
+关掉所有 profile 开关（GDN_PROFILE/ATTN_PROFILE/LAYER_PROFILE 全不设）：
+
+| 长度 | TTFT 中位 | 开 profile 时 |
+|---|---|---|
+| 1021 | 49.5 ms | 54.2 ms |
+| 3009 | 137.3 ms | 140.5 ms |
+| 6019 | 282.0 ms | 284.0 ms |
+
+与 sm100 之前的 49.5/137.1/283.1 **一致（±0.5 ms）** —— 证明历史 profile 未被
+「远端缺 gqa_fa_sm100.cu / umma_peak_sm100.cu」污染（gdn_ho_umma 默认关，走的一直是 mma.sync）。
+
+**profile 开关自身成本**：短 prompt +4.7 ms（325 个事件 record+sync），长 prompt +2 ms。
+
+分段（6019）：attn_gdn 101 / mlp 124 / attn_full 42 ms。
