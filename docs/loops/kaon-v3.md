@@ -193,6 +193,32 @@ mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e
 - 基线走的正是这条路：`FlashInferB12xNvFp4LinearKernel`（**SM120+ 专用**，
   `Sm120BlockScaledDenseGemmKernel`），失败才回落 fbgemm/cutlass/emulation
 
+## NVFP4 MMA 数值验证进度（轮 4b，**未通过**）
+
+| 项 | 状态 |
+|---|---|
+| 指令可编译（compute_120a） | ✅ 已确认 |
+| 指令可执行（kernel 无 CUDA 错误） | ✅ 已确认，`kernel: no error` |
+| **寄存器映射正确** | ❌ **未通过**：实测 D 全为 -8，CPU 参考 -32，`bad=128/128` |
+| scale 语义（4X 是每 4 块共用还是 4 个独立） | ❌ 未确定 |
+
+**CUTLASS traits 实测布局**（`show_layout.cpp` 打印，`SM120_16x8x64_TN_VS<...,VS=16>`）：
+
+```
+ALayout  ((_4,_8),(_8,_2,_2)):((_128,_1),(_16,_8,_512))
+BLayout  ((_4,_8),(_8,_2)):((_64,_1),(_8,_256))
+SFALayout ((_2,_2,_8),_64):((_8,_0,_1),_16)
+SFBLayout ((_4,_8),_64):((_0,_1),_8)
+CLayout  ((_4,_8),(_2,_2)):((_32,_1),(_16,_8))
+```
+
+A 的 t=0/1、v=0..31 线性偏移已打印（见 `/hf_data/yaochen/work/show_layout.cpp` 输出），
+在 (M16,K64) 列主序下换算得 `(m,k) = (lin%16, lin/16)`；按此拼装后结果仍不正确
+（所有 D 相等，说明 A/B 里有系统性错位，不是随机误差）。
+
+**当前判断**：映射还需一至两轮才能钉死。可行的替代路线是直接用 CUTLASS 的
+`make_fragment` + `copy` 把 smem 搬进寄存器（它内部就是这套布局），避免手推。
+
 ## 卡点
 
 - **token 一次性**：每次拿到的 token 只能建一次连接。mux 断了就要新 token，所以要把"一次建成、长期复用"做对。
