@@ -1,3 +1,15 @@
+## 2026-10-22 长 prompt 带 `prompt_logprobs` 请求把共享基线 vLLM 打崩重启（两次）
+
+- **现象**：给基线 `:28067` 发 1252 token 的 `/v1/completions`（`prompt_logprobs:5` + `return_tokens_as_token_ids`），
+  返回空 / `http=000`；`docker ps` 显示 `kaon-vllm-pegaflow` "Up 37 seconds"，`RestartCount=2`。
+- **根因**：APIServer 输出处理在反分词时抛 `OverflowError: out of range integral type conversion attempted`
+  （`async_llm.py:746` output_handler），EngineCore 随之退出，容器按 `restart: always` 重启（重载约 1 分钟）。
+  短 prompt（≤ 25 token）同样参数正常。
+- **解法**：实验请求改打私有副本 `kaon-oracle`（GPU 1，`:28100`，同镜像同参数，`--restart no`）；
+  共享基线只做短 prompt 交叉核对。
+- **避免**：**共享服务只发已验证过的请求形状**；新请求形状先在私有副本上试。跳板 `run` 失败时 rc=0，
+  脚本要按响应内容判失败（`remote_5090.sh` 已改成自动重试）。
+
 ## 2026-10-22 Gemma4 proportional RoPE：分母修了，配对还是错的
 
 - **现象**：Kaon-V3 30 层端到端跑通，但最后一行 top-5 与基线服务完全无交集。
