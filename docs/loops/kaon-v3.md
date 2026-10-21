@@ -44,7 +44,71 @@
 
 | 轮 | 改动 | 结果 | 结论 |
 |---|---|---|---|
-| 0 | 连通 + 环境勘察 | 8×5090 确认，GPU 7 被占 | token 一次性；待新 token 建 mux |
+| 0 | 连通 + 环境勘察 | 8×5090 确认，GPU 7 跑基线 | token 一次性（见卡点） |
+| 1 | 模型 / 基线勘察 | 见下「勘察结果」 | 架构 = Gemma4 MoE 多模态，量化 = MIXED(NVFP4 专家 + FP8 其余) |
+
+## 勘察结果（2026-10-21，轮 1）
+
+### 模型（`/hf_data/hub/models--kaon-release--Kaon-V3-nvpf4-mixed`，16 GB，2 个 safetensors）
+
+- `architectures = ["Gemma4ForConditionalGeneration"]`，`model_type = gemma4` → **多模态**（文本 + 视觉塔 + 音频塔）
+- **text_config**：`hidden_size 2816`，`num_hidden_layers 30`，`num_attention_heads 16`，
+  `head_dim 256` / `global_head_dim 512`，`num_key_value_heads 8` / `num_global_key_value_heads 2`，
+  `intermediate_size 2112`（dense MLP），`moe_intermediate_size 704`，`num_experts 128`，`top_k_experts 8`，
+  `enable_moe_block true`，`sliding_window 1024`，`max_position_embeddings 262144`，`vocab_size 262144`（tied），
+  `hidden_activation gelu_pytorch_tanh`，`final_logit_softcapping 30.0`，`attention_k_eq_v true`（**K 与 V 共享**）
+- **layer_types**：30 层里 **5 层 full_attention**（下标 5、11、17、23、29，即每 6 层一次），其余 25 层 `sliding_attention`（窗口 1024）
+- **rope 两套**：full_attention 用 `partial_rotary_factor 0.25` + `rope_theta 1e6` + `proportional`；
+  sliding_attention 用 `rope_theta 1e4` + `default`
+- **权重命名特殊点**（与标准 HF 不同，直接影响加载器）：
+  - `model.language_model.layers.N.mlp.*` 是 **dense MLP**（gate/up/down），MoE 在 `layers.N.experts.N.{gate,up,down}_proj`
+  - **每个专家独立一套权重**（3840 = 30 层 × 128 专家），不是合并的 `experts.gate_up_proj`
+  - 有 `router.proj.weight` / `router.scale` / `router.per_expert_scale`，还有 `layers.N.layer_scalar`
+  - 四个 layernorm：`input_layernorm`、`post_attention_layernorm`、`pre_feedforward_layernorm`
+    （+`_2`）、`post_feedforward_layernorm`（+`_1`/`_2`）→ **GEMMA 式前后双 norm**
+  - `self_attn.k_norm.weight` 存在 → **QK-norm**
+- **量化 `hf_quant_config.json`**（modelopt 0.45.0）：`quant_algo = MIXED_PRECISION`，`kv_cache_quant_algo = FP8`
+  - **NVFP4**：恰好 30 项，全是 `layers.N.experts`（即 **MoE 专家走 NVFP4**）
+  - **FP8**：394 项 = 视觉塔 189 + 文本层（attn q/k/v/o + dense mlp gate/up/down）
+  - 每个量化权重配 `input_scale` / `weight_scale` / `weight_scale_2`（NVFP4 还有二级 scale）
+
+### 基线容器 `kaon-vllm-pegaflow`（GPU 7，`:28067`，已运行 3 周）
+
+```
+vllm serve <snapshot> --port 28067 --tensor-parallel-size 1 --pipeline-parallel-size 1   --gpu-memory-utilization 0.90 --dtype auto --served-model-name flowgpt_vllm --max-num-seqs 64   --max-model-len 16384 --block-size 32   --kv-transfer-config '{"kv_connector":"PegaKVConnector","kv_role":"kv_both","kv_connector_module_path":"pegaflow.connector"}'
+```
+- 镜像 `image.paigpu.com/library/vllm-openai:v0.28.0-pegaflow-pr455-51261c6-cu130`（torch 2.13 cu130）
+- env：`CUDA_VISIBLE_DEVICES=7`、**`VLLM_BATCH_INVARIANT=1`**、`PYTHONHASHSEED=0`
+- 同镜像还有个 `pegaflow-server-test` 容器（KV 缓存服务）
+
+### 基线实测（2026-10-21，`/tmp/kaon_bench.py`，流式 / ignore_eos / temp 0 / 随机 prompt）
+
+| 并发 | prompt | out | TTFT p50 / p99 (ms) | TPOT p50 (ms) | out tok/s | req/s |
+|---|---|---|---|---|---|---|
+| 1 | 128 | 128 | 122.1 / 122.1 | 8.34 | 108.3 | 0.85 |
+| 8 | 128 | 128 | 175.4 / 184.4 | 9.11 | 758.2 | 5.92 |
+| 32 | 128 | 128 | 372.6 / 451.4 | 11.15 | 2261.3 | 17.67 |
+
+**1.2× 门槛（out tok/s）**：c1 ≥ 130、c8 ≥ 910、c32 ≥ 2714；TTFT 不高于上表。
+
+### dinfer 现状差距（必须补齐的）
+
+| 能力 | dinfer 现在 | Kaon-V3 需要 |
+|---|---|---|
+| 架构 | qwen3 / qwen35 / glm53 / kimik3 | **Gemma4（无）** |
+| MoE 路由 | `moe.cu` 有 sigmoid top-k + 分桶（DeepSeek 口径） | Gemma 路由 + `per_expert_scale` + `layer_scalar` |
+| NVFP4 GEMM | 只有 `mxfp4.cu` 的**反量化参考**（块 32、e8m0 缩放） | **NVFP4 = 块 16 + e4m3 缩放 + 二级 global scale**，格式不同 |
+| FP8 GEMM | **无** | attn 与 dense MLP 全是 FP8 |
+| 滑窗注意力 | 无（全是全注意力） | 25 层窗口 1024 |
+| QK-norm / K==V | 无 / `attention_k_eq_v` | 需要 |
+| 多模态 | 无 | 视觉塔 + 音频塔（**首轮先跳过**，走纯文本路径） |
+| arch | 86/89/90/100/103 | **120（RTX 5090，sm_120）** |
+
+### 机器环境
+
+- **宿主机没有 nvcc / rustc / torch / pip**；只有 python3
+- 容器 `kaon-vllm-pegaflow` 里有 `nvcc 13.0`、`torch 2.13.0+cu130`
+- 128 核 / 503 GB 内存；`/` 439G（剩 332G）、`/hf_data` 1.4T（剩 1.3T）
 
 ## 卡点
 
