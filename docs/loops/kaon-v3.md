@@ -904,3 +904,24 @@ docker run --rm --entrypoint bash --gpus device=0 \
 的签名是 `(float2, __NV_E2M1, cudaRoundNearest)`；**e4m3 次正规公式是 `m/8·2^-6`**，探针与参考侧都多乘了
 一个 1/8（`0x23` 被解成 0.005859 而非 0.171875）；`scale_vec::4X` 的 u32 四字节是 **4 个连续
 16-元素 k-block、lane 共享**。
+
+## 阶段 3：模型主体打通（2026-10-22 凌晨）
+
+`models/kaon3` 现在是完整的模型 crate，**`cargo build --release -p dinfer-kaon3`（CUDA_ARCHS=120）通过**：
+
+| 文件 | 内容 |
+|---|---|
+| `config.rs` | Gemma4 配置解析（proportional rope 分母 = head_dim；单测已过） |
+| `weights.rs` | 三格式加载 + `per_expert_scales`（按层读 `[E]` 向量） |
+| `layer.rs` | `QLinear`（Bf16/Fp8/NvFp4）/ `Expert` / `Router` / `Gemma4Layer::load` / `LayerScratch` / `StepCtx` / `forward`（九步，含写 KV、窗口 attention、dense ∥ MoE、layer_scalar） |
+| `model.rs` | `KaonModel`：embed×√h → 30 层 → final norm → tied lm_head → softcap；`alloc_kv` 逐层分配（滑窗 256 / 全注意力 512） |
+
+**配套 kernel（本轮新增，都已编译）**：`scale_bf16`（原地乘标量）、`mul_row_bf16`（逐行乘向量）、
+`gelu_tanh_mul_bf16`（双缓冲）、`softcap_bf16`（`tanh(x/c)·c`）、无权重 `rmsnorm`、gqa 滑窗、
+`gemm_fp8` / `gemm_nvfp4`（子代理移植）。
+
+**`per_expert_scale` 已折进专家 `down_proj` 的 NVFP4 全局 scale**（加载期，精确；理由见上节）。
+
+**未验证**：整模型还没跑过一次真实前向——缺 `kaon3_probe` 的端到端入口与对拍脚本。
+**下一步**：① 子代理的 NVFP4 吞吐（<450 TF/s 则 Expert 层不达标）；② 端到端跑一次真实权重、
+与 `/hf_data/yaochen/work/kaon_forward.py` 的 torch 参考逐层对拍；③ 窗口=0 回归；④ 阶段 4 服务。
