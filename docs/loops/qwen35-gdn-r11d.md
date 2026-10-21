@@ -534,3 +534,46 @@ CUDA_VISIBLE_DEVICES=4 /tmp/correct7
 ### 已加的细分计时
 `[ld] issue / wait / sync  us/chunk` —— `__pipeline_wait_prior(0)` 的阻塞、发射开销、
 `__syncthreads` 三者分开，用来确认 load 的 60% 到底卡在"发射"还是"等待"。
+
+## 2026-10-21 load 段三连改：1613 → 1068 µs
+
+### 1. 定位：load 的 60% 不是带宽、不是等 cp.async，是**散射 smem 写**
+细分计时（`[ld] issue/wait/sync | q w kgload aq kgtr`）一测就清楚了：
+
+| 项 | 改前 (µs/chunk) | 说明 |
+|---|---|---|
+| `q` | 0.33 | cp.async，正常 |
+| `w` | 0.30 | cp.async，正常 |
+| `kgt` | **7.3** | 同样的 16 KB，是 q/w 的 22 倍 |
+| `aq` | 0.13 | cp.async |
+| `wait_prior` | 0.64 | 原来以为的瓶颈，其实很小 |
+
+`kgt` 慢在**转置写**：源 `kg[token][K]` 的 8 个连续 bf16 沿 K，而 `kgT` 里连续的 8 个沿 token，
+原来用 8 次 2 B 的散射 smem 写，每个线程 64 次。
+
+### 2. 解法：cp.async 装自然布局 + **寄存器内 8×8 块转置**
+像 `w` 一样 cp.async 装到中转区 `skgn`（复用原来 `skg` 空出来的 16 KB），
+wait 之后每线程持有一个完整 8 token × 8 K 的块：8 次 `uint4` 读 + 8 次 `uint4` 写。
+
+| 项 | 改后 (µs/chunk) |
+|---|---|
+| `kgload` | 0.30（和 w 一样了） |
+| `kgtr` | 0.51 |
+| **`kgt` 合计** | **0.81**（原 7.3，**9×**） |
+
+**1×8192：1613 → 1068 µs（8.34 µs/chunk）**，1×256 对拍 `out`/`state` 零误差。
+
+### 3. 顺手删掉的
+- `skg`：装进 smem 后**一次都没被读过**（GEMM(4) 只用 `kgT`），每 chunk 白读 16 KB。
+- `Aq` 的 cp.async 原来单独成组、**从未被 wait**，靠下一轮顺带冲刷 → 并入主组。
+
+### 4. 试过但失败：256 线程提 vp 的并行度
+vp 段原来只有 `myrow < kBT=64` 的线程有活（64/128）。想用 8 warp（256 线程）、
+warp 4-7 读同样的 TMEM lane 但只干 v 的右半列。
+
+**失败**：1068 → 1493 µs。`kgtr` 65 → 111、o 段 4% → 15% —— 多出来的线程抢寄存器导致 spill。
+回退。**教训**：核内并行度不能靠加线程硬拉，寄存器预算先算。
+
+### 5. 计数口径踩坑
+`tot/1900.0` 里的 1900 是 **clock64 频率（约 1.9 GHz）**，不是 chunk 数；
+逐 chunk 要再除 `nt`。我一度改成 `tot/(double)nt`，把 8.34 印成 14325。

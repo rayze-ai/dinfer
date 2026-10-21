@@ -519,8 +519,8 @@ __global__ void __launch_bounds__(kThreads) gdn_ho_umma_kernel(
     printf("[prof] load %.0f%% g1 %.0f%% vp %.0f%% g23 %.0f%% o %.0f%% g4 %.0f%% hupd %.0f%% (%.2f us)\n",
       t_load*100/tot, t_g1*100/tot, t_vp*100/tot, t_g23*100/tot, t_o*100/tot, t_g4*100/tot, t_hu*100/tot, tot/1900.0);
     printf("[ld] issue %.2f wait %.2f sync %.2f | q %.2f w %.2f kgload %.2f aq %.2f kgtr %.2f us/chunk\n",
-      t_issue/1900.0, t_wait/1900.0, t_sync/1900.0,
-      t_part[0]/1900.0, t_part[1]/1900.0, t_part[2]/1900.0, t_part[3]/1900.0, t_ktr/1900.0);
+      t_issue/(1900.0*nt), t_wait/(1900.0*nt), t_sync/(1900.0*nt),
+      t_part[0]/(1900.0*nt), t_part[1]/(1900.0*nt), t_part[2]/(1900.0*nt), t_part[3]/(1900.0*nt), t_ktr/(1900.0*nt));
   }
 
   // 末态回写
