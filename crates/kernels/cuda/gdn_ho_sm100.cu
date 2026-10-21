@@ -376,9 +376,21 @@ __global__ void __launch_bounds__(kThreads) gdn_ho_umma_kernel(
     // 想再快需要把 wh 先落 smem 再全线程分摊 —— 但 store 量翻倍，实测不划算，保持现状。
     if (myrow < kBT) {
       const bf16* urow = (myrow < len) ? (u + (row0 + myrow) * vstride + (long)hv * V) : nullptr;
-      for (int kc = 0; kc < kV; ++kc) {
-        const float vp = urow ? (dinfer::to_f32(urow[kc]) - tmp[kc]) : 0.f;
-        svp[(size_t)(kc * 8 + (((myrow >> 3) ^ (kc & 7)))) * 8 + (myrow & 7)] = dinfer::to_bf16(vp);
+      // 一次处理 8 个 v：uint4 读 u（全局，8 个 bf16 = 16 B 合并访存）+ 8 个 swizzle 写。
+      // 原来 128 次标量读（每次 2 B、不合并）是 vp 段 11.8 µs/chunk 的根因。
+      for (int c8 = 0; c8 < kV; c8 += 8) {
+        uint4 raw = urow ? *reinterpret_cast<const uint4*>(urow + c8) : make_uint4(0, 0, 0, 0);
+        const __nv_bfloat162* r2 = reinterpret_cast<const __nv_bfloat162*>(&raw);
+#pragma unroll
+        for (int e = 0; e < 4; ++e) {
+          const int kc = c8 + 2 * e;
+          const float v0 = dinfer::to_f32(r2[e].x) - tmp[kc];
+          const float v1 = dinfer::to_f32(r2[e].y) - tmp[kc + 1];
+          // 同一 token 的连续元素在 swizzle 后落在同一 16 B 块行内不连续 -> 逐个写
+          svp[(size_t)(kc * 8 + (((myrow >> 3) ^ (kc & 7)))) * 8 + (myrow & 7)] = dinfer::to_bf16(v0);
+          svp[(size_t)((kc + 1) * 8 + (((myrow >> 3) ^ ((kc + 1) & 7)))) * 8 + (myrow & 7)] =
+              dinfer::to_bf16(v1);
+        }
       }
     }
     __syncthreads();
