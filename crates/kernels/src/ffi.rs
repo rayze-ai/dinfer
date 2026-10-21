@@ -1082,6 +1082,24 @@ extern "C" {
                               kv_stride: i32, block_size: i32, max_blocks: i32, skip_single: i32, prof: *mut c_void,
                               stream: cudaStream_t) -> i32;
 }
+/// GDN ho 段的 tcgen05（UMMA）版（`gdn_ho_sm100.cu`，r11d）：BV = 全 V、h 主本在 state、A 补零到 M=128。
+/// 未编入（CUDA_ARCHS 无 100/103 或 no-nvcc）时返回 CUDA_ERROR_NOT_SUPPORTED，调用方回退 `gdn_chunk_ho`。
+#[cfg(all(not(no_nvcc_stub), mega_sm100))]
+extern "C" {
+    pub fn gdn_ho_umma(qn: *const c_void, gc: *const f32, aq: *const c_void, u: *const c_void, w: *const c_void,
+                       kg: *const c_void, o: *mut c_void, st: *mut c_void, cu: *const i32, nt: *const i32,
+                       si: *const i32, sst: i64, ns: i64, h: i64, hv: i64, k: i64, v: i64,
+                       s: cudaStream_t) -> i32;
+}
+#[cfg(not(all(not(no_nvcc_stub), mega_sm100)))]
+#[allow(clippy::missing_safety_doc, clippy::too_many_arguments)]
+pub unsafe fn gdn_ho_umma(_qn: *const c_void, _gc: *const f32, _aq: *const c_void, _u: *const c_void,
+                          _w: *const c_void, _kg: *const c_void, _o: *mut c_void, _st: *mut c_void,
+                          _cu: *const i32, _nt: *const i32, _si: *const i32, _sst: i64, _ns: i64, _h: i64,
+                          _hv: i64, _k: i64, _v: i64, _s: cudaStream_t) -> i32 {
+    CUDA_ERROR_NOT_SUPPORTED
+}
+
 #[cfg(not(all(not(no_nvcc_stub), mega_sm100)))]
 #[allow(clippy::missing_safety_doc)]
 pub unsafe fn umma_peak_launch(_a: *const c_void, _b: *const c_void, _c: *mut c_void, _k: i64, _b2: i64,

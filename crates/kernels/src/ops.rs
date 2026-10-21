@@ -4064,6 +4064,50 @@ pub fn gdn_chunk_wy_with(
 
 /// 第 3 段：跨 chunk 扫 h（fp32，`state` 原地）并输出 `out` `[T, HV, V]` bf16。
 #[allow(clippy::too_many_arguments)]
+/// ho 段的 tcgen05（UMMA）版（r11d）：BV = 全 V、h 主本在 state、A 补零到 M=128。
+/// 只在 K=V=128 的形状可用；返回 `cudaErrorInvalidValue` 时调用方应回退 `gdn_chunk_ho`。
+/// 参数口径与 [`gdn_chunk_ho`] 一致（`qn/gc/aq/u/w/kg` 都是 `GdnChunkScratch` 里的字段）。
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_ho_umma(
+    stream: &Stream,
+    sc: &GdnChunkScratch,
+    out: &mut CudaSlice<bf16>,
+    state: &mut CudaSlice<f32>,
+    cu_seqlens: &CudaSlice<i32>,
+    cu_nt: &CudaSlice<i32>,
+    state_indices: Option<&CudaSlice<i32>>,
+    state_stride_tok: i64,
+    num_seqs: usize,
+    heads_k: usize,
+    heads_v: usize,
+    k_dim: usize,
+    v_dim: usize,
+) -> Result<()> {
+    // SAFETY: 容量由调用方校验（`sc` 与本步 tokens / chunks 一致）；shape 由 kernel 侧再校验一次。
+    check(unsafe {
+        ffi::gdn_ho_umma(
+            stream.ptr(&sc.qn) as *const c_void,
+            stream.ptr(&sc.gc) as *const f32,
+            stream.ptr(&sc.aq) as *const c_void,
+            stream.ptr(&sc.u) as *const c_void,
+            stream.ptr(&sc.w) as *const c_void,
+            stream.ptr(&sc.kg) as *const c_void,
+            stream.ptr(out) as *mut c_void,
+            stream.ptr_mut(state) as *mut c_void,
+            stream.ptr(cu_seqlens) as *const i32,
+            stream.ptr(cu_nt) as *const i32,
+            state_indices.map_or(std::ptr::null(), |x| stream.ptr(x) as *const i32),
+            state_stride_tok,
+            num_seqs as i64,
+            heads_k as i64,
+            heads_v as i64,
+            k_dim as i64,
+            v_dim as i64,
+            stream.raw() as _,
+        )
+    }, "gdn_ho_umma")
+}
+
 pub fn gdn_chunk_ho(
     stream: &Stream,
     cu_seqlens: &CudaSlice<i32>,

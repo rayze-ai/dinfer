@@ -255,6 +255,41 @@ impl ArchProfile {
         Self::gdn_chunk_ho_bv_for(Arch::Sm8x, sm_count, base_blocks, k_dim, v_dim)
     }
 
+    /// 当前**编译目标**是否含 Blackwell（`gdn_ho_sm100.cu` / `gqa_fa_sm100.cu` 等只在这些目标下编入）。
+    /// 与 `ffi::gdn_ho_umma` 的 `mega_sm100` cfg 同源（build.rs 的 `CUDA_ARCHS` 含 100/103 时置位）。
+    pub const fn has_sm100() -> bool {
+        cfg!(mega_sm100)
+    }
+
+    /// GDN chunk prefill 的 ho 段是否走 **tcgen05（UMMA）版**（r11d，`gdn_ho_umma`）。
+    ///
+    /// 卡型分支（用户 2026-10-21：按卡型设置的参数要有 case）：
+    /// - **Sm100（B300 / sm_103）**：默认开。前提是 K == V == 128（kernel 的 A 操作数要 M=128 补零，
+    ///   内存布局按这两个维度写死）；形状不满足返回 false，调用方回退 `gdn_chunk_ho`。
+    /// - **Sm90 / Sm8x**：一律 false —— tcgen05 是 Blackwell 专有指令，`gdn_ho_sm100.cu` 根本不编进它们的 target。
+    ///
+    /// 环境变量 `GDN_HO_UMMA=0/1` 覆盖（0 = 强制回退 mma.sync 版，用于 A/B 与排障）。
+    pub fn gdn_ho_umma(arch: Arch, k_dim: usize, v_dim: usize) -> bool {
+        if let Ok(v) = std::env::var("GDN_HO_UMMA") {
+            if v == "0" {
+                return false;
+            }
+            if v == "1" {
+                return matches!(arch, Arch::Sm100) && k_dim == 128 && v_dim == 128;
+            }
+        }
+        // 没有编入 sm100 文件时，符号是返回 NotSupported 的桩，这里直接关掉。
+        if !Self::has_sm100() {
+            return false;
+        }
+        match arch {
+            // Blackwell：tcgen05 + 全 V（不切片），h 主本在 state，A 补零到 M=128。
+            Arch::Sm100 => k_dim == 128 && v_dim == 128,
+            // Ampere/Ada/Hopper：mma.sync 路径，没有 tcgen05。
+            Arch::Sm8x | Arch::Sm90 => false,
+        }
+    }
+
     /// 按卡型 + 形状选 BV（r10 第 6–7 轮，B300 GPU 7 实测）：
     /// - Sm100 多了 **64 档**（每 warp 8 个 h tile、o / w 各 8 条独立 mma 链，ILP ×2；仅 K=128 有特化）：block 多时赢
     ///   （8×1024：1536 → 768 block，ho 382 → 308 µs，−19%），block 少时输（1×8192：192 → 96 block，504 → 595）——

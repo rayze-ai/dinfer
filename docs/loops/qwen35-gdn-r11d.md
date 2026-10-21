@@ -326,3 +326,46 @@ token 在两种用法里都是 K 维，但 A/B 的 MN-major 语义不同，LBO/S
 | **合计** | **176.5 KB** | h 的 f32 主本放全局 `state`（每 chunk 读写 32 KB） |
 
 寄存器：**REG 168 / STACK 0**。
+
+---
+
+## 2026-10-21 09:xx B300 首轮性能数（UMMA 版已接 C ABI 与 ArchProfile）
+
+### 数字（B300-50 GPU 4，CUDA_ARCHS=103，`gdn_chunk_bench`，连出两次一致）
+
+| 形状 | 现有 ho（bv64）| UMMA 版 | 对比 |
+|---|---|---|---|
+| 1×1024 | 59 µs | **867** | 15× 慢 |
+| 8×1024 | 309 | **3561** | 11× 慢 |
+| 32×128 | 180 | **1648** | 9× 慢 |
+| 1×4096 | 302 | **3943** | 13× 慢 |
+| 1×8192 | 595 | **7893** | 13× 慢 |
+
+全链（prep + wy + ho + conv）不受影响，因为默认路径没切（`ArchProfile::gdn_ho_umma` 只在
+`GDN_HO_UMMA=1` 或显式调用时走）。
+
+### 慢的结构性原因（不是我算漏了 2× 补零，是并行度）
+
+UMMA 版 grid = `HV × seq`，**1×8192 时只有 48 个 block**，而 B300 有 148 个 SM —— 只用到 32% 的卡。
+现有路径靠 `BV` 切片（V/64 = 2 份）+ mma.sync 多 warp 掩盖延迟。
+
+我在设计阶段算的那笔账（"tcgen05 2236 TF/s，51.6 GFLOP 只要 46 µs"）**漏掉了并行度**：
+2236 TF/s 是 148 个 block 全部在跑时的数字，48 个 block 只能拿到约 1/3。
+再叠加 M=128 补零的 2× FLOP 浪费（AB 两个操作数各补一半零行），实际效率更低。
+
+### 下一步（必须先定方向，不要再直接改代码）
+
+1. **恢复 V 切片**：BV=64 → grid ×2 = 96 block，BV=32 → 192 block。但 h 的 f32 主本要按 BV 切，
+   而 `h[v][k]` 的 v 维正好是 BV 切的维度，切了不影响正确性（每个 block 只管自己那段 v）。
+   这是最直接的改法，预期 7893 → ~2600（1×8192）。
+2. **或者接受结论**：GDN 的 ho 段在单序列长 prefill 下并行度天然不足（48 个 hv × 1 条序列），
+   tcgen05 换不来收益，转回 mma.sync 并把精力放到别处。
+3. 需要先算清：BV=64 时 smem 能否装下（现在 176.5 KB 是按 BV=128 算的，BV=64 会减到约 130 KB）。
+
+### 已落地的接口（都过编译 + 3090 对拍 16/16）
+
+- `kernels.h` / `ffi.rs`（含 sm100 条件编译 + NotSupported 桩）/ `ops.rs::gdn_ho_umma`
+- `arch.rs::ArchProfile::gdn_ho_umma(arch, k, v)` + `has_sm100()`，**卡型 case 分支**：
+  Sm100 且 K=V=128 → true；Sm90/Sm8x → false；`GDN_HO_UMMA=0/1` 覆盖
+- `models/qwen35/src/gdn.rs` 调用点（有快照时回退 mma.sync）
+- `build.rs` 白名单加 `gdn_ho_sm100`

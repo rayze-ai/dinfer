@@ -252,6 +252,14 @@ int gdn_chunk_prep(const void* mixed_qkv, const float* g, void* qn, void* kn, fl
 int gdn_chunk_wy(const void* qn, const void* kn, const void* mixed_qkv, const float* gc, const float* beta,
                  void* aq, void* u, void* w, void* kg, const int* cu_seqlens, const int* chunk_tab,
                  int64_t num_chunks, int64_t H, int64_t HV, int64_t K, int64_t V, int64_t bt, int64_t wy_mode, cudaStream_t stream);
+// r11d（docs/loops/qwen35-gdn-r11d.md）：ho 段的 tcgen05（UMMA）版。
+// BV = 全 V（不切片），h 常驻全局 state（f32 主本），四个 GEMM 全走 tcgen05，A 操作数 M 补零到 128。
+// 只有 sm_103 + K=V=128 时可用；返回 cudaErrorInvalidValue 表示形状不支持，调用方回退 gdn_chunk_ho。
+int gdn_ho_umma(const void* qn, const float* gc, const void* aq, const void* u, const void* w, const void* kg,
+                void* out, void* state, const int* cu_seqlens, const int* cu_nt, const int* state_indices,
+                int64_t state_stride_tok, int64_t num_seqs, int64_t H, int64_t HV, int64_t K, int64_t V,
+                cudaStream_t stream);
+
 int gdn_chunk_ho(const void* qn, const float* gc, const void* aq, const void* u, const void* w, const void* kg,
                  void* out, void* state, const int* cu_seqlens, const int* cu_nt, const int* chunk_off,
                  const int* state_indices, int64_t state_stride_tok, int64_t num_seqs, int64_t H, int64_t HV,

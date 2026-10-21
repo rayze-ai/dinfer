@@ -41,7 +41,7 @@ fn main() {
     if has_sm100 {
         println!("cargo:rustc-cfg=mega_sm100");
     }
-    let sm100_only = ["mega_sm100", "gqa_fa_sm100", "umma_peak_sm100"];
+    let sm100_only = ["mega_sm100", "gqa_fa_sm100", "umma_peak_sm100", "gdn_ho_sm100"];
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let profile = env::var("PROFILE").unwrap_or_default();
     let opt = if profile == "release" { "-O3" } else { "-O2" };

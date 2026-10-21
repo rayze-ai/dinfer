@@ -430,21 +430,50 @@ impl GdnLayer {
                 }),
                 None => None,
             };
-            k::gdn_chunk_ho_snap(
-                stream,
-                &meta.cu_seqlens.data,
-                plan,
-                sc,
-                &mut abuf.o.data,
-                &mut self.state.rec.data,
-                Some(&meta.state_indices.data),
-                t,
-                h,
-                hv,
-                kd,
-                vd,
-                snap,
-            )?;
+            // r11d：ho 段可走 tcgen05（UMMA）版 —— BV = 全 V、h 主本在 state、A 补零到 M=128。
+            // 选路见 `ArchProfile::gdn_ho_umma`（Sm100 且 K=V=128 才开，`GDN_HO_UMMA` 可覆盖）。
+            // tcgen05 版暂不支持步内快照（`snap`），有快照时回退 mma.sync 路径。
+            // 架构按**实际编译目标**判：`gdn_ho_sm100.cu` 只在 CUDA_ARCHS 含 100/103 时编入，
+            // 其它目标下 `ffi::gdn_ho_umma` 是返回 CUDA_ERROR_NOT_SUPPORTED 的桩。
+            // 架构按**编译目标**判：没编入 sm100 文件时 `ArchProfile::has_sm100()` 为 false，
+        // `ffi::gdn_ho_umma` 也只是返回 NotSupported 的桩，这里直接走 mma.sync。
+        // 卡型分支在 `ArchProfile::gdn_ho_umma` 里（Sm100 开、Sm90/Sm8x 关）。
+        let use_umma = snap.is_none()
+            && k::arch::ArchProfile::gdn_ho_umma(k::arch::Arch::Sm100, kd, vd);
+            if use_umma {
+                let stride = (self.state.rec.numel() / self.state.rec.shape[0] / hv) as i64;
+                k::ops::gdn_ho_umma(
+                    stream,
+                    sc,
+                    &mut abuf.o.data,
+                    &mut self.state.rec.data,
+                    &meta.cu_seqlens.data,
+                    &plan.cu_nt,
+                    Some(&meta.state_indices.data),
+                    stride,
+                    meta.num_reqs,
+                    h,
+                    hv,
+                    kd,
+                    vd,
+                )?;
+            } else {
+                k::gdn_chunk_ho_snap(
+                    stream,
+                    &meta.cu_seqlens.data,
+                    plan,
+                    sc,
+                    &mut abuf.o.data,
+                    &mut self.state.rec.data,
+                    Some(&meta.state_indices.data),
+                    t,
+                    h,
+                    hv,
+                    kd,
+                    vd,
+                    snap,
+                )?;
+            }
         } else {
             ensure!(meta.snapshot.is_none(), "gdn: 边界快照只支持 chunk prefill 路径（GDN_PREFILL=recurrent 不支持步内快照）");
             let (g, beta, a_raw, b_raw) = if single {

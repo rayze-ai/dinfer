@@ -71,6 +71,11 @@ constexpr int kBKTile = 64;              // 128 B / sizeof(bf16)
 constexpr uint32_t kSboKMajor128B = 8 * 128;  // 1024 B
 
 __device__ __forceinline__ uint64_t k_major_128b_desc(uint32_t saddr) {
+  // CUTLASS `make_umma_desc<Major::K>` 的 canonical（mma_sm100_desc.hpp:833）：
+  //   B128 : Swizzle<3,4,3> o smem_ptr o ((8,n),2):((8,SBO),1)
+  // 注意：那个 `1` 是 **uint128 单位的 stride**，不是 LBO 字节字段的值。
+  // B128 + K-major 时 K 方向的两半由 swizzle 自身定位，LBO 保持 0。
+  // （2026-10-21 实测：把 LBO 填成 16 会让 w·hᵀ 从 4.4047 掉到 3.09 —— 里程碑 1 的 lbo=0 是对的。）
   return make_smem_desc(saddr, /*lbo=*/0, /*sbo=*/kSboKMajor128B, kSwz128B);
 }
 

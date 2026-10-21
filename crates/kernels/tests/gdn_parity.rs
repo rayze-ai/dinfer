@@ -7,7 +7,7 @@
 //! f32 递归状态 2e-3（状态是累乘结果，比单步输出敏感）。
 #![cfg(feature = "ref-tests")]
 
-use dinfer_kernels::arch::GdnDecodeVariant;
+use dinfer_kernels::arch::{self, GdnDecodeVariant};
 use dinfer_kernels::{bf16, ops, ops::GdnAct, Device, Stream};
 use std::path::PathBuf;
 
@@ -657,6 +657,16 @@ fn bench_case(st: &Stream, nseq: usize, len: usize, h: usize, hv: usize, k: usiz
         ("bv32pfsp", ops::GdnChunkHo { bv: 32, prefetch: true, split: true }),
     ] {
         ho.push((name, time_us(st, iters, || ops::gdn_chunk_ho_with(st, &dcu, &plan, &sc, &mut out, &mut state, None, t, h, hv, k, v, how).unwrap())));
+    }
+    // r11d：tcgen05（UMMA）版 ho —— BV = 全 V、A 补零到 M=128、h 主本在 state。
+    // 只有 CUDA_ARCHS 含 100/103 且 K=V=128 时可用（否则 ffi 是返回 NotSupported 的桩）。
+    if arch::ArchProfile::gdn_ho_umma(arch::Arch::Sm100, k, v) {
+        let sidx = st.htod_copy(vec![0i32; nseq]).unwrap();
+        let stride = (v * k) as i64;
+        ho.push(("umma", time_us(st, iters, || {
+            ops::gdn_ho_umma(st, &sc, &mut out, &mut state, &dcu, &plan.cu_nt, Some(&sidx), stride,
+                             nseq, h, hv, k, v).unwrap()
+        })));
     }
     // conv1d prefill（dim = row，width 4）
     let width = 4;
