@@ -21,6 +21,7 @@
 //
 // 只在 CUDA_ARCHS 含 100/103 时编入（build.rs 的 sm100_only 白名单）。
 #include "common.cuh"
+#include <cstdio>
 #include "umma.cuh"
 
 namespace {
@@ -31,29 +32,36 @@ using umma::smem_u32;
 constexpr int kBT = 64;
 constexpr int kK = 128;
 constexpr int kV = 128;
+constexpr int kM = 128;      // tcgen05 的 A 操作数 M 必须是 128（M=64 静默算错，见 knowledge/kernel-rules）
 constexpr int kThreads = 128;
 constexpr int kDepth = 4;
 
 struct Smem {
   static constexpr int kblk = kK / 64;                  // 2 个 64 列的 K 块
-  static constexpr int off_h = 0;                       // h 的 bf16 影子 [V][64]×kblk
+  // 凡是要当 A 操作数的矩阵，M 方向都补到 kM=128（多出的行填 0）。
+  static constexpr int off_h = 0;                       // h 的 bf16 影子 [V=128][64]×kblk（当 B）
   static constexpr int h_elems = kV * 64 * kblk;
-  static constexpr int off_q = off_h + h_elems;         // q [BT][64]×kblk
-  static constexpr int row_elems = kBT * 64 * kblk;
-  static constexpr int off_w = off_q + row_elems;
-  static constexpr int off_kg = off_w + row_elems;
-  static constexpr int off_aq = off_kg + row_elems;     // Aq [BT][BT]
-  static constexpr int aq_elems = kBT * 64;
-  static constexpr int off_vp = off_aq + aq_elems;      // v' [BT][V]，V 连续
-  static constexpr int vp_elems = kBT * 64 * kblk;
-  static constexpr int bf16_elems = off_vp + vp_elems;
+  static constexpr int off_q = off_h + h_elems;         // q [kM][64]×kblk（当 A）
+  static constexpr int am_elems = kM * 64 * kblk;
+  static constexpr int off_w = off_q + am_elems;        // w [kM][64]×kblk（当 A）
+  static constexpr int kg_elems = kBT * 64 * kblk;
+  static constexpr int off_kg = off_w + am_elems;       // kg [BT][64]×kblk（当 B，MN=K，不用补）
+  static constexpr int off_aq = off_kg + kg_elems;      // Aq [kM][kM]（当 A）
+  static constexpr int aq_elems = kM * 64;
+  static constexpr int off_vp = off_aq + aq_elems;      // v' 当 B：[V][token]，K 维 = token 连续
+  static constexpr int vp_elems = kV * 64;
+  static constexpr int off_vt = off_vp + vp_elems;      // v'ᵀ [V][kM]（当 A，K 维 = token）
+  static constexpr int vt_elems = kV * 64;  // 只有 token 维 64 列，一个块
+  static constexpr int off_kgt = off_vt + vt_elems;     // kgᵀ [K=128][token=64]（(4) 的 B，K 维 = token 连续）
+  static constexpr int kgt_elems = kK * 64;
+  static constexpr int bf16_elems = off_kgt + kgt_elems;
   static constexpr int bf16_bytes = bf16_elems * 2;
   static constexpr int off_tmem = (bf16_bytes + 127) & ~127;
   static constexpr int off_bar = off_tmem + 16;
-  static constexpr int off_hf32 = off_bar + kDepth * 8;        // h 的 f32 主本 [V][K] = 64 KB
-  static constexpr int hf32_bytes = kV * kK * 4;
-  static constexpr int off_dec = off_hf32 + hf32_bytes;
-  static constexpr int bytes = off_dec + kBT * 4;
+  // h 的 f32 主本不放 smem（M=128 补零后 bf16 区已占 176 KB，227 KB 上限装不下 64 KB 的 f32）。
+  // 改放全局 state：每 chunk 读一次、写一次（16 KB + 16 KB），在 6 TB/s 下可忽略。
+  static constexpr int off_dec = off_bar + kDepth * 8;
+  static constexpr int bytes = off_dec + kM * 4;
 };
 
 constexpr int kTmemAcc = 128;   // 工作累加器（N=V=128 列）
@@ -70,9 +78,10 @@ __device__ __forceinline__ void stage_tile(bf16* dst, const bf16* src, int rows,
 // q 装载时先乘 dec（按 token 行），使 (2) 直接产出 (q·hᵀ)·dec，与 (3) 能在同一累加器上连续累加。
 __device__ __forceinline__ void stage_q_dec(bf16* dst, const bf16* src, int rows, int src_stride, const float* dec,
                                             int tid) {
-  for (int i = tid; i < rows * 8; i += kThreads) {
+  for (int i = tid; i < kM * 8; i += kThreads) {
     const int row = i >> 3, blk = i & 7;
     const int phys = row * 8 + (blk ^ (row & 7));
+    if (row >= rows) { *reinterpret_cast<uint4*>(dst + (size_t)phys * 8) = make_uint4(0, 0, 0, 0); continue; }
     const float d = dec[row];
     const uint4 raw = *reinterpret_cast<const uint4*>(src + (size_t)row * src_stride + blk * 8);
     const __nv_bfloat162* r2 = reinterpret_cast<const __nv_bfloat162*>(&raw);
@@ -84,6 +93,30 @@ __device__ __forceinline__ void stage_q_dec(bf16* dst, const bf16* src, int rows
       o32[e] = *reinterpret_cast<const uint32_t*>(&v2);
     }
     *reinterpret_cast<uint4*>(dst + (size_t)phys * 8) = out;
+  }
+}
+
+// 把 [rows,64] 的 bf16 行主序 tile 写成 128 B swizzle，并把 [rows, kM) 行补零。
+__device__ __forceinline__ void stage_tile_pad(bf16* dst, const bf16* src, int rows, int src_stride, int tid) {
+  const int nblk = kM * 8;
+  for (int i = tid; i < nblk; i += kThreads) {
+    const int row = i >> 3, blk = i & 7;
+    const int phys = row * 8 + (blk ^ (row & 7));
+    uint4 v = make_uint4(0, 0, 0, 0);
+    if (row < rows) v = *reinterpret_cast<const uint4*>(src + (size_t)row * src_stride + blk * 8);
+    *reinterpret_cast<uint4*>(dst + (size_t)phys * 8) = v;
+  }
+}
+
+// 补零到 rows_pad 行（kM 或 kBT 都可用）。
+__device__ __forceinline__ void stage_tile_pad_rows(bf16* dst, const bf16* src, int rows, int src_stride,
+                                                    int rows_pad, int tid) {
+  for (int i = tid; i < rows_pad * 8; i += kThreads) {
+    const int row = i >> 3, blk = i & 7;
+    const int phys = row * 8 + (blk ^ (row & 7));
+    uint4 v = make_uint4(0, 0, 0, 0);
+    if (row < rows) v = *reinterpret_cast<const uint4*>(src + (size_t)row * src_stride + blk * 8);
+    *reinterpret_cast<uint4*>(dst + (size_t)phys * 8) = v;
   }
 }
 
@@ -119,6 +152,11 @@ __device__ __forceinline__ void mma_panel(uint32_t tmem_c, const bf16* a, int ro
   }
 }
 
+
+__device__ __forceinline__ void chk(const void* p, const void* base, int smem_bytes, const char* tag, int a, int b) {
+  const long off = (long)((const char*)p - (const char*)base);
+  (void)tag; (void)a; (void)b; (void)off; (void)smem_bytes;
+}
 int set_smem(const void* fn, int bytes) {
   return dinfer::err(cudaFuncSetAttribute(fn, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes));
 }
@@ -136,9 +174,10 @@ __global__ void __launch_bounds__(kThreads) gdn_ho_umma_kernel(
   bf16* skg = sm16 + Smem::off_kg;
   bf16* sAq = sm16 + Smem::off_aq;
   bf16* svp = sm16 + Smem::off_vp;
+  bf16* svt = sm16 + Smem::off_vt;
+  bf16* skgt = sm16 + Smem::off_kgt;
   uint32_t* tmem_slot = reinterpret_cast<uint32_t*>(smraw + Smem::off_tmem);
   uint64_t* bar = reinterpret_cast<uint64_t*>(smraw + Smem::off_bar);
-  float* shf = reinterpret_cast<float*>(smraw + Smem::off_hf32);
   float* sdec = reinterpret_cast<float*>(smraw + Smem::off_dec);
 
   const int hv = blockIdx.x, seq = blockIdx.y;
@@ -163,25 +202,26 @@ __global__ void __launch_bounds__(kThreads) gdn_ho_umma_kernel(
   __syncthreads();
   const uint32_t t_acc = *tmem_slot;
 
-  // (1)(2)(3) 都是 M=BT、N=V；A 操作数 K-major。
-  const uint32_t idesc_bv = umma::make_instr_desc_bf16(kBT, kV, false, false);
+  // tcgen05 的 A 操作数 M 必须是 128（M=64 静默算错，见 knowledge/kernel-rules）。
+  // 所以所有以 token 为 M 的矩阵都在 M 方向补零到 kM=128，结果只取前 len 行。
+  const uint32_t idesc_bv = umma::make_instr_desc_bf16(kM, kV, false, false);
   // (3) Aq·v'：A=Aq[BT,BT] K-major，B=v'[BT,V] K-major（K 维 = token）
   // (4) v'ᵀ·kg：A=v'ᵀ → v' 的 MN-major 视图（M=V、K=BT）；B=kg[BT,K] K-major
-  const uint32_t idesc_vk = umma::make_instr_desc_bf16(kV, kK, /*a_mn=*/true, false);
+  const uint32_t idesc_vk = umma::make_instr_desc_bf16(kV, kK, false, false);  // (4) 的 M 是 V=128，天然合规
 
   const long vstride = (long)HV * V;   // 按 hv 分段的行跨度
   const long qstride = (long)H * kK;   // qn 按 h 分段的行跨度
 
-  // h 的 f32 主本放 **smem**（shf，64 KB）：每个线程一行 128 个 f32 会占满寄存器预算
-  // （实测 REG 255 + STACK 136 spill）。128 线程各负责 V=128 的一行。
+  // h 的 f32 主本放**全局 state**：M=128 补零后 smem bf16 区已 176 KB，装不下 64 KB 的 f32。
+  // 每 chunk 读一次写一次（各 16 KB），在 6 TB/s 下 ~0.05 µs。
+  // 128 线程各负责 V=128 的一行（myrow），只做 bf16 影子。
   const int myrow = warp * 32 + (tid & 31);
-  const float* hslot = state + (long)slot * state_stride_tok + (long)hv * V * kK;
-  for (int kk = 0; kk < kK; ++kk) shf[(size_t)myrow * kK + kk] = hslot[(size_t)myrow * kK + kk];
+  float* hslot = state + (long)slot * state_stride_tok + (long)hv * V * kK;
   auto stage_h = [&]() {
     for (int kk = 0; kk < kK; ++kk) {
       const int kb = kk >> 6, kc = kk & 63;
       sh[kb * (kV * 64) + (size_t)(myrow * 8 + ((kc >> 3) ^ (myrow & 7))) * 8 + (kc & 7)] =
-          dinfer::to_bf16(shf[(size_t)myrow * kK + kk]);
+          dinfer::to_bf16(hslot[(size_t)myrow * kK + kk]);
     }
   };
   stage_h();
@@ -190,6 +230,9 @@ __global__ void __launch_bounds__(kThreads) gdn_ho_umma_kernel(
   // 只留 hrow（f32 主本，128 个）+ tmp（四个 GEMM 的取回缓冲复用同一个，128 个）——
   // 四个独立数组会让寄存器爆到 255 + spill（实测 STACK 136）。
   float tmp[kK];
+  // mbarrier 的 parity phase：每完成一次翻转。原代码三处都固定传 0，
+  // chunk 1 起等的是尚未发生的到达 -> 读到上一轮/半成品数据（表现为每次运行结果都不同）。
+  uint32_t ph0 = 0, ph1 = 0, ph3 = 0;
   for (int ci = 0; ci < nt; ++ci) {
     const int len = min(kBT, len_seq - ci * kBT);
     const long row0 = bos + (long)ci * kBT;
@@ -198,9 +241,20 @@ __global__ void __launch_bounds__(kThreads) gdn_ho_umma_kernel(
     // 装载 q（按 h 段）、w / kg / Aq（按 hv 段）
     for (int kb = 0; kb < Smem::kblk; ++kb) {
       const int k0 = kb * 64;
-      stage_q_dec(sq + kb * (kBT * 64), qn + row0 * qstride + (long)h * kK + k0, len, (int)qstride, sdec, tid);
-      stage_tile(sw + kb * (kBT * 64), w + ubase + k0, len, (int)vstride, tid);
-      stage_tile(skg + kb * (kBT * 64), kg + ubase + k0, len, (int)vstride, tid);
+      stage_q_dec(sq + kb * (kM * 64), qn + row0 * qstride + (long)h * kK + k0, len, (int)qstride, sdec, tid);
+      stage_tile_pad(sw + kb * (kM * 64), w + ubase + k0, len, (int)vstride, tid);
+      stage_tile_pad_rows(skg + kb * (kBT * 64), kg + ubase + k0, len, (int)vstride, kBT, tid);
+      // kgᵀ [K][token]：(4) 的 B 需要 K 维 = token 连续。
+      // 源 kg[token][K] 的 K 列 = kb*64 + kc，行 = 该 block 内第 tk 个 token。
+      for (int i = tid; i < kBT * 64; i += kThreads) {
+        const int tk = i >> 6, kc = i & 63;              // tk = token 行，kc = 该块内第几个 K
+        const int kk = kb * 64 + kc;                      // kgT 的行号（K 维）
+        const bf16 v = (tk < len) ? kg[(row0 + tk) * vstride + (long)hv * V + kk] : dinfer::to_bf16(0.f);
+        // kgT 行 = kk、列 = tk，128 B swizzle
+        const size_t koff = (size_t)(kk * 8 + ((tk >> 3) ^ (kk & 7))) * 8 + (tk & 7);
+        chk(&skgt[koff], smraw, Smem::bytes, "kgt", kk, tk);
+        skgt[koff] = v;
+      }
     }
     if (tid < kBT) sdec[tid] = (tid < len) ? exp2f(gc[(row0 + tid) * HV + hv]) : 0.f;
     __syncthreads();
@@ -210,11 +264,12 @@ __global__ void __launch_bounds__(kThreads) gdn_ho_umma_kernel(
     {
       // Aq 是 [num_chunks, HV, BT, BT]：一个 chunk 一个 BT×BT 矩阵，行跨度 = BT。
       const bf16* aqc = reinterpret_cast<const bf16*>(aq) + ((long)ci * HV + hv) * kBT * kBT;
-      for (int i = tid; i < kBT * (kBT / 8); i += kThreads) {
-        const int row = i / (kBT / 8), blk = i % (kBT / 8);
+      for (int i = tid; i < kM * 8; i += kThreads) {
+        const int row = i >> 3, blk = i & 7;
         const int phys = row * 8 + (blk ^ (row & 7));
         uint4 v = make_uint4(0, 0, 0, 0);
         if (row < len) v = *reinterpret_cast<const uint4*>(aqc + row * kBT + blk * 8);
+        chk(sAq + (size_t)phys * 8, smraw, Smem::bytes, "aq", row, blk);
         *reinterpret_cast<uint4*>(sAq + (size_t)phys * 8) = v;
       }
     }
@@ -223,26 +278,30 @@ __global__ void __launch_bounds__(kThreads) gdn_ho_umma_kernel(
 
     // ---- (1) wh = w·hᵀ → 取回 → v' = u − wh
     if (warp == 0 && umma::elect_one()) {
-      mma_panel(t_acc, sw, kBT, sh, kV, idesc_bv, false);
+      mma_panel(t_acc, sw, kM, sh, kV, idesc_bv, false);
       umma::mma_commit(bar);
     }
-    umma::mbar_wait(bar, 0);
+    umma::mbar_wait(bar, ph0);
+    ph0 ^= 1;
     umma::fence_after_sync();
     __syncthreads();
     tmem_get_row(tmp, t_acc, kV, tid);
-    // v' 存成 **[v 块][token][64 v]**（与 r12a 的 V 布局同）：块内 token 是行、64 个 v 连续。
-    //   (3) Aq·v'：B 的 MN = v（N 方向 64 一个块，LBO 跳到下一块）、K = token → MN-major 描述符
-    //   (4) v'ᵀ·kg：A 的 M = v、K = token，同一块内存按 MN-major 也是 [M=V, K=token] 的转置视图
-    if (myrow < len) {
-      const bf16* urow = u + (row0 + myrow) * vstride + (long)hv * V;
-      for (int vb = 0; vb < Smem::kblk; ++vb) {
-        for (int kc = 0; kc < 64; ++kc) {
-          const int vv = vb * 64 + kc;
-          const float vp = dinfer::to_f32(urow[vv]) - tmp[vv];
-          // 行 = token（myrow）、列 = kc（该块内的 v），行跨度 64 个 v。
-          svp[vb * (kBT * 64) + (size_t)(myrow * 8 + ((kc >> 3) ^ (myrow & 7))) * 8 + (kc & 7)] =
-              dinfer::to_bf16(vp);
-        }
+    // 两份布局都写（各 16 KB，代价 ~0.1 µs），彻底绕开 MN-major 的不确定性：
+    //   svp [BT][V]：(3) 里当 B，K 维 = token → K-major
+    //   svt [V][BT]：(4) 里当 A，K 维 = token → K-major（就是 v'ᵀ 的显式转置）
+    // v' 的 token 行 [0, len) 有效，[len, kBT) 必须置 0（否则 (3)(4) 读到上一 chunk 的残留）。
+    // **token 维只有 kBT=64 列**：myrow 覆盖 0..127（V 的行），>63 的线程不能写（会越出 64 列）。
+    if (myrow < kBT) {
+      const bf16* urow = (myrow < len) ? (u + (row0 + myrow) * vstride + (long)hv * V) : nullptr;
+      for (int kc = 0; kc < kV; ++kc) {
+        const float vp = urow ? (dinfer::to_f32(urow[kc]) - tmp[kc]) : 0.f;
+        const bf16 vb16 = dinfer::to_bf16(vp);
+        // svp / svt：[V][token]，行 = v(kc)、列 = token(myrow)，每行 64 列 = 128 B = 8 个 16 B 块
+        const size_t off = (size_t)(kc * 8 + (((myrow >> 3) ^ (kc & 7)))) * 8 + (myrow & 7);
+        chk(&svp[off], smraw, Smem::bytes, "svp", myrow, kc);
+        chk(&svt[off], smraw, Smem::bytes, "svt", myrow, kc);
+        svp[off] = vb16;
+        svt[off] = vb16;
       }
     }
     __syncthreads();
@@ -250,20 +309,20 @@ __global__ void __launch_bounds__(kThreads) gdn_ho_umma_kernel(
 
     // ---- (2)+(3) o = (q⊙dec)·hᵀ + Aq·v'：两条 MMA 连续累加到同一累加器，中间不取回。
     if (warp == 0 && umma::elect_one()) {
-      mma_panel(t_acc, sq, kBT, sh, kV, idesc_bv, /*accumulate_first=*/false);
+      mma_panel(t_acc, sq, kM, sh, kV, idesc_bv, /*accumulate_first=*/false);
       // A=Aq[BT,BT]、B=v'[BT,V]：K 维 = BT = 64，一个 K 块。
-      const uint64_t daq = umma::k_major_128b_desc(smem_u32(sAq));
-      // B = v'[v 块][token][64 v]，MN = v、K = token → MN-major。
-      // atom = 8 token × 128 B；LBO = MN 方向下一个 v 块 = kBT*64*2 B；SBO = K 方向下一个 atom = 1024 B。
-      const uint64_t dvp = umma::mn_major_128b_desc(smem_u32(svp), /*lbo=*/kBT * 64 * 2, /*sbo=*/8 * 128);
+      const uint64_t daq = umma::k_major_128b_desc(smem_u32(sAq));  // A = Aq[128, 64]
+      // B = v'[BT][V]，K 维 = token → K-major。A=Aq[BT,BT]、B=[BT,V]，K 维都是 token=64。
+      const uint64_t dvp = umma::k_major_128b_desc(smem_u32(svp));  // B = v'[V][token]
 #pragma unroll
       for (int k = 0; k < 4; ++k) {
-        const uint32_t ko = (uint32_t)(k * 16 * 128) >> 4;  // 16 个 token × 128 B
-        umma::mma_f16(t_acc, daq + ((uint32_t)(k * 16 * 2) >> 4), dvp + ko, idesc_bv, true);
+        const uint32_t ko = (uint32_t)(k * 16 * 2) >> 4;
+        umma::mma_f16(t_acc, daq + ko, dvp + ko, idesc_bv, true);
       }
       umma::mma_commit(bar + 1);
     }
-    umma::mbar_wait(bar + 1, 0);
+    umma::mbar_wait(bar + 1, ph1);
+    ph1 ^= 1;
     umma::fence_after_sync();
     __syncthreads();
     tmem_get_row(tmp, t_acc, kV, tid);
@@ -278,28 +337,27 @@ __global__ void __launch_bounds__(kThreads) gdn_ho_umma_kernel(
     if (warp == 0 && umma::elect_one()) {
       // v' 的 MN-major：atom = 8 token × 128 B；LBO = MN 方向下一块（V 方向 64 个 v 一块）；
       // SBO = K 方向下一个 atom（8 token）= 1024 B。
-      // A = v'ᵀ：v' 是 [v 块][token][64 v]，MN = v、K = token。
-      // 对 A 而言 MN-major 就是「同一块内存按 [K=token 行, MN=v 列] 的转置视图」，正是 v'ᵀ。
-      const uint64_t da = umma::mn_major_128b_desc(smem_u32(svp), /*lbo=*/kBT * 64 * 2, /*sbo=*/8 * 128);
-      const uint64_t db = umma::k_major_128b_desc(smem_u32(skg));
-      // A 的 K 维 = token = 64，B 的 K 维 = token = 64；MN 方向 V=128、N=K=128。
+      // A = v'ᵀ 的显式转置版 svt[V][BT]：K 维 = token 连续 → K-major，与 (1)(2) 同形。
+      const uint64_t da = umma::k_major_128b_desc(smem_u32(svt));
+      // B = kgᵀ[K][token]，K 维 = token 连续 → K-major，与 A 的 K 维对齐。
+      const uint64_t db0 = umma::k_major_128b_desc(smem_u32(skgt));
 #pragma unroll
-      for (int kb = 0; kb < Smem::kblk; ++kb) {
-        const uint64_t dbk = db + (uint32_t)(kb * (kBT * 64 * 2) >> 4);
+      // B = kgT[K=128][token=64] 是一个连续块（N=K=128 行、K=token=64 列），**不分块**。
+      // （原来按 64 列分两块是给 [BT][64]×kblk 布局用的，kgT 改成单块后那会写到数组外。）
 #pragma unroll
-        for (int k = 0; k < 4; ++k) {
-          const uint32_t ko = (uint32_t)(k * 16 * 2) >> 4;  // A：16 个 token
-          umma::mma_f16(t_acc, da + ko, dbk + ko, idesc_vk, kb > 0 || k > 0);
-        }
+      for (int k = 0; k < 4; ++k) {
+        const uint32_t ko = (uint32_t)(k * 16 * 2) >> 4;  // A：16 个 token
+        umma::mma_f16(t_acc, da + ko, db0 + ko, idesc_vk, k > 0);
       }
       umma::mma_commit(bar + 3);
     }
-    umma::mbar_wait(bar + 3, 0);
+    umma::mbar_wait(bar + 3, ph3);
+    ph3 ^= 1;
     umma::fence_after_sync();
     __syncthreads();
     tmem_get_row(tmp, t_acc, kK, tid);
     const float glast = sdec[len - 1];
-    for (int kk = 0; kk < kK; ++kk) shf[(size_t)myrow * kK + kk] = shf[(size_t)myrow * kK + kk] * glast + tmp[kk];
+    for (int kk = 0; kk < kK; ++kk) hslot[(size_t)myrow * kK + kk] = hslot[(size_t)myrow * kK + kk] * glast + tmp[kk];
     __syncthreads();
     stage_h();
     __syncthreads();
@@ -307,10 +365,6 @@ __global__ void __launch_bounds__(kThreads) gdn_ho_umma_kernel(
   }
 
   // 末态回写
-  {
-    float* hout = state + (long)slot * state_stride_tok + (long)hv * V * kK;
-    for (int kk = 0; kk < kK; ++kk) hout[(size_t)myrow * kK + kk] = shf[(size_t)myrow * kK + kk];
-  }
   umma::fence_before_sync();
   __syncthreads();
   if (warp == 0) umma::tmem_dealloc(t_acc, kTmemAcc);
