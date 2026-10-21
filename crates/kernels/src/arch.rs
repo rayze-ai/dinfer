@@ -282,12 +282,11 @@ impl ArchProfile {
         if !Self::has_sm100() {
             return false;
         }
-        match arch {
-            // Blackwell：tcgen05 + 全 V（不切片），h 主本在 state，A 补零到 M=128。
-            Arch::Sm100 => k_dim == 128 && v_dim == 128,
-            // Ampere/Ada/Hopper：mma.sync 路径，没有 tcgen05。
-            Arch::Sm8x | Arch::Sm90 => false,
-        }
+        // **默认关闭**（2026-10-21）：UMMA 版 1×8192 目前 2462 µs，mma.sync 版 595 µs，还慢 4×。
+        // 结构改造（warp specialization + 流水）完成、实测超过 mma.sync 之后再翻默认。
+        let _ = arch;
+        let _ = (k_dim, v_dim);
+        false
     }
 
     /// 按卡型 + 形状选 BV（r10 第 6–7 轮，B300 GPU 7 实测）：
