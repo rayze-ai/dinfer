@@ -300,7 +300,7 @@ __global__ void __launch_bounds__(kThreads) gdn_ho_umma_kernel(
     // 装载 q（按 h 段）、w / kg / Aq（按 hv 段）
     for (int kb = 0; kb < Smem::kblk; ++kb) {
       const int k0 = kb * 64;
-      stage_q_dec(sq + kb * (kM * 64), qn + row0 * qstride + (long)h * kK + k0, len, (int)qstride, sdec, tid);
+      stage_tile_async(sq + kb * (kM * 64), qn + row0 * qstride + (long)h * kK + k0, len, (int)qstride, tid);
       stage_tile_async(sw + kb * (kM * 64), w + ubase + k0, len, (int)vstride, tid);
       stage_tile_async(skg + kb * (kBT * 64), kg + ubase + k0, len, (int)vstride, tid);
       // kgᵀ [K][token]：(4) 的 B 需要 K 维 = token 连续。
@@ -318,6 +318,27 @@ __global__ void __launch_bounds__(kThreads) gdn_ho_umma_kernel(
     __pipeline_commit();
     if (tid < kBT) sdec[tid] = (tid < len) ? exp2f(gc[(row0 + tid) * HV + hv]) : 0.f;
     __pipeline_wait_prior(0);
+    __syncthreads();
+    // dec 折进 q，但**在 smem 里原地乘**：cp.async 装载（快）+ smem 乘法（快），
+    // 避免原来"全局读 + 逐元素浮点乘 + 逐元素写"的同步路径（实测 4.63 µs/chunk）。
+    for (int kb2 = 0; kb2 < Smem::kblk; ++kb2) {
+      for (int i = tid; i < len * 8; i += kThreads) {
+        const int row = i >> 3, blk = i & 7;
+        const int phys = row * 8 + (blk ^ (row & 7));
+        bf16* p8 = sq + kb2 * (kM * 64) + (size_t)phys * 8;
+        uint4 raw = *reinterpret_cast<const uint4*>(p8);
+        const __nv_bfloat162* r2 = reinterpret_cast<const __nv_bfloat162*>(&raw);
+        uint4 out;
+        uint32_t* o32 = reinterpret_cast<uint32_t*>(&out);
+        const float d = sdec[row];
+#pragma unroll
+        for (int e = 0; e < 4; ++e) {
+          const __nv_bfloat162 v2 = __floats2bfloat162_rn(dinfer::to_f32(r2[e].x) * d, dinfer::to_f32(r2[e].y) * d);
+          o32[e] = *reinterpret_cast<const uint32_t*>(&v2);
+        }
+        *reinterpret_cast<uint4*>(p8) = out;
+      }
+    }
     __syncthreads();
     // Aq 装载时把 dec（按 token = 行）折进 A 侧：o = (q·hᵀ)·dec + Aq·v' 里 dec 只作用于第一项，
     // 所以折进 q 而不是 Aq。见下方 (2) 的装载。
