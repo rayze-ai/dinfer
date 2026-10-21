@@ -379,11 +379,16 @@ impl ActBuf {
 pub struct LayerScratch {
     pub x: Tensor<bf16>,        // 残差主干 [tokens, hidden]
     pub norm: Tensor<bf16>,     // norm 输出 [tokens, hidden]
-    pub qkv: Tensor<bf16>,      // [tokens, (H + 2·Hkv)·D]
-    pub q: Tensor<bf16>,        // [tokens, H·D]（视图同 qkv 前段）
-    pub k: Tensor<bf16>,        // [tokens, Hkv·D]
-    pub v: Tensor<bf16>,        // [tokens, Hkv·D]
-    pub attn: Tensor<bf16>,     // [tokens, H·D]
+    /// q/k/v/attn 按**层型**分两套（滑窗 D=256 / 全注意力 D=512），
+    /// 因为 rope 与 attention 都按精确长度校验，不能共用一个大缓冲。
+    pub q_s: Tensor<bf16>,
+    pub k_s: Tensor<bf16>,
+    pub v_s: Tensor<bf16>,
+    pub attn_s: Tensor<bf16>,
+    pub q_f: Tensor<bf16>,
+    pub k_f: Tensor<bf16>,
+    pub v_f: Tensor<bf16>,
+    pub attn_f: Tensor<bf16>,
     pub o: Tensor<bf16>,        // [tokens, hidden]
     pub gate_up: Tensor<bf16>,  // [tokens, 2·dense_inter]
     pub act: Tensor<bf16>,      // [tokens, max(dense_inter, moe_inter)] 专家 up 复用
@@ -408,11 +413,14 @@ impl LayerScratch {
         Ok(Self {
             x: Tensor::uninit(stream, &[max_tokens, cfg.hidden])?,
             norm: Tensor::uninit(stream, &[max_tokens, cfg.hidden])?,
-            qkv: Tensor::uninit(stream, &[max_tokens, cfg.num_heads * cfg.head_dim_full + 2 * cfg.nkv_full * cfg.head_dim_sliding.max(cfg.head_dim_full)])?,
-            q: Tensor::uninit(stream, &[max_tokens, cfg.num_heads * cfg.head_dim_full])?,
-            k: Tensor::uninit(stream, &[max_tokens, cfg.nkv_sliding * cfg.head_dim_sliding])?,
-            v: Tensor::uninit(stream, &[max_tokens, cfg.nkv_sliding * cfg.head_dim_sliding])?,
-            attn: Tensor::uninit(stream, &[max_tokens, cfg.num_heads * cfg.head_dim_full])?,
+            q_s: Tensor::uninit(stream, &[max_tokens, cfg.num_heads * cfg.head_dim_sliding])?,
+            k_s: Tensor::uninit(stream, &[max_tokens, cfg.nkv_sliding * cfg.head_dim_sliding])?,
+            v_s: Tensor::uninit(stream, &[max_tokens, cfg.nkv_sliding * cfg.head_dim_sliding])?,
+            attn_s: Tensor::uninit(stream, &[max_tokens, cfg.num_heads * cfg.head_dim_sliding])?,
+            q_f: Tensor::uninit(stream, &[max_tokens, cfg.num_heads * cfg.head_dim_full])?,
+            k_f: Tensor::uninit(stream, &[max_tokens, cfg.nkv_full * cfg.head_dim_full])?,
+            v_f: Tensor::uninit(stream, &[max_tokens, cfg.nkv_full * cfg.head_dim_full])?,
+            attn_f: Tensor::uninit(stream, &[max_tokens, cfg.num_heads * cfg.head_dim_full])?,
             o: Tensor::uninit(stream, &[max_tokens, h])?,
             gate_up: Tensor::uninit(stream, &[max_tokens, 2 * cfg.dense_inter])?,
             act: Tensor::uninit(stream, &[max_tokens, cfg.dense_inter.max(cfg.moe_inter)])?,
@@ -443,11 +451,10 @@ pub struct StepCtx<'a> {
     pub max_blocks: usize,
     pub max_seqlen: usize,
     pub block_size: usize,
-    /// 本层的 paged KV cache：[num_blocks, block_size, nkv, 2, D]，`D` 取本层 head_dim。
-    pub kv: &'a dinfer_kernels::cudarc::driver::CudaSlice<bf16>,
     /// 本步 token 的 cache 槽位（写 KV 用）。
     pub slot_mapping: &'a Tensor<i64>,
-    /// 同一份 cache 的可变视图（写 KV 用；attention 只读用 `kv`）。
+    /// 本层 paged KV cache：[num_blocks, block_size, nkv, 2, D]（`D` = 本层 head_dim）。
+    /// 写 KV 与 attention 读同一块，顺序执行；只保留可变引用避免 Rust 的别名冲突。
     pub kv_mut: &'a mut dinfer_kernels::cudarc::driver::CudaSlice<bf16>,
 }
 
@@ -474,30 +481,36 @@ impl Gemma4Layer {
         rmsnorm_into(stream, ops, &sc.x, &self.input_norm, &mut sc.norm, h, tokens, eps)?;
 
         // ---- 2. q/k/v 投影（K 权重兼作 V 的层只算一次）----
-        self.q_proj.forward(gemm, stream, &sc.norm, &mut sc.q, tokens)?;
-        self.k_proj.forward(gemm, stream, &sc.norm, &mut sc.k, tokens)?;
+        // 两种层型的 head_dim 不同（256 / 512），缓冲按层型取。
+        let (q, kk, v, attn) = if self.window > 0 {
+            (&mut sc.q_s, &mut sc.k_s, &mut sc.v_s, &mut sc.attn_s)
+        } else {
+            (&mut sc.q_f, &mut sc.k_f, &mut sc.v_f, &mut sc.attn_f)
+        };
+        self.q_proj.forward(gemm, stream, &sc.norm, q, tokens)?;
+        self.k_proj.forward(gemm, stream, &sc.norm, kk, tokens)?;
         match &self.v_proj {
-            Some(vp) => vp.forward(gemm, stream, &sc.norm, &mut sc.v, tokens)?,
+            Some(vp) => vp.forward(gemm, stream, &sc.norm, v, tokens)?,
             None => {
-                // k_eq_v：把 k 拷到 v（两份内容相同，attention 分别读）
-                stream.dtod_copy_n(&sc.k.data, &mut sc.v.data, tokens * nkv * d)?;
+                // k_eq_v：K 权重兼作 V（只对 full 层成立）
+                stream.dtod_copy_n(&kk.data, &mut v.data, tokens * nkv * d)?;
             }
         }
 
         // ---- 3. 逐头 RMSNorm：q_norm / k_norm 带权重，v_norm 无权重 ----
-        head_rmsnorm(stream, ops, &mut sc.q, Some(&self.q_norm), d, eps)?;
-        head_rmsnorm(stream, ops, &mut sc.k, Some(&self.k_norm), d, eps)?;
-        head_rmsnorm(stream, ops, &mut sc.v, None, d, eps)?;
+        head_rmsnorm(stream, ops, q, Some(&self.q_norm), d, eps)?;
+        head_rmsnorm(stream, ops, kk, Some(&self.k_norm), d, eps)?;
+        head_rmsnorm(stream, ops, v, None, d, eps)?;
 
         // ---- 4. RoPE（只转前 rope_dim 维；proportional 的分母已由 Ropes 处理）----
         let rope = if self.window > 0 { &ropes.sliding } else { &ropes.full };
-        rope.apply(stream, &mut sc.q, Some(&mut sc.k), ctx.positions, heads, nkv, d)?;
+        rope.apply(stream, q, Some(kk), ctx.positions, heads, nkv, d)?;
 
         // ---- 4b. 写本层 paged KV（每层 head_dim / nkv 不同）----
         k::ops::gqa_cache_write_bf16(
             stream,
-            &sc.k.data,
-            &sc.v.data,
+            &kk.data,
+            &v.data,
             &mut *ctx.kv_mut,
             &ctx.slot_mapping.data,
             tokens,
@@ -511,10 +524,10 @@ impl Gemma4Layer {
         match ctx.mode {
             dinfer_core::runner::BatchMode::Prefill => ops.attn().prefill_win(
                 stream,
-                &sc.q.data,
-                &sc.k.data,
-                &sc.v.data,
-                &mut sc.attn.data,
+                &q.data,
+                &kk.data,
+                &v.data,
+                &mut attn.data,
                 &ctx.cu_seqlens.data,
                 ctx.num_reqs,
                 ctx.max_seqlen,
@@ -528,12 +541,12 @@ impl Gemma4Layer {
             )?,
             _ => ops.attn().paged_win(
                 stream,
-                &sc.q.data,
-                ctx.kv,
+                &q.data,
+                &*ctx.kv_mut,
                 &ctx.block_table.data,
                 &ctx.seq_lens.data,
                 &ctx.cu_seqlens.data,
-                &mut sc.attn.data,
+                &mut attn.data,
                 ctx.num_reqs,
                 ctx.max_seqlen,
                 heads,
@@ -550,7 +563,7 @@ impl Gemma4Layer {
         }
 
         // ---- 6. o_proj + post_attention_norm + 残差 ----
-        self.o_proj.forward(gemm, stream, &sc.attn, &mut sc.o, tokens)?;
+        self.o_proj.forward(gemm, stream, attn, &mut sc.o, tokens)?;
         rmsnorm_into(stream, ops, &sc.o, &self.post_attn_norm, &mut sc.norm, h, tokens, eps)?;
         k::ops::add_inplace_bf16_n(stream, &sc.norm.data, &mut sc.x.data, tokens * h)?;
 

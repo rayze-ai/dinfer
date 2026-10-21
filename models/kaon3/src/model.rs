@@ -55,7 +55,7 @@ impl KaonModel {
         for l in 0..cfg.num_layers {
             layers.push(Gemma4Layer::load(stream, src, &cfg, l)?);
         }
-        let final_norm = src.load_bf16(stream, &format!("{}.weight", weights::NORM))?;
+        let final_norm = src.load_bf16(stream, weights::NORM)?;
         ensure!(final_norm.numel() == cfg.hidden, "final_norm 长度 {} != hidden {}", final_norm.numel(), cfg.hidden);
         let _ = embed_name;
         let ropes = Ropes::new(stream, &cfg)?;
@@ -101,6 +101,8 @@ impl KaonModel {
         logits: &mut Tensor<bf16>,
         hidden: &mut Tensor<bf16>,
         tokens: usize,
+        // `Some(l)` 时把第 l 层之后的残差流拷进 `hidden`（逐层对拍用）。
+        dump_layer: Option<usize>,
     ) -> Result<()> {
         let cfg = &self.cfg;
         let h = cfg.hidden;
@@ -126,10 +128,12 @@ impl KaonModel {
                 max_blocks: meta.max_blocks,
                 max_seqlen: meta.max_seqlen,
                 block_size: self.block_size,
-                kv: &self.kv[l].cache.data,
                 kv_mut: &mut kv_cache[l].cache.data,
             };
             layer.forward(stream, gemm, ops, cfg, &self.ropes, sc, &mut ctx, tokens)?;
+            if dump_layer == Some(l) {
+                stream.dtod_copy_n(&sc.x.data, &mut hidden.data, tokens * h)?;
+            }
         }
 
         self.kv = kv_cache;
@@ -174,7 +178,7 @@ pub struct StepMeta<'a> {
 /// 权重清单核对：跑之前确认三件事（避免"编错 feature 空跑"这类假数据）。
 pub fn check_weights(src: &WeightSource, cfg: &KaonConfig) -> Result<()> {
     ensure!(src.contains(weights::EMBED), "缺 embedding：{}", weights::EMBED);
-    ensure!(src.contains(&format!("{}.weight", weights::NORM)), "缺 final norm");
+    ensure!(src.contains(weights::NORM), "缺 final norm：{}", weights::NORM);
     let l0 = weights::layer_prefix(0);
     for n in [
         "input_layernorm.weight",
