@@ -158,6 +158,41 @@ docker run --rm --entrypoint bash --gpus device=0 \
 - chat 路径 `logprobs=True, echo=True` 只返回生成部分，**拿不到 prompt 各位置的 logprobs**。
   → 语义对拍改用：模板文本 → `/v1/completions` + `echo=True` + `logprobs`，取 prompt 最后位置 top-k。
 
+## NVFP4 原生 GEMM 的硬件基础（轮 4，**决定性**）
+
+用户 2026-10-21 明确：**不能反量化**（c32 时 128 专家全覆盖，bf16 展开 45.6 GB 单卡放不下，
+且带宽翻 4×）。所以必须原生 NVFP4 GEMM。ISA 探测结论：
+
+| 编译方式 | 结果 |
+|---|---|
+| `-gencode=arch=compute_120a,code=sm_120a` | ✅ **编译通过** |
+| `-gencode=arch=compute_103a,code=sm_103a` | ❌ `Instruction 'mma with block scale' not supported on .target 'sm_103a'` |
+| `-arch=sm_120a`（隐式） | ❌ 生成的 PTX 仍是 `.target sm_120`，ptxas 报同样错误 |
+| `-arch=sm_120` | ❌ 同上 |
+
+**必须显式写 `-gencode=arch=compute_120a,code=sm_120a`**，`-arch=sm_120a` 不会生成 `a` 变体 PTX。
+→ `crates/kernels/build.rs` 的 arch 映射要把 `120` 也加进 `→ {a}a` 的分支（现在只有 100/103）。
+
+### 正确的 PTX 形式（抄 CUTLASS `cute/arch/mma_sm120.hpp:3216`）
+
+```ptx
+mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3
+  {d0,d1,d2,d3},          // f32 累加器
+  {a0,a1,a2,a3},          // A: 4×u32（8 个 fp4 每 reg，k=64）
+  {b0,b1},                // B: 2×u32
+  {c0,c1,c2,c3},          // C 输入（f32）
+  {sfa}, {bidA,tidA},     // scale A + 块坐标（h 约束 = u16）
+  {sfb}, {bidB,tidB};     // scale B + 块坐标
+```
+
+与直觉不同的三点：① `.kind::` 与 `.block_scale` 在 `.m16n8k64` **之前**；② scale 后面还要跟
+`{bid, tid}` 两个 u16 定位块；③ 末尾 `.ue4m3` 是 scale 的格式（不是 e8m0）。
+
+- `scale_vec::4X` → 每 4 个 k-block 一个 scale（k=64 覆盖 4 个 16 元素块）
+- 另有 `scale_vec::2X`（`mma_sm120.hpp:3159`）与 `m16n8k32` 形式待测
+- 基线走的正是这条路：`FlashInferB12xNvFp4LinearKernel`（**SM120+ 专用**，
+  `Sm120BlockScaledDenseGemmKernel`），失败才回落 fbgemm/cutlass/emulation
+
 ## 卡点
 
 - **token 一次性**：每次拿到的 token 只能建一次连接。mux 断了就要新 token，所以要把"一次建成、长期复用"做对。
