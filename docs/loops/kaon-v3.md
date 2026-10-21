@@ -764,3 +764,49 @@ docker run --rm --entrypoint bash --gpus device=0 \
 
 **待编译验证**：`forward` 依赖子代理交付的 `Gemm::forward_fp8` / `forward_nvfp4`，
 在此之前 `cargo build -p dinfer-kaon3` 必然在 `QLinear::forward` 处失败。
+
+## 阶段 3：GEMM 移植进 `crates/kernels`（2026-10-22）
+
+目标：把探针的 FP8 per-tensor GEMM（阶段 2，292 TF/s）与 NVFP4 块缩放 GEMM（阶段 1，502 TF/s）
+搬成 `crates/kernels` 的生产入口 `Gemm::forward_fp8` / `Gemm::forward_nvfp4`，数值对拍零误差。
+
+### 落地的文件
+
+| 文件 | 内容 |
+|---|---|
+| `crates/kernels/cuda/gemm_fp8_sm120.cu` | 入口 `gemm_fp8_bf16`；block 64x128x64 / 8 warp(2M×4N) / ldmatrix.x4+x2 / smem padding 16 B / cp.async 双缓冲（照 fp8_v2.cu）。**A 侧新增 bf16→e4m3 转换**（探针 A 是预量化字节），转换在寄存器里做，落地用普通 STS |
+| `crates/kernels/cuda/gemm_nvfp4_sm120.cu` | 入口 `gemm_nvfp4_bf16`；照 v5（32x64xBK / 2M×4N / padding）。**A 侧新增 bf16→fp4 现场量化**（16 元素一块，scale=amax/6 的 e4m3），**B 侧接真实块缩放**（探针把 sa/sb 写死 0x38383838=1.0） |
+| `build.rs` | `*_sm120.cu` 单独一轮 nvcc（只 `-gencode=arch=compute_120a,code=sm_120a`），`CUDA_ARCHS` 含 120/120a 才编，并 `cargo:rustc-cfg=sm120` |
+| `ffi.rs` | extern + `#[cfg(not(..., sm120))]` stub 返回 801（与 mega_sm100 同款） |
+| `gemm.rs` | `forward_fp8` / `forward_nvfp4`，`ensure!` 口径与 `forward_bf16` 一致 |
+
+### 已过的门
+
+- 两个 `.cu` 在 5090 基线容器内 `-gencode=arch=compute_120a,code=sm_120a` 编译通过。
+  （`-arch=sm_120a` 的坑已复核：必须显式 gencode，否则 PTX target 是 compute_120，`mxf4nvf4` 报不支持。）
+- **FP8 数值对拍：`bad=0/16384, maxabs=0.125, maxrel=3.8e-3`**（M=128,N=128,K=256，随机 bf16 激活 ×
+  随机 e4m3 权重 × per-tensor scale 0.75；maxrel 是 bf16 落盘的量化底噪）。
+
+### 踩坑（本轮新增，都要写进 knowledge）
+
+1. **`common.cuh` 的内容在 `namespace dinfer` 里** —— `bf16` / `to_f32` / `to_bf16` 直接写会 "undefined"。
+   两个新文件都要 `using namespace dinfer;`。
+2. **`last_err` 撞名**：`common.cuh` 里已有 `dinfer::last_err()`，本地再定义同名函数 → "more than one instance of
+   overloaded function"（报在 `return last_err();` 那行，不在定义处）。改名 `gemm_last_err`。
+3. **`__nv_cvt_float2_to_fp4x2` 的签名是 `(float2, __nv_fp4_interpretation_t, cudaRoundMode)`**，不是
+   `(float2, 饱和标志, 格式)`。正确写法 `__NV_E2M1, cudaRoundNearest`。
+4. **NVFP4 对拍的参考侧又一次"自证"救场**：随机权重 + 随机激活时 `bad=0`，但全 1 探针给出
+   `D=132`（期望 256）。**随机数据能让错误口径互相抵消**，必须保留一个手算期望值的用例
+   （与阶段 1 轮 5 的 `Af[i]` 事件同一类）。当前在用 "单 nibble 扫全表 + 逐 k delta" 定位。
+5. **实测（5090，单 nibble 全表）**：`e2m1` 的 16 个 nibble 与真值表一致（0/0.5/1/1.5/2/3/4/6 与符号），
+   K=256 时 64 个 k 位置全部命中（逐 k delta 每一个都出 36 = 6×6），所以 **k 覆盖与 nibble 语义没问题**，
+   偏差只出现在 **A 侧块缩放（sfA）为 e4m3 次正规数** 时：`0x23` 按 `(1+m/8)·2^(e-7)` 解得 0.171875、
+   按 `(m/8)·2^-6` 解得 0.005859，两种口径差 29×，实测更接近后者被用错的位置。
+   → 待办：读 CUTLASS `mma_sm120.hpp` 的 ue4m3 次正规定义，统一 kernel 的 `e4m3_f` 与参考侧，
+   并把 **A 的 per-block scale 也做成可显式传入**（现在只能靠 kernel 内部量化，无法从外部钉死口径）。
+
+### 未完成
+
+- NVFP4 数值对拍未闭环（上面第 5 条）。
+- 吞吐实测（M=512,N=2816,K=2816 与 M=8 decode 形状）未做。
+- `cargo build --release -p dinfer-kernels`（CUDA_ARCHS=120）与 Rust 侧 `kaon_gemm_parity.rs` 未跑。

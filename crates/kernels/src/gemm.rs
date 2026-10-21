@@ -236,6 +236,85 @@ impl Gemm {
         self.enabled
     }
 
+    /// FP8 per-tensor GEMM（sm_120 专用，`cuda/gemm_fp8_sm120.cu`）：
+    /// `out[m,n] = (a[m,k] · w[n,k]^T) * w_scale`，`a` 是 bf16 激活（载入时转 e4m3），`w` 是 [n,k] 的 e4m3 字节。
+    ///
+    /// 编译时未编入 sm_120 实现（CUDA_ARCHS 无 120）时返回错误，调用方自行回退。
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_fp8(
+        &self,
+        a: &CudaSlice<bf16>,
+        w: &CudaSlice<u8>,
+        w_scale: f32,
+        out: &mut CudaSlice<bf16>,
+        m: usize,
+        n: usize,
+        k: usize,
+    ) -> Result<()> {
+        ensure!(a.len() >= m * k, "gemm fp8: a.len {} < m*k {}", a.len(), m * k);
+        ensure!(w.len() == n * k, "gemm fp8: w.len {} != n*k {}", w.len(), n * k);
+        ensure!(out.len() >= m * n, "gemm fp8: out.len {} < m*n {}", out.len(), m * n);
+        if m == 0 || n == 0 {
+            return Ok(());
+        }
+        ensure!(k > 0, "gemm fp8: k == 0");
+        ensure!(m <= i32::MAX as usize && n <= i32::MAX as usize && k <= i32::MAX as usize, "gemm fp8: 维度 > i32");
+        let rc = unsafe {
+            crate::ffi::gemm_fp8_bf16(
+                self.stream.ptr(a) as *const c_void,
+                self.stream.ptr(w) as *const c_void,
+                w_scale,
+                self.stream.ptr_mut(out) as *mut c_void,
+                m as i64,
+                n as i64,
+                k as i64,
+                self.stream.raw(),
+            )
+        };
+        crate::ops::check(rc, "gemm_fp8_bf16")
+    }
+
+    /// NVFP4 块缩放 GEMM（sm_120 专用，`cuda/gemm_nvfp4_sm120.cu`）：
+    /// `out[m,n] = global * Σ_k a[m,k] · packed[n,k]`。`a` 是 bf16 激活，**在 kernel 内按 16 元素一块量化成 fp4**
+    /// （块缩放 = amax/6 的 e4m3 编码，与权重侧同口径）；`packed` 是 [n, k/2]（每字节两个 fp4，低半字节是偶数列），
+    /// `scale` 是 [n, k/16] 的 e4m3 块缩放，`global` 是 per-tensor 标量。要求 `k % 64 == 0`。
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_nvfp4(
+        &self,
+        a: &CudaSlice<bf16>,
+        packed: &CudaSlice<u8>,
+        scale: &CudaSlice<u8>,
+        global: f32,
+        out: &mut CudaSlice<bf16>,
+        m: usize,
+        n: usize,
+        k: usize,
+    ) -> Result<()> {
+        ensure!(a.len() >= m * k, "gemm nvfp4: a.len {} < m*k {}", a.len(), m * k);
+        ensure!(packed.len() == n * (k / 2), "gemm nvfp4: packed.len {} != n*k/2 {}", packed.len(), n * (k / 2));
+        ensure!(scale.len() == n * (k / 16), "gemm nvfp4: scale.len {} != n*k/16 {}", scale.len(), n * (k / 16));
+        ensure!(out.len() >= m * n, "gemm nvfp4: out.len {} < m*n {}", out.len(), m * n);
+        if m == 0 || n == 0 {
+            return Ok(());
+        }
+        ensure!(k > 0 && k % 64 == 0, "gemm nvfp4: k {k} 不是 64 的倍数（块缩放 mma 是 k64）");
+        ensure!(m <= i32::MAX as usize && n <= i32::MAX as usize && k <= i32::MAX as usize, "gemm nvfp4: 维度 > i32");
+        let rc = unsafe {
+            crate::ffi::gemm_nvfp4_bf16(
+                self.stream.ptr(a) as *const c_void,
+                self.stream.ptr(packed) as *const c_void,
+                self.stream.ptr(scale) as *const c_void,
+                global,
+                self.stream.ptr_mut(out) as *mut c_void,
+                m as i64,
+                n as i64,
+                k as i64,
+                self.stream.raw(),
+            )
+        };
+        crate::ops::check(rc, "gemm_nvfp4_bf16")
+    }
+
     /// out[M,N] = a[M,K] · w[N,K]^T，可选 bias[N]。
     #[allow(clippy::too_many_arguments)]
     pub fn forward_bf16(

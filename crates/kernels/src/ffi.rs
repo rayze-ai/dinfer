@@ -1189,6 +1189,29 @@ pub unsafe fn gqa_fa_umma_launch(_paged: i32, _max_q: i32, _heads: i32, _num_req
     CUDA_ERROR_NOT_SUPPORTED
 }
 
+/// sm_120 专用低精度 GEMM（`gemm_fp8_sm120.cu` / `gemm_nvfp4_sm120.cu`）。
+/// 未编入（CUDA_ARCHS 无 120 或 no-nvcc）时返回 `CUDA_ERROR_NOT_SUPPORTED`，调用方回退。
+/// 判据与 build.rs 的 `cargo:rustc-cfg=sm120` 同源：CUDA_ARCHS 含 120 / 120a。
+#[cfg(all(not(no_nvcc_stub), sm120))]
+extern "C" {
+    pub fn gemm_fp8_bf16(a: *const c_void, w: *const c_void, w_scale: f32, out: *mut c_void, m: i64, n: i64,
+                         k: i64, stream: cudaStream_t) -> i32;
+    pub fn gemm_nvfp4_bf16(a: *const c_void, packed: *const c_void, scale: *const c_void, global: f32,
+                           out: *mut c_void, m: i64, n: i64, k: i64, stream: cudaStream_t) -> i32;
+}
+#[cfg(not(all(not(no_nvcc_stub), sm120)))]
+#[allow(clippy::too_many_arguments, clippy::missing_safety_doc)]
+pub unsafe fn gemm_fp8_bf16(_a: *const c_void, _w: *const c_void, _ws: f32, _o: *mut c_void, _m: i64, _n: i64,
+                            _k: i64, _s: cudaStream_t) -> i32 {
+    CUDA_ERROR_NOT_SUPPORTED
+}
+#[cfg(not(all(not(no_nvcc_stub), sm120)))]
+#[allow(clippy::too_many_arguments, clippy::missing_safety_doc)]
+pub unsafe fn gemm_nvfp4_bf16(_a: *const c_void, _p: *const c_void, _sc: *const c_void, _g: f32, _o: *mut c_void,
+                              _m: i64, _n: i64, _k: i64, _s: cudaStream_t) -> i32 {
+    CUDA_ERROR_NOT_SUPPORTED
+}
+
 #[cfg(no_nvcc_stub)]
 mod stubs {
     use super::*;

@@ -19,6 +19,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rustc-check-cfg=cfg(no_nvcc_stub)");
     println!("cargo:rustc-check-cfg=cfg(mega_sm100)");
+    println!("cargo:rustc-check-cfg=cfg(sm120)");
     println!("cargo:rerun-if-env-changed=MEGA_SM100_DEV");
 
     if env::var_os("CARGO_FEATURE_NO_NVCC").is_some() {
@@ -41,6 +42,13 @@ fn main() {
     if has_sm100 {
         println!("cargo:rustc-cfg=mega_sm100");
     }
+    // sm_120（RTX 5090）专用文件（`*_sm120.cu`）：FP8 / NVFP4 块缩放 MMA 需要 `a` 变体的 cubin
+    // （`-gencode=arch=compute_120a,code=sm_120a`；`-arch=sm_120a` 生成的仍是 compute_120，指令报不支持）。
+    // 这些文件单独编，只对 sm_120 目标生成；其它卡用 ffi.rs 的 stub（返回 cudaErrorNotSupported）。
+    let has_sm120 = archs.split(',').any(|a| matches!(a.trim(), "120" | "120a"));
+    if has_sm120 {
+        println!("cargo:rustc-cfg=sm120");
+    }
     let sm100_only = ["mega_sm100", "gqa_fa_sm100", "umma_peak_sm100", "gdn_ho_sm100"];
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let profile = env::var("PROFILE").unwrap_or_default();
@@ -53,9 +61,23 @@ fn main() {
         .filter(|p| p.extension().is_some_and(|e| e == "cu"))
         .filter(|p| {
             let stem = p.file_stem().unwrap().to_string_lossy();
+            if stem.ends_with("_sm120") {
+                return false;  // 单独一轮 nvcc，见 sm120_srcs
+            }
             has_sm100 || !sm100_only.contains(&stem.as_ref())
         })
         .collect();
+    let mut sm120_srcs: Vec<PathBuf> = if has_sm120 {
+        std::fs::read_dir("cuda")
+            .expect("cuda/ dir")
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|e| e == "cu"))
+            .filter(|p| p.file_stem().unwrap().to_string_lossy().ends_with("_sm120"))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    sm120_srcs.sort();
     srcs.sort();
     let arch_flags: Vec<String> = archs
         .split(',')
@@ -78,18 +100,32 @@ fn main() {
         .and_then(|v| v.parse::<usize>().ok())
         .or_else(|| std::thread::available_parallelism().ok().map(|n| n.get()))
         .unwrap_or(4)
-        .clamp(1, srcs.len().max(1));
-    let objs: Vec<PathBuf> = srcs.iter().map(|src| out_dir.join(format!("{}.o", src.file_stem().unwrap().to_string_lossy()))).collect();
+        .clamp(1, (srcs.len() + sm120_srcs.len()).max(1));
+    let mut objs: Vec<PathBuf> =
+        srcs.iter().map(|src| out_dir.join(format!("{}.o", src.file_stem().unwrap().to_string_lossy()))).collect();
+    objs.extend(
+        sm120_srcs.iter().map(|src| out_dir.join(format!("{}.o", src.file_stem().unwrap().to_string_lossy()))),
+    );
+    // sm_120 文件只生成 sm_120a 一个 cubin，与上面按目标 arch 展开的列表分开
+    let arch_flags_sm120: Vec<String> =
+        vec!["-gencode=arch=compute_120a,code=sm_120a".to_string()];
+    // (源文件, 目标 .o, 是否为 sm_120 专用) —— 两类文件的 gencode 不同，合成一张表再并行
+    let units: Vec<(&PathBuf, &PathBuf, bool)> = srcs
+        .iter()
+        .zip(objs.iter())
+        .map(|(s, o)| (s, o, false))
+        .chain(sm120_srcs.iter().zip(objs[srcs.len()..].iter()).map(|(s, o)| (s, o, true)))
+        .collect();
     let next = std::sync::atomic::AtomicUsize::new(0);
     let nvcc_s = nvcc.clone();
     std::thread::scope(|sc| {
         for _ in 0..jobs {
             sc.spawn(|| loop {
                 let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if i >= srcs.len() {
+                if i >= units.len() {
                     break;
                 }
-                let (src, obj) = (&srcs[i], &objs[i]);
+                let (src, obj, sm120) = units[i];
                 let mut cmd = Command::new(&nvcc_s);
                 cmd.args(["-c", "-std=c++17", opt, "--expt-relaxed-constexpr", "-Xcompiler", "-fPIC", "-I", "cuda"]);
                 // 与 cargo:rustc-cfg=mega_sm100 同步：`.cu` 侧用它决定是否调用 sm100 专用入口
@@ -106,7 +142,7 @@ fn main() {
                     cmd.arg("-DGQA_PROFILE=1");
                     println!("cargo:rerun-if-env-changed=GQA_PROFILE");
                 }
-                cmd.args(&arch_flags);
+                cmd.args(if sm120 { &arch_flags_sm120 } else { &arch_flags });
                 cmd.arg("-o").arg(obj).arg(src);
                 run(&mut cmd, src);
             });

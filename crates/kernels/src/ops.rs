@@ -9,7 +9,7 @@ use cudarc::driver::{CudaSlice, CudaView, DevicePtr, DevicePtrMut};
 use half::bf16;
 use std::ffi::c_void;
 
-fn check(rc: i32, what: &str) -> Result<()> {
+pub(crate) fn check(rc: i32, what: &str) -> Result<()> {
     if rc != 0 {
         bail!("{what} failed: cudaError {rc}");
     }

@@ -355,6 +355,14 @@ int dsa_topk_i32(const float* score, const int32_t* vis, int32_t* out, int64_t r
 int dsa_row_vis_i32(const int32_t* seq_lens, const int32_t* cu_seqlens_q, int32_t* vis, int64_t num_reqs,
                     cudaStream_t stream);
 
+// ---- sm_120 低精度 GEMM（gemm_fp8_sm120.cu / gemm_nvfp4_sm120.cu，编译期只在 CUDA_ARCHS 含 120 时存在）----
+// out[m,n] = (a[m,k] bf16 · w[n,k] e4m3^T) * w_scale；返回 cudaError_t 数值（0 = 成功）。
+int gemm_fp8_bf16(const void* a, const void* w, float w_scale, void* out, int64_t m, int64_t n, int64_t k,
+                  cudaStream_t stream);
+// out[m,n] = global * (a[m,k] bf16 现场量化 · packed[n,k/2] fp4^T)，块缩放 scale[n,k/16] e4m3；K % 64 == 0。
+int gemm_nvfp4_bf16(const void* a, const void* packed, const void* scale, float global, void* out, int64_t m, int64_t n,
+                    int64_t k, cudaStream_t stream);
+
 // 小 M bf16 GEMM（decode）：out[M,N] = a[M,K]·w[N,K]^T (+bias)；splits>1 时需 partial[splits,M,N] f32。见 gemm_small_m.cu。
 int gemm_small_m_bf16(const void* a, const void* w, const void* bias, void* out, float* partial, int64_t m,
                       int64_t n, int64_t k, int64_t splits, cudaStream_t stream);
