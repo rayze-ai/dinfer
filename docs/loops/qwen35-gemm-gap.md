@@ -249,3 +249,33 @@ q_len=6019 时单次约 246 us。**两个 mma 合计 86%，softmax 只占 14%** 
 **profile 开关自身成本**：短 prompt +4.7 ms（325 个事件 record+sync），长 prompt +2 ms。
 
 分段（6019）：attn_gdn 101 / mlp 124 / attn_full 42 ms。
+
+## vLLM vs dinfer：GDN 段直接对照（2026-10-21）
+
+重抓 vLLM trace（关 prefix cache、容器内 nsys、TRTLLM prefill attention），
+三档长度各一次请求：
+
+| 长度 | vLLM GDN | dinfer GDN | 结论 |
+|---|---|---|---|
+| 1021 | 2.2 ms | 10.7 ms (48×0.222) | vLLM 快 4.9× |
+| 6019 | **143.3 ms** | **48–58 ms** | **dinfer 快 2.5×** |
+
+**6K 时 dinfer 的 GDN 反而更快。** `GatedDeltaNetChunked` 在 6K 窗口里 768 次
+（≈48 层 × 16 次），dinfer 一层只有 3 次 launch，重复更少。
+
+## vLLM 6K prefill 完整构成（窗口 21015 kernel / 453.5 ms busy）
+
+| kernel | 时间 | 次数 |
+|---|---|---|
+| GDN chunked | 143.3 ms | 768 |
+| **index_elementwise** | **100.6 ms** | 768 |
+| **elementwise (128,2)** | **55.8 ms** | 783 |
+| vectorized_gather | 21.2 ms | 767 |
+| full attention (fmha) | 8.1 ms | 256 |
+| GEMM | ~36 ms | 512 |
+
+**vLLM 有 156 ms 花在 inductor 生成的 elementwise 上，dinfer 无对应项。**
+dinfer 更重的是 MLP 段（124 ms）。
+
+两者大致抵消 —— 所以 dinfer 的思路没错，差距不在 GDN 也不在 attention。
+**唯一 dinfer 明显更重的是 MLP（124 ms）。**
