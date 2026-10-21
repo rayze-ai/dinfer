@@ -166,3 +166,27 @@ dinfer 慢 8.7%（对 0.32.1）/ 6.9%（对 0.26.1）。
 
 缺口：GEMM 合计 115.5 ms，TTFT 277 ms，160 ms 不在这六个 GEMM 里。
 tr3.csv 抓不到 prefill，在其上做的窗口分析全部作废。
+
+## prefill 分块扫描（2026-10-21）
+
+6019 token，改 --max-num-batched-tokens 强制切块，测 TTFT：
+
+| max-num-batched-tokens | chunk 数 | TTFT | 相对单块 |
+|---|---|---|---|
+| 512 | 12 | 366.4 ms | +89.4 |
+| 1024 | 6 | 333.0 ms | +56.0 |
+| 2048 | 3 | 303.5 ms | +26.5 |
+| 4096 | 2 | 292.8 ms | +15.8 |
+| 16384 | 1 | 277.0 ms | — |
+
+边际成本递减：1→2 +15.8、2→3 +10.7、3→6 +9.8/chunk、6→12 +5.6/chunk。
+说明每次 scheduler step 有固定代价（launch / 层循环 / 逐步 norm），不是按 token 分摊。
+
+**这个实验解释了 vLLM 在 1K 时慢（81.8 vs 49.5 ms，它的每步固定代价更大），
+但不解释 6K 单块时 dinfer 慢 8.7%** —— 那边只有 1 个 chunk，切块开销不参与。
+
+## 仍未解释
+
+6K 单块 prefill：TTFT 277 ms，六个大 GEMM 实测合计 115.5 ms，GPU 利用率 97.4%，
+CPU 入队仅 11.89 ms。**约 160 ms 找不到落点。**
+已排除：GEMM 效率（近峰值）、GPU 空闲、CPU 瓶颈、切块开销、chunked prefill 配置差异（两边都是 16384）。

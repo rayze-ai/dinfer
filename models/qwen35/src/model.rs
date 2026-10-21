@@ -426,6 +426,10 @@ impl<O: OpSet> Qwen35Model<O> {
             let n = trace_norm(stream, &self.hidden, &self.hidden, t, h)?;
             tracing::info!(norm = n.0, "qwen35 trace embed");
         }
+        // `LAYER_PROFILE=1`：分层分阶段墙钟计时（诊断 prefill 缺口用；只在 t 大时开，避免 decode 噪声）。
+        let lprof = std::env::var("LAYER_PROFILE").ok().as_deref() == Some("1") && t >= 256;
+        let (mut p_norm, mut p_attn, mut p_mlp, mut p_post) = (0f64, 0f64, 0f64, 0f64);
+        let mut tp0 = std::time::Instant::now();
         for (li, layer) in self.layers.iter_mut().enumerate() {
             if pending_mlp {
                 self.ops.norm().fused_add_rmsnorm(
@@ -449,6 +453,7 @@ impl<O: OpSet> Qwen35Model<O> {
                     eps,
                 )?;
             }
+            if lprof { p_norm += tp0.elapsed().as_secs_f64() * 1e3; tp0 = std::time::Instant::now(); }
             layer.forward(
                 stream,
                 gemm,
@@ -465,6 +470,7 @@ impl<O: OpSet> Qwen35Model<O> {
                 &mut self.act,
                 &mut self.attn_out,
             )?;
+            if lprof { p_attn += tp0.elapsed().as_secs_f64() * 1e3; tp0 = std::time::Instant::now(); }
             self.ops.norm().fused_add_rmsnorm(
                 stream,
                 &self.attn_out.data,
@@ -475,13 +481,20 @@ impl<O: OpSet> Qwen35Model<O> {
                 h,
                 eps,
             )?;
+            if lprof { p_post += tp0.elapsed().as_secs_f64() * 1e3; tp0 = std::time::Instant::now(); }
             layer.mlp.forward_with_scratch(stream, gemm, self.ops.act(), t, &self.normed, &mut self.mlp_out, &mut self.act.gate_up, &mut self.act.act)?;
+            if lprof { p_mlp += tp0.elapsed().as_secs_f64() * 1e3; tp0 = std::time::Instant::now(); }
             pending_mlp = true;
             if trace {
                 // 调试：最后一个 token 的残差（含本层 mlp 输出）范数，与 HF `output_hidden_states` 逐层对拍
                 let n = trace_norm(stream, &self.hidden, &self.mlp_out, t, h)?;
                 tracing::info!(layer = li, kind = ?layer.kind(), norm = n.0, attn_out = n.1, "qwen35 trace");
             }
+        }
+        if lprof {
+            let tot = p_norm + p_attn + p_post + p_mlp;
+            eprintln!("[layer-prof] t={t} layers={} total={tot:.2}ms | norm={p_norm:.1} attn={p_attn:.1} postnorm={p_post:.1} mlp={p_mlp:.1}",
+                self.layers.len());
         }
         if pending_mlp {
             self.ops.norm().add_inplace(stream, &self.mlp_out.data, &mut self.hidden.data, t * h)?;
