@@ -817,6 +817,17 @@ impl Gemma4Layer {
             ops.act().gelu_tanh_mul(stream, &sc.gate_up.data, &sc.act.data, &mut sc.gelu.data, len, cfg.moe_inter)?;
             let g = Tensor { data: sc.gelu.data.clone(), shape: vec![len.max(1), cfg.moe_inter] };
             ex.down.forward(gemm, stream, &g, &mut sc.yg, len)?;
+            // 子 loop C-5：逐专家中间量（gate / up / 激活 / down 输出 + 该专家的 token 列表），按专家 id 与 vLLM 对齐比较
+            if let Some((dir, _)) = sub_out {
+                let m = cfg.moe_inter;
+                sub_dump(stream, sub_out, &format!("moe_e{eid}_gate"), &sc.gate_up, len, m)?;
+                sub_dump(stream, sub_out, &format!("moe_e{eid}_up"), &sc.act, len, m)?;
+                sub_dump(stream, sub_out, &format!("moe_e{eid}_act"), &g, len, m)?;
+                sub_dump(stream, sub_out, &format!("moe_e{eid}_down"), &sc.yg, len, h)?;
+                let st = stream.dtoh_sync_copy(&sc.buckets.sorted_tok)?;
+                let toks: Vec<String> = st[start..start + len].iter().map(|t| t.to_string()).collect();
+                std::fs::write(dir.join(format!("moe_e{eid}_tok.txt")), toks.join(" "))?;
+            }
             if combine_bf16 {
                 let yg = stream.dtoh_sync_copy(&sc.yg.data)?;
                 for r in 0..len {
