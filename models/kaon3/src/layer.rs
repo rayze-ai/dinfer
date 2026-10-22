@@ -593,14 +593,13 @@ impl Gemma4Layer {
         if cfg.kv_fp8 {
             k::ops::fp8_e4m3_roundtrip_bf16_n(stream, &mut kk.data, tokens * nkv * d, 1.0)?;
             k::ops::fp8_e4m3_roundtrip_bf16_n(stream, &mut v.data, tokens * nkv * d, 1.0)?;
-            // **query 不量化**：vLLM `triton_attn.py:659-667` 里
-            //   q_descale = layer._q_scale if (kv_quant_mode == FP8_PER_TENSOR and query.dtype == fp8) else None
-            // 即"query 已是 fp8 才反量化"；Gemma4 传进 attention 的 q 是 bf16（q_norm 与 rope 都在 bf16 里），
-            // 所以 vLLM 这里用 **bf16 query** 算 QK。原来我们多做了一次 e4m3 roundtrip（e4m3 只有 3 位尾数，
-            // 相对误差 ~6%），是 `p_fp8` 之外的一处额外偏离。A/B 由 `Q_ROUNDTRIP=1` 恢复旧行为。
-            if std::env::var("Q_ROUNDTRIP").is_ok() {
-                k::ops::fp8_e4m3_roundtrip_bf16_n(stream, &mut q.data, tokens * heads * d, 1.0)?;
-            }
+            // q 也要量化成 e4m3（vLLM Triton 后端 `supports_quant_query_input = is_cuda()`，
+            // 上层会把 query 先量化再交给 kernel，`q_descale` 再把它反量化回去）。
+            // **实测依据（2026-10-22 A/B）**：关掉这一步后 ΔNLL 从 −0.0018 恶化到 **+0.0438**、
+            // 长文本从 −0.0464 到 +0.0194 —— 明显变差，说明 vLLM 确实量化 q。
+            // （曾据 `triton_attn.py:659` 的 `query.dtype == fp8` 条件推断"不量化"，**该推断是错的**：
+            //  那个条件是 kernel 内部"已经是 fp8 才反量化"，而量化发生在上层调用之前。）
+            k::ops::fp8_e4m3_roundtrip_bf16_n(stream, &mut q.data, tokens * heads * d, 1.0)?;
         }
 
         // ---- 4b. 写本层 paged KV（每层 head_dim / nkv 不同）----

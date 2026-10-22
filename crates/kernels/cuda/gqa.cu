@@ -22,12 +22,22 @@ using namespace dinfer;
 
 namespace {
 
-// P 是否以 e4m3 参与 PV（复刻 vLLM Triton FP8 attention：Q/K/V 为 fp8 时 `tl.dot(P.to(V.dtype), V)`），行和 L 仍用 fp32 P。
-// 不是进程隐状态：由 prefill/paged 入口的 `p_fp8` 实参在每次 launch 前写入（单流语义，调用方保证同一 stream 串行）。
+// P 是否以 e4m3 参与 PV（复刻 vLLM Triton FP8 attention），行和 L 仍用 fp32 P。
+//
+// **必须先乘 p_scale 再量化**（vLLM `triton_unified_attention.py:592-598`）：
+//   if V.dtype == float8e4nv: p_scale = 256.0     # e4m3
+//   elif V.dtype.is_fp8():    p_scale = 128.0     # e5m2
+//   acc += tl.dot((P * p_scale).to(V.dtype), V) / p_scale
+// e4m3 的最小正规数是 2^-6 ≈ 0.0156：softmax 概率大多远小于它，直接量化会全部落进次正规区
+// （只剩 ~2^-9 的有效分辨率），相对误差可达几十 %。乘 256 后落在正规区，再用 /256 精确还原。
+// 原来我们直接量化 P，这是 attention 输出偏差（进而 `o_proj` / 整层残差）的一个来源。
+// 不是进程隐状态：由 prefill/paged 入口的 `p_fp8` 实参在每次 launch 前写入（单流语义）。
 __constant__ int g_p_fp8 = 0;
 __device__ __forceinline__ float pq8(float p) {
   if (!g_p_fp8) return p;
-  return __half2float(__half(__nv_cvt_fp8_to_halfraw(__nv_cvt_float_to_fp8(p, __NV_SATFINITE, __NV_E4M3), __NV_E4M3)));
+  const float scaled = p * 256.0f;  // 与 vLLM 的 p_scale（e4m3 → 256）一致
+  const float q = __half2float(__half(__nv_cvt_fp8_to_halfraw(__nv_cvt_float_to_fp8(scaled, __NV_SATFINITE, __NV_E4M3), __NV_E4M3)));
+  return q * (1.0f / 256.0f);
 }
 
 constexpr int GQ_BLOCK = 256;

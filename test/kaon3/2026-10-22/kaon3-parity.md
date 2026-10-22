@@ -1023,3 +1023,42 @@ q_descale = (
 我们多做的那次 e4m3 roundtrip 会把 q 压到 3 位尾数（相对误差 ~6%），是纯粹额外的偏离。
 
 已改为默认**不做**（`Q_ROUNDTRIP=1` 可恢复旧行为做 A/B），正在跑完整 verify。
+
+### Q_ROUNDTRIP A/B：我的源码推断**错了**，vLLM 确实量化 q
+
+run `1022-172159-672432`（关掉 q 的 e4m3 roundtrip）：
+
+| 指标 | 开着（原样）| **关掉** | 结论 |
+|---|---|---|---|
+| 翻转率 | 15.32% | 15.53% | 变差 |
+| Δlp | 1.2220 | 1.2576 | 变差 |
+| **短 prompt ΔNLL** | **−0.0018** | **+0.0438** | **明显变差** |
+| long_zh ΔNLL | −0.0464 | +0.0194 | 变差 |
+
+**已恢复原样**，并在代码注释里写明证据。我的推断错在：
+`triton_attn.py:659` 的 `query.dtype == fp8` 是 **kernel 内部**"已经是 fp8 才反量化"的条件，
+而**量化发生在上层调用之前** —— 第 551 行 `supports_quant_query_input = current_platform.is_cuda()`
+说明 CUDA 上后端**支持并接受已量化的 query 输入**，上层会传 fp8 query 进来。
+**教训：源码里的类型条件可能在别的层级，不能据此反推上层没做量化；A/B 是唯一可信判据。**
+
+### 【真 bug 已修】attention 里 P 的 e4m3 量化少了 `p_scale = 256`
+
+`vllm/v1/attention/ops/triton_unified_attention.py:592-598`：
+
+```python
+if V.dtype == tl.float8e4nv:
+    p_scale = 256.0          # e4m3
+elif V.dtype.is_fp8():
+    p_scale = 128.0          # e5m2
+else:
+    p_scale = 1.0
+acc += tl.dot((P * p_scale).to(V.dtype), V) / p_scale
+```
+
+我们的 `pq8()`（`crates/kernels/cuda/gqa.cu`）**直接**把 p 转 e4m3 再转回，
+**没有乘 256**。后果很具体：e4m3 的最小正规数是 **2⁻⁶ ≈ 0.0156**，
+而 softmax 概率绝大多数远小于它 → 全部落进**次正规区**（有效分辨率掉到 ~2⁻⁹），
+相对误差可达几十个百分点。乘 256 后正好落进正规区，再用 `/256` 精确还原。
+
+已改为 `pq8(p) = e4m3(p * 256) * (1/256)`。`gqa_window_parity` 仍过（它是自己对自己，
+测不出这个），**判据只能靠端到端 verify**，正在跑。
