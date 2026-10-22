@@ -474,3 +474,23 @@ const float sc = 1.f / (1.f + __expf(-logits[t * E + e]));   // ← sigmoid！
 
 **下一步**：加 `Lm1.bin`（embed 输出，layer 0 之前）两侧都抓，二分
 "embed 错" vs "layer 0 错"。
+
+### 读 vLLM 的 RMSNorm 路径（BI=1 时不是默认 kernel）
+
+`VLLM_BATCH_INVARIANT=1` 下 `RMSNorm.forward_cuda` 走
+`vllm/model_executor/determinism/batch_invariant.py::rms_norm_batch_invariant`，即
+`_rms_norm_kernel`（Triton，**一行一个 program，BLOCK_SIZE=1024 分块累加**）：
+
+1. `sum_sq += tl.sum(where(mask, vals_f32*vals_f32, 0))` 逐块累加到 fp32 标量；
+2. `mean_sq = sum_sq / n_cols`；`rms = sqrt(mean_sq + eps)`；`inv_rms = 1/rms`；
+3. `y = (x_f32 * inv_rms) * w_f32` → **转回输入 dtype（bf16）**。
+
+关键点：**每个乘法都是"先转 fp32 算，再转回 bf16"**，不是 bf16 链式乘。
+我们的 `rmsnorm_into` 走 `ops.norm().rmsnorm(...)`，需要确认是否同样
+`(x*inv_rms)*w` 且在 fp32 中算中间值——若我们做的是 `x*(inv_rms*w)` 或先乘 w 再归一，
+bf16 舍入顺序不同，**在 L0 就会产生 1e-2 量级的相对差**（bf16 有 8 位尾数，1e-2 正好是
+一两次舍入的量级）。这条要作为 L0 的第一嫌疑直接查 kernel 实现。
+
+同时注意 `n_cols = 2816`，BLOCK_SIZE=1024 → **3 个块**累加，第 3 块只有 768 有效。
+若我们的 kernel 用不同分块（例如 2048 或 512），fp32 累加顺序不同，也会有 ~1e-7 级差，
+但那不足以解释 1e-2。**差三个数量级，说明不是累加顺序，而是 bf16 舍入位置**。
