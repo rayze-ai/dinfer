@@ -97,6 +97,55 @@ W4A4 / W8A8 激活量化让微小扰动跨过舍入边界后放大，逐行对�
 3. 长序列 long_zh（1252 token，过滑窗 1024）的 |ΔNLL| ≤ max(3 × 下限, 0.01)；
 4. 单 token（bos1，无 attention）top1 一致。
 
+## 口径 A/B loop（仪器化，2026-10-22 建立）
+
+用**同一份二进制快照**切运行时开关做对比，而不是"改代码再重编"——排除编译差异与轮次间的代码漂移。
+用户 2026-10-22：「测试注意清理环境」。
+
+### 环境（每轮必须重置到干净状态）
+
+```bash
+# 1) 连接（token 一次性；断了向用户要）
+scripts/dev/remote_5090.sh status          # 期望 alive
+
+# 2) 清环境：GPU 全闲 + 无残留进程（有残留先 pkill -x，不用 -f）
+scripts/dev/remote_5090.sh run "nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader
+  ; ps -eo pid,etime,comm | grep -E 'kaon3_probe|vllm'"
+
+# 3) 清残留产物（只删自己 run 的；runs/ 单轮约 4 MB，bins/ 单快照 14 MB）
+scripts/dev/remote_5090.sh run "rm -rf /hf_data/yaochen/runs/<旧run> /hf_data/yaochen/bins/<旧快照>"
+
+# 4) 一次编译出快照（kernel 对拍不顺带跑就是无效轮）
+BUILD_ONLY=1 bash scripts/verify/kaon3-parity.sh      # 打印 SNAP=<id>
+```
+
+### 观察方法
+
+| 口径 | 命令 | 看什么 |
+|---|---|---|
+| 端到端 | `SNAP=<id> bash scripts/verify/kaon3-parity.sh` | `OURS POOLED` 的 `dnll` / `flip_pct` / `mean_common_d` |
+| A/B 变体 | `SNAP=<id> PROBE_ENV="FP8_RQ_FMT=f32" bash scripts/verify/kaon3-parity.sh` | 同上，与默认（f16）对比 |
+| 单层 | `ctr "$B/kaon3_probe $M --forward --layer-iso <l>:/w/hid/ref_p02/L<l-1>.bin --hidden-all <dir> <ids>"` | `iso_L<l>.bin` vs `ref_p02/L<l>.bin` 的 mean/max |
+| 子模块 | `SUB_LAYER=<n>` + `--hidden-all` / `--sub-cmp` | 逐张量 |
+
+**运行时开关清单**（`PROBE_ENV`，全部默认 = 与 vLLM 一致）：`FP8_RQ_FMT=f32`（重量化中间值退回 f32 旧实现）、
+`GQA_PREFILL_CFG=<n>`（attention 变体）。
+
+### 停止条件（可机器判定，两条都要）
+
+1. **端到端**：`bash scripts/verify/kaon3-parity.sh` exit 0（判据见上「停止条件」节）；
+2. **口径裁决**：新口径在**单层隔离**上不劣于旧口径（同层同 id 的 `mean` 与 `max` 都不更大），
+   否则该改动回退——**字节一致或 ΔNLL 更小都不算证据**。
+
+### 已完成的口径裁决（2026-10-22 第 11 轮）
+
+| 口径 | 短 ΔNLL | 翻转率 | L11 隔离 mean |
+|---|---|---|---|
+| `f16`（= vLLM 字节）| +0.1055 | 15.73% | **1.2198e-02** |
+| `f32`（旧实现）| −0.0018 | 15.32% | 3.9868e-02 |
+
+→ **f16 正确**（层内近 3.3 倍），`−0.0018` 是相消假象。**残余误差在别处，继续按层找。**
+
 ## 上限
 
 - 最多迭代 30 轮（用户要求不达标不停；上限只作为"方法错了"的报警）。
