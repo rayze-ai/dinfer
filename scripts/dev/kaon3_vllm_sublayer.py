@@ -110,6 +110,11 @@ def _patched(self, *a, **k):
             if inp and inp[0] is not None:
                 captured["router_in"] = inp[0].detach().float().cpu().numpy().copy()
         handles.append(pr.register_forward_pre_hook(pre_hook))
+    # qkv_proj 的**原始输出**（norm 之前）：区分 GEMM 累加 vs norm 引入的 1 ulp（子 loop D）
+    if sa is not None:
+        qkv = getattr(sa, "qkv_proj", None)
+        if qkv is not None:
+            handles.append(qkv.register_forward_hook(mk("qkv_raw")))
     # self_attn 内部：q_norm / k_norm 的输出（hook 到 norm 模块本身）
     for attr, name in (("q_norm", "q_norm"), ("k_norm", "k_norm"), ("v_norm", "v_norm")):
         m = getattr(sa, attr, None) if sa is not None else None

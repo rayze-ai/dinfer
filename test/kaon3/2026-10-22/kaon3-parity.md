@@ -2085,3 +2085,27 @@ L0/L1 逐位级（1e-8/1e-6）说明 embed、L0、L1 三层已经与 vLLM 完全
 **因此唯一出路：从 L0 起做到逐位一致**。只要每层输入逐位相同，后面的放大链就作用在同一份数据上，端到端自然一致。
 现状：L-1（embed）逐位 0、L0 rel 4.9e-8、L1 1.3e-6、L2 2.1e-2。
 下一步：L0 整跑逐子模块，把 4.9e-8 追到 0。
+
+### D-8：L0 几乎逐位一致，残余是零星 1-ulp
+
+整跑（各自累积）对比 L0 逐子模块（快照 `1023-063828-1044234`，vLLM 侧 `da_r`）：
+
+| 张量 | 差异 |
+|---|---|
+| input_norm | **0 / 67584** |
+| q_norm | 12 / 98304（rel 1.7e-7）|
+| k_norm | **0** |
+| v_norm | 2 |
+| attn_out | **0** |
+| o_proj | 4 |
+| pre_ff_norm | **0** |
+| mlp_gate_up | 12 |
+| dense | 31 / 67584 |
+| router_in / router_logits / pre_ff2_norm / **moe_y** | **0 / 0 / 0 / 0** |
+| ff2 | 1 |
+
+L0 已经接近逐位；残余 1 ulp 零星分布在 `q_norm`(12) / `mlp_gate_up`(12) / `dense`(31)。
+为区分"GEMM 累加顺序"与"我们的 norm/激活实现"，两侧各加了 **norm 之前的原始输出** dump：
+我们 `q_proj_raw`（`layer.rs` 在 `head_rmsnorm` 前 dump），vLLM `qkv_raw`（hook `self_attn.qkv_proj`）。
+判定法：若两侧 `qkv_raw` 也存在同样 12 处差 → GEMM 累加顺序；若 `qkv_raw` 逐位一致而 `q_norm` 有差 → 我们的 head_rmsnorm。
+（本轮 vLLM 侧抓取因 hook 报错未成功，下一轮重试。）

@@ -568,6 +568,8 @@ impl Gemma4Layer {
             }
         }
 
+        // 子 loop D：q 投影的**原始输出**（norm 之前），用于区分"GEMM 累加"与"norm"引入的 1 ulp。
+        sub_dump(stream, sub_out, "q_proj_raw", q, tokens * heads * d, d)?;
         // ---- 3. 逐头 RMSNorm：q_norm / k_norm 带权重，v_norm 无权重 ----
         head_rmsnorm(stream, ops, q, Some(&self.q_norm), d, eps)?;
         head_rmsnorm(stream, ops, kk, Some(&self.k_norm), d, eps)?;
