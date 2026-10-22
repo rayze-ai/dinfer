@@ -42,7 +42,8 @@ W4A4 / W8A8 激活量化让微小扰动跨过舍入边界后放大，逐行对�
 2. 汇总用例（`test/kaon3/oracle` 里 ≤512 行的全部，当前 27 个：24 条 prompts.tsv + raw9 / chat_en / chat_zh），
    记 FLOOR = vLLM(开 BI) 对 vLLM(关 BI)，OURS = vLLM(开 BI) 对我们：
    - 可判定行 top1 翻转率 OURS ≤ 1.5 × FLOOR + 3 个百分点；
-   - 实际 token 平均 NLL 之差 |ΔNLL| OURS ≤ max(3 × |ΔNLL| FLOOR, 0.01)；
+   - （第 7 轮后改为只作参考、不判定）短 prompt 的平均 NLL 约 13 nat/token，由 chat 模板与用户消息开头那些
+     logprob ≈ −20 的远尾 token 主导，下限本身就有 −0.25；质量判定改由自然长文本的 ΔNLL 承担（第 3 条）；
    - 共有 top-5 token 的 |Δlogprob| 均值 OURS ≤ 1.5 × FLOOR；
 3. 长序列 long_zh（1252 token，过滑窗 1024）的 |ΔNLL| ≤ max(3 × 下限, 0.01)；
 4. 单 token（bos1，无 attention）top1 一致。
