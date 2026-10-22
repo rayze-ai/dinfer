@@ -15,6 +15,10 @@
 #   | batch invariance| 无此概念                          | BI=1 作判据参照 / BI=0 作噪声下限 |
 # 生产（`vllm serve <model> --port 8081 --max_num_batched_tokens 4096`）用 block 16 / max_num_seqs 256，
 # 与上表不同；生产口径只用于阶段 4 之后的引擎层面比较，不用于逐位置 logprob 对拍。
+#
+# **本脚本永不传 `--kv-transfer-config`**（用户 2026-10-22）：共享基线 `kaon-vllm-pegaflow` 当年带了
+# PegaKV 外部 KV 连接器，其 KV cache 经过外部搬运，**不是逐位置 logprob 对拍的合法参照**。
+# 对拍参照一律用本脚本起的干净实例（无外部 KV、无 PegaKV、参数与探针假设对齐）。
 # 等到 /v1/models 返回 200 才退出；失败打印容器日志尾部。绝不碰基线容器 kaon-vllm-pegaflow（GPU 7）。
 set -euo pipefail
 cd "$(dirname "$0")/../.."
