@@ -38,24 +38,24 @@ fi
 n=${#G[@]}
 for i in "${!G[@]}"; do
   GPU=${G[$i]} timeout 2400 $R ctr "M=\$(ls -d /hf_data/hub/models--kaon-release--Kaon-V3-nvpf4-mixed/snapshots/*/ | head -1)
-    ${PROBE_ENV:-} $B/kaon3_probe \$M --batch ${REF:-test/kaon3/oracle_p1} --out $O/ours --shard $i/$n 2>&1 | grep -E 'BATCH|rror|panicked' | tail -3" \
+    ${PROBE_ENV:-} $B/kaon3_probe \$M --batch ${REF:-test/kaon3/oracle_clean} --out $O/ours --shard $i/$n 2>&1 | grep -E 'BATCH|rror|panicked' | tail -3" \
     > /tmp/kaon3_shard_${RUN}_$i.txt 2>&1 &
 done
 wait
 grep -hE 'rror|panicked' /tmp/kaon3_shard_${RUN}_*.txt | head -5
 cnt=$(timeout 300 $R run "ls /hf_data/yaochen/runs/$RUN/ours/*.json 2>/dev/null | wc -l")   # 宿主机路径（容器里是 /w）
-tot=$(ls ${REF:-test/kaon3/oracle_p1}/*.ids | wc -l)
+tot=$(ls ${REF:-test/kaon3/oracle_clean}/*.ids | wc -l)
 # 参照集与下限集用例名必须完全一致（2026-10-22：nobi 少 bos1/dup4，下限与我们的读数来自不同样本）
-miss=$(comm -3 <(ls ${REF:-test/kaon3/oracle_p1}/*.ids | xargs -n1 basename | sed 's/\.ids$//' | sort) \
-             <(ls ${FLR:-test/kaon3/oracle_p1c}/*.ids 2>/dev/null | xargs -n1 basename | sed 's/\.ids$//' | sort) | tr -d '\t' | tr '\n' ' ')
+miss=$(comm -3 <(ls ${REF:-test/kaon3/oracle_clean}/*.ids | xargs -n1 basename | sed 's/\.ids$//' | sort) \
+             <(ls ${FLR:-test/kaon3/oracle_clean_b}/*.ids 2>/dev/null | xargs -n1 basename | sed 's/\.ids$//' | sort) | tr -d '\t' | tr '\n' ' ')
 [ -z "$miss" ] && ok "参照集与下限集用例一致（$tot 个）" || ng "参照集与下限集用例不一致，缺：$miss"
 [ "$cnt" = "$tot" ] && ok "分片前向完成 $cnt/$tot（${n} 卡并行，run $RUN）" || ng "分片前向只完成 $cnt/$tot（看 /tmp/kaon3_shard_${RUN}_*.txt）"
 # 3) 汇总判定
 # 参照 REF 与下限 FLOOR 都是 BI=1、参数显式对齐；区别只在进程：
-#   REF   = 单进程一次抓完的参照集（test/kaon3/oracle_p1）
+#   REF   = 单进程一次抓完的参照集（test/kaon3/oracle_clean）
 #   FLOOR = 同参数**另一个进程**抓的集（oracle_p1b）——跨进程差异才是真实可达下限（2026-10-22 实测 ~18%）
 #   ours 用 REF 作参照；另给 ours-vs-FLOOR 作交叉参考（两边都是不同进程对同一 REF 的偏差）
-REF=${REF:-test/kaon3/oracle_p1}; FLR=${FLR:-test/kaon3/oracle_p1c}
+REF=${REF:-test/kaon3/oracle_clean}; FLR=${FLR:-test/kaon3/oracle_clean_b}
 out=$(GPU=${G[0]} timeout 600 $R ctr "$B/kaon3_oracle_diff $FLR $REF | sed 's/^/FLOOR /'
   $B/kaon3_oracle_diff $REF $O/ours $FLR | sed 's/^/OURS /'
   $B/kaon3_oracle_diff $REF/bos1.json $O/ours/bos1.json | sed 's/^/BOS1 /'")

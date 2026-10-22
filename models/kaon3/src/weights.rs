@@ -242,15 +242,29 @@ pub fn load_fp8_group(src: &WeightSource, stream: &Stream, names: &[String]) -> 
                 // 曾误判为"torch 类型提升到 f32"，已由字节级对拍纠正。
                 // scale 先按 fp16 舍入（vLLM 的 `weight_scale[idx]` 是 fp16 张量的元素），
                 // 再与 fp16 的值相乘、结果留在 fp16 —— **两步都在 fp16 精度**。
+                // A/B 开关（2026-10-22 回退验证）：`FP8_RQ_FMT=f32` 退回"f32 中间值"旧实现，
+                // 其余任何值 / 不设 = fp16（与 vLLM 一致）。同一份二进制切两种口径，排除编译差异。
+                let fp16 = requant_fp16_mid();
                 let s16 = f32::from(half::f16::from_f32(s));
                 for b in w.iter_mut() {
-                    let dq = f32::from(half::f16::from_f32(e4m3_to_f32(*b) * s16));
+                    let v = e4m3_to_f32(*b);
+                    let dq = if fp16 { f32::from(half::f16::from_f32(v * s16)) } else { v * s };
                     *b = f32_to_e4m3(dq * inv);
                 }
             }
             Ok(QWeight::Fp8 { w: h2d_u8(stream, &w)?, scale: smax, a_scale: amax, n, k })
         })
         .collect()
+}
+
+/// 重量化中间值落 fp16（与 vLLM 一致）还是 f32（旧实现）。环境变量 `FP8_RQ_FMT=f32` 退回旧口径。
+fn requant_fp16_mid() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        let r = std::env::var("FP8_RQ_FMT").map(|v| v.trim() != "f32").unwrap_or(true);
+        if !r { eprintln!("[kaon3] FP8_RQ_FMT=f32：重量化中间值按 f32（旧实现，A/B 用）"); }
+        r
+    })
 }
 
 /// e4m3fn 字节 → f32（精确；0x7f / 0xff 是 NaN）。
