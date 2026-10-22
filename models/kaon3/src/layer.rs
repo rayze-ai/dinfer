@@ -511,8 +511,7 @@ fn sub_dump_op(stream: &Stream, sub_out: Option<(&std::path::Path, usize)>, name
 
 fn sub_dump(stream: &Stream, sub_out: Option<(&std::path::Path, usize)>, name: &str,
             buf: &Tensor<bf16>, tokens: usize, h: usize) -> Result<()> {
-    let Some((dir, l)) = sub_out else { return Ok(()) };
-    if l != 0 { return Ok(()); }
+    let Some((dir, _l)) = sub_out else { return Ok(()) };
     let _ = stream;
     let v = buf.to_vec_f32(stream)?;
     let bytes: Vec<u8> = v.iter().take(tokens * h).flat_map(|x| x.to_le_bytes()).collect();
@@ -568,7 +567,7 @@ impl Gemma4Layer {
         head_rmsnorm(stream, ops, q, Some(&self.q_norm), d, eps)?;
         head_rmsnorm(stream, ops, kk, Some(&self.k_norm), d, eps)?;
         head_rmsnorm(stream, ops, v, None, d, eps)?;
-        if let Some((dir, 0)) = sub_out {
+        if let Some((dir, _)) = sub_out {
             for (nm, buf, rows) in [("q_norm", &*q, heads), ("k_norm", &*kk, nkv), ("v_norm", &*v, nkv)] {
                 let vv = buf.to_vec_f32(stream)?;
                 let bytes: Vec<u8> = vv.iter().take(tokens * rows * d).flat_map(|x| x.to_le_bytes()).collect();
@@ -580,7 +579,7 @@ impl Gemma4Layer {
         // ---- 4. RoPE（只转前 rope_dim 维；proportional 的分母已由 Ropes 处理）----
         let rope = if self.window > 0 { &ropes.sliding } else { &ropes.full };
         rope.apply(stream, q, Some(kk), ctx.positions, heads, nkv, d)?;
-        if let Some((dir, 0)) = sub_out {
+        if let Some((dir, _)) = sub_out {
             for (nm, buf, rows) in [("q_rope", &*q, heads), ("k_rope", &*kk, nkv)] {
                 let vv = buf.to_vec_f32(stream)?;
                 let bytes: Vec<u8> = vv.iter().take(tokens * rows * d).flat_map(|x| x.to_le_bytes()).collect();
@@ -661,7 +660,7 @@ impl Gemma4Layer {
         }
 
         // ---- 6. o_proj + post_attention_norm + 残差 ----
-        if let Some((dir, 0)) = sub_out {
+        if let Some((dir, _)) = sub_out {
             let vv = attn.to_vec_f32(stream)?;
             let bytes: Vec<u8> = vv.iter().take(tokens * heads * d).flat_map(|x| x.to_le_bytes()).collect();
             std::fs::write(dir.join("attn_out.bin"), bytes)
@@ -678,7 +677,7 @@ impl Gemma4Layer {
         sub_dump(stream, sub_out, "pre_ff_norm", &sc.norm, tokens, h)?;
         self.dense_gate.forward(gemm, stream, &sc.norm, &mut sc.gate_up, tokens)?;
         self.dense_up.forward(gemm, stream, &sc.norm, &mut sc.act, tokens)?;
-        if let Some((dir, 0)) = sub_out {
+        if let Some((dir, _)) = sub_out {
             // mlp_gate_up = [gate | up] 拼起来（vLLM 的 MergedColumnParallelLinear 输出布局）
             let (g, u) = (sc.gate_up.to_vec_f32(stream)?, sc.act.to_vec_f32(stream)?);
             let di = cfg.dense_inter;
@@ -755,7 +754,7 @@ impl Gemma4Layer {
         // 只在 top-k 上重新归一化。**不是 sigmoid**（那是 DeepSeekV3/GLM/K3 的 `moe_route_f32` 口径，
         // 2026-10-22 发现此前误用，是短 prompt 翻转率超标的主因之一）。
         // per_expert_scale 已折进各专家 down 的 global scale（线性等价，见 weights/load），此处不再乘。
-        if let Some((dir, 0)) = sub_out {
+        if let Some((dir, _)) = sub_out {
             let v = sc.logits.to_vec(stream)?;
             let bytes: Vec<u8> = v.iter().take(tokens * e).flat_map(|x| x.to_le_bytes()).collect();
             std::fs::write(dir.join("router_logits.bin"), bytes)

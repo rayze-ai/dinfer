@@ -168,7 +168,9 @@ impl KaonModel {
                 block_size: self.block_size,
                 kv_mut: &mut kv_cache[l].cache.data,
             };
-            self.layers[l].forward(stream, gemm, ops, cfg, &self.ropes, sc, &mut ctx, tokens, None)?;
+            let so_l: usize = std::env::var("SUB_LAYER").ok().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
+            let so = hidden_dir.filter(|_| l == so_l).map(|d| (std::path::Path::new(d), l));
+            self.layers[l].forward(stream, gemm, ops, cfg, &self.ropes, sc, &mut ctx, tokens, so)?;
             self.kv = kv_cache;
             stream.dtod_copy_n(&sc.x.data, &mut hidden.data, tokens * h)?;
             return Ok(());
@@ -191,8 +193,10 @@ impl KaonModel {
                 block_size: self.block_size,
                 kv_mut: &mut kv_cache[l].cache.data,
             };
+            // 子模块 dump 的层选择：`SUB_LAYER=<n>` 覆盖，默认第 0 层。
+            let sub_l: usize = std::env::var("SUB_LAYER").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
             let so = hidden_dir
-                .filter(|_| l == 0)
+                .filter(|_| l == sub_l)
                 .map(|d| (std::path::Path::new(d), l));
             layer.forward(stream, gemm, ops, cfg, &self.ropes, sc, &mut ctx, tokens, so)?;
             if dump_layer == Some(l) {

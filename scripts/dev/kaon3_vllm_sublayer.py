@@ -54,7 +54,8 @@ except Exception as _e:  # noqa: BLE001
 
 def _patched(self, *a, **k):
     hs = a[1] if len(a) > 1 else k.get("hidden_states")
-    if self.layer_idx != 0 or hs is None or hs.shape[0] != t or captured:
+    _want = int(os.environ.get('SUB_LAYER', '0'))
+    if self.layer_idx != _want or hs is None or hs.shape[0] != t or captured:
         return _orig(self, *a, **k)
     handles = []
     def mk(name):

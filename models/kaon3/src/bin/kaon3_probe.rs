@@ -67,6 +67,10 @@ fn main() -> Result<()> {
     // --layer-iso <l>:<ref.bin>：单层隔离 —— 用参照的第 l-1 层残差流灌进第 l 层，只跑这一层，
     // 输出写 <hidden-all>/L{l}.bin（与参照同层直接比）。用来逐层判"实现本身"对不对。
     let layer_iso = take("--layer-iso");
+    // --layer-iso-eps <f32>：注入时给输入加**确定性**相对扰动（幅度 eps，用行内索引做伪随机符号），
+    // 用来测"该层对输入微小扰动的放大倍数"。因为注入本身要把参照 f32 量化成 bf16（~2e-3 相对），
+    // 这个放大倍数决定了仪器下限——才能分清某层的高误差是"实现错"还是"层本身敏感"。
+    let layer_iso_eps = take("--layer-iso-eps").map(|s| s.parse::<f32>().expect("eps 需要浮点"));
     // --hidden-cmp <refdir>：把 --hidden-all 写的逐层残差流与参照目录逐层比（纯 Rust，不用 Python 参考）。
     let hidden_cmp = take("--hidden-cmp");
     // --sub-cmp <refdir>：把 --hidden-all 目录里**所有同名 .bin** 与参照目录逐项比（layer 0 子模块对拍）。
@@ -106,7 +110,14 @@ fn main() -> Result<()> {
         let (l, path) = spec.split_once(':').context("--layer-iso 需要 l:ref.bin")?;
         let l: usize = l.parse()?;
         let b = std::fs::read(path)?;
-        let data: Vec<f32> = b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let mut data: Vec<f32> = b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        if let Some(eps) = layer_iso_eps {
+            // 确定性扰动：符号由元素下标决定，幅度 = eps * |x|（相对扰动），不引入随机源。
+            for (i, x) in data.iter_mut().enumerate() {
+                let sign = if (i * 2654435761usize) & 1 == 0 { 1.0 } else { -1.0 };
+                *x *= 1.0 + sign * eps;
+            }
+        }
         let dir = hidden_all.as_deref().context("--layer-iso 需要 --hidden-all <dir>")?;
         std::fs::create_dir_all(dir)?;
         return run_layer_iso(&mut ctx, &ids, l, &data, dir);
