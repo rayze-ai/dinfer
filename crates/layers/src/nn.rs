@@ -6,6 +6,12 @@ use anyhow::{ensure, Result};
 use dinfer_kernels::{self as k, Gemm, RopeStyle, Stream};
 use half::bf16;
 
+/// 把 f32 按 bf16 精度就近偶数舍入后还原成 f32（复现 `torch.to(bfloat16).float()`）。
+#[inline]
+fn round_to_bf16(x: f32) -> f32 {
+    f32::from(bf16::from_f32(x))
+}
+
 /// `y = x · W^T (+ b)`，W: [out, in]（PyTorch 布局）。
 pub struct Linear {
     pub w: Tensor<bf16>,
@@ -111,6 +117,8 @@ pub struct Rope {
     /// neox 配对跨度：`(i, i + span)`。默认 `rope_dim/2`；见 [`Rope::with_span`]。
     pub span: usize,
     pub style: RopeStyle,
+    /// 表是否已按 bf16 精度舍入（复现 vLLM `cos_sin_cache.to(dtype)`）。只影响解释，不影响存储类型。
+    pub bf16_cache: bool,
 }
 
 impl Rope {
@@ -142,8 +150,9 @@ impl Rope {
         ensure!(rope_dim % 2 == 0, "rope_dim must be even");
         ensure!(denom >= rope_dim && denom % 2 == 0, "rope denom {denom} 必须 >= rope_dim 且为偶数");
         let half = rope_dim / 2;
-        // 注：HF 在 bf16 模型里把 cos/sin cast 到 bf16 再逐项乘加；这里存 fp32 表、fp32 旋转。
-        // 实测对 logits 的影响 ≤ 1 ULP（P3/P4/P5 对拍均用此表），不改。
+        // 默认存 fp32 表、fp32 旋转。**注意**：vLLM 在 `RotaryEmbeddingBase.__init__` 里
+        // `cache = cache.to(dtype)`，dtype 即模型 dtype（bf16），所以它用的 cos/sin **是 bf16**；
+        // 需要逐位对拍的模型（如 Kaon-V3）用 `with_bf16_cache()` 复现这一点。
         // 40960 × 128 的 cos/sin 在 host 单线程要 ~120 ms → 按位置分片多线程算（启动 loop 第 6 轮）。
         let inv_freq: Vec<f64> =
             (0..half).map(|i| 1.0 / theta.powf(2.0 * i as f64 / denom as f64)).collect();
@@ -166,7 +175,30 @@ impl Rope {
                 });
             }
         });
-        Ok(Self { cos_sin: Tensor::from_vec(stream, table, &[max_pos, rope_dim])?, rope_dim, span: rope_dim / 2, style })
+        Ok(Self {
+            cos_sin: Tensor::from_vec(stream, table, &[max_pos, rope_dim])?,
+            rope_dim,
+            span: rope_dim / 2,
+            style,
+            bf16_cache: false,
+        })
+    }
+    /// 把 cos/sin 表按 **bf16 精度**舍入（仍是 f32 存储，kernel 不变）。
+    ///
+    /// vLLM `RotaryEmbeddingBase.__init__` 做完 `_compute_cos_sin_cache()` 后立刻
+    /// `cache = cache.to(dtype)`，`dtype` 是模型 dtype（bf16）；`forward_cuda` 里
+    /// `_match_cos_sin_cache_dtype(query)` 再对齐一次。CUDA kernel 把它 `static_cast<float>`
+    /// 后参与 fp32 乘加。所以"bf16 表 + fp32 旋转"才是 vLLM 的实际数值路径，
+    /// 用 f32 表会带来 ~2e-3 的相对差（bf16 尾数 8 位）。Kaon-V3 对拍实测正是这个量级。
+    pub fn with_bf16_cache(mut self, stream: &Stream) -> Result<Self> {
+        if self.bf16_cache {
+            return Ok(self);
+        }
+        let v = self.cos_sin.to_vec(stream)?;
+        let r: Vec<f32> = v.into_iter().map(round_to_bf16).collect();
+        self.cos_sin = Tensor::from_vec(stream, r, &self.cos_sin.shape)?;
+        self.bf16_cache = true;
+        Ok(self)
     }
     /// 改 neox 配对跨度。Gemma4 proportional RoPE 在 vLLM / HF 里是"inv_freq 零频补齐到 head_dim/2 对、
     /// 整头 neox 旋转"，非零频只有前 `rope_dim/2` 对，配对是 `(i, i + head_dim/2)` —— 不是只转前

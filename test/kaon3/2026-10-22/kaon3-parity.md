@@ -627,3 +627,47 @@ QK^T 的分数因此带 ~6% 的量化噪声，softmax 之后传到 `attn_out`—
 
 这条**不依赖任何新数据就能判定为可疑**：vLLM 源码里没有对 bf16 query 做量化这一步。
 下一轮 A/B：去掉 `q` 的 fp8 roundtrip（K/V 仍按 FP8 KV cache 量化），看 `o_proj` 是否归零。
+
+## 【根因 1，已修】RoPE 的 cos/sin 表：vLLM 用 **bf16**，我们用了 f32
+
+### 证据链（每一刀都是同名张量直接对比，无推断）
+
+| 步骤 | 张量 | 修前 mean_rel | 修后 mean_rel |
+|---|---|---|---|
+| 投影 + head-norm 输入 | `input_norm` | 0.000e0 | 0.000e0 |
+| head-norm 输出（RoPE 前）| `k_norm` / `v_norm` | 0.000e0 / 4.5e-10 | 同 |
+| head-norm 输出（RoPE 前）| `q_norm` | 8.94e-6 | 8.94e-6（同，< bf16 ULP）|
+| **RoPE 之后** | **`k_rope`** | **1.550e-3** | **0.000e0** |
+| **RoPE 之后** | **`q_rope`** | **1.834e-3** | **1.017e-5** |
+| **attention 输出（o_proj 前）** | **`attn_out`** | **8.234e-3** | **0.000e0** |
+| o_proj 输出 | `o_proj` | 7.653e-3 | **1.149e-7** |
+| dense（FP8 MLP）| `dense` | 1.680e-2 | **1.951e-3** |
+
+### 源码依据
+
+`vllm/model_executor/layers/rotary_embedding/base.py:59-63`：
+
+```python
+cache = self._compute_cos_sin_cache()      # fp32 计算
+if not self.use_flashinfer:
+    cache = cache.to(dtype)                # ← dtype = 模型 dtype = bf16
+self.register_buffer("cos_sin_cache", cache, ...)
+```
+
+`forward_cuda` 里再 `_match_cos_sin_cache_dtype(query)` 对齐一次。
+CUDA kernel（`csrc/pos_encoding_kernels.cu`）把 bf16 表 `static_cast<float>` 后做
+**fp32 乘加**、结果再存 bf16。所以正确口径是 **"bf16 表 + fp32 旋转"**。
+
+我们原来存 f32 表（注释还写着"vLLM 的 rope 实际按 fp32 算"——**那句是错的**）。
+bf16 尾数 8 位 → 相对分辨率 2^-9 ≈ 2e-3，与实测 1.83e-3 完全吻合。
+
+### 修复
+
+`crates/layers/src/nn.rs` 新增 `Rope::with_bf16_cache(&stream)`：把表按 `half::bf16`
+就近偶数舍入后仍存 f32（kernel 不变），只复现精度。**opt-in**，其它模型默认仍用 f32 表。
+Kaon-V3 的 `Ropes::new` 两套表都调用它。
+
+### 连带修正一个历史误判
+
+此前的记录说"bf16 表让 long_zh ΔNLL 从 +0.03 恶化到 +0.48"——那是在**外部 KV 污染参照**
+（PegaKV）下测的，且当时还叠加着 MoE 路由语义错误。**该结论作废**，需在干净参照下重测。

@@ -299,7 +299,10 @@ pub struct Ropes {
 impl Ropes {
     pub fn new(stream: &Stream, cfg: &KaonConfig) -> Result<Self> {
         Ok(Self {
-            // f32 表（第 8 轮 A/B：bf16 表让 long_zh ΔNLL 从 +0.03 恶化到 +0.48；vLLM 的 rope 实际按 fp32 算）
+            // **bf16 表**（2026-10-22 逐层对拍定案）：vLLM `RotaryEmbeddingBase.__init__` 里
+            // `cache = cache.to(dtype)`，dtype = 模型 bf16；`forward_cuda` 再 `_match_cos_sin_cache_dtype`。
+            // CUDA kernel 把 bf16 表 `static_cast<float>` 后做 fp32 乘加。此前用 f32 表，
+            // `q_rope` 相对误差 1.83e-3（= bf16 尾数分辨率），现已改。
             sliding: Rope::with_denom(
                 stream,
                 cfg.rope_sliding.rope_dim,
@@ -308,7 +311,8 @@ impl Ropes {
                 cfg.rope_sliding.theta,
                 RopeStyle::Neox,
             )?
-            .with_span(cfg.rope_sliding.span)?,
+            .with_span(cfg.rope_sliding.span)?
+            .with_bf16_cache(stream)?,
             full: Rope::with_denom(
                 stream,
                 cfg.rope_full.rope_dim,
@@ -317,7 +321,8 @@ impl Ropes {
                 cfg.rope_full.theta,
                 RopeStyle::Neox,
             )?
-            .with_span(cfg.rope_full.span)?,
+            .with_span(cfg.rope_full.span)?
+            .with_bf16_cache(stream)?,
         })
     }
 }
