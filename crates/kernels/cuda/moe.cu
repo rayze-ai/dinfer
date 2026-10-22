@@ -164,6 +164,104 @@ extern "C" int moe_route_f32(const float* logits, const float* bias, int32_t* to
 }
 
 // counts/offsets/cursor: 调用方提供的 [E] / [E+1] / [E] 缓冲（counts 需先清零）。
+// ---------------------------------------------------------------------------
+// Gemma4 路由：**全专家 softmax → 按原始 logits 取 top-k → top-k 上重新归一化 → 乘 per_expert_scale**。
+// 与上面 route_kernel 的 sigmoid 语义完全不同（那是 DeepSeekV3 / GLM / K3 的口径），不能混用。
+// 依据 vLLM `model_executor/models/gemma4.py`：
+//   topk_ids = torch.topk(gating_output, k)[1]                 // 按原始 logits
+//   router_probabilities = softmax(gating_output, dim=-1)      // 全专家
+//   gate_weights = one_hot(topk_ids) * router_probabilities
+//   dispatch_weights = gate_weights / sum(gate_weights)        // 只在 top-k 上
+//   topk_weights = dispatch_weights.gather(1, topk_ids) * per_expert_scale[topk_ids]
+__global__ void route_softmax_kernel(const float* __restrict__ logits, const int32_t* __restrict__ topk_ids,
+                                     const float* __restrict__ per_expert_scale, float* __restrict__ topk_w, int E,
+                                     int K) {
+  const int64_t t = blockIdx.x;
+  __shared__ float s_prob[MAX_E];
+  __shared__ float s_sel[MAX_K];
+  // 全专家 softmax（减最大值保证数值稳定，与 torch.softmax 同）
+  __shared__ float s_max;
+  if (threadIdx.x == 0) {
+    float m = -INFINITY;
+    for (int e = 0; e < E; ++e) m = fmaxf(m, logits[t * E + e]);
+    s_max = m;
+  }
+  __syncthreads();
+  float partial = 0.f;
+  for (int e = threadIdx.x; e < E; e += blockDim.x) {
+    const float p = __expf(logits[t * E + e] - s_max);
+    s_prob[e] = p;
+    partial += p;
+  }
+  // block 内归约求和
+  __shared__ float s_red[32];
+  {
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    for (int off = 16; off > 0; off >>= 1) partial += __shfl_down_sync(0xffffffff, partial, off);
+    if (lane == 0) s_red[warp] = partial;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      float sum = 0.f;
+      const int nw = (blockDim.x + 31) >> 5;
+      for (int i = 0; i < nw; ++i) sum += s_red[i];
+      s_red[0] = sum > 0.f ? 1.f / sum : 1.f;
+    }
+    __syncthreads();
+  }
+  const float inv_sum = s_red[0];
+  // top-k 的 id 由 moe_route 的前一步给出（按原始 logits 排序），这里只算权重
+  for (int k = threadIdx.x; k < K; k += blockDim.x) {
+    const int e = topk_ids[t * K + k];
+    s_sel[k] = s_prob[e] * inv_sum;  // softmax 概率
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    float wsum = 0.f;
+    for (int k = 0; k < K; ++k) wsum += s_sel[k];
+    const float inv_w = wsum > 0.f ? 1.f / wsum : 1.f;  // 只在 top-k 上重新归一化
+    for (int k = 0; k < K; ++k) {
+      const int e = topk_ids[t * K + k];
+      topk_w[t * K + k] = s_sel[k] * inv_w * (per_expert_scale ? per_expert_scale[e] : 1.f);
+    }
+  }
+}
+
+// 按原始 logits 取 top-k（Gemma4 口径：不看 softmax 概率的大小关系，两者单调等价，但按 logits 可避免
+// exp 下溢导致全 0 时排序不稳定）。
+__global__ void route_topk_ids_kernel(const float* __restrict__ logits, int32_t* __restrict__ topk_ids, int E,
+                                      int K) {
+  const int64_t t = blockIdx.x;
+  __shared__ float s_val[MAX_E];
+  for (int e = threadIdx.x; e < E; e += blockDim.x) s_val[e] = logits[t * E + e];
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    for (int k = 0; k < K; ++k) {
+      int best = -1;
+      float bv = -INFINITY;
+      for (int e = 0; e < E; ++e) {
+        const float v = s_val[e];
+        if (v > bv) {
+          bv = v;
+          best = e;
+        }
+      }
+      topk_ids[t * K + k] = best;
+      s_val[best] = -INFINITY;
+    }
+  }
+}
+
+extern "C" int moe_route_softmax_f32(const float* logits, int32_t* topk_ids, const float* per_expert_scale,
+                                     float* topk_w, int64_t tokens, int64_t num_experts, int64_t topk,
+                                     cudaStream_t stream) {
+  if (num_experts <= 0 || num_experts > MAX_E || topk <= 0 || topk > MAX_K || topk > num_experts) return -1;
+  if (tokens <= 0) return 0;
+  route_topk_ids_kernel<<<(unsigned)tokens, 256, 0, stream>>>(logits, topk_ids, (int)num_experts, (int)topk);
+  route_softmax_kernel<<<(unsigned)tokens, 256, 0, stream>>>(logits, topk_ids, per_expert_scale, topk_w,
+                                                             (int)num_experts, (int)topk);
+  return 0;
+}
+
 extern "C" int moe_bucket(const int32_t* topk_ids, int32_t* counts, int32_t* offsets, int32_t* cursor,
                           int32_t* sorted_tok, int32_t* sorted_k, int64_t tokens, int64_t num_experts, int64_t topk,
                           cudaStream_t stream) {

@@ -582,6 +582,18 @@ extern "C" {
         scale: f32,
         stream: cudaStream_t,
     ) -> i32;
+    /// Gemma4 路由：全专家 softmax → 按 logits 取 top-k → top-k 上归一化 → 乘 per_expert_scale。
+    /// （与 `moe_route_f32` 的 sigmoid 语义不同，见 `cuda/moe.cu` 注释与 vLLM `gemma4.py`。）
+    pub fn moe_route_softmax_f32(
+        logits: *const f32,
+        topk_ids: *mut i32,
+        per_expert_scale: *const f32,
+        topk_w: *mut f32,
+        tokens: i64,
+        num_experts: i64,
+        topk: i64,
+        stream: cudaStream_t,
+    ) -> i32;
     pub fn moe_bucket(
         topk_ids: *const i32,
         counts: *mut i32,
@@ -1287,6 +1299,9 @@ mod stubs {
     stub!(gather_head_bf16(a: *const c_void, b: *mut c_void, t: i64, h: i64, w: i64, hd: i64, c0: i64, wd: i64, s: cudaStream_t));
     stub!(scatter_head_bf16(a: *const c_void, b: *mut c_void, t: i64, h: i64, w: i64, hd: i64, c0: i64, wd: i64, s: cudaStream_t));
     stub!(moe_gate_f32(x: *const c_void, w: *const c_void, l: *mut f32, t: i64, e: i64, h: i64, s: cudaStream_t));
+    stub!(moe_route_softmax_f32(l: *const f32, ti: *mut i32, pes: *const f32, tw: *mut f32, t: i64, e: i64, k: i64, s: cudaStream_t)
+        => moe_route_softmax_f32, "moe_route_softmax_f32"
+        [l, ti, pes, tw, t, e, k, s]);
     stub!(moe_route_f32(l: *const f32, b: *const f32, ti: *mut i32, tw: *mut f32, t: i64, e: i64, k: i64, r: i32, sc: f32, s: cudaStream_t));
     stub!(moe_bucket(ti: *const i32, c: *mut i32, o: *mut i32, cu: *mut i32, st: *mut i32, sk: *mut i32, t: i64, e: i64, k: i64, s: cudaStream_t));
     stub!(moe_gather_bf16(x: *const c_void, xg: *mut c_void, st: *const i32, n: i64, h: i64, s: cudaStream_t));

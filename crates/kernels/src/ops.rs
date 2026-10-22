@@ -1698,6 +1698,49 @@ pub fn moe_route_f32(
     )
 }
 
+/// Gemma4 路由（全专家 softmax 口径）：logits[tokens*E] → topk_ids / topk_w。
+///
+/// 语义严格照 vLLM `model_executor/models/gemma4.py`：按**原始 logits** 取 top-k，
+/// 在全专家上做 softmax，只在 top-k 上重新归一化，再乘 `per_expert_scale`。
+/// 与 [`moe_route_f32`]（sigmoid，DeepSeekV3 / GLM / K3 口径）不可互换。
+#[allow(clippy::too_many_arguments)]
+pub fn moe_route_softmax_f32(
+    stream: &Stream,
+    logits: &CudaSlice<f32>,
+    per_expert_scale: Option<&CudaSlice<f32>>,
+    topk_ids: &mut CudaSlice<i32>,
+    topk_w: &mut CudaSlice<f32>,
+    tokens: usize,
+    num_experts: usize,
+    topk: usize,
+) -> Result<()> {
+    ensure!(logits.len() >= tokens * num_experts, "moe_route_softmax: logits");
+    ensure!(topk_ids.len() >= tokens * topk && topk_w.len() >= tokens * topk, "moe_route_softmax: out");
+    if let Some(p) = per_expert_scale {
+        ensure!(p.len() == num_experts, "moe_route_softmax: per_expert_scale len");
+    }
+    let pl = stream.ptr(logits) as *const f32;
+    let pp = per_expert_scale.map_or(std::ptr::null(), |p| stream.ptr(p) as *const f32);
+    let pi = stream.ptr_mut(topk_ids) as *mut i32;
+    let pw = stream.ptr_mut(topk_w) as *mut f32;
+    // SAFETY: 容量已校验；per_expert_scale 可为 null。
+    check(
+        unsafe {
+            ffi::moe_route_softmax_f32(
+                pl,
+                pi,
+                pp,
+                pw,
+                tokens as i64,
+                num_experts as i64,
+                topk as i64,
+                stream.raw() as _,
+            )
+        },
+        "moe_route_softmax_f32",
+    )
+}
+
 /// 分桶工作区：counts[E] / offsets[E+1] / cursor[E] / sorted_tok[T*K] / sorted_k[T*K]。
 pub struct MoeBuckets {
     pub counts: CudaSlice<i32>,

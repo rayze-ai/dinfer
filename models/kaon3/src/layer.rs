@@ -665,8 +665,11 @@ impl Gemma4Layer {
             e,
             h,
         )?;
-        // softmax 在全专家上做，top-k 取概率；renormalize 后乘 per_expert_scale 在 scatter 时折入
-        k::ops::moe_route_f32(
+        // Gemma4 路由（vLLM `gemma4.py`）：按**原始 logits** 取 top-k → 全专家 softmax →
+        // 只在 top-k 上重新归一化。**不是 sigmoid**（那是 DeepSeekV3/GLM/K3 的 `moe_route_f32` 口径，
+        // 2026-10-22 发现此前误用，是短 prompt 翻转率超标的主因之一）。
+        // per_expert_scale 已折进各专家 down 的 global scale（线性等价，见 weights/load），此处不再乘。
+        k::ops::moe_route_softmax_f32(
             stream,
             &sc.logits.data,
             None,
@@ -675,8 +678,6 @@ impl Gemma4Layer {
             tokens,
             e,
             kk,
-            true,
-            1.0,
         )?;
         k::ops::moe_bucket(stream, &sc.topk_ids.data, &mut sc.buckets, tokens, kk)?;
         let offsets = stream.dtoh_sync_copy(&sc.buckets.offsets)?;

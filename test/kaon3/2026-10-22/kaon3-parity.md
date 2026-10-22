@@ -333,3 +333,41 @@ identical rows: 24 / 24
 **但这只排除了"模式差异"**，还没排除"两者的输入假设都不对"，例如：
 `BLOCK_SIZE=32` 与 oracle 的 block 32 是否真的一致、`slot_mapping` 的排布、`block_table` 的构造。
 这些由 `p02`（24 token，1 个 block）覆盖不足 —— 需要跨 block 的用例才能暴露。
+
+### 【真 bug】MoE 路由用错语义：sigmoid vs Gemma4 的 softmax（2026-10-22 深夜）
+
+**逐行读 vLLM `model_executor/models/gemma4.py` 得到的事实**（不是推测）：
+
+`Gemma4Router.forward`（271–277 行）：
+```python
+x = self.norm(x)                      # RMSNorm，has_weight=False
+x = x * self.root_size.to(x.dtype)    # hidden_size ** -0.5
+x = x * self.scale.to(x.dtype)        # 每维学习 scale
+router_logits, _ = self.proj(x)       # GateLinear → fp32
+```
+
+`gemma4_routing_function_torch`（186–212 行）：
+```python
+_, topk_ids = torch.topk(gating_output, k=topk, dim=-1)          # 按**原始 logits**
+router_probabilities = torch.nn.functional.softmax(gating_output, dim=-1)   # **全专家 softmax**
+gate_weights = one_hot(topk_ids, E).sum(-2) * router_probabilities
+renorm_factor = gate_weights.sum(-1, keepdim=True)
+dispatch_weights = gate_weights / renorm_factor                  # 只在 top-k 上归一化
+topk_weights = dispatch_weights.gather(1, topk_ids)
+expert_scales = per_expert_scale[topk_ids]
+topk_weights = topk_weights * expert_scales                      # 乘 per_expert_scale
+```
+
+**我们的实现（`crates/kernels/cuda/moe.cu` 的 `route_kernel`）**：
+```c
+const float sc = 1.f / (1.f + __expf(-logits[t * E + e]));   // ← sigmoid！
+```
+该 kernel 头注释写明它是 `DeepSeekV3TopkRouter / vLLM grouped_topk` 的口径 —— 那是 GLM/K3 用的，
+**不是 Gemma4 的口径**。两者完全不同：sigmoid 逐元素独立，softmax 归一化竞争。
+
+**修法**：新增 `moe_route_softmax_f32`（`cuda/moe.cu`），严格照上面五个步骤；`layer.rs` 的 MoE 支路改用它。
+原 `moe_route_f32` 保留给 GLM/K3。
+
+**`per_expert_scale` 折进 down 的 global scale 是等价的**（down 是线性），不是 bug，保持原样。
+
+编译通过。下一步跑 verify 看指标变化。
