@@ -1815,3 +1815,20 @@ vLLM 日志同时出现 `quant_algo=NVFP4` 与 `W4A16_NVFP4` 两条 ModelOpt 提
 `quantized_layers` 语言模型计 FP8 205 / NVFP4 30，**无 W4A16**。→ 假设排除（那条 W4A16 是 vLLM 探测时的通用提示）。
 vLLM MoE 后端：`Using 'VLLM_CUTLASS' NvFp4 MoE backend`（`nvfp4.py:291`）、`MoEPrepareAndFinalizeNoDPEPModular`。
 补 dump 点：两侧都加 `pre_ff2_norm`（专家输入 = `pre_feedforward_layernorm_2` 输出）。
+
+### C-2：专家输入对齐，分歧在专家路径内部
+快照 `1022-211222-808222`，`ROUTER_BF16=1 SUB_LAYER=11` 同输入隔离（我们 `/w/hid/c2o`，vLLM `/w/hid/c2r`）：
+
+| 张量 | max | mean | 相对 | 不同元素 |
+|---|---|---|---|---|
+| pre_ff2_norm（专家输入）| 1.95e-3 | 3.6e-8 | 1.8e-7 | **2 / 67584** |
+| router_logits | 1.95e-3 | 6.4e-7 | 5.9e-7 | 2 / 3072 |
+| **moe_y** | 3.1e-2 | 1.0e-3 | **9.2e-3** | **57696 / 67584** |
+| ff2 | 5.0 | 5.0e-2 | 1.5e-2 | 57868 / 67584 |
+
+输入与路由全同 → 0.9% 相对差在 **gate/up GEMM → gelu → fp4 激活量化 → down GEMM → 合并** 之内。
+
+**读 vLLM 合并口径**（`fused_moe/experts/cutlass_moe.py run_cutlass_moe_fp4` 末尾）：
+`(c3.view(m,K,k) * topk_weights.view(m,K,1).to(out_dtype)).sum(dim=1)`，`out_dtype = a.dtype = bf16`；
+`per_expert_scale` 在 `gemma4.py _gemma4_routing_kernel` 里折进路由权重（fp32），合并时**权重 cast bf16、乘积 bf16**。
+我们：per_expert_scale 折进 down 全局 scale、权重 f32、f32 累加。→ 新增 A/B `MOE_COMBINE_BF16=1`（按 vLLM 口径，host 实现）。
