@@ -687,6 +687,7 @@ impl Gemma4Layer {
                 .map_err(|err| anyhow::anyhow!("写 mlp_gate_up.bin 失败: {err}"))?;
         }
         ops.act().gelu_tanh_mul(stream, &sc.gate_up.data, &sc.act.data, &mut sc.gelu.data, tokens, cfg.dense_inter)?;
+        sub_dump(stream, sub_out, "mlp_gelu", &sc.gelu, tokens, cfg.dense_inter)?;
         self.dense_down.forward(gemm, stream, &sc.gelu, &mut sc.dense, tokens)?;
         sub_dump(stream, sub_out, "dense", &sc.dense, tokens, h)?;
         rmsnorm_into(stream, ops, &sc.dense, &self.post_ff_norm_1, &mut sc.norm, h, tokens, eps)?;

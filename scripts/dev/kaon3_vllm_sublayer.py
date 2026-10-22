@@ -62,6 +62,27 @@ def _patched(self, *a, **k):
         a_ = getattr(sa, "attn", None)
         if a_ is not None:
             handles.append(a_.register_forward_hook(mk("attn_out")))
+    # down_proj 的**输入**（= gelu(gate)*up，FP8 激活量化的对象）
+    if mlp_ is not None:
+        dp = getattr(mlp_, "down_proj", None)
+        if dp is not None:
+            def _dp_pre(mod, inp):
+                if inp and inp[0] is not None:
+                    captured["mlp_gelu"] = inp[0].detach().float().cpu().numpy().copy()
+            handles.append(dp.register_forward_pre_hook(_dp_pre))
+    # MoE 输出：MoERunner.forward 的返回值（`experts` 是 PluggableLayer，普通 forward hook 不触发）
+    try:
+        import vllm.model_executor.layers.fused_moe.runner.moe_runner as _mr
+        _orig_moe = _mr.MoERunner.forward
+        def _moe_patched(self_, *aa, **kk):
+            out_ = _orig_moe(self_, *aa, **kk)
+            t_ = out_[0] if isinstance(out_, tuple) else out_
+            if t_ is not None and t_.shape[0] == t and "moe_y" not in captured:
+                captured["moe_y"] = t_.detach().float().cpu().numpy().copy()
+            return out_
+        _mr.MoERunner.forward = _moe_patched
+    except Exception as _e:  # noqa: BLE001
+        print(f"MoERunner patch 失败: {_e}", flush=True)
     # MLP 内部：gate_up 投影输出（gelu 之前）与 down 投影输出
     mlp_ = getattr(self, "mlp", None)
     if mlp_ is not None:
