@@ -545,7 +545,29 @@ fn compare_sub_dir(ours: &str, rf: &str, rows_want: usize) -> Result<()> {
 /// 把关键权重原样导出成 bf16 LE，用于和 safetensors 直接 `cmp` 校验加载路径没有改数值。
 fn dump_weights(src: &WeightSource, dir: &str) -> Result<()> {
     std::fs::create_dir_all(dir)?;
+    let dev = Device::new(0)?;
+    let stream = dev.new_stream()?;
     let p = "model.language_model.layers.0";
+    // qkv 组：走与 `GemmaLayer::load` 完全相同的 `load_fp8_group`，导出重量化后的 fp8 字节与 scale
+    for l in [0usize, 11] {
+        let lp = format!("model.language_model.layers.{l}.self_attn");
+        let cfg_path = std::path::Path::new(dir).join("cfg.json");
+        let _ = &cfg_path;
+        let k_eq_v = l != 0; // 本模型：滑窗层 0 三槽；full 层 k_eq_v 两槽（与 layer.rs 判定一致）
+        let names: Vec<String> = if k_eq_v {
+            vec![format!("{lp}.q_proj.weight"), format!("{lp}.k_proj.weight")]
+        } else {
+            vec![format!("{lp}.q_proj.weight"), format!("{lp}.k_proj.weight"), format!("{lp}.v_proj.weight")]
+        };
+        let parts = dinfer_kaon3::weights::load_fp8_group(src, &stream, &names)?;
+        for (i, qw) in parts.iter().enumerate() {
+            if let dinfer_kaon3::weights::QWeight::Fp8 { w, scale, a_scale, n, k } = qw {
+                println!("OUR L{l} part{i}: {n}x{k} scale={scale:e} a_scale={a_scale:e} bytes={}", w.len());
+                let host = stream.dtoh_sync_copy(w)?;
+                std::fs::write(std::path::Path::new(dir).join(format!("our_qkv_L{l}_p{i}.bin")), &host)?;
+            }
+        }
+    }
     for (name, file) in [
         (format!("{p}.router.proj.weight"), "router_proj_bf16.bin"),
         (format!("{p}.router.scale"), "router_scale_bf16.bin"),
