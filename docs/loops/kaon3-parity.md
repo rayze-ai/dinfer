@@ -160,8 +160,12 @@ BUILD_ONLY=1 bash scripts/verify/kaon3-parity.sh      # 打印 SNAP=<id>
 - L11 qkv 权重与 vLLM **逐字节 100%**；attention 段中间量 ≤1e-7（k_norm 2.65e-2 → 2.4e-12）。
 - 残余差异全在 MoE：2/24 token top-8 翻转，**fp64 真值证明是 vLLM 选错**（我们 router 4e-7、0/24 错）。
 - 第 10 轮"沿位置累积"是误读（翻转 token 在后半段）。
-- **下一步**：把 router fp64 三方校验扩到 30 层（`kaon3_router_truth.py` 加层号参数），
-  统计每层"vLLM 选错 / 我们选错"的 token 数；若全模型我们 0 错，端到端差异即可整体归因到参照。
+- **第 13 轮（进行中）**：30 层 router 真值扫描。仪器：
+  - 我们：`SUB_LAYER=all kaon3_probe --forward --hidden-all <dir>` → `<dir>/sub_L{l}/router_{in,logits}.bin`
+  - vLLM：`OUT=<dir> python3 -I scripts/dev/kaon3_vllm_router_all.py <model> <ids>`（只挂 hook，一次抓全 30 层）
+  - 判定：`python3 -I scripts/verify/kaon3_router_truth_all.py <model> <ours_root> <ref_root> <case...>`
+    —— 每个实现对照**自己输入**的 fp64 精确 logits；**exit 0 = 每层我们的 max 偏差 ≤ 参照，且合计选错 token 数 ≤ 参照**。
+  - 用例：p02 / chat_en / chat_zh / raw9（80 token × 30 层）。
 
 ## 上限
 
