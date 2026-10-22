@@ -193,11 +193,20 @@ impl KaonModel {
                 block_size: self.block_size,
                 kv_mut: &mut kv_cache[l].cache.data,
             };
-            // 子模块 dump 的层选择：`SUB_LAYER=<n>` 覆盖，默认第 0 层。
-            let sub_l: usize = std::env::var("SUB_LAYER").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
-            let so = hidden_dir
-                .filter(|_| l == sub_l)
-                .map(|d| (std::path::Path::new(d), l));
+            // 子模块 dump 的层选择：`SUB_LAYER=<n>` 覆盖，默认第 0 层；
+            // `SUB_LAYER=all` 每层都 dump，写到 `<dir>/sub_L{l}/`（逐层 router 真值扫描用）。
+            let sub_env = std::env::var("SUB_LAYER").ok();
+            let sub_l: usize = sub_env.as_deref().and_then(|v| v.parse().ok()).unwrap_or(0);
+            let sub_dir_l = hidden_dir
+                .filter(|_| sub_env.as_deref() == Some("all"))
+                .map(|d| std::path::Path::new(d).join(format!("sub_L{l}")));
+            if let Some(p) = &sub_dir_l {
+                std::fs::create_dir_all(p)?;
+            }
+            let so = match &sub_dir_l {
+                Some(p) => Some((p.as_path(), l)),
+                None => hidden_dir.filter(|_| l == sub_l).map(|d| (std::path::Path::new(d), l)),
+            };
             layer.forward(stream, gemm, ops, cfg, &self.ropes, sc, &mut ctx, tokens, so)?;
             if dump_layer == Some(l) {
                 stream.dtod_copy_n(&sc.x.data, &mut hidden.data, tokens * h)?;
