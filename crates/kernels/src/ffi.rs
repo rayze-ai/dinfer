@@ -523,6 +523,7 @@ extern "C" {
     ) -> i32;
 
     pub fn scale_bf16(x: *mut c_void, n: i64, a: f32, stream: cudaStream_t) -> i32;
+    pub fn fp8_e4m3_roundtrip_bf16(x: *mut c_void, n: i64, scale: f32, stream: cudaStream_t) -> i32;
     pub fn dsa_index_score_f32(
         q: *const c_void,
         w: *const f32,

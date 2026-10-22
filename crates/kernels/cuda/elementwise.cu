@@ -2,6 +2,8 @@
 #include "common.cuh"
 #include "kernels.h"
 
+#include <cuda_fp8.h>
+
 using namespace dinfer;
 
 namespace {
@@ -211,5 +213,24 @@ extern "C" int kv_unpack(void* const* layer_ptrs, const int32_t* blocks, const v
   kv_unpack_kernel<<<dim3((unsigned)n_blocks, (unsigned)num_layers), 256, 0, stream>>>(
       reinterpret_cast<uint8_t* const*>(layer_ptrs), blocks, static_cast<const uint8_t*>(staging), per_layer_bytes,
       (int)num_layers, (int)block_size, (int)kv_heads, (int)(row / 16));
+  return last_err();
+}
+
+namespace {
+// x = bf16(e4m3_satfinite(x / scale) · scale)：模拟 FP8 KV cache 的存取误差（vLLM `kv_cache_dtype=fp8_e4m3` 口径：饱和 ±448、RNE）。
+__global__ void fp8_e4m3_roundtrip_kernel(bf16* __restrict__ x, int64_t n, float inv, float scale) {
+  for (int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x; i < n; i += (int64_t)gridDim.x * blockDim.x) {
+    const __nv_fp8_storage_t q = __nv_cvt_float_to_fp8(to_f32(x[i]) * inv, __NV_SATFINITE, __NV_E4M3);
+    x[i] = to_bf16(__half2float(__half(__nv_cvt_fp8_to_halfraw(q, __NV_E4M3))) * scale);
+  }
+}
+}  // namespace
+
+extern "C" int fp8_e4m3_roundtrip_bf16(void* x, int64_t n, float scale, cudaStream_t stream) {
+  if (n <= 0) return 0;
+  if (!(scale > 0.f)) return err(cudaErrorInvalidValue);
+  const int threads = 256;
+  const int blocks = (int)min((int64_t)4096, (n + threads - 1) / threads);
+  fp8_e4m3_roundtrip_kernel<<<blocks, threads, 0, stream>>>(static_cast<bf16*>(x), n, 1.f / scale, scale);
   return last_err();
 }

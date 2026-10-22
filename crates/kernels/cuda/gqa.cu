@@ -1402,7 +1402,7 @@ static int gqa_prefill_impl(const void* q, const void* k, const void* v, void* o
                               static_cast<const bf16*>(k), static_cast<const bf16*>(v), nullptr, nullptr, nullptr,
                               cu_seqlens, static_cast<bf16*>(out), (int)heads, (int)kv_heads, scale * LOG2E_F,
                               (int)q_stride, (int)kv_stride, 0, 0, 0, window);
-  if (head_dim == 128 || head_dim == 256) {
+  if (cfg >= 0 && (head_dim == 128 || head_dim == 256)) {  // cfg < 0：强制通用慢路径（对拍参照）
     const int bq = head_dim == 128 ? V5Cfg<128>::BQ : V5Cfg<256>::BQ;
     dim3 grid((unsigned)((max_seqlen + bq - 1) / bq), (unsigned)heads, (unsigned)num_reqs);
     return v5_dispatch<false>(head_dim, grid, stream, static_cast<const bf16*>(q), static_cast<const bf16*>(k),
@@ -1454,7 +1454,7 @@ static int gqa_paged_impl(const void* q, const void* cache, const int32_t* block
                              nullptr, static_cast<const bf16*>(cache), block_table, seq_lens, cu_seqlens_q,
                              static_cast<bf16*>(out), (int)heads, (int)kv_heads, scale * LOG2E_F, (int)q_stride, 0,
                              (int)block_size, (int)max_blocks, skip_single, window);
-  if (head_dim == 128 || head_dim == 256) {
+  if (cfg >= 0 && (head_dim == 128 || head_dim == 256)) {  // cfg < 0：强制通用慢路径（对拍参照）
     const int bq = head_dim == 128 ? V5Cfg<128>::BQ : V5Cfg<256>::BQ;
     dim3 grid((unsigned)((max_q_len + bq - 1) / bq), (unsigned)heads, (unsigned)num_reqs);
     return v5_dispatch<true>(head_dim, grid, stream, static_cast<const bf16*>(q), nullptr, nullptr,

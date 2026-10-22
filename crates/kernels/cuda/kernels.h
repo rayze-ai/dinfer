@@ -324,6 +324,8 @@ int gather_blocks_bf16_to_f32(const void* x, float* y, int64_t nb, int64_t rows,
 int scale_f32(float* x, int64_t n, float a, cudaStream_t stream);
 // 逐元素乘标量（bf16 原地）：x *= a。
 int scale_bf16(void* x, int64_t n, float a, cudaStream_t stream);  // x[:n] *= a
+// x[:n] = bf16(e4m3_satfinite(x / scale) * scale)：FP8（e4m3）KV cache 存取误差的模拟 / 量化口径。
+int fp8_e4m3_roundtrip_bf16(void* x, int64_t n, float scale, cudaStream_t stream);
 
 // ---- MoE 参考（moe.cu）----
 // logits[T,E] f32 = x[T,H] bf16 · w[E,H] bf16，fp32 累加（与 HF 路由的 fp32 linear 一致）

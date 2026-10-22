@@ -508,6 +508,12 @@ impl Gemma4Layer {
         let rope = if self.window > 0 { &ropes.sliding } else { &ropes.full };
         rope.apply(stream, q, Some(kk), ctx.positions, heads, nkv, d)?;
 
+        // ---- 4a. FP8 KV（vLLM `kv_cache_dtype=fp8_e4m3`，scale 1.0）：attention 读的是量化后的 K/V ----
+        if cfg.kv_fp8 {
+            k::ops::fp8_e4m3_roundtrip_bf16_n(stream, &mut kk.data, tokens * nkv * d, 1.0)?;
+            k::ops::fp8_e4m3_roundtrip_bf16_n(stream, &mut v.data, tokens * nkv * d, 1.0)?;
+        }
+
         // ---- 4b. 写本层 paged KV（每层 head_dim / nkv 不同）----
         k::ops::gqa_cache_write_bf16(
             stream,

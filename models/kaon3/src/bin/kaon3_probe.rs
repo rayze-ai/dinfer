@@ -5,6 +5,7 @@
 //!   kaon3_probe <model_dir> --forward <ids...>                # 前向一次，打印最后一行 top-5
 //!   kaon3_probe <model_dir> --forward --oracle x.json <ids...> # 与 oracle 比对，PASS 退出 0、FAIL 退出 3
 //!   kaon3_probe <model_dir> --forward --dump-layer 5 <ids...>
+//!   kaon3_probe <model_dir> --forward --layers 6 --oracle L6.json <ids...>   # 截层二分（oracle 用同样截层的 vLLM）
 //!
 //! oracle = 基线 vLLM `/v1/completions` 的原始响应（`prompt_logprobs:5` + `logprobs:5` +
 //! `return_tokens_as_token_ids`，由 `scripts/dev/kaon3_oracle.sh` 抓取）。第 r 行 logits 对应
@@ -45,9 +46,10 @@ fn main() -> Result<()> {
     };
     let dump_layer = take("--dump-layer").map(|s| s.parse::<usize>().expect("--dump-layer 需要整数"));
     let oracle = take("--oracle");
+    let layers = take("--layers").map(|s| s.parse::<usize>().expect("--layers 需要整数"));
     let ids: Vec<i32> = args.iter().map(|s| s.parse::<i32>().expect("token id")).collect();
     ensure!(!ids.is_empty(), "--forward 需要至少一个 token id");
-    let pass = forward(&dir, &src, &ids, dump_layer, oracle.as_deref())?;
+    let pass = forward(&dir, &src, &ids, dump_layer, oracle.as_deref(), layers)?;
     if !pass {
         std::process::exit(3);
     }
@@ -85,12 +87,21 @@ fn format_probe(src: &WeightSource) -> Result<()> {
     Ok(())
 }
 
-fn forward(dir: &str, src: &WeightSource, ids: &[i32], dump_layer: Option<usize>, oracle: Option<&str>) -> Result<bool> {
+fn forward(
+    dir: &str,
+    src: &WeightSource,
+    ids: &[i32],
+    dump_layer: Option<usize>,
+    oracle: Option<&str>,
+    layers: Option<usize>,
+) -> Result<bool> {
     let cfg_path = Path::new(dir).join("config.json");
     let cfg = KaonConfig::from_json(&std::fs::read_to_string(&cfg_path)?)?;
+    let q_path = Path::new(dir).join("hf_quant_config.json");
+    let cfg = if q_path.exists() { cfg.with_quant_json(&std::fs::read_to_string(&q_path)?)? } else { cfg };
     println!(
-        "config: {} 层 / {} 专家 top-{} / hidden {} / vocab {}",
-        cfg.num_layers, cfg.num_experts, cfg.top_k, cfg.hidden, cfg.vocab_size
+        "config: {} 层 / {} 专家 top-{} / hidden {} / vocab {} / kv_fp8 {}",
+        cfg.num_layers, cfg.num_experts, cfg.top_k, cfg.hidden, cfg.vocab_size, cfg.kv_fp8
     );
     check_weights(src, &cfg)?;
 
@@ -102,6 +113,13 @@ fn forward(dir: &str, src: &WeightSource, ids: &[i32], dump_layer: Option<usize>
 
     let t0 = std::time::Instant::now();
     let mut model = KaonModel::load(&stream, src, cfg.clone())?;
+    // --layers N：只跑前 N 层（再接 final norm / lm_head / softcap），与 vLLM `--hf-overrides` 截层的 oracle 逐层二分
+    if let Some(n) = layers {
+        ensure!(n >= 1 && n <= model.layers.len(), "--layers {n} 越界");
+        model.layers.truncate(n);
+        model.cfg.num_layers = n;
+        println!("只跑前 {n} 层");
+    }
     stream.synchronize()?;
     println!("权重加载 {:.1} s", t0.elapsed().as_secs_f64());
 

@@ -1390,6 +1390,17 @@ pub fn scale_bf16_n(stream: &Stream, x: &mut CudaSlice<bf16>, n: usize, a: f32) 
     )
 }
 
+/// `x[:n] = bf16(e4m3(x / scale) · scale)`（饱和 ±448、RNE）：模拟 FP8 KV cache 的存取误差，`scale` 即 vLLM 的
+/// `k_scale` / `v_scale`（checkpoint 没给时为 1.0）。
+pub fn fp8_e4m3_roundtrip_bf16_n(stream: &Stream, x: &mut CudaSlice<bf16>, n: usize, scale: f32) -> Result<()> {
+    ensure!(x.len() >= n, "fp8_e4m3_roundtrip_bf16: buffer");
+    // SAFETY: 长度已校验。
+    check(
+        unsafe { ffi::fp8_e4m3_roundtrip_bf16(stream.ptr_mut(x) as *mut c_void, n as i64, scale, stream.raw() as _) },
+        "fp8_e4m3_roundtrip_bf16",
+    )
+}
+
 /// dst[r, :] = src[rows[r], :]
 pub fn gather_rows_bf16(
     stream: &Stream,

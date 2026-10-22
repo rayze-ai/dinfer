@@ -107,6 +107,9 @@ pub struct KaonConfig {
     pub max_pos: usize,
     pub eps: f32,
     pub softcap: f32,
+    /// KV cache 是否按 FP8 e4m3（scale 1.0）存取：`hf_quant_config.json` 的 `kv_cache_quant_algo == "FP8"`。
+    /// vLLM 据此用 `kv_cache_dtype=fp8_e4m3`，prefill 的 attention 也读量化后的 K/V。
+    pub kv_fp8: bool,
     pub k_eq_v: bool,
     pub tie_embeddings: bool,
     pub rope_sliding: RopeSpec,
@@ -158,11 +161,23 @@ impl KaonConfig {
             max_pos: r.max_position_embeddings,
             eps: r.rms_norm_eps,
             softcap: r.final_logit_softcapping,
+            kv_fp8: false,
             k_eq_v: r.attention_k_eq_v,
             tie_embeddings: r.tie_word_embeddings,
             rope_sliding,
             rope_full,
         })
+    }
+
+    /// 叠加 `hf_quant_config.json`（modelopt）：目前只取 `quantization.kv_cache_quant_algo`。
+    pub fn with_quant_json(mut self, json: &str) -> Result<Self> {
+        let v: serde_json::Value = serde_json::from_str(json)?;
+        self.kv_fp8 = match v["quantization"]["kv_cache_quant_algo"].as_str() {
+            None => false,
+            Some("FP8") => true,
+            Some(other) => anyhow::bail!("不支持的 kv_cache_quant_algo {other}"),
+        };
+        Ok(self)
     }
 
     /// 第 `l` 层是否为滑窗层。

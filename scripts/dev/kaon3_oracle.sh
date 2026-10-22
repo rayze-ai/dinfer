@@ -13,7 +13,7 @@ R=scripts/dev/remote_5090.sh
 PORT=${ORACLE_PORT:-28100}   # 私有副本 kaon-oracle（GPU 1）；共享基线 28067 只许短 prompt（2026-10-22 长请求打崩过它）
 URL=http://127.0.0.1:$PORT
 MODEL=flowgpt_vllm
-OUT=test/kaon3/oracle
+OUT=${ORACLE_OUT:-test/kaon3/oracle}   # 截层二分的 oracle 放别处，别混进默认用例
 mkdir -p "$OUT"
 post() { # post <path>：stdin 是 JSON body，经 ssh 交给远端 curl；跳板偶发 "handshake failed" 且 rc=0，按响应是否为 JSON 判定并重试
   local body out i
