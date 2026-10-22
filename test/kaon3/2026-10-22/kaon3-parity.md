@@ -24,3 +24,33 @@
 | 6 | **Q 也做 e4m3 往返**（vLLM Triton `supports_quant_query_input` + FP8 KV → `query_quant`，q_scale = k_scale = 1.0，饱和 448） | （快测 5 例）| **+0.097** ✅ | 大幅改善；下一步 P→e4m3（Triton `tl.dot(P.to(V.dtype), V)`，V 为 fp8） |
 | 7 | **P 以 e4m3 参与 PV**（Triton `tl.dot(P.to(V.dtype), V)`，V 为 fp8；行和仍 fp32），进程级开关 `gqa_set_p_fp8` | 25.25% / 1.80 / −0.86 | **+0.048 ✅** | 长序列 / 单 token / kernel 三项过；短 prompt 翻转与共有 Δ 仍超；短 prompt ΔNLL 由模板 / 用户消息里 lp≈−20 的离群 token 主导，见下一步 |
 | 8 | RoPE 表舍入到 bf16（vLLM `cos_sin_cache.to(dtype)`）+ embed normalizer 用 bf16（53.0）；同时 verify 改为批量 + 6 卡分片 | 28.24% / 1.77 ✅ / −0.79 | **+0.475 ❌**（第 7 轮 +0.048） | 变差；A/B：两项都退回 / 只退回 RoPE 表，用同一快照在不相交卡上并行跑（用户：并行时编译不要互相覆盖） |
+
+### P1 参数对齐：疑似"参照集本身不干净"（2026-10-22 深夜，进行中）
+
+用显式参数（block 32 / max-num-batched 4096 / max_model_len 16384 / BI=1）重启 `kaon-oracle`，
+重抓 29 个用例到 `test/kaon3/oracle_recheck/`，对旧 `test/kaon3/oracle/` 做 diff：
+
+```
+POOLED cases=29 rows=655 decisive=607 flips=61 flip_pct=10.05 mean_common_d=0.7611 nll_a=13.3821 nll_b=13.4256 dnll=+0.0435
+```
+
+**逐用例看，差异不是均匀的，而是按抓取时间分成两组**：
+
+| 组 | 用例 | 翻转率 | 抓取时刻（`oracle/*.json` mtime） |
+|---|---|---|---|
+| A | `bos1` `raw9` `chat_en` `chat_zh` `dup4` | **全部 0.00** | 07:44–08:05 |
+| B | `p01`–`p24` | 4.2%–21.7%（多数 10–16%）| 09:40–09:41 |
+
+**已排除的假设**：BI=1 不是确定性问题——同一进程连抓两次（`oracle_recheck` vs `oracle_recheck2`，p01/p02/p10/chat_en）：
+`flips=0 mean_common_d=0.0000 dnll=+0.0000`，逐位完全一致。
+
+**推断**：参照集是两个不同进程的产物。A 组来自 07:4x 的 oracle，B 组（p01–p24）来自 09:40 的另一个 oracle
+（`86ec5e9` 前后在调 oracle 多实例参数化）。若如此，B 组的旧文件与现在这个 BI=1 进程本来就不是同一配置，
+**10.05% 里混着"参照集内部不一致"，不能直接当作我们的误差**。
+
+**决定性实验（进行中）**：用**旧参数**（不带 `--max-num-batched-tokens`，其余同）另起 `kaon-oracle-old`，
+抓 p01 后分别与 ① 旧 `oracle/p01.json` ② 新 `oracle_recheck/p01.json` 比：
+- 若 ≈旧文件、≠新文件 → 差异来自 `max-num-batched-tokens` 这一项（隐式 2496 vs 显式 4096 改变了 batch 分派）；
+- 若 ≈新文件、≠旧文件 → B 组旧文件确实来自第三个配置，参照集必须整体重抓。
+
+**这条不查清，P2–P4 的所有数字都没有意义**（判据的下限和我们的读数会来自不同世界的样本）。
