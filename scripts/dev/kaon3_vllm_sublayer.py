@@ -47,8 +47,21 @@ def _patched(self, *a, **k):
         m = getattr(self, attr, None)
         if m is not None:
             handles.append(m.register_forward_hook(mk(name)))
-    # self_attn 内部：q_norm / k_norm 的输出（hook 到 norm 模块本身）
     sa = getattr(self, "self_attn", None)
+    # rope 与 attention 的输出：rope 返回 (q, k)，attention 返回 o_proj 之前的 attn 输出
+    if sa is not None:
+        def rope_hook(mod, inp, outp):
+            q_, k_ = outp[0], outp[1] if isinstance(outp, (tuple, list)) else (outp, None)
+            captured["q_rope"] = q_.detach().float().cpu().numpy().copy()
+            if k_ is not None:
+                captured["k_rope"] = k_.detach().float().cpu().numpy().copy()
+        r_ = getattr(sa, "rotary_emb", None)
+        if r_ is not None:
+            handles.append(r_.register_forward_hook(rope_hook))
+        a_ = getattr(sa, "attn", None)
+        if a_ is not None:
+            handles.append(a_.register_forward_hook(mk("attn_out")))
+    # self_attn 内部：q_norm / k_norm 的输出（hook 到 norm 模块本身）
     for attr, name in (("q_norm", "q_norm"), ("k_norm", "k_norm"), ("v_norm", "v_norm")):
         m = getattr(sa, attr, None) if sa is not None else None
         if m is not None:

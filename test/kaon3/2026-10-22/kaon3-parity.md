@@ -574,3 +574,25 @@ full 层生效）。路径：`q/k/v FP8 投影 → 逐头 RMSNorm(256) → RoPE 
 所以 dump 时取前 `tokens*heads*256` 个元素就是紧凑的 `[T, 4096]`，与 vLLM hook 的
 `(T, num_heads*head_dim)` 同序（vLLM 在 `q_norm` 前后都做 `unflatten/flatten`，展平后
 仍是 head-major 连续）。
+
+### 【二分第三刀】q/k/v 的 head-norm 基本一致，偏差在 **RoPE → attention → o_proj** 之间
+
+p02 / layer 0 逐项对拍（T=24）：
+
+| 子模块 | mean_rel | max_rel | 判定 |
+|---|---|---|---|
+| input_norm | **0.000e0** | 0.000e0 | ✅ 逐位一致 |
+| **k_norm**（RoPE 前）| **0.000e0** | 0.000e0 | ✅ 逐位一致 |
+| **v_norm**（无权重）| 4.528e-10 | 1.054e-8 | ✅ 可视为一致（远小于 bf16 ULP≈4e-3）|
+| **q_norm**（RoPE 前）| **8.942e-6** | 1.193e-4 | ✅ 远小于 1 个 bf16 ULP，可忽略 |
+| o_proj（含 attention）| **7.653e-3** | 1.547e-2 | ❌ **第一处实质性偏差** |
+
+**推论**：
+1. FP8 的 q/k/v 投影 + 逐头 RMSNorm **都是对的**（k_norm 逐位、q_norm 1e-4 以内）。
+   所以"三个独立 GEMM vs vLLM 一个融合 GEMM、input_scale 是否取对"这个疑虑**基本排除**
+   （若 q 的 input_scale 取错，误差会是 1e-2 量级而不是 1e-4）。
+2. 偏差产生在 **RoPE 之后到 o_proj 输出** 这一段：`RoPE → GQA(滑窗 1024, FP8 KV) → o_proj`。
+3. 继续按同名 dump 切这一刀：`q_rope/k_rope`（RoPE 后）、`attn_out`（o_proj 前）。
+
+侧注：`dense`（1.68e-2）虽比 `o_proj`（7.65e-3）大，但它是**继承** attention 的偏差后
+再走 FP8 MLP，不构成独立的第一处偏差。
