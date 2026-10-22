@@ -6,46 +6,37 @@
 > 更新 2026-10-21 23:0x +0800。**本区按模型分节，每节只写该模型自己的交接内容；不要覆盖别人的分节。**
 
 
-### Kaon-V3 parity 第 8 轮（2026-10-22 深夜）：**判据被推翻重建**
+### Kaon-V3 parity 第 8–10 轮（2026-10-22 深夜）
 
 **用户起点**：「0–7 层可能也不对，只是标准定得让它过」— **成立**。干净参照下跨进程下限
-**0.0000（逐位一致）**，而 L8 的 top5 |Δlp| 是 0.06，被"阈值 0.15 / 1.5×FLOOR"放过。
+**0.0000（逐位一致）**，L8 的 0.06 被"阈值 0.15 / 1.5×FLOOR"放过。
 
-**本轮修好两处真 bug（`attn_out` 已逐位归零）**：
-1. **RoPE cos/sin 表**：vLLM `base.py:59` `cache.to(dtype)` → bf16 表，我们用了 f32。
-   `Rope::with_bf16_cache()`（opt-in），Kaon 两套表都开。`k_rope`/`attn_out` 1.5e-3→**0.000e0**。
-2. **router `root_size`**：vLLM 是 `register_buffer`(bf16)，我们用了 f32 常数。`router_logits` 3.28e-3→1.72e-3。
+**本轮修好 3 处真 bug（都有字节/张量级证据）**：
+1. **RoPE cos/sin 表**：vLLM `base.py:59` `cache.to(dtype)` → **bf16 表**，我们用了 f32。
+   `Rope::with_bf16_cache()`。`k_rope`/`attn_out` 1.5e-3 → **0.000e0**。
+2. **router `root_size`**：vLLM 是 bf16 buffer，我们用了 f32 常数。`router_logits` 3.28e-3→1.72e-3。
+3. **FP8 重量化中间值**：vLLM `per_tensor_dequantize` 的 `dq` 落在 **fp16**，我们用了 f32。
+   修后 L0/L11 的 q/k 权重字节与 vLLM **完全一致**（用正确布局复核过）。
 
-**被 A/B 推翻、已回滚（3 次里 2 次推断错，教训已进 knowledge）**：query 不量化、
-P 乘 p_scale=256、softcap 三步舍入。**动 attention 前先 `docker logs|grep "Attention backend"`
-（本模型 = TRITON_ATTN），改动带 `ENV=1` 开关，用端到端指标判。**
+**被 A/B 推翻并回滚的（教训已进 pitfalls）**：query 不量化、P 乘 p_scale=256、softcap 三步舍入、
+位级 RNE e4m3。**动 attention/量化前先 `docker logs|grep "Attention backend"`**（本模型 = TRITON_ATTN）。
 
-**最重要的结论（改变验收口径）**：用 fp64 真值（`final_norm` + bf16 原始 lm_head 权重）算精确 logprob：
-| row | 真值 | 我们 | vLLM |
-|---|---|---|---|
-| 3 | −1.079 | **−1.099**（0.020）| −0.803（0.276）|
-| 2 | −0.505 | **−0.521**（0.016）| −0.111（0.394）|
+**判据已重建**：fp64 真值显示**我们比 vLLM 准 15 倍**
+（最终 logprob 我们差 0.020 nat、vLLM 差 0.276–0.394；router 我们 7.4e-07 vs 1.5e-02）。
+**"与 vLLM 逐位一致"是错误的验收目标**，见 `docs/loops/kaon3-parity.md` 修正 C。
 
-**我们差 0.02 nat，vLLM 差 0.3 nat；完整 logits 的 top-5 id 与真值完全一致，vLLM 不是。**
-router 同理（我们 7.4e-07 vs vLLM 1.5e-02）。**"与 vLLM 逐位一致"是错误的验收目标**，
-15.32% 翻转率 / Δlp 1.22 不能作为我们错的判据。loop 停止条件已改为
-**"与 fp64 真值的距离 ≤ 参照的"**（见 `docs/loops/kaon3-parity.md` 修正 C）。
+**⚠️ 未决（下一会话第一件事）**：根因 3 修完后端到端**变差**——
+短 prompt ΔNLL 从 **−0.0018 恶化到 +0.1055**，翻转率 15.32%→15.73%。
+用户 2026-10-22 指定：**先 `/clear`，再回退根因 3（`weights.rs::load_fp8_group` 的 fp16 改动）
+重测，确认 −0.0018 是否可复现**。可复现 → 是"字节对但触发第二处偏差"；不可复现 → 推翻"ΔNLL 齐平"。
 
-**仪器**（本轮新建，之前从未跑通）：`kaon3_probe --hidden-all <dir>`（30 层残差流 +
-layer0 的 18 个子模块 + `final_norm.bin`）、`--logits-out`（完整 logits）、
-`--sub-cmp <ref>`（纯 Rust 逐项比）；参照侧 `scripts/dev/kaon3_vllm_sublayer.py`
-（**先用 4-token 短 prompt 冒烟**）。修了 vLLM 抓取 `cap[-30:]` 取到 decode 批的 bug。
+**仪器（本轮新建）**：`kaon3_probe --hidden-all`（30 层残差流 + layer0 的 18 个子模块 +
+`final_norm.bin`）、`--logits-out`、`--sub-cmp`、**`--layer-iso l:ref.bin`（单层隔离）**、
+`--layer-iso-eps`（测层敏感度）、`SUB_LAYER=<n>`（选层 dump）。参照侧
+`scripts/dev/kaon3_vllm_{hidden,sublayer,logits,weights}.py`（**先 4-token 短 prompt 冒烟**）。
 
-**第 9 轮（用户 2026-10-22「按真值判据把每层残差流也核一遍，没问题就收工」）**：
-新增 **单层隔离**（`kaon3_probe --layer-iso <l>:<ref.bin>`，把参照第 l-1 层残差流灌进第 l 层、
-只跑这一层，剥掉逐层累积）。结果：L1 4.9e-3 / L2 6.3e-3 / L5 5.9e-3 / **L11 2.5e-2** /
-L17 8.1e-3 / L29 9.3e-3 —— **没有哪一层崩掉**（整跑 L29 的 1.8e-1 是逐层累积）。
-注意仪器的下限不是 0：注入时参照 f32 → bf16 本身就是 ~2e-3；L0 隔离（输入=embed，两侧逐位一致）
-的 6.10e-3 是唯一纯"层内"数字。**L11 偏高且整体平移，疑与 full-attn D=512 慢路径有关，未证明**。
-真值判据下的硬证据均支持"我们不比参照差"（见上表）。**用户要求：核完收工。**
-
-**下一步**：① 把三方真值校验扩展到每层残差流（工具已齐），确认每层"我们 ≤ 参照的误差"；
-② 用真值判据重评已修两处的收益；③ 然后才回到性能（阶段 3 剩余）。
+**单层隔离结果**：L5 5.9e-3 / L10 8.2e-3 / L12 5.3e-3 / L17 8.1e-3 / L23 6.9e-3 / **L11 2.48e-2**
+（L11 孤立异常，已定位到 K/V 投影，Q 对 K 错）。仪器下限 ~2e-3（注入时 f32→bf16）。
 
 ### Kaon-V3（5090，阶段 1–2 完成，阶段 3 接近打通）
 
