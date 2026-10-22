@@ -364,6 +364,15 @@ pub fn softcap_bf16_n(stream: &Stream, x: &mut CudaSlice<bf16>, n: usize, c: f32
     check(unsafe { ffi::softcap_bf16(stream.ptr_mut(x) as *mut c_void, n as i64, c, stream.raw() as _) }, "softcap_bf16")
 }
 
+/// 与参考实现舍入次数对齐的 softcap（`/c`、`tanh`、`*c` 各舍入一次到 bf16）。
+pub fn softcap_bf16_round3_n(stream: &Stream, x: &mut CudaSlice<bf16>, n: usize, c: f32) -> Result<()> {
+    ensure!(x.len() >= n, "softcap_round3: buffer");
+    check(
+        unsafe { ffi::softcap_bf16_round3(stream.ptr_mut(x) as *mut c_void, n as i64, c, stream.raw() as _) },
+        "softcap_bf16_round3",
+    )
+}
+
 /// 逐行乘向量：`x[r, j] *= w[j]`（router.scale 这种逐 hidden 缩放）。
 pub fn mul_bf16_n(stream: &Stream, x: &mut CudaSlice<bf16>, w: &CudaSlice<bf16>, rows: usize, cols: usize) -> Result<()> {
     ensure!(x.len() >= rows * cols && w.len() >= cols, "mul_row: shape");

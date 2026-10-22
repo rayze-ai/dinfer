@@ -179,7 +179,13 @@ impl KaonModel {
         )?;
 
         // ---- softcap: tanh(x/30)·30 ----
-        k::ops::softcap_bf16_n(stream, &mut logits.data, tokens * cfg.vocab_size, cfg.softcap)?;
+        // 与参照对齐舍入次数（`/c`、`tanh`、`*c` 各回 bf16 一次）。A/B 由环境变量控制，
+        // 默认开（parity 口径）；`SOFTCAP_ONE_ROUND=1` 回到单次舍入（更准但与参照不同）。
+        if std::env::var("SOFTCAP_ONE_ROUND").is_ok() {
+            k::ops::softcap_bf16_n(stream, &mut logits.data, tokens * cfg.vocab_size, cfg.softcap)?;
+        } else {
+            k::ops::softcap_bf16_round3_n(stream, &mut logits.data, tokens * cfg.vocab_size, cfg.softcap)?;
+        }
         let _ = hidden;
         Ok(())
     }

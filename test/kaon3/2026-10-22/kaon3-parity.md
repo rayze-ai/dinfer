@@ -953,3 +953,25 @@ x.elts[j] = packed_compute<PACKED_ACT_FN, act_first, HAS_CLAMP>(x.elts[j], y.elt
 - `final_logit_softcapping` 若取值或作用位置不同，**恰好**表现为"头部被压平"（softcap 会把大 logit 压小）；
 - `lm_head` 的 tie 与 final norm 的 eps/精度次之。
 这是与观测形态最吻合的嫌疑，优先于继续追 router / 量化噪声。
+
+## 【根因 3 候选】softcap 的**舍入次数**与参照不同
+
+`vllm/model_executor/layers/logits_processor.py:113-116`：
+
+```python
+logits = logits / self.soft_cap     # logits 是 bf16 张量，Python 标量参与运算，结果回 bf16
+logits = torch.tanh(logits)         # 再一次 bf16 舍入
+logits = logits * self.soft_cap     # 再一次
+```
+
+**三步各舍入一次 bf16**。我们的 `softcap_bf16_kernel` 是
+`to_bf16(c * tanhf(to_f32(x[i]) / c))` —— **只在最后舍入一次**。
+
+这与"头部不够尖、尾部偏高"的观测形态吻合：单次舍入的结果更接近真值，
+但**偏差方向在头/尾相反**，所以相对参照表现为系统性形态差异，而不是常数平移。
+另外我们的 logits 全程存 bf16（lm_head 输出即 bf16），vLLM 在
+`_get_logits` 末尾才 `to(head_dtype)`，中间也是 bf16 —— 这部分口径相同。
+
+**已实现 A/B**：`SOFTCAP_ONE_ROUND=1` 走单次舍入（旧行为），默认走新的
+`softcap_bf16_round3`（`/c`、`tanh`、`*c` 各回 bf16 一次）。p02 末行 top-5 已有可见变化
+（25.75 → 25.625），正在跑完整 verify 测全局指标。
