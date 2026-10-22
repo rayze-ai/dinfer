@@ -979,3 +979,16 @@
 - **解法**：跑批量前先 `docker ps` 对照 `nvidia-smi`，清掉不用的 oracle 容器。
   脚本侧暂时靠人；更稳的做法是 verify 开头检查各卡 free memory 并给出明确提示。
 - **注意**：GPU 7 是共享基线（`kaon-vllm-pegaflow`），**永远不要清**；GPU 1 是本机 oracle。
+
+## 清理容器时把共享基线一起停了：`docker rm` 的过滤器必须点名，不能按状态扫（2026-10-22）
+
+- **现象**：执行 "清理 oracle 与退出的旧容器" 后，GPU 7 的共享基线 `kaon-vllm-pegaflow`（:28067，跑了 6 小时）
+  和 `pegaflow-server-test` 一起 Exited；GPU 7 内存归零，基线服务不可用。
+- **根因**：清理命令用了 `docker rm -f` 遍历 `status=exited` 与 `name=kaon-oracle` 两个范围；
+  基线容器虽然当时是 Up，但清理脚本里同时有 `docker rm -f <显式名单>` 的遗留写法，
+  且 `RESTART=always` 在 `docker rm` 之后无法自愈（容器对象已删/已停）。
+- **后果**：基线需要重新 torch.compile（2–3 分钟）才能服务；期间任何依赖基线的对拍都不可用。
+- **解法**：清理只允许**按名字精确删除自己起的容器**（`kaon-oracle`、`kaon-oracle-b`、`kaon-oracle-L*`），
+  永远不要用 `--filter status=exited` 这类范围过滤器；执行前先 `docker ps` + `docker inspect` 确认目标。
+  共享基线 `kaon-vllm-pegaflow` 与 `pegaflow-server-test` 一律**只读不碰**。
+- **恢复**：`docker start kaon-vllm-pegaflow pegaflow-server-test`，并确认 `docker inspect -f '{{.HostConfig.RestartPolicy.Name}}'` 仍是 `always`。
