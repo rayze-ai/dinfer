@@ -632,7 +632,7 @@ QK^T 的分数因此带 ~6% 的量化噪声，softmax 之后传到 `attn_out`—
 
 ### 证据链（每一刀都是同名张量直接对比，无推断）
 
-| 步骤 | 张量 | 修前 mean_rel | 修后 mean_rel |
+| 步骤（**layer 0**）| 张量 | 修前 mean_rel | 修后 mean_rel |
 |---|---|---|---|
 | 投影 + head-norm 输入 | `input_norm` | 0.000e0 | 0.000e0 |
 | head-norm 输出（RoPE 前）| `k_norm` / `v_norm` | 0.000e0 / 4.5e-10 | 同 |
@@ -1170,8 +1170,10 @@ p01 row3 两侧 **top-1 是同一个 id 1082**，只是 logprob 不同（我们 
 
 ### 这条把整轮的判据问题彻底钉死
 
-1. `o_proj / attn_out / k_rope / input_norm / k_norm / v_norm / pre_ff_norm / router_in`
-   全部**逐位一致**（0.000e0）——这些是确定修好的。
+1. **layer 0**（整跑 p02 抓的）的 `o_proj / attn_out / k_rope / input_norm / k_norm / v_norm /
+   pre_ff_norm / router_in` 全部**逐位一致**（0.000e0）——这些是确定修好的。
+   **注意范围：这只是 layer 0。** 第 10 轮的单层隔离证明 **layer 11 的 `k_norm`/`v_norm` 是 2.6e-2**，
+   同一批张量名在别的层并不一致（详见下文 L11 定位）。
 2. `rank1` 系统性"偏负"的观测，**真相是 vLLM 偏正（偏尖）**，我们才接近真值。
    所以此前"我们的分布被压平"的推断方向反了。
 3. 因此 **15.32% 翻转率 / Δlp 1.22 不能作为"我们错了"的判据**：
@@ -1245,8 +1247,9 @@ p01 row3 两侧 **top-1 是同一个 id 1082**，只是 logprob 不同（我们 
 - `lm_head` 完整 logits vs fp64 真值：**max 0.101 / mean 0.0096**，且 **top-5 id 与真值完全一致**；
 - 最终 logprob：**我们差 0.020 nat，vLLM 差 0.276–0.394 nat**；
 - router：**我们 7.4e-07，vLLM 1.5e-02**；
-- 层内子模块：`input_norm / k_norm / v_norm / attn_out / k_rope / pre_ff_norm / router_in`
-  全部 **0.000e0 逐位一致**。
+- **layer 0** 的子模块：`input_norm / k_norm / v_norm / attn_out / k_rope / pre_ff_norm /
+  router_in` 全部 **0.000e0 逐位一致**（**仅限 layer 0**；layer 11 的 `k_norm` 是 2.6e-2，
+  见第 10 轮）。
 
 **在真值判据下，我们没有发现"我们比参照更远离真值"的层或算子。** 逐层残差流的残留差异
 与"参照自身在 W8A8/NVFP4 下精度更差"一致。**按用户要求：核完，可以收工。**
@@ -1384,3 +1387,28 @@ L0 也是三槽组、`sk/smax = 0.599`（与 L11 的 0.567 接近），但 **L0 
 与我们 `load_group` 的结果逐字节 `cmp`：
 - 若权重字节相同 → 差异在 GEMM（激活 scale / 累加）；
 - 若不同 → 直接看到 vLLM 实际用的 scale，照抄即可。
+
+### 澄清：`0.000e0` 全部是 **layer 0**，与 L11 的 2.6e-2 不矛盾
+
+本文档前面几处写"逐位一致"时漏了层号，读起来像在说全模型。**实际是两个不同的层**：
+
+| 来源 | 层 | 张量 | 值 |
+|---|---|---|---|
+| 整跑 p02 + `--sub-cmp`（第 8 轮）| **layer 0** | `input_norm / k_norm / k_rope / attn_out / pre_ff_norm / router_in` | **0.000e0** |
+| `SUB_LAYER=11` + 单层隔离（第 10 轮）| **layer 11** | `k_norm` / `v_norm` | **2.651e-2 / 2.646e-2** |
+
+两处表述已修正（1175 / 1251 行加"仅限 layer 0"，表格标题加 `（layer 0）`）。
+
+### 回归确认：为排查 L11 的改动**没有影响 layer 0**
+
+改动只有三处，且都在测试侧：`--layer-iso`/`inject` 早退分支、`SUB_LAYER` 选层 dump、
+`sub_dump` 去掉 layer-0 硬编码。**实测回归**（改完后重跑 layer 0 对拍）：
+
+| 张量 | 现在 | 之前 |
+|---|---|---|
+| `input_norm` / `k_norm` / `k_rope` / `attn_out` / `pre_ff_norm` / `router_in` | **0.000e0** | 0.000e0 ✅ |
+| `q_norm` | 8.942e-6 | 8.942e-6 ✅ |
+| `v_norm` | 4.528e-10 | 4.528e-10 ✅ |
+| `o_proj` | 1.149e-7 | 1.149e-7 ✅ |
+
+末行 top-5 logits 也完全一致。**layer 0 未受影响。**
