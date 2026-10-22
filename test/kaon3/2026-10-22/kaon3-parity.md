@@ -975,3 +975,29 @@ logits = logits * self.soft_cap     # 再一次
 **已实现 A/B**：`SOFTCAP_ONE_ROUND=1` 走单次舍入（旧行为），默认走新的
 `softcap_bf16_round3`（`/c`、`tanh`、`*c` 各回 bf16 一次）。p02 末行 top-5 已有可见变化
 （25.75 → 25.625），正在跑完整 verify 测全局指标。
+
+### softcap 舍入次数 A/B 结果：**无效，已回滚**
+
+run `1022-171832-669407`（30/30 完整）：
+
+| 指标 | 单次舍入（旧）| 三步各舍入（新）|
+|---|---|---|
+| 翻转率 | 15.32% | **15.32%**（不变）|
+| mean_common_d | 1.2220 | **1.2228**（略差）|
+| 短 prompt ΔNLL | −0.0018 | −0.0017 |
+
+**结论：softcap 的舍入次数不是成因。** 已把 `softcap_bf16_round3` kernel / ffi / ops 包装
+与 `SOFTCAP_ONE_ROUND` 开关**全部删除**，`model.rs` 回到单次舍入并写明"A/B 无收益，已回滚"。
+不留无收益的分支。
+
+### 第 8 轮定论（写给下一次接手）
+
+- **确凿修好两处**：RoPE bf16 cos/sin 表、router root_size 精度。`k_rope`/`attn_out` 从有偏差到
+  **逐位一致**；`ΔNLL` 从 −0.0252 收敛到 **−0.0018（与下限 −0.0025 齐平）**。
+- **判据修正两次**（用户指出）：分层用绝对判据（下限 0）；参照非真值，router 用 fp64 校验。
+- **仍未解决**：翻转率 15.32% / Δlp 1.2220。已排除：RoPE 表、router root_size、router 累加顺序
+  （我们更准）、`dense` 的 FP8 重量化、gelu 公式与布局、softcap 舍入次数。
+- **下一个方向（有证据支持）**：观测形态是"rank1 系统性偏小 + 尾部偏高 + top5 id 只重叠 2–5/5"，
+  这是一次**分布形态**偏差。剩余未核对项集中在 `final_norm → tied lm_head` 与 attention 的
+  **FP8 KV / p_fp8（query roundtrip）** 上——后者我们比 vLLM 多做了一步 e4m3 roundtrip，
+  `triton_attn.py:659` 显示 vLLM 在 bf16 query 下**不量化 q**。这是下一个该查的点。

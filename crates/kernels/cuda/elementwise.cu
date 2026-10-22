@@ -70,27 +70,6 @@ __global__ void softcap_bf16_kernel(bf16* __restrict__ x, int64_t n, float c) {
   }
 }
 
-// 与参考实现的**舍入次数**对齐的版本：torch 里 `logits / c`、`torch.tanh(...)`、`* c` 三步都在
-// bf16 张量上做，每步都舍入一次（Python 标量在 bf16 运算里按高精度参与、结果回 bf16）。
-// 上面的 `softcap_bf16_kernel` 只在最后舍入一次，数值更准但与参考不同。
-__global__ void softcap_bf16_round3_kernel(bf16* __restrict__ x, int64_t n, float c) {
-  int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
-  const int64_t stride = (int64_t)gridDim.x * blockDim.x;
-  for (; i < n; i += stride) {
-    const bf16 t0 = to_bf16(to_f32(x[i]) / c);  // logits / c
-    const bf16 t1 = to_bf16(tanhf(to_f32(t0))); // tanh
-    x[i] = to_bf16(c * to_f32(t1));             // * c
-  }
-}
-
-extern "C" int softcap_bf16_round3(void* x, int64_t n, float c, cudaStream_t stream) {
-  if (n <= 0 || c <= 0.f) return 0;
-  const int threads = 256;
-  const int blocks = (int)min((int64_t)4096, (n + threads - 1) / threads);
-  softcap_bf16_round3_kernel<<<blocks, threads, 0, stream>>>(static_cast<bf16*>(x), n, c);
-  return last_err();
-}
-
 extern "C" int softcap_bf16(void* x, int64_t n, float c, cudaStream_t stream) {
   if (n <= 0 || c <= 0.f) return 0;
   const int threads = 256;
