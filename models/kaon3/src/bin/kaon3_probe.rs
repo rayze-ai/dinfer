@@ -54,6 +54,10 @@ fn main() -> Result<()> {
     let dump = take("--dump-oracle");
     let hidden_out = take("--hidden-out");
     let hidden_ref = take("--hidden-ref");
+    // --hidden-all <dir>：一次前向 dump 全部层残差流（与 vLLM 侧 30 个 L{i}.bin 逐层比）
+    let hidden_all = take("--hidden-all");
+    // --hidden-cmp <refdir>：把 --hidden-all 写的逐层残差流与参照目录逐层比（纯 Rust，不用 Python 参考）。
+    let hidden_cmp = take("--hidden-cmp");
     // --batch <目录> --out <目录>：加载一次，把目录里每个 <name>.ids 前向一遍、写 <out>/<name>.json（vLLM 同格式）。
     // 单用例模式每次都要 ~30 s 的权重加载 + RoPE 表构建，verify 30 个用例要 17 分钟；批量模式只付一次。
     if let Some(bdir) = take("--batch") {
@@ -77,7 +81,7 @@ fn main() -> Result<()> {
                 .map(|s| s.parse::<i32>())
                 .collect::<std::result::Result<_, _>>()?;
             let t = std::time::Instant::now();
-            forward(&mut ctx, &ids, None, None, Some(&format!("{out}/{n}.json")), (None, None))?;
+            forward(&mut ctx, &ids, None, None, Some(&format!("{out}/{n}.json")), (None, None), None)?;
             println!("BATCH {n}: T={} {:.2} s", ids.len(), t.elapsed().as_secs_f64());
         }
         return Ok(());
@@ -85,7 +89,11 @@ fn main() -> Result<()> {
     let ids: Vec<i32> = args.iter().map(|s| s.parse::<i32>().expect("token id")).collect();
     ensure!(!ids.is_empty(), "--forward 需要至少一个 token id");
     let mut ctx = setup(&dir, &src, layers)?;
-    let pass = forward(&mut ctx, &ids, dump_layer, oracle.as_deref(), dump.as_deref(), (hidden_out.as_deref(), hidden_ref.as_deref()))?;
+    let pass = forward(&mut ctx, &ids, dump_layer, oracle.as_deref(), dump.as_deref(), (hidden_out.as_deref(), hidden_ref.as_deref()), hidden_all.as_deref())?;
+    if let (Some(a), Some(r)) = (hidden_all.as_deref(), hidden_cmp.as_deref()) {
+        compare_hidden_dir(a, r, ctx.cfg.hidden)?;
+        return Ok(());
+    }
     if !pass {
         std::process::exit(3);
     }
@@ -185,6 +193,7 @@ fn forward(
     oracle: Option<&str>,
     dump: Option<&str>,
     hidden_io: (Option<&str>, Option<&str>),
+    hidden_all: Option<&str>,
 ) -> Result<bool> {
     let (stream, gemm, cfg) = (&ctx.stream, &ctx.gemm, ctx.cfg.clone());
     let model = &mut ctx.model;
@@ -219,7 +228,10 @@ fn forward(
     };
 
     let t1 = std::time::Instant::now();
-    model.forward(&stream, &gemm, &ops, &ids_t, &meta, &mut sc, &mut acts, &mut logits, &mut hidden, tokens, dump_layer)?;
+    if let Some(d) = hidden_all {
+        std::fs::create_dir_all(d)?;
+    }
+    model.forward(&stream, &gemm, &ops, &ids_t, &meta, &mut sc, &mut acts, &mut logits, &mut hidden, tokens, dump_layer, hidden_all)?;
     stream.synchronize()?;
     println!("一次前向（T={tokens}）{:.1} ms", t1.elapsed().as_secs_f64() * 1e3);
 
@@ -399,5 +411,44 @@ fn dump_oracle(lg: &[f32], vocab: usize, ids: &[i32], path: &str) -> Result<()> 
     }
     let v = json!({"choices": [{"prompt_logprobs": pl, "logprobs": {"top_logprobs": [last]}}]});
     std::fs::write(path, serde_json::to_string(&v)?)?;
+    Ok(())
+}
+
+/// 逐层残差流对拍：`ours` 与 `ref` 目录下的 `L{i}.bin`（f32 LE，[T,H]）逐层、逐行比。
+/// 输出每层「逐行相对误差」的均值 / 最大，以及相对上一层的放大倍数 —— 用来定位误差从哪层开始。
+fn compare_hidden_dir(ours: &str, rf: &str, h: usize) -> Result<()> {
+    let read = |p: &str| -> Result<Vec<f32>> {
+        let b = std::fs::read(p).with_context(|| format!("读 {p}"))?;
+        ensure!(b.len() % 4 == 0, "{p} 长度不是 4 的倍数");
+        Ok(b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+    };
+    println!("# 逐层残差流相对误差（逐行 L2 差 / 参照 L2），参照 = {rf}");
+    println!("# layer  rows  mean_rel  max_rel  rel_vs_prev");
+    let mut prev: Option<f64> = None;
+    for l in 0..64 {
+        let (pa, pb) = (format!("{ours}/L{l}.bin"), format!("{rf}/L{l}.bin"));
+        if !std::path::Path::new(&pb).exists() {
+            break;
+        }
+        let (a, b) = (read(&pa)?, read(&pb)?);
+        ensure!(a.len() == b.len(), "L{l}: 长度 {} != {}", a.len(), b.len());
+        ensure!(a.len() % h == 0, "L{l}: 长度 {} 不是 H={h} 的倍数", a.len());
+        let rows = a.len() / h;
+        let mut rels = Vec::with_capacity(rows);
+        for t in 0..rows {
+            let (x, y) = (&a[t * h..(t + 1) * h], &b[t * h..(t + 1) * h]);
+            let d: f64 = x.iter().zip(y).map(|(p, q)| ((p - q) as f64).powi(2)).sum::<f64>().sqrt();
+            let n: f64 = y.iter().map(|q| (*q as f64).powi(2)).sum::<f64>().sqrt();
+            rels.push(d / n.max(1e-30));
+        }
+        let mean = rels.iter().sum::<f64>() / rows as f64;
+        let mx = rels.iter().copied().fold(0f64, f64::max);
+        let jump = prev.map(|p| if p > 0.0 { mean / p } else { f64::INFINITY });
+        println!(
+            "L{l:<3} {rows:>4}  {mean:.3e}  {mx:.3e}  {}",
+            jump.map(|j| format!("{j:.2}x")).unwrap_or_else(|| "-".into())
+        );
+        prev = Some(mean);
+    }
     Ok(())
 }

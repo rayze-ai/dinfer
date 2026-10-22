@@ -425,3 +425,19 @@ const float sc = 1.f / (1.f + __expf(-logits[t * E + e]));   // ← sigmoid！
 - 我们侧 `kaon3_probe <M> --forward --layers N --dump-layer N-1 --hidden-out f.bin`
   （`--hidden-ref` 可逐行比相对误差）。
 - `test/kaon3/**` 里目前**一个 `.bin` 都没有** → 这条链路从未跑通过。这是本轮的起点。
+
+### 仪器改造（2026-10-22 深夜）
+
+之前 `test/kaon3/**` 里**一个 `.bin` 都没有**：逐层残差流这条链路写了工具但从未跑通。本轮补齐：
+
+1. `models/kaon3/src/model.rs::forward` 新增 `hidden_dir: Option<&str>`：每层 forward 后把 `sc.x`
+   写 `<dir>/L{l}.bin`（f32 LE，[T,H]）。与 vLLM 侧同名同序，**定义一致**（都含 `layer_scalar`）。
+2. `kaon3_probe --hidden-all <dir>`：一次前向 dump 全部层（省掉 30 次权重加载）。仍保留
+   `--layers N`（前后都按 N 截断）。
+3. `kaon3_probe --hidden-all <ours> --hidden-cmp <ref>`：**纯 Rust 逐层比对**，输出每层
+   `mean_rel / max_rel / 相对上一层放大倍数`，用来定位误差从哪层起跳。不再需要 Python 参考。
+4. 修 `scripts/dev/kaon3_vllm_hidden.py` 的取批 bug：原来 `cap[-30:]` 在 `max_tokens=1` 时会
+   取到**最后一个 decode 步**（单行）而不是 T 行 prefill；改为先按 `h.shape[0] == t` 过滤再取前 30，
+   并 `assert len == 30`。**这条 bug 会让逐层对拍从一开始就对错层**，是此前无法推进的直接原因。
+
+编译：`cargo build --release -p dinfer-kaon3 --bin kaon3_probe` 通过（5090 容器内）。

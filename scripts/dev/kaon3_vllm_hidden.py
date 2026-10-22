@@ -31,10 +31,14 @@ llm = LLM(model=model_dir, enforce_eager=True, tensor_parallel_size=1, gpu_memor
 cap.clear()  # 丢掉 warmup / profile run
 llm.generate(prompts=[{"prompt_token_ids": ids}], sampling_params=SamplingParams(max_tokens=1, temperature=0, logprobs=5))
 t = len(ids)
-layers = cap[-30:] if len(cap) >= 30 else cap
-print(f"captured {len(cap)} forward 调用, 取最后 {len(layers)} 层", flush=True)
+# **只取 prefill 那一批**：decode 步每步也会调 30 次 DecoderLayer.forward，
+# 直接 cap[-30:] 会取到最后一个 decode 步（单行）而不是 T 行的 prefill（2026-10-22 修）。
+pre = [h for h in cap if h.shape[0] == t]
+layers = pre[:30]
+print(f"captured {len(cap)} 次 forward 调用，其中 T={t} 的 {len(pre)} 次；取前 {len(layers)} 层", flush=True)
+assert len(layers) == 30, f"expected 30 prefill layers, got {len(layers)}"
 for i, h in enumerate(layers):
-    h = h[:t]  # 去掉 padding 行
+    h = h[:t]
     h.astype("<f4").tofile(f"{out}/L{i}.bin")
     if i < 3 or i >= len(layers) - 2:
         n = float(np.sqrt((h.astype(np.float64) ** 2).sum()))

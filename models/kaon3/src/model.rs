@@ -9,7 +9,7 @@
 use crate::config::KaonConfig;
 use crate::layer::{ActBuf, Gemma4Layer, LayerScratch, Ropes, StepCtx};
 use crate::weights::{self, QWeight};
-use anyhow::{ensure, Result};
+use anyhow::{anyhow, ensure, Result};
 use dinfer_kernels::{self as k, bf16, Gemm, Stream};
 use dinfer_layers::{Embedding, Norm as _, OpSet, Tensor, WeightSource};
 
@@ -104,6 +104,9 @@ impl KaonModel {
         tokens: usize,
         // `Some(l)` 时把第 l 层之后的残差流拷进 `hidden`（逐层对拍用）。
         dump_layer: Option<usize>,
+        // `Some(dir)` 时把**每一层**之后的残差流写 `<dir>/L{l}.bin`（f32 LE，[T,H]），
+        // 与 `scripts/dev/kaon3_vllm_hidden.py` 抓的 vLLM 逐层残差流同名同序逐层比。
+        hidden_dir: Option<&str>,
     ) -> Result<()> {
         let cfg = &self.cfg;
         let h = cfg.hidden;
@@ -134,6 +137,15 @@ impl KaonModel {
             layer.forward(stream, gemm, ops, cfg, &self.ropes, sc, &mut ctx, tokens)?;
             if dump_layer == Some(l) {
                 stream.dtod_copy_n(&sc.x.data, &mut hidden.data, tokens * h)?;
+            }
+            if let Some(dir) = hidden_dir {
+                stream.dtod_copy_n(&sc.x.data, &mut hidden.data, tokens * h)?;
+                let v = hidden.to_vec_f32(stream)?;
+                let bytes: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
+                std::fs::write(format!("{dir}/L{l}.bin"), bytes)
+                    .map_err(|e| {
+                        anyhow::anyhow!("写 {dir}/L{l}.bin 失败: {e}")
+                    })?;
             }
         }
 
