@@ -64,6 +64,9 @@ fn main() -> Result<()> {
     let hidden_all = take("--hidden-all");
     // --logits-out <file>：把完整 logits（[T,vocab]，softcap 之后）写成 f32 LE，用于与参照逐元素比
     let logits_out = take("--logits-out");
+    // --layer-iso <l>:<ref.bin>：单层隔离 —— 用参照的第 l-1 层残差流灌进第 l 层，只跑这一层，
+    // 输出写 <hidden-all>/L{l}.bin（与参照同层直接比）。用来逐层判"实现本身"对不对。
+    let layer_iso = take("--layer-iso");
     // --hidden-cmp <refdir>：把 --hidden-all 写的逐层残差流与参照目录逐层比（纯 Rust，不用 Python 参考）。
     let hidden_cmp = take("--hidden-cmp");
     // --sub-cmp <refdir>：把 --hidden-all 目录里**所有同名 .bin** 与参照目录逐项比（layer 0 子模块对拍）。
@@ -99,6 +102,15 @@ fn main() -> Result<()> {
     let ids: Vec<i32> = args.iter().map(|s| s.parse::<i32>().expect("token id")).collect();
     ensure!(!ids.is_empty(), "--forward 需要至少一个 token id");
     let mut ctx = setup(&dir, &src, layers)?;
+    if let Some(spec) = layer_iso.as_deref() {
+        let (l, path) = spec.split_once(':').context("--layer-iso 需要 l:ref.bin")?;
+        let l: usize = l.parse()?;
+        let b = std::fs::read(path)?;
+        let data: Vec<f32> = b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let dir = hidden_all.as_deref().context("--layer-iso 需要 --hidden-all <dir>")?;
+        std::fs::create_dir_all(dir)?;
+        return run_layer_iso(&mut ctx, &ids, l, &data, dir);
+    }
     let pass = forward(&mut ctx, &ids, dump_layer, oracle.as_deref(), dump.as_deref(), (hidden_out.as_deref(), hidden_ref.as_deref()), hidden_all.as_deref(), logits_out.as_deref())?;
     if let (Some(a), Some(r)) = (hidden_all.as_deref(), sub_cmp.as_deref()) {
         compare_sub_dir(a, r, ids.len())?;
@@ -246,7 +258,7 @@ fn forward(
     if let Some(d) = hidden_all {
         std::fs::create_dir_all(d)?;
     }
-    model.forward(&stream, &gemm, &ops, &ids_t, &meta, &mut sc, &mut acts, &mut logits, &mut hidden, tokens, dump_layer, hidden_all)?;
+    model.forward(&stream, &gemm, &ops, &ids_t, &meta, &mut sc, &mut acts, &mut logits, &mut hidden, tokens, dump_layer, hidden_all, None)?;
     stream.synchronize()?;
     println!("一次前向（T={tokens}）{:.1} ms", t1.elapsed().as_secs_f64() * 1e3);
 
@@ -536,5 +548,44 @@ fn dump_weights(src: &WeightSource, dir: &str) -> Result<()> {
         std::fs::write(std::path::Path::new(dir).join(file), &bits)?;
         println!("{file}: shape {shape:?} {} bytes", bits.len());
     }
+    Ok(())
+}
+
+/// 单层隔离：把参照的第 `l-1` 层残差流灌进第 `l` 层，只跑这一层，写 `<dir>/L{l}.bin`。
+/// 前置各层照跑（提供本层注意力要读的 KV），但它们的输出不影响本层输入（输入是被灌进去的）。
+fn run_layer_iso(ctx: &mut Ctx, ids: &[i32], l: usize, data: &[f32], dir: &str) -> Result<()> {
+    let (stream, gemm, cfg) = (&ctx.stream, &ctx.gemm, ctx.cfg.clone());
+    let model = &mut ctx.model;
+    let ops = DefaultOps;
+    let tokens = ids.len();
+    let h = cfg.hidden;
+    ensure!(data.len() >= tokens * h, "layer-iso: 参照数据 {} < T*H {}", data.len(), tokens * h);
+    let num_blocks = (tokens + BLOCK_SIZE - 1) / BLOCK_SIZE + 1;
+    model.alloc_kv(stream, num_blocks, BLOCK_SIZE)?;
+    let cu_seqlens = Tensor::from_vec(stream, vec![0i32, tokens as i32], &[2])?;
+    let seq_lens = Tensor::from_vec(stream, vec![tokens as i32], &[1])?;
+    let positions = Tensor::from_vec(stream, (0..tokens as i32).collect::<Vec<_>>(), &[tokens])?;
+    let slot_mapping = Tensor::from_vec(stream, (0..tokens as i64).collect::<Vec<_>>(), &[tokens])?;
+    let block_table = Tensor::from_vec(stream, (0..num_blocks as i32).collect::<Vec<_>>(), &[num_blocks])?;
+    let mut sc = LayerScratch::new(stream, &cfg, tokens)?;
+    let mut acts = ActBuf::new(stream, &cfg)?;
+    let mut logits = Tensor::uninit(stream, &[tokens, cfg.vocab_size])?;
+    let mut hidden = Tensor::uninit(stream, &[tokens, h])?;
+    let ids_t = Tensor::from_vec(stream, ids.to_vec(), &[tokens])?;
+    let meta = StepMeta {
+        mode: dinfer_core::runner::BatchMode::Prefill,
+        cu_seqlens: &cu_seqlens,
+        seq_lens: &seq_lens,
+        block_table: &block_table,
+        positions: &positions,
+        slot_mapping: &slot_mapping,
+        num_reqs: 1,
+        max_blocks: num_blocks,
+        max_seqlen: tokens,
+    };
+    model.forward(stream, gemm, &ops, &ids_t, &meta, &mut sc, &mut acts, &mut logits, &mut hidden,
+                  tokens, None, Some(dir), Some((data, l, l)))?;
+    stream.synchronize()?;
+    println!("layer-iso L{l} 完成，输出在 {dir}/L{l}.bin");
     Ok(())
 }

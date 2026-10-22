@@ -107,6 +107,10 @@ impl KaonModel {
         // `Some(dir)` 时把**每一层**之后的残差流写 `<dir>/L{l}.bin`（f32 LE，[T,H]），
         // 与 `scripts/dev/kaon3_vllm_hidden.py` 抓的 vLLM 逐层残差流同名同序逐层比。
         hidden_dir: Option<&str>,
+        // `Some((data, layer, skip))`：**单层隔离**测试。把 `data`（[T,H] f32）灌进残差流当作
+        // 第 `layer` 层的输入，只跑 `layer` 这一层（`skip` 个层先跳过），输出写 `hidden_dir/L{layer}.bin`。
+        // 用来把逐层累积误差剥掉，单独判断某一层的实现对不对（输入取自参照，输出与参照比）。
+        inject: Option<(&[f32], usize, usize)>,
     ) -> Result<()> {
         let cfg = &self.cfg;
         let h = cfg.hidden;
@@ -122,6 +126,51 @@ impl KaonModel {
             let v = hidden.to_vec_f32(stream)?;
             let bytes: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
             std::fs::write(format!("{dir}/Lm1.bin"), bytes)?;
+        }
+
+        // 单层隔离：把参照的残差流灌进来，只跑指定那一层。
+        if let Some((data, layer, skip)) = inject {
+            ensure!(data.len() >= tokens * h, "inject: 数据长度 {} < {}", data.len(), tokens * h);
+            // 参照的残差流是 f32，模型 buffer 是 bf16：逐元素转换后上传（与 kernel 的舍入口径一致）。
+            let up: Vec<bf16> = data[..tokens * h].iter().map(|x| bf16::from_f32(*x)).collect();
+            let up = Tensor::from_vec(stream, up, &[tokens, h])?;
+            stream.dtod_copy_n(&up.data, &mut sc.x.data, tokens * h)?;
+            let mut kv_cache = std::mem::take(&mut self.kv);
+            let l = layer;
+            // 前置各层照跑，为第 l 层的注意力填好 KV（它们的输出不进入本层输入，输入是被灌进去的）。
+            for pre in 0..skip.min(l) {
+                let mut c = StepCtx {
+                    mode: meta.mode,
+                    cu_seqlens: &meta.cu_seqlens,
+                    seq_lens: &meta.seq_lens,
+                    block_table: &meta.block_table,
+                    positions: &meta.positions,
+                    slot_mapping: &meta.slot_mapping,
+                    num_reqs: meta.num_reqs,
+                    max_blocks: meta.max_blocks,
+                    max_seqlen: meta.max_seqlen,
+                    block_size: self.block_size,
+                    kv_mut: &mut kv_cache[pre].cache.data,
+                };
+                self.layers[pre].forward(stream, gemm, ops, cfg, &self.ropes, sc, &mut c, tokens, None)?;
+            }
+            let mut ctx = StepCtx {
+                mode: meta.mode,
+                cu_seqlens: &meta.cu_seqlens,
+                seq_lens: &meta.seq_lens,
+                block_table: &meta.block_table,
+                positions: &meta.positions,
+                slot_mapping: &meta.slot_mapping,
+                num_reqs: meta.num_reqs,
+                max_blocks: meta.max_blocks,
+                max_seqlen: meta.max_seqlen,
+                block_size: self.block_size,
+                kv_mut: &mut kv_cache[l].cache.data,
+            };
+            self.layers[l].forward(stream, gemm, ops, cfg, &self.ropes, sc, &mut ctx, tokens, None)?;
+            self.kv = kv_cache;
+            stream.dtod_copy_n(&sc.x.data, &mut hidden.data, tokens * h)?;
+            return Ok(());
         }
 
         // ---- 30 层 ----
