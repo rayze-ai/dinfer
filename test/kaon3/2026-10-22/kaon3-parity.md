@@ -1843,3 +1843,23 @@ moe_y 相对 **9.2e-3 → 8.3e-3**，ff2 1.50e-2 → 1.48e-2，iso_L11 6.42e-3 �
 （每专家取 gate/up 两片最大）、a2 逐专家——与我们 `layer.rs`（`ag.max(au)`、down 逐专家）**一致**。排除。
 
 下一步 C-5：两侧逐 (token, 专家) dump gate_up / 激活 / down 输出，按专家 id 对齐，定位第一个分歧段。
+
+### C-5：逐 (token, 专家) 对齐 —— **根因：gelu 的中间舍入**（经 fp4 激活量化放大）
+仪器：我们 `SUB_LAYER=l` 时写 `moe_e{eid}_{gate,up,act,down}.bin` + `moe_e{eid}_tok.txt`；
+vLLM `scripts/dev/kaon3_vllm_moe_experts.py`（patch `run_cutlass_moe_fp4` / `cutlass_fp4_moe_mm` / `apply_moe_activation` / `shuffle_rows`，
+用 `c_map` 把按专家排序的行映射回 (t,k)）。L11 隔离，33 个专家、192 个 (t, e) 对：
+
+| 段 | 修前 相对 / 不同元素 | `GELU_ROUND2=1` |
+|---|---|---|
+| gate（GEMM1）| **0 / 0%** | 0 |
+| up（GEMM1）| **0 / 0%** | 0 |
+| **act = gelu_tanh(gate)·up** | **1.43e-3 / 27.0%** | **0 / 0%** |
+| down（GEMM2，输入先量化 fp4）| 1.36e-2 / 80.5% | **0 / 0%** |
+| moe_y / ff2 | 9.2e-3 / 1.5e-2 | **0 / 0**（67584 元素全同）|
+| iso_L11 vs ref L11 mean | 1.22e-2 | **2.8e-6** |
+
+**根因**：vLLM `csrc/activation_kernels.cu` 的 `act_and_mul_kernel` → `ACT_FN` / `PACKED_ACT_FN` **返回 bf16**，
+即 `bf16(float(bf16(gelu(g))) · u)`（两次舍入，x³ 按 `f*f*f`）；我们 `activation.cu` 是 `bf16(gelu(g)·u)` 全 f32 一次舍入。
+单看我们更精确，但下游 down 的输入要**动态量化到 fp4 e2m1**（3 位），1 ulp 的激活差会翻转 fp4 取整，放大约 10×。
+**两个 GEMM（FP4 W4A4 cutlass vs 我们）在同输入下逐位一致**——GEMM 移植没有问题。
+实现：`gelu_tanh_mul_bf16` 加运行时参数 `mode`（0 = 原口径，1 = vLLM 口径；kernel 体内无 `#if`），`GELU_ROUND2=1` 切换。
