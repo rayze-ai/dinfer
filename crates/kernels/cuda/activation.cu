@@ -23,25 +23,35 @@ __device__ __forceinline__ float gelu_tanh_f(float x) {
   return 0.5f * x * (1.f + tanhf(kAlpha * (x + 0.044715f * x * x * x)));
 }
 
+// mode（运行时参数）：0 = 全 f32、只在最后舍入一次；
+//   1 = vLLM `act_and_mul_kernel` 口径：x³ 按 f·f·f、`ACT_FN` 返回 bf16（gelu 先舍入一次）再乘 up、再舍入。
 __global__ void gelu_tanh_mul_kernel(const bf16* __restrict__ gate, const bf16* __restrict__ up,
-                                   bf16* __restrict__ out, int inter) {
+                                   bf16* __restrict__ out, int inter, int mode) {
   const int64_t row = blockIdx.x;
   const bf16* g = gate + row * inter;
   const bf16* u = up + row * inter;
   bf16* o = out + row * inter;
   for (int i = threadIdx.x; i < inter; i += blockDim.x) {
-    o[i] = to_bf16(gelu_tanh_f(to_f32(g[i])) * to_f32(u[i]));
+    if (mode == 1) {
+      const float f = to_f32(g[i]);
+      const float x_cube = f * f * f;
+      const float inner = 0.7978845608028654f * (f + 0.044715f * x_cube);
+      const float a = to_f32(to_bf16(0.5f * f * (1.f + tanhf(inner))));
+      o[i] = to_bf16(a * to_f32(u[i]));
+    } else {
+      o[i] = to_bf16(gelu_tanh_f(to_f32(g[i])) * to_f32(u[i]));
+    }
   }
 }
 
 // 双缓冲版（gate / up 分开存，避免调用方拼列）：out = gelu_tanh(gate) * up。
 extern "C" int gelu_tanh_mul_bf16(const void* gate, const void* up, void* out, int64_t tokens, int64_t inter,
-                                  cudaStream_t stream) {
+                                  int mode, cudaStream_t stream) {
   if (tokens <= 0 || inter <= 0) return 0;
   const int threads = inter < 256 ? (inter < 32 ? 32 : inter) : 256;
   gelu_tanh_mul_kernel<<<(unsigned)tokens, threads, 0, stream>>>(static_cast<const bf16*>(gate),
                                                                static_cast<const bf16*>(up),
-                                                               static_cast<bf16*>(out), (int)inter);
+                                                               static_cast<bf16*>(out), (int)inter, mode);
   return last_err();
 }
 

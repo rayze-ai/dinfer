@@ -695,7 +695,7 @@ impl Gemma4Layer {
             std::fs::write(dir.join("mlp_gate_up.bin"), bytes)
                 .map_err(|err| anyhow::anyhow!("写 mlp_gate_up.bin 失败: {err}"))?;
         }
-        ops.act().gelu_tanh_mul(stream, &sc.gate_up.data, &sc.act.data, &mut sc.gelu.data, tokens, cfg.dense_inter)?;
+        gelu_mul(stream, ops, &sc.gate_up.data, &sc.act.data, &mut sc.gelu.data, tokens, cfg.dense_inter)?;
         sub_dump(stream, sub_out, "mlp_gelu", &sc.gelu, tokens, cfg.dense_inter)?;
         self.dense_down.forward(gemm, stream, &sc.gelu, &mut sc.dense, tokens)?;
         sub_dump(stream, sub_out, "dense", &sc.dense, tokens, h)?;
@@ -814,7 +814,7 @@ impl Gemma4Layer {
             let ex = &self.experts[eid];
             ex.gate.forward(gemm, stream, &sc.xg, &mut sc.gate_up, len)?;
             ex.up.forward(gemm, stream, &sc.xg, &mut sc.act, len)?;
-            ops.act().gelu_tanh_mul(stream, &sc.gate_up.data, &sc.act.data, &mut sc.gelu.data, len, cfg.moe_inter)?;
+            gelu_mul(stream, ops, &sc.gate_up.data, &sc.act.data, &mut sc.gelu.data, len, cfg.moe_inter)?;
             let g = Tensor { data: sc.gelu.data.clone(), shape: vec![len.max(1), cfg.moe_inter] };
             ex.down.forward(gemm, stream, &g, &mut sc.yg, len)?;
             // 子 loop C-5：逐专家中间量（gate / up / 激活 / down 输出 + 该专家的 token 列表），按专家 id 与 vLLM 对齐比较
@@ -889,4 +889,23 @@ pub fn moe_combine_bf16_ab() -> bool {
         }
         on
     })
+}
+
+/// gelu_tanh(gate)·up。`GELU_ROUND2=1`：按 vLLM `act_and_mul_kernel` 口径（gelu 先舍入 bf16，子 loop C-5 归因 A/B，默认关）。
+fn gelu_mul(stream: &Stream, ops: &impl OpSet, gate: &k::cudarc::driver::CudaSlice<bf16>, up: &k::cudarc::driver::CudaSlice<bf16>,
+            out: &mut k::cudarc::driver::CudaSlice<bf16>,
+            rows: usize, inter: usize) -> Result<()> {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let r2 = *V.get_or_init(|| {
+        let on = std::env::var("GELU_ROUND2").map(|v| v.trim() == "1").unwrap_or(false);
+        if on {
+            eprintln!("[kaon3] GELU_ROUND2=1：gelu 按 vLLM 口径先舍入 bf16（归因 A/B）");
+        }
+        on
+    });
+    if r2 {
+        k::ops::gelu_tanh_mul_round2_bf16(stream, gate, up, out, rows, inter)
+    } else {
+        ops.act().gelu_tanh_mul(stream, gate, up, out, rows, inter)
+    }
 }

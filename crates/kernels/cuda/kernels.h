@@ -55,7 +55,8 @@ int silu_and_mul_bf16(const void* x, void* out, int64_t tokens, int64_t inter, c
 int mul_row_bf16(void* x, const void* w, int64_t rows, int64_t cols, cudaStream_t stream);
 // logit softcapping：x = tanh(x/c)·c（bf16 原地）。
 int softcap_bf16(void* x, int64_t n, float c, cudaStream_t stream);
-int gelu_tanh_mul_bf16(const void* gate, const void* up, void* out, int64_t tokens, int64_t inter, cudaStream_t stream);
+// mode：0 = 全 f32 一次舍入；1 = vLLM act_and_mul 口径（gelu 先舍入 bf16 再乘 up）。
+int gelu_tanh_mul_bf16(const void* gate, const void* up, void* out, int64_t tokens, int64_t inter, int mode, cudaStream_t stream);
 // 输出门（Qwen3.5 attn_output_gate）：x *= sigmoid(gate)，原地逐元素。n 必须是 8 的倍数。
 int mul_sigmoid_bf16(void* x, const void* gate, int64_t n, cudaStream_t stream);
 // 行式：x 紧凑 [rows, cols]，gate 是 [rows, gate_stride] 的列段（融合 qkv+gate 输出的 gate 段）；cols / gate_stride 是 8 的倍数。

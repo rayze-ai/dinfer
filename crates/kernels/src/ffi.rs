@@ -87,6 +87,7 @@ extern "C" {
         out: *mut c_void,
         tokens: i64,
         inter: i64,
+        mode: i32,
         stream: cudaStream_t,
     ) -> i32;
 

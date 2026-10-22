@@ -339,6 +339,30 @@ pub fn gelu_tanh_mul_bf16(
     tokens: usize,
     inter: usize,
 ) -> Result<()> {
+    gelu_tanh_mul_mode(stream, gate, up, out, tokens, inter, 0)
+}
+
+/// 同 [`gelu_tanh_mul_bf16`]，但按 vLLM `act_and_mul_kernel` 口径：gelu 先舍入 bf16 再乘 up（两次舍入）。
+pub fn gelu_tanh_mul_round2_bf16(
+    stream: &Stream,
+    gate: &CudaSlice<bf16>,
+    up: &CudaSlice<bf16>,
+    out: &mut CudaSlice<bf16>,
+    tokens: usize,
+    inter: usize,
+) -> Result<()> {
+    gelu_tanh_mul_mode(stream, gate, up, out, tokens, inter, 1)
+}
+
+fn gelu_tanh_mul_mode(
+    stream: &Stream,
+    gate: &CudaSlice<bf16>,
+    up: &CudaSlice<bf16>,
+    out: &mut CudaSlice<bf16>,
+    tokens: usize,
+    inter: usize,
+    mode: i32,
+) -> Result<()> {
     ensure!(gate.len() >= tokens * inter && up.len() >= tokens * inter && out.len() >= tokens * inter,
             "gelu_tanh_mul: shape");
     // SAFETY: 长度已校验。
@@ -350,6 +374,7 @@ pub fn gelu_tanh_mul_bf16(
                 stream.ptr_mut(out) as *mut c_void,
                 tokens as i64,
                 inter as i64,
+                mode,
                 stream.raw() as _,
             )
         },
