@@ -835,3 +835,18 @@ cuBLAS 在这个形状（M=24、N=128、K=2816）走 split-K + bf16 张量核时
    "谁的 router 更准"，而不是靠猜。
 2. parity 判据加一条：**统计 top-8 集合不一致的 token 数**，并在报告里单列。
    这些 token 上的 logprob 差异不作判据。
+
+### 常驻校验：`scripts/verify/kaon3_router_truth.py`
+
+把上面的 fp64 判定固化成脚本（不进 Python 参考实现，只做真值校验）：
+读 bf16 原始权重 + 我们的 `router_in.bin`，用 float64 算精确 logits，比两个实现的偏差与 top-8。
+
+```
+OURS vs fp64: max=7.409e-07 mean=8.846e-08  top8 错 0/24
+REF  vs fp64: max=1.545e-02 mean=2.023e-03  top8 错 3/24
+我们更接近真值的元素比例: 100.0%
+ROUTER TRUTH PASS（我们不劣于参照）
+```
+
+exit 0 = 我们不劣于参照（逐元素更准比例 ≥ 50% 且 top-8 错得更少）。
+以后每次动 router / GEMM 都能一条命令回答"谁的 router 更准"，不用靠推理。
