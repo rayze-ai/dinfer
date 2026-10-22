@@ -5,6 +5,40 @@
 
 > 更新 2026-10-21 23:0x +0800。**本区按模型分节，每节只写该模型自己的交接内容；不要覆盖别人的分节。**
 
+
+### Kaon-V3 parity 第 8 轮（2026-10-22 深夜）：逐层对拍跑通，三处根因
+
+**用户起点（2026-10-22）**：「我觉的 0–7 层可能也是不对的，只是我们的标准定的让他过」——
+**成立**。干净参照下跨进程下限是 **0.0000（逐位一致）**，而 L8 的 top5 |Δlp| 是 0.06，
+被"阈值 0.15 / 1.5×FLOOR"这类相对判据放过了。分层二分即改为**绝对判据**。
+
+**仪器（本轮新建，之前从未跑通）**：`kaon3_probe --hidden-all <dir>` 一次前向 dump
+全部 30 层残差流 + layer 0 的 17 个子模块；参照侧 `scripts/dev/kaon3_vllm_sublayer.py`
+用 forward hook 抓同名张量（**先用 4-token 短 prompt 冒烟**）；`--sub-cmp <ref>`
+纯 Rust 逐项比。修了 vLLM 抓取脚本 `cap[-30:]` 取到 decode 批的 bug。
+
+**三处根因（前两处已修并验证）**：
+1. **RoPE 的 cos/sin 表**：vLLM `base.py:59` `cache.to(dtype)` → **bf16 表**，我们再 f32 表。
+   修后 `k_rope`/`attn_out` **逐位归零**，`o_proj` 7.65e-3 → 1.15e-7。
+   `Rope::with_bf16_cache()`（opt-in）。
+2. **router `root_size`**：vLLM 是 `register_buffer`（bf16），我们用了 f32 常数。
+   修后 `router_logits` 3.28e-3 → 1.72e-3（剩余是 fp32 累加顺序，见下）。
+3. **softcap 舍入次数**（在测）：vLLM `/c`、`tanh`、`*c` 各回 bf16 一次，我们只回一次。
+   已加 `softcap_bf16_round3` + `SOFTCAP_ONE_ROUND=1` A/B 开关。
+
+**重要判据结论**：fp64 真值三方校验显示 **我们的 router 比 vLLM 准 20 倍**
+（我们 max 7.4e-07 / top8 错 0/24；vLLM max 1.5e-02 / top8 错 3/24）。
+常驻脚本 `scripts/verify/kaon3_router_truth.py`。**参照自身不精确**，top-8 分歧不是我们的 bug。
+
+**端到端（run `1022-170737-660897`，30/30）**：短 prompt 翻转 15.53%→**15.32%**、
+Δlp 1.2578→**1.2220**、**ΔNLL −0.0252→−0.0018（与下限 −0.0025 齐平）**；long_zh ΔNLL 通过；
+单 token / kernel 对拍通过。**5 过 2 败**。
+
+**下一步**：① 等 softcap round3 的 verify 结果（`ba5hydqwe`）；
+② 若翻转率仍不动，按"分布形态"继续查 `final_norm → lm_head` 这段
+（已知 rank1 系统性偏小、尾部偏高、top5 id 只重叠 2–5/5）；
+③ 多卡并发跑 verify 前必须 `docker rm -f` 所有残留容器（本轮 OOM 只跑了 15/30 白跑一次）。
+
 ### Kaon-V3（5090，阶段 1–2 完成，阶段 3 接近打通）
 
 - 目标（用户 2026-10-21）：5090 **单卡**适配，性能 ≥ 基线容器 1.2×；**不反量化权重**。
