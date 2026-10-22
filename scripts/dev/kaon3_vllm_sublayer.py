@@ -24,6 +24,7 @@ HOOKS = {
     "self_attn": "o_proj",              # vLLM 的 self_attn 已含 o_proj
     "post_attention_layernorm": "post_attn_norm",
     "mlp": "dense",
+    "pre_feedforward_layernorm": "pre_ff_norm",
     "router": "router_logits",
     "experts": "moe_y",
     "post_feedforward_layernorm_2": "ff2",
@@ -61,6 +62,13 @@ def _patched(self, *a, **k):
         a_ = getattr(sa, "attn", None)
         if a_ is not None:
             handles.append(a_.register_forward_hook(mk("attn_out")))
+    # MLP 内部：gate_up 投影输出（gelu 之前）与 down 投影输出
+    mlp_ = getattr(self, "mlp", None)
+    if mlp_ is not None:
+        for attr, name in (("gate_up_proj", "mlp_gate_up"), ("down_proj", "mlp_down")):
+            m_ = getattr(mlp_, attr, None)
+            if m_ is not None:
+                handles.append(m_.register_forward_hook(mk(name)))
     # router 的**真正输入**（norm + root_size + scale 之后、proj 之前）：用 pre-hook 抓
     rt = getattr(self, "router", None)
     pr = getattr(rt, "proj", None) if rt is not None else None

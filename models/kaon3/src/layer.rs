@@ -670,8 +670,22 @@ impl Gemma4Layer {
 
         // ---- 7. dense MLP 支路（无条件执行）----
         rmsnorm_into(stream, ops, &sc.x, &self.pre_ff_norm, &mut sc.norm, h, tokens, eps)?;
+        sub_dump(stream, sub_out, "pre_ff_norm", &sc.norm, tokens, h)?;
         self.dense_gate.forward(gemm, stream, &sc.norm, &mut sc.gate_up, tokens)?;
         self.dense_up.forward(gemm, stream, &sc.norm, &mut sc.act, tokens)?;
+        if let Some((dir, 0)) = sub_out {
+            // mlp_gate_up = [gate | up] 拼起来（vLLM 的 MergedColumnParallelLinear 输出布局）
+            let (g, u) = (sc.gate_up.to_vec_f32(stream)?, sc.act.to_vec_f32(stream)?);
+            let di = cfg.dense_inter;
+            let mut outv = Vec::with_capacity(tokens * 2 * di);
+            for t in 0..tokens {
+                outv.extend_from_slice(&g[t * di..(t + 1) * di]);
+                outv.extend_from_slice(&u[t * di..(t + 1) * di]);
+            }
+            let bytes: Vec<u8> = outv.iter().flat_map(|x| x.to_le_bytes()).collect();
+            std::fs::write(dir.join("mlp_gate_up.bin"), bytes)
+                .map_err(|err| anyhow::anyhow!("写 mlp_gate_up.bin 失败: {err}"))?;
+        }
         ops.act().gelu_tanh_mul(stream, &sc.gate_up.data, &sc.act.data, &mut sc.gelu.data, tokens, cfg.dense_inter)?;
         self.dense_down.forward(gemm, stream, &sc.gelu, &mut sc.dense, tokens)?;
         sub_dump(stream, sub_out, "dense", &sc.dense, tokens, h)?;

@@ -38,6 +38,11 @@ fn main() -> Result<()> {
     if args.iter().any(|a| a == "--scales") {
         return scales_probe(&src);
     }
+    if let Some(i) = args.iter().position(|a| a == "--dump-weights") {
+        let d = args.get(i + 1).cloned().context("--dump-weights 需要目录")?;
+        return dump_weights(&src, &d);
+    }
+
     if !args.iter().any(|a| a == "--forward" || a == "--batch") {
         return format_probe(&src);
     }
@@ -52,6 +57,7 @@ fn main() -> Result<()> {
     let oracle = take("--oracle");
     let layers = take("--layers").map(|s| s.parse::<usize>().expect("--layers 需要整数"));
     let dump = take("--dump-oracle");
+
     let hidden_out = take("--hidden-out");
     let hidden_ref = take("--hidden-ref");
     // --hidden-all <dir>：一次前向 dump 全部层残差流（与 vLLM 侧 30 个 L{i}.bin 逐层比）
@@ -501,6 +507,26 @@ fn compare_sub_dir(ours: &str, rf: &str, rows_want: usize) -> Result<()> {
         let mean = rels.iter().sum::<f64>() / rows as f64;
         let mx = rels.iter().copied().fold(0f64, f64::max);
         println!("{:<20} {rows:>6} {mean:>11.3e} {mx:>11.3e}", n.trim_end_matches(".bin"));
+    }
+    Ok(())
+}
+
+/// 把关键权重原样导出成 bf16 LE，用于和 safetensors 直接 `cmp` 校验加载路径没有改数值。
+fn dump_weights(src: &WeightSource, dir: &str) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let p = "model.language_model.layers.0";
+    for (name, file) in [
+        (format!("{p}.router.proj.weight"), "router_proj_bf16.bin"),
+        (format!("{p}.router.scale"), "router_scale_bf16.bin"),
+        (format!("{p}.router.per_expert_scale"), "router_pes_bf16.bin"),
+    ] {
+        let (shape, v) = src.load_f32_host(&name)?;
+        let bits: Vec<u8> = v
+            .iter()
+            .flat_map(|x| half::bf16::from_f32(*x).to_bits().to_le_bytes())
+            .collect();
+        std::fs::write(std::path::Path::new(dir).join(file), &bits)?;
+        println!("{file}: shape {shape:?} {} bytes", bits.len());
     }
     Ok(())
 }

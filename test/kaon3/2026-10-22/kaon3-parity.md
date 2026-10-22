@@ -726,3 +726,29 @@ bf16 舍入后相对变化约 **1.5e-3**，正好是 `router_logits` 残差的�
 
 **所以 `dense` 的 1.95e-3 不在 scale 口径上**，下一刀要抓 `dense` 的内部：
 `pre_ff_norm`（dense 输入，已知逐位级）、`gelu(gate)*up` 中间量、`down` 输入/输出。
+
+### router：输入与权重都逐位一致，残差只能来自累加顺序（待处理）
+
+- `router_in`（norm+root_size+scale 之后、proj 之前）：**0.000e0**，逐位一致。
+- 权重字节校验：`--dump-weights` 导出我们加载后的 bf16 字节，与 safetensors 原始字节
+  `cmp` 对比 —— `router.proj.weight` / `router.scale` / `router.per_expert_scale`
+  **三者全部 IDENTICAL**。加载路径没有改数值。
+- 所以 `router_logits` 的 1.716e-3 **只可能来自 GEMM 累加顺序**。
+  vLLM 的 `GateLinear` 在 sm_120（Blackwell family 100）上走 Tier 5
+  `torch.mm(x, weight.T, out_dtype=torch.float32)`（cuBLAS），我们用自写 `gate_kernel`
+  （128 线程、`block_reduce_sum` 树形归约）。
+- 一个**可检验的推论**：对**同一条输入**，两个正确实现在**不同行**上的精度不应相关。
+  若 `router_logits` 的相对误差在**同一 token 的 128 个专家间**近似常数 → 是归一化/缩放问题；
+  若是随机的逐元素抖动 → 是累加顺序。下一轮直接看逐元素分布即可判定。
+
+### 【已修】重量化的 f16 舍入（`load_fp8_group`）
+
+vLLM `per_tensor_dequantize`：`fake_qweight = tensor.to(float16)` 然后
+`dq = fake_qweight * inv_scale`，`inv_scale` 是 **fp32 张量** → torch 类型提升，乘法在 **f32** 里做。
+我们原来写 `f16(f16(值) * f16(scale))`，把 scale 先舍入成 f16（10 位尾数，相对误差 ~5e-4），**多一次舍入**。
+已改成 f32 相乘、只把最终结果交给 `f32_to_e4m3`。
+
+**实测：`dense` 完全没变（1.951e-3 → 1.951e-3）。**
+解释：e4m3 只有 3 位尾数，量化网格步长约 6%，5e-4 的乘子差异几乎不可能让量化结果翻到相邻格子。
+所以这处修改**是正确的但非本因**，不解决 `dense` 的残差。继续切 MLP 内部（已加
+`pre_ff_norm / mlp_gate_up / mlp_down` 两侧 dump）。

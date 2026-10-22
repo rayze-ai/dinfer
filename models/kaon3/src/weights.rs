@@ -229,11 +229,14 @@ pub fn load_fp8_group(src: &WeightSource, stream: &Stream, names: &[String]) -> 
         .into_iter()
         .map(|(mut w, s, _, n, k)| {
             if s != smax {
-                // per_tensor_dequantize：fp8 → fp16 再乘 0 维 fp32 scale（按 fp16 算，scale 先舍入成 fp16）；
-                // scaled_fp8_quant：x · (1/max_scale) 后就近偶数、饱和转 e4m3。
-                let s16 = half::f16::from_f32(s).to_f32();
+                // vLLM `per_tensor_dequantize`（w8a8_utils.py:44）：
+                //   fake_qweight = tensor.to(torch.float16)     # fp8 → fp16（精确）
+                //   dq_weight    = fake_qweight * inv_scale     # inv_scale 是 **fp32** 张量
+                // 按 torch 类型提升，结果是 **f32**：`f16(值) * f32(scale)` 在 f32 里算。
+                // 我们原来写成 `f16(f16(值) * f16(scale))`（先把 scale 舍入成 f16）——**多了一次舍入**，
+                // f16 只有 10 位尾数，相对误差 ~5e-4，量级正对观测到的 dense 1.95e-3。
                 for b in w.iter_mut() {
-                    let dq = half::f16::from_f32(e4m3_to_f32(*b) * s16).to_f32();
+                    let dq = e4m3_to_f32(*b) * s; // f32 乘（e4m3→f32 是精确的）
                     *b = f32_to_e4m3(dq * inv);
                 }
             }
