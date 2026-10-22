@@ -33,7 +33,11 @@
   vLLM router 在 sm_120 落到 F.linear bf16；**真口径差异 = gelu 中间舍入**（vLLM 两次 bf16，经 fp4 放大 10×），
   `GELU_ROUND2=1` 下 L11 MoE 段逐位一致；其余残余 = GEMM 累加 1-ulp 平局 × 量化放大（非语义）。
   三开关全开端到端 14.49% / 1.23 ≈ vLLM 自身 BI 开/关 13.95% / 1.19。
-- **待用户定**：① `GELU_ROUND2` 是否改默认；② FLOOR 判据是否改为"kernel 变体下限"（BI 开/关）。开关：`ROUTER_BF16` / `MOE_COMBINE_BF16` / `GELU_ROUND2`（默认全关）。
+- **第 15 轮（2026-10-23，用户定）**：三处口径**默认已与 vLLM 对齐**（gelu 两次 bf16 舍入 / MoE 合并 bf16 权重与乘积 /
+  router 舍 bf16）；精确版开关 `GELU_F32` / `MOE_COMBINE_F32` / `ROUTER_F32`（默认关）。MoE 合并在 GPU kernel（runtime mode），
+  per_expert_scale 折进路由权重并按 bf16 读。**L11 MoE 段逐位一致**（moe_y/ff2 0 差异）。verify：**5 过 2 失**
+  （翻转 14.49% / Δlp 1.2302；≈ vLLM 自身 BI 开/关 13.95% / 1.19）。
+- **待用户定**：FLOOR 判据是否改为"kernel 变体下限"（BI 开/关）。不改则这两项对任何换 kernel 的实现都不可达。
 
 **仪器（本轮新建）**：`kaon3_probe --hidden-all`（30 层残差流 + layer0 的 18 个子模块 +
 `final_norm.bin`）、`--logits-out`、`--sub-cmp`、**`--layer-iso l:ref.bin`（单层隔离）**、
