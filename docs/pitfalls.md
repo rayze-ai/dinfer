@@ -954,3 +954,18 @@
 - 解法：`models/qwen3/src/scratch.rs::ActScratch`（qkv / attn / gate_up / act 四块，列宽从本 rank cfg 推），`Attention::forward` / `Mlp::forward_with_scratch` 借用；`swap_scratch` 退化成一次 `mem::swap`。改后 480 MiB，`num_blocks` 3050 → 10808。
 - **共享缓冲后行跨度必须显式传本层行宽**：GEMM 的 `ld = n`、`qkv_post` 逐行原地写、attention 的 `q_stride` 三者都必须是 `(H+2Hkv)·D`；共享块比它宽是安全的（只读前缀），**不能**用 `numel / t` 反推。qwen3 里加了 `numel ≥ t × 行宽` 断言兜住。
 - **别用 HTTP 端到端 greedy 判正确性**：同一二进制同一配置连跑两次，12 条里 6 条输出不同（批组成随机 + greedy 放大逐位分歧）。要确定性证据用 `real_parity::real_scratch_swap_is_bitwise_identical`（主套 / 副套 / 换回，logits 逐位比）。
+
+## `--network host` 多实例：端口被占时 vLLM 退出，但健康检查看到的是"别人的 200"（2026-10-22，Kaon-V3 P1）
+
+- **现象**：起第二个 oracle 容器（同镜像、同参数，只想换个进程），脚本打印"就绪"，
+  抓取也正常返回，但数据与预期差了 15–18%。事后 `docker ps -a` 才发现该容器 `Exited (1)`，
+  日志 `OSError: [Errno 98] Address already in use`。
+- **根因**：`kaon3_oracle_server.sh` 的就绪判定是 `curl :PORT/v1/models == 200`。端口被别人占着时，
+  **占用者的服务**照样返回 200，脚本于是宣布"就绪"；后续所有请求都打在了另一个配置的实例上
+  （本例：以为是 BI=1 的第二个进程，实际是 BI=0 的 nobi）。
+- **代价**：据此得出过一条错误结论（"跨进程噪声 15%"，并改了判据），三份抓取全部作废。
+- **解法**：就绪前额外校验 `docker inspect -f '{{.State.Running}}' $ON == true`，否则 exit 3 并提示换端口。
+  多实例一律**每实例独占端口**（本机 28100/28101/28102…），并在抓取前用
+  `docker ps` 确认目标容器是 `Up` 而不是"端口能答"。
+- **推广**：任何"服务能答 = 就绪"的健康检查，在多实例 / 端口可能冲突的环境里都不成立；
+  要校验"答话的是我起的那个进程"。同类风险：`bench_compare.sh` 用旧二进制（见 2026-10-21 条目）。
