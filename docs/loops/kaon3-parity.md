@@ -193,7 +193,14 @@ BUILD_ONLY=1 bash scripts/verify/kaon3-parity.sh      # 打印 SNAP=<id>
 - **纠正**（用户 2026-10-23）：生产**不开 BI**；`BI 开/关 = 13.95%` 是 vLLM 自身两 kernel 互比，不能当我们的下限；
   且 prefill 时 `use_3d=False`（`triton_unified_attention.py:1041`，`max_seqlen_q > 1`），BI 开关不改变 attention 主路径，
   所以"14.49% 是 kernel 差异、不可消除"**作废**。BI=1 跨进程仅 **1.51%**，说明该口径下有确定答案，残余必有未对齐的口径。
-- **环境**：5090；快照 + `PROBE_ENV`；vLLM 源码以**镜像内 0.28**为准。每轮先核 GPU 全闲、无残留容器。
+- **环境**：5090；快照 + `PROBE_ENV`；vLLM 源码以**镜像内 0.28**为准。
+  **每轮前必做**（本轮踩坑 2 次，都是残留进程占显存导致 vLLM 起不来 / 静默失败）：
+  ```bash
+  scripts/dev/remote_5090.sh run "nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader"
+  # 有残留就 kill -9 <pid>；确认 8 张卡都是 ~1 MiB 再跑
+  scripts/dev/remote_5090.sh run "nvidia-smi --query-gpu=index,memory.used --format=csv,noheader | tr '\n' ' '"
+  ```
+  失败判据：容器日志行数很少（< 30）且无 `写 N 个张量` → 多半是显存不足，先查残留进程。
 - **观察**：
   1. `kaon3-parity.sh` 两行 FLOOR 读数；
   2. **整跑**（非隔离）逐层残差流 `ref_p02/L{l}.bin` vs 我们──隔离会把输入强行对齐、掩盖前层累积，找发散起点层；

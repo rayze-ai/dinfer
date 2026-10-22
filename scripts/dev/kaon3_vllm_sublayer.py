@@ -58,8 +58,13 @@ except Exception as _e:  # noqa: BLE001
 def _want_layer() -> int:
     return int(os.environ.get('SUB_LAYER', '0'))
 
+_seen = {"n": 0}
 def _patched(self, *a, **k):
     hs = a[1] if len(a) > 1 else k.get("hidden_states")
+    if _seen["n"] < 4:
+        _seen["n"] += 1
+        print(f"  [diag] enter layer={getattr(self,'layer_idx',None)} want={_want_layer()} "
+              f"hs={None if hs is None else tuple(hs.shape)} t={t} captured={sorted(captured)[:3]}", flush=True)
     if self.layer_idx != _want_layer() or hs is None or hs.shape[0] != t or captured:
         return _orig(self, *a, **k)
     _cur["layer"] = self.layer_idx
@@ -113,6 +118,7 @@ def _patched(self, *a, **k):
     # qkv_proj 的**原始输出**（norm 之前）：区分 GEMM 累加 vs norm 引入的 1 ulp（子 loop D）
     if sa is not None:
         qkv = getattr(sa, "qkv_proj", None)
+        print(f"  [diag] self_attn={type(sa).__name__} qkv_proj={type(qkv).__name__ if qkv else None}", flush=True)
         if qkv is not None:
             handles.append(qkv.register_forward_hook(mk("qkv_raw")))
     # self_attn 内部：q_norm / k_norm 的输出（hook 到 norm 模块本身）
