@@ -969,3 +969,13 @@
   `docker ps` 确认目标容器是 `Up` 而不是"端口能答"。
 - **推广**：任何"服务能答 = 就绪"的健康检查，在多实例 / 端口可能冲突的环境里都不成立；
   要校验"答话的是我起的那个进程"。同类风险：`bench_compare.sh` 用旧二进制（见 2026-10-21 条目）。
+
+## 5090 上 6 张卡全 OOM：截层 oracle 容器还占着 GPU 2–6（2026-10-22，Kaon-V3 P1）
+
+- **现象**：`kaon3-parity.sh` 的 kernel 对拍通过，随后 5 个分片同时报
+  `DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")`，一行别的信息都没有。
+- **根因**：`kaon-oracle-L{3,6,12,18,24}` 五个截层 oracle 容器(每个 ~28 GB)还开在 GPU 2–6，
+  每卡只剩 ~4 GB，装不下 16 GB 权重。
+- **解法**：跑批量前先 `docker ps` 对照 `nvidia-smi`，清掉不用的 oracle 容器。
+  脚本侧暂时靠人；更稳的做法是 verify 开头检查各卡 free memory 并给出明确提示。
+- **注意**：GPU 7 是共享基线（`kaon-vllm-pegaflow`），**永远不要清**；GPU 1 是本机 oracle。
