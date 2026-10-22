@@ -95,6 +95,7 @@ W4A4 / W8A8 激活量化让微小扰动跨过舍入边界后放大，逐行对�
 
 生产启动命令只有:`vllm serve novita/Kaon-V3-nvpf4 --port 8081 --max_num_batched_tokens 4096`。
 **没有 `VLLM_BATCH_INVARIANT=1`** → 生产用默认(非确定性 / batch-variant)kernel。含义:
-- parity 的**对齐目标 = 不开 BI 的 vLLM**(`test/kaon3/oracle_nobi/`),不是之前当基线的 BI-on(`test/kaon3/oracle/`)。
+- parity 的**判定参照 = BI 开的 vLLM**(`test/kaon3/oracle/`，确定性，任何不一致都可归因到我们)；
+  **BI 关的 `test/kaon3/oracle_nobi/` 只用于定噪声下限**。用户 2026-10-22 晚选定，理由见上面 P1 参数对齐一节。
 - 生产本身 run-to-run / 跨 batch 就不确定;逐 token 完全一致本就无法达到,噪声下限(BI 开 vs 关)正是这个量。
 - pre2 bug 与 BI 无关:两种配置都强判 1852,我们判 5976。

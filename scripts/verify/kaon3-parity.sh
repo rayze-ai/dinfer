@@ -5,7 +5,10 @@
 #   GPUS="0 2 3 4 5 6"（默认；1 = 私有 oracle、7 = 基线，禁用）  PROBE_ENV="GQA_PREFILL_CFG=-1"（给探针加环境变量做 A/B）
 # 隔离（用户 2026-10-22：并行时编译不要互相覆盖）：编译只在本脚本开头串行做一次，产物立即拷到
 #   /w/bins/<run>/ 快照、输出写 /w/runs/<run>/，并行分片只用快照；别的编译改 target/ 影响不到正在跑的测试。
-# 前提：test/kaon3/oracle（vLLM 开 BI = 基线口径）与 test/kaon3/oracle_nobi（关 BI）已抓好；两者之差 = 噪声下限。
+# 前提：test/kaon3/oracle（BI=1 = **判定参照**）与 test/kaon3/oracle_nobi（BI=0 = **噪声下限**）已抓好，
+#   且两边 oracle 启动参数与探针侧假设显式对齐（block 32 / max-num-batched 4096 / 16384 / FP8 KV；
+#   对照表在 scripts/dev/kaon3_oracle_server.sh 头注释与 docs/loops/kaon3-parity.md「P1 参数对齐」）。
+#   用例集必须两边相同：缺用例会让下限与我们的读数来自不同样本，判据失效。
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 R=scripts/dev/remote_5090.sh
@@ -42,6 +45,10 @@ wait
 grep -hE 'rror|panicked' /tmp/kaon3_shard_${RUN}_*.txt | head -5
 cnt=$(timeout 300 $R run "ls /hf_data/yaochen/runs/$RUN/ours/*.json 2>/dev/null | wc -l")   # 宿主机路径（容器里是 /w）
 tot=$(ls test/kaon3/oracle/*.ids | wc -l)
+# 参照集与下限集用例名必须完全一致（2026-10-22：nobi 少 bos1/dup4，下限与我们的读数来自不同样本）
+miss=$(comm -3 <(ls test/kaon3/oracle/*.ids | xargs -n1 basename | sed 's/\.ids$//' | sort) \
+             <(ls test/kaon3/oracle_nobi/*.ids 2>/dev/null | xargs -n1 basename | sed 's/\.ids$//' | sort) | tr -d '\t' | tr '\n' ' ')
+[ -z "$miss" ] && ok "参照集与下限集用例一致（$tot 个）" || ng "参照集与下限集用例不一致，缺：$miss"
 [ "$cnt" = "$tot" ] && ok "分片前向完成 $cnt/$tot（${n} 卡并行，run $RUN）" || ng "分片前向只完成 $cnt/$tot（看 /tmp/kaon3_shard_${RUN}_*.txt）"
 # 3) 汇总判定
 out=$(GPU=${G[0]} timeout 600 $R ctr "$B/kaon3_oracle_diff test/kaon3/oracle test/kaon3/oracle_nobi | sed 's/^/FLOOR /'
