@@ -76,3 +76,35 @@ POOLED cases=29 rows=655 decisive=607 flips=61 flip_pct=10.05 mean_common_d=0.76
 
 **决定性实验 2（进行中）**：同参数再起一个进程（`kaon-oracle-dup`，GPU 0 :28101）抓 p01，
 若与 `oracle_recheck` 不同 → 坐实"跨进程不确定"，参照集与下限集都必须单进程一次抓完。
+
+### P1 结论（2026-10-22 深夜）：**跨进程不确定是判据的根本障碍，不是参数问题**
+
+决定性实验 2 结果：`kaon-oracle-dup`（GPU 0 :28101）与 `kaon-oracle`（GPU 1 :28100）**参数完全相同**
+（同镜像、同 checkpoint、BI=1、block 32、max-num-batched 4096、max_model_len 16384），只是两个进程：
+
+```
+POOLED cases=4 rows=100 decisive=89 flips=16 flip_pct=17.98 mean_common_d=1.2362 dnll=+0.1303
+  p01 15.79% / p02 21.74% / p10 16.67% / chat_en 17.39%
+```
+
+对照：**同一进程**连抓两次 flips=0 / Δ=0.0000。
+
+**修正此前所有判断**：
+
+1. 「BI=1 是确定性参照」**错**。正确表述：`VLLM_BATCH_INVARIANT=1` 保证*同一进程内* batch 组成不影响结果，
+   **不保证跨进程一致**。跨进程翻转率 ~18%，比 BI 开/关的 11–22% 是同一个量级。
+2. 我上一轮把它归因为「CUDA graph 桶 / torch.compile 缓存」是**猜测，未验证**，不作为结论。
+3. `oracle/` 目录由 07:4x 与 09:40 两个进程拼成 → 参照集内部就不自洽（这解释了 A 组 0%、B 组 10–16% 的分布）。
+4. 这不影响 pre2 的判断：~18% 的进程级噪声下 vLLM 仍**强判** 1852 @0.986（top1−top2 ≈ 1.2 的间隔），
+   而我们判 5976 → pre2 仍是真 bug，且比原先认为的更显著。
+
+**判据必须改（P1 的真正产出）**：
+
+| 旧 | 新 |
+|---|---|
+| FLOOR = vLLM(BI=1) vs vLLM(BI=0) | **FLOOR = 同一参数的两个独立进程**（如 `kaon-oracle` vs `kaon-oracle-dup`），这才是真实可达下限 |
+| OURS = 单进程 BI=1 vs 我们 | OURS 保持不变；但参照集必须**单进程一次抓完** |
+| 参照集 = `oracle/`（多进程拼接）| 重抓一个 `oracle_p1/`：一个进程、一次抓完、29 个短用例 + long_zh |
+
+**下一步（P1 收尾，待执行）**：单进程一次抓完整套 → `test/kaon3/oracle_p1/`（参照）与 `oracle_p1_b/`（同参数第二进程，定下限），
+再改 verify 的 FLOOR/OURS 行，然后跑第 7 轮状态拿新基线。**在此之前 P2–P4 的任何数字都不可比。**
