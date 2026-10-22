@@ -85,7 +85,7 @@ CUDA kernel 再把 bf16 表 `static_cast<float>` 做 fp32 乘加。所以正确�
 **"bf16 表 + fp32 旋转"**，不是 f32 表。我们用 f32 表 → `q_rope/k_rope` 相对误差 1.5–1.8e-3。
 **做法**：`Rope::with_bf16_cache()`（opt-in，把表按 bf16 就近偶数舍入后仍存 f32，kernel 不变）。
 
-### 3. 参照实现自己就不精确，不能假设"参照即真值"
+### 3. 参照实现自己就不精确，不能假设"参照即真值"（已用 fp64 实测三次）
 
 用 fp64 真值（bf16 原始权重 + fp32 输入，float64 矩阵乘）校验 router GEMM：
 **我们 max 7.4e-07 / top-8 错 0/24；vLLM max 1.5e-02 / top-8 错 3/24。**
@@ -93,6 +93,25 @@ vLLM 的 `GateLinear` 在 sm_120 走 `torch.mm(out_dtype=f32)`，累加精度不
 后果：router logits 在 top-8 边界附近时参照会**选不同专家**，下游 MoE 输出差到 1e-1 —— 不是 bug。
 **做法**：① 判据里单列"top-8 集合不一致的 token 数"，这些行不作判据；
 ② 常驻 fp64 校验（`scripts/verify/kaon3_router_truth.py`），改动后一条命令回答谁更准。
+
+**同一结论在最终 logprob 上也成立（Kaon-V3 实测）**：拿 `final_norm` 输出 + bf16 原始 lm_head 权重
+在 fp64 里算精确 logits/logprob，**我们差 0.02 nat、vLLM 差 0.28–0.39 nat**；
+完整 logits 的 top-5 **id 与真值完全一致**，而 vLLM 的 top-5 顺序与真值不同。
+**推论：接混精度模型时，"与 vLLM 逐位一致"是个错误的验收目标**——参照自身有 0.3 nat 级误差。
+正确判据是"与 fp64 真值的距离不超过参照的"。实现方式：
+`--hidden-all` 已顺手写 `final_norm.bin`、`--logits-out` 写完整 logits，
+配 safetensors 原始权重即可在 fp64 里重算任一站点的真值。
+
+### 4. 源码里读到的"vLLM 行为"必须 A/B 证伪（本轮 3 次里 2 次推断错）
+
+| 假设 | 源码依据 | A/B 实测 |
+|---|---|---|
+| query 不量化 | `triton_attn.py:659` 的 `query.dtype == fp8` | **错**：关掉后 ΔNLL −0.0018→+0.0438 |
+| P 要乘 p_scale=256 | `triton_unified_attention.py:592` | **错**：加上后 ΔNLL −0.0018→+0.0244 |
+| softcap 三步各舍入 | `logits_processor.py:113` | 无变化（已回滚）|
+
+原因：**不知道模型实际命中哪个后端 / 哪条 dispatch 分支**。先 `docker logs | grep "Attention backend"`
+确认（Kaon-V3 是 `TRITON_ATTN`），再动手；动手就带 `ENV=1` 的 A/B 开关，用端到端指标判。
 
 ### 配套仪器：一次前向 dump 全层 + 全子模块
 
