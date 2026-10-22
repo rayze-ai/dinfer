@@ -1432,3 +1432,67 @@ e4m3 三位尾数下损失约 2.6%，与实测 `k_norm` 2.651e-2 吻合。
 
 **待 vLLM 的 L11 scale 一到即可判定**：若 vLLM 的 L11 也用 `sq`，差异不在 scale 而在别处；
 若 vLLM 用 `sk`（或别的值），则我们的组划分/ max 取值有错。
+
+## 【根因 4，已修并字节级验证】FP8 重量化的中间值落在 **fp16**，我们用了 f32
+
+### 定位路径（这一轮的全部证据）
+
+1. **L11 是孤立异常**（六层隔离：L5 5.9e-3、L10 8.2e-3、L12 5.3e-3、L17 8.1e-3、L23 6.9e-3
+   vs **L11 2.48e-2**），排除了 full-attn 慢路径、滑窗、层敏感度三种解释。
+2. **子模块对拍**（`SUB_LAYER=11`）：`input_norm` **0.000e0**、`q_norm` 4.6e-6 ✅，
+   但 **`k_norm` 2.651e-2**、`v_norm` 2.646e-2 ❌ —— **Q 对、K 错**。
+3. **scale 都对**：我们 L0/L11 的分片 scale 与 vLLM 的 `qkv_proj.weight_scale` **完全相同**
+   （L0 1.3166156e-3 / L11 1.1771066e-3，vLLM 分别是 1.3166156131774187e-3 / 1.1771066347137094e-3）。
+4. **权重字节级 `cmp`**（最严格）：L0 的 q/k 槽 **0 差异**（控制组通过）；
+   **L11 的 q 槽 0 差异，但 k 槽 269,393/2,883,584 = 9.34% 不同**。
+5. **差异形态**：在全部差异元素上 `ours/vLLM = 1.125 = 9/8` **恒成立**（100%），
+   即"我们的值总比 vLLM 大正好一个 e4m3 步进"（绝对值差中位 2.0，正是该量级的步长）。
+   且**次正规区差异率 0%、正规区 9.35%** —— 排除溢出/次正规处理。
+6. **numpy 穷举精度变体**（同一份 `input_norm`，与 vLLM 字节比）：
+
+| 变体 | 字节一致率 |
+|---|---|
+| f64: `dq*sk/smax` | 90.66% |
+| f32: `dq*sk*(1/smax)` | 90.66% |
+| **fp16: `fp16(dq) * fp16(sk)`** | **100.00%** |
+| fp16 inv_scale | 90.66% |
+| f32: `dq/smax*sk` | 90.66% |
+
+### 根因
+
+`vllm/model_executor/layers/quantization/utils/w8a8_utils.py:44`：
+
+```python
+def per_tensor_dequantize(tensor, inv_scale):
+    fake_qweight = tensor.to(torch.float16)   # fp8 → fp16（精确）
+    dq_weight = fake_qweight * inv_scale      # ← scale 是 fp16 张量的元素 → 结果仍是 fp16
+    return dq_weight
+```
+
+`requantize_with_max_scale` 传给它的 `weight_scale[idx]` 取自 **fp16 的 `weight_scale` 张量**，
+所以 **`dq_weight` 落在 fp16 上（10 位尾数），不是 f32**。
+我们原来写 `e4m3_to_f32(b) * s`（f32），多出约 1e-4 的相对精度，
+在 e4m3 的量化边界上让 9.34% 的权重翻到了相邻码字（且**系统性地少进位一个步进**）。
+
+### 修复（`weights.rs::load_fp8_group`）
+
+```rust
+let s16 = f32::from(half::f16::from_f32(s));   // scale 先按 fp16 舍入
+let dq  = f32::from(half::f16::from_f32(e4m3_to_f32(*b) * s16));  // 乘积也回 fp16
+*b = f32_to_e4m3(dq * inv);
+```
+
+### 验证：字节级 100% 一致
+
+| 层 | q 槽 | k 槽 |
+|---|---|---|
+| L0 | 0/11,534,336 ✅ | 0/5,767,168 ✅ |
+| **L11** | 0/23,068,672 ✅ | **0/2,883,584 ✅** |
+
+**"大一个 e4m3 步进"的系统性偏差消失。**
+
+### 顺带纠正两处此前的错误结论
+
+- 我曾写"torch 类型提升 → 结果是 f32"，**错**（`inv_scale` 是 fp16 张量元素，不是 Python 标量）。
+- 我曾把 `f32_to_e4m3` 改成位级 RNE，**无收益**（两种实现字节一致率相同），已回退，
+  避免留无收益的改动。
