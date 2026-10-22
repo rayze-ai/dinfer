@@ -61,6 +61,14 @@ def _patched(self, *a, **k):
         a_ = getattr(sa, "attn", None)
         if a_ is not None:
             handles.append(a_.register_forward_hook(mk("attn_out")))
+    # router 的**真正输入**（norm + root_size + scale 之后、proj 之前）：用 pre-hook 抓
+    rt = getattr(self, "router", None)
+    pr = getattr(rt, "proj", None) if rt is not None else None
+    if pr is not None:
+        def pre_hook(mod, inp):
+            if inp and inp[0] is not None:
+                captured["router_in"] = inp[0].detach().float().cpu().numpy().copy()
+        handles.append(pr.register_forward_pre_hook(pre_hook))
     # self_attn 内部：q_norm / k_norm 的输出（hook 到 norm 模块本身）
     for attr, name in (("q_norm", "q_norm"), ("k_norm", "k_norm"), ("v_norm", "v_norm")):
         m = getattr(sa, attr, None) if sa is not None else None

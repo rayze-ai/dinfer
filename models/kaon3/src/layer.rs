@@ -504,6 +504,11 @@ pub struct StepCtx<'a> {
 
 /// layer 0 子模块对拍的写盘助手：`sub_out` 为 `Some((dir, 0))` 时把 `buf` 前 `tokens*h` 个 bf16 写
 /// `<dir>/<name>.bin`（f32 LE，[T,H]），文件名与 `scripts/dev/kaon3_vllm_sublayer.py` 对齐。
+fn sub_dump_op(stream: &Stream, sub_out: Option<(&std::path::Path, usize)>, name: &str,
+               buf: &Tensor<bf16>, tokens: usize, h: usize) -> Result<()> {
+    sub_dump(stream, sub_out, name, buf, tokens, h)
+}
+
 fn sub_dump(stream: &Stream, sub_out: Option<(&std::path::Path, usize)>, name: &str,
             buf: &Tensor<bf16>, tokens: usize, h: usize) -> Result<()> {
     let Some((dir, l)) = sub_out else { return Ok(()) };
@@ -700,11 +705,21 @@ impl Gemma4Layer {
         sub_out: Option<(&std::path::Path, usize)>,
     ) -> Result<()> {
         let h = cfg.hidden;
-        // router 输入：rmsnorm_no_weight(x) · hidden^-0.5 · scale[hidden]
+        // router 输入：rmsnorm_no_weight(x) · root_size · scale[hidden]
+        //
+        // vLLM `Gemma4Router.forward`：
+        //   x = self.norm(x); x = x * self.root_size.to(x.dtype); x = x * self.scale.to(x.dtype)
+        // `root_size` 是 **bf16 buffer**（`register_buffer(..., persistent=False)`，dtype 跟随模型），
+        // 所以 `root_size.to(bf16)` 会先把 hidden^-0.5 **舍入到 bf16**，再与 bf16 的 x 相乘、
+        // 结果再舍入一次。我们原来用 f32 的 `(h as f32).powf(-0.5)`（scale_bf16_n 内部做 f32 乘、
+        // 舍入一次），少了那一步 bf16 舍入 → `router_logits` 有 3.3e-3 的偏差。
+        // 2026-10-22 逐层对拍定案：这里必须用 **bf16 舍入后的 root_size**。
         ops.norm().rmsnorm_noweight(stream, &sc.x.data, &mut sc.routed.data, tokens, h, eps)?;
-        k::ops::scale_bf16_n(stream, &mut sc.routed.data, tokens * h, (h as f32).powf(-0.5))?;
+        let root_size = f32::from(bf16::from_f32((h as f32).powf(-0.5)));
+        k::ops::scale_bf16_n(stream, &mut sc.routed.data, tokens * h, root_size)?;
         k::ops::mul_bf16_n(stream, &mut sc.routed.data, &self.router.scale.data, tokens, h)?;
 
+        sub_dump_op(stream, sub_out, "router_in", &sc.routed, tokens, h)?;
         let e = cfg.num_experts;
         let kk = cfg.top_k;
         k::ops::moe_gate_f32(

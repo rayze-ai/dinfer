@@ -671,3 +671,29 @@ Kaon-V3 的 `Ropes::new` 两套表都调用它。
 
 此前的记录说"bf16 表让 long_zh ΔNLL 从 +0.03 恶化到 +0.48"——那是在**外部 KV 污染参照**
 （PegaKV）下测的，且当时还叠加着 MoE 路由语义错误。**该结论作废**，需在干净参照下重测。
+
+## 【根因 2，已修】router 的 `root_size` 是 bf16 buffer，不是 f64 常数
+
+`gemma4.py::Gemma4Router`：
+
+```python
+self.register_buffer("root_size", torch.tensor(self.hidden_size**-0.5), persistent=False)
+...
+def forward(self, x):
+    x = self.norm(x)
+    x = x * self.root_size.to(x.dtype)     # ← root_size 先舍入到 bf16
+    x = x * self.scale.to(x.dtype)
+    router_logits, _ = self.proj(x)
+```
+
+我们原来用 f32 `(h as f32).powf(-0.5)`（`scale_bf16_n` 内部 f32 乘、舍入一次），
+少了 `root_size → bf16` 那一步。`hidden=2816` 时 `2816^-0.5 = 0.018843…`，
+bf16 舍入后相对变化约 **1.5e-3**，正好是 `router_logits` 残差的量级。
+
+修后 `router_logits` **3.284e-3 → 1.716e-3**（改善一半，尚未归零 → 还有第二处，见下）。
+
+### 顺带撤回一次错误尝试（记下来避免重犯）
+
+我曾试图把 `x*root_size` 与 `x*scale` **融合成一个 kernel**（只舍入一次）。
+**那是错的**：vLLM 是**两次独立的 bf16 舍入**，融合反而偏离。
+已 `git checkout` 撤回 `elementwise.cu` / `ffi.rs` / `ops.rs` 的改动，没有进入主线。

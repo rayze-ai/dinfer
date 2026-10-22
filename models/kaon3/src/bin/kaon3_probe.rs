@@ -93,7 +93,7 @@ fn main() -> Result<()> {
     let mut ctx = setup(&dir, &src, layers)?;
     let pass = forward(&mut ctx, &ids, dump_layer, oracle.as_deref(), dump.as_deref(), (hidden_out.as_deref(), hidden_ref.as_deref()), hidden_all.as_deref())?;
     if let (Some(a), Some(r)) = (hidden_all.as_deref(), sub_cmp.as_deref()) {
-        compare_sub_dir(a, r)?;
+        compare_sub_dir(a, r, ids.len())?;
         return Ok(());
     }
     if let (Some(a), Some(r)) = (hidden_all.as_deref(), hidden_cmp.as_deref()) {
@@ -464,7 +464,7 @@ fn compare_hidden_dir(ours: &str, rf: &str, h: usize) -> Result<()> {
 /// layer 0 子模块逐项对拍：遍历参照目录里的每个 `.bin`，在 ours 目录找同名文件，
 /// 按"最后一维 = 块宽"切成行，逐行比相对 L2 误差。块宽由文件大小与行数推断：
 /// 对 `router_logits`（E=128）与 hidden（H=2816）都成立的做法是**按参照文件大小 / 行数**算。
-fn compare_sub_dir(ours: &str, rf: &str) -> Result<()> {
+fn compare_sub_dir(ours: &str, rf: &str, rows_want: usize) -> Result<()> {
     let read = |p: &std::path::Path| -> Result<Vec<f32>> {
         let b = std::fs::read(p).with_context(|| format!("读 {}", p.display()))?;
         ensure!(b.len() % 4 == 0, "{} 长度不是 4 的倍数", p.display());
@@ -487,11 +487,9 @@ fn compare_sub_dir(ours: &str, rf: &str) -> Result<()> {
         let pb = std::path::Path::new(rf).join(&n);
         let (a, b) = (read(&pa)?, read(&pb)?);
         ensure!(a.len() == b.len(), "{n}: 长度 {} != {}", a.len(), b.len());
-        // 行宽：优先按 H=2816 / E=128 里能整除的那个；否则按单行处理
-        let w = [2816usize, 128]
-            .into_iter()
-            .find(|w| *w > 0 && a.len() % w == 0)
-            .unwrap_or(a.len());
+        // 行宽直接用 T 算：这些 .bin 都是 [T, w]（w = H / E / heads*head_dim / nkv*head_dim）
+        ensure!(a.len() % rows_want == 0, "{n}: 长度 {} 不是 T={rows_want} 的倍数", a.len());
+        let w = a.len() / rows_want;
         let rows = a.len() / w;
         let mut rels = Vec::with_capacity(rows);
         for t in 0..rows {
