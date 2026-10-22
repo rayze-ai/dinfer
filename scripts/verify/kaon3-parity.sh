@@ -50,6 +50,16 @@ miss=$(comm -3 <(ls ${REF:-test/kaon3/oracle_clean}/*.ids | xargs -n1 basename |
              <(ls ${FLR:-test/kaon3/oracle_clean_b}/*.ids 2>/dev/null | xargs -n1 basename | sed 's/\.ids$//' | sort) | tr -d '\t' | tr '\n' ' ')
 [ -z "$miss" ] && ok "参照集与下限集用例一致（$tot 个）" || ng "参照集与下限集用例不一致，缺：$miss"
 [ "$cnt" = "$tot" ] && ok "分片前向完成 $cnt/$tot（${n} 卡并行，run $RUN）" || ng "分片前向只完成 $cnt/$tot（看 /tmp/kaon3_shard_${RUN}_*.txt）"
+# 2b) 逐层 router fp64 真值（修正 C 第 1 条；2026-10-22 第 13 轮）：每个实现对照**自己输入**的精确 logits。
+#   参照侧 `RT_REF`（默认 /w/rt/ref）只依赖 vLLM 版本，用 scripts/dev/kaon3_vllm_router_all.py 抓一次后复用；
+#   我们侧每轮用本快照重跑（SUB_LAYER=all）。exit 0 = 每层我们 max 偏差 ≤ 参照，且选错 token 数合计 ≤ 参照。
+RT_CASES=${RT_CASES:-p02 chat_en chat_zh raw9}; RT_REF=${RT_REF:-/w/rt/ref}
+rt=$(GPU=${G[0]} timeout 1500 $R ctr "M=\$(ls -d /hf_data/hub/models--kaon-release--Kaon-V3-nvpf4-mixed/snapshots/*/ | head -1)
+  for c in $RT_CASES; do mkdir -p $O/rt/\$c; SUB_LAYER=all $B/kaon3_probe \$M --forward --hidden-all $O/rt/\$c \$(cat ${REF:-test/kaon3/oracle_clean}/\$c.ids) >/dev/null 2>&1 || echo RT_PROBE_FAIL \$c; done
+  python3 -I scripts/verify/kaon3_router_truth_all.py \$M $O/rt $RT_REF $RT_CASES | grep -E '^(TOTAL|ROUTER_TRUTH)'" 2>&1)
+echo "   router 真值 $(echo "$rt" | grep '^TOTAL' | cut -c1-160)"
+echo "$rt" | grep -q 'ROUTER_TRUTH PASS' && ok "逐层 router 不劣于参照（fp64 真值）" \
+  || ng "逐层 router 真值：$(echo "$rt" | grep -E 'RT_PROBE_FAIL|ROUTER_TRUTH|rror' | head -3 | tr '\n' ' ')"
 # 3) 汇总判定
 # 参照 REF 与下限 FLOOR 都是 BI=1、参数显式对齐；区别只在进程：
 #   REF   = 单进程一次抓完的参照集（test/kaon3/oracle_clean）

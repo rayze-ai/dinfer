@@ -750,6 +750,16 @@ impl Gemma4Layer {
             e,
             h,
         )?;
+        // 归因 A/B（2026-10-22 第 14 轮）：`ROUTER_BF16=1` 把 router logits 舍入到 bf16，模仿 vLLM
+        // 的 bf16 router 输出，用来量化"端到端与 vLLM 的翻转有多少来自它的 router 舍入"。默认关（f32 = 更接近真值）。
+        if router_bf16_ab() {
+            let mut v = stream.dtoh_sync_copy(&sc.logits.data)?;
+            for x in v.iter_mut().take(tokens * e) {
+                *x = f32::from(bf16::from_f32(*x));
+            }
+            stream.htod_into(&v, &mut sc.logits.data)?;
+            stream.synchronize()?;
+        }
         // Gemma4 路由（vLLM `gemma4.py`）：按**原始 logits** 取 top-k → 全专家 softmax →
         // 只在 top-k 上重新归一化。**不是 sigmoid**（那是 DeepSeekV3/GLM/K3 的 `moe_route_f32` 口径，
         // 2026-10-22 发现此前误用，是短 prompt 翻转率超标的主因之一）。
@@ -810,4 +820,16 @@ impl Gemma4Layer {
         sub_dump(stream, sub_out, "ff2", &sc.h2, tokens, h)?;
         Ok(())
     }
+}
+
+/// `ROUTER_BF16=1`：router logits 舍入到 bf16（仅归因 A/B，默认关）。
+fn router_bf16_ab() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        let on = std::env::var("ROUTER_BF16").map(|v| v.trim() == "1").unwrap_or(false);
+        if on {
+            eprintln!("[kaon3] ROUTER_BF16=1：router logits 舍入到 bf16（归因 A/B）");
+        }
+        on
+    })
 }
