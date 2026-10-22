@@ -2,6 +2,7 @@ import sys, os
 os.environ.setdefault("VLLM_BATCH_INVARIANT","1"); os.environ.setdefault("VLLM_USE_V1","1")
 os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING","0")
 import numpy as np
+import torch
 from vllm import LLM, SamplingParams
 S=sys.argv[1]; out=os.environ["OUT"]; os.makedirs(out, exist_ok=True)
 llm = LLM(model=S, enforce_eager=True, tensor_parallel_size=1, gpu_memory_utilization=0.85,
@@ -28,7 +29,10 @@ for L in (0, 11):
     print(f"    weight_scale={None if ws is None else (ws.dtype, tuple(ws.shape), ws.flatten()[:4].tolist())}")
     print(f"    input_scale ={None if is_ is None else is_.tolist()}")
     if w is not None:
-        ww = w.detach().to('cpu')
-        u8 = ww.view(torch.uint8).numpy() if ww.dtype==torch.uint8 else ww.numpy().view(np.uint8)
-        np.save(f"{out}/qkv_L{L}.npy", u8)
-        print(f"    写出 {out}/qkv_L{L}.npy {u8.shape}")
+        try:
+            ww = w.detach().to('cpu')
+            u8 = ww.view(torch.uint8).numpy().copy()
+            np.save(f"{out}/qkv_L{L}.npy", u8)
+            print(f"    写出 {out}/qkv_L{L}.npy {u8.shape}", flush=True)
+        except Exception as e:
+            print(f"    导出失败: {e}", flush=True)
