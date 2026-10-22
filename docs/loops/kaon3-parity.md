@@ -187,6 +187,21 @@ BUILD_ONLY=1 bash scripts/verify/kaon3-parity.sh      # 打印 SNAP=<id>
   修后 `kaon3-parity.sh` FLOOR 两项通过即主 loop 收口。
 - **上限**：8 轮。
 
+## 子 loop D：与 vLLM 逐位置对齐到判据通过（2026-10-23 起，用户要求做到解决为止）
+
+- **目标**：`scripts/verify/kaon3-parity.sh` 全项 exit 0（含"翻转率"与"共有 token Δlp"两项 FLOOR 判据）。
+- **纠正**（用户 2026-10-23）：生产**不开 BI**；`BI 开/关 = 13.95%` 是 vLLM 自身两 kernel 互比，不能当我们的下限；
+  且 prefill 时 `use_3d=False`（`triton_unified_attention.py:1041`，`max_seqlen_q > 1`），BI 开关不改变 attention 主路径，
+  所以"14.49% 是 kernel 差异、不可消除"**作废**。BI=1 跨进程仅 **1.51%**，说明该口径下有确定答案，残余必有未对齐的口径。
+- **环境**：5090；快照 + `PROBE_ENV`；vLLM 源码以**镜像内 0.28**为准。每轮先核 GPU 全闲、无残留容器。
+- **观察**：
+  1. `kaon3-parity.sh` 两行 FLOOR 读数；
+  2. **整跑**（非隔离）逐层残差流 `ref_p02/L{l}.bin` vs 我们──隔离会把输入强行对齐、掩盖前层累积，找发散起点层；
+  3. 该层逐子模块（`SUB_LAYER`）与逐专家。
+- **停止条件（可机器判定）**：`SNAP=<id> bash scripts/verify/kaon3-parity.sh` exit 0。
+  辅助：整跑逐层 `L{l}` 相对误差自 L0 起每层 <= 1e-3 且不逐层放大。
+- **上限**：15 轮；每轮一个假设，结果进迭代记录「子 loop D」。**不达成不停**（用户 2026-10-22/23）。
+
 ## 上限
 
 - 最多迭代 30 轮（用户要求不达标不停；上限只作为"方法错了"的报警）。

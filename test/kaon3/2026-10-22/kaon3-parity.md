@@ -1964,3 +1964,18 @@ top-8 无翻转。L9 是三槽 q/k/v 组（独立 v_proj、组内重量化），
 
 之后不再对判据下结论，先去读 vLLM 找剩余差异（见「第 16 轮」）。
 router 真值项改为固定精确口径后不再自相矛盾（默认口径已按 vLLM 舍 bf16，用它判会必然失败）。
+
+## 子 loop D：与 vLLM 逐位置对齐到判据通过（2026-10-23 起）
+
+规格见 `docs/loops/kaon3-parity.md`「子 loop D」。
+
+### D-1：读 vLLM -- 生产不开 BI；BI 不改变 prefill 的 attention 路径
+
+- `v1/attention/ops/triton_unified_attention.py:1041`：`use_3d = not (... or max_seqlen_q > 1 or is_batch_invariant)`
+  -- prefill 恒走 2D kernel，BI 开关在 prefill 上不切 attention kernel。
+  此前"13.95% 是 attention kernel 变体差异"的说法不成立。
+- BI 真正改的是 `model_executor/layers/batch_invariant.py` 覆盖的算子：`mm` / `matmul` / `bmm` / `addmm`
+  / `log_softmax` / `softmax`，以及 `layernorm.py` / `linear.py` / `vocab_parallel_embedding.py` 的路径。
+  **下一步逐个核这些算子在我们侧的等价物**（尤其 lm_head 的 matmul 与最终 log_softmax，直接决定 `prompt_logprobs`）。
+- KV scale：`kv_cache.py:126` 警告"checkpoint 无 q scale，设成 k_scale"；我们查 checkpoint **没有任何 k/v/q_scale 键**
+  （`scale keys 0`），即 k=v=q=1.0，与我们 `fp8_e4m3_roundtrip(scale=1.0)` 一致，排除。
