@@ -1979,3 +1979,24 @@ router 真值项改为固定精确口径后不再自相矛盾（默认口径已�
   **下一步逐个核这些算子在我们侧的等价物**（尤其 lm_head 的 matmul 与最终 log_softmax，直接决定 `prompt_logprobs`）。
 - KV scale：`kv_cache.py:126` 警告"checkpoint 无 q scale，设成 k_scale"；我们查 checkpoint **没有任何 k/v/q_scale 键**
   （`scale keys 0`），即 k=v=q=1.0，与我们 `fp8_e4m3_roundtrip(scale=1.0)` 一致，排除。
+
+### D-2：整跑逐层残差流 —— **发散起点是 L2**
+
+仪器：两侧都是**整跑**（非隔离）。我们 `kaon3_probe --forward --hidden-all`（写 `L-1..L29`）；
+vLLM `scripts/dev/kaon3_vllm_hidden.py`（patch `Gemma4DecoderLayer.forward` 取返回的 hidden_states，BI=1）。
+快照 `1023-053613-1003475`（当前默认口径），p02（24 token）：
+
+| 层 | 相对误差 | 层 | 相对误差 |
+|---|---|---|---|
+| L-1（embed）| **0（逐位）** | L11 | 1.07e-1 |
+| L0 | **4.9e-8** | L15 | 1.29e-1 |
+| L1 | **1.3e-6** | L20 | 1.30e-1 |
+| **L2** | **2.07e-2 ← 跳变** | L25 | 1.53e-1 |
+| L3 | 3.87e-2 | L29 | **2.93e-1** |
+| L5 | 5.35e-2 | | |
+
+L0/L1 逐位级（1e-8/1e-6）说明 embed、L0、L1 三层已经与 vLLM 完全一致；
+**L2 一次性引入 2e-2**，此后每层只缓慢放大（÷5–10 的衰减）。
+→ 与"隔离每个子模块都干净"不矛盾：隔离灌的是参照输入，掩盖了 L2 对**自身输入**的处理差异。
+
+下一步：L2 逐子模块（`SUB_LAYER=2`，灌参照 `L1.bin`）定位那一段。
