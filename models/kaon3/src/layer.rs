@@ -593,8 +593,14 @@ impl Gemma4Layer {
         if cfg.kv_fp8 {
             k::ops::fp8_e4m3_roundtrip_bf16_n(stream, &mut kk.data, tokens * nkv * d, 1.0)?;
             k::ops::fp8_e4m3_roundtrip_bf16_n(stream, &mut v.data, tokens * nkv * d, 1.0)?;
-            // vLLM Triton 后端在 FP8 KV 下也把 query 量化成 e4m3（`Attention.query_quant`，q_scale 缺省 = k_scale = 1.0）
-            k::ops::fp8_e4m3_roundtrip_bf16_n(stream, &mut q.data, tokens * heads * d, 1.0)?;
+            // **query 不量化**：vLLM `triton_attn.py:659-667` 里
+            //   q_descale = layer._q_scale if (kv_quant_mode == FP8_PER_TENSOR and query.dtype == fp8) else None
+            // 即"query 已是 fp8 才反量化"；Gemma4 传进 attention 的 q 是 bf16（q_norm 与 rope 都在 bf16 里），
+            // 所以 vLLM 这里用 **bf16 query** 算 QK。原来我们多做了一次 e4m3 roundtrip（e4m3 只有 3 位尾数，
+            // 相对误差 ~6%），是 `p_fp8` 之外的一处额外偏离。A/B 由 `Q_ROUNDTRIP=1` 恢复旧行为。
+            if std::env::var("Q_ROUNDTRIP").is_ok() {
+                k::ops::fp8_e4m3_roundtrip_bf16_n(stream, &mut q.data, tokens * heads * d, 1.0)?;
+            }
         }
 
         // ---- 4b. 写本层 paged KV（每层 head_dim / nkv 不同）----

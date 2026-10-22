@@ -1001,3 +1001,25 @@ run `1022-171832-669407`（30/30 完整）：
   这是一次**分布形态**偏差。剩余未核对项集中在 `final_norm → tied lm_head` 与 attention 的
   **FP8 KV / p_fp8（query roundtrip）** 上——后者我们比 vLLM 多做了一步 e4m3 roundtrip，
   `triton_attn.py:659` 显示 vLLM 在 bf16 query 下**不量化 q**。这是下一个该查的点。
+
+### 下一个 A/B：query 的 e4m3 roundtrip（`p_fp8` 之外多出来的一步）
+
+`models/kaon3/src/layer.rs` 原来在 `cfg.kv_fp8` 分支里对 **q** 也做了一次
+`fp8_e4m3_roundtrip_bf16_n`，注释称"vLLM Triton 后端在 FP8 KV 下也把 query 量化成 e4m3"。
+
+**该注释与源码不符**。`vllm/v1/attention/backends/triton_attn.py:659-667`：
+
+```python
+q_descale = (
+    layer._q_scale
+    if (self._kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
+        and query.dtype == self.fp8_dtype)   # ← 仅在 query 已经就是 fp8 时
+    else None
+)
+```
+
+即 `q_descale` 只用于"query 已经是 fp8 时反量化回去"；Gemma4 传进 `self.attn(q, k, v)` 的
+`q` 来自 bf16 的 `q_norm` + bf16 的 rope，**dtype 是 bf16 → vLLM 用 bf16 query 算 QK**。
+我们多做的那次 e4m3 roundtrip 会把 q 压到 3 位尾数（相对误差 ~6%），是纯粹额外的偏离。
+
+已改为默认**不做**（`Q_ROUNDTRIP=1` 可恢复旧行为做 A/B），正在跑完整 verify。
