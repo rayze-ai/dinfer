@@ -521,3 +521,15 @@ L1     24  3.754e-2  9.311e-2  1.96x
 所以 layer 0 里只有 MoE 走 NVFP4，attention 与 dense MLP 都是 FP8 静态。
 我们 FP8 路径已核对为 `x*(1/input_scale)` → `__nv_cvt_float_to_fp8(E4M3, SATFINITE)`，
 输出乘 `a_scale*w_scale`，与 vLLM `scaled_mm` 口径一致；**1.9e-2 需要继续往 layer 0 内部切**。
+
+### 仪器二：layer 0 内部子模块对拍
+
+`scripts/dev/kaon3_vllm_sublayer.py`：patch `Gemma4DecoderLayer.forward`，**只在
+`layer_idx == 0` 且 `hidden_states.shape[0] == T` 时**给 layer 0 的子模块挂 forward hook，
+抓 `input_layernorm / self_attn（含 o_proj）/ post_attention_layernorm / mlp /
+router / experts / post_feedforward_layernorm_2 / post_feedforward_layernorm`，写 `<name>.bin`。
+`enforce_eager=True` 保证不走 torch.compile 图、hook 必触发。
+输出文件名与我们 `layer.rs` 待加的 `--sub-out` 同名，便于逐项对比。
+
+（vLLM 侧 `self_attn` 的输出已经过 `o_proj`，见 `gemma4.py:553` `output, _ = self.o_proj(attn_output)`。
+所以 `o_proj.bin` 对应我们的 `sc.o`。）
