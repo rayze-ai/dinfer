@@ -167,6 +167,17 @@ BUILD_ONLY=1 bash scripts/verify/kaon3-parity.sh      # 打印 SNAP=<id>
     —— 每个实现对照**自己输入**的 fp64 精确 logits；**exit 0 = 每层我们的 max 偏差 ≤ 参照，且合计选错 token 数 ≤ 参照**。
   - 用例：p02 / chat_en / chat_zh / raw9（80 token × 30 层）。
 
+## 子 loop B：vLLM router 口径归因（2026-10-22 起，用户选 B）
+
+- **目标**：查清 vLLM router GEMM 的真实口径（kernel、累加精度、输出 dtype 落点），在我们侧做**同口径 A/B 开关**，
+  证明或否定"FLOOR 两项失败来自 router 口径差异"。
+- **环境**：同上；快照 + `PROBE_ENV` 切开关；vLLM 源码以**镜像内已安装的 0.28 版**为准（不是 `/data/ref/vllm` main）。
+- **观察**：`kaon3-parity.sh` 的 `OURS POOLED flip_pct / mean_common_d`；逐层 `kaon3_router_truth_all.py` 的我们侧不一致数应随模仿口径上升到与 vLLM 同量级。
+- **停止条件（可判定，任一）**：
+  1. 模仿开关下 `SNAP=<id> PROBE_ENV=<开关> bash scripts/verify/kaon3-parity.sh` 两项 FLOOR 判据通过 → 因果成立，交用户定判据；
+  2. 模仿开关下逐层 router 输出与 vLLM **逐位一致**（`router_logits` max diff = 0，同输入 L11 隔离）而翻转率仍不过 → router 被排除，残余在别处，回主 loop 按层找。
+- **上限**：8 轮。每轮一个假设，结果进 `test/kaon3/2026-10-22/kaon3-parity.md`「子 loop B」节。
+
 ## 上限
 
 - 最多迭代 30 轮（用户要求不达标不停；上限只作为"方法错了"的报警）。
