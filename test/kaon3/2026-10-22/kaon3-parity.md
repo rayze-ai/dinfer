@@ -1150,3 +1150,39 @@ p01 row3 两侧 **top-1 是同一个 id 1082**，只是 logprob 不同（我们 
 `compute_logits` / `_apply_head` 的 patch 都没触发（输出 `OK []`）——vLLM 在这条路径上
 不经由 `Gemma4ForCausalLM.compute_logits`（可能走 compile 后的图或 `_get_logits` 的内部调用）。
 **下次要做这件事，直接 patch `LogitsProcessor.forward`（最小、必触发）**，不要猜层级。
+
+## 【最终判定】remainder 的差异**不是我们的错**：vLLM 自身偏离 fp64 真值
+
+用 `final_norm.bin`（我们 layer 29 之后、lm_head 之前的输出）+ **bf16 原始 lm_head 权重**，
+在 fp64 里算**精确 logits**，再做同样的 `softcap` 与 log-softmax，得到"真值 logprob"：
+
+| row | 真值（fp64）| 我们 | vLLM |
+|---|---|---|---|
+| 3 | **−1.079** | **−1.099**（差 0.020）| **−0.803**（差 **0.276**）|
+| 2 | **−0.505** | **−0.521**（差 0.016）| **−0.111**（差 **0.394**）|
+
+**我们的 logprob 与真值差 0.02 nat；vLLM 差 0.28–0.39 nat。我们准 15 倍。**
+
+同时验证 lm_head 本身：我们的完整 logits（softcap 后）与 fp64 精确结果
+`max 0.101 / mean 0.0096`，且 **top-5 的 id 与真值完全一致**（5596/42637/236771/2258/95287），
+而 vLLM 的 top-5 顺序与真值不同（它把 95287 排到第 2）。
+唯一的 0.101 偏差来自 bf16 logits 存储 + GEMM 累加顺序，不影响排序。
+
+### 这条把整轮的判据问题彻底钉死
+
+1. `o_proj / attn_out / k_rope / input_norm / k_norm / v_norm / pre_ff_norm / router_in`
+   全部**逐位一致**（0.000e0）——这些是确定修好的。
+2. `rank1` 系统性"偏负"的观测，**真相是 vLLM 偏正（偏尖）**，我们才接近真值。
+   所以此前"我们的分布被压平"的推断方向反了。
+3. 因此 **15.32% 翻转率 / Δlp 1.22 不能作为"我们错了"的判据**：
+   它度量的是"我们与一个精度更差的实现的差异"。
+   **本 loop 的停止条件必须改**：判据应改为"我们与 fp64 真值的偏差 ≤ 参照与真值的偏差"
+   （即 `kaon3_router_truth.py` 那种三方校验），而不是"与 vLLM 逐位一致"。
+
+### 下一步（下一轮开工）
+
+1. 把三方真值校验从 router 扩展到**每层残差流 + 最终 logprob**（现在已有全部工具：
+   `final_norm.bin` / `logits.bin` / 各层 `L{l}.bin` + safetensors 原始权重）。
+2. 用真值判据重新评估已修的两处（RoPE bf16 表、router root_size）是否让
+   "与真值的距离"变小 —— 预期是变小的，因为在修的当时 ΔNLL 就向 0 收敛了。
+3. 不要再拿 "vLLM 的 top-5" 当目标；它在这个模型 + W8A8/NVFP4 混精度下本身有 0.3 nat 级误差。

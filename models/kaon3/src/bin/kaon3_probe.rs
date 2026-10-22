@@ -62,6 +62,8 @@ fn main() -> Result<()> {
     let hidden_ref = take("--hidden-ref");
     // --hidden-all <dir>：一次前向 dump 全部层残差流（与 vLLM 侧 30 个 L{i}.bin 逐层比）
     let hidden_all = take("--hidden-all");
+    // --logits-out <file>：把完整 logits（[T,vocab]，softcap 之后）写成 f32 LE，用于与参照逐元素比
+    let logits_out = take("--logits-out");
     // --hidden-cmp <refdir>：把 --hidden-all 写的逐层残差流与参照目录逐层比（纯 Rust，不用 Python 参考）。
     let hidden_cmp = take("--hidden-cmp");
     // --sub-cmp <refdir>：把 --hidden-all 目录里**所有同名 .bin** 与参照目录逐项比（layer 0 子模块对拍）。
@@ -89,7 +91,7 @@ fn main() -> Result<()> {
                 .map(|s| s.parse::<i32>())
                 .collect::<std::result::Result<_, _>>()?;
             let t = std::time::Instant::now();
-            forward(&mut ctx, &ids, None, None, Some(&format!("{out}/{n}.json")), (None, None), None)?;
+            forward(&mut ctx, &ids, None, None, Some(&format!("{out}/{n}.json")), (None, None), None, None)?;
             println!("BATCH {n}: T={} {:.2} s", ids.len(), t.elapsed().as_secs_f64());
         }
         return Ok(());
@@ -97,7 +99,7 @@ fn main() -> Result<()> {
     let ids: Vec<i32> = args.iter().map(|s| s.parse::<i32>().expect("token id")).collect();
     ensure!(!ids.is_empty(), "--forward 需要至少一个 token id");
     let mut ctx = setup(&dir, &src, layers)?;
-    let pass = forward(&mut ctx, &ids, dump_layer, oracle.as_deref(), dump.as_deref(), (hidden_out.as_deref(), hidden_ref.as_deref()), hidden_all.as_deref())?;
+    let pass = forward(&mut ctx, &ids, dump_layer, oracle.as_deref(), dump.as_deref(), (hidden_out.as_deref(), hidden_ref.as_deref()), hidden_all.as_deref(), logits_out.as_deref())?;
     if let (Some(a), Some(r)) = (hidden_all.as_deref(), sub_cmp.as_deref()) {
         compare_sub_dir(a, r, ids.len())?;
         return Ok(());
@@ -206,6 +208,7 @@ fn forward(
     dump: Option<&str>,
     hidden_io: (Option<&str>, Option<&str>),
     hidden_all: Option<&str>,
+    logits_out: Option<&str>,
 ) -> Result<bool> {
     let (stream, gemm, cfg) = (&ctx.stream, &ctx.gemm, ctx.cfg.clone());
     let model = &mut ctx.model;
@@ -275,6 +278,11 @@ fn forward(
 
     let lg = logits.to_vec_f32(&stream)?;
     let vocab = cfg.vocab_size;
+    if let Some(p) = logits_out {
+        let bytes: Vec<u8> = lg.iter().take(tokens * vocab).flat_map(|x| x.to_le_bytes()).collect();
+        std::fs::write(p, bytes)?;
+        println!("已写 {p}（完整 logits [{}×{}] f32 LE）", tokens, vocab);
+    }
     let last = &lg[(tokens - 1) * vocab..];
     let mut top: Vec<(usize, f32)> = last.iter().copied().enumerate().collect();
     top.sort_by(|a, b| b.1.total_cmp(&a.1));
