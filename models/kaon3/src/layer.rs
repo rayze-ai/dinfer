@@ -786,6 +786,7 @@ impl Gemma4Layer {
         // 专家输入 = pre_feedforward_layernorm_2(residual)（router 用自己的无权重 norm，两者不同）；
         // 借 sc.h2 存，循环结束后才被 post_ff_norm_2 的输出覆盖
         rmsnorm_into(stream, ops, &sc.x, &self.pre_ff_norm_2, &mut sc.h2, h, tokens, eps)?;
+        sub_dump(stream, sub_out, "pre_ff2_norm", &sc.h2, tokens, h)?;
         stream.memset_zeros_n(&mut sc.acc.data, tokens * h)?;
         for (eid, start, len) in k::ops::moe_expert_ranges(&offsets) {
             if len == 0 {

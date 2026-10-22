@@ -1806,3 +1806,12 @@ top1 不同的 4 处（6、7、11、16）都在**用户消息内部**——模�
 **判定（停止条件 2）**：router 输出对齐到 2/3072 个 1-ulp 平局、top-8 全同；端到端（第 14 轮）翻转只降 1.2pp、FLOOR 两项仍不过
 → **router 排除为主因**（严格的"max diff = 0"差 2 个 1-ulp 元素，记为实质满足）。子 loop B 结束（2 轮）。
 **残余在 MoE 专家计算本身**（路由全同时 moe_y 仍差 1e-3）→ 回主 loop：子 loop C 定位专家路径。
+
+## 子 loop C：MoE 专家路径
+
+### C-1：排除"W4A16 被当成 W4A4"
+vLLM 日志同时出现 `quant_algo=NVFP4` 与 `W4A16_NVFP4` 两条 ModelOpt 提示，查 `config.json` / `hf_quant_config.json`：
+语言模型 `config_groups.group_1` = 30 个 `layers.N.experts`，**weights 与 input_activations 都是 4-bit float、group 16**（W4A4）；
+`quantized_layers` 语言模型计 FP8 205 / NVFP4 30，**无 W4A16**。→ 假设排除（那条 W4A16 是 vLLM 探测时的通用提示）。
+vLLM MoE 后端：`Using 'VLLM_CUTLASS' NvFp4 MoE backend`（`nvfp4.py:291`）、`MoEPrepareAndFinalizeNoDPEPModular`。
+补 dump 点：两侧都加 `pre_ff2_norm`（专家输入 = `pre_feedforward_layernorm_2` 输出）。

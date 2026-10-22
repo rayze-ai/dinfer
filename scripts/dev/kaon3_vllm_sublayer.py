@@ -28,6 +28,7 @@ HOOKS = {
     "router": "router_logits",
     "experts": "moe_y",
     "post_feedforward_layernorm_2": "ff2",
+    "pre_feedforward_layernorm_2": "pre_ff2_norm",   # 专家输入（子 loop C）
     "post_feedforward_layernorm": "post_ff_norm",
 }
 
