@@ -37,7 +37,8 @@
   router 舍 bf16）；精确版开关 `GELU_F32` / `MOE_COMBINE_F32` / `ROUTER_F32`（默认关）。MoE 合并在 GPU kernel（runtime mode），
   per_expert_scale 折进路由权重并按 bf16 读。**L11 MoE 段逐位一致**（moe_y/ff2 0 差异）。verify：**5 过 2 失**
   （翻转 14.49% / Δlp 1.2302；≈ vLLM 自身 BI 开/关 13.95% / 1.19）。
-- **待用户定**：FLOOR 判据是否改为"kernel 变体下限"（BI 开/关）。不改则这两项对任何换 kernel 的实现都不可达。
+- **更正（用户 2026-10-23）**：生产不开 BI，不能把"BI 开/关"当可比较下限；"任何换 kernel 都不可达 0.83%"从未验证，作废。
+  BI=1 跨进程仅 1.51% → 该口径下存在逐位复现路径，14.49% 里应仍有**未对齐的口径差异**。下一步：读 vLLM 找剩余差异 + 整跑逐层残差流定位发散起点。
 
 **仪器（本轮新建）**：`kaon3_probe --hidden-all`（30 层残差流 + layer0 的 18 个子模块 +
 `final_norm.bin`）、`--logits-out`、`--sub-cmp`、**`--layer-iso l:ref.bin`（单层隔离）**、
