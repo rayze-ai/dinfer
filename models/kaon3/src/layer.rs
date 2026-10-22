@@ -581,7 +581,7 @@ impl Gemma4Layer {
         self.moe_branch(stream, gemm, ops, cfg, sc, tokens, eps)?;
 
         // ---- 9. 两条支路相加 → post_ff_norm → 残差 → layer_scalar ----
-        k::ops::add_inplace_bf16_n(stream, &sc.y.data, &mut sc.norm.data, tokens * h)?;
+        k::ops::add_inplace_bf16_n(stream, &sc.h2.data, &mut sc.norm.data, tokens * h)?; // h2 = post_ff_norm_2(moe)
         rmsnorm_into(stream, ops, &sc.norm, &self.post_ff_norm, &mut sc.h2, h, tokens, eps)?;
         k::ops::add_inplace_bf16_n(stream, &sc.h2.data, &mut sc.x.data, tokens * h)?;
         if self.layer_scalar != 1.0 {
@@ -635,12 +635,15 @@ impl Gemma4Layer {
         k::ops::moe_bucket(stream, &sc.topk_ids.data, &mut sc.buckets, tokens, kk)?;
         let offsets = stream.dtoh_sync_copy(&sc.buckets.offsets)?;
 
+        // 专家输入 = pre_feedforward_layernorm_2(residual)（router 用自己的无权重 norm，两者不同）；
+        // 借 sc.h2 存，循环结束后才被 post_ff_norm_2 的输出覆盖
+        rmsnorm_into(stream, ops, &sc.x, &self.pre_ff_norm_2, &mut sc.h2, h, tokens, eps)?;
         stream.memset_zeros_n(&mut sc.acc.data, tokens * h)?;
         for (eid, start, len) in k::ops::moe_expert_ranges(&offsets) {
             if len == 0 {
                 continue;
             }
-            k::ops::moe_gather_bf16(stream, &sc.x.data, &mut sc.xg.data, &sc.buckets.sorted_tok, start, len, h)?;
+            k::ops::moe_gather_bf16(stream, &sc.h2.data, &mut sc.xg.data, &sc.buckets.sorted_tok, start, len, h)?;
             let ex = &self.experts[eid];
             ex.gate.forward(gemm, stream, &sc.xg, &mut sc.gate_up, len)?;
             ex.up.forward(gemm, stream, &sc.xg, &mut sc.act, len)?;
