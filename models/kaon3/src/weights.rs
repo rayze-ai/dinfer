@@ -27,7 +27,8 @@ pub const NVFP4_BLOCK: usize = 16;
 /// 一张量化权重在显存里的形态。
 pub enum QWeight {
     /// NVFP4：packed `[N, K/2]`、block scale `[N, K/16]`、全局 scale。
-    NvFp4 { packed: CudaSlice<u8>, scale: CudaSlice<u8>, global: f32, n: usize, k: usize },
+    /// `a_scale` = 激活 input_scale（vLLM a1_gscale = 1/a_scale）。
+    NvFp4 { packed: CudaSlice<u8>, scale: CudaSlice<u8>, global: f32, a_scale: f32, n: usize, k: usize },
     /// FP8 e4m3 per-tensor：`weight [N,K]` + 标量 scale；`a_scale` = 静态激活 scale（`input_scale`，没有为 1.0）。
     Fp8 { w: CudaSlice<u8>, scale: f32, a_scale: f32, n: usize, k: usize },
     /// BF16。
@@ -96,6 +97,7 @@ pub fn load_linear(src: &WeightSource, stream: &Stream, name: &str) -> Result<QW
                 packed: h2d_u8(stream, packed)?,
                 scale: h2d_u8(stream, scale)?,
                 global,
+                a_scale: input_scale(src, name),
                 n,
                 k,
             });

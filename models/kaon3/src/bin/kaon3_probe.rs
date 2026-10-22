@@ -51,9 +51,11 @@ fn main() -> Result<()> {
     let oracle = take("--oracle");
     let layers = take("--layers").map(|s| s.parse::<usize>().expect("--layers 需要整数"));
     let dump = take("--dump-oracle");
+    let hidden_out = take("--hidden-out");
+    let hidden_ref = take("--hidden-ref");
     let ids: Vec<i32> = args.iter().map(|s| s.parse::<i32>().expect("token id")).collect();
     ensure!(!ids.is_empty(), "--forward 需要至少一个 token id");
-    let pass = forward(&dir, &src, &ids, dump_layer, oracle.as_deref(), layers, dump.as_deref())?;
+    let pass = forward(&dir, &src, &ids, dump_layer, oracle.as_deref(), layers, dump.as_deref(), (hidden_out.as_deref(), hidden_ref.as_deref()))?;
     if !pass {
         std::process::exit(3);
     }
@@ -116,6 +118,7 @@ fn forward(
     oracle: Option<&str>,
     layers: Option<usize>,
     dump: Option<&str>,
+    hidden_io: (Option<&str>, Option<&str>),
 ) -> Result<bool> {
     let cfg_path = Path::new(dir).join("config.json");
     let cfg = KaonConfig::from_json(&std::fs::read_to_string(&cfg_path)?)?;
@@ -182,6 +185,26 @@ fn forward(
         let v = hidden.to_vec_f32(&stream)?;
         let n = (v.iter().map(|x| x * x).sum::<f32>()).sqrt();
         println!("layer {l} 残差流: 前 8 = {:?}  ‖x‖ = {n:.4}", &v[..8.min(v.len())]);
+        // --hidden-out：整块残差流写盘（f32 小端）；--hidden-ref：与另一次运行逐行比相对误差（定位误差在哪层放大）
+        if let Some(p) = hidden_io.0 {
+            std::fs::write(p, v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>())?;
+        }
+        if let Some(p) = hidden_io.1 {
+            let b = std::fs::read(p)?;
+            let r: Vec<f32> = b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+            ensure!(r.len() == v.len(), "--hidden-ref 长度 {} != {}", r.len(), v.len());
+            let h = cfg.hidden;
+            let rel: Vec<f32> = (0..tokens)
+                .map(|t| {
+                    let (a, b) = (&v[t * h..(t + 1) * h], &r[t * h..(t + 1) * h]);
+                    let d: f32 = a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum::<f32>().sqrt();
+                    d / b.iter().map(|y| y * y).sum::<f32>().sqrt().max(1e-20)
+                })
+                .collect();
+            let mx = rel.iter().copied().fold(0f32, f32::max);
+            let mean = rel.iter().sum::<f32>() / rel.len() as f32;
+            println!("HIDDEN layer {l}: 逐行相对误差 均值 {mean:.2e} 最大 {mx:.2e} | 前 12 行 {:?}", rel.iter().take(12).map(|x| format!("{x:.1e}")).collect::<Vec<_>>());
+        }
     }
 
     let lg = logits.to_vec_f32(&stream)?;

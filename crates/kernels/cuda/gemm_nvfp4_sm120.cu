@@ -49,7 +49,15 @@ __device__ __forceinline__ void mma_fp4(const uint32_t* a, const uint32_t* b, ui
 /// 16 个 bf16 → 8 字节 fp4 + 1 字节 e4m3 块缩放。
 /// 量化口径（CPU 参考侧必须逐位复现）：amax = max|x|；scale = amax/6 再编码成 e4m3；
 /// 反量化出 deq 后用 1/deq 缩放再做 e2m1 就近舍入。amax == 0 时整块给 0、scale 给 1.0。
-__device__ __forceinline__ void quant16(const bf16* src, bool valid, uint2* out8, uint8_t* out_s) {
+__device__ __forceinline__ float rcp_approx(float a) {
+  float b;
+  asm volatile("rcp.approx.ftz.f32 %0, %1;" : "=f"(b) : "f"(a));
+  return b;
+}
+
+/// gs = 激活全局 scale（vLLM 的 a1_gscale = 1/input_scale；不用时 1）。块 scale 与输出缩放逐式照抄
+/// vLLM `nvfp4_utils.cuh` cvt_warp_fp16_to_fp4 的 NVFP4 分支（含 rcp.approx.ftz），保证与基线同一套量化网格。
+__device__ __forceinline__ void quant16(const bf16* src, bool valid, uint2* out8, uint8_t* out_s, float gs) {
   float x[16];
   float amax = 0.f;
 #pragma unroll
@@ -57,14 +65,13 @@ __device__ __forceinline__ void quant16(const bf16* src, bool valid, uint2* out8
     x[i] = valid ? to_f32(src[i]) : 0.f;
     amax = fmaxf(amax, fabsf(x[i]));
   }
-  uint8_t sb8;
-  float inv;
+  uint8_t sb8 = 0;  // 全零块：scale 字节 0、输出 0（与 vLLM 一致；硬件 0·0 = 0）
+  float inv = 0.f;
   if (amax > 0.f) {
-    sb8 = __nv_cvt_float_to_fp8(amax * (1.f / 6.f), __NV_SATFINITE, __NV_E4M3);
-    inv = 1.f / e4m3_f(sb8);
-  } else {
-    sb8 = 0x38u;  // e4m3 的 1.0：让硬件乘 1 后仍得 0，避免 0/0
-    inv = 0.f;
+    const float sfv = gs * (amax * rcp_approx(6.f));
+    sb8 = __nv_cvt_float_to_fp8(sfv, __NV_SATFINITE, __NV_E4M3);
+    const float sfd = e4m3_f(sb8);
+    inv = sfd != 0.f ? rcp_approx(sfd * rcp_approx(gs)) : 0.f;
   }
   uint32_t w[2];
 #pragma unroll
@@ -87,14 +94,14 @@ __device__ __forceinline__ void quant16(const bf16* src, bool valid, uint2* out8
 // A 的预量化：bf16 [m,k] → packed [m,k/2] + 块缩放 [m,k/16]（e4m3）。
 // 一个 16-元素块一个线程；权重侧同一套口径（scale = amax/6 的 e4m3，反量化后做 e2m1 就近舍入）。
 __global__ void __launch_bounds__(256) quantize_a_kernel(const bf16* __restrict__ A, uint8_t* __restrict__ P,
-                                                         uint8_t* __restrict__ S, int rows, int K) {
+                                                         uint8_t* __restrict__ S, int rows, int K, float gs) {
   const int nb = K / 16;
   const long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= (long)rows * nb) return;
   const int r = (int)(idx / nb), bi = (int)(idx % nb);
   uint2 pk;
   uint8_t sb8;
-  quant16(A + (size_t)r * K + bi * 16, true, &pk, &sb8);
+  quant16(A + (size_t)r * K + bi * 16, true, &pk, &sb8, gs);
   *reinterpret_cast<uint2*>(P + (size_t)r * (K / 2) + bi * 8) = pk;
   S[(size_t)r * nb + bi] = sb8;
 }
@@ -217,8 +224,11 @@ int gemm_last_err() {
 
 extern "C" {
 
-int gemm_nvfp4_bf16(const void* a, const void* packed, const void* scale, float global, void* out, int64_t m, int64_t n,
-                    int64_t k, cudaStream_t stream) {
+// a_gscale = 激活全局 scale（vLLM a1_gscale = 1/input_scale）：只影响 A 的量化网格；global 是最终输出乘子
+// （调用方给 w_global * input_scale，即 vLLM 的 alpha）。
+int gemm_nvfp4_gs_bf16(const void* a, float a_gscale, const void* packed, const void* scale, float global, void* out,
+                       int64_t m, int64_t n, int64_t k, cudaStream_t stream) {
+  if (!(a_gscale > 0.f)) return static_cast<int>(cudaErrorInvalidValue);
   static void* scratch = nullptr;
   static size_t scratch_cap = 0;
   static cudaStream_t scratch_stream = nullptr;
@@ -240,7 +250,7 @@ int gemm_nvfp4_bf16(const void* a, const void* packed, const void* scale, float 
   {
     const long blocks = (long)m * (k / 16);
     const unsigned g = (unsigned)((blocks + 255) / 256);
-    quantize_a_kernel<<<g, 256, 0, stream>>>(static_cast<const bf16*>(a), pa, psa, (int)m, (int)k);
+    quantize_a_kernel<<<g, 256, 0, stream>>>(static_cast<const bf16*>(a), pa, psa, (int)m, (int)k, a_gscale);
     if (const int e = gemm_last_err(); e != 0) return e;
   }
   // 块缩放的 k-block 是 16，mma 是 k64：BK 取 128（K%128==0）否则 64（调用方保证 K%64==0）
@@ -257,6 +267,11 @@ int gemm_nvfp4_bf16(const void* a, const void* packed, const void* scale, float 
     return static_cast<int>(cudaErrorInvalidValue);
   }
   return gemm_last_err();
+}
+
+int gemm_nvfp4_bf16(const void* a, const void* packed, const void* scale, float global, void* out, int64_t m, int64_t n,
+                    int64_t k, cudaStream_t stream) {
+  return gemm_nvfp4_gs_bf16(a, 1.f, packed, scale, global, out, m, n, k, stream);
 }
 
 }  // extern "C"

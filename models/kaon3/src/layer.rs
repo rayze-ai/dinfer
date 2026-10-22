@@ -38,6 +38,8 @@ pub enum QLinear {
         packed: dinfer_kernels::cudarc::driver::CudaSlice<u8>,
         scale: dinfer_kernels::cudarc::driver::CudaSlice<u8>,
         global: f32,
+        /// 激活 input_scale：A 按 gs = 1/a_scale 的网格量化，输出乘 global·a_scale（vLLM 的 alpha）。
+        a_scale: f32,
         n: usize,
         k: usize,
     },
@@ -59,7 +61,7 @@ impl QLinear {
                 Self::Bf16 { w: Tensor { data, shape: vec![n, k] }, n, k }
             }
             QWeight::Fp8 { w, scale, a_scale, n, k } => Self::Fp8 { w, scale, a_scale, n, k },
-            QWeight::NvFp4 { packed, scale, global, n, k } => Self::NvFp4 { packed, scale, global, n, k },
+            QWeight::NvFp4 { packed, scale, global, a_scale, n, k } => Self::NvFp4 { packed, scale, global, a_scale, n, k },
         }
     }
 
@@ -103,8 +105,8 @@ impl QLinear {
             Self::Fp8 { w, scale, a_scale, .. } => {
                 gemm.forward_fp8(&x.data, *a_scale, w, *scale, &mut out.data, tokens, n, kk)
             }
-            Self::NvFp4 { packed, scale, global, .. } => {
-                gemm.forward_nvfp4(&x.data, packed, scale, *global, &mut out.data, tokens, n, kk)
+            Self::NvFp4 { packed, scale, global, a_scale, .. } => {
+                gemm.forward_nvfp4(&x.data, 1.0 / *a_scale, packed, scale, *global * *a_scale, &mut out.data, tokens, n, kk)
             }
         }
     }
@@ -229,11 +231,15 @@ impl Gemma4Layer {
             if let QLinear::NvFp4 { global, .. } = &mut down {
                 *global *= pes[e];
             }
-            experts.push(Expert {
-                gate: QLinear::load(stream, src, &format!("{ep}.gate_proj.weight"))?,
-                up: QLinear::load(stream, src, &format!("{ep}.up_proj.weight"))?,
-                down,
-            });
+            let mut gate = QLinear::load(stream, src, &format!("{ep}.gate_proj.weight"))?;
+            let mut up = QLinear::load(stream, src, &format!("{ep}.up_proj.weight"))?;
+            // vLLM 的 w13（gate∥up）共用一个激活全局 scale：取两分片 input_scale 的最大值
+            if let (QLinear::NvFp4 { a_scale: ag, .. }, QLinear::NvFp4 { a_scale: au, .. }) = (&mut gate, &mut up) {
+                let m = ag.max(*au);
+                *ag = m;
+                *au = m;
+            }
+            experts.push(Expert { gate, up, down });
         }
 
         Ok(Self {

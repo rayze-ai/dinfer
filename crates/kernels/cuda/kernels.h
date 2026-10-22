@@ -371,6 +371,9 @@ int gemm_fp8_static_bf16(const void* a, float a_scale, const void* w, float w_sc
 int gemm_fp8_bf16(const void* a, const void* w, float w_scale, void* out, int64_t m, int64_t n, int64_t k,
                   cudaStream_t stream);
 // out[m,n] = global * (a[m,k] bf16 现场量化 · packed[n,k/2] fp4^T)，块缩放 scale[n,k/16] e4m3；K % 64 == 0。
+// 带激活全局 scale（vLLM a1_gscale）：A 按 gs 网格量化；global = w_global * input_scale。
+int gemm_nvfp4_gs_bf16(const void* a, float a_gscale, const void* packed, const void* scale, float global, void* out,
+                       int64_t m, int64_t n, int64_t k, cudaStream_t stream);
 int gemm_nvfp4_bf16(const void* a, const void* packed, const void* scale, float global, void* out, int64_t m, int64_t n,
                     int64_t k, cudaStream_t stream);
 

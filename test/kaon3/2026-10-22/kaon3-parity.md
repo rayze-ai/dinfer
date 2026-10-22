@@ -12,3 +12,6 @@
 | 3 | FP8 静态激活 scale（`gemm_fp8_static_bf16`：x/input_scale 再转 e4m3，输出乘 a·w scale；实测 input_scale 0.03–3.9，>1 时原实现截断 448）+ 合并组（qkv / gate_up）按 vLLM `requantize_with_max_scale` 重量化 | 0 / 0.95 / 0.013 | 2/6 / 3.06 / 9.7 | 10/23 / 5.15 / 32.2 | — | 单 token 改善；多 token 不动 |
 | 诊断 | `--dump-oracle`：我们 v5 对我们慢路径 | — | 1/9 / 1.12 / 1.88 | 6/21 / 2.46 / 20.1 | 4/19 / 3.27 / 23.0 | 同配置两次完全一致（确定）；两个正确 kernel 互差 20 nat → 模型对 attention 舍入级差异极敏感 |
 | 4 | kernel 测试 `gqa_window_parity` 抓到滑窗 bug：tile0 按 warp 算（K/V 是 block 协作装的）、下界 mask 只在 need_mask 时做、v6 首 tile 固定装 0 → 三处修复，v5/v6/v6B/v6F/v7 全过 | | | | | 窗口生效时原误差 5.9 → 0.0087 |
+| 标定 | vLLM 关 BI vs 开 BI（同镜像私有副本）：raw9 3/6、chat_en 5/23、chat_zh 2/20、long_zh 116/1024（11.3%），共有 token Δ 0.59–1.79 | | | | | **原判据连 vLLM 自己都过不了** → 判据改为相对 vLLM 自身噪声的统计量 |
+| 5 | NVFP4 激活全局 scale：照抄 vLLM `nvfp4_utils.cuh`（gs=1/input_scale、块 scale e4m3(gs·amax·rcp6)、rcp.approx）；专家 gate/up 共用 max(input_scale) | | 2/6 · 0.88 | 9/23 · 2.06 | 6/20 · 1.81 | long_zh 205→277/1024（单条长序列行间强相关，统计不可靠） |
+| 测试 | `gemm_lowp_parity`：FP8 静态 scale 3 档 + NVFP4 gs∈{1,25,900}、K∈{2816(BK128),704(BK64)} 全过（相对误差 ≤3.9e-3）；首跑失败是用例没把 1/gs 折进 global | | | | | 交接区第 ② 步（NVFP4 对拍）完成 |

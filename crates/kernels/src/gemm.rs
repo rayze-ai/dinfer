@@ -280,11 +280,13 @@ impl Gemm {
     /// NVFP4 块缩放 GEMM（sm_120 专用，`cuda/gemm_nvfp4_sm120.cu`）：
     /// `out[m,n] = global * Σ_k a[m,k] · packed[n,k]`。`a` 是 bf16 激活，**在 kernel 内按 16 元素一块量化成 fp4**
     /// （块缩放 = amax/6 的 e4m3 编码，与权重侧同口径）；`packed` 是 [n, k/2]（每字节两个 fp4，低半字节是偶数列），
-    /// `scale` 是 [n, k/16] 的 e4m3 块缩放，`global` 是 per-tensor 标量。要求 `k % 64 == 0`。
+    /// `scale` 是 [n, k/16] 的 e4m3 块缩放，`global` 是最终输出乘子（w_global · input_scale）。要求 `k % 64 == 0`。
+    /// `a_gscale` = 激活全局 scale（vLLM a1_gscale = 1/input_scale；不用时 1.0）：块缩放 = e4m3(gs·amax/6)。
     #[allow(clippy::too_many_arguments)]
     pub fn forward_nvfp4(
         &self,
         a: &CudaSlice<bf16>,
+        a_gscale: f32,
         packed: &CudaSlice<u8>,
         scale: &CudaSlice<u8>,
         global: f32,
@@ -303,8 +305,9 @@ impl Gemm {
         ensure!(k > 0 && k % 64 == 0, "gemm nvfp4: k {k} 不是 64 的倍数（块缩放 mma 是 k64）");
         ensure!(m <= i32::MAX as usize && n <= i32::MAX as usize && k <= i32::MAX as usize, "gemm nvfp4: 维度 > i32");
         let rc = unsafe {
-            crate::ffi::gemm_nvfp4_bf16(
+            crate::ffi::gemm_nvfp4_gs_bf16(
                 self.stream.ptr(a) as *const c_void,
+                a_gscale,
                 self.stream.ptr(packed) as *const c_void,
                 self.stream.ptr(scale) as *const c_void,
                 global,

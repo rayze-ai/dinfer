@@ -1218,6 +1218,8 @@ extern "C" {
                                 m: i64, n: i64, k: i64, stream: cudaStream_t) -> i32;
     pub fn gemm_nvfp4_bf16(a: *const c_void, packed: *const c_void, scale: *const c_void, global: f32,
                            out: *mut c_void, m: i64, n: i64, k: i64, stream: cudaStream_t) -> i32;
+    pub fn gemm_nvfp4_gs_bf16(a: *const c_void, a_gscale: f32, packed: *const c_void, scale: *const c_void, global: f32,
+                              out: *mut c_void, m: i64, n: i64, k: i64, stream: cudaStream_t) -> i32;
 }
 #[cfg(not(all(not(no_nvcc_stub), sm120)))]
 #[allow(clippy::too_many_arguments, clippy::missing_safety_doc)]
@@ -1229,6 +1231,12 @@ pub unsafe fn gemm_fp8_static_bf16(_a: *const c_void, _as: f32, _w: *const c_voi
 #[allow(clippy::too_many_arguments, clippy::missing_safety_doc)]
 pub unsafe fn gemm_fp8_bf16(_a: *const c_void, _w: *const c_void, _ws: f32, _o: *mut c_void, _m: i64, _n: i64,
                             _k: i64, _s: cudaStream_t) -> i32 {
+    CUDA_ERROR_NOT_SUPPORTED
+}
+#[cfg(not(all(not(no_nvcc_stub), sm120)))]
+#[allow(clippy::too_many_arguments, clippy::missing_safety_doc)]
+pub unsafe fn gemm_nvfp4_gs_bf16(_a: *const c_void, _gs: f32, _p: *const c_void, _sc: *const c_void, _g: f32,
+                                 _o: *mut c_void, _m: i64, _n: i64, _k: i64, _s: cudaStream_t) -> i32 {
     CUDA_ERROR_NOT_SUPPORTED
 }
 #[cfg(not(all(not(no_nvcc_stub), sm120)))]
