@@ -62,3 +62,43 @@
   参照集与下限集各用**一个进程、一次抓完**；跨进程下限单独测（同参数两个进程之差）。
 - **证据**：`docs/pitfalls.md` 2026-10-22 三条（端口抢占 / 假就绪 / 误停基线），
   `test/kaon3/2026-10-22/kaon3-parity.md` 的作废记录。
+
+## 逐位对拍的三大坑（Kaon-V3 2026-10-22 一次实测沉淀）
+
+接一个**有权重目录 + vLLM 参照**的模型做逐位置 logprob 对拍，先按这个顺序排除，
+能省掉几小时"以为是自己模型语义写错"的排查。三条都不是模型语义问题。
+
+### 1. 常数张量的精度由它在 vLLM 里**注册成什么 dtype** 决定，不是由数学决定
+
+`x * hidden_size**-0.5` 看着是个常数，但 vLLM 常写成
+`register_buffer("root_size", torch.tensor(h**-0.5), persistent=False)` —— buffer 的 dtype
+跟随模型（bf16），于是 `root_size.to(bf16)` **先把常数舍入到 bf16** 再乘。我们直接用 f64/f32 常数，
+就差出 1.5e-3（bf16 尾数 8 位 → 相对分辨率 ~2e-3）。
+**做法**：grep vLLM 里每个常数乘子，看它是 `register_buffer` / `nn.Parameter` / Python 标量。
+buffer/Parameter → 按模型 dtype 舍入；Python 标量 → f32/f64。
+
+### 2. RoPE 的 cos/sin 表：vLLM 存的是**模型 dtype（bf16）**，不是 f32
+
+`vllm/model_executor/layers/rotary_embedding/base.py`：
+`cache = self._compute_cos_sin_cache(); cache = cache.to(dtype)` —— `dtype` 是模型 dtype。
+CUDA kernel 再把 bf16 表 `static_cast<float>` 做 fp32 乘加。所以正确口径是
+**"bf16 表 + fp32 旋转"**，不是 f32 表。我们用 f32 表 → `q_rope/k_rope` 相对误差 1.5–1.8e-3。
+**做法**：`Rope::with_bf16_cache()`（opt-in，把表按 bf16 就近偶数舍入后仍存 f32，kernel 不变）。
+
+### 3. 参照实现自己就不精确，不能假设"参照即真值"
+
+用 fp64 真值（bf16 原始权重 + fp32 输入，float64 矩阵乘）校验 router GEMM：
+**我们 max 7.4e-07 / top-8 错 0/24；vLLM max 1.5e-02 / top-8 错 3/24。**
+vLLM 的 `GateLinear` 在 sm_120 走 `torch.mm(out_dtype=f32)`，累加精度不如逐元素 f32 归约。
+后果：router logits 在 top-8 边界附近时参照会**选不同专家**，下游 MoE 输出差到 1e-1 —— 不是 bug。
+**做法**：① 判据里单列"top-8 集合不一致的 token 数"，这些行不作判据；
+② 常驻 fp64 校验（`scripts/verify/kaon3_router_truth.py`），改动后一条命令回答谁更准。
+
+### 配套仪器：一次前向 dump 全层 + 全子模块
+
+- `kaon3_probe --hidden-all <dir>`：每层残差流 `L{l}.bin` + `Lm1`（embed）；
+- 同一目录还写 layer 0 的 `input_norm/q_norm/k_norm/v_norm/q_rope/k_rope/attn_out/o_proj/
+  post_attn_norm/pre_ff_norm/mlp_gate_up/mlp_gelu/dense/router_in/router_logits/moe_y/ff2/post_ff_norm`；
+- 参照侧 `scripts/dev/kaon3_vllm_sublayer.py` 用 forward hook 抓同名张量；
+- `--sub-cmp <refdir>` 纯 Rust 逐项比。
+**先用 4-token 短 prompt 冒烟**（几秒）：hook 脚本崩了要几秒发现，别等 10 分钟完整抓取。
