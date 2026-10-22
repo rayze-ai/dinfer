@@ -384,3 +384,44 @@ const float sc = 1.f / (1.f + __expf(-logits[t * E + e]));   // ← sigmoid！
 
 **仍超限**（线：5.81% / 0.184 / 0.01）。所以 sigmoid→softmax 是**主因之一，不是全部**。
 下一步继续逐行读 vLLM 找剩余差异。
+
+## 第 8 轮：判据被"阈值"放水，0–7 层要重判（2026-10-22 深夜，用户指出）
+
+用户 2026-10-22：「我觉的 0–7 层可能也是不对的，只是我们的标准定的让他过」。**成立**。
+
+干净参照下**跨进程下限是 0.0000（逐位一致）**，而 L8 的三个用例分别是
+`0.0613 / 0.0449 / 0.0574`。这不是噪声，是确凿偏差；只是被"阈值 0.15"和
+"1.5×FLOOR"这类**以噪声为基准的相对判据**放过了。下限为 0 时，相对判据退化成"任意非零都过"。
+
+### 判据修正（用户要求）
+
+- 分层二分一律用**绝对判据**：跨进程下限 == 0（已验证）→ 探针与 oracle 的
+  top5 |Δlp| 均值、ΔNLL 都按**"要求 0"**判，不再用 0.15 这类阈值。
+- 端到端（30 层）保留相对判据，因为那里的下限不为 0；但**只能在"每层绝对为 0"之后**再谈。
+
+### 本轮摄入 vLLM 源码的确认（`/data/ref/vllm/vllm/model_executor/models/gemma4.py`）
+
+逐项对照 `models/kaon3/src/layer.rs::forward`，已确认**一致**的：
+
+| vLLM | 我们 | 结论 |
+|---|---|---|
+| `input_layernorm` → attn → `post_attention_layernorm` → +residual | 同序，`rmsnorm_into` + `add_inplace` | ✅ |
+| dense MLP **无条件**执行（MoE 并联而非替换） | `dense_gate/up/down` 无条件 | ✅ |
+| `post_feedforward_layernorm_1(dense)` + `post_feedforward_layernorm_2(moe)` 相加 | `post_ff_norm_1` / `post_ff_norm_2` | ✅ |
+| MoE 输入 = `pre_feedforward_layernorm_2(residual)`，router 输入 = **无权重** norm | `sc.h2` / `rmsnorm_noweight` | ✅ |
+| router 预处理 `norm(x) * hidden^-0.5 * scale` | `scale_bf16_n(h^-0.5)` → `mul(scale)` | ✅ |
+| 路由：原始 logits topk → **全专家 softmax** → top-k 重归一 → ×per_expert_scale | `moe_route_softmax_f32`（softmax 限定 top-k 等价） | ✅ |
+| q_norm/k_norm（带权）/ v_norm（**无**权），RoPE 在 q/k 上、v 不动 | `head_rmsnorm(q,Some) (k,Some) (v,None)`，再 rope(q,k) | ✅ |
+| k_eq_v：K 权重填 K/V 两槽 | `v_proj=None` + dtod 拷贝 | ✅ |
+| `layer_scalar` 乘在**所有**文本层末尾 | `scale_bf16_n` at end | ✅ |
+| **PLE（per-layer embedding）** | 未实现 | ✅ **不适用**：config `hidden_size_per_layer_input = 0`，vLLM 侧 `> 0` 守卫不进入 |
+
+所以"读一遍 vLLM"没有新发现语义错误；剩余差异必须靠**逐层残差流对拍**定位，不能再靠端到端 logprob 猜。
+
+### 下一个仪器：逐层残差流（工具早就有，从没用过）
+
+- vLLM 侧 `scripts/dev/kaon3_vllm_hidden.py`：monkey-patch `Gemma4DecoderLayer.forward`，
+  存每层返回的 hidden（已 ×layer_scalar，与 `sc.x` 同定义）→ `L{i}.bin` (f32 LE, [T,H])。
+- 我们侧 `kaon3_probe <M> --forward --layers N --dump-layer N-1 --hidden-out f.bin`
+  （`--hidden-ref` 可逐行比相对误差）。
+- `test/kaon3/**` 里目前**一个 `.bin` 都没有** → 这条链路从未跑通过。这是本轮的起点。
