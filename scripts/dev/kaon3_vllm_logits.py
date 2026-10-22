@@ -13,8 +13,8 @@ model_dir = sys.argv[1]; ids = [int(x) for x in sys.argv[2:]]; t = len(ids)
 out = os.environ["OUT"]; os.makedirs(out, exist_ok=True)
 cap = {}
 _orig = g4.Gemma4ForCausalLM.compute_logits
-def _patched(self, hidden_states, sampling_metadata=None):
-    r = _orig(self, hidden_states, sampling_metadata)
+def _patched(self, hidden_states, *a, **kw):
+    r = _orig(self, hidden_states, *a, **kw)
     if "post" not in cap and r.shape[0] == t:
         cap["post"] = r.detach().float().cpu().numpy().copy()
     return r
@@ -22,8 +22,8 @@ g4.Gemma4ForCausalLM.compute_logits = _patched
 # 同时抓 softcap 之前的：patch LogitsProcessor.forward 之前拦 _apply_head 返回值
 import vllm.model_executor.layers.logits_processor as lpm
 _orig_apply = lpm.LogitsProcessor._apply_head
-def _patched_apply(self, lm_head, hidden_states, embedding_bias):
-    r = _orig_apply(self, lm_head, hidden_states, embedding_bias)
+def _patched_apply(self, lm_head, hidden_states, *a, **kw):
+    r = _orig_apply(self, lm_head, hidden_states, *a, **kw)
     if "pre" not in cap and r.shape[0] == t:
         cap["pre"] = r.detach().float().cpu().numpy().copy()
     return r

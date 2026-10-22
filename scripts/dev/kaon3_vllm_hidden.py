@@ -18,6 +18,13 @@ out = os.environ["OUT"]
 os.makedirs(out, exist_ok=True)
 
 cap = []
+embeds = []  # embed 输出（L-1：layer 0 之前的残差流）
+_orig_embed = g4.Gemma4SelfDecoderLayers.embed_input_ids
+def _patched_embed(self, input_ids):
+    r = _orig_embed(self, input_ids)
+    embeds.append(r.detach().float().cpu().numpy().copy())
+    return r
+g4.Gemma4SelfDecoderLayers.embed_input_ids = _patched_embed
 _orig = g4.Gemma4DecoderLayer.forward
 def _patched(self, *a, **k):
     r = _orig(self, *a, **k)
@@ -35,6 +42,10 @@ t = len(ids)
 # 直接 cap[-30:] 会取到最后一个 decode 步（单行）而不是 T 行的 prefill（2026-10-22 修）。
 pre = [h for h in cap if h.shape[0] == t]
 layers = pre[:30]
+pe = [e for e in embeds if e.shape[0] == t]
+if pe:
+    pe[0][:t].astype("<f4").tofile(f"{out}/Lm1.bin")
+    print(f"  写 Lm1.bin（embed 输出）shape {pe[0][:t].shape}", flush=True)
 print(f"captured {len(cap)} 次 forward 调用，其中 T={t} 的 {len(pre)} 次；取前 {len(layers)} 层", flush=True)
 assert len(layers) == 30, f"expected 30 prefill layers, got {len(layers)}"
 for i, h in enumerate(layers):
