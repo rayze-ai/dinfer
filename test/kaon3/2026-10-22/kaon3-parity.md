@@ -752,3 +752,12 @@ vLLM `per_tensor_dequantize`：`fake_qweight = tensor.to(float16)` 然后
 解释：e4m3 只有 3 位尾数，量化网格步长约 6%，5e-4 的乘子差异几乎不可能让量化结果翻到相邻格子。
 所以这处修改**是正确的但非本因**，不解决 `dense` 的残差。继续切 MLP 内部（已加
 `pre_ff_norm / mlp_gate_up / mlp_down` 两侧 dump）。
+
+### 我们侧 dump 清单（layer 0）
+
+`--hidden-all <dir>` 现在一次写：`Lm1`（embed）、`L0..L29`（各层残差流）、以及 layer 0 的
+`input_norm / q_norm / k_norm / v_norm / q_rope / k_rope / attn_out / o_proj / post_attn_norm /
+pre_ff_norm / mlp_gate_up / dense / router_in / router_logits / moe_y / ff2 / post_ff_norm`。
+与 `kaon3_vllm_sublayer.py` 的同名 `.bin` 一一对应（`moe_y` 例外：vLLM 的 `experts` 不直挂子模块）。
+
+一层 ≈ 30 s（含 33 s 权重加载），所以**一次前向拿全部中间量**，不再逐项重跑。
