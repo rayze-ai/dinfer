@@ -71,6 +71,26 @@ W4A4 / W8A8 激活量化让微小扰动跨过舍入边界后放大，逐行对�
 - 日期：2026-10-22
 - 第 0 轮：未跑（规格建立）
 
+## P1 参数对齐（2026-10-22 晚，用户纠正后定稿）
+
+用户 2026-10-22：「生产没有但是不代表不能配置，我只是要求你在对拍的时候，把参数对齐」。
+生产命令（`vllm serve novita/Kaon-V3-nvpf4 --port 8081 --max_num_batched_tokens 4096`，无 `VLLM_BATCH_INVARIANT`）
+用的是 vLLM 默认值；**对拍不看生产默认，看探针侧的假设**，逐项显式写出、不许留隐式默认：
+
+| 参数 | 探针侧假设 | oracle 取值（显式传） | 生产实际 |
+|---|---|---|---|
+| block size | 32（`kaon3_probe.rs:23 BLOCK_SIZE`） | `--block-size 32` | 16（默认） |
+| prefill 分块 | 一次 prefill 整串 | `--max-num-batched-tokens 4096`（> 最长用例 1252 → 等效不分块） | 4096 |
+| KV dtype | FP8 e4m3（config `kv_cache_quant_algo`） | checkpoint 自带 `fp8_e4m3` | 同 |
+| max_model_len | 无（单序列） | `--max-model-len 16384` | 取 config |
+| max_num_seqs | 1 条请求 | `--max-num-seqs 64` | 256 |
+| BI | 无此概念 | **BI=1 作判定参照 / BI=0 作噪声下限** | 不设 |
+
+**判定参照口径（用户 2026-10-22 选定）**：`oracle/`（BI=1，确定性）作参照，`oracle_nobi/`（BI=0）只用于定噪声下限。
+理由：BI=1 同输入两次完全一致，任何不一致都能归因到我们的实现；BI=0 抖动大，只当 floor。
+**P1 出口**：用显式参数重启 oracle，重抓同一批用例，`kaon3_oracle_diff` 对旧文件 **flips=0 且 mean_common_d=0**
+（证明没有隐式默认造成的漂移），然后跑一次 verify 把第 7 轮状态在新口径下的 `POOLED` 行写进迭代记录。
+
 ## 生产配置(用户 2026-10-22,**改 oracle 基线**)
 
 生产启动命令只有:`vllm serve novita/Kaon-V3-nvpf4 --port 8081 --max_num_batched_tokens 4096`。
