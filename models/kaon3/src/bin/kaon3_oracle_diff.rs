@@ -59,8 +59,13 @@ struct Acc {
 
 impl Acc {
     fn add(&mut self, ra: &[Row], rb: &[Row]) {
-        self.rows += ra.len();
         for (x, y) in ra.iter().zip(rb) {
+            self.add_row(x, y);
+        }
+    }
+    fn add_row(&mut self, x: &Row, y: &Row) {
+        self.rows += 1;
+        {
             if x.top.len() >= 2 && !y.top.is_empty() && x.top[0].1 - x.top[1].1 >= 0.5 {
                 self.dec += 1;
                 self.miss += (x.top[0].0 != y.top[0].0) as usize;
@@ -112,6 +117,7 @@ fn main() -> Result<()> {
             .collect();
         names.sort();
         let mut tot = Acc::default();
+        let mut seen = std::collections::HashSet::new();
         for n in &names {
             let ids = read_ids(&pa.join(format!("{n}.ids")));
             let (ra, rb) = (rows(&pa.join(format!("{n}.json")), ids.as_deref())?, rows(&pb.join(format!("{n}.json")), ids.as_deref())?);
@@ -131,7 +137,19 @@ fn main() -> Result<()> {
                 continue;
             }
             println!("{}", one.line(&format!("CASE {n:<10}")));
-            tot.add(&ra, &rb);
+            // 汇总按上下文去重：chat 模板让各 prompt 的前几行上下文完全相同（分布也相同），不去重会被计 N 次
+            let ids = ids.unwrap_or_default();
+            let mut h: u64 = 0xcbf29ce484222325;
+            for (r, (x, y)) in ra.iter().zip(&rb).enumerate() {
+                if let Some(t) = ids.get(r) {
+                    for b in t.bytes().chain(std::iter::once(b' ')) {
+                        h = (h ^ b as u64).wrapping_mul(0x100000001b3);
+                    }
+                }
+                if seen.insert(h) {
+                    tot.add_row(x, y);
+                }
+            }
         }
         println!("{}", tot.line(&format!("POOLED cases={}", names.len())));
     } else {
