@@ -202,6 +202,26 @@ BUILD_ONLY=1 bash scripts/verify/kaon3-parity.sh      # 打印 SNAP=<id>
   辅助：整跑逐层 `L{l}` 相对误差自 L0 起每层 <= 1e-3 且不逐层放大。
 - **上限**：15 轮；每轮一个假设，结果进迭代记录「子 loop D」。**不达成不停**（用户 2026-10-22/23）。
 
+## 子 loop D 进展（进行中，2026-10-23）
+
+已确认的事实（细节见 `test/kaon3/2026-10-22/kaon3-parity.md` D-1..D-8）：
+
+| 项 | 结论 |
+|---|---|
+| BI 与 prefill attention | `use_3d` 在 `max_seqlen_q>1` 时为 False → BI 不切 attention kernel |
+| KV/Q fp8 口径 | vLLM 与我们**完全一致**（A/B 判定：KV8=1 vs vLLM 6.7e-7，KV8=0 为 2.3e-2）|
+| Triton fp8 store 舍入 | 探针实测 = **RNE**，与 torch 同 |
+| 放大器 | 1 ulp 输入差经 fp8 KV 往返在**单层内放大约 1.5e4 倍**，双方共有 |
+| 逐层残差流（整跑） | L-1=0、L0 4.9e-8、L1 1.3e-6、**L2 2.1e-2**、L29 2.9e-1 |
+| L0 逐子模块（整跑） | input_norm/attn_out/router_in/router_logits/pre_ff2_norm/**moe_y 全 0**；`q_norm` 12/98304、`dense` 31/67584 的 1-ulp |
+
+**结论**：因为放大链是双方共有的，唯一解法是**每层输入逐位相同**（vLLM 跨进程 1.51% 就是靠这个）。
+当前 L0 已接近逐位，残余是零星 1-ulp。
+
+**下一步（续）**：两侧已加 norm **之前**的原始输出 dump（我们 `q_proj_raw`、vLLM `qkv_raw`）。
+若 `qkv_raw` 同样有那 12 处差 → GEMM 累加顺序；若逐位一致而 `q_norm` 有差 → 我们的 head_rmsnorm。
+本轮 vLLM 侧 `qkv_raw` hook 未生效（`self_attn` 上可能没有 `qkv_proj` 属性名），需先确认属性名。
+
 ## 上限
 
 - 最多迭代 30 轮（用户要求不达标不停；上限只作为"方法错了"的报警）。
