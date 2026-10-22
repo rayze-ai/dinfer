@@ -15,3 +15,10 @@
 | 标定 | vLLM 关 BI vs 开 BI（同镜像私有副本）：raw9 3/6、chat_en 5/23、chat_zh 2/20、long_zh 116/1024（11.3%），共有 token Δ 0.59–1.79 | | | | | **原判据连 vLLM 自己都过不了** → 判据改为相对 vLLM 自身噪声的统计量 |
 | 5 | NVFP4 激活全局 scale：照抄 vLLM `nvfp4_utils.cuh`（gs=1/input_scale、块 scale e4m3(gs·amax·rcp6)、rcp.approx）；专家 gate/up 共用 max(input_scale) | | 2/6 · 0.88 | 9/23 · 2.06 | 6/20 · 1.81 | long_zh 205→277/1024（单条长序列行间强相关，统计不可靠） |
 | 测试 | `gemm_lowp_parity`：FP8 静态 scale 3 档 + NVFP4 gs∈{1,25,900}、K∈{2816(BK128),704(BK64)} 全过（相对误差 ≤3.9e-3）；首跑失败是用例没把 1/gs 折进 global | | | | | 交接区第 ② 步（NVFP4 对拍）完成 |
+
+### 新判据（相对 vLLM 自身噪声）下的轮次
+
+| 轮 | 改动 | 短 prompt 汇总（翻转率 / 共有 Δ / ΔNLL） | long_zh ΔNLL（下限 −0.08） | 结论 |
+|---|---|---|---|---|
+| 5' | 第 5 轮状态，新判据首测（下限：13.95% / 1.19 / −0.25） | 32.72% / 1.82 / −0.41 | **+0.72**（分段：开头 +1.08 → 1024 后 +0.32） | 不是滑窗；全位置系统性差异，开头最大 |
+| 6 | **Q 也做 e4m3 往返**（vLLM Triton `supports_quant_query_input` + FP8 KV → `query_quant`，q_scale = k_scale = 1.0，饱和 448） | （快测 5 例）| **+0.097** ✅ | 大幅改善；下一步 P→e4m3（Triton `tl.dot(P.to(V.dtype), V)`，V 为 fp8） |

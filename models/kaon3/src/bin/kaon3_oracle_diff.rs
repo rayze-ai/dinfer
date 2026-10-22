@@ -121,6 +121,13 @@ fn main() -> Result<()> {
             // 长序列行间强相关（前面一偏后面跟着偏），等效独立样本很少：单独打印，不进汇总
             if ra.len() > 512 {
                 println!("{}", one.line(&format!("LONG {n:<10}")));
+                // 按位置分段的 NLL：看差距是否集中在滑窗生效之后（> sliding_window）
+                for s in (0..ra.len()).step_by(256) {
+                    let e = (s + 256).min(ra.len());
+                    let mut seg = Acc::default();
+                    seg.add(&ra[s..e], &rb[s..e]);
+                    println!("  SEG {s:>5}..{e:<5} {}", seg.line(""));
+                }
                 continue;
             }
             println!("{}", one.line(&format!("CASE {n:<10}")));

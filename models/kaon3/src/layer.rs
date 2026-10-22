@@ -544,6 +544,8 @@ impl Gemma4Layer {
         if cfg.kv_fp8 {
             k::ops::fp8_e4m3_roundtrip_bf16_n(stream, &mut kk.data, tokens * nkv * d, 1.0)?;
             k::ops::fp8_e4m3_roundtrip_bf16_n(stream, &mut v.data, tokens * nkv * d, 1.0)?;
+            // vLLM Triton 后端在 FP8 KV 下也把 query 量化成 e4m3（`Attention.query_quant`，q_scale 缺省 = k_scale = 1.0）
+            k::ops::fp8_e4m3_roundtrip_bf16_n(stream, &mut q.data, tokens * heads * d, 1.0)?;
         }
 
         // ---- 4b. 写本层 paged KV（每层 head_dim / nkv 不同）----
