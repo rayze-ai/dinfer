@@ -172,10 +172,15 @@ impl KaonConfig {
     /// 叠加 `hf_quant_config.json`（modelopt）：目前只取 `quantization.kv_cache_quant_algo`。
     pub fn with_quant_json(mut self, json: &str) -> Result<Self> {
         let v: serde_json::Value = serde_json::from_str(json)?;
-        self.kv_fp8 = match v["quantization"]["kv_cache_quant_algo"].as_str() {
+        // A/B（子 loop D）：`KV_FP8=0` 关掉 KV 的 e4m3 往返（仅归因用），`=1` 强制开；不设则按 checkpoint。
+        self.kv_fp8 = match std::env::var("KV_FP8").ok().as_deref() {
+            Some("0") => false,
+            Some("1") => true,
+            _ => match v["quantization"]["kv_cache_quant_algo"].as_str() {
             None => false,
             Some("FP8") => true,
             Some(other) => anyhow::bail!("不支持的 kv_cache_quant_algo {other}"),
+            }
         };
         Ok(self)
     }

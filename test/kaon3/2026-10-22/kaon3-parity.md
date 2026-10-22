@@ -2036,3 +2036,22 @@ L0/L1 逐位级（1e-8/1e-6）说明 embed、L0、L1 三层已经与 vLLM 完全
 1 ulp 的输入足以让个别元素跨过量化边界，取值跳一整档（~6%），再经 softmax/专家混合扩散到全 token。
 
 **待确认**：放大器具体是 KV 往返还是激活量化 → 对比 `in` / `in0` 两跑的逐子模块（`attn_out` 处跳 = KV；`router/moe_y` 处跳 = MoE）。
+
+### D-5：放大器 = **attention 的 FP8 KV 往返**（不是激活量化）
+
+把同一份输入（`d6_in.bin` = 参照 L1 + 真实差）灌进 L2，只在 `KV_FP8` 上 A/B：
+
+| 张量 | KV8 开 vs 关 |
+|---|---|
+| q_norm / k_norm | **0（逐位）** |
+| **attn_out** | **2.29e-2** |
+| o_proj | 2.29e-2 |
+| router_logits | 8.2e-3 |
+| ff2 | 3.2e-2 |
+| iso_L2 | 8.3e-3 |
+
+说明放大的那一刀落在 **K/V 写 cache 的 e4m3 往返**：我们 `layer.rs:597` `kv_fp8` 时对 k/v 做
+`fp8_e4m3_roundtrip_bf16(scale=1.0)`，e4m3 只有 3 位尾数 → 1e-7 级输入差可让个别元素跨档（~6% 跳变）→ attention 全域扩散。
+
+**待核**：vLLM 在 TRITON_ATTN + fp8 KV 时，K/V 到底在何处、以什么 scale 量化；若它并不在 prefill 时量化（或量化点不同），
+这就是我们要对齐的口径。下一步读 `triton_attn` / `triton_attention_helpers` 的 kv 量化路径。
