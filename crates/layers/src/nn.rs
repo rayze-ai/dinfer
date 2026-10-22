@@ -131,6 +131,20 @@ impl Rope {
     /// `head_dim * partial_rotary_factor` = 128 维，而频率分母是 **head_dim** = 512
     /// （vLLM `rotary_embedding/gemma4_rope.py`，HF `_compute_proportional_rope_parameters`）。
     /// `denom == rope_dim` 时与 `new` 完全等价。
+    /// 同 [`Rope::with_denom`]，但表项舍入到 bf16 再以 f32 存：复刻 vLLM `RotaryEmbedding` 的
+    /// `cos_sin_cache.to(model dtype)`（旋转仍在 f32 里算、只在输出舍入一次，与 vLLM rotary kernel 同）。
+    /// 后面接 FP8 量化（如 Q/K 的 e4m3）时，cos/sin 差 1 个 bf16 ulp 就足以改变约 6% 元素的量化结果。
+    pub fn with_denom_bf16_table(
+        stream: &Stream,
+        rope_dim: usize,
+        denom: usize,
+        max_pos: usize,
+        theta: f64,
+        style: RopeStyle,
+    ) -> Result<Self> {
+        Self::build(stream, rope_dim, denom, max_pos, theta, style, true)
+    }
+
     pub fn with_denom(
         stream: &Stream,
         rope_dim: usize,
@@ -138,6 +152,18 @@ impl Rope {
         max_pos: usize,
         theta: f64,
         style: RopeStyle,
+    ) -> Result<Self> {
+        Self::build(stream, rope_dim, denom, max_pos, theta, style, false)
+    }
+
+    fn build(
+        stream: &Stream,
+        rope_dim: usize,
+        denom: usize,
+        max_pos: usize,
+        theta: f64,
+        style: RopeStyle,
+        round_bf16: bool,
     ) -> Result<Self> {
         ensure!(rope_dim % 2 == 0, "rope_dim must be even");
         ensure!(denom >= rope_dim && denom % 2 == 0, "rope denom {denom} 必须 >= rope_dim 且为偶数");
@@ -159,8 +185,10 @@ impl Rope {
                         let p = (p0 + r) as f64;
                         for i in 0..half {
                             let f = p * inv_freq[i];
-                            row[i] = f.cos() as f32;
-                            row[half + i] = f.sin() as f32;
+                            let (c, s) = (f.cos() as f32, f.sin() as f32);
+                            let rb = |x: f32| if round_bf16 { half::bf16::from_f32(x).to_f32() } else { x };
+                            row[i] = rb(c);
+                            row[half + i] = rb(s);
                         }
                     }
                 });

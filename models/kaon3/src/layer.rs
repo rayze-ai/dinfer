@@ -296,7 +296,8 @@ pub struct Ropes {
 impl Ropes {
     pub fn new(stream: &Stream, cfg: &KaonConfig) -> Result<Self> {
         Ok(Self {
-            sliding: Rope::with_denom(
+            // 表项舍入到 bf16：vLLM 的 cos_sin_cache 存成模型 dtype（Q/K 之后还要 e4m3，差 1 ulp 也会放大）
+            sliding: Rope::with_denom_bf16_table(
                 stream,
                 cfg.rope_sliding.rope_dim,
                 cfg.rope_sliding.denom,
@@ -305,7 +306,7 @@ impl Ropes {
                 RopeStyle::Neox,
             )?
             .with_span(cfg.rope_sliding.span)?,
-            full: Rope::with_denom(
+            full: Rope::with_denom_bf16_table(
                 stream,
                 cfg.rope_full.rope_dim,
                 cfg.rope_full.denom,

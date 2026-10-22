@@ -22,3 +22,4 @@
 |---|---|---|---|---|
 | 5' | 第 5 轮状态，新判据首测（下限：13.95% / 1.19 / −0.25） | 32.72% / 1.82 / −0.41 | **+0.72**（分段：开头 +1.08 → 1024 后 +0.32） | 不是滑窗；全位置系统性差异，开头最大 |
 | 6 | **Q 也做 e4m3 往返**（vLLM Triton `supports_quant_query_input` + FP8 KV → `query_quant`，q_scale = k_scale = 1.0，饱和 448） | （快测 5 例）| **+0.097** ✅ | 大幅改善；下一步 P→e4m3（Triton `tl.dot(P.to(V.dtype), V)`，V 为 fp8） |
+| 7 | **P 以 e4m3 参与 PV**（Triton `tl.dot(P.to(V.dtype), V)`，V 为 fp8；行和仍 fp32），进程级开关 `gqa_set_p_fp8` | 25.25% / 1.80 / −0.86 | **+0.048 ✅** | 长序列 / 单 token / kernel 三项过；短 prompt 翻转与共有 Δ 仍超；短 prompt ΔNLL 由模板 / 用户消息里 lp≈−20 的离群 token 主导，见下一步 |

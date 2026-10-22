@@ -6,13 +6,14 @@
 //!   kaon3_probe <model_dir> --forward --oracle x.json <ids...> # 与 oracle 比对，PASS 退出 0、FAIL 退出 3
 //!   kaon3_probe <model_dir> --forward --dump-layer 5 <ids...>
 //!   kaon3_probe <model_dir> --forward --layers 6 --oracle L6.json <ids...>   # 截层二分（oracle 用同样截层的 vLLM）
+//!   kaon3_probe <model_dir> --batch test/kaon3/oracle --out test/kaon3/ours   # 加载一次跑完目录里全部 <name>.ids
 //!
 //! oracle = 基线 vLLM `/v1/completions` 的原始响应（`prompt_logprobs:5` + `logprobs:5` +
 //! `return_tokens_as_token_ids`，由 `scripts/dev/kaon3_oracle.sh` 抓取）。第 r 行 logits 对应
 //! `prompt_logprobs[r+1]`（预测第 r+1 个 prompt token），最后一行对应 `logprobs.top_logprobs[0]`。
 
 use anyhow::{bail, ensure, Context, Result};
-use dinfer_kernels::{Device, Gemm};
+use dinfer_kernels::{Device, Gemm, Stream};
 use dinfer_kaon3::config::KaonConfig;
 use dinfer_kaon3::layer::{ActBuf, LayerScratch};
 use dinfer_kaon3::model::{check_weights, KaonModel, StepMeta};
@@ -37,7 +38,7 @@ fn main() -> Result<()> {
     if args.iter().any(|a| a == "--scales") {
         return scales_probe(&src);
     }
-    if !args.iter().any(|a| a == "--forward") {
+    if !args.iter().any(|a| a == "--forward" || a == "--batch") {
         return format_probe(&src);
     }
     args.retain(|a| a != "--forward");
@@ -53,9 +54,38 @@ fn main() -> Result<()> {
     let dump = take("--dump-oracle");
     let hidden_out = take("--hidden-out");
     let hidden_ref = take("--hidden-ref");
+    // --batch <目录> --out <目录>：加载一次，把目录里每个 <name>.ids 前向一遍、写 <out>/<name>.json（vLLM 同格式）。
+    // 单用例模式每次都要 ~30 s 的权重加载 + RoPE 表构建，verify 30 个用例要 17 分钟；批量模式只付一次。
+    if let Some(bdir) = take("--batch") {
+        let out = take("--out").context("--batch 需要 --out <目录>")?;
+        std::fs::create_dir_all(&out)?;
+        let mut names: Vec<String> = std::fs::read_dir(&bdir)?
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter_map(|f| f.strip_suffix(".ids").map(str::to_string))
+            .collect();
+        names.sort();
+        // --shard i/n：只跑排序后下标 ≡ i (mod n) 的用例（多卡并行 verify 用）
+        if let Some(s) = take("--shard") {
+            let (i, n) = s.split_once('/').context("--shard 格式 i/n")?;
+            let (i, n): (usize, usize) = (i.parse()?, n.parse()?);
+            names = names.into_iter().enumerate().filter(|(k, _)| k % n == i).map(|(_, v)| v).collect();
+        }
+        let mut ctx = setup(&dir, &src, layers)?;
+        for n in &names {
+            let ids: Vec<i32> = std::fs::read_to_string(format!("{bdir}/{n}.ids"))?
+                .split_whitespace()
+                .map(|s| s.parse::<i32>())
+                .collect::<std::result::Result<_, _>>()?;
+            let t = std::time::Instant::now();
+            forward(&mut ctx, &ids, None, None, Some(&format!("{out}/{n}.json")), (None, None))?;
+            println!("BATCH {n}: T={} {:.2} s", ids.len(), t.elapsed().as_secs_f64());
+        }
+        return Ok(());
+    }
     let ids: Vec<i32> = args.iter().map(|s| s.parse::<i32>().expect("token id")).collect();
     ensure!(!ids.is_empty(), "--forward 需要至少一个 token id");
-    let pass = forward(&dir, &src, &ids, dump_layer, oracle.as_deref(), layers, dump.as_deref(), (hidden_out.as_deref(), hidden_ref.as_deref()))?;
+    let mut ctx = setup(&dir, &src, layers)?;
+    let pass = forward(&mut ctx, &ids, dump_layer, oracle.as_deref(), dump.as_deref(), (hidden_out.as_deref(), hidden_ref.as_deref()))?;
     if !pass {
         std::process::exit(3);
     }
@@ -110,16 +140,16 @@ fn format_probe(src: &WeightSource) -> Result<()> {
     Ok(())
 }
 
-fn forward(
-    dir: &str,
-    src: &WeightSource,
-    ids: &[i32],
-    dump_layer: Option<usize>,
-    oracle: Option<&str>,
-    layers: Option<usize>,
-    dump: Option<&str>,
-    hidden_io: (Option<&str>, Option<&str>),
-) -> Result<bool> {
+/// 一次加载、多次前向的上下文（批量模式按用例复用）。
+struct Ctx {
+    _dev: Device,
+    stream: Stream,
+    gemm: Gemm,
+    cfg: KaonConfig,
+    model: KaonModel,
+}
+
+fn setup(dir: &str, src: &WeightSource, layers: Option<usize>) -> Result<Ctx> {
     let cfg_path = Path::new(dir).join("config.json");
     let cfg = KaonConfig::from_json(&std::fs::read_to_string(&cfg_path)?)?;
     let q_path = Path::new(dir).join("hf_quant_config.json");
@@ -133,8 +163,6 @@ fn forward(
     let dev = Device::new(0)?;
     let stream = dev.new_stream()?;
     let gemm = Gemm::new(&stream)?;
-    let ops = DefaultOps;
-    let tokens = ids.len();
 
     let t0 = std::time::Instant::now();
     let mut model = KaonModel::load(&stream, src, cfg.clone())?;
@@ -147,7 +175,21 @@ fn forward(
     }
     stream.synchronize()?;
     println!("权重加载 {:.1} s", t0.elapsed().as_secs_f64());
+    Ok(Ctx { _dev: dev, stream, gemm, cfg, model })
+}
 
+fn forward(
+    ctx: &mut Ctx,
+    ids: &[i32],
+    dump_layer: Option<usize>,
+    oracle: Option<&str>,
+    dump: Option<&str>,
+    hidden_io: (Option<&str>, Option<&str>),
+) -> Result<bool> {
+    let (stream, gemm, cfg) = (&ctx.stream, &ctx.gemm, ctx.cfg.clone());
+    let model = &mut ctx.model;
+    let ops = DefaultOps;
+    let tokens = ids.len();
     let num_blocks = (tokens + BLOCK_SIZE - 1) / BLOCK_SIZE + 1;
     model.alloc_kv(&stream, num_blocks, BLOCK_SIZE)?;
 

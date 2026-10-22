@@ -62,7 +62,8 @@ impl KaonModel {
         let _ = embed_name;
         let ropes = Ropes::new(stream, &cfg)?;
         Ok(Self {
-            embed_scale: (cfg.hidden as f32).sqrt(),
+            // vLLM：normalizer 以模型 dtype 存（"avoid mixed-precision drift"），sqrt(2816)=53.07 → bf16 53.0
+            embed_scale: half::bf16::from_f32((cfg.hidden as f32).sqrt()).to_f32(),
             cfg,
             embed,
             layers,
