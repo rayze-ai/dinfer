@@ -1776,3 +1776,17 @@ top1 不同的 4 处（6、7、11、16）都在**用户消息内部**——模�
 - **不能**据此把 verify 的两项 FLOOR 判据降级（第 14 轮因果实验也不支持）。
 
 ## 子 loop B：vLLM router 口径归因
+
+### B-1：读镜像内 vLLM 0.28 的 router 口径 —— **5090 上 router 输出落 bf16**
+
+`gemma4.py:258 Gemma4Router`：`self.proj = GateLinear(..., out_dtype=torch.float32)`，注释写"bf16 W/A → fp32 output"。
+但 `fused_moe/router/gate_linear.py` 的分派：
+
+- `can_use_specialized_kernels = is_cuda and (is_hopper or is_blackwell)`；`is_blackwell = is_device_capability_family(100)`。
+  **5090 是 (12, 0)** → 两者皆假 → `allow_specialized_router_gemm=False`。
+- 于是 ll_bf16（还要求 M≤16）/ dsv3 / fp32 / bf16x3 / cuBLAS `torch.mm(..., out_dtype=fp32)` 五档全关，
+  落到第 6 档：`super().forward(x)` = `F.linear`（bf16 输出）→ `output.to(self.out_dtype)`。
+  **fp32 只是事后 cast，精度在 bf16 输出时已丢**——与实测 vLLM 偏差 ≈ bf16 步长吻合。
+
+含义：第 14 轮 `ROUTER_BF16=1`（f32 累加 → 舍入 bf16）**原理上就是 vLLM 在 5090 上的口径**。
+下一步按停止条件 2 验证：同输入（L11 隔离）下开关后 `router_logits` 是否与 vLLM 逐位一致。
