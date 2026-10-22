@@ -86,6 +86,7 @@ fn gqa_window_large_scores_parity() {
                     0,
                     cfg,
                     window as i32,
+                    0, // p_fp8：本测试对 CPU bf16 参照，P 不量化
                     st.raw() as _,
                 )
             };
