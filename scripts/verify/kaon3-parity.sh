@@ -20,8 +20,8 @@ build=$(timeout 1200 $R ctr 'cargo build --release -p dinfer-kaon3 --bin kaon3_p
 echo "$build" | grep -q Finished || { echo "❌ 编译失败"; echo "$build" | cut -c1-200; exit 1; }
 for c in "${cases[@]}"; do
   out=$(timeout 900 $R ctr "M=\$(ls -d /hf_data/hub/models--kaon-release--Kaon-V3-nvpf4-mixed/snapshots/*/ | head -1); \
-    ${PROBE_ENV:-} ./target/release/kaon3_probe \$M --forward ${PROBE_ARGS:-} --oracle ${ORACLE_DIR:-test/kaon3/oracle}/$c.json \$(cat ${ORACLE_DIR:-test/kaon3/oracle}/$c.ids) 2>&1 \
-    | grep -E 'PARITY|^row|^worst|一次前向|rror|panicked' | head -24")
+    ${PROBE_ENV:-} ./target/release/kaon3_probe \$M --forward ${PROBE_ARGS:-} --oracle ${ORACLE_DIR:-test/kaon3/oracle}/$c.json \$(cat ${ORACLE_DIR:-test/kaon3/oracle}/$c.ids) > /tmp/probe_$c.txt 2>&1; \
+    grep -E '^row' /tmp/probe_$c.txt | head -${ROWS:-8}; grep -E '^worst|一次前向|rror|panicked|PARITY' /tmp/probe_$c.txt | head -12")
   echo "$out" | sed "s/^/   [$c] /" | cut -c1-230
   if echo "$out" | grep -q 'PARITY PASS'; then echo "✅ $c"; PASS=$((PASS+1)); else echo "❌ $c"; FAIL=$((FAIL+1)); fi
 done

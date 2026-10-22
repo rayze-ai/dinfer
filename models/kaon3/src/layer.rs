@@ -22,7 +22,7 @@
 
 use crate::config::KaonConfig;
 use crate::weights::{self, QWeight};
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use dinfer_kernels::{self as k, bf16, Gemm, Stream};
 use dinfer_layers::{Act as _, Attention as _, Norm as _, OpSet, Rope, RopeStyle, Tensor, WeightSource};
 
@@ -31,7 +31,8 @@ pub enum QLinear {
     /// BF16 直读（router、小矩阵）。
     Bf16 { w: Tensor<bf16>, n: usize, k: usize },
     /// FP8 per-tensor e4m3。
-    Fp8 { w: dinfer_kernels::cudarc::driver::CudaSlice<u8>, scale: f32, n: usize, k: usize },
+    /// `a_scale` = 静态激活 scale（`input_scale`），`scale` = 权重 per-tensor scale（合并组已换成组内最大值）。
+    Fp8 { w: dinfer_kernels::cudarc::driver::CudaSlice<u8>, scale: f32, a_scale: f32, n: usize, k: usize },
     /// NVFP4：packed `[n, k/2]` + block scale `[n, k/16]` + 全局 scale。
     NvFp4 {
         packed: dinfer_kernels::cudarc::driver::CudaSlice<u8>,
@@ -57,13 +58,18 @@ impl QLinear {
                 };
                 Self::Bf16 { w: Tensor { data, shape: vec![n, k] }, n, k }
             }
-            QWeight::Fp8 { w, scale, n, k } => Self::Fp8 { w, scale, n, k },
+            QWeight::Fp8 { w, scale, a_scale, n, k } => Self::Fp8 { w, scale, a_scale, n, k },
             QWeight::NvFp4 { packed, scale, global, n, k } => Self::NvFp4 { packed, scale, global, n, k },
         }
     }
 
     pub fn load(stream: &Stream, src: &WeightSource, name: &str) -> Result<Self> {
         Ok(Self::from_qw(weights::load_linear(src, stream, name)?))
+    }
+
+    /// 一组会被 vLLM 合并成一个线性层的权重（q/k/v、gate/up），按 `weights::load_fp8_group` 的口径重量化。
+    pub fn load_group(stream: &Stream, src: &WeightSource, names: &[String]) -> Result<Vec<Self>> {
+        Ok(weights::load_fp8_group(src, stream, names)?.into_iter().map(Self::from_qw).collect())
     }
 
     /// 取 BF16 权重（router 这类必须用 bf16 路由算子的场合）；其它格式报错。
@@ -94,7 +100,9 @@ impl QLinear {
         ensure!(out.numel() >= tokens * n, "QLinear: out 太小");
         match self {
             Self::Bf16 { w, .. } => gemm.forward_bf16(&x.data, &w.data, None, &mut out.data, tokens, n, kk),
-            Self::Fp8 { w, scale, .. } => gemm.forward_fp8(&x.data, w, *scale, &mut out.data, tokens, n, kk),
+            Self::Fp8 { w, scale, a_scale, .. } => {
+                gemm.forward_fp8(&x.data, *a_scale, w, *scale, &mut out.data, tokens, n, kk)
+            }
             Self::NvFp4 { packed, scale, global, .. } => {
                 gemm.forward_nvfp4(&x.data, packed, scale, *global, &mut out.data, tokens, n, kk)
             }
@@ -178,12 +186,23 @@ impl Gemma4Layer {
         let (head_dim, nkv, _rope) = cfg.attn_shape(l);
         let k_eq_v = cfg.k_eq_v_at(l);
         let attn = format!("{p}.self_attn");
-        let q_proj = QLinear::load(stream, src, &format!("{attn}.q_proj.weight"))?;
-        let k_proj = QLinear::load(stream, src, &format!("{attn}.k_proj.weight"))?;
+        // vLLM 的 qkv_proj 是合并层：k_eq_v 时 K 权重填 K、V 两个槽，组 scale 只由 q/k 决定
+        let mut qk = QLinear::load_group(
+            stream,
+            src,
+            &if k_eq_v {
+                vec![format!("{attn}.q_proj.weight"), format!("{attn}.k_proj.weight")]
+            } else {
+                vec![format!("{attn}.q_proj.weight"), format!("{attn}.k_proj.weight"), format!("{attn}.v_proj.weight")]
+            },
+        )?
+        .into_iter();
+        let q_proj = qk.next().context("q_proj")?;
+        let k_proj = qk.next().context("k_proj")?;
         let v_proj = if k_eq_v {
             None
         } else {
-            Some(QLinear::load(stream, src, &format!("{attn}.v_proj.weight"))?)
+            Some(qk.next().context("v_proj")?)
         };
         let o_proj = QLinear::load(stream, src, &format!("{attn}.o_proj.weight"))?;
         ensure!(q_proj.shape() == (cfg.num_heads * head_dim, cfg.hidden), "第 {l} 层 q_proj {:?}", q_proj.shape());
@@ -191,6 +210,13 @@ impl Gemma4Layer {
         ensure!(o_proj.shape() == (cfg.hidden, cfg.num_heads * head_dim), "第 {l} 层 o_proj {:?}", o_proj.shape());
 
         let dense = format!("{p}.mlp");
+        // gate_up_proj 同为合并层
+        let mut gate_up = QLinear::load_group(
+            stream,
+            src,
+            &[format!("{dense}.gate_proj.weight"), format!("{dense}.up_proj.weight")],
+        )?
+        .into_iter();
         let router_p = format!("{p}.router");
         // per_expert_scale 每层一份 [E]；读一次，逐专家把该专家的系数折进 down 的全局 scale。
         let pes = weights::per_expert_scales(src, &p)?;
@@ -224,8 +250,8 @@ impl Gemma4Layer {
             o_proj,
             q_norm: load_vec(stream, src, &format!("{attn}.q_norm.weight"))?,
             k_norm: load_vec(stream, src, &format!("{attn}.k_norm.weight"))?,
-            dense_gate: QLinear::load(stream, src, &format!("{dense}.gate_proj.weight"))?,
-            dense_up: QLinear::load(stream, src, &format!("{dense}.up_proj.weight"))?,
+            dense_gate: gate_up.next().context("gate_proj")?,
+            dense_up: gate_up.next().context("up_proj")?,
             dense_down: QLinear::load(stream, src, &format!("{dense}.down_proj.weight"))?,
             router: Router {
                 proj: QLinear::load(stream, src, &format!("{router_p}.proj.weight"))?,

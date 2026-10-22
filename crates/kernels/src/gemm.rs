@@ -237,13 +237,15 @@ impl Gemm {
     }
 
     /// FP8 per-tensor GEMM（sm_120 专用，`cuda/gemm_fp8_sm120.cu`）：
-    /// `out[m,n] = (a[m,k] · w[n,k]^T) * w_scale`，`a` 是 bf16 激活（载入时转 e4m3），`w` 是 [n,k] 的 e4m3 字节。
+    /// `out[m,n] = (e4m3(a[m,k] / a_scale) · w[n,k]^T) * (a_scale * w_scale)`：`a` 是 bf16 激活，`a_scale` 是静态
+    /// per-tensor 激活 scale（checkpoint 的 `input_scale`，没有就传 1.0），`w` 是 [n,k] 的 e4m3 字节。
     ///
     /// 编译时未编入 sm_120 实现（CUDA_ARCHS 无 120）时返回错误，调用方自行回退。
     #[allow(clippy::too_many_arguments)]
     pub fn forward_fp8(
         &self,
         a: &CudaSlice<bf16>,
+        a_scale: f32,
         w: &CudaSlice<u8>,
         w_scale: f32,
         out: &mut CudaSlice<bf16>,
@@ -260,8 +262,9 @@ impl Gemm {
         ensure!(k > 0, "gemm fp8: k == 0");
         ensure!(m <= i32::MAX as usize && n <= i32::MAX as usize && k <= i32::MAX as usize, "gemm fp8: 维度 > i32");
         let rc = unsafe {
-            crate::ffi::gemm_fp8_bf16(
+            crate::ffi::gemm_fp8_static_bf16(
                 self.stream.ptr(a) as *const c_void,
+                a_scale,
                 self.stream.ptr(w) as *const c_void,
                 w_scale,
                 self.stream.ptr_mut(out) as *mut c_void,

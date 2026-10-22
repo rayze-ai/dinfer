@@ -1214,8 +1214,16 @@ pub unsafe fn gqa_fa_umma_launch(_paged: i32, _max_q: i32, _heads: i32, _num_req
 extern "C" {
     pub fn gemm_fp8_bf16(a: *const c_void, w: *const c_void, w_scale: f32, out: *mut c_void, m: i64, n: i64,
                          k: i64, stream: cudaStream_t) -> i32;
+    pub fn gemm_fp8_static_bf16(a: *const c_void, a_scale: f32, w: *const c_void, w_scale: f32, out: *mut c_void,
+                                m: i64, n: i64, k: i64, stream: cudaStream_t) -> i32;
     pub fn gemm_nvfp4_bf16(a: *const c_void, packed: *const c_void, scale: *const c_void, global: f32,
                            out: *mut c_void, m: i64, n: i64, k: i64, stream: cudaStream_t) -> i32;
+}
+#[cfg(not(all(not(no_nvcc_stub), sm120)))]
+#[allow(clippy::too_many_arguments, clippy::missing_safety_doc)]
+pub unsafe fn gemm_fp8_static_bf16(_a: *const c_void, _as: f32, _w: *const c_void, _ws: f32, _o: *mut c_void, _m: i64,
+                                   _n: i64, _k: i64, _s: cudaStream_t) -> i32 {
+    CUDA_ERROR_NOT_SUPPORTED
 }
 #[cfg(not(all(not(no_nvcc_stub), sm120)))]
 #[allow(clippy::too_many_arguments, clippy::missing_safety_doc)]

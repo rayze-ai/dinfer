@@ -28,8 +28,8 @@ pub const NVFP4_BLOCK: usize = 16;
 pub enum QWeight {
     /// NVFP4：packed `[N, K/2]`、block scale `[N, K/16]`、全局 scale。
     NvFp4 { packed: CudaSlice<u8>, scale: CudaSlice<u8>, global: f32, n: usize, k: usize },
-    /// FP8 e4m3 per-tensor：`weight [N,K]` + 标量 scale。
-    Fp8 { w: CudaSlice<u8>, scale: f32, n: usize, k: usize },
+    /// FP8 e4m3 per-tensor：`weight [N,K]` + 标量 scale；`a_scale` = 静态激活 scale（`input_scale`，没有为 1.0）。
+    Fp8 { w: CudaSlice<u8>, scale: f32, a_scale: f32, n: usize, k: usize },
     /// BF16。
     Bf16 { w: CudaSlice<u16>, n: usize, k: usize },
 }
@@ -107,7 +107,7 @@ pub fn load_linear(src: &WeightSource, stream: &Stream, name: &str) -> Result<QW
             let w = read_u8(src, name, n * k)?;
             let scale = read_f32_scalar(src, &format!("{name}_scale"))
                 .with_context(|| format!("{name}: FP8 per-tensor 缺标量 weight_scale"))?;
-            Ok(QWeight::Fp8 { w: h2d_u8(stream, w)?, scale, n, k })
+            Ok(QWeight::Fp8 { w: h2d_u8(stream, w)?, scale, a_scale: input_scale(src, name), n, k })
         }
         "BF16" => {
             let (_, b) = src.bytes(name)?;
@@ -192,4 +192,109 @@ impl RouterNames {
 
 pub fn layer_prefix(l: usize) -> String {
     format!("{TEXT_PREFIX}layers.{l}")
+}
+
+/// 静态激活 scale（`<层>.input_scale`）；没有（BF16 / 动态量化）时 1.0。
+fn input_scale(src: &WeightSource, name: &str) -> f32 {
+    let base = name.strip_suffix(".weight").unwrap_or(name);
+    read_f32_scalar(src, &format!("{base}.input_scale")).unwrap_or(1.0)
+}
+
+/// vLLM 把 q/k/v、gate/up 合并成一个线性层（`QKVParallelLinear` / `MergedColumnParallelLinear`）。FP8 per-tensor
+/// 时各分片 scale 不同，`requantize_with_max_scale` 把每个分片按自己的 scale 反量化（fp16）再用组内最大 scale
+/// 重新量化成 e4m3，之后整组共用 max weight scale 与 max input scale。这里逐位复现，保证与基线同一份权重。
+/// 返回顺序同 `names`；任何一个不是 FP8 per-tensor 就退回逐个 `load_linear`（不重量化）。
+pub fn load_fp8_group(src: &WeightSource, stream: &Stream, names: &[String]) -> Result<Vec<QWeight>> {
+    let all_fp8 = names.iter().all(|nm| {
+        src.info(nm).is_some_and(|i| i.dtype == "F8_E4M3" && i.shape.len() == 2)
+            && src.info(&format!("{nm}_scale")).is_some_and(|i| i.shape.iter().product::<usize>() <= 1)
+    });
+    if !all_fp8 {
+        return names.iter().map(|nm| load_linear(src, stream, nm)).collect();
+    }
+    let mut parts = Vec::with_capacity(names.len());
+    for nm in names {
+        let shape = src.info(nm).context("weight info")?.shape.clone();
+        let (n, k) = (shape[0], shape[1]);
+        let w = read_u8(src, nm, n * k)?.to_vec();
+        let s = read_f32_scalar(src, &format!("{nm}_scale"))?;
+        parts.push((w, s, input_scale(src, nm), n, k));
+    }
+    let smax = parts.iter().map(|p| p.1).fold(f32::MIN, f32::max);
+    let amax = parts.iter().map(|p| p.2).fold(f32::MIN, f32::max);
+    let inv = 1.0 / smax;
+    parts
+        .into_iter()
+        .map(|(mut w, s, _, n, k)| {
+            if s != smax {
+                // per_tensor_dequantize：fp8 → fp16 再乘 0 维 fp32 scale（按 fp16 算，scale 先舍入成 fp16）；
+                // scaled_fp8_quant：x · (1/max_scale) 后就近偶数、饱和转 e4m3。
+                let s16 = half::f16::from_f32(s).to_f32();
+                for b in w.iter_mut() {
+                    let dq = half::f16::from_f32(e4m3_to_f32(*b) * s16).to_f32();
+                    *b = f32_to_e4m3(dq * inv);
+                }
+            }
+            Ok(QWeight::Fp8 { w: h2d_u8(stream, &w)?, scale: smax, a_scale: amax, n, k })
+        })
+        .collect()
+}
+
+/// e4m3fn 字节 → f32（精确；0x7f / 0xff 是 NaN）。
+pub fn e4m3_to_f32(b: u8) -> f32 {
+    let sign = if b & 0x80 != 0 { -1.0 } else { 1.0 };
+    let e = ((b >> 3) & 0xf) as i32;
+    let m = (b & 7) as f32;
+    if e == 15 && b & 7 == 7 {
+        return f32::NAN;
+    }
+    sign * if e == 0 { m / 8.0 * 2f32.powi(-6) } else { (1.0 + m / 8.0) * 2f32.powi(e - 7) }
+}
+
+/// f32 → e4m3fn（就近偶数、饱和到 ±448），与 `__nv_cvt_float_to_fp8(x, __NV_SATFINITE, __NV_E4M3)` 一致。
+pub fn f32_to_e4m3(x: f32) -> u8 {
+    let sign = if x.is_sign_negative() { 0x80u8 } else { 0 };
+    let a = x.abs();
+    if a.is_nan() {
+        return 0x7f;
+    }
+    if a >= 448.0 {
+        return sign | 0x7e;
+    }
+    if a < 2f32.powi(-6) {
+        // 次正规 m · 2^-9；m = 8 时恰好进位成最小正规数 0x08，编码连续
+        return sign | (a * 512.0).round_ties_even() as u8;
+    }
+    let mut e = a.log2().floor() as i32;
+    let mut m = ((a / 2f32.powi(e) - 1.0) * 8.0).round_ties_even() as i32;
+    if m == 8 {
+        m = 0;
+        e += 1;
+    }
+    let eb = e + 7;
+    if eb > 15 || (eb == 15 && m > 6) {
+        return sign | 0x7e;
+    }
+    sign | ((eb as u8) << 3) | m as u8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn e4m3_codec_roundtrip_and_ties() {
+        for b in 0u8..=255 {
+            if b & 0x7f == 0x7f {
+                continue; // NaN
+            }
+            assert_eq!(f32_to_e4m3(e4m3_to_f32(b)), b, "byte {b:#04x}");
+        }
+        assert_eq!(e4m3_to_f32(0x38), 1.0);
+        assert_eq!(e4m3_to_f32(0x23), 0.171875, "次正规之上的正规数锚点");
+        assert_eq!(f32_to_e4m3(1.0625), 0x38, "1.0 与 1.125 正中间 → 偶数 1.0");
+        assert_eq!(f32_to_e4m3(1.1875), 0x3a, "1.125 与 1.25 正中间 → 偶数 1.25");
+        assert_eq!(f32_to_e4m3(1000.0), 0x7e, "饱和到 448");
+        assert_eq!(f32_to_e4m3(2f32.powi(-10)), 0x00, "最小次正规的一半 → 偶数 0");
+    }
 }

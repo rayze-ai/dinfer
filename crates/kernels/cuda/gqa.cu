@@ -160,8 +160,11 @@ __global__ void __launch_bounds__(V4_THREADS) gqa_fa_v5_kernel(
   const int last_key = hist + min(q_base + BQ - 1, q_len - 1);
   const int n_tiles = last_key / TILE + 1;
   const int warp_min_vis = hist + q_base + warp * 16;
-  const int warp_lo_vis = window > 0 ? warp_min_vis - window + 1 : INT_MIN;
-  const int tile0 = warp_lo_vis > 0 ? warp_lo_vis / TILE : 0;
+  // 滑窗：本 warp 16 行里最大的下界（最后一行的 lo）；tile 起点低于它就要做下界 mask
+  const int warp_hi_lo = window > 0 ? warp_min_vis + 15 - window + 1 : INT_MIN;
+  // tile0 必须全 block 一致：K/V tile 是 128 线程协作装的、循环里有 __syncthreads（按 warp 取起点会错位，2026-10-22）
+  const int blk_lo_vis = window > 0 ? hist + q_base - window + 1 : INT_MIN;
+  const int tile0 = blk_lo_vis > 0 ? blk_lo_vis / TILE : 0;
   const int32_t* bt = PAGED ? block_table + (int64_t)b * max_blocks : nullptr;
   // 装一个 tile 到缓冲 buf（cp.async，越界 key 零填充）：TILE key × (D/8) uint4，128 线程各 V5_ITERS 个
   auto load_tile = [&](int tile, int buf) {
@@ -215,7 +218,7 @@ __global__ void __launch_bounds__(V4_THREADS) gqa_fa_v5_kernel(
         mma16816(sacc[nt], qa[2 * kk2 + 1], bk[2], bk[3]);
       }
     }
-    const bool need_mask = (k0 + TILE - 1 > warp_min_vis);
+    const bool need_mask = (k0 + TILE - 1 > warp_min_vis) || (k0 < warp_hi_lo);
     float mx_a = -INFINITY, mx_b = -INFINITY;
 #pragma unroll
     for (int nt = 0; nt < SFRAG; ++nt) {
@@ -410,7 +413,8 @@ __global__ void __launch_bounds__(NW * 32) gqa_fa_v6_kernel(
     }
     cp_async_commit();
   };
-  load_tile(0, 0);  // 与 Q 同一 commit 组（Q 的 cp.async 在此一并 commit）
+  // 首 tile = tile0（滑窗时 > 0，全 block 一致；下面循环从 tile0 起）。与 Q 同一 commit 组
+  load_tile(window > 0 && hist + q_base - window + 1 > 0 ? (hist + q_base - window + 1) / TILE : 0, 0);
   float o[OF][4];
 #pragma unroll
   for (int i = 0; i < OF; ++i) { o[i][0] = o[i][1] = o[i][2] = o[i][3] = 0.f; }
@@ -423,8 +427,9 @@ __global__ void __launch_bounds__(NW * 32) gqa_fa_v6_kernel(
   const int n_tiles = last_key / TILE + 1;
   const int warp_min_vis = hist + q_base + warp * 16;
   const int warp_max_vis = hist + min(q_base + warp * 16 + 15, q_len - 1);
-  const int warp_lo_vis = window > 0 ? warp_min_vis - window + 1 : INT_MIN;
-  const int tile0 = warp_lo_vis > 0 ? warp_lo_vis / TILE : 0;
+  const int warp_hi_lo = window > 0 ? warp_min_vis + 15 - window + 1 : INT_MIN;
+  const int blk_lo_vis = window > 0 ? hist + q_base - window + 1 : INT_MIN;  // tile0 全 block 一致（同 v5）
+  const int tile0 = blk_lo_vis > 0 ? blk_lo_vis / TILE : 0;
   const bf16* sQw = sQ + (warp * 16) * LDS;
 #if GQA_PROFILE
   long long t_qk = 0, t_sm = 0, t_pv = 0;
@@ -461,7 +466,7 @@ __global__ void __launch_bounds__(NW * 32) gqa_fa_v6_kernel(
 #if GQA_PROFILE
       const long long _tp1 = clock64();
 #endif
-      const bool need_mask = (k0 + TILE - 1 > warp_min_vis);
+      const bool need_mask = (k0 + TILE - 1 > warp_min_vis) || (k0 < warp_hi_lo);
       float mx_a = -INFINITY, mx_b = -INFINITY;
 #pragma unroll
       for (int nt = 0; nt < SFRAG; ++nt) {
@@ -657,8 +662,9 @@ __global__ void __launch_bounds__(NW * 32, 2) gqa_fa_v7_kernel(
   };
   const int pair_min_vis = hist + q_base + pair * 16;
   const int pair_max_vis = hist + min(q_base + pair * 16 + 15, q_len - 1);
-  const int pair_lo_vis = window > 0 ? pair_min_vis - window + 1 : INT_MIN;
-  const int tile0 = pair_lo_vis > 0 ? pair_lo_vis / TILE : 0;
+  const int pair_hi_lo = window > 0 ? pair_min_vis + 15 - window + 1 : INT_MIN;
+  const int blk_lo_vis = window > 0 ? hist + q_base - window + 1 : INT_MIN;  // tile0 全 block 一致（同 v5）
+  const int tile0 = blk_lo_vis > 0 ? blk_lo_vis / TILE : 0;
   load_tile(tile0);
   float o[OF][4];
 #pragma unroll
@@ -696,7 +702,7 @@ __global__ void __launch_bounds__(NW * 32, 2) gqa_fa_v7_kernel(
           mma16816(sacc[nt], qa + 4, bk[2], bk[3]);
         }
       }
-      const bool need_mask = (k0 + TILE - 1 > pair_min_vis);
+      const bool need_mask = (k0 + TILE - 1 > pair_min_vis) || (k0 < pair_hi_lo);
       float mx_a = -INFINITY, mx_b = -INFINITY;
 #pragma unroll
       for (int nt = 0; nt < SFRAG; ++nt) {

@@ -1,4 +1,4 @@
-// FP8 per-tensor GEMM（sm_120 专用）：out[m,n] = (a[m,k] · w[n,k]^T) * w_scale
+// FP8 per-tensor GEMM（sm_120 专用）：out[m,n] = (e4m3(a[m,k] / a_scale) · w[n,k]^T) * (a_scale * w_scale)
 //   a : bf16 激活 [m,k]，载入时转 e4m3（饱和到 ±448，bf16 超出即钳）
 //   w : [n,k] 的 e4m3 字节（每字节一个 fp8），w_scale 是 per-tensor 标量
 // 结构照 models/kaon3/cuda/fp8_v2.cu（实测 292 TF/s）：block 64x128x64、8 warp = 2(M)x4(N)、
@@ -41,7 +41,7 @@ __device__ __forceinline__ void cp16(uint32_t s, const void* g, int bytes) {
 
 /// bf16 → e4m3 字节（每线程 16 个：2 个 uint4 读，1 个 uint4 写）。
 /// 对拍参考侧要逐位复现：饱和 ±448 + 就近偶数舍入，与 __nv_cvt_float_to_fp8 一致。
-__device__ __forceinline__ uint4 cvt16(const bf16* src, bool valid) {
+__device__ __forceinline__ uint4 cvt16(const bf16* src, bool valid, float inv) {
   uint32_t w[4];
   if (!valid) {
     w[0] = w[1] = w[2] = w[3] = 0u;  // e4m3 的 +0 编码是 0x00
@@ -51,7 +51,7 @@ __device__ __forceinline__ uint4 cvt16(const bf16* src, bool valid) {
       uint32_t v = 0;
 #pragma unroll
       for (int j = 0; j < 4; ++j) {
-        const float x = to_f32(src[i * 4 + j]);
+        const float x = to_f32(src[i * 4 + j]) * inv;  // 静态激活 scale（vLLM：x * (1/input_scale)）
         v |= static_cast<uint32_t>(__nv_cvt_float_to_fp8(x, __NV_SATFINITE, __NV_E4M3)) << (8 * j);
       }
       w[i] = v;
@@ -61,7 +61,8 @@ __device__ __forceinline__ uint4 cvt16(const bf16* src, bool valid) {
 }
 
 __global__ void __launch_bounds__(256) gemm_fp8_kernel(const bf16* __restrict__ A, const uint8_t* __restrict__ B,
-                                                      bf16* __restrict__ D, int M, int N, int K, float wscale) {
+                                                      bf16* __restrict__ D, int M, int N, int K, float wscale,
+                                                      float a_inv) {
   __shared__ uint8_t sA[2][BM * RS];
   __shared__ uint8_t sB[2][BN * RS];
   const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
@@ -76,7 +77,7 @@ __global__ void __launch_bounds__(256) gemm_fp8_kernel(const bf16* __restrict__ 
     const int gm = m_blk + a_row;
     const int gk = kb * BK + a_ch * 16;
     const bool ok = (gm < M) && (gk + 15 < K);
-    return cvt16(A + static_cast<size_t>(gm < M ? gm : M - 1) * K + gk, ok);
+    return cvt16(A + static_cast<size_t>(gm < M ? gm : M - 1) * K + gk, ok, a_inv);
   };
   auto store_a = [&](int st, const uint4& v) {
     *reinterpret_cast<uint4*>(&sA[st][a_row * RS + a_ch * 16]) = v;
@@ -158,8 +159,11 @@ int gemm_last_err() {
 extern "C" {
 
 // 入口：返回 cudaError_t 数值（0 = 成功），调用方非 0 即报错。
-int gemm_fp8_bf16(const void* a, const void* w, float w_scale, void* out, int64_t m, int64_t n, int64_t k,
-                  cudaStream_t stream) {
+// a_scale = 静态 per-tensor 激活 scale（checkpoint 的 input_scale）：A 先乘 1/a_scale 再饱和转 e4m3，输出乘 a_scale*w_scale。
+// 不用它（a_scale=1）时超过 448 的激活被截断、小于 2^-6 的落进次正规区；Kaon-V3 的 input_scale 实测 0.03 到 3.9。
+int gemm_fp8_static_bf16(const void* a, float a_scale, const void* w, float w_scale, void* out, int64_t m, int64_t n,
+                         int64_t k, cudaStream_t stream) {
+  if (!(a_scale > 0.f)) return static_cast<int>(cudaErrorInvalidValue);
   if (m < 0 || n < 0 || k < 0) return static_cast<int>(cudaErrorInvalidValue);
   if (m == 0 || n == 0) return 0;
   // 形状由 host 侧校验过；这里只挡会越界读的（K 方向按 ceil 分块补零，任意 K 都安全）
@@ -167,8 +171,14 @@ int gemm_fp8_bf16(const void* a, const void* w, float w_scale, void* out, int64_
   if (n > 0x7fffffff || m > 0x7fffffff || k > 0x7fffffff) return static_cast<int>(cudaErrorInvalidValue);
   const dim3 grid((unsigned)((n + BN - 1) / BN), (unsigned)((m + BM - 1) / BM));
   gemm_fp8_kernel<<<grid, 256, 0, stream>>>(static_cast<const bf16*>(a), static_cast<const uint8_t*>(w),
-                                            static_cast<bf16*>(out), (int)m, (int)n, (int)k, w_scale);
+                                            static_cast<bf16*>(out), (int)m, (int)n, (int)k, w_scale * a_scale,
+                                            1.f / a_scale);
   return gemm_last_err();
+}
+
+int gemm_fp8_bf16(const void* a, const void* w, float w_scale, void* out, int64_t m, int64_t n, int64_t k,
+                  cudaStream_t stream) {
+  return gemm_fp8_static_bf16(a, 1.f, w, w_scale, out, m, n, k, stream);
 }
 
 }  // extern "C"

@@ -34,6 +34,9 @@ fn main() -> Result<()> {
     let dir = args.remove(0);
     let src = WeightSource::open_dir(Path::new(&dir))?;
 
+    if args.iter().any(|a| a == "--scales") {
+        return scales_probe(&src);
+    }
     if !args.iter().any(|a| a == "--forward") {
         return format_probe(&src);
     }
@@ -47,11 +50,29 @@ fn main() -> Result<()> {
     let dump_layer = take("--dump-layer").map(|s| s.parse::<usize>().expect("--dump-layer 需要整数"));
     let oracle = take("--oracle");
     let layers = take("--layers").map(|s| s.parse::<usize>().expect("--layers 需要整数"));
+    let dump = take("--dump-oracle");
     let ids: Vec<i32> = args.iter().map(|s| s.parse::<i32>().expect("token id")).collect();
     ensure!(!ids.is_empty(), "--forward 需要至少一个 token id");
-    let pass = forward(&dir, &src, &ids, dump_layer, oracle.as_deref(), layers)?;
+    let pass = forward(&dir, &src, &ids, dump_layer, oracle.as_deref(), layers, dump.as_deref())?;
     if !pass {
         std::process::exit(3);
+    }
+    Ok(())
+}
+
+/// 各层 FP8 / NVFP4 线性层的 `input_scale`（静态激活 scale，amax ≈ 448·s）：> 1 说明标定 amax 超过 e4m3 上限。
+fn scales_probe(src: &WeightSource) -> Result<()> {
+    let names = ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj", "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj", "experts.0.gate_proj", "experts.0.down_proj"];
+    for l in 0..30 {
+        let mut line = format!("L{l:02}");
+        for n in names {
+            let key = format!("model.language_model.layers.{l}.{n}.input_scale");
+            match src.load_f32_host(&key) {
+                Ok((_, v)) => line += &format!(" {}={:.3}", n.rsplit('.').next().unwrap_or(n), v[0]),
+                Err(_) => line += &format!(" {}=-", n.rsplit('.').next().unwrap_or(n)),
+            }
+        }
+        println!("{line}");
     }
     Ok(())
 }
@@ -94,6 +115,7 @@ fn forward(
     dump_layer: Option<usize>,
     oracle: Option<&str>,
     layers: Option<usize>,
+    dump: Option<&str>,
 ) -> Result<bool> {
     let cfg_path = Path::new(dir).join("config.json");
     let cfg = KaonConfig::from_json(&std::fs::read_to_string(&cfg_path)?)?;
@@ -168,6 +190,10 @@ fn forward(
     let mut top: Vec<(usize, f32)> = last.iter().copied().enumerate().collect();
     top.sort_by(|a, b| b.1.total_cmp(&a.1));
     println!("最后一行 top-5: {:?}", &top[..5]);
+    if let Some(p) = dump {
+        dump_oracle(&lg, vocab, ids, p)?;
+        println!("已写 {p}（vLLM 同格式，可作 --oracle 做实现间对照）");
+    }
     match oracle {
         Some(path) => compare_oracle(&lg, vocab, ids, path),
         None => Ok(true),
@@ -236,8 +262,10 @@ fn compare_oracle(lg: &[f32], vocab: usize, ids: &[i32], path: &str) -> Result<b
             sum_d += (lp(id) - l).abs();
             n_d += 1;
         }
+        let mut dact = f64::NAN;
         if let Some((id, l)) = o.actual {
-            sum_act += (lp(id) - l).abs();
+            dact = (lp(id) - l).abs();
+            sum_act += dact;
             n_act += 1;
         }
         let bad = margin >= MARGIN && am != o1;
@@ -246,11 +274,11 @@ fn compare_oracle(lg: &[f32], vocab: usize, ids: &[i32], path: &str) -> Result<b
             miss += bad as usize;
         }
         let line = format!(
-            "row {r:>4}: oracle top1 {o1:>6} ({lp1:>7.3}, margin {margin:.2}) | ours top1 {am:>6} ({:>7.3}) | Δtop1 {d1:.3}{}",
+            "row {r:>4}: oracle top1 {o1:>6} ({lp1:>7.3}, margin {margin:.2}) | ours top1 {am:>6} ({:>7.3}) | Δtop1 {d1:.3} | Δact {dact:.3}{}",
             lp(am),
             if bad { "  ← top1 不一致" } else { "" }
         );
-        if r < 8 {
+        if r < 32 {
             println!("{line}");
         }
         worst.push((if bad { 1e9 } else { d1 }, line));
@@ -270,4 +298,41 @@ fn compare_oracle(lg: &[f32], vocab: usize, ids: &[i32], path: &str) -> Result<b
         rows.len()
     );
     Ok(pass)
+}
+
+/// 把本次 logits 写成 vLLM `/v1/completions` 同格式（`prompt_logprobs` 每行 top-5 + 实际 token，末行 `top_logprobs`），
+/// 用于两种实现互相当 oracle：量化"数值敏感度"与"系统性错误"各占多少。
+fn dump_oracle(lg: &[f32], vocab: usize, ids: &[i32], path: &str) -> Result<()> {
+    use serde_json::{json, Map, Value};
+    let t = ids.len();
+    let mut pl = vec![Value::Null];
+    let mut last = Map::new();
+    for r in 0..t {
+        let x = &lg[r * vocab..(r + 1) * vocab];
+        let mx = x.iter().copied().fold(f32::MIN, f32::max);
+        let lse = mx as f64 + x.iter().map(|&v| ((v - mx) as f64).exp()).sum::<f64>().ln();
+        let mut idx: Vec<usize> = (0..vocab).collect();
+        idx.select_nth_unstable_by(5, |&a, &b| x[b].total_cmp(&x[a]));
+        let mut top = idx[..5].to_vec();
+        top.sort_by(|&a, &b| x[b].total_cmp(&x[a]));
+        if r + 1 < t {
+            let mut m = Map::new();
+            for (i, &id) in top.iter().enumerate() {
+                m.insert(id.to_string(), json!({"logprob": x[id] as f64 - lse, "rank": i + 1}));
+            }
+            let a = ids[r + 1] as usize;
+            if !m.contains_key(&a.to_string()) {
+                let rank = x.iter().filter(|&&v| v > x[a]).count() + 1;
+                m.insert(a.to_string(), json!({"logprob": x[a] as f64 - lse, "rank": rank}));
+            }
+            pl.push(Value::Object(m));
+        } else {
+            for &id in &top {
+                last.insert(format!("token_id:{id}"), json!(x[id] as f64 - lse));
+            }
+        }
+    }
+    let v = json!({"choices": [{"prompt_logprobs": pl, "logprobs": {"top_logprobs": [last]}}]});
+    std::fs::write(path, serde_json::to_string(&v)?)?;
+    Ok(())
 }
