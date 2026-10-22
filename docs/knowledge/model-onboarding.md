@@ -102,6 +102,20 @@ vLLM 的 `GateLinear` 在 sm_120 走 `torch.mm(out_dtype=f32)`，累加精度不
 `--hidden-all` 已顺手写 `final_norm.bin`、`--logits-out` 写完整 logits，
 配 safetensors 原始权重即可在 fp64 里重算任一站点的真值。
 
+### 4b. 找"哪一层错"要用单层隔离，找"层内哪步错"要用逐子模块对拍
+
+残差流的**累积**会掩盖单层问题；**单层隔离**（`--layer-iso l:ref_L{l-1}.bin`）之后
+再加 `SUB_LAYER=<l>` 把该层的 18 个中间张量两侧都 dump 出来逐项比，
+才能一步定到算子。Kaon-V3 L11 的实测序列：
+
+```
+input_norm 0.000e0  →  q_norm 4.6e-6 ✅  |  k_norm 2.65e-2 ❌  →  k_rope 2.65e-2
+```
+
+**"Q 对、K 错"** 这种不对称极小见，但它立刻把范围从"attention 全层"缩到
+"K 的权重或 K 的 GEMM"——因为同一个 `input_norm`、同一段 RoPE 代码、同一套 head-norm
+对 Q 都是对的。**对拍一定要按张量逐项看，不要只看整层残差**。
+
 ### 4. 源码里读到的"vLLM 行为"必须 A/B 证伪（本轮 3 次里 2 次推断错）
 
 | 假设 | 源码依据 | A/B 实测 |
