@@ -533,3 +533,25 @@ router / experts / post_feedforward_layernorm_2 / post_feedforward_layernorm`，
 
 （vLLM 侧 `self_attn` 的输出已经过 `o_proj`，见 `gemma4.py:553` `output, _ = self.o_proj(attn_output)`。
 所以 `o_proj.bin` 对应我们的 `sc.o`。）
+
+### 【二分第二刀】第一处偏差在 **layer 0 的 attention 路径**，不在 MLP/MoE
+
+`--sub-cmp` 逐项对拍（p02，T=24，参照 vLLM layer0 hook）：
+
+| 子模块 | mean_rel | max_rel | 读法 |
+|---|---|---|---|
+| **input_norm** | **0.000e0** | **0.000e0** | ✅ 逐位一致 → RMSNorm 与 embed 都不是问题 |
+| **o_proj** | **7.653e-3** | 1.547e-2 | ❌ **第一处偏差**（vLLM 的 self_attn 输出已含 o_proj）|
+| post_attn_norm | 9.014e-3 | 1.778e-2 | 继承 |
+| dense（MLP）| 1.680e-2 | 3.942e-2 | 继承 + 自身 |
+| router_logits | 6.276e-3 | 1.303e-2 | 继承 |
+| post_ff_norm | 2.136e-2 | 5.249e-2 | 累积 |
+
+**结论**：
+1. `input_layernorm` 逐位一致 → **此前怀疑的 RMSNorm bf16 舍入位置不成立**（我们与 vLLM 同序）。
+2. 偏差首次出现在 `self_attn`（输出含 o_proj）这一步，**7.65e-3**。
+   layer 0 的 attention 路径是：`q/k/v FP8 投影 → 逐头 RMSNorm → RoPE → GQA(窗口 1024) → o_proj(FP8)`。
+3. 由此把区间收窄到这 5 个环节。下一刀：抓 `q_norm / k_norm / v_norm`（RoPE 之前）
+   与 `q_rope / k_rope`（RoPE 之后）以及 `attn_out`（o_proj 之前），一次定位到具体环节。
+
+`experts` 的 hook 抓不到（MoERunner 里不直挂为子模块），要另抓；本轮先解决 attention。

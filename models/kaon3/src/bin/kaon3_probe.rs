@@ -58,6 +58,8 @@ fn main() -> Result<()> {
     let hidden_all = take("--hidden-all");
     // --hidden-cmp <refdir>：把 --hidden-all 写的逐层残差流与参照目录逐层比（纯 Rust，不用 Python 参考）。
     let hidden_cmp = take("--hidden-cmp");
+    // --sub-cmp <refdir>：把 --hidden-all 目录里**所有同名 .bin** 与参照目录逐项比（layer 0 子模块对拍）。
+    let sub_cmp = take("--sub-cmp");
     // --batch <目录> --out <目录>：加载一次，把目录里每个 <name>.ids 前向一遍、写 <out>/<name>.json（vLLM 同格式）。
     // 单用例模式每次都要 ~30 s 的权重加载 + RoPE 表构建，verify 30 个用例要 17 分钟；批量模式只付一次。
     if let Some(bdir) = take("--batch") {
@@ -90,6 +92,10 @@ fn main() -> Result<()> {
     ensure!(!ids.is_empty(), "--forward 需要至少一个 token id");
     let mut ctx = setup(&dir, &src, layers)?;
     let pass = forward(&mut ctx, &ids, dump_layer, oracle.as_deref(), dump.as_deref(), (hidden_out.as_deref(), hidden_ref.as_deref()), hidden_all.as_deref())?;
+    if let (Some(a), Some(r)) = (hidden_all.as_deref(), sub_cmp.as_deref()) {
+        compare_sub_dir(a, r)?;
+        return Ok(());
+    }
     if let (Some(a), Some(r)) = (hidden_all.as_deref(), hidden_cmp.as_deref()) {
         compare_hidden_dir(a, r, ctx.cfg.hidden)?;
         return Ok(());
@@ -451,6 +457,52 @@ fn compare_hidden_dir(ours: &str, rf: &str, h: usize) -> Result<()> {
             jump.map(|j| format!("{j:.2}x")).unwrap_or_else(|| "-".into())
         );
         prev = Some(mean);
+    }
+    Ok(())
+}
+
+/// layer 0 子模块逐项对拍：遍历参照目录里的每个 `.bin`，在 ours 目录找同名文件，
+/// 按"最后一维 = 块宽"切成行，逐行比相对 L2 误差。块宽由文件大小与行数推断：
+/// 对 `router_logits`（E=128）与 hidden（H=2816）都成立的做法是**按参照文件大小 / 行数**算。
+fn compare_sub_dir(ours: &str, rf: &str) -> Result<()> {
+    let read = |p: &std::path::Path| -> Result<Vec<f32>> {
+        let b = std::fs::read(p).with_context(|| format!("读 {}", p.display()))?;
+        ensure!(b.len() % 4 == 0, "{} 长度不是 4 的倍数", p.display());
+        Ok(b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+    };
+    let mut names: Vec<String> = std::fs::read_dir(rf)?
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|f| f.ends_with(".bin"))
+        .collect();
+    names.sort();
+    ensure!(!names.is_empty(), "参照目录 {rf} 里没有 .bin");
+    println!("# layer 0 子模块对拍：参照 = {rf}");
+    println!("# {:<18} {:>6} {:>11} {:>11}", "name", "rows", "mean_rel", "max_rel");
+    for n in names {
+        let pa = std::path::Path::new(ours).join(&n);
+        if !pa.exists() {
+            println!("# {n:<18} 我们侧缺这个文件");
+            continue;
+        }
+        let pb = std::path::Path::new(rf).join(&n);
+        let (a, b) = (read(&pa)?, read(&pb)?);
+        ensure!(a.len() == b.len(), "{n}: 长度 {} != {}", a.len(), b.len());
+        // 行宽：优先按 H=2816 / E=128 里能整除的那个；否则按单行处理
+        let w = [2816usize, 128]
+            .into_iter()
+            .find(|w| *w > 0 && a.len() % w == 0)
+            .unwrap_or(a.len());
+        let rows = a.len() / w;
+        let mut rels = Vec::with_capacity(rows);
+        for t in 0..rows {
+            let (x, y) = (&a[t * w..(t + 1) * w], &b[t * w..(t + 1) * w]);
+            let d: f64 = x.iter().zip(y).map(|(p, q)| ((p - q) as f64).powi(2)).sum::<f64>().sqrt();
+            let nn: f64 = y.iter().map(|q| (*q as f64).powi(2)).sum::<f64>().sqrt();
+            rels.push(d / nn.max(1e-30));
+        }
+        let mean = rels.iter().sum::<f64>() / rows as f64;
+        let mx = rels.iter().copied().fold(0f64, f64::max);
+        println!("{:<20} {rows:>6} {mean:>11.3e} {mx:>11.3e}", n.trim_end_matches(".bin"));
     }
     Ok(())
 }

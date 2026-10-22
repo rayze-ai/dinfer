@@ -47,6 +47,12 @@ def _patched(self, *a, **k):
         m = getattr(self, attr, None)
         if m is not None:
             handles.append(m.register_forward_hook(mk(name)))
+    # self_attn 内部：q_norm / k_norm 的输出（hook 到 norm 模块本身）
+    sa = getattr(self, "self_attn", None)
+    for attr, name in (("q_norm", "q_norm"), ("k_norm", "k_norm"), ("v_norm", "v_norm")):
+        m = getattr(sa, attr, None) if sa is not None else None
+        if m is not None:
+            handles.append(m.register_forward_hook(mk(name)))
     try:
         r = _orig(self, *a, **k)
     finally:

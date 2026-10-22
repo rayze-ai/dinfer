@@ -558,10 +558,26 @@ impl Gemma4Layer {
         head_rmsnorm(stream, ops, q, Some(&self.q_norm), d, eps)?;
         head_rmsnorm(stream, ops, kk, Some(&self.k_norm), d, eps)?;
         head_rmsnorm(stream, ops, v, None, d, eps)?;
+        if let Some((dir, 0)) = sub_out {
+            for (nm, buf, rows) in [("q_norm", &*q, heads), ("k_norm", &*kk, nkv), ("v_norm", &*v, nkv)] {
+                let vv = buf.to_vec_f32(stream)?;
+                let bytes: Vec<u8> = vv.iter().take(tokens * rows * d).flat_map(|x| x.to_le_bytes()).collect();
+                std::fs::write(dir.join(format!("{nm}.bin")), bytes)
+                    .map_err(|err| anyhow::anyhow!("写 {nm}.bin 失败: {err}"))?;
+            }
+        }
 
         // ---- 4. RoPE（只转前 rope_dim 维；proportional 的分母已由 Ropes 处理）----
         let rope = if self.window > 0 { &ropes.sliding } else { &ropes.full };
         rope.apply(stream, q, Some(kk), ctx.positions, heads, nkv, d)?;
+        if let Some((dir, 0)) = sub_out {
+            for (nm, buf, rows) in [("q_rope", &*q, heads), ("k_rope", &*kk, nkv)] {
+                let vv = buf.to_vec_f32(stream)?;
+                let bytes: Vec<u8> = vv.iter().take(tokens * rows * d).flat_map(|x| x.to_le_bytes()).collect();
+                std::fs::write(dir.join(format!("{nm}.bin")), bytes)
+                    .map_err(|err| anyhow::anyhow!("写 {nm}.bin 失败: {err}"))?;
+            }
+        }
 
         // ---- 4a. FP8 KV（vLLM `kv_cache_dtype=fp8_e4m3`，scale 1.0）：attention 读的是量化后的 K/V ----
         if cfg.kv_fp8 {
@@ -630,6 +646,12 @@ impl Gemma4Layer {
         }
 
         // ---- 6. o_proj + post_attention_norm + 残差 ----
+        if let Some((dir, 0)) = sub_out {
+            let vv = attn.to_vec_f32(stream)?;
+            let bytes: Vec<u8> = vv.iter().take(tokens * heads * d).flat_map(|x| x.to_le_bytes()).collect();
+            std::fs::write(dir.join("attn_out.bin"), bytes)
+                .map_err(|err| anyhow::anyhow!("写 attn_out.bin 失败: {err}"))?;
+        }
         self.o_proj.forward(gemm, stream, attn, &mut sc.o, tokens)?;
         sub_dump(stream, sub_out, "o_proj", &sc.o, tokens, h)?;
         rmsnorm_into(stream, ops, &sc.o, &self.post_attn_norm, &mut sc.norm, h, tokens, eps)?;
