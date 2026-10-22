@@ -6,38 +6,38 @@
 > 更新 2026-10-21 23:0x +0800。**本区按模型分节，每节只写该模型自己的交接内容；不要覆盖别人的分节。**
 
 
-### Kaon-V3 parity 第 8 轮（2026-10-22 深夜）：逐层对拍跑通，三处根因
+### Kaon-V3 parity 第 8 轮（2026-10-22 深夜）：**判据被推翻重建**
 
-**用户起点（2026-10-22）**：「我觉的 0–7 层可能也是不对的，只是我们的标准定的让他过」——
-**成立**。干净参照下跨进程下限是 **0.0000（逐位一致）**，而 L8 的 top5 |Δlp| 是 0.06，
-被"阈值 0.15 / 1.5×FLOOR"这类相对判据放过了。分层二分即改为**绝对判据**。
+**用户起点**：「0–7 层可能也不对，只是标准定得让它过」— **成立**。干净参照下跨进程下限
+**0.0000（逐位一致）**，而 L8 的 top5 |Δlp| 是 0.06，被"阈值 0.15 / 1.5×FLOOR"放过。
 
-**仪器（本轮新建，之前从未跑通）**：`kaon3_probe --hidden-all <dir>` 一次前向 dump
-全部 30 层残差流 + layer 0 的 17 个子模块；参照侧 `scripts/dev/kaon3_vllm_sublayer.py`
-用 forward hook 抓同名张量（**先用 4-token 短 prompt 冒烟**）；`--sub-cmp <ref>`
-纯 Rust 逐项比。修了 vLLM 抓取脚本 `cap[-30:]` 取到 decode 批的 bug。
+**本轮修好两处真 bug（`attn_out` 已逐位归零）**：
+1. **RoPE cos/sin 表**：vLLM `base.py:59` `cache.to(dtype)` → bf16 表，我们用了 f32。
+   `Rope::with_bf16_cache()`（opt-in），Kaon 两套表都开。`k_rope`/`attn_out` 1.5e-3→**0.000e0**。
+2. **router `root_size`**：vLLM 是 `register_buffer`(bf16)，我们用了 f32 常数。`router_logits` 3.28e-3→1.72e-3。
 
-**三处根因（前两处已修并验证）**：
-1. **RoPE 的 cos/sin 表**：vLLM `base.py:59` `cache.to(dtype)` → **bf16 表**，我们再 f32 表。
-   修后 `k_rope`/`attn_out` **逐位归零**，`o_proj` 7.65e-3 → 1.15e-7。
-   `Rope::with_bf16_cache()`（opt-in）。
-2. **router `root_size`**：vLLM 是 `register_buffer`（bf16），我们用了 f32 常数。
-   修后 `router_logits` 3.28e-3 → 1.72e-3（剩余是 fp32 累加顺序，见下）。
-3. **softcap 舍入次数**（在测）：vLLM `/c`、`tanh`、`*c` 各回 bf16 一次，我们只回一次。
-   已加 `softcap_bf16_round3` + `SOFTCAP_ONE_ROUND=1` A/B 开关。
+**被 A/B 推翻、已回滚（3 次里 2 次推断错，教训已进 knowledge）**：query 不量化、
+P 乘 p_scale=256、softcap 三步舍入。**动 attention 前先 `docker logs|grep "Attention backend"`
+（本模型 = TRITON_ATTN），改动带 `ENV=1` 开关，用端到端指标判。**
 
-**重要判据结论**：fp64 真值三方校验显示 **我们的 router 比 vLLM 准 20 倍**
-（我们 max 7.4e-07 / top8 错 0/24；vLLM max 1.5e-02 / top8 错 3/24）。
-常驻脚本 `scripts/verify/kaon3_router_truth.py`。**参照自身不精确**，top-8 分歧不是我们的 bug。
+**最重要的结论（改变验收口径）**：用 fp64 真值（`final_norm` + bf16 原始 lm_head 权重）算精确 logprob：
+| row | 真值 | 我们 | vLLM |
+|---|---|---|---|
+| 3 | −1.079 | **−1.099**（0.020）| −0.803（0.276）|
+| 2 | −0.505 | **−0.521**（0.016）| −0.111（0.394）|
 
-**端到端（run `1022-170737-660897`，30/30）**：短 prompt 翻转 15.53%→**15.32%**、
-Δlp 1.2578→**1.2220**、**ΔNLL −0.0252→−0.0018（与下限 −0.0025 齐平）**；long_zh ΔNLL 通过；
-单 token / kernel 对拍通过。**5 过 2 败**。
+**我们差 0.02 nat，vLLM 差 0.3 nat；完整 logits 的 top-5 id 与真值完全一致，vLLM 不是。**
+router 同理（我们 7.4e-07 vs vLLM 1.5e-02）。**"与 vLLM 逐位一致"是错误的验收目标**，
+15.32% 翻转率 / Δlp 1.22 不能作为我们错的判据。loop 停止条件已改为
+**"与 fp64 真值的距离 ≤ 参照的"**（见 `docs/loops/kaon3-parity.md` 修正 C）。
 
-**下一步**：① 等 softcap round3 的 verify 结果（`ba5hydqwe`）；
-② 若翻转率仍不动，按"分布形态"继续查 `final_norm → lm_head` 这段
-（已知 rank1 系统性偏小、尾部偏高、top5 id 只重叠 2–5/5）；
-③ 多卡并发跑 verify 前必须 `docker rm -f` 所有残留容器（本轮 OOM 只跑了 15/30 白跑一次）。
+**仪器**（本轮新建，之前从未跑通）：`kaon3_probe --hidden-all <dir>`（30 层残差流 +
+layer0 的 18 个子模块 + `final_norm.bin`）、`--logits-out`（完整 logits）、
+`--sub-cmp <ref>`（纯 Rust 逐项比）；参照侧 `scripts/dev/kaon3_vllm_sublayer.py`
+（**先用 4-token 短 prompt 冒烟**）。修了 vLLM 抓取 `cap[-30:]` 取到 decode 批的 bug。
+
+**下一步**：① 把三方真值校验扩展到每层残差流（工具已齐），确认每层"我们 ≤ 参照的误差"；
+② 用真值判据重评已修两处的收益；③ 然后才回到性能（阶段 3 剩余）。
 
 ### Kaon-V3（5090，阶段 1–2 完成，阶段 3 接近打通）
 
