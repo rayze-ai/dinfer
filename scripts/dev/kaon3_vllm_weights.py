@@ -19,7 +19,7 @@ while not hasattr(cand, "layers"):
     cand = nxt
 layers = cand.layers
 print("layers:", len(layers), flush=True)
-for L in (0, 11):
+for L in [int(x) for x in os.environ.get("WLAYERS", "0,11").split(",")]:
     attn = layers[L].self_attn
     qkv = attn.qkv_proj
     w = getattr(qkv, "weight", None)

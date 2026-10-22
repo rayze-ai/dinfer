@@ -549,11 +549,14 @@ fn dump_weights(src: &WeightSource, dir: &str) -> Result<()> {
     let stream = dev.new_stream()?;
     let p = "model.language_model.layers.0";
     // qkv 组：走与 `GemmaLayer::load` 完全相同的 `load_fp8_group`，导出重量化后的 fp8 字节与 scale
-    for l in [0usize, 11] {
+    // 层号：`WLAYERS=0,9,11`（默认 0,11）
+    let wl: Vec<usize> = std::env::var("WLAYERS").unwrap_or_else(|_| "0,11".into())
+        .split(',').filter_map(|x| x.trim().parse().ok()).collect();
+    for l in wl {
         let lp = format!("model.language_model.layers.{l}.self_attn");
         let cfg_path = std::path::Path::new(dir).join("cfg.json");
         let _ = &cfg_path;
-        let k_eq_v = l != 0; // 本模型：滑窗层 0 三槽；full 层 k_eq_v 两槽（与 layer.rs 判定一致）
+        let k_eq_v = (l + 1) % 6 == 0; // 本模型：full 层（5/11/17/23/29）k_eq_v 两槽，其余滑窗层三槽（与 config.k_eq_v_at 一致）
         let names: Vec<String> = if k_eq_v {
             vec![format!("{lp}.q_proj.weight"), format!("{lp}.k_proj.weight")]
         } else {
