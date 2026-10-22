@@ -178,6 +178,14 @@ BUILD_ONLY=1 bash scripts/verify/kaon3-parity.sh      # 打印 SNAP=<id>
   2. 模仿开关下逐层 router 输出与 vLLM **逐位一致**（`router_logits` max diff = 0，同输入 L11 隔离）而翻转率仍不过 → router 被排除，残余在别处，回主 loop 按层找。
 - **上限**：8 轮。每轮一个假设，结果进 `test/kaon3/2026-10-22/kaon3-parity.md`「子 loop B」节。
 
+## 子 loop C：MoE 专家路径（2026-10-22 起，承接子 loop B）
+
+- **前提**：`ROUTER_BF16=1` 下 L11 路由与 vLLM 全同，moe_y 仍差 mean 1.0e-3（L11 隔离，快照 `1022-204821-796920`）。
+- **观察**：同输入 L11 隔离，逐段比 专家输入（pre_ff_norm_2）/ 路由权重 / gate_up / 激活 / down / 合并；先补 dump 点。
+- **停止条件**：找到 moe_y 差异的第一个非零段并解释（实现口径差 → 修 / A/B；或证明是参照自身精度）；
+  修后 `kaon3-parity.sh` FLOOR 两项通过即主 loop 收口。
+- **上限**：8 轮。
+
 ## 上限
 
 - 最多迭代 30 轮（用户要求不达标不停；上限只作为"方法错了"的报警）。
