@@ -29,8 +29,11 @@
 - 回退验证：`FP8_RQ_FMT=f16|f32` 运行时开关同快照 A/B，两方向逐位可复现；−0.0018 是 f32 少一次舍入的**相消假象**，f16 正确（L11 隔离近 3.3×）。
 - L11 qkv 权重与 vLLM **逐字节 100%**（q/k/v 槽）；attention 段中间量 ≤1e-7（k_norm 2.65e-2→2.4e-12）。
 - 残余 = MoE 专家翻转；30 层扫描：我们 router GEMM 与 fp64 一致（≤7.4e-7、0/2400 不一致），vLLM 97/2400 不一致但**全是 bf16 步长以下的平局**（不是 bug，不能据此降级 FLOOR 判据）。
-- **下一步**：router fp64 三方校验扩到 30 层（`kaon3_router_truth.py` 加层号），统计每层谁选错；
-  全模型我们 0 错 → 端到端差异整体归因参照，按真值判据收口。证据：`test/kaon3/2026-10-22/kaon3-parity.md` 第 11–12 轮。
+- 第 13–14 轮 + 子 loop B/C（2026-10-22 深夜）：router 30 层真值我们 0/2400 不一致（vLLM 97，全是 bf16 平局）；
+  vLLM router 在 sm_120 落到 F.linear bf16；**真口径差异 = gelu 中间舍入**（vLLM 两次 bf16，经 fp4 放大 10×），
+  `GELU_ROUND2=1` 下 L11 MoE 段逐位一致；其余残余 = GEMM 累加 1-ulp 平局 × 量化放大（非语义）。
+  三开关全开端到端 14.49% / 1.23 ≈ vLLM 自身 BI 开/关 13.95% / 1.19。
+- **待用户定**：① `GELU_ROUND2` 是否改默认；② FLOOR 判据是否改为"kernel 变体下限"（BI 开/关）。开关：`ROUTER_BF16` / `MOE_COMBINE_BF16` / `GELU_ROUND2`（默认全关）。
 
 **仪器（本轮新建）**：`kaon3_probe --hidden-all`（30 层残差流 + layer0 的 18 个子模块 +
 `final_norm.bin`）、`--logits-out`、`--sub-cmp`、**`--layer-iso l:ref.bin`（单层隔离）**、
