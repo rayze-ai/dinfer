@@ -555,3 +555,22 @@ router / experts / post_feedforward_layernorm_2 / post_feedforward_layernorm`，
    与 `q_rope / k_rope`（RoPE 之后）以及 `attn_out`（o_proj 之前），一次定位到具体环节。
 
 `experts` 的 hook 抓不到（MoERunner 里不直挂为子模块），要另抓；本轮先解决 attention。
+
+### 下一刀：layer 0 attention 内部 5 环
+
+layer 0 是**滑窗层**（`layer_types[0] = sliding_attention`），所以 `head_dim = 256`、`nkv = 8`、
+`num_heads = 16`，RoPE 是 `default`（theta 10000，全 256 维旋转，`partial_rotary_factor` 只对
+full 层生效）。路径：`q/k/v FP8 投影 → 逐头 RMSNorm(256) → RoPE → GQA(窗 1024) → o_proj(FP8)`。
+
+两侧新增同名 dump（RoPE 之前 / 之后 / attention 输出）：
+
+| 我们 | vLLM | 位置 |
+|---|---|---|
+| `q_norm.bin` / `k_norm.bin` / `v_norm.bin` | hook `self_attn.{q,k,v}_norm` | RoPE **前**（head-norm 输出）|
+| `q_rope.bin` / `k_rope.bin` | （需另加 hook 或从 rope 输出取）| RoPE **后** |
+| `attn_out.bin` | （需 patch `self.attn`）| o_proj **前** |
+
+缓冲区布局已核对：`q_s = [max_tokens, num_heads*head_dim_sliding]`，第 0 层用 `q_s`（滑窗），
+所以 dump 时取前 `tokens*heads*256` 个元素就是紧凑的 `[T, 4096]`，与 vLLM hook 的
+`(T, num_heads*head_dim)` 同序（vLLM 在 `q_norm` 前后都做 `unflatten/flatten`，展平后
+仍是 head-major 连续）。
