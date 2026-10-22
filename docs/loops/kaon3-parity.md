@@ -146,6 +146,15 @@ BUILD_ONLY=1 bash scripts/verify/kaon3-parity.sh      # 打印 SNAP=<id>
 
 → **f16 正确**（层内近 3.3 倍），`−0.0018` 是相消假象。**残余误差在别处，继续按层找。**
 
+### 第 11 轮续 2：L11 残余误差的去向（已知边界）
+
+- f16 已使 q/k 权重**字节与 vLLM 完全一致**（`--dump-weights` 复核），所以 L11 剩下的 1.2e-2
+  **不是权重口径**，只能在 GEMM 的激活量化 / 累加，或 `k_eq_v` 分组的 V 槽参与方式。
+- 已有控制组：**L0 同一份 `load_group` 代码产出与 vLLM 相同的 scale 与权重**（`sk/smax=0.599`，`k_norm` 0.000e0）；
+  L11 的 `sk/smax=0.567` 却差 2.6e-2 —— 差别只能在 **vLLM 对该层的处理分支**。
+- **下一条可判定命令**：在参照容器里读加载后的 `layers.11.self_attn.qkv_proj.weight` 分片字节与 scale，
+  与我们的 `--dump-weights` 逐字节 `cmp`。字节相同 → 差异在 GEMM；不同 → 直接看到 vLLM 实取值。
+
 ## 上限
 
 - 最多迭代 30 轮（用户要求不达标不停；上限只作为"方法错了"的报警）。
