@@ -2055,3 +2055,16 @@ L0/L1 逐位级（1e-8/1e-6）说明 embed、L0、L1 三层已经与 vLLM 完全
 
 **待核**：vLLM 在 TRITON_ATTN + fp8 KV 时，K/V 到底在何处、以什么 scale 量化；若它并不在 prefill 时量化（或量化点不同），
 这就是我们要对齐的口径。下一步读 `triton_attn` / `triton_attention_helpers` 的 kv 量化路径。
+
+### D-6：读 vLLM attention 的 fp8 口径 —— 三条候选全部与 vLLM 一致
+1. **`tl.store` 的 fp8 隐式转换是 RNE 还是截断？** 写探针（`/w/hid/tr_probe_fp8round.py`）实测
+   `1.1875→1.25`、`1.3125→1.25`、`1.0625→1.0`，**与 torch `to(fp8_e4m3)` 逐值相同 = RNE**。→ 与我们一致，排除。
+2. **Q 是否量化**：`triton_attn.py:579` `supports_quant_query_input = is_cuda()`；
+   `attention.py:456-473` fp8 KV + 非 per-token-head 时建 `QuantFP8(static=True, PER_TENSOR)`；
+   `attention.py:513` `query, _ = self.query_quant(query, self._q_scale)`。`q_scale` 被设成 `k_scale`（`kv_cache.py:126`），
+   而 checkpoint **无任何 k/v/q_scale 键**（实测 `scale keys 0`）→ q=k=v=**1.0**，即"直接 cast 到 e4m3"。
+   我们 `layer.rs:606` 也是 `fp8_e4m3_roundtrip(q, 1.0)`。→ **一致**。
+3. **KV 解量化**：`_cast_kv_tile` / `score_scale = scale*q_scale*k_scale`，k=v=1 时是 no-op。→ 一致。
+
+**剩余唯一疑点**：vLLM 的 prefill 是否真的让 attention 读**写回 cache 的 fp8 K/V**（而不是用寄存器里的 bf16 K/V）。
+下一步实验：同输入（参照 `L1.bin`）下比较 `KV_FP8=1` 与 `KV_FP8=0` 的 `attn_out` 哪个更接近 vLLM —— 更近的那个才是 vLLM 的口径。
