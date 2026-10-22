@@ -45,3 +45,20 @@
 
 **同类陷阱**：Gemma 系的 norm 是「attn 前一个 + attn 输出上一个」，残差加在 norm **之后**——
 层结构照抄 vLLM 的 `DecoderLayer.forward`，不要套 Qwen 的 `input_norm → attn → +res` 模板。
+
+## 对拍参照必须自己起，且不能带任何 KV 缓存外挂
+
+- **判断**：vLLM 对拍的参照实例必须**自己起**，参数与探针侧假设逐项对齐，且**不能带
+  `--kv-transfer-config`**（PegaKV / LMCache / 任何外部 KV 连接器）。共享基线容器往往带业务配置
+  （外部 KV、不同的 block size、别的 `max-num-seqs`），它的输出**不是逐位置 logprob 的合法参照**。
+- **为什么**：外部 KV 连接器会让 K/V 经过搬运与可能的布局重排，数值路径与"纯 GPU 内 paged cache"不同；
+  block size / max-num-batched-tokens 会改变 attention kernel 的 tile 划分与 batch 分派。这些差异会
+  混进"我们 vs vLLM"的比较里，且**无法事后剥离**。
+- **代价**（2026-10-22 实例）：整条 Kaon-V3 parity 线用了带 PegaKV 的基线做参照，
+  由此得出的下限（1.51%/0.100/0.001）、判据线（5.27%/0.150/0.01）、以及"修复前 28.87%→修复后 15.26%"
+  全部需要重测。同期还因为参照集是多进程拼接、以及 `--network host` 端口抢占抓到别人数据，
+  得出过两条相反的错误结论。
+- **怎么用**：`scripts/dev/kaon3_oracle_server.sh` 一律不带 `--kv-transfer-config`；
+  参照集与下限集各用**一个进程、一次抓完**；跨进程下限单独测（同参数两个进程之差）。
+- **证据**：`docs/pitfalls.md` 2026-10-22 三条（端口抢占 / 假就绪 / 误停基线），
+  `test/kaon3/2026-10-22/kaon3-parity.md` 的作废记录。
