@@ -860,3 +860,23 @@ exit 0 = 我们不劣于参照（逐元素更准比例 ≥ 50% 且 top-8 错得�
 
 可用的对照只有相对量：`mlp_gate_up` 相对误差 1.047e-5、`mlp_gelu` 7.525e-4、`dense` 1.951e-3，
 逐级放大但都在 FP8（e4m3，3 位尾数）的量化噪声量级内。
+
+### FAQ：`mlp_gelu` 的 7.5e-4 是否可归因于我们的 gelu kernel
+
+查 vLLM CUDA 路径：`GeluAndMul.forward_cuda` → `torch.ops._C.gelu_tanh_and_mul`
+→ `act_and_mul_kernel`（`csrc/activation_kernels.cu:110`）：
+
+```cpp
+const scalar_t* x_ptr = input + token_idx * 2 * d;   // gate 在前半
+const scalar_t* y_ptr = x_ptr + d;                    // up   在后半
+x.elts[j] = packed_compute<PACKED_ACT_FN, act_first, HAS_CLAMP>(x.elts[j], y.elts[j]);
+```
+
+`gelu_tanh_kernel` 的式子（`activation_kernels.cu:204`）与我们的
+`gelu_tanh_f` **逐项相同**：`BETA = sqrt(2/pi) = 0.7978845608028654`、`KAPPA = 0.044715`、
+`0.5*f*(1+tanhf(BETA*(f + KAPPA*f*f*f)))`，且都在 **f32** 里算、最后 cast 回 bf16。
+布局也相同（gate = 前半、up = 后半）。
+
+所以 `mlp_gelu` 的 7.5e-4 **不可能来自公式或布局**。输入 `mlp_gate_up` 已有 1.047e-5 的差异
+（FP8 GEMM 累加重排），经过 `tanh` 后在少量元素上放大到 1.9e-3 max —— 属于
+**W8A8 静态量化 + tanh 敏感区的固有放大**，与本轮两个真 bug（RoPE 表精度、router root_size）不同性质。
