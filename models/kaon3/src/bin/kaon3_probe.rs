@@ -584,7 +584,7 @@ fn run_layer_iso(ctx: &mut Ctx, ids: &[i32], l: usize, data: &[f32], dir: &str) 
         max_seqlen: tokens,
     };
     model.forward(stream, gemm, &ops, &ids_t, &meta, &mut sc, &mut acts, &mut logits, &mut hidden,
-                  tokens, None, Some(dir), Some((data, l, l + 1)))?;
+                  tokens, None, Some(dir), Some((data, l, 0)))?;
     stream.synchronize()?;
     // 隔离结果写到 `iso_L{l}.bin`（不与 `--hidden-all` 写的逐层残差流抢同一个文件名）
     let v = hidden.to_vec_f32(stream)?;
