@@ -22,8 +22,8 @@ using namespace dinfer;
 
 namespace {
 
-// 进程级数值模式：P 以 e4m3 参与 PV（复刻 vLLM Triton FP8 attention：Q/K/V 为 fp8 时 `tl.dot(P.to(V.dtype), V)`），
-// 行和 L 仍用 fp32 的 P。由 `gqa_set_p_fp8` 在模型加载时设一次，默认 0（bf16 P）。真 FP8 attention kernel 落地后改显式参数。
+// P 是否以 e4m3 参与 PV（复刻 vLLM Triton FP8 attention：Q/K/V 为 fp8 时 `tl.dot(P.to(V.dtype), V)`），行和 L 仍用 fp32 P。
+// 不是进程隐状态：由 prefill/paged 入口的 `p_fp8` 实参在每次 launch 前写入（单流语义，调用方保证同一 stream 串行）。
 __constant__ int g_p_fp8 = 0;
 __device__ __forceinline__ float pq8(float p) {
   if (!g_p_fp8) return p;
@@ -1399,7 +1399,8 @@ extern "C" int gqa_fa_umma_launch(int paged, int max_q, int heads, int num_reqs,
 
 static int gqa_prefill_impl(const void* q, const void* k, const void* v, void* out, const int32_t* cu_seqlens,
                                 int64_t num_reqs, int64_t max_seqlen, int64_t heads, int64_t kv_heads, int64_t head_dim,
-                                float scale, int64_t q_stride, int64_t kv_stride, int cfg, int window, cudaStream_t stream) {
+                                float scale, int64_t q_stride, int64_t kv_stride, int cfg, int window, int p_fp8, cudaStream_t stream) {
+  cudaMemcpyToSymbolAsync(g_p_fp8, &p_fp8, sizeof(int), 0, cudaMemcpyHostToDevice, stream);
   if (q_stride <= 0) q_stride = heads * head_dim;
   if (kv_stride <= 0) kv_stride = kv_heads * head_dim;
   if (num_reqs <= 0) return 0;
@@ -1437,21 +1438,22 @@ static int gqa_prefill_impl(const void* q, const void* k, const void* v, void* o
 extern "C" int gqa_prefill_win_bf16(const void* q, const void* k, const void* v, void* out, const int32_t* cu_seqlens,
                                     int64_t num_reqs, int64_t max_seqlen, int64_t heads, int64_t kv_heads,
                                     int64_t head_dim, float scale, int64_t q_stride, int64_t kv_stride, int cfg,
-                                    int window, cudaStream_t stream) {
+                                    int window, int p_fp8, cudaStream_t stream) {
   return gqa_prefill_impl(q, k, v, out, cu_seqlens, num_reqs, max_seqlen, heads, kv_heads, head_dim, scale, q_stride,
-                          kv_stride, cfg, window, stream);
+                          kv_stride, cfg, window, p_fp8, stream);
 }
 extern "C" int gqa_prefill_bf16(const void* q, const void* k, const void* v, void* out, const int32_t* cu_seqlens,
                                 int64_t num_reqs, int64_t max_seqlen, int64_t heads, int64_t kv_heads, int64_t head_dim,
                                 float scale, int64_t q_stride, int64_t kv_stride, int cfg, cudaStream_t stream) {
   return gqa_prefill_impl(q, k, v, out, cu_seqlens, num_reqs, max_seqlen, heads, kv_heads, head_dim, scale, q_stride,
-                          kv_stride, cfg, 0, stream);
+                          kv_stride, cfg, 0, 0, stream);
 }
 
 static int gqa_paged_impl(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens,
                               const int32_t* cu_seqlens_q, void* out, int64_t num_reqs, int64_t max_q_len, int64_t heads,
                               int64_t kv_heads, int64_t head_dim, int64_t block_size, int64_t max_blocks, float scale,
-                              int64_t q_stride, int skip_single, int cfg, int window, cudaStream_t stream) {
+                              int64_t q_stride, int skip_single, int cfg, int window, int p_fp8, cudaStream_t stream) {
+  cudaMemcpyToSymbolAsync(g_p_fp8, &p_fp8, sizeof(int), 0, cudaMemcpyHostToDevice, stream);
   if (q_stride <= 0) q_stride = heads * head_dim;
   if (num_reqs <= 0) return 0;
   if (head_dim <= 0 || head_dim > MAX_D || heads <= 0 || kv_heads <= 0 || heads % kv_heads != 0 || block_size <= 0 ||
@@ -1489,16 +1491,16 @@ extern "C" int gqa_paged_win_bf16(const void* q, const void* cache, const int32_
                                   const int32_t* seq_lens, const int32_t* cu_seqlens_q, void* out, int64_t num_reqs,
                                   int64_t max_q_len, int64_t heads, int64_t kv_heads, int64_t head_dim,
                                   int64_t block_size, int64_t max_blocks, float scale, int64_t q_stride,
-                                  int skip_single, int cfg, int window, cudaStream_t stream) {
+                                  int skip_single, int cfg, int window, int p_fp8, cudaStream_t stream) {
   return gqa_paged_impl(q, cache, block_table, seq_lens, cu_seqlens_q, out, num_reqs, max_q_len, heads, kv_heads,
-                        head_dim, block_size, max_blocks, scale, q_stride, skip_single, cfg, window, stream);
+                        head_dim, block_size, max_blocks, scale, q_stride, skip_single, cfg, window, p_fp8, stream);
 }
 extern "C" int gqa_paged_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens,
                               const int32_t* cu_seqlens_q, void* out, int64_t num_reqs, int64_t max_q_len, int64_t heads,
                               int64_t kv_heads, int64_t head_dim, int64_t block_size, int64_t max_blocks, float scale,
                               int64_t q_stride, int skip_single, int cfg, cudaStream_t stream) {
   return gqa_paged_impl(q, cache, block_table, seq_lens, cu_seqlens_q, out, num_reqs, max_q_len, heads, kv_heads,
-                        head_dim, block_size, max_blocks, scale, q_stride, skip_single, cfg, 0, stream);
+                        head_dim, block_size, max_blocks, scale, q_stride, skip_single, cfg, 0, 0, stream);
 }
 
 // 每个有效 split 至少处理多少 key（kernel 内按 seq_len 算有效 splits）。默认 32：B300 kps 16/32/64 扫描（loop 第 4b 轮）
@@ -1589,8 +1591,4 @@ extern "C" int gqa_decode_bf16(const void* q, const void* cache, const int32_t* 
   dim3 grid2((unsigned)num_reqs, (unsigned)heads);
   gqa_decode_merge_kernel<<<grid2, PF_D, 0, stream>>>(scratch, static_cast<bf16*>(out), (int)heads);
   return last_err();
-}
-
-extern "C" int gqa_set_p_fp8(int on) {
-  return (int)cudaMemcpyToSymbol(g_p_fp8, &on, sizeof(int));
 }

@@ -162,6 +162,8 @@ pub struct Gemma4Layer {
     pub head_dim: usize,
     pub nkv: usize,
     pub window: usize,
+    /// FP8 KV 层:attention 的 P 也以 e4m3 参与 PV(vLLM Triton FP8 路径),传给 gqa 的 p_fp8。
+    pub p_fp8: bool,
     pub rope_dim: usize,
     pub k_eq_v: bool,
 }
@@ -269,6 +271,7 @@ impl Gemma4Layer {
             head_dim,
             nkv,
             window: cfg.window_at(l),
+            p_fp8: cfg.kv_fp8,
             rope_dim: cfg.attn_shape(l).2.rope_dim,
             k_eq_v,
         })
@@ -581,6 +584,7 @@ impl Gemma4Layer {
                 0,
                 0,
                 self.window,
+                self.p_fp8,
             )?,
             _ => ops.attn().paged_win(
                 stream,
@@ -602,6 +606,7 @@ impl Gemma4Layer {
                 // 混批（Paged 且同一步里也有 prefill 行）时跳过单行请求；纯 decode 不跳。
                 matches!(ctx.mode, dinfer_core::runner::BatchMode::Paged),
                 self.window,
+                self.p_fp8,
             )?,
         }
 

@@ -1940,6 +1940,7 @@ fn gqa_prefill_impl<
     q_stride: usize,
     kv_stride: usize,
     window: usize,
+    p_fp8: bool,
 ) -> Result<()> {
     ensure!(cu_seqlens.len() > num_reqs, "gqa_prefill: cu_seqlens");
     ensure!(max_seqlen > 0, "gqa_prefill: max_seqlen");
@@ -1968,6 +1969,7 @@ fn gqa_prefill_impl<
                 kv_stride as i64,
                 gqa_prefill_cfg(stream),
                 window as i32,
+                p_fp8 as i32,
                 stream.raw() as _,
             )
         },
@@ -1996,19 +1998,12 @@ pub fn gqa_prefill_bf16<
     q_stride: usize,
     kv_stride: usize,
 ) -> Result<()> {
-    gqa_prefill_impl(stream, q, k, v, out, cu_seqlens, num_reqs, max_seqlen, heads, kv_heads, head_dim, scale, q_stride, kv_stride, 0)
+    gqa_prefill_impl(stream, q, k, v, out, cu_seqlens, num_reqs, max_seqlen, heads, kv_heads, head_dim, scale, q_stride, kv_stride, 0, false)
 }
 
 /// 带滑窗的 prefill（Gemma4 的 sliding 层）：每行 query 只能看到 `[pos - window + 1, pos]`。
 /// `window = 0` 等价全注意力。
 #[allow(clippy::too_many_arguments)]
-/// 进程级 attention 数值模式：`on` 时 P 以 e4m3 参与 PV、行和仍用 fp32 P（复刻 vLLM Triton 在 Q/K/V 全 FP8 时的
-/// `tl.dot(P.to(V.dtype), V)`）。只影响 `gqa.cu` 的 prefill / paged kernel；模型加载时设一次。
-pub fn gqa_set_p_fp8(on: bool) -> Result<()> {
-    // SAFETY: 只写一个 __constant__ int。
-    check(unsafe { ffi::gqa_set_p_fp8(on as i32) }, "gqa_set_p_fp8")
-}
-
 pub fn gqa_prefill_win_bf16<
     Q: DevicePtr<bf16> + ?Sized,
     K: DevicePtr<bf16> + ?Sized,
@@ -2029,8 +2024,9 @@ pub fn gqa_prefill_win_bf16<
     q_stride: usize,
     kv_stride: usize,
     window: usize,
+    p_fp8: bool,
 ) -> Result<()> {
-    gqa_prefill_impl(stream, q, k, v, out, cu_seqlens, num_reqs, max_seqlen, heads, kv_heads, head_dim, scale, q_stride, kv_stride, window)
+    gqa_prefill_impl(stream, q, k, v, out, cu_seqlens, num_reqs, max_seqlen, heads, kv_heads, head_dim, scale, q_stride, kv_stride, window, p_fp8)
 }
 
 /// D=256 全注意力 prefill kernel 结构（`ArchProfile::gqa_prefill_cfg_for`），`GQA_PREFILL_CFG` 覆盖；进程内只算一次。
@@ -2072,6 +2068,7 @@ fn gqa_paged_impl<Q: DevicePtr<bf16> + ?Sized>(
     // 混批：跳过 q_len==1 的请求（它们由 gqa_decode_bf16 处理）。
     skip_single: bool,
     window: usize,
+    p_fp8: bool,
 ) -> Result<()> {
     ensure!(
         block_table.len() >= num_reqs * max_blocks && seq_lens.len() >= num_reqs,
@@ -2108,6 +2105,7 @@ fn gqa_paged_impl<Q: DevicePtr<bf16> + ?Sized>(
                 skip_single as i32,
                 gqa_prefill_cfg(stream),
                 window as i32,
+                p_fp8 as i32,
                 stream.raw() as _,
             )
         },
@@ -2135,7 +2133,7 @@ pub fn gqa_paged_bf16<Q: DevicePtr<bf16> + ?Sized>(
     q_stride: usize,
     skip_single: bool,
 ) -> Result<()> {
-    gqa_paged_impl(stream, q, cache, block_table, seq_lens, cu_seqlens_q, out, num_reqs, max_q_len, heads, kv_heads, head_dim, block_size, max_blocks, scale, q_stride, skip_single, 0)
+    gqa_paged_impl(stream, q, cache, block_table, seq_lens, cu_seqlens_q, out, num_reqs, max_q_len, heads, kv_heads, head_dim, block_size, max_blocks, scale, q_stride, skip_single, 0, false)
 }
 
 /// 带滑窗的 paged attention：可见 key ∈ `[pos - window + 1, pos]`；`window = 0` 等价全注意力。
@@ -2159,8 +2157,9 @@ pub fn gqa_paged_win_bf16<Q: DevicePtr<bf16> + ?Sized>(
     q_stride: usize,
     skip_single: bool,
     window: usize,
+    p_fp8: bool,
 ) -> Result<()> {
-    gqa_paged_impl(stream, q, cache, block_table, seq_lens, cu_seqlens_q, out, num_reqs, max_q_len, heads, kv_heads, head_dim, block_size, max_blocks, scale, q_stride, skip_single, window)
+    gqa_paged_impl(stream, q, cache, block_table, seq_lens, cu_seqlens_q, out, num_reqs, max_q_len, heads, kv_heads, head_dim, block_size, max_blocks, scale, q_stride, skip_single, window, p_fp8)
 }
 
 /// 纯 decode（每请求 1 行）split-K attention（D ∈ {128, 256}）。q: [B, heads, D]，out 同形；`scratch` ≥ `gqa_decode_scratch_len`。

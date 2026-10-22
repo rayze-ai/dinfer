@@ -127,7 +127,6 @@ int gqa_cache_write_bf16(const void* k, const void* v, void* cache, const int64_
 // NW ∈ {4,8} × TILE ∈ {32,64}），0 = v5 旧路径
 // （4 warp、tile 32、Q 在寄存器）。数值由 Rust 侧 ArchProfile 按卡给；D=128 忽略 cfg。
 // 进程级：P 以 e4m3 参与 PV（复刻 vLLM FP8 attention 数值），模型加载时设一次。
-int gqa_set_p_fp8(int on);
 int gqa_prefill_bf16(const void* q, const void* k, const void* v, void* out, const int32_t* cu_seqlens, int64_t num_reqs,
                      int64_t max_seqlen, int64_t heads, int64_t kv_heads, int64_t head_dim, float scale, int64_t q_stride,
                      int64_t kv_stride, int cfg, cudaStream_t stream);
@@ -138,11 +137,11 @@ int gqa_paged_bf16(const void* q, const void* cache, const int32_t* block_table,
 // 滑窗变体（Kaon-V3 / Gemma4 的 25 个 sliding_attention 层）：window <= 0 = 全注意力，与上面的旧符号等价。
 int gqa_prefill_win_bf16(const void* q, const void* k, const void* v, void* out, const int32_t* cu_seqlens,
                          int64_t num_reqs, int64_t max_seqlen, int64_t heads, int64_t kv_heads, int64_t head_dim,
-                         float scale, int64_t q_stride, int64_t kv_stride, int cfg, int window, cudaStream_t stream);
+                         float scale, int64_t q_stride, int64_t kv_stride, int cfg, int window, int p_fp8, cudaStream_t stream);
 int gqa_paged_win_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens,
                        const int32_t* cu_seqlens_q, void* out, int64_t num_reqs, int64_t max_q_len, int64_t heads,
                        int64_t kv_heads, int64_t head_dim, int64_t block_size, int64_t max_blocks, float scale,
-                       int64_t q_stride, int skip_single, int cfg, int window, cudaStream_t stream);
+                       int64_t q_stride, int skip_single, int cfg, int window, int p_fp8, cudaStream_t stream);
 int gqa_decode_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens, void* out,
                     float* scratch, int64_t num_reqs, int64_t heads, int64_t kv_heads, int64_t head_dim,
                     int64_t block_size, int64_t max_blocks, float scale, int64_t q_stride, const int32_t* cu_seqlens_q, cudaStream_t stream);

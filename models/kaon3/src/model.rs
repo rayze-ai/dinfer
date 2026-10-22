@@ -47,8 +47,6 @@ pub struct KaonModel {
 impl KaonModel {
     /// 只装权重结构（不含 KV cache，KV 由 `alloc_kv` 单独按显存预算分配）。
     pub fn load(stream: &Stream, src: &WeightSource, cfg: KaonConfig) -> Result<Self> {
-        // FP8 KV 时 vLLM 的 attention 是 Q/K/V/P 全 e4m3（Triton FP8 路径）；P 的量化在 kernel 内，按进程设一次
-        k::ops::gqa_set_p_fp8(cfg.kv_fp8)?;
         let embed_name = weights::EMBED;
         let embed = Embedding::load(stream, src, &format!("{}{}", weights::TEXT_PREFIX, "embed_tokens"))?;
         ensure!(embed.vocab == cfg.vocab_size, "vocab {} != {}", embed.vocab, cfg.vocab_size);

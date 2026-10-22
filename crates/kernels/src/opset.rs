@@ -46,7 +46,7 @@ pub trait Attention {
     fn prefill_win<Q: DevicePtr<bf16> + ?Sized, K: DevicePtr<bf16> + ?Sized, V: DevicePtr<bf16> + ?Sized>(
         &self, _stream: &Stream, _q: &Q, _k: &K, _v: &V, _out: &mut CudaSlice<bf16>, _cu_seqlens: &CudaSlice<i32>,
         _num_reqs: usize, _max_seqlen: usize, _heads: usize, _kv_heads: usize, _head_dim: usize, _scale: f32,
-        _q_stride: usize, _kv_stride: usize, _window: usize,
+        _q_stride: usize, _kv_stride: usize, _window: usize, _p_fp8: bool,
     ) -> Result<()> {
         anyhow::bail!("当前后端不支持滑窗 prefill（prefill_win）")
     }
@@ -56,7 +56,7 @@ pub trait Attention {
         &self, _stream: &Stream, _q: &Q, _cache: &CudaSlice<bf16>, _block_table: &CudaSlice<i32>,
         _seq_lens: &CudaSlice<i32>, _cu_seqlens_q: &CudaSlice<i32>, _out: &mut CudaSlice<bf16>, _num_reqs: usize,
         _max_q_len: usize, _heads: usize, _kv_heads: usize, _head_dim: usize, _block_size: usize, _max_blocks: usize,
-        _scale: f32, _q_stride: usize, _skip_single: bool, _window: usize,
+        _scale: f32, _q_stride: usize, _skip_single: bool, _window: usize, _p_fp8: bool,
     ) -> Result<()> {
         anyhow::bail!("当前后端不支持滑窗 paged attention（paged_win）")
     }
@@ -157,9 +157,9 @@ impl Attention for DefaultOps {
     fn prefill_win<Q: DevicePtr<bf16> + ?Sized, K: DevicePtr<bf16> + ?Sized, V: DevicePtr<bf16> + ?Sized>(
         &self, stream: &Stream, q: &Q, k: &K, v: &V, out: &mut CudaSlice<bf16>, cu_seqlens: &CudaSlice<i32>,
         num_reqs: usize, max_seqlen: usize, heads: usize, kv_heads: usize, head_dim: usize, scale: f32,
-        q_stride: usize, kv_stride: usize, window: usize,
+        q_stride: usize, kv_stride: usize, window: usize, p_fp8: bool,
     ) -> Result<()> {
-        ops::gqa_prefill_win_bf16(stream, q, k, v, out, cu_seqlens, num_reqs, max_seqlen, heads, kv_heads, head_dim, scale, q_stride, kv_stride, window)
+        ops::gqa_prefill_win_bf16(stream, q, k, v, out, cu_seqlens, num_reqs, max_seqlen, heads, kv_heads, head_dim, scale, q_stride, kv_stride, window, p_fp8)
     }
     #[inline]
     #[allow(clippy::too_many_arguments)]
@@ -167,9 +167,9 @@ impl Attention for DefaultOps {
         &self, stream: &Stream, q: &Q, cache: &CudaSlice<bf16>, block_table: &CudaSlice<i32>,
         seq_lens: &CudaSlice<i32>, cu_seqlens_q: &CudaSlice<i32>, out: &mut CudaSlice<bf16>, num_reqs: usize,
         max_q_len: usize, heads: usize, kv_heads: usize, head_dim: usize, block_size: usize, max_blocks: usize,
-        scale: f32, q_stride: usize, skip_single: bool, window: usize,
+        scale: f32, q_stride: usize, skip_single: bool, window: usize, p_fp8: bool,
     ) -> Result<()> {
-        ops::gqa_paged_win_bf16(stream, q, cache, block_table, seq_lens, cu_seqlens_q, out, num_reqs, max_q_len, heads, kv_heads, head_dim, block_size, max_blocks, scale, q_stride, skip_single, window)
+        ops::gqa_paged_win_bf16(stream, q, cache, block_table, seq_lens, cu_seqlens_q, out, num_reqs, max_q_len, heads, kv_heads, head_dim, block_size, max_blocks, scale, q_stride, skip_single, window, p_fp8)
     }
     #[inline]
     fn decode_scratch_len(&self, batch: usize, heads: usize, head_dim: usize) -> usize {
