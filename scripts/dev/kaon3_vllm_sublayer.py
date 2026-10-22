@@ -34,6 +34,24 @@ HOOKS = {
 captured = {}
 _orig = g4.Gemma4DecoderLayer.forward
 
+# MoE 输出：MoERunner.forward 的返回值。`experts` 是 PluggableLayer，挂普通 forward hook 不触发，
+# 所以直接 patch 类方法（模块级只做一次，避免每层重复包装）。
+try:
+    import vllm.model_executor.layers.fused_moe.runner.moe_runner as _mr
+    _orig_moe = _mr.MoERunner.forward
+
+    def _moe_patched(self_, *aa, **kk):
+        out_ = _orig_moe(self_, *aa, **kk)
+        t_ = out_[0] if isinstance(out_, tuple) else out_
+        if t_ is not None and "moe_y" not in captured and t_.shape[0] == t:
+            captured["moe_y"] = t_.detach().float().cpu().numpy().copy()
+        return out_
+
+    _mr.MoERunner.forward = _moe_patched
+except Exception as _e:  # noqa: BLE001
+    print(f"MoERunner patch 失败: {_e}", flush=True)
+
+
 def _patched(self, *a, **k):
     hs = a[1] if len(a) > 1 else k.get("hidden_states")
     if self.layer_idx != 0 or hs is None or hs.shape[0] != t or captured:
@@ -63,6 +81,7 @@ def _patched(self, *a, **k):
         if a_ is not None:
             handles.append(a_.register_forward_hook(mk("attn_out")))
     # down_proj 的**输入**（= gelu(gate)*up，FP8 激活量化的对象）
+    mlp_ = getattr(self, "mlp", None)
     if mlp_ is not None:
         dp = getattr(mlp_, "down_proj", None)
         if dp is not None:
@@ -70,21 +89,7 @@ def _patched(self, *a, **k):
                 if inp and inp[0] is not None:
                     captured["mlp_gelu"] = inp[0].detach().float().cpu().numpy().copy()
             handles.append(dp.register_forward_pre_hook(_dp_pre))
-    # MoE 输出：MoERunner.forward 的返回值（`experts` 是 PluggableLayer，普通 forward hook 不触发）
-    try:
-        import vllm.model_executor.layers.fused_moe.runner.moe_runner as _mr
-        _orig_moe = _mr.MoERunner.forward
-        def _moe_patched(self_, *aa, **kk):
-            out_ = _orig_moe(self_, *aa, **kk)
-            t_ = out_[0] if isinstance(out_, tuple) else out_
-            if t_ is not None and t_.shape[0] == t and "moe_y" not in captured:
-                captured["moe_y"] = t_.detach().float().cpu().numpy().copy()
-            return out_
-        _mr.MoERunner.forward = _moe_patched
-    except Exception as _e:  # noqa: BLE001
-        print(f"MoERunner patch 失败: {_e}", flush=True)
     # MLP 内部：gate_up 投影输出（gelu 之前）与 down 投影输出
-    mlp_ = getattr(self, "mlp", None)
     if mlp_ is not None:
         for attr, name in (("gate_up_proj", "mlp_gate_up"), ("down_proj", "mlp_down")):
             m_ = getattr(mlp_, attr, None)
