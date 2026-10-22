@@ -33,7 +33,15 @@ timeout 120 $R run "docker rm -f $ON >/dev/null 2>&1; docker run -d --name $ON -
 for _ in $(seq 1 60); do
   s=$(timeout 30 $R run "curl -s -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:$OP/v1/models; docker inspect -f ' {{.State.Status}}' $ON" 2>/dev/null || true)
   case "$s" in
-    200*) echo "$ON 就绪（GPU $OG :$OP layers=${N:-30} block=${BLOCK:-32} BI=${BI:-1}）"; exit 0 ;;
+    200*)
+      # 端口独占校验（2026-10-22 踩坑）：--network host 下若端口被别的容器占着，vLLM 会
+      # Address already in use 直接退出，但 curl 打到的**是那个别人的服务**并返回 200 → 假"就绪"，
+      # 之后所有抓取都打在别的配置上（P1 因此得出过一次错误结论）。
+      own=$(timeout 30 $R run "docker inspect -f '{{.State.Running}}' $ON 2>/dev/null" | tr -d '[:space:]')
+      if [ "$own" != "true" ]; then
+        echo "❌ :$OP 有服务在答，但容器 $ON 未运行 —— 端口被别的容器占用（换 ORACLE_PORT）"; exit 3
+      fi
+      echo "$ON 就绪（GPU $OG :$OP layers=${N:-30} block=${BLOCK:-32} BI=${BI:-1}）"; exit 0 ;;
     *exited*|*dead*) break ;;
   esac
   sleep 10
