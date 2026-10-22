@@ -54,3 +54,25 @@ POOLED cases=29 rows=655 decisive=607 flips=61 flip_pct=10.05 mean_common_d=0.76
 - 若 ≈新文件、≠旧文件 → B 组旧文件确实来自第三个配置，参照集必须整体重抓。
 
 **这条不查清，P2–P4 的所有数字都没有意义**（判据的下限和我们的读数会来自不同世界的样本）。
+
+**三方对比结果（2026-10-22 深夜）**，p01，全部 BI=1、block 32：
+
+| A | B | flips | flip_pct | mean_common_d | dnll |
+|---|---|---|---|---|---|
+| old-params 新进程 | 旧 `oracle/p01` | 2/19 | 10.53% | 1.2236 | −0.1354 |
+| old-params 新进程 | 新 `oracle_recheck/p01`（4096）| 3/19 | 15.79% | 1.1366 | −0.2480 |
+| `oracle_recheck` | `oracle_recheck2`（**同进程**）| **0**/89 | **0.00%** | **0.0000** | **0.0000** |
+
+**关键推论**：旧参数的新进程与旧文件也差 10.53% → **`max-num-batched-tokens` 不是主因**；
+同进程逐位一致、跨进程必然不同 → 差异是**进程级别的**，不是参数级别的。
+
+怀疑方向（按先验）：① CUDA graph 捕获时的 buffer 地址 / 分桶不同；② torch.compile 缓存命中与否
+（日志里 `torch_compile_cache/95a7cdd52e/...`，若某些进程重新编译会走不同 kernel）；③ 其它按进程随机的
+自动调优（cuBLAS workspace、cutlass heuristics、FlashInfer autotune 的 benchmark 选择）。
+
+**这意味着什么（重要）**：`VLLM_BATCH_INVARIANT=1` 只保证**同一进程内** batch 组成不影响结果，
+**不保证跨进程一致**。所以判据里"BI=1 是确定性参照"这个说法要修正为"**同一进程内确定**"。
+而 `oracle/` 目录是多个进程拼成的，内部就不自洽 —— 必须用**单个进程一次抓完**的参照集。
+
+**决定性实验 2（进行中）**：同参数再起一个进程（`kaon-oracle-dup`，GPU 0 :28101）抓 p01，
+若与 `oracle_recheck` 不同 → 坐实"跨进程不确定"，参照集与下限集都必须单进程一次抓完。
