@@ -596,3 +596,34 @@ p02 / layer 0 逐项对拍（T=24）：
 
 侧注：`dense`（1.68e-2）虽比 `o_proj`（7.65e-3）大，但它是**继承** attention 的偏差后
 再走 FP8 MLP，不构成独立的第一处偏差。
+
+### 读码补充：BI=1 下 query **不**量化（我们多做了一个 fp8 roundtrip）
+
+`vllm/v1/attention/backends/triton_attn.py:659-667`：
+
+```python
+q_descale = (
+    layer._q_scale
+    if (self._kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
+        and query.dtype == self.fp8_dtype)   # ← 只有 query 已是 fp8 才用它
+    else None
+)
+```
+
+即：**query 是否 fp8 由上游决定**，`unified_attention` 只在 `query.dtype == fp8` 时才反量化。
+Gemma4 的 `self.attn(q, k, v)` 传进去的 `q` 是 bf16（`q_norm` 是 bf16 RMSNorm，rope 也是 bf16）。
+**所以 vLLM 在这里用 bf16 query 算 QK。**
+
+我们 `layer.rs`（`cfg.kv_fp8` 分支）额外做了：
+
+```rust
+fp8_e4m3_roundtrip_bf16_n(&mut q.data, tokens*heads*d, 1.0)   // ← 把 q 转成 e4m3 再转回 bf16
+```
+
+这会把 q 的每个元素压到 e4m3（**相对精度 ~2^-3 ≈ 6%，即 e4m3 只有 3 位尾数**）。
+QK^T 的分数因此带 ~6% 的量化噪声，softmax 之后传到 `attn_out`——
+**量级正好落在我们观测到的 `o_proj` 7.65e-3 上**，而且能解释为什么
+`q_norm`（RoPE 前，1e-4 以内、可忽略）与 `o_proj` 之间有跳变。
+
+这条**不依赖任何新数据就能判定为可疑**：vLLM 源码里没有对 bf16 query 做量化这一步。
+下一轮 A/B：去掉 `q` 的 fp8 roundtrip（K/V 仍按 FP8 KV cache 量化），看 `o_proj` 是否归零。
