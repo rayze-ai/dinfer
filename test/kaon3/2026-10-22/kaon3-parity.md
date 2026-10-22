@@ -313,3 +313,23 @@ L6–L11（滑窗 + MoE）。**结论：12 层之前的所有组件（含 D=512 
   而不是拿全 30 层算出的全局 1.51%/0.100 去套所有层；
 - 或者更省：**不做逐层**，改为"组件级"定位 —— 直接对 L13–L17 的**子组件**做单元级比对
   （滑窗 attention 已有 kernel 对拍过；剩下 MoE 路由 / dense MLP / norm / RoPE 位置编码）。
+
+### 排除"验证脚本批量模式有 bug"（2026-10-22 深夜）
+
+怀疑：`--batch` 只 `setup()` 一次、在同一个 ctx 上连跑 30 次 forward，可能与单用例模式（每次全新 ctx）结果不同，
+从而让 verify 的 28.87% / 1.825 成为脚本产物。
+
+**实验**：同一用例 `p02`（24 token）分别用 `--batch`（单用例目录）与 `--forward --dump-oracle` 跑，
+逐行比对 `prompt_logprobs`：
+
+```
+rows 24 24
+identical rows: 24 / 24
+```
+
+**结论：批量模式与单用例模式逐位一致，脚本无此 bug。** verify 的数字不是批量模式的产物。
+（`forward()` 里每次 `alloc_kv` 重建 KV、`LayerScratch`/`ActBuf` 每次新建，状态确实是干净的。）
+
+**但这只排除了"模式差异"**，还没排除"两者的输入假设都不对"，例如：
+`BLOCK_SIZE=32` 与 oracle 的 block 32 是否真的一致、`slot_mapping` 的排布、`block_table` 的构造。
+这些由 `p02`（24 token，1 个 block）覆盖不足 —— 需要跨 block 的用例才能暴露。
