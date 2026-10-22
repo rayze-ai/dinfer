@@ -14,12 +14,21 @@
 #include <cstdio>
 #include <cstdlib>
 #include "common.cuh"
+#include <cuda_fp8.h>
 #include <stdlib.h>
 #include "kernels.h"
 
 using namespace dinfer;
 
 namespace {
+
+// 进程级数值模式：P 以 e4m3 参与 PV（复刻 vLLM Triton FP8 attention：Q/K/V 为 fp8 时 `tl.dot(P.to(V.dtype), V)`），
+// 行和 L 仍用 fp32 的 P。由 `gqa_set_p_fp8` 在模型加载时设一次，默认 0（bf16 P）。真 FP8 attention kernel 落地后改显式参数。
+__constant__ int g_p_fp8 = 0;
+__device__ __forceinline__ float pq8(float p) {
+  if (!g_p_fp8) return p;
+  return __half2float(__half(__nv_cvt_fp8_to_halfraw(__nv_cvt_float_to_fp8(p, __NV_SATFINITE, __NV_E4M3), __NV_E4M3)));
+}
 
 constexpr int GQ_BLOCK = 256;
 constexpr int MAX_D = 512;  // 通用慢路径上限；Gemma4 full 层 head_dim = 512
@@ -255,10 +264,10 @@ __global__ void __launch_bounds__(V4_THREADS) gqa_fa_v5_kernel(
 #pragma unroll
     for (int j = 0; j < TILE / 16; ++j) {
       uint32_t pa[4];
-      pa[0] = pack_bf16x2(sacc[2 * j][0], sacc[2 * j][1]);
-      pa[1] = pack_bf16x2(sacc[2 * j][2], sacc[2 * j][3]);
-      pa[2] = pack_bf16x2(sacc[2 * j + 1][0], sacc[2 * j + 1][1]);
-      pa[3] = pack_bf16x2(sacc[2 * j + 1][2], sacc[2 * j + 1][3]);
+      pa[0] = pack_bf16x2(pq8(sacc[2 * j][0]), pq8(sacc[2 * j][1]));
+      pa[1] = pack_bf16x2(pq8(sacc[2 * j][2]), pq8(sacc[2 * j][3]));
+      pa[2] = pack_bf16x2(pq8(sacc[2 * j + 1][0]), pq8(sacc[2 * j + 1][1]));
+      pa[3] = pack_bf16x2(pq8(sacc[2 * j + 1][2]), pq8(sacc[2 * j + 1][3]));
 #pragma unroll
       for (int nt2 = 0; nt2 < D / 16; ++nt2) {
         uint32_t bv[4];
@@ -507,10 +516,10 @@ __global__ void __launch_bounds__(NW * 32) gqa_fa_v6_kernel(
 #endif
       for (int j = 0; j < TILE / 16; ++j) {
         uint32_t pa[4];
-        pa[0] = pack_bf16x2(sacc[2 * j][0], sacc[2 * j][1]);
-        pa[1] = pack_bf16x2(sacc[2 * j][2], sacc[2 * j][3]);
-        pa[2] = pack_bf16x2(sacc[2 * j + 1][0], sacc[2 * j + 1][1]);
-        pa[3] = pack_bf16x2(sacc[2 * j + 1][2], sacc[2 * j + 1][3]);
+        pa[0] = pack_bf16x2(pq8(sacc[2 * j][0]), pq8(sacc[2 * j][1]));
+        pa[1] = pack_bf16x2(pq8(sacc[2 * j][2]), pq8(sacc[2 * j][3]));
+        pa[2] = pack_bf16x2(pq8(sacc[2 * j + 1][0]), pq8(sacc[2 * j + 1][1]));
+        pa[3] = pack_bf16x2(pq8(sacc[2 * j + 1][2]), pq8(sacc[2 * j + 1][3]));
 #pragma unroll
         for (int nt2 = 0; nt2 < D / 16; ++nt2) {
           uint32_t bv[4];
@@ -741,8 +750,8 @@ __global__ void __launch_bounds__(NW * 32, 2) gqa_fa_v7_kernel(
       for (int nt = 0; nt < OF; ++nt) { o[nt][0] *= alpha_a; o[nt][1] *= alpha_a; o[nt][2] *= alpha_b; o[nt][3] *= alpha_b; }
 #pragma unroll
       for (int nt = 0; nt < SFRAG; ++nt) {
-        *reinterpret_cast<uint32_t*>(sPp + g * PLD + hf * HK + nt * 8 + cq) = pack_bf16x2(sacc[nt][0], sacc[nt][1]);
-        *reinterpret_cast<uint32_t*>(sPp + (g + 8) * PLD + hf * HK + nt * 8 + cq) = pack_bf16x2(sacc[nt][2], sacc[nt][3]);
+        *reinterpret_cast<uint32_t*>(sPp + g * PLD + hf * HK + nt * 8 + cq) = pack_bf16x2(pq8(sacc[nt][0]), pq8(sacc[nt][1]));
+        *reinterpret_cast<uint32_t*>(sPp + (g + 8) * PLD + hf * HK + nt * 8 + cq) = pack_bf16x2(pq8(sacc[nt][2]), pq8(sacc[nt][3]));
       }
       bar_named(bar_id, 64);
 #pragma unroll
@@ -900,7 +909,7 @@ __global__ void gqa_prefill_ref_kernel(const bf16* __restrict__ q, const bf16* _
         const bf16* kj = kptr(j);
         float s = 0.f;
         for (int d = 0; d < D; ++d) s += s_q[d] * to_f32(kj[d]);
-        p = __expf(s * scale - s_stat[0]) / s_stat[1];
+        p = pq8(__expf(s * scale - s_stat[0])) / s_stat[1];
       }
       s_p[threadIdx.x] = p;
       __syncthreads();
@@ -981,7 +990,7 @@ __global__ void gqa_paged_kernel(const bf16* __restrict__ q, const bf16* __restr
         const bf16* kj = kptr(j);
         float s = 0.f;
         for (int d = 0; d < D; ++d) s += s_q[d] * to_f32(kj[d]);
-        p = __expf(s * scale - s_stat[0]) / s_stat[1];
+        p = pq8(__expf(s * scale - s_stat[0])) / s_stat[1];
       }
       s_p[threadIdx.x] = p;
       __syncthreads();
@@ -1580,4 +1589,8 @@ extern "C" int gqa_decode_bf16(const void* q, const void* cache, const int32_t* 
   dim3 grid2((unsigned)num_reqs, (unsigned)heads);
   gqa_decode_merge_kernel<<<grid2, PF_D, 0, stream>>>(scratch, static_cast<bf16*>(out), (int)heads);
   return last_err();
+}
+
+extern "C" int gqa_set_p_fp8(int on) {
+  return (int)cudaMemcpyToSymbol(g_p_fp8, &on, sizeof(int));
 }

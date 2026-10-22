@@ -126,6 +126,8 @@ int gqa_cache_write_bf16(const void* k, const void* v, void* cache, const int64_
 // 2 = v6 + K/V 双缓冲、3 = v6 + SFU ex2.approx；
 // NW ∈ {4,8} × TILE ∈ {32,64}），0 = v5 旧路径
 // （4 warp、tile 32、Q 在寄存器）。数值由 Rust 侧 ArchProfile 按卡给；D=128 忽略 cfg。
+// 进程级：P 以 e4m3 参与 PV（复刻 vLLM FP8 attention 数值），模型加载时设一次。
+int gqa_set_p_fp8(int on);
 int gqa_prefill_bf16(const void* q, const void* k, const void* v, void* out, const int32_t* cu_seqlens, int64_t num_reqs,
                      int64_t max_seqlen, int64_t heads, int64_t kv_heads, int64_t head_dim, float scale, int64_t q_stride,
                      int64_t kv_stride, int cfg, cudaStream_t stream);

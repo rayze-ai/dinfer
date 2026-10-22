@@ -2002,6 +2002,13 @@ pub fn gqa_prefill_bf16<
 /// 带滑窗的 prefill（Gemma4 的 sliding 层）：每行 query 只能看到 `[pos - window + 1, pos]`。
 /// `window = 0` 等价全注意力。
 #[allow(clippy::too_many_arguments)]
+/// 进程级 attention 数值模式：`on` 时 P 以 e4m3 参与 PV、行和仍用 fp32 P（复刻 vLLM Triton 在 Q/K/V 全 FP8 时的
+/// `tl.dot(P.to(V.dtype), V)`）。只影响 `gqa.cu` 的 prefill / paged kernel；模型加载时设一次。
+pub fn gqa_set_p_fp8(on: bool) -> Result<()> {
+    // SAFETY: 只写一个 __constant__ int。
+    check(unsafe { ffi::gqa_set_p_fp8(on as i32) }, "gqa_set_p_fp8")
+}
+
 pub fn gqa_prefill_win_bf16<
     Q: DevicePtr<bf16> + ?Sized,
     K: DevicePtr<bf16> + ?Sized,

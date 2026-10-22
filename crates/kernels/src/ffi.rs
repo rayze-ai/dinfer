@@ -265,6 +265,7 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
     /// 滑窗变体（Kaon-V3 / Gemma4 滑窗层）：`window <= 0` = 全注意力。
+    pub fn gqa_set_p_fp8(on: i32) -> i32;
     pub fn gqa_prefill_win_bf16(
         q: *const c_void,
         k: *const c_void,
