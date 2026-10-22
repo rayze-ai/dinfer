@@ -156,7 +156,7 @@ pub struct Gemma4Layer {
     pub dense_down: QLinear,
     pub router: Router,
     pub experts: Vec<Expert>,
-    /// `per_expert_scale`（host 副本）；`MOE_COMBINE_BF16=1` 时不折进 down，在合并时乘进路由权重。
+    /// `per_expert_scale`（host 副本）；`MOE_COMBINE_F32=1` 时不折进 down，在合并时乘进路由权重。
     pub pes: Vec<f32>,
     /// `layer_scalar`，BF16 单元素。
     pub layer_scalar: f32,
@@ -775,10 +775,17 @@ impl Gemma4Layer {
             std::fs::write(dir.join("router_logits.bin"), bytes)
                 .map_err(|err| anyhow::anyhow!("写 router_logits.bin 失败: {err}"))?;
         }
+        // per_expert_scale 在这里折进路由权重（vLLM `_gemma4_routing_kernel` 同位置；默认口径）；
+        // `MOE_COMBINE_F32=1` 时改在 load 期折进 down 的全局 scale，这里传 None。
+        let pes_route: Option<&k::cudarc::driver::CudaSlice<bf16>> = if moe_combine_f32() {
+            None
+        } else {
+            Some(&self.router.per_expert.data)
+        };
         k::ops::moe_route_softmax_f32(
             stream,
             &sc.logits.data,
-            None,
+            pes_route,
             &mut sc.topk_ids.data,
             &mut sc.topk_w.data,
             tokens,
@@ -825,7 +832,7 @@ impl Gemma4Layer {
                     &sc.buckets.sorted_tok,
                     &sc.buckets.sorted_k,
                     &sc.topk_w.data,
-                    Some(&self.router.per_expert.data),
+                    None,
                     start,
                     len,
                     kk,

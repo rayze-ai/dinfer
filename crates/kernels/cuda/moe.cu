@@ -122,13 +122,14 @@ __global__ void gather_kernel(const bf16* __restrict__ x, bf16* __restrict__ xg,
 // per_expert 为空指针时视为全 1（无 per-expert scale 的模型）。kernel 体内无 #if，口径由运行时参数选。
 __global__ void scatter_add_kernel(const bf16* __restrict__ y, float* __restrict__ acc,
                                    const int32_t* __restrict__ sorted_tok, const int32_t* __restrict__ sorted_k,
-                                   const float* __restrict__ topk_w, const float* __restrict__ per_expert,
+                                   const float* __restrict__ topk_w, const void* __restrict__ per_expert,
                                    float w_scale, int K, int H, int mode) {
   const int64_t i = blockIdx.x;
   const int tok = sorted_tok[i];
   const int e = sorted_k[i];
   float w = topk_w[(int64_t)tok * K + e];
-  if (per_expert) w *= per_expert[e] * w_scale;
+  // vLLM：`per_expert_scale[topk_ids].to(topk_weights.dtype)`——per_expert 是 bf16 参数，参与 f32 运算前转 f32。
+  if (per_expert) w *= to_f32(static_cast<const bf16*>(per_expert)[e]) * w_scale;
   else w *= w_scale;
   const bf16* src = y + i * H;
   float* dst = acc + (int64_t)tok * H;
@@ -189,7 +190,7 @@ extern "C" int moe_route_f32(const float* logits, const float* bias, int32_t* to
 //   dispatch_weights = gate_weights / sum(gate_weights)        // 只在 top-k 上
 //   topk_weights = dispatch_weights.gather(1, topk_ids) * per_expert_scale[topk_ids]
 __global__ void route_softmax_kernel(const float* __restrict__ logits, const int32_t* __restrict__ topk_ids,
-                                     const float* __restrict__ per_expert_scale, float* __restrict__ topk_w, int E,
+                                     const void* __restrict__ per_expert_scale, float* __restrict__ topk_w, int E,
                                      int K) {
   const int64_t t = blockIdx.x;
   __shared__ float s_prob[MAX_E];
@@ -236,7 +237,9 @@ __global__ void route_softmax_kernel(const float* __restrict__ logits, const int
     const float inv_w = wsum > 0.f ? 1.f / wsum : 1.f;  // 只在 top-k 上重新归一化
     for (int k = 0; k < K; ++k) {
       const int e = topk_ids[t * K + k];
-      topk_w[t * K + k] = s_sel[k] * inv_w * (per_expert_scale ? per_expert_scale[e] : 1.f);
+      // per_expert_scale 是 bf16 参数（vLLM `.to(topk_weights.dtype)` → 参与 f32 运算前转 f32）。
+      topk_w[t * K + k] = s_sel[k] * inv_w *
+                          (per_expert_scale ? to_f32(static_cast<const bf16*>(per_expert_scale)[e]) : 1.f);
     }
   }
 }
@@ -266,7 +269,7 @@ __global__ void route_topk_ids_kernel(const float* __restrict__ logits, int32_t*
   }
 }
 
-extern "C" int moe_route_softmax_f32(const float* logits, int32_t* topk_ids, const float* per_expert_scale,
+extern "C" int moe_route_softmax_f32(const float* logits, int32_t* topk_ids, const void* per_expert_scale,
                                      float* topk_w, int64_t tokens, int64_t num_experts, int64_t topk,
                                      cudaStream_t stream) {
   if (num_experts <= 0 || num_experts > MAX_E || topk <= 0 || topk > MAX_K || topk > num_experts) return -1;
@@ -301,7 +304,7 @@ extern "C" int moe_gather_bf16(const void* x, void* xg, const int32_t* sorted_to
 
 // acc: [tokens, hidden] fp32，需先清零；y: [n, hidden] bf16（n = tokens*topk 的排序后行）。
 extern "C" int moe_scatter_add_f32(const void* y, float* acc, const int32_t* sorted_tok, const int32_t* sorted_k,
-                                   const float* topk_w, const float* per_expert, float w_scale,
+                                   const float* topk_w, const void* per_expert, float w_scale,
                                    int64_t n, int64_t topk, int64_t hidden, int mode, cudaStream_t stream) {
   if (n <= 0) return 0;
   const int threads = hidden >= 256 ? 256 : (int)(((hidden + 31) / 32) * 32);

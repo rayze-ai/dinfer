@@ -1733,7 +1733,7 @@ pub fn moe_route_f32(
 pub fn moe_route_softmax_f32(
     stream: &Stream,
     logits: &CudaSlice<f32>,
-    per_expert_scale: Option<&CudaSlice<f32>>,
+    per_expert_scale: Option<&CudaSlice<bf16>>,
     topk_ids: &mut CudaSlice<i32>,
     topk_w: &mut CudaSlice<f32>,
     tokens: usize,
@@ -1746,7 +1746,7 @@ pub fn moe_route_softmax_f32(
         ensure!(p.len() == num_experts, "moe_route_softmax: per_expert_scale len");
     }
     let pl = stream.ptr(logits) as *const f32;
-    let pp = per_expert_scale.map_or(std::ptr::null(), |p| stream.ptr(p) as *const f32);
+    let pp = per_expert_scale.map_or(std::ptr::null(), |p| stream.ptr(p) as *const c_void);
     let pi = stream.ptr_mut(topk_ids) as *mut i32;
     let pw = stream.ptr_mut(topk_w) as *mut f32;
     // SAFETY: 容量已校验；per_expert_scale 可为 null。
@@ -1911,7 +1911,7 @@ pub fn moe_scatter_add_bf16w_f32(
     sorted_tok: &CudaSlice<i32>,
     sorted_k: &CudaSlice<i32>,
     topk_w: &CudaSlice<f32>,
-    per_expert: Option<&CudaSlice<f32>>,
+    per_expert: Option<&CudaSlice<bf16>>,
     start: usize,
     n: usize,
     topk: usize,
@@ -1930,7 +1930,7 @@ pub fn moe_scatter_add_bf16w_f32(
     let pst = stream.ptr(sorted_tok) as *const i32;
     let psk = stream.ptr(sorted_k) as *const i32;
     let pw = stream.ptr(topk_w) as *const f32;
-    let pe = per_expert.map(|t| stream.ptr(t) as *const f32).unwrap_or(std::ptr::null());
+    let pe = per_expert.map(|t| stream.ptr(t) as *const c_void).unwrap_or(std::ptr::null());
     // SAFETY: 容量已校验；偏移 start 在界内。
     let (pst, psk) = unsafe { (pst.add(start), psk.add(start)) };
     check(

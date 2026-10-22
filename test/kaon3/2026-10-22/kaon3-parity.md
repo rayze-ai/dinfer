@@ -1921,3 +1921,23 @@ top-8 无翻转。L9 是三槽 q/k/v 组（独立 v_proj、组内重量化），
 **端到端**：三开关全开 14.49% / 1.2302；对照 **vLLM 自身只换 kernel（BI 开 vs 关，P1 实测）13.95% / 1.19**——同一量级。
 即"两项 FLOOR 判据"的 FLOOR（同 kernel、跨进程 0.83%）对**不同 kernel 的实现**不可达；
 可比的下限是"kernel 变体下限"（BI 开 / 关 ≈ 14% / 1.19）。**改判据需用户确认**（P1 当时用户选定 FLOOR=跨进程）。
+
+## 第 15 轮（2026-10-23）：按用户决定，**三处口径默认改为与 vLLM 对齐**
+
+用户 2026-10-23：「默认，先和 vllm 对齐，至于是不是更精确，是下一步或者开关的事」。
+
+| 项 | 新默认（= vLLM） | 精确版开关 |
+|---|---|---|
+| gelu | `bf16(bf16(gelu(g))·u)`，x³ 按 `f*f*f` | `GELU_F32=1`（全 f32 一次舍入）|
+| MoE 合并 | `w = bf16(topk_w · per_expert_scale)`、每项 `bf16(w·y)`，f32 累加 | `MOE_COMBINE_F32=1`（per_expert 折进 down 全局 scale、f32 乘积）|
+| router logits | 舍入 bf16（vLLM 在 sm_120 上 `F.linear`→bf16→cast）| `ROUTER_F32=1` |
+
+实现要点：
+- MoE 合并改到 **GPU kernel**（`moe_scatter_add_f32` 加运行时 `mode` / `per_expert` / `w_scale` 参数，mode 1 = vLLM 口径），
+  不再走第 14 轮那种 host 往返；`per_expert_scale` 折进**路由权重**（`moe_route_softmax_f32` 的 `per_expert_scale` 参数，
+  vLLM `_gemma4_routing_kernel` 同位置），且按 **bf16 读取**（vLLM 里它就是 bf16 参数）。
+- 踩坑（当轮修掉）：第一版在合并 kernel 里用 `sorted_k[i]` 查 `per_expert_scale`——`sorted_k` 是 **top-k 槽位**不是专家 id，
+  导致 moe_y 反而变差到 1.8e-2；改为在路由处折叠后恢复。
+
+**L11 复测（默认，无环境变量）**：`router_logits` 2/3072 个 1-ulp 平局；`moe_y` / `ff2` **0 差异（67584 元素全同）**；
+`iso_L11` mean **2.8e-6**。
