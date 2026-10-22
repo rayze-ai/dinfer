@@ -32,11 +32,20 @@
 
 ## 停止条件（必须可机器判定）
 
-`scripts/verify/kaon3-parity.sh` exit 0，即每个用例：
-1. 可判定行（oracle top1 − top2 ≥ 0.5）top-1 全部一致；
-2. oracle top-5 的 |Δlogprob| 均值 ≤ 0.15；
-3. oracle top-1 的 |Δlogprob| 最大 ≤ 0.6。
-（常量在 `kaon3_probe.rs` 顶部；双方 logits 都是 bf16，|x|∈[16,32) 的量化步长 0.125，判据按此留余量。改判据要先在本文件写理由。）
+**2026-10-22 修订**（原判据"可判定行 top1 零翻转 + Δ 均值 ≤ 0.15"作废）：标定发现 **vLLM 自己对自己**（同镜像，
+开 / 关 `VLLM_BATCH_INVARIANT`，只换 kernel）在 long_zh 上就有 11.3% 的可判定行 top1 翻转、chat_en 22%、raw9 50%；
+我们两个都正确的 attention kernel（v5 / 慢路径）互比也有 29% 翻转，逐层追踪显示差异从 L0 的 1.2% 放大到 L29 的 23%——
+W4A4 / W8A8 激活量化让微小扰动跨过舍入边界后放大，逐行对齐在原理上做不到。新判据以 vLLM 自身噪声为基准：
+
+`scripts/verify/kaon3-parity.sh` exit 0，即：
+1. kernel 对拍 `gqa_window_parity`（滑窗 / 大分数）与 `gemm_lowp_parity`（FP8 静态 scale、NVFP4 gs）全过；
+2. 汇总用例（`test/kaon3/oracle` 里 ≤512 行的全部，当前 27 个：24 条 prompts.tsv + raw9 / chat_en / chat_zh），
+   记 FLOOR = vLLM(开 BI) 对 vLLM(关 BI)，OURS = vLLM(开 BI) 对我们：
+   - 可判定行 top1 翻转率 OURS ≤ 1.5 × FLOOR + 3 个百分点；
+   - 实际 token 平均 NLL 之差 |ΔNLL| OURS ≤ max(3 × |ΔNLL| FLOOR, 0.01)；
+   - 共有 top-5 token 的 |Δlogprob| 均值 OURS ≤ 1.5 × FLOOR；
+3. 长序列 long_zh（1252 token，过滑窗 1024）的 |ΔNLL| ≤ max(3 × 下限, 0.01)；
+4. 单 token（bos1，无 attention）top1 一致。
 
 ## 上限
 
