@@ -12,10 +12,12 @@ R=scripts/dev/remote_5090.sh
 read -r -a G <<< "${GPUS:-0 2 3 4 5 6}"
 for g in "${G[@]}"; do case $g in 1|7) echo "❌ GPU $g 禁用（1=私有 oracle，7=基线）"; exit 1;; esac; done
 RUN=$(date +%m%d-%H%M%S)-$$
-B=/w/bins/$RUN; O=/w/runs/$RUN
+# SNAP=<run>：复用已有快照、跳过 sync / 编译（并行跑多个变体时只编一次）；BUILD_ONLY=1：只编译 + 快照 + kernel 对拍
+B=/w/bins/${SNAP:-$RUN}; O=/w/runs/$RUN
 PASS=0; FAIL=0
 ok() { echo "✅ $1"; PASS=$((PASS+1)); }
 ng() { echo "❌ $1"; FAIL=$((FAIL+1)); }
+if [ -z "${SNAP:-}" ]; then
 timeout 300 $R sync >/dev/null || { echo "❌ sync 到远端失败"; exit 1; }
 # 1) 串行：编译 + kernel 对拍 + 产物快照
 pre=$(GPU=${G[0]} timeout 3000 $R ctr "cargo build --release -p dinfer-kaon3 --bins 2>&1 | grep -E '^error' -A4 | head -8
@@ -25,6 +27,10 @@ echo "$pre" | grep -E '^error' | head -5
 echo "$pre" | grep -q SNAP_OK || { echo "❌ 编译 / 快照失败"; exit 1; }
 [ "$(echo "$pre" | grep -c '^KTEST test result: ok')" -ge 2 ] && ok "kernel 对拍（gqa_window_parity / gemm_lowp_parity）" \
   || ng "kernel 对拍：$(echo "$pre" | grep KTEST | tr '\n' ' ')"
+[ -n "${BUILD_ONLY:-}" ] && { echo "SNAP=$RUN"; exit 0; }
+else
+  timeout 120 $R ctr "mkdir -p $O/ours" >/dev/null
+fi
 # 2) 并行：按卡分片跑批量前向（每卡只加载一次权重）
 n=${#G[@]}
 for i in "${!G[@]}"; do

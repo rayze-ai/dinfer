@@ -287,6 +287,11 @@ pub struct LayerMeta<'a> {
     pub positions: &'a Tensor<i32>,
 }
 
+type RopeCtor = fn(&Stream, usize, usize, usize, f64, RopeStyle) -> Result<Rope>;
+fn rope_ctor() -> RopeCtor {
+    if std::env::var_os("ROPE_F32_TABLE").is_some() { Rope::with_denom } else { Rope::with_denom_bf16_table }
+}
+
 /// RoPE 表（两种：sliding 与 full 各一套）。
 pub struct Ropes {
     pub sliding: Rope,
@@ -296,8 +301,9 @@ pub struct Ropes {
 impl Ropes {
     pub fn new(stream: &Stream, cfg: &KaonConfig) -> Result<Self> {
         Ok(Self {
-            // 表项舍入到 bf16：vLLM 的 cos_sin_cache 存成模型 dtype（Q/K 之后还要 e4m3，差 1 ulp 也会放大）
-            sliding: Rope::with_denom_bf16_table(
+            // 表项舍入到 bf16：vLLM 的 cos_sin_cache 存成模型 dtype（Q/K 之后还要 e4m3，差 1 ulp 也会放大）。
+            // A/B 开关 ROPE_F32_TABLE=1 退回 f32 表（第 8 轮对照用）。
+            sliding: rope_ctor()(
                 stream,
                 cfg.rope_sliding.rope_dim,
                 cfg.rope_sliding.denom,
@@ -306,7 +312,7 @@ impl Ropes {
                 RopeStyle::Neox,
             )?
             .with_span(cfg.rope_sliding.span)?,
-            full: Rope::with_denom_bf16_table(
+            full: rope_ctor()(
                 stream,
                 cfg.rope_full.rope_dim,
                 cfg.rope_full.denom,
