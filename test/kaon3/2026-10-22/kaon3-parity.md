@@ -1832,3 +1832,14 @@ vLLM MoE 后端：`Using 'VLLM_CUTLASS' NvFp4 MoE backend`（`nvfp4.py:291`）�
 `(c3.view(m,K,k) * topk_weights.view(m,K,1).to(out_dtype)).sum(dim=1)`，`out_dtype = a.dtype = bf16`；
 `per_expert_scale` 在 `gemma4.py _gemma4_routing_kernel` 里折进路由权重（fp32），合并时**权重 cast bf16、乘积 bf16**。
 我们：per_expert_scale 折进 down 全局 scale、权重 f32、f32 累加。→ 新增 A/B `MOE_COMBINE_BF16=1`（按 vLLM 口径，host 实现）。
+
+### C-3：`MOE_COMBINE_BF16=1`（合并按 vLLM bf16 口径）—— 几乎无效，合并排除
+快照 `1022-211549-811041`，`MOE_COMBINE_BF16=1 ROUTER_BF16=1` L11 隔离 vs `/w/hid/c2r`：
+moe_y 相对 **9.2e-3 → 8.3e-3**，ff2 1.50e-2 → 1.48e-2，iso_L11 6.42e-3 → 6.33e-3。→ 合并口径不是主因。
+
+### C-4：排除"激活全局 scale 口径不同"
+`quantization/utils/flashinfer_fp4_moe.py prepare_nvfp4_moe_layer_for_fi_or_cutlass`：
+`is_global_sf_supported_for_nvfp4_backend(VLLM_CUTLASS)` = **False**（只含 FlashInfer 后端）→ 走 `a13_scale.max(dim=1)`
+（每专家取 gate/up 两片最大）、a2 逐专家——与我们 `layer.rs`（`ag.max(au)`、down 逐专家）**一致**。排除。
+
+下一步 C-5：两侧逐 (token, 专家) dump gate_up / 激活 / down 输出，按专家 id 对齐，定位第一个分歧段。
