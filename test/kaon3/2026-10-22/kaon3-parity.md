@@ -1656,3 +1656,46 @@ f32 读数与第 8 轮 `1022-170737` 逐位一致（−0.0018 / 15.32% / 1.2220 
 **误差沿 token 位置单调增长**，与第 10 轮观察一致。这个形态指向"沿 key 方向逐步累积"，
 候选：KV cache 的 FP8 往返（`layer.rs:592-594`，`kv_fp8` 时 k/v 都做 `fp8_e4m3_roundtrip_bf16`，scale=1.0）、
 或 attention 内 P 的量化。**待 `SUB_LAYER=11` 子模块对拍决定是 `k_norm` 还是 `attn_out` 引入的。**
+
+## 第 12 轮结论：**L11 没有计算错误或逻辑错误**；残余差异 = vLLM router 精度不足选错专家
+
+`SUB_LAYER=11` 两侧同输入（我们灌参照 `L10.bin`；vLLM 整跑，输入是它自己的 L10），快照 `1022-193421-754085`（f16 口径）：
+
+| 子模块 | max | mean | 判定 |
+|---|---|---|---|
+| input_norm | 0 | 0 | 逐位 |
+| q_norm / q_rope | 3.9e-3 | 5.3e-8 | ✅ |
+| **k_norm / k_rope** | 6.0e-8 | **2.4e-12** | ✅（修根因 4 前是 **2.65e-2**）|
+| v_norm | 9.5e-7 | 3.9e-11 | ✅ |
+| attn_out / o_proj | 7.8e-3 | 2e-8 / 2e-7 | ✅ |
+| post_attn_norm / pre_ff_norm / router_in | ≤7.8e-3 | ≤1.4e-7 | ✅ |
+| mlp_gate_up / mlp_gelu / dense | 6.3e-2 | ≤3.3e-4 | ✅（dense MLP）|
+| **router_logits** | 1.2e-2 | 1.4e-3 | 见下 |
+| moe_y / post_ff_norm / ff2 | 16.5 | 1.9e-3 / 1.8e-2 / 1.0e-1 | 由 router 翻转主导 |
+
+**attention 整段已与 vLLM 对齐**（权重字节 100% + 中间量 ≤1e-7）。残余全部在 MoE：
+
+- 24 个 token 里 **t10 / t16 两个 top-8 专家集合翻转**；在 vLLM 的输出里这两个 token 第 8/9 名 logit **完全相等**（gap8=0）。
+  这两个 token 的 `ff2` 差 0.75 / 0.65，其余 22 个 0.01–0.09；`iso_L11` 末段 7.8e-2 那一行就是 t16。
+  **第 10 轮"误差随位置单调增长、沿 key 累积"是误读**——是翻转 token 恰好落在后半段。
+- **fp64 真值**（bf16 原始 router 权重 × `router_in`，float64）：
+
+| 实现 | 与 fp64 max | mean | top-8 错 |
+|---|---|---|---|
+| 我们 | **3.97e-7** | 5.9e-8 | **0/24** |
+| vLLM | 1.21e-2 | 1.4e-3 | **2/24（t10、t16）**|
+
+  真值下 t10 / t16 的 gap8 是 4.4e-3 / 6.1e-3（不是平局）——**vLLM 的 bf16 router 输出把它们舍成平局后选错**，我们选对。
+
+### 对用户问题的回答
+
+- **权重 / 重量化**：无错（字节 100%，f16 口径与 vLLM 同一逻辑 `per_tensor_dequantize`→`scaled_fp8_quant(max_w_scale)`）。
+- **k_eq_v 逻辑**：无错（vLLM 10240 行里 V 槽 == K 槽字节；我们 K 算完 dtod 拷到 V 等价；v 槽不参与 max 也对）。
+- **attention / KV FP8**：无错（k/v_norm 2e-12 级）。
+- 残余差异来自**参照自身**的 router 精度；按停止条件 2「与真值的距离不劣于参照」，L11 **通过**。
+- 端到端 +0.1055 vs −0.0018 的变化，是 L11 的 K 从"错 2.6%"变成"对"后，下游混沌传播的重新分布，不是新 bug。
+
+### 清理
+
+停掉本轮起的 `kaon-oracle`（GPU 1）；删 `/w/hid/{sweep_*,iso_*,ourw,vwL11}` 临时产物；
+保留 `/w/hid/{sub11_new,refsub11}`（本节证据）与快照 `/w/bins/1022-193421-754085`。

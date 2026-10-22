@@ -1,6 +1,6 @@
 # loop 规格：kaon3-parity
 
-- 状态：进行中（2026-10-22；回退验证已完成 → **下一步：fp64 真值三方校验定口径**）
+- 状态：进行中（2026-10-22 第 12 轮：**L11 通过真值判据**，attention 段与 vLLM 对齐；下一步：逐层 router 真值扫描）
 - 创建：2026-10-22
 - 验证脚本：`scripts/verify/kaon3-parity.sh`
 - 迭代记录：`test/kaon3/2026-10-22/kaon3-parity.md`
@@ -154,6 +154,14 @@ BUILD_ONLY=1 bash scripts/verify/kaon3-parity.sh      # 打印 SNAP=<id>
   L11 的 `sk/smax=0.567` 却差 2.6e-2 —— 差别只能在 **vLLM 对该层的处理分支**。
 - **下一条可判定命令**：在参照容器里读加载后的 `layers.11.self_attn.qkv_proj.weight` 分片字节与 scale，
   与我们的 `--dump-weights` 逐字节 `cmp`。字节相同 → 差异在 GEMM；不同 → 直接看到 vLLM 实取值。
+
+## 第 12 轮结论（2026-10-22）
+
+- L11 qkv 权重与 vLLM **逐字节 100%**；attention 段中间量 ≤1e-7（k_norm 2.65e-2 → 2.4e-12）。
+- 残余差异全在 MoE：2/24 token top-8 翻转，**fp64 真值证明是 vLLM 选错**（我们 router 4e-7、0/24 错）。
+- 第 10 轮"沿位置累积"是误读（翻转 token 在后半段）。
+- **下一步**：把 router fp64 三方校验扩到 30 层（`kaon3_router_truth.py` 加层号参数），
+  统计每层"vLLM 选错 / 我们选错"的 token 数；若全模型我们 0 错，端到端差异即可整体归因到参照。
 
 ## 上限
 
