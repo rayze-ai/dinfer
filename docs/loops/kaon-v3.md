@@ -983,3 +983,25 @@ docker run --rm --entrypoint bash --gpus device=0 \
 2. 怀疑点（按先验）：FP8 激活没用 `input_scale`（kernel 直接 e4m3 饱和 ±448，Gemma 残差大）、norm 权重口径
    （Gemma 的 `1+w` 与否要核 `gemma4.py` 的 RMSNorm 类）、embed normalizer 的 bf16 舍入、router 预处理、layer_scalar。
 3. 之后：NVFP4 Rust 对拍测试 → 高效 D=512 kernel（慢路径做参照）→ decode 滑窗。
+
+## 阶段 3 → 4 计划（2026-10-22 晚盘点，按序执行，每步有机器可判定的出口）
+
+> 现状：parity 最好状态是第 7 轮（long_zh ΔNLL +0.048，长序列 / 单 token / kernel 三项过；短 prompt 翻转率 25.25% / 共有 Δ 1.80
+> 仍超下限 13.95% / 1.19）。第 8 轮两项里 RoPE 表已退回 f32（`86ec5e9`），**embed normalizer 仍是 bf16（`model.rs:64`）未验证**。
+> `pre2 = [2, 105]` 是与 BI 无关的真 bug（vLLM 30 层强判 1852 @0.986，我们 5976）；截层 oracle L3/6/12/18/24 已抓好。
+> 性能一个数都没测。阶段总目标不变：`kaon_v3.sh` exit 0 + out tok/s 与 TTFT 双 ≥ 基线 1.2×。
+
+| 步 | 做什么 | 出口（可判定） | 预估 |
+|---|---|---|---|
+| **P1** 判据对齐生产 | `kaon3-parity.sh` 的参照目录 `oracle/` → `oracle_nobi/`；下限 FLOOR 改为 `oracle_nobi` 对 `oracle`（方向反过来，数值同）；重跑一次拿第 7 轮状态在新判据下的基线 | 脚本跑通、`POOLED` 行写进迭代记录 | 半轮 |
+| **P2** 第 8 轮收尾 | 只剩 embed normalizer bf16 一项：同一快照 `SNAP=` 两卡并行，`EMBED_SCALE_F32=1` 对照（开关已删，临时加回再删）| long_zh ΔNLL 回到 ≤ +0.05 的那个取法留下，另一个删；进迭代记录 | 半轮 |
+| **P3** pre2 截层二分 | `kaon3_probe $M --forward --layers N --oracle oracle_layers/LN/pre2.json 2 105`，N ∈ {3, 6, 12, 18, 24}，找第一个 top1 / Δ 跳变的层；再 `--dump-layer` 看是 attention（5/11/17/23/29 全注意力层 D=512）还是 MoE / dense MLP；pre3 同法交叉 | 定位到层 + 子模块，修后 pre2 top1 = 1852 且 P1 判据不退 | 1–2 轮 |
+| **P4** 短 prompt 超标 | P3 修完先重测；若仍超，按先验顺序只剩：router 预处理 / `per_expert_scale` 折算 / `layer_scalar` / softcap 前 dtype，每轮一处 | `kaon3-parity.sh` exit 0（P1 判据） | ≤ 3 轮；到 30 轮上限则按规格填卡点 |
+| **P5** D=512 full 层快路径 | 5 层 full attention 现在走 `gqa_prefill_ref_kernel` O(T²)；做 flash 风格 D=512 分块（K/V tile 按 D 切两半累加，smem 翻倍），慢路径当 ref | 新 kernel ref 测试过（1e-2）；6 K prefill 单层耗时记录；parity 不退 | 1–2 轮 |
+| **P6** decode 滑窗 + KV 写入 | `gqa_decode_v3.cu` 加 window 下界（与 prefill 同三处 mask 口径）；FP8 KV cache 真写（现在是 e4m3 往返模拟） | decode ref 测试过；T=1 逐 token 与 prefill 同 ids 的 logits 一致 | 1 轮 |
+| **P7** 阶段 4 服务 | 照 `models/qwen35/{service,executor}.rs` 接 `ChatBackend` + `ModelExecutor`（tokenizer / Gemma chat 模板 / 采样 / graph 桶）；`bins/dinfer` 加 `kaon3` feature | `serve` 起来、`/v1/models` id 正确、greedy 短 prompt 与基线 oracle 一致 | 2 轮 |
+| **P8** 首轮性能 | 同口径四组（c1 / c8 / c32 / 6 K TTFT）对基线 `:28067`，三方钉核，`bench_compare.sh test/kaon3/<日期>/bench1` | 拿到第一组 ×基线数字，写 `test/kaon3/perf-trend.csv` | 1 轮 |
+| **P9** 性能迭代 | 按 P8 分段归属排序，已知候选：NVFP4 512×2816 形状 141 → ≥ 330 TF/s（tile 变体 / split-K，`ArchProfile` 选）；MoE 路由 → 按专家聚合 → grouped GEMM；D=512 attention decode | 每轮 CSV；直到四组 ≥ 1.2× | 开放 |
+
+**纪律**：P1–P4 是同一条 loop `kaon3-parity`（不达标不停）；P5–P6 改 kernel 前先写 ref 测试；P7 起每轮 bench 进 CSV。
+GPU 1 = 私有 oracle、7 = 基线，其余 0/2–6 用；并行 A/B 用同一 `SNAP` 快照。

@@ -16,7 +16,7 @@
 
 | # | 事项 | 状态 | 规格 |
 |---|---|---|---|
-| K1 | **parity 第 8 轮退回验证**：bf16 RoPE 表 + bf16 embed normalizer 让 long_zh 从 +0.048 退到 +0.475；A/B「两项都退回 / 只退 RoPE 表」在同一快照、不相交卡上并行跑 | 待做（下一步第一件事） | `loops/kaon3-parity.md`、`test/kaon3/2026-10-22/` |
+| K1 | **parity 第 8 轮收尾**：RoPE 表已退回 f32（`86ec5e9`），**embed normalizer 仍 bf16 未验证**；同一快照两卡 A/B | 待做（P2） | `loops/kaon-v3.md` 末节计划 P1–P9 |
 | K2 | **pre2 真 bug**：vLLM 强判 1852 @0.986，我们判 5976，BI 开 / 关都一样 → 与噪声无关 | 待做（定位中） | 同上 |
 | K3 | **短 prompt 翻转率 / 共有 Δ 仍超下限**（25.25% / 1.80 vs 下限 13.95% / 1.19） | 待做 | 同上 |
 | K4 | **判据对齐生产**：oracle 目标改 `oracle_nobi`（生产不开 BI），verify 仍比对 `oracle/` | 待做（脚本改一行 + 重算下限） | `loops/kaon3-parity.md` 末节 |
