@@ -1121,3 +1121,32 @@ run `1022-172445-674582`：
 `scripts/dev/kaon3_vllm_logits.py`：抓 vLLM 的**完整 logits**（softcap 前 `logits_pre.bin`
 与后 `logits_post.bin`，各 24×262144），与我们同名的完整 logits 直接比
 `max / std / 与真值（bf16 权重 fp64 计算）的相关`，一次判定是"整体缩放"还是"个别维度偏移"。
+
+### 用已有数据定量判"logits 整体偏平"（不依赖新抓取）
+
+p01 row3 两侧 **top-1 是同一个 id 1082**，只是 logprob 不同（我们 −0.521 / 参照 −0.111）。
+这排除了"选了不同 token"，可以直接反解分布形状。
+
+`log p1 = −log(Σ_j exp(L_j − L_1))`，记 `E = Σ_{j>1} exp(L_j − L_1) = exp(−log p1) − 1`：
+
+| 侧 | log p1 | E |
+|---|---|---|
+| 参照 | −0.111 | **0.1175** |
+| 我们 | −0.521 | **0.6841** |
+
+即：**我们非 top-1 的质量是参照的 5.8 倍**。若假设 `L_ours = s · L_ref`（整体缩放），
+且由第二名主导（ref 第二第三名差 3.75 / 3.86 nat），则
+`exp(3.75(1−s)) ≈ 5.8 → 3.75(1−s) = 1.758 → s ≈ 0.53`。
+
+**这不像"温度略偏"，像整体幅度少了约一半**。但矛盾在于：`ΔNLL ≈ 0`
+（若分布真被压平到 0.53，实际 token 的长尾 logprob 应显著抬高，NLL 会明显偏小）。
+
+**所以 s≈0.53 这个单一缩放模型不成立**，更可能是"**部分方向**被压平"
+（例如只有少数几个大 logit 被 clamp / 饱和，其余不变）。
+这指向 **logits 饱和或 softcap 之前某一步的溢出/截断**，而不是线性缩放。
+
+### 参照 logits 抓取失败（记录，别重踩）
+
+`compute_logits` / `_apply_head` 的 patch 都没触发（输出 `OK []`）——vLLM 在这条路径上
+不经由 `Gemma4ForCausalLM.compute_logits`（可能走 compile 后的图或 `_get_logits` 的内部调用）。
+**下次要做这件事，直接 patch `LogitsProcessor.forward`（最小、必触发）**，不要猜层级。
