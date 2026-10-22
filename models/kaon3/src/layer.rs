@@ -496,6 +496,21 @@ pub struct StepCtx<'a> {
     pub kv_mut: &'a mut dinfer_kernels::cudarc::driver::CudaSlice<bf16>,
 }
 
+
+/// layer 0 子模块对拍的写盘助手：`sub_out` 为 `Some((dir, 0))` 时把 `buf` 前 `tokens*h` 个 bf16 写
+/// `<dir>/<name>.bin`（f32 LE，[T,H]），文件名与 `scripts/dev/kaon3_vllm_sublayer.py` 对齐。
+fn sub_dump(stream: &Stream, sub_out: Option<(&std::path::Path, usize)>, name: &str,
+            buf: &Tensor<bf16>, tokens: usize, h: usize) -> Result<()> {
+    let Some((dir, l)) = sub_out else { return Ok(()) };
+    if l != 0 { return Ok(()); }
+    let _ = stream;
+    let v = buf.to_vec_f32(stream)?;
+    let bytes: Vec<u8> = v.iter().take(tokens * h).flat_map(|x| x.to_le_bytes()).collect();
+    std::fs::write(dir.join(format!("{name}.bin")), bytes)
+        .map_err(|e| anyhow::anyhow!("写 {name}.bin 失败: {e}"))?;
+    Ok(())
+}
+
 impl Gemma4Layer {
     /// 一层的完整前向。`tokens` = 本步 token 数（prefill 多行 / decode 每请求 1 行）。
     #[allow(clippy::too_many_arguments)]
@@ -509,6 +524,9 @@ impl Gemma4Layer {
         sc: &mut LayerScratch,
         ctx: &mut StepCtx<'_>,
         tokens: usize,
+        // `Some((dir, layer))` 时把本层各子模块输出写盘，供 layer 0 逐项对拍
+        // （与 `scripts/dev/kaon3_vllm_sublayer.py` 抓的同名 `.bin` 一一对应）。
+        sub_out: Option<(&std::path::Path, usize)>,
     ) -> Result<()> {
         let (h, d, nkv) = (cfg.hidden, self.head_dim, self.nkv);
         let heads = cfg.num_heads;
@@ -517,6 +535,7 @@ impl Gemma4Layer {
 
         // ---- 1. input_norm ----
         rmsnorm_into(stream, ops, &sc.x, &self.input_norm, &mut sc.norm, h, tokens, eps)?;
+        sub_dump(stream, sub_out, "input_norm", &sc.norm, tokens, h)?;
 
         // ---- 2. q/k/v 投影（K 权重兼作 V 的层只算一次）----
         // 两种层型的 head_dim 不同（256 / 512），缓冲按层型取。
@@ -612,7 +631,9 @@ impl Gemma4Layer {
 
         // ---- 6. o_proj + post_attention_norm + 残差 ----
         self.o_proj.forward(gemm, stream, attn, &mut sc.o, tokens)?;
+        sub_dump(stream, sub_out, "o_proj", &sc.o, tokens, h)?;
         rmsnorm_into(stream, ops, &sc.o, &self.post_attn_norm, &mut sc.norm, h, tokens, eps)?;
+        sub_dump(stream, sub_out, "post_attn_norm", &sc.norm, tokens, h)?;
         k::ops::add_inplace_bf16_n(stream, &sc.norm.data, &mut sc.x.data, tokens * h)?;
 
         // ---- 7. dense MLP 支路（无条件执行）----
@@ -621,14 +642,16 @@ impl Gemma4Layer {
         self.dense_up.forward(gemm, stream, &sc.norm, &mut sc.act, tokens)?;
         ops.act().gelu_tanh_mul(stream, &sc.gate_up.data, &sc.act.data, &mut sc.gelu.data, tokens, cfg.dense_inter)?;
         self.dense_down.forward(gemm, stream, &sc.gelu, &mut sc.dense, tokens)?;
+        sub_dump(stream, sub_out, "dense", &sc.dense, tokens, h)?;
         rmsnorm_into(stream, ops, &sc.dense, &self.post_ff_norm_1, &mut sc.norm, h, tokens, eps)?;
 
         // ---- 8. MoE 支路（与 dense 并联）----
-        self.moe_branch(stream, gemm, ops, cfg, sc, tokens, eps)?;
+        self.moe_branch(stream, gemm, ops, cfg, sc, tokens, eps, sub_out)?;
 
         // ---- 9. 两条支路相加 → post_ff_norm → 残差 → layer_scalar ----
         k::ops::add_inplace_bf16_n(stream, &sc.h2.data, &mut sc.norm.data, tokens * h)?; // h2 = post_ff_norm_2(moe)
         rmsnorm_into(stream, ops, &sc.norm, &self.post_ff_norm, &mut sc.h2, h, tokens, eps)?;
+        sub_dump(stream, sub_out, "post_ff_norm", &sc.h2, tokens, h)?;
         k::ops::add_inplace_bf16_n(stream, &sc.h2.data, &mut sc.x.data, tokens * h)?;
         if self.layer_scalar != 1.0 {
             k::ops::scale_bf16_n(stream, &mut sc.x.data, tokens * h, self.layer_scalar)?;
@@ -647,6 +670,7 @@ impl Gemma4Layer {
         sc: &mut LayerScratch,
         tokens: usize,
         eps: f32,
+        sub_out: Option<(&std::path::Path, usize)>,
     ) -> Result<()> {
         let h = cfg.hidden;
         // router 输入：rmsnorm_no_weight(x) · hidden^-0.5 · scale[hidden]
@@ -669,6 +693,12 @@ impl Gemma4Layer {
         // 只在 top-k 上重新归一化。**不是 sigmoid**（那是 DeepSeekV3/GLM/K3 的 `moe_route_f32` 口径，
         // 2026-10-22 发现此前误用，是短 prompt 翻转率超标的主因之一）。
         // per_expert_scale 已折进各专家 down 的 global scale（线性等价，见 weights/load），此处不再乘。
+        if let Some((dir, 0)) = sub_out {
+            let v = sc.logits.to_vec(stream)?;
+            let bytes: Vec<u8> = v.iter().take(tokens * e).flat_map(|x| x.to_le_bytes()).collect();
+            std::fs::write(dir.join("router_logits.bin"), bytes)
+                .map_err(|err| anyhow::anyhow!("写 router_logits.bin 失败: {err}"))?;
+        }
         k::ops::moe_route_softmax_f32(
             stream,
             &sc.logits.data,
@@ -714,7 +744,9 @@ impl Gemma4Layer {
         // acc（fp32）→ bf16，再做 post_feedforward_layernorm_2
         stream.memset_zeros_n(&mut sc.y.data, tokens * h)?;
         k::ops::f32_add_to_bf16_n(stream, &sc.acc.data, &mut sc.y.data, tokens * h)?;
+        sub_dump(stream, sub_out, "moe_y", &sc.y, tokens, h)?;
         rmsnorm_into(stream, ops, &sc.y, &self.post_ff_norm_2, &mut sc.h2, h, tokens, eps)?;
+        sub_dump(stream, sub_out, "ff2", &sc.h2, tokens, h)?;
         Ok(())
     }
 }

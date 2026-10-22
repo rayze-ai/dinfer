@@ -116,6 +116,13 @@ impl KaonModel {
         if self.embed_scale != 1.0 {
             k::ops::scale_bf16_n(stream, &mut sc.x.data, tokens * h, self.embed_scale)?;
         }
+        // L-1 = embed 之后（layer 0 之前的残差流），用于把"embed 错"与"layer 0 错"分开。
+        if let Some(dir) = hidden_dir {
+            stream.dtod_copy_n(&sc.x.data, &mut hidden.data, tokens * h)?;
+            let v = hidden.to_vec_f32(stream)?;
+            let bytes: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
+            std::fs::write(format!("{dir}/Lm1.bin"), bytes)?;
+        }
 
         // ---- 30 层 ----
         // KV cache 逐层不同（head_dim 256/512），写与读都要按层取。
@@ -134,7 +141,10 @@ impl KaonModel {
                 block_size: self.block_size,
                 kv_mut: &mut kv_cache[l].cache.data,
             };
-            layer.forward(stream, gemm, ops, cfg, &self.ropes, sc, &mut ctx, tokens)?;
+            let so = hidden_dir
+                .filter(|_| l == 0)
+                .map(|d| (std::path::Path::new(d), l));
+            layer.forward(stream, gemm, ops, cfg, &self.ropes, sc, &mut ctx, tokens, so)?;
             if dump_layer == Some(l) {
                 stream.dtod_copy_n(&sc.x.data, &mut hidden.data, tokens * h)?;
             }

@@ -425,14 +425,16 @@ fn compare_hidden_dir(ours: &str, rf: &str, h: usize) -> Result<()> {
     println!("# 逐层残差流相对误差（逐行 L2 差 / 参照 L2），参照 = {rf}");
     println!("# layer  rows  mean_rel  max_rel  rel_vs_prev");
     let mut prev: Option<f64> = None;
-    for l in 0..64 {
-        let (pa, pb) = (format!("{ours}/L{l}.bin"), format!("{rf}/L{l}.bin"));
+    // Lm1 = embed 输出（layer 0 之前），用来把 "embed 错" 与 "layer 0 错" 分开
+    for l in (-1i64..64).collect::<Vec<_>>() {
+        let tag = if l < 0 { "Lm1".to_string() } else { format!("L{l}") };
+        let (pa, pb) = (format!("{ours}/{tag}.bin"), format!("{rf}/{tag}.bin"));
         if !std::path::Path::new(&pb).exists() {
             break;
         }
         let (a, b) = (read(&pa)?, read(&pb)?);
-        ensure!(a.len() == b.len(), "L{l}: 长度 {} != {}", a.len(), b.len());
-        ensure!(a.len() % h == 0, "L{l}: 长度 {} 不是 H={h} 的倍数", a.len());
+        ensure!(a.len() == b.len(), "{tag}: 长度 {} != {}", a.len(), b.len());
+        ensure!(a.len() % h == 0, "{tag}: 长度 {} 不是 H={h} 的倍数", a.len());
         let rows = a.len() / h;
         let mut rels = Vec::with_capacity(rows);
         for t in 0..rows {
@@ -445,7 +447,7 @@ fn compare_hidden_dir(ours: &str, rf: &str, h: usize) -> Result<()> {
         let mx = rels.iter().copied().fold(0f64, f64::max);
         let jump = prev.map(|p| if p > 0.0 { mean / p } else { f64::INFINITY });
         println!(
-            "L{l:<3} {rows:>4}  {mean:.3e}  {mx:.3e}  {}",
+            "{tag:<4} {rows:>4}  {mean:.3e}  {mx:.3e}  {}",
             jump.map(|j| format!("{j:.2}x")).unwrap_or_else(|| "-".into())
         );
         prev = Some(mean);
