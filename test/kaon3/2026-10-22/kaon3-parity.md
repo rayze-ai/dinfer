@@ -2109,3 +2109,29 @@ L0 已经接近逐位；残余 1 ulp 零星分布在 `q_norm`(12) / `mlp_gate_up
 我们 `q_proj_raw`（`layer.rs` 在 `head_rmsnorm` 前 dump），vLLM `qkv_raw`（hook `self_attn.qkv_proj`）。
 判定法：若两侧 `qkv_raw` 也存在同样 12 处差 → GEMM 累加顺序；若 `qkv_raw` 逐位一致而 `q_norm` 有差 → 我们的 head_rmsnorm。
 （本轮 vLLM 侧抓取因 hook 报错未成功，下一轮重试。）
+
+### D-9：L0 的 1-ulp 来自 **FP8 GEMM 的累加顺序**，不是我们的 norm/激活
+
+两侧都加 norm **之前**的原始输出 dump（我们 `q_proj_raw`，vLLM hook `self_attn.qkv_proj` → `qkv_raw`），
+同输入、整跑、L0：
+
+| 张量 | 差异 |
+|---|---|
+| `q_proj_raw`（GEMM 输出）| **5 / 98304**（rel 1.05e-7）|
+| `q_norm`（norm 之后）| 12 / 98304 |
+
+**GEMM 输出本身就不逐位一致**——这是 vLLM `QKVParallelLinear`（合并 qkv、cutlass fp8）与我们分开的 q/k/v GEMM
+在 f32 累加顺序上的差别，落在 bf16 舍入边界的少数元素取向不同。norm 只是把它从 5 处扩散到 12 处（除以头内 RMS 分母）。
+→ 我们的 `head_rmsnorm` / `gelu` / 归约实现**没有错**。
+
+### 至此的分层结论（子 loop D 累计）
+
+| 层 | 残余 | 性质 |
+|---|---|---|
+| L-1 embed | 0 | 逐位 |
+| L0 | 5–31 处 1-ulp | **FP8 GEMM 累加顺序**（不可口径对齐） |
+| L1 | 1e-6 级 | 继承 L0 |
+| L2+ | 2e-2 → 2.9e-1 | 放大器（fp8 KV 往返，双方共有）把 L0/L1 的 1-ulp 放大 |
+
+**要过 FLOOR（翻转 0.83%）必须让 L0 的 5 处 GEMM 差异也归零**，即逐位复刻 vLLM 的 fp8 GEMM 累加顺序
+（cutlass 合并 qkv 的 tile 顺序 + f32 累加树）。这是子 loop D 剩余的唯一实质项。
