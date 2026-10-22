@@ -584,8 +584,13 @@ fn run_layer_iso(ctx: &mut Ctx, ids: &[i32], l: usize, data: &[f32], dir: &str) 
         max_seqlen: tokens,
     };
     model.forward(stream, gemm, &ops, &ids_t, &meta, &mut sc, &mut acts, &mut logits, &mut hidden,
-                  tokens, None, Some(dir), Some((data, l, l)))?;
+                  tokens, None, Some(dir), Some((data, l, l + 1)))?;
     stream.synchronize()?;
-    println!("layer-iso L{l} 完成，输出在 {dir}/L{l}.bin");
+    // 隔离结果写到 `iso_L{l}.bin`（不与 `--hidden-all` 写的逐层残差流抢同一个文件名）
+    let v = hidden.to_vec_f32(stream)?;
+    let bytes: Vec<u8> = v.iter().take(tokens * h).flat_map(|x| x.to_le_bytes()).collect();
+    let out = std::path::Path::new(dir).join(format!("iso_L{l}.bin"));
+    std::fs::write(&out, bytes)?;
+    println!("layer-iso L{l} 完成 → {}", out.display());
     Ok(())
 }

@@ -138,7 +138,8 @@ impl KaonModel {
             let mut kv_cache = std::mem::take(&mut self.kv);
             let l = layer;
             // 前置各层照跑，为第 l 层的注意力填好 KV（它们的输出不进入本层输入，输入是被灌进去的）。
-            for pre in 0..skip.min(l) {
+            for pre in 0..skip {
+                if pre == l { continue; }  // 第 l 层自己只跑一次（用灌入的输入）
                 let mut c = StepCtx {
                     mode: meta.mode,
                     cu_seqlens: &meta.cu_seqlens,
