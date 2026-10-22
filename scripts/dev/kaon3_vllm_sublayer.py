@@ -32,6 +32,7 @@ HOOKS = {
 }
 
 captured = {}
+_cur = {"layer": -1}   # 当前正在跑的层号（MoERunner 是全局 patch，必须按层过滤）
 _orig = g4.Gemma4DecoderLayer.forward
 
 # MoE 输出：MoERunner.forward 的返回值。`experts` 是 PluggableLayer，挂普通 forward hook 不触发，
@@ -43,7 +44,8 @@ try:
     def _moe_patched(self_, *aa, **kk):
         out_ = _orig_moe(self_, *aa, **kk)
         t_ = out_[0] if isinstance(out_, tuple) else out_
-        if t_ is not None and "moe_y" not in captured and t_.shape[0] == t:
+        if (t_ is not None and "moe_y" not in captured and t_.shape[0] == t
+                and _cur["layer"] == _want_layer()):
             captured["moe_y"] = t_.detach().float().cpu().numpy().copy()
         return out_
 
@@ -52,11 +54,14 @@ except Exception as _e:  # noqa: BLE001
     print(f"MoERunner patch 失败: {_e}", flush=True)
 
 
+def _want_layer() -> int:
+    return int(os.environ.get('SUB_LAYER', '0'))
+
 def _patched(self, *a, **k):
     hs = a[1] if len(a) > 1 else k.get("hidden_states")
-    _want = int(os.environ.get('SUB_LAYER', '0'))
-    if self.layer_idx != _want or hs is None or hs.shape[0] != t or captured:
+    if self.layer_idx != _want_layer() or hs is None or hs.shape[0] != t or captured:
         return _orig(self, *a, **k)
+    _cur["layer"] = self.layer_idx
     handles = []
     def mk(name):
         def hook(mod, inp, outp):
@@ -114,6 +119,7 @@ def _patched(self, *a, **k):
     finally:
         for h in handles:
             h.remove()
+        _cur["layer"] = -1
     return r
 
 g4.Gemma4DecoderLayer.forward = _patched
