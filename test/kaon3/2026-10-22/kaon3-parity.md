@@ -494,3 +494,30 @@ bf16 舍入顺序不同，**在 L0 就会产生 1e-2 量级的相对差**（bf16
 同时注意 `n_cols = 2816`，BLOCK_SIZE=1024 → **3 个块**累加，第 3 块只有 768 有效。
 若我们的 kernel 用不同分块（例如 2048 或 512），fp32 累加顺序不同，也会有 ~1e-7 级差，
 但那不足以解释 1e-2。**差三个数量级，说明不是累加顺序，而是 bf16 舍入位置**。
+
+### 【二分第一刀】embed 逐位一致，误差 100% 在 layer 0 内部
+
+加了 `Lm1.bin`（embed 之后、layer 0 之前）两侧抓取后：
+
+```
+Lm1    24  0.000e0  0.000e0  -        ← embedding × sqrt(H) 逐位一致
+L0     24  1.913e-2  4.607e-2  infx
+L1     24  3.754e-2  9.311e-2  1.96x
+```
+
+**结论**：`embed_tokens(ids) * sqrt(2816)` 与 vLLM 完全一致（bf16 逐位）。
+**所有偏差都产生在 layer 0 内部**。此前"embed 或 0–7 层"的二选一，答案是后者。
+
+### layer 0 的量化配置（决定嫌疑范围）
+
+`config.json::quantization_config`（modelopt，MIXED_PRECISION）：
+
+| 层 0 的模块 | 算法 |
+|---|---|
+| `self_attn.{q,k,v,o}_proj` | **FP8**（per-tensor 静态激活 scale，`dynamic:false`）|
+| `mlp.{gate,up,down}_proj` | **FP8** |
+| `experts` | **NVFP4** |
+
+所以 layer 0 里只有 MoE 走 NVFP4，attention 与 dense MLP 都是 FP8 静态。
+我们 FP8 路径已核对为 `x*(1/input_scale)` → `__nv_cvt_float_to_fp8(E4M3, SATFINITE)`，
+输出乘 `a_scale*w_scale`，与 vLLM `scaled_mm` 口径一致；**1.9e-2 需要继续往 layer 0 内部切**。
