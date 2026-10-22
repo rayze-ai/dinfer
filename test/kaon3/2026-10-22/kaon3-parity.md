@@ -697,3 +697,32 @@ bf16 舍入后相对变化约 **1.5e-3**，正好是 `router_logits` 残差的�
 我曾试图把 `x*root_size` 与 `x*scale` **融合成一个 kernel**（只舍入一次）。
 **那是错的**：vLLM 是**两次独立的 bf16 舍入**，融合反而偏离。
 已 `git checkout` 撤回 `elementwise.cu` / `ffi.rs` / `ops.rs` 的改动，没有进入主线。
+
+### 当前状态（第 8 轮中途）
+
+| 子模块 | 修 RoPE 前 | 修 root_size 后 | 状态 |
+|---|---|---|---|
+| input_norm / k_norm / v_norm / attn_out / k_rope | — | **0.000e0** | ✅ 逐位一致 |
+| q_norm / q_rope | 8.9e-6 / 1.83e-3 | 8.9e-6 / 1.02e-5 | ✅ < bf16 ULP |
+| o_proj | 7.65e-3 | **1.149e-7** | ✅ bf16 噪声量级 |
+| post_attn_norm | 9.01e-3 | 3.105e-10 | ✅ |
+| dense（FP8 MLP）| 1.68e-2 | **1.951e-3** | 待查 |
+| router_logits | 6.28e-3 | **1.716e-3** | 待查（已加 `router_in` 对拍）|
+| ff2（MoE 输出）| 3.74e-2 | **1.156e-2** | 待查 |
+| post_ff_norm | 2.14e-2 | **6.300e-3** | 继承 |
+
+整层残差流：L0 **1.913e-2 → 6.184e-3**；L1 **3.754e-2 → 2.952e-2**；L29 1.712e-1 → 1.779e-1。
+
+### 读码核对（`dense` 与 router 的 FP8 路径）
+
+- `requantize_with_max_scale`（`w8a8_utils.py:75`）：`max_w_scale = weight_scale.max()` 取**原始 fp32**，
+  再 `per_tensor_dequantize(w, s_i)` → `scaled_fp8_quant(w_dq, max_w_scale)`。
+  `per_tensor_dequantize` 是 `tensor.to(float16) * inv_scale`，**f16 相乘、不会溢出**
+  （f16 上限 65504；权重 dq 值在 e4m3 量级 × e-2 级 scale）。与我们 `load_fp8_group` 的口径一致。
+- 激活侧 `layer.input_scale = layer.input_scale.max()`（`modelopt.py:2136`，原始 fp32 取 max），
+  与我们 `amax` 一致。
+- `scaled_fp8_quant(x, scale)` 静态路径：`x / scale` → 饱和 ±448 → RNE → e4m3；输出乘 `scale`。
+  与我们 `gemm_fp8_static_bf16` 的 `x*(1/a_scale)` / `a_scale*w_scale` 一致。
+
+**所以 `dense` 的 1.95e-3 不在 scale 口径上**，下一刀要抓 `dense` 的内部：
+`pre_ff_norm`（dense 输入，已知逐位级）、`gelu(gate)*up` 中间量、`down` 输入/输出。
