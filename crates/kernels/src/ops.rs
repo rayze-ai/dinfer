@@ -1887,13 +1887,70 @@ pub fn moe_scatter_add_f32(
                 pst,
                 psk,
                 pw,
+                std::ptr::null(),
+                1.0,
                 n as i64,
                 topk as i64,
                 hidden as i64,
+                0,
                 stream.raw() as _,
             )
         },
         "moe_scatter_add_f32",
+    )
+}
+
+/// vLLM `cutlass_moe` 合并口径：`w = bf16(topk_w · per_expert[e])`，每项 `bf16(w · y)` 再累加（两次 bf16 舍入）。
+///
+/// `per_expert` 为 None 时视为全 1。`w_scale` 供探针做系数 A/B（正常传 1.0）。
+#[allow(clippy::too_many_arguments)]
+pub fn moe_scatter_add_bf16w_f32(
+    stream: &Stream,
+    y: &CudaSlice<bf16>,
+    acc: &mut CudaSlice<f32>,
+    sorted_tok: &CudaSlice<i32>,
+    sorted_k: &CudaSlice<i32>,
+    topk_w: &CudaSlice<f32>,
+    per_expert: Option<&CudaSlice<f32>>,
+    start: usize,
+    n: usize,
+    topk: usize,
+    hidden: usize,
+    w_scale: f32,
+) -> Result<()> {
+    ensure!(
+        y.len() >= n * hidden && sorted_tok.len() >= start + n && sorted_k.len() >= start + n,
+        "moe_scatter_add: capacity"
+    );
+    if n == 0 {
+        return Ok(());
+    }
+    let py = stream.ptr(y) as *const c_void;
+    let pa = stream.ptr_mut(acc) as *mut f32;
+    let pst = stream.ptr(sorted_tok) as *const i32;
+    let psk = stream.ptr(sorted_k) as *const i32;
+    let pw = stream.ptr(topk_w) as *const f32;
+    let pe = per_expert.map(|t| stream.ptr(t) as *const f32).unwrap_or(std::ptr::null());
+    // SAFETY: 容量已校验；偏移 start 在界内。
+    let (pst, psk) = unsafe { (pst.add(start), psk.add(start)) };
+    check(
+        unsafe {
+            ffi::moe_scatter_add_f32(
+                py,
+                pa,
+                pst,
+                psk,
+                pw,
+                pe,
+                w_scale,
+                n as i64,
+                topk as i64,
+                hidden as i64,
+                1,
+                stream.raw() as _,
+            )
+        },
+        "moe_scatter_add_bf16w_f32",
     )
 }
 

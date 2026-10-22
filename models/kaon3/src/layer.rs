@@ -232,7 +232,7 @@ impl Gemma4Layer {
             let ep = format!("{p}.experts.{e}");
             let mut down = QLinear::load(stream, src, &format!("{ep}.down_proj.weight"))?;
             // 折法精确：非线性在 gate/up 之后，down 是线性 → down(x)·s == down_with_global_s(x)
-            if !moe_combine_bf16_ab() {
+            if moe_combine_f32() {
                 if let QLinear::NvFp4 { global, .. } = &mut down {
                     *global *= pes[e];
                 }
@@ -793,19 +793,6 @@ impl Gemma4Layer {
         rmsnorm_into(stream, ops, &sc.x, &self.pre_ff_norm_2, &mut sc.h2, h, tokens, eps)?;
         sub_dump(stream, sub_out, "pre_ff2_norm", &sc.h2, tokens, h)?;
         stream.memset_zeros_n(&mut sc.acc.data, tokens * h)?;
-        // 归因 A/B（子 loop C）：`MOE_COMBINE_BF16=1` 按 vLLM cutlass_moe 口径合并：
-        // w = bf16(topk_w · per_expert_scale)，每项 bf16(y · w)，f32 累加后再舍入一次（host 实现，仅 A/B）。
-        let combine_bf16 = moe_combine_bf16_ab();
-        let (h_tok, h_k, h_w, mut h_acc) = if combine_bf16 {
-            (
-                stream.dtoh_sync_copy(&sc.buckets.sorted_tok)?,
-                stream.dtoh_sync_copy(&sc.buckets.sorted_k)?,
-                stream.dtoh_sync_copy(&sc.topk_w.data)?,
-                vec![0f32; tokens * h],
-            )
-        } else {
-            (Vec::new(), Vec::new(), Vec::new(), Vec::new())
-        };
         for (eid, start, len) in k::ops::moe_expert_ranges(&offsets) {
             if len == 0 {
                 continue;
@@ -828,18 +815,25 @@ impl Gemma4Layer {
                 let toks: Vec<String> = st[start..start + len].iter().map(|t| t.to_string()).collect();
                 std::fs::write(dir.join(format!("moe_e{eid}_tok.txt")), toks.join(" "))?;
             }
-            if combine_bf16 {
-                let yg = stream.dtoh_sync_copy(&sc.yg.data)?;
-                for r in 0..len {
-                    let (t, ks) = (h_tok[start + r] as usize, h_k[start + r] as usize);
-                    let w = f32::from(bf16::from_f32(h_w[t * kk + ks] * self.pes[eid]));
-                    for j in 0..h {
-                        h_acc[t * h + j] += f32::from(bf16::from_f32(f32::from(yg[r * h + j]) * w));
-                    }
-                }
+            // 合并口径（2026-10-23 用户定：**默认为 vLLM 口径**）：w = bf16(topk_w·per_expert_scale)、每项 bf16(w·y)。
+            // `MOE_COMBINE_F32=1` 退回旧口径（per_expert_scale 折进 down 全局 scale、f32 权重与乘积）。
+            if !moe_combine_f32() {
+                k::ops::moe_scatter_add_bf16w_f32(
+                    stream,
+                    &sc.yg.data,
+                    &mut sc.acc.data,
+                    &sc.buckets.sorted_tok,
+                    &sc.buckets.sorted_k,
+                    &sc.topk_w.data,
+                    Some(&self.router.per_expert.data),
+                    start,
+                    len,
+                    kk,
+                    h,
+                    1.0,
+                )?;
                 continue;
             }
-            // per_expert_scale 已折进 down_proj 的全局 scale（见 weights::load），这里只按路由权重累加
             k::ops::moe_scatter_add_f32(
                 stream,
                 &sc.yg.data,
@@ -853,10 +847,6 @@ impl Gemma4Layer {
                 h,
             )?;
         }
-        if combine_bf16 {
-            stream.htod_into(&h_acc, &mut sc.acc.data)?;
-            stream.synchronize()?;
-        }
         // acc（fp32）→ bf16，再做 post_feedforward_layernorm_2
         stream.memset_zeros_n(&mut sc.y.data, tokens * h)?;
         k::ops::f32_add_to_bf16_n(stream, &sc.acc.data, &mut sc.y.data, tokens * h)?;
@@ -867,39 +857,42 @@ impl Gemma4Layer {
     }
 }
 
-/// `ROUTER_BF16=1`：router logits 舍入到 bf16（仅归因 A/B，默认关）。
+/// router logits 是否舍入到 bf16。**默认开**（vLLM 口径）；`ROUTER_F32=1` 保留 f32。
 fn router_bf16_ab() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| {
-        let on = std::env::var("ROUTER_BF16").map(|v| v.trim() == "1").unwrap_or(false);
-        if on {
-            eprintln!("[kaon3] ROUTER_BF16=1：router logits 舍入到 bf16（归因 A/B）");
+        // 默认开：vLLM 在 sm_120 上 router 走 F.linear → bf16 输出再 cast fp32；`ROUTER_F32=1` 退回精确口径。
+        let on = std::env::var("ROUTER_F32").map(|v| v.trim() != "1").unwrap_or(true);
+        if !on {
+            eprintln!("[kaon3] ROUTER_F32=1：router logits 保持 f32（偏离 vLLM）");
         }
         on
     })
 }
 
-/// `MOE_COMBINE_BF16=1`：MoE 合并按 vLLM cutlass_moe 口径（bf16 权重 / bf16 乘积；仅归因 A/B，默认关）。
-pub fn moe_combine_bf16_ab() -> bool {
+/// `MOE_COMBINE_F32=1`：MoE 合并退回"f32 权重 + f32 乘积 + per_expert_scale 折进 down"的旧口径。
+/// **默认（不设）= vLLM cutlass_moe 口径**（2026-10-23 用户定：先与 vLLM 对齐，精确性另议）。
+fn moe_combine_f32() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| {
-        let on = std::env::var("MOE_COMBINE_BF16").map(|v| v.trim() == "1").unwrap_or(false);
+        let on = std::env::var("MOE_COMBINE_F32").map(|v| v.trim() == "1").unwrap_or(false);
         if on {
-            eprintln!("[kaon3] MOE_COMBINE_BF16=1：MoE 合并按 vLLM bf16 口径（归因 A/B）");
+            eprintln!("[kaon3] MOE_COMBINE_F32=1：MoE 合并用旧 f32 口径（偏离 vLLM）");
         }
         on
     })
 }
 
-/// gelu_tanh(gate)·up。`GELU_ROUND2=1`：按 vLLM `act_and_mul_kernel` 口径（gelu 先舍入 bf16，子 loop C-5 归因 A/B，默认关）。
+/// gelu_tanh(gate)·up。**默认按 vLLM 口径**（gelu 先舍入 bf16 再乘 up）；`GELU_F32=1` 用一次舍入的精确版。
 fn gelu_mul(stream: &Stream, ops: &impl OpSet, gate: &k::cudarc::driver::CudaSlice<bf16>, up: &k::cudarc::driver::CudaSlice<bf16>,
             out: &mut k::cudarc::driver::CudaSlice<bf16>,
             rows: usize, inter: usize) -> Result<()> {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let r2 = *V.get_or_init(|| {
-        let on = std::env::var("GELU_ROUND2").map(|v| v.trim() == "1").unwrap_or(false);
-        if on {
-            eprintln!("[kaon3] GELU_ROUND2=1：gelu 按 vLLM 口径先舍入 bf16（归因 A/B）");
+        // 默认开：vLLM `act_and_mul_kernel` 的 ACT_FN 返回 bf16（gelu 先舍入一次再乘 up）；`GELU_F32=1` 退回一次舍入。
+        let on = std::env::var("GELU_F32").map(|v| v.trim() != "1").unwrap_or(true);
+        if !on {
+            eprintln!("[kaon3] GELU_F32=1：gelu 全 f32 一次舍入（偏离 vLLM）");
         }
         on
     });

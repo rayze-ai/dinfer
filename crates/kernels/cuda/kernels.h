@@ -341,8 +341,11 @@ int moe_bucket(const int32_t* topk_ids, int32_t* counts, int32_t* offsets, int32
                int32_t* sorted_k, int64_t tokens, int64_t num_experts, int64_t topk, cudaStream_t stream);
 int moe_gather_bf16(const void* x, void* xg, const int32_t* sorted_tok, int64_t n, int64_t hidden, cudaStream_t stream);
 // acc[tok] += topk_w[tok,k] * y[i]（fp32 累加器，调用方清零）
+// MoE 输出合并：acc[tok] += w * y[i]（i 为 sorted 下标）。mode 0 = f32 权重/乘积；
+// mode 1 = vLLM cutlass_moe 口径（w 先舍 bf16，乘积再舍 bf16）。per_expert 可空（视为全 1）。
 int moe_scatter_add_f32(const void* y, float* acc, const int32_t* sorted_tok, const int32_t* sorted_k,
-                        const float* topk_w, int64_t n, int64_t topk, int64_t hidden, cudaStream_t stream);
+                        const float* topk_w, const float* per_expert, float w_scale,
+                        int64_t n, int64_t topk, int64_t hidden, int mode, cudaStream_t stream);
 // out[:n] = bf16(bf16(acc) + out)
 int f32_add_to_bf16(const float* acc, void* out, int64_t n, cudaStream_t stream);
 

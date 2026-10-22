@@ -117,15 +117,30 @@ __global__ void gather_kernel(const bf16* __restrict__ x, bf16* __restrict__ xg,
 // out[sorted_tok[i], :] += topk_w[sorted_tok[i]*K + sorted_k[i]] * y[i, :]
 // 同一 token 的 K 个专家可能并发写同一行 → 用 fp32 atomicAdd 到临时 fp32 累加器更稳；
 // 参考版直接 bf16 读-加-写会有竞争。这里 out 用 fp32 累加器，最后 cast。
+// mode：0 = 直接 `acc += f32(w) * f32(y)`（f32 权重，我们原口径）；
+//   1 = vLLM `cutlass_moe` 合并口径：`w = bf16(f32(topk_w·per_expert_scale))`，每项 `bf16(w · f32(y))` 再累加。
+// per_expert 为空指针时视为全 1（无 per-expert scale 的模型）。kernel 体内无 #if，口径由运行时参数选。
 __global__ void scatter_add_kernel(const bf16* __restrict__ y, float* __restrict__ acc,
                                    const int32_t* __restrict__ sorted_tok, const int32_t* __restrict__ sorted_k,
-                                   const float* __restrict__ topk_w, int K, int H) {
+                                   const float* __restrict__ topk_w, const float* __restrict__ per_expert,
+                                   float w_scale, int K, int H, int mode) {
   const int64_t i = blockIdx.x;
   const int tok = sorted_tok[i];
-  const float w = topk_w[(int64_t)tok * K + sorted_k[i]];
+  const int e = sorted_k[i];
+  float w = topk_w[(int64_t)tok * K + e];
+  if (per_expert) w *= per_expert[e] * w_scale;
+  else w *= w_scale;
   const bf16* src = y + i * H;
   float* dst = acc + (int64_t)tok * H;
-  for (int d = threadIdx.x; d < H; d += blockDim.x) atomicAdd(&dst[d], w * to_f32(src[d]));
+  for (int d = threadIdx.x; d < H; d += blockDim.x) {
+    const float v = to_f32(src[d]);
+    if (mode == 1) {
+      const float wb = to_f32(to_bf16(w));
+      atomicAdd(&dst[d], to_f32(to_bf16(wb * v)));
+    } else {
+      atomicAdd(&dst[d], w * v);
+    }
+  }
 }
 
 // out = bf16(acc) + out：先把 fp32 累加器 cast 成 bf16，再与 out（shared expert 输出）bf16 相加 → 与 HF
@@ -286,11 +301,12 @@ extern "C" int moe_gather_bf16(const void* x, void* xg, const int32_t* sorted_to
 
 // acc: [tokens, hidden] fp32，需先清零；y: [n, hidden] bf16（n = tokens*topk 的排序后行）。
 extern "C" int moe_scatter_add_f32(const void* y, float* acc, const int32_t* sorted_tok, const int32_t* sorted_k,
-                                   const float* topk_w, int64_t n, int64_t topk, int64_t hidden, cudaStream_t stream) {
+                                   const float* topk_w, const float* per_expert, float w_scale,
+                                   int64_t n, int64_t topk, int64_t hidden, int mode, cudaStream_t stream) {
   if (n <= 0) return 0;
   const int threads = hidden >= 256 ? 256 : (int)(((hidden + 31) / 32) * 32);
   scatter_add_kernel<<<(unsigned)n, threads, 0, stream>>>(static_cast<const bf16*>(y), acc, sorted_tok, sorted_k,
-                                                          topk_w, (int)topk, (int)hidden);
+                                                          topk_w, per_expert, w_scale, (int)topk, (int)hidden, mode);
   return last_err();
 }
 

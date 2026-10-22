@@ -621,9 +621,12 @@ extern "C" {
         sorted_tok: *const i32,
         sorted_k: *const i32,
         topk_w: *const f32,
+        per_expert: *const f32,
+        w_scale: f32,
         n: i64,
         topk: i64,
         hidden: i64,
+        mode: i32,
         stream: cudaStream_t,
     ) -> i32;
     pub fn f32_add_to_bf16(acc: *const f32, out: *mut c_void, n: i64, stream: cudaStream_t) -> i32;
