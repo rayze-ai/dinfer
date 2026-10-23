@@ -643,10 +643,16 @@ impl Gemm {
         let algo = match cached {
             Some(al) => al,
             None => {
-                let h = self.heuristics(&d, 1)?;
-                ensure!(!h.is_empty(), "cublasLt fp8: no algo for m={m} n={n} k={k}");
-                self.default_algos.lock().unwrap().insert(key, h[0].algo);
-                h[0].algo
+                // 关键：**不能取启发式第 0 个**。实测（m=24,n=8192,k=2816，Kaon-V3 L0 qkv_proj）
+                // 启发式共 8 个候选，[0]/[1] 与 vLLM 差 8/196608 个 1-ulp，而 **[2] 逐位一致**。
+                // vLLM 侧真实走的是 FlashInfer `CublasFp8GemmRunner` → cuBLAS，命中的就是这个 algo；
+                // PyTorch `_scaled_mm` 交叉验证同样为 0。见 test/kaon3/2026-10-23/D-16-REBASE.md §28。
+                const ALGO_IDX: usize = 2;
+                let hs = self.heuristics(&d, ALGO_IDX + 1)?;
+                ensure!(!hs.is_empty(), "cublasLt fp8: no algo for m={m} n={n} k={k}");
+                let pick = hs.get(ALGO_IDX).unwrap_or(&hs[0]).algo;
+                self.default_algos.lock().unwrap().insert(key, pick);
+                pick
             }
         };
         self.run_lt_fp8(&d, &algo, a, w, out)
