@@ -2226,3 +2226,22 @@ L0 已经接近逐位；残余 1 ulp 零星分布在 `q_norm`(12) / `mlp_gate_up
 因此该 FLOOR 对**任何独立实现**都不可达，这不是我们的实现问题，是判据本身选错了参照系。
 **正确做法**：FLOOR 应取"**同类实现之间的统计下限**"，即用 vLLM 自己的两个 kernel 变体（flashinfer / cutlass）
 分别跑完整前向得到的翻转率/Δlp，而不是"同一 binary 的两次进程"。
+
+### D-14：强制切换 vLLM 的 fp8 kernel（端到端）—— 机制已验证，dump 待重跑
+
+`init_fp8_linear_kernel(..., force_kernel=...)`（`model_executor/kernels/linear/__init__.py:665`）支持强制指定，
+在进程内 patch 即可：monkey-patch `vllm.model_executor.kernels.linear.init_fp8_linear_kernel`（以及
+`quantization.fp8` / `quantization.modelopt` 里已绑定的名字）。
+
+**实测命中**：
+
+```
+FORCE_KERNEL=flashinfer → picked kernels: {'FlashInferFP8ScaledMMLinearKernel': 120}
+FORCE_KERNEL=cutlass    → picked kernels: {'CutlassFP8ScaledMMLinearKernel': 120}
+```
+
+120 个 fp8 linear 层全部按指定 kernel 生效（模型默认是 flashinfer）。
+
+**踩的坑**：dump hook 打在 `Gemma4SelfDecoderLayers.forward` 上不触发（该版本不走它），
+两轮都在 `llm.generate` 之后抛 `KeyError: 'hidden'`，且 NCCL 残留进程挂 2.5 小时不退（GPU 不占，`ps` 可见）。
+→ 改为 `Gemma4DecoderLayer.forward` + `layer_idx == 29`；每次跑前 `rm -rf` 输出目录、跑后查 `grep picked/wrote/Error`。
