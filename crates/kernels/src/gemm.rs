@@ -582,16 +582,18 @@ impl Gemm {
                 // 区分点是 **reduction scheme**，不是 id/tile/splitk：8 个候选里 `red=4`（OUTPUT_TYPE，
                 // split-K 部分和先舍入到 bf16）的全部差 768–803，`red=2`（COMPUTE_TYPE，f32 归约）的 3 个全为 0
                 // （短描述同为 `id=21 tile=11 splitk=8` 的 [2]/[3] 一个 801 一个 0）。
-                // 规则 = 取第一个非 OUTPUT_TYPE 归约的候选。**这是实测规则**：容器 torch 默认
-                // `allow_bf16_reduced_precision_reduction=True`，并不禁止，只是它选中的 kernel 恰为 f32 归约；
-                // 仅 router 形状验证过。见 test/kaon3/2026-10-23/D-16-REBASE.md §48/§51。
-                let hs = self.heuristics(&d, 32)?;
+                // 但 L0 那份参照是事后单独 `F.linear` 算的；**vLLM 真实前向（oracle 在 `VLLM_BATCH_INVARIANT=1`
+                // 下生成）**在 sm_120 上走的是：`preferred_blas_library("cublaslt")` + 禁降精度归约 +
+                // `CUBLASLT_WORKSPACE_SIZE=1`（1 KiB，禁掉要 workspace 的 split-K）。L2 真实输入上，32 MiB
+                // workspace 下没有任何候选为 0（最好 3/3072），按这套约束则 L0/L2 均为 0（§51）。
+                // 所以：归约掩码一律排除 OUTPUT_TYPE；workspace 上限读与 torch 同名同单位（KiB）的
+                // `CUBLASLT_WORKSPACE_SIZE`（parity 对 BI oracle 时设 1），未设 = 整块 workspace。
+                let ws = std::env::var("CUBLASLT_WORKSPACE_SIZE").ok().and_then(|v| v.trim().parse::<usize>().ok()).map_or(usize::MAX, |kib| kib * 1024);
+                use sys::cublasLtReductionScheme_t as R;
+                let mask = R::CUBLASLT_REDUCTION_SCHEME_NONE as u32 | R::CUBLASLT_REDUCTION_SCHEME_INPLACE as u32 | R::CUBLASLT_REDUCTION_SCHEME_COMPUTE_TYPE as u32;
+                let hs = self.heuristics_with(&d, 32, ws, Some(mask))?;
                 ensure!(!hs.is_empty(), "cublasLt: no algo for m={m} n={n} k={k}");
-                let pick = hs
-                    .iter()
-                    .find(|h| Self::algo_reduction(&h.algo) != sys::cublasLtReductionScheme_t::CUBLASLT_REDUCTION_SCHEME_OUTPUT_TYPE as u32)
-                    .map(|h| h.algo)
-                    .unwrap_or(hs[0].algo);
+                let pick = hs[0].algo;
                 if std::env::var("GEMM_ALGO_LOG").is_ok_and(|v| v == "1") {
                     let all: Vec<String> = hs.iter().map(|h| Self::algo_desc_full(&h.algo)).collect();
                     eprintln!("[gemm] bf16 m={m} n={n} k={k} pick={} cands={all:?}", Self::algo_desc_full(&pick));
@@ -648,8 +650,13 @@ impl Gemm {
 
     /// 启发式候选（最多 `count` 个，按 cuBLASLt 的排序；过滤掉 state != SUCCESS 的）。
     fn heuristics(&self, d: &LtDescs, count: usize) -> Result<Vec<sys::cublasLtMatmulHeuristicResult_t>> {
+        self.heuristics_with(d, count, self.workspace.len(), None)
+    }
+
+    /// 带约束的启发式：`ws` = workspace 上限（字节），`red_mask` = 允许的 reduction scheme 掩码。
+    fn heuristics_with(&self, d: &LtDescs, count: usize, ws: usize, red_mask: Option<u32>) -> Result<Vec<sys::cublasLtMatmulHeuristicResult_t>> {
         let pref = lt_err(lt::create_matmul_pref(), "matmul pref")?;
-        let ws = self.workspace.len();
+        let ws = ws.min(self.workspace.len());
         // SAFETY: 属性/缓冲区按 cublasLt 文档；pref 创建成功后在此销毁。
         let r = unsafe {
             lt::set_matmul_pref_attribute(
@@ -658,7 +665,16 @@ impl Gemm {
                 &ws as *const usize as *const c_void,
                 std::mem::size_of::<usize>(),
             )
-            .map_err(|e| anyhow!("pref workspace: cublasLt {:?}", e.0))
+            .and_then(|_| match red_mask {
+                Some(m) => lt::set_matmul_pref_attribute(
+                    pref,
+                    sys::cublasLtMatmulPreferenceAttributes_t::CUBLASLT_MATMUL_PREF_REDUCTION_SCHEME_MASK,
+                    &m as *const u32 as *const c_void,
+                    std::mem::size_of::<u32>(),
+                ),
+                None => Ok(()),
+            })
+            .map_err(|e| anyhow!("pref workspace/reduction: cublasLt {:?}", e.0))
             .and_then(|_| {
                 let mut res: Vec<sys::cublasLtMatmulHeuristicResult_t> = vec![std::mem::zeroed(); count.max(1)];
                 let mut cnt: i32 = 0;
