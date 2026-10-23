@@ -18,11 +18,17 @@
 - 逐层（整跑）：**L-1 / L0 / L1 完全逐位 0**；L2 1.1e-4（仅 token 1）；L3 1.5e-2；L29 1.6e-1。
 - 单层隔离：L3、L2 均 **23/24 token 恰好 0**，差异只集中在个别 token。
 
-**2026-10-23 续（本会话）**：上面"plan_for 优先级"的诊断**是错的**——kaon3 不调 `autotune`（plans 空），
-router 也不走 `Gemm`，走自写 `moe_gate_f32`（f32 累加 → host 舍入 bf16）。镜像 vLLM 在 sm_120 上
-`GateLinear` 落 Tier 6（`F.linear` bf16 输出 → `.to(fp32)`），所以 router 改为 cuBLASLt bf16（钉 id=21）+ cast（52e9c27），
-`SMALL_M_LT` 已撤回。**读 vLLM 代码一律读镜像副本 `/data/ref/vllm-img-v0.28.0-pr455/`**（本地 main 在此处是 Tier 5，口径不同）。
-待测：L2 隔离 `router_logits` 是否归 0 → 端到端。
+**2026-10-23 续（本会话）：router 已逐位归零** —— 详见 `D-16-REBASE.md` §51。
+- 旧诊断（plan_for / small_m）错：kaon3 不调 autotune，router 走的是自写 `moe_gate_f32`。`SMALL_M_LT` 已撤回。
+- 真因：`oracle_clean` 是 **BI=1** 生成的；镜像 vLLM 的 BI 在 sm_120 上 = cuBLASLt + 禁降精度归约 + `CUBLASLT_WORKSPACE_SIZE=1`。
+  现 router = `forward_bf16`→cast；`run_lt_default` 排除 OUTPUT_TYPE 归约 + 读 `CUBLASLT_WORKSPACE_SIZE`。
+  **对 BI oracle 跑探针必须带 `PROBE_ENV="CUBLASLT_WORKSPACE_SIZE=1"`**（`bf16_algo_calib` 在 L2 数据上也要带）。
+- p02 整跑逐层：L2 1.1e-4→**1.4e-8**，L3 1.5e-2→**3.3e-9**；**新发散点 L4（6.0e-4，×1.8e5）**；L29 仍 0.17。
+- 端到端（run 1023-151951-1421909）：flip 15.53%（前 13.04%）/ |Δlp| 1.2593（前 1.2847）——放大器下末层量级不变，单次读数不作判据。
+- **下一步**：L4 单层隔离 + 子模块对拍（需用 `kaon3_vllm_sublayer.py` 抓 L4 的 vLLM 子模块，BI=1）；
+  L2 剩余 `attn_out` 1 元素 / `v_norm` 2/49152 可能同源，一起看。
+- **口径待用户确认**：oracle_clean=BI，生产=non-BI（memory 2026-10-22）。non-BI 下 vLLM 走 cuBLAS(非 Lt)，需另标定。
+- 读 vLLM 代码读镜像副本 `/data/ref/vllm-img-v0.28.0-pr455/`；`/data/ref/vllm` 已切 v0.28.0rc2（与镜像差 87 文件）。
 
 **⚠️（旧）bf16 小 M 未生效**
 `bf16_algo_calib` 证明 router 形状 `(24,128,2816)` 默认 algo 差 **768/3072**，正确配置
