@@ -88,3 +88,16 @@ out_dtype)` 原样存盘**，再把这四个字节串灌进我们的 kernel：
 - 超过 5 分钟的任务，**每 2 分钟探活**一次（看日志增量 / 进程 / `nvidia-smi`），不静默等。
 - 每轮跑前 `cleanrun.sh`，跑前跑后各查一次 8 卡空闲；日志无"写 N 个张量"即判失败重来。
 - 每个数值落盘前回答：脚本 sync 了吗？A/B 的 md5 不同吗？环境干净吗？跑了几次？
+
+## 8. D-17 进行中（2026-10-23）
+
+- `layer_scalar` 实测**不是 1.0**（`layers.0=0.0703125`、`layers.1=0.203125`、`layers.10=0.7265625`，
+  bf16 精确可表示，共 17 个）。两侧都是 bf16 × 这个标量，且 bf16×bf16 恰为 1 次舍入 → 口径一致；
+  **但此前从未核过"它是否真的被应用"**，已记入待核。
+- **新线索（很可能就是剩下的口径差）**：`FlashInferFP8ScaledMMLinearKernel.apply_input_quant = False`
+  —— vLLM 不预先量化激活，**把 bf16 直接交给 FlashInfer，由算子内部量化**。
+  那么内部用的是 checkpoint 的**静态 `input_scale`**（`input_activations.dynamic=false`）还是**输入 amax 的动态 scale**？
+  这决定激活量化点在哪、舍入对象是谁。我们侧 `Gemm::forward_fp8(a: bf16, a_scale, ...)` 同样是传 bf16 进 kernel 量化，
+  但用的是静态 `input_scale`。**待核**。
+- 探针 `scripts/dev/kaon3_vllm_fp8det.py` 已同步（md5 一致）并在 GPU 0 后台运行：
+  抓 L0 第一个 fp8 GEMM 的真实入参，并**重复 5 次同入参**判定算子自身是否逐位确定。
