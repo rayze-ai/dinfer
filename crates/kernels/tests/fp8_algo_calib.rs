@@ -86,6 +86,7 @@ fn calibrate_algo_per_shape() {
         let cnt = gemm.fp8_cublaslt_algo_count(&dsa, &dsb, rows, n, k).expect("count");
         let mut hits = Vec::new();
         let mut best = (usize::MAX, usize::MAX);
+        let mut descs = Vec::new();
         for idx in 0..cnt {
             let mut o = st.alloc_zeros::<bf16>(rows * n).expect("alloc");
             if gemm.forward_fp8_cublaslt_algo(&da, &dsa, &dw, &dsb, &mut o, rows, n, k, idx).is_err() {
@@ -98,6 +99,8 @@ fn calibrate_algo_per_shape() {
                     d2 += 1;
                 }
             }
+            let desc = gemm.fp8_cublaslt_algo_desc(&dsa, &dsb, rows, n, k, idx).unwrap_or_default();
+            descs.push((idx, d2, desc));
             if d2 < best.0 {
                 best = (d2, idx);
             }
@@ -109,8 +112,21 @@ fn calibrate_algo_per_shape() {
             println!("  n={n:<6} k={k:<6} 候选 {cnt} 个：**无 0 差异**，最好 algo[{}] diff {}",
                      best.1, best.0);
         } else {
-            println!("  n={n:<6} k={k:<6} 候选 {cnt} 个：algo {:?} 为 0 差异", hits);
+            println!("  n={n:<6} k={k:<6} 候选 {cnt} 个：0 差异 algo {:?}", hits);
         }
+        for (idx, d2, desc) in &descs {
+            let mark = if *d2 == 0 { " ✓" } else { "" };
+            println!("      [{idx}] diff {d2:<7} {desc}{mark}");
+        }
+
+        // **默认路径**（forward_fp8_cublaslt，内部按 algo 配置属性选）必须也是 0 差异。
+        let mut o = st.alloc_zeros::<bf16>(rows * n).expect("alloc");
+        gemm.forward_fp8_cublaslt(&da, &dsa, &dw, &dsb, &mut o, rows, n, k)
+            .expect("forward_fp8_cublaslt");
+        let g = st.dtoh_sync_copy(&o).expect("dl");
+        let dflt = (0..rows * n).filter(|&i| g[i].to_f32() != ref_out[i]).count();
+        println!("      → 默认选择器: diff {dflt}/{total}", total = rows * n);
+        assert_eq!(dflt, 0, "n={n} k={k}: 默认 algo 选择器没有选出 0 差异的 algo");
     }
     println!("DONE");
 }
