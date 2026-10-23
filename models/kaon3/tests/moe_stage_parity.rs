@@ -110,6 +110,12 @@ fn moe_stage_matches_vllm() {
         let yv = st.dtoh_sync_copy(&y.data).expect("y d2h");
         let yv: Vec<f32> = yv.iter().map(|b| f32::from(*b)).collect();
         per_expert_y.push(yv.clone());
+        // 诊断用：把该专家输出落盘，宿主侧做最小二乘反推真实权重
+        if let Ok(dd) = std::env::var("MOE_DUMP") {
+            let _ = std::fs::create_dir_all(&dd);
+            let bits: Vec<u8> = yv.iter().flat_map(|v| bf16::from_f32(*v).to_bits().to_le_bytes()).collect();
+            let _ = std::fs::write(format!("{dd}/e{eid}.bin"), bits);
+        }
         // 累加：只在该专家被选中的 (row, slot) 上加 w·y
         for r in 0..t {
             for j in 0..k {

@@ -913,3 +913,33 @@ NQ4_EXACT_RCP=1  ndiff=50214/67584 max|d|=2.500e-1    ← 完全相同
 `rcp.approx(1/6)` 的误差是 2⁻²³，下游 e4m3 块缩放的步长是 2⁻⁴ → **被吞掉 52 万倍**，
 改了不起作用。已把这条判断方法写进 `docs/knowledge/parity-localization.md` 第 8 条：
 **动手前先算"近似误差 / 下游首次舍入步长"**。
+
+## 第 9 轮（用户建议）：直接调用 cutlass MoE —— **可行，参数已拿到**
+
+用户问：「为啥不直接调用 Cutlass，之前不也直接调用 cuBLAS 吗」——**对，这是正确路线**。
+之前 fp8 GEMM 就是直接调 cuBLASLt（`run_lt_default`）做到逐位一致的（D-16-REBASE §28）。
+
+**已跑通**：hook `vllm...cutlass_moe.run_cutlass_moe_fp4`，抓到参照真实调用的全部入参：
+```
+CAP m,n,k,e = 24 704 2816 128 | a (24, 2816) | topk (24, 8)
+```
+（n=704 = moe_intermediate，k=2816 = hidden，e=128 专家）
+
+### ⚠️ 我第一次的比对标签写错了，结果作废
+
+脚本里那行 `OURS_VS_CUTLASS ndiff=0/67584` **是错的**：
+它比的 `moe1/y.bin` 与 `cap['out']` **都来自 vLLM**（前者 hook `.experts` 的输出，后者 cutlass op 的输出），
+同源自比当然是 0。**它完全没有和我们的 Rust 实现比过。**
+
+`REPLAY self-consistent=False ndiff=66403/67584` 也不可信：复跑时我用了全零 workspace + 默认参数，
+输入不等于真实调用的 workspace，不是"kernel 不可复现"的证据。
+
+**教训**：A/B 脚本里每个 `printf` 之前先问"这两边分别是谁产出的"。
+名字里带 `OURS` 就必须真的是我们算的（这条已并入 `docs/knowledge/parity-localization.md` 第 7 条）。
+
+### 下一步（直接调用的正确做法）
+
+1. 用抓到的入参，在容器里**独立调用** `run_cutlass_moe_fp4`（workspace 按真实形状分配），
+   得到 cutlass 的 MoE 输出；
+2. 用**同一组** `a / topk_ids / topk_weights` 走我们的 Rust 路径，两边逐位比 —— 这才是有判别力的比较；
+3. 若不同：把 cutlass 这个 op 像 cuBLASLt 一样**绑到 Rust 侧**（`ops.cutlass_fp4_moe_mm`）。
