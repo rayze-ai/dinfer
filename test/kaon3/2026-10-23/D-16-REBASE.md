@@ -457,3 +457,31 @@ test result: ok. 1 passed
 `FP8_SELF_KERNEL=1` 可切回原自写 kernel（`forward_fp8`）做 A/B。
 新增 `Gemm::quant_fp8` 与 C 入口 `quant_fp8_bf16`（复用 kernel 里已有的 `cvt16` 逻辑，饱和 ±448 + RNE，
 与 vLLM `scaled_fp8_quant` 字节一致——D-12 已验）。
+
+## 31. 端到端 verify（cuBLASLt 接入后）：6 过 2 失
+
+run `1023-125513-1295126`（30 用例，6 卡并行）：
+
+| 项 | 读数 |
+|---|---|
+| kernel 对拍 | ✅ |
+| 参照/下限用例一致 | ✅ 30 个 |
+| 分片前向 | ✅ 30/30 |
+| 逐层 router（fp64 真值）| ✅ |
+| **翻转率** | ❌ **15.73%**（FLOOR 0.83%）|
+| **共有 token Δlp** | ❌ **1.2189**（FLOOR 0.0276）|
+| 自然长文本 ΔNLL | ✅ +0.0597 |
+| 单 token top1 | ✅ |
+
+**FLOOR 之谜解开**：`FLOOR POOLED cases=30 rows=538 decisive=481 flips=4 flip_pct=0.83
+mean_common_d=0.0276` —— **0.83% 就是 `oracle_clean_b` vs `oracle_clean` 的实测值**，
+之前怀疑的 0.83/1.51/18 三个数里，这个是对的（另外两个是别的 oracle 组合/别的时间点）。
+
+**⚠️ 这个 15.73% 与之前的 14.49% 不可直接比**：分母不同（本次 rows=538 decisive=483；
+此前是另一套 oracle，rows=655 decisive=607）。要判 cuBLASLt 是改善还是回退，必须做**同集 A/B**：
+`PROBE_ENV="FP8_SELF_KERNEL=1"` 跑同一套用例，比 flip_pct。
+
+**另一个必须查的假设**：`algo[2]` 只在 `m=24,n=8192,k=2816`（L0 qkv）上定标，
+120 个 fp8 层的 N/K 各不相同；**不同形状命中的"与 vLLM 一致的 algo"未必都是下标 2**。
+若某形状上 algo[2] 反而更差，就解释了翻转率没降。
+→ 做法：对每个 (n,k) 组合，同入参下枚举 algo 并与参照比；或先用"层内 1-ulp 计数"看哪层变差了。
