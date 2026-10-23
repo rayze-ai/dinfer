@@ -348,3 +348,35 @@ thread 'fp8_matches_flashinfer_bitwise' panicked at ...:41:64:
 靠 `test/kaon3/d17b/` 的真实入参（`A_fp8.bin` / `B_fp8.bin` / `ref_f32.bin` / `meta.txt`），
 这些文件在远端已不在。**要重跑需先用 `scripts/dev/kaon3_vllm_fp8det.py` 重新抓一组。**
 在拿到之前，`bmm_fp8` 只能靠端到端 A/B 判，不能靠这个测试。
+
+### 第 3 轮期间的读数：router 归约用 `rcp.approx`，参照是精确除法（**新发现的真差异**）
+
+参照实际执行的是 **Triton kernel** `_gemma4_routing_kernel`（`gemma4.py:100-163`），不是
+`gemma4_routing_function_torch`（那个只在非 CUDA 平台用）：
+
+```python
+all_raw_exp = tl.math.exp2((all_logits - max_l) * 1.4426950408889634)
+renorm_raw  = tl.sum(tl.where(top_mask, all_raw_exp, 0.0), axis=0)
+inv_renorm  = 1.0 / renorm_raw                       # ← 精确除法（IEEE div.rn）
+all_weights = (all_raw_exp * inv_renorm * all_scales).to(tl.float32)
+```
+
+我们 `moe.cu:232-237`：
+```cpp
+const float inv = route_rcp(renorm);                 // ← rcp.approx.ftz.f32（近似！）
+topk_w[..] = __fmul_rn(__fmul_rn(raw[k], inv), sc);
+```
+
+| 项 | 参照 | 我们 | 判定 |
+|---|---|---|---|
+| `exp2` | `tl.math.exp2` → `ex2.approx` | `ex2.approx.ftz.f32` | ✅ 同 |
+| `log2e` 常数 | `1.4426950408889634` | 同 | ✅ |
+| 归一化倒数 | `1.0 / renorm` **精确** | `rcp.approx` **近似** | ❌ **差 ~1-2 ulp** |
+| 乘序 | `exp * inv * sc` | `(exp*inv) * sc` | ✅ 同 |
+| top-k 选择 | 按 logits 位模式排序（bitcast 成 int，保序） | 按 logits 直接比 | ✅ 等价 |
+| 归约次序 | `tl.sum` 按 BLOCK_E=128 树形 | 32 lane 树 + 组内顺序 | ⚠️ 可能不同（需测） |
+
+**`rcp.approx` 相对精确除法有 1-2 ulp 误差**。128 个专家、每 token 2 个权重——
+这直接影响 `topk_w`，进而每条专家路径的输出。**这是目前最具体的一处口径差。**
+
+→ 第 4 轮：把 `route_rcp` 换成 `__frcp_rn`（精确倒数）或 `__fdiv_rn(1.f, renorm)`，整跑比 flip。
