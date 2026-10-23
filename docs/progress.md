@@ -6,31 +6,46 @@
 > 更新 2026-10-21 23:0x +0800。**本区按模型分节，每节只写该模型自己的交接内容；不要覆盖别人的分节。**
 
 
-### Kaon-V3 parity（2026-10-23 收工；子 loop D 进行中）
+### Kaon-V3 parity（2026-10-23 晚；子 loop D 第 17 轮，**fp8 GEMM 已逐位对齐**）
+
+**本轮解决的核心问题：fp8 GEMM 的 1-ulp 累加序差异。**
+- **vLLM 真实走 cuBLAS**（FlashInfer `CublasFp8GemmRunner`；`auto`/`cublas` backend 都是 0/196608，
+  `cudnn` 8、`cutlass` 7）。
+- 我们自写 kernel = **8/196608**（1-ulp 级，max 1.25e-1 = 一个 bf16 ulp）；**cuBLASLt 启发式
+  algo[0]/[1] 也是 8，algo[2] = 0/196608**（`test/kaon3/2026-10-23/D-16-REBASE.md` §26–29）。
+- 已接进 `QLinear::Fp8`：默认 `quant_fp8` + `forward_fp8_cublaslt`（algo 固定 2，附来历注释）；
+  `FP8_SELF_KERNEL=1` 切回自写 kernel 做 A/B。新增 `Gemm::quant_fp8` / `forward_fp8_cublaslt`
+  / `forward_fp8_cublaslt_algo` / `fp8_cublaslt_algo_count`。
+
+**两条旧结论已作废（重要，别再引用）**：
+1. ~~"逐位复刻 vLLM 不可达（连它自己都复现不出自己的前向 7/196608）"~~ —— 那 7 处是
+   **flashinfer vs cutlass** 的差，被误读成自复现失败。实测：同入参重复 6 次 0、重调 vs 前向 0、
+   **跨进程 0**。目标良定义。
+2. ~~"我们另有一个放大器（L2 起是 vLLM 自身变体的 2–3 倍）"~~ —— 量化放大倍数 ≈ q/δ 且随 δ 饱和，
+   两边起点差 540 倍时不可比。同分母下我们 10/196608 vs 参照 7/196608，同量级。
 
 **已验证的对齐（都有字节/运行时证据）**：
-- 三处口径**默认已与 vLLM 对齐**：gelu 两次 bf16 舍入 / MoE 合并 bf16 权重与乘积 / router 舍 bf16。
-  精确版开关 `GELU_F32` / `MOE_COMBINE_F32` / `ROUTER_F32`（默认关）。**L11 MoE 段逐位一致**（moe_y/ff2 0 差异）。
-- 权重：L0/L7/L9/L10/L11 的 q/k/v 与 vLLM **逐字节 0 差异**；fp8 KV / Q 量化 / 解量化口径**完全一致**
-  （`KV_FP8=1` vs vLLM 6.7e-7，`=0` 为 2.3e-2）。
-- vLLM 的 fp8 GEMM 是 **FlashInfer**（运行时实测；cutlass 调用 0 次，可用 `FORCE_KERNEL` 强制切换）。
-- verify 现状：**5 过 2 失**（翻转 14.49% / Δlp 1.2302）。两项失败用的是"同 binary 跨进程"下限（0.83%）。
+- 三处口径默认与 vLLM 对齐：gelu 两次 bf16 舍入 / MoE 合并 bf16 / router 舍 bf16
+  （精确版开关 `GELU_F32` / `MOE_COMBINE_F32` / `ROUTER_F32`，默认关）。**L11 MoE 段逐位 0**。
+- 权重 L0/L7/L9/L10/L11 的 q/k/v 与 vLLM **逐字节 0**；fp8 KV/Q 量化口径完全一致。
+- 逐层：L-1 **逐位 0**、L0 仅 `q_norm`12+`dense`31 处 1-ulp、L1 1.3e-6；L2–L29 的 1e-2→2.9e-1
+  是 fp8 KV 放大器的饱和区（双方共有），非缺陷。
 
-**关键事实：逐位复刻 vLLM 不可达**——连 vLLM 调它自己的 flashinfer 算子都复现不出它自己的前向（7/196608）；
-它自家 fi-vs-cu 两 kernel 单层就差 10/196608。
+**下一步**：
+1. 端到端 verify（改后）读数 —— 正在跑，看翻转率从 14.49% 降到多少。
+2. **判据 FLOOR 需用户裁定**：仓里有三个互相矛盾的数（0.83% / 1.51% / 18%），0.83% 无落盘证据。
+3. cuBLASLt 的**性能**：decode 小 M 未必比自写 kernel 快，需 bench 后决定是否按 M 分流。
 
-**下一步（具体可执行）**：kernel 变体下限实测显示——L0 我们 4.9e-8 比 vLLM 自家 kernel 差（2.65e-5）**好 540 倍**，
-但**从 L2 起我们是它们的 2–3 倍**（L2 2.07e-2 vs 8.53e-3；L29 2.93e-1 vs 9.38e-2）。
-→ 我们这边还有一个放大器是 vLLM 没有的，或系数更陡。查法：同输入下 `KV_FP8=1/0` × `FORCE_KERNEL=flashinfer`
-对比 L2 单层放大倍数，确认**我们的 KV 往返数值上是否与 vLLM 等价**（D-5 只证明了"读的是 fp8"，未验等价）。
+**⚠️ 我的错误模式（用户 2026-10-23 严重关切，本轮又犯一次）**：① 把自己的残留进程说成"机器被占"；
+② 改脚本没 `sync` 就跑；③ 单次运行直接下结论；④ **改坏 `.cu`/大段 Rust 不先自检结构就远端编译**
+（本轮 3 次，每次白费约 6 分钟）。规则：改完先 `grep -n '<符号>\|^}'` + 括号配平，
+脚本先 `python3 -c ast.parse` / `bash -n`。
 
-**⚠️ 我的错误模式（用户 2026-10-23 严重关切）**：① 把自己的残留进程说成"机器被占"；② 改脚本没 `sync` 就跑，
-导致两次同码却以为在 A/B（已作废一条"kernel 下限=0"）；③ 单次运行直接下结论。**跑前必过 `bash /w/hid/cleanrun.sh`**，
-**每个数值落盘前先验证前置条件**（md5 不同 / 日志有"写 N 个张量" / 8 卡空闲）。
-
-**仪器**：`kaon3_probe --hidden-all / --layer-iso / SUB_LAYER=<n>|all / --dump-weights`（`WLAYERS=` 选层）；
+**仪器**：`kaon3_probe --hidden-all / --layer-iso / SUB_LAYER=<n>|all / --dump-weights`；
 参照侧 `scripts/dev/kaon3_vllm_{hidden,sublayer,logits,weights,moe_experts,router_all}.py`；
-`FORCE_KERNEL=cutlass|flashinfer` 强制 vLLM 的 fp8 kernel（必须在建 LLM 前 patch，脚本里已内置）。
+`FORCE_KERNEL=cutlass|flashinfer`；本轮新增 `kaon3_vllm_fp8det.py`（抓真实入参 + 确定性）、
+`kaon3_d17_cublas.py`（cuBLAS 验证）、`kaon3_d17_tactic.py`（backend 枚举）、`kaon3_d17_autotune.py`。
+**容器内持久路径只有 `/w`**（宿主 `/hf_data/yaochen`）；`/w/hid` 与容器的 `/root/.cache` 退出即丢。
 
 ### Kaon-V3（5090，阶段 1–2 完成，阶段 3 接近打通）
 
