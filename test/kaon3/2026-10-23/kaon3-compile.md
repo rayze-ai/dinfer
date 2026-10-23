@@ -1058,3 +1058,24 @@ cutlass 在 `quantize` 阶段就把 scale 写成 swizzled。
 2. 通过后再看整段 MoE（`moe_stage_parity`）与端到端 flip。
 
 **这比重写整个 cutlass 融合 MoE kernel 便宜得多**，且判据现成。
+
+## swizzle 公式：**已用参照数据验证通过**
+
+```python
+# 正向（写）：[M,K] → padded(Mp=round_up(M,128), Kp=round_up(K,4))
+x = padded.reshape(1, Mp//128, 4, 32, Kp//4, 4)      # (g, a4, r32, kO, k4)
+y = x.transpose(0, 1, 4, 3, 2, 5)                    # (g, a4, kO, r32, r4, k4)
+flat = y.reshape(Mp, Kp)
+# 逆向（读）：
+z = flat.reshape(1, Mp//128, Kp//4, 32, 4, 4)
+nat = z.transpose(0, 1, 4, 3, 2, 5).reshape(Mp, Kp)
+```
+
+**验证**：
+1. 用随机 `[8,176]` 走正向→逆向，`array_equal == True` ✅
+2. 解析参照真实 `a_s.bin`（22528 B = 128×176）：**恰好 8 行非零**（= m=8），
+   值 `[112,112,98,108,...]` 是合理的 e4m3（112≈1.0, 98≈0.1）✅
+
+**踩了 4 次才写对**，错在 `transpose` 的参数不是"再转一次"（permute 不是对合），
+以及 `reshape` 的维序必须按 `(g, a4, kO, r32, r4, k4)` 展开。
+**先造已知输入验证公式，再去解析真实数据** —— 直接猜会浪费很多轮。
