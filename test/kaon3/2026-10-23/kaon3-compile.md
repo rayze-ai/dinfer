@@ -474,3 +474,27 @@ topk_w[..] = __fmul_rn(__fmul_rn(raw[k], inv), sc);
 
 → **假设 6（router GEMM 复刻 BI persistent matmul）升级为 loop 的主线**，
 不再是"试试 A/B"，而是"必须做"。规格里的假设清单要按这个重排。
+
+## 第 5 轮：**决定性测量**——cuBLAS 与参照 BI matmul 在 router 形状上差 43%
+
+在 oracle 容器里直接调参照自己的 `matmul_persistent`（`batch_invariant.py`），与 `torch.matmul`（cuBLAS）比：
+
+```
+shape      M      N      K    ndiff/total   max|d|
+cublas       24    128   2816      1332/3072     7.812e-03
+BI-self      24    128   2816         0/3072
+cublas       64    128   2816      3352/8192     1.562e-02
+BI-self      64    128   2816         0/8192
+cublas      512    128   2816       103/65536     7.812e-03
+BI-self     512    128   2816         0/65536
+```
+
+**读法**：
+- 真实 router 形状（K=2816、N=128）上，**43% 的输出元素不同**（M=24 时 1332/3072），最大差 7.8e-3；
+- 参照的 BI matmul **自身完全可复现**（0 差异）→ 目标可达；
+- 这也解释了之前为什么必须 `CUBLASLT_WORKSPACE_SIZE=1` 才能稳定：cuBLAS 的启发式会换 kernel。
+
+**结论**：**router GEMM 必须复刻 BI persistent matmul，没有替代方案。**
+43% 的 logits 元素不同 → top-8 边界必然换专家 → 端到端 16% flip 完全说得通。
+
+**这条把"是否要写这个 kernel"从假设变成了定论**（测量成本：一次容器内 Python，几分钟）。
