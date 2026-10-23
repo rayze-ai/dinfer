@@ -87,3 +87,16 @@
    要确认 compile 下走哪条（默认值是否对）。
 7. **专家 gate/up/down 的 GEMM 算法**：NVFP4 路径，compile 下是否仍走同一个（custom op 应是同一个）。
 8. **attention 输出 → `o_proj`**：`unified_attention_with_output` 是 custom op，但 `o_proj` 前的输入量化点要对。
+
+## 第 2 轮：抓 compile 中间层的三条路都不通（记录，避免重试）
+
+| 方法 | 结果 |
+|---|---|
+| forward hook（eager 下能用） | compile 下**不触发**（图已 trace） |
+| 替换 `torch.ops.vllm.<op>.default` | 破坏 `OpOverloadPacket`（`_dispatch_cache` 缺失），且 dynamo 在建图时已固化句柄 |
+| 包 `MoERunner.forward`（Python 层） | compile 后**根本不调用**（直接跑图） |
+| `TorchDispatchMode` | 只命中 `unified_attention_with_output`；`moe_forward`/`bmm_fp8` 在 warmup 期已消耗掉首次计数 |
+| `.numpy()` 在 fake trace 里 | 崩（`FakeTensor` 无 `numpy`）；需 `torch.compiler.is_compiling()` 守卫 |
+
+**结论**：compile 模式下拿不到层内中间量，只能做**整层输出**级对拍。
+可行替代：截层 oracle（`kaon3_oracle_server.sh <N>`）做**逐层**比对；层内只能靠“改一个点 → 看整层是否变好”的 A/B。
