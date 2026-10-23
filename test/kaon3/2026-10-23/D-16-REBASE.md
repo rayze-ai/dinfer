@@ -733,3 +733,30 @@ run `1023-133609-1331717`，同一套用例（rows=538 / decisive=483）：
 **这不是系统性口径错误**（否则所有 token 都会差），而是**特定条件下的差异**。token 1 的特殊之处：
 RoPE 位置 1（非 0）、滑窗 1024 内的第二个位置、KV cache 的第二个写入槽位。
 → 下一步拿 vLLM 的 L2 子模块参照，找**第一个非零子模块**，而不是继续猜。
+
+## 46. L2 子模块定位：**输入逐位 0，router 的 bf16 GEMM 差 1-ulp**
+
+隔离 L2（灌参照 L1），与 vLLM 同层子模块逐项比：
+
+| 子模块 | 差异 |
+|---|---|
+| `input_norm` / `pre_ff_norm` / `pre_ff2_norm` / `post_attn_norm` / `router_in` | **恰好 0** |
+| `q_norm` / `q_rope` / `k_norm` / `k_rope` | **恰好 0** |
+| `dense` / `mlp_gate_up` / `mlp_gelu` / `o_proj` | **0**（或仅 token 8/12 的 1e-7）|
+| **`router_logits`** | **4 个元素 1-ulp**（token 1: `2.625` vs `2.640625`；token 22/23 各 1–2 个）|
+| **`moe_y`** | token 1 差 `1.17e-2`（router 权重的直接后果）|
+| `attn_out` | 1/98304（token 9）|
+| `v_norm` | 2/49152（token 19）|
+
+**top-8 专家集合完全一致**（3 个 token 只是 logits 有位差，没有路由翻转）。
+
+### 结论：与 fp8 同源，是 bf16 GEMM 的 algo 选择
+
+`router_in` **逐位相等**（输入相同），`router_logits` 却有位差 → **差在 router 的 GEMM 本身**。
+router 走 `QLinear::Bf16` → `Gemm::forward_bf16` → cuBLASLt 启发式 `h[0]`；
+而 vLLM 的 router 是 `F.linear`（PyTorch → **cuBLAS**）。
+→ **与 §41 完全同类**：同一份输入，不同库/不同 algo，差 1-ulp。
+`attn_out` / `v_norm` 的个别元素同理（那些 GEMM 也走各自的 Lt 默认 algo）。
+
+**下一步（沿用 §41 的方法，不另开思路）**：给 bf16 路径也做一遍"按实测配置选 algo"，
+或直接确认 PyTorch `F.linear` 在 bf16 下落到 cuBLAS 的哪条路径并对齐。
