@@ -239,3 +239,36 @@ GPU=0 scripts/dev/remote_5090.sh ctr "cd /w/dinfer && D17_DIR=/w/d17b CUDA_ARCHS
 **做法**：测试里两种解释都跑一遍（原样当 `[N,K]`；以及手动转置成 `[N,K]`），
 哪个对上就是哪个。这样一次运行同时完成"判定布局"和"判定精度"。
 → 教训：**布局歧义要用实验判定，不要从 stride 推**（跨语言/跨框架时 stride 语义极易读反）。
+
+## 17. 决定性结果：我们 = 8/196608，与 cutlass 的 7 同级（都复现不了 FlashInfer）
+
+同一份字节入参（vLLM 真实喂给 FlashInfer 的 A/B/scale），L0 `qkv_proj` `[24,2816]×[2816,8192]`：
+
+| 实现 | vs FlashInfer 前向输出 |
+|---|---|
+| **我们（`forward_fp8_prequant`）** | **8 / 196608**，max **1.25e-1** |
+| cutlass（D-17b） | 7 / 196608，max 1.25e-1 |
+| FlashInfer 重跑 | **0** |
+
+**max = 0.125 恰是 25.6 处的一个 bf16 ulp** → 全是 1-ulp 级，不是口径错、不是布局错（布局错是 196449）。
+
+**布局判定的副产品**：`B_fp8.bin` 落盘是 **`[K,N]` 逻辑序**（`np.ascontiguousarray` 会把转置视图按逻辑序重排）。
+按 `[N,K]` 读 → 196449/196608；按 `[K,N]` 读再手动转置 → 8/196608。**布局必须实验判定，不能从 stride 推。**
+
+### 这条数字的含义（把整条线钉死了）
+
+我们的 fp8 GEMM 在数值上与 **cutlass** 同级（8 vs 7），都不等于 FlashInfer。
+而实测的端到端对照正是：vLLM 换 cutlass vs vLLM 用 FlashInfer = **13.95% / 1.19**；
+我们 = **14.49% / 1.2302**。**两者吻合**——不是巧合，是同一件事的两种测法。
+
+→ **结论：要过 FLOOR，必须让 fp8 GEMM 与 FlashInfer 逐位相同（diff=0）。**
+差 7–8 个元素看似微小，但经 fp8 KV 往返放大约 1.5e4 倍后就是 14% 翻转率。**没有第三条路。**
+
+### 剩下的唯一技术问题是"复刻 FlashInfer 的累加序"，难点已定位
+
+`bmm_fp8` 在 sm_120 上**带 JIT autotuner**（容器日志：`Autotuning fp8_gemm: 20 configs`、
+`Saved 120 configs to /root/.cache/vllm/flashinfer_autotune_cache/0.6.18/`）。
+不同 tile/unroll 配置的 **K 方向累加顺序不同** → 要逐位复现，得先知道**该形状命中的是哪一个配置**，
+再让我们的 K 循环与它一致（或直接按它的分块重构）。
+下一步：dump 该形状的 autotune 选择（`VLLM_...`/flashinfer 的 tuner 接口），把配置的
+`tile_k / num_mma_per_k / split` 读出来，对照我们 `BK=64 + 2×mma(k32)` 的顺序。
