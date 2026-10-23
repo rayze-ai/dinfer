@@ -686,3 +686,8 @@ OURS POOLED cases=30 rows=538 decisive=483 flips=68 flip_pct=14.08 mean_common_d
    → 抓取脚本入库到 `scripts/dev/moe_capture.py`，容器内用 `/w/scripts/dev/moe_capture.py`。
 3. **要看实时输出就写远端文件**（`> /w/tmp/cap.log 2>&1; tail`），
    不要靠 `nohup … &` + 本地 log —— ssh 断开时 stdout 会丢，日志 0 字节。
+
+4. **vLLM 脚本必须有 `if __name__ == '__main__':` 保护**：
+   vLLM v1 用 `multiprocessing` spawn 起 EngineCore，子进程会 `runpy.run_path(main_path)` **重新执行主模块**。
+   没有保护 → 子进程也去 `LLM(...)` → `RuntimeError`（堆栈起点是 `spawn.py:297 _fixup_main_from_path`）。
+   看到这个堆栈就是缺保护，不是 vLLM 装坏了。
