@@ -44,7 +44,8 @@ def main():
     al1 = w1a[0]
     # 激活先量化成 fp4（与 MoE 里 `scaled_fp4_experts_quant` 同口径：n=1 的普通量化）
     # MoE 路径用的是 swizzled 布局（报错明确要求 "padded and swizzled"）
-    aq, asq = ops.scaled_fp4_quant(a, a1g[0], True, "none", padded_n=n * 2)
+    # 注意：padded_n 是**输入张量的列数**（= k），不是输出列数
+    aq, asq = ops.scaled_fp4_quant(a, a1g[0], True, "none", padded_n=a.shape[1])
     out = ops.cutlass_scaled_fp4_mm(aq, w1, asq, s1, al1, torch.bfloat16)[:, : n * 2]
     a_q, a_s = aq, asq
     d = "/w/tmp/fp4d"; os.makedirs(d, exist_ok=True)
