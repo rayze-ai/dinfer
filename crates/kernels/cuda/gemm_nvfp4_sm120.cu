@@ -10,6 +10,7 @@
 //   2. 探针 A 也是预量化字节；这里 A 是 bf16，量化融进载入。
 // 语义细节见 docs/loops/kaon-v3.md「阶段 1/2」：每组 8 个 nibble 在 A/B 里沿 k 连续，可单条 u32 读。
 #include <cstdint>
+#include <cstdlib>
 #include <cuda_runtime.h>
 #include <cuda_fp4.h>
 #include <cuda_fp8.h>
@@ -57,7 +58,7 @@ __device__ __forceinline__ float rcp_approx(float a) {
 
 /// gs = 激活全局 scale（vLLM 的 a1_gscale = 1/input_scale；不用时 1）。块 scale 与输出缩放逐式照抄
 /// vLLM `nvfp4_utils.cuh` cvt_warp_fp16_to_fp4 的 NVFP4 分支（含 rcp.approx.ftz），保证与基线同一套量化网格。
-__device__ __forceinline__ void quant16(const bf16* src, bool valid, uint2* out8, uint8_t* out_s, float gs) {
+__device__ __forceinline__ void quant16(const bf16* src, bool valid, uint2* out8, uint8_t* out_s, float gs, int exact_rq) {
   float x[16];
   float amax = 0.f;
 #pragma unroll
@@ -68,7 +69,9 @@ __device__ __forceinline__ void quant16(const bf16* src, bool valid, uint2* out8
   uint8_t sb8 = 0;  // 全零块：scale 字节 0、输出 0（与 vLLM 一致；硬件 0·0 = 0）
   float inv = 0.f;
   if (amax > 0.f) {
-    const float sfv = gs * (amax * rcp_approx(6.f));
+    // `exact_rq`：块缩放用**精确除法** `amax / 6`（对照参照），否则 `amax * rcp.approx(1/6)`（历史口径，1 ulp 偏差）。
+    // 由 host 按 `NQ4_EXACT_RCP` 传入。A/B 见 docs/loops/kaon3-compile.md 第 8 轮。
+    const float sfv = gs * (exact_rq ? __fdiv_rn(amax, 6.f) : (amax * rcp_approx(6.f)));
     sb8 = __nv_cvt_float_to_fp8(sfv, __NV_SATFINITE, __NV_E4M3);
     const float sfd = e4m3_f(sb8);
     inv = sfd != 0.f ? rcp_approx(sfd * rcp_approx(gs)) : 0.f;
@@ -94,14 +97,14 @@ __device__ __forceinline__ void quant16(const bf16* src, bool valid, uint2* out8
 // A 的预量化：bf16 [m,k] → packed [m,k/2] + 块缩放 [m,k/16]（e4m3）。
 // 一个 16-元素块一个线程；权重侧同一套口径（scale = amax/6 的 e4m3，反量化后做 e2m1 就近舍入）。
 __global__ void __launch_bounds__(256) quantize_a_kernel(const bf16* __restrict__ A, uint8_t* __restrict__ P,
-                                                         uint8_t* __restrict__ S, int rows, int K, float gs) {
+                                                         uint8_t* __restrict__ S, int rows, int K, float gs, int exact_rq) {
   const int nb = K / 16;
   const long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= (long)rows * nb) return;
   const int r = (int)(idx / nb), bi = (int)(idx % nb);
   uint2 pk;
   uint8_t sb8;
-  quant16(A + (size_t)r * K + bi * 16, true, &pk, &sb8, gs);
+  quant16(A + (size_t)r * K + bi * 16, true, &pk, &sb8, gs, exact_rq);
   *reinterpret_cast<uint2*>(P + (size_t)r * (K / 2) + bi * 8) = pk;
   S[(size_t)r * nb + bi] = sb8;
 }
@@ -247,10 +250,15 @@ int gemm_nvfp4_gs_bf16(const void* a, float a_gscale, const void* packed, const 
   }
   uint8_t* pa = static_cast<uint8_t*>(scratch);
   uint8_t* psa = pa + (size_t)m * (size_t)k / 2;
+  // `NQ4_EXACT_RCP=1`：块缩放改精确除法 `amax/6`（A/B 用，见 docs/loops/kaon3-compile.md 第 8 轮）
+  static const int exact_rq = [] {
+    const char* e2 = getenv("NQ4_EXACT_RCP");
+    return (e2 && e2[0] == '1') ? 1 : 0;
+  }();
   {
     const long blocks = (long)m * (k / 16);
     const unsigned g = (unsigned)((blocks + 255) / 256);
-    quantize_a_kernel<<<g, 256, 0, stream>>>(static_cast<const bf16*>(a), pa, psa, (int)m, (int)k, a_gscale);
+    quantize_a_kernel<<<g, 256, 0, stream>>>(static_cast<const bf16*>(a), pa, psa, (int)m, (int)k, a_gscale, exact_rq);
     if (const int e = gemm_last_err(); e != 0) return e;
   }
   // 块缩放的 k-block 是 16，mma 是 k64：BK 取 128（K%128==0）否则 64（调用方保证 K%64==0）
