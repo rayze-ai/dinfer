@@ -2095,7 +2095,7 @@ fn gqa_prefill_impl<
                 kv_stride as i64,
                 gqa_prefill_cfg(stream),
                 window as i32,
-                p_fp8 as i32,
+                p_fp8 as i32 | (attn_mode_ab() << 1),
                 stream.raw() as _,
             )
         },
@@ -2153,6 +2153,12 @@ pub fn gqa_prefill_win_bf16<
     p_fp8: bool,
 ) -> Result<()> {
     gqa_prefill_impl(stream, q, k, v, out, cu_seqlens, num_reqs, max_seqlen, heads, kv_heads, head_dim, scale, q_stride, kv_stride, window, p_fp8)
+}
+
+/// 对拍 A/B：`ATTN_MODE=<bits>`（bit0 = o/l 归一化，bit1 = 自然域指数参数；仅 v6 kernel 读）。默认 0。
+fn attn_mode_ab() -> i32 {
+    static V: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("ATTN_MODE").ok().and_then(|s| s.trim().parse::<i32>().ok()).unwrap_or(0) & 3)
 }
 
 /// D=256 全注意力 prefill kernel 结构（`ArchProfile::gqa_prefill_cfg_for`），`GQA_PREFILL_CFG` 覆盖；进程内只算一次。
@@ -2231,7 +2237,7 @@ fn gqa_paged_impl<Q: DevicePtr<bf16> + ?Sized>(
                 skip_single as i32,
                 gqa_prefill_cfg(stream),
                 window as i32,
-                p_fp8 as i32,
+                p_fp8 as i32 | (attn_mode_ab() << 1),
                 stream.raw() as _,
             )
         },

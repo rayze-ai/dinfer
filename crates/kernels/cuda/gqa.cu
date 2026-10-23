@@ -30,6 +30,9 @@ namespace {
 // 说明本模型实际命中的不是那条 Triton P 量化路径。
 // 不是进程隐状态：由 prefill/paged 入口的 `p_fp8` 实参在每次 launch 前写入（单流语义）。
 __constant__ int g_p_fp8 = 0;
+// 对拍 A/B（`ATTN_MODE`，Rust 侧经 p_fp8 的高位传入）：bit0 = 归一化用 o/l（vLLM），bit1 = 指数参数 ex2((s-m)·log2e)。仅 v6。
+__constant__ int g_attn_mode = 0;
+constexpr float kAttnLog2e = 1.4426950408889634f;
 __device__ __forceinline__ float pq8(float p) {
   if (!g_p_fp8) return p;
   return __half2float(__half(__nv_cvt_fp8_to_halfraw(__nv_cvt_float_to_fp8(p, __NV_SATFINITE, __NV_E4M3), __NV_E4M3)));
@@ -487,7 +490,9 @@ __global__ void __launch_bounds__(NW * 32) gqa_fa_v6_kernel(
         const int key = k0 + nt * 8 + cq;
 #pragma unroll
         for (int e = 0; e < 2; ++e) {
-          float sa = sacc[nt][e] * scale_log2, sb = sacc[nt][2 + e] * scale_log2;
+          // ATTN_MODE bit1：分数留在自然域（vLLM `S - m` 后再 ·log2e 进 ex2）
+          const float ssc = (g_attn_mode & 2) ? scale_log2 / kAttnLog2e : scale_log2;
+          float sa = sacc[nt][e] * ssc, sb = sacc[nt][2 + e] * ssc;
           if (need_mask) {
             if (key + e > vis_a || key + e < lo_a) sa = -INFINITY;
             if (key + e > vis_b || key + e < lo_b) sb = -INFINITY;
@@ -499,15 +504,16 @@ __global__ void __launch_bounds__(NW * 32) gqa_fa_v6_kernel(
       mx_a = fmaxf(mx_a, __shfl_xor_sync(0xffffffffu, mx_a, 1)); mx_a = fmaxf(mx_a, __shfl_xor_sync(0xffffffffu, mx_a, 2));
       mx_b = fmaxf(mx_b, __shfl_xor_sync(0xffffffffu, mx_b, 1)); mx_b = fmaxf(mx_b, __shfl_xor_sync(0xffffffffu, mx_b, 2));
       float alpha_a = 1.f, alpha_b = 1.f;
-      if (mx_a != -INFINITY) { const float mn = fmaxf(m_a, mx_a); alpha_a = ex2f<FEXP>(m_a - mn); m_a = mn; }
-      if (mx_b != -INFINITY) { const float mn = fmaxf(m_b, mx_b); alpha_b = ex2f<FEXP>(m_b - mn); m_b = mn; }
+      const float l2m = (g_attn_mode & 2) ? kAttnLog2e : 1.f;
+      if (mx_a != -INFINITY) { const float mn = fmaxf(m_a, mx_a); alpha_a = ex2f<FEXP>(__fmul_rn(__fsub_rn(m_a, mn), l2m)); m_a = mn; }
+      if (mx_b != -INFINITY) { const float mn = fmaxf(m_b, mx_b); alpha_b = ex2f<FEXP>(__fmul_rn(__fsub_rn(m_b, mn), l2m)); m_b = mn; }
       float ps_a = 0.f, ps_b = 0.f;
 #pragma unroll
       for (int nt = 0; nt < SFRAG; ++nt) {
 #pragma unroll
         for (int e = 0; e < 2; ++e) {
-          const float pa = (sacc[nt][e] == -INFINITY) ? 0.f : ex2f<FEXP>(sacc[nt][e] - m_a);
-          const float pb = (sacc[nt][2 + e] == -INFINITY) ? 0.f : ex2f<FEXP>(sacc[nt][2 + e] - m_b);
+          const float pa = (sacc[nt][e] == -INFINITY) ? 0.f : ex2f<FEXP>(__fmul_rn(__fsub_rn(sacc[nt][e], m_a), l2m));
+          const float pb = (sacc[nt][2 + e] == -INFINITY) ? 0.f : ex2f<FEXP>(__fmul_rn(__fsub_rn(sacc[nt][2 + e], m_b), l2m));
           sacc[nt][e] = pa; sacc[nt][2 + e] = pb; ps_a += pa; ps_b += pb;
         }
       }
@@ -560,13 +566,17 @@ __global__ void __launch_bounds__(NW * 32) gqa_fa_v6_kernel(
     bf16* op = out + ((int64_t)(q0 + row_a) * H + h) * D + cq;
 #pragma unroll
     for (int nt = 0; nt < OF; ++nt)
-      *reinterpret_cast<uint32_t*>(op + nt * 8) = pack_bf16x2(o[nt][0] * inv_a, o[nt][1] * inv_a);
+      *reinterpret_cast<uint32_t*>(op + nt * 8) = (g_attn_mode & 1)
+          ? pack_bf16x2(__fdiv_rn(o[nt][0], l_a), __fdiv_rn(o[nt][1], l_a))   // ATTN_MODE bit0：vLLM `acc / L`
+          : pack_bf16x2(o[nt][0] * inv_a, o[nt][1] * inv_a);
   }
   if (live_b) {
     bf16* op = out + ((int64_t)(q0 + row_b) * H + h) * D + cq;
 #pragma unroll
     for (int nt = 0; nt < OF; ++nt)
-      *reinterpret_cast<uint32_t*>(op + nt * 8) = pack_bf16x2(o[nt][2] * inv_b, o[nt][3] * inv_b);
+      *reinterpret_cast<uint32_t*>(op + nt * 8) = (g_attn_mode & 1)
+          ? pack_bf16x2(__fdiv_rn(o[nt][2], l_b), __fdiv_rn(o[nt][3], l_b))
+          : pack_bf16x2(o[nt][2] * inv_b, o[nt][3] * inv_b);
   }
 }
 template <bool PAGED, int D, int NW, int TILE, int NBUF = 1, bool FEXP = false>
@@ -1405,7 +1415,9 @@ extern "C" int gqa_fa_umma_launch(int paged, int max_q, int heads, int num_reqs,
 static int gqa_prefill_impl(const void* q, const void* k, const void* v, void* out, const int32_t* cu_seqlens,
                                 int64_t num_reqs, int64_t max_seqlen, int64_t heads, int64_t kv_heads, int64_t head_dim,
                                 float scale, int64_t q_stride, int64_t kv_stride, int cfg, int window, int p_fp8, cudaStream_t stream) {
-  cudaMemcpyToSymbolAsync(g_p_fp8, &p_fp8, sizeof(int), 0, cudaMemcpyHostToDevice, stream);
+  { const int pf = p_fp8 & 1, am = p_fp8 >> 1;
+    cudaMemcpyToSymbolAsync(g_p_fp8, &pf, sizeof(int), 0, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyToSymbolAsync(g_attn_mode, &am, sizeof(int), 0, cudaMemcpyHostToDevice, stream); }
   if (q_stride <= 0) q_stride = heads * head_dim;
   if (kv_stride <= 0) kv_stride = kv_heads * head_dim;
   if (num_reqs <= 0) return 0;
@@ -1458,7 +1470,9 @@ static int gqa_paged_impl(const void* q, const void* cache, const int32_t* block
                               const int32_t* cu_seqlens_q, void* out, int64_t num_reqs, int64_t max_q_len, int64_t heads,
                               int64_t kv_heads, int64_t head_dim, int64_t block_size, int64_t max_blocks, float scale,
                               int64_t q_stride, int skip_single, int cfg, int window, int p_fp8, cudaStream_t stream) {
-  cudaMemcpyToSymbolAsync(g_p_fp8, &p_fp8, sizeof(int), 0, cudaMemcpyHostToDevice, stream);
+  { const int pf = p_fp8 & 1, am = p_fp8 >> 1;
+    cudaMemcpyToSymbolAsync(g_p_fp8, &pf, sizeof(int), 0, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyToSymbolAsync(g_attn_mode, &am, sizeof(int), 0, cudaMemcpyHostToDevice, stream); }
   if (q_stride <= 0) q_stride = heads * head_dim;
   if (num_reqs <= 0) return 0;
   if (head_dim <= 0 || head_dim > MAX_D || heads <= 0 || kv_heads <= 0 || heads % kv_heads != 0 || block_size <= 0 ||
