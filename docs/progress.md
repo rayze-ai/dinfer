@@ -18,7 +18,13 @@
 - 逐层（整跑）：**L-1 / L0 / L1 完全逐位 0**；L2 1.1e-4（仅 token 1）；L3 1.5e-2；L29 1.6e-1。
 - 单层隔离：L3、L2 均 **23/24 token 恰好 0**，差异只集中在个别 token。
 
-**⚠️ 下一步就在这里（bf16 小 M 未生效）**
+**2026-10-23 续（本会话）**：上面"plan_for 优先级"的诊断**是错的**——kaon3 不调 `autotune`（plans 空），
+router 也不走 `Gemm`，走自写 `moe_gate_f32`（f32 累加 → host 舍入 bf16）。镜像 vLLM 在 sm_120 上
+`GateLinear` 落 Tier 6（`F.linear` bf16 输出 → `.to(fp32)`），所以 router 改为 cuBLASLt bf16（钉 id=21）+ cast（52e9c27），
+`SMALL_M_LT` 已撤回。**读 vLLM 代码一律读镜像副本 `/data/ref/vllm-img-v0.28.0-pr455/`**（本地 main 在此处是 Tier 5，口径不同）。
+待测：L2 隔离 `router_logits` 是否归 0 → 端到端。
+
+**⚠️（旧）bf16 小 M 未生效**
 `bf16_algo_calib` 证明 router 形状 `(24,128,2816)` 默认 algo 差 **768/3072**，正确配置
 `id=21 tile=11 splitk=8`。但我加的 `SMALL_M_LT` 开关**没生效**：`router_logits` 仍差 4/3072。
 原因是 `plan_for` 先命中 `plans.get(&Key::bf16(m,n,k,bias))`（autotune 已为 m=24 存了 SmallM 计划），
