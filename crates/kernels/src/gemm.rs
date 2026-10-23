@@ -30,6 +30,18 @@ struct Key {
     n: usize,
     k: usize,
     bias: bool,
+    /// 数据类型：bf16 与 fp8 两条路径的 algo 选择规则不同（fp8 要按实测配置表选，
+    /// 见 `forward_fp8_cublaslt`），缓存键必须区分，否则 bf16 先跑过同形状会让 fp8 复用错的 algo。
+    fp8: bool,
+}
+
+impl Key {
+    const fn bf16(m: usize, n: usize, k: usize, bias: bool) -> Self {
+        Self { m, n, k, bias, fp8: false }
+    }
+    const fn fp8(m: usize, n: usize, k: usize) -> Self {
+        Self { m, n, k, bias: false, fp8: true }
+    }
 }
 
 /// 某个 (M, N, K) 形状选定的执行方式。
@@ -443,14 +455,14 @@ impl Gemm {
         if plans.is_empty() {
             return None;
         }
-        if let Some(p) = plans.get(&Key { m, n, k, bias }) {
+        if let Some(p) = plans.get(&Key::bf16(m, n, k, bias)) {
             return Some(*p);
         }
         // 非桶 M 在 autotune 末尾已按桶展开（1..=最大桶 每个 m 一条，Lt algo 过 AlgoCheck 才借）；
         // 这里只兜底 small_m（对任意 m ≤ 桶都正确）。
         if m <= self.profile.gemm_tune.small_m_max {
             let bucket = m.next_power_of_two();
-            if let Some(p @ (GemmPlan::SmallM { .. } | GemmPlan::SmallMma { .. })) = plans.get(&Key { m: bucket, n, k, bias }) {
+            if let Some(p @ (GemmPlan::SmallM { .. } | GemmPlan::SmallMma { .. })) = plans.get(&Key::bf16(bucket, n, k, bias)) {
                 return Some(*p);
             }
         }
@@ -522,7 +534,7 @@ impl Gemm {
         k: usize,
     ) -> Result<()> {
         let d = self.make_descs(m, n, k, bias.map(|b| self.stream.ptr(b)))?;
-        let key = Key { m, n, k, bias: bias.is_some() };
+        let key = Key::bf16(m, n, k, bias.is_some());
         let cached = self.default_algos.lock().unwrap().get(&key).copied();
         let algo = match cached {
             Some(a) => a,
@@ -659,7 +671,7 @@ impl Gemm {
             return Ok(());
         }
         let d = self.make_descs_fp8(m, n, k, self.stream.ptr(a_scale), self.stream.ptr(w_scale))?;
-        let key = Key { m, n, k, bias: false };
+        let key = Key::fp8(m, n, k);
         let cached = self.default_algos.lock().unwrap().get(&key).copied();
         let algo = match cached {
             Some(al) => al,
@@ -1068,7 +1080,7 @@ impl Gemm {
                     }
                     _ => {}
                 }
-                plans.insert(Key { m, n: e.n, k: e.k, bias: e.bias.is_some() }, row.chosen);
+                plans.insert(Key::bf16(m, e.n, e.k, e.bias.is_some()), row.chosen);
                 report.rows.push(row);
             }
         }
@@ -1086,7 +1098,7 @@ impl Gemm {
                     continue;
                 }
                 let bucket = m.next_power_of_two();
-                let Some(&bp) = plans.get(&Key { m: bucket, n: e.n, k: e.k, bias: key_bias }) else { continue };
+                let Some(&bp) = plans.get(&Key::bf16(bucket, e.n, e.k, key_bias)) else { continue };
                 let plan = match bp {
                     GemmPlan::SmallM { .. } | GemmPlan::SmallMma { .. } if m <= tp.small_m_max => Some(bp),
                     GemmPlan::SmallM { .. } | GemmPlan::SmallMma { .. } => None,
@@ -1097,7 +1109,7 @@ impl Gemm {
                 };
                 match plan {
                     Some(p) => {
-                        plans.insert(Key { m, n: e.n, k: e.k, bias: key_bias }, p);
+                        plans.insert(Key::bf16(m, e.n, e.k, key_bias), p);
                         borrowed += 1;
                     }
                     None => rejected += 1,
