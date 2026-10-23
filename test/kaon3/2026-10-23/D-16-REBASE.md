@@ -130,3 +130,19 @@ D-12 已验字节一致 0/67584）。
 
 **下一轮**：① 修脚本的类型 bug；② 断网式验证——把已抓到的 `A_fp8/B_fp8/scale` 直接喂我们和 FlashInfer，
 判定"同字节入参下输出是否逐位相同"；③ 同入参重复 5 次判定 FlashInfer 自身是否逐位确定（原 D-17 的核心问题，仍未答）。
+
+## 10. 判据 FLOOR 的数字对不上（待用户裁定的第 2 件事）
+
+`scripts/verify/kaon3-parity.sh` 的注释写"跨进程实测 ~18%"，代码默认 `FLR=test/kaon3/oracle_clean_b`；
+交接区与迭代记录里写 **FLOOR 0.83%**。但同一份记录里"P1 真实跨进程下限（`oracle_p1c` vs `oracle_p1`，
+同参数两进程）"是 **flip 1.51% / mean_common_d 0.1000**（`kaon3-parity.md:175`）。
+
+**三个数（0.83% / 1.51% / 18%）出处不同，不能混用**：
+- `0.83%` 来自哪个 oracle 组合，仓里没有落盘证据；
+- `1.51%` 是 P1 那次两进程的实测；
+- `18%` 在 verify 注释里、标着"2026-10-22 实测"，与上面两个都不符。
+
+**在拿到 `oracle_clean_b` vs `oracle_clean` 的实际 diff 前，判据的分母是不可信的。**
+这不影响"我们的读数 14.49% 远大于任何一个候选下限"，但会让"差多少倍"失真。
+
+→ 下一轮顺带做一次 `kaon3_oracle_diff oracle_clean_b oracle_clean`，把真实 FLOOR 钉死并写进规格。
