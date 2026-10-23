@@ -1005,3 +1005,31 @@ a1_gscale = 462.4516（所有专家相同）
 **这条对复刻很重要**：如果我们自己的 `gemm_nvfp4` 用的是非 swizzled 的块缩放布局，
 那不只是"归约次序不同"，而是**缩放因子的排布约定不同** —— 这足以造成 73% 元素差异。
 下一步要核对的就是这个。
+
+## 第 10 轮：**找到了具体的布局差异** —— 块缩放的自然排布 vs swizzled
+
+| | 参照（cutlass） | 我们（`gemm_nvfp4_sm120.cu`） |
+|---|---|---|
+| A 的块缩放布局 | **padded + swizzled**（`nvfp4_scaled_mm_sm120_kernels.cu:281` 明确校验） | **自然排布** `[m, k/16]`（`:146` 直接按 `row*(K/16)+bi` 读） |
+| 代码里有没有 swizzle | — | **`grep -c swizzle` = 0** |
+
+`gemm_nvfp4_sm120.cu:146`：
+```cpp
+sfa[r * NQ4 + q] = *reinterpret_cast<const uint32_t*>(
+    Sc + (m_blk + r) * (K / 16) + kb * NB16 + q * 4);      // ← 自然行主序
+```
+而 `mma ... block_scale.scale_vec::4X` 的硬件布局要求是
+`tcgen05`/`mma` 的 scale-factor 4× 交错排布（PTX doc: "Scale Factor B Layout 4x"），
+cutlass 在 `quantize` 阶段就把 scale 写成 swizzled。
+
+**注意**：我们的 kernel 在自测里是"自洽"的（自己量化、自己按同一布局读），所以**单测发现不了**。
+但一旦要和参照比，布局约定不同 → 每个 mma 取到的 scale 不同 → **73% 元素差异**完全可以解释。
+
+### 这修正了"必须复刻 cutlass 归约"的判断
+
+差异**未必**需要重写整个融合 kernel：如果只是把 **A/B 的块缩放按 swizzled 布局打包**
+（以及输出/累加顺序对齐），我们的逐专家 GEMM 就可能有质变。
+这比复刻 cutlass MoE **便宜得多**，且能直接验证——先用 dense FP4 GEMM 这一级做对拍。
+
+**下一步**：拿到参照 dense FP4 GEMM 的输出（正在跑），
+把 `a_q / a_s / w1 / s1` 与我们的量化结果逐字节比 —— 只要 scale 布局不同，这一步立刻看得出来。
