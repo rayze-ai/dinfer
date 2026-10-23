@@ -618,8 +618,8 @@ impl Gemm {
     ///
     /// cuBLAS 视角与 bf16 路径相同：A 操作数 = W（存储 `[K,N]` 列主序，即物理 `[n,k]`），
     /// B 操作数 = 激活（`[K,M]` 列主序，即物理 `[m,k]`），C = `[N,M]`。
-    /// 两个 scale 是**设备上的 f32 标量指针**（`A_SCALE_POINTER` / `B_SCALE_POINTER`），
-    /// 由 compute type 32F + scale type 32F 决定。
+    /// 两个 scale 是**设备上的 f32 标量指针**（`A_SCALE_POINTER` / `B_SCALE_POINTER`）。
+    #[allow(clippy::too_many_arguments)]
     pub fn forward_fp8_cublaslt(
         &self,
         a: &CudaSlice<u8>,
@@ -670,7 +670,7 @@ impl Gemm {
                 d.c,
                 po,
                 d.c,
-                algo as *const _,
+                &algo as *const _,
                 pws,
                 self.workspace.len(),
                 self.stream.raw() as *mut _,
