@@ -609,3 +609,22 @@ md5 /w/tmp/o1/p02.json = 48751c2a3c356b37581689d1dce61b8a   (ROUTER_GEMM_BI=1, B
 - 它不改变数值，但**不依赖 `CUBLASLT_WORKSPACE_SIZE` 环境变量**，比 cuBLASLt 更可控；
 - 默认开（`ROUTER_GEMM_BI`），cuBLAS 路径留作 A/B 与回退。
 - **但它不是 flip 的来源**，loop 还得往下找。
+
+## 第 6 轮：`MOE_COMBINE_F32=1` 让 p02 的 top-1 翻转归零（**重大**）
+
+同环境（`ROUTER_GEMM_BI=1 CUBLASLT_WORKSPACE_SIZE=1 RMSNORM_MODE=2`），只切一个开关，p02 单例：
+
+| 开关 | top-1 不一致 | top5 \|Δlp\| | top1 \|Δlp\| max | 实际 token \|Δlp\| |
+|---|---|---|---|---|
+| `MOE_COMBINE_F32=0`（**当前默认**，号称"vLLM cutlass_moe 口径"） | **4 / 22** | 1.8089 | 2.0405 | 2.1794 |
+| **`MOE_COMBINE_F32=1`**（f32 权重 + f32 乘积） | **0 / 22** | **1.3760** | **0.5195** | **1.1844** |
+| `NORM_FUSE_QUANT=1` | 3 / 22 | 1.8046 | 2.6193 | 1.7220 |
+
+**判读**：
+- `MOE_COMBINE_F32=1` 把 **top-1 翻转从 4 降到 0**，top1 |Δlp| max 从 2.04 降到 0.52（**4 倍**）。
+  这是本轮所有尝试里唯一产生质变的开关。
+- 默认值（`=0`，"vLLM cutlass_moe 口径"）**是错的**：那个口径假设 combine 时权重先落 bf16；
+  参照的 Triton/inductor 路径显然不是。
+- `NORM_FUSE_QUANT=1` 有轻微改善但不质变，暂不动。
+
+**下一步**：把 `MOE_COMBINE_F32` 默认改成 1（与 `RMSNORM_MODE=2` 一起），跑完整 30 用例验证。
