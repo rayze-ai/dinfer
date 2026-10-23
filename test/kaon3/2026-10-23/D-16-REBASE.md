@@ -760,3 +760,16 @@ router 走 `QLinear::Bf16` → `Gemm::forward_bf16` → cuBLASLt 启发式 `h[0]
 
 **下一步（沿用 §41 的方法，不另开思路）**：给 bf16 路径也做一遍"按实测配置选 algo"，
 或直接确认 PyTorch `F.linear` 在 bf16 下落到 cuBLAS 的哪条路径并对齐。
+
+## 47. router 探针的两次修正（记下来避免重复踩）
+
+1. **抓错了入参**：`Gemma4Router.forward` 是
+   `x = norm(x); x *= root_size; x *= scale; router_logits, _ = self.proj(x)`，
+   所以真正喂进 GEMM 的是**预处理之后**的 x。第一版抓的是进 router 前的 x，
+   元素数 24×2816 vs 输出 24×128，比较时形状不匹配（返回 -1）。
+   → 改为在 patch 里复刻预处理拿到 `xp`。
+2. **参考输出自己算**：不再依赖 hook 到的返回值，直接用
+   `F.linear(xp, w)` 生成（同进程、同权重、确定性），避免"抓到的 out 与比的张量不同源"。
+
+**当前状态**：探针在跑，比较 `F.linear(x,w)` / `x@w.t()` / `torch.mm` / `contiguous` 等变体，
+看哪种与 vLLM 真实输出逐位一致。
