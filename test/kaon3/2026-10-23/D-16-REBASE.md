@@ -427,3 +427,22 @@ cuBLAS 是闭源库。要"逐位复刻"，只能靠**实验反推它的 K 方向
 （或按"实测与参照一致"选定并写死，附注释说明来历）。
 剩下的端到端问题（翻转率 14%）预计会随这一处对齐而大幅收敛——因为 fp8 KV 放大器不再放大
 "我们自己引入的" 1-ulp。
+
+## 29. ✅ 最终验证通过
+
+```
+自写 kernel B=[K,N] 正解(已转置): diff 8/196608    max 1.2500e-1
+cuBLASLt(默认 algo=2):            diff 0/196608    max 0.0000e0
+test result: ok. 1 passed
+```
+
+**`Gemm::forward_fp8_cublaslt` 与 vLLM 的 fp8 GEMM 逐位一致。**
+
+### 下一步：接进模型前向（还没做）
+
+`models/kaon3/src/layer.rs` 目前走 `Gemm::forward_fp8`（自写 kernel，8 处 1-ulp）。
+要享受这个对齐，`QLinear::Fp8` 的调用点要改成 `forward_fp8_cublaslt`。
+
+**注意性能**：cuBLASLt 对小 M（decode 时 m=1..32）未必比自写 kernel 快。
+建议按 M 分流：**prefill（M 大）走自写 kernel，或反之——以 bench 为准**，不要凭直觉选。
+接入前先测两条路径在 [1×2816×8192, 24×2816×8192, 512×2816×8192] 上的耗时。
