@@ -857,3 +857,19 @@ router 形状 (m=24, n=128, k=2816)，用 vLLM 真实入参（`kaon3_d17_router.
 
 **⚠️ 口径提醒**：`oracle_clean` 是 BI=1 生成的（P1-clean-rebuild.md:38），而生产不开 BI（memory 2026-10-22）。
 因此 `CUBLASLT_WORKSPACE_SIZE=1` 只在对 BI oracle 时设；对生产口径（non-BI）vLLM 走 cuBLAS（非 Lt），另需标定。
+
+## 52. **post_ff_norm 归零：RMSNorm 的 1/rms 写法（低级精度问题），L2 输出逐位 0**
+
+补抓 `ff1`（post_ff_norm_1 输出）与 `post_ff_in`（post_ff_norm 输入），vLLM 两次抓取 21/21 逐位一致（参照可信）：
+`dense` 0 → `ff1` 差 (12,1087) → `post_ff_in` 只继承它 → `post_ff_norm` 继承 + 新增 (8,499)。**两处都是同输入经 RMSNorm 后不同**。
+
+`tests/rmsnorm_calib.rs`（NVRTC 变体，生产 kernel = 模拟 ours/inv=0 逐位一致，模拟可信）：
+- 归约顺序（ours 两级蝶形 vs Triton 1024 块 × 4 warp）**无影响**；
+- `rsqrtf` → IEEE `1/sqrt`：(8,499) 归 0，(12,1087) 不动；`sqrt.approx` 反而多出 (17,2298)；
+- (12,1087) 精确值 0.200683594157，bf16 中点 0.20068359375（高 4e-10）→ 需 inv 小 ≥1 ulp ⇔ ss 大 ≥1 ulp；
+- **`mean = ss × fl(1/h)`**（乘倒数，非 `ss/h`）+ `1/sqrt_rn`：两组 48 行**全 0**。
+排除：`forward_native`（先舍入 x·inv 再乘 w，第 12 行会差 719）——实际跑的是 BI Triton kernel。
+
+改动：`norm.cu` 新增 `rms_inv`（全显式 `_rn`，防 fma 收缩），三处 `rsqrtf(ss/hidden+eps)` 全换。
+结果（L2 隔离）：**L2 输出 0 / 67584**；子模块仅剩 `v_norm` (19,1040)(19,1125) 与 `attn_out` (6,2462)，均未传播。
+`v_norm` 用同一 kernel 却未变 → 差在它的输入（v_proj，`qkv_raw` 待补导出）。
