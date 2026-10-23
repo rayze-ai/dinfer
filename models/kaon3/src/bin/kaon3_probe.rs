@@ -552,7 +552,9 @@ fn dump_weights(src: &WeightSource, dir: &str) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     let dev = Device::new(0)?;
     let stream = dev.new_stream()?;
-    let p = "model.language_model.layers.0";
+    // router 三件按 `RLAYER=<l>` 导出（默认 0；bf16 algo 要按真实层的输入标定）
+    let rl: usize = std::env::var("RLAYER").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let p = format!("model.language_model.layers.{rl}");
     // qkv 组：走与 `GemmaLayer::load` 完全相同的 `load_fp8_group`，导出重量化后的 fp8 字节与 scale
     // 层号：`WLAYERS=0,9,11`（默认 0,11）
     let wl: Vec<usize> = std::env::var("WLAYERS").unwrap_or_else(|_| "0,11".into())
