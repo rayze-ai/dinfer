@@ -378,3 +378,13 @@ cuBLAS 是闭源库。要"逐位复刻"，只能靠**实验反推它的 K 方向
 风险：换 GPU / CUDA 版本时 cuBLAS 内部选择可能变，但那时 vLLM 也一起变，仍是对齐的。
 
 **下一步**：在 `crates/kernels` 里加 `forward_fp8_cublaslt`，用 `fp8_flashinfer_parity` 测试判 diff=0。
+
+## 25. 实现：`Gemm::forward_fp8_cublaslt`（2026-10-23）
+
+在 `crates/kernels/src/gemm.rs` 复用现有 Lt 基础设施新增 fp8 路径：
+- 描述符 `make_descs_fp8`：A/B = `CUDA_R_8F_E4M3`，C/D = `CUDA_R_16BF`，
+  compute `CUBLAS_COMPUTE_32F` + scale `CUDA_R_32F`；
+  `A_SCALE_POINTER` / `B_SCALE_POINTER` 传**设备上的 f32 标量指针**（对照 flashinfer
+  `data/include/flashinfer/gemm/bmm_fp8.cuh:171-172`）；
+- 布局沿用 bf16 路径的 cuBLAS 视角（A 操作数 = W 物理 `[n,k]` 当 `[K,N]` 列主序，`lda=K`）；
+- algo 走与 bf16 相同的 `heuristics()` + `default_algos` 桶缓存（同一形状只查一次）。

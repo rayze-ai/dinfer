@@ -87,16 +87,16 @@ fn fp8_matches_flashinfer_bitwise() {
 
     // B 的落盘布局有歧义：vLLM 拿到的是 `B.stride()==(1,2816)` 的**转置视图**（物理 [N,K] 行主序），
     // 而 `np.ascontiguousarray(视图)` 会按**逻辑序**重排成 [K,N] 连续。两种都试，用哪份能让输出对上
-    // 由结果判定，不靠猜。
-    let b_nk = b_bytes.clone(); // 解释成 [N,K] 行主序
-    let mut b_kn = b_bytes.clone(); // 解释成 [K,N] 行主序 → 手动转成 [N,K]
+    // 由结果判定，不靠猜。实测答案是「文件里是 [K,N] 逻辑序」，即下面转置后的 `w_nk` 才对。
+    let b_as_nk = b_bytes.clone(); // 误解：把文件直接当 [N,K]
+    let mut w_nk = b_bytes.clone(); // 正解：文件是 [K,N]，转成物理 [N,K]
     for row in 0..n {
         for col in 0..k {
-            b_kn[row * k + col] = b_bytes[col * n + row];
+            w_nk[row * k + col] = b_bytes[col * n + row];
         }
     }
 
-    for (label, wbytes) in [("[N,K] 物理序", b_nk), ("[K,N] 逻辑序(已转置)", b_kn)] {
+    for (label, wbytes) in [("[N,K] 误解", b_as_nk), ("[K,N] 正解(已转置)", w_nk.clone())] {
         let dw = st.htod_copy(wbytes).expect("upload w");
         let mut dout = st.alloc_zeros::<bf16>(rows * n).expect("alloc");
         gemm.forward_fp8_prequant(&da, scale_a, &dw, scale_b, &mut dout, rows, n, k)
@@ -120,9 +120,42 @@ fn fp8_matches_flashinfer_bitwise() {
                 }
             }
         }
-        println!("B={label}: diff {diff}/{}  max {max:.4e}", rows * n);
+        println!("自写 kernel B={label}: diff {diff}/{}  max {max:.4e}", rows * n);
         for (row, col, g, x) in &first {
             println!("    [row {row}, col {col}] ours {g:.6e}  vllm {x:.6e}");
         }
     }
+
+    // ---- cuBLASLt 路径：应当与 vLLM 逐位相同（实测 torch._scaled_mm 为 0）----
+    // B 的真身是 `[K,N]` 逻辑序；cuBLASLt 要的是物理 `[N,K]`（当 [K,N] 列主序），所以用 b_kn 那份。
+    let da_scale = st.htod_copy(vec![scale_a]).expect("upload a_scale");
+    let dw_scale = st.htod_copy(vec![scale_b]).expect("upload w_scale");
+    let dw_nk = st.htod_copy(w_nk).expect("upload w");
+    let mut dout = st.alloc_zeros::<bf16>(rows * n).expect("alloc");
+    gemm.forward_fp8_cublaslt(&da, &da_scale, &dw_nk, &dw_scale, &mut dout, rows, n, k)
+        .expect("forward_fp8_cublaslt");
+    let got = st.dtoh_sync_copy(&dout).expect("download");
+
+    let mut diff = 0usize;
+    let mut max = 0f32;
+    let mut first = Vec::new();
+    for i in 0..rows * n {
+        let g = got[i].to_f32();
+        let r = ref_out[i];
+        if g != r {
+            diff += 1;
+            let d = (g - r).abs();
+            if d > max {
+                max = d;
+            }
+            if first.len() < 6 {
+                first.push((i / n, i % n, g, r));
+            }
+        }
+    }
+    println!("cuBLASLt: diff {diff}/{}  max {max:.4e}", rows * n);
+    for (row, col, g, x) in &first {
+        println!("    [row {row}, col {col}] ours {g:.6e}  vllm {x:.6e}");
+    }
+    assert_eq!(diff, 0, "cuBLASLt 与 vLLM 不是逐位一致");
 }

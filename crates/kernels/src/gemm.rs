@@ -608,6 +608,129 @@ impl Gemm {
         r
     }
 
+    /// **cuBLASLt 的 fp8 per-tensor GEMM**（sm_120）：`out[m,n] = (A·Wᵀ) * (a_scale * w_scale)`，
+    /// `A`/`W` 都是 e4m3 字节，`W` 是 `[n, k]`。
+    ///
+    /// 为什么走这条路：实测 vLLM 的 fp8 GEMM 真实命中 **cuBLAS**（`CublasFp8GemmRunner`），
+    /// 而我们自写 kernel 与它差 8/196608 个 1-ulp（累加序不同），却怎么都追不齐。
+    /// 直接调同一个库 → 实测 **0/196608**（`torch._scaled_mm` 交叉验证，见
+    /// `test/kaon3/2026-10-23/D-16-REBASE.md` §24）。
+    ///
+    /// cuBLAS 视角与 bf16 路径相同：A 操作数 = W（存储 `[K,N]` 列主序，即物理 `[n,k]`），
+    /// B 操作数 = 激活（`[K,M]` 列主序，即物理 `[m,k]`），C = `[N,M]`。
+    /// 两个 scale 是**设备上的 f32 标量指针**（`A_SCALE_POINTER` / `B_SCALE_POINTER`），
+    /// 由 compute type 32F + scale type 32F 决定。
+    pub fn forward_fp8_cublaslt(
+        &self,
+        a: &CudaSlice<u8>,
+        a_scale: &CudaSlice<f32>,
+        w: &CudaSlice<u8>,
+        w_scale: &CudaSlice<f32>,
+        out: &mut CudaSlice<bf16>,
+        m: usize,
+        n: usize,
+        k: usize,
+    ) -> Result<()> {
+        ensure!(a.len() >= m * k, "gemm fp8 lt: a.len {} < m*k {}", a.len(), m * k);
+        ensure!(w.len() == n * k, "gemm fp8 lt: w.len {} != n*k {}", w.len(), n * k);
+        ensure!(out.len() >= m * n, "gemm fp8 lt: out.len {} < m*n {}", out.len(), m * n);
+        if m == 0 || n == 0 || k == 0 {
+            return Ok(());
+        }
+        let d = self.make_descs_fp8(m, n, k, self.stream.ptr(a_scale), self.stream.ptr(w_scale))?;
+        let key = Key { m, n, k, bias: false };
+        let cached = self.default_algos.lock().unwrap().get(&key).copied();
+        let algo = match cached {
+            Some(al) => al,
+            None => {
+                let h = self.heuristics(&d, 1)?;
+                ensure!(!h.is_empty(), "cublasLt fp8: no algo for m={m} n={n} k={k}");
+                self.default_algos.lock().unwrap().insert(key, h[0].algo);
+                h[0].algo
+            }
+        };
+        let alpha = 1.0f32;
+        let beta = 0.0f32;
+        let pw = self.stream.ptr(w) as *const c_void;
+        let pa = self.stream.ptr(a) as *const c_void;
+        let po = self.stream.ptr_mut(out) as *mut c_void;
+        let pws = self.stream.ptr(&self.workspace) as *mut c_void;
+        // SAFETY: 描述符由 make_descs_fp8 构造，指针指向调用方持有的设备缓冲。
+        let r = unsafe {
+            lt::matmul(
+                self.handle,
+                d.op,
+                &alpha as *const f32 as *const c_void,
+                &beta as *const f32 as *const c_void,
+                pw,
+                d.a,
+                pa,
+                d.b,
+                po as *const c_void,
+                d.c,
+                po,
+                d.c,
+                algo as *const _,
+                pws,
+                self.workspace.len(),
+                self.stream.raw() as *mut _,
+            )
+        };
+        lt_err(r, "cublasLt matmul fp8")
+    }
+
+    /// fp8 版本的去量化描述符：A/B 是 e4m3，C/D 是 bf16，compute 32F，scale 32F（设备指针）。
+    fn make_descs_fp8(&self, m: usize, n: usize, k: usize, a_scale_ptr: u64, w_scale_ptr: u64) -> Result<LtDescs> {
+        use sys::cublasLtMatmulDescAttributes_t as D;
+        let f8 = sys::cudaDataType_t::CUDA_R_8F_E4M3;
+        let out_ty = sys::cudaDataType_t::CUDA_R_16BF;
+        // cuBLAS 视角同 bf16 路径：A 操作数 = W（物理 [n,k] 当 [K,N] 列主序，lda=K），B = 激活，C = [N,M]
+        let a = lt_err(lt::create_matrix_layout(f8, k as u64, n as u64, k as i64), "layout W")?;
+        let b = match lt::create_matrix_layout(f8, k as u64, m as u64, k as i64) {
+            Ok(b) => b,
+            Err(e) => {
+                unsafe { let _ = lt::destroy_matrix_layout(a); }
+                bail!("layout A: cublasLt {:?}", e.0);
+            }
+        };
+        let c = match lt::create_matrix_layout(out_ty, n as u64, m as u64, n as i64) {
+            Ok(c) => c,
+            Err(e) => {
+                unsafe { let _ = lt::destroy_matrix_layout(a); let _ = lt::destroy_matrix_layout(b); }
+                bail!("layout C: cublasLt {:?}", e.0);
+            }
+        };
+        let op = match lt::create_matmul_desc(sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                                             sys::cudaDataType_t::CUDA_R_32F) {
+            Ok(op) => op,
+            Err(e) => {
+                unsafe {
+                    let _ = lt::destroy_matrix_layout(a);
+                    let _ = lt::destroy_matrix_layout(b);
+                    let _ = lt::destroy_matrix_layout(c);
+                }
+                bail!("matmul desc: cublasLt {:?}", e.0);
+            }
+        };
+        let d = LtDescs { op, a, b, c };
+        let t: i32 = 1;
+        let nt: i32 = 0;
+        // SAFETY: 属性值类型与 cublasLt 文档一致：transpose 是 int，scale 是设备指针。
+        unsafe {
+            lt_err(lt::set_matmul_desc_attribute(d.op, D::CUBLASLT_MATMUL_DESC_TRANSA,
+                                                 &t as *const _ as *const c_void, std::mem::size_of_val(&t)), "transa")?;
+            lt_err(lt::set_matmul_desc_attribute(d.op, D::CUBLASLT_MATMUL_DESC_TRANSB,
+                                                 &nt as *const _ as *const c_void, std::mem::size_of_val(&nt)), "transb")?;
+            lt_err(lt::set_matmul_desc_attribute(d.op, D::CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
+                                                 &a_scale_ptr as *const _ as *const c_void,
+                                                 std::mem::size_of_val(&a_scale_ptr)), "a_scale")?;
+            lt_err(lt::set_matmul_desc_attribute(d.op, D::CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
+                                                 &w_scale_ptr as *const _ as *const c_void,
+                                                 std::mem::size_of_val(&w_scale_ptr)), "b_scale")?;
+        }
+        Ok(d)
+    }
+
     fn run_lt(&self, d: &LtDescs, algo: &sys::cublasLtMatmulAlgo_t, a: &CudaSlice<bf16>, w: &CudaSlice<bf16>, out: &mut CudaSlice<bf16>) -> Result<()> {
         let alpha = 1.0f32;
         let beta = 0.0f32;
