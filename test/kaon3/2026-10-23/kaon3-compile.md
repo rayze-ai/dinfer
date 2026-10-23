@@ -841,3 +841,19 @@ INFO [nvfp4.py:564] Using MoEPrepareAndFinalizeNoDPEPModular
 3. **若单专家相同、只有 combine 不同** → 只需对齐 combine 的累加顺序（更便宜）。
 
 **这条决定了后续工作量**，所以先做第 1 步。
+
+## 单专家 hook 抓不到：融合 kernel 里没有"单个专家"这个模块
+
+`scripts/dev/moe_expert_capture.py` 找 `layers.0.moe.experts.experts[i]` 挂 hook → **一个都没挂上**，
+日志里连 `EXPERTS_CONTAINER` 都没打印。原因与 `VLLM_CUTLASS` 后端一致：
+**cutlass MoE 是一个融合 kernel**（门控 → gate/up → SwiGLU → down → combine 全在里面），
+Python 层没有逐专家的 nn.Module，自然无法 hook。
+
+→ **没法从参照侧直接拿"单专家输出"**。要判断"专家 GEMM 本身对不对"，只能换方法：
+用参照的 `x` 与**我们自己的**单专家结果，和"参照的整段输出"做**留一法**：
+把其余 7 个专家的贡献从参照 y 里减掉，反推该专家的贡献，再比。但误差会累积，判别力有限。
+
+**更实际的路线**：既然已经知道是 `VLLM_CUTLASS`，
+直接读它的 cutlass 配置（`nvfp4.py` 里选后端的表 + `cutlass_moe` 的 tile/K 分块），
+按它的归约结构实现，然后用**整段 MoE**（`moe_stage_parity`）做判据。
+换言之：**跳过"单专家对拍"，直接对齐 cutlass 的归约**。
