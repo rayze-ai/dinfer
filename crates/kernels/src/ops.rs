@@ -167,6 +167,7 @@ pub fn rmsnorm_bf16(
                 hidden as i64,
                 eps,
                 rmsnorm_layout(stream, tokens as usize, hidden, None),
+                norm_mode(),
                 stream.raw() as _,
             )
         },
@@ -200,6 +201,7 @@ pub fn rmsnorm_bf16_noweight(
                 hidden as i64,
                 eps,
                 rmsnorm_layout(stream, tokens as usize, hidden, None),
+                norm_mode(),
                 stream.raw() as _,
             )
         },
@@ -239,6 +241,7 @@ pub fn fused_add_rmsnorm_bf16(
                 hidden as i64,
                 eps,
                 rmsnorm_layout(stream, tokens as usize, hidden, None),
+                norm_mode(),
                 stream.raw() as _,
             )
         },
@@ -589,6 +592,7 @@ pub fn rmsnorm_bf16_layout(
                 hidden as i64,
                 eps,
                 rmsnorm_layout(stream, tokens, hidden, layout),
+                norm_mode(),
                 stream.raw() as _,
             )
         },
@@ -626,6 +630,7 @@ pub fn gather_rmsnorm_bf16(
                 hidden as i64,
                 eps,
                 rmsnorm_layout(stream, num_rows, hidden, None),
+                norm_mode(),
                 stream.raw() as _,
             )
         },
@@ -684,6 +689,7 @@ pub fn fused_add_rmsnorm_bf16_layout(
                 hidden as i64,
                 eps,
                 rmsnorm_layout(stream, tokens, hidden, layout),
+                norm_mode(),
                 stream.raw() as _,
             )
         },
@@ -2158,6 +2164,15 @@ pub fn gqa_prefill_win_bf16<
 /// v6 attention 的数值口径位（仅 v6 kernel 读），`ATTN_MODE=<bits>` 覆盖：
 /// bit1 = 指数参数走自然域 `ex2((s - m)·log2e)`（= vLLM Triton `tl.exp(S - m)`），**默认开**（Kaon-V3 L4 隔离 4457 → 1，§54）；
 /// bit0 = 归一化 `o / l`（vLLM `acc / L`），现有数据无区分力，默认关。`ATTN_MODE=0` 退回旧口径。
+/// RMSNorm 的数值口径（`RMSNORM_MODE` 覆盖）：**0 = compile（默认）**，1 = eager BI。
+/// vLLM 默认就走 torch.compile（`enforce_eager=False`；`vllm/config/vllm.py:1379` 的 `mode` 解析），
+/// 两种模式下 norm 是不同实现：compile 是 `rsqrt(mean+eps)` 且全程 fp32；eager BI 是
+/// `rcp(sqrt(fma(rcp(n), ss, eps)))`（SASS 复刻）。定位见 `docs/loops/kaon3-parity.md` 第 19 轮。
+fn norm_mode() -> i32 {
+    static V: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("RMSNORM_MODE").ok().and_then(|s| s.trim().parse::<i32>().ok()).unwrap_or(0))
+}
+
 fn attn_mode_ab() -> i32 {
     static V: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
     *V.get_or_init(|| std::env::var("ATTN_MODE").ok().and_then(|s| s.trim().parse::<i32>().ok()).unwrap_or(2) & 3)
