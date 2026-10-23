@@ -27,7 +27,8 @@
 - 端到端（run 1023-151951-1421909）：flip 15.53%（前 13.04%）/ |Δlp| 1.2593（前 1.2847）——放大器下末层量级不变，单次读数不作判据。
 - **§52 post_ff_norm 归零**：RMSNorm 的 1/rms 改为 `ss·fl(1/h)` + `1/sqrt_rn`（norm.cu `rms_inv`，替代 `rsqrtf(ss/h+eps)`，**全模型生效**）；
   L2 隔离输出 **0/67584**；整跑 **L0–L2 逐位 0**，L3 3.3e-9，L4 6.0e-4（首个大跳变）。L2 内仅剩 `v_norm` 2 元素 / `attn_out` 1 元素（不传播）。
-- **下一步**：`v_norm`（补导出 `qkv_raw` 区分 v_proj vs norm）→ `attn_out` → L3/L4 子模块；原计划：L4 单层隔离 + 子模块对拍（需用 `kaon3_vllm_sublayer.py` 抓 L4 的 vLLM 子模块，BI=1）；
+- **§53 v_norm 归零**：RMSNorm 平方和归约改为 Triton 同构（`rms_ss_triton`，全模型生效）；L2 内仅剩 `attn_out` 1 元素。
+- **下一步**：`attn_out` → L3/L4 子模块（L3/L4 读数未随 norm 修复变化，源头另在）；原计划：L4 单层隔离 + 子模块对拍（需用 `kaon3_vllm_sublayer.py` 抓 L4 的 vLLM 子模块，BI=1）；
   L2 剩余 `attn_out` 1 元素 / `v_norm` 2/49152 可能同源，一起看。
 - **口径待用户确认**：oracle_clean=BI，生产=non-BI（memory 2026-10-22）。non-BI 下 vLLM 走 cuBLAS(非 Lt)，需另标定。
 - 读 vLLM 代码读镜像副本 `/data/ref/vllm-img-v0.28.0-pr455/`；`/data/ref/vllm` 已切 v0.28.0rc2（与镜像差 87 文件）。

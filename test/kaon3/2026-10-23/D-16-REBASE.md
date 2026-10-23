@@ -873,3 +873,18 @@ router 形状 (m=24, n=128, k=2816)，用 vLLM 真实入参（`kaon3_d17_router.
 改动：`norm.cu` 新增 `rms_inv`（全显式 `_rn`，防 fma 收缩），三处 `rsqrtf(ss/hidden+eps)` 全换。
 结果（L2 隔离）：**L2 输出 0 / 67584**；子模块仅剩 `v_norm` (19,1040)(19,1125) 与 `attn_out` (6,2462)，均未传播。
 `v_norm` 用同一 kernel 却未变 → 差在它的输入（v_proj，`qkv_raw` 待补导出）。
+
+## 53. **v_norm 归零：RMSNorm 平方和的归约顺序**
+
+补导出 `q/k/v_proj_raw`（并修 `q_proj_raw` 原来把整块缓冲写出的截断错误），与 vLLM `qkv_raw`（[24, 4096+2048+2048]）
+三段**全 0** → v_proj 无差，差在 `v_norm`（逐头无权重 RMSNorm，h=256）本身。
+
+`rmsnorm_calib`（v 段 192 行 × 256）：**ours 归约顺序在所有 inv 写法下都差 2**（行 156 = token 19 头 4），
+**Triton 顺序在所有 inv 写法下都为 0**；h=256 时 1/h 精确，§52 的 inv 修正对它无效。
+根因：线程内 `ss += a·a + b·b`（两两先加）≠ Triton 的 8 元素逐个顺序累加；h=2816 时还有第二处不同
+（我们 32 warp 一次蝶形 vs Triton 每 1024 列 4 warp 一块、块间顺序加），之前未触发是巧合。
+
+改动：`norm.cu` `rms_ss_triton<BLOCK,VPT>`——8 元素组顺序 → 每 warp（256 列段）xor 蝶形 → 每 4 段 `(s0+s2)+(s1+s3)`
+→ 块间从 0 顺序加，全显式 `_rn`；`rmsnorm_vec_kernel` 全部布局改用它。标量 kernel（非对齐）未改，kaon3 不走。
+验证：`rmsnorm_calib` 三组（ff1 / post_ff_norm / v_norm）生产 kernel **全 0**；`ops_parity` 4 个 rmsnorm 测试通过。
+L2 隔离：子模块仅剩 `attn_out` (6,2462) 1 元素，层输出 0。整跑 L3 3.3e-9 / L4 6.0e-4 **不变** → L3/L4 的源头不在 norm。
