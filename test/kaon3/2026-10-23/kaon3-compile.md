@@ -649,3 +649,19 @@ OURS POOLED cases=30 rows=538 decisive=483 flips=68 flip_pct=14.08 mean_common_d
   → **说明 combine 口径只是众多差异之一，不是唯一主因**；
 - `|Δlp|` 反而从 1.1816 升到 1.2847：flip 与 |Δlp| 两个指标不同向，说明改动在"让 top-1 对上"上有效，
   但整体分布仍有系统性偏差。
+
+## 附：抓参照中间量的工具坑（2026-10-24）
+
+想抓参照的**真实 MoE 输入**做逐位核验时，连续三次抓不到东西，原因各不相同：
+
+| 尝试 | 现象 | 原因 |
+|---|---|---|
+| patch `MoERunner.forward(self, layer, x, topk_weights, topk_ids)` | 无输出、无产物 | **签名不对**：实际是 `(hidden_states, router_logits, input_ids, shared_experts_input)` |
+| `nohup … | tail` 包远端 `docker exec` | 日志 0 字节 | `nohup` + 管道 + ssh 三层叠加把 stdout 吞了 |
+| 后台任务退出码 0 但无产物 | — | 后台 shell 只负责"启动"，不代表远端跑完 |
+
+**规则**：
+1. **先 `inspect.signature` 确认被 patch 的方法签名**，别照记忆写；
+2. 远端长任务的输出用 `run_in_background` + 前台同步捕获（`timeout … $R run '… 2>&1 | tail -N'`），
+   **不要** `nohup … > log &` —— ssh 断开时 stdout 会丢；
+3. 判断"跑完没有"要看**产物**（`ls /w/tmp/…`），不看退出码。
