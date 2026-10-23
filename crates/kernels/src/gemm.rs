@@ -162,8 +162,15 @@ impl Drop for LtDescs {
     }
 }
 
-fn lt_err<T>(r: Result<T, cudarc::cublaslt::result::CublasError>, what: &str) -> Result<T> {
-    r.map_err(|e| anyhow!("{what}: cublasLt {:?}", e.0))
+/// 小 M 是否走 cuBLASLt（而非自写 split-K kernel）。默认**走**（用户 2026-10-23：优先正确性）。
+/// `SMALL_M_LT=0` 可切回自写 kernel 做性能 A/B。
+/// 理由：自写 split-K 的累加序与 cuBLAS 不同，router 这类小 M GEMM 会因此与 vLLM 差 768/3072。
+fn small_m_uses_lt() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("SMALL_M_LT").map(|v| v != "0").unwrap_or(true))
+}
+
+fn lt_err<T>(r: Result<T, cudarc::cublaslt::result::CublasError>, what: &str) -> Result<T> {    r.map_err(|e| anyhow!("{what}: cublasLt {:?}", e.0))
 }
 
 fn status_ok(st: sys::cublasStatus_t, what: &str) -> Result<()> {
@@ -498,7 +505,11 @@ impl Gemm {
         }
         // 非桶 M 在 autotune 末尾已按桶展开（1..=最大桶 每个 m 一条，Lt algo 过 AlgoCheck 才借）；
         // 这里只兜底 small_m（对任意 m ≤ 桶都正确）。
-        if m <= self.profile.gemm_tune.small_m_max {
+        //
+        // `SMALL_M_LT=1`：**小 M 也走 cuBLASLt**（用户 2026-10-23 决定：优先正确性）。
+        // 自写 split-K kernel 的累加序与 cuBLAS 不同，会让 router 等小 M GEMM 与 vLLM 差
+        // 768/3072（见 test/kaon3/2026-10-23/D-16-REBASE.md §48/§50）。代价是性能，需 bench 复核。
+        if m <= self.profile.gemm_tune.small_m_max && !small_m_uses_lt() {
             let bucket = m.next_power_of_two();
             if let Some(p @ (GemmPlan::SmallM { .. } | GemmPlan::SmallMma { .. })) = plans.get(&Key::bf16(bucket, n, k, bias)) {
                 return Some(*p);
