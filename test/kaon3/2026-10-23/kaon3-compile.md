@@ -283,3 +283,21 @@ gate_linear.py:231      to_11: "f32[s59,128]" = empty.to(torch.float32)     # �
 130 项 prompt_logprobs，不同 0
 ```
 → `oracle_clean` **确实是 compile 口径**，可以放心当靶子。FLOOR 0.83% 是 30 用例聚合的跨进程差，不是口径错。
+
+## 第 3 轮：`RMSNORM_MODE=2`（`x·inv` 后先舍 bf16 再乘 w）
+
+**依据（FX 图 + 源码，两者一致）**：
+- FX 图：`rms_norm_default: "bf16[s59,2816]" = vllm_ir.rms_norm.default(...)`——**返回类型是 bf16**；
+- 源码 `vllm/ir/ops/layernorm.py:17`：`x = x.to(weight.dtype) * weight`——**先舍 bf16 再乘 w**；
+- 第 19 轮的数值表也支持：`(x·rsqrt).to(bf16)·w` vs eager IR **0 差异**；
+  不先舍入直接乘 w → **47030/67584 元素不同**。
+
+而我们 `norm.cu` 的 mode 0 是 `x·inv·w` fp32 连乘、末尾舍一次 —— 与上面**不符**。
+（第 19 轮注释称"inductor 消除了那次舍入"，但 FX 图和源码都不支持该说法。）
+
+**改动**：`norm.cu` 新增 `norm_mid()`（mode 2 时舍 bf16），作用于三处：vec kernel、warp kernel、标量回退；
+`rmsnorm_scale2` 的 mode 2 走 FX 图的三次舍入（norm 出口 / ×rs 后 / ×scale 后）。mode 0 路径**未变**。
+`layer.rs` 的 `norm_mode() == 0` 统一改成 `!= 1`，让 mode 2 走同一条 compile 分支。
+
+- 命令：`PROBE_ENV="CUBLASLT_WORKSPACE_SIZE=1 RMSNORM_MODE=2" bash scripts/verify/kaon3-compile.sh`
+- 对照：第 1 轮 `MODE=0` → flip **16.98%** / |Δlp| **1.1816**

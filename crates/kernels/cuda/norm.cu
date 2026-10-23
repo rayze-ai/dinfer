@@ -67,10 +67,20 @@ __device__ __forceinline__ float rms_inv_compile(float ss, int hidden, float eps
   return rsqrtf(__fdiv_rn(ss, (float)hidden) + eps);
 }
 
-// inv = 1/rms。`mode`：0 = compile（**默认**，vLLM 未开 enforce_eager 时的口径），1 = eager BI。
+// `mode`：0 = compile 无中间舍入，1 = eager BI，**2 = compile 且 `x·inv` 后先舍 bf16 再乘 w**。
+//
+// 2 的依据（2026-10-23，`docs/loops/kaon3-compile.md` 第 3 轮）：vLLM compile 的 FX 图里
+// `vllm_ir.rms_norm` 的**返回类型就是 bf16**，且 `ir/ops/layernorm.py:17` 源码是
+// `x = x.to(weight.dtype) * weight`（先舍 bf16 再乘 w）。mode 0 的「fp32 连乘、末尾舍一次」
+// 是早期按生成代码推断的，与 FX 图矛盾——两种口径都留着 A/B，由 `RMSNORM_MODE=2` 选。
 __device__ __forceinline__ float rms_inv(float ss, int hidden, float eps, int mode) {
-  return mode == 0 ? rms_inv_compile(ss, hidden, eps)
-                   : rcp_approx(sqrt_approx(__fmaf_rn(rcp_approx((float)hidden), ss, eps)));
+  return (mode == 1) ? rcp_approx(sqrt_approx(__fmaf_rn(rcp_approx((float)hidden), ss, eps)))
+                     : rms_inv_compile(ss, hidden, eps);
+}
+
+/// `y = bf16(x·inv)` —— mode 2 的中间舍入点；mode 0 时原样返回 f32（不引入额外舍入）。
+__device__ __forceinline__ float norm_mid(float y, int mode) {
+  return mode == 2 ? __bfloat162float(__float2bfloat16_rn(y)) : y;
 }
 
 // rows：非空时输出第 r 行取 x 的第 rows[r] 行（gather + rmsnorm 融合，Q3 第 59 轮：lm_head 前只取每请求最后一行）。
@@ -147,7 +157,8 @@ __global__ void __launch_bounds__(BLOCK) rmsnorm_vec_kernel(const bf16* __restri
 #pragma unroll
       for (int c = 0; c < 4; ++c) {
         const float2 g = __bfloat1622float2(wp[c]);
-        op[c] = __floats2bfloat162_rn(v[j][2 * c] * inv * g.x, v[j][2 * c + 1] * inv * g.y);
+        op[c] = __floats2bfloat162_rn(norm_mid(v[j][2 * c] * inv, mode) * g.x,
+                                      norm_mid(v[j][2 * c + 1] * inv, mode) * g.y);
       }
       orow[i] = ob;
     }
@@ -220,7 +231,7 @@ __global__ void __launch_bounds__(kNormWarps * 32) rmsnorm_warp_kernel(const bf1
       for (int c = 0; c < 4; ++c) {
         const float2 f = __bfloat1622float2(xp[c]);
         const float2 g = __bfloat1622float2(wp[c]);
-        op[c] = __floats2bfloat162_rn(f.x * inv * g.x, f.y * inv * g.y);
+        op[c] = __floats2bfloat162_rn(norm_mid(f.x * inv, mode) * g.x, norm_mid(f.y * inv, mode) * g.y);
       }
       orow[i] = ob;
     }
@@ -254,7 +265,7 @@ __global__ void rmsnorm_kernel(const bf16* __restrict__ x, bf16* __restrict__ re
   // 第二遍：归一化并乘权重。
   const bf16* src = FUSED_ADD ? rr : xr;
   for (int i = threadIdx.x; i < hidden; i += BLOCK) {
-    orow[i] = to_bf16(to_f32(src[i]) * inv * (w ? to_f32(w[i]) : 1.f));
+    orow[i] = to_bf16(norm_mid(to_f32(src[i]) * inv, mode) * (w ? to_f32(w[i]) : 1.f));
   }
 }
 
@@ -374,9 +385,11 @@ __global__ void __launch_bounds__(BLOCK) rmsnorm_scale2_kernel(const bf16* __res
 #pragma unroll
       for (int c = 0; c < 4; ++c) {
         const float2 g = __bfloat1622float2(sp[c]);
-        // fp32 全程：norm → ×rs → ×scale，只在写回时舍入一次
-        op[c] = __floats2bfloat162_rn(v[j][2 * c] * inv * rs * g.x,
-                                       v[j][2 * c + 1] * inv * rs * g.y);
+        // mode 0：fp32 全程 norm → ×rs → ×scale，只在写回时舍一次。
+        // mode 2：照 FX 图的三次 bf16 舍入（norm 出口、×rs 后、×scale 后）。
+        const float y0 = norm_mid(norm_mid(v[j][2 * c] * inv, mode) * rs, mode) * g.x;
+        const float y1 = norm_mid(norm_mid(v[j][2 * c + 1] * inv, mode) * rs, mode) * g.y;
+        op[c] = __floats2bfloat162_rn(y0, y1);
       }
       orow[i] = ob;
     }
@@ -494,8 +507,8 @@ extern "C" int rmsnorm_scale2_bf16(const void* x, const void* scale, void* out, 
                                    float eps, float rs, int mode, cudaStream_t stream) {
   if (tokens <= 0) return 0;
   if (hidden <= 0 || hidden > 8192 || (hidden % 8) != 0) return err(cudaErrorInvalidValue);
-  if (mode != 0) {
-    // eager 口径没有实测过这条融合，退回三步由调用方负责 → 这里直接不支持
+  if (mode != 0 && mode != 2) {
+    // eager 口径（1）没有实测过这条融合，退回三步由调用方负责 → 这里直接不支持
     return err(cudaErrorInvalidValue);
   }
   if (hidden <= 1024) return launch_scale2<128, 1>(x, scale, out, tokens, hidden, eps, rs, stream);

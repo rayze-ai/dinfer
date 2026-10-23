@@ -455,7 +455,8 @@ fn rmsnorm_noweight_into(
 }
 
 /// 带权重 RMSNorm 到新缓冲。
-/// 数值口径：0 = compile（默认，vLLM 未开 `enforce_eager` 时的实现），1 = eager BI。
+/// 数值口径：1 = eager BI；0 / 2 = compile（vLLM 未开 `enforce_eager` 时的实现），
+/// 两者差别在 `x·inv` 后是否先舍 bf16（见 `crates/kernels/src/ops.rs::norm_mode`）。
 /// 与 `dinfer_kernels` 内部的 `norm_mode()` 读同一个 `RMSNORM_MODE`，两边必须一致。
 fn norm_mode() -> i32 {
     static V: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
@@ -656,7 +657,7 @@ impl Gemma4Layer {
         // q/k/v 共用同一个 input_norm 且共用同一个 `input_scale`（实测 L0/L5 三者 scale 相同），
         // 所以这里量化一次、三个投影复用。eager 口径（`RMSNORM_MODE=1`）走原来的两步。
         let mut qkv_preq = false;
-        if norm_mode() == 0 && fuse_norm_quant() {
+        if norm_mode() != 1 && fuse_norm_quant() {
             // k_eq_v 的层没有 v_proj，此时 v 复用 k 的权重与 scale。
             let v_sc = self.v_proj.as_ref().map_or(self.k_proj.a_scale(), |p| p.a_scale());
             if let (Some(qs), Some(ks), Some(vs)) = (self.q_proj.a_scale(), self.k_proj.a_scale(), v_sc) {
@@ -892,7 +893,7 @@ impl Gemma4Layer {
         // 只在写回时舍入一次。分三步做会多两次 bf16 舍入（实测差 17299/67584）。所以默认走融合算子；
         // `RMSNORM_MODE=1`（eager BI）才退回三步。
         let root_size = f32::from(bf16::from_f32((h as f32).powf(-0.5)));
-        if norm_mode() == 0 {
+        if norm_mode() != 1 {
             k::ops::rmsnorm_scale2_bf16(
                 stream, &sc.x.data, &self.router.scale.data, &mut sc.routed.data, tokens, h, eps, root_size,
             )?;
