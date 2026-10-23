@@ -807,3 +807,24 @@ router 形状 (m=24, n=128, k=2816)，用 vLLM 真实入参（`kaon3_d17_router.
 按 **algo 配置属性**（`id/tile/splitk`）匹配而非按下标（下标随形状漂移）。
 
 **副产品**：L0/L1 整跑已达到**完全逐位 0**。
+
+## 50. **bf16 algo 修复未生效——小 M 走自写 kernel，绕过 cuBLASLt**
+
+两次端到端读数**逐位相同**（13.04% / 1.2847，同一 rows/decisive）——这是信号，不是巧合。
+查证结果：
+
+`forward_bf16` → `forward_inner` → `plan_for(m,n,k)`：
+- `m <= profile.gemm_tune.small_m_max` 时命中 `GemmPlan::SmallM` / `SmallMma`，
+  走 **`ops::gemm_small_m_bf16` / `gemm_small_m_mma_bf16` 的自写 split-K kernel**；
+- 只有 `GemmPlan::LtAlgo` 或 `None` 才走 `run_lt_default`（我改的地方）。
+
+**router 是 m=24，属于小 M → 走自写 kernel → 我的 algo 选择完全不生效。**
+自写 split-K kernel 与 cuBLAS 的累加序必然不同，所以 bf16 那 768/3072 的差异依然存在。
+
+**教训**：改一条路径前必须先确认**目标调用真的走那条路径**（`plan_for` 的分派），
+否则就是"改了没生效"，而且端到端读数**逐位不变**正是它的指纹。
+
+**下一步二选一**（需决定）：
+(a) 小 M 也走 cuBLASLt（可能影响性能——自写 split-K 就是为小 M 优化的）；
+(b) 让自写小 M kernel 对齐 cuBLAS 的累加序（工作量大）。
+建议先测 (a) 的端到端收益，再决定是否为此付性能代价。
