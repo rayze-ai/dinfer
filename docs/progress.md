@@ -8,22 +8,29 @@
 
 ### Kaon-V3 parity（2026-10-23 收功）
 
-**一句话现状**：p02 上 **L0–L29 全部 30 层逐位 0**（eager vLLM，BI=1），**已亲自复验**
-（`CUBLASLT_WORKSPACE_SIZE=1 kaon3_probe … --hidden-all --hidden-cmp` → 30 层全 `0.000e0`）。
-端到端判据 `oracle_clean` 是 **compile** 服务，与我们 eager 口径差 |Δlp| 1.20 / flip 16.56%（FLOOR 0.83% / 0.0276）。
+**一句话现状**：本轮建立了 `docs/loops/kaon3-compile.md`（**全程 compile 口径，eager 不作判据**），
+跑了 6 轮端到端 A/B。**flip 16.56% → 14.08%**（`MOE_COMBINE_F32` 已改默认 1），
+但离 FLOOR（0.83% / 0.0276）**还差 17 倍**，仍在 loop 中。
 
-**⚠️ 今天最大的事故（务必先看 `docs/pitfalls.md` 首条）**：逐层对拍**必须**带 `CUBLASLT_WORKSPACE_SIZE=1`，
-不设会让 router 的 bf16 GEMM 选错 algo → L2 出现 1.1e-4、L3 放大 133 倍，**看起来像真的发散**。
-今天据此推的"L2 起发散""§57 不可复现"等结论**全部作废**（L0–L29 一直是全 0）。
+**本轮唯一有效改动**：`MOE_COMBINE_F32` 默认值 `0 → 1`（MoE 合并用 f32 权重与乘积，不落 bf16）。
+p02 单例 top-1 翻转 4/22 → **0/22**、top1 |Δlp| 2.04 → 0.52；30 用例聚合 flip 16.56% → 14.08%。
+原注释称 `=0` 是 "vLLM cutlass_moe 口径"——**错了**，参照的 Triton/inductor 路径不做那次舍入。
 
-**已完成（本会话）**
-- 确认 vLLM 默认 = compile（`enforce_eager=False`；`vllm/config/vllm.py:1379`），compile 逐位确定（同配置两次 0.0000）。
-- compile 与 eager 是**两套实现**：norm（`rsqrt(mean+eps)` vs BI Triton SASS）、gelu（`libdevice.tanh` 融合 vs custom op）。
-- gelu：我们的实现在 **compile 口径下逐位正确**（0/50688）。
-- `RMSNORM_MODE` 开关（0=compile / 1=eager BI，**默认已改回 1**）；`NORM_FUSE_QUANT`（默认关）；
-  router 预处理 fp32 融合 `rmsnorm_scale2`（默认开）。
-- 导出 inductor 产物（远端 `/w/tmp/ind`）：`computation_graph.py` + 36 个 Triton kernel；
-  逐行解析了 MoE 融合 kernel 的 12 个入参 → 模型参数对应表。
+**本轮已排除（别再查）**
+| 假设 | 结论 |
+|---|---|
+| compile 口径的 norm（`RMSNORM_MODE=0/2`） | 三者 flip 都在 16%，不是主因 |
+| `rcp.approx` vs 精确除法 | 误差 2⁻²³ 被 bf16 舍入（2⁻⁹）吞掉，md5 相同 |
+| router GEMM kernel（cuBLAS vs BI matmul） | **真实输入下逐位相同（0/3072）**；43% 那个数是拿 `torch.matmul` 当对照测出来的，作废 |
+| lm_head 量化 | 424 个量化层里没有 lm_head / embed |
+| Gemma4 的残差融合 | 用显式 bf16 加法（`gemma4.py:702-731`），我们已一致 |
+| q 的 fp8 量化 | 我们已做（`layer.rs:753`），A/B 证实必需 |
+
+**关键环境事实**：oracle 容器里就有 inductor 产物，
+`docker cp kaon-oracle:/root/.cache/vllm/torch_compile_cache /w/tmp/ind2/` 直接拿 `computation_graph.py`
+（12451 行 FX 图），**不用重跑导出**。
+
+**⚠️ 仍然成立的事故**（`docs/pitfalls.md` 首条）：逐层对拍**必须**带 `CUBLASLT_WORKSPACE_SIZE=1`。
 
 ### 下一步：解决 compile 模式下的端到端差距（本阶段唯一目标）
 
