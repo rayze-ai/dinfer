@@ -278,3 +278,17 @@ MOE_STAGE [T=24 H=2816 E=128 K=8] 48 个被选专家 | ndiff=50214/67584 max|d|=
 **下一步**：确定参照实际命中哪个 experts 实现，再决定：
 - 若是 `CutlassExpertsW4A8Fp8`（NVFP4 权重 + FP8 激活）→ 需要按它的 tile/归约结构复刻；
 - 若是 modular 的 prepare/finalize 路径 → combine 的累加顺序也要照抄。
+
+### 第 7 轮：定位到 MoE，且**参照后端已查明**
+
+| 阶段 | 结论 | 证据 |
+|---|---|---|
+| router（norm→×rs→×scale→GEMM） | ✅ **逐位一致 0/3072**，top-8 集合 0 行不同 | `models/kaon3/tests/router_stage_parity.rs` |
+| MoE（top-8 → 8 专家 → combine） | ❌ **74% 元素差 1–2 ulp**，量级比 1.0021 | `models/kaon3/tests/moe_stage_parity.rs` |
+| 参照 MoE 后端 | **`VLLM_CUTLASS` NvFp4 + `MoEPrepareAndFinalizeNoDPEPModular`** | oracle 日志 `nvfp4.py:291/564` |
+
+差异性质已确定：**同一数学、不同归约次序**（量级对得上；若是语义错，量级会差几倍）。
+
+**当前在做的判定（决定工作量）**：抓参照**单专家**输出，看
+- 单专家就不同 → 要复刻 cutlass 的 K 方向归约（工作量大）；
+- 单专家相同、只有 combine 不同 → 只对齐累加顺序（便宜得多）。
