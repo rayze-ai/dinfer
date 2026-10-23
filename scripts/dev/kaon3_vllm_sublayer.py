@@ -76,6 +76,8 @@ def _patched(self, *a, **k):
             captured[name] = o.detach().float().cpu().numpy().copy()
             if name == "post_ff_norm":   # 同时抓输入（= ff1 + ff2 的 bf16 和）
                 captured["post_ff_in"] = inp[0].detach().float().cpu().numpy().copy()
+            if name in ("input_norm", "post_attn_norm"):   # norm 的真实输入（§55：拼接来的输入不可信）
+                captured[name + "_in"] = inp[0].detach().float().cpu().numpy().copy()
         return hook
     for attr, name in HOOKS.items():
         m = getattr(self, attr, None)
