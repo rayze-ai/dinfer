@@ -350,3 +350,31 @@ cuBLAS 是闭源库。要"逐位复刻"，只能靠**实验反推它的 K 方向
 但代价高且脆弱（换 GPU / 换 cuBLAS 版本可能就变）。
 → **需要用户裁定**：是继续追 cuBLAS 逐位，还是把判据改成"达到 vLLM 自身换 kernel 的水平"
 （我们 14.49%/1.2302 vs vLLM 换 cutlass 13.95%/1.19，**已经达到**）。
+
+## 24. **用户方向验证成功：直接调 cuBLAS 可以逐位复现**（2026-10-23）
+
+用户提议"能换成直接调用 cuBLAS，测试一下吗"——**成立，而且是最优解**。
+
+同入参（L0 `qkv_proj`，`A(24,2816) B(2816,8192)`，`A_fp8.bin` + `B_fp8.bin` + `fwd_ref_bf16.bin`）：
+
+| 实现 | vs vLLM 前向 |
+|---|---|
+| **`torch._scaled_mm(A, B_nk.t(), scale_a, scale_b, bf16)`** | **0 / 196608** ✅ |
+| 同上重复 3 次 | 逐位一致（确定性 ✓）|
+| 我们自己的 kernel | 8 / 196608 |
+| `flashinfer.bmm_fp8(..., backend="cublas")`（显式传参）| 8 / 196608 |
+
+**布局要点（又踩一次）**：`B_fp8.bin` 是 `[K,N]` 逻辑序；喂 cuBLAS 要 `B_nk = B.t().contiguous()`（物理 `[N,K]`）
+再 `.t()` 成 `[K,N]` 视图。直接传 `B.t()`（非连续）→ 形状报错；传错序 → 196449。
+
+### 结论：实现路线改变
+
+不再需要反推 cuBLAS 的累加分组——**直接调 cuBLASLt 的 fp8 GEMM 即可**。
+我们已有 `cudarc::cublaslt` 的完整基础设施（`LtDescs` / `heuristics` / `algo_valid_for` / 桶缓存，见
+`crates/kernels/src/gemm.rs`），只需补一条 fp8 数据类型的 Lt 调用。这条路：
+- **精确**（实测 diff=0）；
+- **简单**（复用现有 Lt 代码，不用摸 kernel 的 K 循环）；
+- **与 vLLM 同源**（它就是 `CublasFp8GemmRunner` → cuBLASLt）。
+风险：换 GPU / CUDA 版本时 cuBLAS 内部选择可能变，但那时 vLLM 也一起变，仍是对齐的。
+
+**下一步**：在 `crates/kernels` 里加 `forward_fp8_cublaslt`，用 `fp8_flashinfer_parity` 测试判 diff=0。
