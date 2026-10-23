@@ -943,3 +943,27 @@ CAP m,n,k,e = 24 704 2816 128 | a (24, 2816) | topk (24, 8)
    得到 cutlass 的 MoE 输出；
 2. 用**同一组** `a / topk_ids / topk_weights` 走我们的 Rust 路径，两边逐位比 —— 这才是有判别力的比较；
 3. 若不同：把 cutlass 这个 op 像 cuBLASLt 一样**绑到 Rust 侧**（`ops.cutlass_fp4_moe_mm`）。
+
+## 第 9 轮结论：**问题就在这里** —— 专家 GEMM 与 cutlass 差 73% 元素（输入完全相同）
+
+把变量全部锁死后重跑（`MOE_USE_REF_TOPK=1`）：
+
+| 项 | 证据 |
+|---|---|
+| 输入相同 | `cutlass 的 a` 与 `.experts` 的输入 **逐位相同**（`array_equal=True`） |
+| 路由相同 | 直接用参照抓的 `topk_ids` / `topk_w`（**已含 per_expert_scale**，行和 ≈1 但不精确等于 1，说明它是在 bf16 上算的） |
+| 参照答案可信 | 独立调 cutlass op 的输出 vs 前向里 `.experts` 的输出 **ndiff=0/67584** |
+| **我们的输出** | **`ndiff=49347/67584`，`max|d|=2.5e-1`，量级比 1.0021** |
+
+**所以：差异确实在"专家 GEMM（NVFP4 gate/up/down）的数值"上，不在 routing、不在权重折法、不在精度口径。**
+排除掉 routing 后 ndiff 从 50214 → 49347，只降 1.7% —— routing 的贡献很小，**主因是专家 GEMM 本身**。
+
+### 与 cuBLASLt 那次成功的对照
+
+| | fp8 线性层（已解决） | 专家 NVFP4（本次） |
+|---|---|---|
+| 参照用什么 | cuBLASLt（`torch.mm` 底层） | **cutlass** FP4 融合 kernel |
+| 我们的做法 | **直接调 cuBLASLt**（`run_lt_default`） | 自写 `gemm_nvfp4_sm120` |
+| 结果 | **逐位一致** | 差 73% 元素 |
+
+→ **同样的解法应该适用：直接调 cutlass，而不是自己复刻。** 这是本轮最重要的结论。

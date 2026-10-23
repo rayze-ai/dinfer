@@ -56,6 +56,9 @@ fn moe_stage_matches_vllm() {
     let src = WeightSource::open_dir(std::path::Path::new(&model)).expect("ckpt");
     let p = "model.language_model.layers.0";
 
+    // `MOE_USE_REF_TOPK=1`：直接用参照抓的 topk_ids / topk_w（它们已含 per_expert_scale），
+    // 把我方 routing 的贡献完全排除，只测"专家 GEMM + combine"。
+    let use_ref_topk = std::env::var("MOE_USE_REF_TOPK").map(|v| v == "1").unwrap_or(false);
     // ---- 参照语义的 top-k 权重（f32，全专家 softmax → top-k 重归一化 → × per_expert_scale）----
     let pes = {
         let v = src.load_bf16(&st, &format!("{p}.router.per_expert_scale")).expect("pes");
@@ -63,7 +66,19 @@ fn moe_stage_matches_vllm() {
     };
     let mut ids = vec![0i32; t * k];
     let mut w = vec![0f32; t * k];
+    let mut ref_ids: Vec<i32> = Vec::new();
+    let mut ref_w: Vec<f32> = Vec::new();
+    if use_ref_topk {
+        let b = std::fs::read(format!("{dir}/../cmo/topk_ids.bin")).expect("cmo/topk_ids.bin");
+        ref_ids = b.chunks_exact(4).map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let b = std::fs::read(format!("{dir}/../cmo/topk_w.bin")).expect("cmo/topk_w.bin");
+        ref_w = b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        assert_eq!(ref_ids.len(), t * k);
+        ids.copy_from_slice(&ref_ids);
+        w.copy_from_slice(&ref_w);
+    }
     for r in 0..t {
+        if use_ref_topk { break; }
         let row = &logits[r * e..(r + 1) * e];
         let mut idx: Vec<usize> = (0..e).collect();
         idx.sort_by(|&i, &j| row[j].partial_cmp(&row[i]).unwrap_or(std::cmp::Ordering::Equal).then(i.cmp(&j)));
@@ -94,8 +109,11 @@ fn moe_stage_matches_vllm() {
         let up = QLinear::load(&st, &src, &format!("{ep}.up_proj.weight")).expect("up");
         let mut down = QLinear::load(&st, &src, &format!("{ep}.down_proj.weight")).expect("down");
         // 与 `layer.rs:319` 同：默认口径把 per_expert_scale 折进 down 的全局 scale（线性等价）
-        if let QLinear::NvFp4 { global, .. } = &mut down {
-            *global *= pes[eid];
+        if !use_ref_topk {
+            // 只有"自己算路由权重"时才把 pes 折进 down（那时 w 里没乘 pes）
+            if let QLinear::NvFp4 { global, .. } = &mut down {
+                *global *= pes[eid];
+            }
         }
         let inter = cfg.moe_inter;
         let mut g = Tensor::<bf16>::uninit(&st, &[t, inter]).unwrap();
