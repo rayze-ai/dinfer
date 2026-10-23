@@ -696,3 +696,25 @@ OURS POOLED cases=30 rows=538 decisive=483 flips=68 flip_pct=14.08 mean_common_d
    `llm.llm_engine.model_executor` → `AttributeError: 'LLMEngine' object has no attribute 'model_executor'`。
    必须 `VLLM_ENABLE_V1_MULTIPROCESSING=0` 走单进程（`kaon3_vllm_hidden.py` 早就这么做了，我没照抄）。
    同时 `VLLM_BATCH_INVARIANT=1` 要与 oracle 口径一致，否则抓到的是 BI=0 的数值。
+
+## 第 7 轮：拿到参照的真实 MoE 输入/输出 ✅
+
+```
+loaded
+hooks 1
+gen done, caps 1
+CAP language_model.model.layers.0.moe.experts torch.Size([24, 2816]) torch.Size([24, 2816])
+x.bin  y.bin
+```
+
+`/w/tmp/moe1/{x,y}.bin` = `layers.0.moe.experts` 的**真实输入与输出**（bf16 原始位，p02 的 24 token）。
+抓取脚本入库为 `scripts/dev/moe_capture.py`（单进程模式 + `if __name__ == '__main__'`）。
+
+**抓取踩的 4 个坑（全部记在下面，下次别再花两小时）**：
+1. 在 oracle 容器里跑 → GPU 1 被服务占了 27 GB，必然卡死。**用 `GPU=<n> … ctr`**起干净容器。
+2. 脚本放本地 `/tmp` → 容器里看不到。**放仓库内**（挂成 `/w`）。
+3. 缺 `if __name__ == '__main__':` → vLLM spawn 子进程重新执行主模块 → `RuntimeError`。
+4. 不加 `VLLM_ENABLE_V1_MULTIPROCESSING=0` → 模型在 EngineCore 子进程里，
+   `llm.llm_engine.model_executor` 直接 `AttributeError`。
+
+**下一步**：用同一份 `x` 跑我们的专家路径（routing + 128 专家 + combine），与 `y` 逐位比。
