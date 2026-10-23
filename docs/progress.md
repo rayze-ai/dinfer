@@ -6,58 +6,35 @@
 > 更新 2026-10-21 23:0x +0800。**本区按模型分节，每节只写该模型自己的交接内容；不要覆盖别人的分节。**
 
 
-### Kaon-V3 parity（2026-10-23 深夜收工；子 loop D 第 17 轮）
+### Kaon-V3 parity（2026-10-23 晚收工；子 loop D 第 18 轮）
 
-**一句话现状**：所有已定位的差异都是同一个形状——**同一份输入 + 不同 cuBLASLt algo → 位差**，
-没有发现任何语义/口径错误。fp8 已完全对齐；bf16 的修复**尚未生效**（见下方 ⚠️）。
+**一句话现状**：我们已与 **eager 模式** vLLM（BI=1）在 p02 上 **L0–L29 全部 30 层逐位一致**；但端到端判据
+`oracle_clean`（服务实例）跑的是 **compile 模式**，vLLM eager 与 compile 自身就差 |Δlp| 1.57（§58）→ 端到端没动
+（flip 16.56% / |Δlp| 1.1994，FLOOR 0.83% / 0.0276）。**下一步换靶子：对齐 compile 模式。**
 
-**已完成（有断言/字节证据）**
-- **fp8 GEMM：6/6 形状与 vLLM 逐位一致**（`crates/kernels/tests/fp8_algo_calib.rs` 守护）。
-  真实后端是 **cuBLAS**（flashinfer `CublasFp8GemmRunner`；`cublas`=0、`cudnn`=8、`cutlass`=7 /196608）。
-  正确配置 `id=67 tile=13 splitk=1`（`2816×8192` 需 `id=35 tile=13 splitk=3`）。
-- 逐层（整跑）：**L-1 / L0 / L1 完全逐位 0**；L2 1.1e-4（仅 token 1）；L3 1.5e-2；L29 1.6e-1。
-- 单层隔离：L3、L2 均 **23/24 token 恰好 0**，差异只集中在个别 token。
+**⚠️ 待用户决策（下次开场先问）**
+1. 目标 = compile 模式（服务 / 生产实际口径）？我建议是。
+2. compile 是 BI=1（现 oracle_clean）还是 BI=0（生产不开 BI，memory 2026-10-22）？
 
-**2026-10-23 续（本会话）：router 已逐位归零** —— 详见 `D-16-REBASE.md` §51。
-- 旧诊断（plan_for / small_m）错：kaon3 不调 autotune，router 走的是自写 `moe_gate_f32`。`SMALL_M_LT` 已撤回。
-- 真因：`oracle_clean` 是 **BI=1** 生成的；镜像 vLLM 的 BI 在 sm_120 上 = cuBLASLt + 禁降精度归约 + `CUBLASLT_WORKSPACE_SIZE=1`。
-  现 router = `forward_bf16`→cast；`run_lt_default` 排除 OUTPUT_TYPE 归约 + 读 `CUBLASLT_WORKSPACE_SIZE`。
-  **对 BI oracle 跑探针必须带 `PROBE_ENV="CUBLASLT_WORKSPACE_SIZE=1"`**（`bf16_algo_calib` 在 L2 数据上也要带）。
-- p02 整跑逐层：L2 1.1e-4→**1.4e-8**，L3 1.5e-2→**3.3e-9**；**新发散点 L4（6.0e-4，×1.8e5）**；L29 仍 0.17。
-- 端到端（run 1023-151951-1421909）：flip 15.53%（前 13.04%）/ |Δlp| 1.2593（前 1.2847）——放大器下末层量级不变，单次读数不作判据。
-- **§52 post_ff_norm 归零**：RMSNorm 的 1/rms 改为 `ss·fl(1/h)` + `1/sqrt_rn`（norm.cu `rms_inv`，替代 `rsqrtf(ss/h+eps)`，**全模型生效**）；
-  L2 隔离输出 **0/67584**；整跑 **L0–L2 逐位 0**，L3 3.3e-9，L4 6.0e-4（首个大跳变）。L2 内仅剩 `v_norm` 2 元素 / `attn_out` 1 元素（不传播）。
-- **§53 v_norm 归零**：RMSNorm 平方和归约改为 Triton 同构（`rms_ss_triton`，全模型生效）；L2 内仅剩 `attn_out` 1 元素。
-- **§54/§55（本会话）整跑 p02 L0–L6 逐位 0**（首个发散 L7 3.3e-5）。attention：v6 指数改自然域（`ATTN_MODE=2`，**尚未设默认**）；
-  RMSNorm：按 vLLM Triton **SASS** 复刻（`rcp(sqrt(fma(rcp(n),ss,eps)))` + 线程内 1,0,2..7 fma + Triton 归约结构），全模型生效。
-  跑探针现需 `PROBE_ENV="CUBLASLT_WORKSPACE_SIZE=1 ATTN_MODE=2"`。
-- **§56：ATTN_MODE=2 已默认；Gemma4 路由权重改 vLLM Triton 融合版口径 → 整跑 p02 L0–L10 逐位 0**，首个发散 L11（全注意力 D=512）。
-  探针现只需 `PROBE_ENV="CUBLASLT_WORKSPACE_SIZE=1"`。
-- **§57：整跑 p02 L0–L29 全部逐位 0**（D=512 慢路径改未归一化累加 + rcp；fp8 2816×8192 改选 tile=15/stages=18/swz=1）。
-- **下一步**：30 用例端到端（`PROBE_ENV="CUBLASLT_WORKSPACE_SIZE=1"`）；paged 慢路径同步改；性能门禁（norm/attn/route 全模型生效）；原计划：L4 单层隔离 + 子模块对拍（需用 `kaon3_vllm_sublayer.py` 抓 L4 的 vLLM 子模块，BI=1）；
-  L2 剩余 `attn_out` 1 元素 / `v_norm` 2/49152 可能同源，一起看。
-- **口径待用户确认**：oracle_clean=BI，生产=non-BI（memory 2026-10-22）。non-BI 下 vLLM 走 cuBLAS(非 Lt)，需另标定。
-- 读 vLLM 代码读镜像副本 `/data/ref/vllm-img-v0.28.0-pr455/`；`/data/ref/vllm` 已切 v0.28.0rc2（与镜像差 87 文件）。
+**下一步（定了目标后按序）**
+1. 导出 inductor 生成的融合 kernel 源码（`TORCH_COMPILE_DEBUG=1` / vLLM compile debug dump），看 RMSNorm / 路由 / softmax
+   在 compile 下实际是什么（预期 RMSNorm 走 `forward_native`：先舍入 x·inv 到 bf16 再乘 w，且不看 BI）。
+2. compile 模式逐层参照：`kaon3_oracle_server.sh <N>`（截前 N 层）+ 探针 `--layers N` 二分发散层；forward hook 在 compile 下不可用。
+3. 验证复现：`/w/tmp/eager_vs_srv.py <M> <eager 0|1> p02`（远端临时脚本；compile 版应 0/23、0.0000）。
 
-**⚠️（旧）bf16 小 M 未生效**
-`bf16_algo_calib` 证明 router 形状 `(24,128,2816)` 默认 algo 差 **768/3072**，正确配置
-`id=21 tile=11 splitk=8`。但我加的 `SMALL_M_LT` 开关**没生效**：`router_logits` 仍差 4/3072。
-原因是 `plan_for` 先命中 `plans.get(&Key::bf16(m,n,k,bias))`（autotune 已为 m=24 存了 SmallM 计划），
-压根走不到后面的 small_m 兜底分支。**下次先改这一处的优先级，或直接在 autotune 侧不生成 small_m 计划。**
+**已完成（本会话，均有逐位证据，`test/kaon3/2026-10-23/D-16-REBASE.md` §51–§58）**
+- bf16 GEMM（router）：BI 下 = cuBLASLt + 禁 OUTPUT_TYPE 归约 + `CUBLASLT_WORKSPACE_SIZE=1`；router 改走 `forward_bf16`→cast。
+- RMSNorm（`norm.cu`，**全模型生效**）：按 vLLM Triton **SASS** 复刻（`rcp(sqrt(fma(rcp(n),ss,eps)))`、线程内 1,0,2..7 fma、Triton 归约结构）。
+- attention：v6 指数自然域（`ATTN_MODE` 默认 2）；D=512 慢路径未归一化累加 + `acc·rcp(L)`。
+- Gemma4 路由权重：vLLM Triton 融合版口径（`moe.cu::route_softmax_kernel`）。
+- fp8 `2816×8192`：`id=35 tile=15 splitk=3 red=2 stages=18 swz=1`（L5/L11 两份数据均 0）。
+- 撤回 `SMALL_M_LT`（上一轮诊断错误）。
 
-**教训（本轮 4 次踩同类）**：改一条路径前必须确认目标调用真的走那条路径
-（`plan_for` 分派 / cache key / dtype）；**端到端两次读数逐位相同 = 改动没生效的指纹**，不是"影响小"。
-
-**三次端到端（同分母 rows=538 decisive=483）**：仅 fp8 13.04% / 1.2847；+bf16(未生效) 13.04%；
-+小M(未生效) 13.04%。FLOOR 0.83% / 0.0276 已确认 = `oracle_clean_b` vs `oracle_clean` 实测值。
-
-**判据**：用户 2026-10-23 明确——**目标是逐位相同，不是"容忍多少"**。
-
-**仪器**：`kaon3_probe --hidden-all / --layer-iso / SUB_LAYER=<n>`；
-`scripts/dev/kaon3_vllm_{hidden,sublayer}.py`、`kaon3_d17_{calib,shapes,cublas,router,fp8det}.py`；
-测试 `fp8_algo_calib` / `bf16_algo_calib` / `fp8_flashinfer_parity`。
-**容器内持久路径只有 `/w`**（宿主 `/hf_data/yaochen`），`/w/hid` 与容器 `/root/.cache` 退出即丢。
-详细记录：`test/kaon3/2026-10-23/D-16-REBASE.md` §1–50。
+**运行口径**：探针对 BI oracle 需 `PROBE_ENV="CUBLASLT_WORKSPACE_SIZE=1"`；读 vLLM 代码读镜像副本 `/data/ref/vllm-img-v0.28.0-pr455/`
+（`/data/ref/vllm` 已切 v0.28.0rc2，差 87 文件）；Triton 中间产物：`TRITON_CACHE_DIR` + `triton/backends/nvidia/bin/nvdisasm`。
+**未做**：paged 慢路径（`gqa_paged_kernel`）同步改；norm/attn/route 改动的两卡性能门禁；Qwen 线回归。
+**仪器**：`rmsnorm_calib` / `bf16_algo_calib` / `fp8_algo_calib`（含 `SHAPE_NTH` 数据）；`kaon3_vllm_sublayer.py`（`SUB_LAYER`）；
+远端 `/w/tmp/subcmp.py <ref> <ours> <L>`。容器内持久路径只有 `/w`（宿主 `/hf_data/yaochen`）。
 
 ### Kaon-V3（5090，阶段 1–2 完成，阶段 3 接近打通）
 
@@ -355,3 +332,12 @@
 - decode 非桶 M GEMM：自调优表展开 1..=最大桶 的每个 m（借幂桶 plan + `cublasLtMatmulAlgoCheck`），默认 algo 按形状缓存；3090 真形状 M=7/8 `gdn.in_proj_a` 默认 31 µs → 8 µs，其它形状 4–17%。候选数 8→32 无收益（不改）。
 - 新指标 `engine_step_execute_{prefill,decode,mixed}_seconds`：tiny 全词表模型 c32 混批步 4.6%、每步 2.6× decode；结论 pair 跨流不优先。详见 `docs/loops/qwen35-perf.md` 5B 行。
 - 验证：golden 4/4（含 `GEMM_TUNE=off`）、ops_parity 95/95、core 55 单测、workspace check qwen3 / qwen35。**待 B300**：bench_b300_10 看 `borrowed=` 日志 + 三个 mode 直方图 + c32 / c8-long TPOT。**改口径后 B300 复跑 exit 0（03:07，`/tmp/k3_model_full.log`，产物在远端 `test/kimik3/2026-10-20/model/` 24 MB 待 pull）**：隔离口径 L0–L4 cos 0.999983–0.999991（L3 MLA+MoE 0.999989）；端到端 L0 0.999985 → L4 0.999269、logits 0.999897、decode-vs-prefill 0.999970。子代理因后台任务完成通知丢失空等 4.5 h（07:3x 已叫醒收尾：pull 产物 + 填 `k3-model.md` 表 + commit）。**教训**：子代理等后台任务要给超时并主动查产物时间戳，不能只等通知。 
+
+## 2026-10-23（Kaon-V3 parity，子 loop D 第 18 轮）
+
+- 上轮"plan_for 优先级"诊断错误（kaon3 不调 autotune，router 走自写 kernel）→ 撤回 SMALL_M_LT；router 对齐 vLLM BI cuBLASLt 口径。
+- 逐个子模块归零：L2（router / post_ff_norm / v_norm / attn_out）→ L3/L4（RMSNorm 按 SASS、attention 自然域指数）→
+  L7（路由权重融合版口径）→ L11（D=512 慢路径、fp8 o_proj algo）。p02 整跑 **L0–L29 逐位 0**（对 eager vLLM）。
+- 30 用例端到端无改善（16.56% / 1.1994）：定位为参照口径——服务实例是 compile 模式，与 eager 自身差 1.57（§58）。
+- 新知识页 `docs/knowledge/bitexact-replication.md`；踩坑 +3（pitfalls 2026-10-23 三条）；记录 `test/kaon3/2026-10-23/D-16-REBASE.md` §51–§58。
+

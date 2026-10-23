@@ -3,6 +3,12 @@
 > 与 `parity-localization.md` 的分工：那页讲"差异在哪"，这页讲"定位到某个算子之后，怎样写到与参照逐位相同"。
 > 证据全部来自 Kaon-V3 对 vLLM（`VLLM_BATCH_INVARIANT=1`，sm_120），`test/kaon3/2026-10-23/D-16-REBASE.md` §51–§55。
 
+## 0. 先证明逐层参照与端到端判据是同一口径（2026-10-23，最贵的一课）
+
+**判断**：抓逐层参照的进程，必须先用它直接出 `prompt_logprobs` 对端到端 oracle，**0 差异**才往下做。
+**证据**：Kaon-V3 对 eager vLLM 30 层逐位 0，端到端纹丝不动——oracle 服务是 compile 模式，vLLM 自身 eager↔compile 差 |Δlp| 1.57（§58）。
+**怎么用**：抓取脚本的 LLM 参数逐项抄服务（含**是否 enforce_eager**、max_num_seqs、batched tokens、block、BI）；hook 依赖 eager 时改用截层 + 二分。
+
 ## 1. 真值是参照实际执行的机器码：源码 → PTX → SASS，逐级下钻
 
 **判断**：源码只能用来猜结构，PTX 能看出顺序，**只有 SASS 是真值**。

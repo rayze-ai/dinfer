@@ -1,3 +1,28 @@
+## 2026-10-23 逐层全部逐位一致，端到端却一点没动——参照是 eager，判据是 compile
+
+- **现象**：p02 对 vLLM 30 层隐状态逐位 0，30 用例端到端 flip 16.56% / |Δlp| 1.20，和修复前几乎一样。
+- **根因**：逐层参照脚本都用 `LLM(enforce_eager=True)`（forward hook 依赖 eager）；端到端 oracle 是服务实例，
+  没加 `--enforce-eager` → torch.compile + CUDA graph。vLLM 自己 eager 对 compile 就差 4/23 翻转、|Δlp| 1.57。
+- **解法**：离线用与服务**完全相同参数**跑 `prompt_logprobs` 对 oracle：compile 版 0/23、0.0000（复现），eager 版 1.57（不是）。
+- **避免**：开始逐层对拍前，先证明"逐层参照的抓取进程"和"端到端判据"是同一口径——
+  拿抓取进程直接出 `prompt_logprobs` 对 oracle，必须 0 差异，否则逐层参照没有意义。
+
+## 2026-10-23 在单层数据上标定的 algo / 公式"全对"，换一层就错
+
+- **现象**：bf16 router 在 L0 数据上选出的 algo diff 0，L2 上 diff 3；fp8 `2816×8192` 在 L5 上 diff 0，L11 上 diff 2；
+  RMSNorm"乘倒数 + IEEE"在 L2 两组数据上 0，L3/L4 新数据上错。
+- **根因**：多个候选在某一份数据上碰巧都为 0；一份数据区分力不够。
+- **解法**：每种标定至少用两层以上真实数据（`SHAPE_NTH`、`RLAYER`、各层 `ref_sub_L*`），选**所有数据上都为 0** 的那个；
+  最终以参照的 SASS 为准（见 `knowledge/bitexact-replication.md`）。
+- **避免**：标定测试的数据目录列表要包含不同层；只有一份数据时结论写"未验证泛化"。
+
+## 2026-10-23 没确认目标调用走哪条路径就下诊断（plan_for 优先级），整轮白改
+
+- **现象**：上一轮交接写"SMALL_M_LT 没生效是因为 plan_for 先命中 autotune 的 SmallM 计划"，并据此改代码。
+- **根因**：kaon3 从不调 `autotune`（plans 为空），router 也根本不走 `Gemm`，走自写 `moe_gate_f32`；两层前提都没核实。
+- **解法**：grep 调用点（`layer.rs` 里 router 实际调用的函数）+ 运行期日志（`GEMM_ALGO_LOG=1` 打印实际选中的 algo）。
+- **避免**：任何"X 没生效因为走了 Y"的结论，先用日志证明目标调用确实到达 Y；交接区的诊断标"已验证 / 未验证"。
+
 ## 2026-10-23 改脚本没 sync 就跑，两次"不同配置"的 A/B 实际跑同一份代码
 
 - **现象**：`FORCE_KERNEL=flashinfer` 与 `=cutlass` 两轮跑出**逐位相同**的结果（31 层全 0，`L29.bin` md5 一致），
