@@ -105,3 +105,31 @@
 - 日期：2026-10-23
 - 第 0 轮（基线，MODE=1 得的历史数）：flip 16.56% / `|Δlp|` 1.1994 / FLOOR 0.83% / 0.0276
 - 第 N 轮：
+
+## 进度快照（2026-10-24 凌晨，loop 进行中）
+
+- **第 1 轮**（`RMSNORM_MODE=0`）：flip **16.98%** / |Δlp| **1.1816**（基线 MODE=1 是 16.56% / 1.1994）
+  → **compile 口径的 norm 不是主因**，交接区点名的"唯一未验差异点"已排除。
+- **第 2 轮**（读 FX 图）：从 oracle 容器 `docker cp` 出 `computation_graph.py`（12451 行，**不用重导 inductor**）。
+  读出：norm 返回 bf16 / 量化是 `f32×reciprocal(scale)` → clamp ±448 → fp8 / router 预处理三次 bf16 舍入 /
+  router GEMM 走 **BI Triton persistent matmul**（不是 cuBLAS）/ `v_norm` weight=None / q 进 attention 前是 fp8。
+- **第 3 轮**（`RMSNORM_MODE=2`：`x·inv` 后先舍 bf16 再乘 w）：照 FX 图 + `ir/ops/layernorm.py:17` 源码。
+  第一次因 `norm.cu` 签名漏 `mode` 编译失败**且未 sync**，脚本只看 `^error` 没拦住 → **作废**；
+  已加**编译门禁**（匹配 `cargo:warning=.*error:` 与 `nvfb failed`）后重跑。结果见迭代记录。
+
+### 已排除的假设（别重复）
+
+| 假设 | 结论 |
+|---|---|
+| lm_head 量化 | ❌ `quantized_layers` 424 项里没有 lm_head / embed |
+| `fused_add_rms_norm` 残差语义 | ❌ Gemma4 用显式 bf16 加法（`gemma4.py:702-731`） |
+| q 未做 fp8 量化 | ❌ 我们已做（`layer.rs:753`），A/B 证实必需 |
+| `oracle_clean` 口径不对 | ❌ 与当前 compile 服务重抓逐项 0 差异 |
+| compile 口径 norm（mode 0） | ❌ 第 1 轮：与 eager 口径无实质差别 |
+
+### 尚未核对（按嫌疑度）
+
+1. `bmm_fp8` ×120（fp8 GEMM 的 scale 应用顺序与 out_dtype）
+2. `moe_forward` ×30（combine 口径 / per_expert_scale 折进位置）
+3. router 的 BI persistent matmul（我们用 cuBLAS → 需 `CUBLASLT_WORKSPACE_SIZE=1` 才稳）
+4. `unified_kv_cache_update` 的 kv fp8 量化点

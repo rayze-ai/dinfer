@@ -40,10 +40,20 @@ apps=$(timeout 60 $R run "nvidia-smi --query-compute-apps=pid,used_memory --form
 [ "${apps:-0}" -le 1 ] && ok "GPU 无我们的残留进程（共 ${apps:-0} 个占用者）" \
   || ng "GPU 上有 $apps 个计算进程，可能含残留（先清理再测）"
 
-# ---------- 2) 端到端（compile 口径：显式 RMSNORM_MODE=0） ----------
+# ---------- 2) 编译门禁：编译失败就不许跑（2026-10-23 踩过：build.rs 的 nvcc 错误是
+#   `cargo:warning=nvcc[...]: error:` 前缀，`grep '^error'` 抓不到，旧二进制照跑一整轮） ----------
 echo
-echo "     整跑（这步要几分钟）..."
-PROBE_ENV="CUBLASLT_WORKSPACE_SIZE=1 RMSNORM_MODE=0${PROBE_EXTRA:+ $PROBE_EXTRA}" \
+echo "     编译（这步要先过，否则读数作废）..."
+bld=$(timeout 2400 $R ctr 'cd /w/dinfer && CUDA_ARCHS=120 cargo build --release -p dinfer-kaon3 --bins 2>&1' 2>&1)
+if printf '%s' "$bld" | grep -qE 'cargo:warning=.*error:|^error(\[|:)|BUILD FAILED|nvcc failed'; then
+  ng "编译失败，整跑作废"
+  printf '%s' "$bld" | grep -E 'cargo:warning=.*error:|^error(\[|:)|nvcc failed' | head -5 | cut -c1-200 | sed 's/^/     /'
+  echo; echo "通过 $PASS 项，失败 $FAIL 项（编译失败，未跑整跑）"; exit 1
+fi
+ok "编译通过（dinfer-kaon3 bins）"
+
+# ---------- 3) 端到端（compile 口径：显式 RMSNORM_MODE） ----------
+PROBE_ENV="CUBLASLT_WORKSPACE_SIZE=1 RMSNORM_MODE=${RMSNORM_MODE:-0}${PROBE_EXTRA:+ $PROBE_EXTRA}" \
   timeout 3600 bash scripts/verify/kaon3-parity.sh > /tmp/kc_parity.txt 2>&1
 rc=$?
 grep -E 'POOLED|噪声下限|我们     |长序列|❌|通过 .* 项' /tmp/kc_parity.txt | cut -c1-220 | sed 's/^/     /'
