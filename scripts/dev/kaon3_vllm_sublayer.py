@@ -27,6 +27,7 @@ HOOKS = {
     "pre_feedforward_layernorm": "pre_ff_norm",
     "router": "router_logits",
     "experts": "moe_y",
+    "post_feedforward_layernorm_1": "ff1",            # dense 支路 norm 后（post_ff_norm 定位）
     "post_feedforward_layernorm_2": "ff2",
     "pre_feedforward_layernorm_2": "pre_ff2_norm",   # 专家输入（子 loop C）
     "post_feedforward_layernorm": "post_ff_norm",
@@ -73,6 +74,8 @@ def _patched(self, *a, **k):
         def hook(mod, inp, outp):
             o = outp[0] if isinstance(outp, tuple) else outp
             captured[name] = o.detach().float().cpu().numpy().copy()
+            if name == "post_ff_norm":   # 同时抓输入（= ff1 + ff2 的 bf16 和）
+                captured["post_ff_in"] = inp[0].detach().float().cpu().numpy().copy()
         return hook
     for attr, name in HOOKS.items():
         m = getattr(self, attr, None)

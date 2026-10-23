@@ -751,12 +751,14 @@ impl Gemma4Layer {
         self.dense_down.forward(gemm, stream, &sc.gelu, &mut sc.dense, tokens)?;
         sub_dump(stream, sub_out, "dense", &sc.dense, tokens, h)?;
         rmsnorm_into(stream, ops, &sc.dense, &self.post_ff_norm_1, &mut sc.norm, h, tokens, eps)?;
+        sub_dump(stream, sub_out, "ff1", &sc.norm, tokens, h)?;
 
         // ---- 8. MoE 支路（与 dense 并联）----
         self.moe_branch(stream, gemm, ops, cfg, sc, tokens, eps, sub_out)?;
 
         // ---- 9. 两条支路相加 → post_ff_norm → 残差 → layer_scalar ----
         k::ops::add_inplace_bf16_n(stream, &sc.h2.data, &mut sc.norm.data, tokens * h)?; // h2 = post_ff_norm_2(moe)
+        sub_dump(stream, sub_out, "post_ff_in", &sc.norm, tokens, h)?;
         rmsnorm_into(stream, ops, &sc.norm, &self.post_ff_norm, &mut sc.h2, h, tokens, eps)?;
         sub_dump(stream, sub_out, "post_ff_norm", &sc.h2, tokens, h)?;
         k::ops::add_inplace_bf16_n(stream, &sc.h2.data, &mut sc.x.data, tokens * h)?;
