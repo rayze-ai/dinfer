@@ -238,3 +238,48 @@ to_2:      "f8e4m3fn[...]"  = clamp.to(torch.float8_e4m3fn)
 rms_norm_default_3: "bf16[s59, 8, 256]" = torch.ops.vllm_ir.rms_norm.default(unflatten_2, None, 1e-06, None)
 ```
 → 与我们 `head_rmsnorm(v, None)` 一致。
+
+### 逐行读数 4（**重要**）：router 预处理在 FX 图里是**两次独立 bf16 舍入**，没融合
+
+`/w/tmp/cg.py:1400-1412`（layer 0）：
+
+```
+rms_norm_default_4: "bf16[s59,2816]" = vllm_ir.rms_norm.default(add, None, 1e-06, None)   # 无权重 norm
+to_9:  "bf16[]"           = router_root_size.to(torch.bfloat16)
+mul_4: "bf16[s59,2816]"   = rms_norm_default_4 * to_9        # ← 乘完是 bf16（舍入 1）
+to_10: "bf16[2816]"       = router_scale.to(torch.bfloat16)
+mul_5: "bf16[s59,2816]"   = mul_4 * to_10                    # ← 再乘再舍（舍入 2）
+```
+
+⚠️ **这与我们 `rmsnorm_scale2`（「全程 fp32、只舍入一次」，`ops.rs:603`）的口径相反。**
+FX 图显示参照是 `bf16(norm) → ×rs → 舍 bf16 → ×scale → 舍 bf16`，**三次舍入**。
+我们按"inductor 会融成 fp32 链"的推测只舍一次 → **每层 router 输入都不同 → 可能选不同专家**。
+
+标注为**待验证**：FX 图不等于 fuse 后的 Triton kernel。判据是 `artifact_*_subgraph_*` 里的生成代码
+（若有专门的 router 段）或直接 A/B：加 `ROUTER_PRE_3ROUND=1` 开关走三次 bf16，看 flip 是否下降。
+
+### 逐行读数 5：router GEMM 走 **BI Triton persistent matmul**，不是 cuBLAS
+
+```
+batch_invariant.py:146  matmul_persistent:  empty "bf16[s59,128]" = torch.empty(...)
+batch_invariant.py:151  grid: sym_min(170, ceil(s59/128))
+batch_invariant.py:184  triton_kernel_wrapper_mutation(kernel_idx=1, grid=[(sym_min,1,1)], ...)
+gate_linear.py:231      to_11: "f32[s59,128]" = empty.to(torch.float32)     # 输出转 fp32
+```
+
+→ **即便在 compile 模式下，router 投影仍是 BI 的 Triton persistent matmul**（`VLLM_BATCH_INVARIANT=1` 生效）。
+我们 `router_bf16_ab()` 用 cuBLAS bf16 GEMM，**两者是不同的 kernel**。
+→ 这解释了为什么必须有 `CUBLASLT_WORKSPACE_SIZE=1` 才能稳定：我们的 router GEMM 受 cuBLASLt 启发式影响，
+而参照根本不用 cuBLAS。**router GEMM 要复刻 BI persistent matmul 才可能逐位**（假设 6 升级为主嫌疑）。
+
+### 顺带确认：`moe_forward(rms_norm_default_3, to_11, …)` 的第二个参数是 **f32 router logits**
+
+`to_11: "f32[s59,128]"` → 与我们"logits 保持 f32 进 top-k"一致 ✅
+
+### 参照集口径已验证（重要，排除一个怀疑）
+
+从**当前** compile oracle 重抓 p02，与仓库里的 `test/kaon3/oracle_clean/p02.json` 比：
+```
+130 项 prompt_logprobs，不同 0
+```
+→ `oracle_clean` **确实是 compile 口径**，可以放心当靶子。FLOOR 0.83% 是 30 用例聚合的跨进程差，不是口径错。
