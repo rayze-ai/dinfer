@@ -1755,6 +1755,45 @@ pub fn moe_gate_f32(
     )
 }
 
+/// router 的 **BI persistent matmul**（复刻 vLLM `matmul_persistent`）：
+/// `out[T,E] f32 = x[T,H] bf16 · w[E,H]ᵀ bf16`，**K 方向严格顺序累加、末尾舍 bf16 再转 f32**。
+///
+/// 为什么不能换 cuBLAS：同形状（M×128×2816）实测 **43% 输出元素不同**（max 7.8e-3），
+/// 而 router logits 差一个 bf16 ulp 就会在 top-8 边界换专家 → 端到端 flip 16%。
+/// 见 `docs/loops/kaon3-compile.md` 第 5 轮。
+///
+/// `hidden` 必须是 64 的倍数、`num_experts` 必须是 8 的倍数（参照 BLOCK 配置的前提）。
+pub fn router_gemm_bi_f32(
+    stream: &Stream,
+    x: &CudaSlice<bf16>,
+    w: &CudaSlice<bf16>,
+    out: &mut CudaSlice<f32>,
+    tokens: usize,
+    num_experts: usize,
+    hidden: usize,
+) -> Result<()> {
+    ensure!(x.len() >= tokens * hidden && w.len() == num_experts * hidden, "router_gemm_bi: input");
+    ensure!(out.len() >= tokens * num_experts, "router_gemm_bi: out");
+    ensure!(hidden % 64 == 0 && num_experts % 8 == 0, "router_gemm_bi: 形状不满足 BLOCK 约束");
+    let (px, pw) = (stream.ptr(x) as *const c_void, stream.ptr(w) as *const c_void);
+    let po = stream.ptr_mut(out) as *mut f32;
+    // SAFETY: 容量已校验。
+    check(
+        unsafe {
+            ffi::router_gemm_bi_f32(
+                px,
+                pw,
+                po,
+                tokens as i64,
+                num_experts as i64,
+                hidden as i64,
+                stream.raw() as _,
+            )
+        },
+        "router_gemm_bi_f32",
+    )
+}
+
 /// 路由：logits[tokens*E] f32 → (topk_ids[tokens*K], topk_w[tokens*K])。
 #[allow(clippy::too_many_arguments)]
 pub fn moe_route_f32(

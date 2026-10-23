@@ -531,3 +531,29 @@ FX 图里 `batch_invariant.py:146/151/184` 的 `matmul_persistent` + `triton_ker
 
 **我们的现状**：`gemm.forward_bf16` = cuBLASLt。第 5 轮实测该形状上**43% 元素不同**（max 7.8e-3）。
 → **必须换成 BI persistent matmul 的等价实现。** 这是 loop 的主线，不再是候选假设。
+
+## 第 5 轮成果：`router_gemm_bi_f32` **逐位复刻成功（0/8192）**
+
+新增 `crates/kernels/cuda/router_gemm_bi.cu` + `ops::router_gemm_bi_f32` + kernel 级对拍
+`crates/kernels/tests/router_bi_parity.rs`（数据由容器内 `matmul_persistent` 导出到 `/w/tmp/rbi`）。
+
+```
+ROUTER_BI [M=64 K=2816 N=128] ndiff=0/8192 max|d|=0.000e0
+```
+
+**实现要点（三条，缺一条就全错）**：
+1. **A 块 smem 必须每 warp 一份**（`a_tile[BI_WARPS][16][BK+8]`）。
+   最初写成 block 共享一份 → 8 个 warp 都在写同一块 smem → 全部 8192 元素错（max|d| 2.455）。
+2. **K 方向严格顺序**：BK=64 分块、块内 4 条 `mma.m16n8k16` 顺序累加，全程一个 fp32 累加器
+   （参照 `matmul_persistent` 的结构）。
+3. **输出先舍 bf16 再转 f32**：`to_f32(to_bf16(acc))`。漏掉这步 → max|d| 3.898e-3、
+   **4192/8192 全部不同**（正好一个 bf16 ulp，是这个 bug 的典型指纹）。
+
+### 踩坑记录（值得记）
+
+| 症状 | 根因 |
+|---|---|
+| `ndiff=8192/8192`，max\|d\| **2.455**（数量级都不对） | smem 只分了一份，8 个 warp 写同一块 |
+| `ndiff=8192/8192`，max\|d\| **3.9e-3**（一个 bf16 ulp） | 漏了输出的 `to(bf16)` 舍入 |
+
+"全部元素都不同但只差一个 ulp" = **输出精度不对**，不是算法错——这条以后可以直接当指纹用。

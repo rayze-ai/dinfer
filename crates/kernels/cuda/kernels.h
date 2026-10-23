@@ -340,6 +340,10 @@ int fp8_e4m3_roundtrip_bf16(void* x, int64_t n, float scale, cudaStream_t stream
 // logits[T,E] f32 = x[T,H] bf16 · w[E,H] bf16，fp32 累加（与 HF 路由的 fp32 linear 一致）
 int moe_gate_f32(const void* x, const void* w, float* logits, int64_t tokens, int64_t num_experts, int64_t hidden,
                  cudaStream_t stream);
+// router 的 BI persistent matmul（复刻 vLLM `matmul_persistent`，见 docs/loops/kaon3-compile.md 第 5 轮）：
+// out[T,E] f32 = x[T,H] bf16 · w[E,H]^T bf16，K 方向严格顺序累加、末尾舍 bf16 再转 f32。
+int router_gemm_bi_f32(const void* x, const void* w, float* out, int64_t tokens, int64_t num_experts, int64_t hidden,
+                       cudaStream_t stream);
 // logits[T,E] f32 → topk_ids[T,K] i32, topk_w[T,K] f32。语义 = vLLM grouped_topk(n_group=1, sigmoid, bias)。
 int moe_route_f32(const float* logits, const float* bias, int32_t* topk_ids, float* topk_w, int64_t tokens,
                   int64_t num_experts, int64_t topk, int renormalize, float scale, cudaStream_t stream);

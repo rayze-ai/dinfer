@@ -586,6 +586,15 @@ extern "C" {
     ) -> i32;
 
     // ---- MoE ----
+    pub fn router_gemm_bi_f32(
+        x: *const c_void,
+        w: *const c_void,
+        out: *mut f32,
+        tokens: i64,
+        num_experts: i64,
+        hidden: i64,
+        stream: cudaStream_t,
+    ) -> i32;
     pub fn moe_gate_f32(
         x: *const c_void,
         w: *const c_void,
@@ -1344,6 +1353,7 @@ mod stubs {
     stub!(gather_head_bf16(a: *const c_void, b: *mut c_void, t: i64, h: i64, w: i64, hd: i64, c0: i64, wd: i64, s: cudaStream_t));
     stub!(scatter_head_bf16(a: *const c_void, b: *mut c_void, t: i64, h: i64, w: i64, hd: i64, c0: i64, wd: i64, s: cudaStream_t));
     stub!(moe_gate_f32(x: *const c_void, w: *const c_void, l: *mut f32, t: i64, e: i64, h: i64, s: cudaStream_t));
+    stub!(router_gemm_bi_f32(x: *const c_void, w: *const c_void, o: *mut f32, t: i64, e: i64, h: i64, s: cudaStream_t));
     stub!(moe_route_softmax_f32(l: *const f32, ti: *mut i32, pes: *const c_void, tw: *mut f32, t: i64, e: i64, k: i64, s: cudaStream_t)
         => moe_route_softmax_f32, "moe_route_softmax_f32"
         [l, ti, pes, tw, t, e, k, s]);
