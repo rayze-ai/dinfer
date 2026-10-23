@@ -6,47 +6,31 @@
 > 更新 2026-10-21 23:0x +0800。**本区按模型分节，每节只写该模型自己的交接内容；不要覆盖别人的分节。**
 
 
-### Kaon-V3 parity 第 8–10 轮（2026-10-22 深夜）
+### Kaon-V3 parity（2026-10-23 收工；子 loop D 进行中）
 
-**用户起点**：「0–7 层可能也不对，只是标准定得让它过」— **成立**。干净参照下跨进程下限
-**0.0000（逐位一致）**，L8 的 0.06 被"阈值 0.15 / 1.5×FLOOR"放过。
+**已验证的对齐（都有字节/运行时证据）**：
+- 三处口径**默认已与 vLLM 对齐**：gelu 两次 bf16 舍入 / MoE 合并 bf16 权重与乘积 / router 舍 bf16。
+  精确版开关 `GELU_F32` / `MOE_COMBINE_F32` / `ROUTER_F32`（默认关）。**L11 MoE 段逐位一致**（moe_y/ff2 0 差异）。
+- 权重：L0/L7/L9/L10/L11 的 q/k/v 与 vLLM **逐字节 0 差异**；fp8 KV / Q 量化 / 解量化口径**完全一致**
+  （`KV_FP8=1` vs vLLM 6.7e-7，`=0` 为 2.3e-2）。
+- vLLM 的 fp8 GEMM 是 **FlashInfer**（运行时实测；cutlass 调用 0 次，可用 `FORCE_KERNEL` 强制切换）。
+- verify 现状：**5 过 2 失**（翻转 14.49% / Δlp 1.2302）。两项失败用的是"同 binary 跨进程"下限（0.83%）。
 
-**本轮修好 3 处真 bug（都有字节/张量级证据）**：
-1. **RoPE cos/sin 表**：vLLM `base.py:59` `cache.to(dtype)` → **bf16 表**，我们用了 f32。
-   `Rope::with_bf16_cache()`。`k_rope`/`attn_out` 1.5e-3 → **0.000e0**。
-2. **router `root_size`**：vLLM 是 bf16 buffer，我们用了 f32 常数。`router_logits` 3.28e-3→1.72e-3。
-3. **FP8 重量化中间值**：vLLM `per_tensor_dequantize` 的 `dq` 落在 **fp16**，我们用了 f32。
-   修后 L0/L11 的 q/k 权重字节与 vLLM **完全一致**（用正确布局复核过）。
+**关键事实：逐位复刻 vLLM 不可达**——连 vLLM 调它自己的 flashinfer 算子都复现不出它自己的前向（7/196608）；
+它自家 fi-vs-cu 两 kernel 单层就差 10/196608。
 
-**被 A/B 推翻并回滚的（教训已进 pitfalls）**：query 不量化、P 乘 p_scale=256、softcap 三步舍入、
-位级 RNE e4m3。**动 attention/量化前先 `docker logs|grep "Attention backend"`**（本模型 = TRITON_ATTN）。
+**下一步（具体可执行）**：kernel 变体下限实测显示——L0 我们 4.9e-8 比 vLLM 自家 kernel 差（2.65e-5）**好 540 倍**，
+但**从 L2 起我们是它们的 2–3 倍**（L2 2.07e-2 vs 8.53e-3；L29 2.93e-1 vs 9.38e-2）。
+→ 我们这边还有一个放大器是 vLLM 没有的，或系数更陡。查法：同输入下 `KV_FP8=1/0` × `FORCE_KERNEL=flashinfer`
+对比 L2 单层放大倍数，确认**我们的 KV 往返数值上是否与 vLLM 等价**（D-5 只证明了"读的是 fp8"，未验等价）。
 
-**判据已重建**：fp64 真值显示**我们比 vLLM 准 15 倍**
-（最终 logprob 我们差 0.020 nat、vLLM 差 0.276–0.394；router 我们 7.4e-07 vs 1.5e-02）。
-**"与 vLLM 逐位一致"是错误的验收目标**，见 `docs/loops/kaon3-parity.md` 修正 C。
+**⚠️ 我的错误模式（用户 2026-10-23 严重关切）**：① 把自己的残留进程说成"机器被占"；② 改脚本没 `sync` 就跑，
+导致两次同码却以为在 A/B（已作废一条"kernel 下限=0"）；③ 单次运行直接下结论。**跑前必过 `bash /w/hid/cleanrun.sh`**，
+**每个数值落盘前先验证前置条件**（md5 不同 / 日志有"写 N 个张量" / 8 卡空闲）。
 
-**第 11–12 轮已结（2026-10-22 晚）**：
-- 回退验证：`FP8_RQ_FMT=f16|f32` 运行时开关同快照 A/B，两方向逐位可复现；−0.0018 是 f32 少一次舍入的**相消假象**，f16 正确（L11 隔离近 3.3×）。
-- L11 qkv 权重与 vLLM **逐字节 100%**（q/k/v 槽）；attention 段中间量 ≤1e-7（k_norm 2.65e-2→2.4e-12）。
-- 残余 = MoE 专家翻转；30 层扫描：我们 router GEMM 与 fp64 一致（≤7.4e-7、0/2400 不一致），vLLM 97/2400 不一致但**全是 bf16 步长以下的平局**（不是 bug，不能据此降级 FLOOR 判据）。
-- 第 13–14 轮 + 子 loop B/C（2026-10-22 深夜）：router 30 层真值我们 0/2400 不一致（vLLM 97，全是 bf16 平局）；
-  vLLM router 在 sm_120 落到 F.linear bf16；**真口径差异 = gelu 中间舍入**（vLLM 两次 bf16，经 fp4 放大 10×），
-  `GELU_ROUND2=1` 下 L11 MoE 段逐位一致；其余残余 = GEMM 累加 1-ulp 平局 × 量化放大（非语义）。
-  三开关全开端到端 14.49% / 1.23 ≈ vLLM 自身 BI 开/关 13.95% / 1.19。
-- **第 15 轮（2026-10-23，用户定）**：三处口径**默认已与 vLLM 对齐**（gelu 两次 bf16 舍入 / MoE 合并 bf16 权重与乘积 /
-  router 舍 bf16）；精确版开关 `GELU_F32` / `MOE_COMBINE_F32` / `ROUTER_F32`（默认关）。MoE 合并在 GPU kernel（runtime mode），
-  per_expert_scale 折进路由权重并按 bf16 读。**L11 MoE 段逐位一致**（moe_y/ff2 0 差异）。verify：**5 过 2 失**
-  （翻转 14.49% / Δlp 1.2302；≈ vLLM 自身 BI 开/关 13.95% / 1.19）。
-- **更正（用户 2026-10-23）**：生产不开 BI，不能把"BI 开/关"当可比较下限；"任何换 kernel 都不可达 0.83%"从未验证，作废。
-  BI=1 跨进程仅 1.51% → 该口径下存在逐位复现路径，14.49% 里应仍有**未对齐的口径差异**。下一步：读 vLLM 找剩余差异 + 整跑逐层残差流定位发散起点。
-
-**仪器（本轮新建）**：`kaon3_probe --hidden-all`（30 层残差流 + layer0 的 18 个子模块 +
-`final_norm.bin`）、`--logits-out`、`--sub-cmp`、**`--layer-iso l:ref.bin`（单层隔离）**、
-`--layer-iso-eps`（测层敏感度）、`SUB_LAYER=<n>`（选层 dump）。参照侧
-`scripts/dev/kaon3_vllm_{hidden,sublayer,logits,weights}.py`（**先 4-token 短 prompt 冒烟**）。
-
-**单层隔离结果**：L5 5.9e-3 / L10 8.2e-3 / L12 5.3e-3 / L17 8.1e-3 / L23 6.9e-3 / **L11 2.48e-2**
-（L11 孤立异常，已定位到 K/V 投影，Q 对 K 错）。仪器下限 ~2e-3（注入时 f32→bf16）。
+**仪器**：`kaon3_probe --hidden-all / --layer-iso / SUB_LAYER=<n>|all / --dump-weights`（`WLAYERS=` 选层）；
+参照侧 `scripts/dev/kaon3_vllm_{hidden,sublayer,logits,weights,moe_experts,router_all}.py`；
+`FORCE_KERNEL=cutlass|flashinfer` 强制 vLLM 的 fp8 kernel（必须在建 LLM 前 patch，脚本里已内置）。
 
 ### Kaon-V3（5090，阶段 1–2 完成，阶段 3 接近打通）
 

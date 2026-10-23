@@ -1,3 +1,25 @@
+## 2026-10-23 改脚本没 sync 就跑，两次"不同配置"的 A/B 实际跑同一份代码
+
+- **现象**：`FORCE_KERNEL=flashinfer` 与 `=cutlass` 两轮跑出**逐位相同**的结果（31 层全 0，`L29.bin` md5 一致），
+  差点据此得出"vLLM 的 kernel 变体下限是 0"。
+- **根因**：改的是本地 `scripts/dev/kaon3_vllm_hidden.py`，容器里跑的是远端旧副本。
+  `remote_5090.sh sync` 不会自动发生。且当轮日志里没有新加的 `[force_kernel]` 行，我没看。
+- **解法**：改完先 `scripts/dev/remote_5090.sh sync`，并在容器里 `grep` 确认新代码存在；
+  两个"不同配置"的运行，**必须证明输出不同**（md5 / 日志标志行），否则不算 A/B。
+- **避免**：任何"两次运行结论相反/相同"的结果，先问"这两次真的跑的是不同东西吗"。
+  A/B 的前置条件要写进记录：同步了没有、命中了几个 kernel、输出 md5 是否不同。
+
+## 2026-10-23 自己的残留进程让 vLLM 启动失败，却记成"机器被占"
+
+- **现象**：`ValueError: Free memory on device cuda:0 (3.07/31.36 GiB) ... less than desired`，
+  我写成"GPU 被别的进程占着"。整机其实只有我在用。
+- **根因**：上一轮 vLLM 进程在 `llm.generate` 之后抛异常（我的 dump hook 写错），
+  NCCL 残留进程不退（不占 GPU、`ps` 可见），把显存/句柄留着。
+- **解法**：跑前跑后都执行闸门脚本 `bash /w/hid/cleanrun.sh`（任何卡 >500 MiB 就 kill 并重试，仍脏则 exit 1）。
+  失败判据：容器日志 < 30 行且没有 `写 N 个张量` → 先查残留进程。
+- **避免**：不要把自己的泄漏描述成外部占用；先查 `ps -eo pid,etime,comm` 与
+  `nvidia-smi --query-compute-apps=pid,used_memory`，再下判断。
+
 ## 2026-10-22 长 prompt 带 `prompt_logprobs` 请求把共享基线 vLLM 打崩重启（两次）
 
 - **现象**：给基线 `:28067` 发 1252 token 的 `/v1/completions`（`prompt_logprobs:5` + `return_tokens_as_token_ids`），

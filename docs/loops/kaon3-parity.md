@@ -1,6 +1,8 @@
 # loop 规格：kaon3-parity
 
-- 状态：进行中（2026-10-22 第 12 轮：**L11 通过真值判据**，attention 段与 vLLM 对齐；下一步：逐层 router 真值扫描）
+- 状态：**进行中**（2026-10-23 收工；子 loop D 第 15 轮）。**下一步**：查"L0 我们比 vLLM 自家 kernel 好 540 倍、
+  但 L2 起是它们 2–3 倍"这个反超——同输入下 `KV_FP8=1/0` × `FORCE_KERNEL=flashinfer` 对比 L2 单层放大倍数，
+  确认我们的 KV 往返在数值上是否与 vLLM 等价（D-5 只证明了"读的是 fp8"）。
 - 创建：2026-10-22
 - 验证脚本：`scripts/verify/kaon3-parity.sh`
 - 迭代记录：`test/kaon3/2026-10-22/kaon3-parity.md`
