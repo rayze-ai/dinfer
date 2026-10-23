@@ -164,7 +164,7 @@ __global__ void __launch_bounds__(kNormWarps * 32) rmsnorm_warp_kernel(const bf1
                                                                         const bf16* __restrict__ w,
                                                                         bf16* __restrict__ out,
                                                                         const int32_t* __restrict__ rows, int hidden,
-                                                                        int64_t tokens, float eps) {
+                                                                        int64_t tokens, float eps, int mode) {
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
   const int64_t row = (int64_t)blockIdx.x * kNormWarps + warp;
   if (row >= tokens) return;

@@ -412,3 +412,35 @@ N=1 与 eager 比：`mean|dlp| 1.4892 → 0.3741`，max `29.31 → 4.37`，flips
 **结论（compile 下 norm 的真实口径）**：**全程 fp32，到 store 时才舍入一次**；`inv = rsqrt(mean + eps)`，
 `mean` 单独舍入（torch `.mean()`）。与 BI 版的**唯一差别就是 `inv`**：BI 是 `rcp(sqrt(fma(rcp(n), ss, eps)))`
 （SASS 复刻），IR 是 `rsqrt(ss/n + eps)`。我们 `norm.cu` 现有 epilogue 已经是「fp32 乘 w、store 舍入一次」，**不用改**。
+
+### 第 20 轮：mode 开关无效——真正的差异不在 inv，而在**融合边界**
+
+在 `norm.cu` 加了两套 inv（`RMSNORM_MODE`，0=compile `rsqrt(ss/n+eps)` / 1=eager BI `rcp(sqrt(fma(rcp(n),ss,eps)))`），
+kernel 级同进程 A/B（`crates/kernels/tests/norm_mode_diff.rs`，直接调 C ABI 传 mode）：
+
+```
+NORM_MODE diff: 0/22528 max=0.000e0        # [8,2816] bf16 输出
+```
+
+**两种 inv 在 bf16 输出下逐位相同。** 原因：bf16 只有 8 位尾数，`inv` 的 fp32 低位差异在乘完、舍入到 bf16 时被全部吃掉。
+
+→ **观察 4/5 的解读要再修正一层**：compile 与 eager 的 norm 差异**不在算法**，而在
+**norm 的输出有没有被舍入回 bf16**：
+- eager BI：`rms_norm_batch_invariant` 返回 **bf16**（`output_f32.to(vals.dtype)`），下游再量化；
+- compile：inductor 把 norm 融进 **fp8 量化 kernel**，`tmp13 = x·rsqrt` → `tmp14 = tmp13.to(f32)` 空转 →
+  乘 w → **直接 `× (1/scale)` → clamp ±448 → to fp8**，**全程没有 bf16 往返**。
+
+即：compile 少了一次 bf16 舍入（8 位尾数），我们多了一次。这才是 1.49 的来源，改 inv 公式无济于事。
+
+**下一步**：在 `norm.cu` 加**融合量化**路径（norm 在 fp32 里直接进 `×1/scale → clamp → fp8`，不回 bf16），
+与 inductor 生成的 `triton_red_fused__to_copy_add_clamp_moe_forward_mul_reciprocal_rms_norm_t_view_1` 对齐；
+`RMSNORM_MODE` 保留（无副作用），但记录它在本形状下无区分力。
+
+---
+
+**第 19 轮补充：vLLM 默认口径 = compile**（源码确认）
+- `ModelConfig.enforce_eager = False`（`vllm/config/model.py:236`）——eager 是显式开关；
+- `VllmConfig.__post_init__`：`mode is None` → `optimization_level > O0 ? VLLM_COMPILE : NONE`（`vllm/config/vllm.py:1379`）；
+- `enforce_eager=True` 才强制 `mode=NONE`（同文件 1289）；
+- inductor 后端下 `custom_ops` 基模式默认补 `"none"`（同文件 1392）→ 全部算子进图融合。
+- 对照：同配置两进程 compile 输出 `0.0000` 差异 → **compile 完全确定**，可逐位对拍。

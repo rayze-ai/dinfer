@@ -43,6 +43,7 @@ extern "C" {
         hidden: i64,
         eps: f32,
         layout: i32,
+        mode: i32,
         stream: cudaStream_t,
     ) -> i32;
 
