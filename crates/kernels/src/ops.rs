@@ -600,6 +600,45 @@ pub fn rmsnorm_bf16_layout(
     )
 }
 
+/// `out[i] = fp8(norm(x)[i] * (1/a_scale))`：norm 与 fp8 量化**融合**，中间不落 bf16。
+///
+/// 这是 vLLM **compile 口径**（默认；inductor 把 RMSNorm 融进下游量化 kernel）。eager BI 口径是
+/// `rmsnorm_bf16` + `quant_fp8` 两步、中间一次 bf16 舍入——两者实测差 668/67584 个 fp8 元素
+/// （max 一个 fp8 步长），详见 `docs/loops/kaon3-parity.md` 第 20 轮。
+pub fn rmsnorm_quant_fp8(
+    stream: &Stream,
+    x: &CudaSlice<bf16>,
+    w: &CudaSlice<bf16>,
+    out: &mut CudaSlice<u8>,
+    tokens: usize,
+    hidden: usize,
+    eps: f32,
+    a_scale: f32,
+) -> Result<()> {
+    ensure!(
+        x.len() >= tokens * hidden && out.len() >= tokens * hidden && w.len() == hidden,
+        "rmsnorm_quant_fp8: shape"
+    );
+    let (px, pw) = (stream.ptr(x) as *const c_void, stream.ptr(w) as *const c_void);
+    let po = stream.ptr_mut(out) as *mut c_void;
+    // SAFETY: 缓冲容量已校验。
+    check(
+        unsafe {
+            ffi::rmsnorm_quant_fp8_bf16(
+                px,
+                pw,
+                po,
+                tokens as i64,
+                hidden as i64,
+                eps,
+                a_scale,
+                stream.raw() as _,
+            )
+        },
+        "rmsnorm_quant_fp8_bf16",
+    )
+}
+
 /// out[r] = rmsnorm(x[rows[r]]) · w（gather + rmsnorm 融合）。
 pub fn gather_rmsnorm_bf16(
     stream: &Stream,

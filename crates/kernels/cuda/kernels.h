@@ -23,6 +23,9 @@ int rmsnorm_bf16(const void* x, const void* w, void* out, int64_t tokens, int64_
 // residual 融合：res[t,:] += x[t,:]; out[t,:] = rmsnorm(res[t,:])。res 原位更新。
 int fused_add_rmsnorm_bf16(const void* x, void* res, const void* w, void* out, int64_t tokens, int64_t hidden,
                            float eps, int layout, int mode, cudaStream_t stream);
+// norm + fp8 量化融合（vLLM compile 口径）：out[i] = fp8(norm(x)[i] * (1/a_scale))，h % 8 == 0 且 h <= 8192。
+int rmsnorm_quant_fp8_bf16(const void* x, const void* w, void* out, int64_t tokens, int64_t hidden, float eps,
+                           float a_scale, cudaStream_t stream);
 
 // ---- 小消息 one-shot all-reduce（allreduce.cu，对齐 vLLM custom_all_reduce；需 cuda-ipc / P2P）----
 // Signal / RankData 的字节数（Rust 侧按此分配 ipc 区头部 / 设备 RankData）。

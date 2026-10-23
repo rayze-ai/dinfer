@@ -225,8 +225,7 @@ __global__ void __launch_bounds__(kNormWarps * 32) rmsnorm_warp_kernel(const bf1
   }
 }
 
-// 标量回退：hidden 不是 8 的倍数或 > 8192 时用（与旧实现相同）。
-template <int BLOCK, bool FUSED_ADD>
+// 标量回退：hidden 不是 8 的倍数或 > 8192 时用（与旧实现相同）。template <int BLOCK, bool FUSED_ADD>
 __global__ void rmsnorm_kernel(const bf16* __restrict__ x, bf16* __restrict__ res, const bf16* __restrict__ w,
                                bf16* __restrict__ out, const int32_t* __restrict__ rows, int hidden, float eps,
                                int mode) {
@@ -253,6 +252,70 @@ __global__ void rmsnorm_kernel(const bf16* __restrict__ x, bf16* __restrict__ re
   const bf16* src = FUSED_ADD ? rr : xr;
   for (int i = threadIdx.x; i < hidden; i += BLOCK) {
     orow[i] = to_bf16(to_f32(src[i]) * inv * (w ? to_f32(w[i]) : 1.f));
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// norm → fp8 融合（vLLM **compile 默认口径**，`docs/loops/kaon3-parity.md` 第 20 轮）
+//
+// vLLM 不开 `enforce_eager` 时（默认就是 compile），inductor 把 RMSNorm 与**下游 fp8 量化**融进同一个
+// Triton kernel：`x·rsqrt` → 乘 w → `×(1/scale)` → `clamp(±448)` → `to(fp8)`，**中间没有 bf16 往返**。
+// eager 的 BI 路径则是 norm 输出 bf16，再由独立的 quant kernel 读。
+// 差别实测（[24,2816]，同一 a_scale）：**668/67584 个 fp8 元素不同，max = 8.0**（正好一个 fp8 步长）。
+// 这正是端到端 |Δlp| 的主要来源：改 inv 的算法（rsqrt vs rcp·sqrt）在 bf16 输出下**逐位无差异**。
+//
+// 所以这里必须把两步合成一个 kernel 才能对上 compile。`w` 仍是 bf16（vLLM 也按 f32 乘）。
+// ---------------------------------------------------------------------------------------------
+template <int BLOCK, int VPT>
+__global__ void __launch_bounds__(BLOCK) rmsnorm_quant_kernel(const bf16* __restrict__ x, const bf16* __restrict__ w,
+                                                             uint8_t* __restrict__ out, int hidden, float eps,
+                                                             float inv_scale) {
+  const int64_t row = blockIdx.x;
+  const uint4* xr = reinterpret_cast<const uint4*>(x + row * hidden);
+  const uint4* wv = reinterpret_cast<const uint4*>(w);
+  uint8_t* orow = out + row * hidden;
+  const int nvec = hidden / 8;
+
+  float v[VPT][8];
+  float gs[VPT];
+#pragma unroll
+  for (int j = 0; j < VPT; ++j) {
+    const int i = threadIdx.x + j * BLOCK;
+    gs[j] = 0.f;
+    if (i < nvec) {
+      const uint4 xa = xr[i];
+      const __nv_bfloat162* xp = reinterpret_cast<const __nv_bfloat162*>(&xa);
+#pragma unroll
+      for (int c = 0; c < 4; ++c) {
+        const float2 f = __bfloat1622float2(xp[c]);
+        v[j][2 * c] = f.x; v[j][2 * c + 1] = f.y;
+      }
+      float acc = __fmul_rn(v[j][1], v[j][1]);
+      acc = __fmaf_rn(v[j][0], v[j][0], acc);
+#pragma unroll
+      for (int e = 2; e < 8; ++e) acc = __fmaf_rn(v[j][e], v[j][e], acc);
+      gs[j] = acc;
+    }
+  }
+  const float inv = rms_inv_compile(rms_ss_triton<BLOCK, VPT>(gs, nvec), hidden, eps);
+#pragma unroll
+  for (int j = 0; j < VPT; ++j) {
+    const int i = threadIdx.x + j * BLOCK;
+    if (i < nvec) {
+      const uint4 wb = wv[i];
+      const __nv_bfloat162* wp = reinterpret_cast<const __nv_bfloat162*>(&wb);
+#pragma unroll
+      for (int c = 0; c < 4; ++c) {
+        const float2 g = __bfloat1622float2(wp[c]);
+        // fp32 一路算到 fp8：不做 bf16 往返（这正是与 eager 的差别所在）
+        const float y0 = v[j][2 * c] * inv * g.x * inv_scale;
+        const float y1 = v[j][2 * c + 1] * inv * g.y * inv_scale;
+        orow[i * 8 + 2 * c] =
+            static_cast<uint8_t>(__nv_cvt_float_to_fp8(y0, __NV_SATFINITE, __NV_E4M3));
+        orow[i * 8 + 2 * c + 1] =
+            static_cast<uint8_t>(__nv_cvt_float_to_fp8(y1, __NV_SATFINITE, __NV_E4M3));
+      }
+    }
   }
 }
 
@@ -309,6 +372,18 @@ int launch(const void* x, void* res, const void* w, void* out, const int32_t* ro
   return last_err();
 }
 
+// norm → fp8（compile 口径）。`a_scale` 是静态激活 scale：输出 = fp8(norm(x) · (1/a_scale))。
+template <int BLOCK, int VPT>
+static int launch_quant(const void* x, const void* w, void* out, int64_t tokens, int64_t hidden, float eps, float a_scale,
+                        cudaStream_t s) {
+  if (!(a_scale > 0.f)) return err(cudaErrorInvalidValue);
+  const dim3 grid((unsigned)tokens);
+  rmsnorm_quant_kernel<BLOCK, VPT><<<grid, BLOCK, 0, s>>>(static_cast<const bf16*>(x), static_cast<const bf16*>(w),
+                                                          static_cast<uint8_t*>(out), (int)hidden, eps, 1.f / a_scale);
+  return last_err();
+}
+
+
 }  // namespace
 
 extern "C" int rmsnorm_bf16(const void* x, const void* w, void* out, int64_t tokens, int64_t hidden, float eps,
@@ -325,4 +400,16 @@ extern "C" int gather_rmsnorm_bf16(const void* x, const int32_t* rows, const voi
 extern "C" int fused_add_rmsnorm_bf16(const void* x, void* res, const void* w, void* out, int64_t tokens,
                                       int64_t hidden, float eps, int layout, int mode, cudaStream_t stream) {
   return launch<true>(x, res, w, out, nullptr, tokens, hidden, eps, layout, mode, stream);
+}
+
+// norm + 量化融合：`out[i] = fp8(norm(x)[i] * (1/a_scale))`，out 是 e4m3 字节。
+// 与 vLLM compile（inductor 融合 norm+quant）同口径；eager BI 口径请用 rmsnorm_bf16 + quant_fp8_bf16 两步。
+extern "C" int rmsnorm_quant_fp8_bf16(const void* x, const void* w, void* out, int64_t tokens, int64_t hidden, float eps,
+                                      float a_scale, cudaStream_t stream) {
+  if (tokens <= 0) return 0;
+  if (hidden <= 0 || hidden > 8192 || (hidden % 8) != 0) return err(cudaErrorInvalidValue);
+  if (hidden <= 1024) return launch_quant<128, 1>(x, w, out, tokens, hidden, eps, a_scale, stream);
+  if (hidden <= 2048) return launch_quant<256, 1>(x, w, out, tokens, hidden, eps, a_scale, stream);
+  if (hidden <= 4096) return launch_quant<256, 2>(x, w, out, tokens, hidden, eps, a_scale, stream);
+  return launch_quant<256, 4>(x, w, out, tokens, hidden, eps, a_scale, stream);
 }
