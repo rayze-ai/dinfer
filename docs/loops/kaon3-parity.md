@@ -461,3 +461,72 @@ NORM_MODE diff: 0/22528 max=0.000e0        # [8,2816] bf16 输出
 **下一步**：先把这个 kernel 的 12 个入参逐个对应到模型参数（谁 residual、谁 w、谁 bias），再决定融合公式。
 
 保留：`RMSNORM_MODE`（0=compile 默认 / 1=eager BI）已接通三处 ABI，两种 inv 在 bf16 输出下逐位无差异（第 20 轮）。
+
+## 第 22 轮：`4s/c4shm6xroqnr…py` 的 12 个入参逐个对应到模型参数
+
+来源：`ind/vllm/.../backbone/computation_graph.py:1315-1355` + `ind/inductor/vz/cvzkbhmuxvy…py` 的
+`Topologically Sorted Source Nodes` / `Graph fragment` / 第 1285 行的实际调用。**这是 MoE 支路**（含 `moe_forward`）。
+
+### 图（`computation_graph.py:1315-1355`，正是子图 1 的尾巴）
+```
+rms_norm_default   = rms_norm(view_2, input_layernorm.weight, 1e-6)      # view_2 = 本层输入
+add                = rms_norm_default + l_inputs_embeds_                 # ← 残差并入（见下）
+rms_norm_default_1 = rms_norm(add, pre_feedforward_layernorm_2.weight)   # 专家输入
+moe_forward(...)
+rms_norm_default_3 = rms_norm(add, None)                                 # 无权重（v_norm 类）
+rms_norm_default_4 = rms_norm(add, post_...weight)
+```
+
+### 12 个入参对应（`kernel(...)` 的实参顺序来自第 1285 行）
+
+| kernel 形参 | 实参 | 形状 | 对应模型参数 |
+|---|---|---|---|
+| `in_ptr0` | `buf2` | bf16 `[s59, 2816]` | **本层输入残差流**（`bmm_fp8` reshape，即 layer input / attn 输出） |
+| `in_ptr1` | `arg5_1` | bf16 `[2816]` | **`input_layernorm.weight`** |
+| `in_ptr2` | `arg6_1` | bf16 `[s59, 2816]` | **残差加数**（`l_inputs_embeds_`：L0 是 embedding，深层是 attention 输出） |
+| `in_ptr3` | `arg16_1` | bf16 `[]` | **标量 1**（`mul_80` 乘的 1.0） |
+| `in_ptr4` | `arg17_1` | bf16 `[2816]` | **`pre_feedforward_layernorm_2.weight`**（专家输入 norm） |
+| `in_ptr5` | `arg15_1` | bf16 `[2816]` | **`post_feedforward_layernorm.weight`**（fp8 分支的 w） |
+| `in_ptr6` | `arg7_1` | bf16 `[2816]` | 与 in_ptr5 同一组权重在另一条支路（见下"待定"） |
+| `in_ptr7` | `arg8_1` | **fp32 `[]`** | **fp8 的 `input_scale`**（`1/scale` 的 scale 源） |
+| `out_ptr0` | `buf3` | f32 `[s59,1]` | 平方和（`Σx²`，未除 n） |
+| `out_ptr4` | `buf6` | bf16 `[s59,2816]` | `rms_norm_default` 的**中间输出**（供 `add` 用） |
+| `out_ptr5` | `buf9` | bf16 `[s59,2816]` | `add` 的结果（残差流） |
+| `out_ptr7` | `buf16` | **fp8** `[s59,2816]` | **量化后的专家输入**（喂 `moe_forward`） |
+
+### 算子语义（逐行照抄生成代码，`tmp` 编号是文件里的）
+```
+第一遍：  tmp4  = Σ (in_ptr0)²                                  # 存 out_ptr0
+第二遍：  tmp12 = rsqrt(tmp4/2816 + 1e-6)                       # ← compile 口径：mean 单独舍入
+          tmp16 = (in_ptr0 · tmp12) * in_ptr1                   # norm · input_layernorm.w
+          tmp18 = tmp16 + in_ptr2                               # + 残差
+          out_ptr4 ← tmp16 ; out_ptr5 ← tmp18                   # 两个 bf16 输出
+          tmp22 = Σ (tmp18)²                                    # 残差流的平方和（另一路归约）
+第三遍：  tmp47 = in_ptr0 · rsqrt(tmp4/2816+1e-6)               # 再算一遍 norm（同一 inv）
+          tmp56 = (tmp47 * in_ptr1) * in_ptr4                   # · pre_ff_norm_2.w  ← 专家输入
+          tmp73 = 同上的另一支（用 in_ptr6）
+          tmp77 = 二选一（按 r0 分区）
+          tmp82 = tmp77 * (1.0 / in_ptr7)                       # ← 乘倒数，不是除
+          clamp(±448) → fp8                                     # 存 out_ptr7
+```
+
+### 与我们的实现对照
+
+| 点 | vLLM compile | 我们 | 结论 |
+|---|---|---|---|
+| norm 的 inv | `rsqrt(ss/n + eps)` | `RMSNORM_MODE=0` 已一致 | ✅ 已对齐 |
+| norm → bf16 舍入 | **有**（`out_ptr4`、`out_ptr5` 都是 bf16） | 有 | ✅ 本来就对 |
+| norm 的输入 | `view_2`（本层输入），**不是**先加残差 | `sc.x` | ✅ |
+| 残差相加的位置 | **norm 之后**加 `in_ptr2` | 同 | ✅ |
+| 专家输入 | `(x·inv·input_ln.w) + residual`，**再**乘 `pre_ff_norm_2.w`，**中间有一个 bf16 舍入** | — | ⚠️ **待核对** |
+| fp8 量化 | `× (1/scale)` | `quant_fp8` 也是乘 inv | ✅ |
+| `clamp(±448)` | 有 | 有 | ✅ |
+
+**重要修正**：我第 20/21 轮假设的"compile 少一次 bf16 舍入"是**错的**——生成代码里 `tmp14 = tmp13.to(tl.float32)`
+确实是空转，但 `out_ptr4/out_ptr5` 这两个 **bf16 store 才是真正的舍入点**，而它们存在。
+所以 norm 口径已经被 `RMSNORM_MODE=0` 对齐，`NORM_FUSE_QUANT` 那条融合路径**与 vLLM 不符**（它跳过了 bf16），
+默认关闭是对的。
+
+**待定**：`in_ptr5`/`in_ptr6` 到底各是哪个 norm 的权重（两者都 `[2816]`），需要看 `arg15_1`/`arg7_1`
+在 `computation_graph.py` 里绑到哪个 `_get_data_attr`。下一步查这个，它决定专家输入到底是
+`pre_feedforward_layernorm_2` 还是 `post_feedforward_layernorm`。
