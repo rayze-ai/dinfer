@@ -903,3 +903,13 @@ Python 层没有逐专家的 nn.Module，自然无法 hook。
 **`rcp_approx(6.f)` vs `__fdiv_rn(1.f, 6.f)`**：`quant16` 里 `amax * rcp_approx(6.f)`，
 参照大概率是精确的 `amax / 6`。差 1 ulp 的 `sfv` 会经 e4m3 舍入改变块缩放（e4m3 只有 3 位尾数，
 1 ulp 就可能换一个刻度）。**这是当前最便宜、最可能有质变的单点改动。**
+
+## 第 8 轮：`NQ4_EXACT_RCP` 无效（第三次"1-ulp 幽灵"）
+
+```
+NQ4_EXACT_RCP=0  ndiff=50214/67584 max|d|=2.500e-1
+NQ4_EXACT_RCP=1  ndiff=50214/67584 max|d|=2.500e-1    ← 完全相同
+```
+`rcp.approx(1/6)` 的误差是 2⁻²³，下游 e4m3 块缩放的步长是 2⁻⁴ → **被吞掉 52 万倍**，
+改了不起作用。已把这条判断方法写进 `docs/knowledge/parity-localization.md` 第 8 条：
+**动手前先算"近似误差 / 下游首次舍入步长"**。
