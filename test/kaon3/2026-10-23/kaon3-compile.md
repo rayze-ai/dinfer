@@ -498,3 +498,36 @@ BI-self     512    128   2816         0/65536
 43% 的 logits 元素不同 → top-8 边界必然换专家 → 端到端 16% flip 完全说得通。
 
 **这条把"是否要写这个 kernel"从假设变成了定论**（测量成本：一次容器内 Python，几分钟）。
+
+## 根因定位：router 走 BI matmul 的**真正机制**（我们代码注释写错了）
+
+`models/kaon3/src/layer.rs:908-912` 的注释说：
+> vLLM（容器 0.26.1rc1，sm_120）`GateLinear` 落到 Tier 6：`F.linear`（cuBLAS，bf16 输出）→ `.to(fp32)`
+> （sm_120 不满足 `allow_specialized_router_gemm`，Tier 5 的 fp32 epilogue 不开）
+
+**前半句对（落到 Tier 6），后半句"cuBLAS"错。** 实际路径：
+
+```python
+# vllm/model_executor/layers/linear.py:203-212  (UnquantizedLinearMethod.apply)
+if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda_alike():
+    return linear_batch_invariant(x, layer.weight, bias)      # ← 直接走 Triton persistent
+return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
+```
+
+```python
+# vllm/model_executor/layers/batch_invariant.py:889
+def linear_batch_invariant(input, weight, bias=None):
+    output = matmul_batch_invariant(input, weight.t())         # → matmul_persistent
+    ...
+```
+
+**注意**：`batch_invariant.py:911-927` 里那个 `is_device_capability_family(80)` 分支只决定
+**是否安装 dispatcher patch**（`aten::linear` 等）；sm_120（12.x）走 else、只设
+`CUBLASLT_WORKSPACE_SIZE=1`、**不 patch dispatcher**。但 `linear.py:209` 是**显式调用**，
+不经过 dispatcher，所以在 sm_120 上**照样走 BI Triton persistent matmul**。
+
+FX 图里 `batch_invariant.py:146/151/184` 的 `matmul_persistent` + `triton_kernel_wrapper_mutation`
+就是这个路径，两者对上了。
+
+**我们的现状**：`gemm.forward_bf16` = cuBLASLt。第 5 轮实测该形状上**43% 元素不同**（max 7.8e-3）。
+→ **必须换成 BI persistent matmul 的等价实现。** 这是 loop 的主线，不再是候选假设。
