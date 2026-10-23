@@ -759,3 +759,26 @@ row 23: top7=top8=2.421875，并列出现在 experts [33, 120] → 取 33
 `router_x.bin`（参照真实输入）→ 跑我们的 router（`rmsnorm_scale2` + GEMM）→ 与 `router_y.bin` 逐位比。
 这一步能直接判定"我们的 router 输出与参照差多少 ulp"，是所有剩余假设里最该先做的
 （因为后面 128 专家 + combine 都建立在它的 top-8 之上）。
+
+## 第 7 轮结果：**router 整段逐位一致（0/3072，top-8 集合 0 行不同）**
+
+用参照的**真实 router 输入**（`router_x.bin`）跑我们的路径（`rmsnorm_scale2` + `router_gemm_bi_f32`），
+与参照的 `router_y.bin` 比：
+
+```
+ROUTER_STAGE [T=24 E=128 H=2816] logits ndiff=0/3072 max|d|=0.000e0 | top-8 集合不同的行 = 0/24
+```
+
+**这是本轮最干净的结论**：`无权重 norm → ×root_size → ×scale → router GEMM` 整条链
+（含 `RMSNORM_MODE=2` 的 bf16 中间舍入、BI persistent matmul 的归约次序）**与参照逐位相同**，
+连 3 行 top-8 并列的边界也选得一样。
+
+→ **router 完全排除**。差异只可能在两部分：
+1. **8 个专家的 GEMM**（NVFP4：gate / up / down，含块缩放与累加次序）；
+2. **combine**（已有 `MOE_COMBINE_F32`，第 6 轮改默认后 flip 16.56%→14.08%，说明它**是**一部分，
+   但改完仍差 14%，说明专家 GEMM 还有差异）。
+
+### 新增测试
+
+`models/kaon3/tests/router_stage_parity.rs` —— 用真实参照输入复算 router 阶段并逐位比。
+注意：测试里要显式 `RMSNORM_MODE=2`（`rmsnorm_scale2` 只支持 compile 系，默认 1 会 `cudaError`）。
