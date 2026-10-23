@@ -2135,3 +2135,22 @@ L0 已经接近逐位；残余 1 ulp 零星分布在 `q_norm`(12) / `mlp_gate_up
 
 **要过 FLOOR（翻转 0.83%）必须让 L0 的 5 处 GEMM 差异也归零**，即逐位复刻 vLLM 的 fp8 GEMM 累加顺序
 （cutlass 合并 qkv 的 tile 顺序 + f32 累加树）。这是子 loop D 剩余的唯一实质项。
+
+### D-10：直接调用 vLLM 的 cutlass 算子 —— 可行，但**不是** vLLM 实际走的那条路径
+
+用户 2026-10-23：「不能直接调用 cutlass 吗……盲目重写，要是走错，或者又说推翻之前的结论」——**对**。
+
+**可行性**：`vllm._custom_ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)` 可在容器内直接调用
+（内部 `torch.ops._C.cutlass_scaled_mm`）。踩的坑：`b` 必须是**转置视图**（`b.t().contiguous().t()`）；
+连续布局会抛 `scaled_mm_entry.cu:209`（错误消息被宏截断，只有文件名不带原因）。
+
+**但它复现不了 vLLM 自己的输出**（L0 `q_proj`，同输入 `input_norm.bin`、同 checkpoint 权重与 scale）：
+
+| 实现 | 与 vLLM `qkv_raw` 差异 |
+|---|---|
+| 我们（Rust kernel）| **5 / 98304** |
+| 直接调 `cutlass_scaled_mm` | 89026 / 98304 |
+
+→ vLLM 在该层走的**不是**这个通用 fp8 scaled_mm 入口（可能是 fused norm+quant 后的专用 kernel、
+或 `QKVParallelLinear` 的打包布局/内部 requant 路径）。**必须先确定它真实命中哪个 kernel，再谈"逐位复刻"**，
+否则就是又一次盲改。
