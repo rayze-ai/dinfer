@@ -189,3 +189,52 @@ GPU=1 scripts/dev/remote_5090.sh ctr 'cd /w/dinfer && TORCHINDUCTOR_CACHE_DIR=/w
 
 `residual is None` → `hidden_states = self.norm(hidden_states)`，**独立 norm，不与 lm_head 融合**
 （lm_head 是独立的 `ParallelLMHead` 模块，中间没有量化）。假设 2 的"融合"分支**排除**。
+
+## 第 2 轮：直接从 oracle 容器取 FX 图（不用重导）
+
+**方法（省掉重导，已验证）**：oracle 容器刚做过 compile，产物就在容器里：
+```bash
+docker cp kaon-oracle:/root/.cache/vllm/torch_compile_cache /w/tmp/ind2/
+# → /w/tmp/ind2/torch_compile_cache/0642510a5c/rank_0_0/backbone/computation_graph.py（12451 行）
+```
+**以后要 inductor 产物，先 `docker cp` 现成的容器，别重跑导出。**
+
+### 图内算子清单（全 30 层，`grep -oE` 统计）
+
+```
+331 torch.ops.vllm_ir.rms_norm            120 torch.ops.vllm.bmm_fp8
+ 60 torch.ops.vllm.unified_kv_cache_update   60 torch.ops.vllm.unified_attention_with_output
+ 30 torch.ops.vllm.moe_forward              30 torch.ops.higher_order.triton_kernel_wrapper_mutation
+```
+331 = 30×(input_norm + post_attn_norm + pre_ff_norm + post_ff_norm_1 + pre_ff_norm_2 + post_ff_norm_2
++ post_ff_norm + q_norm + k_norm + v_norm) + final_norm 左右 —— 即**所有 norm 都走同一个 op**。
+
+### 逐行读数 1：norm 输出的 dtype 在 FX 图里 **是 bf16**
+
+```
+rms_norm_default: "bf16[s59, 2816]" = torch.ops.vllm_ir.rms_norm.default(l_inputs_embeds_, w, 1e-06, None)
+view:             "bf16[s59, 2816]" = rms_norm_default.view(-1, 2816)
+to:               "f32[s59, 2816]" = view.to(torch.float32)          # ← 量化入口
+```
+
+⚠️ `norm.cu:58` 的注释说「`x.to(weight.dtype)` 的 bf16 舍入被 inductor 消除了」。
+**FX 图上它没被消除**（签名就是 bf16）。是否在 fuse 后的 Triton kernel 里才消失，**必须看生成的 kernel**，
+不能靠 FX 图推定。这是 `NORM_FUSE_QUANT` 该不该开的判据。
+
+### 逐行读数 2：fp8 量化 = `f32 × reciprocal(scale)` → clamp(±448) → fp8
+
+```
+to_1:      "f32[]"          = input_scale.to(torch.float32)
+reciprocal:"f32[]"          = to_1.reciprocal()        # ← 先求倒数再乘，不是除
+mul:       "f32[s59,2816]"  = to * reciprocal
+clamp:     "f32[s59,2816]"  = mul.clamp(-448.0, 448.0)
+to_2:      "f8e4m3fn[...]"  = clamp.to(torch.float8_e4m3fn)
+```
+→ 与 `norm.cu:439` 的注释一致（`out * (1.0/scale)`，clamp ±448）✅
+
+### 逐行读数 3：`v_norm` 的 weight 是 `None` ✅
+
+```
+rms_norm_default_3: "bf16[s59, 8, 256]" = torch.ops.vllm_ir.rms_norm.default(unflatten_2, None, 1e-06, None)
+```
+→ 与我们 `head_rmsnorm(v, None)` 一致。
