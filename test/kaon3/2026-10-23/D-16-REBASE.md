@@ -828,3 +828,32 @@ router 形状 (m=24, n=128, k=2816)，用 vLLM 真实入参（`kaon3_d17_router.
 (a) 小 M 也走 cuBLASLt（可能影响性能——自写 split-K 就是为小 M 优化的）；
 (b) 让自写小 M kernel 对齐 cuBLAS 的累加序（工作量大）。
 建议先测 (a) 的端到端收益，再决定是否为此付性能代价。
+
+## 51. **router 归零：真因是 vLLM BI 模式在 sm_120 上的 cuBLASLt 约束，不是 small_m**
+
+§50 的诊断（`plan_for` 优先级）**错**：kaon3 不调 `autotune`（plans 空），router 也不走 `Gemm`，
+而是自写 `moe_gate_f32`（f32 累加 → host 舍入 bf16）。§46 写的"router 走 QLinear::Bf16 → cuBLASLt"同样不实。
+
+逐步证据（L2 真实输入 = `ref_sub/router_in`，参照 = `ref_sub/router_logits`，均 `VLLM_BATCH_INVARIANT=1` 抓）：
+
+| 做法 | L0（`router2`）| L2（`router_L2`）|
+|---|---|---|
+| 旧：`moe_gate_f32` + 舍入 | — | 3–4 / 3072 |
+| Lt 启发式 h[0]（`red=4` OUTPUT_TYPE 归约）| 768 | 748 |
+| 钉 "id=21 tile=11 splitk=8"（短描述命中的是 `red=4` 那个）| — | 776 |
+| 排除 `red=4`，32 MiB workspace | 0 | **3**（8 个候选无一为 0）|
+| **排除 `red=4` + workspace 1 KiB（`CUBLASLT_WORKSPACE_SIZE=1`）** | **0** | **0** → `id=21 tile=5 splitk=1 red=0` |
+
+两个盲点：
+1. **短描述 `id/tile/splitk` 不足以区分累加序**：[2]/[3] 同为 `id=21 tile=11 splitk=8`，`red` 分别 4/2，差 801 vs 0。现在 `algo_desc_full` 带 red/stages/swz/…。
+2. **L0 参照是事后单独 `F.linear` 算的**（`kaon3_d17_router.py`），不是前向里的真实值，而且那个进程没开 BI。
+   独立 torch 现场判定（不入库）：默认 F.linear 与 L2 真值差 748；仅 BI 的全部设置（`preferred_blas_library("cublaslt")`
+   + `allow_bf16_reduced_precision_reduction=(False,False)` + `CUBLASLT_WORKSPACE_SIZE=1`）才 L0/L2 都为 0。
+   出处：镜像 `vllm/model_executor/layers/batch_invariant.py` L913–955（sm_120 不走 Triton 覆盖，只改 cuBLAS 配置）。
+
+改动：router 改走 `Gemm::forward_bf16`（bf16 输出）→ `bf16_to_f32_n`（= vLLM Tier 6）；`run_lt_default`
+归约掩码排除 OUTPUT_TYPE，workspace 上限读 `CUBLASLT_WORKSPACE_SIZE`（KiB，同 torch）；`SMALL_M_LT` 撤回。
+**L2 隔离结果**：`router_logits` / `moe_y` / `ff2` **全部 0**；剩 `attn_out` 1 元素 7e-6、`v_norm` 2/49152（下一步）。
+
+**⚠️ 口径提醒**：`oracle_clean` 是 BI=1 生成的（P1-clean-rebuild.md:38），而生产不开 BI（memory 2026-10-22）。
+因此 `CUBLASLT_WORKSPACE_SIZE=1` 只在对 BI oracle 时设；对生产口径（non-BI）vLLM 走 cuBLAS（非 Lt），另需标定。
