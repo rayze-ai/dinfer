@@ -101,3 +101,32 @@ out_dtype)` 原样存盘**，再把这四个字节串灌进我们的 kernel：
   但用的是静态 `input_scale`。**待核**。
 - 探针 `scripts/dev/kaon3_vllm_fp8det.py` 已同步（md5 一致）并在 GPU 0 后台运行：
   抓 L0 第一个 fp8 GEMM 的真实入参，并**重复 5 次同入参**判定算子自身是否逐位确定。
+
+## 9. D-17 第一轮结果（抓到真实入参，脚本自身崩在类型上）
+
+`kaon3_vllm_fp8det.py` 在 GPU 0 跑到"抓样本"后就崩了——**是我的脚本 bug**：
+`orig_mm` 期望 `scale_a` 是 **tensor**（它内部 `assert scale_a.numel() == 1`），我传了 Python `float`。
+抓样本本身成功（打印在崩溃之前）。
+
+**抓到的 L0 第一个 fp8 GEMM 真实入参**（p02，24 token）：
+
+| 项 | 值 |
+|---|---|
+| `A` | `(24, 2816)` `float8_e4m3fn`，stride `(2816, 1)` → 行主序，**已量化** |
+| `B` | `(2816, 8192)` `float8_e4m3fn`，stride `(1, 2816)` → **列主序视图 = 物理 `[N,K]` 行主序** |
+| `scale_a` | `0.59375`（静态，= checkpoint `input_scale`）|
+| `scale_b` | `1.3166156e-3`（= `weight_scale`）|
+| `out_dtype` | `bfloat16` |
+
+**两条此前未记录的事实**：
+1. `scale_a = 0.59375` 是**静态**标量，与我们口径一致（`input_activations.dynamic=false` 得到印证）。
+   → 激活量化点不在"静态 vs 动态"，D-17 原假设的一半被排除。
+2. 权重给 FlashInfer 的是**转置视图**（物理 `[N,K]` 连续）。我们 kernel 收的也是 `[n,k]`，
+   而累计是 `D[g0*N+gn]`——布局假设一致。
+
+**剩下的差异只可能在**：GEMM 内部 K 方向累加顺序 / tile 形状（FlashInfer 用 cutlass 类 128×128 tile + f32 累加），
+以及激活量化的**舍入实现**（我们 kernel 内 `A * 1/a_scale` 饱和转 e4m3；vLLM 走 `scaled_fp8_quant`，
+D-12 已验字节一致 0/67584）。
+
+**下一轮**：① 修脚本的类型 bug；② 断网式验证——把已抓到的 `A_fp8/B_fp8/scale` 直接喂我们和 FlashInfer，
+判定"同字节入参下输出是否逐位相同"；③ 同入参重复 5 次判定 FlashInfer 自身是否逐位确定（原 D-17 的核心问题，仍未答）。
