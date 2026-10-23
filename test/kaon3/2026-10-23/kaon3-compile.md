@@ -986,3 +986,22 @@ CAP m,n,k,e = 24 704 2816 128 | a (24, 2816) | topk (24, 8)
 3. 放弃逐位，接受 ulp 级差异（**不满足 FLOOR 线，不建议**）。
 
 **采用第 2 条作为下一步**：它便宜、且直接告诉我们"是否只需修 NVFP4 GEMM 的某一步"。
+
+## dense FP4 GEMM 直调：形状与坑
+
+参照真实权重形状（`run_cutlass_moe_fp4` 的入参）：
+```
+W1 (128, 1408, 1408)  bf16->fp4 packed   # [E, 2n, k/2]，2n=1408（gate+up），k/2=1408
+W1 blockscale (128, 1408, 176)           # [E, 2n, k/16]，k/16=176
+W2 (128, 2816, 352)                      # [E, k, n/2]
+a1_gscale = 462.4516（所有专家相同）
+```
+
+**坑**：`ops.cutlass_scaled_fp4_mm` 要求 **`scale_a` 是 padded + swizzled 布局**
+（`RuntimeError: ... scale_a must be padded and swizzled`，`nvfp4_scaled_mm_sm120_kernels.cu:281`）。
+→ 激活量化必须用 `scaled_fp4_quant(a, gscale, is_sf_swizzled_layout=True, padded_n=...)`，
+不能用普通布局。这与 MoE 路径里 `scaled_fp4_experts_quant` 的布局要求一致。
+
+**这条对复刻很重要**：如果我们自己的 `gemm_nvfp4` 用的是非 swizzled 的块缩放布局，
+那不只是"归约次序不同"，而是**缩放因子的排布约定不同** —— 这足以造成 73% 元素差异。
+下一步要核对的就是这个。
