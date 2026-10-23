@@ -246,3 +246,16 @@ compile 模式下 forward hook 不触发、op 不能替换、Python 层不被调
 **已排除（勿重复）**：norm 口径（mode 0/1/2 都是 16%）· `rcp.approx`（被 bf16 吞掉）·
 router GEMM kernel（真实输入下 cuBLAS 与 BI matmul 逐位相同，0/3072）· lm_head 量化（未量化）·
 `fused_add_rms_norm` 残差语义（Gemma4 用显式 bf16 加）· q 的 fp8 量化（已做且 A/B 证实必需）。
+
+## 第 7 轮（进行中）：专家 NVFP4 GEMM 逐位核验
+
+**方法**（沿用第 5 轮修正后的正确做法：真实数据 + 真实调用路径）：
+在 oracle 容器里 patch `MoERunner.forward`，抓**第一个 MoE 调用的真实**
+`x`（专家输入）、`topk_weights`、`topk_ids`、`y`（MoE 输出）→ `/w/tmp/moe1/*.bin`。
+然后用同一组 `x / ids / w` 跑我们的专家 GEMM + combine，与 `y` 逐位比。
+
+脚本：`/tmp/moe_probe.py`（容器内 `M=<model> IDS=<ids> python3 /tmp/moe_probe.py`）。
+
+**判读规则**：
+- 若专家输出逐位相同 → 假设排除，往下查 attention / kv；
+- 若有差异 → 差异在 NVFP4 的块缩放或累加次序，需要按参照 cutlass_moe 的归约结构复刻。
