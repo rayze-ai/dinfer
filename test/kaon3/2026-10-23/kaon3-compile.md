@@ -322,3 +322,19 @@ gate_linear.py:231      to_11: "f32[s59,128]" = empty.to(torch.float32)     # �
 | `vllm.moe_forward` | 30 | **未核对（最大一块）** |
 | `triton_kernel_wrapper_mutation` | 30 | = BI persistent matmul（router）+ 其他 |
 | `aten` 逐元素（add/mul/split/cat…） | 其余 | 逐元素，口径已基本确认 |
+
+### 第 3 轮第一次作废：编译失败 + 未 sync
+
+第一次跑 `RMSNORM_MODE=2` 时 `dinfer-kernels` 构建失败：
+```
+cuda/norm.cu(390): error: identifier "mode" is undefined
+```
+`rmsnorm_scale2_kernel` / `launch_scale2` 没传 `mode`。**但脚本没拦住**——`kaon3-parity.sh` 只 `grep '^error'`，
+而 build.rs 的失败是 `cargo:warning=` 前缀的 `nvcc[...] error:`，grep 不到 → 脚本继续用**上一轮的旧二进制**
+跑完了整轮（`❌ kernel 对拍：` 那行是空的，其实已经失败了）。
+
+**这类"编译失败但测试照跑"必须堵住**：
+- 本地改完必须先 `sync`（我漏了一次，远端还是旧文件，第一次修完再编仍报同一个错）；
+- 判据要检查 `cargo:warning=.*error:` 与 `BUILD FAILED`，不能只 grep `^error`。
+
+已修 `norm.cu` 的 kernel/launcher 签名并 sync，重编通过。**下面这条读数必须来自重编后的二进制。**

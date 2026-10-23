@@ -345,7 +345,7 @@ template <int BLOCK, int VPT>
 __global__ void __launch_bounds__(BLOCK) rmsnorm_scale2_kernel(const bf16* __restrict__ x,
                                                               const bf16* __restrict__ scale,
                                                               bf16* __restrict__ out, int hidden, float eps,
-                                                              float rs) {
+                                                              float rs, int mode) {
   const int64_t row = blockIdx.x;
   const uint4* xr = reinterpret_cast<const uint4*>(x + row * hidden);
   const uint4* sv = reinterpret_cast<const uint4*>(scale);
@@ -464,9 +464,9 @@ static int launch_quant(const void* x, const void* w, void* out, int64_t tokens,
 // router 预处理：`out = bf16(fp32(norm(x, 无权重) · rs · scale))`。
 template <int BLOCK, int VPT>
 static int launch_scale2(const void* x, const void* scale, void* out, int64_t tokens, int64_t hidden, float eps, float rs,
-                         cudaStream_t s) {
+                         int mode, cudaStream_t s) {
   rmsnorm_scale2_kernel<BLOCK, VPT><<<(unsigned)tokens, BLOCK, 0, s>>>(
-      static_cast<const bf16*>(x), static_cast<const bf16*>(scale), static_cast<bf16*>(out), (int)hidden, eps, rs);
+      static_cast<const bf16*>(x), static_cast<const bf16*>(scale), static_cast<bf16*>(out), (int)hidden, eps, rs, mode);
   return last_err();
 }
 
@@ -511,8 +511,8 @@ extern "C" int rmsnorm_scale2_bf16(const void* x, const void* scale, void* out, 
     // eager 口径（1）没有实测过这条融合，退回三步由调用方负责 → 这里直接不支持
     return err(cudaErrorInvalidValue);
   }
-  if (hidden <= 1024) return launch_scale2<128, 1>(x, scale, out, tokens, hidden, eps, rs, stream);
-  if (hidden <= 2048) return launch_scale2<256, 1>(x, scale, out, tokens, hidden, eps, rs, stream);
-  if (hidden <= 4096) return launch_scale2<256, 2>(x, scale, out, tokens, hidden, eps, rs, stream);
-  return launch_scale2<256, 4>(x, scale, out, tokens, hidden, eps, rs, stream);
+  if (hidden <= 1024) return launch_scale2<128, 1>(x, scale, out, tokens, hidden, eps, rs, mode, stream);
+  if (hidden <= 2048) return launch_scale2<256, 1>(x, scale, out, tokens, hidden, eps, rs, mode, stream);
+  if (hidden <= 4096) return launch_scale2<256, 2>(x, scale, out, tokens, hidden, eps, rs, mode, stream);
+  return launch_scale2<256, 4>(x, scale, out, tokens, hidden, eps, rs, mode, stream);
 }
