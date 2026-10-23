@@ -172,3 +172,12 @@ c = accumulator.to(bf16)                        # 只在最后舍一次
 - fp32 累加器，末尾 `to(bf16)` 一次；
 - 由 `ROUTER_GEMM_BI=1` 选（默认关，A/B 后再定默认）；
 - 判据：**先做 kernel 级对拍**（同入参 vs 参照 BI matmul 逐位 0），再端到端看 flip。
+
+### 第 5 轮实现计划（进行中）
+
+新增 `router_gemm_bi_f32(x[M,K] bf16, w[N,K] bf16, out[M,N] f32)`，逐位复刻参照归约：
+- `BM=128`、`BN=128`（N=128 正好一整块）、`BK=64`，K=2816 → 44 个 chunk；
+- 每个 chunk 内 4 条 `mma.m16n8k16` **顺序**累加进同一个 fp32 累加器；
+- 输出 `f32(bf16(acc))`（参照是 bf16 输出再 cast f32）；
+- 8 warp 各管 16 行，每 warp 16 个 `n8` tile。
+- 开关 `ROUTER_GEMM_BI=1`；**先做 kernel 级对拍**（vs 容器内 `matmul_persistent`，要求 0 差异），再端到端。
