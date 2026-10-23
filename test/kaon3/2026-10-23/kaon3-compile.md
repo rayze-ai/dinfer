@@ -557,3 +557,24 @@ ROUTER_BI [M=64 K=2816 N=128] ndiff=0/8192 max|d|=0.000e0
 | `ndiff=8192/8192`，max\|d\| **3.9e-3**（一个 bf16 ulp） | 漏了输出的 `to(bf16)` 舍入 |
 
 "全部元素都不同但只差一个 ulp" = **输出精度不对**，不是算法错——这条以后可以直接当指纹用。
+
+### 第 5 轮（续）：接入后端到端 A/B **完全没有差异**（待解释）
+
+`router_gemm_bi_f32` kernel 级逐位 0/8192，已接入 `layer.rs:918`（`ROUTER_GEMM_BI` 默认开，
+诊断输出确认分支确实执行：`[kaon3] router GEMM = BI persistent matmul`）。
+
+但两条路径的整批输出**逐字节相同**：
+```
+md5 /w/tmp/o0/p02.json = 48751c2a3c356b37581689d1dce61b8a   (ROUTER_GEMM_BI=0, cuBLAS)
+md5 /w/tmp/o1/p02.json = 48751c2a3c356b37581689d1dce61b8a   (ROUTER_GEMM_BI=1, BI)
+```
+`--oracle` 判定也完全一致：`4 行翻转 / top5 1.8089 / 实际 token 2.1794`（旧口径 1.1816 的差异来自
+`RMSNORM_MODE` 与 oracle 文件不匹配，不影响本 A/B 的结论）。
+
+**必须解释清楚才能继续**：
+1. 若真实 router 输入下两 kernel 输出确实相同 → 我前面 43% 的测量用错了对照
+   （那次比的是 `torch.matmul` vs `matmul_persistent`，而我们原来走的 cuBLASLt 启发式**未必**与
+   `torch.matmul` 同轨；也可能真实 routed 输入的动态范围小，两者恰好都舍到同一 bf16）；
+2. 若两 kernel 输出不同却端到端相同 → 说明 router 之后有某一步把差异抹掉了（量化？bf16 存储？）。
+
+→ 下一步：**抓真实 `sc.routed` 输入**，分别喂两个 kernel，直接比输出。

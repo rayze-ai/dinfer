@@ -911,8 +911,28 @@ impl Gemma4Layer {
         // 所以必须走 cuBLASLt bf16 GEMM（`run_lt_default` 钉 `id=21 tile=11 splitk=8`）再 cast；
         // 原来的自写 `moe_gate_f32` + 舍入累加序不同，差 4/3072（D-16-REBASE §51）。
         if router_bf16_ab() {
-            gemm.forward_bf16(&sc.routed.data, &self.router.bf16_weight()?.data, None, &mut sc.logits_bf16.data, tokens, e, h)?;
-            k::ops::bf16_to_f32_n(stream, &sc.logits_bf16.data, &mut sc.logits.data, tokens * e)?;
+            // **BI 口径**（`ROUTER_GEMM_BI=1`，默认）：vLLM 在 `VLLM_BATCH_INVARIANT=1` 下
+            // `linear.py:209` 显式走 `linear_batch_invariant` → `matmul_persistent`（Triton），
+            // **sm_120 也一样**（不装 dispatcher patch 但照样显式调用）。与 cuBLAS 在同形状上
+            // 43% 元素不同 → 必须用同归约结构的 kernel（`docs/loops/kaon3-compile.md` 第 5 轮）。
+            if router_gemm_bi() && h % 64 == 0 && e % 8 == 0 {
+                {
+                    static ONCE: std::sync::Once = std::sync::Once::new();
+                    ONCE.call_once(|| eprintln!("[kaon3] router GEMM = BI persistent matmul"));
+                }
+                k::ops::router_gemm_bi_f32(
+                    stream,
+                    &sc.routed.data,
+                    &self.router.bf16_weight()?.data,
+                    &mut sc.logits.data,
+                    tokens,
+                    e,
+                    h,
+                )?;
+            } else {
+                gemm.forward_bf16(&sc.routed.data, &self.router.bf16_weight()?.data, None, &mut sc.logits_bf16.data, tokens, e, h)?;
+                k::ops::bf16_to_f32_n(stream, &sc.logits_bf16.data, &mut sc.logits.data, tokens * e)?;
+            }
         } else {
             k::ops::moe_gate_f32(stream, &sc.routed.data, &self.router.bf16_weight()?.data, &mut sc.logits.data, tokens, e, h)?;
         }
@@ -1026,6 +1046,14 @@ fn router_bf16_ab() -> bool {
         }
         on
     })
+}
+
+/// router GEMM 是否走 **BI persistent matmul**（复刻参照）。**默认开**：vLLM 在 `VLLM_BATCH_INVARIANT=1`
+/// 下 `linear.py:209` 显式调 `linear_batch_invariant`，与 cuBLAS 同形状 43% 元素不同
+/// （`docs/loops/kaon3-compile.md` 第 5 轮）。`ROUTER_GEMM_BI=0` 退回 cuBLASLt，仅供 A/B。
+fn router_gemm_bi() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("ROUTER_GEMM_BI").map(|v| v.trim() != "0").unwrap_or(true))
 }
 
 /// `MOE_COMBINE_F32=1`：MoE 合并退回"f32 权重 + f32 乘积 + per_expert_scale 折进 down"的旧口径。
