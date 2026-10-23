@@ -530,3 +530,46 @@ rms_norm_default_4 = rms_norm(add, post_...weight)
 **待定**：`in_ptr5`/`in_ptr6` 到底各是哪个 norm 的权重（两者都 `[2816]`），需要看 `arg15_1`/`arg7_1`
 在 `computation_graph.py` 里绑到哪个 `_get_data_attr`。下一步查这个，它决定专家输入到底是
 `pre_feedforward_layernorm_2` 还是 `post_feedforward_layernorm`。
+
+### 第 22 轮续：`arg15_1` / `arg7_1` 绑定确定 + 完整 MoE 链
+
+依据 `computation_graph.py:1395-1450`（`_get_data_attr` 紧挨着参数名，无歧义）：
+
+```
+_get_data_attr_3 = pre_feedforward_layernorm_2.weight
+rms_norm_default_3 = rms_norm(add, _get_data_attr_3)        # ← 专家输入 = norm(residual) · pre_ff_norm_2.w
+rms_norm_default_4 = rms_norm(add, None)                    # ← 路由输入（无权重）
+mul_4 = rms_norm_default_4 * router.buffers.root_size       # bf16 标量
+mul_5 = mul_4 * router.scale                                # [2816]
+router GEMM (bf16 persistent) → to_11
+moe_forward(rms_norm_default_3, to_11, ...)
+_get_data_attr_4 = post_feedforward_layernorm_2.weight
+rms_norm_default_5 = rms_norm(moe_forward, _get_data_attr_4)
+add_2 = rms_norm_default_2 + rms_norm_default_5              # dense 支路(rms_norm_2) + MoE 支路
+_get_data_attr_5 = post_feedforward_layernorm.weight
+rms_norm_default_6 = rms_norm(add_2, _get_data_attr_5)
+add_3 = rms_norm_default_6 + add                             # 再加回层输入残差 → 输出
+```
+
+**`arg15_1` / `arg7_1` 的答案**：这两者**都不是** norm 权重，而是 **router 的预处理标量**：
+- `in_ptr3`（`arg16_1`，bf16 标量 `[]`）= `router.buffers.root_size`
+- `in_ptr5` / `in_ptr6`（`arg15_1` / `arg7_1`，bf16 `[2816]`）= 同一个 **`router.scale`** 在两条 `r0` 支路上的重复载入
+  （`arg7_1` 走 `rms_norm_default_4 → ×root_size → ×scale` 那条，即 `mul_5`；`arg15_1` 是它被另一段共享的副本）
+
+> 注：`vz` 那个 kernel 的 `in_ptr5`/`in_ptr6` 在 fp8 分支里被当 `[2816]` 乘，而 `arg15_1/arg7_1` 都 `[2816]`，
+> 与 `router.scale` 形状一致；真正的 norm `[2816]` 权重是 `in_ptr1`（input_ln）/`in_ptr4`（pre_ff_norm_2）。
+> 这也解释了为什么 fp8 分支要 `where(r0 < 128, …)` 二选一 —— 它在处理 **2816 维里前 128 维**（router 的 128 个专家）与其余维度的分区。
+
+**完整层数据流（与我们 `layer.rs` 对照）**
+```
+① x  = hidden (残差)
+② h  = input_layernorm(x)          → self_attn → h
+③ h  = post_attention_layernorm(h) + x        # 注意：norm 在加之前
+④ r  = h
+⑤ d  = pre_feedforward_layernorm(h) → mlp(dense) → post_feedforward_layernorm_1
+⑥ m  = pre_feedforward_layernorm_2(r) → moe(·, router(r)) → post_feedforward_layernorm_2
+⑦ h  = post_feedforward_layernorm(d + m) + r
+⑧ h  = h * layer_scalar
+```
+其中 ⑥ 的 **router 输入是 `r`（残差流 `add`）**，不是 `m` 的输入；且 router 前有
+`rms_norm(no weight) × root_size × scale` 三级预处理——这一条与我们已对齐的 `route_softmax_kernel` 要对上。
