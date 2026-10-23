@@ -6,35 +6,34 @@
 > 更新 2026-10-21 23:0x +0800。**本区按模型分节，每节只写该模型自己的交接内容；不要覆盖别人的分节。**
 
 
-### Kaon-V3 parity（2026-10-23 晚收工；子 loop D 第 18 轮）
+### Kaon-V3 parity（2026-10-23 收功）
 
-**一句话现状**：我们已与 **eager 模式** vLLM（BI=1）在 p02 上 **L0–L29 全部 30 层逐位一致**；但端到端判据
-`oracle_clean`（服务实例）跑的是 **compile 模式**，vLLM eager 与 compile 自身就差 |Δlp| 1.57（§58）→ 端到端没动
-（flip 16.56% / |Δlp| 1.1994，FLOOR 0.83% / 0.0276）。**下一步换靶子：对齐 compile 模式。**
+**一句话现状**：p02 上 **L0–L29 全部 30 层逐位 0**（eager vLLM，BI=1），**已亲自复验**
+（`CUBLASLT_WORKSPACE_SIZE=1 kaon3_probe … --hidden-all --hidden-cmp` → 30 层全 `0.000e0`）。
+端到端判据 `oracle_clean` 是 **compile** 服务，与我们 eager 口径差 |Δlp| 1.20 / flip 16.56%（FLOOR 0.83% / 0.0276）。
 
-**⚠️ 待用户决策（下次开场先问）**
-1. 目标 = compile 模式（服务 / 生产实际口径）？我建议是。
-2. compile 是 BI=1（现 oracle_clean）还是 BI=0（生产不开 BI，memory 2026-10-22）？
+**⚠️ 今天最大的事故（务必先看 `docs/pitfalls.md` 首条）**：逐层对拍**必须**带 `CUBLASLT_WORKSPACE_SIZE=1`，
+不设会让 router 的 bf16 GEMM 选错 algo → L2 出现 1.1e-4、L3 放大 133 倍，**看起来像真的发散**。
+今天据此推的"L2 起发散""§57 不可复现"等结论**全部作废**（L0–L29 一直是全 0）。
 
-**下一步（定了目标后按序）**
-1. 导出 inductor 生成的融合 kernel 源码（`TORCH_COMPILE_DEBUG=1` / vLLM compile debug dump），看 RMSNorm / 路由 / softmax
-   在 compile 下实际是什么（预期 RMSNorm 走 `forward_native`：先舍入 x·inv 到 bf16 再乘 w，且不看 BI）。
-2. compile 模式逐层参照：`kaon3_oracle_server.sh <N>`（截前 N 层）+ 探针 `--layers N` 二分发散层；forward hook 在 compile 下不可用。
-3. 验证复现：`/w/tmp/eager_vs_srv.py <M> <eager 0|1> p02`（远端临时脚本；compile 版应 0/23、0.0000）。
+**已完成（本会话）**
+- 确认 vLLM 默认 = compile（`enforce_eager=False`；`vllm/config/vllm.py:1379`），compile 逐位确定（同配置两次 0.0000）。
+- compile 与 eager 是**两套实现**：norm（`rsqrt(mean+eps)` vs BI Triton SASS）、gelu（`libdevice.tanh` 融合 vs custom op）。
+- gelu：我们的实现在 **compile 口径下逐位正确**（0/50688）。
+- `RMSNORM_MODE` 开关（0=compile / 1=eager BI，**默认已改回 1**）；`NORM_FUSE_QUANT`（默认关）；
+  router 预处理 fp32 融合 `rmsnorm_scale2`（默认开）。
+- 导出 inductor 产物（远端 `/w/tmp/ind`）：`computation_graph.py` + 36 个 Triton kernel；
+  逐行解析了 MoE 融合 kernel 的 12 个入参 → 模型参数对应表。
 
-**已完成（本会话，均有逐位证据，`test/kaon3/2026-10-23/D-16-REBASE.md` §51–§58）**
-- bf16 GEMM（router）：BI 下 = cuBLASLt + 禁 OUTPUT_TYPE 归约 + `CUBLASLT_WORKSPACE_SIZE=1`；router 改走 `forward_bf16`→cast。
-- RMSNorm（`norm.cu`，**全模型生效**）：按 vLLM Triton **SASS** 复刻（`rcp(sqrt(fma(rcp(n),ss,eps)))`、线程内 1,0,2..7 fma、Triton 归约结构）。
-- attention：v6 指数自然域（`ATTN_MODE` 默认 2）；D=512 慢路径未归一化累加 + `acc·rcp(L)`。
-- Gemma4 路由权重：vLLM Triton 融合版口径（`moe.cu::route_softmax_kernel`）。
-- fp8 `2816×8192`：`id=35 tile=15 splitk=3 red=2 stages=18 swz=1`（L5/L11 两份数据均 0）。
-- 撤回 `SMALL_M_LT`（上一轮诊断错误）。
+**下一步**
+1. **换靶 compile**：端到端判据是 compile 服务，需要 compile 口径的逐层参照；但 compile 下 forward hook 不触发，
+   `--hidden-all` 这条路走不通（四种抓中间层的方法都试过，见 `docs/loops/kaon3-gelu.md` 第 2 轮）。
+   可行路线只剩「整跑端到端 + 单点 A/B」。
+2. compile 与 eager 的**已知差异点**（已确认）：norm、gelu。逐项改成 compile 口径后看端到端 flip 是否下降。
+3. 未做：paged 慢路径同步改；norm/attn/route 改动的两卡性能门禁；Qwen 线回归。
 
-**运行口径**：探针对 BI oracle 需 `PROBE_ENV="CUBLASLT_WORKSPACE_SIZE=1"`；读 vLLM 代码读镜像副本 `/data/ref/vllm-img-v0.28.0-pr455/`
-（`/data/ref/vllm` 已切 v0.28.0rc2，差 87 文件）；Triton 中间产物：`TRITON_CACHE_DIR` + `triton/backends/nvidia/bin/nvdisasm`。
-**未做**：paged 慢路径（`gqa_paged_kernel`）同步改；norm/attn/route 改动的两卡性能门禁；Qwen 线回归。
-**仪器**：`rmsnorm_calib` / `bf16_algo_calib` / `fp8_algo_calib`（含 `SHAPE_NTH` 数据）；`kaon3_vllm_sublayer.py`（`SUB_LAYER`）；
-远端 `/w/tmp/subcmp.py <ref> <ours> <L>`。容器内持久路径只有 `/w`（宿主 `/hf_data/yaochen`）。
+**运行口径（照抄，别凭记忆）**：逐层对拍 `PROBE_ENV="CUBLASLT_WORKSPACE_SIZE=1"`；
+读 vLLM 代码读镜像副本 `/data/ref/vllm-img-v0.28.0-pr455/`。
 
 ### Kaon-V3（5090，阶段 1–2 完成，阶段 3 接近打通）
 

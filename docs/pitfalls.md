@@ -1,3 +1,22 @@
+## 2026-10-23 漏设 `CUBLASLT_WORKSPACE_SIZE=1`，逐层对拍测出一整套"假发散"（L2 1.1e-4、L3 ×133）
+
+- **现象**：`kaon3_probe --hidden-all --hidden-cmp <eager 参照>` 报 L0/L1 逐位 0、L2 = 1.1e-4、L3 放大 **133 倍**、
+  L29 到 4.4e-1。跨多个 commit 复现、参照重抓两次也一致，看起来像真的实现 bug。
+  据此推了一整天"差异在 L2/L3""§57 的全 0 声明不可复现""交接区记录有错"等结论——**全部是假的**。
+- **根因**：vLLM 的 BI（batch invariant）在 sm_120 上不改 Triton，只改 **cuBLAS 配置**，其中一条是
+  `CUBLASLT_WORKSPACE_SIZE=1`（workspace 限 1 KiB → 改变 split-K 归约序）。我们的 `run_lt_default` 归一化掩码
+  与 workspace 上限都**读这个环境变量**来对齐。不设它 → router 的 bf16 GEMM 选到别的 algo → L2 起出现 1-ulp 差，
+  再被 L3 的注意力放大 133 倍。**数据看起来完全像真的发散**（连"多次运行确定性"都成立）。
+- **解法**：设上即归零。`CUBLASLT_WORKSPACE_SIZE=1 RMSNORM_MODE=1 ./target/release/kaon3_probe … --hidden-cmp`
+  → **L0–L29 全部 30 层 `0.000e0`**（2026-10-23 亲自复验）。
+- **避免**：
+  1. 任何对 **BI oracle** 的逐层/逐子模块对拍，**必须先带 `CUBLASLT_WORKSPACE_SIZE=1`**；它已写在
+     `docs/loops/kaon3-parity.md` 的"运行口径"里，跑之前照抄，不要凭记忆敲命令。
+  2. **看到"发散"先自证环境**：同一命令换一份参照、换一个 commit 都复现，**不等于**结论正确——两者可能共享同一个
+     错误环境。正确的自证是：拿一个**已知应当为 0** 的点（L0）去跑；L0 不为 0 就是环境问题，不是实现问题。
+  3. `D-16-REBASE.md` 的 §44（L3 ×133）是 **GEMM 对齐之前**的中间状态，§52/§53 之后已归零；
+     引用该文件时必须看**最后**一节，不要拿中间节的表当最终结论。
+
 ## 2026-10-23 逐层全部逐位一致，端到端却一点没动——参照是 eager，判据是 compile
 
 - **现象**：p02 对 vLLM 30 层隐状态逐位 0，30 用例端到端 flip 16.56% / |Δlp| 1.20，和修复前几乎一样。

@@ -459,7 +459,7 @@ fn rmsnorm_noweight_into(
 /// 与 `dinfer_kernels` 内部的 `norm_mode()` 读同一个 `RMSNORM_MODE`，两边必须一致。
 fn norm_mode() -> i32 {
     static V: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("RMSNORM_MODE").ok().and_then(|s| s.trim().parse::<i32>().ok()).unwrap_or(0))
+    *V.get_or_init(|| std::env::var("RMSNORM_MODE").ok().and_then(|s| s.trim().parse::<i32>().ok()).unwrap_or(1))
 }
 
 /// norm 与 fp8 量化是否融合（`NORM_FUSE_QUANT=1` 开启）。**默认关**：

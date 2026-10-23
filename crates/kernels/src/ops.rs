@@ -2238,7 +2238,7 @@ pub fn gqa_prefill_win_bf16<
 /// `rcp(sqrt(fma(rcp(n), ss, eps)))`（SASS 复刻）。定位见 `docs/loops/kaon3-parity.md` 第 19 轮。
 fn norm_mode() -> i32 {
     static V: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("RMSNORM_MODE").ok().and_then(|s| s.trim().parse::<i32>().ok()).unwrap_or(0))
+    *V.get_or_init(|| std::env::var("RMSNORM_MODE").ok().and_then(|s| s.trim().parse::<i32>().ok()).unwrap_or(1))
 }
 
 fn attn_mode_ab() -> i32 {
