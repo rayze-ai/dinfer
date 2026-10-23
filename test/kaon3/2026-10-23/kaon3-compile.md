@@ -691,3 +691,8 @@ OURS POOLED cases=30 rows=538 decisive=483 flips=68 flip_pct=14.08 mean_common_d
    vLLM v1 用 `multiprocessing` spawn 起 EngineCore，子进程会 `runpy.run_path(main_path)` **重新执行主模块**。
    没有保护 → 子进程也去 `LLM(...)` → `RuntimeError`（堆栈起点是 `spawn.py:297 _fixup_main_from_path`）。
    看到这个堆栈就是缺保护，不是 vLLM 装坏了。
+
+5. **`LLM(...)` 的模型在 EngineCore **子进程**里，主进程 hook 够不到**：
+   `llm.llm_engine.model_executor` → `AttributeError: 'LLMEngine' object has no attribute 'model_executor'`。
+   必须 `VLLM_ENABLE_V1_MULTIPROCESSING=0` 走单进程（`kaon3_vllm_hidden.py` 早就这么做了，我没照抄）。
+   同时 `VLLM_BATCH_INVARIANT=1` 要与 oracle 口径一致，否则抓到的是 BI=0 的数值。

@@ -10,6 +10,10 @@ import os, torch, sys
 def main():
     M=os.environ["M"]; ids=[int(x) for x in os.environ["IDS"].split()]
     print("start", flush=True)
+    # 单进程模式：`LLM` 的模型在 EngineCore 子进程里，主进程 patch/hook 都够不到
+    # （实测 `AttributeError: 'LLMEngine' object has no attribute 'model_executor'`）。
+    os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    os.environ.setdefault("VLLM_BATCH_INVARIANT", "1")
     from vllm import LLM, SamplingParams
     llm=LLM(model=M, enforce_eager=True, tensor_parallel_size=1, gpu_memory_utilization=0.85,
             dtype="auto", max_model_len=4096, enable_prefix_caching=False, block_size=32, max_num_seqs=1)
