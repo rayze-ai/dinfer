@@ -6,46 +6,37 @@
 > 更新 2026-10-21 23:0x +0800。**本区按模型分节，每节只写该模型自己的交接内容；不要覆盖别人的分节。**
 
 
-### Kaon-V3 parity（2026-10-23 晚；子 loop D 第 17 轮，**fp8 GEMM 已逐位对齐**）
+### Kaon-V3 parity（2026-10-23 深夜收工；子 loop D 第 17 轮）
 
-**本轮解决的核心问题：fp8 GEMM 的 1-ulp 累加序差异。**
-- **vLLM 真实走 cuBLAS**（FlashInfer `CublasFp8GemmRunner`；`auto`/`cublas` backend 都是 0/196608，
-  `cudnn` 8、`cutlass` 7）。
-- 我们自写 kernel = **8/196608**（1-ulp 级，max 1.25e-1 = 一个 bf16 ulp）；**cuBLASLt 启发式
-  algo[0]/[1] 也是 8，algo[2] = 0/196608**（`test/kaon3/2026-10-23/D-16-REBASE.md` §26–29）。
-- 已接进 `QLinear::Fp8`：默认 `quant_fp8` + `forward_fp8_cublaslt`（algo 固定 2，附来历注释）；
-  `FP8_SELF_KERNEL=1` 切回自写 kernel 做 A/B。新增 `Gemm::quant_fp8` / `forward_fp8_cublaslt`
-  / `forward_fp8_cublaslt_algo` / `fp8_cublaslt_algo_count`。
+**一句话现状**：所有已定位的差异都是同一个形状——**同一份输入 + 不同 cuBLASLt algo → 位差**，
+没有发现任何语义/口径错误。fp8 已完全对齐；bf16 的修复**尚未生效**（见下方 ⚠️）。
 
-**两条旧结论已作废（重要，别再引用）**：
-1. ~~"逐位复刻 vLLM 不可达（连它自己都复现不出自己的前向 7/196608）"~~ —— 那 7 处是
-   **flashinfer vs cutlass** 的差，被误读成自复现失败。实测：同入参重复 6 次 0、重调 vs 前向 0、
-   **跨进程 0**。目标良定义。
-2. ~~"我们另有一个放大器（L2 起是 vLLM 自身变体的 2–3 倍）"~~ —— 量化放大倍数 ≈ q/δ 且随 δ 饱和，
-   两边起点差 540 倍时不可比。同分母下我们 10/196608 vs 参照 7/196608，同量级。
+**已完成（有断言/字节证据）**
+- **fp8 GEMM：6/6 形状与 vLLM 逐位一致**（`crates/kernels/tests/fp8_algo_calib.rs` 守护）。
+  真实后端是 **cuBLAS**（flashinfer `CublasFp8GemmRunner`；`cublas`=0、`cudnn`=8、`cutlass`=7 /196608）。
+  正确配置 `id=67 tile=13 splitk=1`（`2816×8192` 需 `id=35 tile=13 splitk=3`）。
+- 逐层（整跑）：**L-1 / L0 / L1 完全逐位 0**；L2 1.1e-4（仅 token 1）；L3 1.5e-2；L29 1.6e-1。
+- 单层隔离：L3、L2 均 **23/24 token 恰好 0**，差异只集中在个别 token。
 
-**已验证的对齐（都有字节/运行时证据）**：
-- 三处口径默认与 vLLM 对齐：gelu 两次 bf16 舍入 / MoE 合并 bf16 / router 舍 bf16
-  （精确版开关 `GELU_F32` / `MOE_COMBINE_F32` / `ROUTER_F32`，默认关）。**L11 MoE 段逐位 0**。
-- 权重 L0/L7/L9/L10/L11 的 q/k/v 与 vLLM **逐字节 0**；fp8 KV/Q 量化口径完全一致。
-- 逐层：L-1 **逐位 0**、L0 仅 `q_norm`12+`dense`31 处 1-ulp、L1 1.3e-6；L2–L29 的 1e-2→2.9e-1
-  是 fp8 KV 放大器的饱和区（双方共有），非缺陷。
+**⚠️ 下一步就在这里（bf16 小 M 未生效）**
+`bf16_algo_calib` 证明 router 形状 `(24,128,2816)` 默认 algo 差 **768/3072**，正确配置
+`id=21 tile=11 splitk=8`。但我加的 `SMALL_M_LT` 开关**没生效**：`router_logits` 仍差 4/3072。
+原因是 `plan_for` 先命中 `plans.get(&Key::bf16(m,n,k,bias))`（autotune 已为 m=24 存了 SmallM 计划），
+压根走不到后面的 small_m 兜底分支。**下次先改这一处的优先级，或直接在 autotune 侧不生成 small_m 计划。**
 
-**下一步**：
-1. 端到端 verify（改后）读数 —— 正在跑，看翻转率从 14.49% 降到多少。
-2. **判据 FLOOR 需用户裁定**：仓里有三个互相矛盾的数（0.83% / 1.51% / 18%），0.83% 无落盘证据。
-3. cuBLASLt 的**性能**：decode 小 M 未必比自写 kernel 快，需 bench 后决定是否按 M 分流。
+**教训（本轮 4 次踩同类）**：改一条路径前必须确认目标调用真的走那条路径
+（`plan_for` 分派 / cache key / dtype）；**端到端两次读数逐位相同 = 改动没生效的指纹**，不是"影响小"。
 
-**⚠️ 我的错误模式（用户 2026-10-23 严重关切，本轮又犯一次）**：① 把自己的残留进程说成"机器被占"；
-② 改脚本没 `sync` 就跑；③ 单次运行直接下结论；④ **改坏 `.cu`/大段 Rust 不先自检结构就远端编译**
-（本轮 3 次，每次白费约 6 分钟）。规则：改完先 `grep -n '<符号>\|^}'` + 括号配平，
-脚本先 `python3 -c ast.parse` / `bash -n`。
+**三次端到端（同分母 rows=538 decisive=483）**：仅 fp8 13.04% / 1.2847；+bf16(未生效) 13.04%；
++小M(未生效) 13.04%。FLOOR 0.83% / 0.0276 已确认 = `oracle_clean_b` vs `oracle_clean` 实测值。
 
-**仪器**：`kaon3_probe --hidden-all / --layer-iso / SUB_LAYER=<n>|all / --dump-weights`；
-参照侧 `scripts/dev/kaon3_vllm_{hidden,sublayer,logits,weights,moe_experts,router_all}.py`；
-`FORCE_KERNEL=cutlass|flashinfer`；本轮新增 `kaon3_vllm_fp8det.py`（抓真实入参 + 确定性）、
-`kaon3_d17_cublas.py`（cuBLAS 验证）、`kaon3_d17_tactic.py`（backend 枚举）、`kaon3_d17_autotune.py`。
-**容器内持久路径只有 `/w`**（宿主 `/hf_data/yaochen`）；`/w/hid` 与容器的 `/root/.cache` 退出即丢。
+**判据**：用户 2026-10-23 明确——**目标是逐位相同，不是"容忍多少"**。
+
+**仪器**：`kaon3_probe --hidden-all / --layer-iso / SUB_LAYER=<n>`；
+`scripts/dev/kaon3_vllm_{hidden,sublayer}.py`、`kaon3_d17_{calib,shapes,cublas,router,fp8det}.py`；
+测试 `fp8_algo_calib` / `bf16_algo_calib` / `fp8_flashinfer_parity`。
+**容器内持久路径只有 `/w`**（宿主 `/hf_data/yaochen`），`/w/hid` 与容器 `/root/.cache` 退出即丢。
+详细记录：`test/kaon3/2026-10-23/D-16-REBASE.md` §1–50。
 
 ### Kaon-V3（5090，阶段 1–2 完成，阶段 3 接近打通）
 
