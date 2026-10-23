@@ -1,0 +1,89 @@
+# loop 规格：kaon3-gelu
+
+- 状态：**进行中**
+- 创建：2026-10-23
+- 验证脚本：`scripts/verify/kaon3-gelu.sh`
+- 迭代记录：`test/kaon3/2026-10-23/kaon3-gelu.md`
+- 上游：`docs/loops/kaon3-parity.md`（子 loop D，第 23–24 轮已确认 norm / router 口径）
+
+## 目标
+
+让 `models/kaon3` 的 **gelu_tanh·mul** 在 **vLLM compile 口径**下逐位一致（0/67584 元素不同），
+并把 L1 截层的 `|Δlp|(实际 token)` 从 1.5221 压下去。
+
+## 背景（第 23/24 轮已确认的事实）
+
+- vLLM 默认走 **compile**（`enforce_eager=False`），compile 与 eager 的 norm 是**两条实现**；
+  我们要对齐的是 compile（判据 `oracle_clean` 来自 compile 服务）。
+- L0 的 norm / residual / 无权重 norm / fp8 量化 / router 预处理**已逐条核对**，只剩 gelu 与 MoE 内部未查。
+- 现有 `activation.cu::gelu_tanh_mul_kernel` 有 `mode` 参数（0=全 f32 一次舍入，1=gelu 先舍 bf16 再乘 up），
+  这一套是**按 eager 的 `act_and_mul_kernel` 定案的**，compile 口径未验证过。
+
+## 环境
+
+- 机器：5090（`scripts/dev/remote_5090.sh`，ControlMaster，断了要新 token 向用户要）
+- 跑 GPU：`GPU=0 scripts/dev/remote_5090.sh ctr '<cmd>'`（cwd=`/w/dinfer`；GPU 1 = oracle，7 = 基线，禁用）
+- 模型：`/hf_data/hub/models--kaon-release--Kaon-V3-nvpf4-mixed/snapshots/e268bef12555d299ed7ca02ade5e77f239f27478`
+- oracle：compile 模式、截 1 层已抓在 `/w/tmp/lay/L1.json`（由 `kaon3_oracle_server.sh 1` + `kaon3_oracle.sh` 产生）
+- 编译：`GPU=0 scripts/dev/remote_5090.sh ctr 'cd /w/dinfer && CUDA_ARCHS=120 cargo build --release -p dinfer-kaon3'`
+- 重置到干净状态：远端二进制重编即可；oracle 容器 `docker rm -f kaon-oracle` 再 `scripts/dev/kaon3_oracle_server.sh 1`
+
+## 观察方法
+
+| 看什么 | 在哪里 | 命令 |
+|---|---|---|
+| 探针 L1 截层 vs compile oracle | 探针 stdout | `./target/release/kaon3_probe $M --forward --layers 1 --oracle /w/tmp/lay/L1.json $(cat test/kaon3/oracle_clean/p02.ids)` |
+| kernel 级逐元素差 | `/w/tmp/*.bin` + Python 比对 | `GPU=4 ... ctr 'cd /w/tmp && python3 gelu_cmp.py'` |
+| inductor 生成代码 | `/hf_data/yaochen/tmp/ind/inductor/*/` | `grep -n 'tanh' <file>` |
+| FX 图 | `.../backbone/computation_graph.py` | `grep -n 'gelu' ...` |
+
+## 停止条件（可机器判定，`scripts/verify/kaon3-gelu.sh`）
+
+1. **kernel 级**：我们的 gelu 输出 vs compile 参考（`torch.compile(F.gelu(tanh)·up)`）**逐位相同**（0/67584）。
+2. **截层级**：`kaon3_probe --layers 1 --oracle /w/tmp/lay/L1.json` 的「实际 token |Δlp| 均值」**≤ 0.30**
+   （现状 1.5221；期望 norm+router+gelu 全部对齐后接近 0）。
+
+两条都满足 exit 0。
+
+## 上限
+
+8 轮。每轮只改一个假设（tanh 实现 / 常数 / 舍入次数 / 乘序）。到上限仍不满足就停下，
+把已排除的假设写进本文件"卡点"区交给用户。
+
+## 假设清单（按怀疑度排序）
+
+1. **`tanhf` 的实现**：我们调 CUDA 的 `tanhf`（可能是 `htanh` 近似或 libdevice 精确版），
+   inductor 生成的是 `libdevice.tanh`。两者在 sm_120 上可能差 ulp。
+2. **常数精度**：`0.7978845608028654f` 与 inductor 里的常量是否同一 f32 值（写死的 double→float 舍入）。
+3. **`x³` 的算法**：我们是 `x*x*x`，inductor 生成的是 `tmp4=x*x; tmp5=tmp4*x`（同序，但要确认）。
+4. **舍入次数**：compile 下 gelu 与 `* up` 是否融成一条 fp32 链（像 router 那样），还是中间落一次 bf16。
+5. **`torch._C._nn.gelu` 的 ATen 实现**：`approximate='tanh'` 在 ATen 里是 `0.5*x*(1+erf(x/√2))` 的 tanh 近似式，
+   注意其内部可能用 `opmath_t`（f32）但 `tanh` 走 `std::tanh`。
+
+## 卡点
+
+（未开始）
+
+## 第 1 轮（2026-10-23）
+
+**假设 1–5 一次性检验**（kernel 级 `[24,2112]`，`/w/tmp/gelu_cmp.py`）：
+
+| 对比 | 不同元素 | max |
+|---|---|---|
+| 我们的 `gelu_tanh_mul`(mode 0) vs **compile 参考** | **0 / 50688** | 0.0 |
+| 我们的 vs eager（`F.gelu(tanh)*u`） | 12670 / 50688 | 3.125e-2 |
+| compile vs eager 参考自身 | 12670 | — |
+
+→ **gelu 在 compile 口径下已经逐位正确**（现有 `mode=0`：全 f32、`tanhf`、最后舍一次）。
+且证实 gelu 也是 compile≠eager 的一个点（12670 个元素差），只是我们已经站在 compile 这边。
+
+**结论**：gelu 不是残余差异来源。条件 1 过、条件 2 未过（1.5221）。
+**下一假设**：MoE 支路内部（专家 GEMM / combine 加权 / `moe_forward` 的 per-expert scale 折法），
+以及 attention 的 `o_proj` 段。见下方新增假设 6–8。
+
+## 新增假设（第 2 轮起）
+
+6. **`moe_forward` 的 combine 口径**：`moe.cu::moe_combine` 有 `mode` 参数（vLLM cutlass_moe vs 旧口径），
+   要确认 compile 下走哪条（默认值是否对）。
+7. **专家 gate/up/down 的 GEMM 算法**：NVFP4 路径，compile 下是否仍走同一个（custom op 应是同一个）。
+8. **attention 输出 → `o_proj`**：`unified_attention_with_output` 是 custom op，但 `o_proj` 前的输入量化点要对。
