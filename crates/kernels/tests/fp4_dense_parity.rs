@@ -57,6 +57,7 @@ fn fp4_dense_matches_cutlass() {
     // **首选路径**：直接用参照的 `a_q` / `a_s`（swizzled），把我们自己的量化整个排除。
     // 这样测的就纯粹是 GEMM 本身（布局 + 累加 + 乘子）。
     let use_ref_aq = std::env::var("FP4_USE_REF_AQ").map(|v| v != "0").unwrap_or(true);
+    println!("FP4_DENSE 路径: {}", if use_ref_aq { "参照 a_q/a_s + swizzled 读" } else { "自己量化 + 自然读" });
     let mut r = if use_ref_aq {
         let aqb = std::fs::read(format!("{dir}/a_q.bin")).expect("a_q");
         let asb = std::fs::read(format!("{dir}/a_s.bin")).expect("a_s");
@@ -66,8 +67,9 @@ fn fp4_dense_matches_cutlass() {
     } else {
         gemm.forward_nvfp4(&da, a_gscale, &dw, &ds, alpha, &mut dout, m, n, k)
     };
+
     if let Err(e) = r {
-        println!("FP4_DENSE forward_nvfp4 直接喂 swizzled scale 失败（预期：长度/布局不符）: {e}");
+        println!("FP4_DENSE 第一次失败，走回退分支: {e}");
         // 退一步：补零到 n*(k/16) 长度再跑，只为拿到一个基线差异
         let mut pad = s.clone();
         pad.resize(n * (k / 16), 0);

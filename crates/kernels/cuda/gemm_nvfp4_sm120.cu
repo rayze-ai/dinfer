@@ -10,6 +10,7 @@
 //   2. 探针 A 也是预量化字节；这里 A 是 bf16，量化融进载入。
 // 语义细节见 docs/loops/kaon-v3.md「阶段 1/2」：每组 8 个 nibble 在 A/B 里沿 k 连续，可单条 u32 读。
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cuda_runtime.h>
 #include <cuda_fp4.h>
@@ -151,6 +152,8 @@ __global__ void __launch_bounds__(256) gemm_nvfp4_kernel(const uint8_t* __restri
       //       col = kb*NB16 + q;  kO = col / 4, k4 = col % 4
       //       线性下标 = ((((g*(Mp/128) + a4) * (Kp/4) + kO) * 32 + r32) * 4 + k4)
       if (swz) {
+        // 正确的维序（用随机数据枚举验证）：平铺索引 = ((((g*(Kp/4) + kO)*32 + r32)*4 + a4)*4 + k4)
+        // 其中 row → g = row/128, r32 = row%32, a4 = (row%128)/32；col → kO = col/4, k4 = col%4
         const int Kp = ((K / 16) + 3) / 4 * 4;
         const int Mp = (M + 127) / 128 * 128;
         const long gp = (long)(Mp / 128);
@@ -158,20 +161,21 @@ __global__ void __launch_bounds__(256) gemm_nvfp4_kernel(const uint8_t* __restri
           const int r = i / NQ4, q = i % NQ4;
           const int row = m_blk + r;
           if (row >= M) { sfa[r * NQ4 + q] = 0x38383838u; continue; }
-          const int col = kb * NB16 + q * 4;
-          const int g = row / 128, rIn = row % 128, a4 = rIn / 32, r32 = rIn % 32;
-          const int kO = col / 4, k4 = col % 4;
-          const long base = ((((long)g * gp) * (Kp / 4) + kO) * 32 + r32) * 4 + k4;
+          const int g = row / 128, rIn = row % 128, r32 = rIn % 32, a4 = rIn / 32;
           uint32_t v = 0;
           for (int t = 0; t < 4; ++t) {
-            const int c2 = col + t;
-            const int kO2 = c2 / 4, k42 = c2 % 4;
-            const long off = ((((long)g * gp) * (Kp / 4) + kO2) * 32 + r32) * 4 + k42;
+            const int col = kb * NB16 + q * 4 + t;
+            const int kO = col / 4, k4 = col % 4;
+            const long off = ((((long)g * (Kp / 4) + kO) * 32 + r32) * 4 + a4) * 4 + k4;
             v |= (uint32_t)Sc[off] << (8 * t);
           }
-          (void)base;
           sfa[r * NQ4 + q] = v;
         }
+        __syncthreads();
+        if (tid == 0 && kb == 0) {
+          printf("[swz] swz=%d sfa[0..4]=%08x %08x %08x %08x\n", swz, sfa[0], sfa[1], sfa[2], sfa[3]);
+        }
+        __syncthreads();
       } else {
         for (int i = tid; i < BM * NQ4; i += blockDim.x) {
           const int r = i / NQ4, q = i % NQ4;
@@ -268,6 +272,7 @@ extern "C" {
 extern "C" int gemm_nvfp4_prequant_bf16(const void* aq, const void* as, const void* packed, const void* scale,
                                         float global, void* out, int64_t m, int64_t n, int64_t k, int swz,
                                         cudaStream_t stream) {
+  fprintf(stderr, "[nvfp4] prequant ENTER m=%lld n=%lld k=%lld swz=%d\n", (long long)m, (long long)n, (long long)k, swz);
   if (m < 0 || n < 0 || k <= 0) return static_cast<int>(cudaErrorInvalidValue);
   if (m == 0 || n == 0) return 0;
   if (k % 64 != 0) return static_cast<int>(cudaErrorInvalidValue);

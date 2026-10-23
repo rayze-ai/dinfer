@@ -11,7 +11,8 @@ import os, numpy as np, torch
 def probe_scale_layout():
     from vllm import _custom_ops as ops
     import torch
-    m, n, k = 1, 128, 64
+    # 形状覆盖真实数据的 K 维：k=2816 时 kO 维 = 44，k=64 时只有 1（掩盖错误）
+    m, n, k = 1, 128, 2816
     # q: 第 0 块（前 16 个元素 = 前 8 字节）全 1.0(0x22)，其余 0
     aq = torch.zeros((m, k // 2), dtype=torch.uint8, device='cuda')
     aq[:, :8] = 0x22
@@ -23,9 +24,12 @@ def probe_scale_layout():
             pass
         return None
     # e4m3: 1.0=0x38, 2.0=0x40, 4.0=0x48, 8.0=0x50
-    nat = np.array([[0x38, 0x40, 0x48, 0x50]], dtype=np.uint8)   # [m=1, k/16=4]
-    padded = np.zeros((128, 4), dtype=np.uint8); padded[:1, :] = nat
-    sw = padded.reshape(1, 1, 4, 32, 1, 4).transpose(0, 1, 4, 3, 2, 5).reshape(128, 4)
+    Kb = k // 16            # 176
+    nat = np.full((1, Kb), 0x38, dtype=np.uint8)   # 全部 sf = 1.0
+    nat[0, 0] = 0x38; nat[0, 1] = 0x40; nat[0, 2] = 0x48; nat[0, 3] = 0x50  # 1,2,4,8
+    Kp = ((Kb + 3) // 4) * 4
+    padded = np.zeros((128, Kp), dtype=np.uint8); padded[:1, :] = nat
+    sw = padded.reshape(1, 128 // 128, 4, 32, Kp // 4, 4).transpose(0, 1, 4, 3, 2, 5).reshape(128, Kp)
     asq = torch.from_numpy(sw.copy()).cuda().view(torch.float8_e4m3fn)
     wsf = torch.full((n, k // 16), 0x38, dtype=torch.uint8, device='cuda').view(torch.float8_e4m3fn)
     for alpha in (1.0,):
@@ -34,8 +38,17 @@ def probe_scale_layout():
                                         torch.bfloat16)
         v = out[0, 0].float().item()
         got = v / (16 * alpha)
-        print(f"LAYOUT alpha={alpha} y={v:.4f}  y/(16a)={got:.4f}  "
-              f"(1.0→块0取sf[0]=1; 2/4/8→取到了别的块)", flush=True)
+        print(f"LAYOUT alpha={alpha} k=2816 y={v:.4f}  y/(16a)={got:.4f}  "
+              f"(只让块 0 非零、sf=1.0；若为 1.0 则块 0 的 sf 读对了)", flush=True)
+        # 再看：让第 1/2/3 块也非零，分别验证它们的 sf 位置
+        for bi in (1, 2, 3):
+            aq2 = torch.zeros((m, k // 2), dtype=torch.uint8, device='cuda')
+            aq2[:, bi * 8:(bi + 1) * 8] = 0x22
+            out2 = ops.cutlass_scaled_fp4_mm(aq2, wq, asq, wsf,
+                                             torch.tensor([1.0], dtype=torch.float32, device='cuda'),
+                                             torch.bfloat16)
+            g2 = out2[0, 0].float().item() / 16
+            print(f"LAYOUT block{bi} -> sf={g2:.4f}  (期望 {[1.0,2.0,4.0,8.0][bi]})", flush=True)
 
 def main():
     os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING","0")
