@@ -365,3 +365,25 @@ implementation`）。语义 = `forward_native`：fp32 累加 → `rsqrt(mean+eps
 第二遍再算 residual 的 rms；`tmp52 = out * (1.0/scale)`；`clamp(±448)`；`to(fp8)`。
 注意：**`x.to(weight.dtype)` 的 bf16 舍入在生成代码里被消掉了**（`tmp13.to(tl.float32)` 是空转），
 且 scale 用 **`1.0/scale` 再乘**（不是除以 scale）。这两点都要在 `norm.cu` / 量化侧逐条核对。
+
+**观察 5（根因，已数值确认）**：**compile 与 eager 的 RMSNorm 是两条不同实现**。
+- eager + BI=1 → `rms_norm_batch_invariant`（Triton `_rms_norm_kernel`：`tl.sqrt` 后 `1.0/rms`，fp32 乘 w）
+- compile → `torch.ops.vllm_ir.rms_norm`（`forward_native`：`rsqrt`，**先舍入 bf16 再乘 w**）
+
+同输入实测（`/w/tmp/norm_cmp2.py`）：
+
+| dim | max\|Δ\| | 不同元素 |
+|---|---|---|
+| 2816 | 6.25e-2 | 17838 / 67584 |
+| 256 (q/k_norm) | 6.25e-2 | 1670 / 6144 |
+| 128 | 3.125e-2 | 760 / 3072 |
+
+即 **1 个 bf16 ulp**，量级一致（x~3 时 ulp=2^-4=6.25e-2）。我们的 `norm.cu` 是按 eager BI 的 Triton SASS 复刻的
+→ 只对 eager 成立。compile 靶子需要另一套 norm。
+
+**观察 6（N=1 截层已发散）**：`kaon3_oracle_server.sh 1`（compile）+ 探针 `--layers 1` → top5 |Δlp| 0.0102；
+eager vs compile 单层（`evc2.py`，两个进程分别跑）→ `rows=23 flips=0 mean|dlp|=1.4892 max=29.31`。
+**差异在 L0 内，不需要 30 层二分。**
+
+**下一步**：在 `norm.cu` 加 compile 口径分支（`rsqrt` + 先舍入 bf16 再乘 w），由 `ArchProfile`/env 选；
+对拍 compile oracle（已起，`kaon3_oracle_server.sh <N>` 默认 BI=1 compile）。
