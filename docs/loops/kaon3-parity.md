@@ -391,3 +391,24 @@ eager vs compile 单层（`evc2.py`，两个进程分别跑）→ `rows=23 flips
 **观察 7（A/B 定责）**：在 compile 实例里把 `vllm.ir.ops.rms_norm` 换成 BI Triton 版（`PATCH_NORM=1 evc5.py`），
 N=1 与 eager 比：`mean|dlp| 1.4892 → 0.3741`，max `29.31 → 4.37`，flips 仍 0。
 → **RMSNorm 一条占差距的 ~75%**，但还有剩余（量化 / gelu / attention 等在 compile 里也是融合 fp32 链）。
+
+### 补充确认（2026-10-23 夜，第 19 轮续）
+
+**vLLM 默认口径 = compile**（源码确认，不是推测）：
+- `ModelConfig.enforce_eager = False`（`vllm/config/model.py:236`）——eager 才是显式开关；
+- `VllmConfig.__post_init__`：`mode is None` → `optimization_level > O0 ? VLLM_COMPILE : NONE`（`vllm/config/vllm.py:1379-1384`），默认 O2；
+- `enforce_eager=True` 才强制 `mode=NONE`（同文件 1289，日志 "Enforce eager set, disabling torch.compile and CUDAGraphs"）；
+- inductor 后端下 `custom_ops` 基模式默认补 `"none"`（同文件 1392-1399）→ 默认**全部算子进图融合**。
+
+**对照实验（必须先做）**：同配置两进程两卡各跑一次 compile → `mean|dlp| 0.0000 max 0.0000`。
+**compile 完全确定**，任何差异都可归因，不存在噪声底。
+
+**修正观察 7 的解释**（上一版把"换 BI norm 降 1.49→0.37"当成 norm 占 75%，需细化）：
+- `PATCH_NORM=bi` 有效，因为 BI 是 **Triton kernel**，dynamo 追不进去 → 算子留在图外，真换了实现；
+- `PATCH_NORM=f32/bf16`（纯 Python 实现）**结果与不 patch 逐位相同**（`1.4892 / max 29.3078@5` 完全一致）。
+  原因：Python 实现会被 trace 进图，inductor 编出来就是原口径；其中 bf16 版的 `x·inv→bf16` 那步
+  **被 inductor 消除**（生成代码里 `tmp14 = tmp13.to(tl.float32)` 空转）——这正好反证了观察 4。
+
+**结论（compile 下 norm 的真实口径）**：**全程 fp32，到 store 时才舍入一次**；`inv = rsqrt(mean + eps)`，
+`mean` 单独舍入（torch `.mean()`）。与 BI 版的**唯一差别就是 `inv`**：BI 是 `rcp(sqrt(fma(rcp(n), ss, eps)))`
+（SASS 复刻），IR 是 `rsqrt(ss/n + eps)`。我们 `norm.cu` 现有 epilogue 已经是「fp32 乘 w、store 舍入一次」，**不用改**。

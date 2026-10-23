@@ -57,6 +57,16 @@ __device__ __forceinline__ float rms_inv(float ss, int hidden, float eps) {
   return rcp_approx(sqrt_approx(__fmaf_rn(rcp_approx((float)hidden), ss, eps)));
 }
 
+// compile 口径（vLLM torch.compile 下**实际运行**的 norm，来源见 `docs/loops/kaon3-parity.md` 第 19 轮）：
+// 图里是 `torch.ops.vllm_ir.rms_norm`，语义 `vllm/ir/ops/layernorm.py:10`，被 inductor 融进相邻逐元素链后
+// **开方是 `libdevice.rsqrt`（= `rsqrtf`），且 `x·inv` 到 bf16 的那次舍入在生成代码里被消掉了**
+// （`tmp14 = tmp13.to(tl.float32)` 空转，w 也按 f32 乘）。与 BI 的 Triton 版（`rms_inv`，SASS 复刻）不是一条实现：
+// 同输入差 1 个 bf16 ulp（Kaon-V3 L0 第一个 norm 即发散）。
+// 归约顺序在 compile 口径下无区分力（256/512/1024/2048 分块与整树 `tl.sum` 实测全 0），所以复用同一套归约结构。
+__device__ __forceinline__ float rms_inv_compile(float ss, int hidden, float eps) {
+  return rsqrtf(__fdiv_rn(ss, (float)hidden) + eps);   // mean 单独舍入（torch `.mean()`），再 `rsqrt`
+}
+
 // rows：非空时输出第 r 行取 x 的第 rows[r] 行（gather + rmsnorm 融合，Q3 第 59 轮：lm_head 前只取每请求最后一行）。
 // 向量化版本（B4 第 1 轮）：每线程一次 16 B（8 × bf16）读 x / res / w，所有访存在归约前一次发出，
 // 不再按 hidden/BLOCK 轮次串行等待——decode T=1 时每 token 只有一个 block，串行访存链在 B300 这类高延迟 HBM 上
