@@ -63,11 +63,14 @@ fn fp4_dense_matches_cutlass() {
         let asb = std::fs::read(format!("{dir}/a_s.bin")).expect("a_s");
         let daq = st.htod_copy(aqb).expect("aq");
         let das = st.htod_copy(asb).expect("as");
-        gemm.forward_nvfp4_prequant(&daq, &das, &dw, &ds, alpha, &mut dout, m, n, k, true)
+        let swz = std::env::var("FP4_SWZ").map(|v| v != "0").unwrap_or(true);
+        println!("FP4_DENSE prequant swz={swz}");
+        gemm.forward_nvfp4_prequant(&daq, &das, &dw, &ds, alpha, &mut dout, m, n, k, swz)
     } else {
         gemm.forward_nvfp4(&da, a_gscale, &dw, &ds, alpha, &mut dout, m, n, k)
     };
 
+    println!("FP4_DENSE prequant 返回: {:?}", r.is_ok());
     if let Err(e) = r {
         println!("FP4_DENSE 第一次失败，走回退分支: {e}");
         // 退一步：补零到 n*(k/16) 长度再跑，只为拿到一个基线差异

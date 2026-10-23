@@ -227,6 +227,9 @@ __global__ void __launch_bounds__(256) gemm_nvfp4_kernel(const uint8_t* __restri
       // scale 的线程→行映射（探针实测，见 loop 文档）：A 看 t%2 选高/低 8 行，B 看 t/4
       const int sam = (8 * (lane & 1) + (lane >> 2)) & 15;
       const uint32_t sa = sfa[(mrow + sam) * NQ4 + b];
+      if (tid == 0 && kb == 0 && b == 0 && swz) {
+        printf("[use] swz=%d sa=%08x sfa[0]=%08x sfa[1]=%08x\n", swz, sa, sfa[0], sfa[1]);
+      }
       const uint32_t sb0 = sfb[(ncol + brow) * NQ4 + b];
       const uint32_t sb1 = sfb[(ncol + 8 + brow) * NQ4 + b];
       mma_fp4(a, b0, sa, sb0, acc);
