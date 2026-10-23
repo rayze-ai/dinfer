@@ -718,3 +718,16 @@ x.bin  y.bin
    `llm.llm_engine.model_executor` 直接 `AttributeError`。
 
 **下一步**：用同一份 `x` 跑我们的专家路径（routing + 128 专家 + combine），与 `y` 逐位比。
+
+## 第 7 轮数据齐了
+
+`/w/tmp/moe1/`（p02，24 token，layer 0）：
+
+| 文件 | 内容 | 形状 |
+|---|---|---|
+| `router_x.bin` | router 的输入（pre_ff_norm_2 输出） | `[24, 2816]` bf16 |
+| `router_y.bin` | **router logits**（f32，vLLM 口径） | `[24, 128]` |
+| `x.bin` | MoE experts 的输入 | `[24, 2816]` bf16 |
+| `y.bin` | **MoE 输出**（combine 之后） | `[24, 2816]` bf16 |
+
+有这四份就能把「router → top-k → 8 专家 → combine」整段逐位复算，不用跑整个模型。

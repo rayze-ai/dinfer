@@ -23,7 +23,8 @@ def main():
     model=llm.llm_engine.model_executor.driver_worker.model_runner.model
     n=0
     for name,mod in model.named_modules():
-        if name.endswith('.experts') and 'layers.0.' in name:
+        # experts（MoE 输出）与 router（logits）都要；router 决定 top-k，缺了没法复现 y
+        if ('layers.0.' in name) and (name.endswith('.experts') or name.endswith('.router') or name.endswith('.moe')):
             def mk(nm):
                 def h(m,i,o):
                     if i and i[0].shape[0]==len(ids) and not cap:
@@ -33,12 +34,12 @@ def main():
     print("hooks", n, flush=True)
     llm.generate(prompts=[{"prompt_token_ids":ids}], sampling_params=SamplingParams(max_tokens=1,temperature=0))
     print("gen done, caps", len(cap), flush=True)
-    if cap:
-        nm,x,y=cap[0]
-        d="/w/tmp/moe1"; os.makedirs(d,exist_ok=True)
-        x.to(torch.bfloat16).view(torch.int16).cpu().numpy().tofile(f"{d}/x.bin")
-        if y is not None: y.to(torch.bfloat16).view(torch.int16).cpu().numpy().tofile(f"{d}/y.bin")
-        print("CAP",nm,x.shape, None if y is None else y.shape, flush=True)
+    d="/w/tmp/moe1"; os.makedirs(d,exist_ok=True)
+    for k,(nm,x,y) in enumerate(cap):
+        tag=nm.split('.')[-1]
+        x.to(torch.bfloat16).view(torch.int16).cpu().numpy().tofile(f"{d}/{tag}_x.bin")
+        if y is not None: y.to(torch.bfloat16).view(torch.int16).cpu().numpy().tofile(f"{d}/{tag}_y.bin")
+        print("CAP",tag,nm,x.shape, None if y is None else y.shape, flush=True)
 
 
 if __name__ == '__main__':
