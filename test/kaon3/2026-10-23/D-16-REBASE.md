@@ -284,3 +284,28 @@ GPU=0 scripts/dev/remote_5090.sh ctr "cd /w/dinfer && D17_DIR=/w/d17b CUDA_ARCHS
 （容器日志：`Autotuning fp8_gemm: 20 configs`、`Saved 120 configs`）。
 不同 tile/unroll 的 **K 方向累加顺序不同** → 要复现得先读出该形状命中的配置
 （`tile_k` / `num_mma_per_k` / split 方式），再让我们的 `BK=64 + 2×mma(k32)` 与它一致。
+
+## 19. **目标良定义：FlashInfer 跨进程逐位一致**
+
+两个**独立进程**（各自加载模型、各自跑 JIT autotune、各自缓存），跑同一份 p02：
+
+| 项 | 结果 |
+|---|---|
+| 各自内部重复 6 次 | **0 / 196608**（两次都是）|
+| 各自"重调 vs 前向真实值" | **0 / 196608**（两次都是）|
+| **跨进程：r1 输出 vs r2 输出** | **0 / 196608** |
+| 跨进程：A_fp8 / B_fp8 入参 | 完全一致 |
+
+→ **FlashInfer 的 fp8 GEMM 是可确定复刻的**：跨进程、跨 autotune 缓存都给出同一串字节。
+**"让我们的 fp8 GEMM 与它逐位相同"是一个良定义、有唯一答案的目标。**
+
+## 20. 因此子 loop D 的剩余任务是一件事
+
+把 `crates/kernels/cuda/gemm_fp8_sm120.cu` 的 K 方向累加序改成与 FlashInfer 一致。
+已知的差异只是 8 个元素的 1-ulp（我们 8/196608、cutlass 7/196608、FlashInfer 0），
+不是口径、不是布局、不是量化——**纯粹是累加树形状**。
+
+线索：FlashInfer 的 JIT autotuner（`flashinfer/gemm/gemm_base.py`）对 fp8 GEMM 的候选含
+`tile_k ∈ {128, 256}` 等；不同 `tile_k` / `num_mma_per_k` / 是否 split-K 会改变 f32 累加的**分组方式**。
+我们当前是 `BK=64 + 2×mma(k32)` 顺序累加。
+下一步：读出该形状（m=24, n=8192, k=2816）命中的 tactic，再看是否 split-K。
