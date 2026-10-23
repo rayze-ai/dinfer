@@ -462,6 +462,14 @@ fn norm_mode() -> i32 {
     *V.get_or_init(|| std::env::var("RMSNORM_MODE").ok().and_then(|s| s.trim().parse::<i32>().ok()).unwrap_or(0))
 }
 
+/// norm 与 fp8 量化是否融合（`NORM_FUSE_QUANT=1` 开启）。**默认关**：
+/// 实测在 Kaon-V3 L1 上融合后 top5 |Δlp| 0.0102→0.0108、实际 token 1.4898→1.6856，**反而更差**，
+/// 说明 inductor 融合链的真实语义还没对上（见 `docs/loops/kaon3-parity.md` 第 20 轮）。留着供继续排查。
+fn fuse_norm_quant() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("NORM_FUSE_QUANT").map(|v| v == "1").unwrap_or(false))
+}
+
 fn rmsnorm_into(
     stream: &Stream,
     ops: &impl OpSet,
@@ -648,7 +656,7 @@ impl Gemma4Layer {
         // q/k/v 共用同一个 input_norm 且共用同一个 `input_scale`（实测 L0/L5 三者 scale 相同），
         // 所以这里量化一次、三个投影复用。eager 口径（`RMSNORM_MODE=1`）走原来的两步。
         let mut qkv_preq = false;
-        if norm_mode() == 0 {
+        if norm_mode() == 0 && fuse_norm_quant() {
             // k_eq_v 的层没有 v_proj，此时 v 复用 k 的权重与 scale。
             let v_sc = self.v_proj.as_ref().map_or(self.k_proj.a_scale(), |p| p.a_scale());
             if let (Some(qs), Some(ks), Some(vs)) = (self.q_proj.a_scale(), self.k_proj.a_scale(), v_sc) {

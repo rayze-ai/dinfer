@@ -444,3 +444,20 @@ NORM_MODE diff: 0/22528 max=0.000e0        # [8,2816] bf16 输出
 - `enforce_eager=True` 才强制 `mode=NONE`（同文件 1289）；
 - inductor 后端下 `custom_ops` 基模式默认补 `"none"`（同文件 1392）→ 全部算子进图融合。
 - 对照：同配置两进程 compile 输出 `0.0000` 差异 → **compile 完全确定**，可逐位对拍。
+
+### 第 21 轮：融合 norm→fp8 实测**更差**，降级为开关（`NORM_FUSE_QUANT=1`，默认关）
+
+实现：`norm.cu::rmsnorm_quant_kernel` + `ops::rmsnorm_quant_fp8`；Kaon 层在 `input_norm → q/k/v` 处
+一次量化、三个投影复用（实测 q/k/v 的 `input_scale` 相同：L0 = 0.59375，L5 = 0.265625）。
+
+| 口径 | L1 top5 \|Δlp\| | 实际 token \|Δlp\| |
+|---|---|---|
+| 两步（默认，现状） | 0.0102 | 1.4898 |
+| 融合（`NORM_FUSE_QUANT=1`） | 0.0108 | **1.6856** |
+
+**融合更差**，说明我对 inductor 融合链的语义还原还有偏差。需要重读 `4s/c4shm6xroqnr…py` 的**完整数据流**：
+它同时写 `out_ptr4`(bf16) / `out_ptr5`(bf16) / `out_ptr7`(fp8) 三个输出，且 `w` 在不同输出上
+乘的位置不同（`tmp45 = tmp42*tmp44` vs `tmp49 = tmp42*tmp48`）——说明 bf16 分支与 fp8 分支的 w 不是同一个张量。
+**下一步**：先把这个 kernel 的 12 个入参逐个对应到模型参数（谁 residual、谁 w、谁 bias），再决定融合公式。
+
+保留：`RMSNORM_MODE`（0=compile 默认 / 1=eager BI）已接通三处 ABI，两种 inv 在 bf16 输出下逐位无差异（第 20 轮）。
