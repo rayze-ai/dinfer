@@ -100,3 +100,24 @@
 
 **结论**：compile 模式下拿不到层内中间量，只能做**整层输出**级对拍。
 可行替代：截层 oracle（`kaon3_oracle_server.sh <N>`）做**逐层**比对；层内只能靠“改一个点 → 看整层是否变好”的 A/B。
+
+## 第 3 轮：关键转向——差异在**层外**，不在 decoder 层内
+
+1 层截断（同一 p02、同一 oracle 参数）：
+
+| 对比 | 实际 token \|Δlp\| | top5 \|Δlp\| |
+|---|---|---|
+| 我们 vs compile | 1.5221 | 0.0097 |
+| 我们 vs **eager** | **0.0564**（MODE=0）/ 0.0243（MODE=1） | 0.5391 |
+| eager vs compile | **1.4892** | — |
+
+**推理**：30 层时 eager vs compile = 1.5725（`test/kaon3/2026-10-23/e2e-eager-vs-compile.md`），
+1 层时 1.4892。若差异来自层内，1 层应远小于 30 层；实测 1 层已占满 → **差异在层外**：
+embedding / final norm / lm_head / softcap / logits。
+
+**这解释了为什么逐层对齐做了 18 轮、端到端不动**：修的层是对的，但差的 1.5 不在层里。
+
+**下一步**：查 compile 下输出路径
+1. final norm 与 lm_head fp8 量化是否融合（同 input_norm→qkv 的模式，vocab=262144 大形状）
+2. logits softcap 的数值与位置
+3. lm_head 权重量化 / dequant 路径
