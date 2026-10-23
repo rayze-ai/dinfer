@@ -32,3 +32,35 @@ eager 抓的中间量（`/w/hid2/*`、`kaon3_vllm_hidden.py`）**不作判据、
 ### 第 1 轮结果
 
 （待整跑完成回填）
+
+## 读参照源码：compile 口径的两个语义点（2026-10-23，读镜像副本 `/data/ref/vllm-img-v0.28.0-pr455/`）
+
+### 1. `fused_add_rms_norm`（`vllm/ir/ops/layernorm.py:44`）——残差**先 fp32 加、舍 bf16 存回**
+
+```python
+x = x.to(torch.float32)
+x = x + x_residual.to(torch.float32)
+x_residual = x.to(orig_dtype)          # ← 舍回 bf16，下游读的是这个
+variance = x.pow(2).mean(dim=-1, keepdim=True)
+x = x * torch.rsqrt(variance + epsilon)
+if weight is not None: x = x.to(weight.dtype) * weight
+return x.to(orig_dtype), x_residual
+```
+
+注意：**`x_residual`（残差流）与 `x`（norm 输入）不是同一个值**。norm 的方差与归一化用**未舍入的 fp32 和**，
+而残差流写回时舍了一次 bf16。我们的 `rmsnorm_vec_kernel<FUSED_ADD>` 写法是
+「相加 → 舍 bf16 写回 `rr` → **再把舍入后的值读回 `f[c]` 用于归一化**」，注释说"与标量版逐位一致"。
+
+**这是与参照的语义分歧点**：参照用 fp32 和算方差，我们用 bf16 舍入后的和算方差。
+除非 inductor 把那次 store 重排成 f32 直通（需要生成代码验证），否则这里每层都会引入偏差。
+→ 若第 1 轮 MODE=0 仍不达标，这是**第一优先**要 A/B 的点（新增 `RMSNORM_ADD_F32` 开关）。
+
+### 2. `rms_norm`（`vllm/ir/ops/layernorm.py:10`）——`rsqrt(mean+eps)`，源码里有 bf16 舍入
+
+源码 `x = x.to(weight.dtype) * weight` 是显式 bf16 舍入；我们 `norm.cu:58` 的注释说 inductor 把它消除了
+（A/B 证实 bf16 版与 f32 版逐位相同）。**若第 1 轮读数不对，这条也要重验**，别只信注释。
+
+### 待查（未读）
+
+- `lm_head` 前 `final_norm` 是否与 fp8 量化融合（vocab=262144 大形状）。
+- logits softcap `tanh(x/30)·30` 的精度与位置。
