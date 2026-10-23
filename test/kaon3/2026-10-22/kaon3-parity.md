@@ -2245,3 +2245,31 @@ FORCE_KERNEL=cutlass    → picked kernels: {'CutlassFP8ScaledMMLinearKernel': 1
 **踩的坑**：dump hook 打在 `Gemma4SelfDecoderLayers.forward` 上不触发（该版本不走它），
 两轮都在 `llm.generate` 之后抛 `KeyError: 'hidden'`，且 NCCL 残留进程挂 2.5 小时不退（GPU 不占，`ps` 可见）。
 → 改为 `Gemma4DecoderLayer.forward` + `layer_idx == 29`；每次跑前 `rm -rf` 输出目录、跑后查 `grep picked/wrote/Error`。
+
+## 【审计】子 loop D 各结论的可靠度复核（2026-10-23，用户质疑后）
+
+用户 2026-10-23：「整台机器都是你在，动不动就说被占……我现在对你之前的测试结论表示严重关切」——**成立**。
+
+我的错误模式（本轮重复出现，必记录）：
+1. **把自己的残留进程说成"机器被占"**。整机只有我在用；`Free memory 3.07 GiB` 是**我上一轮失败的进程**没退。
+   正确表述：我自己的进程泄漏。→ 已加前置闸门 `bash /w/hid/cleanrun.sh`（任何卡 >500 MiB 就 kill 并重试，失败则退出）。
+2. **改了脚本没同步远端就跑**。`remote_5090.sh sync` 不做会自动发生；本轮 `FORCE_KERNEL` 补丁没同步，
+   两次运行跑的是同一份旧代码，`L29.bin` md5 完全相同（`987335c6…`）→ "31 层全 0" 这个读数**无效，已作废**。
+3. **拿单次运行直接下结论**，没先验证前置条件（kernel 是否真的切换、文件是否真的新）。
+
+### 逐条复核
+
+| 结论 | 证据来源 | 状态 |
+|---|---|---|
+| D-1 BI 不切 prefill attention（`use_3d`） | 镜像内源码 `triton_unified_attention.py:1041` | **成立**（源码直读，可复核）|
+| D-2 逐层残差流 L0 4.9e-8 / L2 2.1e-2 | 整跑两侧 dump，有文件 | 成立（数值待重跑复核）|
+| D-5 放大器 = fp8 KV 往返 | 同输入 `KV_FP8` A/B，`q/k_norm` 0 差异、`attn_out` 2.3e-2 | **成立**（同二进制、同输入、只切环境变量）|
+| D-7 vLLM prefill 读 fp8 KV | `KV8=1` 6.7e-7 vs `KV8=0` 2.3e-2（对 vLLM） | 成立 |
+| D-9 L0 1-ulp 来自 GEMM | 两侧 `q_proj_raw`/`qkv_raw` 5/98304 | **需复核**：vLLM 侧抓取当时是否前置干净未记录 |
+| D-11 vLLM 用 FlashInfer kernel | 运行时打印 `FlashInferFP8ScaledMMLinearKernel`、cutlass 调用 0 次 | **成立**（运行时实证）|
+| D-12 cutlass 89026 是脚本布局错 | 修正布局后 fi/cu 都降到个位数 | 成立（我的错误，已纠正）|
+| D-13 单层 fi/cu/我们三方对比 | 同输入同权重，一次性脚本 | **部分成立**：单层数值可信，但"vLLM 前向 2/4 处"依赖 D-9 的 `qkv_raw` |
+| D-14 强制 kernel 命中 120 层 | `picked kernels: {...: 120}` | **成立**（但端到端 dump 未生效，见上）|
+| **"kernel 变体下限 = 0（31 层逐位相同）"** | fk3 两次运行 | **作废**：脚本未同步，两次跑的是同一份代码 |
+
+**教训**：每个数值结论落盘前，必须先回答"这次运行的前置条件我验证过吗"。

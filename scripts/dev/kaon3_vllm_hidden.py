@@ -9,6 +9,28 @@ os.environ.setdefault("VLLM_BATCH_INVARIANT", "1")
 os.environ.setdefault("VLLM_USE_V1", "1")
 os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")  # 单进程,patch 才在同进程生效
 import numpy as np
+# 端到端 kernel 变体下限（子 loop D-14）：FORCE_KERNEL=cutlass|flashinfer 强制 fp8 linear kernel。
+# 必须在创建 LLM 之前 patch（实测：放在之后不生效）。
+_FORCE = os.environ.get("FORCE_KERNEL")
+if _FORCE:
+    import vllm.model_executor.kernels.linear as _KL
+    from vllm.model_executor.kernels.linear.scaled_mm.cutlass import CutlassFP8ScaledMMLinearKernel as _C
+    from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import FlashInferFP8ScaledMMLinearKernel as _F
+    _want = {"cutlass": _C, "flashinfer": _F}[_FORCE]
+    _orig_init = _KL.init_fp8_linear_kernel
+    _picked = {}
+    def _patched_init(*a, **k):
+        k.setdefault("force_kernel", _want)
+        r = _orig_init(*a, **k)
+        _picked[type(r).__name__] = _picked.get(type(r).__name__, 0) + 1
+        return r
+    _KL.init_fp8_linear_kernel = _patched_init
+    import vllm.model_executor.layers.quantization.fp8 as _F8
+    import vllm.model_executor.layers.quantization.modelopt as _MO
+    for _m in (_F8, _MO):
+        if hasattr(_m, "init_fp8_linear_kernel"):
+            _m.init_fp8_linear_kernel = _patched_init
+    print(f"[force_kernel] 请求 {_FORCE}", flush=True)
 import vllm.model_executor.models.gemma4 as g4
 from vllm import LLM, SamplingParams
 
