@@ -144,3 +144,33 @@ hidden_states = hidden_states + residual           # ← 再一次
 | pre_ff_norm → dense → post_ff_norm_1 | — | `849` ✅ |
 | pre_ff_norm_2(residual) + router(residual) → moe → post_ff_norm_2 | **并联** | `950 / 1011` ✅ |
 | (ff1 + ff2) → post_ff_norm → **+residual** | bf16 | `856/860` ✅ |
+
+## router 预处理：参照是**三次独立 bf16 舍入**（`gemma4.py:299-301`）
+
+```python
+def forward(self, x):
+    x = self.norm(x)                       # 无权重 RMSNorm
+    x = x * self.root_size.to(x.dtype)     # bf16 乘 → 存回 bf16
+    x = x * self.scale.to(x.dtype)         # bf16 乘 → 存回 bf16
+    router_logits, _ = self.proj(x)        # out_dtype=float32
+    return router_logits
+```
+
+**但编译后 inductor 会把这三步融成一条 fp32 链**（这正是我们加 `rmsnorm_scale2` 的依据，
+`ops.rs:603`：「全程 fp32、只舍入一次」）。
+
+⚠️ **这条与"照抄 Python 源码"相反——是推断，不是实测**。判据必须是 inductor **生成的代码**，
+不是 `gemma4.py`。`/w/tmp/ind` 已在 2026-10-23 丢失，需要重导。
+
+**重导方法**（`kaon3-gelu.md` 第 2 轮已验证可行）：
+```bash
+GPU=1 scripts/dev/remote_5090.sh ctr 'cd /w/dinfer && TORCHINDUCTOR_CACHE_DIR=/w/tmp/ind \
+  VLLM_BATCH_INVARIANT=1 python3 -I -c "..."'
+```
+导出后 grep `computation_graph.py` 里 `router` / `root_size` / `scale` 对应的融合段，
+看 `x_bf16 * rs * sc` 是**一次舍入还是两次**。这是假设 6 的判据来源。
+
+### `final_norm`（`gemma4.py:1344`）
+
+`residual is None` → `hidden_states = self.norm(hidden_states)`，**独立 norm，不与 lm_head 融合**
+（lm_head 是独立的 `ParallelLMHead` 模块，中间没有量化）。假设 2 的"融合"分支**排除**。
