@@ -101,3 +101,20 @@ FlashInfer（实测 `B.stride()==(1,2816)`）——真按连续 `[K,N]` 造数�
 
 **教训**：自写 kernel 追 1-ulp 的尽头是"复刻闭源代码的舍入"，代价高且脆弱。
 **优先检查能否直接调用同一个库**——尤其当参照是 PyTorch/vLLM 这类会落到 cuBLAS 的实现。
+
+## 9. 参照落到同一个第三方库时，用"配置属性"而非"列表下标"选 algo（2026-10-23）
+
+cuBLASLt 的 `cublasLtMatmulAlgoGetHeuristic` 返回**多个**候选，**顺序随形状漂移**：
+同一个正确 kernel 在 A 形状排第 0、在 B 形状排第 2。因此
+
+- **不能按下标写死**（我们一度写死 `[2]`，只在一个形状对，其余 5 个形状反而变差，端到端退步 1.24pp）；
+- **要按 `CUBLASLT_ALGO_CONFIG_ID / TILE_ID / SPLITK_NUM` 匹配**（`cublasLtMatmulAlgoConfigGetAttribute`
+  读出，拼成 `id=67 tile=13 splitk=1` 这样的字符串做索引）。
+- 不同形状的"正确配置"可能不同（我们 6 种形状里 5 种共用一套，`K=8192` 需要 split-K 的另一套），
+  所以用 **`(n,k) → 配置` 的实测表 + 通配回退**，未命中时用启发式第 0 个（不会更差）。
+
+**通用工具已落地**：`Gemm::forward_fp8_cublaslt_algo` / `forward_bf16_algo` +
+`*_algo_count` / `*_algo_desc` + `crates/kernels/tests/{fp8,bf16}_algo_calib.rs`。
+
+**还有一个前置陷阱**：小 M（我们 `m ≤ 32`）会走自写 split-K kernel，**根本到不了 Lt 路径**。
+改 Lt 的 algo 选择前必须先确认目标调用走的是哪条分派（`plan_for`）。
