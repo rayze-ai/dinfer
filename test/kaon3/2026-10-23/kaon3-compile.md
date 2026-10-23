@@ -967,3 +967,22 @@ CAP m,n,k,e = 24 704 2816 128 | a (24, 2816) | topk (24, 8)
 | 结果 | **逐位一致** | 差 73% 元素 |
 
 → **同样的解法应该适用：直接调 cutlass，而不是自己复刻。** 这是本轮最重要的结论。
+
+## 直接调用 cutlass 的可行性（查证结果）
+
+`ops.cutlass_fp4_moe_mm` 实现在 `/usr/local/lib/python3.12/dist-packages/vllm/_C_stable_libtorch.abi3.so`
+（`nm -D` 里 1547 个含 `cutlass` 的符号）。
+
+**但它不是纯 C ABI**：那是 PyTorch 扩展，函数经 `TORCH_LIBRARY` 注册成 torch op
+（`torch.ops._C.cutlass_fp4_moe_mm`），入参是 `at::Tensor`。**不能像 cuBLASLt 那样从 Rust 直接链接调用**
+（cuBLASLt 是纯 C API，`run_lt_default` 才做得成）。
+
+三条路：
+1. **自己用 cutlass 头文件编译** FP4 MoE（vLLM 就是这么做的）——工作量大，但结果必然同源；
+   本机有 `/data/ref/flashinfer/3rdparty/cutlass` 可作源码。
+2. **先把差异缩小到"单个专家的 dense FP4 GEMM"**：`ops.cutlass_scaled_fp4_mm` 是 dense op，
+   可以对单个专家调用，与我们的 `gemm_nvfp4` 逐位比 —— 这能回答"我们的 NVFP4 kernel 到底差在哪"，
+   是走第 1 条之前必须先做的（否则不知道该复刻哪一段）。
+3. 放弃逐位，接受 ulp 级差异（**不满足 FLOOR 线，不建议**）。
+
+**采用第 2 条作为下一步**：它便宜、且直接告诉我们"是否只需修 NVFP4 GEMM 的某一步"。
