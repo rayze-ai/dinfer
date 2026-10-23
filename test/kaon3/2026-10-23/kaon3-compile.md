@@ -435,3 +435,23 @@ topk_w[..] = __fmul_rn(__fmul_rn(raw[k], inv), sc);
 
 而参照的 top-k 拿不到（compile 不可 hook）。替代：**用 `ROUTER_F32=1` 让我们的 router 走精确路径**，
 若 flip 明显下降，则确认主因在 router 数值。
+
+## 为什么 "ulp 级差异" 能放大成 16% flip：128 选 8 × 30 层
+
+配置（`config.json` text_config）：`num_experts=128`、`top_k_experts=8`、`num_hidden_layers=30`。
+
+**放大机制**：router logits 只要差 1 ulp，在 **第 8 名与第 9 名分数接近**的 token 上就会换专家。
+换掉一个专家 = 该 token 的 MoE 输出整块不同（不是小扰动），经过 30 层累积，
+**少数层上的少数 token 被换 → 端到端 16% 的 flip**。
+
+这与实测形态完全吻合：
+- 大多数位置 Δ 很小（那些位置 top-8 边界不敏感）；
+- 少数位置**突变**（间隔比 9.7 倍、top-1 翻转）；
+- 后几位**完全精确**（边界恰好不敏感）。
+
+**结论**：只要 router GEMM 与参照不是同一个 kernel，就不可能达到 FLOOR 线。
+而参照的 router 是 **BI Triton persistent matmul**（FX 图已证），我们用的是 **cuBLAS bf16 GEMM**
+（要靠 `CUBLASLT_WORKSPACE_SIZE=1` 才稳定）——**两者归约次序必然不同**。
+
+→ **假设 6（router GEMM 复刻 BI persistent matmul）升级为 loop 的主线**，
+不再是"试试 A/B"，而是"必须做"。规格里的假设清单要按这个重排。
