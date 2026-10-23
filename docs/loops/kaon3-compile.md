@@ -342,3 +342,34 @@ MOE_STAGE [T=24 H=2816 E=128 K=8] 48 个被选专家 | ndiff=50214/67584 max|d|=
 **踩到的两个 API 坑**（记下来）：
 - `cutlass_scaled_fp4_mm` 要求 `scale_a` 是 **padded+swizzled**（`is_sf_swizzled_layout=True`）；
 - `scaled_fp4_quant` 的 `padded_n` 是**输入张量的列数**（=k），不是输出列数（传错会 assert）。
+
+## swizzle 的精确公式（参照源码，可直接照抄）
+
+`vllm/model_executor/layers/quantization/utils/nvfp4_utils.py:13 swizzle_blockscale`：
+
+```python
+M_padded = round_up(M, 128)
+K_padded = round_up(K, 4)
+padded = zeros(B, M_padded, K_padded); padded[:, :M, :K] = scale
+padded   = padded.reshape(B, M_padded // 128, 4, 32, K_padded // 4, 4)
+swizzled = padded.permute(0, 1, 4, 3, 2, 5).contiguous()
+return swizzled.reshape(B, M_padded, K_padded)
+```
+
+即：把 `[M, K]` 的块缩放看成
+`[M/128, 4, 32, K/4, 4]`，再按 `(组, k_outer, 行内32, 行内4, k_inner)` 重排。
+- `M_padded`：行方向按 **128** 对齐（这就是 `a_s` 从 1408 涨到 22528 字节的原因：
+  M=8 → 128，K=176 → 176，128×176 = 22528）；
+- `K_padded`：列方向按 **4** 对齐。
+
+**我们的 kernel**（`gemm_nvfp4_sm120.cu:146/192`）用 `sfa[row * NQ4 + b]` 的自然序，
+与上式不同 → 每个 mma 取到不同的 scale。
+
+### 改法（两个选项）
+
+1. **kernel 内改索引**（便宜）：把 `sfa[...]` 的行/列索引换成 swizzle 公式的逆映射，
+   这样可以直接吃参照布局的 scale（也就能做逐位对拍）。
+2. **量化时按 swizzle 写**（更彻底）：`quantize_a_kernel` 直接写 swizzled 布局，
+   kernel 内改读法。与 cutlass 完全同源。
+
+**先做 1**：改动最小、能立刻用 `/tmp/fp4d` 的标准答案验证。
