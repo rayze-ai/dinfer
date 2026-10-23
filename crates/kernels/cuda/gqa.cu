@@ -30,7 +30,7 @@ namespace {
 // 说明本模型实际命中的不是那条 Triton P 量化路径。
 // 不是进程隐状态：由 prefill/paged 入口的 `p_fp8` 实参在每次 launch 前写入（单流语义）。
 __constant__ int g_p_fp8 = 0;
-// 对拍 A/B（`ATTN_MODE`，Rust 侧经 p_fp8 的高位传入）：bit0 = 归一化用 o/l（vLLM），bit1 = 指数参数 ex2((s-m)·log2e)。仅 v6。
+// 数值口径位（Rust `attn_mode_ab`，经 p_fp8 高位传入；默认 bit1）：bit0 = 归一化用 o/l，bit1 = 指数参数 ex2((s-m)·log2e)（vLLM Triton 同式）。仅 v6。
 __constant__ int g_attn_mode = 0;
 constexpr float kAttnLog2e = 1.4426950408889634f;
 __device__ __forceinline__ float pq8(float p) {

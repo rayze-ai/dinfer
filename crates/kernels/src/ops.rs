@@ -2155,10 +2155,12 @@ pub fn gqa_prefill_win_bf16<
     gqa_prefill_impl(stream, q, k, v, out, cu_seqlens, num_reqs, max_seqlen, heads, kv_heads, head_dim, scale, q_stride, kv_stride, window, p_fp8)
 }
 
-/// 对拍 A/B：`ATTN_MODE=<bits>`（bit0 = o/l 归一化，bit1 = 自然域指数参数；仅 v6 kernel 读）。默认 0。
+/// v6 attention 的数值口径位（仅 v6 kernel 读），`ATTN_MODE=<bits>` 覆盖：
+/// bit1 = 指数参数走自然域 `ex2((s - m)·log2e)`（= vLLM Triton `tl.exp(S - m)`），**默认开**（Kaon-V3 L4 隔离 4457 → 1，§54）；
+/// bit0 = 归一化 `o / l`（vLLM `acc / L`），现有数据无区分力，默认关。`ATTN_MODE=0` 退回旧口径。
 fn attn_mode_ab() -> i32 {
     static V: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("ATTN_MODE").ok().and_then(|s| s.trim().parse::<i32>().ok()).unwrap_or(0) & 3)
+    *V.get_or_init(|| std::env::var("ATTN_MODE").ok().and_then(|s| s.trim().parse::<i32>().ok()).unwrap_or(2) & 3)
 }
 
 /// D=256 全注意力 prefill kernel 结构（`ArchProfile::gqa_prefill_cfg_for`），`GQA_PREFILL_CFG` 覆盖；进程内只算一次。
