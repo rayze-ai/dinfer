@@ -277,6 +277,45 @@ impl Gemm {
         crate::ops::check(rc, "gemm_fp8_bf16")
     }
 
+    /// **预量化** FP8 GEMM（sm_120）：`a` 已是 e4m3 字节 `[m, k]`，kernel 不再做量化。
+    /// `out[m,n] = (Σ_k a[m,k]·w[n,k]) * (a_scale * w_scale)`，`w` 仍是 `[n, k]` 的 e4m3。
+    ///
+    /// 与 [`forward_fp8`] 共用同一套 smem 布局 / mma / 累加顺序，唯一差别是 A 不做 `x/a_scale` + RNE。
+    /// 用途：与外部实现（vLLM 的 FlashInfer）**逐位对拍**——把对方真实喂进算子的字节原样灌进来比输出。
+    pub fn forward_fp8_prequant(
+        &self,
+        a: &CudaSlice<u8>,
+        a_scale: f32,
+        w: &CudaSlice<u8>,
+        w_scale: f32,
+        out: &mut CudaSlice<bf16>,
+        m: usize,
+        n: usize,
+        k: usize,
+    ) -> Result<()> {
+        ensure!(a.len() >= m * k, "gemm fp8 prequant: a.len {} < m*k {}", a.len(), m * k);
+        ensure!(w.len() == n * k, "gemm fp8 prequant: w.len {} != n*k {}", w.len(), n * k);
+        ensure!(out.len() >= m * n, "gemm fp8 prequant: out.len {} < m*n {}", out.len(), m * n);
+        if m == 0 || n == 0 || k == 0 {
+            return Ok(());
+        }
+        ensure!(m <= i32::MAX as usize && n <= i32::MAX as usize && k <= i32::MAX as usize, "维度 > i32");
+        let rc = unsafe {
+            crate::ffi::gemm_fp8_prequant_bf16(
+                self.stream.ptr(a) as *const c_void,
+                a_scale,
+                self.stream.ptr(w) as *const c_void,
+                w_scale,
+                self.stream.ptr_mut(out) as *mut c_void,
+                m as i64,
+                n as i64,
+                k as i64,
+                self.stream.raw() as _,
+            )
+        };
+        crate::ops::check(rc, "gemm_fp8_prequant_bf16")
+    }
+
     /// NVFP4 块缩放 GEMM（sm_120 专用，`cuda/gemm_nvfp4_sm120.cu`）：
     /// `out[m,n] = global * Σ_k a[m,k] · packed[n,k]`。`a` 是 bf16 激活，**在 kernel 内按 16 元素一块量化成 fp4**
     /// （块缩放 = amax/6 的 e4m3 编码，与权重侧同口径）；`packed` 是 [n, k/2]（每字节两个 fp4，低半字节是偶数列），

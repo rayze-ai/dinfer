@@ -60,9 +60,11 @@ __device__ __forceinline__ uint4 cvt16(const bf16* src, bool valid, float inv) {
   return make_uint4(w[0], w[1], w[2], w[3]);
 }
 
-__global__ void __launch_bounds__(256) gemm_fp8_kernel(const bf16* __restrict__ A, const uint8_t* __restrict__ B,
-                                                      bf16* __restrict__ D, int M, int N, int K, float wscale,
-                                                      float a_inv) {
+// A 已是 e4m3 字节（预量化）：跳过 cvt16，直接读 16 B。与 bf16 版本共用同一套 smem / mma / 累加顺序，
+// 因此两者的输出在"同一个 A 的数值"上逐位相同——这是与 FlashInfer 逐位对拍所需的入口。
+__global__ void __launch_bounds__(256) gemm_fp8_pre_kernel(const uint8_t* __restrict__ A,
+                                                           const uint8_t* __restrict__ B, bf16* __restrict__ D,
+                                                           int M, int N, int K, float wscale) {
   __shared__ uint8_t sA[2][BM * RS];
   __shared__ uint8_t sB[2][BN * RS];
   const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
@@ -71,13 +73,16 @@ __global__ void __launch_bounds__(256) gemm_fp8_kernel(const bf16* __restrict__ 
   float acc[2][4][4] = {};
   const int nk = (K + BK - 1) / BK;
 
-  // A：每线程 16 个 bf16（row = tid>>2，chunk = tid&3）
+  // A：每线程 16 个 e4m3 字节（row = tid>>2，chunk = tid&3）
   const int a_row = tid >> 2, a_ch = tid & 3;
   auto conv_a = [&](int kb) -> uint4 {
     const int gm = m_blk + a_row;
     const int gk = kb * BK + a_ch * 16;
-    const bool ok = (gm < M) && (gk + 15 < K);
-    return cvt16(A + static_cast<size_t>(gm < M ? gm : M - 1) * K + gk, ok, a_inv);
+    // 越界补 0：e4m3 的 +0 编码是 0x00，与 bf16 版本 valid=false 时的填法一致
+    if (gm < M && gk + 15 < K) {
+      return *reinterpret_cast<const uint4*>(A + static_cast<size_t>(gm) * K + gk);
+    }
+    return make_uint4(0u, 0u, 0u, 0u);
   };
   auto store_a = [&](int st, const uint4& v) {
     *reinterpret_cast<uint4*>(&sA[st][a_row * RS + a_ch * 16]) = v;
@@ -179,6 +184,21 @@ int gemm_fp8_static_bf16(const void* a, float a_scale, const void* w, float w_sc
 int gemm_fp8_bf16(const void* a, const void* w, float w_scale, void* out, int64_t m, int64_t n, int64_t k,
                   cudaStream_t stream) {
   return gemm_fp8_static_bf16(a, 1.f, w, w_scale, out, m, n, k, stream);
+}
+
+// 预量化入口：a 已是 e4m3 字节 [m,k]（调用方做过 x/a_scale + RNE），输出仍需乘 a_scale*w_scale，
+// 所以 a_scale 以普通 float 参数传入（不参与量化）。用于与外部实现（vLLM/FlashInfer）逐位对拍。
+int gemm_fp8_prequant_bf16(const void* a, float a_scale, const void* w, float w_scale, void* out, int64_t m,
+                           int64_t n, int64_t k, cudaStream_t stream) {
+  if (m < 0 || n < 0 || k < 0) return static_cast<int>(cudaErrorInvalidValue);
+  if (m == 0 || n == 0) return 0;
+  if (k == 0) return static_cast<int>(cudaErrorInvalidValue);
+  if (n > 0x7fffffff || m > 0x7fffffff || k > 0x7fffffff) return static_cast<int>(cudaErrorInvalidValue);
+  const dim3 grid((unsigned)((n + BN - 1) / BN), (unsigned)((m + BM - 1) / BM));
+  gemm_fp8_pre_kernel<<<grid, 256, 0, stream>>>(static_cast<const uint8_t*>(a), static_cast<const uint8_t*>(w),
+                                                static_cast<bf16*>(out), (int)m, (int)n, (int)k,
+                                                w_scale * a_scale);
+  return gemm_last_err();
 }
 
 }  // extern "C"

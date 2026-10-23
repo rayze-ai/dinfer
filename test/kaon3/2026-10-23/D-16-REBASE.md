@@ -191,3 +191,15 @@ D-17b 把 `A_fp8.bin` / `B_fp8.bin` / `fwd_ref_bf16.bin` 写到 `/w/hid/d17b/`�
 日志里打印的数值仍然有效（stdout 已落 `/tmp/d17b.log`）；只有文件产物受影响。
 
 **重跑**：`OUT=/hf_data/yaochen/d17b`。
+
+## 13. 修正 §12：`/hf_data/yaochen` 在容器内**不是**宿主的——唯一持久路径是 `/w`
+
+`remote_5090.sh ctr` 的挂载只有：`-v $REMOTE_ROOT:/w`（宿主 `/hf_data/yaochen` → 容器 `/w`）、
+`-v /hf_data/hub:/hf_data/hub:ro`、cargo/rustup。容器内的 `/hf_data/yaochen` 是**另一个独立临时目录**，
+容器退出即丢。
+
+**所以**：容器内产出一律写 **`/w/...`**，落到宿主 `/hf_data/yaochen/...`。
+（§12 写"写 `/hf_data/yaochen`"是错的，按此更正。）
+
+D-17b 已用 `OUT=/w/d17b` 重跑，**结果与首轮逐位相同**（0/196608 ×6 次 + 自复现 0），
+说明该结论可复现、不受路径影响。
