@@ -932,3 +932,13 @@ L3/L4 新增 4 组 norm 标定后，§52 的"`ss·fl(1/h)` + IEEE 1/sqrt"在 L4 
 
 **方法教训（进知识库）**：数值逐位对齐的参照是**参照实际执行的机器码**。顺序：源码（猜）→ PTX（结构/顺序）→ SASS（真值）。
 Triton kernel 用 `TRITON_CACHE_DIR` 落 cache，取 `.ptx` / `.cubin`，用 Triton 自带 `nvdisasm` 看 SASS。
+
+## 56. ATTN_MODE 默认 + **L7 归零：Gemma4 路由权重改走 vLLM Triton 融合版口径**；整跑 L0–L10 逐位 0
+
+- `ATTN_MODE` 默认 2（v6 自然域指数）；默认值下整跑复核 L0–L6 仍为 0。
+- L7 隔离：q/k/v、attention、dense、router_logits、`pre_ff2_norm` 全 0；**仅 `moe_y` 在 token 10 差 344 元素**（相对 6.7e-4），
+  top-8 边界无并列 → 不是选专家，是**组合权重**。
+- vLLM 在 CUDA 上走 `_gemma4_routing_kernel`（Triton 融合版），不是我们照抄的 torch 版（全专家 softmax → top-k 再归一化）。
+  PTX / SASS：`ex2.approx.ftz((l − max)·0x3FB8AA3B)`（排序位）→ 每 lane 4 个排序位顺序加（仅 < K）→ 32 lane xor 蝶形 →
+  `rcp.approx` → `(raw·inv)·scale`。`moe.cu::route_softmax_kernel` 已逐条对应。
+- 结果：**L7 隔离全部子模块 0**；**整跑 p02 L0–L10 逐位 0**，首个发散 **L11（全注意力层，D=512）2.6e-7**，L13 5.0e-5、L14 1.1e-3。
