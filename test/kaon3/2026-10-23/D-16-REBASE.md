@@ -773,3 +773,22 @@ router 走 `QLinear::Bf16` → `Gemm::forward_bf16` → cuBLASLt 启发式 `h[0]
 
 **当前状态**：探针在跑，比较 `F.linear(x,w)` / `x@w.t()` / `torch.mm` / `contiguous` 等变体，
 看哪种与 vLLM 真实输出逐位一致。
+
+## 48. **bf16 也是同一个问题：默认 algo 差 768/3072（四分之一）**
+
+router 形状 (m=24, n=128, k=2816)，用 vLLM 真实入参（`kaon3_d17_router.py` 抓）：
+
+| algo | vs vLLM（PyTorch `F.linear`）| 配置 |
+|---|---|---|
+| **[0]（我们当前的默认）** | **768 / 3072** ❌ | `id=21 tile=5 splitk=12` |
+| [3] / [5] | **0** ✓ | `id=21 tile=11 splitk=8` |
+| [6] | 0 ✓ | `id=21 tile=11 splitk=5` |
+| [1][2][4][7] | 785–803 | 其它 |
+
+**这比 fp8 严重得多**：默认 algo 让 router 输出差四分之一，而不是 1-ulp。
+
+**已修**：`forward_bf16` 的 algo 选择改为优先匹配 `id=21 tile=11 splitk=8`（与 fp8 同款做法：
+按配置属性而非下标），未命中回退第 0 个。
+
+**注意**：这条只验证了 router 这一个 bf16 形状。模型里其它 bf16 GEMM（若有）形状不同，
+其"正确配置"未必相同——但它们是零星的（`o_proj`/`dense` 等已实测为 0 或 1e-7），先看端到端影响。

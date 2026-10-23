@@ -374,6 +374,44 @@ impl Gemm {
 
     /// out[M,N] = a[M,K] · w[N,K]^T，可选 bias[N]。
     #[allow(clippy::too_many_arguments)]
+    /// 同 [`forward_bf16`]，但**指定启发式候选的下标**（对拍/标定用，不进热路径）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_bf16_algo(
+        &self,
+        a: &CudaSlice<bf16>,
+        w: &CudaSlice<bf16>,
+        bias: Option<&CudaSlice<bf16>>,
+        out: &mut CudaSlice<bf16>,
+        m: usize,
+        n: usize,
+        k: usize,
+        algo_idx: usize,
+    ) -> Result<()> {
+        ensure!(a.len() >= m * k && w.len() == n * k && out.len() >= m * n, "gemm bf16 algo: 尺寸不符");
+        if m == 0 || n == 0 || k == 0 {
+            return Ok(());
+        }
+        let d = self.make_descs(m, n, k, bias.map(|b| self.stream.ptr(b)))?;
+        let hs = self.heuristics(&d, 32)?;
+        ensure!(algo_idx < hs.len(), "只有 {} 个候选", hs.len());
+        self.run_lt(&d, &hs[algo_idx].algo, a, w, out)
+    }
+
+    /// 当前形状的 bf16 启发式候选数。
+    pub fn bf16_algo_count(&self, m: usize, n: usize, k: usize, bias: bool) -> Result<usize> {
+        let d = self.make_descs(m, n, k, None)?;
+        let _ = bias;
+        Ok(self.heuristics(&d, 32)?.len())
+    }
+
+    /// 第 `algo_idx` 个候选的可读摘要（`id=/tile=/splitk=`）。
+    pub fn bf16_algo_desc(&self, m: usize, n: usize, k: usize, algo_idx: usize) -> Result<String> {
+        let d = self.make_descs(m, n, k, None)?;
+        let hs = self.heuristics(&d, 32)?;
+        ensure!(algo_idx < hs.len(), "只有 {} 个候选", hs.len());
+        Ok(Self::algo_desc(&hs[algo_idx].algo))
+    }
+
     pub fn forward_bf16(
         &self,
         a: &CudaSlice<bf16>,
@@ -539,10 +577,19 @@ impl Gemm {
         let algo = match cached {
             Some(a) => a,
             None => {
-                let h = self.heuristics(&d, 1)?;
-                ensure!(!h.is_empty(), "cublasLt: no algo for m={m} n={n} k={k}");
-                self.default_algos.lock().unwrap().insert(key, h[0].algo);
-                h[0].algo
+                // **与 fp8 同样的问题**：默认取启发式第 0 个，与 vLLM（PyTorch `F.linear` → cuBLAS）
+                // 的累加序不同。实测 router 形状 (m=24,n=128,k=2816) 上第 0 个差 **768/3072**
+                // （四分之一！），而 `id=21 tile=11 splitk=8` 为 0。
+                // 见 test/kaon3/2026-10-23/D-16-REBASE.md §48。
+                let hs = self.heuristics(&d, 32)?;
+                ensure!(!hs.is_empty(), "cublasLt: no algo for m={m} n={n} k={k}");
+                let pick = hs
+                    .iter()
+                    .find(|h| Self::algo_desc(&h.algo) == "id=21 tile=11 splitk=8")
+                    .map(|h| h.algo)
+                    .unwrap_or(hs[0].algo);
+                self.default_algos.lock().unwrap().insert(key, pick);
+                pick
             }
         };
         self.run_lt(&d, &algo, a, w, out)
