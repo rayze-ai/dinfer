@@ -159,3 +159,38 @@ fn calibrate_rmsnorm() {
         assert_eq!(*n, 0, "生产 rmsnorm 与 vLLM 不逐位一致：{d}");
     }
 }
+
+/// 指令级探针：给定 ss，按 vLLM PTX 的 `div.full → +eps → sqrt.approx.ftz → div.full` 算 inv（`RMS_SS=a,b,…`、`RMS_H`）。
+#[test]
+#[ignore = "需要 GPU"]
+fn probe_inv_chain() {
+    const PSRC: &str = r#"
+extern "C" __global__ void inv_chain(const float* ss, float* out, int n, float h, float eps) {
+  int i = threadIdx.x; if (i >= n) return;
+  float mean, t, r, inv, one = 1.0f;
+  asm("div.full.f32 %0, %1, %2;" : "=f"(mean) : "f"(ss[i]), "f"(h));
+  asm("add.f32 %0, %1, %2;" : "=f"(t) : "f"(eps), "f"(mean));
+  asm("sqrt.approx.ftz.f32 %0, %1;" : "=f"(r) : "f"(t));
+  asm("div.full.f32 %0, %1, %2;" : "=f"(inv) : "f"(one), "f"(r));
+  out[4*i] = mean; out[4*i+1] = t; out[4*i+2] = r; out[4*i+3] = inv;
+}"#;
+    let ss: Vec<f32> = std::env::var("RMS_SS").expect("RMS_SS").split(',').map(|v| v.trim().parse().unwrap()).collect();
+    let h: f32 = std::env::var("RMS_H").ok().and_then(|v| v.parse().ok()).unwrap_or(2816.0);
+    let eps: f32 = 1e-6;
+    let dev = Device::new(0).expect("cuda");
+    let st = dev.default_stream();
+    let cs = st.inner_arc();
+    let (maj, min) = dev.compute_capability().expect("cc");
+    let opts = cudarc::nvrtc::CompileOptions { arch: Some(Box::leak(format!("sm_{maj}{min}").into_boxed_str())), ..Default::default() };
+    let m = cs.context().load_module(cudarc::nvrtc::compile_ptx_with_opts(PSRC, opts).expect("nvrtc")).expect("mod");
+    let f = m.load_function("inv_chain").expect("fn");
+    let dss = st.htod_copy(ss.clone()).expect("ss");
+    let mut o = st.alloc_zeros::<f32>(4 * ss.len()).expect("o");
+    let n = ss.len() as i32;
+    let cfg = LaunchConfig { grid_dim: (1, 1, 1), block_dim: (32, 1, 1), shared_mem_bytes: 0 };
+    unsafe { cs.launch_builder(&f).arg(&dss).arg(&mut o).arg(&n).arg(&h).arg(&eps).launch(cfg) }.expect("launch");
+    let v = st.dtoh_sync_copy(&o).expect("dl");
+    for (i, s) in ss.iter().enumerate() {
+        println!("ss={s:?} mean={:?} t={:?} rms={:?} inv={:?} ({:#x})", v[4 * i], v[4 * i + 1], v[4 * i + 2], v[4 * i + 3], v[4 * i + 3].to_bits());
+    }
+}

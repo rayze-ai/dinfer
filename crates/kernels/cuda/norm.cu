@@ -39,22 +39,22 @@ __device__ __forceinline__ float rms_ss_triton(const float (&gs)[VPT], int nvec)
   return tot_s;
 }
 
-// 1/rms：逐条对应 vLLM BI Triton `_rms_norm_kernel` 在 sm_120 上编出的 PTX（容器 triton cache 实抓，§55）：
-//   mean = div.full.f32(ss, n)；rms = sqrt.approx.ftz.f32(eps + mean)；inv = div.full.f32(1, rms)。
-// 两次除法都是 **div.full（近似，非 IEEE）**——§52 的"乘倒数 + IEEE"是凑巧吻合，L4 数据推翻了它。
+// 1/rms：对应 vLLM BI Triton `_rms_norm_kernel` 在 sm_120 上的**实际执行**（§55）：
+//   PTX 是 mean = div.full(ss, n)；rms = sqrt.approx.ftz(eps + mean)；inv = div.full(1, rms)，
+//   但 rms 只被 1/rms 用到时 **ptxas 把 div.full(1, sqrt.approx(x)) 合成倒数平方根**——实测把 rms 存出来
+//   （阻止合并）inv 就变回 1 ulp 之差。所以这里显式写 rsqrt.approx.ftz，不赌编译器是否合并。
 __device__ __forceinline__ float div_full(float a, float b) {
   float r;
   asm("div.full.f32 %0, %1, %2;" : "=f"(r) : "f"(a), "f"(b));
   return r;
 }
-__device__ __forceinline__ float sqrt_approx_ftz(float x) {
+__device__ __forceinline__ float rsqrt_approx_ftz(float x) {
   float r;
-  asm("sqrt.approx.ftz.f32 %0, %1;" : "=f"(r) : "f"(x));
+  asm("rsqrt.approx.ftz.f32 %0, %1;" : "=f"(r) : "f"(x));
   return r;
 }
 __device__ __forceinline__ float rms_inv(float ss, int hidden, float eps) {
-  const float mean = div_full(ss, (float)hidden);
-  return div_full(1.0f, sqrt_approx_ftz(__fadd_rn(eps, mean)));
+  return rsqrt_approx_ftz(__fadd_rn(eps, div_full(ss, (float)hidden)));
 }
 
 // rows：非空时输出第 r 行取 x 的第 rows[r] 行（gather + rmsnorm 融合，Q3 第 59 轮：lm_head 前只取每请求最后一行）。
