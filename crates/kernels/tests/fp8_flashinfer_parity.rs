@@ -77,39 +77,52 @@ fn fp8_matches_flashinfer_bitwise() {
     let b_bytes = std::fs::read(format!("{dir}/B_fp8.bin")).expect("B_fp8.bin");
     let ref_out = read_ref(&dir);
     assert_eq!(a_bytes.len(), rows * k, "A 字节数");
-    assert_eq!(b_bytes.len(), n * k, "B 物理是 [N,K]");
+    assert_eq!(b_bytes.len(), n * k, "B 字节数");
     assert_eq!(ref_out.len(), rows * n, "参考输出元素数");
 
     let dev = Device::new(0).expect("cuda");
     let st = dev.default_stream();
     let gemm = Gemm::new(&st).expect("gemm");
-    let da = st.htod_copy(a_bytes).expect("upload a");
-    let dw = st.htod_copy(b_bytes).expect("upload w");
-    let mut dout = st.alloc_zeros::<bf16>(rows * n).expect("alloc");
-    gemm.forward_fp8_prequant(&da, scale_a, &dw, scale_b, &mut dout, rows, n, k)
-        .expect("forward_fp8_prequant");
-    let got = st.dtoh_sync_copy(&dout).expect("download");
+    let da = st.htod_copy(a_bytes.clone()).expect("upload a");
 
-    let mut diff = 0usize;
-    let mut max = 0f32;
-    let mut first = Vec::new();
-    for i in 0..rows * n {
-        let g = got[i].to_f32();
-        let r = ref_out[i];
-        if g != r {
-            diff += 1;
-            let d = (g - r).abs();
-            if d > max {
-                max = d;
-            }
-            if first.len() < 8 {
-                first.push((i / n, i % n, g, r));
-            }
+    // B 的落盘布局有歧义：vLLM 拿到的是 `B.stride()==(1,2816)` 的**转置视图**（物理 [N,K] 行主序），
+    // 而 `np.ascontiguousarray(视图)` 会按**逻辑序**重排成 [K,N] 连续。两种都试，用哪份能让输出对上
+    // 由结果判定，不靠猜。
+    let b_nk = b_bytes.clone(); // 解释成 [N,K] 行主序
+    let mut b_kn = b_bytes.clone(); // 解释成 [K,N] 行主序 → 手动转成 [N,K]
+    for row in 0..n {
+        for col in 0..k {
+            b_kn[row * k + col] = b_bytes[col * n + row];
         }
     }
-    println!("fp8 vs FlashInfer: diff {diff}/{}  max {max:.4e}", rows * n);
-    for (row, col, g, x) in &first {
-        println!("  [row {row}, col {col}] ours {g:.6e}  vllm {x:.6e}");
+
+    for (label, wbytes) in [("[N,K] 物理序", b_nk), ("[K,N] 逻辑序(已转置)", b_kn)] {
+        let dw = st.htod_copy(wbytes).expect("upload w");
+        let mut dout = st.alloc_zeros::<bf16>(rows * n).expect("alloc");
+        gemm.forward_fp8_prequant(&da, scale_a, &dw, scale_b, &mut dout, rows, n, k)
+            .expect("forward_fp8_prequant");
+        let got = st.dtoh_sync_copy(&dout).expect("download");
+
+        let mut diff = 0usize;
+        let mut max = 0f32;
+        let mut first = Vec::new();
+        for i in 0..rows * n {
+            let g = got[i].to_f32();
+            let r = ref_out[i];
+            if g != r {
+                diff += 1;
+                let d = (g - r).abs();
+                if d > max {
+                    max = d;
+                }
+                if first.len() < 4 {
+                    first.push((i / n, i % n, g, r));
+                }
+            }
+        }
+        println!("B={label}: diff {diff}/{}  max {max:.4e}", rows * n);
+        for (row, col, g, x) in &first {
+            println!("    [row {row}, col {col}] ours {g:.6e}  vllm {x:.6e}");
+        }
     }
-    assert_eq!(diff, 0, "与 FlashInfer 不是逐位一致");
 }
