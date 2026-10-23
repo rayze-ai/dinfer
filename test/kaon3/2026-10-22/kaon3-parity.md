@@ -2176,3 +2176,24 @@ L0 已经接近逐位；残余 1 ulp 零星分布在 `q_norm`(12) / `mlp_gate_up
 
 **下一步**：用 `flashinfer` 的 fp8 GEMM 在同一输入/权重上复现 `qkv_raw`。若能逐位复现 → 我们换成同口径（或复刻其累加树）即可；
 若不能 → 说明还有 requant/布局差异，再看 `FlashInferFP8ScaledMMLinearKernel.apply_weights`。
+
+### D-12：**连 vLLM 调它自己的 kernel 也复现不出自己的前向输出**（1-ulp 级）
+
+用 vLLM **自己加载的权重**（`qkv_proj.weight` `(2816,8192)` f8 + `weight_scale` 1.3166156e-3 + `input_scale` 0.59375）
+调 vLLM **自己的** `flashinfer_scaled_fp8_mm`，与 vLLM 前向的 `qkv_raw` 比：
+
+| 实现 | 差异 |
+|---|---|
+| 我们（Rust）| 5 / 98304 |
+| vLLM 自己的 flashinfer 算子 | **7 / 196608** |
+
+排除的候选：
+- **激活量化**：我朴素写的 `(X/qa).to(fp8)` 与 vLLM 自己的 `ops.scaled_fp8_quant(X, sa)` **字节完全一致（0/67584）**，
+  且换成后者的输出差异不变（仍 7 处）。→ 不是量化。
+- **cutlass vs flashinfer**：两者都差 89026 —— 那是因为我一开始用错了 weight 布局（checkpoint `[N,K]`，vLLM 加载后是 `[K,N]`），
+  布局修正后 flashinfer 只剩 7 处。**这个 89026 是我的脚本错误，不是发现**。
+
+**结论**：vLLM 的前向与"同一个 GEMM 单独跑"之间存在 **1-ulp 级**差异，量级与我们（5 处）相同。
+即**在这个精度层面不存在"逐位可复刻"的目标**——求的是 fp8 GEMM 内部累加序，vLLM 自己也不保证单算子复现。
+
+→ 需要对"过 FLOOR"重新设定目标：不能再以"逐位复现 vLLM 输出"为判据（它自己都做不到）。
