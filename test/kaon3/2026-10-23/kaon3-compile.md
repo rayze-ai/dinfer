@@ -677,3 +677,12 @@ OURS POOLED cases=30 rows=538 decisive=483 flips=68 flip_pct=14.08 mean_common_d
 
 **教训**：抓参照数据时先看那张卡**有没有别的进程占着**（`nvidia-smi --query-compute-apps`），
 `docker exec 进服务容器`听起来最省事，实际上是最容易撞上资源冲突的做法。
+
+### 抓取工具链又两个坑（2026-10-24，别重犯）
+
+1. **`pkill -f "moe_capture.py"` 会杀掉自己**：Bash 工具那条命令行本身含这个字符串，
+   `-f` 匹配全命令行 → 自我终止（两次 exit 144）。**链内杀进程用 `pkill -x`**（匹配进程名而非命令行）。
+2. **脚本要放在容器可见的挂载里**：`ctr` 把远端仓库根挂成 `/w`，本地 `/tmp/*.py` 在容器里不存在。
+   → 抓取脚本入库到 `scripts/dev/moe_capture.py`，容器内用 `/w/scripts/dev/moe_capture.py`。
+3. **要看实时输出就写远端文件**（`> /w/tmp/cap.log 2>&1; tail`），
+   不要靠 `nohup … &` + 本地 log —— ssh 断开时 stdout 会丢，日志 0 字节。
