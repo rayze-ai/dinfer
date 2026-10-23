@@ -812,3 +812,32 @@ ref [0..8] = [0.23339844, 1.78125, -2.21875, 0.032958984, 0.40039063, 0.26367188
    （mode 版是 `gelu_tanh_mul_mode`）。多传一个 `0` 能编译（被当成 `tokens`），但语义全错。
 
 → **下次写"复算参照"的测试，先核对每个调用的签名，再核对量级（范数比），最后才看逐位。**
+
+## 第 7 轮定位完成：参照的 MoE 后端 = `VLLM_CUTLASS` NvFp4 + modular prepare/finalize
+
+从 oracle 容器日志（`/w/tmp/wm2.log`）：
+
+```
+INFO [nvfp4.py:291] Using 'VLLM_CUTLASS' NvFp4 MoE backend out of potential backends:
+     ['FLASHINFER_TRTLLM', 'FLASHINFER_CUTEDSL', 'FLASHINFER_CUTEDSL_BATCHED', 'FLASHINFER_...', ...]
+INFO [nvfp4.py:564] Using MoEPrepareAndFinalizeNoDPEPModular
+```
+
+**这就是 MoE 差异的根源**：
+- 参照：**一个融合的 cutlass MoE kernel**（`VLLM_CUTLASS`），
+  内部完成 激活量化 → 专家门控 → gate/up GEMM → SwiGLU → down GEMM → **加权累加（combine）**，
+  K 方向的归约树与 combine 的累加顺序都由该 kernel 的 tile 结构决定；
+- 我们：**逐专家分别调 NVFP4 GEMM**（`gemm.forward_nvfp4`）+ 单独的 `moe_scatter_add`，
+  归约树完全不同。
+
+与第 7 轮的实测完全吻合：**量级一致（‖ours‖/‖ref‖=1.0021）、74% 元素差 1–2 bf16 ulp** ——
+这是"同一数学、不同归约次序"的典型指纹，不是语义错误。
+
+### 下一步（按性价比排序）
+
+1. **先降级验证**：把我们的专家 GEMM 换成"单专家、单 token 组"的最简路径，确认单专家输出与参照的
+   cutlass 单专家结果差多少 ulp（需要参照侧也 dump 单专家输出）；
+2. **若单专家就不同** → 复刻 cutlass 的 K 方向归约（BLOCK_K 与块内顺序）；
+3. **若单专家相同、只有 combine 不同** → 只需对齐 combine 的累加顺序（更便宜）。
+
+**这条决定了后续工作量**，所以先做第 1 步。
