@@ -904,3 +904,17 @@ vLLM `P = tl.exp(S - m)`（自然域减 max，再 ·log2e 进 ex2）；我们 `e
 
 bit0 在现有数据上无区分力；bit1 是主因。剩余：L3 `q_norm` (13,·)×2、`post_attn_norm` (14,·)×2、`attn_out` (10,3550)；
 L4 `input_norm` (21,·)×2（**输入即参照** → RMSNorm 仍有行未对齐）、`ff2`/`post_ff_norm` (21,2323)。
+
+## 55. RMSNorm 按 vLLM 实际 PTX 复刻（§52 的公式被推翻）
+
+L3/L4 新增 4 组 norm 标定后，§52 的"`ss·fl(1/h)` + IEEE 1/sqrt"在 L4 上失败；8 种 inv 变体无一全过。
+改为直接抓**容器 Triton cache 里 `_rms_norm_kernel` 的 PTX**（`/w/rms_triton.ptx`，sm_120）：
+- 线程内：`mul.f32` 的是**第 1 个**元素，再 `fma.rn.f32.bf16` 第 0、2..7 个（顺序 1,0,2,…,7）；
+- warp `shfl.bfly` 16..1 → 4 warp `bfly` 2,1 → `tot = tot + chunk`；
+- `mean = div.full.f32(ss, n)`、`rms = sqrt.approx.ftz.f32(eps + mean)`、`inv = div.full.f32(1, rms)`（**两次 div.full，非 IEEE**）；
+- 输出 `mul.f32x2`（x·inv）·w → `cvt.rn.bf16x2`。
+`norm.cu` 已逐条对应。7 组标定：ff1 / pff / vnorm / L3_qnorm / L4_ff2 **0**；L4_input (21,·) 与 L3_postattn (14,·) 仍各 2。
+这两组的输入是**拼来的**（`ref_p02/L3.bin`、`o_proj` hook 输出），其余 5 组输入输出同源；反推需 inv 比 IEEE 小 1–48 ulp。
+→ 补抓两个 norm 的真实输入（`input_norm_in` / `post_attn_norm_in`），待对比。
+教训：**对拍数值写法，先拿参照的编译产物（PTX）再写，不要从源码猜**——源码 `sum_sq / n_cols`、`1.0 / tl.sqrt`
+实际编成 div.full + sqrt.approx，线程内顺序也被调度改过。
