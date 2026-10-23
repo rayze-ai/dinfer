@@ -203,3 +203,15 @@ D-17b 把 `A_fp8.bin` / `B_fp8.bin` / `fwd_ref_bf16.bin` 写到 `/w/hid/d17b/`�
 
 D-17b 已用 `OUT=/w/d17b` 重跑，**结果与首轮逐位相同**（0/196608 ×6 次 + 自复现 0），
 说明该结论可复现、不受路径影响。
+
+## 14. 本轮我自己的失误（第三次同类：改坏代码就直接跑）
+
+给 kernel 加预量化入口时，第一次 Edit 把 `gemm_fp8_kernel` 的声明替换掉了而不是新增，
+第二次补回时又在 `conv_a` 后留下 4 行残块（`return *reinterpret_cast...`）。两次都是
+**改完没在本地看一眼结构就直接 sync + 远端编译**，各浪费一轮 6 分钟编译。
+
+**规则（新增，写进 pitfalls）**：改 `.cu` / 大段 Rust 后，先 `grep -n '<关键符号>\|^}'` 看结构
+（函数数、大括号配对、总行数），再 sync。sed/Edit 的多行替换必须回读确认。
+
+最终形态：`gemm_fp8_kernel<PRE>` 模板，`PRE=false` 走 bf16 激活量化、`PRE=true` 直接读 e4m3 字节，
+两条路径共用同一套 smem/ldmatrix/mma/K 累加序 → 对同一 A 的数值逐位相同。
