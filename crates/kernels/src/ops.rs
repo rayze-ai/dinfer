@@ -600,6 +600,35 @@ pub fn rmsnorm_bf16_layout(
     )
 }
 
+/// router 预处理融合：`out = bf16(norm(x, 无权重) · rs · scale)`，**全程 fp32、只舍入一次**。
+///
+/// vLLM compile 口径（`docs/loops/kaon3-parity.md` 第 23 轮）：FX 图上 `rms_norm(None) → ×root_size → ×scale`
+/// 三步都标 bf16，但 inductor 融成一条 fp32 链、只在写回时舍入一次（两步 bf16 版差 17299/67584，fp32 版 0）。
+pub fn rmsnorm_scale2_bf16(
+    stream: &Stream,
+    x: &CudaSlice<bf16>,
+    scale: &CudaSlice<bf16>,
+    out: &mut CudaSlice<bf16>,
+    tokens: usize,
+    hidden: usize,
+    eps: f32,
+    rs: f32,
+) -> Result<()> {
+    ensure!(
+        x.len() >= tokens * hidden && out.len() >= tokens * hidden && scale.len() == hidden,
+        "rmsnorm_scale2: shape"
+    );
+    let (px, ps) = (stream.ptr(x) as *const c_void, stream.ptr(scale) as *const c_void);
+    let po = stream.ptr_mut(out) as *mut c_void;
+    // SAFETY: 缓冲容量已校验。
+    check(
+        unsafe {
+            ffi::rmsnorm_scale2_bf16(px, ps, po, tokens as i64, hidden as i64, eps, rs, norm_mode(), stream.raw() as _)
+        },
+        "rmsnorm_scale2_bf16",
+    )
+}
+
 /// `out[i] = fp8(norm(x)[i] * (1/a_scale))`：norm 与 fp8 量化**融合**，中间不落 bf16。
 ///
 /// 这是 vLLM **compile 口径**（默认；inductor 把 RMSNorm 融进下游量化 kernel）。eager BI 口径是

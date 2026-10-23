@@ -615,3 +615,25 @@ compile vs B(乘完再舍)       ndiff=17839    max=6.25e-2
 `models/kaon3` 的 router 预处理若按 `norm→bf16 × root_size→bf16 × scale` 分步做，会多两次 bf16 舍入。
 这是 L0 剩余差异的**具体、可修**的一项。下一步：把 router 预处理改成一条 fp32 链（norm 输出不落 bf16），
 再跑 L1 截层看 top5 \|Δlp\| 是否下降。
+
+### 第 24 轮：router 预处理改 fp32 融合链 —— 已实现，但**不是主要残余**
+
+实现：`norm.cu::rmsnorm_scale2_kernel` + `ops::rmsnorm_scale2_bf16`（`mode=0` 才走，eager 仍三步）。
+`models/kaon3/src/layer.rs` 的 router 输入在 `RMSNORM_MODE=0` 下走融合算子。
+
+**kernel 级验证**（`/w/tmp/rpcmp.py`，[24,2816]）：
+| 对比 | 不同元素 | max |
+|---|---|---|
+| 融合 vs `torch.compile` 参考 | 15912/67584 | **6.1e-5** |
+| 融合 vs 三步 bf16 | 21022/67584 | 6.1e-5 |
+
+6.1e-5 在该输出量级上约 **半个 bf16 ulp**（舍入平局差异），即融合口径基本对了，但还没到逐位。
+
+**L1 截层**：
+| 口径 | top5 \|Δlp\| | 实际 token \|Δlp\| |
+|---|---|---|
+| 三步（第 23 轮前） | 0.0102 | 1.4898 |
+| 融合 fp32（本轮） | **0.0097** | **1.5221** |
+
+top5 略降、实际 token 略升 —— **都在噪声量级，router 预处理不是 L0 残余差异的主项**。
+保留（口径与 compile 一致、无副作用），但继续找别的点。

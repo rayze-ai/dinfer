@@ -322,6 +322,67 @@ __global__ void __launch_bounds__(BLOCK) rmsnorm_quant_kernel(const bf16* __rest
   }
 }
 
+// ---------------------------------------------------------------------------------------------
+// router 预处理的融合（vLLM **compile 口径**，`docs/loops/kaon3-parity.md` 第 23 轮）
+//
+// FX 图里是 `rms_norm(x, None) → × root_size → × scale`（`computation_graph.py:1400-1406`，三步都标 bf16），
+// 但实测 inductor 把这三次乘法**融成一条 fp32 链、只在写回时舍入一次**：
+//   (y·rs)·sc 两步 bf16 → 17299/67584 不同；`y.float()·rs·sc → bf16` → **0 不同**。
+// 我们原来分 `rmsnorm_noweight` + `scale_bf16_n` + `mul_bf16_n` 三步做，中间多两次 bf16 舍入。
+// 这里把三件事合成一个 kernel：无权重 norm 的 inv 用 compile 口径，输出在 fp32 里连乘 rs、scale 后舍入一次。
+template <int BLOCK, int VPT>
+__global__ void __launch_bounds__(BLOCK) rmsnorm_scale2_kernel(const bf16* __restrict__ x,
+                                                              const bf16* __restrict__ scale,
+                                                              bf16* __restrict__ out, int hidden, float eps,
+                                                              float rs) {
+  const int64_t row = blockIdx.x;
+  const uint4* xr = reinterpret_cast<const uint4*>(x + row * hidden);
+  const uint4* sv = reinterpret_cast<const uint4*>(scale);
+  uint4* orow = reinterpret_cast<uint4*>(out + row * hidden);
+  const int nvec = hidden / 8;
+
+  float v[VPT][8];
+  float gs[VPT];
+#pragma unroll
+  for (int j = 0; j < VPT; ++j) {
+    const int i = threadIdx.x + j * BLOCK;
+    gs[j] = 0.f;
+    if (i < nvec) {
+      const uint4 xa = xr[i];
+      const __nv_bfloat162* xp = reinterpret_cast<const __nv_bfloat162*>(&xa);
+#pragma unroll
+      for (int c = 0; c < 4; ++c) {
+        const float2 f = __bfloat1622float2(xp[c]);
+        v[j][2 * c] = f.x; v[j][2 * c + 1] = f.y;
+      }
+      float acc = __fmul_rn(v[j][1], v[j][1]);
+      acc = __fmaf_rn(v[j][0], v[j][0], acc);
+#pragma unroll
+      for (int e = 2; e < 8; ++e) acc = __fmaf_rn(v[j][e], v[j][e], acc);
+      gs[j] = acc;
+    }
+  }
+  const float inv = rms_inv_compile(rms_ss_triton<BLOCK, VPT>(gs, nvec), hidden, eps);
+#pragma unroll
+  for (int j = 0; j < VPT; ++j) {
+    const int i = threadIdx.x + j * BLOCK;
+    if (i < nvec) {
+      const uint4 sb = sv[i];
+      const __nv_bfloat162* sp = reinterpret_cast<const __nv_bfloat162*>(&sb);
+      uint4 ob;
+      __nv_bfloat162* op = reinterpret_cast<__nv_bfloat162*>(&ob);
+#pragma unroll
+      for (int c = 0; c < 4; ++c) {
+        const float2 g = __bfloat1622float2(sp[c]);
+        // fp32 全程：norm → ×rs → ×scale，只在写回时舍入一次
+        op[c] = __floats2bfloat162_rn(v[j][2 * c] * inv * rs * g.x,
+                                       v[j][2 * c + 1] * inv * rs * g.y);
+      }
+      orow[i] = ob;
+    }
+  }
+}
+
 // layout（host 给，`ArchProfile::rmsnorm_layout`）：0 一 block(256 线程) 一行；1 一 warp 一行（hidden ≤ 4096，
 // 否则退回 0）；2 一 block(1024 线程) 一行（hidden ≤ 8192）。hidden 不对齐 / > 8192 一律标量版。
 template <bool FUSED_ADD>
@@ -387,6 +448,16 @@ static int launch_quant(const void* x, const void* w, void* out, int64_t tokens,
 }
 
 
+// router 预处理：`out = bf16(fp32(norm(x, 无权重) · rs · scale))`。
+template <int BLOCK, int VPT>
+static int launch_scale2(const void* x, const void* scale, void* out, int64_t tokens, int64_t hidden, float eps, float rs,
+                         cudaStream_t s) {
+  rmsnorm_scale2_kernel<BLOCK, VPT><<<(unsigned)tokens, BLOCK, 0, s>>>(
+      static_cast<const bf16*>(x), static_cast<const bf16*>(scale), static_cast<bf16*>(out), (int)hidden, eps, rs);
+  return last_err();
+}
+
+
 }  // namespace
 
 extern "C" int rmsnorm_bf16(const void* x, const void* w, void* out, int64_t tokens, int64_t hidden, float eps,
@@ -415,4 +486,20 @@ extern "C" int rmsnorm_quant_fp8_bf16(const void* x, const void* w, void* out, i
   if (hidden <= 2048) return launch_quant<256, 1>(x, w, out, tokens, hidden, eps, a_scale, stream);
   if (hidden <= 4096) return launch_quant<256, 2>(x, w, out, tokens, hidden, eps, a_scale, stream);
   return launch_quant<256, 4>(x, w, out, tokens, hidden, eps, a_scale, stream);
+}
+
+// router 预处理融合（vLLM compile 口径）：`out = bf16(norm(x) · rs · scale)`，norm 无权重。
+// 与 `rmsnorm_noweight` + `scale_bf16_n` + `mul_bf16_n` 三步的差别仅在 bf16 舍入次数（这里只舍一次）。
+extern "C" int rmsnorm_scale2_bf16(const void* x, const void* scale, void* out, int64_t tokens, int64_t hidden,
+                                   float eps, float rs, int mode, cudaStream_t stream) {
+  if (tokens <= 0) return 0;
+  if (hidden <= 0 || hidden > 8192 || (hidden % 8) != 0) return err(cudaErrorInvalidValue);
+  if (mode != 0) {
+    // eager 口径没有实测过这条融合，退回三步由调用方负责 → 这里直接不支持
+    return err(cudaErrorInvalidValue);
+  }
+  if (hidden <= 1024) return launch_scale2<128, 1>(x, scale, out, tokens, hidden, eps, rs, stream);
+  if (hidden <= 2048) return launch_scale2<256, 1>(x, scale, out, tokens, hidden, eps, rs, stream);
+  if (hidden <= 4096) return launch_scale2<256, 2>(x, scale, out, tokens, hidden, eps, rs, stream);
+  return launch_scale2<256, 4>(x, scale, out, tokens, hidden, eps, rs, stream);
 }

@@ -887,10 +887,20 @@ impl Gemma4Layer {
         // 结果再舍入一次。我们原来用 f32 的 `(h as f32).powf(-0.5)`（scale_bf16_n 内部做 f32 乘、
         // 舍入一次），少了那一步 bf16 舍入 → `router_logits` 有 3.3e-3 的偏差。
         // 2026-10-22 逐层对拍定案：这里必须用 **bf16 舍入后的 root_size**。
-        ops.norm().rmsnorm_noweight(stream, &sc.x.data, &mut sc.routed.data, tokens, h, eps)?;
+        //
+        // **compile 口径（第 23 轮实测）**：inductor 把 `norm → ×root_size → ×scale` 融成一条 fp32 链，
+        // 只在写回时舍入一次。分三步做会多两次 bf16 舍入（实测差 17299/67584）。所以默认走融合算子；
+        // `RMSNORM_MODE=1`（eager BI）才退回三步。
         let root_size = f32::from(bf16::from_f32((h as f32).powf(-0.5)));
-        k::ops::scale_bf16_n(stream, &mut sc.routed.data, tokens * h, root_size)?;
-        k::ops::mul_bf16_n(stream, &mut sc.routed.data, &self.router.scale.data, tokens, h)?;
+        if norm_mode() == 0 {
+            k::ops::rmsnorm_scale2_bf16(
+                stream, &sc.x.data, &self.router.scale.data, &mut sc.routed.data, tokens, h, eps, root_size,
+            )?;
+        } else {
+            ops.norm().rmsnorm_noweight(stream, &sc.x.data, &mut sc.routed.data, tokens, h, eps)?;
+            k::ops::scale_bf16_n(stream, &mut sc.routed.data, tokens * h, root_size)?;
+            k::ops::mul_bf16_n(stream, &mut sc.routed.data, &self.router.scale.data, tokens, h)?;
+        }
 
         sub_dump_op(stream, sub_out, "router_in", &sc.routed, tokens, h)?;
         let e = cfg.num_experts;
