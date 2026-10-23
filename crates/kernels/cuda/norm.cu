@@ -5,6 +5,14 @@ using namespace dinfer;
 
 namespace {
 
+// 1/rms：与 vLLM（BI 模式 Triton `_rms_norm_kernel`）逐位一致的写法 —— mean = ss × fl(1/h)（不是 ss / h），
+// inv = 1 / sqrt_rn(mean + eps)（不是 rsqrtf 近似）。全部显式 _rn，禁止编译器把 ss·r + eps 收缩成 fma。
+// 依据：Kaon-V3 L2 真实输入 48 行，旧写法 2 元素 1-ulp、此写法 0（`tests/rmsnorm_calib.rs`，D-16-REBASE §52）。
+__device__ __forceinline__ float rms_inv(float ss, int hidden, float eps) {
+  const float mean = __fmul_rn(ss, __fdiv_rn(1.0f, (float)hidden));
+  return __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(mean, eps)));
+}
+
 // rows：非空时输出第 r 行取 x 的第 rows[r] 行（gather + rmsnorm 融合，Q3 第 59 轮：lm_head 前只取每请求最后一行）。
 // 向量化版本（B4 第 1 轮）：每线程一次 16 B（8 × bf16）读 x / res / w，所有访存在归约前一次发出，
 // 不再按 hidden/BLOCK 轮次串行等待——decode T=1 时每 token 只有一个 block，串行访存链在 B300 这类高延迟 HBM 上
@@ -61,7 +69,7 @@ __global__ void __launch_bounds__(BLOCK) rmsnorm_vec_kernel(const bf16* __restri
     }
   }
   ss = block_reduce_sum<BLOCK>(ss);
-  const float inv = rsqrtf(ss / hidden + eps);
+  const float inv = rms_inv(ss, hidden, eps);
 #pragma unroll
   for (int j = 0; j < VPT; ++j) {
     const int i = threadIdx.x + j * BLOCK;
@@ -131,7 +139,7 @@ __global__ void __launch_bounds__(kNormWarps * 32) rmsnorm_warp_kernel(const bf1
   }
 #pragma unroll
   for (int o = 16; o > 0; o >>= 1) ss += __shfl_xor_sync(0xffffffffu, ss, o);
-  const float inv = rsqrtf(ss / hidden + eps);
+  const float inv = rms_inv(ss, hidden, eps);
 #pragma unroll
   for (int j = 0; j < VPL; ++j) {
     const int i = lane + j * 32;
@@ -173,7 +181,7 @@ __global__ void rmsnorm_kernel(const bf16* __restrict__ x, bf16* __restrict__ re
     ss += v * v;
   }
   ss = block_reduce_sum<BLOCK>(ss);
-  const float inv = rsqrtf(ss / hidden + eps);
+  const float inv = rms_inv(ss, hidden, eps);
 
   // 第二遍：归一化并乘权重。
   const bf16* src = FUSED_ADD ? rr : xr;

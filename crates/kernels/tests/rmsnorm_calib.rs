@@ -131,6 +131,7 @@ fn calibrate_rmsnorm() {
             let y: Vec<u16> = st.dtoh_sync_copy(&o).expect("dl").iter().map(|v| v.to_bits()).collect();
             let (n, ex) = diff(&y);
             println!("  production          diff {n:<5} {ex:?}");
+            assert_eq!(n, 0, "生产 rmsnorm 与 vLLM 不逐位一致：{dir}");
         }
         for inv in 0..4i32 {
             let mut o = st.alloc_zeros::<u16>(rows * h).expect("o");
