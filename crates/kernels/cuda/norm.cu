@@ -6,7 +6,7 @@ using namespace dinfer;
 namespace {
 
 // 平方和，归约结构与 vLLM BI 的 Triton `_rms_norm_kernel`（BLOCK_SIZE=1024、4 warp × 32 lane × 8 元素）逐位同序：
-// 8 元素组（gs）→ 每 warp 32 组 = 256 列一段做 xor 蝶形 → 每 4 段 = 1024 列一块做 4-lane 蝶形 `(s0+s2)+(s1+s3)`
+// 8 元素组（gs，首元素乘 + 7 次 fma）→ 每 warp 32 组 = 256 列一段做 xor 蝶形 → 每 4 段 = 1024 列一块做 4-lane 蝶形 `(s0+s2)+(s1+s3)`
 // → 块间从 0 顺序累加。旧写法（线程内 a·a+b·b 两两加 + 全 block 一次蝶形）在 Kaon-V3 v_norm（h=256）上差 2 元素（§53）。
 // 要求 hidden % 8 == 0 且 hidden ≤ 8192（段数 ≤ 32）——vec kernel 的使用条件本就如此。
 template <int BLOCK, int VPT>
@@ -39,12 +39,22 @@ __device__ __forceinline__ float rms_ss_triton(const float (&gs)[VPT], int nvec)
   return tot_s;
 }
 
-// 1/rms：与 vLLM（BI 模式 Triton `_rms_norm_kernel`）逐位一致的写法 —— mean = ss × fl(1/h)（不是 ss / h），
-// inv = 1 / sqrt_rn(mean + eps)（不是 rsqrtf 近似）。全部显式 _rn，禁止编译器把 ss·r + eps 收缩成 fma。
-// 依据：Kaon-V3 L2 真实输入 48 行，旧写法 2 元素 1-ulp、此写法 0（`tests/rmsnorm_calib.rs`，D-16-REBASE §52）。
+// 1/rms：逐条对应 vLLM BI Triton `_rms_norm_kernel` 在 sm_120 上编出的 PTX（容器 triton cache 实抓，§55）：
+//   mean = div.full.f32(ss, n)；rms = sqrt.approx.ftz.f32(eps + mean)；inv = div.full.f32(1, rms)。
+// 两次除法都是 **div.full（近似，非 IEEE）**——§52 的"乘倒数 + IEEE"是凑巧吻合，L4 数据推翻了它。
+__device__ __forceinline__ float div_full(float a, float b) {
+  float r;
+  asm("div.full.f32 %0, %1, %2;" : "=f"(r) : "f"(a), "f"(b));
+  return r;
+}
+__device__ __forceinline__ float sqrt_approx_ftz(float x) {
+  float r;
+  asm("sqrt.approx.ftz.f32 %0, %1;" : "=f"(r) : "f"(x));
+  return r;
+}
 __device__ __forceinline__ float rms_inv(float ss, int hidden, float eps) {
-  const float mean = __fmul_rn(ss, __fdiv_rn(1.0f, (float)hidden));
-  return __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(mean, eps)));
+  const float mean = div_full(ss, (float)hidden);
+  return div_full(1.0f, sqrt_approx_ftz(__fadd_rn(eps, mean)));
 }
 
 // rows：非空时输出第 r 行取 x 的第 rows[r] 行（gather + rmsnorm 融合，Q3 第 59 轮：lm_head 前只取每请求最后一行）。
@@ -100,9 +110,10 @@ __global__ void __launch_bounds__(BLOCK) rmsnorm_vec_kernel(const bf16* __restri
       for (int c = 0; c < 4; ++c) {
         v[j][2 * c] = f[c].x; v[j][2 * c + 1] = f[c].y;
       }
+      // PTX：mul.f32 首元素，其余 7 个 fma.rn.f32.bf16（积不舍入，融合累加）
       float acc = __fmul_rn(v[j][0], v[j][0]);
 #pragma unroll
-      for (int e = 1; e < 8; ++e) acc = __fadd_rn(acc, __fmul_rn(v[j][e], v[j][e]));
+      for (int e = 1; e < 8; ++e) acc = __fmaf_rn(v[j][e], v[j][e], acc);
       gs[j] = acc;
     }
   }
