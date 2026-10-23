@@ -547,3 +547,27 @@ mean_common_d=0.0276` —— **0.83% 就是 `oracle_clean_b` vs `oracle_clean` �
 **这条已经第 4 次**（改脚本/改代码不先同步或自检就发远端）。已固化到 `pitfalls.md`：
 **任何 `ctr` 调用前**：① `remote_5090.sh sync`；② 比 `md5sum` 本地 vs 远端；
 ③ 不同就停，不要跑。宁可多花 5 秒，不要浪费一轮 6 分钟并产出假读数。
+
+## 36. **形状扫描（md5 已验证，m=24 真实）——cuBLAS 对全部 6 形状都是 0**
+
+| (n,k) | auto | **cublas** | cudnn | cutlass |
+|---|---|---|---|---|
+| 2816×2112 | 0 | **0** | 0 | 5 |
+| 2816×4096 | 0 | **0** | 4 | 5 |
+| 2816×8192 | 0 | **0** | 0 | 6 |
+| 4224×2816 | 0 | **0** | 0 | 10 |
+| 8192×2816 | 0 | **0** | 8 | 7 |
+| 10240×2816 | 0 | **0** | 14 | 18 |
+
+**两个结论**：
+1. **cuBLAS 是普适正确的**（6/6 形状全 0），不是只在 qkv 上成立。方向对。
+2. **我的实现有错**：`forward_fp8_cublaslt` 把 algo **写死 index 2**，而 2 只是 `(8192,2816)` 的答案。
+   其他形状的正确 algo 下标不同 → 直接解释 §34 的 A/B（翻转率 15.73% > 14.49%）。
+
+**更关键**：`flashinfer.bmm_fp8(..., backend="cublas")` 用**默认 tactic=-1** 就能对全部形状给 0，
+而我们的 Lt 用默认 `h[0]` 在 `(8192,2816)` 上给 8。→ **差异在描述符构造，不在 algo 选择**。
+最可能是 cuBLAS 视角的**行列方向 / lda-ldb-ldc 约定**与 flashinfer 不同，导致 cuBLAS 内部挑了不同 kernel。
+
+**下一步**：照 `flashinfer/data/include/flashinfer/gemm/bmm_fp8.cuh` 的
+`CuBlasLtMatrixLayout(type, rows, cols, ld, ...)` 与 `setAttribute(TRANSA/TRANSB)` 逐项对齐我们的
+`make_descs_fp8`，而不是继续猜 algo 下标。
