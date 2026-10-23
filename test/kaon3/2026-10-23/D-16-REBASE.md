@@ -272,3 +272,15 @@ GPU=0 scripts/dev/remote_5090.sh ctr "cd /w/dinfer && D17_DIR=/w/d17b CUDA_ARCHS
 再让我们的 K 循环与它一致（或直接按它的分块重构）。
 下一步：dump 该形状的 autotune 选择（`VLLM_...`/flashinfer 的 tuner 接口），把配置的
 `tile_k / num_mma_per_k / split` 读出来，对照我们 `BK=64 + 2×mma(k32)` 的顺序。
+
+## 18. 下一步的两个问题（按可能性排序）
+
+**(A) 目标是否良定义**：FlashInfer 在**跨进程**（各自加载权重、各自 JIT autotune）时是否仍逐位一致？
+- 若**是** → 目标良定义，任务变成"复刻它的累加序"（可做，需知道命中哪套 tile 配置）。
+- 若**否** → "与 vLLM 逐位相同"本身没有唯一答案，判据必须改成"落在其运行间抖动内"。
+这决定后面是继续攻 kernel 还是改判据，**必须先答**。测试已在跑（两个独立进程 dump 同一 GEMM 输出比）。
+
+**(B) 若目标良定义**：FlashInfer `bmm_fp8` 在 sm_120 上带 JIT autotuner
+（容器日志：`Autotuning fp8_gemm: 20 configs`、`Saved 120 configs`）。
+不同 tile/unroll 的 **K 方向累加顺序不同** → 要复现得先读出该形状命中的配置
+（`tile_k` / `num_mma_per_k` / split 方式），再让我们的 `BK=64 + 2×mma(k32)` 与它一致。
