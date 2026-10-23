@@ -1128,3 +1128,29 @@ q   = fp4(x / (sf / gs))         反量化 = q · sf / gs
 下一步应该直接读 `cutlass_moe.py: run_cutlass_moe_fp4` 里
 `ops.cutlass_fp4_moe_mm` 的完整调用与 `w1_alphas` 的构造（`oracle/nvfp4.py:496 g1_alphas=w13_scale_2`），
 把 `alpha` 到底含哪几项写成一个式子，再回来验算。
+
+## 乘子口径：**已从 checkpoint 精确对上**
+
+```
+weight_scale_2 (checkpoint)          = 9.736560605233535e-05
+alpha × a1_gscale (capture 里抓的)   = 2.1054227e-07 × 462.4516 = 9.7365606e-05   ✅ 精确相等
+input_scale (checkpoint)             = 0.0021623885 = 1/a1_gscale                  ✅
+```
+→ **`alpha = weight_scale_2 / a1_gscale`**（`oracle/nvfp4.py:526` 的 `a1_gscale=1/a13_scale`
+配合 `process_weights_after_loading` 的 in-place fuse）。
+
+### 但 numpy 复算仍差一个常数（相对 0.4085，逐行都是 0.9978）
+
+**残差形态**是关键证据：
+```
+corr(ours, ref) = 0.924        ← 形状基本对
+逐行相对误差 = [0.9978, 0.9978, ...]  ← **全部相同的常数**，不是随机
+```
+常数偏差 + 高相关 = **乘子错了一个固定因子**，不是算法错。
+`alpha/gs` 也给出 0.9978 → 说明"是否已经除过 gs"这一步我搞反了，
+但在两种写法下相对误差都不变，意味着**我改的地方不是那个因子所在**。
+
+⚠️ **这一轮已经在"试乘子"上花了太多时间**（能量化误差、nibble 顺序、permute 方向、乘子，共 6 次猜错）。
+正确做法：**不要再用 numpy 反推参照**，而是让**参照自己的 dense op**在这组输入上跑一遍，
+它的输出就是标准答案，与 MoE 里的 `y` 比 —— 若两者一致，说明我的 numpy 解读有 bug；
+若不一致，说明 MoE 路径还做了额外的事（例如 epilogue）。
