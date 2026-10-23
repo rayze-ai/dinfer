@@ -857,3 +857,24 @@ Python 层没有逐专家的 nn.Module，自然无法 hook。
 直接读它的 cutlass 配置（`nvfp4.py` 里选后端的表 + `cutlass_moe` 的 tile/K 分块），
 按它的归约结构实现，然后用**整段 MoE**（`moe_stage_parity`）做判据。
 换言之：**跳过"单专家对拍"，直接对齐 cutlass 的归约**。
+
+## 量化口径（决定了 MoE 差异为什么这么大）
+
+`config.json` 的 `quantization_config.config_groups`：
+
+| 组 | 激活 | 权重 | 目标 |
+|---|---|---|---|
+| `group_0` | **8 bit** float | **8 bit** float | attention / dense mlp（q/k/v/o、gate/up/down） |
+| `group_1` | **4 bit** float，**group_size 16** | **4 bit** float，group_size 16 | **`layers.*.experts`（专家）** |
+
+`quant_algo = MIXED_PRECISION`。
+
+**专家是 W4A4（NVFP4 两边都量化）**，group_size 16 的块缩放。含义：
+- 一个 fp4 只有 3 个尾数位，**ulps 是 bf16 的 2^5 = 32 倍粗**；
+- 块内 16 个元素共享一个 e4m3 缩放，**缩放怎么算、块内怎么累加**都直接影响结果；
+- 所以"同一数学、不同归约次序"在 W4A4 上产生的 ulp 差异，比 W8A8 大得多，经 8 专家加权 + 30 层后
+  被放大成端到端的 14–16% flip。
+
+**这对 loop 的含义**：MoE 的逐位对齐必须**同时**对齐两件事——
+① 激活量化（`a_scale` 的 gp = 全局 scale、block scale 的算法）；② cutlass 的 K 方向归约结构与 combine 顺序。
+只改其一不会有质变（这与第 6 轮 `MOE_COMBINE_F32` 只带来 2.5pp 改善的现象一致）。
