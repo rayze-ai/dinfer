@@ -25,12 +25,39 @@
 - 导出 inductor 产物（远端 `/w/tmp/ind`）：`computation_graph.py` + 36 个 Triton kernel；
   逐行解析了 MoE 融合 kernel 的 12 个入参 → 模型参数对应表。
 
-**下一步**
-1. **换靶 compile**：端到端判据是 compile 服务，需要 compile 口径的逐层参照；但 compile 下 forward hook 不触发，
-   `--hidden-all` 这条路走不通（四种抓中间层的方法都试过，见 `docs/loops/kaon3-gelu.md` 第 2 轮）。
-   可行路线只剩「整跑端到端 + 单点 A/B」。
-2. compile 与 eager 的**已知差异点**（已确认）：norm、gelu。逐项改成 compile 口径后看端到端 flip 是否下降。
-3. 未做：paged 慢路径同步改；norm/attn/route 改动的两卡性能门禁；Qwen 线回归。
+### 下一步：解决 compile 模式下的端到端差距（本阶段唯一目标）
+
+**目标**：p02 端到端对 `oracle_clean`（compile 服务，BI=1）达到 FLOOR 线——
+flip ≤ 0.83%、|Δlp| ≤ 0.0276。现状 flip 16.56% / |Δlp| 1.1994。
+
+**已确认的事实（不用再查）**
+- vLLM 默认就是 compile（`enforce_eager=False`，`vllm/config/vllm.py:1379`），eager 才是显式开关。
+- **compile 与 eager 是两套实现**，vLLM 自己两者就差 |Δlp| 1.5725（p02）。所以「逐层对 eager 全 0」推不出「端到端对 compile 为 0」。
+- compile 逐位确定：同配置两进程、两卡各跑一次 → 0.0000。**可以逐位对拍，没有噪声底。**
+
+**已确认的 compile↔eager 差异点（改这些，别猜）**
+
+| 点 | eager（BI=1） | compile | 我们的状态 |
+|---|---|---|---|
+| RMSNorm | `rms_norm_batch_invariant`（Triton，`tl.sqrt`→`1/rms`） | `vllm_ir.rms_norm`：`rsqrt(mean+eps)`，**先舍入 bf16 再乘 w** | `RMSNORM_MODE=1` 对 eager；**compile 口径未验证** |
+| gelu·mul | `act_and_mul` custom op | inductor 融合（`libdevice.tanh`，f32 全链） | **已逐位正确**（0/50688，`mode=0`） |
+| router 预处理 | 三步（`×root_size`、`×scale` 各自 bf16） | 融成 fp32 链、写回舍一次 | 已加 `rmsnorm_scale2`（kernel 级差半 ulp，未逐位） |
+
+**已知障碍**：compile 下 forward hook 不触发，`--hidden-all` 逐层对拍这条路走不通。
+已试过四种抓中间层的方法（hook / 替换 `op.default` / 包 Python 层 / `TorchDispatchMode`）**全部失败**
+（详见 `docs/loops/kaon3-gelu.md` 第 2 轮）。所以 compile 只能做**整跑端到端 + 单点 A/B**。
+
+**下一步按序**
+1. 把 `RMSNORM_MODE=1` 改成 compile 口径（0）后整跑 `scripts/verify/kaon3-parity.sh`，
+   记 flip / |Δlp|，与现状（16.56% / 1.1994）比。**这是唯一还没验过的已知差异点。**
+2. 若仍不达标：按 `computation_graph.py` 逐段列出剩下没验过的算子（attention 的 `o_proj` 段、
+   MoE 专家 combine、层尾 `post_ff_norm + residual + layer_scalar`、`final_norm + lm_head + softcap`），
+   每个都用「改口径 → 整跑 → 看 flip」单点 A/B，一次只改一个。
+3. 每轮结果写进 `test/kaon3/<日期>/`，并把有效的判断提炼进 `docs/knowledge/`。
+
+**⚠️ 不要做的事**
+- 不要再用 `--layers 1` 截层做判据：1 层时 logits 全部饱和到 softcap ±30，|Δlp| 无判别力（`kaon3-gelu.md` 第 4 轮）。
+- 不要拿 `D-16-REBASE.md` 中间节的表当最终结论（§44 的 L3 ×133 是 GEMM 对齐前的状态）。
 
 **运行口径（照抄，别凭记忆）**：逐层对拍 `PROBE_ENV="CUBLASLT_WORKSPACE_SIZE=1"`；
 读 vLLM 代码读镜像副本 `/data/ref/vllm-img-v0.28.0-pr455/`。
