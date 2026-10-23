@@ -387,3 +387,7 @@ eager vs compile 单层（`evc2.py`，两个进程分别跑）→ `rows=23 flips
 
 **下一步**：在 `norm.cu` 加 compile 口径分支（`rsqrt` + 先舍入 bf16 再乘 w），由 `ArchProfile`/env 选；
 对拍 compile oracle（已起，`kaon3_oracle_server.sh <N>` 默认 BI=1 compile）。
+
+**观察 7（A/B 定责）**：在 compile 实例里把 `vllm.ir.ops.rms_norm` 换成 BI Triton 版（`PATCH_NORM=1 evc5.py`），
+N=1 与 eager 比：`mean|dlp| 1.4892 → 0.3741`，max `29.31 → 4.37`，flips 仍 0。
+→ **RMSNorm 一条占差距的 ~75%**，但还有剩余（量化 / gelu / attention 等在 compile 里也是融合 fp32 链）。
