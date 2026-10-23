@@ -372,6 +372,47 @@ impl Gemm {
         crate::ops::check(rc, "gemm_nvfp4_bf16")
     }
 
+    /// **A 已预量化**的 NVFP4 GEMM（对拍/诊断用）：`aq` 是 `[m, k/2]` fp4 字节，`a_s` 是 A 的块缩放。
+    /// `swz=1` 表示 `a_s` 是 cutlass 的 padded+swizzled 布局，`0` 是自然 `[m, k/16]`。
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_nvfp4_prequant(
+        &self,
+        aq: &CudaSlice<u8>,
+        a_s: &CudaSlice<u8>,
+        packed: &CudaSlice<u8>,
+        scale: &CudaSlice<u8>,
+        global: f32,
+        out: &mut CudaSlice<bf16>,
+        m: usize,
+        n: usize,
+        k: usize,
+        swz: bool,
+    ) -> Result<()> {
+        ensure!(aq.len() == m * (k / 2), "prequant: aq.len {} != m*k/2 {}", aq.len(), m * (k / 2));
+        ensure!(packed.len() == n * (k / 2) && scale.len() == n * (k / 16), "prequant: w 形状");
+        ensure!(out.len() >= m * n, "prequant: out");
+        if m == 0 || n == 0 {
+            return Ok(());
+        }
+        ensure!(k % 64 == 0, "prequant: k 必须是 64 的倍数");
+        let rc = unsafe {
+            crate::ffi::gemm_nvfp4_prequant_bf16(
+                self.stream.ptr(aq) as *const c_void,
+                self.stream.ptr(a_s) as *const c_void,
+                self.stream.ptr(packed) as *const c_void,
+                self.stream.ptr(scale) as *const c_void,
+                global,
+                self.stream.ptr_mut(out) as *mut c_void,
+                m as i64,
+                n as i64,
+                k as i64,
+                swz as i32,
+                self.stream.raw() as _,
+            )
+        };
+        crate::ops::check(rc, "gemm_nvfp4_prequant_bf16")
+    }
+
     /// out[M,N] = a[M,K] · w[N,K]^T，可选 bias[N]。
     #[allow(clippy::too_many_arguments)]
     /// 同 [`forward_bf16`]，但**指定启发式候选的下标**（对拍/标定用，不进热路径）。

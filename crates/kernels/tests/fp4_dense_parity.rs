@@ -54,8 +54,18 @@ fn fp4_dense_matches_cutlass() {
     let ds = st.htod_copy(s.clone()).expect("s");
     let da = st.htod_copy(a.clone()).expect("a");
     let mut dout = st.alloc_zeros::<bf16>(m * n).expect("out");
-    // `FP4_SWZ=1`：A 的块缩放按 cutlass 的 padded+swizzled 布局读（kernel 侧由 NQ4_SWIZZLED 选）
-    let mut r = gemm.forward_nvfp4(&da, a_gscale, &dw, &ds, alpha, &mut dout, m, n, k);
+    // **首选路径**：直接用参照的 `a_q` / `a_s`（swizzled），把我们自己的量化整个排除。
+    // 这样测的就纯粹是 GEMM 本身（布局 + 累加 + 乘子）。
+    let use_ref_aq = std::env::var("FP4_USE_REF_AQ").map(|v| v != "0").unwrap_or(true);
+    let mut r = if use_ref_aq {
+        let aqb = std::fs::read(format!("{dir}/a_q.bin")).expect("a_q");
+        let asb = std::fs::read(format!("{dir}/a_s.bin")).expect("a_s");
+        let daq = st.htod_copy(aqb).expect("aq");
+        let das = st.htod_copy(asb).expect("as");
+        gemm.forward_nvfp4_prequant(&daq, &das, &dw, &ds, alpha, &mut dout, m, n, k, true)
+    } else {
+        gemm.forward_nvfp4(&da, a_gscale, &dw, &ds, alpha, &mut dout, m, n, k)
+    };
     if let Err(e) = r {
         println!("FP4_DENSE forward_nvfp4 直接喂 swizzled scale 失败（预期：长度/布局不符）: {e}");
         // 退一步：补零到 n*(k/16) 长度再跑，只为拿到一个基线差异

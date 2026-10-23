@@ -262,6 +262,30 @@ extern "C" {
 
 // a_gscale = 激活全局 scale（vLLM a1_gscale = 1/input_scale）：只影响 A 的量化网格；global 是最终输出乘子
 // （调用方给 w_global * input_scale，即 vLLM 的 alpha）。
+// **A 已预量化**的入口：`aq` = `[m, k/2]` 的 fp4 字节，`as` = A 的块缩放。
+// `swz`：`as` 是 cutlass 的 padded+swizzled 布局（1）还是自然 `[m, k/16]`（0）。
+// 用途：把"量化"与"GEMM"隔离后逐位对拍（参照的 `a_q/a_s` 可以直接喂进来）。
+extern "C" int gemm_nvfp4_prequant_bf16(const void* aq, const void* as, const void* packed, const void* scale,
+                                        float global, void* out, int64_t m, int64_t n, int64_t k, int swz,
+                                        cudaStream_t stream) {
+  if (m < 0 || n < 0 || k <= 0) return static_cast<int>(cudaErrorInvalidValue);
+  if (m == 0 || n == 0) return 0;
+  if (k % 64 != 0) return static_cast<int>(cudaErrorInvalidValue);
+  const dim3 grid((unsigned)((n + BN - 1) / BN), (unsigned)((m + BM - 1) / BM));
+  const uint8_t* pa = static_cast<const uint8_t*>(aq);
+  const uint8_t* psa = static_cast<const uint8_t*>(as);
+  if (k % 128 == 0) {
+    gemm_nvfp4_kernel<128><<<grid, 256, 0, stream>>>(pa, psa, static_cast<const uint8_t*>(packed),
+                                                     static_cast<const uint8_t*>(scale), static_cast<bf16*>(out),
+                                                     (int)m, (int)n, (int)k, global, swz);
+  } else {
+    gemm_nvfp4_kernel<64><<<grid, 256, 0, stream>>>(pa, psa, static_cast<const uint8_t*>(packed),
+                                                    static_cast<const uint8_t*>(scale), static_cast<bf16*>(out),
+                                                    (int)m, (int)n, (int)k, global, swz);
+  }
+  return gemm_last_err();
+}
+
 int gemm_nvfp4_gs_bf16(const void* a, float a_gscale, const void* packed, const void* scale, float global, void* out,
                        int64_t m, int64_t n, int64_t k, cudaStream_t stream) {
   if (!(a_gscale > 0.f)) return static_cast<int>(cudaErrorInvalidValue);
