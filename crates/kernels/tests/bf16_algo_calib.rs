@@ -56,4 +56,11 @@ fn calibrate_bf16_algo() {
         println!("  [{idx}] diff {d:<6} {desc}{mark}");
     }
     println!("DONE");
+    // 守护：默认路径（`forward_bf16` → `run_lt_default` 的选择规则）必须与 vLLM 逐位一致。
+    let mut o = st.alloc_zeros::<bf16>(m * n).expect("alloc");
+    gemm.forward_bf16(&da, &dw, None, &mut o, m, n, k).expect("forward_bf16");
+    let g = st.dtoh_sync_copy(&o).expect("dl");
+    let d = (0..m * n).filter(|&i| g[i].to_f32() != ref_out[i]).count();
+    println!("DEFAULT diff {d}");
+    assert_eq!(d, 0, "默认 algo 选择与 vLLM 不逐位一致");
 }

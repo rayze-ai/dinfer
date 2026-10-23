@@ -578,14 +578,18 @@ impl Gemm {
             Some(a) => a,
             None => {
                 // **与 fp8 同样的问题**：默认取启发式第 0 个，与 vLLM（PyTorch `F.linear` → cuBLAS）
-                // 的累加序不同。实测 router 形状 (m=24,n=128,k=2816) 上第 0 个差 **768/3072**
-                // （四分之一！），而 `id=21 tile=11 splitk=8` 为 0。
-                // 见 test/kaon3/2026-10-23/D-16-REBASE.md §48。
+                // 的累加序不同。实测 router 形状 (m=24,n=128,k=2816) 上第 0 个差 **768/3072**。
+                // 区分点是 **reduction scheme**，不是 id/tile/splitk：8 个候选里 `red=4`（OUTPUT_TYPE，
+                // split-K 部分和先舍入到 bf16）的全部差 768–803，`red=2`（COMPUTE_TYPE，f32 归约）的 3 个全为 0
+                // （短描述同为 `id=21 tile=11 splitk=8` 的 [2]/[3] 一个 801 一个 0）。
+                // 规则 = 取第一个非 OUTPUT_TYPE 归约的候选。**这是实测规则**：容器 torch 默认
+                // `allow_bf16_reduced_precision_reduction=True`，并不禁止，只是它选中的 kernel 恰为 f32 归约；
+                // 仅 router 形状验证过。见 test/kaon3/2026-10-23/D-16-REBASE.md §48/§51。
                 let hs = self.heuristics(&d, 32)?;
                 ensure!(!hs.is_empty(), "cublasLt: no algo for m={m} n={n} k={k}");
                 let pick = hs
                     .iter()
-                    .find(|h| Self::algo_desc(&h.algo) == "id=21 tile=11 splitk=8")
+                    .find(|h| Self::algo_reduction(&h.algo) != sys::cublasLtReductionScheme_t::CUBLASLT_REDUCTION_SCHEME_OUTPUT_TYPE as u32)
                     .map(|h| h.algo)
                     .unwrap_or(hs[0].algo);
                 if std::env::var("GEMM_ALGO_LOG").is_ok_and(|v| v == "1") {
@@ -958,6 +962,23 @@ impl Gemm {
         format!("id={} tile={} splitk={}", get(C::CUBLASLT_ALGO_CONFIG_ID), get(C::CUBLASLT_ALGO_CONFIG_TILE_ID), get(C::CUBLASLT_ALGO_CONFIG_SPLITK_NUM))
     }
 
+    /// `CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME`（split-K 部分和按什么精度归约；见 `run_lt_default`）。
+    fn algo_reduction(algo: &sys::cublasLtMatmulAlgo_t) -> u32 {
+        let mut v: u32 = 0;
+        let mut written: usize = 0;
+        // SAFETY: 该属性为 u32，缓冲 4 字节。
+        unsafe {
+            let _ = sys::cublasLtMatmulAlgoConfigGetAttribute(
+                algo as *const _,
+                sys::cublasLtMatmulAlgoConfigAttributes_t::CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME,
+                &mut v as *mut u32 as *mut c_void,
+                4,
+                &mut written,
+            );
+        }
+        v
+    }
+
     /// 完整配置串：`id/tile/splitk` 相同的候选仍可能累加序不同（reduction / stages / swizzle 等），
     /// 2026-10-23 router 实测 [2] 与 [3] 短描述同为 `id=21 tile=11 splitk=8`，一个差 801/3072、一个 0。
     fn algo_desc_full(algo: &sys::cublasLtMatmulAlgo_t) -> String {
@@ -974,7 +995,7 @@ impl Gemm {
         format!(
             "{} red={} stages={} swz={} custom={} inner={} cluster={}",
             Self::algo_desc(algo),
-            get(C::CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME),
+            Self::algo_reduction(algo),
             get(C::CUBLASLT_ALGO_CONFIG_STAGES_ID),
             get(C::CUBLASLT_ALGO_CONFIG_CTA_SWIZZLING),
             get(C::CUBLASLT_ALGO_CONFIG_CUSTOM_OPTION),
