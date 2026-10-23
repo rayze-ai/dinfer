@@ -918,3 +918,17 @@ L3/L4 新增 4 组 norm 标定后，§52 的"`ss·fl(1/h)` + IEEE 1/sqrt"在 L4 
 → 补抓两个 norm 的真实输入（`input_norm_in` / `post_attn_norm_in`），待对比。
 教训：**对拍数值写法，先拿参照的编译产物（PTX）再写，不要从源码猜**——源码 `sum_sq / n_cols`、`1.0 / tl.sqrt`
 实际编成 div.full + sqrt.approx，线程内顺序也被调度改过。
+
+### §55 续：最终按 **SASS** 复刻，7/7 归零；整跑 L0–L6 逐位 0
+
+- 补抓两个 norm 的真实输入：与拼接输入**逐位相同**（输入无问题）；vLLM `rms_norm_batch_invariant` 喂真实输入能完全复现前向（路径确认）。
+- 复制 Triton kernel 存出中间量：ss 与模拟一致，inv 比 IEEE 小 1 ulp；**一旦把 rms 存出来 inv 就变**（编译器合并行为随用途变）。
+- 用 Triton 自带 `nvdisasm`（`triton/backends/nvidia/bin/`，容器无系统 nvdisasm）反汇编 cache 里的 cubin：
+  `RCP(n)` → `FFMA(rcp, ss, eps)`（div.full 拆成乘倒数并与 +eps 融合）→ `SQRT` → `RCP`。
+  Triton 用自带 ptxas（含 `ptxas-blackwell`），与我们 nvcc 的 ptxas 不同，**同一 PTX 可能编出不同 SASS**——所以我们必须显式写指令。
+- `norm.cu`：`rms_inv = rcp.approx(sqrt.approx(fma(rcp.approx(n), ss, eps)))`；线程内平方和顺序 1,0,2..7（fma）。
+- 结果：`rmsnorm_calib` 7 组**全 0**；`ops_parity` rmsnorm 4/4；隔离（ATTN_MODE=2）L2/L4 子模块全 0、L3 仅 `attn_out` (10,3550) 1 元素（不传播）；
+  **整跑 p02：L0–L6 逐位 0**，首个发散 L7 3.3e-5 → L8 1.1e-2；L29 0.080（之前 0.16）。
+
+**方法教训（进知识库）**：数值逐位对齐的参照是**参照实际执行的机器码**。顺序：源码（猜）→ PTX（结构/顺序）→ SASS（真值）。
+Triton kernel 用 `TRITON_CACHE_DIR` 落 cache，取 `.ptx` / `.cubin`，用 Triton 自带 `nvdisasm` 看 SASS。
