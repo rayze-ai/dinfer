@@ -782,3 +782,33 @@ ROUTER_STAGE [T=24 E=128 H=2816] logits ndiff=0/3072 max|d|=0.000e0 | top-8 集�
 
 `models/kaon3/tests/router_stage_parity.rs` —— 用真实参照输入复算 router 阶段并逐位比。
 注意：测试里要显式 `RMSNORM_MODE=2`（`rmsnorm_scale2` 只支持 compile 系，默认 1 会 `cudaError`）。
+
+## 第 7 轮：**MoE 阶段定位到了**——专家 GEMM/combine 是 ulp 级差异
+
+用参照真实的 `x` + `router_y` 复算整段 MoE（top-8 → 48 个被选专家各自 gate/up/gelu·mul/down → 加权累加），
+与参照的 `y` 比：
+
+```
+MOE_STAGE [T=24 H=2816 E=128 K=8] 选中专家 48 个 | ndiff=50214/67584 max|d|=2.500e-1
+ours[0..8] = [0.23632813, 1.78125, -2.21875, 0.03540039, 0.40039063, 0.265625, 0.9453125, 4.90625]
+ref [0..8] = [0.23339844, 1.78125, -2.21875, 0.032958984, 0.40039063, 0.26367188, 0.9453125, 4.90625]
+‖ours‖=364.63  ‖ref‖=363.88  比值 1.0021
+```
+
+**判读**：
+- **量级完全对**（比值 1.0021）→ 语义、路由、per_expert_scale 折法都对，不是结构性错误；
+- 前 8 个里有 5 个**逐位相同**，其余差 1–2 个 bf16 ulp（0.233→0.236 是 bf16 的 1 ulp）；
+- **74% 元素不同，但最大差只有 0.25**（在 ‖y‖≈364 的尺度上）→ 典型的**累加次序**差异。
+
+**结论**：差异在**专家 GEMM 的累加归约**与/或 **combine 的累加顺序**，不是口径选错。
+参照走 cutlass_moe 融合 kernel（`moe_forward` op），我们逐专家分别调 NVFP4 GEMM 再 scatter-add ——
+两者 K 方向的归约树必然不同。
+
+### 测试自身的两个坑（已修，记下来）
+
+1. `per_expert_scale` **不能同时**乘进路由权重又折进 down 的 global（默认 `MOE_COMBINE_F32=1` 只折 down）。
+   我第一次两边都乘了 → ‖ours‖/‖ref‖ = 0.1321（差 7.6 倍）。
+2. `gelu_tanh_mul_bf16(stream, gate, up, out, tokens, inter)` **没有 mode 参数**
+   （mode 版是 `gelu_tanh_mul_mode`）。多传一个 `0` 能编译（被当成 `tokens`），但语义全错。
+
+→ **下次写"复算参照"的测试，先核对每个调用的签名，再核对量级（范数比），最后才看逐位。**
