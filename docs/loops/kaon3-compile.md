@@ -181,3 +181,26 @@ c = accumulator.to(bf16)                        # 只在最后舍一次
 - 输出 `f32(bf16(acc))`（参照是 bf16 输出再 cast f32）；
 - 8 warp 各管 16 行，每 warp 16 个 `n8` tile。
 - 开关 `ROUTER_GEMM_BI=1`；**先做 kernel 级对拍**（vs 容器内 `matmul_persistent`，要求 0 差异），再端到端。
+
+## 第 6 轮方向：换核查手段（逐层参照在 compile 下拿不到）
+
+**已确认的约束**（交接区 + gelu loop 第 2 轮，四种方法全失败）：
+compile 模式下 forward hook 不触发、op 不能替换、Python 层不被调用 → **拿不到参照的层内/逐层中间量**。
+`kaon3_vllm_hidden.py` 硬编码 `enforce_eager=True`，它产出的参照是 **eager 口径**，按本项目口径**不能作判据**。
+
+所以剩下的手段只有两条：
+1. **端到端单点 A/B**（唯一可靠）：改一个点 → 整跑 → 看 flip/Δlp 是否显著下降；
+2. **kernel 级逐位对拍**（若能在容器里直接调参照算子的真实实现）。
+
+**已排除（本轮新增）**：
+| 假设 | 结论 | 依据 |
+|---|---|---|
+| router GEMM kernel 不同 | ❌ 真实输入下 cuBLAS 与 BI matmul **逐位相同**（0/3072） | 第 5 轮 DIAG |
+| `rcp.approx` vs 精确除法 | ❌ 误差 2⁻²³ 被 bf16 舍入吞掉 | 第 4 轮 md5 相同 |
+| norm 口径（mode 0/1/2） | ❌ 三者 flip 都在 16% | 第 1/3 轮 |
+
+**剩余候选**（按可 A/B 性排序）：
+1. `MOE_COMBINE_F32`（combine 时权重是否落 bf16）——已有开关，直接 A/B；
+2. `NORM_FUSE_QUANT`（norm 与 fp8 量化是否融合）——已有开关，直接 A/B；
+3. 专家 GEMM 本身（`forward_nvfp4` 与参照 cutlass_moe 的归约）——需要新开关；
+4. attention 的 `o_proj` 段 / `unified_kv_cache_update` 的 kv 量化点。
