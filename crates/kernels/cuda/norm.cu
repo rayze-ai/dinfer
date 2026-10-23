@@ -5,6 +5,40 @@ using namespace dinfer;
 
 namespace {
 
+// 平方和，归约结构与 vLLM BI 的 Triton `_rms_norm_kernel`（BLOCK_SIZE=1024、4 warp × 32 lane × 8 元素）逐位同序：
+// 8 元素组（gs）→ 每 warp 32 组 = 256 列一段做 xor 蝶形 → 每 4 段 = 1024 列一块做 4-lane 蝶形 `(s0+s2)+(s1+s3)`
+// → 块间从 0 顺序累加。旧写法（线程内 a·a+b·b 两两加 + 全 block 一次蝶形）在 Kaon-V3 v_norm（h=256）上差 2 元素（§53）。
+// 要求 hidden % 8 == 0 且 hidden ≤ 8192（段数 ≤ 32）——vec kernel 的使用条件本就如此。
+template <int BLOCK, int VPT>
+__device__ __forceinline__ float rms_ss_triton(const float (&gs)[VPT], int nvec) {
+  static_assert(BLOCK % 32 == 0 && BLOCK * VPT / 32 <= 32, "rms_ss_triton: 段数 > 32");
+  __shared__ float seg[32];
+  __shared__ float tot_s;
+  const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+  const int nseg = (nvec + 31) / 32;
+#pragma unroll
+  for (int j = 0; j < VPT; ++j) {
+    float g = gs[j];
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) g = __fadd_rn(g, __shfl_xor_sync(0xffffffffu, g, o));
+    const int sidx = j * (BLOCK / 32) + warp;
+    if (lane == 0 && sidx < nseg) seg[sidx] = g;
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    float tot = 0.f;
+    for (int c = 0; 4 * c < nseg; ++c) {
+      float a[4];
+#pragma unroll
+      for (int k = 0; k < 4; ++k) a[k] = (4 * c + k < nseg) ? seg[4 * c + k] : 0.f;
+      tot = __fadd_rn(tot, __fadd_rn(__fadd_rn(a[0], a[2]), __fadd_rn(a[1], a[3])));
+    }
+    tot_s = tot;
+  }
+  __syncthreads();
+  return tot_s;
+}
+
 // 1/rms：与 vLLM（BI 模式 Triton `_rms_norm_kernel`）逐位一致的写法 —— mean = ss × fl(1/h)（不是 ss / h），
 // inv = 1 / sqrt_rn(mean + eps)（不是 rsqrtf 近似）。全部显式 _rn，禁止编译器把 ss·r + eps 收缩成 fma。
 // 依据：Kaon-V3 L2 真实输入 48 行，旧写法 2 元素 1-ulp、此写法 0（`tests/rmsnorm_calib.rs`，D-16-REBASE §52）。
@@ -32,10 +66,11 @@ __global__ void __launch_bounds__(BLOCK) rmsnorm_vec_kernel(const bf16* __restri
 
   float v[VPT][8];
   uint4 wa[VPT];
-  float ss = 0.f;
+  float gs[VPT];   // 每个 8 元素组的平方和（组内按元素顺序累加，Triton 线程内归约同序）
 #pragma unroll
   for (int j = 0; j < VPT; ++j) {
     const int i = threadIdx.x + j * BLOCK;
+    gs[j] = 0.f;
     if (i < nvec) {
       uint4 xa = xr[i];
       // w == nullptr → 无权重 RMSNorm（Gemma4 的 v_norm / router 预处理），权重当作 1.0
@@ -64,12 +99,14 @@ __global__ void __launch_bounds__(BLOCK) rmsnorm_vec_kernel(const bf16* __restri
 #pragma unroll
       for (int c = 0; c < 4; ++c) {
         v[j][2 * c] = f[c].x; v[j][2 * c + 1] = f[c].y;
-        ss += f[c].x * f[c].x + f[c].y * f[c].y;
       }
+      float acc = __fmul_rn(v[j][0], v[j][0]);
+#pragma unroll
+      for (int e = 1; e < 8; ++e) acc = __fadd_rn(acc, __fmul_rn(v[j][e], v[j][e]));
+      gs[j] = acc;
     }
   }
-  ss = block_reduce_sum<BLOCK>(ss);
-  const float inv = rms_inv(ss, hidden, eps);
+  const float inv = rms_inv(rms_ss_triton<BLOCK, VPT>(gs, nvec), hidden, eps);
 #pragma unroll
   for (int j = 0; j < VPT; ++j) {
     const int i = threadIdx.x + j * BLOCK;

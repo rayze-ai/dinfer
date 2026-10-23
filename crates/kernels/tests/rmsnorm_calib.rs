@@ -106,6 +106,7 @@ fn calibrate_rmsnorm() {
     let f_ours = module.load_function("rms_ours").expect("rms_ours");
     let f_tri = module.load_function("rms_triton").expect("rms_triton");
 
+    let mut prod_bad: Vec<(String, usize)> = Vec::new();
     for dir in cases.split(',') {
         let x = read_f32(&format!("{dir}/x_f32.bin"));
         let rf = read_f32(&format!("{dir}/ref_f32.bin"));
@@ -131,7 +132,7 @@ fn calibrate_rmsnorm() {
             let y: Vec<u16> = st.dtoh_sync_copy(&o).expect("dl").iter().map(|v| v.to_bits()).collect();
             let (n, ex) = diff(&y);
             println!("  production          diff {n:<5} {ex:?}");
-            assert_eq!(n, 0, "生产 rmsnorm 与 vLLM 不逐位一致：{dir}");
+            prod_bad.push((dir.to_string(), n));
         }
         for inv in 0..4i32 {
             let mut o = st.alloc_zeros::<u16>(rows * h).expect("o");
@@ -150,4 +151,8 @@ fn calibrate_rmsnorm() {
         }
     }
     println!("DONE");
+    // 守护放最后：先让所有变体打印完，便于定位。
+    for (d, n) in &prod_bad {
+        assert_eq!(*n, 0, "生产 rmsnorm 与 vLLM 不逐位一致：{d}");
+    }
 }
