@@ -649,6 +649,58 @@ impl Gemm {
                 h[0].algo
             }
         };
+        self.run_lt_fp8(&d, &algo, a, w, out)
+    }
+
+    /// 同 [`forward_fp8_cublaslt`]，但**指定启发式候选的下标**（`None` = 第 0 个，即默认）。
+    ///
+    /// 存在意义：实测 vLLM（PyTorch `_scaled_mm` 路径）能逐位复现，而默认启发式第 0 个不同
+    /// —— 说明两者选的 algo 不同。用它把候选逐个扫一遍，找出与参照一致的那个。
+    /// 仅供对拍 / 定标用，不要进热路径。
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_fp8_cublaslt_algo(
+        &self,
+        a: &CudaSlice<u8>,
+        a_scale: &CudaSlice<f32>,
+        w: &CudaSlice<u8>,
+        w_scale: &CudaSlice<f32>,
+        out: &mut CudaSlice<bf16>,
+        m: usize,
+        n: usize,
+        k: usize,
+        algo_idx: usize,
+    ) -> Result<()> {
+        ensure!(a.len() >= m * k && w.len() == n * k && out.len() >= m * n, "gemm fp8 lt algo: 尺寸不符");
+        if m == 0 || n == 0 || k == 0 {
+            return Ok(());
+        }
+        let d = self.make_descs_fp8(m, n, k, self.stream.ptr(a_scale), self.stream.ptr(w_scale))?;
+        let hs = self.heuristics(&d, 32)?;
+        ensure!(algo_idx < hs.len(), "只有 {} 个候选 algo，要第 {}", hs.len(), algo_idx);
+        self.run_lt_fp8(&d, &hs[algo_idx].algo, a, w, out)
+    }
+
+    /// 当前形状的启发式候选数量（配合 `forward_fp8_cublaslt_algo` 用来枚举）。
+    pub fn fp8_cublaslt_algo_count(
+        &self,
+        a_scale: &CudaSlice<f32>,
+        w_scale: &CudaSlice<f32>,
+        m: usize,
+        n: usize,
+        k: usize,
+    ) -> Result<usize> {
+        let d = self.make_descs_fp8(m, n, k, self.stream.ptr(a_scale), self.stream.ptr(w_scale))?;
+        Ok(self.heuristics(&d, 32)?.len())
+    }
+
+    fn run_lt_fp8(
+        &self,
+        d: &LtDescs,
+        algo: &sys::cublasLtMatmulAlgo_t,
+        a: &CudaSlice<u8>,
+        w: &CudaSlice<u8>,
+        out: &mut CudaSlice<bf16>,
+    ) -> Result<()> {
         let alpha = 1.0f32;
         let beta = 0.0f32;
         let pw = self.stream.ptr(w) as *const c_void;
@@ -670,7 +722,7 @@ impl Gemm {
                 d.c,
                 po,
                 d.c,
-                &algo as *const _,
+                algo as *const _,
                 pws,
                 self.workspace.len(),
                 self.stream.raw() as *mut _,

@@ -400,3 +400,11 @@ cuBLAS 是闭源库。要"逐位复刻"，只能靠**实验反推它的 K 方向
 `torch._scaled_mm` 实测是 **0**，所以 cuBLAS 能做到——差在**algo 选择**（`cublasLtMatmulAlgoGetHeuristic` 的第一个
 未必是 PyTorch 用的那个）或**描述符细节**（如 `TRANSA/TRANSB` 方向、`ld` 取值导致走不同内部 tile）。
 下一步：把启发式的**全部** algo 逐一试一遍，看有没有能到 0 的；若有，就固定用它。
+
+## 27. 枚举 algo 的实现（配合 §26）
+
+`Gemm::forward_fp8_cublaslt_algo(..., algo_idx)`：用 `cublasLtMatmulAlgoGetHeuristic` 取**前 32 个**候选，
+按 `algo_idx` 取其一执行；`fp8_cublaslt_algo_count(...)` 给候选数。
+`forward_fp8_cublaslt` 改用共用的 `run_lt_fp8`（去掉重复的 matmul 调用）。
+
+测试里逐个跑并比 `ref_f32`，命中 `diff==0` 即停并打印下标。**只用于定标，不进热路径。**

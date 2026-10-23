@@ -153,9 +153,45 @@ fn fp8_matches_flashinfer_bitwise() {
             }
         }
     }
-    println!("cuBLASLt: diff {diff}/{}  max {max:.4e}", rows * n);
+    println!("cuBLASLt(默认 algo): diff {diff}/{}  max {max:.4e}", rows * n);
     for (row, col, g, x) in &first {
         println!("    [row {row}, col {col}] ours {g:.6e}  vllm {x:.6e}");
     }
-    assert_eq!(diff, 0, "cuBLASLt 与 vLLM 不是逐位一致");
+
+    // ---- 枚举启发式的全部候选 algo，看有没有能到 0 的 ----
+    // 默认第 0 个与我自写 kernel 同为 8 处，说明 PyTorch/_scaled_mm 用的不是它。
+    let cnt = gemm.fp8_cublaslt_algo_count(&da_scale, &dw_scale, rows, n, k).expect("algo count");
+    println!("启发式候选中 algo 数: {cnt}");
+    let mut best = (usize::MAX, usize::MAX, 0f32);
+    for idx in 0..cnt {
+        let mut o = st.alloc_zeros::<bf16>(rows * n).expect("alloc");
+        if gemm
+            .forward_fp8_cublaslt_algo(&da, &da_scale, &dw_nk, &dw_scale, &mut o, rows, n, k, idx)
+            .is_err()
+        {
+            println!("  algo[{idx}] 执行失败");
+            continue;
+        }
+        let g = st.dtoh_sync_copy(&o).expect("download");
+        let mut d2 = 0usize;
+        let mut mx = 0f32;
+        for i in 0..rows * n {
+            let a = g[i].to_f32();
+            let r = ref_out[i];
+            if a != r {
+                d2 += 1;
+                mx = mx.max((a - r).abs());
+            }
+        }
+        println!("  algo[{idx}] diff {d2}/{}  max {mx:.4e}", rows * n);
+        if d2 < best.0 {
+            best = (d2, idx, mx);
+        }
+        if d2 == 0 {
+            println!("  ^^^ algo[{idx}] 与 vLLM 逐位一致");
+            break;
+        }
+    }
+    println!("最好: algo[{}] diff {}/{}  max {:.4e}", best.1, best.0, rows * n, best.2);
+    assert_eq!(best.0, 0, "没有任何启发式 algo 能逐位复现 vLLM");
 }
