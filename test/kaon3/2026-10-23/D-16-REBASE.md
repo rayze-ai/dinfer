@@ -309,3 +309,15 @@ GPU=0 scripts/dev/remote_5090.sh ctr "cd /w/dinfer && D17_DIR=/w/d17b CUDA_ARCHS
 `tile_k ∈ {128, 256}` 等；不同 `tile_k` / `num_mma_per_k` / 是否 split-K 会改变 f32 累加的**分组方式**。
 我们当前是 `BK=64 + 2×mma(k32)` 顺序累加。
 下一步：读出该形状（m=24, n=8192, k=2816）命中的 tactic，再看是否 split-K。
+
+## 21. FlashInfer 的 `bmm_fp8` 真实签名（读错了两次，记下来）
+
+```python
+bmm_fp8(A, B, A_scale, B_scale, dtype, out=None, backend='cublas')
+# backend ∈ {'cudnn', 'cublas', 'cutlass', 'cute-dsl', 'auto'}
+```
+
+- vLLM 的调用形态是 **3D**：`bmm_fp8(a.unsqueeze(0), b.unsqueeze(0), ...)`，输出也 unsqueeze(0)。
+- 没有 `tile_k` / `unroll` 这类可传参数（那些在 `gemm_base.py` 的更底层接口里）。
+  所以"枚举 autotune 候选"只能通过 **backend 枚举** 做，不能传 tile 参数。
+- `flashinfer.bmm_fp8` 不是模块（`import flashinfer.bmm_fp8` 会 ModuleNotFoundError），是 `from flashinfer import bmm_fp8` 的函数。
