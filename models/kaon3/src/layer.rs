@@ -32,7 +32,27 @@ pub enum QLinear {
     Bf16 { w: Tensor<bf16>, n: usize, k: usize },
     /// FP8 per-tensor e4m3。
     /// `a_scale` = 静态激活 scale（`input_scale`），`scale` = 权重 per-tensor scale（合并组已换成组内最大值）。
-    Fp8 { w: dinfer_kernels::cudarc::driver::CudaSlice<u8>, scale: f32, a_scale: f32, n: usize, k: usize },
+    ///
+    /// `quant` 是走 cuBLASLt 路径时的**激活量化暂存**（bf16 → e4m3，按需扩容）。
+    /// 为什么默认走 cuBLASLt：实测 vLLM 的 fp8 GEMM 真实命中 cuBLAS，自写 kernel 与它差
+    /// 8/196608 个 1-ulp（累加序不同），而 cuBLASLt 的启发式 algo[2] 与它**逐位一致**
+    /// （`test/kaon3/2026-10-23/D-16-REBASE.md` §28）。`FP8_SELF_KERNEL=1` 可切回自写 kernel 做 A/B。
+    Fp8 {
+        w: dinfer_kernels::cudarc::driver::CudaSlice<u8>,
+        scale: f32,
+        a_scale: f32,
+        n: usize,
+        k: usize,
+        /// 量化暂存（按 `max_tokens × k` 容量），`Mutex` 只为内部可变性，无跨线程竞争。
+        quant: std::sync::Mutex<Option<dinfer_kernels::cudarc::driver::CudaSlice<u8>>>,
+        /// 两个 per-tensor scale 的设备副本（cuBLASLt 要设备指针），首次调用时建一次。
+        scache: std::sync::Mutex<
+            Option<(
+                dinfer_kernels::cudarc::driver::CudaSlice<f32>,
+                dinfer_kernels::cudarc::driver::CudaSlice<f32>,
+            )>,
+        >,
+    },
     /// NVFP4：packed `[n, k/2]` + block scale `[n, k/16]` + 全局 scale。
     NvFp4 {
         packed: dinfer_kernels::cudarc::driver::CudaSlice<u8>,
@@ -60,7 +80,13 @@ impl QLinear {
                 };
                 Self::Bf16 { w: Tensor { data, shape: vec![n, k] }, n, k }
             }
-            QWeight::Fp8 { w, scale, a_scale, n, k } => Self::Fp8 { w, scale, a_scale, n, k },
+            QWeight::Fp8 { w, scale, a_scale, n, k } => {
+                Self::Fp8 {
+                    w, scale, a_scale, n, k,
+                    quant: std::sync::Mutex::new(None),
+                    scache: std::sync::Mutex::new(None),
+                }
+            }
             QWeight::NvFp4 { packed, scale, global, a_scale, n, k } => Self::NvFp4 { packed, scale, global, a_scale, n, k },
         }
     }
@@ -102,8 +128,29 @@ impl QLinear {
         ensure!(out.numel() >= tokens * n, "QLinear: out 太小");
         match self {
             Self::Bf16 { w, .. } => gemm.forward_bf16(&x.data, &w.data, None, &mut out.data, tokens, n, kk),
-            Self::Fp8 { w, scale, a_scale, .. } => {
-                gemm.forward_fp8(&x.data, *a_scale, w, *scale, &mut out.data, tokens, n, kk)
+            Self::Fp8 { w, scale, a_scale, quant, scache, .. } => {
+                // 自写 kernel 做 A/B 用（`FP8_SELF_KERNEL=1`）；默认走 cuBLASLt，与 vLLM 逐位一致。
+                let self_kernel = std::env::var("FP8_SELF_KERNEL").map(|v| v == "1").unwrap_or(false);
+                if self_kernel {
+                    return gemm.forward_fp8(&x.data, *a_scale, w, *scale, &mut out.data, tokens, n, kk);
+                }
+                let mut g = quant.lock().unwrap();
+                let need = tokens * kk;
+                let buf = match g.as_mut() {
+                    Some(b) if b.len() >= need => b,
+                    _ => {
+                        *g = Some(stream.alloc_zeros::<u8>(need)?);
+                        g.as_mut().unwrap()
+                    }
+                };
+                gemm.quant_fp8(&x.data, *a_scale, buf, need)?;
+                // 两个 per-tensor scale 以设备标量形式传给 cuBLASLt；按 shape 缓存一次即可（每层不同）。
+                let mut sc = scache.lock().unwrap();
+                if sc.is_none() {
+                    *sc = Some((stream.htod_copy(vec![*a_scale])?, stream.htod_copy(vec![*scale])?));
+                }
+                let (a_s, w_s) = sc.as_ref().unwrap();
+                gemm.forward_fp8_cublaslt(buf, a_s, w, w_s, &mut out.data, tokens, n, kk)
             }
             Self::NvFp4 { packed, scale, global, a_scale, .. } => {
                 gemm.forward_nvfp4(&x.data, 1.0 / *a_scale, packed, scale, *global * *a_scale, &mut out.data, tokens, n, kk)

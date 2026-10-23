@@ -446,3 +446,14 @@ test result: ok. 1 passed
 **注意性能**：cuBLASLt 对小 M（decode 时 m=1..32）未必比自写 kernel 快。
 建议按 M 分流：**prefill（M 大）走自写 kernel，或反之——以 bench 为准**，不要凭直觉选。
 接入前先测两条路径在 [1×2816×8192, 24×2816×8192, 512×2816×8192] 上的耗时。
+
+## 30. 接入模型前向（2026-10-23）
+
+`QLinear::Fp8` 增加两块**内部暂存**（用 `Mutex` 只为内部可变性，无并发）：
+- `quant`：bf16→e4m3 的激活量化缓冲（按 `tokens×k` 需求扩容）；
+- `scache`：两个 per-tensor scale 的**设备副本**（cuBLASLt 要设备指针），首次调用建一次。
+
+`forward` 默认走 `quant_fp8` + `forward_fp8_cublaslt`；
+`FP8_SELF_KERNEL=1` 可切回原自写 kernel（`forward_fp8`）做 A/B。
+新增 `Gemm::quant_fp8` 与 C 入口 `quant_fp8_bf16`（复用 kernel 里已有的 `cvt16` 逻辑，饱和 ±448 + RNE，
+与 vLLM `scaled_fp8_quant` 字节一致——D-12 已验）。

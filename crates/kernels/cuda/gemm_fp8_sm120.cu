@@ -163,11 +163,22 @@ __global__ void __launch_bounds__(256) gemm_fp8_kernel(const void* __restrict__ 
     }
 }
 
+/// bf16 → e4m3 的独立量化 kernel：`out[i] = e4m3(round(x[i] * inv))`，
+/// 与 `cvt16` 里内联的量化**逐位相同**（同样饱和 ±448 + RNE），
+/// 供"先量化再交给 cuBLASLt"的路径使用（cuBLASLt 只吃已量化的字节）。
+__global__ void quant_fp8_kernel(const bf16* __restrict__ x, uint8_t* __restrict__ out, size_t n, float inv) {
+  const size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const size_t stride = static_cast<size_t>(gridDim.x) * blockDim.x;
+  for (size_t k = i; k < n; k += stride) {
+    const float v = to_f32(x[k]) * inv;
+    out[k] = static_cast<uint8_t>(__nv_cvt_float_to_fp8(v, __NV_SATFINITE, __NV_E4M3));
+  }
+}
+
 int gemm_last_err() {
   const cudaError_t e = cudaGetLastError();
   return static_cast<int>(e);
 }
-
 }  // namespace
 
 extern "C" {
@@ -207,6 +218,20 @@ int gemm_fp8_prequant_bf16(const void* a, float a_scale, const void* w, float w_
   gemm_fp8_kernel<true><<<grid, 256, 0, stream>>>(static_cast<const uint8_t*>(a), static_cast<const uint8_t*>(w),
                                                  static_cast<bf16*>(out), (int)m, (int)n, (int)k,
                                                  w_scale * a_scale, 1.f);
+  return gemm_last_err();
+}
+
+// 独立的 bf16 → e4m3 量化（与 kernel 内联的 cvt16 逐位一致）。
+// a_scale = 静态 per-tensor 激活 scale：先 x * (1/a_scale)，再饱和 ±448 + RNE。
+int quant_fp8_bf16(const void* x, float a_scale, void* out, int64_t n, cudaStream_t stream) {
+  if (!(a_scale > 0.f)) return static_cast<int>(cudaErrorInvalidValue);
+  if (n < 0) return static_cast<int>(cudaErrorInvalidValue);
+  if (n == 0) return 0;
+  const int threads = 256;
+  int blocks = static_cast<int>((n + threads - 1) / threads);
+  if (blocks > 65535) blocks = 65535;
+  quant_fp8_kernel<<<blocks, threads, 0, stream>>>(static_cast<const bf16*>(x), static_cast<uint8_t*>(out),
+                                                  static_cast<size_t>(n), 1.f / a_scale);
   return gemm_last_err();
 }
 

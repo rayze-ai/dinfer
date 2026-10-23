@@ -608,6 +608,27 @@ impl Gemm {
         r
     }
 
+    /// bf16 → e4m3 量化（静态 per-tensor 激活 scale）：`out[i] = e4m3(round(x[i] / a_scale))`。
+    /// 与 `forward_fp8` 内联的量化**逐位一致**，供 [`forward_fp8_cublaslt`] 前使用。
+    pub fn quant_fp8(&self, x: &CudaSlice<bf16>, a_scale: f32, out: &mut CudaSlice<u8>, n: usize) -> Result<()> {
+        ensure!(a_scale > 0.0, "quant fp8: a_scale 必须 > 0");
+        ensure!(x.len() >= n, "quant fp8: x.len {} < {}", x.len(), n);
+        ensure!(out.len() >= n, "quant fp8: out.len {} < {}", out.len(), n);
+        if n == 0 {
+            return Ok(());
+        }
+        let rc = unsafe {
+            crate::ffi::quant_fp8_bf16(
+                self.stream.ptr(x) as *const c_void,
+                a_scale,
+                self.stream.ptr_mut(out) as *mut c_void,
+                n as i64,
+                self.stream.raw() as _,
+            )
+        };
+        crate::ops::check(rc, "quant_fp8_bf16")
+    }
+
     /// **cuBLASLt 的 fp8 per-tensor GEMM**（sm_120）：`out[m,n] = (A·Wᵀ) * (a_scale * w_scale)`，
     /// `A`/`W` 都是 e4m3 字节，`W` 是 `[n, k]`。
     ///
