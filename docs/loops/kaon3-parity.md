@@ -573,3 +573,45 @@ add_3 = rms_norm_default_6 + add                             # 再加回层输�
 ```
 其中 ⑥ 的 **router 输入是 `r`（残差流 `add`）**，不是 `m` 的输入；且 router 前有
 `rms_norm(no weight) × root_size × scale` 三级预处理——这一条与我们已对齐的 `route_softmax_kernel` 要对上。
+
+## 第 23 轮：L0 乘法点逐条核对结果
+
+方法：把 `computation_graph.py:1395-1450` 的每一段单独拿出来，用 `ir.rms_norm` + 相同算子写成 Python 函数，
+`torch.compile(fullgraph=True)` 与 eager 对拍（`/w/tmp/l0mul.py`、`l0r2.py`、`l0r3.py`）。
+
+| 乘法点 | 结论 |
+|---|---|
+| `rms_norm(x, w, 1e-6)` 单步 | **0 差异** |
+| `rms_norm(x, w) + residual` | **0 差异** |
+| `rms_norm(x, None)` 无权重 | **0 差异**；且等价于 `weight=全 1` |
+| `rms_norm(x,None) × root_size × scale`（router 预处理） | **17299/67584 不同，max 3.125e-2** ← 唯一没对上的 |
+| 完整 L0 链（norm+add+专家输入+router） | 前两项 0；router 一项 17497 不同 |
+
+### 关键：norm 的 `x.to(weight.dtype)` 确实是**先舍入再乘**
+
+```
+compile vs A(先舍后乘 bf16)  ndiff=0        max=0
+compile vs B(乘完再舍)       ndiff=17839    max=6.25e-2
+```
+→ 我们的 `norm.cu` epilogue 若写成 `x·inv·w` 一次算完再舍入，**是错的**；必须 `(x·inv)→bf16`，再与 w 相乘。
+
+### 关键：router 的两次乘法是 **fp32 全程、只在最后舍入一次**
+
+四种 bf16 候选全不匹配，反推后唯一命中：
+
+| 候选 | 差异 |
+|---|---|
+| `(y·rs)` bf16 舍入后再 `·sc` | 17299 |
+| `y · (rs·sc)`（rs*sc 先在 bf16 里算） | 17532 |
+| bf16 两步乘 | 17299 |
+| **`(y.float()·rs.float())·sc.float() → to(bf16)`** | **0** ✅ |
+
+即 `rms_norm(x,None)` 的输出**不落回 bf16**，直接在 fp32 里连乘 `root_size`、`scale`，只在写回时舍入一次。
+这与 FX 图里 `mul_4`/`mul_5` 标的 bf16 类型不一致——**inductor 把这段链的中间精度提升了**（融合进同一个逐元素 kernel、
+中间量留在寄存器里的 fp32）。
+
+### 对我们的影响
+
+`models/kaon3` 的 router 预处理若按 `norm→bf16 × root_size→bf16 × scale` 分步做，会多两次 bf16 舍入。
+这是 L0 剩余差异的**具体、可修**的一项。下一步：把 router 预处理改成一条 fp32 链（norm 输出不落 bf16），
+再跑 L1 截层看 top5 \|Δlp\| 是否下降。
