@@ -112,7 +112,8 @@ __global__ void __launch_bounds__(256) quantize_a_kernel(const bf16* __restrict_
 template <int BK>
 __global__ void __launch_bounds__(256) gemm_nvfp4_kernel(const uint8_t* __restrict__ A, const uint8_t* __restrict__ Sc,
                                                          const uint8_t* __restrict__ B, const uint8_t* __restrict__ S,
-                                                         bf16* __restrict__ D, int M, int N, int K, float global) {
+                                                         bf16* __restrict__ D, int M, int N, int K, float global,
+                                                         int swz) {
   constexpr int RSA = BK / 2 + PAD, RSB = BK / 2 + PAD;
   constexpr int NB16 = BK / 16;  // 每行 16 元素块数
   constexpr int NQ4 = BK / 64;   // 每行 scale 四元组数（= scale_vec::4X 的 u32 个数）
@@ -140,13 +141,45 @@ __global__ void __launch_bounds__(256) gemm_nvfp4_kernel(const uint8_t* __restri
         *reinterpret_cast<uint4*>(&sA[r * RSA + c * 16]) =
             (m_blk + r < M) ? sa_src[static_cast<size_t>(r) * (K / 32) + c] : z;
       }
-      // A 的块缩放：预量化输出 [m, k/16] 的 e4m3，按 4 个连续块打成 u32
-      for (int i = tid; i < BM * NQ4; i += blockDim.x) {
-        const int r = i / NQ4, q = i % NQ4;
-        sfa[r * NQ4 + q] =
-            (m_blk + r < M)
-                ? *reinterpret_cast<const uint32_t*>(Sc + static_cast<size_t>(m_blk + r) * (K / 16) + kb * NB16 + q * 4)
-                : 0x38383838u;
+      // A 的块缩放。
+      //   `swz==0`：自然布局 `[M, K/16]`（我们自己量化的输出，行主序）；
+      //   `swz==1`：**cutlass 的 padded+swizzled 布局**（`[round_up(M,128), round_up(K/16,4)]`），
+      //     可以直接吃参照的 `a_s`。映射与 `vllm/.../nvfp4_utils.py::swizzle_blockscale` 一致：
+      //       padded.reshape(g, a4, r32, kO, k4).transpose(0,1,4,3,2,5) → flat
+      //     读第 (row, kb*NB16 + q) 个 16-元素块的 scale 时：
+      //       g  = row / 128, rIn128 = row % 128, a4 = rIn128 / 32, r32 = rIn128 % 32
+      //       col = kb*NB16 + q;  kO = col / 4, k4 = col % 4
+      //       线性下标 = ((((g*(Mp/128) + a4) * (Kp/4) + kO) * 32 + r32) * 4 + k4)
+      if (swz) {
+        const int Kp = ((K / 16) + 3) / 4 * 4;
+        const int Mp = (M + 127) / 128 * 128;
+        const long gp = (long)(Mp / 128);
+        for (int i = tid; i < BM * NQ4; i += blockDim.x) {
+          const int r = i / NQ4, q = i % NQ4;
+          const int row = m_blk + r;
+          if (row >= M) { sfa[r * NQ4 + q] = 0x38383838u; continue; }
+          const int col = kb * NB16 + q * 4;
+          const int g = row / 128, rIn = row % 128, a4 = rIn / 32, r32 = rIn % 32;
+          const int kO = col / 4, k4 = col % 4;
+          const long base = ((((long)g * gp) * (Kp / 4) + kO) * 32 + r32) * 4 + k4;
+          uint32_t v = 0;
+          for (int t = 0; t < 4; ++t) {
+            const int c2 = col + t;
+            const int kO2 = c2 / 4, k42 = c2 % 4;
+            const long off = ((((long)g * gp) * (Kp / 4) + kO2) * 32 + r32) * 4 + k42;
+            v |= (uint32_t)Sc[off] << (8 * t);
+          }
+          (void)base;
+          sfa[r * NQ4 + q] = v;
+        }
+      } else {
+        for (int i = tid; i < BM * NQ4; i += blockDim.x) {
+          const int r = i / NQ4, q = i % NQ4;
+          sfa[r * NQ4 + q] =
+              (m_blk + r < M)
+                  ? *reinterpret_cast<const uint32_t*>(Sc + static_cast<size_t>(m_blk + r) * (K / 16) + kb * NB16 + q * 4)
+                  : 0x38383838u;
+        }
       }
     }
     {
@@ -263,14 +296,19 @@ int gemm_nvfp4_gs_bf16(const void* a, float a_gscale, const void* packed, const 
   }
   // 块缩放的 k-block 是 16，mma 是 k64：BK 取 128（K%128==0）否则 64（调用方保证 K%64==0）
   const dim3 grid((unsigned)((n + BN - 1) / BN), (unsigned)((m + BM - 1) / BM));
+  // `NQ4_SWIZZLED=1`：A 的块缩放按 cutlass 的 padded+swizzled 布局读（吃参照的 a_s 时用）
+  static const int swz = [] {
+    const char* e2 = getenv("NQ4_SWIZZLED");
+    return (e2 && e2[0] == '1') ? 1 : 0;
+  }();
   if (k % 128 == 0) {
     gemm_nvfp4_kernel<128><<<grid, 256, 0, stream>>>(pa, psa, static_cast<const uint8_t*>(packed),
                                                      static_cast<const uint8_t*>(scale), static_cast<bf16*>(out),
-                                                     (int)m, (int)n, (int)k, global);
+                                                     (int)m, (int)n, (int)k, global, swz);
   } else if (k % 64 == 0) {
     gemm_nvfp4_kernel<64><<<grid, 256, 0, stream>>>(pa, psa, static_cast<const uint8_t*>(packed),
                                                     static_cast<const uint8_t*>(scale), static_cast<bf16*>(out),
-                                                    (int)m, (int)n, (int)k, global);
+                                                    (int)m, (int)n, (int)k, global, swz);
   } else {
     return static_cast<int>(cudaErrorInvalidValue);
   }

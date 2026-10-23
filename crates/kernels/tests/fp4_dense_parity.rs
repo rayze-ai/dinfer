@@ -54,7 +54,8 @@ fn fp4_dense_matches_cutlass() {
     let ds = st.htod_copy(s.clone()).expect("s");
     let da = st.htod_copy(a.clone()).expect("a");
     let mut dout = st.alloc_zeros::<bf16>(m * n).expect("out");
-    let r = gemm.forward_nvfp4(&da, a_gscale, &dw, &ds, alpha, &mut dout, m, n, k);
+    // `FP4_SWZ=1`：A 的块缩放按 cutlass 的 padded+swizzled 布局读（kernel 侧由 NQ4_SWIZZLED 选）
+    let mut r = gemm.forward_nvfp4(&da, a_gscale, &dw, &ds, alpha, &mut dout, m, n, k);
     if let Err(e) = r {
         println!("FP4_DENSE forward_nvfp4 直接喂 swizzled scale 失败（预期：长度/布局不符）: {e}");
         // 退一步：补零到 n*(k/16) 长度再跑，只为拿到一个基线差异

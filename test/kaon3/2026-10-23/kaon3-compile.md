@@ -1186,3 +1186,26 @@ y[m,n] = alpha · Σ_k (a_q[m,k] · sf_a[m,k/16]) · (w_q[n,k] · sf_w[n,k/16])
 
 `gemm_nvfp4_sm120.cu` 现在：A 的 scale 按 `row*(K/16)+bi` 自然序读。
 改成 swizzled 索引后，就能直接吃参照布局的 scale，进而与 `/tmp/fp4d` 的标准答案逐位对拍。
+
+## 第 13 轮：swizzled 读取已实现，但 A/B 显示它**必须与量化端配套**
+
+加了 `NQ4_SWIZZLED` 开关（kernel 按 cutlass 的 padded+swizzled 布局读 A 的块缩放）后：
+
+```
+NQ4_SWIZZLED=0  ndiff=11210/11264  max|d|=1.363  ‖ours‖/‖ref‖ = 1.0784
+NQ4_SWIZZLED=1  ndiff=11255/11264  max|d|=2.600  ‖ours‖/‖ref‖ = 0.6669   ← 更差
+```
+
+**原因明确**：我们的 `quantize_a_kernel` 写的是**自然布局** `[m, k/16]`，
+而 `NQ4_SWIZZLED=1` 让 kernel 按 swizzled 布局去读 — 读的和写的对不上，当然更差。
+
+**所以这两件事必须同时改**：
+1. `quantize_a_kernel` 按 swizzled 布局**写**；
+2. kernel 按 swizzled 布局**读**。
+
+而且真正的判据应该是：**用参照的 `a_s`（本来就是 swizzled）+ 我们按 swizzled 读**，
+这样把"我们自己的量化"整个排除掉。`fp4_dense_parity` 现在喂的是 `s1`（权重侧）和
+kernel 自己量化的 A，所以 `NQ4_SWIZZLED=1` 时读的是自己写的自然布局 —— 测法本身不成立。
+
+→ 下一步：给 `forward_nvfp4` 加一条"**A 的量化结果外部提供**"的入口
+（`a_q` + `a_s` 都由调用方给），这样才能真正隔离"量化"与"GEMM"。
