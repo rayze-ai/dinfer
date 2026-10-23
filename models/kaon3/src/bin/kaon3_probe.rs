@@ -584,6 +584,12 @@ fn dump_weights(src: &WeightSource, dir: &str) -> Result<()> {
         (format!("{p}.router.per_expert_scale"), "router_pes_bf16.bin"),
         (format!("{p}.post_feedforward_layernorm.weight"), "post_ff_norm_w_bf16.bin"),
         (format!("{p}.post_feedforward_layernorm_1.weight"), "post_ff_norm1_w_bf16.bin"),
+        (format!("{p}.input_layernorm.weight"), "input_norm_w_bf16.bin"),
+        (format!("{p}.post_attention_layernorm.weight"), "post_attn_norm_w_bf16.bin"),
+        (format!("{p}.pre_feedforward_layernorm.weight"), "pre_ff_norm_w_bf16.bin"),
+        (format!("{p}.pre_feedforward_layernorm_2.weight"), "pre_ff2_norm_w_bf16.bin"),
+        (format!("{p}.post_feedforward_layernorm_2.weight"), "post_ff_norm2_w_bf16.bin"),
+        (format!("{p}.self_attn.q_norm.weight"), "q_norm_w_bf16.bin"),
     ] {
         let (shape, v) = src.load_f32_host(&name)?;
         let bits: Vec<u8> = v
