@@ -215,3 +215,16 @@ D-17b 已用 `OUT=/w/d17b` 重跑，**结果与首轮逐位相同**（0/196608 �
 
 最终形态：`gemm_fp8_kernel<PRE>` 模板，`PRE=false` 走 bf16 激活量化、`PRE=true` 直接读 e4m3 字节，
 两条路径共用同一套 smem/ldmatrix/mma/K 累加序 → 对同一 A 的数值逐位相同。
+
+## 15. 测试跑通流程（记录给下次省时间）
+
+`crates/kernels/tests/fp8_flashinfer_parity.rs` 的默认数据目录是 `test/kaon3/d17b/`（仓内，便于入库），
+但抓取产物落在宿主的 `/hf_data/yaochen/d17b/`（容器内 `/w/d17b`）。跑法：
+
+```bash
+GPU=0 scripts/dev/remote_5090.sh ctr "cd /w/dinfer && D17_DIR=/w/d17b CUDA_ARCHS=120 \
+  cargo test --release -p dinfer-kernels --test fp8_flashinfer_parity -- --ignored --nocapture"
+```
+
+首次编译约 6 分钟（含 nvcc 编 sm_120），重跑只测不编只需几十秒。
+**注意**：`ctr` 的输出别接 `| tail -N`——管道会缓冲，中途完全看不到进度，长任务直接 `> log`。
