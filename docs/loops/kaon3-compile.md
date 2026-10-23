@@ -259,3 +259,22 @@ router GEMM kernel（真实输入下 cuBLAS 与 BI matmul 逐位相同，0/3072�
 **判读规则**：
 - 若专家输出逐位相同 → 假设排除，往下查 attention / kv；
 - 若有差异 → 差异在 NVFP4 的块缩放或累加次序，需要按参照 cutlass_moe 的归约结构复刻。
+
+## 第 7 轮末：MoE 差异已定量，下一步看参照的专家 kernel
+
+**已定量**（真实数据，`models/kaon3/tests/moe_stage_parity.rs`）：
+```
+MOE_STAGE [T=24 H=2816 E=128 K=8] 48 个被选专家 | ndiff=50214/67584 max|d|=2.500e-1
+‖ours‖/‖ref‖ = 1.0021      ← 量级对，语义/路由/scale 折法都对
+前 8 个值里 5 个逐位相同，其余差 1–2 个 bf16 ulp
+```
+→ 差异在**累加归约次序**，不在语义。
+
+**参照配置**（oracle 日志）：`moe_backend='auto'`、`quantization=modelopt_mixed`、
+候选里有 `CutlassBatchedExpertsFp8 / CutlassExpertsFp8 / CutlassExpertsW4A8Fp8 / FusedMoEExpertsModular`。
+且 combine 是在**融合 kernel 内部**完成的（`MoERunner` 的 `_fused_output_is_reduced`），
+我们是"逐专家 GEMM + 单独 scatter-add"——两者归约树不同。
+
+**下一步**：确定参照实际命中哪个 experts 实现，再决定：
+- 若是 `CutlassExpertsW4A8Fp8`（NVFP4 权重 + FP8 激活）→ 需要按它的 tile/归约结构复刻；
+- 若是 modular 的 prepare/finalize 路径 → combine 的累加顺序也要照抄。
