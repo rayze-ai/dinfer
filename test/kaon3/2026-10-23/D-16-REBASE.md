@@ -592,3 +592,25 @@ matmul_desc.setAttribute(CUBLASLT_MATMUL_DESC_FAST_ACCUM, fast_accum);   // ← 
 
 **已按 flashinfer 逐项改写**，并**去掉写死的 algo 下标**（改回启发式默认第 1 个 = flashinfer 的 tactic=-1 路径）。
 若这条成立，就不再需要"按形状标定 algo"，对全部 6 个形状自然成立。
+
+## 38. 弯路：误读 flashinfer 的 `t` 参数（已回退）
+
+按 `a_layout(m, k, k, true)` **字面**改成 `(m,k)` 后，cuBLASLt 在 fp8 heuristic 上直接
+`CUBLAS_STATUS_INVALID_VALUE`（带不带 `FAST_ACCUM` 都一样）。
+
+真因：`CuBlasLtMatrixLayout` 的**第 5 个参数 `t`** 会交换行列：
+```cpp
+cublasLtMatrixLayoutCreate(&raw, type, t ? cols : rows, t ? rows : cols, ld);
+```
+所以 `a_layout(m,k,k,true)` → `LayoutCreate(k, m, k)`，**与我们原来的 `(k,m,ld=k)` 等价**。
+→ **布局本来就是对的**，差异确实只在 algo 选择。已回退到原方向并把这段写进代码注释。
+
+**教训**：读参照实现要连 wrapper 的构造参数语义一起读，不能只看调用点的字面实参。
+
+## 39. 正确做法：按形状标定 algo，不写死下标
+
+- `algo[2]` 只在 `(n=8192,k=2816)` 上验证过；写死它会让其余 5 个形状变差（§34 的 A/B 就退步在这一点）。
+- 新增 `scripts/dev/kaon3_d17_calib.py`：抓 vLLM 前向里**每种 (n,k)** 的真实入参 + 输出，存
+  `/w/d17b/shapes/<n>x<k>/{A_fp8,B_fp8,ref_f32}.bin`，供 Rust 侧逐形状标定 algo 下标。
+- 标定结果应作为**启动期自调优**写进 `default_algos`（符合 `arch-profile` 规格：调优数值由实测给，
+  不写死在 kernel / 代码里）。
