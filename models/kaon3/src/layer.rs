@@ -496,6 +496,7 @@ pub struct LayerScratch {
     pub yg: Tensor<bf16>,       // 分桶后专家输出 [tokens·topk, hidden]
     pub h2: Tensor<bf16>,       // [tokens, hidden]
     pub logits: Tensor<f32>,    // [tokens, E]
+    pub logits_bf16: Tensor<bf16>, // [tokens, E] router GEMM 的 bf16 输出（vLLM 口径，再 cast 到 logits）
     pub topk_ids: Tensor<i32>,  // [tokens, topk]
     pub topk_w: Tensor<f32>,    // [tokens, topk]
     pub buckets: k::ops::MoeBuckets,
@@ -528,6 +529,7 @@ impl LayerScratch {
             yg: Tensor::uninit(stream, &[max_tokens * cfg.top_k, h])?,
             h2: Tensor::uninit(stream, &[max_tokens, h])?,
             logits: Tensor::uninit(stream, &[max_tokens, cfg.num_experts])?,
+            logits_bf16: Tensor::uninit(stream, &[max_tokens, cfg.num_experts])?,
             topk_ids: Tensor::uninit(stream, &[max_tokens * cfg.top_k])?,
             topk_w: Tensor::uninit(stream, &[max_tokens * cfg.top_k])?,
             buckets: k::ops::MoeBuckets::new(stream, cfg.num_experts, max_tokens, cfg.top_k)?,
@@ -795,24 +797,15 @@ impl Gemma4Layer {
         sub_dump_op(stream, sub_out, "router_in", &sc.routed, tokens, h)?;
         let e = cfg.num_experts;
         let kk = cfg.top_k;
-        k::ops::moe_gate_f32(
-            stream,
-            &sc.routed.data,
-            &self.router.bf16_weight()?.data,
-            &mut sc.logits.data,
-            tokens,
-            e,
-            h,
-        )?;
-        // 归因 A/B（2026-10-22 第 14 轮）：`ROUTER_BF16=1` 把 router logits 舍入到 bf16，模仿 vLLM
-        // 的 bf16 router 输出，用来量化"端到端与 vLLM 的翻转有多少来自它的 router 舍入"。默认关（f32 = 更接近真值）。
+        // vLLM（容器 0.26.1rc1，sm_120）`GateLinear` 落到 Tier 6：`F.linear`（cuBLAS，bf16 输出）→ `.to(fp32)`
+        // （sm_120 不满足 `allow_specialized_router_gemm`，Tier 5 的 fp32 epilogue 不开）。
+        // 所以必须走 cuBLASLt bf16 GEMM（`run_lt_default` 钉 `id=21 tile=11 splitk=8`）再 cast；
+        // 原来的自写 `moe_gate_f32` + 舍入累加序不同，差 4/3072（D-16-REBASE §51）。
         if router_bf16_ab() {
-            let mut v = stream.dtoh_sync_copy(&sc.logits.data)?;
-            for x in v.iter_mut().take(tokens * e) {
-                *x = f32::from(bf16::from_f32(*x));
-            }
-            stream.htod_into(&v, &mut sc.logits.data)?;
-            stream.synchronize()?;
+            gemm.forward_bf16(&sc.routed.data, &self.router.bf16_weight()?.data, None, &mut sc.logits_bf16.data, tokens, e, h)?;
+            k::ops::bf16_to_f32_n(stream, &sc.logits_bf16.data, &mut sc.logits.data, tokens * e)?;
+        } else {
+            k::ops::moe_gate_f32(stream, &sc.routed.data, &self.router.bf16_weight()?.data, &mut sc.logits.data, tokens, e, h)?;
         }
         // Gemma4 路由（vLLM `gemma4.py`）：按**原始 logits** 取 top-k → 全专家 softmax →
         // 只在 top-k 上重新归一化。**不是 sigmoid**（那是 DeepSeekV3/GLM/K3 的 `moe_route_f32` 口径，
