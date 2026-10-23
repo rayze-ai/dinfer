@@ -96,9 +96,43 @@
 5. **attention `o_proj` 前的量化点**——`unified_attention_with_output` 是 custom op，出口是否又量化一次。
 6. **router 预处理 `rmsnorm_scale2`**——fp32 融合链目前"kernel 级差半 ulp"，未逐位。
 
-## 卡点（到上限或放弃时填）
+## 卡点（2026-10-24，**已到迭代上限，交给用户**）
 
-（未开始）
+### 已经确证的事实（可直接复用，都经实测或参照源码验证）
+
+| # | 事实 | 证据 |
+|---|---|---|
+| 1 | 参照 MoE 后端 = `VLLM_CUTLASS` NvFp4 + `MoEPrepareAndFinalizeNoDPEPModular` | oracle 日志 `nvfp4.py:291/564` |
+| 2 | 专家是 **W4A4**（group_size 16），其余层 W8A8 | `config.json` config_groups |
+| 3 | `alpha` 是**唯一乘子、作用在最后**（`y/alpha ≡ k`） | 极小规模定标，换 3 个 alpha |
+| 4 | **swizzle 写入公式**正确，真实 K 维下 block0–3 命中 1/2/4/8 | `fp4_calib.py` LAYOUT |
+| 5 | 块缩放 `sf = gs·amax/6 → e4m3`，`q = fp4(x/(sf/gs))` | 字节级复现 |
+| 6 | `a_q` nibble：**低半字节 = 偶数列** | lo_first 0.096 vs hi_first 1.41 |
+| 7 | 激活 scale 是 padded+swizzled；权重 scale 是自然 `[N,K/16]` | 字节数 22528 vs 247808 |
+| 8 | `alpha = weight_scale_2 / a1_gscale` | checkpoint 两侧精确相等 |
+| 9 | **router 整段与参照逐位一致**（0/3072，top-8 集合 0 行不同） | `router_stage_parity.rs` |
+| 10 | 端到端：`MOE_COMBINE_F32=1` 使 flip 16.56% → **14.08%** | 30 用例整跑 |
+
+### 尚未解决（这是交给用户的问题）
+
+**dense FP4 GEMM 与参照仍差 7.8%**（`ndiff=11210/11264`、‖ours‖/‖ref‖=1.0784），
+用参照自己的 `a_q/a_s` 直接喂我们的 kernel 也一样。
+
+**已用定标法排除的**：乘子位置、swizzle 写入、读索引维序、nibble 顺序、块缩放公式、
+量化常数、布局是否为 swizzled。
+
+**矛盾点**：numpy 按"已确证的公式"复算参照的 dense GEMM，仍与参照的 `y.bin` 差 0.4085；
+`corr=0.924` 说明主体对、局部不对。
+
+### 建议用户决策的三条路
+
+1. **改用已有材料做端到端验证**：`MOE_COMBINE_F32=1` 已把 flip 从 16.56% 降到 14.08%，
+   若目标可放宽到"引擎层面 SLO/goodput 相当"，可以先用当前状态做性能与稳定性验证，
+   逐位 parity 另行排期（逐位已达成的部分：router 全段、gelu、q 量化）。
+2. **继续攻 dense GEMM 的 7.8%**：需要我重新审视 `a_q/a_s` 的抓取是否配对
+   （怀疑 `fp4_dense_probe.py` 里 `a` 与 `a_q` 不是同一次调用的产物）。这一步可在一轮内判定。
+3. **直接绑 cutlass**：编译 cutlass 的 FP4 MoE kernel（vLLM 的做法）。
+   工作量大，但结果必然同源；注意 `ops.cutlass_fp4_moe_mm` 是 torch op，**不能**像 cuBLASLt 那样直接链接。
 
 ## 最新一次结果
 

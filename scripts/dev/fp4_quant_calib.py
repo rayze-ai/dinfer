@@ -31,6 +31,8 @@ def main():
         qv = np.zeros((M,K))
         qv[:,0::2] = np.vectorize(lambda v: f(int(v)&0xF))(qn)
         qv[:,1::2] = np.vectorize(lambda v: f(int(v)>>4))(qn)
+        print(f"QCALIB gs={gs_val} sf_raw[0,:6]={s[:1,:6].ravel().tolist()} sfval[0,:6]={np.round(sval[0,:6],6).tolist()}", flush=True)
+        print(f"QCALIB gs={gs_val} q_raw[0,:4]={qn[0,:4].tolist()}", flush=True)
         for nm, deq in (("q*sf", qv*sval.repeat(16,1)),
                         ("q*sf/gs", qv*sval.repeat(16,1)/gs_val)):
             print(f"QCALIB gs={gs_val:9.3f} {nm:8s} mean={deq.mean():.6f} (期望 1.0)", flush=True)
