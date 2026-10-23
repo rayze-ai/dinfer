@@ -120,7 +120,12 @@ fn main() -> Result<()> {
         }
         let dir = hidden_all.as_deref().context("--layer-iso 需要 --hidden-all <dir>")?;
         std::fs::create_dir_all(dir)?;
-        return run_layer_iso(&mut ctx, &ids, l, &data, dir);
+        run_layer_iso(&mut ctx, &ids, l, &data, dir)?;
+        // 隔离 + `SUB_LAYER=<l>` 时可一次跑完子模块对拍（原来 sub-cmp 在早退之后，永远走不到）。
+        if let Some(r) = sub_cmp.as_deref() {
+            compare_sub_dir(dir, r, ids.len())?;
+        }
+        return Ok(());
     }
     let pass = forward(&mut ctx, &ids, dump_layer, oracle.as_deref(), dump.as_deref(), (hidden_out.as_deref(), hidden_ref.as_deref()), hidden_all.as_deref(), logits_out.as_deref())?;
     if let (Some(a), Some(r)) = (hidden_all.as_deref(), sub_cmp.as_deref()) {

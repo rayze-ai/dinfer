@@ -409,7 +409,7 @@ impl Gemm {
         let d = self.make_descs(m, n, k, None)?;
         let hs = self.heuristics(&d, 32)?;
         ensure!(algo_idx < hs.len(), "只有 {} 个候选", hs.len());
-        Ok(Self::algo_desc(&hs[algo_idx].algo))
+        Ok(Self::algo_desc_full(&hs[algo_idx].algo))
     }
 
     pub fn forward_bf16(
@@ -588,6 +588,10 @@ impl Gemm {
                     .find(|h| Self::algo_desc(&h.algo) == "id=21 tile=11 splitk=8")
                     .map(|h| h.algo)
                     .unwrap_or(hs[0].algo);
+                if std::env::var("GEMM_ALGO_LOG").is_ok_and(|v| v == "1") {
+                    let all: Vec<String> = hs.iter().map(|h| Self::algo_desc_full(&h.algo)).collect();
+                    eprintln!("[gemm] bf16 m={m} n={n} k={k} pick={} cands={all:?}", Self::algo_desc_full(&pick));
+                }
                 self.default_algos.lock().unwrap().insert(key, pick);
                 pick
             }
@@ -952,6 +956,31 @@ impl Gemm {
             v
         };
         format!("id={} tile={} splitk={}", get(C::CUBLASLT_ALGO_CONFIG_ID), get(C::CUBLASLT_ALGO_CONFIG_TILE_ID), get(C::CUBLASLT_ALGO_CONFIG_SPLITK_NUM))
+    }
+
+    /// 完整配置串：`id/tile/splitk` 相同的候选仍可能累加序不同（reduction / stages / swizzle 等），
+    /// 2026-10-23 router 实测 [2] 与 [3] 短描述同为 `id=21 tile=11 splitk=8`，一个差 801/3072、一个 0。
+    fn algo_desc_full(algo: &sys::cublasLtMatmulAlgo_t) -> String {
+        use sys::cublasLtMatmulAlgoConfigAttributes_t as C;
+        let get = |attr: C| -> u32 {
+            let mut v: u32 = 0;
+            let mut written: usize = 0;
+            // SAFETY: 属性为 ≤4 字节整型（u16/u32/i32），v 预置 0，缓冲 4 字节。
+            unsafe {
+                let _ = sys::cublasLtMatmulAlgoConfigGetAttribute(algo as *const _, attr, &mut v as *mut u32 as *mut c_void, 4, &mut written);
+            }
+            v
+        };
+        format!(
+            "{} red={} stages={} swz={} custom={} inner={} cluster={}",
+            Self::algo_desc(algo),
+            get(C::CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME),
+            get(C::CUBLASLT_ALGO_CONFIG_STAGES_ID),
+            get(C::CUBLASLT_ALGO_CONFIG_CTA_SWIZZLING),
+            get(C::CUBLASLT_ALGO_CONFIG_CUSTOM_OPTION),
+            get(C::CUBLASLT_ALGO_CONFIG_INNER_SHAPE_ID),
+            get(C::CUBLASLT_ALGO_CONFIG_CLUSTER_SHAPE_ID),
+        )
     }
 
     /// 流上计时：预热 1 次，再跑 `iters` 次取平均（µs）。
