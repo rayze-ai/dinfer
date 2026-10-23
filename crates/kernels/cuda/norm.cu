@@ -110,10 +110,12 @@ __global__ void __launch_bounds__(BLOCK) rmsnorm_vec_kernel(const bf16* __restri
       for (int c = 0; c < 4; ++c) {
         v[j][2 * c] = f[c].x; v[j][2 * c + 1] = f[c].y;
       }
-      // PTX：mul.f32 首元素，其余 7 个 fma.rn.f32.bf16（积不舍入，融合累加）
-      float acc = __fmul_rn(v[j][0], v[j][0]);
+      // PTX（§55 实抓）：`mul.f32` 的是**第 1 个**元素，再 fma 第 0 个，然后 2..7（顺序 1,0,2,…,7——编译器调度结果，
+      // 逐位相关：照 0..7 做在 Kaon-V3 L3/L4 的 3 行上 inv 偏 1 ulp）。fma.rn.f32.bf16 = 积精确、融合累加。
+      float acc = __fmul_rn(v[j][1], v[j][1]);
+      acc = __fmaf_rn(v[j][0], v[j][0], acc);
 #pragma unroll
-      for (int e = 1; e < 8; ++e) acc = __fmaf_rn(v[j][e], v[j][e], acc);
+      for (int e = 2; e < 8; ++e) acc = __fmaf_rn(v[j][e], v[j][e], acc);
       gs[j] = acc;
     }
   }
