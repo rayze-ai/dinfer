@@ -89,3 +89,36 @@ A 的 fp4 全 1.0（编码 0x22）、A/W 的 scale 全 1.0（e4m3 0x38）
   权重侧 `s1` 却是**自然布局** `[N, K/16]`；
 - `alpha = weight_scale_2 / a1_gscale`（`a1_gscale = 1/input_scale`），
   且 `process_weights_after_loading` 会 in-place fuse 激活 scale。
+
+## 极小规模定标的正确姿势（2026-10-24 实测有效）
+
+**问题**：反推参照算子的数值口径（乘子在哪、scale 怎么映射），在真实数据上试错会一直猜错。
+本轮在真实数据上猜错 6 次；换成极小规模定标，**一次就钉死了乘子**。
+
+**设计**（以 NVFP4 dense GEMM 为例）：
+```python
+# A 的 fp4 全 1.0（编码 0x22）、A/W 的块缩放全 1.0（e4m3 0x38）
+# → 理论输出 = k · 1 · 1 · alpha
+for alpha in (1.0, 2.0, 0.5):
+    out = ops.cutlass_scaled_fp4_mm(...)
+    print(alpha, out[0,0], out[0,0]/alpha)
+```
+**结果**：
+```
+alpha= 1.00  y= 64.0000   y/alpha= 64.0000     (k=64)
+alpha= 2.00  y=128.0000   y/alpha= 64.0000
+alpha= 0.50  y= 32.0000   y/alpha= 64.0000
+```
+→ `alpha` 是**唯一乘子、作用在最后**，一次确定，无需再猜。
+
+**第二个探针（排布映射）**：只让第 0 个 16-元素块非零、四个块缩放取 `1/2/4/8`，
+读 `y/(16·alpha)` 就知道"第 0 块实际取到哪个 scale"——这能直接验证 swizzle 映射对不对，
+比"解析真实数据看像不像"可靠得多。
+
+**API 坑清单（`ops.cutlass_scaled_fp4_mm`，本轮全踩过）**：
+| 约束 | 报错 |
+|---|---|
+| `scale_a` 必须 **padded + swizzled** | `scale_a must be padded and swizzled` |
+| scale 的 dtype 必须 **`float8_e4m3fn`**（不能 uint8） | `Inconsistency of torch::stable::Tensor type:scale_a` |
+| `out_dtype` 只支持 **bf16 / fp16** | `Unsupported output data type of nvfp4 mm sm120 (Float)` |
+| `scaled_fp4_quant` 的 `padded_n` 是**输入列数**（=k） | `padded_n must be >= n` |
