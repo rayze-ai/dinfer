@@ -183,64 +183,58 @@ extern "C" int moe_route_f32(const float* logits, const float* bias, int32_t* to
 // ---------------------------------------------------------------------------
 // Gemma4 路由：**全专家 softmax → 按原始 logits 取 top-k → top-k 上重新归一化 → 乘 per_expert_scale**。
 // 与上面 route_kernel 的 sigmoid 语义完全不同（那是 DeepSeekV3 / GLM / K3 的口径），不能混用。
-// 依据 vLLM `model_executor/models/gemma4.py`：
-//   topk_ids = torch.topk(gating_output, k)[1]                 // 按原始 logits
-//   router_probabilities = softmax(gating_output, dim=-1)      // 全专家
-//   gate_weights = one_hot(topk_ids) * router_probabilities
-//   dispatch_weights = gate_weights / sum(gate_weights)        // 只在 top-k 上
-//   topk_weights = dispatch_weights.gather(1, topk_ids) * per_expert_scale[topk_ids]
+// 依据 vLLM（镜像 0.26.1rc1）在 CUDA 上实际走的 `_gemma4_routing_kernel`（Triton 融合版，非 torch 版），
+// 逐条对应其 PTX / SASS（§56，`num_warps=1`、BLOCK_E = next_pow2(E)，每 lane 持排序后的 EPT = BLOCK_E/32 个位置）：
+//   raw_k = ex2.approx.ftz((logit_k − max) · 0x3FB8AA3B)          // 按 logits 降序（并列取小下标）
+//   lane_t = ((raw_{EPT·t} + raw_{EPT·t+1}) + …)（仅位置 < K）→ 32 lane xor 蝶形 → renorm
+//   inv = rcp.approx(renorm)；w_k = (raw_k · inv) · per_expert_scale[id_k]
+// 旧写法（全专家 softmax 再在 top-k 上重归一化，两次除法）数学等价但舍入不同：Kaon-V3 L7 token 10 的 moe_y 差 344 元素。
+__device__ __forceinline__ float route_ex2(float x) {
+  float r;
+  asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(r) : "f"(x));
+  return r;
+}
+__device__ __forceinline__ float route_rcp(float x) {
+  float r;
+  asm("rcp.approx.ftz.f32 %0, %1;" : "=f"(r) : "f"(x));
+  return r;
+}
 __global__ void route_softmax_kernel(const float* __restrict__ logits, const int32_t* __restrict__ topk_ids,
                                      const void* __restrict__ per_expert_scale, float* __restrict__ topk_w, int E,
                                      int K) {
+  if (threadIdx.x != 0) return;
   const int64_t t = blockIdx.x;
-  __shared__ float s_prob[MAX_E];
-  __shared__ float s_sel[MAX_K];
-  // 全专家 softmax（减最大值保证数值稳定，与 torch.softmax 同）
-  __shared__ float s_max;
-  if (threadIdx.x == 0) {
-    float m = -INFINITY;
-    for (int e = 0; e < E; ++e) m = fmaxf(m, logits[t * E + e]);
-    s_max = m;
-  }
-  __syncthreads();
-  float partial = 0.f;
-  for (int e = threadIdx.x; e < E; e += blockDim.x) {
-    const float p = __expf(logits[t * E + e] - s_max);
-    s_prob[e] = p;
-    partial += p;
-  }
-  // block 内归约求和
-  __shared__ float s_red[32];
-  {
-    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
-    for (int off = 16; off > 0; off >>= 1) partial += __shfl_down_sync(0xffffffff, partial, off);
-    if (lane == 0) s_red[warp] = partial;
-    __syncthreads();
-    if (threadIdx.x == 0) {
-      float sum = 0.f;
-      const int nw = (blockDim.x + 31) >> 5;
-      for (int i = 0; i < nw; ++i) sum += s_red[i];
-      s_red[0] = sum > 0.f ? 1.f / sum : 1.f;
+  const float* lg = logits + t * E;
+  float m = -INFINITY;
+  for (int e = 0; e < E; ++e) m = fmaxf(m, lg[e]);
+  float raw[MAX_K];
+  for (int k = 0; k < K; ++k) raw[k] = route_ex2(__fmul_rn(__fsub_rn(lg[topk_ids[t * K + k]], m), 1.4426950408889634f));
+  int block_e = 1;
+  while (block_e < E) block_e <<= 1;
+  const int ept = block_e >= 32 ? block_e / 32 : 1;
+  float lane[32];
+  for (int l = 0; l < 32; ++l) {
+    float acc = 0.f;
+    bool first = true;
+    for (int j = 0; j < ept; ++j) {
+      const int pos = l * ept + j;
+      if (pos >= K) continue;
+      acc = first ? raw[pos] : __fadd_rn(acc, raw[pos]);
+      first = false;
     }
-    __syncthreads();
+    lane[l] = acc;
   }
-  const float inv_sum = s_red[0];
-  // top-k 的 id 由 moe_route 的前一步给出（按原始 logits 排序），这里只算权重
-  for (int k = threadIdx.x; k < K; k += blockDim.x) {
+  for (int o = 16; o > 0; o >>= 1) {
+    float nxt[32];
+    for (int l = 0; l < 32; ++l) nxt[l] = __fadd_rn(lane[l], lane[l ^ o]);
+    for (int l = 0; l < 32; ++l) lane[l] = nxt[l];
+  }
+  const float renorm = lane[0] > 0.f ? lane[0] : 1.f;
+  const float inv = route_rcp(renorm);
+  for (int k = 0; k < K; ++k) {
     const int e = topk_ids[t * K + k];
-    s_sel[k] = s_prob[e] * inv_sum;  // softmax 概率
-  }
-  __syncthreads();
-  if (threadIdx.x == 0) {
-    float wsum = 0.f;
-    for (int k = 0; k < K; ++k) wsum += s_sel[k];
-    const float inv_w = wsum > 0.f ? 1.f / wsum : 1.f;  // 只在 top-k 上重新归一化
-    for (int k = 0; k < K; ++k) {
-      const int e = topk_ids[t * K + k];
-      // per_expert_scale 是 bf16 参数（vLLM `.to(topk_weights.dtype)` → 参与 f32 运算前转 f32）。
-      topk_w[t * K + k] = s_sel[k] * inv_w *
-                          (per_expert_scale ? to_f32(static_cast<const bf16*>(per_expert_scale)[e]) : 1.f);
-    }
+    const float sc = per_expert_scale ? to_f32(static_cast<const bf16*>(per_expert_scale)[e]) : 1.f;
+    topk_w[t * K + k] = __fmul_rn(__fmul_rn(raw[k], inv), sc);
   }
 }
 
