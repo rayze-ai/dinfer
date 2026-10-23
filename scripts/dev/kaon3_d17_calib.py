@@ -31,13 +31,18 @@ out = os.environ.get("OUT", "/w/d17b/shapes")
 os.makedirs(out, exist_ok=True)
 
 seen = {}
+cnt = {}
+# 每种 (n,k) 记第 SHAPE_NTH 次调用（默认 0 = 第一次，即最早那层；Kaon-V3 全注意力层 5/11/17/… → 1 = L11）
+nth = int(os.environ.get("SHAPE_NTH", "0"))
 orig_mm = FIK.flashinfer_scaled_fp8_mm
 
 
 def _rec(A, B, out_dtype, scale_a, scale_b, bias=None):
     r = orig_mm(A, B, out_dtype=out_dtype, scale_a=scale_a, scale_b=scale_b, bias=bias)
     key = (int(B.shape[1]), int(A.shape[1]))  # (n, k)
-    if key not in seen:
+    i = cnt.get(key, 0)
+    cnt[key] = i + 1
+    if i == nth and key not in seen:
         seen[key] = dict(A=A.detach().clone(), B=B.detach().clone(),
                          scale_a=scale_a.detach().clone(), scale_b=scale_b.detach().clone(),
                          out=r.detach().clone(), m=int(A.shape[0]))
@@ -48,7 +53,7 @@ FIK.flashinfer_scaled_fp8_mm = _rec
 
 llm = LLM(model=model_dir, enforce_eager=True, tensor_parallel_size=1, gpu_memory_utilization=0.85,
           dtype="auto", max_model_len=4096, enable_prefix_caching=False, block_size=32, max_num_seqs=1)
-seen.clear()  # 必须清：profile run 的假批量（m=4096）会抢占 key
+seen.clear(); cnt.clear()  # 必须清：profile run 的假批量（m=4096）会抢占 key
 llm.generate([{"prompt_token_ids": ids}], SamplingParams(max_tokens=1, temperature=0.0), use_tqdm=False)
 
 print(f"[calib] 抓到 {len(seen)} 种 (n,k)", flush=True)
