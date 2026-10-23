@@ -388,3 +388,15 @@ cuBLAS 是闭源库。要"逐位复刻"，只能靠**实验反推它的 K 方向
   `data/include/flashinfer/gemm/bmm_fp8.cuh:171-172`）；
 - 布局沿用 bf16 路径的 cuBLAS 视角（A 操作数 = W 物理 `[n,k]` 当 `[K,N]` 列主序，`lda=K`）；
 - algo 走与 bf16 相同的 `heuristics()` + `default_algos` 桶缓存（同一形状只查一次）。
+
+## 26. cuBLASLt 首版 = 8/196608（与我自写 kernel 同数）：选错 algo
+
+`forward_fp8_cublaslt` 首版跑出 **8/196608**，与我自写 kernel **完全相同**的 8。
+
+这意味着两件事之一：
+1. 启发式第一个 algo 恰好落到与我 kernel 相同的累加序；或
+2. 我们两版都命中同一条 cuBLAS 内部路径，而 `torch._scaled_mm` 走的是**另一条**（不同 algo/不同 Lt 配置）。
+
+`torch._scaled_mm` 实测是 **0**，所以 cuBLAS 能做到——差在**algo 选择**（`cublasLtMatmulAlgoGetHeuristic` 的第一个
+未必是 PyTorch 用的那个）或**描述符细节**（如 `TRANSA/TRANSB` 方向、`ld` 取值导致走不同内部 tile）。
+下一步：把启发式的**全部** algo 逐一试一遍，看有没有能到 0 的；若有，就固定用它。
