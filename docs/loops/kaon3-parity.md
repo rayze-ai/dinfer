@@ -327,3 +327,30 @@ BUILD_ONLY=1 bash scripts/verify/kaon3-parity.sh      # 打印 SNAP=<id>
   **BI 关的 `test/kaon3/oracle_nobi/` 只用于定噪声下限**。用户 2026-10-22 晚选定，理由见上面 P1 参数对齐一节。
 - 生产本身 run-to-run / 跨 batch 就不确定;逐 token 完全一致本就无法达到,噪声下限(BI 开 vs 关)正是这个量。
 - pre2 bug 与 BI 无关:两种配置都强判 1852,我们判 5976。
+
+## 第 19 轮（2026-10-23 夜）：换靶 compile（BI=1），导出 inductor kernel
+目标（用户 2026-10-23）：对齐 **compile 模式**（服务/生产实际口径），**BI=1**，先用 inductor 产物看算子口径。
+
+导出方法（远端 `/w/tmp/ind`）：`TORCHINDUCTOR_CACHE_DIR` + `VLLM_CACHE_ROOT` + `TRITON_CACHE_DIR` 指向同一目录，
+跑 `eager_vs_srv.py <M> 0 p02`（compile）。产物：`ind/vllm/torch_compile_cache/<key>/rank_0_0/backbone/`
+（`computation_graph.py` 9116 行 + 31 个 subgraph artifact）、`ind/inductor/<xx>/*.py`（36 个 Triton kernel）。
+
+**观察 1（关键）**：compile 下 vLLM 的 RMSNorm **不走** BI Triton kernel（`rms_norm_batch_invariant`），
+走 `torch.ops.vllm_ir.rms_norm.default`（图里 331 次；日志 `Priority not set for op rms_norm, using native
+implementation`）。语义 = `forward_native`：fp32 累加 → `rsqrt(mean+eps)` → **先舍入回 bf16 再乘 weight**
+（`ir/ops/layernorm.py:10`）。BI 的 Triton 版是 `tl.sqrt` 后 `1.0/rms`，**两者本来就不同**。
+
+**观察 2**：inductor 把 norm 与相邻算子融进大 Triton kernel（`c4shm6xroqnr…py`，2816 维）：平方和按
+`R0_BLOCK` 分块 fp32 累加后用 `tl.sum` 归约，再 `rsqrt(var+eps)`、fp32 乘 weight、clamp ±448、量化 fp8。
+与我们按 BI Triton SASS 复刻的 `norm.cu`（fma 结构 + `sqrt`/`rcp`）**归约树和开方都不同**。
+
+**数值验证**（远端 `/w/tmp/ind_norm_probe.py`，N=2816，[64,2816] bf16）：
+| 口径 | 与 eager IR 差异 |
+|---|---|
+| `(x·rsqrt).to(bf16)·w` | **0**（逐位相同） |
+| 不舍入直接乘 w | max 6.25e-2，47030 元素不同 |
+| `torch.compile(ir.rms_norm)` | **0**（与 eager 逐位相同） |
+→ 舍入位置（先 bf16 再乘 w）是必有的；单测规模下 inductor 归约与 eager 一致，但真 kernel 分块（R0_BLOCK）时不一定。
+
+**下一步**：① 用 compile oracle（`kaon3_oracle_server.sh <N>`，BI=1，默认 compile）配合 `kaon3_probe --layers N`
+逐层二分找首个发散层；② 按 inductor kernel 原文改 `norm.cu` 的归约/开方（先确认是哪一层的 norm 形态）。
