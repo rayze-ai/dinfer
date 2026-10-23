@@ -100,3 +100,16 @@ kaon-oracle 就绪（GPU 1 :28100 layers=30 block=32 BI=1）
 oracle 启动日志确认走 compile 且 IR 选 native：
 `IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'])`，
 `init engine … (compilation: 122.05 s)`。整跑进行中。
+
+## 确认：`lm_head` 不量化（排除假设 2 的一半）
+
+远端 `config.json` 的 `quantization_config.quantized_layers` 共 424 项，按后缀统计：
+
+```
+Counter({'linear': 189, 'q_proj': 30, 'k_proj': 30, 'o_proj': 30,
+         'gate_proj': 30, 'up_proj': 30, 'down_proj': 30, 'experts': 30, 'v_proj': 25})
+lm_head quantized: []    embed quantized: []    ignore: []
+```
+
+→ **`lm_head` / `token_embd` 都是 bf16**，我们 `gemm.forward_bf16(normed, embed.table, …)` 口径正确。
+假设 2「lm_head 量化」**排除**。剩下要查的只有 `final_norm` 是否与量化融合（不进 graph 就看不出来）。
