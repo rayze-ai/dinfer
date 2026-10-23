@@ -338,3 +338,13 @@ cuda/norm.cu(390): error: identifier "mode" is undefined
 - 判据要检查 `cargo:warning=.*error:` 与 `BUILD FAILED`，不能只 grep `^error`。
 
 已修 `norm.cu` 的 kernel/launcher 签名并 sync，重编通过。**下面这条读数必须来自重编后的二进制。**
+
+### 附：`fp8_flashinfer_parity` 目前跑不起来（数据缺失，不是数值失败）
+
+```
+thread 'fp8_matches_flashinfer_bitwise' panicked at ...:41:64:
+读 meta.txt: Os { code: 2, kind: NotFound }
+```
+靠 `test/kaon3/d17b/` 的真实入参（`A_fp8.bin` / `B_fp8.bin` / `ref_f32.bin` / `meta.txt`），
+这些文件在远端已不在。**要重跑需先用 `scripts/dev/kaon3_vllm_fp8det.py` 重新抓一组。**
+在拿到之前，`bmm_fp8` 只能靠端到端 A/B 判，不能靠这个测试。
