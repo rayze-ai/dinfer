@@ -582,6 +582,8 @@ fn dump_weights(src: &WeightSource, dir: &str) -> Result<()> {
         (format!("{p}.router.proj.weight"), "router_proj_bf16.bin"),
         (format!("{p}.router.scale"), "router_scale_bf16.bin"),
         (format!("{p}.router.per_expert_scale"), "router_pes_bf16.bin"),
+        (format!("{p}.post_feedforward_layernorm.weight"), "post_ff_norm_w_bf16.bin"),
+        (format!("{p}.post_feedforward_layernorm_1.weight"), "post_ff_norm1_w_bf16.bin"),
     ] {
         let (shape, v) = src.load_f32_host(&name)?;
         let bits: Vec<u8> = v
