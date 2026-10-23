@@ -393,3 +393,15 @@ topk_w[..] = __fmul_rn(__fmul_rn(raw[k], inv), sc);
 这直接影响 `topk_w`，进而每条专家路径的输出。**这是目前最具体的一处口径差。**
 
 → 第 4 轮：把 `route_rcp` 换成 `__frcp_rn`（精确倒数）或 `__fdiv_rn(1.f, renorm)`，整跑比 flip。
+
+## 第 4 轮：router 归约换精确倒数（`ROUTER_RCP_EXACT=1`）
+
+**假设**：参照 Triton 的 `inv_renorm = 1.0 / renorm_raw` 是 IEEE `div.rn`；
+我们 `route_rcp` 用 `rcp.approx.ftz.f32`（1–2 ulp 偏差），直接影响每 token 的 top-k 权重。
+
+**改动**：`moe.cu` 加 `route_inv(x, exact)`，`exact_rcp` 由 host 侧读 `ROUTER_RCP_EXACT` 传入
+（device 内不能有动态初始化的 static，第一次写成 device 侧 lambda 编译失败——已改）。
+默认仍走 `rcp.approx`，A/B 时用环境变量开。
+
+- 命令：`RMSNORM_MODE=2 ROUTER_RCP_EXACT=1 …`（同时保留第 3 轮较优的 norm 口径）
+- 对照：MODE=2 无此项 → flip **15.94%** / |Δlp| **1.2367**

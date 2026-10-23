@@ -8,6 +8,7 @@
 //                        （两 kernel：count + fill；offsets 由 host 读 counts 做 scan 再传回，或 GPU 单 block scan）
 //   moe_gather_bf16      按 sorted_tok 把 x[T,H] 行收集到 xg[T*K, H]
 //   moe_scatter_add_bf16 out[tok] += w * y[i]（i 为 sorted 下标）
+#include <cstdlib>
 #include "common.cuh"
 #include "kernels.h"
 
@@ -199,9 +200,13 @@ __device__ __forceinline__ float route_rcp(float x) {
   asm("rcp.approx.ftz.f32 %0, %1;" : "=f"(r) : "f"(x));
   return r;
 }
+/// `exact != 0` 时用 IEEE 精确倒数（Triton 的 `1.0 / renorm_raw` 编译成 div.rn）。
+__device__ __forceinline__ float route_inv(float x, int exact) {
+  return exact ? __frcp_rn(x) : route_rcp(x);
+}
 __global__ void route_softmax_kernel(const float* __restrict__ logits, const int32_t* __restrict__ topk_ids,
                                      const void* __restrict__ per_expert_scale, float* __restrict__ topk_w, int E,
-                                     int K) {
+                                     int K, int exact_rcp) {
   if (threadIdx.x != 0) return;
   const int64_t t = blockIdx.x;
   const float* lg = logits + t * E;
@@ -230,7 +235,7 @@ __global__ void route_softmax_kernel(const float* __restrict__ logits, const int
     for (int l = 0; l < 32; ++l) lane[l] = nxt[l];
   }
   const float renorm = lane[0] > 0.f ? lane[0] : 1.f;
-  const float inv = route_rcp(renorm);
+  const float inv = route_inv(renorm, exact_rcp);
   for (int k = 0; k < K; ++k) {
     const int e = topk_ids[t * K + k];
     const float sc = per_expert_scale ? to_f32(static_cast<const bf16*>(per_expert_scale)[e]) : 1.f;
@@ -269,8 +274,13 @@ extern "C" int moe_route_softmax_f32(const float* logits, int32_t* topk_ids, con
   if (num_experts <= 0 || num_experts > MAX_E || topk <= 0 || topk > MAX_K || topk > num_experts) return -1;
   if (tokens <= 0) return 0;
   route_topk_ids_kernel<<<(unsigned)tokens, 256, 0, stream>>>(logits, topk_ids, (int)num_experts, (int)topk);
+  // `ROUTER_RCP_EXACT=1`：router 归约用精确倒数（对照 Triton `1.0 / renorm`），A/B 用。
+  static const int exact_rcp = [] {
+    const char* e = getenv("ROUTER_RCP_EXACT");
+    return (e && e[0] == '1') ? 1 : 0;
+  }();
   route_softmax_kernel<<<(unsigned)tokens, 256, 0, stream>>>(logits, topk_ids, per_expert_scale, topk_w,
-                                                             (int)num_experts, (int)topk);
+                                                             (int)num_experts, (int)topk, exact_rcp);
   return 0;
 }
 
