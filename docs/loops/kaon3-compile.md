@@ -133,3 +133,42 @@
 2. `moe_forward` ×30（combine 口径 / per_expert_scale 折进位置）
 3. router 的 BI persistent matmul（我们用 cuBLAS → 需 `CUBLASLT_WORKSPACE_SIZE=1` 才稳）
 4. `unified_kv_cache_update` 的 kv fp8 量化点
+
+## 第 5 轮主线：复刻 router 的 BI persistent matmul（规格已从源码读出）
+
+**参照路径**（`vllm/model_executor/layers/batch_invariant.py:55-138` + `:155-165`）：
+
+| 参数 | bf16 取值 |
+|---|---|
+| `BLOCK_SIZE_M` | **128** |
+| `BLOCK_SIZE_N` | **128** |
+| `BLOCK_SIZE_K` | **64** |
+| `GROUP_SIZE_M` | 8 |
+| `num_stages` / `num_warps` | 3 / 8 |
+
+**归约结构（决定逐位结果）**：
+```
+accumulator = tl.zeros((BM, BN), fp32)
+for ki in range(k_tiles):                       # K 方向严格顺序，ki = 0,1,2,…
+    accumulator = tl.dot(a[ki], b[ki], accumulator)
+c = accumulator.to(bf16)                        # 只在最后舍一次
+```
+`tl.dot` 在 bf16 上发 `mma.m16n8k16`：每个 `BLOCK_SIZE_K=64` 块内是 4 条 k16 mma **顺序累加**，
+块与块之间也是顺序累加。**全程一个 fp32 累加器，K 方向零并行**。
+
+我们的 router 走 cuBLAS bf16 GEMM（要 `CUBLASLT_WORKSPACE_SIZE=1` 才稳定），归约树与上表无关。
+
+**为什么这条必须做（不再是"试试"）**：
+- 第 4 轮证明：低于 bf16 ulp 的差异（rcp.approx 2⁻²³ vs bf16 2⁻⁹）**会被舍入吞掉**，
+  所以剩下的分歧必然在 **bf16 ulp 级别**；
+- `num_experts=128` 选 8、30 层 → bf16 ulp 级的 logits 偏差会在 top-8 边界换专家，
+  换一个专家就是该 token 的 MoE 输出整块变化（实测：个别位置间隔比差 9.7 倍、top-1 翻转，其余位置 Δ≈0）。
+- **只要 router GEMM 不是同一归约结构，端到端就不可能收敛到 FLOOR。**
+
+### 实现要点
+
+新增 kernel（`crates/kernels/cuda/`），专门服务 router 这种 `N` 很小的形状（`N=128`）：
+- 每个 block 负责 `BM=128` 行 × `BN=128`（整块 N），K 方向 64 一块顺序累加；
+- fp32 累加器，末尾 `to(bf16)` 一次；
+- 由 `ROUTER_GEMM_BI=1` 选（默认关，A/B 后再定默认）；
+- 判据：**先做 kernel 级对拍**（同入参 vs 参照 BI matmul 逐位 0），再端到端看 flip。
