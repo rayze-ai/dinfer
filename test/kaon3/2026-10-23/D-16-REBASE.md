@@ -485,3 +485,13 @@ mean_common_d=0.0276` —— **0.83% 就是 `oracle_clean_b` vs `oracle_clean` �
 120 个 fp8 层的 N/K 各不相同；**不同形状命中的"与 vLLM 一致的 algo"未必都是下标 2**。
 若某形状上 algo[2] 反而更差，就解释了翻转率没降。
 → 做法：对每个 (n,k) 组合，同入参下枚举 algo 并与参照比；或先用"层内 1-ulp 计数"看哪层变差了。
+
+## 32. 形状扫描首次无效（我的 bug，与 §14 同类）
+
+读数全是 `m=4096`、四个 backend 全 `=0` —— **假的**。
+原因：`seen` 没在 `llm.generate` 前清空，LLM 构造期的 **profiling run** 用
+`m=max_num_batched_tokens=4096` 的假批量先占了每个 `(n,k)` 的 key，真实 prefill（`m=24`）被挡在门外。
+（同 `kaon3_vllm_hidden.py` 里 `cap.clear()` 的道理。）
+
+→ **规则**：任何"前向里抓 X"的 hook，`LLM(...)` 之后必须清空累积器，否则抓到的是 profile 阶段的假数据。
+已修脚本（`seen.clear()`），重跑。
