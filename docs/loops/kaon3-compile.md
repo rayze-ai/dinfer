@@ -373,3 +373,36 @@ return swizzled.reshape(B, M_padded, K_padded)
    kernel 内改读法。与 cutlass 完全同源。
 
 **先做 1**：改动最小、能立刻用 `/tmp/fp4d` 的标准答案验证。
+
+## 第 11 轮总结（2026-10-24 凌晨）
+
+### 已确定事实（可直接用，不用再查）
+
+| 项 | 结论 | 依据 |
+|---|---|---|
+| 参照 MoE 后端 | `VLLM_CUTLASS` NvFp4 + `MoEPrepareAndFinalizeNoDPEPModular` | oracle 日志 `nvfp4.py:291/564` |
+| 专家量化 | **W4A4**，group_size **16**（其余层 W8A8） | `config.json` config_groups |
+| 激活量化公式 | `sf=e4m3(gs·amax/6)`，`q=fp4(x/(sf/gs))`，反量化 `q·sf/gs` | numpy 复现，相对误差 0.096（= fp4 噪声） |
+| `a_q` nibble 顺序 | **低半字节 = 偶数列** | lo_first 0.096 vs hi_first 1.41 |
+| 激活 scale `a_s` | **padded+swizzled**，`[128, k/16]`（自然只需 `[8,176]`） | 22528 vs 1408 字节 |
+| 权重 scale `s1` | 自然布局 `[n, k/16]` | 247808 = 1408×176 |
+| swizzle 公式 | reshape `(g,a4,r32,kO,k4)` → transpose `(0,1,4,3,2,5)` | 随机往返验证 + 真实 `a_s` 解析 |
+| `alpha` 构成 | `weight_scale_2 / a1_gscale`（checkpoint 精确对上） | 9.7366e-05 两侧相等 |
+| dense GEMM 差距 | ndiff 11210/11264，‖ours‖/‖ref‖ = **1.0784** | `crates/kernels/tests/fp4_dense_parity.rs` |
+
+### 卡点（诚实记录）
+
+**numpy 复算参照 dense GEMM 时差一个常数因子**（相对 0.4085，逐行都是 0.9978，corr=0.924）。
+形状对、常数偏 → 乘子或 k 分段的解读还差一步，但**试了 6 次都没对上**。
+
+**止损决定**：不再用 numpy 反推。改为让**参照自己的 `ops.cutlass_scaled_fp4_mm`** 在可控输入上
+产出一个已知答案（例如 A 全 1、W 全 1，或单 k-block），先用**极小规模**把乘子语义钉死，
+再回到真实数据。
+
+### 下一步（按顺序）
+
+1. **极小规模定标**：构造 `m=1, n=8, k=64` 的合成 fp4 数据（A、W 的 q 和 scale 都手工给），
+   调 `cutlass_scaled_fp4_mm`，用解析解推出 `alpha` 的确切作用位置。**这一步能一次钉死乘子。**
+2. 回到真实数据，验证 numpy 与参照一致。
+3. 再看我们的 kernel 与参照的 1.0784 范数比，定位是布局还是累加。
+4. 通过后回到 `moe_stage_parity` 与端到端。
