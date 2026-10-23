@@ -1,11 +1,16 @@
 # loop 规格：kaon3-parity
 
-- 状态：**进行中**（2026-10-23 收工；子 loop D 第 15 轮）。**下一步**：查"L0 我们比 vLLM 自家 kernel 好 540 倍、
-  但 L2 起是它们 2–3 倍"这个反超——同输入下 `KV_FP8=1/0` × `FORCE_KERNEL=flashinfer` 对比 L2 单层放大倍数，
-  确认我们的 KV 往返在数值上是否与 vLLM 等价（D-5 只证明了"读的是 fp8"）。
+- 状态：**进行中**（2026-10-23，子 loop D 第 17 轮）。**当前卡点已收敛为一句话**：
+  **让我们的 fp8 GEMM 在同一字节入参下与 FlashInfer 逐位相同（diff=0）**。
+  实测（L0 `qkv_proj`，同入参）：我们 **8/196608**、cutlass **7/196608**、FlashInfer 重跑 **0**；
+  max 差 1.25e-1 = 一个 bf16 ulp。我们与 cutlass 同级 → 端到端也吻合（我们 14.49%/1.2302
+  vs vLLM 换 cutlass 13.95%/1.19）。见 `test/kaon3/2026-10-23/D-16-REBASE.md` §17。
+  **作废**：① "逐位复刻不可达"（D-12 误读，实为 fi-vs-cu 的 7 处）；② "我们另有一个放大器"（放大倍数不可跨起点比）。
+  **待答**：FlashInfer 跨进程（各自 JIT autotune）是否仍逐位一致——决定目标是否良定义。
 - 创建：2026-10-22
 - 验证脚本：`scripts/verify/kaon3-parity.sh`
-- 迭代记录：`test/kaon3/2026-10-22/kaon3-parity.md`
+- 迭代记录：`test/kaon3/2026-10-22/kaon3-parity.md`（D-1..D-15）
+  + `test/kaon3/2026-10-23/D-16-REBASE.md`（D-16..D-17，含本轮所有复核与作废）
 - 上游：`docs/loops/kaon-v3.md`（阶段 3）。用户 2026-10-22：Rust 实现、Rust 验证，不用 Python 参考；loop 不达标不停。
 
 ## 目标
