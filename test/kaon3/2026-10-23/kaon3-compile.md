@@ -731,3 +731,31 @@ x.bin  y.bin
 | `y.bin` | **MoE 输出**（combine 之后） | `[24, 2816]` bf16 |
 
 有这四份就能把「router → top-k → 8 专家 → combine」整段逐位复算，不用跑整个模型。
+
+## 第 7 轮关键数据：**参照 router 的 top-8 边界有 3/24 行完全并列**
+
+用参照真实 router logits（`router_y.bin`，f32，`[24,128]`）统计：
+
+```
+top8-top9 gap: min 0.00000  median 0.05469
+gap < 1e-4 的行: 3/24      gap < 0.05 的行: 12/24
+row 1:  top7=top8=2.187500，并列出现在 experts [79, 84]  → 取 79
+row 11: top7=top8=3.437500，并列出现在 experts [79, 81]  → 取 79
+row 23: top7=top8=2.421875，并列出现在 experts [33, 120] → 取 33
+```
+
+**两边的平局决胜规则一致**（都是取 expert_id 小的）：
+- 参照：`packed = (key<<32) | expert_id`，`tl.sort(descending=False)`。
+  logit 越大 → key 越小 → 整体越小 → 同值时 expert_id 小的在前。
+- 我们：`if (v > bv)` 严格大于，平局保留先遇到的（= 小 id）。
+
+✅ **所以平局本身不是 bug**。但它说明了一件事：
+**top-8 边界极其敏感**——`gap < 0.05` 的有 12/24 行，而 bf16 在该量级的分辨率就是 ~0.004–0.016。
+**router logits 只要差 1–3 个 bf16 ulp，就可能换掉一个专家**。这解释了为什么端到端 flip 顽固在 14–16%：
+换一个专家 = 该 token 的 MoE 输出整块不同。
+
+### 仍未核验（下一步）
+
+`router_x.bin`（参照真实输入）→ 跑我们的 router（`rmsnorm_scale2` + GEMM）→ 与 `router_y.bin` 逐位比。
+这一步能直接判定"我们的 router 输出与参照差多少 ulp"，是所有剩余假设里最该先做的
+（因为后面 128 专家 + combine 都建立在它的 top-8 之上）。

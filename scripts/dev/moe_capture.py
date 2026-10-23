@@ -38,7 +38,11 @@ def main():
     for k,(nm,x,y) in enumerate(cap):
         tag=nm.split('.')[-1]
         x.to(torch.bfloat16).view(torch.int16).cpu().numpy().tofile(f"{d}/{tag}_x.bin")
-        if y is not None: y.to(torch.bfloat16).view(torch.int16).cpu().numpy().tofile(f"{d}/{tag}_y.bin")
+        if y is not None:
+            if tag == 'router':   # logits 是 f32，按 f32 存（按 bf16 存会丢精度、误导判读）
+                y.to(torch.float32).cpu().numpy().tofile(f"{d}/{tag}_y.bin")
+            else:
+                y.to(torch.bfloat16).view(torch.int16).cpu().numpy().tofile(f"{d}/{tag}_y.bin")
         print("CAP",tag,nm,x.shape, None if y is None else y.shape, flush=True)
 
 
