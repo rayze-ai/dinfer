@@ -751,12 +751,14 @@ impl Gemm {
                 // test/kaon3/2026-10-23/D-16-REBASE.md §40–41）：与 vLLM 逐位一致的配置，
                 // 除 K=8192 外都是 `id=67 tile=13 splitk=1`；而该配置在启发式列表里的**位置随形状漂移**
                 // （某形状排第 0、另一个排第 2），所以下标不是稳定标识。
-                // `2816×8192` 是例外：需要 split-K 的 `id=35 tile=13 splitk=3`。
+                // `2816×8192` 是例外：需要 split-K 的 `id=35 tile=15 splitk=3 red=2 stages=18 swz=1`。
+                // **按完整属性前缀匹配**（`algo_desc_full`）：短描述 `id=35 tile=13 splitk=3` 只在 L5 数据上碰巧为 0，
+                // L11 数据上 8 个候选里只有 tile=15/stages=18/swz=1 这一个为 0（§57，`shapes_L11`）；L5 上它也为 0。
                 let hs = self.heuristics(&d, 32)?;
                 ensure!(!hs.is_empty(), "cublasLt fp8: no algo for m={m} n={n} k={k}");
-                // 实测表：按 (n, k) 给首选配置，未命中则用通配。
-                const TABLE: &[(usize, usize, &str)] = &[(2816, 8192, "id=35 tile=13 splitk=3")];
-                const FALLBACK: &str = "id=67 tile=13 splitk=1";
+                // 实测表：按 (n, k) 给首选配置（完整属性前缀），未命中则用通配。
+                const TABLE: &[(usize, usize, &str)] = &[(2816, 8192, "id=35 tile=15 splitk=3 red=2 stages=18 swz=1")];
+                const FALLBACK: &str = "id=67 tile=13 splitk=1 red=0";
                 let want = TABLE
                     .iter()
                     .find(|(tn, tk, _)| *tn == n && *tk == k)
@@ -764,7 +766,7 @@ impl Gemm {
                     .unwrap_or(FALLBACK);
                 let pick = hs
                     .iter()
-                    .find(|h| Self::algo_desc(&h.algo) == want)
+                    .find(|h| Self::algo_desc_full(&h.algo).starts_with(want))
                     .map(|h| h.algo)
                     .unwrap_or(hs[0].algo);
                 self.default_algos.lock().unwrap().insert(key, pick);
@@ -828,7 +830,7 @@ impl Gemm {
         let d = self.make_descs_fp8(m, n, k, self.stream.ptr(a_scale), self.stream.ptr(w_scale))?;
         let hs = self.heuristics(&d, 32)?;
         ensure!(algo_idx < hs.len(), "只有 {} 个候选", hs.len());
-        Ok(Self::algo_desc(&hs[algo_idx].algo))
+        Ok(Self::algo_desc_full(&hs[algo_idx].algo))
     }
 
     fn run_lt_fp8(
