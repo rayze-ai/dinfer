@@ -888,3 +888,19 @@ router 形状 (m=24, n=128, k=2816)，用 vLLM 真实入参（`kaon3_d17_router.
 → 块间从 0 顺序加，全显式 `_rn`；`rmsnorm_vec_kernel` 全部布局改用它。标量 kernel（非对齐）未改，kaon3 不走。
 验证：`rmsnorm_calib` 三组（ff1 / post_ff_norm / v_norm）生产 kernel **全 0**；`ops_parity` 4 个 rmsnorm 测试通过。
 L2 隔离：子模块仅剩 `attn_out` (6,2462) 1 元素，层输出 0。整跑 L3 3.3e-9 / L4 6.0e-4 **不变** → L3/L4 的源头不在 norm。
+
+## 54. **attention 指数参数写法：L4 隔离 4457 → 1**
+
+vLLM 后端实测 = **TRITON_ATTN**（日志 `Using AttentionBackendEnum.TRITON_ATTN`）；sm_120 → `Arch::Sm100` → 我们走 v6（cfg 3464，FEXP）。
+差异点（镜像 `triton_unified_attention.py` / `triton_attention_helpers.py::softmax_step`）：
+vLLM `P = tl.exp(S - m)`（自然域减 max，再 ·log2e 进 ex2）；我们 `ex2(s·scale·log2e − m₂)`（先乘 log2e 再减）。
+另：vLLM 归一化 `acc / L`，我们 `o · (1/l)`。A/B 开关 `ATTN_MODE`（bit0 = o/l，bit1 = 自然域指数），仅 v6。
+
+| | L2 attn_out | L3 输出 | L4 输出（隔离）|
+|---|---|---|---|
+| A=0（旧）| 1 | 1 | **4457** |
+| A=2（自然域指数）| **0** | 1 | **1** |
+| A=3（+ o/l）| 0 | 1 | 1 |
+
+bit0 在现有数据上无区分力；bit1 是主因。剩余：L3 `q_norm` (13,·)×2、`post_attn_norm` (14,·)×2、`attn_out` (10,3550)；
+L4 `input_norm` (21,·)×2（**输入即参照** → RMSNorm 仍有行未对齐）、`ff2`/`post_ff_norm` (21,2323)。
