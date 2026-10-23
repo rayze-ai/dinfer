@@ -5,6 +5,38 @@
 # 那么 y = (1·C_a)·(1·C_w) 累加 k 次 · alpha  →  理论值 = k · C_a · C_w · alpha
 # 用 k=64（一个 k-block 的 4 倍）与不同 alpha 各跑一次，直接读出乘子位置。
 import os, numpy as np, torch
+# ---- 第二段：钉死「块缩放排布映射」----
+# 设计：A 的 fp4 只在第 0 个 16-元素块里为 1.0，其余为 0；A 的 4 个块缩放分别给 1/2/4/8。
+# 那么 y = 16 · sf[0] · (W 侧 1·1) · alpha。读出 y/(16·alpha) 就知道「第 0 块」实际取到了哪个 sf。
+def probe_scale_layout():
+    from vllm import _custom_ops as ops
+    import torch
+    m, n, k = 1, 128, 64
+    # q: 第 0 块（前 16 个元素 = 前 8 字节）全 1.0(0x22)，其余 0
+    aq = torch.zeros((m, k // 2), dtype=torch.uint8, device='cuda')
+    aq[:, :8] = 0x22
+    wq = torch.full((n, k // 2), 0x22, dtype=torch.uint8, device='cuda')
+    # A 的 4 个块缩放（自然序）= 1,2,4,8 的 e4m3 编码
+    import numpy as np
+    def e4(v):
+        for b in range(0x38, 0x7f):
+            pass
+        return None
+    # e4m3: 1.0=0x38, 2.0=0x40, 4.0=0x48, 8.0=0x50
+    nat = np.array([[0x38, 0x40, 0x48, 0x50]], dtype=np.uint8)   # [m=1, k/16=4]
+    padded = np.zeros((128, 4), dtype=np.uint8); padded[:1, :] = nat
+    sw = padded.reshape(1, 1, 4, 32, 1, 4).transpose(0, 1, 4, 3, 2, 5).reshape(128, 4)
+    asq = torch.from_numpy(sw.copy()).cuda().view(torch.float8_e4m3fn)
+    wsf = torch.full((n, k // 16), 0x38, dtype=torch.uint8, device='cuda').view(torch.float8_e4m3fn)
+    for alpha in (1.0,):
+        out = ops.cutlass_scaled_fp4_mm(aq, wq, asq, wsf,
+                                        torch.tensor([alpha], dtype=torch.float32, device='cuda'),
+                                        torch.bfloat16)
+        v = out[0, 0].float().item()
+        got = v / (16 * alpha)
+        print(f"LAYOUT alpha={alpha} y={v:.4f}  y/(16a)={got:.4f}  "
+              f"(1.0→块0取sf[0]=1; 2/4/8→取到了别的块)", flush=True)
+
 def main():
     os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING","0")
     os.environ.setdefault("VLLM_BATCH_INVARIANT","1")
@@ -37,34 +69,3 @@ def main():
 if __name__=='__main__':
     main()
 
-# ---- 第二段：钉死「块缩放排布映射」----
-# 设计：A 的 fp4 只在第 0 个 16-元素块里为 1.0，其余为 0；A 的 4 个块缩放分别给 1/2/4/8。
-# 那么 y = 16 · sf[0] · (W 侧 1·1) · alpha。读出 y/(16·alpha) 就知道「第 0 块」实际取到了哪个 sf。
-def probe_scale_layout():
-    from vllm import _custom_ops as ops
-    import torch
-    m, n, k = 1, 128, 64
-    # q: 第 0 块（前 16 个元素 = 前 8 字节）全 1.0(0x22)，其余 0
-    aq = torch.zeros((m, k // 2), dtype=torch.uint8, device='cuda')
-    aq[:, :8] = 0x22
-    wq = torch.full((n, k // 2), 0x22, dtype=torch.uint8, device='cuda')
-    # A 的 4 个块缩放（自然序）= 1,2,4,8 的 e4m3 编码
-    import numpy as np
-    def e4(v):
-        for b in range(0x38, 0x7f):
-            pass
-        return None
-    # e4m3: 1.0=0x38, 2.0=0x40, 4.0=0x48, 8.0=0x50
-    nat = np.array([[0x38, 0x40, 0x48, 0x50]], dtype=np.uint8)   # [m=1, k/16=4]
-    padded = np.zeros((128, 4), dtype=np.uint8); padded[:1, :] = nat
-    sw = padded.reshape(1, 1, 4, 32, 1, 4).transpose(0, 1, 4, 3, 2, 5).reshape(128, 4)
-    asq = torch.from_numpy(sw.copy()).cuda().view(torch.float8_e4m3fn)
-    wsf = torch.full((n, k // 16), 0x38, dtype=torch.uint8, device='cuda').view(torch.float8_e4m3fn)
-    for alpha in (1.0,):
-        out = ops.cutlass_scaled_fp4_mm(aq, wq, asq, wsf,
-                                        torch.tensor([alpha], dtype=torch.float32, device='cuda'),
-                                        torch.bfloat16)
-        v = out[0, 0].float().item()
-        got = v / (16 * alpha)
-        print(f"LAYOUT alpha={alpha} y={v:.4f}  y/(16a)={got:.4f}  "
-              f"(1.0→块0取sf[0]=1; 2/4/8→取到了别的块)", flush=True)

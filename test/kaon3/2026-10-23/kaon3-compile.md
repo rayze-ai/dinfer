@@ -1154,3 +1154,35 @@ corr(ours, ref) = 0.924        ← 形状基本对
 正确做法：**不要再用 numpy 反推参照**，而是让**参照自己的 dense op**在这组输入上跑一遍，
 它的输出就是标准答案，与 MoE 里的 `y` 比 —— 若两者一致，说明我的 numpy 解读有 bug；
 若不一致，说明 MoE 路径还做了额外的事（例如 epilogue）。
+
+## 第 12 轮：极小规模定标**全部通过**，乘子与 swizzle 双双钉死
+
+### 探针 1：乘子语义（A/W 全 1，scale 全 1）
+```
+alpha= 1.00  y= 64.0000   y/alpha= 64.0000     (k=64)
+alpha= 2.00  y=128.0000   y/alpha= 64.0000
+alpha= 0.50  y= 32.0000   y/alpha= 64.0000
+```
+→ **`alpha` 是唯一乘子、作用在最后**，`y = Σ(a·sf_a)(w·sf_w) · alpha`。一次确定。
+
+### 探针 2：块缩放排布映射（只让第 0 个 16-元素块非零，四个块缩放 = 1/2/4/8）
+```
+LAYOUT alpha=1.0  y=16.0000  y/(16·alpha)=1.0000
+```
+→ 第 0 个 k-block 取到的正是我写进 `padded[0,0]` 的 `sf=1.0`。
+**我的 swizzle 写入公式第一次通过参照 op 本身验证**（不是靠"看起来合理"）。
+
+### 至此，参照 dense FP4 GEMM 的全部语义都已确定
+
+```
+y[m,n] = alpha · Σ_k (a_q[m,k] · sf_a[m,k/16]) · (w_q[n,k] · sf_w[n,k/16])
+其中  sf_a 是 padded+swizzled 布局（[round_up(M,128), round_up(K/16,4)]）
+      sf_w 是自然布局 [N, K/16]
+      a_q 的 nibble：低半字节 = 偶数列
+      alpha = weight_scale_2 / a1_gscale
+```
+
+### 下一步：把我们的 kernel 改成这个口径
+
+`gemm_nvfp4_sm120.cu` 现在：A 的 scale 按 `row*(K/16)+bi` 自然序读。
+改成 swizzled 索引后，就能直接吃参照布局的 scale，进而与 `/tmp/fp4d` 的标准答案逐位对拍。
