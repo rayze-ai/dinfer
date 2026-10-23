@@ -942,3 +942,15 @@ Triton kernel 用 `TRITON_CACHE_DIR` 落 cache，取 `.ptx` / `.cubin`，用 Tri
   PTX / SASS：`ex2.approx.ftz((l − max)·0x3FB8AA3B)`（排序位）→ 每 lane 4 个排序位顺序加（仅 < K）→ 32 lane xor 蝶形 →
   `rcp.approx` → `(raw·inv)·scale`。`moe.cu::route_softmax_kernel` 已逐条对应。
 - 结果：**L7 隔离全部子模块 0**；**整跑 p02 L0–L10 逐位 0**，首个发散 **L11（全注意力层，D=512）2.6e-7**，L13 5.0e-5、L14 1.1e-3。
+
+## 57. **L11 归零 → 整跑 p02 L0–L29 全部 30 层逐位 0**
+
+L11（全注意力 D=512，k_eq_v）。D=512 不进 v5/v6，落通用慢路径 `gqa_prefill_ref_kernel`：
+1. **attn_out 23 元素**：慢路径是 `p = pq8(exp)/L` 每元素先除再累加；vLLM Triton（单 tile，24 key < TILE）是
+   `Σ pq8(exp(S−m))·V` 再 `/ L`（SASS 规律：除法 = RCP 后乘）。改为未归一化累加 + `acc·rcp.approx(L)` → **0**。
+2. **o_proj 2 元素**（输入已 0）：fp8 `2816×8192` 的 algo。`kaon3_d17_calib.py` 加 `SHAPE_NTH`（取第 n 次调用），
+   抓 L11 数据（`/w/d17b/shapes_L11`）：L5 上 `[0] id=35 tile=13 splitk=3` 与 `[2] id=35 tile=15 splitk=3 red=2 stages=18 swz=1`
+   都为 0，**L11 上只有后者为 0**。改为按完整属性前缀匹配后者；两份数据 `fp8_algo_calib` 均通过。
+结果：L11 隔离全部子模块 0；**整跑 p02（24 token）L0–L29 逐位 0**。
+复用教训：**标定必须用多层真实数据**——单层数据会让"碰巧对"的候选混进来（bf16 router L0/L2、fp8 o_proj L5/L11 两次同型）。
+paged 慢路径（`gqa_paged_kernel`，chunked prefill 用）还是旧写法，待改。

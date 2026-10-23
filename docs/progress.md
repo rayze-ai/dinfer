@@ -33,7 +33,8 @@
   跑探针现需 `PROBE_ENV="CUBLASLT_WORKSPACE_SIZE=1 ATTN_MODE=2"`。
 - **§56：ATTN_MODE=2 已默认；Gemma4 路由权重改 vLLM Triton 融合版口径 → 整跑 p02 L0–L10 逐位 0**，首个发散 L11（全注意力 D=512）。
   探针现只需 `PROBE_ENV="CUBLASLT_WORKSPACE_SIZE=1"`。
-- **下一步**：L11 子模块（全注意力 kernel D=512 走哪条路径）→ 30 用例端到端；原计划：L4 单层隔离 + 子模块对拍（需用 `kaon3_vllm_sublayer.py` 抓 L4 的 vLLM 子模块，BI=1）；
+- **§57：整跑 p02 L0–L29 全部逐位 0**（D=512 慢路径改未归一化累加 + rcp；fp8 2816×8192 改选 tile=15/stages=18/swz=1）。
+- **下一步**：30 用例端到端（`PROBE_ENV="CUBLASLT_WORKSPACE_SIZE=1"`）；paged 慢路径同步改；性能门禁（norm/attn/route 全模型生效）；原计划：L4 单层隔离 + 子模块对拍（需用 `kaon3_vllm_sublayer.py` 抓 L4 的 vLLM 子模块，BI=1）；
   L2 剩余 `attn_out` 1 元素 / `v_norm` 2/49152 可能同源，一起看。
 - **口径待用户确认**：oracle_clean=BI，生产=non-BI（memory 2026-10-22）。non-BI 下 vLLM 走 cuBLAS(非 Lt)，需另标定。
 - 读 vLLM 代码读镜像副本 `/data/ref/vllm-img-v0.28.0-pr455/`；`/data/ref/vllm` 已切 v0.28.0rc2（与镜像差 87 文件）。
