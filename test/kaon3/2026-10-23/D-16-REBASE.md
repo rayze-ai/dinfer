@@ -321,3 +321,32 @@ bmm_fp8(A, B, A_scale, B_scale, dtype, out=None, backend='cublas')
 - 没有 `tile_k` / `unroll` 这类可传参数（那些在 `gemm_base.py` 的更底层接口里）。
   所以"枚举 autotune 候选"只能通过 **backend 枚举** 做，不能传 tile 参数。
 - `flashinfer.bmm_fp8` 不是模块（`import flashinfer.bmm_fp8` 会 ModuleNotFoundError），是 `from flashinfer import bmm_fp8` 的函数。
+
+## 22. **vLLM 的 fp8 GEMM 后端是 cuBLAS**（不是 cutlass，也不是 cudnn）
+
+同入参（L0 `qkv_proj`，`A(24,2816) B(2816,8192)`，`bmm_fp8` 3D 形态）逐个 backend 跑：
+
+| backend | vs vLLM 前向真实值 |
+|---|---|
+| `auto` | **0 / 196608** |
+| **`cublas`** | **0 / 196608** |
+| `cudnn` | **8** / 196608 |
+| `cutlass` | **7** / 196608 |
+| `cute-dsl` | sm_120 不支持 |
+
+→ `auto` 落到 **cuBLAS**；**cuBLAS 就是这个模型的真实执行路径**，而且逐位可复现（跨进程 0）。
+
+**注意一个巧合**：我们的 kernel 也是 **8**，与 **cudnn** 同数。下一步先验"我们 vs cudnn 是否逐位相同"
+（若是，说明我们的累加序 = cudnn 的，要改的目标就从 cudnn 序迁到 cublas 序，路径更明确）。
+
+## 23. 复刻 cuBLAS 的难度评估（必须让用户知道的战略问题）
+
+cuBLAS 是闭源库。要"逐位复刻"，只能靠**实验反推它的 K 方向累加分组**：
+- 已知 `k=2816`、`tile_k` 常见 128（2816/128 = 22 整），我们当前是 `BK=64 + 2×mma(k32)`（44 组）；
+- 差异只有 8/196608 个 1-ulp，说明**顺序极其接近**，差的可能只是 K 遍历的分组边界或末级归约方式；
+- 可测：构造**探针输入**（单位向量 / 幂次权重），从输出反推它的分组边界。
+
+**这条路的尽头是"复刻一个闭源库的舍入行为"**。它是可做的（差异极小、且 cuBLAS 确定），
+但代价高且脆弱（换 GPU / 换 cuBLAS 版本可能就变）。
+→ **需要用户裁定**：是继续追 cuBLAS 逐位，还是把判据改成"达到 vLLM 自身换 kernel 的水平"
+（我们 14.49%/1.2302 vs vLLM 换 cutlass 13.95%/1.19，**已经达到**）。
