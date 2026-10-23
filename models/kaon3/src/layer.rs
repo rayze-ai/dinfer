@@ -1078,14 +1078,18 @@ fn router_gemm_bi() -> bool {
     *V.get_or_init(|| std::env::var("ROUTER_GEMM_BI").map(|v| v.trim() != "0").unwrap_or(true))
 }
 
-/// `MOE_COMBINE_F32=1`：MoE 合并退回"f32 权重 + f32 乘积 + per_expert_scale 折进 down"的旧口径。
-/// **默认（不设）= vLLM cutlass_moe 口径**（2026-10-23 用户定：先与 vLLM 对齐，精确性另议）。
+/// MoE 合并口径：**f32 权重 + f32 乘积 + per_expert_scale 折进 down**（默认，`=1`）；
+/// `MOE_COMBINE_F32=0` 退回"权重先落 bf16、每项 bf16(w·y)"的旧假设口径。
+///
+/// **2026-10-24 改正**：原来默认是 `0`（当时判断为 vLLM cutlass_moe 口径）。p02 单例 A/B：
+/// `=0` → top-1 翻转 **4/22**、top1 |Δlp| max 2.04；`=1` → **0/22**、max **0.52**。
+/// 参照实际跑的是 Triton/inductor 融合路径，combine 不做那次 bf16 舍入。见 `docs/loops/kaon3-compile.md` 第 6 轮。
 fn moe_combine_f32() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| {
-        let on = std::env::var("MOE_COMBINE_F32").map(|v| v.trim() == "1").unwrap_or(false);
+        let on = std::env::var("MOE_COMBINE_F32").map(|v| v.trim() != "0").unwrap_or(true);
         if on {
-            eprintln!("[kaon3] MOE_COMBINE_F32=1：MoE 合并用旧 f32 口径（偏离 vLLM）");
+            eprintln!("[kaon3] MOE_COMBINE_F32=0：MoE 合并用 bf16 权重口径（A/B 用）");
         }
         on
     })

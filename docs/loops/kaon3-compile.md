@@ -204,3 +204,17 @@ compile 模式下 forward hook 不触发、op 不能替换、Python 层不被调
 2. `NORM_FUSE_QUANT`（norm 与 fp8 量化是否融合）——已有开关，直接 A/B；
 3. 专家 GEMM 本身（`forward_nvfp4` 与参照 cutlass_moe 的归约）——需要新开关；
 4. attention 的 `o_proj` 段 / `unified_kv_cache_update` 的 kv 量化点。
+
+## 第 6 轮（进行中）：`MOE_COMBINE_F32` 默认改为 1
+
+**依据**（p02 单例 A/B，同环境只切这一个开关）：
+
+| | top-1 不一致 | top5 \|Δlp\| | top1 \|Δlp\| max | 实际 token \|Δlp\| |
+|---|---|---|---|---|
+| `MOE_COMBINE_F32=0`（原默认） | 4 / 22 | 1.8089 | 2.0405 | 2.1794 |
+| **`MOE_COMBINE_F32=1`（新默认）** | **0 / 22** | **1.3760** | **0.5195** | **1.1844** |
+
+原默认值注释写的是"vLLM cutlass_moe 口径（权重先落 bf16、每项 bf16(w·y)）"——
+参照实际跑 Triton/inductor 融合路径，**不做那次 bf16 舍入**。这是本轮唯一产生质变的开关。
+
+已改默认并跑完整 30 用例验证（`RMSNORM_MODE=2`）。
