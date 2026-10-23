@@ -954,3 +954,19 @@ L11（全注意力 D=512，k_eq_v）。D=512 不进 v5/v6，落通用慢路径 `
 结果：L11 隔离全部子模块 0；**整跑 p02（24 token）L0–L29 逐位 0**。
 复用教训：**标定必须用多层真实数据**——单层数据会让"碰巧对"的候选混进来（bf16 router L0/L2、fp8 o_proj L5/L11 两次同型）。
 paged 慢路径（`gqa_paged_kernel`，chunked prefill 用）还是旧写法，待改。
+
+## 58. ⚠️ **口径问题：逐层参照是 eager，端到端判据是 compile**
+
+30 用例端到端（run 1023-165244-1500999，p02 30 层逐位 0 之后）：flip 16.56% / |Δlp| 1.1994（前 15.53% / 1.2593），**无实质改善**；
+p02 单例 13.64% / 1.21。原因定位（离线 vLLM 同参数跑 p02 `prompt_logprobs`，与服务实例 `oracle_clean` 比）：
+
+| 离线 vLLM vs 服务 oracle_clean | top-1 翻转 | mean \|Δlp\| |
+|---|---|---|
+| compile 模式（= 服务，未加 --enforce-eager）| **0/23** | **0.0000** |
+| eager 模式（= 所有逐层参照的抓取口径）| 4/23 | 1.5725 |
+
+→ **我们已与 eager vLLM 30 层逐位一致；但服务实例（以及生产）跑的是 torch.compile + CUDA graph**，两者自身就差 1.57。
+compile 模式下 CustomOp 走 inductor 策略（RMSNorm 等可能走 `forward_native` → `ir.ops.rms_norm`：先舍入 x·inv 到 bf16 再乘 w，
+**且 forward_native 不看 BI**），算子还会被 inductor 融合。逐层抓取脚本的 forward hook 依赖 eager。
+诊断脚本：`/w/tmp/eager_vs_srv.py`（远端临时，未入库）。
+**待决**：对齐目标定为 compile 模式（= 服务 / 生产）；需要新的 compile 模式逐层参照抓法。
