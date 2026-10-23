@@ -571,3 +571,24 @@ mean_common_d=0.0276` —— **0.83% 就是 `oracle_clean_b` vs `oracle_clean` �
 **下一步**：照 `flashinfer/data/include/flashinfer/gemm/bmm_fp8.cuh` 的
 `CuBlasLtMatrixLayout(type, rows, cols, ld, ...)` 与 `setAttribute(TRANSA/TRANSB)` 逐项对齐我们的
 `make_descs_fp8`，而不是继续猜 algo 下标。
+
+## 37. 读 flashinfer 源码找到真因：描述符两处与它不一致
+
+`flashinfer/data/include/flashinfer/gemm/bmm_fp8.cuh` 的 `Fp8GemmDescriptors`（第 ~118 行）：
+
+```cpp
+a_layout(get_cuda_data_type<AT>(), m, k, k, true),   // A = 激活 [m,k], ld=k
+b_layout(get_cuda_data_type<BT>(), k, n, k),         // B = 权重 [k,n], ld=k
+d_layout(get_cuda_data_type<DT>(), m, n, m),         // D = [m,n], ld=m
+matmul_desc.setAttribute(CUBLASLT_MATMUL_DESC_TRANSA, CUBLAS_OP_T);
+matmul_desc.setAttribute(CUBLASLT_MATMUL_DESC_TRANSB, CUBLAS_OP_N);
+int8_t fast_accum = 1;
+matmul_desc.setAttribute(CUBLASLT_MATMUL_DESC_FAST_ACCUM, fast_accum);   // ← 关键
+```
+
+我们的 `make_descs_fp8` 原来有两处不同：
+1. **操作数方向反了**：我们让 W 当 A 操作数（沿用了 bf16 路径的写法），flashinfer 是激活当 A。
+2. **没设 `FAST_ACCUM`**：flashinfer 显式置 1 —— 这直接决定 f32 累加顺序，**极可能就是我们差的那 8 个 1-ulp**。
+
+**已按 flashinfer 逐项改写**，并**去掉写死的 algo 下标**（改回启发式默认第 1 个 = flashinfer 的 tactic=-1 路径）。
+若这条成立，就不再需要"按形状标定 algo"，对全部 6 个形状自然成立。

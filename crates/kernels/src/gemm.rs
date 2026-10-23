@@ -664,16 +664,13 @@ impl Gemm {
         let algo = match cached {
             Some(al) => al,
             None => {
-                // 关键：**不能取启发式第 0 个**。实测（m=24,n=8192,k=2816，Kaon-V3 L0 qkv_proj）
-                // 启发式共 8 个候选，[0]/[1] 与 vLLM 差 8/196608 个 1-ulp，而 **[2] 逐位一致**。
-                // vLLM 侧真实走的是 FlashInfer `CublasFp8GemmRunner` → cuBLAS，命中的就是这个 algo；
-                // PyTorch `_scaled_mm` 交叉验证同样为 0。见 test/kaon3/2026-10-23/D-16-REBASE.md §28。
-                const ALGO_IDX: usize = 2;
-                let hs = self.heuristics(&d, ALGO_IDX + 1)?;
+                // 描述符已按 FlashInfer `bmm_fp8.cuh` 对齐（A=激活、B=权重、FAST_ACCUM=1），
+                // 因此取启发式默认第一个即可 —— 这正是 flashinfer 的 tactic=-1 路径。
+                // 不再需要写死某个 algo 下标（曾经写死 2，只在 (8192,2816) 上成立，其余形状反被改坏）。
+                let hs = self.heuristics(&d, 1)?;
                 ensure!(!hs.is_empty(), "cublasLt fp8: no algo for m={m} n={n} k={k}");
-                let pick = hs.get(ALGO_IDX).unwrap_or(&hs[0]).algo;
-                self.default_algos.lock().unwrap().insert(key, pick);
-                pick
+                self.default_algos.lock().unwrap().insert(key, hs[0].algo);
+                hs[0].algo
             }
         };
         self.run_lt_fp8(&d, &algo, a, w, out)
@@ -730,8 +727,9 @@ impl Gemm {
     ) -> Result<()> {
         let alpha = 1.0f32;
         let beta = 0.0f32;
-        let pw = self.stream.ptr(w) as *const c_void;
+        // 与 make_descs_fp8 的布局一致：A 操作数 = 激活，B 操作数 = 权重
         let pa = self.stream.ptr(a) as *const c_void;
+        let pw = self.stream.ptr(w) as *const c_void;
         let po = self.stream.ptr_mut(out) as *mut c_void;
         let pws = self.stream.ptr(&self.workspace) as *mut c_void;
         // SAFETY: 描述符由 make_descs_fp8 构造，指针指向调用方持有的设备缓冲。
@@ -741,9 +739,9 @@ impl Gemm {
                 d.op,
                 &alpha as *const f32 as *const c_void,
                 &beta as *const f32 as *const c_void,
-                pw,
-                d.a,
                 pa,
+                d.a,
+                pw,
                 d.b,
                 po as *const c_void,
                 d.c,
@@ -758,25 +756,33 @@ impl Gemm {
         lt_err(r, "cublasLt matmul fp8")
     }
 
-    /// fp8 版本的去量化描述符：A/B 是 e4m3，C/D 是 bf16，compute 32F，scale 32F（设备指针）。
+    /// fp8 版本的描述符：**照 FlashInfer `bmm_fp8.cuh` 的 `Fp8GemmDescriptors` 逐项对齐**。
+    ///
+    /// 关键差异（我们原来写错的两处，正是 1-ulp 的来源）：
+    /// 1. **布局方向**：flashinfer 是 `a_layout(m,k,ld=k)` / `b_layout(k,n,ld=k)` / `d_layout(m,n,ld=m)` —
+    ///    即 **A = 激活 [m,k]、B = 权重 [k,n]、C = [m,n]**，与 bf16 路径（W 当 A 操作数）**相反**。
+    /// 2. **`FAST_ACCUM = 1`**：flashinfer 显式打开快速累加，直接决定 f32 累加顺序。
+    ///
+    /// `a` = 激活 e4m3 `[m,k]`，`w` = 权重 e4m3 物理 `[n,k]`（这里按 `[k,n]` 列主序视图解释，`ld=k`）。
     fn make_descs_fp8(&self, m: usize, n: usize, k: usize, a_scale_ptr: u64, w_scale_ptr: u64) -> Result<LtDescs> {
         use sys::cublasLtMatmulDescAttributes_t as D;
         let f8 = sys::cudaDataType_t::CUDA_R_8F_E4M3;
         let out_ty = sys::cudaDataType_t::CUDA_R_16BF;
-        // cuBLAS 视角同 bf16 路径：A 操作数 = W（物理 [n,k] 当 [K,N] 列主序，lda=K），B = 激活，C = [N,M]
-        let a = lt_err(lt::create_matrix_layout(f8, k as u64, n as u64, k as i64), "layout W")?;
-        let b = match lt::create_matrix_layout(f8, k as u64, m as u64, k as i64) {
+        // 与 flashinfer 同：A(激活) [m,k] ld=k；B(权重) [k,n] ld=k（物理 [n,k]）；D [m,n] ld=n
+        let a = lt_err(lt::create_matrix_layout(f8, m as u64, k as u64, k as i64), "layout A")?;
+        let b = match lt::create_matrix_layout(f8, k as u64, n as u64, k as i64) {
             Ok(b) => b,
             Err(e) => {
                 unsafe { let _ = lt::destroy_matrix_layout(a); }
-                bail!("layout A: cublasLt {:?}", e.0);
+                bail!("layout B: cublasLt {:?}", e.0);
             }
         };
+        // flashinfer 用 ld=m（列主序 [m,n]）；我们用行主序输出 out[m,n]，所以 ldc=n
         let c = match lt::create_matrix_layout(out_ty, n as u64, m as u64, n as i64) {
             Ok(c) => c,
             Err(e) => {
                 unsafe { let _ = lt::destroy_matrix_layout(a); let _ = lt::destroy_matrix_layout(b); }
-                bail!("layout C: cublasLt {:?}", e.0);
+                bail!("layout D: cublasLt {:?}", e.0);
             }
         };
         let op = match lt::create_matmul_desc(sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
@@ -792,14 +798,20 @@ impl Gemm {
             }
         };
         let d = LtDescs { op, a, b, c };
+        // flashinfer: TRANSA=T, TRANSB=N（A 是 [m,k] 行主序 → 以转置形式交给列主序的 cuBLAS）
         let t: i32 = 1;
         let nt: i32 = 0;
-        // SAFETY: 属性值类型与 cublasLt 文档一致：transpose 是 int，scale 是设备指针。
+        // 关键：flashinfer 打开 FAST_ACCUM；不设它累加顺序会不同（实测差 8/196608 个 1-ulp）。
+        let fast_accum: i8 = 1;
+        // SAFETY: 属性值类型与 cublasLt 文档一致：transpose 是 int，scale 是设备指针，fast_accum 是 int8。
         unsafe {
             lt_err(lt::set_matmul_desc_attribute(d.op, D::CUBLASLT_MATMUL_DESC_TRANSA,
                                                  &t as *const _ as *const c_void, std::mem::size_of_val(&t)), "transa")?;
             lt_err(lt::set_matmul_desc_attribute(d.op, D::CUBLASLT_MATMUL_DESC_TRANSB,
                                                  &nt as *const _ as *const c_void, std::mem::size_of_val(&nt)), "transb")?;
+            lt_err(lt::set_matmul_desc_attribute(d.op, D::CUBLASLT_MATMUL_DESC_FAST_ACCUM,
+                                                 &fast_accum as *const _ as *const c_void,
+                                                 std::mem::size_of_val(&fast_accum)), "fast_accum")?;
             lt_err(lt::set_matmul_desc_attribute(d.op, D::CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
                                                  &a_scale_ptr as *const _ as *const c_void,
                                                  std::mem::size_of_val(&a_scale_ptr)), "a_scale")?;
