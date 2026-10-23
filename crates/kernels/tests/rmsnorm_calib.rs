@@ -8,7 +8,8 @@
 //! - SS 0 = 我们 `rmsnorm_vec_kernel<1024,1>`（每线程 8 连续元素 `ss += a·a + b·b` → 32 warp 两级蝶形）；
 //!   SS 1/2 = Triton（BLOCK_SIZE=1024、4 warp × 32 lane × 8 元素；线程内顺序累加，2 = fma 收缩；
 //!   warp 蝶形 → 4 warp 蝶形 → 块间 `sum_sq += chunk` 顺序累加）。
-//! - INV 0 = `rsqrtf`；1 = `1/sqrt` 全 IEEE；2 = `sqrt.approx` + IEEE 除；3 = `sqrt.approx` + `div.full`。
+//! - INV 0 = `rsqrtf`；1 = `1/sqrt` 全 IEEE；2 = `sqrt.approx` + IEEE 除；3 = `sqrt.approx` + `div.full`；
+//!   +4 = mean 用 `ss × fl(1/h)`（否则 `ss / h`）。
 //!
 //! 数据目录（`RMS_CASES` 逗号分隔）每个含 `x_f32.bin`（[rows,h]，bf16 精确值）、`w_bf16.bin`（[h]）、`ref_f32.bin`。
 //! 跑：`RMS_CASES=/w/d17b/rms_ff1,/w/d17b/rms_pff RMS_EPS=1e-6 cargo test --release -p dinfer-kernels \
@@ -28,7 +29,9 @@ __device__ __forceinline__ float bfly(float v) {
   return v;
 }
 __device__ float inv_of(float ss, int n, float eps, int inv_mode) {
-  float mean = __fdiv_rn(ss, (float)n);
+  // inv_mode bit2：mean = ss × fl(1/n)（乘倒数）而非 ss / n
+  float mean = (inv_mode & 4) ? __fmul_rn(ss, __fdiv_rn(1.0f, (float)n)) : __fdiv_rn(ss, (float)n);
+  inv_mode &= 3;
   float t = mean + eps;
   if (inv_mode == 0) return rsqrtf(t);
   if (inv_mode == 1) return __fdiv_rn(1.0f, __fsqrt_rn(t));
@@ -134,7 +137,7 @@ fn calibrate_rmsnorm() {
             println!("  production          diff {n:<5} {ex:?}");
             prod_bad.push((dir.to_string(), n));
         }
-        for inv in 0..4i32 {
+        for inv in 0..8i32 {
             let mut o = st.alloc_zeros::<u16>(rows * h).expect("o");
             let cfg = LaunchConfig { grid_dim: (rows as u32, 1, 1), block_dim: (1024, 1, 1), shared_mem_bytes: 0 };
             let hi = h as i32;
