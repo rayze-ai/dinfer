@@ -665,3 +665,15 @@ OURS POOLED cases=30 rows=538 decisive=483 flips=68 flip_pct=14.08 mean_common_d
 2. 远端长任务的输出用 `run_in_background` + 前台同步捕获（`timeout … $R run '… 2>&1 | tail -N'`），
    **不要** `nohup … > log &` —— ssh 断开时 stdout 会丢；
 3. 判断"跑完没有"要看**产物**（`ls /w/tmp/…`），不看退出码。
+
+### 抓取一直卡住的真正原因：**在 oracle 容器里跑，GPU 被占着**
+
+前几次抓取全部失败（超时 143 / 无产物），根因不是脚本：
+`docker exec kaon-oracle python3 …` 跑在 **GPU 1** 上，而 **oracle 服务本身已经占了 27 GB**（`nvidia-smi` 显示 `585, 27386 MiB`）。
+再加载一个 LLM 必然卡死或 OOM。
+
+**正确做法**：用 `GPU=<n> scripts/dev/remote_5090.sh ctr '…'`，它 `docker run --gpus device=$n` 起干净的临时容器
+（`ctr` 默认 `GPU=0`；GPU 1 = oracle、GPU 7 = 基线，都别用）。
+
+**教训**：抓参照数据时先看那张卡**有没有别的进程占着**（`nvidia-smi --query-compute-apps`），
+`docker exec 进服务容器`听起来最省事，实际上是最容易撞上资源冲突的做法。
