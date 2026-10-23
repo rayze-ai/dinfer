@@ -64,3 +64,39 @@ return x.to(orig_dtype), x_residual
 
 - `lm_head` 前 `final_norm` 是否与 fp8 量化融合（vocab=262144 大形状）。
 - logits softcap `tanh(x/30)·30` 的精度与位置。
+
+## 读参照：logits 出口路径（compile 口径，`vllm/model_executor/layers/logits_processor.py`）
+
+```python
+logits = self._apply_head(lm_head, hidden_states, embedding_bias)   # bf16 输出（head_dtype=None）
+logits = logits[..., :self.org_vocab_size]
+...
+if self.soft_cap is not None:                                        # logits_processor.py:209
+    logits = torch.tanh(logits / self.soft_cap) * self.soft_cap
+```
+
+两个要点：
+1. **softcap 在 bf16 logits 上做**（`_apply_head` 返回模型 dtype），但 `tanh` 在 PyTorch 里对 bf16
+   是"升 f32 计算 → 存回 bf16"，即 `round_bf16(tanh_f32(bf16(x)/30)*30)`。我们 `softcap_bf16_n`
+   注释写"单次舍入 `to_bf16(c*tanhf(v/c))`"——**口径看起来一致**，且曾做过三步 A/B 无差异。
+2. **真正的分歧风险在 lm_head GEMM 本身**：`_apply_head` 走 `lm_head.quant_method.apply`，即 fp8 GEMM。
+   我们的 `gemm.forward_bf16(normed, embed.table, ...)` 用的是 **bf16 权重**（tied embedding 表）。
+   若参照把 lm_head 量化成 fp8，则 vocab=262144 的大 GEMM 每行误差会被 softcap 前的幅度放大。
+   **这是下一个要确认的点**（读 checkpoint 的 quant 配置即可判定，不必跑）。
+
+### 待办
+
+- [ ] 确认参照 `lm_head` 是否量化（读远端镜像里加载后的 `lm_head.quant_method`，或 checkpoint config）。
+- [ ] 确认 `final_norm` 在 compile 下是与 fp8 量化融合还是分离（fusion 会改变舍入点）。
+
+## 第 1 轮进行中（环境已确认干净）
+
+`kaon3-compile.sh` 前 6 项环境检查全过：
+```
+kaon-oracle 就绪（GPU 1 :28100 layers=30 block=32 BI=1）
+✅ oracle 容器在跑   ✅ 全 30 层   ✅ 未开 eager（compile 口径）
+✅ BI=1   ✅ :28100 200   ✅ GPU 无残留
+```
+oracle 启动日志确认走 compile 且 IR 选 native：
+`IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'])`，
+`init engine … (compilation: 122.05 s)`。整跑进行中。
