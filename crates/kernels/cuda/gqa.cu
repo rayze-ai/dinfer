@@ -33,6 +33,11 @@ __constant__ int g_p_fp8 = 0;
 // 数值口径位（Rust `attn_mode_ab`，经 p_fp8 高位传入；默认 bit1）：bit0 = 归一化用 o/l，bit1 = 指数参数 ex2((s-m)·log2e)（vLLM Triton 同式）。仅 v6。
 __constant__ int g_attn_mode = 0;
 constexpr float kAttnLog2e = 1.4426950408889634f;
+__device__ __forceinline__ float attn_rcp(float x) {
+  float r;
+  asm("rcp.approx.ftz.f32 %0, %1;" : "=f"(r) : "f"(x));
+  return r;
+}
 __device__ __forceinline__ float pq8(float p) {
   if (!g_p_fp8) return p;
   return __half2float(__half(__nv_cvt_fp8_to_halfraw(__nv_cvt_float_to_fp8(p, __NV_SATFINITE, __NV_E4M3), __NV_E4M3)));
@@ -924,7 +929,7 @@ __global__ void gqa_prefill_ref_kernel(const bf16* __restrict__ q, const bf16* _
         const bf16* kj = kptr(j);
         float s = 0.f;
         for (int d = 0; d < D; ++d) s += s_q[d] * to_f32(kj[d]);
-        p = pq8(__expf(s * scale - s_stat[0])) / s_stat[1];
+        p = pq8(__expf(s * scale - s_stat[0]));  // 未归一化（vLLM Triton：P 量化后进 PV，最后才 / L）
       }
       s_p[threadIdx.x] = p;
       __syncthreads();
@@ -937,7 +942,9 @@ __global__ void gqa_prefill_ref_kernel(const bf16* __restrict__ q, const bf16* _
       __syncthreads();
     }
     bf16* oi = out + ((int64_t)(start + i) * H + h) * D;
-    for (int d = threadIdx.x, c = 0; d < D; d += GQ_BLOCK, ++c) oi[d] = to_bf16(acc[c]);
+    // vLLM `acc / L`：Triton 的 f32 除法在 SASS 上是 RCP(L) 再乘（§55 同款），这里显式写
+    const float inv_l = attn_rcp(s_stat[1]);
+    for (int d = threadIdx.x, c = 0; d < D; d += GQ_BLOCK, ++c) oi[d] = to_bf16(__fmul_rn(acc[c], inv_l));
     __syncthreads();
   }
 }
