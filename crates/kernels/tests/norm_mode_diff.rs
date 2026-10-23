@@ -1,42 +1,33 @@
-//! 临时：同一进程内直接调 C ABI，传 mode=0/1 逐元素比（验证完即删）。
+//! 临时：融合 norm→fp8 与两步（norm bf16 → quant fp8）逐元素比（验证完即删）。
 use dinfer_kernels as k;
 
 #[test]
 #[ignore]
-fn norm_mode_differs() {
+fn fused_vs_two_step() {
     let dev = k::Device::new(0).unwrap();
     let s = dev.default_stream();
-    let (rows, hidden) = (8usize, 2816usize);
+    let (rows, hidden) = (24usize, 2816usize);
     let x: Vec<k::bf16> = (0..rows * hidden)
         .map(|i| k::bf16::from_f32(((i * 37 % 1000) as f32 - 500.0) / 97.0))
         .collect();
     let w: Vec<k::bf16> = (0..hidden).map(|i| k::bf16::from_f32(0.5 + (i % 13) as f32 * 0.1)).collect();
     let dx = s.htod_copy(x).unwrap();
     let dw = s.htod_copy(w).unwrap();
-    let mut out = Vec::new();
-    for mode in [0, 1] {
-        let mut o = s.alloc_zeros::<k::bf16>(rows * hidden).unwrap();
-        let rc = unsafe {
-            k::ffi::rmsnorm_bf16(
-                s.ptr(&dx) as *const std::ffi::c_void,
-                s.ptr(&dw) as *const std::ffi::c_void,
-                s.ptr_mut(&mut o) as *mut std::ffi::c_void,
-                rows as i64,
-                hidden as i64,
-                1e-6,
-                0,
-                mode,
-                s.raw() as _,
-            )
-        };
-        assert_eq!(rc, 0, "rmsnorm mode={mode} rc={rc}");
-        out.push(s.dtoh_sync_copy(&o).unwrap());
-    }
-    let nd = out[0].iter().zip(out[1].iter()).filter(|(a, b)| a != b).count();
-    let mx = out[0]
-        .iter()
-        .zip(out[1].iter())
-        .map(|(a, b)| (a.to_f32() - b.to_f32()).abs())
-        .fold(0f32, f32::max);
-    println!("NORM_MODE diff: {nd}/{} max={mx:.3e}", rows * hidden);
+    let a_scale = 0.0371f32;
+
+    // 融合
+    let mut fused = s.alloc_zeros::<u8>(rows * hidden).unwrap();
+    k::ops::rmsnorm_quant_fp8(&s, &dx, &dw, &mut fused, rows, hidden, 1e-6, a_scale).unwrap();
+
+    // 两步：norm 到 bf16，再 quant
+    let mut normed = s.alloc_zeros::<k::bf16>(rows * hidden).unwrap();
+    k::rmsnorm_bf16_n(&s, &dx, &dw, &mut normed, rows, hidden, 1e-6).unwrap();
+    let mut two = s.alloc_zeros::<u8>(rows * hidden).unwrap();
+    let g = k::Gemm::new(&s).unwrap();
+    g.quant_fp8(&normed, a_scale, &mut two, rows * hidden).unwrap();
+
+    let a = s.dtoh_sync_copy(&fused).unwrap();
+    let b = s.dtoh_sync_copy(&two).unwrap();
+    let nd = a.iter().zip(b.iter()).filter(|(p, q)| p != q).count();
+    println!("FUSED vs TWO-STEP: {nd}/{} differ", rows * hidden);
 }

@@ -114,6 +114,43 @@ impl QLinear {
         }
     }
 
+    /// 本层激活的静态 scale（只有 FP8 才有）；调用方据此决定能否把 norm 与量化融合。
+    pub fn a_scale(&self) -> Option<f32> {
+        match self {
+            Self::Fp8 { a_scale, .. } => Some(*a_scale),
+            _ => None,
+        }
+    }
+
+    /// A 已经量化成 e4m3（`[tokens, kk]`）时直接做 GEMM。
+    ///
+    /// 与 [`Self::forward`] 的唯一区别是跳过 `x` 的量化——用于把 RMSNorm 与量化**融合**成一次 kernel
+    /// （vLLM compile 口径；见 `docs/loops/kaon3-parity.md` 第 20 轮）。`a` 必须是用本层 `a_scale` 量化出来的。
+    pub fn forward_preq(
+        &self,
+        gemm: &Gemm,
+        stream: &Stream,
+        a: &dinfer_kernels::cudarc::driver::CudaSlice<u8>,
+        out: &mut Tensor<bf16>,
+        tokens: usize,
+    ) -> Result<()> {
+        let (n, kk) = self.shape();
+        ensure!(out.numel() >= tokens * n, "QLinear: out 太小");
+        match self {
+            Self::Fp8 { w, scale, a_scale, scache, .. } => {
+                ensure!(a.len() >= tokens * kk, "QLinear::forward_preq: a 太小");
+                let mut sc = scache.lock().unwrap();
+                if sc.is_none() {
+                    *sc = Some((stream.htod_copy(vec![*a_scale])?, stream.htod_copy(vec![*scale])?));
+                }
+                let (a_s, w_s) = sc.as_ref().unwrap();
+                gemm.forward_fp8_cublaslt(a, a_s, w, w_s, &mut out.data, tokens, n, kk)
+            }
+            // 非 FP8 权重没有可复用的量化结果，退回普通路径
+            _ => anyhow::bail!("forward_preq 只用于 FP8 权重"),
+        }
+    }
+
     /// `out[..tokens, ..] = x[..tokens, :] · Wᵀ`；`x`/`out` 允许按 max_tokens 预分配。
     pub fn forward(
         &self,
@@ -418,6 +455,13 @@ fn rmsnorm_noweight_into(
 }
 
 /// 带权重 RMSNorm 到新缓冲。
+/// 数值口径：0 = compile（默认，vLLM 未开 `enforce_eager` 时的实现），1 = eager BI。
+/// 与 `dinfer_kernels` 内部的 `norm_mode()` 读同一个 `RMSNORM_MODE`，两边必须一致。
+fn norm_mode() -> i32 {
+    static V: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("RMSNORM_MODE").ok().and_then(|s| s.trim().parse::<i32>().ok()).unwrap_or(0))
+}
+
 fn rmsnorm_into(
     stream: &Stream,
     ops: &impl OpSet,
@@ -500,6 +544,8 @@ pub struct LayerScratch {
     pub topk_ids: Tensor<i32>,  // [tokens, topk]
     pub topk_w: Tensor<f32>,    // [tokens, topk]
     pub buckets: k::ops::MoeBuckets,
+    /// compile 口径下 input_norm 的**融合量化**结果（e4m3 `[max_tokens, hidden]`），q/k/v 三个投影共用。
+    pub preq: std::sync::Mutex<Option<dinfer_kernels::cudarc::driver::CudaSlice<u8>>>,
 }
 
 impl LayerScratch {
@@ -533,6 +579,7 @@ impl LayerScratch {
             topk_ids: Tensor::uninit(stream, &[max_tokens * cfg.top_k])?,
             topk_w: Tensor::uninit(stream, &[max_tokens * cfg.top_k])?,
             buckets: k::ops::MoeBuckets::new(stream, cfg.num_experts, max_tokens, cfg.top_k)?,
+            preq: std::sync::Mutex::new(None),
         })
     }
 }
@@ -597,7 +644,32 @@ impl Gemma4Layer {
         ensure!(self.rope_dim <= d, "rope_dim {} > head_dim {d}", self.rope_dim);
 
         // ---- 1. input_norm ----
-        rmsnorm_into(stream, ops, &sc.x, &self.input_norm, &mut sc.norm, h, tokens, eps)?;
+        // vLLM **compile 口径**（默认）：inductor 把 RMSNorm 与下游 fp8 量化融成一个 kernel，中间不落 bf16。
+        // q/k/v 共用同一个 input_norm 且共用同一个 `input_scale`（实测 L0/L5 三者 scale 相同），
+        // 所以这里量化一次、三个投影复用。eager 口径（`RMSNORM_MODE=1`）走原来的两步。
+        let mut qkv_preq = false;
+        if norm_mode() == 0 {
+            // k_eq_v 的层没有 v_proj，此时 v 复用 k 的权重与 scale。
+            let v_sc = self.v_proj.as_ref().map_or(self.k_proj.a_scale(), |p| p.a_scale());
+            if let (Some(qs), Some(ks), Some(vs)) = (self.q_proj.a_scale(), self.k_proj.a_scale(), v_sc) {
+                if qs == ks && qs == vs {
+                    let need = tokens * h;
+                    let mut g = sc.preq.lock().unwrap();
+                    let buf = match g.as_mut() {
+                        Some(b) if b.len() >= need => b,
+                        _ => {
+                            *g = Some(stream.alloc_zeros::<u8>(need)?);
+                            g.as_mut().unwrap()
+                        }
+                    };
+                    k::ops::rmsnorm_quant_fp8(stream, &sc.x.data, &self.input_norm.data, buf, tokens, h, eps, qs)?;
+                    qkv_preq = true;
+                }
+            }
+        }
+        if !qkv_preq {
+            rmsnorm_into(stream, ops, &sc.x, &self.input_norm, &mut sc.norm, h, tokens, eps)?;
+        }
         sub_dump(stream, sub_out, "input_norm", &sc.norm, tokens, h)?;
 
         // ---- 2. q/k/v 投影（K 权重兼作 V 的层只算一次）----
@@ -607,13 +679,26 @@ impl Gemma4Layer {
         } else {
             (&mut sc.q_f, &mut sc.k_f, &mut sc.v_f, &mut sc.attn_f)
         };
-        self.q_proj.forward(gemm, stream, &sc.norm, q, tokens)?;
-        self.k_proj.forward(gemm, stream, &sc.norm, kk, tokens)?;
-        match &self.v_proj {
-            Some(vp) => vp.forward(gemm, stream, &sc.norm, v, tokens)?,
-            None => {
-                // k_eq_v：K 权重兼作 V（只对 full 层成立）
-                stream.dtod_copy_n(&kk.data, &mut v.data, tokens * nkv * d)?;
+        if qkv_preq {
+            let g = sc.preq.lock().unwrap();
+            let buf = g.as_ref().unwrap();
+            self.q_proj.forward_preq(gemm, stream, buf, q, tokens)?;
+            self.k_proj.forward_preq(gemm, stream, buf, kk, tokens)?;
+            match &self.v_proj {
+                Some(vp) => vp.forward_preq(gemm, stream, buf, v, tokens)?,
+                None => {
+                    stream.dtod_copy_n(&kk.data, &mut v.data, tokens * nkv * d)?;
+                }
+            }
+        } else {
+            self.q_proj.forward(gemm, stream, &sc.norm, q, tokens)?;
+            self.k_proj.forward(gemm, stream, &sc.norm, kk, tokens)?;
+            match &self.v_proj {
+                Some(vp) => vp.forward(gemm, stream, &sc.norm, v, tokens)?,
+                None => {
+                    // k_eq_v：K 权重兼作 V（只对 full 层成立）
+                    stream.dtod_copy_n(&kk.data, &mut v.data, tokens * nkv * d)?;
+                }
             }
         }
 

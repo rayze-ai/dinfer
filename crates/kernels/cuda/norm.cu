@@ -1,3 +1,5 @@
+#include <cuda_fp8.h>
+
 #include "common.cuh"
 #include "kernels.h"
 
@@ -225,7 +227,8 @@ __global__ void __launch_bounds__(kNormWarps * 32) rmsnorm_warp_kernel(const bf1
   }
 }
 
-// 标量回退：hidden 不是 8 的倍数或 > 8192 时用（与旧实现相同）。template <int BLOCK, bool FUSED_ADD>
+// 标量回退：hidden 不是 8 的倍数或 > 8192 时用（与旧实现相同）。
+template <int BLOCK, bool FUSED_ADD>
 __global__ void rmsnorm_kernel(const bf16* __restrict__ x, bf16* __restrict__ res, const bf16* __restrict__ w,
                                bf16* __restrict__ out, const int32_t* __restrict__ rows, int hidden, float eps,
                                int mode) {
