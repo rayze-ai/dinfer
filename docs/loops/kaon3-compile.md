@@ -292,3 +292,27 @@ MOE_STAGE [T=24 H=2816 E=128 K=8] 48 个被选专家 | ndiff=50214/67584 max|d|=
 **当前在做的判定（决定工作量）**：抓参照**单专家**输出，看
 - 单专家就不同 → 要复刻 cutlass 的 K 方向归约（工作量大）；
 - 单专家相同、只有 combine 不同 → 只对齐累加顺序（便宜得多）。
+
+## 第 8 轮结束时的状态：只剩一个结构性差异
+
+**已排除（全部有实测）**
+
+| 假设 | 实测 | 结论 |
+|---|---|---|
+| norm 口径（MODE 0/1/2） | flip 16.98 / 16.56 / 15.94% | 非主因 |
+| `rcp.approx`（router 归一化） | md5 相同 | 被 bf16 吞掉 |
+| router GEMM kernel | **0/3072 逐位相同** | 完全一致 |
+| router 整段（norm→×rs→×scale→GEMM） | **0/3072，top-8 集合 0 行不同** | 完全一致 |
+| lm_head / embed 量化 | 424 层里没有 | 不适用 |
+| `fused_add_rms_norm` 残差语义 | Gemma4 用显式 bf16 加 | 一致 |
+| q 的 fp8 量化 | 已做且 A/B 证实必需 | 一致 |
+| fp4 块缩放 `rcp_approx(6)` | ndiff 不变 | 被 e4m3 吞掉 |
+
+**唯一剩下的**：MoE 的**归约结构**
+- 参照：`VLLM_CUTLASS` NvFp4 **融合 kernel**（gate/up/SwiGLU/down/combine 全在一个 kernel 里，
+  中间激活不落显存；K 方向按 cutlass tile 顺序累加）；
+- 我们：逐专家 `gemm_nvfp4` + 单独 `moe_scatter_add`。
+- 实测差距：`ndiff=50214/67584`、`max|d|=2.5e-1`、**量级比 1.0021（语义正确）**。
+
+**这意味着**：要达到逐位一致，必须复刻 cutlass 的融合归约 —— 这是**结构性工作量**，
+不是再切一个开关能解决的。在动手前应先向用户确认优先级（见下）。
