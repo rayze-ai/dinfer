@@ -301,3 +301,24 @@ gate_linear.py:231      to_11: "f32[s59,128]" = empty.to(torch.float32)     # �
 
 - 命令：`PROBE_ENV="CUBLASLT_WORKSPACE_SIZE=1 RMSNORM_MODE=2" bash scripts/verify/kaon3-compile.sh`
 - 对照：第 1 轮 `MODE=0` → flip **16.98%** / |Δlp| **1.1816**
+
+### 第 3 轮期间的排除项（读 FX 图）
+
+**已排除：q 的 fp8 量化**——图里 `query_2: "f8e4m3fn[s59, 16, 256]"` 进 attention，
+用 `attn_buffers_q_scale_` 的 `reciprocal` 量化、clamp ±448。我们 `layer.rs:753`
+`fp8_e4m3_roundtrip_bf16_n(&mut q, …)` 已做（2026-10-22 A/B：关掉 ΔNLL −0.0018→+0.0438 明显变差）✅
+**k / v 是 bf16**（`view_6/view_7: "bf16[s59, 8, 256]"`），KV cache 才走 fp8 ✅
+
+**已排除：output 缓冲**——`empty: "bf16[s59,4096]"` 由 attention 原地写，我们 `sc.o` 同口径 ✅
+
+### 攻击面收缩（FX 图全算子清单 vs 已核对）
+
+| 图内算子 | 次数 | 状态 |
+|---|---|---|
+| `vllm_ir.rms_norm` | 331 | 第 1/3 轮 A/B（mode 0 vs 2） |
+| `vllm.bmm_fp8` | 120 | **未核对**（fp8 GEMM 的 scale 应用顺序） |
+| `unified_kv_cache_update` | 60 | 未核对（kv fp8 量化点） |
+| `unified_attention_with_output` | 60 | q fp8 ✅ / 其余未核对 |
+| `vllm.moe_forward` | 30 | **未核对（最大一块）** |
+| `triton_kernel_wrapper_mutation` | 30 | = BI persistent matmul（router）+ 其他 |
+| `aten` 逐元素（add/mul/split/cat…） | 其余 | 逐元素，口径已基本确认 |
