@@ -113,3 +113,34 @@ lm_head quantized: []    embed quantized: []    ignore: []
 
 → **`lm_head` / `token_embd` 都是 bf16**，我们 `gemm.forward_bf16(normed, embed.table, …)` 口径正确。
 假设 2「lm_head 量化」**排除**。剩下要查的只有 `final_norm` 是否与量化融合（不进 graph 就看不出来）。
+
+## 更正：Gemma4 不用 `fused_add_rms_norm`，残差是显式 bf16 加法（排除该假设）
+
+前面"compiled `fused_add_rms_norm` 残差语义分歧"的猜测**不适用**——
+`vllm/model_executor/models/gemma4.py:698-731` 的 decoder layer 是：
+
+```python
+residual = hidden_states
+hidden_states = self.input_layernorm(residual)     # 独立 norm，不融 add
+hidden_states = self.self_attn(...)
+hidden_states = self.post_attention_layernorm(hidden_states)
+hidden_states = hidden_states + residual           # ← 显式 bf16 加法
+residual = hidden_states
+...
+hidden_states = self.post_feedforward_layernorm(hidden_states)
+hidden_states = hidden_states + residual           # ← 再一次
+```
+
+即 **norm 与残差加分离**，两处加法都在 bf16 里做。我们 `layer.rs:825 / 856 / 860`
+用 `add_inplace_bf16_n`，口径一致 → **假设排除**。
+（oracle 日志里的 `fused_add_rms_norm=['native']` 只是 IR 优先级注册，本模型没调用它。）
+
+### 层内残差结构（照参照抄，供后续核对）
+
+| 步骤 | 参照 | 我们 |
+|---|---|---|
+| input_norm(residual) | 独立 | `layer.rs:679` ✅ |
+| attn → post_attn_norm → **+residual** | bf16 | `layer.rs:823-825` ✅ |
+| pre_ff_norm → dense → post_ff_norm_1 | — | `849` ✅ |
+| pre_ff_norm_2(residual) + router(residual) → moe → post_ff_norm_2 | **并联** | `950 / 1011` ✅ |
+| (ff1 + ff2) → post_ff_norm → **+residual** | bf16 | `856/860` ✅ |
