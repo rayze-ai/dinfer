@@ -920,6 +920,28 @@ impl Gemma4Layer {
                     static ONCE: std::sync::Once = std::sync::Once::new();
                     ONCE.call_once(|| eprintln!("[kaon3] router GEMM = BI persistent matmul"));
                 }
+                // 诊断（`ROUTER_GEMM_DIAG=1`）：同一输入下再跑一遍 cuBLAS，比两者差异。
+                if std::env::var("ROUTER_GEMM_DIAG").map(|v| v == "1").unwrap_or(false) {
+                    let mut alt = Tensor::uninit(stream, &[tokens, e])?;
+                    gemm.forward_bf16(&sc.routed.data, &self.router.bf16_weight()?.data, None, &mut alt.data, tokens, e, h)?;
+                    let mut a32 = Tensor::uninit(stream, &[tokens, e])?;
+                    k::ops::bf16_to_f32_n(stream, &alt.data, &mut a32.data, tokens * e)?;
+                    let bi = k::ops::router_gemm_bi_f32(
+                        stream, &sc.routed.data, &self.router.bf16_weight()?.data,
+                        &mut sc.logits.data, tokens, e, h,
+                    );
+                    bi?;
+                    let va = a32.to_vec(stream)?;
+                    let vb = sc.logits.to_vec(stream)?;
+                    let n = va.iter().zip(&vb).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
+                    let mx = va.iter().zip(&vb).map(|(x, y)| (*x - *y).abs()).fold(0f32, f32::max);
+                    let md5 = |v: &[f32]| -> String {
+                        let mut hsh: u64 = 0xcbf29ce484222325;
+                        for x in v { for b in x.to_le_bytes() { hsh ^= b as u64; hsh = hsh.wrapping_mul(0x100000001b3); } }
+                        format!("{hsh:016x}")
+                    };
+                    eprintln!("[kaon3] DIAG cuBLAS vs BI: ndiff={n}/{} max|d|={mx:.3e} md5={}/{}", tokens * e, md5(&va), md5(&vb));
+                }
                 k::ops::router_gemm_bi_f32(
                     stream,
                     &sc.routed.data,

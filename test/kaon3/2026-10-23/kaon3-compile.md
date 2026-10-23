@@ -578,3 +578,34 @@ md5 /w/tmp/o1/p02.json = 48751c2a3c356b37581689d1dce61b8a   (ROUTER_GEMM_BI=1, B
 2. 若两 kernel 输出不同却端到端相同 → 说明 router 之后有某一步把差异抹掉了（量化？bf16 存储？）。
 
 → 下一步：**抓真实 `sc.routed` 输入**，分别喂两个 kernel，直接比输出。
+
+## 第 5 轮结论：router GEMM **不是**差异来源（我前面的 43% 测量用错了对照）
+
+在**真实 router 输入**（p02 前向时 `sc.routed` 的实际内容）上，把两个 kernel 都跑一遍直接比：
+
+```
+[kaon3] DIAG cuBLAS vs BI: ndiff=0/3072 max|d|=0.000e0 md5=53fc67f37d192829/53fc67f37d192829
+[kaon3] DIAG cuBLAS vs BI: ndiff=0/3072 max|d|=0.000e0 md5=ab47dc88750f4936/ab47dc88750f4936
+```
+
+**逐位相同。** 两份 md5 是 layer 0 和 layer 1 两次诊断（每层各跑一次）。
+
+### 前面那个 43% 的测量错在哪
+
+我用的是 `torch.matmul(a, w.t())` vs `matmul_persistent(a, w.t())`，随机正态输入。
+但 **`torch.matmul` 不必然走我们代码里用的 cuBLASLt 启发式路径**：
+- `torch.matmul` 在 2D 形状下可能选 split-k / 不同 tile 的 kernel；
+- 我们 `gemm.forward_bf16` 是显式 cuBLASLt + `CUBLASLT_WORKSPACE_SIZE=1` 钉死的算法。
+
+**而且随机正态输入的动态范围比真实 `routed` 大得多**，真实输入下两者恰好都舍到同一 bf16。
+→ **"43% 元素不同"是真的（对那个对照成立），但它不代表我们的 cuBLAS 路径与参照不一致。**
+
+**教训（可复用）**：A/B 的**对照必须用真实数据 + 真实调用路径**。
+用 `torch.matmul` 代替被测代码自己的 GEMM 封装，会得到一个真实但无关的数字。
+
+### 保留的决定
+
+`router_gemm_bi_f32` **保留**（kernel 级逐位 0/8192，已在真实输入上验证与 cuBLAS 同结果）：
+- 它不改变数值，但**不依赖 `CUBLASLT_WORKSPACE_SIZE` 环境变量**，比 cuBLASLt 更可控；
+- 默认开（`ROUTER_GEMM_BI`），cuBLAS 路径留作 A/B 与回退。
+- **但它不是 flip 的来源**，loop 还得往下找。
