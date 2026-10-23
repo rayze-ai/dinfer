@@ -354,3 +354,14 @@ implementation`）。语义 = `forward_native`：fp32 累加 → `rsqrt(mean+eps
 
 **下一步**：① 用 compile oracle（`kaon3_oracle_server.sh <N>`，BI=1，默认 compile）配合 `kaon3_probe --layers N`
 逐层二分找首个发散层；② 按 inductor kernel 原文改 `norm.cu` 的归约/开方（先确认是哪一层的 norm 形态）。
+
+**观察 3（L1 截层实测）**：compile oracle 截 1 层（`kaon3_oracle_server.sh 1`，BI=1 默认 compile），
+探针 `--layers 1 --oracle /w/tmp/lay/L1.json p02` → `PARITY PASS`（超参线），但 top5 |Δlp| 均值 **0.0102**、
+实际 token |Δlp| 1.4898，可判定行 0（1 层时 top1 margin 全 0.00）。eager 下同样截层是 0。
+→ **compile 专属差异在 L0 内**，不需要 30 层二分；只需拆 L0 的子模块。
+
+**观察 4（inductor 的 norm+quant 融合）**：`4s/c4shm6xroqnr…py`（2816 维，单 kernel 内做 norm → fp8 量化）：
+`tmp13 = x_f32 * rsqrt(var+eps)`；`tmp14 = tmp13.to(f32)`；`tmp16 = tmp14 * w`；`tmp18 = tmp16 + residual`；
+第二遍再算 residual 的 rms；`tmp52 = out * (1.0/scale)`；`clamp(±448)`；`to(fp8)`。
+注意：**`x.to(weight.dtype)` 的 bf16 舍入在生成代码里被消掉了**（`tmp13.to(tl.float32)` 是空转），
+且 scale 用 **`1.0/scale` 再乘**（不是除以 scale）。这两点都要在 `norm.cu` / 量化侧逐条核对。
