@@ -2154,3 +2154,25 @@ L0 已经接近逐位；残余 1 ulp 零星分布在 `q_norm`(12) / `mlp_gate_up
 → vLLM 在该层走的**不是**这个通用 fp8 scaled_mm 入口（可能是 fused norm+quant 后的专用 kernel、
 或 `QKVParallelLinear` 的打包布局/内部 requant 路径）。**必须先确定它真实命中哪个 kernel，再谈"逐位复刻"**，
 否则就是又一次盲改。
+
+### D-11：**vLLM 的 FP8 GEMM kernel 是 FlashInfer，不是 cutlass**（运行时实测）
+
+用户建议"直接调 cutlass"是对的思路，但必须**先确认 vLLM 真实命中哪个 kernel**。运行时探针给出答案：
+
+| 项 | 实测值 |
+|---|---|
+| `layers.0.self_attn.qkv_proj.quant_method` | `ModelOptFp8LinearMethod` |
+| 其 `fp8_linear` 实现类 | **`FlashInferFP8ScaledMMLinearKernel`** |
+| 权重 | `fp8_e4m3fn`，`(2816, 8192)` |
+| 一次前向里 `cutlass_scaled_mm` 调用次数 | **0** |
+| 一次前向里 `scaled_fp8_quant` 调用次数 | **748** |
+
+另有一条重要分支（`fp8.py` `Fp8LinearMethod.apply`）：**只有** `isinstance(self.fp8_linear, CutlassFP8ScaledMMLinearKernel)`
+才走 `apply_weights` 的直通 FP8 路径，否则走"把权重反量化成 BF16 再跑 BF16 GEMM"。本模型命中的是 FlashInfer，不属于该 isinstance 分支。
+
+**这解释了两件事**：
+1. D-10 里"直接调 `cutlass_scaled_mm` 差 89026/98304"不是 bug —— **vLLM 根本不用 cutlass 做这个 GEMM**；
+2. 我们要对齐的目标是 **FlashInfer 的 fp8 scaled_mm**（`flashinfer.gemm` 系列），不是 cutlass。
+
+**下一步**：用 `flashinfer` 的 fp8 GEMM 在同一输入/权重上复现 `qkv_raw`。若能逐位复现 → 我们换成同口径（或复刻其累加树）即可；
+若不能 → 说明还有 requant/布局差异，再看 `FlashInferFP8ScaledMMLinearKernel.apply_weights`。
