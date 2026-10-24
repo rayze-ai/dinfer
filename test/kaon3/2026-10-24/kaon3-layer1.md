@@ -105,3 +105,10 @@ rope 段**逐位对齐**。注意：rope.cu 是公共件，qwen3/glm/kimik3 共�
 - 直接用 `rope.cu`（`Rope::apply`）的：**kaon3、glm53**。qwen3/qwen35 走 `qkv_post`（另一 kernel，不受影响）。
 - 回归面只有 glm53（本线 hands-off，未跑 e2e）。rope ref golden（`test/kernel_refs/rope_*.npy`）清机删了，待重生。
 - 改动方向是"更贴 vLLM bf16 rope"，tolerance 2e-2 可吸收；glm53 若回归再评估加 arch 开关。
+
+### 第 10 轮 rope 修复后端到端（24 用例）
+```
+POOLED mean_common_d=0.0085  dnll=-0.0595  (修前 0.0083/-0.0006)
+```
+→ **几乎没动**。rope 已逐位但端到端主残差不在 rope → 在 **attention(gqa) / o_proj**（rope 之后）。
+下一步：单测 o_proj（喂 attn_out 过 fp8 GEMM 比 o_proj.bin）+ 定位 attention。
