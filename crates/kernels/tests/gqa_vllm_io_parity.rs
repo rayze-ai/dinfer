@@ -53,12 +53,14 @@ fn gqa_matches_vllm_attn_output() {
     let dev = Device::new(0).unwrap();
     let st = dev.default_stream();
     let up = |x: &[f32]| st.htod_copy(x.iter().map(|&f| bf16::from_f32(f)).collect::<Vec<_>>()).unwrap();
-    // vLLM：k/v 写 fp8 cache 再 dequant 回 bf16（scale 1.0）→ 喂 kernel 前做 fp8 往返复刻
-    let fp8rt = |x: &[f32]| x.iter().map(|&f| f32_e4m3_rt(bf16::from_f32(f).to_f32())).collect::<Vec<_>>();
-    let kq = fp8rt(k);
-    let vq = fp8rt(v);
-    // q 已是 fp8 值，直接 bf16 上传（kernel 内用 bf16 读）
-    let (dq, dk, dv) = (up(q), up(&kq), up(&vq));
+    // 输入保持与 vLLM 一致：q 直接上传（vLLM 进 attn 时 q 已是 fp8 值）。
+    // k/v：用我们**生产代码里真实的** device 端 fp8 往返算子（scale 1.0），复刻 vLLM 写 fp8 cache→读 dequant，
+    // 不用 CPU 近似（之前的 f32_e4m3_rt 等于私自改输入，已删）。
+    let dq = up(q);
+    let mut dk = up(k);
+    let mut dv = up(v);
+    dinfer_kernels::fp8_e4m3_roundtrip_bf16_n(&st, &mut dk, t * hkv * d, 1.0).unwrap();
+    dinfer_kernels::fp8_e4m3_roundtrip_bf16_n(&st, &mut dv, t * hkv * d, 1.0).unwrap();
     let cu = st.htod_copy(vec![0i32, t as i32]).unwrap();
 
     let cfg: i32 = std::env::var("GQA_PREFILL_CFG").ok().and_then(|v| v.parse().ok()).unwrap_or(-1);
@@ -87,30 +89,6 @@ fn gqa_matches_vllm_attn_output() {
         let rel = dot.sqrt() / nrm_r.sqrt().max(1e-30);
         println!("gqa vs vLLM out [{tag}] rc={rc} 不同 {nd}/{} max|d|={mx:.4e} rel={rel:.3e} ‖want‖={:.2} ‖got‖={:.2}",
                  t * h * d, nrm_r.sqrt(), nrm_g.sqrt());
-        // 决定性对照：同一份输入过 CPU f64 参照（bf16 量化后的 q/kq/vq），比 (a) 我方 gqa 离它多远 (b) vLLM out 离它多远
-        let qb: Vec<f32> = q.iter().map(|&x| bf16::from_f32(x).to_f32()).collect();
-        let kb: Vec<f32> = kq.iter().map(|&x| bf16::from_f32(x).to_f32()).collect();
-        let vb: Vec<f32> = vq.iter().map(|&x| bf16::from_f32(x).to_f32()).collect();
-        let gt = cpu_ref(&qb, &kb, &vb, t, h, hkv, d, window);
-        let rel_to = |a: &dyn Fn(usize) -> f32| {
-            let (mut dd, mut nn) = (0f64, 0f64);
-            for i in 0..t * h * d { let e = (a(i) - gt[i]) as f64; dd += e * e; nn += (gt[i] as f64).powi(2); }
-            dd.sqrt() / nn.sqrt().max(1e-30)
-        };
-        let r_ours = rel_to(&|i| got[i].to_f32());
-        let r_vllm = rel_to(&|i| bf16::from_f32(want[i]).to_f32());
-        println!("  [对照 {tag}] 我方gqa→cpuf64 rel={r_ours:.3e}   vLLM_out→cpuf64 rel={r_vllm:.3e}  (同一份 bf16 量化输入)");
     }
-}
-
-fn f32_e4m3_rt(x: f32) -> f32 {
-    // 复刻 __nv_cvt_float_to_fp8(E4M3, SATFINITE) 往返；用 half crate 的 f16 近似不对，
-    // 这里走 CPU e4m3：饱和 ±448、就近偶数。简化版（够做末位级对拍）。
-    let a = x.abs();
-    if a == 0.0 { return 0.0; }
-    if a >= 448.0 { return x.signum() * 448.0; }
-    let e = a.log2().floor();
-    let step = 2f32.powf(e - 3.0); // 3 尾数位
-    let q = (a / step).round() * step;
-    x.signum() * q
+    let _ = cpu_ref; // 留着备用，本测试不再绕 f64
 }

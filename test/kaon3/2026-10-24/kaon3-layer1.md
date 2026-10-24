@@ -214,3 +214,14 @@ vLLM_out → cpu_f64:  rel=2.2e-2                                 ← vLLM 离 f
 坑（诚实）：该 cpu_f64 的 k/v 用 Rust `f32_e4m3_rt` **近似**往返，精确值依赖它；但方向结论稳。
 → L0 attention kernel **排除**。残差来自：① 上游 qkv 库差（cuBLASLt vs FlashInfer bmm_fp8）累积到 q/k/v；
 ② k/v 进 attention 前 fp8 cache 量化口径（reshape_and_cache）。
+
+### 第 12 轮最终（逐位对齐）：输入一致 + 精度一致 → gqa == vLLM attention
+用户纠正：别绕 f64、别用 CPU e4m3 近似改输入。改用生产 device 算子 `fp8_e4m3_roundtrip_bf16_n`
+对 k/v 做 fp8 往返（scale 1.0），q 直接上传（vLLM 进 attn 时 q 已 fp8 值），喂同一份 vLLM q/k/v：
+```
+p_fp8=1（生产档，P 以 e4m3 参与 PV）：不同 0/90112  max|d|=0  rel=0   ← 完全逐位
+p_fp8=0（P 不量化变体）：          rel=6.5e-3
+```
+**L0 attention kernel 与 vLLM 逐位一致**（生产 `p_fp8=cfg.kv_fp8=true` 正好是逐位那档）。
+根因教训：之前"我方离 vLLM 2.2%"是**我在测试里用 CPU e4m3 近似私自改了 k/v 输入**，
+不是 kernel/精度问题。输入一致 + 精度路径一致 → 同版本 attention 输出就该一样，一样了。
