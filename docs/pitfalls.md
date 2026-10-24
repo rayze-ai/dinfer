@@ -60,7 +60,7 @@
   ① 用**真实前向里的那份张量**（dump/hook 下来），不自己造；
   ② 对照必须是**被测代码真正走的那个封装**，不能用 `torch.*` 的等价 API 代替；
   ③ 先做真实输入的 A/B，再决定要不要写新实现。**顺序反了会白写一个 kernel。**
-  已提炼进 `docs/knowledge/parity-localization.md` 第 7 条。
+  已提炼进 `docs/knowledge/parity-localization.md` §8。
 
 ## 2026-10-24 定标只在 k=64 做过一次，就当成通用公式，导致布局 bug 多绕 3 轮
 
@@ -1177,7 +1177,7 @@
 - **解法**：判定必须**分成两个实验**——① 同入参重复调同一算子（确定性 + 自复现）；
   ② 同入参换 kernel 变体（变体下限）。混在一起比，就会把②读成①。
 - **避免**：任何"参照自己都做不到"的结论，先问一句"我是拿同一份入参、同一个 kernel 比的吗"。
-  详见 `docs/knowledge/parity-localization.md` §4。
+  详见 `docs/knowledge/parity-localization.md` §3。
 
 ## 2026-10-23 改 kernel/脚本后不看结构直接跑（同一类失误第 3 次，废弃两轮编译）
 

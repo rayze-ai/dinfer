@@ -211,7 +211,7 @@ k_norm / k_rope / attn_out / o_proj / post_attn_norm / pre_ff_norm / dense / …
 
 **先做逐段隔离，再谈优化**：一次 `--layer-iso` + `SUB_LAYER=<l>` + 参照侧同位置 hook，
 就把范围从"30 层全都不对"收敛到"某一支路"。上两轮共 30+ 轮盲试，
-抵不上这一张分段表。已提炼进 `docs/knowledge/parity-localization.md` §1b。
+抵不上这一张分段表。已提炼进 `docs/knowledge/segment-isolation.md` §1。
 
 ## 进度（2026-10-24，loop 进行中）
 
