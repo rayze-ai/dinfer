@@ -107,6 +107,7 @@ fn moe_seg_matches_vllm() {
     diff("up  ", &st.dtoh_sync_copy(&u.data).expect("d2h"), inter);
 
     // ---- gelu(tanh)·mul：与参照的 `c2`（activation 之后）逐位比 ----
+    let mut act_ref: Vec<bf16> = Vec::new();
     if std::path::Path::new(&format!("{dir}/c2_act.bin")).exists() {
         let c2 = rd_bf16(&format!("{dir}/c2_act.bin"));
         assert_eq!(c2.len(), rows * inter, "c2 形状");
@@ -124,7 +125,46 @@ fn moe_seg_matches_vllm() {
             }
         }
         println!("SEG act ndiff={nd}/{} max|d|={maxd:.3e}", cnt * inter);
+        act_ref = c2[r0 * inter..r1 * inter].to_vec();
     } else {
         println!("SEG act 跳过（没有 c2_act.bin）");
+    }
+
+    // ---- down：用**参照自己的 act**（c2）喂我们的 down，与参照的 c3 逐位比 ----
+    // 这样 down 段的输入完全排除我方 gelu 的影响，只测 down 的 GEMM。
+    if !act_ref.is_empty() && std::path::Path::new(&format!("{dir}/c3_down.bin")).exists() {
+        let c3 = rd_bf16(&format!("{dir}/c3_down.bin"));
+        assert_eq!(c3.len(), rows * h, "c3 形状");
+        let mut down = QLinear::load(&st, &src, &format!("{ep}.down_proj.weight")).expect("down");
+        // 与 `layer.rs:319` 同：默认口径把 per_expert_scale 折进 down 的全局 scale
+        let pes = {
+            let v = src.load_bf16(&st, "model.language_model.layers.0.router.per_expert_scale")
+                .expect("pes");
+            let vals: Vec<f32> = st.dtoh_sync_copy(&v.data).expect("d2h")
+                .iter().map(|b| f32::from(*b)).collect();
+            vals
+        };
+        if let QLinear::NvFp4 { global, .. } = &mut down {
+            *global *= pes[expert];
+        }
+        let dact = st.htod_copy(act_ref.clone()).expect("act");
+        let at = Tensor { data: dact, shape: vec![cnt, inter] };
+        let mut y = Tensor::<bf16>::uninit(&st, &[cnt, h]).unwrap();
+        down.forward(&gemm, &st, &at, &mut y, cnt).expect("down fwd");
+        let yv = st.dtoh_sync_copy(&y.data).expect("d2h");
+        let mut nd = 0usize;
+        let mut maxd = 0f32;
+        let mut nd1 = 0usize;
+        for i in 0..cnt * h {
+            let r = c3[r0 * h + i];
+            if yv[i].to_bits() != r.to_bits() {
+                nd += 1;
+                let (g, rr) = (f32::from(yv[i]), f32::from(r));
+                maxd = maxd.max((g - rr).abs());
+                let step = (g - f32::from(bf16::from_bits(r.to_bits() ^ 1))).abs();
+                if (g - rr).abs() <= step * 1.01 { nd1 += 1; }
+            }
+        }
+        println!("SEG down ndiff={nd}/{} max|d|={maxd:.3e} 其中 ≤1ULP {nd1}", cnt * h);
     }
 }

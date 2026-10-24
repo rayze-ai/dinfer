@@ -84,6 +84,18 @@ def main():
 
     ops.scaled_fp4_experts_quant = eoq_patched
 
+    # ---- patch 2b：shuffle_rows（第二次调用返回 c3，即 combine 之前的 per-slot 输出）----
+    real_shuf = ops.shuffle_rows
+
+    def shuf_patched(t, idx):
+        r = real_shuf(t, idx)
+        cap["ns"] = cap.get("ns", 0) + 1
+        if cap["ns"] == 2 and cap["n"] == 0:
+            dump("c3_down", r)
+        return r
+
+    ops.shuffle_rows = shuf_patched
+
     # ---- patch 3：整个 run_cutlass_moe_fp4（拿 c3 与 combine 后的 output）----
     real_run = cm.run_cutlass_moe_fp4
 

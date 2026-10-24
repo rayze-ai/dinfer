@@ -96,6 +96,10 @@ fn moe_stage_matches_vllm() {
 
     // ---- 逐专家做 gate/up → gelu·mul → down，再用权重累加 ----
     let bf16_prod = std::env::var("MOE_BF16_PROD").map(|v| v == "1").unwrap_or(false);
+    // `MOE_SLOT_ORDER=1`：参照是 `(c3 * w).sum(dim=1)`，沿 slot 0..k-1 顺序累加。
+    // 我们原实现按**专家 id** 顺序累加 → 归约顺序不同 → f32 舍入差。
+    let slot_order = std::env::var("MOE_SLOT_ORDER").map(|v| v == "1").unwrap_or(false);
+    let mut slots = vec![vec![0f32; h]; t * k];
     let mut acc = vec![0f32; t * h];
     let mut per_expert_y: Vec<Vec<f32>> = Vec::new();
     let dstd = st.htod_copy(x.clone()).expect("x");
@@ -146,8 +150,23 @@ fn moe_stage_matches_vllm() {
                     for c in 0..h {
                         let p = wb * yv[r * h + c];
                         let p = if bf16_prod { f32::from(bf16::from_f32(p)) } else { p };
-                        acc[r * h + c] += p;
+                        if slot_order {
+                            // 参照口径：先存进 slot 桶，最后按 slot 0..k-1 顺序求和
+                            slots[r * k + j][c] = p;
+                        } else {
+                            acc[r * h + c] += p;
+                        }
                     }
+                }
+            }
+        }
+    }
+
+    if slot_order {
+        for r in 0..t {
+            for j in 0..k {
+                for c in 0..h {
+                    acc[r * h + c] += slots[r * k + j][c];
                 }
             }
         }

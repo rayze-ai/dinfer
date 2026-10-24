@@ -199,3 +199,39 @@ output.copy_((c3.view(m, num_topk, k) * topk_weights.view(m, num_topk, 1).to(out
 范数比从 1.0021 修正到 0.9999、max|d| 减半 → **确认是这个口径**，但还没逐位：
 剩下的差异来自**累加顺序**——参照沿 `dim=1`（slot 0→7 顺序）归约，
 我们现在按专家 id 顺序累加。下一轮改成先按 slot 收集、再按 slot 顺序求和。
+
+## 第 5 轮：**四个分段全部逐位 0**，差异只在 combine
+
+给 `moe_seg_parity.rs` 加了 down 段（用**参照自己的 c2 当 act 输入**，排除我方 gelu 的影响）：
+
+```
+SEG rows=32768 expert=0 行区间=[0,4096) 共 4096 行
+SEG gate ndiff=0/2883584   max|d|=0.000e0
+SEG up   ndiff=0/2883584   max|d|=0.000e0
+SEG act  ndiff=0/2883584   max|d|=0.000e0
+SEG down ndiff=0/11534336  max|d|=0.000e0
+```
+
+抓 c3 的做法：patch `ops.shuffle_rows`，第二次调用（`shuffle_rows(c3, c_map)`）的返回值就是
+combine 之前的 per-slot 输出。产物 `/w/tmp/moe3b`。
+
+### 至此 MoE 内部全部逐位：量化 → gate/up → gelu·mul → down
+
+**唯一剩下的是 combine**（`(c3 * w).sum(dim=1)`）。
+
+| 口径 | ndiff | ‖ours‖/‖ref‖ |
+|---|---|---|
+| 全 f32 | 49347/67584 | 1.0021 |
+| bf16 权重 + bf16 乘积 | 46055/67584 | 0.9999 |
+| + 按 slot 顺序累加 | 46055/67584 | 0.9999 |
+
+**注意**：`slot_order` 改了 `ours[0]`（0.23633 → 0.23535）但 **ndiff 没变**，
+说明 f32 累加顺序不是当前的瓶颈。剩下 46055 个元素差 1–1.5 ULP。
+
+### 下一步
+
+参照的 `topk_weights` 是 **bf16** 张量（`topk_weights.view(m, num_topk, 1).to(out_dtype)` 里的
+`to(out_dtype)` 说明它原本可能不是 bf16）。要逐位复现 combine，必须确认：
+1. 参照 `topk_weights` 进 combine 时的**原始 dtype 与数值**（抓下来，不要从 logits 重算）；
+2. `.sum(dim=1)` 在 bf16 张量上到底是 f32 累加还是逐次 bf16 舍入（PyTorch 语义）。
+下一步抓这两项。
