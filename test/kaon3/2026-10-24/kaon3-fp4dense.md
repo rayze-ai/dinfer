@@ -590,3 +590,39 @@ p02 单例 A/B：=0 → top-1 翻转 4/22、top1 |Δlp| max 2.04
 但 compile 口径下我们对不上的原因不是 kernel 错，而是没复刻 inductor 的融合图。**
 
 **不修改 `MOE_COMBINE_F32` 默认值**（compile 判据支持 1）。
+
+## 最终图景（本轮全部证据汇总，含对每条证据口径的标注）
+
+### 两套口径，两种 combine 行为 —— 不矛盾，都是真的
+
+| 口径 | 参照路径 | combine | 证据 |
+|---|---|---|---|
+| **eager** | `cutlass_moe.py:680` Python | **bf16 权重 + bf16 乘积** | 本轮逐段比对：`COMBINE=0` 时 `moe_out/ff2/post_ff_norm` 全 0.0 |
+| **compile** | inductor 融合 | **不做那次 bf16 舍入** | 上轮 p02 A/B + 30 用例整跑（flip 16.56%→14.08%） |
+
+**唯一正确的组合**：在 **compile 口径**下我们对齐时要复刻 inductor 的行为——
+这正是 `MOE_COMBINE_F32=1`。所以默认值保持 1，**不改**。
+
+### 本轮真正确定的产出
+
+1. **dense NVFP4 GEMM 完全正确**：自洽合成判据（三条独立路径互证，cutlass vs 参照 python
+   复算 corr=0.99999869、numpy 独立复算 relerr=0），我们的实现
+   `ndiff=0/11264`，两条布局路径（A=swz / A=nat、自己的量化器）全部逐位。
+   **上轮"差 7.8%"是对着坏判据测的，作废。**
+2. **"还差常数 1/14.22"作废**：那是每层 `layer_scalar = 0.0703125`，与量化无关。
+3. **MoE 支路在 eager 口径下逐段归零**：`moe_out`、`post_ff_norm_2`、`post_ff_norm`
+   在 `MOE_COMBINE_F32=0` 时全部 100% 逐位相同。说明**我们对 eager 语义的理解和实现完全正确**。
+4. **逐层残差流判据不可用**：参照 `/w/hid/fn/L*.bin` 与 `r12` 两次抓取**自身相差 0.0077**，
+   且与其子模块 hook 不自洽。基于它的逐层结论全部降级。
+
+### 剩余差距的性质
+
+compile 口径下 flip 14.08% vs FLOOR 0.83%。已知：
+- 我们的 eager 语义完全正确（逐段 100% 逐位）；
+- dense FP4 GEMM 完全正确；
+- 差异只在 **compile 特有的行为**：inductor 融合图里的 combine、
+  以及尚未逐段核过的 inductor 对 norm/量化点的融合。
+
+→ **下一步方向**：不是"找 bug"，而是**读 oracle 的 inductor 计算图**
+（`computation_graph.py`，上轮已从容器 `docker cp` 出来过），
+把 MoE 段融合后的实际算子序列逐项对齐。这条路是确定的，只是工作量。
