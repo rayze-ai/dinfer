@@ -45,3 +45,12 @@ pre_ff2_norm = rms_norm(add, pre_ff_norm_2)；add = post_attn_norm(o)+embed（o=
 不能默认相等；但 compile 口径 MoE 输出**无法 hook 抓取**——"抓 vLLM compile MoE 直接比"这条路不通。
 待解矛盾：用户"eager moe 已对齐"，但我 eager 抓的 vLLM MoE vs 我方 moe_y 差 1.9% → 需确认比对口径
 （是否 moe_y 定义 / 加权和 / post_ff_norm_2 前后 对错了量）。
+
+## 第 19 轮（用户 2026-10-25 纠正）：MoE 隔离正确做法=同输入比输出
+之前错在：拿"我方 moe_y(我方残差流)"比"vLLM moe_out(vLLM 残差流)"——输入不同，差 1.9% 必然，不能判 MoE kernel。
+正确：喂 vLLM 的 MoE 输入 → 我方完整 MoE → 比 vLLM moe_out（同输入比输出）。
+回看 vLLM `_forward_impl`(moe_runner.py:830)：收 hidden_states + router_logits，但 **gate 不为 None 时用
+hidden 重算 router_logits**（self.gate(hidden) 或 fused gate，忽略传入 logits）→ MoE 真正输入只是 hidden_states。
+已抓：/moe_e08 的 vllm_moe_hidden[36,2816]（MoE 输入）、vllm_moe_out[36,2816]（输出）。
+下一步：我方加"喂外部 hidden 跑完整 MoE"入口（或 kaon3_probe 支持），喂 vllm_moe_hidden，比 vllm_moe_out。
+待确认：我方路由是否也从 hidden 重算（与 vLLM gate 口径一致）。
