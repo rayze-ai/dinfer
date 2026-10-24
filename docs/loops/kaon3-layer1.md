@@ -272,3 +272,42 @@ max|d| 4.0
 - 仓库里已有 `crates/kernels/tests/fp8_flashinfer_parity.rs`（专为逐位对拍 FlashInfer 写的），
   但它依赖的数据 `test/kaon3/d17b` 在清理 5090 时被删了，正在重新生成。
 - 重跑该测试即可判定：是我们的 fp8 GEMM 实现有偏差，还是 q/k/v 三次 GEMM vs 一次合并 GEMM 的差异。
+
+## 第 6 轮：**q/k 差、v 几乎不差** —— 说明 GEMM 本身是对的
+
+同一份 `input_norm`、同一份 fp8 权重、同一套量化，参照用 `flashinfer_scaled_fp8_mm` 分别算 q/k/v，
+与我们 dump 的 `*_proj_raw` 逐位比：
+
+```
+q  不同 88911 / 98304   max|d|=4.0
+k  不同 43145 / 49152    max|d|=3.0
+v  不同     2 / 49152    max|d|=0.0005     ← 几乎完全一致
+```
+
+**v 只差 2 个元素**，这排除了"我们的 fp8 GEMM 实现有错"这个假设
+（否则 v 不可能对上）。差异必须来自 **q/k 与 v 的某种不同处理**。
+
+### 参照侧的结构（FX 图 + 权重形状）
+
+vLLM 的 `qkv_proj` 是**一个** `[2816] × [2816, 8192]` 的合并 GEMM（图里 `unsqueeze_1: f8e4m3fn[1, 2816, 8192]`）。
+checkpoint 里是分开的 `q[4096,2816]` / `k[2048,2816]` / `v[2048,2816]`，三者 `input_scale` 相同（0.59375），
+所以 vLLM 能拼成一次。**我们是三次独立 GEMM。**
+
+FlashInfer 的 `bmm_fp8` 在 N=8192 / 4096 / 2048 下会选不同 tile 与 split-K，
+**累加顺序不同 → fp32 累加末位不同 → 舍到 bf16 时跨过舍入中点**。
+这解释了"N 小的 v 恰好对上、N 大的 q 对不上"。
+
+### 顺带确认（既有测试）
+
+`crates/kernels/tests/fp8_flashinfer_parity.rs`（`D17_DIR=/w/d17b`）：
+```
+自写 kernel B=[K,N] 正解(已转置): diff 8/196608   max 0.125
+cuBLASLt(默认 algo):              diff 0/196608   max 0
+```
+→ **我们实际走的 `forward_fp8_cublaslt` 与 FlashInfer 在 N=8192 上逐位相同**。
+所以问题不在 GEMM 实现，而在**调用形状**（三次独立 vs 一次合并）。
+
+### 下一步
+
+把 L0 的 q/k/v 三次 GEMM 改成**一次合并 N=8192**，再对拍。
+这是明确、可验证、改动小的动作。
