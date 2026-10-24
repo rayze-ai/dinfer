@@ -433,3 +433,11 @@ compile 图里 L0 的算子序列（`6c6aae890c/rank_0_0/backbone/computation_gr
 ### 逐段验证计划（用户 2026-10-24：按顺序一个个打，没对齐就攻破）
 norm ✅ → **q_norm/k_norm/v_norm**（下一个）→ rope → fp8 KV → attention → o_proj。
 每段：compile 口径参照（扩 `seg_l0.py` 从 graph replay）vs 我们 dump 的同名 .bin，逐位比。
+
+## 第 16 轮后状态（loop 继续）
+已对齐/修复：input_norm / q/k/v_norm / rope（逐位）、qkv（全T逐位，修TABLE n/k+splitk=1）、
+attention（3464→464去FEXP，1279→2）。端到端仍 0.0086 → 主残差在 **o_proj/gate_up/down**（fp8 GEMM
+TABLE未命中走fallback）+ MoE(NVFP4)。
+停止条件：o_proj/gate_up/down 各扫 algo 对齐 FlashInfer（nd=0 或仅末位），填 TABLE，端到端 mean_common_d 显著下降。
+方法（qkv 同法）：① fi_qkv_ref 风格造各 shape 的 FlashInfer bmm_fp8 ref；② Rust 扫 algo 找逐位的；③ 填 TABLE。
+shapes：o_proj(n=2816,k=4096) gate_up(n=4224,k=2816) down(n=2112,k=2816)。注意 TABLE 匹配 (n,k) 别写反。
