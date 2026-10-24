@@ -522,3 +522,47 @@ ULP 中位数 = 1.004
 把 1e-3 的不连续跳变放大 → logprob 偏 1.25。
 
 这不是"修一个 bug"能解决的，属于 `parity-localization.md` 第 1 条的**放大器**一类。
+
+## 第 16 轮（重大发现）：`MOE_COMBINE_F32=0` 时 L0 层内**全部逐位 0**
+
+### 决定性 A/B（同一份二进制，只切 combine 开关，L0 单层隔离）
+
+| 对比 | `MOE_COMBINE_F32=1` | `MOE_COMBINE_F32=0` |
+|---|---|---|
+| `moe_y` vs 参照 `moe_out` | 4.316e-3（49.6% 逐位同） | **0.0（100% 逐位同）** |
+| `ff1` vs 参照 `post_ff_norm1` | 0.0 | **0.0** |
+| `ff2` vs 参照 `post_ff_norm2` | 3.878e-3 | **0.0** |
+| `post_ff_norm` vs 参照 `post_ff_norm` | 2.863e-3 | **0.0（100% 逐位同）** |
+
+**→ MoE 支路的全部差异来自 combine 口径。`MOE_COMBINE_F32=0`（bf16 权重）让整层逐段归零。**
+
+这与参照源码一致：`cutlass_moe.py:680` 的 `(c3 * topk_weights.to(bf16)).sum(dim=1)`
+就是 bf16 权重口径 —— 即 **`MOE_COMBINE_F32=0` 才是对的**，而当前默认值是 1。
+
+### ⚠️ 但同时发现一个必须先解决的问题：参照的 `L0.bin` 自身不确定
+
+即使 `post_ff_norm` 100% 逐位相同，我们与参照的 `L0.bin` 仍差 6.1e-3。查下去发现：
+
+```
+同一份参照，两个目录里的 L0.bin 互相比：relL2 = 0.007667   ← 参照自己都不一致
+参照 (residual + post_ff_norm) 与 L0.bin 的比值中位数 = 0.0371
+参照 L0.bin / residual 比值中位数 = 0.0195
+```
+
+**说明 `kaon3_vllm_hidden.py` 的 `L0.bin` 与它的子模块 hook 不是同一口径**
+（很可能 patch `DecoderLayer.forward` 取到的返回值经过了后续处理，
+或者多次 warmup/prefill 调用混淆）。所以：
+
+- **子模块级比对（`post_ff_norm` 等）是可信的** —— 两侧口径一致，且互相自洽；
+- **`L0.bin` 这一路（逐层残差流）不可信** —— 参照自己重复抓都对不上。
+
+→ 第 8–13 轮里所有基于 `/w/hid/fn/L*.bin` 的逐层结论（"L0 差 5.8e-3、L1 放大 5 倍"、
+"L2 起缓慢累积"）**全部降级为不可信**，需要按新口径重做。
+
+### 下一步
+
+1. **先把 `MOE_COMBINE_F32` 默认值改成 0**（有源码 + 逐位证据支持），跑端到端 A/B 看 flip。
+2. 修 `kaon3_vllm_hidden.py` 的 `L0.bin` 口径（或有条件时直接用 compile 口径抓），
+   重做逐层。
+3. compile 口径的 MoE 分段抓取：patch 在 inductor 图里不生效（`CALL ... nz=0.0000` 60 次），
+   这条路走不通；改走"我们的实现在 eager 下逐段归零 + compile 端到端验收"。
