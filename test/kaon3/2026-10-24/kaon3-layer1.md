@@ -183,3 +183,13 @@ v(bf16)  ❌ 36910/45056  rel=8.7e-3    ‖ref‖=212.27 ‖our‖=212.27
 但我方输入本身从 qkv GEMM（cuBLASLt vs FlashInfer bmm_fp8，13 元素差）起就与 vLLM 微漂，
 一路带到 attention 入口。→ 印证"各段 fp8/bf16 末位累积"，非单点 bug。
 第 2 步：把 vLLM 自己的 q/k/v 喂我们 Rust gqa，比 vLLM 输出（隔离 attention kernel 本身）。
+
+### 第 12 轮第 2 步：vLLM 真实 q/k/v → 我方 Rust gqa → 比 vLLM 真实 output
+```
+p_fp8=0  rel=2.17e-2  max|d|=0.97  ‖want‖=255.13 ‖got‖=255.61
+p_fp8=1  rel=2.22e-2  max|d|=0.97  ‖want‖=255.13 ‖got‖=255.57
+```
+范数几乎相等但 rel=2.2%、max|d|=0.97（大）。比对手搓 fp32 参照的 0.68% 大。
+**待判**：2.2% 是"我方 kernel 错"还是"fp8 attention 固有噪声"（我方/vLLM 各离 fp32 ~1-2%、方向不同）。
+对照实验：同一份 vLLM q/k/v 做 fp32 softmax 当地面真值，看 vLLM output 离它多远。
+注意：我方喂 kernel 时对 k/v 做了 CPU e4m3 往返（复刻 vLLM 写 fp8 cache），该往返近似可能引入额外差，待核。
