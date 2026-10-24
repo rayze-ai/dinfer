@@ -156,3 +156,52 @@ norm 本身逐位对了，端到端却更差 → **说明下游还有别的口�
 在 mode 2（norm 已逐位正确）的基础上，逐个核对 L0 的后续段：
 `input_norm → q/k/v fp8 量化 → attention → o_proj → post_attn_norm → …`
 每一段单独与参照比，找出下一处口径错。
+
+## 第 3 轮：L0 的精确数据流（直接从 FX 图读出，不再是推断）
+
+来源：oracle 容器 `/root/.cache/vllm/torch_compile_cache/6c6aae890c/rank_0_0/backbone/computation_graph.py`
+（**compile 口径的 ATen 层图，2816 维，单层截断**）。全部节点都标了 dtype，**全是 bf16 张量**。
+
+```python
+# ---- attention 前 ----
+input_norm  = rms_norm(embed, w_input, 1e-6)          # bf16
+qkv_fp8     = quant_fp8(input_norm)                   # bf16 → to(f32) → *recip → clamp(±448) → fp8
+attn        = flashinfer_scaled_fp8_mm(qkv_fp8, W_qkv_fp8, ...)
+q           = attn[:, :4096].unflatten(16, 256)        # bf16
+q           = rms_norm(q, w_q_norm, 1e-6)             # bf16   ← 也是 rms_norm 同一个 op
+k           = attn[:, 4096:6144].unflatten(8, 256)
+k           = rms_norm(k, w_k_norm, 1e-6)             # bf16
+... rope ...
+o           = attn_kernel(q, k, v)                     # bf16
+
+# ---- residual + FFN ----
+add         = rms_norm(o, w_post_attn, 1e-6) + embed   # bf16   ← 第 301 行
+pre_ff1     = rms_norm(add, w_pre_ff, 1e-6)            # bf16   ← 第 307 行
+mlp_out     = mlp(pre_ff1)                             # bf16
+post_ff1    = rms_norm(mlp_out, w_post_ff_1, 1e-6)     # bf16   ← 第 383 行附近
+pre_ff2     = rms_norm(add, w_pre_ff_2, 1e-6)          # bf16   ← 第 383 行（注意输入是 **add**）
+router_in   = rms_norm(add, None, 1e-6) * root_size * scale   # 无权重 norm，第 384 行
+moe_out     = moe_forward(pre_ff2, router_in, ...)      # bf16
+post_ff2    = rms_norm(moe_out, w_post_ff_2, 1e-6)     # bf16   ← 第 424 行
+sum2        = post_ff1 + post_ff2                      # bf16   ← 第 424 行 `add_2`
+post_ff     = rms_norm(sum2, w_post_ff, 1e-6)          # bf16   ← 第 430 行
+out         = (post_ff + add) * layer_scalar           # bf16   ← 第 434/437 行
+```
+
+### 关键结构点（与我们的实现逐条对照用）
+
+1. **`pre_ff2` 和 `router_in` 的输入都是 `add`**（= attention 残差流），**不是** `mlp_out`。
+   → 我们 `layer.rs` 里 router 用的 `sc.routed` / MoE 用的 `sc.h2`，要确认都来自 `add`。
+2. **`pre_ff2` 用 `w_pre_feedforward_layernorm_2`**，`post_ff_2` 用 `w_post_feedforward_layernorm_2`，
+   两者是不同权重。
+3. `router_in` 是 **`rms_norm(add, None)` 无权重**，然后 `* root_size * scale`（两次 bf16 乘）。
+4. 最后 `(post_ff + add) * layer_scalar` —— 残差加在 **post_ff 之后**，与 `add` 加。
+5. `post_ff_norm` 的输入是 `post_ff1 + post_ff2`，**不含 residual**；residual 在最外面加。
+
+### 已数值验证（mode 2）
+
+```
+input_norm vs 运行时 rms_norm : 0 / 67584 不同（逐位）
+q_norm     vs 运行时 rms_norm : 0 / 98304 不同（逐位）
+```
+→ norm kernel 在 mode 2 下完全正确；**差异在别处**。
