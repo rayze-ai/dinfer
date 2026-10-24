@@ -270,3 +270,7 @@ oracle server 也传 `block_size: 32`（docker logs 确认），与 attn_io 同�
 → oracle 实际 fp8 cache 也是 16。**attn_io 与端到端参照 block 一致，block 不是变量。**
 推论：attn_io 抓的 attention IO == 端到端参照里真实那次 → "p01 逐位/p08 差1279" 可信。
 **第 12 轮稳定结论**：gqa 与 vLLM attention rel~5e-4 极接近、非严格逐位；剩 1279 bf16 末位待查 q 侧。
+
+### 第 12 轮多组验证（用户 2026-10-24：多测几组再观察）
+已有 p01(22):0  p08(36):1279。再抓 p03(31)/p16(22)/p06(27) 三组真实 fp8 cache k/v，
+凑 5 组看 nd/rel 随 T 的分布，判 1279 是偶发还是随 token 数单调。每组 T 取真实 token 数（排 padding）。
