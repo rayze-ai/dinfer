@@ -6,45 +6,35 @@
 > 更新 2026-10-21 23:0x +0800。**本区按模型分节，每节只写该模型自己的交接内容；不要覆盖别人的分节。**
 
 
-### Kaon-V3 parity（2026-10-24 第二次收功，loop `kaon3-fp4dense`）
+### Kaon-V3 parity（2026-10-24 第三次收工，loop `kaon3-layer1`）
 
-**一句话现状**：**上轮的核心结论被推翻了三条，并锁定了真正的剩余差距性质。**
+**一句话**：逐段定位做完，**差异收敛到 L0 的 fp8 qkv GEMM 形状**；norm/FFN 已证明逐位正确。
 
-**本轮推翻（都有实测证据，别再走回头路）**
+**已逐位证明正确的部分（可直接复用，别重查）**
 
-| 上轮结论 | 现状 | 证据 |
+| 段 | 判据 | 结果 |
 |---|---|---|
-| 专家 NVFP4 dense GEMM 差 7.8% | **作废**：我们的实现 `ndiff=0/11264` | 自洽合成判据，三条独立路径互证 |
-| 还差常数 1/14.22 | **作废**：那是每层的 `layer_scalar = 0.0703125` | 与量化无关 |
-| `a_q/a_s` 配对错位 | **不成立**：同一次调用的产物 | 读 `fp4_dense_probe.py` |
-| 11 轮盯 MoE 内部 | **方向对了一半**，但缺逐段定位 | 见下 |
+| `input_norm` / `pre_ff_norm` / `pre_ff2_norm` / `ff1` / `post_ff_norm` | `seg_l0.py` 按 FX 图逐步复现 | **0/67584 全同** |
+| norm 实现（`RMSNORM_MODE=2`） | 与运行时 `vllm.ir.ops.rms_norm` 比 | **0/67584** |
+| dense NVFP4 GEMM | 自洽合成判据，三条路径互证 | **ndiff=0** |
+| qkv requantize（`load_group`） | 与 vLLM 运行时合并权重逐字节比 | **23068672 字节全同** |
 
-**本轮确定的事实**
+**根因（第 7 轮，证据确凿）**
+- vLLM 的 `qkv_proj` 是**单个** `[2816, 8192]` GEMM（FX 图 `unsqueeze_1: f8e4m3fn[1,2816,8192]`）；
+- 我们跑的是 q/k/v 三次独立 GEMM；
+- 合并一次 N=8192 实测 `ndiff=13/196608`，分开三次差 **13 万个元素** → 形状决定 fp8 的 tile 与 split-K，累加序不同。
 
-1. **dense FP4 GEMM 完全正确**：`fp4_dense_synth_parity.rs`，`m=8 n=1408 k=2816`，
-   三条路径（cutlass kernel / 参照 python 复算 / 纯 numpy）互证后，
-   我们两条布局路径 + 自己的量化器全部 `ndiff=0`。
-2. **eager 口径下 MoE 支路逐段归零**：`MOE_COMBINE_F32=0` 时
-   `moe_out` / `post_ff_norm_2` / `post_ff_norm` 全部 100% 逐位相同 →
-   **我们对 eager 语义的实现完全正确**。
-3. **两套口径两种 combine 行为**（不矛盾）：eager 走 `cutlass_moe.py:680`
-   Python 路径（bf16 乘积）；compile 走 inductor 融合（不做那次舍入）。
-   → **`MOE_COMBINE_F32` 默认保持 1**，不要改。
-4. **逐层残差流判据不可用**：参照 `/w/hid/fn/L*.bin` 两次抓取**自身差 0.0077**，
-   与其子模块 hook 也不自洽。基于它的逐层结论全部降级。
+**卡点（下次接手第一件事）**
+**第 0 层 `k_eq_v=True` 时，参照的 `qkv_proj` 是 N=8192 还是 N=6144？**
+两处源码给出相反暗示（`gemma4.py:413` 说结构不变、K 填 K/V 两槽；`gemma4.py:1513` 注释说
+k_eq_v 层用分开的 q/k 不打包）。已抓到 vLLM 运行时真实 `[2816,8192]` 权重（`scripts/dev/capqkv.py`），
+用第 8 轮已验证的 requantize 公式分别按「q,k,v」与「q,k,k」复现，看哪个逐字节相等 —— **一步定死**。
 
-**下一次接手的第一件事**：读 oracle 的 **inductor 计算图**（`computation_graph.py`，
-上轮已从容器 `docker cp` 出过一次），把 MoE 段**融合后的实际算子序列**逐项对齐。
-不是找 bug —— 我们的 eager 语义已经证明是对的，差的是 compile 特有的融合行为。
+**代码状态**：`layer.rs` 里未验证的合并改动**已回退**，工作区干净。
+端到端现状：分开三次 `flip 6.12% / |Δlp| 1.0062`（2 个中文用例）。
 
-**环境/工具已就绪**
-- `docs/data-layout.md` + `scripts/dev/mkrun.sh`：数据按 `用途_日期时间_轮次` 存，
-  目录内 `README.txt` 记口径、环境变量、非零校验（用户 2026-10-24 要求）。
-- `scripts/dev/fp4_dense_synth.py` / `crates/kernels/tests/fp4_dense_synth_parity.rs`：可信判据。
-- `models/kaon3/tests/moe_seg_parity.rs` / `moe_stage_parity.rs`：MoE 逐段对拍。
-- `scripts/dev/moe_seg_capture.py` / `kaon3_vllm_hidden.py`：抓参照中间量（**均须 `nz>0` 守卫**）。
-
-**⚠️ 仍然成立的事故**：逐层对拍**必须**带 `CUBLASLT_WORKSPACE_SIZE=1`（`docs/pitfalls.md`）。
+**环境**：5090 `/hf_data/yaochen`，`kaon-oracle-1`（GPU1 :28101，compile，1 层）在跑；
+GPU2 可抓取。`put` 有 bug（目标路径不生效），改用 `rsync -az` 直传。
 
 ### Kaon-V3（5090，阶段 1–2 完成，阶段 3 接近打通）
 
