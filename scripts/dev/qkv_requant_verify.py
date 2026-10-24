@@ -44,8 +44,14 @@ def main():
     # 抓 vLLM 前向里真正喂给 fp8 GEMM 的 qkv 权重（处理后的合并权重）与输出
     orig = FIK.flashinfer_scaled_fp8_mm
 
-    def patched(a, b, sa, sb, od, bias=None):
-        r = orig(a, b, sa, sb, od, bias)
+    def patched(*args, **kw):
+        r = orig(*args, **kw)
+        a = kw.get("a", args[0] if len(args) > 0 else None)
+        b = kw.get("b", args[1] if len(args) > 1 else None)
+        sa = kw.get("scale_a", args[2] if len(args) > 2 else None)
+        sb = kw.get("scale_b", args[3] if len(args) > 3 else None)
+        if a is None or b is None or sa is None or sb is None:
+            return r
         if "w" not in cap:
             # 第一个 fp8 mm 就是 qkv（图里顺序：input_norm → qkv_proj）
             cap["w"] = b.detach().clone()
@@ -125,7 +131,7 @@ def main():
     mm_ws = torch.tensor(max_ws, dtype=torch.float32, device="cuda")
     mm_sa = torch.tensor(sa, dtype=torch.float32, device="cuda")
     try:
-        out_ours = orig(a, merged_kn, mm_sa, mm_ws, out_ref.dtype)
+        out_ours = orig(a, merged_kn, mm_sa, mm_ws, out_dtype=out_ref.dtype)
         nd = int((out_ours.bfloat16() != out_ref.bfloat16()).sum())
         print(f"[2] 复现权重 GEMM vs vLLM 输出: 不同 {nd}/{out_ref.numel()}", flush=True)
     except Exception as e:
