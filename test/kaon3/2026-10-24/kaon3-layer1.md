@@ -140,3 +140,9 @@ value   = bf16[s59,8,256]        # v 进 attention 仍 bf16
 vLLM compile 图只量化 **q**，k/v 以 **bf16** 交给 attention op，fp8 KV 量化在 **attention kernel 内部**
 用 k_scale/v_scale 做。**疑点**：我们 kernel 外预量化 k/v 与 vLLM kernel 内量化是否等价？待验。
 下一步：读 attention 后端源码（graph-break 外 op，图里看不到内部），确认 k/v 在 kernel 内的处理。
+
+### 第 11 轮：q/k/v KV-scale 都是 1.0（与我们一致）
+checkpoint 无独立 KV q/k/v_scale → 默认 1.0，我们 4a 也用 1.0。scale 不是差异点。
+vLLM attention 全链路：q 量化 fp8（scale 1.0）/ k,v bf16 进 op → `reshape_and_cache_flash` 写 fp8 cache
+→ attention 从 cache 读 fp8 再 dequant 回 bf16 → **attention 数学在 bf16 算**（trtllm/flashinfer prefill）。
+疑点转向：我们 `prefill_win` 的 q/k/v fp8 往返后，attention 内部累加精度与 flashinfer 是否一致。
