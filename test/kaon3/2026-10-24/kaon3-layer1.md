@@ -350,3 +350,17 @@ attn: T=31:0   32:0   33:145 34:520 ...              （32 处硬跳变）
 **对"接 flashinfer"的结论**：qkv 已对齐 FlashInfer 全部可配置口径（compute/scale/trans/scale_ptr/fast_accum）
 仍差 11-33 末位，因差异在 **cuBLASLt 对该 shape 的 algo 内部选择**（非配置可控）。
 "接" ≠ 逐位；FlashInfer 底层同是 cublasLtMatmul，不是换库。要逐位须锁定同一 algo（algo 扫描）或链接其 JIT 产物。
+
+### 第 14 轮（攻克）：algo 扫描找到与 FlashInfer 逐位的 cuBLASLt algo
+qkv shape(n=8192,k=2816) 8 个候选 algo，T=22 比 FlashInfer：
+```
+algo[0] id=67 tile=15 splitk=1 stages=16  → nd=0 逐位 ✅
+algo[1] id=67 tile=15 splitk=1 stages=18  → nd=0 ✅
+algo[7] id=67 tile=20 splitk=1 stages=15  → nd=0 ✅
+algo[2/3] id=67 tile=13 splitk=1          → nd=11
+algo[4/5/6] id=35 tile=18 splitk=2/5      → nd=17/18
+默认 TABLE(id=35 splitk=3)                → nd=11
+```
+**根因**：FlashInfer 用 **splitk=1（不切 K）**，我方 TABLE 选了 id=35 splitk=3 → split-K 多段归约累加序
+与 FlashInfer 单段不同 → 11 个末位差。**换成 splitk=1 的 algo（id=67 tile=15）即逐位。**
+下一步：验 id=67 splitk=1 在 T=31/32/33/63/64/65 全逐位，再固化进 TABLE。
