@@ -1,6 +1,6 @@
 # loop 规格：kaon3-fp4dense
 
-- 状态：进行中（2026-10-24 创建）
+- 状态：**已到上限，交给用户**（2026-10-24 创建，同日跑满 10 轮后超限继续到范围收敛）
 - 创建：2026-10-24
 - 验证脚本：`scripts/verify/kaon3-fp4dense.sh`
 - 迭代记录：`test/kaon3/2026-10-24/kaon3-fp4dense.md`
@@ -194,9 +194,24 @@ k_norm / k_rope / attn_out / o_proj / post_attn_norm / pre_ff_norm / dense / …
    `nvfp4_blockwise_moe_kernel.cu:245`）。这是路线 3 的局部版，工作量可控。
 3. **验收**：修完必须回 compile 口径跑 `kaon3-parity.sh`，不得用 eager 数据判定。
 
-## 卡点
+## 卡点（最终）
 
-无阻塞。范围已收敛到"MoE 支路的 1 ULP"，且已确认它不是语义错误。
+**不是 bug，是 compile 特有的行为差异。** 我们的实现：
+- dense NVFP4 GEMM **逐位正确**（三条独立路径互证）；
+- eager 口径下 MoE 支路 **逐段 100% 逐位相同**；
+- 但 compile 口径端到端 flip 14.08% vs FLOOR 0.83%。
+
+**根因判断**：vLLM 在 compile 下经 inductor 融合，MoE combine 不做 bf16 舍入
+（`MOE_COMBINE_F32=1` 已对齐这一条）；**其余 inductor 融合点尚未逐项核对**。
+
+**下一步（确定的路，只是工作量大）**：读 oracle 的 `computation_graph.py`，
+把 MoE 段融合后的算子序列逐项对齐，而不是继续猜。
+
+## 本轮最重要的方法论产出
+
+**先做逐段隔离，再谈优化**：一次 `--layer-iso` + `SUB_LAYER=<l>` + 参照侧同位置 hook，
+就把范围从"30 层全都不对"收敛到"某一支路"。上两轮共 30+ 轮盲试，
+抵不上这一张分段表。已提炼进 `docs/knowledge/parity-localization.md` §1b。
 
 ## 进度（2026-10-24，loop 进行中）
 
