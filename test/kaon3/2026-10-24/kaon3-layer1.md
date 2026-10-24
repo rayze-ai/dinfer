@@ -112,3 +112,13 @@ POOLED mean_common_d=0.0085  dnll=-0.0595  (修前 0.0083/-0.0006)
 ```
 → **几乎没动**。rope 已逐位但端到端主残差不在 rope → 在 **attention(gqa) / o_proj**（rope 之后）。
 下一步：单测 o_proj（喂 attn_out 过 fp8 GEMM 比 o_proj.bin）+ 定位 attention。
+
+### 第 10 轮 o_proj：我们对，参照写错（退化检查救回）
+```
+bf16 ground truth ‖gt‖=734   rel(ours→gt)=1.1e-2 ✓   rel(我写的FlashInfer参照→gt)=1.118 ✗
+```
+- 用 bf16 全精度 `x@(w·ws).T` 当地面真值：**我们的 o_proj 贴 gt（bf16 末位级）→ o_proj 正确**。
+- 我第一版 seg_oproj.py 的 FlashInfer 参照手搓量化/转置口径不对，离 gt 很远 → **参照不可信，不是 o_proj 错**。
+  教训（用户 2026-10-24 两条）：① 结果先做退化检查（范数/样本），差点把对的报错；
+  ② 读 vLLM 要区分 eager/compile：`flashinfer_scaled_fp8_mm` eager 直调 ≠ compile 图的 `bmm_fp8` op。
+- **L0 逐段结论**：input_norm✅ qkv✅ q/k/v_norm✅ rope✅ o_proj✅ → **只剩 attention(gqa) 未验证，主残差在它**。
