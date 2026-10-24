@@ -412,3 +412,24 @@ POOLED mean_common_d=0.0083  dnll=-0.0006  (decisive=0)
    replay，但要含 flashinfer attention + o_proj），喂参照的 qkv 量化字节，产 compile 口径的 `o`；
 2. 或截到 1 层后用 `--hf-overrides` 不同配置逼出 o_proj 的中间量（难）。
 推荐路径 1：扩 `seg_l0.py` 加 attention 段 replay，与我们 dump 的 `o`（需在 layer.rs 加 o 的 sub_dump）比。
+
+## 第 10 轮：核实 compile 口径的真实算子（从 oracle 的 computation_graph.py 读）
+
+**关键纠正**：之前"cuBLASLt 与 vLLM 逐位一致"是 **eager 口径**结论，**compile 下不成立**。
+compile 图里 L0 的算子序列（`6c6aae890c/rank_0_0/backbone/computation_graph.py`）：
+
+| 段 | compile 口径真实算子 | 我们走的 |
+|---|---|---|
+| qkv GEMM | **`torch.ops.vllm.bmm_fp8`**（FlashInfer `flashinfer_scaled_fp8_mm`，`flashinfer.py:903`） | cuBLASLt |
+| q/k/v split | `gemma4.py:527 qkv.split([q_size,kv,kv])` | copy2d 切列段 ✅ 结构同 |
+| q_norm/k_norm | `rms_norm`（`gemma4.py:302-303`） | `head_rmsnorm` |
+| RoPE | `rotary_embedding/{base,common}.py forward_static`（**neox**，逐步 cos/sin） | `rope.apply` |
+| attention | `attention/attention.py:529-570 forward`（flashinfer 后端） | `prefill_win` |
+| o_proj | fp8 GEMM（`o_proj f8e4m3fn[4096,2816]`，同样 scaled_mm/bmm_fp8） | cuBLASLt |
+
+**qkv 差 13 个元素的真因**：vLLM 用 FlashInfer `bmm_fp8`，我们用 cuBLASLt —— 两个库累加序不同。
+要彻底逐位，要么我们也调 FlashInfer bmm_fp8，要么继续用 cuBLASLt 的 algo 表逼近（已逼到 13）。
+
+### 逐段验证计划（用户 2026-10-24：按顺序一个个打，没对齐就攻破）
+norm ✅ → **q_norm/k_norm/v_norm**（下一个）→ rope → fp8 KV → attention → o_proj。
+每段：compile 口径参照（扩 `seg_l0.py` 从 graph replay）vs 我们 dump 的同名 .bin，逐位比。
