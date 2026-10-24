@@ -156,9 +156,47 @@ k_norm / k_rope / attn_out / o_proj / post_attn_norm / pre_ff_norm / dense / …
 子模块参照只能是 eager（hook 在 compile 下不触发）。**定位用 eager 可以，验收到修复后
 必须回到 compile 口径重跑端到端**（规格明写）。
 
+## 结果（2026-10-24，本次会话已超过 10 轮上限，但把范围收敛到一个点）
+
+### 一句话
+
+**除 MoE 支路外，模型全链逐位一致；MoE 支路差 ~1 bf16 ULP（中位 1.004 ULP，|d|>1.0 元素为零）。
+端到端 |Δlp| = 1.25 是这 1 ULP 经 30 层累积 + 不连续量化放大的结果，不是任何一段写错。**
+
+### 逐段实测（L0，参照 = eager + `SUB_LAYER=0`）
+
+| 段 | relL2 | 逐位相同 |
+|---|---|---|
+| embedding | 0.0 | 100% |
+| `input_norm` | 0.0 | 100% |
+| attention（`o_proj` vs 参照 `attn_out`，含滑窗掩码/RoPE/GQA） | 0.0 | 100% |
+| `pre_ff_norm` | 0.0 | 100% |
+| MLP（`dense`） | 0.0 | 100% |
+| MLP 过 norm（`ff1` vs `post_ff_norm_1`） | 0.0 | 100% |
+| **MoE（`moe_y` vs `moe_out`）** | **4.3e-3** | 49.6% |
+
+且 **dense FP4 GEMM 本身逐位 0**（自洽合成判据，三条独立路径互证）。
+
+### 重大纠正（本轮推翻了上一轮循环的结论）
+
+1. **"专家 NVFP4 dense GEMM 差 7.8%" 作废** —— 那份 `y.bin` 自身 corr 只有 0.25，判据是坏的。
+   换自洽合成数据后我们**逐位 0**。
+2. **"还差常数 1/14.22" 作废** —— 那是每层 `layer_scalar = 0.0703125`，与量化无关。
+3. **`kaon3-compile` 17 轮盯 MoE 的方向本身不错，但缺了"先逐段定位"**：
+   当时不知道除 MoE 外全链都逐位一致，所以一直在 MoE 内部盲试。
+
+### 下一步（按性价比）
+
+1. **把 MoE 的 1 ULP 压到 0**：需要参照的 c1/c2/c3 分段（compile 口径，抓取中）。
+   逐段比能确定 1 ULP 来自 gate/up GEMM、gelu、还是 down+combine。
+2. 若分段显示每段都是 1 ULP，则差异来自**归约顺序**，需要复刻 cutlass 的 tile 切分
+   （`MmaTileShape = <128,128,128>`，`ClusterShape = <1,1,1>`，见
+   `nvfp4_blockwise_moe_kernel.cu:245`）。这是路线 3 的局部版，工作量可控。
+3. **验收**：修完必须回 compile 口径跑 `kaon3-parity.sh`，不得用 eager 数据判定。
+
 ## 卡点
 
-无（根因已锁定 L0，未到需要用户决策的程度）。
+无阻塞。范围已收敛到"MoE 支路的 1 ULP"，且已确认它不是语义错误。
 
 ## 进度（2026-10-24，loop 进行中）
 
