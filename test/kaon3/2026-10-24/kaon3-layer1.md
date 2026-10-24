@@ -48,3 +48,18 @@ requantize 公式，分别按「q,k,v」与「q,k,k」两种拼法复现，看�
 这一步能一次定死 `k_eq_v` 的语义。
 
 **代码状态**：`layer.rs` 的未验证改动**已回退**，工作区干净。
+
+## 第 9b 轮：合并前向重做（Opus 4.8 接手）
+
+**先解卡点**：L0 是 **sliding 层**（full 层只有 5/11/17/23/29），`k_eq_v_at(0)=false` →
+L0 有独立 q/k/v → 合并 N=4096+2048+2048=8192。第 9 轮"L0 是不是 k_eq_v"是伪命题。
+
+**实现**（这次对参照，不是 fused-vs-split 自比）：
+- `weights.rs`：`load_fp8_group_merged` 重量化后把 q/k/v 字节拼成单块 `[8192,2816]`
+  （requant 逻辑提取成 `requant_part_to_max`，与原 `load_fp8_group` 同口径）。
+- `layer.rs`：`Attention` 改为单个 `qkv: QLinear` + `qkv_widths`；前向一次
+  `forward(_preq)` 到 `sc.qkv[tokens,8192]`，再 `copy2d` 按列段切 q/k/v。
+  k_eq_v 的 full 层只合并 q+k、v 复用 k 段（dtod）。
+- 本机 cargo check：kaon3 零错误；5090 容器 CUDA_ARCHS=120 build 过。
+
+待测：1 层 oracle 端到端 `|Δlp|` / `ΔNLL`（判据 `decisive==0` → 看 mean_common_d 与 dnll）。
