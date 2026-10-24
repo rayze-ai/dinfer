@@ -225,3 +225,14 @@ p_fp8=0（P 不量化变体）：          rel=6.5e-3
 **L0 attention kernel 与 vLLM 逐位一致**（生产 `p_fp8=cfg.kv_fp8=true` 正好是逐位那档）。
 根因教训：之前"我方离 vLLM 2.2%"是**我在测试里用 CPU e4m3 近似私自改了 k/v 输入**，
 不是 kernel/精度问题。输入一致 + 精度路径一致 → 同版本 attention 输出就该一样，一样了。
+
+### 第 12 轮换输入复测（用户 2026-10-24：一轮站不住）
+p08（36 token）重跑同一 gqa-vs-vLLM 对拍：
+```
+p01(22 tok) p_fp8=1: 0/90112      rel=0       ← 完全逐位
+p08(36 tok) p_fp8=1: 1279/147456  rel=5.3e-4  ← 接近非逐位（1279 个元素差，max|d|=0.0625 bf16末位）
+```
+**结论修正**：p01 的 0 diff 是偶然全中，**attention 非严格逐位，是 rel~5e-4 级极接近**。
+未消除变量：喂 kernel 的 k/v 是用**我方 device fp8 往返**从 vLLM bf16 k/v 重建，
+不是 vLLM 真正写进 fp8 cache 的字节。p01 全中/p08 差 1279 很可能是重建与 vLLM cache 实际 fp8 值
+在少数元素舍入方向不同。要彻底干净：直接抓 vLLM fp8 cache 的 k/v 字节喂入。
