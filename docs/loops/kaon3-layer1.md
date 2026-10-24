@@ -110,3 +110,49 @@ compile 下 inductor 把 `norm → ×(1/scale) → clamp ±448 → fp8` 融成�
 **全程 fp32、没有 bf16 往返**；我们多了一次 bf16 舍入。改 `inv` 公式无效（kernel 级 A/B `0/22528`）。
 第 22 轮卡在：那个融合 kernel 的 12 个入参（三个输出 `out_ptr4` bf16 / `out_ptr5` bf16 /
 `out_ptr7` fp8，`w` 在两处乘的位置不同）还没逐个对上模型参数。
+
+## 第 2 轮：**norm kernel 已逐位正确（mode 2），但端到端反而更差**
+
+### 权威源码（`vllm/ir/ops/layernorm.py:11-25`，从 oracle 容器直接读的）
+
+```python
+def rms_norm(x, weight, epsilon, variance_size=None):
+    orig_dtype = x.dtype
+    x = x.to(torch.float32)
+    x_var = x if variance_size is None else x[..., :variance_size]
+    variance = x_var.pow(2).mean(dim=-1, keepdim=True)
+    x = x * torch.rsqrt(variance + epsilon)
+    if weight is not None:
+        x = x.to(weight.dtype) * weight     # ← 先舍 bf16，再乘 w
+    return x.to(orig_dtype)
+```
+
+### 数值验证（把我们的 `input_norm.bin` 与运行时 `rms_norm` 逐位比）
+
+```
+nm0（fp32 连乘、末尾舍一次） vs vLLM rms_norm : 17063 / 67584 不同，max|d| = 0.5
+nm2（x·inv 先舍 bf16 再乘 w）vs vLLM rms_norm :     0 / 67584 不同，max|d| = 0.0   ← 逐位相同
+```
+
+**`RMSNORM_MODE=2` 才是 compile 口径，且我们的 kernel 实现已经完全正确。**
+
+这推翻了 `kaon3-parity.md` 第 20 轮「bf16 往返被 inductor 消除」的判断 ——
+那是读了 inductor 生成的低层 Triton 源码得出的，与 ATen 层 FX 图和数值实测都矛盾。
+
+### 但：端到端 A/B 里 mode 2 **更差**
+
+```
+截 1 层，cn1：
+  RMSNORM_MODE=0 : mean_common_d=0.0085  ΔNLL=+1.5064
+  RMSNORM_MODE=2 : mean_common_d=0.0103  ΔNLL=+1.8513   ← 更差
+```
+
+norm 本身逐位对了，端到端却更差 → **说明下游还有别的口径用错了，
+且它的错正好被 mode 0 的错「抵消」了一部分。** 这是最需要警惕的情况
+（两个错误互相掩盖），不能因为"mode 0 数字好看"就选它。
+
+### 下一步
+
+在 mode 2（norm 已逐位正确）的基础上，逐个核对 L0 的后续段：
+`input_norm → q/k/v fp8 量化 → attention → o_proj → post_attn_norm → …`
+每一段单独与参照比，找出下一处口径错。
