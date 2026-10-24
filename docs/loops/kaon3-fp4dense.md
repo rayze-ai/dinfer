@@ -25,6 +25,9 @@
 
 - 机器：5090（`scripts/dev/remote_5090.sh`，ControlMaster 已 alive）。cwd=`/w/dinfer`，产物落 `/w/tmp`。
 - GPU：0 / 2–6 = 我们；1 = 私有 oracle；**7 = 共享基线，禁用**。
+  ⚠️ **用前先 `nvidia-smi` 核显存**：2026-10-24 实测 GPU 4 被别的进程占了 18 GB，
+  `gpu_memory_utilization=0.85` 需要 26.65 GB → 启动直接 `ValueError`。
+  抓取前先挑一张空的，别假设"编号空闲 = 真空闲"。
 - 编译：
   ```bash
   GPU=0 scripts/dev/remote_5090.sh ctr 'cd /w/dinfer && CUDA_ARCHS=120 cargo build --release -p dinfer-kaon3 --bins'
