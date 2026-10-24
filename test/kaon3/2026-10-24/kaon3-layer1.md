@@ -384,3 +384,15 @@ qkv 全 T 逐位，但 L0 24 用例端到端 mean_common_d 0.0085→0.0086（噪
 o_proj(2816×4096) / gate_up(4224×2816) / down(2816×2112)——它们同样 TABLE 未命中走 fallback，
 algo 与 FlashInfer 不同。MoE 专家是 NVFP4（另一路）。
 algo 攻克法已验证有效（qkv 11→0）。下一步：对 o_proj/gate_up/down 各扫 algo 找 FlashInfer 逐位的填 TABLE。
+
+### 第 15 轮：attention 三方对比（决定性，定性收口）
+同一份 vLLM 真实 fp8 cache q/k/v，p08 T=36：
+```
+vLLM_out 离 fp32 真值:  rel=7.2e-3   ← vLLM 自己偏真值 0.72%
+我方 gqa 离 vLLM_out:    rel=5.3e-4   ← 我们离 vLLM 0.05%（小 14 倍）
+```
+**我方离 vLLM 比 vLLM 离真值小一个数量级** → attention 的 1279 差是 fp8 噪声底内的舍入方向差，**非 bug**。
+纠正旧结论"vLLM 不量化 P"：实测 p_fp8=1 差 1279、p_fp8=0 差 108501（85 倍）→ **vLLM 实际量化 P，我方 p_fp8=1 正确**。
+与 qkv 本质不同：qkv 是选现成的 splitk=1 algo（可攻克）；attention 的 TILE=32 是 D=256 smem 硬约束，
+要逐位须重写 kernel 复刻 vLLM trtllm 分块，且复刻目标(vLLM)本身离真值 0.72% > 我方偏差。
+**attention 定性：正确，跨 tile 1-ULP 噪声，不值得为"对齐一个更不准的参照"重写 kernel。**
