@@ -28,3 +28,11 @@ pre_ff2_norm = rms_norm(add, pre_ff_norm_2)；add = post_attn_norm(o)+embed（o=
 更正：seg_l0 测 pre_ff2_norm "逐位" 是用**我方自己 add** 当输入（自洽）；对 vLLM 的 add 则偏 2.3%。
 根因链：add 偏 → pre_ff2_norm 2.3% → router_logits 1.1% → topk 翻转 3 行 → MoE 1.9%。
 下一步：抓 vLLM 的 add（= attention 后残差，o_proj+post_attn_norm+embed）比我方，定位 add 偏的来源。
+
+## 第 18 轮关键（用户 2026-10-25）：先验 MoE 的 eager vs compile 差异
+用户："Eager 我 moe 已经对齐了" —— 但我 eager 抓的 vLLM MoE vs 我方 moe_y 差 1.9%，矛盾待解。
+方法：VLLM_DISABLE_COMPILE_CACHE=1 强制重编译（patch 能被吞进图），抓 compile 口径 vLLM MoE，
+与 eager 的 vLLM MoE 比：
+  - 若 eager==compile → MoE 两模式无差异，eager 数据可直接用，1.9% 是我方真 bug；
+  - 若有差异 → 看差异结构，eager 不能当 compile 判据，1.9% 里混了模式差。
+产物：/moe_cc08（compile-nocache）vs /moe_e08（eager）vs /sd_now（我方）。
