@@ -205,3 +205,36 @@ input_norm vs 运行时 rms_norm : 0 / 67584 不同（逐位）
 q_norm     vs 运行时 rms_norm : 0 / 98304 不同（逐位）
 ```
 → norm kernel 在 mode 2 下完全正确；**差异在别处**。
+
+## 第 4 轮：**所有 norm 段与 FFN 合成段逐位相同**，差异在 GEMM
+
+用 `scripts/dev/seg_l0.py` 在 oracle 容器里按 FX 图逐步复现，与我们 mode 2 的 dump 逐段比：
+
+```
+input_norm             ✅ 0/67584   max|d|=0.0  rel=0.0
+pre_ff_norm            ✅ 0/67584   max|d|=0.0  rel=0.0
+pre_ff2_norm           ✅ 0/67584   max|d|=0.0  rel=0.0
+ff1                    ✅ 0/67584   max|d|=0.0  rel=0.0
+post_ff_norm           ✅ 0/67584   max|d|=0.0  rel=0.0
+```
+
+**五段全部逐位相同。** 涵盖：
+- `RMSNORM_MODE=2` 的 norm 实现（含 `x·inv → 舍 bf16 → ×w` 这条口径）；
+- `pre_ff2` 与 `pre_ff1` 用**不同权重**、且都吃 `add` 这个结构；
+- `post_ff_norm` 的输入是 `ff1 + ff2`（不含 residual）这个合成方式。
+
+→ **norm / 结构分支 / 残差add 全部正确。**
+
+### 排除法结论：差异在 GEMM
+
+L0 剩下的量只有三类 GEMM，全部是 fp8：
+| GEMM | 形状 | 状态 |
+|---|---|---|
+| `qkv_proj` | `[2816] × [2816, 8192]` | **未验证** |
+| `o_proj` | `[4096] × [4096, 2816]` | **未验证** |
+| `gate_up_proj` / `down_proj` | MLP | **未验证** |
+| MoE 专家（NVFP4） | — | dense GEMM 已证明逐位 0（自洽判据） |
+
+下一步：验证 fp8 量化口径 + `flashinfer_scaled_fp8_mm` 的累加顺序。
+图里是 `flashinfer_scaled_fp8_mm`（`vllm/utils/flashinfer.py:903`），
+我们走的是 cuBLASLt 或其他路径 —— **这可能是最后一处差异**。
