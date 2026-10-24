@@ -460,3 +460,37 @@ L0 的实现**基本正确**：`input_norm` / `attention`（`o_proj` 与参照�
 2. 若拆分后两边都是 1e-3 量级的舍入差，那 **L0 已经到 bf16 噪声底**，
    端到端 `|Δlp| = 1.25` 的成因要另找（更可能是**逐层累积** + 不连续量化放大，
    参见 `docs/knowledge/parity-localization.md` 的"放大器"一类）。
+
+## 第 13 轮（决定性拆分）：L0 里除 MoE 支路外**全部逐位 0**
+
+参照补抓了 `post_ff_norm_1 / pre_ff_norm_2 / router_out / moe_out / post_ff_norm_2`
+（`/w/runs/hidden_20261024-0254_r12`，eager + `SUB_LAYER=0`），逐段比：
+
+| 我方 | 参照 | relL2 | 逐位相同 |
+|---|---|---|---|
+| `input_norm` | `input_norm` | **0.0** | **100%** |
+| `o_proj` | `attn_out` | **0.0** | **100%** |
+| `pre_ff_norm` | `pre_ff_norm` | **0.0** | **100%** |
+| `dense`（MLP 输出） | `dense` | **0.0** | **100%** |
+| `ff1`（MLP 过 norm） | `post_ff_norm1` | **0.0** | **100%** |
+| **`moe_y`** | **`moe_out`** | **4.316e-3** | **49.6%** |
+| **`ff2`**（MoE 过 norm） | `post_ff_norm2` | 3.878e-3 | 47.0% |
+| `post_ff_norm` | `post_ff_norm` | 2.863e-3 | 56.9% |
+
+**读法**：
+- 归一化、注意力（含滑窗掩码/RoPE/GQA）、MLP 支路 —— **6 段全部逐位相同**，实现没问题。
+- **唯一的差异源是 MoE 支路**（`moe_out` 4.3e-3，约一半元素差 1 个 bf16 ULP）。
+
+这与第 3 轮 `moe_stage_parity` 的独立测量一致（真实数据、范数比 1.0021、~1 ULP）。
+**两条独立路径互证：MoE 支路差 ~1 ULP，其余全部逐位一致。**
+
+### 所以端到端 |Δlp| = 1.25 从哪来？
+
+不是某一层"写错了"，而是 **1 ULP 的 MoE 差在 30 层里逐层累积，
+再被下游的不连续量化（fp8/fp4 激活量化）放大**。
+这正是 `docs/knowledge/parity-localization.md` 第 1 条里的"放大器"一类，
+也是 `requirements.md` 验收口径里 FLOOR（0.83%）存在的理由 ——
+参照自己两个进程之间也有 0.83% 的翻转率。
+
+**问题变成：我们能否把 MoE 的 1 ULP 压到 0。** 这才是 `kaon3-compile` 那 17 轮真正该做的事，
+只是当时没有先做逐段定位，不知道只有 MoE 一段。
