@@ -80,3 +80,33 @@ compile 口径、中文 prompt、`kaon3_oracle_diff`：
 - **dense NVFP4 GEMM**：自洽合成判据，`ndiff=0/11264`，三条独立路径互证。
 - **`MOE_COMBINE_F32` 是主因**：compile 口径下两种口径都差 ~1.1，改它方向还反了。
 - **eager 抓的子模块数据当判据**：规格禁止；且参照 `L*.bin` 两次抓取自身差 0.0077。
+
+## 第 1 轮结果（2026-10-24）：**差异在 L0 之内**
+
+参数对齐 5/5 通过，FLOOR = 0（参照逐位可复现），判据可信。
+
+```
+截到 1 层（我们 vs vLLM compile）：
+  decisive=0  flip=0.00%  mean_common_d=0.0085  ΔNLL=+1.5064
+```
+
+**关键：`decisive=0`。** 1 层时 top1 margin 全为 0，`flip` 是 0/0，
+**不能用 flip 判"一致"**——改成看 `|Δlp|` 与 `ΔNLL`。两者都不为 0 → **L0 已经偏了**。
+
+这与 `docs/loops/kaon3-parity.md` 第 21–22 轮的结论一致（当时用 p02 测得 `|Δlp| 1.4898`），
+**互相印证**：不需要再往 30 层二分，范围就在 L0 内部。
+
+### 判据（修正后，后续每层都用这套）
+
+| 情况 | 用什么判 |
+|---|---|
+| `decisive > 0` | `flip == 0` |
+| `decisive == 0`（层数少） | `mean_common_d == 0` **且** `dnll == 0` |
+
+### 下一步
+
+L0 内部已有明确的嫌疑（`kaon3-parity.md` 第 20–22 轮）：
+compile 下 inductor 把 `norm → ×(1/scale) → clamp ±448 → fp8` 融成一个 kernel，
+**全程 fp32、没有 bf16 往返**；我们多了一次 bf16 舍入。改 `inv` 公式无效（kernel 级 A/B `0/22528`）。
+第 22 轮卡在：那个融合 kernel 的 12 个入参（三个输出 `out_ptr4` bf16 / `out_ptr5` bf16 /
+`out_ptr7` fp8，`w` 在两处乘的位置不同）还没逐个对上模型参数。
