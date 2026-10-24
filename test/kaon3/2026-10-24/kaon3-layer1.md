@@ -396,3 +396,14 @@ vLLM_out 离 fp32 真值:  rel=7.2e-3   ← vLLM 自己偏真值 0.72%
 与 qkv 本质不同：qkv 是选现成的 splitk=1 algo（可攻克）；attention 的 TILE=32 是 D=256 smem 硬约束，
 要逐位须重写 kernel 复刻 vLLM trtllm 分块，且复刻目标(vLLM)本身离真值 0.72% > 我方偏差。
 **attention 定性：正确，跨 tile 1-ULP 噪声，不值得为"对齐一个更不准的参照"重写 kernel。**
+
+### 第 16 轮（突破）：cfg 选择是 attention 差异根源，不是算法
+p08 T=36 换 GQA_PREFILL_CFG：
+```
+cfg=-1 (慢参考，测试默认): 1279  max|d|=0.0625
+cfg=0  (v5 flash):          2    max|d|=9.8e-4  ← 几乎逐位
+cfg=3464 (v6):              1279
+```
+**根因**：之前测试一直用 cfg=-1（老非 tiled 参考路径），它的累加/softmax 口径与 vLLM 差 → 1279。
+**v5(cfg=0) 几乎逐位（2/147456）**。同 qkv 套路：选错 kernel 配置，非算法错。
+待查：① 生产 gqa_prefill_cfg() 实际给哪个 cfg（我测试用 -1 是误导）；② v5 残留的 2 个差能否消。
