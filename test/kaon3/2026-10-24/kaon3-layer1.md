@@ -435,3 +435,6 @@ arch.rs gqa_prefill_cfg_for(Sm100/Sm90) 3464→464。L0 24 用例端到端 mean_
 ### 第 17 轮：o_proj 已逐位（fallback 恰好 splitk=1）
 o_proj(N=2816,K=4096) 默认 TABLE 走 FALLBACK `id=67 tile=13 splitk=1`，与 FlashInfer algo[0] 一致 → **0/101376 逐位**。
 无需改。残差在 gate_up/down/MoE。继续测 gate_up(输入 pre_ff_norm,K=2816)/down(输入 ff1 的 gelu,K=2112)。
+
+### 第 17 轮：down_proj 已逐位（fallback splitk=1）
+down(N=2816,K=2112) 默认 TABLE 走 FALLBACK → 0/101376 逐位。o_proj/down 都 fallback 命中。
