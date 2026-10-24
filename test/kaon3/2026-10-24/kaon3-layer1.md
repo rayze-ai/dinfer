@@ -295,3 +295,13 @@ nd 随 T 单调增。p01/p03/p16/p06（≤31）全逐位，仅 p08(36) 跨到第
 **结论**：不是 fp8 噪声，是**序列跨 block 边界（>2 block）后 gqa prefill 的分块 KV 读取/累加顺序
 与 vLLM 不一致**——真实、可定位的 kernel 口径差。多组（5 组 + T-sweep）稳定复现。
 下一步：查 gqa prefill kernel 的 KV 分块累加（block 维循环 / online-softmax 跨 block 的 m/l 更新顺序）。
+
+### 第 12 轮闭环定论：跨 tile 累加序差（1 ULP 噪声，非 bug）
+- max|d| 从 T=33→36 **恒定 0.0625**（= 值~8 的 1 个 bf16 ULP），只有**数量** 145→1279 增。
+  → 所有差异无一例外是 1 ULP，没有大误差混入 → **排除逻辑 bug**（mask/alpha/off-by-one 会给大误差）。
+- vLLM prefill = `_trtllm_prefill_attn_kvfp8_dequant`：fp8 KV → dequant bf16 → 自己的 tile 调度做 bf16 attn，P 不量化 fp8。
+- 我方 gqa.cu：D=256 `TILE=32`，跨 tile online-softmax 合并（alpha 重标定）。
+- 机制：两个不同 tile 调度 → 跨 tile 时 fp32 累加序不同 → 舍 bf16 末位不同。单 tile(≤32)无跨 tile 合并 → 逐位；
+  跨 tile(>32)暴露，差异数 ∝ 跨 tile 的 query 行数。
+**结论**：attention 非 bug，是累加序 bf16 末位噪声（与 qkv 的 cuBLASLt-vs-FlashInfer 库差同性质）。
+要逐位须复刻 vLLM 的 tile 调度/累加序，收益极小。L0 attention 定性为"正确、1 ULP 级一致"。
