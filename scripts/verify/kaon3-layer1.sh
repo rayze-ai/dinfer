@@ -24,6 +24,10 @@ ng() { echo "❌ $1"; FAIL=$((FAIL+1)); }
 die() { echo "❌ $1"; echo "整轮作废，不要用它的数字下任何结论。"; exit 1; }
 
 [ "$OG" = 7 ] && die "GPU 7 是基线，禁止占用"
+# 显存预检：2026-10-24 踩过（另一个 oracle 占着 27 GB，gpu_memory_utilization=0.85
+# 需要 26.65 GB → ValueError，但容器名不同所以没察觉）。
+used=$($R run "nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i $OG" 2>/dev/null | tail -1 | tr -d ' ')
+[ -n "${used:-}" ] && [ "$used" -gt 2000 ] && die "GPU $OG 已被占用 ${used} MiB（需要空卡；先 docker rm -f 旧 oracle）"
 $R status 2>/dev/null | grep -q alive || die "ControlMaster 不在（token 过期？向用户要新的）"
 
 # ---------- 参数对齐：能机器判定的逐项核 ----------
