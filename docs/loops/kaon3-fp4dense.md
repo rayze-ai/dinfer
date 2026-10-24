@@ -130,3 +130,26 @@ nibble：`break_fp4_bytes` 用 `(low, high)` 交错 → **低半字节 = 偶数�
 ## 卡点
 
 （待填）
+
+## 进度（2026-10-24，loop 进行中）
+
+| 轮 | 改动 | 结果 |
+|---|---|---|
+| 0 | 读参照源码 + 复核上一轮判据 | 上一轮三条判据全不成立；`y.bin` 自身 corr 0.25，判据作废 |
+| 1 | 换自洽合成判据（vLLM CI 同款） | 判据自证通过；**dense GEMM ndiff=0**，"差 7.8%" 作废 |
+| 2 | 补测自己的量化器 + 权重 scale 布局 | `forward_nvfp4` 也 ndiff=0；权重 scale 线性（`VLLM_CUTLASS` 不 swizzle） |
+| 3 | 真实数据分段（`moe_stage_parity`） | 换参照 topk 只降 867/67584 → **路由不是主因**；差异是 1–1.5 ULP 系统性偏大 |
+| 4 | 抓 compile 口径的 c1/c2/c3 分段 | 进行中 |
+
+### 已排除（累计，不要重复查）
+
+- dense FP4 GEMM 整段（量化 + GEMM + 布局 + 乘子），三条独立路径都是 `ndiff=0`
+- 路由段（换参照 topk 几乎不变）
+- gelu·mul（此前 0/50688）
+- MoE 权重 scale 布局（`VLLM_CUTLASS` 分支不做 swizzle）
+- "SiLU+Mul 与量化融合的舍入点"——Kaon 是 gelu_tanh，走 `apply_moe_activation` 非融合分支
+
+### 新确认的参照事实
+
+- MoE 专家量化走 `scaled_fp4_experts_quant`（按专家偏移），dense 走 `cvt_fp16_to_fp4`。
+- `activation != SILU` 时 `run_cutlass_moe_fp4` 写 bf16 的 `c2`，再单独量化 —— 与我们结构一致。
