@@ -57,10 +57,20 @@ fn gqa_matches_vllm_attn_output() {
     // k/v：用我们**生产代码里真实的** device 端 fp8 往返算子（scale 1.0），复刻 vLLM 写 fp8 cache→读 dequant，
     // 不用 CPU 近似（之前的 f32_e4m3_rt 等于私自改输入，已删）。
     let dq = up(q);
-    let mut dk = up(k);
-    let mut dv = up(v);
-    dinfer_kernels::fp8_e4m3_roundtrip_bf16_n(&st, &mut dk, t * hkv * d, 1.0).unwrap();
-    dinfer_kernels::fp8_e4m3_roundtrip_bf16_n(&st, &mut dv, t * hkv * d, 1.0).unwrap();
+    // 优先用 vLLM fp8 cache 里读回的 k/v（attention 实际用的那份字节）；没有再退回 bf16 + 我方 fp8 往返。
+    let (dk, dv) = if std::path::Path::new(&format!("{dir}/vllm_kcache.bin")).exists() {
+        let kc = &rd(&dir, "vllm_kcache")[..t * hkv * d];
+        let vc = &rd(&dir, "vllm_vcache")[..t * hkv * d];
+        println!("[输入] 用 vLLM fp8 cache 的 k/v（完全对齐）");
+        (up(kc), up(vc))
+    } else {
+        let mut dk = up(k);
+        let mut dv = up(v);
+        dinfer_kernels::fp8_e4m3_roundtrip_bf16_n(&st, &mut dk, t * hkv * d, 1.0).unwrap();
+        dinfer_kernels::fp8_e4m3_roundtrip_bf16_n(&st, &mut dv, t * hkv * d, 1.0).unwrap();
+        println!("[输入] 用 bf16 k/v + 我方 fp8 往返（近似，无 cache dump 时）");
+        (dk, dv)
+    };
     let cu = st.htod_copy(vec![0i32, t as i32]).unwrap();
 
     let cfg: i32 = std::env::var("GQA_PREFILL_CFG").ok().and_then(|v| v.parse().ok()).unwrap_or(-1);
