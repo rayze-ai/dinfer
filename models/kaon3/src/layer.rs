@@ -95,6 +95,13 @@ impl QLinear {
         Ok(Self::from_qw(weights::load_linear(src, stream, name)?))
     }
 
+    /// 一组会被 vLLM 合并成**一个 GEMM** 的 fp8 权重（q/k/v、gate/up），重量化后拼成单块 `[ΣN,K]`。
+    /// 返回合并线性层 + 各分片 N 宽度（供前向切列段）。见 `weights::load_fp8_group_merged`。
+    pub fn load_group_merged(stream: &Stream, src: &WeightSource, names: &[String]) -> Result<(Self, Vec<usize>)> {
+        let (qw, widths) = weights::load_fp8_group_merged(src, stream, names)?;
+        Ok((Self::from_qw(qw), widths))
+    }
+
     /// 一组会被 vLLM 合并成一个线性层的权重（q/k/v、gate/up），按 `weights::load_fp8_group` 的口径重量化。
     pub fn load_group(stream: &Stream, src: &WeightSource, names: &[String]) -> Result<Vec<Self>> {
         Ok(weights::load_fp8_group(src, stream, names)?.into_iter().map(Self::from_qw).collect())
@@ -227,10 +234,11 @@ pub struct Gemma4Layer {
     pub post_ff_norm: Tensor<bf16>,
     pub post_ff_norm_1: Tensor<bf16>,
     pub post_ff_norm_2: Tensor<bf16>,
-    pub q_proj: QLinear,
-    pub k_proj: QLinear,
-    /// full 层 `attention_k_eq_v` 时为空（K 权重兼作 V）。
-    pub v_proj: Option<QLinear>,
+    /// q/k/v 合并成**一次 N=ΣN 的 GEMM**（vLLM `QKVParallelLinear`，loop `kaon3-layer1` 第 7 轮根因）。
+    /// 前向一次算完再按 `qkv_widths` 切列段。k_eq_v 的 full 层只合并 q+k，v 复用 k 段。
+    pub qkv: QLinear,
+    /// 合并 GEMM 各列段宽度：`[q_n, k_n]`（k_eq_v）或 `[q_n, k_n, v_n]`。
+    pub qkv_widths: Vec<usize>,
     pub o_proj: QLinear,
     /// 逐头 RMSNorm（带权重），长度 = head_dim。
     pub q_norm: Tensor<bf16>,
@@ -276,8 +284,9 @@ impl Gemma4Layer {
         let (head_dim, nkv, _rope) = cfg.attn_shape(l);
         let k_eq_v = cfg.k_eq_v_at(l);
         let attn = format!("{p}.self_attn");
-        // vLLM 的 qkv_proj 是合并层：k_eq_v 时 K 权重填 K、V 两个槽，组 scale 只由 q/k 决定
-        let mut qk = QLinear::load_group(
+        // vLLM 的 qkv_proj 是**合并成一次 N=ΣN GEMM** 的层（loop `kaon3-layer1` 第 7 轮：分开三次差 13 万，
+        // 合并一次只差 13）。k_eq_v 的 full 层 K 权重兼作 V，只合并 q+k，组 scale 只由 q/k 决定。
+        let (qkv, qkv_widths) = QLinear::load_group_merged(
             stream,
             src,
             &if k_eq_v {
@@ -285,18 +294,14 @@ impl Gemma4Layer {
             } else {
                 vec![format!("{attn}.q_proj.weight"), format!("{attn}.k_proj.weight"), format!("{attn}.v_proj.weight")]
             },
-        )?
-        .into_iter();
-        let q_proj = qk.next().context("q_proj")?;
-        let k_proj = qk.next().context("k_proj")?;
-        let v_proj = if k_eq_v {
-            None
-        } else {
-            Some(qk.next().context("v_proj")?)
-        };
+        )?;
         let o_proj = QLinear::load(stream, src, &format!("{attn}.o_proj.weight"))?;
-        ensure!(q_proj.shape() == (cfg.num_heads * head_dim, cfg.hidden), "第 {l} 层 q_proj {:?}", q_proj.shape());
-        ensure!(k_proj.shape() == (nkv * head_dim, cfg.hidden), "第 {l} 层 k_proj {:?}", k_proj.shape());
+        ensure!(qkv_widths[0] == cfg.num_heads * head_dim, "第 {l} 层 q 宽 {}", qkv_widths[0]);
+        ensure!(qkv_widths[1] == nkv * head_dim, "第 {l} 层 k 宽 {}", qkv_widths[1]);
+        if !k_eq_v {
+            ensure!(qkv_widths[2] == nkv * head_dim, "第 {l} 层 v 宽 {}", qkv_widths[2]);
+        }
+        ensure!(qkv.shape() == (qkv_widths.iter().sum::<usize>(), cfg.hidden), "第 {l} 层 qkv {:?}", qkv.shape());
         ensure!(o_proj.shape() == (cfg.hidden, cfg.num_heads * head_dim), "第 {l} 层 o_proj {:?}", o_proj.shape());
 
         let dense = format!("{p}.mlp");
@@ -340,9 +345,8 @@ impl Gemma4Layer {
             post_ff_norm: load_vec(stream, src, &format!("{p}.post_feedforward_layernorm.weight"))?,
             post_ff_norm_1: load_vec(stream, src, &format!("{p}.post_feedforward_layernorm_1.weight"))?,
             post_ff_norm_2: load_vec(stream, src, &format!("{p}.post_feedforward_layernorm_2.weight"))?,
-            q_proj,
-            k_proj,
-            v_proj,
+            qkv,
+            qkv_widths,
             o_proj,
             q_norm: load_vec(stream, src, &format!("{attn}.q_norm.weight"))?,
             k_norm: load_vec(stream, src, &format!("{attn}.k_norm.weight"))?,
@@ -533,6 +537,8 @@ pub struct LayerScratch {
     pub k_s: Tensor<bf16>,
     pub v_s: Tensor<bf16>,
     pub attn_s: Tensor<bf16>,
+    /// 合并 qkv GEMM 的输出 `[tokens, ΣN]`，之后切列段到 q/k/v。按最大层型容量分配。
+    pub qkv: Tensor<bf16>,
     pub q_f: Tensor<bf16>,
     pub k_f: Tensor<bf16>,
     pub v_f: Tensor<bf16>,
@@ -572,6 +578,10 @@ impl LayerScratch {
             k_f: Tensor::uninit(stream, &[max_tokens, cfg.nkv_full * cfg.head_dim_full])?,
             v_f: Tensor::uninit(stream, &[max_tokens, cfg.nkv_full * cfg.head_dim_full])?,
             attn_f: Tensor::uninit(stream, &[max_tokens, cfg.num_heads * cfg.head_dim_full])?,
+            // 合并 qkv 输出的上界：两层型 q+k+v 的较大者（full: num_heads·D + 2·nkv·D）。
+            qkv: Tensor::uninit(stream, &[max_tokens,
+                (cfg.num_heads * cfg.head_dim_sliding + 2 * cfg.nkv_sliding * cfg.head_dim_sliding)
+                    .max(cfg.num_heads * cfg.head_dim_full + 2 * cfg.nkv_full * cfg.head_dim_full)])?,
             o: Tensor::uninit(stream, &[max_tokens, h])?,
             gate_up: Tensor::uninit(stream, &[max_tokens, 2 * cfg.dense_inter])?,
             act: Tensor::uninit(stream, &[max_tokens, cfg.dense_inter.max(cfg.moe_inter)])?,
@@ -656,24 +666,21 @@ impl Gemma4Layer {
         // vLLM **compile 口径**（默认）：inductor 把 RMSNorm 与下游 fp8 量化融成一个 kernel，中间不落 bf16。
         // q/k/v 共用同一个 input_norm 且共用同一个 `input_scale`（实测 L0/L5 三者 scale 相同），
         // 所以这里量化一次、三个投影复用。eager 口径（`RMSNORM_MODE=1`）走原来的两步。
+        // q/k/v 合并成一次 GEMM，共用一个 `input_scale`（= 合并组 input_scale 的 max，见 `load_fp8_group_merged`）。
         let mut qkv_preq = false;
         if norm_mode() != 1 && fuse_norm_quant() {
-            // k_eq_v 的层没有 v_proj，此时 v 复用 k 的权重与 scale。
-            let v_sc = self.v_proj.as_ref().map_or(self.k_proj.a_scale(), |p| p.a_scale());
-            if let (Some(qs), Some(ks), Some(vs)) = (self.q_proj.a_scale(), self.k_proj.a_scale(), v_sc) {
-                if qs == ks && qs == vs {
-                    let need = tokens * h;
-                    let mut g = sc.preq.lock().unwrap();
-                    let buf = match g.as_mut() {
-                        Some(b) if b.len() >= need => b,
-                        _ => {
-                            *g = Some(stream.alloc_zeros::<u8>(need)?);
-                            g.as_mut().unwrap()
-                        }
-                    };
-                    k::ops::rmsnorm_quant_fp8(stream, &sc.x.data, &self.input_norm.data, buf, tokens, h, eps, qs)?;
-                    qkv_preq = true;
-                }
+            if let Some(qs) = self.qkv.a_scale() {
+                let need = tokens * h;
+                let mut g = sc.preq.lock().unwrap();
+                let buf = match g.as_mut() {
+                    Some(b) if b.len() >= need => b,
+                    _ => {
+                        *g = Some(stream.alloc_zeros::<u8>(need)?);
+                        g.as_mut().unwrap()
+                    }
+                };
+                k::ops::rmsnorm_quant_fp8(stream, &sc.x.data, &self.input_norm.data, buf, tokens, h, eps, qs)?;
+                qkv_preq = true;
             }
         }
         if !qkv_preq {
@@ -688,27 +695,36 @@ impl Gemma4Layer {
         } else {
             (&mut sc.q_f, &mut sc.k_f, &mut sc.v_f, &mut sc.attn_f)
         };
+        // ---- 2a. 一次合并 GEMM 到 sc.qkv[tokens, ΣN]（vLLM 口径：分开三次差 13 万，合并只差 13）----
         if qkv_preq {
             let g = sc.preq.lock().unwrap();
             let buf = g.as_ref().unwrap();
-            self.q_proj.forward_preq(gemm, stream, buf, q, tokens)?;
-            self.k_proj.forward_preq(gemm, stream, buf, kk, tokens)?;
-            match &self.v_proj {
-                Some(vp) => vp.forward_preq(gemm, stream, buf, v, tokens)?,
-                None => {
-                    stream.dtod_copy_n(&kk.data, &mut v.data, tokens * nkv * d)?;
-                }
-            }
+            self.qkv.forward_preq(gemm, stream, buf, &mut sc.qkv, tokens)?;
         } else {
-            self.q_proj.forward(gemm, stream, &sc.norm, q, tokens)?;
-            self.k_proj.forward(gemm, stream, &sc.norm, kk, tokens)?;
-            match &self.v_proj {
-                Some(vp) => vp.forward(gemm, stream, &sc.norm, v, tokens)?,
-                None => {
-                    // k_eq_v：K 权重兼作 V（只对 full 层成立）
-                    stream.dtod_copy_n(&kk.data, &mut v.data, tokens * nkv * d)?;
-                }
-            }
+            self.qkv.forward(gemm, stream, &sc.norm, &mut sc.qkv, tokens)?;
+        }
+        // ---- 2b. 切列段：q=[0,q_n) k=[q_n,q_n+k_n) v=... ；k_eq_v 时 v 复用 k 段 ----
+        let merged_n = self.qkv_widths.iter().sum::<usize>();
+        let q_n = self.qkv_widths[0];
+        let k_n = self.qkv_widths[1];
+        let col_bytes = |cols: usize| cols * std::mem::size_of::<bf16>();
+        let src_base = stream.ptr(&sc.qkv.data);
+        let src_pitch = col_bytes(merged_n);
+        {
+            let dst = stream.ptr(&q.data);
+            stream.copy2d(dst, false, col_bytes(q_n), src_base, false, src_pitch, col_bytes(q_n), tokens)?;
+        }
+        {
+            let dst = stream.ptr(&kk.data);
+            stream.copy2d(dst, false, col_bytes(k_n), src_base + col_bytes(q_n) as u64, false, src_pitch, col_bytes(k_n), tokens)?;
+        }
+        if self.k_eq_v {
+            // K 权重兼作 V（只对 full 层成立）：k 段逐位复制给 v
+            stream.dtod_copy_n(&kk.data, &mut v.data, tokens * nkv * d)?;
+        } else {
+            let v_n = self.qkv_widths[2];
+            let dst = stream.ptr(&v.data);
+            stream.copy2d(dst, false, col_bytes(v_n), src_base + col_bytes(q_n + k_n) as u64, false, src_pitch, col_bytes(v_n), tokens)?;
         }
 
         // 子 loop D：q 投影的**原始输出**（norm 之前），用于区分"GEMM 累加"与"norm"引入的 1 ulp。

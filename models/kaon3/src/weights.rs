@@ -224,37 +224,85 @@ pub fn load_fp8_group(src: &WeightSource, stream: &Stream, names: &[String]) -> 
     }
     let smax = parts.iter().map(|p| p.1).fold(f32::MIN, f32::max);
     let amax = parts.iter().map(|p| p.2).fold(f32::MIN, f32::max);
-    let inv = 1.0 / smax;
     parts
         .into_iter()
         .map(|(mut w, s, _, n, k)| {
-            if s != smax {
-                // vLLM `per_tensor_dequantize`（`w8a8_utils.py:44`）：
-                //   fake_qweight = tensor.to(torch.float16)   # fp8 → fp16（精确，e4m3 只有 4 位指数/3 位尾数）
-                //   dq_weight    = fake_qweight * scale       # **`scale` 是 Python float → 走 fp16 乘法**
-                // 关键：`inv_scale` 在这里是 **Python 标量**（`weight_scale[idx]`，0 维张量取出的 float），
-                // 不是 fp32 张量；torch 的 **0 维/python 标量 × fp16 张量 → 结果是 fp16**。
-                // 所以 `dq_weight` 落在 **fp16** 上（10 位尾数），我们必须在 fp16 里算。
-                //
-                // **实测证据（2026-10-22，layer 11 的 k_proj）**：与 vLLM 加载后的 fp8 权重逐字节比：
-                //   dq 在 f32/f64 里算 → 一致率 **90.66%**
-                //   dq 在 fp16 里算    → 一致率 **100.00%**（且差异 100% 是"我们大一个 e4m3 步进"）
-                // 曾误判为"torch 类型提升到 f32"，已由字节级对拍纠正。
-                // scale 先按 fp16 舍入（vLLM 的 `weight_scale[idx]` 是 fp16 张量的元素），
-                // 再与 fp16 的值相乘、结果留在 fp16 —— **两步都在 fp16 精度**。
-                // A/B 开关（2026-10-22 回退验证）：`FP8_RQ_FMT=f32` 退回"f32 中间值"旧实现，
-                // 其余任何值 / 不设 = fp16（与 vLLM 一致）。同一份二进制切两种口径，排除编译差异。
-                let fp16 = requant_fp16_mid();
-                let s16 = f32::from(half::f16::from_f32(s));
-                for b in w.iter_mut() {
-                    let v = e4m3_to_f32(*b);
-                    let dq = if fp16 { f32::from(half::f16::from_f32(v * s16)) } else { v * s };
-                    *b = f32_to_e4m3(dq * inv);
-                }
-            }
+            requant_part_to_max(&mut w, s, smax);
             Ok(QWeight::Fp8 { w: h2d_u8(stream, &w)?, scale: smax, a_scale: amax, n, k })
         })
         .collect()
+}
+
+/// 把一个分片的 e4m3 字节按组内最大 scale 重量化（就地）。
+///
+/// vLLM `per_tensor_dequantize`（`w8a8_utils.py:44`）：
+///   fake_qweight = tensor.to(torch.float16)   # fp8 → fp16（精确，e4m3 只有 4 位指数/3 位尾数）
+///   dq_weight    = fake_qweight * scale       # **`scale` 是 Python float → 走 fp16 乘法**
+/// 关键：`inv_scale` 在这里是 **Python 标量**（`weight_scale[idx]`，0 维张量取出的 float），
+/// 不是 fp32 张量；torch 的 **0 维/python 标量 × fp16 张量 → 结果是 fp16**。
+/// 所以 `dq_weight` 落在 **fp16** 上（10 位尾数），我们必须在 fp16 里算。
+///
+/// **实测证据（2026-10-22，layer 11 的 k_proj）**：与 vLLM 加载后的 fp8 权重逐字节比：
+///   dq 在 f32/f64 里算 → 一致率 **90.66%**；dq 在 fp16 里算 → 一致率 **100.00%**。
+/// scale 先按 fp16 舍入（vLLM 的 `weight_scale[idx]` 是 fp16 张量的元素），再与 fp16 的值相乘、
+/// 结果留在 fp16 —— **两步都在 fp16 精度**。`FP8_RQ_FMT=f32` 退回"f32 中间值"旧实现做 A/B。
+fn requant_part_to_max(w: &mut [u8], s: f32, smax: f32) {
+    if s == smax {
+        return;
+    }
+    let inv = 1.0 / smax;
+    let fp16 = requant_fp16_mid();
+    let s16 = f32::from(half::f16::from_f32(s));
+    for b in w.iter_mut() {
+        let v = e4m3_to_f32(*b);
+        let dq = if fp16 { f32::from(half::f16::from_f32(v * s16)) } else { v * s };
+        *b = f32_to_e4m3(dq * inv);
+    }
+}
+
+/// 一组 vLLM 会合并成**单个** GEMM 的 fp8 权重（`QKVParallelLinear` / `MergedColumnParallelLinear`），
+/// 返回**一块连续的合并权重** `[ΣN, K]`（行方向按 `names` 顺序拼接）+ 各分片的 N 宽度。
+///
+/// 为什么要合并（loop `kaon3-layer1` 第 6-7 轮实测）：分开 q/k/v 三次 GEMM 与参照差 13 万个元素，
+/// 合并一次 N=8192 只差 13 个 —— FlashInfer 的 `bmm_fp8` 在不同 N 下选不同 tile/split-K，累加序不同，
+/// 舍到 bf16 时跨过舍入中点。**不是实现错，是调用形状不同**。所以前向必须一次合并 GEMM 再切列段。
+///
+/// 要求所有分片同 K、同为 FP8 per-tensor；否则报错（qkv/gate_up 在 Kaon-V3 里恒为 FP8）。
+pub fn load_fp8_group_merged(
+    src: &WeightSource,
+    stream: &Stream,
+    names: &[String],
+) -> Result<(QWeight, Vec<usize>)> {
+    let all_fp8 = names.iter().all(|nm| {
+        src.info(nm).is_some_and(|i| i.dtype == "F8_E4M3" && i.shape.len() == 2)
+            && src.info(&format!("{nm}_scale")).is_some_and(|i| i.shape.iter().product::<usize>() <= 1)
+    });
+    ensure!(all_fp8, "load_fp8_group_merged 只支持全 FP8 per-tensor 分片：{names:?}");
+    let mut parts = Vec::with_capacity(names.len());
+    let mut k0 = None;
+    for nm in names {
+        let shape = src.info(nm).context("weight info")?.shape.clone();
+        let (n, k) = (shape[0], shape[1]);
+        match k0 {
+            None => k0 = Some(k),
+            Some(kk) => ensure!(kk == k, "合并组 K 不一致：{nm} K={k} != {kk}"),
+        }
+        let w = read_u8(src, nm, n * k)?.to_vec();
+        let s = read_f32_scalar(src, &format!("{nm}_scale"))?;
+        parts.push((w, s, input_scale(src, nm), n));
+    }
+    let k = k0.context("空合并组")?;
+    let smax = parts.iter().map(|p| p.1).fold(f32::MIN, f32::max);
+    let amax = parts.iter().map(|p| p.2).fold(f32::MIN, f32::max);
+    let widths: Vec<usize> = parts.iter().map(|p| p.3).collect();
+    let n_total: usize = widths.iter().sum();
+    let mut merged = Vec::with_capacity(n_total * k);
+    for (mut w, s, _, _) in parts {
+        requant_part_to_max(&mut w, s, smax);
+        merged.extend_from_slice(&w);
+    }
+    let qw = QWeight::Fp8 { w: h2d_u8(stream, &merged)?, scale: smax, a_scale: amax, n: n_total, k };
+    Ok((qw, widths))
 }
 
 /// 重量化中间值落 fp16（与 vLLM 一致）还是 f32（旧实现）。环境变量 `FP8_RQ_FMT=f32` 退回旧口径。
