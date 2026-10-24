@@ -312,3 +312,8 @@ FlashInfer `bmm_fp8` 默认 backend=**cublas**，源码 `flashinfer/data/include
 → "接 FlashInfer" = 复刻它的 cublasLt 描述符（compute_type/scale_type/epilogue/algo 选择），
   不必链接整个 JIT 扩展。我方已逼到 qkv 13/196608，差距很可能就是 algo 或 scale_type 的细节。
 下一步：读 bmm_fp8.cuh 的 matmul 主体（compute type / algo heuristic / 是否 per-tensor scale 走 epilogue），与我方逐项对。
+
+### 第 13 轮：找到 qkv 差异点——FAST_ACCUM
+逐项对 FlashInfer bmm_fp8.cuh vs 我方 make_descs_fp8：compute_type/scale_type/TRANS/scale_ptr 全同，
+**唯一差异：FlashInfer 显式设 `CUBLASLT_MATMUL_DESC_FAST_ACCUM`，我方没设（默认 0=关）**。
+fp8 fast accum 改累加精度 → 极可能是 qkv 13/196608 的根源。待查 FlashInfer 传的 fast_accum 值。
