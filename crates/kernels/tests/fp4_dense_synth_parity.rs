@@ -104,5 +104,34 @@ fn fp4_dense_synth_matches_cutlass() {
 
     run(&asw, true, "A=swz  B=nat");
     run(&anat, false, "A=nat  B=nat");
-    let _ = &bsw;
+    let _ = (&bsw, &anat);
+
+    // ---- 关键：走我们**自己的量化器**（`forward_nvfp4` 吃 bf16 输入）----
+    // 上面两组喂的是参照的 a_q/a_s（prequant 路径），完全绕开了 `quantize_a_kernel`。
+    // 端到端走的是 `forward_nvfp4`，差异很可能在这一段。
+    {
+        let a: Vec<bf16> = rd_u16(&format!("{dir}/a.bin")).iter().map(|&u| bf16::from_bits(u)).collect();
+        assert_eq!(a.len(), m * k, "a 形状");
+        let da = st.htod_copy(a).expect("a");
+        let ds = st.htod_copy(bnat.clone()).expect("bs");
+        let mut dout = st.alloc_zeros::<bf16>(m * n).expect("out");
+        match gemm.forward_nvfp4(&da, a_gs, &dbq, &ds, alpha, &mut dout, m, n, k) {
+            Err(e) => println!("FP4_SYNTH {:<24} 失败: {e}", "self-quant"),
+            Ok(()) => {
+                let ours = st.dtoh_sync_copy(&dout).expect("d2h");
+                let mut ndiff = 0usize;
+                let mut maxd = 0f32;
+                for i in 0..m * n {
+                    if ours[i].to_bits() != yref[i] {
+                        ndiff += 1;
+                        maxd = maxd.max((f32::from(ours[i]) - f32::from(bf16::from_bits(yref[i]))).abs());
+                    }
+                }
+                let ny: f32 = yref.iter().map(|&u| { let v = f32::from(bf16::from_bits(u)); v * v }).sum::<f32>().sqrt();
+                let no: f32 = ours.iter().map(|&v| { let v = f32::from(v); v * v }).sum::<f32>().sqrt();
+                println!("FP4_SYNTH {:<24} ndiff={}/{} max|d|={:.3e} ‖ours‖/‖ref‖={:.6}",
+                         "self-quant", ndiff, m * n, maxd, no / ny);
+            }
+        }
+    }
 }

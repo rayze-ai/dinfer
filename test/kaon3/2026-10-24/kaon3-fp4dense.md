@@ -96,3 +96,31 @@ FP4_SYNTH A=nat  B=nat   ndiff=0/11264 max|d|=0.000e0 ‖ours‖/‖ref‖=1.000
    需要对 `w1_scale` 做同样判定。
 2. 专家量化走的是 `scaled_fp4_experts_quant`（按专家偏移），不是 dense 的 `cvt_fp16_to_fp4`。
 3. SiLU+Mul 与量化融合（`silu_and_mul_scaled_fp4_experts_quant`）的舍入点。
+
+## 第 2 轮：MoE 权重 scale 布局确认 + 我们自己的量化路径也是 0
+
+### 权重 scale 布局（读源码，不再靠字节数猜）
+
+`VLLM_CUTLASS` 分支走 `prepare_nvfp4_moe_layer_for_fi_or_cutlass`
+（`vllm/model_executor/layers/quantization/utils/flashinfer_fp4_moe.py:321`）：
+只有 `FLASHINFER_TRTLLM` 才做 `align_trtllm_fp4_moe_hidden_dim_for_fi` 的 shuffle，
+**`VLLM_CUTLASS` 不做任何 swizzle**，权重 scale 保持线性 `[E, N, K/16]`。
+→ 我们按自然布局读是对的。
+
+### 我们自己的量化器也逐位 0（这是关键补充）
+
+第 1 轮喂的是参照的 `a_q/a_s`（`forward_nvfp4_prequant`），**完全绕开了 `quantize_a_kernel`**。
+本轮补测 `forward_nvfp4`（吃 bf16 输入、走我们自己的量化）：
+
+```
+FP4_SYNTH A=swz  B=nat   ndiff=0/11264 max|d|=0.000e0 ‖ours‖/‖ref‖=1.000000 corr=1.00000000
+FP4_SYNTH A=nat  B=nat   ndiff=0/11264 max|d|=0.000e0 ‖ours‖/‖ref‖=1.000000 corr=1.00000000
+FP4_SYNTH self-quant     ndiff=0/11264 max|d|=0.000e0 ‖ours‖/‖ref‖=1.000000
+```
+
+**dense GEMM 整段（量化 + GEMM + 布局 + 乘子）全部逐位一致**，彻底排除。
+
+### 下一步
+
+差异在 MoE 的其余环节。用现成的 `models/kaon3/tests/moe_stage_parity.rs` + `/w/tmp/moe1`
+（真实激活 + 真实 router logits + 参照 MoE 输出）定位分段。
