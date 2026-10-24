@@ -346,3 +346,33 @@ p02 的 24 token，`L*.bin` 135168 字节 = 24×2816×2，nz=0.4996（已核非�
 端到端 `|Δlp| = 1.25` 不可能由 MoE 的 1 ULP 造成（第 7 轮已排除），
 逐层数据也证实**第一层就偏**。L0 是**滑窗注意力层**（`layer_types[0] = sliding_attention`），
 下一步在 L0 内部逐子模块定位，不在 MoE 上再花时间。
+
+## 第 9–10 轮：**L0 的实现是错的**（相对 L2 ≈ 1.0），L1 只有 1 ULP
+
+用 `--layer-iso <l>:<参照 l-1 层>.bin`：灌参照的上一层残差流，只跑第 l 层，与参照同层比。
+数据在 `/w/runs/hidden_*_r10`（新规范）。
+
+| 层 | 输入 | 逐行相对 L2 | 判读 |
+|---|---|---|---|
+| **L0** | embedding（与参照同一份） | **1.34, 1.07, 1.14, 1.27, 1.14, 1.36 …** | **完全对不上** |
+| **L1** | **参照的 L0**（`/w/hid/fn/L0.bin`） | **0.0039, 0.0125, 0.0044, 0.0025, 0.0052, 0.0070** | 1 ULP 级 |
+
+`max|a-b|`：L0 达到 **35–89**（‖b‖ 量级 ~1e1），L1 在 1e-3 量级。
+
+**结论**：差异的**根因在第 0 层**（滑窗注意力层），L1 及以上只是把这个误差往下传。
+`kaon3-compile` 的 17 轮、以及本 loop 前 7 轮，全部花在 MoE（在第 14 层之后）上，
+**方向从一开始就偏了**。
+
+### 过程中的自身错误（已记 pitfalls / memory）
+
+1. 把 `--hidden-cmp` 的输出（比的是同目录下一整套 `L*.bin`）当成了 `--layer-iso` 的结果 ——
+   两者写的是不同文件名（`L{l}.bin` vs `iso_L{l}.bin`），我混读了。
+2. 两次凭印象猜文件格式（先按 uint16、后按 f32）导致 reshape 失败；
+   正确做法是**先 grep 写入代码**（`kaon3_probe.rs:641` 写的是 f32 LE）。
+3. `mkrun.sh` 只 `put` 过一次，后来 `sync` 没带上它 → `No such file or directory`。
+
+### 下一步
+
+**攻 L0**。L0 是 `layer_types[0] = sliding_attention`（滑窗 1024，GQA 16/8 头，head_dim 256）。
+先看 L0 内部的子模块：embed 之后 → `input_layernorm` → attention（q/k/v/o）→ 残差 →
+`pre_ff_norm` → router → MoE → `post_ff_norm`。用 `--hidden-all` 的子模块 dump 逐项比。
