@@ -42,3 +42,57 @@ A=nat  B=nat   *alpha   relerr=0.999857  corr=0.221814  ‖out‖/‖y‖=0.0006
 停用 `y.bin`。改用**自洽合成数据**建判据：A、B 两侧都用 `scaled_fp4_quant` 量化（两侧都 swizzled），
 用 `dequantize_nvfp4_to_dtype` 复算，先证明 `ref == cutlass_scaled_fp4_mm`（vLLM CI 同款配方），
 再拿这份已知答案喂我们的 kernel。这样判据的每一环都可控。
+
+## 第 1 轮：换自洽合成判据 → **我们的 dense GEMM 逐位一致（ndiff=0）**
+
+### 做法
+
+`scripts/dev/fp4_dense_synth.py`，vLLM CI 同款配方（`test_nvfp4_scaled_mm.py`）：
+两侧都用 `scaled_fp4_quant` 量化 → `cutlass_scaled_fp4_mm` 出 `y` → 用参照自己的
+`dequantize_nvfp4_to_dtype`（逐字复制，仅 oracle 侧诊断用）复算 → 纯 numpy 按公式再独立复算。
+
+标准形状 `m=8 n=1408 k=2816`（Kaon 专家 gate/up 的真实形状），`torch.manual_seed(0)`。
+
+### 判据自证（先证明判据可信，再测我们）
+
+```
+[1] cutlass vs 参照 dequant+matmul: relerr=0.001671 corr=0.99999869 bf16 逐位不同 1/11264
+    max|d|=4.9954e-01  ‖y‖=5581.0322
+[3] numpy 独立复算 vs 参照 dequant+matmul: relerr=0.000000 corr=1.00000000 ‖np‖/‖ref‖=1.000000
+```
+
+三条独立路径（cutlass kernel / 参照 python 复算 / 纯 numpy）互相吻合到 fp32 精度，
+**`y.bin` 现在是可信判据**。注意 `[1]` 里那个 `1/11264` 说明 cutlass 与 python 复算
+在 bf16 下**并非严格逐位**（fp32 累加序差异），所以下面的 `ndiff=0` 是真结果而不是巧合。
+
+### 我们的 kernel（`fp4_dense_synth_parity.rs`）
+
+```
+FP4_SYNTH A=swz  B=nat   ndiff=0/11264 max|d|=0.000e0 ‖ours‖/‖ref‖=1.000000 corr=1.00000000
+FP4_SYNTH A=nat  B=nat   ndiff=0/11264 max|d|=0.000e0 ‖ours‖/‖ref‖=1.000000 corr=1.00000000
+```
+
+**逐位一致**（两条布局路径都对）。
+
+### 结论
+
+**"专家 NVFP4 dense GEMM 与参照差 7.8%" 作废。** 那是上一轮 `/w/tmp/fp4d` 那份坏数据测出来的：
+用参照自己的复算去比那份 `y.bin`，corr 只有 0.25——判据本身坏掉，任何对比都没有意义。
+所以端到端 flip 14.08% 的差异**不在 dense GEMM 的数值实现上**。
+
+### 过程中的自身错误（记下来避免重犯）
+
+1. 第一版手写 `unswz()` 把 permute 维序写反（写成 `(g,a4,r32,kO,k4)`，正确是 `(g,kO,r32,a4,k4)`）。
+   → 改成**按 `nvfp4_utils.cuh:164` 的偏移公式逐元素取**，不再依赖 permute 语义。
+2. 第一版对拍把 `swz` 当成了"两侧布局"开关，实际 `forward_nvfp4_prequant` 的 `swz` **只作用于 A 侧**，
+   B 侧永远按自然 `[n, k/16]` 读 → 两组都配错了，得到 corr 0.949 / 0.265 的假差异。
+   → 必须**先读被调函数的签名与注释**再设计 A/B。
+
+### 下一步
+
+端到端差异要找别处。按嫌疑排序：
+1. **MoE 权重 scale 的布局**：`n=1408` 是 128 的倍数，swizzled 与自然字节数都是 247808，
+   **无法用字节数判定**。参照的 `nvfp4_blockwise_moe_kernel.cu` 用 `tile_atom_to_shape_SFB`，
+   需要对 `w1_scale` 做同样判定。
+2. 专家量化走的是 `scaled_fp4_experts_quant`（按专家偏移），不是 dense 的 `cvt_fp16_to_fp4`。
+3. SiLU+Mul 与量化融合（`silu_and_mul_scaled_fp4_experts_quant`）的舍入点。
