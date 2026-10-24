@@ -474,3 +474,12 @@ row=32 h=13 d=125: fp64=-0.176239  我方|d|=5.21e-4  vLLM|d|=4.57e-4  ← vLLM 
 **定性（有证据）**：不是对齐 bug，是 bf16 格点分辨率极限；我方 row=6 比 vLLM 更接近真值。
 要让这 2 个也"等于 vLLM"须逐指令复刻其 PV 累加落到同一舍入侧，无数值收益（我方已同等或更准）。
 attention 系统性 bug（FEXP 1279）已修；剩 2 个是 bf16 分辨率，非 bug——此结论由 fp64 判决支撑。
+
+### 第 18 轮：MoE 隔离——系统性偏差 rel=1.9%（非末位）
+EAGER 抓 vLLM MoE io（compile patch 被缓存烘死，eager 命中；MoE 无 FEXP 类差异，eager≈compile）。
+我方 moe_y vs vLLM moe_out：
+```
+不同 97607/101376  max|d|=0.5  rel=1.915e-2  ‖vllm‖=365.93 ‖ours‖=365.83  36/36 行全差
+```
+范数近但分布偏、1.9% → **系统性偏差，非末位**（和 qkv/attention 末位不同量级）。
+下一步：定位差在**路由**还是**专家 GEMM**。先比我方 router_logits vs vLLM moe_logits（已抓）。
