@@ -43,10 +43,12 @@ if [ -z "$cmd" ] || [ "$cmd" = "null" ]; then
   ng "容器 $ON 不存在或未运行（先起 oracle，见 loop 规格）"
 else
   echo "$cmd" | grep -qiE 'enforce[-_]eager' && die "oracle 带了 enforce_eager → 不是 compile 口径"
-  echo "$cmd" | grep -q -- "--block-size 32" || echo "$cmd" | grep -q -- "--block-size" || ng "block size 未显式设为 32"
-  echo "$cmd" | grep -q -- "--max-num-batched-tokens 4096" || ng "max-num-batched-tokens 不是 4096"
-  [ "$(echo "$cmd" | grep -oE '"num_hidden_layers":[0-9]+' | grep -oE '[0-9]+$')" = "$N" ] \
-    && ok "截层数 = $N（与探针侧一致）" || ng "截层数不是 $N：$cmd"
+  # 注意 cmd 是 **JSON 数组**（`["--block-size","32"]`），参数与值之间是 `","` 不是空格。
+  echo "$cmd" | grep -qE '"--block-size"[[:space:]]*,[[:space:]]*"32"' && ok "block size = 32" || ng "block size 不是 32"
+  echo "$cmd" | grep -qE '"--max-num-batched-tokens"[[:space:]]*,[[:space:]]*"4096"' && ok "max-num-batched-tokens = 4096" || ng "max-num-batched-tokens 不是 4096"
+  # --hf-overrides 里的 JSON 被转义成 \"num_hidden_layers\":1
+  got=$(echo "$cmd" | grep -oE 'num_hidden_layers[\\"]*:[0-9]+' | grep -oE '[0-9]+$')
+  [ "$got" = "$N" ] && ok "截层数 = $N（与探针侧一致）" || ng "截层数不是 $N（读到 '$got'）"
   # ② BI=1
   envv=$($R run "docker inspect -f '{{json .Config.Env}}' $ON 2>/dev/null" 2>/dev/null | tail -1)
   echo "$envv" | grep -q 'VLLM_BATCH_INVARIANT=1' && ok "BI=1" || die "oracle 不是 BI=1"
@@ -82,11 +84,22 @@ res=$($R ctr "cd /w/dinfer && ./target/release/kaon3_oracle_diff test/kaon3/_ref
 echo "  $res"
 flip=$(echo "$res" | grep -oE 'flip_pct=[0-9.]+' | cut -d= -f2)
 d=$(echo "$res" | grep -oE 'mean_common_d=[0-9.]+' | cut -d= -f2)
+dec=$(echo "$res" | grep -oE 'decisive=[0-9]+' | cut -d= -f2)
+dnll=$(echo "$res" | grep -oE 'dnll=[-+0-9.]+' | cut -d= -f2)
 echo
-echo "第 $N 层：flip=${flip}%  mean_common_d=${d}"
-awk -v f="${flip:-999}" 'BEGIN{exit !(f+0 == 0)}' \
-  && ok "第 $N 层逐位一致（flip=0）→ 继续往上加层" \
-  || echo "⚠️  第 $N 层已有差异（flip=${flip}%）→ 差异在第 $N 层之前/之内"
+echo "第 $N 层：decisive=${dec}  flip=${flip}%  mean_common_d=${d}  dnll=${dnll}"
+# ⚠️ 层数少时 top1 margin 接近 0 → decisive=0，flip 是 0/0，**不能**用它判"一致"。
+# 正确判据：decisive>0 才看 flip；否则看 mean_common_d / dnll 是否严格为 0。
+if [ "${dec:-0}" -eq 0 ]; then
+  echo "ℹ️  decisive=0：本层 top1 margin 全为 0，flip 不可判定 → 改用 |Δlp| 判据"
+  awk -v d="${d:-1}" -v n="${dnll:-1}" 'BEGIN{exit !(d+0 == 0 && (n+0 == 0 || n+0 == -0))}' \
+    && ok "第 $N 层逐位一致（|Δlp|=0 且 ΔNLL=0）" \
+    || echo "⚠️  第 $N 层已有差异（|Δlp|=${d}，ΔNLL=${dnll}）→ 差异在本层之内或之前"
+else
+  awk -v f="${flip:-999}" 'BEGIN{exit !(f+0 == 0)}' \
+    && ok "第 $N 层逐位一致（decisive=$dec 上 flip=0，|Δlp|=${d}）" \
+    || echo "⚠️  第 $N 层已有差异（flip=${flip}%，|Δlp|=${d}）"
+fi
 
 echo
 if [ "$FAIL" -eq 0 ]; then echo "判据可信（FLOOR=0、参数对齐），可以下结论"; exit 0; fi
