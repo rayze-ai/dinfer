@@ -322,3 +322,9 @@ fp8 fast accum 改累加精度 → 极可能是 qkv 13/196608 的根源。待查
 - make_descs_fp8 加 `CUBLASLT_MATMUL_DESC_FAST_ACCUM`（默认 1，`FP8_FAST_ACCUM=0` 退回）。
 - L0 24 用例端到端 mean_common_d **仍 0.0085**（端到端混所有段，判不了单段）。
 - 直接验 qkv：用 cmp_attn_in 比我方 q（qkv→qnorm→rope→fp8）vs vLLM 真实 attn 输入 q（改动前 rel=2.16e-2）。
+
+### 第 13 轮：FAST_ACCUM 对我方 qkv 输出无影响（A/B 实测）
+`FP8_FAST_ACCUM=1 vs 0` 同一 bin 跑 p01，比 q_proj_raw：**0/90112 完全相同**。
+→ 要么该 shape cuBLASLt 的 algo 不受 fast_accum 影响，要么属性被 algo 选择覆盖/未采纳。
+qkv 逐位验证需造 vLLM 真实 qkv_proj 输出做隔离对拍（d17qkv 旧数据已删）。
+下一步：attn_io 加 hook dump vLLM `qkv_proj` 输出（split 前的合并 [T,8192]），与我方合并 qkv 比。
