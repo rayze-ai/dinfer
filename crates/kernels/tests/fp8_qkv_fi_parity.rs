@@ -10,9 +10,10 @@ fn qkv_cublaslt_vs_flashinfer() {
     let meta: Vec<f32> = std::fs::read(format!("{dir}/meta.bin")).unwrap()
         .chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
     let (a_scale, w_scale, tmax) = (meta[0], meta[1], meta[2] as usize);
-    // T 覆盖：ref 造了 tmax 行，这里只取前 t 行（qkv 每行独立）。默认 = tmax。
+    // T 覆盖：ref 造了 tmax 行，这里只取前 t 行（每行独立）。默认 = tmax。
     let t: usize = std::env::var("T").ok().and_then(|v| v.parse().ok()).unwrap_or(tmax);
-    let (n, k) = (8192usize, 2816usize);
+    // meta 5 字段版（fi_lin_ref）带 N/K；3 字段版（fi_qkv_ref）默认 qkv 8192/2816。
+    let (n, k) = if meta.len() >= 5 { (meta[3] as usize, meta[4] as usize) } else { (8192usize, 2816usize) };
     let a_all = std::fs::read(format!("{dir}/A_fp8.bin")).unwrap();   // [tmax,k] u8
     let w = std::fs::read(format!("{dir}/W_qkv_fp8.bin")).unwrap();   // [n,k] u8
     let rb_all: Vec<f32> = std::fs::read(format!("{dir}/ref_out.bin")).unwrap()

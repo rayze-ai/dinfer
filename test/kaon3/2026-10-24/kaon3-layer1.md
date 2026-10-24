@@ -431,3 +431,7 @@ arch.rs gqa_prefill_cfg_for(Sm100/Sm90) 3464→464。L0 24 用例端到端 mean_
 → attention（同 qkv）非端到端主残差来源。**主残差几乎全在未攻克的 o_proj/gate_up/down（fp8 GEMM，TABLE 未命中）+ MoE(NVFP4)**。
 修正：gqa_vllm_io_parity 测试硬编码 GQA_PREFILL_CFG 默认 -1（慢路径），改默认 464 以测生产 v6 精确指数路径。
 下一步：o_proj(2816×4096)/gate_up(4224×2816)/down(2816×2112) 逐个扫 algo 对齐 FlashInfer（qkv 同法）。
+
+### 第 17 轮：o_proj 已逐位（fallback 恰好 splitk=1）
+o_proj(N=2816,K=4096) 默认 TABLE 走 FALLBACK `id=67 tile=13 splitk=1`，与 FlashInfer algo[0] 一致 → **0/101376 逐位**。
+无需改。残差在 gate_up/down/MoE。继续测 gate_up(输入 pre_ff_norm,K=2816)/down(输入 ff1 的 gelu,K=2112)。
