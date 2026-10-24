@@ -124,3 +124,38 @@ FP4_SYNTH self-quant     ndiff=0/11264 max|d|=0.000e0 ‖ours‖/‖ref‖=1.000
 
 差异在 MoE 的其余环节。用现成的 `models/kaon3/tests/moe_stage_parity.rs` + `/w/tmp/moe1`
 （真实激活 + 真实 router logits + 参照 MoE 输出）定位分段。
+
+## 第 3 轮：真实数据下 MoE 段有差异，路由影响很小
+
+`models/kaon3/tests/moe_stage_parity.rs` + `/w/tmp/moe1`（p02 / layer 0，T=24）：
+
+| 口径 | ndiff | 说明 |
+|---|---|---|
+| 我方路由权重 | 50214/67584 | 基线 |
+| **参照的 topk_ids/topk_w**（`MOE_USE_REF_TOPK=1`） | **49347/67584** | 把路由整段换掉只降 867 个元素 |
+
+→ **路由不是主因**，差异在"专家 GEMM + gelu + combine"这一段内部。
+
+```
+ours[0..8] = [0.23632813, 1.78125, -2.21875, 0.03564453, 0.40234375, 0.265625, 0.9453125, 4.90625]
+ref [0..8] = [0.23339844, 1.78125, -2.21875, 0.032958984, 0.40039063, 0.26367188, 0.9453125, 4.90625]
+‖ours‖=364.6431  ‖ref‖=363.8837  比值=1.0021
+```
+
+读法：**部分元素逐位相同**（1.78125 / -2.21875 / 0.9453125 / 4.90625），
+不同的那些**我方一致偏大**（0.23633 vs 0.23340、0.035644 vs 0.032959），差 1–1.5 个 bf16 ULP。
+范数比 1.0021 的偏离是"多数元素略微偏大"累积出来的，不是某一个点的语义错。
+
+### 已排除（累计）
+
+dense FP4 GEMM（量化+GEMM+布局+乘子，三条路径都 `ndiff=0`）、路由段、gelu·mul、MoE 权重 scale 布局。
+
+### 下一步（决定性实验）
+
+vLLM 的融合路径按 activation 分叉（`cutlass_moe.py:645`）：
+`activation == SILU` 才走 `silu_and_mul_scaled_fp4_experts_quant`（SiLU+Mul 与量化融合）；
+**Kaon 是 gelu_tanh，走 else 分支**：`apply_moe_activation` 写 bf16 的 `c2`，再 `scaled_fp4_experts_quant(c2, …)`。
+所以"融合算子的舍入点"这个嫌疑**不成立**，结构与我们一致。
+
+剩下要做的是**逐段抓参照的 c1 / c2 / c3**（patch `run_cutlass_moe_fp4` dump），
+与我们的 gate/up、gelu、down 输出逐位比，定位是哪一段引入 1 ULP。
