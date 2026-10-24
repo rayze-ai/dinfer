@@ -566,3 +566,27 @@ ULP 中位数 = 1.004
    重做逐层。
 3. compile 口径的 MoE 分段抓取：patch 在 inductor 图里不生效（`CALL ... nz=0.0000` 60 次），
    这条路走不通；改走"我们的实现在 eager 下逐段归零 + compile 端到端验收"。
+
+### ⚠️ 第 16 轮的结论必须降级：那是 **eager 口径**，不能当判据
+
+`moe_seg_capture`/`kaon3_vllm_hidden` 抓子模块都必须 `enforce_eager=True`
+（hook 在 inductor 图里不生效，实测 patch 后 60 次调用 `nz=0.0000`）。
+所以"`MOE_COMBINE_F32=0` 让 L0 逐段归零"的对比对象是 **eager 参照**。
+
+而规格（用户 2026-10-23）明写：**eager 只能用于诊断，不得写进任何判据**。
+并且 `layer.rs:1081` 记着相反的 **compile 口径端到端证据**：
+
+```
+p02 单例 A/B：=0 → top-1 翻转 4/22、top1 |Δlp| max 2.04
+               =1 → 0/22、max 0.52
+30 用例整跑：=1 使 flip 16.56% → 14.08%
+```
+
+两者其实**不矛盾**，恰好说明：
+- **eager** 的 vLLM 走 `cutlass_moe.py:680` 的 Python 路径 → bf16 乘积（= combine 0）；
+- **compile** 的 vLLM 经 inductor 融合 → 不做那次 bf16 舍入（= combine 1）。
+
+**所以我们"在 eager 下逐段归零"是真的（实现本身对），
+但 compile 口径下我们对不上的原因不是 kernel 错，而是没复刻 inductor 的融合图。**
+
+**不修改 `MOE_COMBINE_F32` 默认值**（compile 判据支持 1）。
