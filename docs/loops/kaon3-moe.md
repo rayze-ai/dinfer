@@ -64,3 +64,22 @@ hidden 重算 router_logits**（self.gate(hidden) 或 fused gate，忽略传入 
   纯测专家 GEMM(NVFP4)+topk+加权和，路由用 vLLM 的（排除路由差）。
 - 待做：我方加入口接收外部 hidden+logits 跑专家（kaon3_probe --moe-iso 或测试）；已有数据 /moe_e08。
 - 注：routing 是 gemma4_routing_function（softmax over ALL → topk → renormalize），top_k=config.top_k_experts。
+
+## 第 20 轮：loop 固化——核心约束 compile 口径 + 当前卡点
+**目标**：L0 MoE 在 **compile 口径**（oracle 是 compile）下与 vLLM 对齐；端到端 mean_common_d 的 MoE 残差清掉。
+**铁律**：判据必须 compile 口径。eager 抓的 MoE io 不能直接当 compile 判据（犯过多次"eager 当 compile"坑）。
+
+**当前卡点**：compile 下 MoE 内联进图（不在 splitting_ops），输入/输出 hook 抓不到
+（3 种 patch + VLLM_DISABLE_COMPILE_CACHE=1 重编 均 grabbed=[]）。eager 能抓（/moe_e08）但口径存疑。
+
+**迭代步骤（机器判定，按序）**：
+1. 查 vLLM FusedMoE 专家 kernel 在 eager vs compile 是否同一实现（dispatch 有无换 kernel）。
+   - 若同一 kernel（MoE 无 FEXP 类 compile 专属近似，很可能）→ eager io 可当 compile 判据，用 /moe_e08。
+   - 若不同 → 必须拿 compile io，走步骤 2b。
+2a. 我方加 `--moe-iso` 入口：喂外部 x(moe_hidden)+router_logits → 只跑专家(NVFP4 GEMM+topk+加权和) → 比 vllm_moe_out。
+2b. 若需 compile io：从相邻可抓点夹（pre_ff2_norm 输入 / post_ff_norm_2 后输出），或用 oracle 端到端 prompt_logprobs 粗判。
+3. 定位差在 ① NVFP4 解包/scale ② topk/renormalize ③ 专家 GEMM 累加/per_expert_scale 折法。按 qkv/attention 同法修。
+**停止条件**：compile 口径下 MoE 输出 vs vLLM 逐位或仅 bf16 末位（fp64 判决），且端到端 MoE 残差消失。
+**上限**：每轮 ≤10 迭代；单点超 3 轮无结论写卡点换方向。
+**数据**：/moe_e08(eager vllm_moe_hidden/logits/out)、/w/sd_now(我方 moe_y/moe_e*/router_logits)。
+**下一步（接手第一件事）**：执行步骤 1——查 FusedMoE eager vs compile kernel 是否同一。
