@@ -255,3 +255,30 @@ Rust 侧 `moe_seg_parity` 报 `gate/up/act/down ndiff=0` —— 是拿**全零�
 
 **教训**（写进 pitfalls 前先确认修复有效）：抓参照中间量的脚本，
 **必须校验数据非零/非常量再入库**，否则"ndiff=0"可能只是两个全零张量相等。
+
+## 第 6 轮：找到作废的根因并修好抓取
+
+### 根因确认
+`od -A d -t x1 /w/tmp/moe3/c1_gateup.bin` → 92 MB 全是 `00`。
+vLLM 启动时先跑一次**显存 profile**（全零 dummy 前向），我的 `if cap["n"] == 0` 抓到的是那次。
+
+### 修正
+`moe_seg_capture.py`：所有 dump 前加 `nz(t) > 0` 守卫，并打印每次调用的 nz 比例。
+另外确认 `/w/tmp/moe1`（eager 口径）是**真实数据**（`x` nz=0.9994、`y` nz=1.0），
+所以第 3 轮基于它的结论仍然有效 —— 但**那是 eager，不能做 compile 判据**。
+
+### combine 的确切语义（读参照源码）
+`vllm/model_executor/layers/fused_moe/experts/cutlass_moe.py:680`：
+```python
+output.copy_((c3.view(m, num_topk, k) * topk_weights.view(m, num_topk, 1).to(out_dtype)).sum(dim=1))
+```
+- `topk_weights` 来自 `gemma4_routing_function_torch`，返回时**已经是 `.to(torch.float32)`**；
+- 进 combine 时再 `.to(out_dtype)` = **转回 bf16**；
+- 乘积是 bf16×bf16 → `.sum(dim=1)`。
+
+→ 即：**bf16 权重、bf16 乘积、沿 slot 求和**。这与我方 `MOE_BF16_PROD=1` 的口径一致。
+
+⚠️ 但注意：配置里出现了 `'enable_bf16x3_router_gemm': False` 与
+`compilation_config['compile_ranges_endpoints'] = [4096]`，说明 oracle 是 **inductor compile** 模式，
+真实调用路径可能与 eager 的 `gemma4_routing_function_torch` 不同 —— 必须用 compile 抓到的
+`topk_w` 实测确认，不能只看 Python 源码。
