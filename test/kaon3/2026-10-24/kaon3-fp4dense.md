@@ -159,3 +159,43 @@ vLLM 的融合路径按 activation 分叉（`cutlass_moe.py:645`）：
 
 剩下要做的是**逐段抓参照的 c1 / c2 / c3**（patch `run_cutlass_moe_fp4` dump），
 与我们的 gate/up、gelu、down 输出逐位比，定位是哪一段引入 1 ULP。
+
+## 第 4 轮：gate/up/act 逐位 0；combine 的 bf16 乘积是主因
+
+### 抓参照 compile 口径的分段（新工具 `scripts/dev/moe_seg_capture.py`）
+
+compile 下 forward hook 不触发，所以改成 **patch 模块函数**（compile 会照常调用被 patch 的函数）。
+抓 `apply_moe_activation` 的输入/输出（= c1 / c2）、`scaled_fp4_experts_quant` 的输入与输出、
+`run_cutlass_moe_fp4` 的 output（= y）。产物 `/w/tmp/moe3`。
+
+**踩坑**：`IDS=$(cat p02.ids | tr "\n" " ")` 得到的是 **4096 token 的长序列**（不是 24），
+所以 `m*topk = 32768` 行、`a1_sf.bin` 有 900 MB。
+
+### 逐段比对（参照自己的专家输入 + 真实权重，专家 0，4096 行）
+
+| 段 | ndiff | 结论 |
+|---|---|---|
+| gate | **0/2883584** | ✅ 逐位 |
+| up | **0/2883584** | ✅ 逐位 |
+| act（gelu·mul） | **0/2883584** | ✅ 逐位 |
+
+**专家 GEMM + 量化 + gelu 整段全部逐位一致。** 差异只在 down / combine。
+
+### combine 口径：bf16 乘积是主因
+
+参照（`cutlass_moe.py:686`）：
+```python
+output.copy_((c3.view(m, num_topk, k) * topk_weights.view(m, num_topk, 1).to(out_dtype)).sum(dim=1))
+```
+即 **权重先舍 bf16、乘积再舍 bf16**，只有最后沿 topk 的 sum 用 f32。
+
+我们在 `/w/tmp/moe1`（T=24）上加 `MOE_BF16_PROD=1` 实测：
+
+| 口径 | ndiff | max\|d\| | ‖ours‖/‖ref‖ |
+|---|---|---|---|
+| 全 f32（原） | 49347/67584 | 2.5e-1 | **1.0021** |
+| **bf16 权重 + bf16 乘积** | 46055/67584 | 1.25e-1 | **0.9999** |
+
+范数比从 1.0021 修正到 0.9999、max|d| 减半 → **确认是这个口径**，但还没逐位：
+剩下的差异来自**累加顺序**——参照沿 `dim=1`（slot 0→7 顺序）归约，
+我们现在按专家 id 顺序累加。下一轮改成先按 slot 收集、再按 slot 顺序求和。

@@ -95,6 +95,7 @@ fn moe_stage_matches_vllm() {
     }
 
     // ---- 逐专家做 gate/up → gelu·mul → down，再用权重累加 ----
+    let bf16_prod = std::env::var("MOE_BF16_PROD").map(|v| v == "1").unwrap_or(false);
     let mut acc = vec![0f32; t * h];
     let mut per_expert_y: Vec<Vec<f32>> = Vec::new();
     let dstd = st.htod_copy(x.clone()).expect("x");
@@ -135,12 +136,17 @@ fn moe_stage_matches_vllm() {
             let _ = std::fs::write(format!("{dd}/e{eid}.bin"), bits);
         }
         // 累加：只在该专家被选中的 (row, slot) 上加 w·y
+        // `MOE_BF16_PROD=1`：按参照口径 `(c3 * topk_weights.to(bf16)).sum(dim=1)` ——
+        // **权重与乘积都按 bf16 舍入**，只有最终 sum 用 f32 累加。
         for r in 0..t {
             for j in 0..k {
                 if ids[r * k + j] == eid as i32 {
                     let ww = w[r * k + j];
+                    let wb = if bf16_prod { f32::from(bf16::from_f32(ww)) } else { ww };
                     for c in 0..h {
-                        acc[r * h + c] += ww * yv[r * h + c];
+                        let p = wb * yv[r * h + c];
+                        let p = if bf16_prod { f32::from(bf16::from_f32(p)) } else { p };
+                        acc[r * h + c] += p;
                     }
                 }
             }
@@ -158,7 +164,7 @@ fn moe_stage_matches_vllm() {
             maxd = maxd.max((ours - r).abs());
         }
     }
-    println!("MOE_STAGE [T={t} H={h} E={e} K={k}] 选中专家 {} 个 | ndiff={ndiff}/{} max|d|={maxd:.3e}", per_expert_y.len(), t * h);
+    println!("MOE_STAGE [T={t} H={h} E={e} K={k}] bf16_prod={bf16_prod} 选中专家 {} 个 | ndiff={ndiff}/{} max|d|={maxd:.3e}", per_expert_y.len(), t * h);
     let oursv: Vec<f32> = (0..8).map(|i| f32::from(bf16::from_f32(acc[i]))).collect();
     let refv: Vec<f32> = (0..8).map(|i| f32::from(refy[i])).collect();
     println!("   ours[0..8] = {:?}", oursv);
