@@ -328,3 +328,13 @@ fp8 fast accum 改累加精度 → 极可能是 qkv 13/196608 的根源。待查
 → 要么该 shape cuBLASLt 的 algo 不受 fast_accum 影响，要么属性被 algo 选择覆盖/未采纳。
 qkv 逐位验证需造 vLLM 真实 qkv_proj 输出做隔离对拍（d17qkv 旧数据已删）。
 下一步：attn_io 加 hook dump vLLM `qkv_proj` 输出（split 前的合并 [T,8192]），与我方合并 qkv 比。
+
+### 第 13 轮：真实 qkv cuBLASLt vs FlashInfer bmm_fp8（同输入同权重）
+造数据坑（退化检查救）：`W.t().contiguous()` 把列主序又转回行主序→布局错→ref rel=1.065 假。
+去掉 contiguous（W 行主序[n,k] → .t() 即列主序[k,n]）后 ref rel(→f32 gt)=1.6e-3，参照可信。
+```
+T=22  FP8_FAST_ACCUM=1: 11/180224  max|d|=0.25  rel=4.4e-5  分段 q=3 k=0 v=8
+T=22  FP8_FAST_ACCUM=0: 11/180224  (同)
+```
+→ 我方 cuBLASLt 与 FlashInfer bmm_fp8 **仅差 11 个末位**（同库同配置，cuBLASLt algo 微观选择不同）。
+FAST_ACCUM 开/关无差（印证第 13 轮 A/B）。下一步：按用户 31/32/33/63/64/65 跑 qkv T-sweep 看边界/单调。
