@@ -338,9 +338,12 @@ impl ArchProfile {
     /// `GQA_PREFILL_CFG` 环境变量只做覆盖（微基准 / 对拍扫变体）。
     pub fn gqa_prefill_cfg_for(arch: Arch) -> i32 {
         match arch {
-            Arch::Sm100 => 3464,  // 第 4 轮：SFU ex2.approx（464 + FEXP）6 K 1650 → 1556 µs
-            Arch::Sm90 => 3464,
-            Arch::Sm8x => 0,  // 3090 99 KB 装不下 tile 64（3464 需 101 KB），v5 回退；待单独量 3432
+            // 464（精确 exp2f，去掉 FEXP）：FEXP=SFU ex2.approx 近似指数与 vLLM 差 1279/147456（max|d|=0.0625），
+            // 换精确指数降到 2/147456（loop kaon3-layer1 第 16 轮，与 tile/smem 无关，纯指数口径）。
+            // 原 3464（+FEXP）为速度（6 K 1650→1556µs，~6%），改精确后需过两卡 bench 门禁确认损失可接受。
+            Arch::Sm100 => 464,
+            Arch::Sm90 => 464,
+            Arch::Sm8x => 0,  // 3090 99 KB 装不下 tile 64（464 需 101 KB），v5 回退；待单独量 432
         }
     }
 

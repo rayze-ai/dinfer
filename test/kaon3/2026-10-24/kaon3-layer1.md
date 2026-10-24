@@ -425,3 +425,9 @@ cfg=432/32 (精确指数其他 NW/TILE):          2
 **修法**：`ArchProfile::gqa_prefill_cfg_for(Sm100)` 3464→464（去 FEXP）→ attention 差 1279→2。
 代价：FEXP 为速度（arch.rs 注释 6K 1650→1556µs），去掉有性能损失，需两卡门禁权衡。
 残留 2 个：精确指数下仍差 2（max|d|=9.8e-4），属 tile 累加序真末位，极小。
+
+### 第 16 轮：改 cfg 3464→464 后端到端仍 0.0086（attention 也非主残差）
+arch.rs gqa_prefill_cfg_for(Sm100/Sm90) 3464→464。L0 24 用例端到端 mean_common_d 仍 0.0086。
+→ attention（同 qkv）非端到端主残差来源。**主残差几乎全在未攻克的 o_proj/gate_up/down（fp8 GEMM，TABLE 未命中）+ MoE(NVFP4)**。
+修正：gqa_vllm_io_parity 测试硬编码 GQA_PREFILL_CFG 默认 -1（慢路径），改默认 464 以测生产 v6 精确指数路径。
+下一步：o_proj(2816×4096)/gate_up(4224×2816)/down(2816×2112) 逐个扫 algo 对齐 FlashInfer（qkv 同法）。
