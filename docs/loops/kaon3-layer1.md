@@ -379,3 +379,36 @@ input_scale  = max(q,k,v 的 input_scale)
 所以用哪个都行。
 
 **下一步**：把这个 requantize 做进 Rust 的 `weights` 加载，前向改成一次 N=8192 的 GEMM 再切三段。
+
+## 第 9b 轮（完成）：merged qkv 落地 + 1 层端到端实测
+
+**解卡点**：L0 是 **sliding 层**（full 层只有 5/11/17/23/29），`k_eq_v_at(0)=false` → 独立 q/k/v →
+合并 N=4096+2048+2048=8192。第 9 轮"L0 是不是 k_eq_v"是伪命题。
+
+**落地**：
+- `weights.rs::load_fp8_group_merged`：重量化（`requant_part_to_max`，与 `load_fp8_group` 同口径）后把
+  q/k/v 字节拼成单块 `[8192,2816]`，返回 `(QWeight, widths)`。
+- `layer.rs`：`Attention` 改成单个 `qkv: QLinear` + `qkv_widths`；前向一次 `forward(_preq)` 到
+  `sc.qkv[tokens,8192]`，再 `copy2d` 按列段切 q/k/v；k_eq_v 的 full 层只合并 q+k、v 复用 k 段。
+- 5090 容器 CUDA_ARCHS=120 build 过。
+
+**实测（24 用例，RMSNORM_MODE=2，1 层 oracle）**：
+```
+POOLED mean_common_d=0.0083  dnll=-0.0006  (decisive=0)
+```
+→ **仍未逐位**。qkv kernel 级已对（第 7 轮 13/196608），所以残差只能在**注意力块内**：
+`head_rmsnorm(q/k/v) → rope → gqa → o_proj`。
+
+**关键认识**：`seg_l0.py` 的所有"逐位相同"段都是**从我们自己的 `post_attn_norm` 往后**算的
+（`our_add = ours("post_attn_norm") + emb`），**从未独立验证 attention 的输出 `o`**。
+所以 norm/FFN 的 0/67584 只证明"attention 之后的 norm/FFN 数学自洽"，**不覆盖 attention 块本身**。
+
+## 卡点（下次接手）：attention 块内无 compile 口径参照
+
+`kaon3_vllm_sublayer.py` 的子模块 hook 跑 `enforce_eager=True`，**不是 compile 口径**
+（知识库 `segment-isolation.md` §3：eager 抓的不能当 compile 判据）。
+要定位 attention 块内第一处偏，需要**compile 口径**下的 `o`（o_proj 输出）参照。候选路径：
+1. 从 oracle 容器的 `computation_graph.py`（已有）里把 attention 子图单独 eval（像 `seg_l0.py` 那样
+   replay，但要含 flashinfer attention + o_proj），喂参照的 qkv 量化字节，产 compile 口径的 `o`；
+2. 或截到 1 层后用 `--hf-overrides` 不同配置逼出 o_proj 的中间量（难）。
+推荐路径 1：扩 `seg_l0.py` 加 attention 段 replay，与我们 dump 的 `o`（需在 layer.rs 加 o 的 sub_dump）比。
