@@ -238,3 +238,37 @@ L0 剩下的量只有三类 GEMM，全部是 fp8：
 下一步：验证 fp8 量化口径 + `flashinfer_scaled_fp8_mm` 的累加顺序。
 图里是 `flashinfer_scaled_fp8_mm`（`vllm/utils/flashinfer.py:903`），
 我们走的是 cuBLASLt 或其他路径 —— **这可能是最后一处差异**。
+
+## 第 5 轮：差异定位到 fp8 GEMM（qkv_proj）
+
+### 隔离实验
+
+用参照的**同一份 `input_norm` + 同一份 fp8 权重**，在容器里调 `flashinfer_scaled_fp8_mm` 复现 `q_proj`，
+与我们 dump 的 `q_proj_raw` 逐位比：
+
+```
+形状  (24,4096) vs (24,4096)          ✅
+‖ref‖ 7559.7   ‖ours‖ 7563.9          （比值 1.00056）
+不同   88911 / 98304                  ❌
+max|d| 4.0
+```
+
+**量化口径已排除**：`x * recip` 与 `x / scale` 逐位相同（0/67584 不同），
+说明量化本身没问题。
+
+### 关键结构发现（从 FX 图读出）
+
+参照的 qkv 是**一个合并 GEMM**：`[2816] × [2816, 8192]`（图里 `qkv_proj` 单个权重，
+`flashinfer_scaled_fp8_mm` 一次调用）。而 checkpoint 里存的是分开的
+`q_proj [4096,2816]` / `k_proj [2048,2816]` / `v_proj [2048,2816]`。
+三者的 `input_scale` **完全相同**（都是 0.59375），所以 vLLM 能把它们拼成一个 GEMM。
+
+我们目前是 **q/k/v 三次独立 GEMM**。这会改变 fp8 的 tiling 与累加顺序。
+
+### 现状与下一步
+
+- 即使用参照自己的单次 `flashinfer_scaled_fp8_mm` 复现，与我们仍差 88911/98304
+  → **我们的 fp8 GEMM 与 FlashInfer 不等价**（不是形状问题）。
+- 仓库里已有 `crates/kernels/tests/fp8_flashinfer_parity.rs`（专为逐位对拍 FlashInfer 写的），
+  但它依赖的数据 `test/kaon3/d17b` 在清理 5090 时被删了，正在重新生成。
+- 重跑该测试即可判定：是我们的 fp8 GEMM 实现有偏差，还是 q/k/v 三次 GEMM vs 一次合并 GEMM 的差异。
