@@ -170,3 +170,16 @@ ref[0,:4]=[-0.203,0.406,-0.406,-0.016]  ours[0,:4]=[同]  ← 样本完全一致
 2. 把**同一份** vLLM q/k/v 喂我们的 Rust gqa kernel，比 vLLM attention 的真实输出。
 实现：compile 口径起 offline LLM（非 enforce_eager），monkeypatch `unified_attention_with_output`
 （graph-break custom op，compile 下可命中）dump q/k/v/output。现有 Rust `gqa_window_parity` 壳可改读文件。
+
+### 第 12 轮第 1 步：进 attention 前 q/k/v 已与 vLLM 不逐位（关键）
+抓 vLLM compile 真实 attention 输入（monkeypatch `unified_attention_with_output`），比我方 dump：
+```
+q(fp8)   ❌ 18638/90112  rel=2.16e-2   ‖ref‖=307.10 ‖our‖=306.81
+k(bf16)  ❌ 34847/45056  rel=6.4e-3    ‖ref‖=25.91  ‖our‖=25.92
+v(bf16)  ❌ 36910/45056  rel=8.7e-3    ‖ref‖=212.27 ‖our‖=212.27
+```
+范数都几乎相同、max|d| 是 bf16/fp8 末位级 → **非结构错，是末位漂移**。
+**推翻之前"q_norm/rope 逐位"的乐观**：那些"逐位"是我方 op 作用在**我方自己**输入上自洽；
+但我方输入本身从 qkv GEMM（cuBLASLt vs FlashInfer bmm_fp8，13 元素差）起就与 vLLM 微漂，
+一路带到 attention 入口。→ 印证"各段 fp8/bf16 末位累积"，非单点 bug。
+第 2 步：把 vLLM 自己的 q/k/v 喂我们 Rust gqa，比 vLLM 输出（隔离 attention kernel 本身）。
