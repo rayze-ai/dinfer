@@ -441,3 +441,22 @@ TABLE未命中走fallback）+ MoE(NVFP4)。
 停止条件：o_proj/gate_up/down 各扫 algo 对齐 FlashInfer（nd=0 或仅末位），填 TABLE，端到端 mean_common_d 显著下降。
 方法（qkv 同法）：① fi_qkv_ref 风格造各 shape 的 FlashInfer bmm_fp8 ref；② Rust 扫 algo 找逐位的；③ 填 TABLE。
 shapes：o_proj(n=2816,k=4096) gate_up(n=4224,k=2816) down(n=2112,k=2816)。注意 TABLE 匹配 (n,k) 别写反。
+
+## TODO（attention 残 2 个差，用户 2026-10-25 要求留档）
+- 状态：cfg=464 下 T=36 仍差 2/147456（row=6/h5/d14、row=32/h13/d125），各 1 bf16 ULP。
+- 已排除：attn_mode 0/1/2/3 同样 2 个；p_fp8=0 差 10 万（vLLM 量化 P，pq8 对）；FEXP 已去。
+- fp64 判决：row=6 我方比 vLLM 更准、row=32 vLLM 略准，均 ±1 ULP，真值落 bf16 格点中点 → 定性 bf16 分辨率。
+- 待消（低优先）：逐指令复刻 vLLM trtllm PV 累加舍入侧；无数值收益（我方已同等/更准），仅为位相同。
+- 结论：非系统性偏差，不传染下游（o_proj 等吃同残差流仍逐位，已证）。
+
+## loop：kaon3-moe（攻克 L0 MoE 与 vLLM 对齐）
+- 背景：L0 所有 fp8 路径 + attention 已对齐 FlashInfer，但端到端 mean_common_d 仍 0.0086
+  → 主残差锁定 **MoE（128 专家，NVFP4 量化，不走 fp8 cuBLASLt）**，从未对过 vLLM 的 MoE 输出。
+- 结构：L0 FFN = dense MLP + MoE 相加；MoE = 路由(router bf16 GEMM + topk) → 选中专家 gate/up(NVFP4) → act → down(NVFP4) → 加权和。
+- 环境：5090 容器 kaon-oracle-1(oracle,GPU1) / kaon-attnio(抓 vLLM 真值,GPU0)；probe sub-dump 有 moe_* / router_* / moe_y。
+- 停止条件（机器判定）：
+  1. 隔离 MoE 输出（moe_y）vs vLLM 真实 MoE 输出逐位/末位比；
+  2. 若系统性偏差 → 定位口径（路由 topk / NVFP4 解包 scale / 专家累加序 / per_expert_scale 折法）按 qkv/attention 同法修；
+  3. 若末位 → fp64 三方判决定性，不搪塞。
+- 观察方法：抓 vLLM compile 口径的 MoE 输出（monkeypatch MoERunner / Gemma4MoE.forward），比我方 moe_y dump。
+- 上限：每轮 ≤10 次迭代；先定位"差在路由还是专家 GEMM"再深入。
