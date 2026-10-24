@@ -122,3 +122,33 @@ alpha= 0.50  y= 32.0000   y/alpha= 64.0000
 | scale 的 dtype 必须 **`float8_e4m3fn`**（不能 uint8） | `Inconsistency of torch::stable::Tensor type:scale_a` |
 | `out_dtype` 只支持 **bf16 / fp16** | `Unsupported output data type of nvfp4 mm sm120 (Float)` |
 | `scaled_fp4_quant` 的 `padded_n` 是**输入列数**（=k） | `padded_n must be >= n` |
+
+## 复刻量化算子前，先把"参照用哪个 kernel"查清楚（2026-10-24）
+
+NVFP4 这条线花了 17 轮，最大的时间浪费来自**没先确认参照走哪个 kernel**就去调公式。
+
+**应该第一件事就做的**：
+```python
+# 在参照容器里直接问
+from vllm.model_executor.layers.fused_moe.experts import cutlass_moe as cm
+cm.run_cutlass_moe_fp4          # hook 它，看真实入参形状
+# 或看日志：grep "Using .* NvFp4 MoE backend"  → VLLM_CUTLASS
+#            grep "Using MoE.*Modular"          → MoEPrepareAndFinalizeNoDPEPModular
+```
+拿到"参照是 cutlass 融合 kernel"这个事实后，才知道**自己在跟什么比**，
+以及"要不要照它的归约结构复刻"还是"直接调用它"。
+
+**本轮在这件事上得到的确定结论**：
+- 参照的 MoE 是**一个融合 kernel**（gate/up/SwiGLU/down/combine 全在里面），
+  Python 层**没有逐专家的 `nn.Module`** → 单专家 hook 抓不到（试过，一个都没挂上）；
+- `ops.cutlass_fp4_moe_mm` 是 **torch op**（`_C_stable_libtorch.abi3.so`，`TORCH_LIBRARY` 注册，
+  入参 `at::Tensor`），**不能像 cuBLASLt 那样从 Rust 直接链接**。
+
+**判据层面的收获**（可直接复用）：
+
+| 现象 | 含义 |
+|---|---|
+| `ndiff` 接近全量、`max|d|` = 一个 bf16 ulp | 输出精度/舍入位置不对（如漏了 `to(bf16)`） |
+| `ndiff` 全量、`max|d|` 大一个量级 | smem/寄存器层面的布局错（如每 warp 共享了同一份 smem） |
+| 量级比 ≈ 1.00x 但逐元素不同 | 语义对、归约次序不同 |
+| 逐行相对误差是**同一常数** + corr 高 | 乘子错了一个固定因子（最好修） |
