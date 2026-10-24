@@ -73,3 +73,10 @@ POOLED cases=24 rows=494 decisive=0 mean_common_d=0.0083 dnll=-0.0006
 - kernel 级 merged qkv 已证明对（第 7 轮 13/196608）；端到端残差必来自 **下游未验证的 GEMM**：
   `o_proj`（[2816,4096]）/ attention(gqa) / MoE 专家 GEMM —— 第 4 轮表里全标"未验证"。
 - 下一步：逐段 dump L0（`SUB_LAYER`）与 `seg_l0.py` 容器复现比，定位 qkv 之后第一处偏。
+
+### 第 10 轮逐段验证（扩 seg_l0.py，给定我方 *_proj_raw 输入单测 op）
+```
+q_norm   ✅ 0/90112   k_norm ✅ 0/45056   v_norm ✅ 0/45056   (RMSNORM_MODE=2)
+```
+→ 逐头 RMSNorm（q/k 带权重、v 无权重）**实现逐位正确**。第 3 段清掉。
+下一个：**rope**（neox，`rotary_embedding/base.py forward_static`）。

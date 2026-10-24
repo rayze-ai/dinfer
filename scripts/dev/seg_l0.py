@@ -36,6 +36,12 @@ def ours(d, name, shape=None):
     return torch.from_numpy(v).cuda().reshape(n, H)
 
 
+def ours_w(d, name, width):
+    """读我们 dump 的 [T, width] bin（width ≠ H 的注意力中间量）。"""
+    v = np.fromfile(f"{d}/{name}.bin", dtype=np.float32)
+    return torch.from_numpy(v).cuda().reshape(-1, width)
+
+
 def cmp(tag, ref, our):
     if ref.shape != our.shape:
         print(f"{tag:22s} 形状不同 ref{tuple(ref.shape)} ours{tuple(our.shape)}")
@@ -56,6 +62,24 @@ def main():
     # ---- 1. input_norm ----
     inn = rms_norm(emb, W["input_layernorm.weight"], 1e-6)
     cmp("input_norm", inn, ours(d, "input_norm").bfloat16())
+
+    # ---- 1b. 注意力块逐段（用户 2026-10-24：按顺序一个个打）----
+    # 结构（gemma4.py:527-560）：qkv.split → q/k/v 各 unflatten 到 head_dim → q_norm/k_norm(带权重)
+    #   / v_norm(无权重) → rope(q,k) → attn → o_proj。每段用我方对应 *_raw.bin 当输入，单测该 op。
+    D = 256          # L0 sliding head_dim
+    NH, NKV = 16, 8  # L0 num_heads / num_kv_heads
+    def head_rms(raw, wname, rows):
+        x = raw.reshape(-1, rows, D).bfloat16()
+        w = W[wname].bfloat16() if wname else None
+        y = rms_norm(x, w, 1e-6)
+        return y.reshape(-1, rows * D)
+    # q_norm：输入我方 q_proj_raw[T,4096]，vLLM rms_norm(head_dim, 带权重)
+    cmp("q_norm", head_rms(ours_w(d, "q_proj_raw", NH * D), "self_attn.q_norm.weight", NH),
+        ours_w(d, "q_norm", NH * D).bfloat16())
+    cmp("k_norm", head_rms(ours_w(d, "k_proj_raw", NKV * D), "self_attn.k_norm.weight", NKV),
+        ours_w(d, "k_norm", NKV * D).bfloat16())
+    cmp("v_norm", head_rms(ours_w(d, "v_proj_raw", NKV * D), None, NKV),
+        ours_w(d, "v_norm", NKV * D).bfloat16())
 
     # ---- 2. FFN 支路（与 attention 无关，先做能做的）----
     # 需要 add（= post_attn_norm(o) + embed），但我们没有参照的 o_proj，
