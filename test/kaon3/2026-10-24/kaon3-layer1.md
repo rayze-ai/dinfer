@@ -122,3 +122,9 @@ bf16 ground truth ‖gt‖=734   rel(ours→gt)=1.1e-2 ✓   rel(我写的FlashI
   教训（用户 2026-10-24 两条）：① 结果先做退化检查（范数/样本），差点把对的报错；
   ② 读 vLLM 要区分 eager/compile：`flashinfer_scaled_fp8_mm` eager 直调 ≠ compile 图的 `bmm_fp8` op。
 - **L0 逐段结论**：input_norm✅ qkv✅ q/k/v_norm✅ rope✅ o_proj✅ → **只剩 attention(gqa) 未验证，主残差在它**。
+
+### 依赖顺序修正（用户 2026-10-24）
+数据流 `rope → fp8 KV 量化 → 写 KV → attention → o_proj`。o_proj 在 attention 之后，
+前面没对齐前拿我方 attn_out 验 o_proj 无意义。**o_proj 状态改回 △（只排除了大错，未逐位）**。
+按依赖顺序，下一个节点是 rope 之后的 **fp8 KV 往返量化（4a）→ attention（gqa）**，解完再回头逐位验 o_proj。
+逐位已确认：input_norm / q/k/v_norm / rope。kernel 级：qkv(13)。
