@@ -338,3 +338,15 @@ T=22  FP8_FAST_ACCUM=0: 11/180224  (同)
 ```
 → 我方 cuBLASLt 与 FlashInfer bmm_fp8 **仅差 11 个末位**（同库同配置，cuBLASLt algo 微观选择不同）。
 FAST_ACCUM 开/关无差（印证第 13 轮 A/B）。下一步：按用户 31/32/33/63/64/65 跑 qkv T-sweep 看边界/单调。
+
+### 第 13 轮 qkv T-sweep（31/32/33/63/64/65）vs attention 对比（决定性）
+```
+qkv:  T=31:15  32:17  33:18  63:32  64:32  65:33   rel≈4.3e-5  （平滑增，无 32/64 跳变）
+attn: T=31:0   32:0   33:145 34:520 ...              （32 处硬跳变）
+```
+**两段残差性质不同且都非 bug**：
+- qkv：同库（都 cuBLASLt）不同 algo 选择 → 均匀末位，差异 ∝ T，无 tile 边界效应，rel 稳定 4e-5。
+- attn：不同 tile 调度 → 仅跨 tile（>32）才差，32 边界跳变。
+**对"接 flashinfer"的结论**：qkv 已对齐 FlashInfer 全部可配置口径（compute/scale/trans/scale_ptr/fast_accum）
+仍差 11-33 末位，因差异在 **cuBLASLt 对该 shape 的 algo 内部选择**（非配置可控）。
+"接" ≠ 逐位；FlashInfer 底层同是 cublasLtMatmul，不是换库。要逐位须锁定同一 algo（algo 扫描）或链接其 JIT 产物。

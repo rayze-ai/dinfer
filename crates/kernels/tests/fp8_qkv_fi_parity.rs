@@ -9,15 +9,18 @@ fn qkv_cublaslt_vs_flashinfer() {
     let dir = std::env::var("FIQKV_DIR").unwrap_or_else(|_| "/w/fiqkv".into());
     let meta: Vec<f32> = std::fs::read(format!("{dir}/meta.bin")).unwrap()
         .chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
-    let (a_scale, w_scale, t) = (meta[0], meta[1], meta[2] as usize);
+    let (a_scale, w_scale, tmax) = (meta[0], meta[1], meta[2] as usize);
+    // T 覆盖：ref 造了 tmax 行，这里只取前 t 行（qkv 每行独立）。默认 = tmax。
+    let t: usize = std::env::var("T").ok().and_then(|v| v.parse().ok()).unwrap_or(tmax);
     let (n, k) = (8192usize, 2816usize);
-    let a = std::fs::read(format!("{dir}/A_fp8.bin")).unwrap();       // [t,k] u8
+    let a_all = std::fs::read(format!("{dir}/A_fp8.bin")).unwrap();   // [tmax,k] u8
     let w = std::fs::read(format!("{dir}/W_qkv_fp8.bin")).unwrap();   // [n,k] u8
-    let rb: Vec<f32> = std::fs::read(format!("{dir}/ref_out.bin")).unwrap()
+    let rb_all: Vec<f32> = std::fs::read(format!("{dir}/ref_out.bin")).unwrap()
         .chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
-    assert_eq!(a.len(), t * k, "A size");
+    assert!(t <= tmax, "T {t} > ref tmax {tmax}");
+    let a = a_all[..t * k].to_vec();
+    let rb = rb_all[..t * n].to_vec();
     assert_eq!(w.len(), n * k, "W size");
-    assert_eq!(rb.len(), t * n, "ref size");
 
     let dev = Device::new(0).unwrap();
     let st = dev.default_stream();

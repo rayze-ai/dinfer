@@ -20,8 +20,12 @@ H = 2816
 
 # 1) 真实 input_norm（我方 dump，f32）→ bf16 → fp8（input_scale=0.59375，per-tensor）
 inn = np.fromfile(f"{dd}/input_norm.bin", dtype=np.float32)
-T = inn.size // H
-x = torch.from_numpy(inn).cuda().reshape(T, H).bfloat16()
+T0 = inn.size // H
+x0 = torch.from_numpy(inn).cuda().reshape(T0, H).bfloat16()
+# 平铺到 MAXT 行（qkv 纯 GEMM 每行独立，ref 前 T 行对任意 T 有效；用真实行平铺保数值真实）
+T = int(os.environ.get("MAXT", str(T0)))
+reps = (T + T0 - 1) // T0
+x = x0.repeat(reps, 1)[:T].contiguous()
 a_scale = torch.tensor([0.59375], dtype=torch.float32, device="cuda")
 A = (x.float() / a_scale).clamp(-448, 448).to(torch.float8_e4m3fn)  # [T,2816]
 
