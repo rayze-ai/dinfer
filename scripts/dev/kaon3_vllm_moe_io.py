@@ -23,26 +23,29 @@ grabbed = {}
 
 # patch MoERunner.forward（moe_forward op 背后的 eager 实现，moe_runner.py:714 self._forward_entry 所在）。
 # 不碰 op 注册，无递归；graph-break op 内部 eager 跑，compile 下仍命中。
-# patch MoERunner._forward_impl（moe_forward op 最终调的实例方法，moe_runner.py:830）。
-# 实例调用动态查类方法 → 一定命中；op 背后 eager 跑，compile 下仍走它。
 import vllm.model_executor.layers.fused_moe.runner.moe_runner as mr
-_orig_impl = mr.MoERunner._forward_impl
-def _patched_impl(self, hidden_states, router_logits, *a, **k):
-    outp = _orig_impl(self, hidden_states, router_logits, *a, **k)
-    if GEN["on"] and "l0" not in grabbed and hidden_states.shape[0] <= MAX_T:
-        def sv(nm, t):
-            t.detach().float().cpu().numpy().tofile(f"{out}/vllm_moe_{nm}.bin")
-            return tuple(t.shape), str(t.dtype)
-        grabbed["l0"] = {"hidden": sv("hidden", hidden_states), "logits": sv("logits", router_logits), "out": sv("out", outp)}
-        print("[moe_io] L0 抓到:", grabbed["l0"], flush=True)
-    return outp
-mr.MoERunner._forward_impl = _patched_impl
-print("[moe_io] patched MoERunner._forward_impl", flush=True)
+
+def install():
+    # compile 图调 torch.ops.vllm.moe_forward，按当前注册的 CUDA impl dispatch。
+    # 重注册 impl（调模块函数 mr._moe_forward，不是调 op → 无递归），抓输入输出。
+    _orig = mr._moe_forward
+    @torch.library.impl("vllm::moe_forward", "cuda")
+    def _impl(hidden_states, router_logits, shared_experts_input, input_ids, layer_name, hidden_dim_unpadded):
+        outp = _orig(hidden_states, router_logits, shared_experts_input, input_ids, layer_name, hidden_dim_unpadded)
+        if GEN["on"] and "l0" not in grabbed and hidden_states.shape[0] <= MAX_T:
+            def sv(nm, t):
+                t.detach().float().cpu().numpy().tofile(f"{out}/vllm_moe_{nm}.bin")
+                return tuple(t.shape), str(t.dtype)
+            grabbed["l0"] = {"hidden": sv("hidden", hidden_states), "logits": sv("logits", router_logits), "out": sv("out", outp)}
+            print("[moe_io] L0 抓到:", grabbed["l0"], flush=True)
+        return outp
+    print("[moe_io] re-registered vllm::moe_forward CUDA impl", flush=True)
 
 llm = LLM(model=model_dir, tensor_parallel_size=1, gpu_memory_utilization=0.85,
           dtype="auto", max_model_len=16384, enable_prefix_caching=False, block_size=32,
           max_num_seqs=64, max_num_batched_tokens=4096,
           hf_overrides={"text_config": {"num_hidden_layers": 1}})
+install()
 grabbed.clear(); GEN["on"] = True
 llm.generate(prompts=[{"prompt_token_ids": ids}],
              sampling_params=SamplingParams(max_tokens=1, temperature=0, logprobs=5))
