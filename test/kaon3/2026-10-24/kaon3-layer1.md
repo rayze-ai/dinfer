@@ -193,3 +193,12 @@ p_fp8=1  rel=2.22e-2  max|d|=0.97  ‖want‖=255.13 ‖got‖=255.57
 **待判**：2.2% 是"我方 kernel 错"还是"fp8 attention 固有噪声"（我方/vLLM 各离 fp32 ~1-2%、方向不同）。
 对照实验：同一份 vLLM q/k/v 做 fp32 softmax 当地面真值，看 vLLM output 离它多远。
 注意：我方喂 kernel 时对 k/v 做了 CPU e4m3 往返（复刻 vLLM 写 fp8 cache），该往返近似可能引入额外差，待核。
+
+### 第 12 轮对照：vLLM output 离 fp32 只有 0.65%，我方离 vLLM 2.2%
+```
+vLLM_out vs fp32-gt:  rel=6.48e-3   ← vLLM 贴 fp32（fp8 固有噪声量级）
+我方 gqa vs vLLM_out: rel=2.2e-2    ← 我方离 vLLM 3 倍远
+```
+→ **我方 gqa kernel 确与 vLLM 算得不一样**，非单纯 fp8 噪声，是真口径差。
+待排除干扰：我方喂 kernel 时 k/v 走的是 **CPU e4m3 近似往返**（`f32_e4m3_rt`），该近似本身可能有误差。
+**决定性判据**：我方 gqa 输出直接 vs fp32 gt —— 若也 ~0.6% 则只是舍入方向差；若 ~2% 则 kernel 真错。
