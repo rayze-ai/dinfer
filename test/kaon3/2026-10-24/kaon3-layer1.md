@@ -245,3 +245,15 @@ p08(36 tok) p_fp8=1: 1279/147456  rel=5.3e-4  ← 接近非逐位（1279 个元�
 p01(22) p_fp8=1: 0/90112  rel=0  （真实 cache k/v）
 ```
 p08 复测中。
+
+### 第 12 轮两输入定论（真实 fp8 cache k/v，退化检查过）
+抓 vLLM 写 cache 后的真实 fp8 k/v（非 bf16 重建），退化检查 ‖k_bf16‖≈‖k_cache‖ max|d|=0.055：
+```
+p01 T=22 p_fp8=1: 0/90112     rel=0
+p08 T=36 p_fp8=1: 1279/147456 rel=5.3e-4  （与 bf16 重建版完全相同的 1279）
+```
+**真实 cache k/v 与 bf16 重建给出相同的 1279 → 残差不在 k/v 输入，输入已对齐。**
+退化检查又救一次：p08 vLLM output 第 36-39 行是 **padding 垃圾**（范数 1500-2600 vs 正常 50），
+T=40 时 want 范数爆到 4400、rel=0.997 假阳；截 T=36 真实 token 后恢复 rel=5.3e-4。
+**两输入定论**：我方 gqa 与 vLLM attention **rel~5e-4 极接近，非严格逐位**（p01 的 0 是偶然）。
+剩 1279 待查：attention kernel 口径差，或 q 侧（fp8 值但 vLLM 内部还有 q descale/bmm1_scale）未对齐。
