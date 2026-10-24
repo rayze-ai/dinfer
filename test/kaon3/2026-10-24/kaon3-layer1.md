@@ -128,3 +128,15 @@ bf16 ground truth ‖gt‖=734   rel(ours→gt)=1.1e-2 ✓   rel(我写的FlashI
 前面没对齐前拿我方 attn_out 验 o_proj 无意义。**o_proj 状态改回 △（只排除了大错，未逐位）**。
 按依赖顺序，下一个节点是 rope 之后的 **fp8 KV 往返量化（4a）→ attention（gqa）**，解完再回头逐位验 o_proj。
 逐位已确认：input_norm / q/k/v_norm / rope。kernel 级：qkv(13)。
+
+### 第 11 轮：attention 输入 dtype（compile 图读出）
+`unified_attention_with_output(query_2, key_2, value, ...)` 的输入 dtype：
+```
+query_2 = f8e4m3fn[s59,16,256]   # q 量化 fp8：to_f32 → ×(1/q_scale) → clamp(±448) → fp8
+key_2   = bf16[s59,8,256]        # k 进 attention 仍 bf16
+value   = bf16[s59,8,256]        # v 进 attention 仍 bf16
+```
+**与我们代码的差异**：`layer.rs:761-770` 的 4a 在 `kv_fp8` 时把 **q/k/v 三个都** fp8 往返；
+vLLM compile 图只量化 **q**，k/v 以 **bf16** 交给 attention op，fp8 KV 量化在 **attention kernel 内部**
+用 k_scale/v_scale 做。**疑点**：我们 kernel 外预量化 k/v 与 vLLM kernel 内量化是否等价？待验。
+下一步：读 attention 后端源码（graph-break 外 op，图里看不到内部），确认 k/v 在 kernel 内的处理。
