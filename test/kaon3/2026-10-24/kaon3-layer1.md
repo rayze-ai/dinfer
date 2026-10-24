@@ -63,3 +63,13 @@ L0 有独立 q/k/v → 合并 N=4096+2048+2048=8192。第 9 轮"L0 是不是 k_e
 - 本机 cargo check：kaon3 零错误；5090 容器 CUDA_ARCHS=120 build 过。
 
 待测：1 层 oracle 端到端 `|Δlp|` / `ΔNLL`（判据 `decisive==0` → 看 mean_common_d 与 dnll）。
+
+### 第 9b 轮结果：1 层端到端（24 用例，merged qkv，RMSNORM_MODE=2）
+```
+POOLED cases=24 rows=494 decisive=0 mean_common_d=0.0083 dnll=-0.0006
+```
+- `decisive=0` → 判据看 `mean_common_d` 与 `dnll`。pooled `dnll≈0`（每例 ±1.8 相消），
+  但 **`mean_common_d=0.0083 ≠ 0`** → **仍未逐位**。
+- kernel 级 merged qkv 已证明对（第 7 轮 13/196608）；端到端残差必来自 **下游未验证的 GEMM**：
+  `o_proj`（[2816,4096]）/ attention(gqa) / MoE 专家 GEMM —— 第 4 轮表里全标"未验证"。
+- 下一步：逐段 dump L0（`SUB_LAYER`）与 `seg_l0.py` 容器复现比，定位 qkv 之后第一处偏。
