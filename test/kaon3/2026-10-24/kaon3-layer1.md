@@ -91,3 +91,12 @@ q_rope(我kernel口径)      ✅ 0/90112                      # bf16表 cast fp3
 - **根因：rope 这步 vLLM 全程 bf16 乘加，我们 cast 到 fp32 算**。差 15843 个元素、max|d|=0.0625。
   与 norm 相反：norm vLLM 先舍 bf16（我们也舍），rope vLLM 不升 fp32（我们却升了）。
 - 修法：rope kernel 改成 bf16 乘加（`layer.rs:397-398` 注释说"cast fp32 做乘加"就是这里）。
+
+### 第 10 轮 rope 修复（验证通过）
+`rope.cu:36-41` 改成**逐 op 舍 bf16**（每个 x·cos / x·sin 先 `to_bf16` 再相加减），复现 vLLM
+`ApplyRotaryEmb(enable_fp32_compute=False)` 的 bf16 乘加。重 build 后：
+```
+q_rope ✅ 0/90112   k_rope ✅ 0/45056   (RMSNORM_MODE=2)
+```
+rope 段**逐位对齐**。注意：rope.cu 是公共件，qwen3/glm/kimik3 共用，需回归（vLLM 全系默认 bf16 rope）。
+下一段：**attention(gqa) + o_proj**。

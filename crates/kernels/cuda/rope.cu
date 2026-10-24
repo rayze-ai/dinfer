@@ -33,9 +33,14 @@ __global__ void rope_kernel(bf16* __restrict__ q, bf16* __restrict__ k, const in
       a = 2 * i;
       b = 2 * i + 1;
     }
+    // vLLM `ApplyRotaryEmb`（`enable_fp32_compute=False`）：cos/sin 与 x 都是 bf16，torch 的 bf16
+    // 二元 op 逐个 fp32 算再舍 bf16。逐位对齐就要复现这个"每步舍 bf16"，不能全程 fp32 只末尾舍一次
+    // （Kaon-V3 loop kaon3-layer1 第 10 轮实测：全程 fp32 与参照差 15843/90112，max|d|=0.0625）。
     const float x0 = to_f32(base[a]), x1 = to_f32(base[b]);
-    base[a] = to_bf16(x0 * c - x1 * s);
-    base[b] = to_bf16(x1 * c + x0 * s);
+    const float p0 = to_f32(to_bf16(x0 * c)), p1 = to_f32(to_bf16(x1 * s));
+    const float p2 = to_f32(to_bf16(x1 * c)), p3 = to_f32(to_bf16(x0 * s));
+    base[a] = to_bf16(p0 - p1);
+    base[b] = to_bf16(p2 + p3);
   }
 }
 
