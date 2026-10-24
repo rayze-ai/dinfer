@@ -15,6 +15,29 @@ fn rd(dir: &str, name: &str) -> Vec<f32> {
     b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
 }
 
+/// CPU f64 attention 参照（因果+滑窗），输入是 bf16 量化后的 q/k/v（f32）。与 gqa_window_parity::cpu_ref 同口径。
+fn cpu_ref(q: &[f32], k: &[f32], v: &[f32], t: usize, h: usize, hkv: usize, d: usize, window: usize) -> Vec<f32> {
+    let mut out = vec![0f32; t * h * d];
+    for i in 0..t {
+        let j0 = if window > 0 { (i + 1).saturating_sub(window) } else { 0 };
+        for hh in 0..h {
+            let hk = hh / (h / hkv);
+            let qi = &q[(i * h + hh) * d..][..d];
+            let s: Vec<f64> = (j0..=i)
+                .map(|j| qi.iter().zip(&k[(j * hkv + hk) * d..][..d]).map(|(a, b)| *a as f64 * *b as f64).sum())
+                .collect();
+            let m = s.iter().copied().fold(f64::MIN, f64::max);
+            let e: Vec<f64> = s.iter().map(|x| (x - m).exp()).collect();
+            let z: f64 = e.iter().sum();
+            for c in 0..d {
+                let acc: f64 = (j0..=i).zip(&e).map(|(j, p)| p * v[(j * hkv + hk) * d + c] as f64).sum();
+                out[(i * h + hh) * d + c] = (acc / z) as f32;
+            }
+        }
+    }
+    out
+}
+
 #[test]
 #[ignore]
 fn gqa_matches_vllm_attn_output() {
@@ -64,6 +87,19 @@ fn gqa_matches_vllm_attn_output() {
         let rel = dot.sqrt() / nrm_r.sqrt().max(1e-30);
         println!("gqa vs vLLM out [{tag}] rc={rc} 不同 {nd}/{} max|d|={mx:.4e} rel={rel:.3e} ‖want‖={:.2} ‖got‖={:.2}",
                  t * h * d, nrm_r.sqrt(), nrm_g.sqrt());
+        // 决定性对照：同一份输入过 CPU f64 参照（bf16 量化后的 q/kq/vq），比 (a) 我方 gqa 离它多远 (b) vLLM out 离它多远
+        let qb: Vec<f32> = q.iter().map(|&x| bf16::from_f32(x).to_f32()).collect();
+        let kb: Vec<f32> = kq.iter().map(|&x| bf16::from_f32(x).to_f32()).collect();
+        let vb: Vec<f32> = vq.iter().map(|&x| bf16::from_f32(x).to_f32()).collect();
+        let gt = cpu_ref(&qb, &kb, &vb, t, h, hkv, d, window);
+        let rel_to = |a: &dyn Fn(usize) -> f32| {
+            let (mut dd, mut nn) = (0f64, 0f64);
+            for i in 0..t * h * d { let e = (a(i) - gt[i]) as f64; dd += e * e; nn += (gt[i] as f64).powi(2); }
+            dd.sqrt() / nn.sqrt().max(1e-30)
+        };
+        let r_ours = rel_to(&|i| got[i].to_f32());
+        let r_vllm = rel_to(&|i| bf16::from_f32(want[i]).to_f32());
+        println!("  [对照 {tag}] 我方gqa→cpuf64 rel={r_ours:.3e}   vLLM_out→cpuf64 rel={r_vllm:.3e}  (同一份 bf16 量化输入)");
     }
 }
 

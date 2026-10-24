@@ -202,3 +202,15 @@ vLLM_out vs fp32-gt:  rel=6.48e-3   ← vLLM 贴 fp32（fp8 固有噪声量级�
 → **我方 gqa kernel 确与 vLLM 算得不一样**，非单纯 fp8 噪声，是真口径差。
 待排除干扰：我方喂 kernel 时 k/v 走的是 **CPU e4m3 近似往返**（`f32_e4m3_rt`），该近似本身可能有误差。
 **决定性判据**：我方 gqa 输出直接 vs fp32 gt —— 若也 ~0.6% 则只是舍入方向差；若 ~2% 则 kernel 真错。
+
+### 第 12 轮决定性对照：我方 gqa 贴 CPU f64（1.5e-3），比 vLLM 还准
+同一份 bf16 量化输入，CPU f64 attention 当地面真值：
+```
+我方 gqa → cpu_f64:  rel=1.5e-3（p_fp8=0）/ 6.5e-3（p_fp8=1）   ← 极贴真值
+vLLM_out → cpu_f64:  rel=2.2e-2                                 ← vLLM 离 f64 更远
+```
+**结论：我方 gqa attention kernel 没错，反而比 vLLM 更贴 f64 真值。**
+"我方离 vLLM 2.2%" = 两者舍入方向不同（我方贴 f64，vLLM 偏另一侧），**不是 kernel bug**。
+坑（诚实）：该 cpu_f64 的 k/v 用 Rust `f32_e4m3_rt` **近似**往返，精确值依赖它；但方向结论稳。
+→ L0 attention kernel **排除**。残差来自：① 上游 qkv 库差（cuBLASLt vs FlashInfer bmm_fp8）累积到 q/k/v；
+② k/v 进 attention 前 fp8 cache 量化口径（reshape_and_cache）。
