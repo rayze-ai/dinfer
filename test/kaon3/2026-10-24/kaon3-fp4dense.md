@@ -376,3 +376,49 @@ p02 的 24 token，`L*.bin` 135168 字节 = 24×2816×2，nz=0.4996（已核非�
 **攻 L0**。L0 是 `layer_types[0] = sliding_attention`（滑窗 1024，GQA 16/8 头，head_dim 256）。
 先看 L0 内部的子模块：embed 之后 → `input_layernorm` → attention（q/k/v/o）→ 残差 →
 `pre_ff_norm` → router → MoE → `post_ff_norm`。用 `--hidden-all` 的子模块 dump 逐项比。
+
+## 第 11 轮（超上限，收尾）：L0 层内定位 —— 已缩小到 post-attention 之后
+
+> ⚠️ 先纠正第 9–10 轮的一个错误结论：我当时说"L0 相对 L2 ≈ 1.0，实现完全错"，
+> 那是**用 `L0.bin` 当 L0 的输入**造成的（L0 的输入应当是 `Lm1.bin` = embedding 输出）。
+> 用正确输入 `--layer-iso 0:/w/hid/fn/Lm1.bin` 重跑：**逐行相对 L2 0.0018–0.0109，均值 5.795e-3**。
+> 所以 L0 **不是"完全对不上"，而是 5.8e-3 级别的偏差**，与逐层对拍的数字一致。
+
+### 已确证（本次逐子模块比对，全部核过非零）
+
+参照侧：`kaon3_vllm_hidden.py` + `SUB_LAYER=0`（**eager，仅诊断**），`/w/runs/hidden_20261024-0245_r10`。
+我方：`kaon3_probe --layer-iso 0:…/Lm1.bin` + `SUB_LAYER=0`，`/w/runs/hidden_20261024-0242_r10`。
+
+| 子模块 | 相对 L2 | 结论 |
+|---|---|---|
+| `Lm1`（embedding） | **0.0（67584/67584 逐位相同）** | ✅ |
+| `input_norm` | **0.0（逐位相同）** | ✅ norm 实现对 |
+| `o_proj` vs 参照 `attn_out` | **0.0（逐位相同）** | ✅ **attention 整段（含滑窗掩码、RoPE、GQA）正确** |
+| `pre_ff_norm` | **0.0（逐位相同）** | ✅ |
+| `dense`（MLP） | **0.0（逐位相同）** | ✅ |
+| **`post_ff_norm`** | **2.66e-3（均值，max 4.4e-3）** | ❌ **唯一偏离的段** |
+
+`post_ff_norm` 的偏离是**全元素均匀**的（每 256 列 2.2e-3–3.9e-3，逐行 1.9e-3–4.4e-3），
+不是局部边界问题 —— 典型的**舍入/口径差**，不是语义错。
+
+### 已排除（本层内）
+
+- embedding、`input_norm`、attention 整段（`o_proj` 与参照逐位相同）、`pre_ff_norm`、`dense` MLP
+- 于是偏差只能来自 **`post_ff_norm` 的输入**：`sc.x`（残差流）+ 两条支路相加的方式。
+
+`post_ff_norm` 的定义（`layer.rs:857`）：`rmsnorm(sc.x + post_ff_norm_2(moe), post_ff_norm.weight)`。
+其中 `sc.x = embed + post_attn_norm(o_proj)`。
+
+### 下一步（接手第一件事）
+
+1. 单独把 `post_ff_in`（= `sc.x + post_ff_norm_2(moe)`，`layer.rs:856` 落盘）与
+   参照的对应量逐位比 —— **需要给参照侧加 `post_ff_in` 的 hook**（当前只抓了
+   `input_norm/attn_out/o_proj/pre_ff_norm/dense/post_ff_norm`）。
+2. 重点看 **`post_feedforward_layernorm_1` / `_2`**：Gemma4 这一层有三个
+   `post_feedforward_layernorm{,_1,_2}` 权重，我们只用了 `post_ff_norm` 一个，
+   另两个分别给 MoE 支路用。**很可能其中一个没接对**。
+
+### 口径提醒
+
+本轮的参照是 **eager**（hook 在 compile 下不触发），只用于定位。
+修复后必须回 compile 口径重跑端到端（`kaon3_parity.sh`）。
