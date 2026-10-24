@@ -971,6 +971,14 @@ impl Gemm {
             lt_err(lt::set_matmul_desc_attribute(d.op, D::CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
                                                  &w_scale_ptr as *const _ as *const c_void,
                                                  std::mem::size_of_val(&w_scale_ptr)), "b_scale")?;
+            // FAST_ACCUM：fp8 低精度快速累加。vLLM 的 FlashInfer `bmm_fp8.cuh` 硬编码 `fast_accum=1`，
+            // 我方默认不设（=0，更精确）。为与 vLLM compile 口径逐位对齐，默认跟随设 1；
+            // `FP8_FAST_ACCUM=0` 退回关闭（A/B）。（旧注释提到"试过 FAST_ACCUM"是连带照搬输出方向时，
+            // 非在当前可跑方向上单独设，故此前未验证本组合。）
+            let fa: i8 = if fp8_fast_accum() { 1 } else { 0 };
+            lt_err(lt::set_matmul_desc_attribute(d.op, D::CUBLASLT_MATMUL_DESC_FAST_ACCUM,
+                                                 &fa as *const _ as *const c_void,
+                                                 std::mem::size_of_val(&fa)), "fast_accum")?;
         }
         Ok(d)
     }
@@ -1296,6 +1304,12 @@ impl Gemm {
         );
         Ok(report)
     }
+}
+
+/// fp8 GEMM 是否用 FAST_ACCUM（默认 true = 与 vLLM FlashInfer 一致）。`FP8_FAST_ACCUM=0` 关闭（A/B）。
+fn fp8_fast_accum() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("FP8_FAST_ACCUM").map(|v| v.trim() != "0").unwrap_or(true))
 }
 
 #[cfg(test)]
