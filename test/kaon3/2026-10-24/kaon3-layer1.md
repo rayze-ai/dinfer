@@ -305,3 +305,10 @@ nd 随 T 单调增。p01/p03/p16/p06（≤31）全逐位，仅 p08(36) 跨到第
   跨 tile(>32)暴露，差异数 ∝ 跨 tile 的 query 行数。
 **结论**：attention 非 bug，是累加序 bf16 末位噪声（与 qkv 的 cuBLASLt-vs-FlashInfer 库差同性质）。
 要逐位须复刻 vLLM 的 tile 调度/累加序，收益极小。L0 attention 定性为"正确、1 ULP 级一致"。
+
+### 第 13 轮：接 FlashInfer 的本质 = 复刻其 cublasLt 调用（用户 2026-10-24）
+FlashInfer `bmm_fp8` 默认 backend=**cublas**，源码 `flashinfer/data/include/flashinfer/gemm/bmm_fp8.cuh`
+底层就是 **`cublasLtMatmul`**（和我方 `gemm.rs::forward_fp8_cublaslt` 同 API）。无预编译 .so（JIT）。
+→ "接 FlashInfer" = 复刻它的 cublasLt 描述符（compute_type/scale_type/epilogue/algo 选择），
+  不必链接整个 JIT 扩展。我方已逼到 qkv 13/196608，差距很可能就是 algo 或 scale_type 的细节。
+下一步：读 bmm_fp8.cuh 的 matmul 主体（compute type / algo heuristic / 是否 per-tensor scale 走 epilogue），与我方逐项对。
