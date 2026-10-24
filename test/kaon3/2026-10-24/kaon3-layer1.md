@@ -153,3 +153,14 @@ vLLM attention（prefill/decode 都）**从 fp8 cache 读 k/v**（写时 fp8 量
 q 量化 fp8、scale 全 1.0，也对。→ **attention 输入口径正确**。
 残差只能在 **attention kernel 内部**：我们 `gqa_prefill_win_bf16` 的累加/softmax 精度 vs
 vLLM flashinfer/trtllm prefill（graph-break 外 op，FX 图看不到内部）。
+
+### 第 11 轮 attention 隔离：不是结构错（rel=6.8e-3）
+喂我方 q_rope/k_rope/v_norm（fp8 往返 scale1.0 + GQA + 因果 + fp32 softmax）算参照，比 attn_out：
+```
+attn_out  不同 63349/90112  max|d|=0.25  rel=6.8e-3  ‖ref‖=255.247 ‖ours‖=255.102
+ref[0,:4]=[-0.203,0.406,-0.406,-0.016]  ours[0,:4]=[同]  ← 样本完全一致
+```
+- 范数几乎相等、样本首元素一致 → **attention kernel 无结构错**，0.68% 是 fp8 KV+bf16 attention 末位抖动。
+- 但参照是**手搓 fp32 softmax**（非 vLLM flashinfer 真实输出），只能排除大错，非逐位判据。
+- **重要转向**：L0 逐段都只有 fp8 末位级小差（qkv 13、attention 0.68%），没有哪段结构错。
+  端到端 0.0085 更像 **各段 fp8 末位差累积**，不是单点 bug。要逐位，得每段都切到和 vLLM 完全相同的库/精度。
