@@ -1,3 +1,16 @@
+## 2026-10-24 `remote_5090.sh ctr` 跑长任务被静默杀掉（`docker run --rm` 随 SSH 会话结束）
+
+- **现象**：`GPU=4 scripts/dev/remote_5090.sh ctr '... python3 capture.py'` 抓参照中间量，
+  反复出现"跑了 90 s 没有任何输出、`/w/tmp/moe4` 目录都没建、`pgrep python3` 返回 0"。
+  改用 `setsid nohup ... &` 放进容器内也没用。
+- **根因**：`ctr` 是 `docker run --rm ...`（`remote_5090.sh:59`）。SSH 命令返回 / 会话断，
+  容器被回收，里面的进程跟着死。容器内再 `nohup` 也救不了 —— 父容器没了。
+- **解法**：长任务在**宿主机**上拉起容器并脱离会话：
+  `setsid nohup docker run --rm --entrypoint bash --gpus device=N ... image /w/script.sh > log 2>&1 < /dev/null &`
+  脚本先写到 `/hf_data/yaochen/cap.sh`（容器里是 `/w/cap.sh`）。
+- **避免**：`ctr` 只适合**短命令**（编译、跑测试，几分钟内返回）。
+  抓数据 / 跑服务 / 任何超过几分钟的任务，一律走宿主机 `setsid nohup docker run`。
+
 ## 2026-10-24 抓到的参照中间量全是 0，据此报出"四段全部逐位 0"（整两轮作废）
 
 - **现象**：为定位 Kaon MoE 的 1 ULP 差异，我 patch vLLM 的模块函数抓 `c1/c2/c3/y`，
