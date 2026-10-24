@@ -61,7 +61,11 @@ fn gqa_matches_vllm_attn_output() {
     let (dk, dv) = if std::path::Path::new(&format!("{dir}/vllm_kcache.bin")).exists() {
         let kc = &rd(&dir, "vllm_kcache")[..t * hkv * d];
         let vc = &rd(&dir, "vllm_vcache")[..t * hkv * d];
-        println!("[输入] 用 vLLM fp8 cache 的 k/v（完全对齐）");
+        // 退化检查：cache 读回的 k 应与 op 入参 bf16 k 接近（fp8 量化级），范数非零、不全等
+        let (mut nk, mut nc, mut dmax) = (0f64, 0f64, 0f32);
+        for i in 0..t * hkv * d { nk += (k[i] as f64).powi(2); nc += (kc[i] as f64).powi(2); dmax = dmax.max((k[i] - kc[i]).abs()); }
+        println!("[输入] 用 vLLM fp8 cache 的 k/v（完全对齐）；退化检查 ‖k_bf16‖={:.2} ‖k_cache‖={:.2} max|d|={dmax:.3e}", nk.sqrt(), nc.sqrt());
+        assert!(nc.sqrt() > 1.0, "k_cache 范数异常（可能全零/布局错）");
         (up(kc), up(vc))
     } else {
         let mut dk = up(k);

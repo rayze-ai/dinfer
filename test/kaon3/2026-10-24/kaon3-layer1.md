@@ -236,3 +236,12 @@ p08(36 tok) p_fp8=1: 1279/147456  rel=5.3e-4  ← 接近非逐位（1279 个元�
 未消除变量：喂 kernel 的 k/v 是用**我方 device fp8 往返**从 vLLM bf16 k/v 重建，
 不是 vLLM 真正写进 fp8 cache 的字节。p01 全中/p08 差 1279 很可能是重建与 vLLM cache 实际 fp8 值
 在少数元素舍入方向不同。要彻底干净：直接抓 vLLM fp8 cache 的 k/v 字节喂入。
+
+### 第 12 轮修正：改用 vLLM fp8 cache 真实 k/v 字节（用户 2026-10-24 两次纠正）
+之前从 bf16 重建 k/v = 输入没对齐。改 attn_io 直接 dump `reshape_and_cache` 后 fp8 cache 的 k/v
+（布局 (nb, nkv=8, block, 2D=512)，前 256=k 后 256=v，slot=blk*block+off；block_size 取 cache 维不猜）。
+退化检查：‖k_bf16‖=25.91 vs ‖k_cache‖=25.92 max|d|=0.055（fp8 级）→ gather 正确非垃圾。
+```
+p01(22) p_fp8=1: 0/90112  rel=0  （真实 cache k/v）
+```
+p08 复测中。
