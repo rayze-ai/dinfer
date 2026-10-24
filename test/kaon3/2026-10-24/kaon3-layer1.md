@@ -80,3 +80,14 @@ q_norm   ✅ 0/90112   k_norm ✅ 0/45056   v_norm ✅ 0/45056   (RMSNORM_MODE=2
 ```
 → 逐头 RMSNorm（q/k 带权重、v 无权重）**实现逐位正确**。第 3 段清掉。
 下一个：**rope**（neox，`rotary_embedding/base.py forward_static`）。
+
+### 第 10 轮 rope：定位到精度口径差（证据确凿）
+```
+q_rope(bf16 replay)      ~ 15843/90112  max|d|=0.0625   # vLLM compile 口径
+q_rope(我kernel口径)      ✅ 0/90112                      # bf16表 cast fp32 + fp32 乘加
+```
+- `q_rope(我kernel口径)`（bf16 表→cast fp32→**fp32 乘加**）逐位对上我们 dump → **我们 kernel 自洽无 bug**。
+- compile 图里 rope 的 mul/sub/add **全是 bf16**（`computation_graph.py` L140-175 都标 `bf16[s59,16,128]`）。
+- **根因：rope 这步 vLLM 全程 bf16 乘加，我们 cast 到 fp32 算**。差 15843 个元素、max|d|=0.0625。
+  与 norm 相反：norm vLLM 先舍 bf16（我们也舍），rope vLLM 不升 fp32（我们却升了）。
+- 修法：rope kernel 改成 bf16 乘加（`layer.rs:397-398` 注释说"cast fp32 做乘加"就是这里）。

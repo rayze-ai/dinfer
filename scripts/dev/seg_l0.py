@@ -81,6 +81,54 @@ def main():
     cmp("v_norm", head_rms(ours_w(d, "v_proj_raw", NKV * D), None, NKV),
         ours_w(d, "v_norm", NKV * D).bfloat16())
 
+    # rope（L0 sliding：default rope，theta=1e4，rotary_dim=256 全维，neox）。
+    # 按 base.py forward_static 复现：cache=cat(cos,sin)（fp32 构造→bf16 存），输入我方 q_norm/k_norm。
+    ROT, THETA, MAXP = 256, 10000.0, 262144
+    # vLLM 在 GPU 上 fp32 构造 cache（"create the cache on GPU"）→ cos/sin 末位与 CPU 版可能不同
+    inv_freq = 1.0 / (THETA ** (torch.arange(0, ROT, 2, dtype=torch.float, device="cuda") / ROT))
+    tpos = torch.arange(MAXP, dtype=torch.float, device="cuda")
+    freqs = torch.einsum("i,j->ij", tpos, inv_freq)
+    cache = torch.cat((freqs.cos(), freqs.sin()), dim=-1).bfloat16()  # [MAXP, 256]
+    T_ = ours_w(d, "q_norm", NH * D).shape[0]
+    pos = torch.arange(T_, dtype=torch.long).cuda()
+    cs = cache.index_select(0, pos)
+    cosb, sinb = cs.chunk(2, dim=-1)  # [T,128] 各
+
+    def apply_rope(raw_norm, rows):
+        x = raw_norm.reshape(T_, rows, D).bfloat16()
+        cos = cosb.unsqueeze(-2).to(x.dtype)  # [T,1,128]
+        sin = sinb.unsqueeze(-2).to(x.dtype)
+        x1, x2 = torch.chunk(x, 2, dim=-1)    # neox：前后半
+        o1 = x1 * cos - x2 * sin
+        o2 = x2 * cos + x1 * sin
+        return torch.cat((o1, o2), dim=-1).reshape(T_, rows * D)
+    cmp("q_rope(bf16)", apply_rope(ours_w(d, "q_norm", NH * D), NH), ours_w(d, "q_rope", NH * D).bfloat16())
+    cmp("k_rope(bf16)", apply_rope(ours_w(d, "k_norm", NKV * D), NKV), ours_w(d, "k_rope", NKV * D).bfloat16())
+
+    # A/B：fp32 全程算 rope（cos/sin/值都 fp32），看我们的输出是否更贴 fp32 版 → 判我们 kernel 在 fp32 算
+    cosf, sinf = freqs.cos(), freqs.sin()  # fp32 cache（已在 GPU）
+    csf = torch.cat((cosf, sinf), dim=-1).index_select(0, pos)
+    cfo, sfo = csf.chunk(2, dim=-1)
+    def apply_rope_f32(raw_norm, rows):
+        x = raw_norm.reshape(T_, rows, D).float()
+        cos = cfo.unsqueeze(-2); sin = sfo.unsqueeze(-2)
+        x1, x2 = torch.chunk(x, 2, dim=-1)
+        o1 = x1 * cos - x2 * sin; o2 = x2 * cos + x1 * sin
+        return torch.cat((o1, o2), dim=-1).reshape(T_, rows * D).bfloat16()
+    cmp("q_rope(fp32)", apply_rope_f32(ours_w(d, "q_norm", NH * D), NH), ours_w(d, "q_rope", NH * D).bfloat16())
+    cmp("k_rope(fp32)", apply_rope_f32(ours_w(d, "k_norm", NKV * D), NKV), ours_w(d, "k_rope", NKV * D).bfloat16())
+
+    # 我们 kernel 的真实口径：bf16 表 → cast fp32 → fp32 乘加 → 存 bf16。看是否对上我们 dump（判 kernel 自洽）。
+    cosk = cosb.float().unsqueeze(-2)  # bf16 表 cast fp32
+    sink = sinb.float().unsqueeze(-2)
+    def apply_rope_bf16tab_f32math(raw_norm, rows):
+        x = raw_norm.reshape(T_, rows, D).bfloat16().float()  # 输入也是 bf16 dump → fp32
+        x1, x2 = torch.chunk(x, 2, dim=-1)
+        o1 = x1 * cosk - x2 * sink; o2 = x2 * cosk + x1 * sink
+        return torch.cat((o1, o2), dim=-1).reshape(T_, rows * D).bfloat16()
+    cmp("q_rope(我kernel口径)", apply_rope_bf16tab_f32math(ours_w(d, "q_norm", NH * D), NH), ours_w(d, "q_rope", NH * D).bfloat16())
+    cmp("k_rope(我kernel口径)", apply_rope_bf16tab_f32math(ours_w(d, "k_norm", NKV * D), NKV), ours_w(d, "k_rope", NKV * D).bfloat16())
+
     # ---- 2. FFN 支路（与 attention 无关，先做能做的）----
     # 需要 add（= post_attn_norm(o) + embed），但我们没有参照的 o_proj，
     # 所以这里只能用**我方**的 add 当输入，测"给定同一 add，后续段是否一致"。
