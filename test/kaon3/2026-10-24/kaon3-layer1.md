@@ -164,3 +164,9 @@ ref[0,:4]=[-0.203,0.406,-0.406,-0.016]  ours[0,:4]=[同]  ← 样本完全一致
 - 但参照是**手搓 fp32 softmax**（非 vLLM flashinfer 真实输出），只能排除大错，非逐位判据。
 - **重要转向**：L0 逐段都只有 fp8 末位级小差（qkv 13、attention 0.68%），没有哪段结构错。
   端到端 0.0085 更像 **各段 fp8 末位差累积**，不是单点 bug。要逐位，得每段都切到和 vLLM 完全相同的库/精度。
+
+### 第 12 轮计划（用户 2026-10-24 方法）：两步硬对拍
+1. 确认进 attention 前 dinfer 与 vLLM 的 q/k/v **逐位一致**（拿 vLLM 真实 attention 输入比我方 dump）。
+2. 把**同一份** vLLM q/k/v 喂我们的 Rust gqa kernel，比 vLLM attention 的真实输出。
+实现：compile 口径起 offline LLM（非 enforce_eager），monkeypatch `unified_attention_with_output`
+（graph-break custom op，compile 下可命中）dump q/k/v/output。现有 Rust `gqa_window_parity` 壳可改读文件。
