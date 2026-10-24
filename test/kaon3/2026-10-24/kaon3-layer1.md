@@ -100,3 +100,8 @@ q_rope ✅ 0/90112   k_rope ✅ 0/45056   (RMSNORM_MODE=2)
 ```
 rope 段**逐位对齐**。注意：rope.cu 是公共件，qwen3/glm/kimik3 共用，需回归（vLLM 全系默认 bf16 rope）。
 下一段：**attention(gqa) + o_proj**。
+
+### rope.cu 回归面（第 10 轮）
+- 直接用 `rope.cu`（`Rope::apply`）的：**kaon3、glm53**。qwen3/qwen35 走 `qkv_post`（另一 kernel，不受影响）。
+- 回归面只有 glm53（本线 hands-off，未跑 e2e）。rope ref golden（`test/kernel_refs/rope_*.npy`）清机删了，待重生。
+- 改动方向是"更贴 vLLM bf16 rope"，tolerance 2e-2 可吸收；glm53 若回归再评估加 arch 开关。
