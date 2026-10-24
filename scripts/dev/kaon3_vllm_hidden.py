@@ -48,6 +48,8 @@ def _patched_embed(self, input_ids):
     return r
 g4.Gemma4SelfDecoderLayers.embed_input_ids = _patched_embed
 _orig = g4.Gemma4DecoderLayer.forward
+SUB = os.environ.get("SUB_LAYER")          # 设了才抓该层的子模块中间量
+sub = {}
 def _patched(self, *a, **k):
     r = _orig(self, *a, **k)
     hs = r[0] if isinstance(r, tuple) else r
@@ -58,6 +60,41 @@ g4.Gemma4DecoderLayer.forward = _patched
 llm = LLM(model=model_dir, enforce_eager=True, tensor_parallel_size=1, gpu_memory_utilization=0.85,
           dtype="auto", max_model_len=4096, enable_prefix_caching=False, block_size=32, max_num_seqs=1)
 cap.clear()  # 丢掉 warmup / profile run
+
+# ---- 子模块级 hook：只为定位"层内哪一段"（SUB_LAYER=<n>）----
+# 必须在 LLM 构造之后挂：模型实例那时才存在。用 named_modules 取真实模块，
+# 不猜属性名 —— 找不到就打印候选名，不要静默跳过。
+sub = {}
+if SUB is not None:
+    want = int(SUB)
+    model = llm.llm_engine.model_executor.driver_worker.model_runner.model
+    cands = [(n, m) for n, m in model.named_modules() if f"layers.{want}." in n]
+    print(f"SUB_LAYER={want}: 候选模块 {len(cands)} 个", flush=True)
+    picked = 0
+    for n, m in cands:
+        tag = None
+        for key, t in (("input_layernorm", "input_norm"),
+                       ("self_attn", "attn_out"),
+                       ("pre_feedforward_layernorm", "pre_ff_norm"),
+                       ("post_feedforward_layernorm", "post_ff_norm"),
+                       ("mlp", "dense")):
+            if n.endswith("." + key):
+                tag = t
+        if tag is None:
+            continue
+
+        def _mk(tg):
+            def _h(mod, inp, out):
+                o = out[0] if isinstance(out, tuple) else out
+                if not hasattr(o, "detach") or o.shape[0] != len(ids):
+                    return
+                sub.setdefault(tg, o.detach().float().cpu().numpy().copy())
+            return _h
+        m.register_forward_hook(_mk(tag))
+        picked += 1
+        print(f"  hook {n} -> {tag}", flush=True)
+    if picked == 0:
+        print("  ⚠️ 一个都没挂上；候选名：", [n for n, _ in cands][:20], flush=True)
 llm.generate(prompts=[{"prompt_token_ids": ids}], sampling_params=SamplingParams(max_tokens=1, temperature=0, logprobs=5))
 t = len(ids)
 # **只取 prefill 那一批**：decode 步每步也会调 30 次 DecoderLayer.forward，
@@ -65,6 +102,9 @@ t = len(ids)
 pre = [h for h in cap if h.shape[0] == t]
 layers = pre[:30]
 pe = [e for e in embeds if e.shape[0] == t]
+for k_, v_ in sub.items():
+    v_[:t].astype("<f4").tofile(f"{out}/{k_}.bin")
+    print(f"  写 {k_}.bin shape {v_[:t].shape} nz={float((v_[:t]!=0).mean()):.4f}", flush=True)
 if pe:
     pe[0][:t].astype("<f4").tofile(f"{out}/Lm1.bin")
     print(f"  写 Lm1.bin（embed 输出）shape {pe[0][:t].shape}", flush=True)

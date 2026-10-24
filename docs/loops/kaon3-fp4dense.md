@@ -130,9 +130,35 @@ nibble：`break_fp4_bytes` 用 `(low, high)` 交错 → **低半字节 = 偶数�
 它们与被测 kernel 同仓同版本，是这套语义的**权威口径**。
 用法只限于 oracle 侧诊断（不进仓库、不作判据），符合"Rust 实现、Rust 验证"。
 
+## 第 10 轮（上限）—— 已到，但根因已锁定 L0
+
+### 关键结论（可直接接手）
+
+| 事实 | 证据 |
+|---|---|
+| **embedding 逐位相同** | `Lm1.bin` 67584/67584 完全一致（参照 `/w/hid/fn`） |
+| **L0 实现本身错** | `--layer-iso 0:<参照 Lm1>` → 逐行相对 L2 **1.07–1.36**（max\|d\| 35–89） |
+| **L1 只差 1 ULP** | `--layer-iso 1:<参照 L0>` → 逐行相对 L2 **0.0025–0.0125** |
+| L0 是滑窗注意力层 | `layer_types[0] = sliding_attention`，GQA 16/8，head_dim 256 |
+| `input_norm` 自洽 | 用 `w`（不是 1+w）+ 无权重 RMSNorm + eps 1e-6 复算，relerr **1.6e-3**（bf16 提升） |
+
+→ **根因在第 0 层内部，不在 MoE、不在 embedding、不在上层。**
+
+### 下一步（接手第一件事）
+
+`SUB_LAYER=0` 能 dump L0 的子模块（`input_norm / q_proj_raw / k_proj_raw / v_proj_raw /
+k_norm / k_rope / attn_out / o_proj / post_attn_norm / pre_ff_norm / dense / …`），
+参照侧用 `kaon3_vllm_hidden.py` 的 `SUB_LAYER=0` 抓（**eager，仅诊断**），逐项比，
+定位是 **attention（q/k/v/o 或 RoPE/滑窗掩码）** 还是 **FFN 段**。
+
+### 口径提醒
+
+子模块参照只能是 eager（hook 在 compile 下不触发）。**定位用 eager 可以，验收到修复后
+必须回到 compile 口径重跑端到端**（规格明写）。
+
 ## 卡点
 
-（待填）
+无（根因已锁定 L0，未到需要用户决策的程度）。
 
 ## 进度（2026-10-24，loop 进行中）
 
