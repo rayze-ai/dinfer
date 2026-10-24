@@ -23,9 +23,8 @@ GEN = {"on": False}  # 只在真实 generate 阶段抓，warmup 阶段不抓
 _orig = attn.unified_attention_with_output
 def _patched(query, key, value, output, layer_name, *a, **k):
     name = attn._resolve_layer_name(layer_name) if hasattr(attn, "_resolve_layer_name") else str(layer_name)
-    _orig(query, key, value, output, layer_name, *a, **k)  # 先算（output 就地写）
+    _orig(query, key, value, output, layer_name, *a, **k)  # 先算（output 就地写、KV 已写进 fp8 cache）
     # 第 0 层：generate 期间每次都覆盖保存（warmup 在 clear 前已丢），并打印 shape。
-    # 只接受 token 数 <= max_want 的（排除 4096 warmup padding 批；真实 prefill token 数小）。
     max_want = int(os.environ.get("MAX_T", "512"))
     got_t = query.shape[0]
     if "layers.0." in str(name) and got_t <= max_want and GEN["on"]:
@@ -37,6 +36,36 @@ def _patched(query, key, value, output, layer_name, *a, **k):
             "query": sv("q", query), "key": sv("k", key),
             "value": sv("v", value), "output": sv("out", output),
         }
+        # 关键（用户 2026-10-24）：不从 bf16 重建 k/v，直接从 fp8 cache 读回 attention 实际用的那份字节。
+        try:
+            md, slf, kv_cache, slot = attn.get_attention_context(attn._resolve_layer_name(layer_name))
+            import torch as _t
+            T = got_t
+            sm = slot.flatten()[:T].long()
+            bs = int(os.environ.get("BLOCK", "32"))
+            blk, off = sm // bs, sm % bs
+            # kv_cache 形状含 fp8；view 成 fp8 后按 (block, off) gather。布局 [num_blocks, 2, block, nkv, D] 或 split。
+            kc = kv_cache
+            if kc.dtype == _t.uint8:
+                kc = kc.view(_t.float8_e4m3fn)
+            def gather_kv(cache_half):  # cache_half: [nb, block, nkv, D]（fp8）→ dequant bf16 [T,nkv,D]
+                g = cache_half[blk, off]  # [T, nkv, D]
+                return g.to(_t.bfloat16)
+            # 尝试常见布局：kc [nb, 2, block, nkv, D]
+            shp = tuple(kc.shape)
+            saved = False
+            if len(shp) == 5 and shp[1] == 2:
+                kk = gather_kv(kc[:, 0]); vv = gather_kv(kc[:, 1])
+                kk.float().cpu().numpy().tofile(f"{out}/vllm_kcache.bin")
+                vv.float().cpu().numpy().tofile(f"{out}/vllm_vcache.bin")
+                info["kv_cache"] = ("5d_2", shp, str(kv_cache.dtype))
+                saved = True
+            if not saved:
+                info["kv_cache"] = ("shape_unhandled", shp, str(kv_cache.dtype))
+                print("[attn_io] kv_cache 布局未处理:", shp, kv_cache.dtype, flush=True)
+        except Exception as e:
+            info["kv_cache_err"] = str(e)
+            print("[attn_io] 读 fp8 cache 失败:", e, flush=True)
         grabbed["l0"] = info
         print("[attn_io] L0 抓到:", info, flush=True)
 attn.unified_attention_with_output = _patched
