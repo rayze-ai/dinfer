@@ -146,3 +146,10 @@ checkpoint 无独立 KV q/k/v_scale → 默认 1.0，我们 4a 也用 1.0。scal
 vLLM attention 全链路：q 量化 fp8（scale 1.0）/ k,v bf16 进 op → `reshape_and_cache_flash` 写 fp8 cache
 → attention 从 cache 读 fp8 再 dequant 回 bf16 → **attention 数学在 bf16 算**（trtllm/flashinfer prefill）。
 疑点转向：我们 `prefill_win` 的 q/k/v fp8 往返后，attention 内部累加精度与 flashinfer 是否一致。
+
+### 第 11 轮结论：attention 输入口径我们对，残差在 kernel 内部
+vLLM attention（prefill/decode 都）**从 fp8 cache 读 k/v**（写时 fp8 量化、读时 dequant 回 bf16），
+不是用刚算的 bf16 k/v。我们 4a 把 k/v fp8 往返 = "写 cache 量化 + 读 dequant" 合并一步，**结构等价**。
+q 量化 fp8、scale 全 1.0，也对。→ **attention 输入口径正确**。
+残差只能在 **attention kernel 内部**：我们 `gqa_prefill_win_bf16` 的累加/softmax 精度 vs
+vLLM flashinfer/trtllm prefill（graph-break 外 op，FX 图看不到内部）。
