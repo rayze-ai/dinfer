@@ -29,7 +29,8 @@
 | `docs/loops/<feature>.md` | 需反复调试功能的环境-观察-停止条件 |
 | `test/<model>/YYYY-MM-DD/` | 按模型、按日期归档的测试结果与每轮改进记录（用户 2026-10-16 要求：每一轮验证与改进都要记进去）；GLM 线历史在 `test/2026-10-1x/` |
 | `scripts/verify/` | 验证脚本，exit 0 = 通过 |
-| `scripts/dev/` | 启动环境、造数据、清理等 |
+| `scripts/dev/` | 启动环境、造数据、清理等；`mkrun.sh` 造规范数据目录 |
+| `docs/data-layout.md` | 远端产物目录规范：`用途_日期时间_轮次` + 目录内 README 记口径 |
 
 ## 常用命令
 
