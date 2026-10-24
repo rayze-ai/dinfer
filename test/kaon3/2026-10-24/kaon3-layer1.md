@@ -438,3 +438,16 @@ o_proj(N=2816,K=4096) 默认 TABLE 走 FALLBACK `id=67 tile=13 splitk=1`，与 F
 
 ### 第 17 轮：down_proj 已逐位（fallback splitk=1）
 down(N=2816,K=2112) 默认 TABLE 走 FALLBACK → 0/101376 逐位。o_proj/down 都 fallback 命中。
+
+### 第 17 轮：所有 dense fp8 GEMM 已与 FlashInfer 逐位
+gate_proj(N=2112,K=2816) 默认 0/76032 逐位。汇总：
+```
+qkv     ✅ 逐位（修 TABLE splitk=1）
+o_proj  ✅ 逐位（fallback splitk=1）
+down    ✅ 逐位（fallback）
+gate_up ✅ 逐位（fallback）
+attention ✅ 差2（去 FEXP，cfg 464）
+norm/rope ✅ 逐位
+```
+**L0 所有 fp8 路径都对齐 FlashInfer，但端到端仍 0.0086** → 残差只能在 **MoE（NVFP4，不走 fp8 cuBLASLt，另一条 kernel）**。
+L0 FFN = dense MLP + MoE 相加，MoE 偏则整层偏。下一步：隔离 MoE 输出 vs vLLM。
