@@ -83,3 +83,12 @@ hidden 重算 router_logits**（self.gate(hidden) 或 fused gate，忽略传入 
 **上限**：每轮 ≤10 迭代；单点超 3 轮无结论写卡点换方向。
 **数据**：/moe_e08(eager vllm_moe_hidden/logits/out)、/w/sd_now(我方 moe_y/moe_e*/router_logits)。
 **下一步（接手第一件事）**：执行步骤 1——查 FusedMoE eager vs compile kernel 是否同一。
+
+## 第 20 轮（卡点解开）：moe_forward 是 opaque custom op → eager==compile
+moe_runner.py:190 注释明示 **"moe_forward being opaque custom ops is a load-bearing assumption"**。
+不透明 custom op：inductor **不追踪其内部**，compile 下按原样 eager 执行 `_moe_forward`。
+→ **compile 与 eager 跑同一个 `_moe_forward` 实现 → eager 抓的 MoE io 就是 compile 口径**（之前"内联进图"判错）。
+→ 用户"eager moe 已对齐"可直接作 compile 判据；"抓不到 compile io"是伪问题（eager io 即 compile io）。
+patch 没抓到 compile 版：因 direct_register_custom_op 注册时固化 _moe_forward 引用，运行时 patch 不改已注册 op；
+但 eager 跑也走同一 op，故 eager patch 命中（已抓 /moe_e08 成功）。
+**结论**：MoE 隔离可直接用 eager 抓的 /moe_e08（= compile 口径）。回到步骤 2a：加 --moe-iso 喂 x+logits 比 moe_out。
