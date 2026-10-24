@@ -24,6 +24,14 @@ import numpy as np
 import torch
 
 
+def nz(t):
+    """非零元素比例：vLLM 启动前的显存 profile 用**全零 dummy** 跑一次，必须跳过。"""
+    try:
+        return float((t.detach().abs().float() > 0).float().mean().item())
+    except Exception:
+        return 1.0
+
+
 def dump(name, t):
     d = os.environ.get("OUT", "/w/tmp/moe3")
     os.makedirs(d, exist_ok=True)
@@ -60,7 +68,9 @@ def main():
 
     def act_patched(activation, out, input_, **kw):
         r = real_act(activation, out, input_, **kw)
-        if cap["n"] == 0:
+        cap["na"] = cap.get("na", 0) + 1
+        print(f"CALL act #{cap['na']} in_nz={nz(input_):.4f} out_nz={nz(out):.4f}", flush=True)
+        if cap["n"] == 0 and nz(input_) > 0 and nz(out) > 0:
             dump("c1_gateup", input_)
             dump("c2_act", out)
         return r
@@ -72,7 +82,8 @@ def main():
 
     def eoq_patched(a, gscale, eoff, boff, ntopk):
         r = real_eoq(a, gscale, eoff, boff, ntopk)
-        if cap["n"] == 0:
+        print(f"CALL eoq in_nz={nz(a):.4f}", flush=True)
+        if cap["n"] == 0 and nz(a) > 0:
             k = "a1" if "q1" not in cap else "a2"
             cap["q1"] = 1
             dump(f"{k}_in", a)
@@ -90,7 +101,7 @@ def main():
     def shuf_patched(t, idx):
         r = real_shuf(t, idx)
         cap["ns"] = cap.get("ns", 0) + 1
-        if cap["ns"] == 2 and cap["n"] == 0:
+        if cap["ns"] >= 2 and cap["n"] == 0 and nz(r) > 0:
             dump("c3_down", r)
         return r
 
@@ -100,8 +111,16 @@ def main():
     real_run = cm.run_cutlass_moe_fp4
 
     def run_patched(output, *a, **kw):
+        # run_cutlass_moe_fp4(output, a, a1_gscale, w1_fp4, w1_blockscale, w1_alphas,
+        #   a2_gscale, w2_fp4, w2_blockscale, w2_alphas, topk_weights, topk_ids,
+        #   activation, workspace13, workspace2, m, n, k, e, device, apply_router_weight_on_input)
+        if cap["n"] == 0 and len(a) >= 10 and nz(a[9]) > 0:
+            tw, ti = a[9], a[10]
+            dump("topk_w", tw)
+            dump("topk_ids", ti)
+            print(f"TOPKW dtype={tw.dtype} shape={tuple(tw.shape)}", flush=True)
         r = real_run(output, *a, **kw)
-        if cap["n"] == 0:
+        if cap["n"] == 0 and nz(output) > 0:
             dump("y_moe", output)
             cap["n"] = 1
         return r

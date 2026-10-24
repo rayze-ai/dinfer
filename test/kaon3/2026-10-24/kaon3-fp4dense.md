@@ -235,3 +235,23 @@ combine 之前的 per-slot 输出。产物 `/w/tmp/moe3b`。
 1. 参照 `topk_weights` 进 combine 时的**原始 dtype 与数值**（抓下来，不要从 logits 重算）；
 2. `.sum(dim=1)` 在 bf16 张量上到底是 f32 累加还是逐次 bf16 舍入（PyTorch 语义）。
 下一步抓这两项。
+
+## ⚠️ 第 4/5 轮结论作废：抓到的 compile 分段数据**全是 0**
+
+**现象**：`/w/tmp/moe3` 与 `/w/tmp/moe3b` 的 `c1_gateup.bin`（92 MB）、`c2_act.bin`、
+`c3_down.bin`、`y_moe.bin` **每一个字节都是 0**（`od -t x1` 全是 `00`，nz 比例 0.0）。
+
+**根因**：vLLM 启动时先跑一次**显存 profile**，用**全零 dummy 输入**走一遍前向。
+我的 patch 条件写的是"第一次调用就抓"（`if cap["n"] == 0`），抓到的正是那次 dummy。
+Rust 侧 `moe_seg_parity` 报 `gate/up/act/down ndiff=0` —— 是拿**全零比全零**，
+不是真实数据的逐位一致。**第 4、5 轮的"四段全部逐位 0"作废。**
+
+**唯一仍然成立的**：`moe_stage_parity`（第 3 轮）用的是 `moe_capture.py` 抓的
+**eager** 口径数据（非零，`max|d|=2.5e-1`、范数比 1.0021、bf16_prod 修正到 0.9999）。
+但那是 **eager**，**违反 compile 口径**（规格明写不得用 eager 做判据）。
+
+**修正**：`moe_seg_capture.py` 加非零守卫（`nz(t) > 0` 才 dump），并打印每次调用的 nz 比例。
+重新抓取后必须**先验证非零**再拿去做任何比对。
+
+**教训**（写进 pitfalls 前先确认修复有效）：抓参照中间量的脚本，
+**必须校验数据非零/非常量再入库**，否则"ndiff=0"可能只是两个全零张量相等。
