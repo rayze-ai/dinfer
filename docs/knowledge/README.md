@@ -11,6 +11,7 @@
 | [model-onboarding.md](model-onboarding.md) | 接新模型的方法与盲区清单（golden 怎么造、对拍口径、与 vLLM 的差异点） | 开新 `models/<m>` 前 |
 | [executor-common.md](executor-common.md) | executor 公共件（async / graph / 槽表 / plan 上传）用法，模型 crate 该剩什么 | 给模型接 executor 前 |
 | [parity-localization.md](parity-localization.md) | 数值对不上时怎么定位：口径/1-ulp/放大器三分、整跑 vs 隔离、A/B 开关、调参照自己的算子、前置条件 | 端到端读数不齐时 |
+| [segment-isolation.md](segment-isolation.md) | 逐段隔离定位（`--layer-iso` + `SUB_LAYER`）、参照数据自证三项、口径红线、数据布局 | 数值对不上、要抓参照中间量前 |
 | [bitexact-replication.md](bitexact-replication.md) | 定位到算子后怎样写到逐位一致：源码→PTX→SASS、Triton cache/nvdisasm、允许区间反推、探针干扰 | 复刻参照 kernel 数值前 |
 | [subagent-ops.md](subagent-ops.md) | 多子代理并行作业：brief 模板、文件分工、远端共用目录、后台任务超时 | 派子代理前 |
 | [infra-b300.md](infra-b300.md) | B300-50 / 4090 / 3090 三机口径：连接、口径一致性、GPU 编号、容器、bench 流程 | 上远端机器前 |
