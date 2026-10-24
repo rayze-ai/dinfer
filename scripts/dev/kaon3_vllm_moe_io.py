@@ -25,25 +25,35 @@ grabbed = {}
 # 不碰 op 注册，无递归；graph-break op 内部 eager 跑，compile 下仍命中。
 import vllm.model_executor.layers.fused_moe.runner.moe_runner as mr
 
+def _grab(hidden_states, router_logits, outp):
+    if GEN["on"] and "l0" not in grabbed and hidden_states.shape[0] <= MAX_T:
+        def sv(nm, t):
+            t.detach().float().cpu().numpy().tofile(f"{out}/vllm_moe_{nm}.bin")
+            return tuple(t.shape), str(t.dtype)
+        grabbed["l0"] = {"hidden": sv("hidden", hidden_states), "logits": sv("logits", router_logits), "out": sv("out", outp)}
+        print("[moe_io] L0 抓到:", grabbed["l0"], flush=True)
+
 def install():
-    # compile 图调 torch.ops.vllm.moe_forward，按当前注册的 CUDA impl dispatch。
-    # 重注册 impl（调模块函数 mr._moe_forward，不是调 op → 无递归），抓输入输出。
+    # 两处都 patch：① 重注册 op CUDA impl（compile 路径）；② _forward_impl 类方法（eager 路径）。
     _orig = mr._moe_forward
     @torch.library.impl("vllm::moe_forward", "cuda")
     def _impl(hidden_states, router_logits, shared_experts_input, input_ids, layer_name, hidden_dim_unpadded):
         outp = _orig(hidden_states, router_logits, shared_experts_input, input_ids, layer_name, hidden_dim_unpadded)
-        if GEN["on"] and "l0" not in grabbed and hidden_states.shape[0] <= MAX_T:
-            def sv(nm, t):
-                t.detach().float().cpu().numpy().tofile(f"{out}/vllm_moe_{nm}.bin")
-                return tuple(t.shape), str(t.dtype)
-            grabbed["l0"] = {"hidden": sv("hidden", hidden_states), "logits": sv("logits", router_logits), "out": sv("out", outp)}
-            print("[moe_io] L0 抓到:", grabbed["l0"], flush=True)
+        _grab(hidden_states, router_logits, outp)
         return outp
-    print("[moe_io] re-registered vllm::moe_forward CUDA impl", flush=True)
+    _oi = mr.MoERunner._forward_impl
+    def _pi(self, hidden_states, router_logits, *a, **k):
+        outp = _oi(self, hidden_states, router_logits, *a, **k)
+        _grab(hidden_states, router_logits, outp)
+        return outp
+    mr.MoERunner._forward_impl = _pi
+    print("[moe_io] installed op-impl + _forward_impl patches", flush=True)
 
+# EAGER=1：enforce_eager，MoE patch 一定命中（无 compile 图吞）。MoE 数值 eager≈compile（无 FEXP 类差异）。
+_eager = os.environ.get("EAGER", "0") == "1"
 llm = LLM(model=model_dir, tensor_parallel_size=1, gpu_memory_utilization=0.85,
           dtype="auto", max_model_len=16384, enable_prefix_caching=False, block_size=32,
-          max_num_seqs=64, max_num_batched_tokens=4096,
+          max_num_seqs=64, max_num_batched_tokens=4096, enforce_eager=_eager,
           hf_overrides={"text_config": {"num_hidden_layers": 1}})
 install()
 grabbed.clear(); GEN["on"] = True
