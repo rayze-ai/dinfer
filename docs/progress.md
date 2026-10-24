@@ -6,68 +6,34 @@
 > 更新 2026-10-21 23:0x +0800。**本区按模型分节，每节只写该模型自己的交接内容；不要覆盖别人的分节。**
 
 
-### Kaon-V3 parity（2026-10-23 收功）
+### Kaon-V3 parity（2026-10-24 收功）
 
-**一句话现状**：本轮建立了 `docs/loops/kaon3-compile.md`（**全程 compile 口径，eager 不作判据**），
-跑了 6 轮端到端 A/B。**flip 16.56% → 14.08%**（`MOE_COMBINE_F32` 已改默认 1），
-但离 FLOOR（0.83% / 0.0276）**还差 17 倍**，仍在 loop 中。
+**一句话现状**：按「全程 compile 口径」跑了 17 轮，**已到 loop 迭代上限，停在卡点**。
+端到端 flip **16.56% → 14.08%**（唯一有效改动：`MOE_COMBINE_F32` 默认改 1），距 FLOOR（0.83%）仍差 17 倍。
+**差异已收敛到一个点**：专家 **NVFP4 dense GEMM** 与参照差 7.8%（`ndiff=11210/11264`）。
 
-**本轮唯一有效改动**：`MOE_COMBINE_F32` 默认值 `0 → 1`（MoE 合并用 f32 权重与乘积，不落 bf16）。
-p02 单例 top-1 翻转 4/22 → **0/22**、top1 |Δlp| 2.04 → 0.52；30 用例聚合 flip 16.56% → 14.08%。
-原注释称 `=0` 是 "vLLM cutlass_moe 口径"——**错了**，参照的 Triton/inductor 路径不做那次舍入。
-
-**本轮已排除（别再查）**
-| 假设 | 结论 |
+**已逐位达成的部分（可放心）**
+| 段 | 状态 |
 |---|---|
-| compile 口径的 norm（`RMSNORM_MODE=0/2`） | 三者 flip 都在 16%，不是主因 |
-| `rcp.approx` vs 精确除法 | 误差 2⁻²³ 被 bf16 舍入（2⁻⁹）吞掉，md5 相同 |
-| router GEMM kernel（cuBLAS vs BI matmul） | **真实输入下逐位相同（0/3072）**；43% 那个数是拿 `torch.matmul` 当对照测出来的，作废 |
-| lm_head 量化 | 424 个量化层里没有 lm_head / embed |
-| Gemma4 的残差融合 | 用显式 bf16 加法（`gemma4.py:702-731`），我们已一致 |
-| q 的 fp8 量化 | 我们已做（`layer.rs:753`），A/B 证实必需 |
+| router 全段（无权重 norm → ×rs → ×scale → GEMM） | **0/3072 逐位一致**，top-8 集合 0 行不同 |
+| gelu·mul | 0/50688（compile 口径） |
+| q 的 fp8 量化 | 已做，A/B 证实必需 |
+| `router_gemm_bi_f32`（复刻 BI persistent matmul） | 0/8192 |
 
-**关键环境事实**：oracle 容器里就有 inductor 产物，
-`docker cp kaon-oracle:/root/.cache/vllm/torch_compile_cache /w/tmp/ind2/` 直接拿 `computation_graph.py`
-（12451 行 FX 图），**不用重跑导出**。
+**卡点（本质问题）**：参照的专家走 `VLLM_CUTLASS` 的 **FP4 融合 MoE kernel**；我们是逐专家 GEMM + scatter-add。
+用参照自己的 `a_q/a_s` 直接喂我们的 kernel 仍差 7.8%。定标法已排除：乘子位置、swizzle 读写、
+nibble 顺序、块缩放公式、量化常数。**numpy 按已确证公式复算参照仍差 0.4085（corr=0.924）**——
+说明还有一处解读不对，最可能是 `fp4_dense_probe.py` 里 `a` 与 `a_q` 不是同一次调用的产物。
+
+**下一次接手的第一件事**（便宜、一轮内可判定）：
+核对 `scripts/dev/fp4_dense_probe.py` 中 `a`（送给 `scaled_fp4_quant` 的输入）与导出的 `a_q/a_s`
+是否为同一次调用；若不是，重抓一遍再判断 7.8%。
+
+**⚠️ 用户提过的方向（正确但受限）**：「直接调 cutlass，像 cuBLASLt 那样」——
+查证结论：`ops.cutlass_fp4_moe_mm` 是 **torch op**（`_C_stable_libtorch.abi3.so` 里 `TORCH_LIBRARY` 注册，
+入参 `at::Tensor`），**不能从 Rust 直接链接**。只能自己编译 cutlass 头文件（vLLM 的做法）。
 
 **⚠️ 仍然成立的事故**（`docs/pitfalls.md` 首条）：逐层对拍**必须**带 `CUBLASLT_WORKSPACE_SIZE=1`。
-
-### 下一步：解决 compile 模式下的端到端差距（本阶段唯一目标）
-
-**目标**：p02 端到端对 `oracle_clean`（compile 服务，BI=1）达到 FLOOR 线——
-flip ≤ 0.83%、|Δlp| ≤ 0.0276。现状 flip 16.56% / |Δlp| 1.1994。
-
-**已确认的事实（不用再查）**
-- vLLM 默认就是 compile（`enforce_eager=False`，`vllm/config/vllm.py:1379`），eager 才是显式开关。
-- **compile 与 eager 是两套实现**，vLLM 自己两者就差 |Δlp| 1.5725（p02）。所以「逐层对 eager 全 0」推不出「端到端对 compile 为 0」。
-- compile 逐位确定：同配置两进程、两卡各跑一次 → 0.0000。**可以逐位对拍，没有噪声底。**
-
-**已确认的 compile↔eager 差异点（改这些，别猜）**
-
-| 点 | eager（BI=1） | compile | 我们的状态 |
-|---|---|---|---|
-| RMSNorm | `rms_norm_batch_invariant`（Triton，`tl.sqrt`→`1/rms`） | `vllm_ir.rms_norm`：`rsqrt(mean+eps)`，**先舍入 bf16 再乘 w** | `RMSNORM_MODE=1` 对 eager；**compile 口径未验证** |
-| gelu·mul | `act_and_mul` custom op | inductor 融合（`libdevice.tanh`，f32 全链） | **已逐位正确**（0/50688，`mode=0`） |
-| router 预处理 | 三步（`×root_size`、`×scale` 各自 bf16） | 融成 fp32 链、写回舍一次 | 已加 `rmsnorm_scale2`（kernel 级差半 ulp，未逐位） |
-
-**已知障碍**：compile 下 forward hook 不触发，`--hidden-all` 逐层对拍这条路走不通。
-已试过四种抓中间层的方法（hook / 替换 `op.default` / 包 Python 层 / `TorchDispatchMode`）**全部失败**
-（详见 `docs/loops/kaon3-gelu.md` 第 2 轮）。所以 compile 只能做**整跑端到端 + 单点 A/B**。
-
-**下一步按序**
-1. 把 `RMSNORM_MODE=1` 改成 compile 口径（0）后整跑 `scripts/verify/kaon3-parity.sh`，
-   记 flip / |Δlp|，与现状（16.56% / 1.1994）比。**这是唯一还没验过的已知差异点。**
-2. 若仍不达标：按 `computation_graph.py` 逐段列出剩下没验过的算子（attention 的 `o_proj` 段、
-   MoE 专家 combine、层尾 `post_ff_norm + residual + layer_scalar`、`final_norm + lm_head + softcap`），
-   每个都用「改口径 → 整跑 → 看 flip」单点 A/B，一次只改一个。
-3. 每轮结果写进 `test/kaon3/<日期>/`，并把有效的判断提炼进 `docs/knowledge/`。
-
-**⚠️ 不要做的事**
-- 不要再用 `--layers 1` 截层做判据：1 层时 logits 全部饱和到 softcap ±30，|Δlp| 无判别力（`kaon3-gelu.md` 第 4 轮）。
-- 不要拿 `D-16-REBASE.md` 中间节的表当最终结论（§44 的 L3 ×133 是 GEMM 对齐前的状态）。
-
-**运行口径（照抄，别凭记忆）**：逐层对拍 `PROBE_ENV="CUBLASLT_WORKSPACE_SIZE=1"`；
-读 vLLM 代码读镜像副本 `/data/ref/vllm-img-v0.28.0-pr455/`。
 
 ### Kaon-V3（5090，阶段 1–2 完成，阶段 3 接近打通）
 

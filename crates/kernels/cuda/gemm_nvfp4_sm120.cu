@@ -10,7 +10,6 @@
 //   2. 探针 A 也是预量化字节；这里 A 是 bf16，量化融进载入。
 // 语义细节见 docs/loops/kaon-v3.md「阶段 1/2」：每组 8 个 nibble 在 A/B 里沿 k 连续，可单条 u32 读。
 #include <cstdint>
-#include <cstdio>
 #include <cstdlib>
 #include <cuda_runtime.h>
 #include <cuda_fp4.h>
@@ -171,11 +170,6 @@ __global__ void __launch_bounds__(256) gemm_nvfp4_kernel(const uint8_t* __restri
           }
           sfa[r * NQ4 + q] = v;
         }
-        __syncthreads();
-        if (tid == 0 && kb == 0) {
-          printf("[swz] swz=%d sfa[0..4]=%08x %08x %08x %08x\n", swz, sfa[0], sfa[1], sfa[2], sfa[3]);
-        }
-        __syncthreads();
       } else {
         for (int i = tid; i < BM * NQ4; i += blockDim.x) {
           const int r = i / NQ4, q = i % NQ4;
@@ -227,9 +221,6 @@ __global__ void __launch_bounds__(256) gemm_nvfp4_kernel(const uint8_t* __restri
       // scale 的线程→行映射（探针实测，见 loop 文档）：A 看 t%2 选高/低 8 行，B 看 t/4
       const int sam = (8 * (lane & 1) + (lane >> 2)) & 15;
       const uint32_t sa = sfa[(mrow + sam) * NQ4 + b];
-      if (tid == 0 && kb == 0 && b == 0 && swz) {
-        printf("[use] swz=%d sa=%08x sfa[0]=%08x sfa[1]=%08x\n", swz, sa, sfa[0], sfa[1]);
-      }
       const uint32_t sb0 = sfb[(ncol + brow) * NQ4 + b];
       const uint32_t sb1 = sfb[(ncol + 8 + brow) * NQ4 + b];
       mma_fp4(a, b0, sa, sb0, acc);
@@ -275,7 +266,6 @@ extern "C" {
 extern "C" int gemm_nvfp4_prequant_bf16(const void* aq, const void* as, const void* packed, const void* scale,
                                         float global, void* out, int64_t m, int64_t n, int64_t k, int swz,
                                         cudaStream_t stream) {
-  fprintf(stderr, "[nvfp4] prequant ENTER m=%lld n=%lld k=%lld swz=%d\n", (long long)m, (long long)n, (long long)k, swz);
   if (m < 0 || n < 0 || k <= 0) return static_cast<int>(cudaErrorInvalidValue);
   if (m == 0 || n == 0) return 0;
   if (k % 64 != 0) return static_cast<int>(cudaErrorInvalidValue);
