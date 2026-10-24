@@ -294,3 +294,29 @@ GPU 4 被别的进程占了 18 GB → 换 GPU 5（已记入规格的"用前核�
 - `MOE_COMBINE_F32=0`（bf16 权重口径，与参照 `cutlass_moe.py:680` 一致）
 
 同时重抓 compile 分段（带非零守卫），用于逐段比对确认到底哪段引入差异。
+
+## 第 7 轮结果：端到端 A/B —— combine 不是主因，**差异不在 MoE**
+
+`kaon3_probe` 30 用例 / 538 行，`CUBLASLT_WORKSPACE_SIZE=1 RMSNORM_MODE=0`：
+
+| 口径 | flip | mean_common_d | dnll |
+|---|---|---|---|
+| **FLOOR**（参照自比） | **0.83%** | **0.0276** | -0.0025 |
+| `MOE_COMBINE_F32=1`（f32 权重） | 15.94% | 1.2577 | +0.2027 |
+| `MOE_COMBINE_F32=0`（bf16 权重） | 16.98% | 1.1816 | +0.2621 |
+
+**两个口径都离 FLOOR 差 19 倍**，bf16 口径只把 |Δlp| 从 1.2577 降到 1.1816，
+flip 反而略升。→ **combine 不是端到端差异的主因。**
+
+### 关键推论：差异不在 MoE
+
+`moe_stage_parity`（真实数据，eager 口径）显示 MoE 段只有 ~1 ULP 差、范数比 1.0021；
+而端到端 `mean_common_d = 1.25`（比 FLOOR 大 45 倍）。
+**MoE 不可能贡献这么大的偏差** —— 端到端差异主要来自 **MoE 之外**（attention / norm / 前几层）。
+
+这意味着 `kaon3-compile` 那 17 轮把注意力集中在 MoE 上，**方向可能从一开始就偏了**。
+
+### 下一步（本轮剩余轮次）
+
+逐层比对 `--hidden-cmp`，定位差异**从第几层开始**、以及那一层是哪一段。
+不预设是 MoE。
