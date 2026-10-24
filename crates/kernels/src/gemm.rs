@@ -798,7 +798,10 @@ impl Gemm {
                 let hs = self.heuristics(&d, 32)?;
                 ensure!(!hs.is_empty(), "cublasLt fp8: no algo for m={m} n={n} k={k}");
                 // 实测表：按 (n, k) 给首选配置（完整属性前缀），未命中则用通配。
-                const TABLE: &[(usize, usize, &str)] = &[(2816, 8192, "id=35 tile=15 splitk=3 red=2 stages=18 swz=1")];
+                // qkv(2816×8192)：FlashInfer bmm_fp8 用 **splitk=1**，`id=67 tile=15 splitk=1` 与其逐位
+                // （loop kaon3-layer1 第 14 轮 algo 扫描，T=22/31/32/33/63/64/65 全 nd=0）。
+                // 旧值 `id=35 splitk=3` 是对旧自洽判据收敛到 0，但与 FlashInfer 差 11 末位（split-K 累加序不同）。
+                const TABLE: &[(usize, usize, &str)] = &[(8192, 2816, "id=67 tile=15 splitk=1 red=0")];
                 const FALLBACK: &str = "id=67 tile=13 splitk=1 red=0";
                 let want = TABLE
                     .iter()
@@ -810,6 +813,10 @@ impl Gemm {
                     .find(|h| Self::algo_desc_full(&h.algo).starts_with(want))
                     .map(|h| h.algo)
                     .unwrap_or(hs[0].algo);
+                if std::env::var("GEMM_FP8_DEBUG").is_ok() {
+                    let all: Vec<String> = hs.iter().map(|h| Self::algo_desc_full(&h.algo)).collect();
+                    eprintln!("[gemm fp8] m={m} n={n} k={k} want='{want}' pick='{}' cands={all:?}", Self::algo_desc_full(&pick));
+                }
                 self.default_algos.lock().unwrap().insert(key, pick);
                 pick
             }

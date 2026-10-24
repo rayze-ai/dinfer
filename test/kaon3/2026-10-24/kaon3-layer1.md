@@ -364,3 +364,16 @@ algo[4/5/6] id=35 tile=18 splitk=2/5      → nd=17/18
 **根因**：FlashInfer 用 **splitk=1（不切 K）**，我方 TABLE 选了 id=35 splitk=3 → split-K 多段归约累加序
 与 FlashInfer 单段不同 → 11 个末位差。**换成 splitk=1 的 algo（id=67 tile=15）即逐位。**
 下一步：验 id=67 splitk=1 在 T=31/32/33/63/64/65 全逐位，再固化进 TABLE。
+
+### 第 14 轮（攻克完成）：qkv 与 FlashInfer 全 T 逐位
+修 TABLE 后 T=22/31/32/33/63/64/65 **全 0/N 逐位**：
+```
+T=22:0  T=31:0  T=32:0  T=33:0  T=63:0  T=64:0  T=65:0   (全 nd=0 max|d|=0)
+```
+**双重根因**：
+1. TABLE 的 (n,k) **写反**：`(2816,8192)` 应为 `(8192,2816)`（匹配 `*tn==n && *tk==k`，qkv 实际 n=8192/k=2816）
+   → 一直没命中、走 FALLBACK(tile=13)，qkv 从来没用过 TABLE（潜伏 bug）。
+2. 真正要选 **splitk=1** 的 algo（`id=67 tile=15 splitk=1`）：FlashInfer bmm_fp8 不切 K 单段累加；
+   旧想指定的 `id=35 splitk=3` 多段归约累加序不同 → 11 末位差。
+修 TABLE=`(8192,2816,"id=67 tile=15 splitk=1 red=0")` → 默认路径直接逐位。
+注意：gemm.rs 公共件，需核 (8192,2816) shape 是否只 kaon3 qkv 用（不影响他模型）。
