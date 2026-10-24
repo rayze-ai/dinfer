@@ -4,7 +4,8 @@
 #   scripts/dev/remote_5090.sh up | status | ssh | run '<cmd>' | push | sync | pull <远端> <本地> | put <本地> <远端>
 #   GPU=0 scripts/dev/remote_5090.sh ctr '<cmd>'   # 在基线镜像容器里跑（cwd=/w/dinfer，含 stub 软链接 / LD_LIBRARY_PATH / 代理）
 #   GPU 7 是基线服务，ctr 拒绝。宿主无 nvcc / rust，编译与 GPU 运行都走 ctr。
-#   sync = 把本地 crates/ models/ scripts/ test/kaon3/ Cargo.* 增量推到远端（**不带 --delete**，本地为准；SYNC_DRY=1 只列差异）。
+#   sync = 把本地 crates/ models/ bins/ scripts/ test/kaon3/ Cargo.* 增量推到远端
+#          （**不带 --delete**，本地为准；SYNC_DRY=1 只列差异）。
 # 跳板会间歇拒绝新会话：打印 "new ssh client failed: ssh: handshake failed: EOF" 且 rc=0（命令没到远端），
 # run / ctr 识别这句后重放 stdin 重试，rsync 按非零 rc 重试（2026-10-22 实测约 1/4 会话失败）。
 # 凭据：~/.ssh/jms_5090_{user,pass}。不进仓库。
@@ -73,7 +74,7 @@ case "${1:-}" in
   ctr)    shift; up >/dev/null; ctr "$*" ;;
   push)   up >/dev/null; exec rsync -az --delete -e "ssh ${BASE[*]} ${MUX[*]}" \
             --exclude target/ --exclude .git/ ./ "$USER_AT:$REMOTE_DIR/" ;;
-  sync)   up >/dev/null; rsyncr ${SYNC_DRY:+-n -i} -R --exclude target/ crates models scripts test/kaon3 Cargo.toml Cargo.lock "$USER_AT:$REMOTE_DIR/" ;;
+  sync)   up >/dev/null; rsyncr ${SYNC_DRY:+-n -i} -R --exclude target/ crates models bins scripts test/kaon3 Cargo.toml Cargo.lock "$USER_AT:$REMOTE_DIR/" ;;
   pull)   shift; up >/dev/null; rsyncr "$USER_AT:$1" "$2" ;;
   put)    shift; up >/dev/null; rsyncr "$1" "$USER_AT:$2" ;;
   *) echo "usage: $0 up|status|ssh|run '<cmd>'|ctr '<cmd>'|push|sync|pull <remote> <local>|put <local> <remote>"; exit 2 ;;
