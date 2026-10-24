@@ -81,7 +81,9 @@ def main():
 
     # ---- 1. 从 checkpoint 复现 ----
     import safetensors.torch as st
-    snap = glob.glob("/models/models--kaon*/snapshots/*/")[0]
+    cand = glob.glob("/models/models--kaon*/snapshots/*/") + glob.glob("/hf_data/hub/models--kaon*/snapshots/*/")
+    assert cand, "找不到模型快照目录"
+    snap = cand[0]
     P = "model.language_model.layers.0.self_attn."
     W = {}
     for f in sorted(glob.glob(snap + "*.safetensors")):
@@ -93,15 +95,15 @@ def main():
     names = ["q_proj", "k_proj", "v_proj"]
     widths = [4096, 2048, 2048]
     scales = [W[n + ".weight_scale"].float() for n in names]
-    max_ws = torch.stack(scales).max()
+    max_ws = torch.stack([t.cuda() for t in scales]).max()
     print(f"checkpoint 三个 weight_scale = {[float(s) for s in scales]}", flush=True)
     print(f"max = {float(max_ws):.16g}", flush=True)
 
     parts = []
     start = 0
     for n, lw, s in zip(names, widths, scales):
-        wq = W[n + ".weight"]                       # [lw, 2816] fp8
-        wdq = wq.to(torch.float32) * s              # 反量化
+        wq = W[n + ".weight"].cuda()               # [lw, 2816] fp8
+        wdq = wq.to(torch.float32) * s.cuda()      # 反量化
         # 用 max_ws 重新量化（与 vLLM `ops.scaled_fp8_quant` 同口径）
         requant = (wdq / max_ws).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
         parts.append(requant)

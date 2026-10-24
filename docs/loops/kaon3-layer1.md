@@ -349,3 +349,33 @@ v      2 /  49152
 
 把 `layer.rs` 的 q/k/v 三次 `forward_preq` / `forward` 改成一个合并调用（N=8192），
 `q`/`k`/`v` 各自从合并输出的对应列段切片。然后用 1 层 oracle 复测端到端。
+
+## 第 8 轮（验证通过）：qkv requantize 算法完全复现
+
+按 `vllm/.../utils/w8a8_utils.py:76 requantize_with_max_scale` 在 Python 里复现，与 vLLM 前向里
+真正使用的合并权重逐字节比：
+
+```
+vLLM 实际使用 : weight_scale=0.0013166156131774187  input_scale=0.59375
+checkpoint 三个 weight_scale = [0.0011247907532379031, 0.0007890973938629031, 0.0013166156131774187]
+max_w_scale  = 0.0013166156131774187        ← 取三个的 max（v_proj 那个）
+
+[1] 复现权重 vs vLLM 实际权重 : 相同字节 23068672/23068672        ✅ 逐字节
+[2] 复现权重 GEMM vs vLLM 输出: 不同 0/33554432                  ✅ 逐位
+[3] input_scale = [0.59375]*3, max = 0.59375                     ✅ 与 vLLM 一致
+```
+
+**算法（三步，可直接照抄）**：
+```python
+max_w_scale = max(q,k,v 的 weight_scale)
+for 每个分片（logical_widths = 4096/2048/2048）:
+    weight_dq = fp8_to_f32(weight[start:end]) * 该分片原 scale
+    weight[start:end] = clamp(weight_dq / max_w_scale, ±448).to(fp8)
+weight_scale = max_w_scale          # 合并后只有一个
+input_scale  = max(q,k,v 的 input_scale)
+```
+
+关键细节：`clamp(x / max_ws, ±448)` 与 `clamp(x * recip, ±448)` 在 fp8 上逐位相同（已验证 0/67584），
+所以用哪个都行。
+
+**下一步**：把这个 requantize 做进 Rust 的 `weights` 加载，前向改成一次 N=8192 的 GEMM 再切三段。
