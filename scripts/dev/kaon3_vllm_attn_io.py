@@ -42,23 +42,25 @@ def _patched(query, key, value, output, layer_name, *a, **k):
             import torch as _t
             T = got_t
             sm = slot.flatten()[:T].long()
-            bs = int(os.environ.get("BLOCK", "32"))
-            blk, off = sm // bs, sm % bs
             # kv_cache 形状含 fp8；view 成 fp8 后按 (block, off) gather。布局 [num_blocks, 2, block, nkv, D] 或 split。
             kc = kv_cache
             if kc.dtype == _t.uint8:
                 kc = kc.view(_t.float8_e4m3fn)
-            def gather_kv(cache_half):  # cache_half: [nb, block, nkv, D]（fp8）→ dequant bf16 [T,nkv,D]
-                g = cache_half[blk, off]  # [T, nkv, D]
-                return g.to(_t.bfloat16)
-            # 尝试常见布局：kc [nb, 2, block, nkv, D]
             shp = tuple(kc.shape)
             saved = False
-            if len(shp) == 5 and shp[1] == 2:
-                kk = gather_kv(kc[:, 0]); vv = gather_kv(kc[:, 1])
+            # 实测布局 (num_blocks, nkv=8, block=16, 2*D=512)：最后一维前 D=k、后 D=v
+            if len(shp) == 4 and shp[1] == 8 and shp[3] == 512:
+                D2 = 256
+                bs = shp[2]  # block size = cache 实际第 3 维（不猜，直接取）
+                blk, off = sm // bs, sm % bs
+                print(f"[attn_io] cache block_size={bs}, slot[:4]={sm[:4].tolist()}", flush=True)
+                # gather：对每个 token 取 [nkv, 2D]，blk/off 索引到 (block, pos)
+                kv = kc[blk, :, off, :]           # [T, nkv, 512] fp8
+                kk = kv[:, :, :D2].to(_t.bfloat16)   # [T, nkv, 256]
+                vv = kv[:, :, D2:].to(_t.bfloat16)
                 kk.float().cpu().numpy().tofile(f"{out}/vllm_kcache.bin")
                 vv.float().cpu().numpy().tofile(f"{out}/vllm_vcache.bin")
-                info["kv_cache"] = ("5d_2", shp, str(kv_cache.dtype))
+                info["kv_cache"] = ("4d_nkv_block_2D", shp, str(kv_cache.dtype), "blk*16+off")
                 saved = True
             if not saved:
                 info["kv_cache"] = ("shape_unhandled", shp, str(kv_cache.dtype))
