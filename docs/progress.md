@@ -340,3 +340,29 @@ nibble 顺序、块缩放公式、量化常数。**numpy 按已确证公式复�
 - 30 用例端到端无改善（16.56% / 1.1994）：定位为参照口径——服务实例是 compile 模式，与 eager 自身差 1.57（§58）。
 - 新知识页 `docs/knowledge/bitexact-replication.md`；踩坑 +3（pitfalls 2026-10-23 三条）；记录 `test/kaon3/2026-10-23/D-16-REBASE.md` §51–§58。
 
+
+## 2026-10-24（Kaon-V3 compile 口径 parity，17 轮 loop 到上限）
+
+**做了什么**：按用户定的「全程 compile 口径、eager 不作判据」建立了 `docs/loops/kaon3-compile.md`
+与 `scripts/verify/kaon3-compile.sh`（含编译门禁），跑了 17 轮。
+
+**结果**：flip **16.56% → 14.08%**，|Δlp| 1.1994 → 1.2847（两个指标不同向）。
+唯一产生质变的改动是 `MOE_COMBINE_F32` 默认值 `0 → 1`（p02 单例 top-1 翻转 4/22 → 0/22）。
+离 FLOOR（0.83% / 0.0276）仍差 17 倍。
+
+**逐位达成的部分**：router 全段 0/3072（含 top-8 集合）、gelu 0/50688、
+`router_gemm_bi_f32` 0/8192、q 的 fp8 量化已做。
+
+**卡点**：专家 NVFP4 dense GEMM 差 7.8%（`ndiff=11210/11264`），用参照自己的 `a_q/a_s` 也一样。
+参照走 `VLLM_CUTLASS` 的 FP4 融合 MoE kernel，我们逐专家 GEMM；`cutlass_fp4_moe_mm` 是 torch op，
+不能从 Rust 直接链接。详见交接区与 `docs/loops/kaon3-compile.md` 的卡点节。
+
+**新增工具**（`scripts/dev/`）：`moe_capture.py`（抓参照真实 MoE 输入输出）、
+`fp4_dense_probe.py` / `fp4_calib.py` / `fp4_quant_calib.py`（FP4 定标）、
+`which_moe.py`（查参照 MoE 后端）、`cutlass_moe_probe.py`、`read_scale.py`。
+
+**踩坑 2 条**（`docs/pitfalls.md` 顶部）：
+用 `torch.matmul` 当对照测出假的 43% 差异（白写一个 kernel）；
+定标只在 k=64 做过一次就当通用公式（布局 bug 多绕 3 轮）。
+
+**下一次接手第一件事**：核对 `fp4_dense_probe.py` 里 `a` 与导出的 `a_q/a_s` 是否同一次调用产物。
