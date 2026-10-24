@@ -264,3 +264,9 @@ attn_io 请求 `block_size=32`（`non-default args` 确认），但 **vLLM 实�
 - 所以 attn_io 全程 block16；cache-gather 与 bf16 重建给相同 1279 = 同一份 bf16 做同一 e4m3 量化
   （两条路 fp8 字节逐位同），证明 gather 读对了（block/slot 没错位，否则结果乱）。
 - 待核：oracle server（端到端参照，也传 32）实际 cache block 是否也 16 → 若是，两处一致，block 非变量。
+
+### block size 闭环：两处一致（都 16），排除为变量
+oracle server 也传 `block_size: 32`（docker logs 确认），与 attn_io 同镜像同参数
+→ oracle 实际 fp8 cache 也是 16。**attn_io 与端到端参照 block 一致，block 不是变量。**
+推论：attn_io 抓的 attention IO == 端到端参照里真实那次 → "p01 逐位/p08 差1279" 可信。
+**第 12 轮稳定结论**：gqa 与 vLLM attention rel~5e-4 极接近、非严格逐位；剩 1279 bf16 末位待查 q 侧。
