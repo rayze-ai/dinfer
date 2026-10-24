@@ -54,3 +54,13 @@ hidden 重算 router_logits**（self.gate(hidden) 或 fused gate，忽略传入 
 已抓：/moe_e08 的 vllm_moe_hidden[36,2816]（MoE 输入）、vllm_moe_out[36,2816]（输出）。
 下一步：我方加"喂外部 hidden 跑完整 MoE"入口（或 kaon3_probe 支持），喂 vllm_moe_hidden，比 vllm_moe_out。
 待确认：我方路由是否也从 hidden 重算（与 vLLM gate 口径一致）。
+
+## 第 19 轮：回看 vLLM 确认 MoE 干净隔离方案
+- gemma4.py:371 `Gemma4MoE.forward(x, router_logits)` → `self.experts(x, router_logits)`。
+  两输入：**x=专家 hidden（moe_hidden）+ router_logits（外部算好传入）**。
+- `_forward_impl` 的 `self.gate` 对 Gemma4=None（gate 在 Gemma4Router 外算好传入），**不重算** → 用传入 logits。
+- router 预处理(norm·root_size·scale) **只给 router 不给专家**（gemma4.py:265 注释），与我方一致，结构没搞错。
+- **干净隔离**：喂我抓的 x(moe_hidden)+router_logits(moe_logits) 进我方专家，比 moe_out。
+  纯测专家 GEMM(NVFP4)+topk+加权和，路由用 vLLM 的（排除路由差）。
+- 待做：我方加入口接收外部 hidden+logits 跑专家（kaon3_probe --moe-iso 或测试）；已有数据 /moe_e08。
+- 注：routing 是 gemma4_routing_function（softmax over ALL → topk → renormalize），top_k=config.top_k_experts。
