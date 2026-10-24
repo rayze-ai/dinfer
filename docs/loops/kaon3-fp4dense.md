@@ -139,11 +139,14 @@ nibble：`break_fp4_bytes` 用 `(low, high)` 交错 → **低半字节 = 偶数�
 | 1 | 换自洽合成判据（vLLM CI 同款） | 判据自证通过；**dense GEMM ndiff=0**，"差 7.8%" 作废 |
 | 2 | 补测自己的量化器 + 权重 scale 布局 | `forward_nvfp4` 也 ndiff=0；权重 scale 线性（`VLLM_CUTLASS` 不 swizzle） |
 | 3 | 真实数据分段（`moe_stage_parity`） | 换参照 topk 只降 867/67584 → **路由不是主因**；差异是 1–1.5 ULP 系统性偏大 |
-| 4 | 抓 compile 口径的 c1/c2/c3 分段 | 进行中 |
+| 4 | 抓 compile 口径的 c1/c2/c3 分段 | ⚠️ **作废**：抓到的是 vLLM 显存 profile 的全零 dummy |
+| 5 | （同上）逐段比对 | ⚠️ **作废**：全零比全零，`ndiff=0` 无意义 |
 
 ### 已排除（累计，不要重复查）
 
+- ⚠️ **第 4/5 轮"四段逐位 0"已作废**（抓到的数据全零，见 `test/kaon3/2026-10-24/kaon3-fp4dense.md`）
 - dense FP4 GEMM 整段（量化 + GEMM + 布局 + 乘子），三条独立路径都是 `ndiff=0`
+  —— 这一条用的是**自洽合成数据**，判据三条独立路径互证，**仍然成立**
 - 路由段（换参照 topk 几乎不变）
 - gelu·mul（此前 0/50688）
 - MoE 权重 scale 布局（`VLLM_CUTLASS` 分支不做 swizzle）
