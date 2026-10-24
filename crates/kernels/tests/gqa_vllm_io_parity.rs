@@ -78,7 +78,10 @@ fn gqa_matches_vllm_attn_output() {
     let cu = st.htod_copy(vec![0i32, t as i32]).unwrap();
 
     let cfg: i32 = std::env::var("GQA_PREFILL_CFG").ok().and_then(|v| v.parse().ok()).unwrap_or(464);
-    for &(p_fp8, tag) in &[(0i32, "p_fp8=0"), (1i32, "p_fp8=1")] {
+    // 生产 p_fp8 实参 = p_fp8 | (attn_mode<<1)，attn_mode 默认 2（bit1，vLLM Triton 指数口径）。
+    // ATTN_MODE 环境可覆盖；之前测试漏传 attn_mode，跑的是 mode=0 口径（与生产不一致）。
+    let am: i32 = std::env::var("ATTN_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(2);
+    for &(p_fp8, tag) in &[(0i32, "p_fp8=0"), (1i32 | (am << 1), "p_fp8=1")] {
         let mut out = st.alloc_zeros::<bf16>(t * h * d).unwrap();
         let rc = unsafe {
             ffi::gqa_prefill_win_bf16(
