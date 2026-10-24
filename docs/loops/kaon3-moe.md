@@ -20,3 +20,11 @@ router_logits 差 1.1% → 3/36 行 topk8 选错专家 → 选错行 MoE 输出�
 - 下一步：查 router_logits 1.1% 来自 ① router 自身口径（GEMM 累加/norm/scale）还是 ② 上游 add 残差流带入。
   方法：抓 vLLM 的 router 输入（add 或 router_in），比我方；或比 router GEMM 隔离（同输入同权重）。
 - 数据：/hf_data/yaochen/moe_e08（vllm_moe_hidden/logits/out），我方 /w/sd_now（router_logits/router_in/moe_y/moe_e*）。
+
+## 第 18 轮续：根因往上收一层——MoE 输入(pre_ff2_norm)就偏 2.3%
+vLLM moe_hidden vs 我方 pre_ff2_norm：rel=2.3%（范数都 92.5，分布偏）→ **MoE 输入已偏，非 router 自身**。
+pre_ff2_norm = rms_norm(add, pre_ff_norm_2)；add = post_attn_norm(o)+embed（o=attention 输出）。
+→ add 残差流带着偏差进来。**印证 attention 偏差向下游传**（但传到 pre_ff2/router，经 topk 离散放大）。
+更正：seg_l0 测 pre_ff2_norm "逐位" 是用**我方自己 add** 当输入（自洽）；对 vLLM 的 add 则偏 2.3%。
+根因链：add 偏 → pre_ff2_norm 2.3% → router_logits 1.1% → topk 翻转 3 行 → MoE 1.9%。
+下一步：抓 vLLM 的 add（= attention 后残差，o_proj+post_attn_norm+embed）比我方，定位 add 偏的来源。
