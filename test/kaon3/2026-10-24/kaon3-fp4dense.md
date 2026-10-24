@@ -422,3 +422,41 @@ p02 的 24 token，`L*.bin` 135168 字节 = 24×2816×2，nz=0.4996（已核非�
 
 本轮的参照是 **eager**（hook 在 compile 下不触发），只用于定位。
 修复后必须回 compile 口径重跑端到端（`kaon3_parity.sh`）。
+
+## 第 12 轮：解开 `1/14.22` 之谜 —— 它是 `layer_scalar`，不是量化常数
+
+之前（上一轮循环）花了 6 次反推的那个"1/14.22 常数"，**真实身份是每层的 `layer_scalar`**：
+
+```
+model.language_model.layers.0.layer_scalar = 0.0703125 = 1/14.2222
+```
+
+`layer.rs:353` 读它，`layer.rs:861` 在**层末**乘上（`isotropic` 式的层输出缩放）。
+所以：
+- 逐层残差流 `L{l}.bin` **已含** `layer_scalar`；
+- sub-dump 的中间量（`post_ff_norm` / `ff1` / `ff2` 等）**未含**。
+
+**这解释了此前所有"对不上"**：我拿 `iso_L0` 去比未乘标量的中间量，比值当然是 0.0703。
+
+### 全部自洽验证（本次）
+
+```
+layer_scalar = 0.0703125 (1/14.2222)
+(residual + post_ff_norm) * layer_scalar  vs  iso_L0        relL2 = 0.002587
+我方 post_ff_norm  vs 参照 post_ff_norm                     relL2 = 0.002863
+我方 (res+post_ff_norm)*ls  vs  参照 L0.bin（已含 ls）        relL2 = 0.007882
+```
+
+### L0 的真实结论
+
+L0 的实现**基本正确**：`input_norm` / `attention`（`o_proj` 与参照逐位相同）/ `pre_ff_norm` /
+`dense` 全部 **0.0 逐位**，只有 `post_ff_norm`（以及含 MoE 的部分）差 **2.6e-3**。
+这个量级是 **bf16 舍入 / 归约顺序**，不是语义错。
+
+### 下一步
+
+1. 拿到参照的 `post_ff_norm_1` / `post_ff_norm_2` / `moe_out`（本轮正在抓，`r12`），
+   把 2.6e-3 拆到 MLP 支路还是 MoE 支路。
+2. 若拆分后两边都是 1e-3 量级的舍入差，那 **L0 已经到 bf16 噪声底**，
+   端到端 `|Δlp| = 1.25` 的成因要另找（更可能是**逐层累积** + 不连续量化放大，
+   参见 `docs/knowledge/parity-localization.md` 的"放大器"一类）。

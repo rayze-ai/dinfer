@@ -68,18 +68,29 @@ sub = {}
 if SUB is not None:
     want = int(SUB)
     model = llm.llm_engine.model_executor.driver_worker.model_runner.model
-    cands = [(n, m) for n, m in model.named_modules() if f"layers.{want}." in n]
+    # 只要语言模型那一层：`vision_tower.encoder.layers.0` 也会命中 "layers.0."，
+    # 2026-10-24 实测因此抓到了 1152 宽的视觉层（形状对不上），必须限定前缀。
+    cands = [(n, m) for n, m in model.named_modules()
+             if n.startswith("language_model.model.layers.") and f".layers.{want}." in n]
     print(f"SUB_LAYER={want}: 候选模块 {len(cands)} 个", flush=True)
     picked = 0
     for n, m in cands:
         tag = None
-        for key, t in (("input_layernorm", "input_norm"),
+        # 顺序重要：端到端匹配优先，长的放前面（`post_feedforward_layernorm_1`
+        # 不能被 `post_feedforward_layernorm` 抢走）。
+        for key, t in (("post_feedforward_layernorm_1", "post_ff_norm1"),
+                       ("post_feedforward_layernorm_2", "post_ff_norm2"),
+                       ("pre_feedforward_layernorm_2", "pre_ff_norm2"),
+                       ("post_feedforward_layernorm", "post_ff_norm"),
+                       ("input_layernorm", "input_norm"),
                        ("self_attn", "attn_out"),
                        ("pre_feedforward_layernorm", "pre_ff_norm"),
-                       ("post_feedforward_layernorm", "post_ff_norm"),
-                       ("mlp", "dense")):
+                       ("mlp", "dense"),
+                       ("moe", "moe_out"),
+                       ("router", "router_out")):
             if n.endswith("." + key):
                 tag = t
+                break
         if tag is None:
             continue
 
