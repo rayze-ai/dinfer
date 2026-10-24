@@ -257,3 +257,10 @@ p08 T=36 p_fp8=1: 1279/147456 rel=5.3e-4  （与 bf16 重建版完全相同的 1
 T=40 时 want 范数爆到 4400、rel=0.997 假阳；截 T=36 真实 token 后恢复 rel=5.3e-4。
 **两输入定论**：我方 gqa 与 vLLM attention **rel~5e-4 极接近，非严格逐位**（p01 的 0 是偶然）。
 剩 1279 待查：attention kernel 口径差，或 q 侧（fp8 值但 vLLM 内部还有 q descale/bmm1_scale）未对齐。
+
+### 第 12 轮 block size 核实（用户 2026-10-24 质疑）
+attn_io 请求 `block_size=32`（`non-default args` 确认），但 **vLLM 实际建 fp8 cache block_size=16**
+（`cache block_size=16 slot=[16,17,18,19]`）→ vLLM 对 fp8 KV cache 自行按 16 对齐，无视请求的 32。
+- 所以 attn_io 全程 block16；cache-gather 与 bf16 重建给相同 1279 = 同一份 bf16 做同一 e4m3 量化
+  （两条路 fp8 字节逐位同），证明 gather 读对了（block/slot 没错位，否则结果乱）。
+- 待核：oracle server（端到端参照，也传 32）实际 cache block 是否也 16 → 若是，两处一致，block 非变量。
