@@ -103,6 +103,17 @@ fn gqa_matches_vllm_attn_output() {
         let rel = dot.sqrt() / nrm_r.sqrt().max(1e-30);
         println!("gqa vs vLLM out [{tag}] rc={rc} 不同 {nd}/{} max|d|={mx:.4e} rel={rel:.3e} ‖want‖={:.2} ‖got‖={:.2}",
                  t * h * d, nrm_r.sqrt(), nrm_g.sqrt());
+        // 定位差异位置（row=token, head, dim）：diff 很少时打全部
+        if std::env::var("LOCATE").is_ok() && nd > 0 && nd <= 40 {
+            for i in 0..t * h * d {
+                let g = bf16::from_f32(got[i].to_f32()).to_bits();
+                let w = bf16::from_f32(want[i]).to_bits();
+                if g != w {
+                    let (row, hh, dd) = (i / (h * d), (i / d) % h, i % d);
+                    println!("   diff[{tag}] row={row} head={hh} dim={dd} got={:.5} want={:.5}", got[i].to_f32(), want[i]);
+                }
+            }
+        }
     }
     let _ = cpu_ref; // 留着备用，本测试不再绕 f64
 }

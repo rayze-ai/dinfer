@@ -451,3 +451,14 @@ norm/rope ✅ 逐位
 ```
 **L0 所有 fp8 路径都对齐 FlashInfer，但端到端仍 0.0086** → 残差只能在 **MoE（NVFP4，不走 fp8 cuBLASLt，另一条 kernel）**。
 L0 FFN = dense MLP + MoE 相加，MoE 偏则整层偏。下一步：隔离 MoE 输出 vs vLLM。
+
+### 第 17 轮：attention 残留 2 个差的定位
+cfg=464 下 LOCATE：
+```
+diff1: row=6  head=5  dim=14   got=-0.22168 want=-0.22070  差 9.8e-4 (1 bf16 ULP)
+diff2: row=32 head=13 dim=125  got=-0.17676 want=-0.17578  差 1 ULP
+```
+**row=6 在第一个 tile 内（≤32）** → 推翻"单 tile 必逐位、差只在跨 tile"的旧说法。
+这 2 个是 PV 累加（exp2f 结果 × V 的 fp32 累加）顺序与 vLLM trtllm kernel 不同，
+恰好把 2 个值推过 bf16 舍入中点。2/147456=0.001%，不可约末位（无"另一 algo"可选，是我方自有 kernel）。
+与 FEXP 的 1279（系统性、已修）不同：这 2 个是累加序真末位，要消须逐指令复刻 vLLM PV 累加，为 2 ULP 不值得。
