@@ -377,3 +377,10 @@ T=22:0  T=31:0  T=32:0  T=33:0  T=63:0  T=64:0  T=65:0   (全 nd=0 max|d|=0)
    旧想指定的 `id=35 splitk=3` 多段归约累加序不同 → 11 末位差。
 修 TABLE=`(8192,2816,"id=67 tile=15 splitk=1 red=0")` → 默认路径直接逐位。
 注意：gemm.rs 公共件，需核 (8192,2816) shape 是否只 kaon3 qkv 用（不影响他模型）。
+
+### 第 14 轮：qkv 逐位后端到端仍 0.0086（主残差不在 qkv）
+qkv 全 T 逐位，但 L0 24 用例端到端 mean_common_d 0.0085→0.0086（噪声级，没动）。
+→ **qkv 的 11 末位本就不是端到端主残差来源**。主残差在其余 fp8 GEMM：
+o_proj(2816×4096) / gate_up(4224×2816) / down(2816×2112)——它们同样 TABLE 未命中走 fallback，
+algo 与 FlashInfer 不同。MoE 专家是 NVFP4（另一路）。
+algo 攻克法已验证有效（qkv 11→0）。下一步：对 o_proj/gate_up/down 各扫 algo 找 FlashInfer 逐位的填 TABLE。
