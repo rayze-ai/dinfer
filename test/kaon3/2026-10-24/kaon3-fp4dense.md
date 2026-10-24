@@ -282,3 +282,15 @@ output.copy_((c3.view(m, num_topk, k) * topk_weights.view(m, num_topk, 1).to(out
 `compilation_config['compile_ranges_endpoints'] = [4096]`，说明 oracle 是 **inductor compile** 模式，
 真实调用路径可能与 eager 的 `gemma4_routing_function_torch` 不同 —— 必须用 compile 抓到的
 `topk_w` 实测确认，不能只看 Python 源码。
+
+## 第 7 轮：跑端到端 A/B，同时重抓 compile 分段
+
+`ctr` 的坑：`docker run --rm` 随 SSH 会话结束被杀（已记 pitfalls）。
+torch.compile 首次追踪要 15 min 左右，所以抓取必须宿主机 `setsid nohup docker run` 脱离会话。
+GPU 4 被别的进程占了 18 GB → 换 GPU 5（已记入规格的"用前核显存"）。
+
+端到端 A/B（`kaon3_probe` + `kaon3_oracle_diff`，`CUBLASLT_WORKSPACE_SIZE=1` `RMSNORM_MODE=0`）：
+- `MOE_COMBINE_F32=1`（现状默认）
+- `MOE_COMBINE_F32=0`（bf16 权重口径，与参照 `cutlass_moe.py:680` 一致）
+
+同时重抓 compile 分段（带非零守卫），用于逐段比对确认到底哪段引入差异。
