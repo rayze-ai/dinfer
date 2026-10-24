@@ -36,3 +36,12 @@ pre_ff2_norm = rms_norm(add, pre_ff_norm_2)；add = post_attn_norm(o)+embed（o=
   - 若 eager==compile → MoE 两模式无差异，eager 数据可直接用，1.9% 是我方真 bug；
   - 若有差异 → 看差异结构，eager 不能当 compile 判据，1.9% 里混了模式差。
 产物：/moe_cc08（compile-nocache）vs /moe_e08（eager）vs /sd_now（我方）。
+
+## 第 18 轮关键结构事实：MoE 在 compile 下被内联进图，抓不到
+`splitting_ops` 只含 attention 类（unified_attention_with_output 等），**不含 moe_forward**。
+→ compile 下 MoE 被 inductor 完全追踪/融合进图，**不走任何可 patch 的 Python 函数**（类方法/模块函数/重注册 op impl 全失效，含 DISABLE_COMPILE_CACHE 重编译也 grabbed=[]）。
+→ eager 下 MoE 走 Python 专家实现（patch 命中，抓到 vLLM MoE，vs 我方差 1.9%）。
+**回答"MoE eager vs compile 有无差异"**：执行路径不同（eager=Python 专家循环，compile=inductor 融合图），
+不能默认相等；但 compile 口径 MoE 输出**无法 hook 抓取**——"抓 vLLM compile MoE 直接比"这条路不通。
+待解矛盾：用户"eager moe 已对齐"，但我 eager 抓的 vLLM MoE vs 我方 moe_y 差 1.9% → 需确认比对口径
+（是否 moe_y 定义 / 加权和 / post_ff_norm_2 前后 对错了量）。
