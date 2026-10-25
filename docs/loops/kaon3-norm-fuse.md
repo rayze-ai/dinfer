@@ -76,3 +76,22 @@
 不落 bf16、直接以 fp32 喂 fp8-quant（需改 qkv 前的 norm→quant 为融合 fp32 链，去掉中间 bf16 落盘）。
 → 下一步（需改代码+rebuild）：input_norm 输出保持 fp32 直喂 qkv 的 fp8 量化（融合口径），再比 attn_io k/v 是否塌到 fp8 地板。
 收益评估：端到端 1 层 mean_common_d 0.0085，入口 2.6e-3 被放大主导之；若融合口径把入口压到地板，端到端应明显降。
+
+## R3（2026-10-25）：口径候选穷举——我方=标准 mid0/mid1，真实 compile 两者都没命中（可观测性墙）
+在 oracle 容器用 Lm1+checkpoint 权重算候选 norm，比我方 input_norm dump：
+```
+我方 mode0 == rms(raw_w, mid0=fp32不中间舍)   0/101376
+我方 mode2 == rms(raw_w, mid1=x·inv先舍bf16)  0/101376
+(1+w) 各变体                                  rel=0.144（差14%）
+```
+事实1：**checkpoint input_layernorm.weight 存有效权重本身（mean=4.48 max=30.6），非 Gemma (1+w) 偏移**；
+  我方 `×w` 不 +1 正确，vLLM 对此 ModelOpt ckpt 也不加 +1（否则 14% 偏）。q_norm=1.0000 只是该层恰为 identity。
+事实2：我方 mode0/mode2 = 标准"中间不舍/中间舍"两口径，但对真实 compile k/v **都没命中**（mode0 4e-3、mode2 6.2e-3）。
+→ 真实 compile 的 input_norm 口径是第三种，且其输出在 inductor 融合图里**不物化**、fp8-quant/cutlass 是 `_C` op 不可 Python patch
+  → **无法把真实 input_norm 输出抓来逐 bit 对齐**。这是本 loop 的硬可观测性墙。
+**本 loop 诚实结论**：残差漂移主贡献段已定位到 **input_norm→qkv→quant 的 compile 融合微观口径**（embed/GEMM/gqa/MoE/dense 均已排除/证明非错源）；
+  但真实口径在 compile 黑盒内不可观测，mode0 为当前最优（k 4e-3→attn_out 1.86e-2→端到端贡献 0.0085 主体）。
+**要再推进的两条路（都需离开纯观测）**：
+  A. 复刻 inductor 对 (input_norm→fp8-quant) 的融合 codegen 舍入——需读 compile 产物（VLLM_DEBUG_DUMP_PATH 的图/代码），工程量大、脆弱；
+  B. 承认 mode0 为 fp8-pipeline 实际地板，端到端 0.0085 作为"各段末位沿残差流累积 + attention 放大"的系统噪声接受。
+停止条件评估：严格"k/v 逐位"在 compile 融合+fp8 下不可达且不可观测验证；改为"已定位主贡献段 + 证明非单段结构错"达成。
