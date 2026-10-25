@@ -152,3 +152,14 @@ knorm→rope 保 fp32（其余 bf16）             : rel=3.516e-3  （略好，�
 **判定**：我方实现**无 bug**（op 级全逐位）；0.0085 是"手写离散 kernel vs torch.compile 融合 kernel"的固有舍入地板，
   非实现错误。要再降只能把我方前向也做成等价融合并逐位追 inductor codegen（投入与收益不成比例）。
 loop kaon3-norm-fuse 收：定位彻底（每段证逐位 + 残差归因到 inductor 融合），停止条件"定位主贡献段 + 证非实现错"达成。
+
+## R9（2026-10-25）：用 vLLM 真实 op 逐个替换 + 比对 gemma4.py 模块顺序，铁证 op 级全对；残差=compile 融合特定混精
+把重建里**每个** op 换成 vLLM 真实实现（不再手搭）：
+- rope 用真实 `torch.ops._C.rotary_embedding`（cache=fp32算→bf16，与 base.py 一致）：vs attn_io 仍 3.84e-3。
+- norm=rms_norm_batch_invariant、quant=scaled_fp8_quant、GEMM=cutlass_scaled_mm（合并权重与 vLLM 逐字节同，23068672B）。
+- 比对 gemma4.py:517-546 真实 attention forward：qkv_proj→split→k_norm→rotary_emb→v_norm，**op 间全 bf16**，与我方重建**顺序/精度完全一致**。
+→ vLLM **eager 模块 == 我方重建**（同真实 op、同顺序、同 bf16 中间量）。但 attn_io 跑的是 **compile**（未设 enforce_eager），差 1 个 bf16 ULP（max|d|=1/128 恒定）。
+扫边界精度：全 bf16 3.94e-3 / knorm→rope 保 fp32 3.52e-3（更好）/ 全 fp32 5.49e-3（更差）。
+→ attn_io 命中的是 **inductor 对该前向的特定部分-fp32 融合**（非任何统一 dtype）。op 级我方全对，残差是 compile codegen 的中间精度选择。
+**可落地杠杆（唯一被证明有效）**：我方 Rust 在 q/k_norm→rope 之间保 fp32（现在落 bf16），复刻 inductor 的 norm+rope 融合，回收 ~0.4e-3/3.9e-3。
+其余为分布式融合差，需逐点复刻 inductor codegen（投入大、随版本变）。
