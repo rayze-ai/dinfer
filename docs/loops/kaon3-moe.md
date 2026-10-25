@@ -254,3 +254,13 @@ rel=1.138 是行序未对齐（f64 按自然序 14 token vs 我方 bucket 序 15
   ③ 两边同 NVFP4 W4A4；解包口径验证通过；单专家 GEMM 范数量级对（1.4%）
   → **专家 0.43% = NVFP4 fp4 量化噪声底，非 bug**。结构错会致范数差一半（如我 f64-moe_inter 错时 588 vs 366）。
 **kaon3-moe loop 收口**：MoE 路由逐位对齐；专家残差 0.43% 坐实为 fp4 噪声。L0 无结构 bug。
+
+## 第 24 轮：读 vLLM 源码（不靠注释）确认 MoE 结构
+- 实测 backend：nvfp4.py:291 `Using 'VLLM_CUTLASS' NvFp4 MoE backend`（不是猜）。
+- cutlass_moe.py:621 `scaled_fp4_experts_quant(a1_gscale)` → vLLM **激活也量化 fp4**（W4A4，非 W4A16）；我方激活 fp4 方向对。
+- cutlass_moe.py:644 分支：activation==SILU 走融合 silu kernel；**gemma4(gelu) 走 else：apply_moe_activation(gelu)+scaled_fp4_experts_quant**。
+  → 激活函数 gelu 正确；down 输入也量化 fp4（line 659），我方 down.forward(NvFp4) 同样量化，顺序/量化点对上。
+- NQ4_EXACT_RCP A/B 对 MoE out 零影响（与注释声称"照抄 vLLM rcp.approx"矛盾——注释不可信，但 rcp 口径确非差异源）。
+**结论（源码读出）**：MoE 顺序/量化点/激活函数全对，0.43% 在 **vLLM CUTLASS fp4 GEMM vs 我方 mma.sync e2m1 GEMM 的累加实现差**
+（同 qkv 的库差性质，但 NVFP4 无 algo 可选）。这是实现差非口径 bug。
+下一步坐实：隔离单个 NVFP4 GEMM（同 fp4 输入+权重）我方 mma vs vLLM cutlass，比累加差——需调 vLLM ops.cutlass_scaled_fp4_mm 单算子。
