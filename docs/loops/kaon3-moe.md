@@ -357,3 +357,15 @@ MoE 逐位只保证"同输入同输出"，端到端输入已偏 → MoE 逐位�
 → 端到端 0.0085 残差 = 各段 fp8/bf16 末位沿残差流累积，非 MoE 口径。
 MoE loop 成果：MoE 本身（路由+gate/up/down+加权和）给定同输入与 vLLM 逐位；0.43% 根因（加权和 combine 口径）已定位可切逐位。
 待办：① 多组（≥2 prompt）验 MoE iso 逐位站得住（仅 p08）；② 改默认 combine 口径；③ 端到端残差转上游残差流累积问题。
+
+## 第 26 轮：MoE 多组逐位验证通过（combine_f32=0）
+```
+p08(36tok): 0/101376 逐位  ‖365.93==365.93‖
+p03(31tok): 0/87296  逐位  ‖363.17==363.17‖
+```
+→ 两组确认 MoE（路由+gate/up/down+加权和）在 vLLM 口径（MOE_COMBINE_F32=0）与 vLLM **逐位一致**，非 p08 偶然。
+**MoE 0.43% 彻底解决**：根因=加权和 combine 口径（默认 f32 累加+pes折down 非 vLLM；=0 走 bf16·pes 加权=vLLM）。
+整条 MoE 定位链（用户方法：逐步+实际cutlass对拍+脚本自验+多组）：
+  路由逐位 → gate/up/down GEMM 各 12 专家逐位 → 加权和 combine 口径是唯一差 → 切 vLLM 口径逐位。
+关于改默认：iso 逐位但端到端 0.0085 不降（端到端 MoE 输入已带上游残差流末位）→ 翻默认 combine 对端到端收益小。
+待用户定：是否改 moe_combine_f32 默认 false 使生产走 vLLM 口径（需评估对其他用例影响）。
