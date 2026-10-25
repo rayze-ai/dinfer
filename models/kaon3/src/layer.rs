@@ -1016,6 +1016,14 @@ impl Gemma4Layer {
             e,
             kk,
         )?;
+        if let Some((dir, _)) = sub_out {
+            let ids = stream.dtoh_sync_copy(&sc.topk_ids.data)?;
+            let ws = stream.dtoh_sync_copy(&sc.topk_w.data)?;
+            let ib: Vec<u8> = ids.iter().take(tokens * kk).flat_map(|x| x.to_le_bytes()).collect();
+            let wb: Vec<u8> = ws.iter().take(tokens * kk).flat_map(|x| x.to_le_bytes()).collect();
+            std::fs::write(dir.join("topk_ids.bin"), ib).ok();
+            std::fs::write(dir.join("topk_w.bin"), wb).ok();
+        }
         k::ops::moe_bucket(stream, &sc.topk_ids.data, &mut sc.buckets, tokens, kk)?;
         let offsets = stream.dtoh_sync_copy(&sc.buckets.offsets)?;
 
