@@ -134,3 +134,11 @@ ROUTER_RCP_EXACT=1 + 强制 exp2f 精确，topk_w max|d| 仍 8.2201e-3 不变 �
 重新定位方向：① 我方只对 topk 的 exp 做分母 vs vLLM 全体 softmax 概率再 renorm（数学应等价，需核）；
 ② per_expert_scale 折入顺序/dtype；③ renorm 的 1e-20 vs vLLM where(>0)。
 下一步：Python 精确复现我方 kernel 口径 vs vLLM 口径，在 f64 下比，定位哪步口径差。
+
+## 第 21 轮：topk_w 8.2e-3 = f32 实现差（非口径、非 exp 近似）
+- 退化检查救：tw3 脚本 id 对齐写错报 rel=3.8%，作废；按 oid 顺序直接比得 rel=1.2% max|d|=8.2e-3（与直接比 vLLM 一致）。
+- f64 口径验证：我方 kernel 口径 == vLLM 口径（1e-16）→ 数学没错。
+- row0 样本：我方 0.4021 vs f64 0.40838（差 0.006，~1.5%）。我方与 vLLM 都离 f64 ~1%，方向不同。
+- 根因推断：f32 下 vLLM 全体 128 softmax 概率 gather+renorm vs 我方只 topk 8 个 exp 求和分母，
+  数学等价但 f32 归约舍入不同 → topk_w 差 8.2e-3（2% 相对）。这是真实实现差，非 bug/口径。
+- 影响：传到 MoE out rel=4.3e-3（0.43%）。是否修需权衡（改我方 kernel 走全体 128 softmax 复刻 vLLM 归约）。
