@@ -285,3 +285,16 @@ emu[0,:4]=[-0.9185,-1.3499,-0.6168,0.1823]  我方=[-0.918,-1.3516,-0.6211,0.182
   → 0.45% = 我方 fp4 GEMM 累加/舍入 相对 **理想 fp4 解包 f32** 的软件实现差（同机同格式，非硬件）。
 **待消（下次）**：① 搭对 cutlass_scaled_fp4_mm 直接对拍（查 blockscale 是否含 global、alpha 方向）；
 ② 或逐步查我方 mma e2m1 kernel 的累加序/舍入 vs vLLM cutlass，对齐到末位。0.45% 是软件差，原则上可消。
+
+## 第 25 轮：0.43% 是实际对实际（无手搭参照），定位到两个软件嫌疑
+确认：我方专家走生产 forward_nvfp4（gemm_nvfp4_sm120），路由逐位 → moe_y vs vLLM 真实 cutlass moe_out
+**0.43% = 实际生产路径 vs vLLM 实际 cutlass 的真实软件差**（iso 同输入，无手搭参照，不需再比 emulation/cutlass_scaled_fp4_mm）。
+软件嫌疑（gemm_nvfp4_sm120.cu）：
+  ① **激活量化 scale 用 rcp_approx**（line 77 `inv=rcp_approx(sfd*rcp_approx(gs))` 两次近似，**无开关恒近似**）
+     vs vLLM scaled_fp4_quant 的量化——两边激活量化不同实现，量化出的 fp4 字节可能就不同。
+  ② mma.sync e2m1 GEMM 累加序 vs cutlass。
+**下一步（kernel 级实际对拍，不手搭）**：
+  a. 我方 quant_a_kernel 加 dump 量化后激活 fp4 字节；vLLM ops.scaled_fp4_quant 同输入量化；逐字节比。
+     若 fp4 字节就不同 → 差在量化（line 77 rcp_approx 给精确开关 A/B）；若同 → 差在 GEMM 累加。
+  b. 按结果：量化差则加 exact rcp（如 route_ex2 那样）；累加差则对齐 mma 顺序或接 cutlass。
+停止条件不变：MoE out 对齐到末位。0.43% 是软件差、可消，继续。
