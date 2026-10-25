@@ -56,3 +56,23 @@
   当前 4e-3 远在地板之上 = 真有系统差（input_norm 口径），仍要攻。
 下一步候选：① patch `scaled_fp8_quant`（cudagraph 关）抓真实 input_norm 输出，与我方逐 bit 比，枚举口径命中；
   ② 端到端 oracle 量化 mode0 当前 mean_common_d（确认 0.0085 基线）。
+
+## R2（2026-10-25）：4e-3 不在 qkv GEMM，在 input_norm（compile 融合不可观测）
+尝试抓真实 input_norm 输出失败——**compile 不透明墙**：
+- patch `scaled_fp8_quant`（Python wrapper）：`CAPQKV_DONE n=0`，compile 下 quant 被 lower 成 torch.ops 节点/融进 inductor，Python wrapper 不走。
+- `cutlass_scaled_mm` 是 `torch.ops._C`（C++，非 vllm:: splitting op），无法 Python impl-patch。
+→ compile 下 L0 可观测边界只有：embed（Lm1）、attention q/k/v（attn_io splitting op）、MoE io（moe_forward op）。
+  input_norm / fp8-quant / qkv-GEMM 全在 embed 与 attention 之间的黑盒里（inductor 融合 / _C），不可单独抓。
+
+**结论（按量级判定，无需抓）：4e-3 不在 qkv GEMM，在 input_norm。**
+- 量级：k 不同 56224/73728（systematic）。qkv fp8 GEMM 给同输入仅 ~13/196608（round7）→ GEMM 自身 fp8 舍入产不出 56k 系统差。
+- 唯一来源 = 喂给 GEMM 的输入（input_norm 输出）系统性偏 ~2.6e-3（与 seg_l0 mode0 一致），GEMM 如实传成 4e-3，gqa 放大到 1.86e-2。
+- GEMM 是传播器不是错源。
+
+**技术边界（诚实）**：vLLM 的 input_norm+fp8-quant 在 compile 下**融合**（native/fp32 一路到 fp8，无中间物化），
+我方是离散 kernel(input_norm bf16 输出)→ 单独 fp8-quant。两者舍入路径不同 → ~2.6e-3。
+真实 input_norm 输出在 compile 下不物化、不可观测 → 无法"抓来逐 bit 对齐"。
+要逐位命中只能**复刻 inductor 的融合舍入**（input_norm 全程 fp32、直到 fp8 量化前不落 bf16），即我方把 input_norm 输出
+不落 bf16、直接以 fp32 喂 fp8-quant（需改 qkv 前的 norm→quant 为融合 fp32 链，去掉中间 bf16 落盘）。
+→ 下一步（需改代码+rebuild）：input_norm 输出保持 fp32 直喂 qkv 的 fp8 量化（融合口径），再比 attn_io k/v 是否塌到 fp8 地板。
+收益评估：端到端 1 层 mean_common_d 0.0085，入口 2.6e-3 被放大主导之；若融合口径把入口压到地板，端到端应明显降。
