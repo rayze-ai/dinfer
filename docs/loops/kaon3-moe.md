@@ -444,3 +444,9 @@ operation failed due to a previous error during capture`（cudaErrorStreamCaptur
   `CompilationConfig(mode=VLLM_COMPILE, cudagraph_mode=NONE)`。cudagraph 只改启动方式不改 kernel 数值
   （MoE 仍走同一 fp4/cutlass kernel、同一 graph-break 结构）→ dump 合法，判据仍 compile 有效。
   runcap2.py（容器 /runcap2.py）已带此 config。p08 ids=test/kaon3/oracle_clean_b/p08.ids（36 tok）。
+
+## 第 29b 轮：cudagraph 关后 dump 合法，但门控放过 warmup profile 跑（退化检查抓）
+关 cudagraph 后 `_moe_forward` dump 不再作废捕获，产出文件。**退化检查**：hidden 46137344 B=11534336 f32 /2816=**4096 tok**，
+非 p08 的 36 tok → 是引擎 **profile/warmup 跑**（dummy max_num_batched_tokens=4096，hidden 非零 → 门控 `sum>0` 放过）。
+这批 warmup 文件**不能用**。真实 generate（36 tok）随后写同名文件覆盖（numpy tofile 截断）→ 必须等 generate 跑完，
+再按文件大小复核 T=36（hidden=36×2816×4=405504 B）才是 p08 的 compile MoE io。等 runcap2 退出后复核。
