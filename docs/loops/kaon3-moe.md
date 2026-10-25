@@ -180,3 +180,10 @@ f32 下 `exp2f(x·log2e)` ≠ `expf(x)`。下一步：route_ex2 精确分支改�
 **下一步（不猜，插桩）**：kernel dump raw[k]（softmax 概率，renorm 前）比 vLLM router_probabilities，
 定位 exp 出来就差 还是 renorm/pes 后才差。疑点剩：max 用全体 vs vLLM、分母 Z 的实际值、per_expert_scale 乘入点。
 注意：ROUTER_RCP_EXACT 是否真生效待核（static getenv 缓存；probe 新进程应读到，但改 exp 无效可能它压根没进精确分支）。
+
+## 第 22 轮重大转折：口径对，kernel 实现有 bug
+Python f32 复刻我方口径(m=max全体, Z=Σexp, prob=exp/Z, renorm, ×pes) vs vLLM：**max|d|=0 完全一致**（row0=0.40838）。
+但我方 **kernel 实际跑出 0.4021（偏 8e-3）** → **CUDA kernel 实现与应算口径不符，是实现 bug，不是口径/精度**。
+- 连续 4 改无效的原因找到：我加的"全体 Z"里 raw=exp·invZ 后面又 renorm=Σraw 再除，invZ 被消掉 → 等于没改。
+- 真正 kernel 算 exp_k/Σ_topk exp（topk 分母），数学该 =0.40838，但实际 0.4021 → lane 蝶形归约(line 236-240)或 raw 计算有 bug。
+**下一步**：kernel 插桩 dump raw[k]（renorm 前）与 Σ，对比 Python；查 lane 蝶形求和（ept 分配、K=8 的归约是否漏项/重复）。
