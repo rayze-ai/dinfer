@@ -295,13 +295,13 @@ pub fn rope_span_bf16(
         span >= rope_dim / 2 && span + rope_dim / 2 <= head_dim,
         "rope: span {span} 越界（rope_dim {rope_dim} / head_dim {head_dim}）"
     );
-    ensure!(q.len() == tokens * q_heads * head_dim, "rope: q shape mismatch");
+    ensure!(q.len() >= tokens * q_heads * head_dim, "rope: q shape mismatch");
     ensure!(rope_dim > 0 && rope_dim % 2 == 0 && rope_dim <= head_dim, "rope: bad rope_dim {rope_dim}");
     ensure!(cos_sin.len() % rope_dim == 0, "rope: cos_sin not multiple of rope_dim");
     let pq = stream.ptr_mut(q) as *mut c_void;
     let pk = match k {
         Some(k) => {
-            ensure!(k.len() == tokens * k_heads * head_dim, "rope: k shape mismatch");
+            ensure!(k.len() >= tokens * k_heads * head_dim, "rope: k shape mismatch");
             stream.ptr_mut(k) as *mut c_void
         }
         None => {
