@@ -201,3 +201,12 @@ pes[79]=1.0156，0.40838/0.40209=1.0156 吻合 → topk_w 的 8e-3 = 少乘的 p
 **真实残差**：MoE out（moe_y，含 down 的 pes）rel=0.43%。topk_w 对齐（去掉参照的 pes 后应逐位或末位）。
 教训（用户 2026-10-24 反复强调）：结果先做退化检查/对口径；连续 4 改无效早该怀疑参照而非实现。
 下一步：重验 topk_w（参照不乘 pes）；再定位 MoE out 0.43% 真正来源（专家 NVFP4 GEMM / down 的 pes 折法）。
+
+## 第 22 轮结果：路由对齐（参照去 pes 后 topk_w max|d|=4.5e-8）
+```
+topk_ids: 36/36 一致   topk_w: max|d|=4.47e-8（浮点末位）
+```
+→ **MoE 路由完全正确**。之前 8e-3 全是参照多乘 per_expert_scale（我方折进 down）的假差。
+剩 MoE out rel=0.43% 必在**专家 NVFP4 GEMM（gate/up/down）或 pes 折进 down**。路由排除。
+下一步：隔离专家——喂同 hidden + 我方 topk（已对）跑专家，比 vLLM moe_out；或逐专家 moe_e{id}_* 比。
+注意：route kernel 现有"全体Z+expf"改动数值等价（不影响），保留；性能未测。
