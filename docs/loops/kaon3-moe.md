@@ -369,3 +369,10 @@ p03(31tok): 0/87296  逐位  ‖363.17==363.17‖
   路由逐位 → gate/up/down GEMM 各 12 专家逐位 → 加权和 combine 口径是唯一差 → 切 vLLM 口径逐位。
 关于改默认：iso 逐位但端到端 0.0085 不降（端到端 MoE 输入已带上游残差流末位）→ 翻默认 combine 对端到端收益小。
 待用户定：是否改 moe_combine_f32 默认 false 使生产走 vLLM 口径（需评估对其他用例影响）。
+
+## 第 27 轮（用户 2026-10-25 提醒"注意 eager，要依据自己测"）：自测 MoE eager==compile
+我 MoE 逐位结论建立在"eager 抓的 vLLM MoE io = compile 口径"上，但这前提**我没实测过**（第20轮读注释"opaque op"推的，且当时 compile grabbed=[] 的矛盾没解决）。
+现自测：同 p08，compile 口径（VLLM_DISABLE_COMPILE_CACHE=1 重编）抓 MoE out，比 eager /moe_e08 的 moe_out。
+- 若 compile 也抓到且 == eager → eager==compile 成立，MoE 逐位结论稳；
+- 若 compile 抓不到（grabbed=[]）→ 无法直接验，退而比 moe 下游（post_ff_norm_2 输入）或端到端；
+- 若抓到但 ≠ eager → 我用 eager 当 compile 判据错，MoE 结论需用 compile io 重做。
