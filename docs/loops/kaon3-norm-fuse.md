@@ -163,3 +163,9 @@ loop kaon3-norm-fuse 收：定位彻底（每段证逐位 + 残差归因到 indu
 → attn_io 命中的是 **inductor 对该前向的特定部分-fp32 融合**（非任何统一 dtype）。op 级我方全对，残差是 compile codegen 的中间精度选择。
 **可落地杠杆（唯一被证明有效）**：我方 Rust 在 q/k_norm→rope 之间保 fp32（现在落 bf16），复刻 inductor 的 norm+rope 融合，回收 ~0.4e-3/3.9e-3。
 其余为分布式融合差，需逐点复刻 inductor codegen（投入大、随版本变）。
+
+## R10（2026-10-25）：实现 norm→rope fp32 融合 kernel（env NORM_ROPE_FUSE），A/B 量端到端
+现状：head_rmsnorm 写 bf16 → rope 逐步舍 bf16（enable_fp32_compute=False 口径，round10 对旧参照调的）。
+attn_io（compile 真实）偏好 norm→rope 保 fp32（3.94→3.52e-3）。实现融合 kernel：
+  per (token,head)：load bf16 raw → rms(fp32,1/sqrt 口径同 batch_invariant) → ×w(fp32,保留) → rope(fp32 math) → 末尾舍 bf16。
+  仅 q/k 走融合（v 只 norm 无 rope）。env `NORM_ROPE_FUSE=1` 开，默认关（不动现有行为，先 A/B）。
