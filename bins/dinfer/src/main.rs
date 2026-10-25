@@ -9,9 +9,13 @@ use clap::{Parser, Subcommand};
     all(feature = "glm53", feature = "qwen3"),
     all(feature = "kimik3", feature = "qwen35"),
     all(feature = "glm53", feature = "qwen35"),
-    all(feature = "qwen3", feature = "qwen35")
+    all(feature = "qwen3", feature = "qwen35"),
+    all(feature = "kimik3", feature = "kaon3"),
+    all(feature = "glm53", feature = "kaon3"),
+    all(feature = "qwen3", feature = "kaon3"),
+    all(feature = "qwen35", feature = "kaon3")
 ))]
-compile_error!("enable exactly one model feature: `kimik3`, `glm53`, `qwen3` or `qwen35`");
+compile_error!("enable exactly one model feature: `kimik3`, `glm53`, `qwen3`, `qwen35` or `kaon3`");
 
 #[derive(Parser)]
 #[command(name = "dinfer", version, about = "Rust LLM inference engine for Kimi-K3 / GLM-5.3")]
@@ -160,7 +164,11 @@ fn model_name() -> &'static str {
     {
         dinfer_qwen35::MODEL_NAME
     }
-    #[cfg(not(any(feature = "kimik3", feature = "glm53", feature = "qwen3", feature = "qwen35")))]
+    #[cfg(feature = "kaon3")]
+    {
+        dinfer_kaon3::MODEL_NAME
+    }
+    #[cfg(not(any(feature = "kimik3", feature = "glm53", feature = "qwen3", feature = "qwen35", feature = "kaon3")))]
     {
         "none"
     }
@@ -358,7 +366,34 @@ async fn main() -> Result<()> {
                 tracing::info!(%addr, "dinfer serving (no auth; bind to localhost unless fronted by a gateway)");
                 dinfer_server::serve(&addr, std::sync::Arc::new(svc)).await?;
             }
-            #[cfg(not(any(feature = "kimik3", feature = "glm53", feature = "qwen3", feature = "qwen35")))]
+            #[cfg(feature = "kaon3")]
+            {
+                let _ = (
+                    &role, kv_port, &peer, pd_wait_ms, pd_pool_bufs, &kv_transport, kv_slots, tp, dp, mtp,
+                    &speculative, num_speculative_tokens, ngram_min, ngram_max, kv_host_gib,
+                    gpu_memory_utilization, no_prefix_caching, no_cuda_graph, no_decode_exempt,
+                    long_prefill_token_threshold,
+                );
+                let opt = dinfer_kaon3::service::ServeOptions {
+                    model_dir: model,
+                    tokenizer_dir: tokenizer,
+                    max_model_len,
+                    max_num_seqs,
+                    max_num_batched_tokens,
+                    num_blocks: num_blocks.unwrap_or(2048),
+                    block_size,
+                    enable_chunked_prefill: true,
+                    device,
+                };
+                let name = name.clone();
+                let svc = tokio::task::spawn_blocking(move || {
+                    dinfer_kaon3::service::KaonService::start(opt, name)
+                })
+                .await??;
+                tracing::info!(%addr, "dinfer serving (no auth; bind to localhost unless fronted by a gateway)");
+                dinfer_server::serve(&addr, std::sync::Arc::new(svc)).await?;
+            }
+            #[cfg(not(any(feature = "kimik3", feature = "glm53", feature = "qwen3", feature = "qwen35", feature = "kaon3")))]
             {
                 let _ = (
                     &addr,
@@ -380,7 +415,7 @@ async fn main() -> Result<()> {
                     ngram_max,
                 );
                 anyhow::bail!(
-                    "serve for model `{name}` is not implemented yet (build with --features kimik3, glm53, qwen3 or qwen35)"
+                    "serve for model `{name}` is not implemented yet (build with --features kimik3, glm53, qwen3, qwen35 or kaon3)"
                 );
             }
         }

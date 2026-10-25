@@ -576,6 +576,7 @@ dependencies = [
  "clap",
  "dinfer-core",
  "dinfer-glm53",
+ "dinfer-kaon3",
  "dinfer-kimik3",
  "dinfer-layers",
  "dinfer-qwen3",
@@ -660,10 +661,15 @@ dependencies = [
  "dinfer-core",
  "dinfer-kernels",
  "dinfer-layers",
+ "dinfer-server",
+ "dinfer-text",
  "half",
  "memmap2",
+ "minijinja",
  "serde",
  "serde_json",
+ "tokenizers",
+ "tokio",
  "tracing",
 ]
 

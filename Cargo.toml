@@ -36,6 +36,7 @@ dinfer-kimik3 = { path = "models/kimik3" }
 dinfer-glm53 = { path = "models/glm53" }
 dinfer-qwen3 = { path = "models/qwen3" }
 dinfer-qwen35 = { path = "models/qwen35" }
+dinfer-kaon3 = { path = "models/kaon3" }
 dinfer-text = { path = "crates/text" }
 dinfer-guided = { path = "crates/guided" }
 
