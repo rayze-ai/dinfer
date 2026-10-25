@@ -311,3 +311,17 @@ cutlass vs emulation:      rel=4.5e-3
 真实对真实：我方 gate GEMM == vLLM cutlass **逐位**。0.45% 只是两者都相对 f32 理想偏（同向，fp4 本身）。
 → 整 MoE 的 0.43% 不在 gate GEMM。按用户方法逐步往下：查 **up GEMM / gelu / down GEMM / 加权和**。
 教训：参照必须用 vLLM 实际跑的路径（cutlass），不是 emulation；且先自验脚本（cutlass vs emu）。
+
+## 第 25 轮定位：MoE 0.43% 在 down GEMM（gate/up 逐位，down 差 1.2e-2）
+多专家对拍（脚本自验 cutlass vs emu=2e-3 确认脚本对）：
+```
+gate GEMM: 12 专家全逐位 rel=0
+up GEMM:   12 专家全逐位 rel=0
+act=gelu_tanh(gate)*up: 自验 rel<5e-3（我方公式对）
+down GEMM: 我方 vs cutlass rel=0.8~1.6e-2 ❌  ← 差在这！
+```
+→ **MoE 残差来源 = down GEMM**（专家最后一步，直接进加权和 → 整 MoE 0.43%）。
+疑点：down 的 global scale 被折了 per_expert_scale（layer.rs:324 moe_combine_f32 时 down.global*=pes[e]），
+而我脚本 alpha 用 checkpoint 原始 weight_scale_2（未折 pes）→ 可能我脚本 alpha 漏 pes（脚本错），
+或我方 down 折 pes 引入差。下一步：① 脚本 alpha 补 pes 对齐我方 down 实际 scale 再比；
+② 查我方 down 输入量化（act→fp4）是否与 gate/up 口径一致（down 输入是中间激活，范围不同）。
