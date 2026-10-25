@@ -127,3 +127,10 @@ vLLM gemma4_routing_function：`softmax(全体 logits)` → one_hot 累加 → r
 ## 第 21 轮续：route_softmax kernel 用 ex2.approx + rcp.approx（近似指数/倒数，同 FEXP 性质）
 moe.cu route_ex2=`ex2.approx.ftz`、route_rcp=`rcp.approx.ftz`。vLLM gemma4 是 torch 精确 softmax+精确除。
 → topk_w 差 8e-3 = 近似指数/倒数（与 attention FEXP 同性质）。已有 ROUTER_RCP_EXACT=1 开关（倒数精确），ex2 无开关需加。
+
+## 第 21 轮：排除 exp/rcp 近似——强制精确 exp 后 topk_w 仍差 8.2201e-3（一字不差）
+ROUTER_RCP_EXACT=1 + 强制 exp2f 精确，topk_w max|d| 仍 8.2201e-3 不变 → **8e-3 不是 ex2.approx/rcp.approx 造成**。
+两边同 logits（iso 灌），差只能在 softmax/renorm **数学口径**本身。
+重新定位方向：① 我方只对 topk 的 exp 做分母 vs vLLM 全体 softmax 概率再 renorm（数学应等价，需核）；
+② per_expert_scale 折入顺序/dtype；③ renorm 的 1e-20 vs vLLM where(>0)。
+下一步：Python 精确复现我方 kernel 口径 vs vLLM 口径，在 f64 下比，定位哪步口径差。
