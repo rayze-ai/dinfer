@@ -212,3 +212,10 @@ chat 生成报 500：`engine step failed: embedding: out shape mismatch`（dinfe
 修：crates/layers/src/nn.rs 加 `Embedding::forward_rows(ids,out,tokens)` 调 embedding_bf16_n（out.len()>=tokens*h 即可）；
   models/kaon3/src/model.rs:119 embed.forward → forward_rows(…, tokens)。sync+重编中(bbiyg7o3c)。
 （同 [[dinfer-linear-forward-rows-trap]]：预分配缓冲按 ids 推行数的坑，embed 版。）
+
+## R17（2026-10-25）embed 修好 → 下一同类 bug：rope q/k shape（== 改 >=）
+embed 修后 chat 进到 attention，报 `rope: q shape mismatch`。同根因：rope_span_bf16（ops.rs:298/304）断言
+  `q.len() == tokens*q_heads*head_dim` 精确，但 executor 的 q/kk/v 是 max_tokens scratch（q.len()>t*…）。
+  kernel launch grid=tokens 只碰前 tokens 行 → 改 `==`→`>=` 安全。k 同。
+扫了 forward 路径其余 ==tokens 断言：都是相对（out.len()==x.len()，两边都 max_tokens 一致）或 gqa 用 cu_seqlens 驱动，无其他精确坑。
+sync+重编(by2jiduo7)→重启 serve 冒烟。
