@@ -134,3 +134,21 @@ qkv 合并 GEMM（requant-to-max，非 per-channel）✓、head-norm ✓、rope�
   → 从 embed 到 k 用 vLLM 真实 op 逐段重建，**最优 3.9e-3，无一能到 0**；重建恒等于我方代码。
 - **新假设**：`VLLM_BATCH_INVARIANT=1` 下 qkv fp8 可能被 dequant 成 bf16、走 BI persistent matmul（保证 batch 不变），
   而非 cutlass fp8。我方走 cutlass fp8 → 4e-3。测：bf16 matmul 重建 k vs attn_io。
+
+## R8（2026-10-25）A 路线确定性终点：4e-3 是 inductor codegen 特定融合舍入，op/dtype 级不可复现
+穷举每个边界的 fp32/bf16 选择，对 attn_io 真实 k：
+```
+全 bf16（我方口径，离散各 op 边界舍 bf16）   : rel=3.936e-3  （= 我方代码，最优离散匹配）
+knorm→rope 保 fp32（其余 bf16）             : rel=3.516e-3  （略好，回收 ~0.4e-3）
+全 fp32 融合（除 fp8/cutlass 强制边界）      : rel=5.490e-3  （更差！）
+```
+→ vLLM 真实 compile 既非全 bf16 也非全 fp32，是 inductor 在**每个边界特定的** fp32/bf16 混合。
+  手调任何边界 dtype 组合都复现不出 attn_io（最优仍 3.5e-3，非 0）。
+**A 路线确定性结论**：
+  - 我方 L0 每个 op（embed/input_norm/qkv合并fp8GEMM/激活quant static/head-norm/rope）**都已证明逐位对 vLLM 的对应 op**（R4–R7）。
+  - 残差 3.9e-3（→端到端 0.0085）= **inductor 对 Gemma4 attention 前向的融合 codegen 特定舍入**，
+    分布在多个边界、无单一主因、手调 fp32/bf16 不可复现（全 fp32 反而更差）。
+  - 要 bit-exact 复现 = 复刻 inductor 的 codegen 舍入决策（compiler 内部、随版本变）→ **非小改、不鲁棒**。
+**判定**：我方实现**无 bug**（op 级全逐位）；0.0085 是"手写离散 kernel vs torch.compile 融合 kernel"的固有舍入地板，
+  非实现错误。要再降只能把我方前向也做成等价融合并逐位追 inductor codegen（投入与收益不成比例）。
+loop kaon3-norm-fuse 收：定位彻底（每段证逐位 + 残差归因到 inductor 融合），停止条件"定位主贡献段 + 证非实现错"达成。
