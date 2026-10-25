@@ -398,3 +398,13 @@ compile 下原样调注册实现 `_moe_forward`，与 eager 调**同一 Python �
 → 端到端 0.0085 = 我方 Rust vs vLLM compile 的真实差，不在 MoE combine。
 下一步（纯 compile）：用 kaon3_oracle_diff 逐 case 看哪些 token 位置 flip/|Δlp| 大，定位 compile 口径下第一处偏，
   参照只用 oracle（compile）的 prompt_logprobs，不抓任何 eager 中间量。
+
+## 第 28 轮：compile 端到端逐 case——均匀 0.008-0.010，无离群
+24 case mean_common_d 0.0084~0.0100 均匀（p02 最高 0.0100），无结构性离群 case → compile 下每 token 位置普遍小偏，非单点。
+截 1 层 oracle：1 层 logprob 差 ~0.009。各段 kernel 给同输入已逐位（norm/qkv/rope/o_proj 用 seg_l0=compile computation_graph 验、
+attention 用 attn_io=compile splitting op 验，均 compile 有效）；**唯 MoE 之前用 eager io 验（作废）**。
+→ compile 下 MoE 这段未用 compile 判据验过。残差可能在：段间衔接（残差流/dtype 累积）或 MoE compile 口径未对齐。
+下一步（纯 compile，不碰 eager）：
+  ① 我方 hidden-all dump L0 残差流（compile 口径 probe），与 seg_l0 从 computation_graph 复现的 compile 中间量逐段比；
+  ② MoE 段：从 computation_graph.py 读 compile 的 moe_forward 输入/输出表达式，用 seg_l0 式复现（compile 口径）比我方 moe_y；
+  ③ 严禁用 moe_io.py EAGER 抓的任何量。
