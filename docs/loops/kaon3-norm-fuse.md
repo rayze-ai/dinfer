@@ -180,3 +180,10 @@ norm→rope fp32 融合只回收 10% 不值当。**改做有意义的事**：全
   - chat 模板：用 /data/ref/models 或 checkpoint 的 tokenizer+模板（kaon3 走 gemma/flowgpt 模板，需确认）。
   - 远端 5090 容器编译跑（sm_120），serve 起来后造中文问答 prompt 集，dinfer vs vLLM 各跑，比乱码/答非所问 + tok/s/TTFT，进 bench_index/dashboard(8090)。
 已委派子代理做 serve 接入（worktree 隔离），主会话保上下文做后续质量/性能/dashboard 分析。
+
+## R12（2026-10-25）对比框架就位，等子代理 serve 接通
+主会话已备：test/kaon3/qa_zh/prompts.jsonl（20 条中文问答，带 expect 关键词）+ scripts/dev/kaon3_qa_compare.py
+  （流式打两边 /v1/chat/completions，判乱码[异常字符/重复/空]+命中+TTFT+tok/s，产 report.html 可进 dashboard）。
+子代理（aec3a748）后台做 kaon3 serve 接入（照 qwen35），正跑 serve 自测（加载权重 ~30s 后 curl），未出最终报告。
+待子代理报：能否编过 / serve 能否起 / 短 prompt 生成样例。之后流程：dinfer serve → qa_compare run dinfer；vLLM chat → run vllm；report。
+注意：远端命令本会话出现超时（疑子代理占连接/GPU）——主会话暂不碰远端，等子代理收口，避免抢资源。
