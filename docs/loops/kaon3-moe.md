@@ -92,3 +92,16 @@ moe_runner.py:190 注释明示 **"moe_forward being opaque custom ops is a load-
 patch 没抓到 compile 版：因 direct_register_custom_op 注册时固化 _moe_forward 引用，运行时 patch 不改已注册 op；
 但 eager 跑也走同一 op，故 eager patch 命中（已抓 /moe_e08 成功）。
 **结论**：MoE 隔离可直接用 eager 抓的 /moe_e08（= compile 口径）。回到步骤 2a：加 --moe-iso 喂 x+logits 比 moe_out。
+
+## 第 20 轮结果：MOE_ISO 同输入隔离 → rel 1.9%→0.43%
+喂 vLLM moe_hidden+logits 进我方专家，比 vLLM moe_out：
+```
+不同输入(旧):  rel=1.9e-2
+同输入(iso):   rel=4.3e-3  max|d|=0.25  ‖vllm‖=365.93 ‖ours‖=366.69  36/36 行差
+```
+→ 证实 1.9% 大部分是**输入差（残差流偏）带入**，非 MoE kernel。剩 0.43% 是 MoE kernel 自身系统性差。
+下一步（拆 MoE 内部，定位 0.43% 在哪步）：
+  ① topk 选择：我方 topk_ids vs vLLM（用同 logits，应完全一致，否则 topk/renorm 口径差）；
+  ② 专家 GEMM(NVFP4 gate/up/down)：我方 moe_e{id}_* vs vLLM 专家中间量；
+  ③ 加权和 / per_expert_scale 折法 / renormalize。
+数据：/w/sd_iso（iso 的 moe_y + moe_e*）、/moe_e08（vLLM）。
