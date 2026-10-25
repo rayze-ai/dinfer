@@ -219,3 +219,9 @@ embed 修后 chat 进到 attention，报 `rope: q shape mismatch`。同根因：
   kernel launch grid=tokens 只碰前 tokens 行 → 改 `==`→`>=` 安全。k 同。
 扫了 forward 路径其余 ==tokens 断言：都是相对（out.len()==x.len()，两边都 max_tokens 一致）或 gqa 用 cu_seqlens 驱动，无其他精确坑。
 sync+重编(by2jiduo7)→重启 serve 冒烟。
+
+## R18（2026-10-25）里程碑：kaon3 serve 端到端真实生成跑通，答案正确无乱码
+修完 embed + rope 两处 scratch shape 坑后，chat 生成成功：
+  问"中国的首都是哪座城市？" → "中国的首都是**北京**。" finish_reason=stop。正确/通顺/无乱码/正常停。
+→ 从零写的 KaonExecutor + 全 bf16/fp4/fp8 推理端到端通。**印证 0.0085 是亚决策噪声，不影响真实生成质量。**
+接着：qa_compare run dinfer（20 条）→ vLLM 侧 → report.html 进 dashboard。
