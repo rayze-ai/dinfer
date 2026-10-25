@@ -74,7 +74,8 @@ __device__ __forceinline__ void quant16(const bf16* src, bool valid, uint2* out8
     const float sfv = gs * (exact_rq ? __fdiv_rn(amax, 6.f) : (amax * rcp_approx(6.f)));
     sb8 = __nv_cvt_float_to_fp8(sfv, __NV_SATFINITE, __NV_E4M3);
     const float sfd = e4m3_f(sb8);
-    inv = sfd != 0.f ? rcp_approx(sfd * rcp_approx(gs)) : 0.f;
+    // exact_rq 也控 inv 的倒数：精确 1/(sfd/gs)=gs/sfd（对照 vLLM scaled_fp4_quant），否则双 rcp.approx（历史）。
+    inv = sfd != 0.f ? (exact_rq ? __fdiv_rn(gs, sfd) : rcp_approx(sfd * rcp_approx(gs))) : 0.f;
   }
   uint32_t w[2];
 #pragma unroll
