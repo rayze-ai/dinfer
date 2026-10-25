@@ -428,3 +428,9 @@ moecut（我方 compile dump 输入→vLLM cutlass→比 moe_y）逐 token×专�
   compile 下 moe_forward 是 opaque op，调的就是 `_moe_forward` 本体 → 改函数体的 dump 在 compile 命中
   （之前 monkeypatch 失败是 op 注册时已捕获引用；改源码本体不受此限）。
   这是改 vLLM 一处加 dump，compile 口径生效。下一步：加 dump 抓 compile MoE 输入/输出，比我方 moe_y。
+
+## 第 29 轮：Tensor Capture（Neuron 思路 CUDA 等效）抓 compile MoE io
+借 Neuron tensor_capture 设计（op 边界捕获）：在 vLLM 源码 `_moe_forward` 函数体加 dump（KAON_MOE_CAP=dir）。
+compile 下 moe_forward 是 opaque op → 调 `_moe_forward` 本体 → dump 在 **compile 口径命中**（不碰 eager）。机制跑通（产出文件）。
+坑1（退化检查救）：首次抓到全零 → 是 compile warmup 的 dummy 空跑。加门控 `hidden.abs().sum()>0`（真实 forward 才 dump）。
+重抓中。拿到后比我方 moe_y（compile 有效判据，替代作废的 eager /moe_e08）。
