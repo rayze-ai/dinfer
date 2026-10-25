@@ -476,3 +476,18 @@ moe_y(MoE输出)             vs vllm_moe_out      : rel=1.74e-2  不同 96701/10
 结合：attn_io 证"给同 q/k/v 我方 gqa core 逐位"、seg_l0 证"给同输入 norm/qkv/rope/o_proj 逐位"。
 → 最大贡献段 = **attention 块内 gqa 之前**（input_norm/qkv/rope/q-k_norm/kv-cache fp8），全前向里我方 q/k/v 已偏。
 下一步：比我方全前向最终 q/k/v（喂 gqa 的那份）vs attn_io vllm_q/k/v，定位 attention 内第一处偏。
+
+## 第 30 轮：attention 内部——q/k/v 产出已偏 4e-3，gqa 放大到 1.86e-2
+全前向 p08 vs attn_io vLLM compile（pre-fp8 bf16，边界对齐）：
+```
+k (k_norm+rope后,pre-fp8) vs vllm_k : rel=4.0e-3  不同 45786/73728  max|d|=7.8e-3  ‖33.145 vs 33.148‖
+v (v_norm后,pre-fp8)      vs vllm_v : rel=4.5e-3  不同 46472/73728  max|d|=1.25e-1 ‖271.54 vs 271.55‖
+——gqa core——
+attn_out(gqa输出)         vs vllm_out: rel=1.86e-2 （4e-3 → 1.86e-2，gqa 放大约 4.6×）
+```
+链条：q/k/v 产出 4e-3 → gqa core 对 key 漂移敏感放大到 1.86e-2 → o_proj/dense/MoE 平着带（1.86→1.80→1.74）。
+gqa core 本身给同 q/k/v 逐位（attn_io 证）→ 它是**放大器非错源**；错源 = q/k/v 产出的 4e-3。
+**结论：端到端最大贡献段 = attention 块**，根 = q/k/v 产出（fp8 qkv GEMM + 逐头 q/k_norm + rope + 上游 input_norm）的 4e-3，
+被 softmax attention 放大 ~4.6×。注意 round7 已测"合并 qkv GEMM 给同输入近逐位(13/196608)"→ 4e-3 很可能来自
+**input_norm 输出（embed/norm 末位）或逐头 norm**，而非 qkv GEMM 本身。
+下一步（compile 安全，不碰 eager）：patch vLLM rms_norm op 抓 input_layernorm 输出，比我方 input_norm，钉死 4e-3 的入口。
