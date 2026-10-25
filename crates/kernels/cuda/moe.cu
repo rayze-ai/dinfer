@@ -190,10 +190,14 @@ extern "C" int moe_route_f32(const float* logits, const float* bias, int32_t* to
 //   lane_t = ((raw_{EPT·t} + raw_{EPT·t+1}) + …)（仅位置 < K）→ 32 lane xor 蝶形 → renorm
 //   inv = rcp.approx(renorm)；w_k = (raw_k · inv) · per_expert_scale[id_k]
 // 旧写法（全专家 softmax 再在 top-k 上重归一化，两次除法）数学等价但舍入不同：Kaon-V3 L7 token 10 的 moe_y 差 344 元素。
-__device__ __forceinline__ float route_ex2(float x) {
+__device__ __forceinline__ float route_ex2_approx(float x) {
   float r;
   asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(r) : "f"(x));
   return r;
+}
+// exact=1：精确 exp2f（对齐 vLLM gemma4 torch softmax）；0：SFU ex2.approx（旧，topk_w 差 8e-3）。
+__device__ __forceinline__ float route_ex2(float x, int exact) {
+  return exact ? exp2f(x) : route_ex2_approx(x);
 }
 __device__ __forceinline__ float route_rcp(float x) {
   float r;
@@ -213,7 +217,7 @@ __global__ void route_softmax_kernel(const float* __restrict__ logits, const int
   float m = -INFINITY;
   for (int e = 0; e < E; ++e) m = fmaxf(m, lg[e]);
   float raw[MAX_K];
-  for (int k = 0; k < K; ++k) raw[k] = route_ex2(__fmul_rn(__fsub_rn(lg[topk_ids[t * K + k]], m), 1.4426950408889634f));
+  for (int k = 0; k < K; ++k) raw[k] = route_ex2(__fmul_rn(__fsub_rn(lg[topk_ids[t * K + k]], m), 1.4426950408889634f), exact_rcp);
   int block_e = 1;
   while (block_e < E) block_e <<= 1;
   const int ept = block_e >= 32 ? block_e / 32 : 1;
