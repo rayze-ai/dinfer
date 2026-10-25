@@ -142,3 +142,22 @@ ROUTER_RCP_EXACT=1 + 强制 exp2f 精确，topk_w max|d| 仍 8.2201e-3 不变 �
 - 根因推断：f32 下 vLLM 全体 128 softmax 概率 gather+renorm vs 我方只 topk 8 个 exp 求和分母，
   数学等价但 f32 归约舍入不同 → topk_w 差 8.2e-3（2% 相对）。这是真实实现差，非 bug/口径。
 - 影响：传到 MoE out rel=4.3e-3（0.43%）。是否修需权衡（改我方 kernel 走全体 128 softmax 复刻 vLLM 归约）。
+
+## 第 22 轮：推远程 + 继续对齐（用户 2026-10-25）
+已 git push origin dev（217 commits，至 754d1d0）。
+**L0 对齐总表**（compile 口径 vs vLLM）：
+| 段 | 状态 |
+|---|---|
+| input_norm / q/k/v_norm / rope | ✅ 逐位 |
+| qkv GEMM | ✅ 逐位（TABLE splitk=1） |
+| o_proj / gate_up / down | ✅ 逐位（fallback splitk=1） |
+| attention | ✅ 差2（去 FEXP，cfg 464）；残2个 bf16 格点 TODO |
+| MoE 专家选择 | ✅ 36/36 |
+| MoE topk_w | ⚠️ 差8.2e-3（f32 归约：我方 topk 分母 vs vLLM 全体128 softmax）→ MoE out 0.43% |
+| MoE 专家 GEMM(NVFP4) | ❓ 未单独隔离（topk_w 修齐后再看残差是否全消） |
+**下一步（继续对齐）**：
+1. 改 route kernel：topk softmax 分母改为**全体 128 专家 exp 和**（复刻 vLLM torch softmax 归约），对齐 topk_w。
+   moe.cu 公共件——K3/GLM 走 sigmoid(moe_route_f32) 不受影响；只动 moe_route_softmax_f32(gemma4)。
+2. 修后重测 MOE_ISO：topk_w 是否降到末位、MoE out rel 是否 <1e-3。
+3. 若 MoE out 仍有残差 → 隔离专家 NVFP4 GEMM（喂同 hidden+topk 比专家输出）。
+4. 全 L0 对齐后：端到端 24 用例 mean_common_d 应显著下降，记入。
