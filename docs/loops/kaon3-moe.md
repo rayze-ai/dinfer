@@ -417,3 +417,14 @@ moecut（我方 compile dump 输入→vLLM cutlass→比 moe_y）逐 token×专�
 → compile 端到端 1 层 mean_common_d=0.0085 均匀，是我方整条 Rust 前向 vs vLLM compile 的**累积系统差**，
   不是单段 kernel 结构错（能对的段 compile 下都逐位）。MoE 段 compile 黑盒，无直接判据。
 真实状态：compile 下可验的全部逐位；端到端 0.0085 是各段 fp8/bf16/fp4 末位沿残差流累积，MoE 因 opaque 无法单独 compile 对拍。
+
+## 第 29 轮：官方 Tensor Capture 在本版本不存在（实测），用替代方案抓 compile MoE
+用户建议用官方 Tensor Capture 抓 compile 中间量。实测（grep 全 vllm + envs）：
+本版本（0.26.1rc1 镜像）**无"Tensor Capture"运行时中间张量捕获**。只有：
+  - VLLM_DEBUG_DUMP_PATH：dump inductor **编译产物**（图/代码），非运行时激活值；
+  - VLLM_PATTERN_MATCH_DEBUG：fusion pass 调试。
+→ 没有官方抓"某层运行时中间 tensor"的接口。
+**替代（达到同效果，compile 口径，不碰 eager）**：直接在 vLLM 源码 `_moe_forward`（moe_runner.py）函数体内加 dump。
+  compile 下 moe_forward 是 opaque op，调的就是 `_moe_forward` 本体 → 改函数体的 dump 在 compile 命中
+  （之前 monkeypatch 失败是 op 注册时已捕获引用；改源码本体不受此限）。
+  这是改 vLLM 一处加 dump，compile 口径生效。下一步：加 dump 抓 compile MoE 输入/输出，比我方 moe_y。
