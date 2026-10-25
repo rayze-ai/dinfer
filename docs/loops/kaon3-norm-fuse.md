@@ -169,3 +169,14 @@ loop kaon3-norm-fuse 收：定位彻底（每段证逐位 + 残差归因到 indu
 attn_io（compile 真实）偏好 norm→rope 保 fp32（3.94→3.52e-3）。实现融合 kernel：
   per (token,head)：load bf16 raw → rms(fp32,1/sqrt 口径同 batch_invariant) → ×w(fp32,保留) → rope(fp32 math) → 末尾舍 bf16。
   仅 q/k 走融合（v 只 norm 无 rope）。env `NORM_ROPE_FUSE=1` 开，默认关（不动现有行为，先 A/B）。
+
+## R11（2026-10-25）视角拉回全局：目标升级为端到端生成对比（乱码/答非所问/性能，进 Dashboard）
+用户："局部纠结太久，全局看"。判定：0.0085 是 compile 融合地板（我方=vLLM eager 逐位，连 vLLM 自己 eager 都复现不了 compile），
+norm→rope fp32 融合只回收 10% 不值当。**改做有意义的事**：全模型真实生成，比 dinfer vs vLLM 的乱码/答非所问/性能，进 Dashboard。
+前置缺口：kaon3 只有 probe（teacher-forcing），无自回归生成/serve。用户定：**接入 server crate 做完整 OpenAI serve**。
+接法（照 qwen35）：
+  - 新建 models/kaon3/src/service.rs 实现 ChatBackend（参照 models/qwen35/src/service.rs，单卡无 TP/PD/graph 第一版）。
+  - bins/dinfer/src/main.rs + Cargo.toml 加 kaon3 feature 分派（照 qwen35 的 cfg 分支）。
+  - chat 模板：用 /data/ref/models 或 checkpoint 的 tokenizer+模板（kaon3 走 gemma/flowgpt 模板，需确认）。
+  - 远端 5090 容器编译跑（sm_120），serve 起来后造中文问答 prompt 集，dinfer vs vLLM 各跑，比乱码/答非所问 + tok/s/TTFT，进 bench_index/dashboard(8090)。
+已委派子代理做 serve 接入（worktree 隔离），主会话保上下文做后续质量/性能/dashboard 分析。
