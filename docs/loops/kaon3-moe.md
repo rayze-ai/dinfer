@@ -491,3 +491,20 @@ gqa core 本身给同 q/k/v 逐位（attn_io 证）→ 它是**放大器非错�
 被 softmax attention 放大 ~4.6×。注意 round7 已测"合并 qkv GEMM 给同输入近逐位(13/196608)"→ 4e-3 很可能来自
 **input_norm 输出（embed/norm 末位）或逐头 norm**，而非 qkv GEMM 本身。
 下一步（compile 安全，不碰 eager）：patch vLLM rms_norm op 抓 input_layernorm 输出，比我方 input_norm，钉死 4e-3 的入口。
+
+## 第 30 轮：钉死入口——带权重 RMSNorm kernel 偏 2.6e-3（RMSNORM_MODE=0）
+seg_l0 逐 op（给我方同输入，比 vLLM native rms_norm，oracle 容器 vllm.ir）p08：
+```
+input_norm   rel=2.639e-3  不同 25641/101376   ← 第一处就偏（带权重）
+q_norm       rel=2.795e-3  不同 38447/147456   （带权重）
+k_norm       rel=2.877e-3  （带权重）
+v_norm       ✅ 0/73728    （无权重）
+q/k_rope(bf16) ✅ 0         ff1(GEMM) ✅ 0
+pre_ff_norm/pre_ff2_norm/post_ff_norm 均 ~2.8e-3（都带权重）
+```
+**规律：所有带权重 RMSNorm 偏 ~2.6-2.8e-3；无权重 v_norm / GEMM / rope 全逐位。**
+→ 残差流漂移的**唯一入口 = 带权重 RMSNorm kernel**（Gemma `(1+weight)` 口径）在 RMSNORM_MODE=0（全前向/verify 脚本用的）下与 vLLM native rms_norm 差 2.8e-3。
+链：input_norm 2.6e-3 → qkv 4e-3 → gqa 放大 1.86e-2 → 一路平着带到 moe/输出。
+注意：历史交接称"RMSNORM_MODE=2 与 vllm.ir rms_norm 0/67584"——即 **MODE=2 对、MODE=0 偏**。verify/全前向用的是 MODE=0 = bug 源。
+下一步：读我方 rmsnorm kernel（MODE=0 路径）vs vLLM gemma_rms_norm 的 (1+w) 口径/dtype/舍入，定位 2.8e-3 来源；
+  再用 MODE=2（或修 MODE=0）重跑全前向验 input_norm→0、端到端 0.0085 是否降。
