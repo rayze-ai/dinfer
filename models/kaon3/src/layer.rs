@@ -1133,9 +1133,13 @@ fn router_gemm_bi() -> bool {
 fn moe_combine_f32() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| {
-        let on = std::env::var("MOE_COMBINE_F32").map(|v| v.trim() != "0").unwrap_or(true);
+        // 默认 **false = vLLM 口径**（w=bf16(topk_w·pes)、每项 bf16(w·y)、bf16 累加，与 cutlass_moe
+        // topk_weight_and_reduce 一致）。loop kaon3-moe 第 25-26 轮：combine_f32=0 时 MoE 与 vLLM 逐位
+        // （p08 0/101376、p03 0/87296）；旧默认 true（f32 累加+pes折down）差 0.43%。
+        // `MOE_COMBINE_F32=1` 显式退回旧口径（A/B）。
+        let on = std::env::var("MOE_COMBINE_F32").map(|v| v.trim() == "1").unwrap_or(false);
         if on {
-            eprintln!("[kaon3] MOE_COMBINE_F32=0：MoE 合并用 bf16 权重口径（A/B 用）");
+            eprintln!("[kaon3] MOE_COMBINE_F32=1：MoE 合并用 f32 累加+pes折down 旧口径（A/B 用，非 vLLM）");
         }
         on
     })
