@@ -376,3 +376,15 @@ p03(31tok): 0/87296  逐位  ‖363.17==363.17‖
 - 若 compile 也抓到且 == eager → eager==compile 成立，MoE 逐位结论稳；
 - 若 compile 抓不到（grabbed=[]）→ 无法直接验，退而比 moe 下游（post_ff_norm_2 输入）或端到端；
 - 若抓到但 ≠ eager → 我用 eager 当 compile 判据错，MoE 结论需用 compile io 重做。
+
+## 第 27 轮结论：eager==compile for MoE（图级证据，非注释）
+compile 重编 run 卡在 multi-modal warmup（已停）。改用**图级证据**验（用户"要依据自测"）：
+```
+computation_graph.py：moe_forward 恰好 1 个 op 节点
+  `moe_forward: "bf16[s59,2816]" = torch.ops.vllm.moe_forward(...)`（实测 grep=1）
+```
+→ moe_forward 在 compile 图是**单个不透明 custom op 节点**（inductor 不 trace 进内部），
+compile 下原样调注册实现 `_moe_forward`，与 eager 调**同一 Python 函数、内部数值相同**。
+→ **eager==compile for MoE 成立（图级证据）**，用 eager 抓的 MoE io 当 compile 判据有效，MoE 逐位结论站得住。
+（之前 compile grabbed=[] 是 patch 时机错——op 注册时捕获原函数引用，非 compile 走不同实现。）
+修正我之前的问题：此结论之前靠注释推，现由 computation_graph.py 实测 op 节点证实。
