@@ -198,3 +198,9 @@ token 约 22:22(+0800) 过期，远端动作打包减少握手。
 冒烟：serve 启动成功——model_load 33s，`dinfer_kaon3::service: kaon3 engine started (single-stream,greedy,no graph/spec/PD)`，
 `listening addr=127.0.0.1:8131`。**从零写的 executor 至少能 boot 引擎。** 但 /v1/models/chat 返回空：
 serve 跑在 ctr 的 docker run --rm 容器里，poll 窗口内未就绪+会话结束容器销毁。需用 docker run -d 常驻容器起 serve（挂 /w）。
+
+## R15（2026-10-25）serve 常驻通，/v1/models OK，chat 暴露真实 bug：embedding out shape mismatch
+docker run -d 常驻容器 kaon3-serve（GPU0,8131）起成功，/v1/models 正常返回 kaon3。
+chat 生成报 500：`engine step failed: embedding: out shape mismatch`（dinfer_core::engine）。
+→ 子代理从零写的 KaonExecutor 在真实 prefill 的 embedding 调用 shape 不对（代码 bug 非环境）。可定位可修。
+定位：KaonExecutor 调 KaonModel embed/forward 时传的 out 缓冲 shape 与 tokens 不匹配。
