@@ -388,3 +388,13 @@ compile 下原样调注册实现 `_moe_forward`，与 eager 调**同一 Python �
 → **eager==compile for MoE 成立（图级证据）**，用 eager 抓的 MoE io 当 compile 判据有效，MoE 逐位结论站得住。
 （之前 compile grabbed=[] 是 patch 时机错——op 注册时捕获原函数引用，非 compile 走不同实现。）
 修正我之前的问题：此结论之前靠注释推，现由 computation_graph.py 实测 op 节点证实。
+
+## 第 28 轮（用户 2026-10-25 铁律）：本 loop 只做 compile 口径，禁止再碰 eager
+用户：eager 一致早做完了，目标是 **compile 口径下与 vLLM 一致**。我在 eager 上反复犯错（50 次），到此为止。
+**铁律**：本 loop 判据只用 **compile 口径**——oracle 端到端 prompt_logprobs（oracle=compile 服务）或 compile 图。
+  禁止用 eager 抓的 io（如 moe_io.py EAGER=1 抓的 /moe_e08、/moe_c03）当判据——那些作废，不作数。
+之前"MoE iso 逐位"全是 eager 抓的 io 验的 → **不能作为 compile 对齐的证据**。
+现状（compile 端到端唯一干净判据）：combine_f32 默认改 vLLM 口径后，24 用例 mean_common_d **仍 0.0085**（没动）。
+→ 端到端 0.0085 = 我方 Rust vs vLLM compile 的真实差，不在 MoE combine。
+下一步（纯 compile）：用 kaon3_oracle_diff 逐 case 看哪些 token 位置 flip/|Δlp| 大，定位 compile 口径下第一处偏，
+  参照只用 oracle（compile）的 prompt_logprobs，不抓任何 eager 中间量。
