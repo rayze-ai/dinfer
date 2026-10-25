@@ -464,3 +464,15 @@ operation failed due to a previous error during capture`（cudaErrorStreamCaptur
 全景：compile 下可验段全部逐位 = norm/qkv/rope/o_proj（seg_l0 computation_graph）+ attention（attn_io splitting op）+ **MoE（本轮 Tensor-Capture dump）**。
 → 端到端 1 层 mean_common_d=0.0085（24 case 均匀无离群）= 各段 fp8/bf16/fp4 末位沿残差流累积，**非任何单段 kernel 结构错**。
 数据留痕：test/kaon3/moe_iso_compile_p08/{vllm_moe_hidden,vllm_moe_logits,vllm_moe_out}.bin（compile 抓，36 tok）。
+
+## 第 30 轮：残差流累积定位——漂移在 attention 块进入，后段平着带
+全前向 p08（RMSNORM_MODE=0 compile 口径）各 L0 边界 vs vLLM compile 参照 rel：
+```
+attn_out(gqa输出,o_proj前) vs attn_io vllm_out : rel=1.86e-2  不同 112731/147456  ‖312.54 vs 312.44‖
+pre_ff2_norm(MoE输入)      vs vllm_moe_hidden   : rel=1.80e-2  不同 74513/101376    ‖92.52 vs 92.53‖
+moe_y(MoE输出)             vs vllm_moe_out      : rel=1.74e-2  不同 96701/101376    ‖367.3 vs 365.3‖
+```
+→ 漂移到 **attention core 输出就已 1.86e-2**，o_proj/dense/MoE 不再放大（1.86→1.80→1.74 平/微降）。
+结合：attn_io 证"给同 q/k/v 我方 gqa core 逐位"、seg_l0 证"给同输入 norm/qkv/rope/o_proj 逐位"。
+→ 最大贡献段 = **attention 块内 gqa 之前**（input_norm/qkv/rope/q-k_norm/kv-cache fp8），全前向里我方 q/k/v 已偏。
+下一步：比我方全前向最终 q/k/v（喂 gqa 的那份）vs attn_io vllm_q/k/v，定位 attention 内第一处偏。
