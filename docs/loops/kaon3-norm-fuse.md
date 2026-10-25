@@ -187,3 +187,9 @@ norm→rope fp32 融合只回收 10% 不值当。**改做有意义的事**：全
 子代理（aec3a748）后台做 kaon3 serve 接入（照 qwen35），正跑 serve 自测（加载权重 ~30s 后 curl），未出最终报告。
 待子代理报：能否编过 / serve 能否起 / 短 prompt 生成样例。之后流程：dinfer serve → qa_compare run dinfer；vLLM chat → run vllm；report。
 注意：远端命令本会话出现超时（疑子代理占连接/GPU）——主会话暂不碰远端，等子代理收口，避免抢资源。
+
+## R13（2026-10-25）新 token 到，清残留，容器重编 kaon3 serve（后台）
+新 5090 token 写入，常驻连接建立；pkill 无残留 dinfer；GPU0 空闲，kaon-oracle-1(GPU1)=vLLM 对比对象在。
+sync 代码 → 容器 `cargo build --release -p dinfer --features kaon3`（后台 b03jl4q2d，_kbuild.log）。
+编过后：起 serve(端口 8131, GPU0) 冒烟 → 中文 prompt 验非空/非乱码 → qa_compare run dinfer + vLLM → report.html。
+token 约 22:22(+0800) 过期，远端动作打包减少握手。
