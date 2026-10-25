@@ -195,9 +195,14 @@ __device__ __forceinline__ float route_ex2_approx(float x) {
   asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(r) : "f"(x));
   return r;
 }
-// exact=1：精确 exp2f（对齐 vLLM gemma4 torch softmax）；0：SFU ex2.approx（旧，topk_w 差 8e-3）。
+// exact=1：精确 exp2f；0：SFU ex2.approx。x 已是 (logit-m)·log2e（2 为底）。
 __device__ __forceinline__ float route_ex2(float x, int exact) {
   return exact ? exp2f(x) : route_ex2_approx(x);
+}
+// vLLM torch softmax 用 `expf(logit-m)`（e 为底，不走 log2e 换算）。f32 下 exp2f(x·log2e)≠expf(x)。
+// 传入原始 (logit-m)，exact=1 走 expf 对齐 vLLM。
+__device__ __forceinline__ float route_exp_e(float dx, int exact) {
+  return exact ? expf(dx) : route_ex2_approx(__fmul_rn(dx, 1.4426950408889634f));
 }
 __device__ __forceinline__ float route_rcp(float x) {
   float r;
@@ -220,11 +225,11 @@ __global__ void route_softmax_kernel(const float* __restrict__ logits, const int
   // f64 下与"只对 topk 的 exp 求和"等价，但 f32 下 vLLM 先按 Z 除（每个 prob 舍 f32）再求 topk 和，
   // 归约舍入不同 → 必须复刻全体 Z（loop kaon3-moe 第 21 轮：差 8.2e-3）。
   float Z = 0.f;
-  for (int e = 0; e < E; ++e) Z = __fadd_rn(Z, route_ex2(__fmul_rn(__fsub_rn(lg[e], m), 1.4426950408889634f), exact_rcp));
+  for (int e = 0; e < E; ++e) Z = __fadd_rn(Z, route_exp_e(__fsub_rn(lg[e], m), exact_rcp));
   const float invZ = route_inv(Z, exact_rcp);
   float raw[MAX_K];
   for (int k = 0; k < K; ++k)
-    raw[k] = __fmul_rn(route_ex2(__fmul_rn(__fsub_rn(lg[topk_ids[t * K + k]], m), 1.4426950408889634f), exact_rcp), invZ);
+    raw[k] = __fmul_rn(route_exp_e(__fsub_rn(lg[topk_ids[t * K + k]], m), exact_rcp), invZ);
   int block_e = 1;
   while (block_e < E) block_e <<= 1;
   const int ept = block_e >= 32 ? block_e / 32 : 1;
