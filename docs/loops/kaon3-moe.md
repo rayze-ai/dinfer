@@ -227,3 +227,10 @@ moe_y vs vLLM 真 out（同输入同路由）每行 rel：最大 0.0045 最小 0
 2. 连续改无效（route 4 改 topk_w 不变）第 1 次就该停下查参照，不该改到第 4 次才插桩。
 3. 专家选择 36/36 一致时范围已很窄（只剩权重值/量化），我绕远了。
 坐实下一步：解包 NVFP4 做 f64 专家复现，三方判决（我方/vLLM/f64）确认 0.43% 是 fp4 噪声底。
+
+## 第 23 轮：NVFP4 解包口径验证通过（fp4 e2m1+block16 scale+global）
+Python 解包 eid79 gate：E2M1 码表[0,.5,1,1.5,2,3,4,6,±] + weight_scale(e4m3,每16列) + weight_scale_2(global f32)。
+wdq f64 范数 39.92、值合理 → **解包口径正确**。vLLM 专家也是 NVFP4（hf_quant_config 30 个 NVFP4）。
+证据链（判 0.43% 是 fp4 噪声非 bug）：① 均匀分布 36 行 0.3-0.45% ② 两边同 NVFP4 W4A4 ③ 解包口径对 ④ 路由逐位。
+最终坐实（下一步）：整个 MoE f64 复现（解包选中专家+路由+gelu+加权和），三方判决 我方/vLLM/f64 moe_y，
+看我方与 vLLM 是否都在 f64 周围 ±fp4 噪声（则坐实非 bug；若我方系统性更远则有解包/scale bug）。
