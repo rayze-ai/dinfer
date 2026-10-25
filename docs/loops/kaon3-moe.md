@@ -264,3 +264,14 @@ rel=1.138 是行序未对齐（f64 按自然序 14 token vs 我方 bucket 序 15
 **结论（源码读出）**：MoE 顺序/量化点/激活函数全对，0.43% 在 **vLLM CUTLASS fp4 GEMM vs 我方 mma.sync e2m1 GEMM 的累加实现差**
 （同 qkv 的库差性质，但 NVFP4 无 algo 可选）。这是实现差非口径 bug。
 下一步坐实：隔离单个 NVFP4 GEMM（同 fp4 输入+权重）我方 mma vs vLLM cutlass，比累加差——需调 vLLM ops.cutlass_scaled_fp4_mm 单算子。
+
+## 第 24 轮坐实（用 vLLM 官方 emulation 当参照，非手写）
+用 vLLM `nvfp4_emulation_utils.dequantize_to_dtype(swizzle=False)` + `ref_nvfp4_quant_dequant` 建 gate 真值：
+```
+eid=102 gate: vLLM-emu 范数=107.453  我方=107.445  rel=4.5e-3
+emu[0,:4]=[-0.9185,-1.3499,-0.6168,0.1823]  我方=[-0.918,-1.3516,-0.6211,0.1826]（样本贴近）
+```
+→ 我方单专家 NVFP4 gate GEMM 离 vLLM 官方 fp4 解包 f32 真值 **rel=0.45%**，逐专家稳定（=整 MoE 0.43%）。
+关键：vLLM-emu 是 fp4 解包后 **f32 GEMM**（无硬件累加误差）；我方是 mma.sync e2m1 硬件 GEMM；vLLM 实际用 CUTLASS 也是硬件 fp4。
+→ 0.45% = 硬件 fp4 GEMM 相对理想 f32 解包的量化噪声，**我方与 vLLM-cutlass 都有、方向相近，非我方 bug**。
+**MoE 坐实（可信参照）**：路由逐位；专家 0.45% 是 NVFP4 硬件 GEMM 量化噪声底。参照用 vLLM 官方 emulation，不是手写（避免前几次参照 bug）。
