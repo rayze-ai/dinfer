@@ -450,3 +450,17 @@ operation failed due to a previous error during capture`（cudaErrorStreamCaptur
 非 p08 的 36 tok → 是引擎 **profile/warmup 跑**（dummy max_num_batched_tokens=4096，hidden 非零 → 门控 `sum>0` 放过）。
 这批 warmup 文件**不能用**。真实 generate（36 tok）随后写同名文件覆盖（numpy tofile 截断）→ 必须等 generate 跑完，
 再按文件大小复核 T=36（hidden=36×2816×4=405504 B）才是 p08 的 compile MoE io。等 runcap2 退出后复核。
+
+## 第 29b 轮结论：compile 口径 MoE 段逐位一致（非 eager，退化检查过）
+用 compile（inductor 开 / cudagraph 关）抓的 p08 真实 MoE io 喂我方 Rust MoE 出 moe_y，比 vLLM compile moe_out：
+```
+退化检查：n=101376 ‖ours‖=365.2733 ‖vllm‖=365.2733 样本两边同（非全零比全零）；T=36 已核非 warmup(4096)
+对比：不同 0/101376  max|d|=0.0  rel=0.0 → 逐位一致
+```
+意义：用户禁 eager 后，MoE 段**首次用 compile 口径判据**证明——给定 vLLM compile 的真实 MoE 输入，
+我方 MoE 输出与 vLLM compile 逐位相同。第26轮 eager io 的 0/101376 现由 compile io 独立复现；
+第27轮"eager==compile for MoE"图级论证现有直接数值证据。
+判据边界（诚实，承第28轮）：这是**同输入对拍**（喂我方 vLLM 真实输入），验 MoE kernel 在 compile 口径对不对，**非端到端**。
+全景：compile 下可验段全部逐位 = norm/qkv/rope/o_proj（seg_l0 computation_graph）+ attention（attn_io splitting op）+ **MoE（本轮 Tensor-Capture dump）**。
+→ 端到端 1 层 mean_common_d=0.0085（24 case 均匀无离群）= 各段 fp8/bf16/fp4 末位沿残差流累积，**非任何单段 kernel 结构错**。
+数据留痕：test/kaon3/moe_iso_compile_p08/{vllm_moe_hidden,vllm_moe_logits,vllm_moe_out}.bin（compile 抓，36 tok）。
