@@ -216,8 +216,15 @@ __global__ void route_softmax_kernel(const float* __restrict__ logits, const int
   const float* lg = logits + t * E;
   float m = -INFINITY;
   for (int e = 0; e < E; ++e) m = fmaxf(m, lg[e]);
+  // vLLM gemma4：全体 E 个专家 softmax 概率（prob_e = exp(l_e-m)/Z，Z=全体和），再 gather top-k、renorm。
+  // f64 下与"只对 topk 的 exp 求和"等价，但 f32 下 vLLM 先按 Z 除（每个 prob 舍 f32）再求 topk 和，
+  // 归约舍入不同 → 必须复刻全体 Z（loop kaon3-moe 第 21 轮：差 8.2e-3）。
+  float Z = 0.f;
+  for (int e = 0; e < E; ++e) Z = __fadd_rn(Z, route_ex2(__fmul_rn(__fsub_rn(lg[e], m), 1.4426950408889634f), exact_rcp));
+  const float invZ = route_inv(Z, exact_rcp);
   float raw[MAX_K];
-  for (int k = 0; k < K; ++k) raw[k] = route_ex2(__fmul_rn(__fsub_rn(lg[topk_ids[t * K + k]], m), 1.4426950408889634f), exact_rcp);
+  for (int k = 0; k < K; ++k)
+    raw[k] = __fmul_rn(route_ex2(__fmul_rn(__fsub_rn(lg[topk_ids[t * K + k]], m), 1.4426950408889634f), exact_rcp), invZ);
   int block_e = 1;
   while (block_e < E) block_e <<= 1;
   const int ept = block_e >= 32 ? block_e / 32 : 1;
