@@ -123,3 +123,7 @@ vLLM gemma4_routing_function：`softmax(全体 logits)` → one_hot 累加 → r
 注意：layer.rs:977 注释早标"不是 sigmoid（DeepSeek/GLM/K3 口径）"，但 kernel 名叫 moe_route_softmax 实际却是 sigmoid——名实不符。
 修法：kaon3 路由权重走 softmax 口径（全体 softmax 的概率，不是 sigmoid）。moe.cu 公共件，需按口径分支（K3/GLM=sigmoid, gemma4=softmax）。
 待确认：kaon3 调的 moe_route_softmax_f32 是否真走这个 sigmoid kernel，还是有别的 softmax 变体没接上。
+
+## 第 21 轮续：route_softmax kernel 用 ex2.approx + rcp.approx（近似指数/倒数，同 FEXP 性质）
+moe.cu route_ex2=`ex2.approx.ftz`、route_rcp=`rcp.approx.ftz`。vLLM gemma4 是 torch 精确 softmax+精确除。
+→ topk_w 差 8e-3 = 近似指数/倒数（与 attention FEXP 同性质）。已有 ROUTER_RCP_EXACT=1 开关（倒数精确），ex2 无开关需加。
