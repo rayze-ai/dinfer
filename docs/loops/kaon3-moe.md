@@ -338,3 +338,14 @@ gate/up/down GEMM: 12 专家全逐位 rel=0 ✓
 注意：down 对拍喂的是**我方 act dump**；真实全链里若我方 act≠vLLM act，down 会差 → 要查 act 量化。
 下一步：① 比我方 act(gelu输出) vs vLLM 真实 act（需 vLLM 中间，或查 gelu 量化口径）；② 查加权和 scatter_add。
 教训再记：脚本 alpha 必须含我方实际 scale 变换（pes 折法）——第 N 次脚本漏 scale。
+
+## 第 25 轮解决：MoE 完全逐位（MOE_COMBINE_F32=0）—— 0.43% 根因=加权和口径
+```
+MOE_COMBINE_F32=1（默认）: rel=4.288e-3  ← 旧口径（pes 折 down.global + f32 加权和）
+MOE_COMBINE_F32=0:        rel=0.000, 0/101376  ← vLLM 口径（w=bf16(topk_w·pes)、每项 bf16(w·y)、bf16 累加）✓✓
+```
+**根因确凿**：MoE 0.43% = 加权和口径。vLLM(cutlass_moe topk_weight_and_reduce)：fused_out.mul_(topk_weights) bf16 → ops.moe_sum。
+我方默认 combine_f32=1 走 f32 累加 + pes 折 down（非 vLLM）；=0 走 bf16·pes 加权（=vLLM）→ **逐位**。
+注释说"默认 vLLM 口径"但 `if !moe_combine_f32()` + 默认 true → 实际默认走旧口径（注释与实际第 N 次不符，用户"别信注释"再验证）。
+专家三 GEMM + 路由本就逐位，差纯在加权和。**MoE 彻底对齐**。
+下一步：① 多组（多 prompt）验 rel=0 站得住；② 改默认 combine_f32=false（或 arch 定）使生产走 vLLM 口径；③ 端到端 24 用例复测。
