@@ -275,3 +275,13 @@ emu[0,:4]=[-0.9185,-1.3499,-0.6168,0.1823]  我方=[-0.918,-1.3516,-0.6211,0.182
 关键：vLLM-emu 是 fp4 解包后 **f32 GEMM**（无硬件累加误差）；我方是 mma.sync e2m1 硬件 GEMM；vLLM 实际用 CUTLASS 也是硬件 fp4。
 → 0.45% = 硬件 fp4 GEMM 相对理想 f32 解包的量化噪声，**我方与 vLLM-cutlass 都有、方向相近，非我方 bug**。
 **MoE 坐实（可信参照）**：路由逐位；专家 0.45% 是 NVFP4 硬件 GEMM 量化噪声底。参照用 vLLM 官方 emulation，不是手写（避免前几次参照 bug）。
+
+## 第 24 轮续（用户纠正"同机非硬件"）：改口径——0.45% 是软件实现差
+用户对：vLLM 与我方同台 5090、同 fp4 硬件，差异**不是硬件**，是软件（我方 mma.sync kernel vs vLLM CUTLASS 的 tiling/累加/scale）。
+我撤回"硬件噪声不可消"的错误框架。
+- 直接对拍 vLLM 真实 cutlass_scaled_fp4_mm：alpha=input_scale*weight_scale_2（源码 modelopt.py:1207 读出），
+  但 scale/alpha 约定我反复没搭对（范数 40亿→36，rel 仍 1.0/2.5）——**cutlass 单算子对拍我没搭对，记为未完成**（能力不足非结论）。
+- 可信已得：vLLM 官方 emulation（ref_nvfp4_quant_dequant+dequantize_to_dtype）参照，我方 gate rel=0.45%。
+  → 0.45% = 我方 fp4 GEMM 累加/舍入 相对 **理想 fp4 解包 f32** 的软件实现差（同机同格式，非硬件）。
+**待消（下次）**：① 搭对 cutlass_scaled_fp4_mm 直接对拍（查 blockscale 是否含 global、alpha 方向）；
+② 或逐步查我方 mma e2m1 kernel 的累加序/舍入 vs vLLM cutlass，对齐到末位。0.45% 是软件差，原则上可消。
