@@ -193,3 +193,8 @@ norm→rope fp32 融合只回收 10% 不值当。**改做有意义的事**：全
 sync 代码 → 容器 `cargo build --release -p dinfer --features kaon3`（后台 b03jl4q2d，_kbuild.log）。
 编过后：起 serve(端口 8131, GPU0) 冒烟 → 中文 prompt 验非空/非乱码 → qa_compare run dinfer + vLLM → report.html。
 token 约 22:22(+0800) 过期，远端动作打包减少握手。
+
+## R14（2026-10-25）kaon3 serve 能起！但 ctr --rm 会话结束即死，需常驻
+冒烟：serve 启动成功——model_load 33s，`dinfer_kaon3::service: kaon3 engine started (single-stream,greedy,no graph/spec/PD)`，
+`listening addr=127.0.0.1:8131`。**从零写的 executor 至少能 boot 引擎。** 但 /v1/models/chat 返回空：
+serve 跑在 ctr 的 docker run --rm 容器里，poll 窗口内未就绪+会话结束容器销毁。需用 docker run -d 常驻容器起 serve（挂 /w）。
