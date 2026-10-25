@@ -349,3 +349,11 @@ MOE_COMBINE_F32=0:        rel=0.000, 0/101376  ← vLLM 口径（w=bf16(topk_w·
 注释说"默认 vLLM 口径"但 `if !moe_combine_f32()` + 默认 true → 实际默认走旧口径（注释与实际第 N 次不符，用户"别信注释"再验证）。
 专家三 GEMM + 路由本就逐位，差纯在加权和。**MoE 彻底对齐**。
 下一步：① 多组（多 prompt）验 rel=0 站得住；② 改默认 combine_f32=false（或 arch 定）使生产走 vLLM 口径；③ 端到端 24 用例复测。
+
+## 第 26 轮：MOE_COMBINE_F32=0 端到端 24 用例仍 0.0085（MoE 逐位但端到端不降）
+MoE iso 逐位（同输入），但端到端 mean_common_d 0.0086→0.0085（没动）。
+原因：端到端 MoE 的**输入**（pre_ff2_norm，来自残差流）与 vLLM 差 2.3%（上游 attention/qkv 末位累积到残差流），
+MoE 逐位只保证"同输入同输出"，端到端输入已偏 → MoE 逐位不改变端到端。
+→ 端到端 0.0085 残差 = 各段 fp8/bf16 末位沿残差流累积，非 MoE 口径。
+MoE loop 成果：MoE 本身（路由+gate/up/down+加权和）给定同输入与 vLLM 逐位；0.43% 根因（加权和 combine 口径）已定位可切逐位。
+待办：① 多组（≥2 prompt）验 MoE iso 逐位站得住（仅 p08）；② 改默认 combine 口径；③ 端到端残差转上游残差流累积问题。
