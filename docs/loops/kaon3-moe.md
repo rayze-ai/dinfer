@@ -105,3 +105,13 @@ patch 没抓到 compile 版：因 direct_register_custom_op 注册时固化 _moe
   ② 专家 GEMM(NVFP4 gate/up/down)：我方 moe_e{id}_* vs vLLM 专家中间量；
   ③ 加权和 / per_expert_scale 折法 / renormalize。
 数据：/w/sd_iso（iso 的 moe_y + moe_e*）、/moe_e08（vLLM）。
+
+## 第 21 轮：MoE 0.43% 定位到 topk_w（路由权重），非专家选择/GEMM
+同 vLLM logits 下：
+```
+topk 专家选择：36/36 全一致（选对）
+topk_w 路由权重：max|d|=8.2e-3  ‖our‖=2.504 vs ‖vllm‖=2.492（偏大）
+```
+→ MoE 0.43% 落在 **topk_w 口径**（权重差按比例传到加权和），非专家 GEMM/选择。
+vLLM 路由(gemma4_routing_function_torch)：softmax(全体)→one_hot累加→renorm→×per_expert_scale，全程 fp32。
+下一步：查我方 moe_route_softmax_f32 kernel 的 renorm/per_expert_scale 口径 vs vLLM（哪步舍 bf16 或折法不同）。
