@@ -298,3 +298,16 @@ emu[0,:4]=[-0.9185,-1.3499,-0.6168,0.1823]  我方=[-0.918,-1.3516,-0.6211,0.182
      若 fp4 字节就不同 → 差在量化（line 77 rcp_approx 给精确开关 A/B）；若同 → 差在 GEMM 累加。
   b. 按结果：量化差则加 exact rcp（如 route_ex2 那样）；累加差则对齐 mma 顺序或接 cutlass。
 停止条件不变：MoE out 对齐到末位。0.43% 是软件差、可消，继续。
+
+## 第 25 轮突破：我方单专家 gate GEMM 与 vLLM 真实 cutlass 逐位一致（rel=0）
+脚本自验（用户要求"保证脚本对"）：cutlass vs emulation rel=4.5e-3（合理，脚本调用正确）。照搬 vLLM cutlass.py：
+scaled_fp4_quant(x,1/input_scale) + cutlass_scaled_fp4_mm(x_fp4,w,x_bs,swizzle_blockscale(ws),alpha=input_scale*weight_scale_2)。
+```
+我方 gate vs vLLM cutlass: rel=0.000e+00  ← 逐位！
+我方 gate vs emulation:    rel=4.5e-3
+cutlass vs emulation:      rel=4.5e-3
+```
+**重大纠正**：之前"0.43%/0.45% 是软件差"**用错参照**（拿 f32 emulation 比，而非 vLLM 真实 cutlass）。
+真实对真实：我方 gate GEMM == vLLM cutlass **逐位**。0.45% 只是两者都相对 f32 理想偏（同向，fp4 本身）。
+→ 整 MoE 的 0.43% 不在 gate GEMM。按用户方法逐步往下：查 **up GEMM / gelu / down GEMM / 加权和**。
+教训：参照必须用 vLLM 实际跑的路径（cutlass），不是 emulation；且先自验脚本（cutlass vs emu）。
