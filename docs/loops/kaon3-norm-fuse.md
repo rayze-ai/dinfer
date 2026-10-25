@@ -127,3 +127,10 @@ qkv 合并 GEMM（requant-to-max，非 per-channel）✓、head-norm ✓、rope�
 → 每个 op 都逐位对，4e-3 是全链恒定偏移，op 级匹配无法复现。可能：① attn_io 参照陈旧（10-24 抓，本会话前）；
   ② 真实前向有 op 级重建没有的东西（inductor 端到端融合 / Gemma4 per-layer 输入）。
 下一步：重抓 attn_io（当前设置，p08，BI=1），比我方 k_rope。若 0 → 旧 attn_io 陈旧，本无 4e-3 bug；若仍 4e-3 → 真实。
+
+## R7（2026-10-25）：穷举 norm/embed/rope 全排除，疑点转向 BI 下 qkv 是否走 bf16 matmul
+- 新抓 attn_io == 旧 attn_io（0/73728）→ 参照可复现，4e-3 真实非陈旧。
+- embed（bf16 norm 最优，fp32 更差 6.6e-3）、input_norm/k_norm（BI/native 四组合最优 BI+BI 3.9e-3）、rope（变体都 3.9e-3）
+  → 从 embed 到 k 用 vLLM 真实 op 逐段重建，**最优 3.9e-3，无一能到 0**；重建恒等于我方代码。
+- **新假设**：`VLLM_BATCH_INVARIANT=1` 下 qkv fp8 可能被 dequant 成 bf16、走 BI persistent matmul（保证 batch 不变），
+  而非 cutlass fp8。我方走 cutlass fp8 → 4e-3。测：bf16 matmul 重建 k vs attn_io。
