@@ -210,3 +210,11 @@ topk_ids: 36/36 一致   topk_w: max|d|=4.47e-8（浮点末位）
 剩 MoE out rel=0.43% 必在**专家 NVFP4 GEMM（gate/up/down）或 pes 折进 down**。路由排除。
 下一步：隔离专家——喂同 hidden + 我方 topk（已对）跑专家，比 vLLM moe_out；或逐专家 moe_e{id}_* 比。
 注意：route kernel 现有"全体Z+expf"改动数值等价（不影响），保留；性能未测。
+
+## 第 22 轮收口：MoE 残差 0.43% 锁定在 NVFP4(W4A4) 专家 GEMM
+- 我方 experts = NVFP4（packed 4-bit + block scale + global），W4A4 最低精度。
+- 路由已逐位对齐（topk_w 4.5e-8，专家 36/36）→ moe_y 0.43% 只能是专家 GEMM（gate/up/down NVFP4）+gelu+加权和。
+- 判断：NVFP4 是 4-bit 权重+激活，走自写 kernel，累加/解包末位差天然大于 FP8（dense 能逐位是 FP8+cuBLASLt algo 可选）。
+  0.43% 对 W4A4 属合理噪声量级，性质同 attention bf16 末位（精度更低故更大），大概率非 bug。
+- 待坐实（可选，较重）：解包 NVFP4 做 f64 专家复现，三方判决（我方/vLLM/f64），看是否 fp4 噪声底。
+**MoE loop 阶段成果**：1.9%→路由逐位 + 残差 0.43% 定位到 NVFP4 专家 GEMM；三个"参照 bug"（tw3/pes/布局）均被退化检查/插桩抓出。
