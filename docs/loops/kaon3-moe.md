@@ -434,3 +434,13 @@ moecut（我方 compile dump 输入→vLLM cutlass→比 moe_y）逐 token×专�
 compile 下 moe_forward 是 opaque op → 调 `_moe_forward` 本体 → dump 在 **compile 口径命中**（不碰 eager）。机制跑通（产出文件）。
 坑1（退化检查救）：首次抓到全零 → 是 compile warmup 的 dummy 空跑。加门控 `hidden.abs().sum()>0`（真实 forward 才 dump）。
 重抓中。拿到后比我方 moe_y（compile 有效判据，替代作废的 eager /moe_e08）。
+
+## 第 29b 轮：门控 compile MoE dump 撞 cudagraph 捕获（根因+修法）
+门控重抓（KAON_MOE_CAP + hidden.abs().sum()>0）**失败**：`torch.AcceleratorError: CUDA error:
+operation failed due to a previous error during capture`（cudaErrorStreamCaptureInvalidated）。
+根因：`_moe_forward` 里 `.cpu()` dump（甚至门控的 `float(...)` host 读）在 **cudagraph 捕获区**内做 host sync → 作废捕获。
+这正是"MoE compile 不透明"的物理原因：op 在被捕获的 cudagraph 内跑，无法从内部同步 dump。
+**修法（仍 compile 口径，不碰 eager）**：inductor 编译开，**cudagraph 关**。
+  `CompilationConfig(mode=VLLM_COMPILE, cudagraph_mode=NONE)`。cudagraph 只改启动方式不改 kernel 数值
+  （MoE 仍走同一 fp4/cutlass kernel、同一 graph-break 结构）→ dump 合法，判据仍 compile 有效。
+  runcap2.py（容器 /runcap2.py）已带此 config。p08 ids=test/kaon3/oracle_clean_b/p08.ids（36 tok）。
