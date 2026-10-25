@@ -119,3 +119,11 @@ q_norm/k_norm/v_norm（给我方 q_proj_raw）              0/0 逐位
 → input_norm ✓ + qkv fp8 GEMM（合并）✓ + head-norm ✓ + rope ✓ = **L0 产出链全逐位**（给 BI norm 输入）。
 attn_io.py 确认开了 BI=1。那 k_rope vs attn_io vllm_k 的 4e-3 **存疑**：要么 attn_io 参照边界/捕获有别，要么比较口径错。
 下一步：重建完整 k 链（inn→qkv→k_norm→rope）直接比 attn_io vllm_k 和我方 k_rope，定位 4e-3 真实来源。
+
+## R6（2026-10-25）：每个 op 都对，4e-3 是全链恒定偏移——怀疑 attn_io 参照陈旧
+穷举排除：embed（主模型 gemma4.py normalizer=bf16(53.0)=我方 Lm1）✓、input_norm(batch_invariant)✓、
+qkv 合并 GEMM（requant-to-max，非 per-channel）✓、head-norm ✓、rope（fp32/bf16 各变体都 ~3.9e-3，非 rope 口径）。
+**用 vLLM 真实 op 从我方 Lm1 重建的 k == 我方 k_rope（0/73728）**，但两者都对 attn_io vllm_k 差 4e-3（近恒定偏移）。
+→ 每个 op 都逐位对，4e-3 是全链恒定偏移，op 级匹配无法复现。可能：① attn_io 参照陈旧（10-24 抓，本会话前）；
+  ② 真实前向有 op 级重建没有的东西（inductor 端到端融合 / Gemma4 per-layer 输入）。
+下一步：重抓 attn_io（当前设置，p08，BI=1），比我方 k_rope。若 0 → 旧 attn_io 陈旧，本无 4e-3 bug；若仍 4e-3 → 真实。
