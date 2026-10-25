@@ -192,3 +192,12 @@ Python f32 复刻我方口径(m=max全体, Z=Σexp, prob=exp/Z, renorm, ×pes) v
 moe.cu route_softmax_kernel 加 printf dump t=0 的 exact/m/Z/renorm/raw0/tw0/id0/sc0。
 对比 Python f32 复刻（row0 应 m/Z/raw0 一致、tw0=0.40838）。若 kernel 的 Z 或 raw0 就偏 → 定位到 exp/归约；
 若 raw0 对但 tw0=0.4021 → renorm/pes 环节 bug。需 #include <cstdio>（已加）。
+
+## 第 22 轮真相：topk_w 的 8e-3 是参照错（我方 pes 折进 down，topk_w 本就不含 pes）
+kernel 插桩：m/Z 对，但 **sc0=1.0** → route kernel 没乘 per_expert_scale。
+原因：`moe_combine_f32()` 默认 true → `pes_route=None` → **per_expert_scale 折进专家 down 的 global scale**（设计如此，layer.rs:324），不在 route 乘。
+→ 我方 topk_w **本就不含 pes**，而我的 cmp_topk/Python 复刻都 `*pes[tid]` → **参照比较错**（又一个 tw3 式参照 bug）。
+pes[79]=1.0156，0.40838/0.40209=1.0156 吻合 → topk_w 的 8e-3 = 少乘的 pes，是假差。
+**真实残差**：MoE out（moe_y，含 down 的 pes）rel=0.43%。topk_w 对齐（去掉参照的 pes 后应逐位或末位）。
+教训（用户 2026-10-24 反复强调）：结果先做退化检查/对口径；连续 4 改无效早该怀疑参照而非实现。
+下一步：重验 topk_w（参照不乘 pes）；再定位 MoE out 0.43% 真正来源（专家 NVFP4 GEMM / down 的 pes 折法）。
