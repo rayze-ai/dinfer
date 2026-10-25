@@ -325,3 +325,16 @@ down GEMM: 我方 vs cutlass rel=0.8~1.6e-2 ❌  ← 差在这！
 而我脚本 alpha 用 checkpoint 原始 weight_scale_2（未折 pes）→ 可能我脚本 alpha 漏 pes（脚本错），
 或我方 down 折 pes 引入差。下一步：① 脚本 alpha 补 pes 对齐我方 down 实际 scale 再比；
 ② 查我方 down 输入量化（act→fp4）是否与 gate/up 口径一致（down 输入是中间激活，范围不同）。
+
+## 第 25 轮：down GEMM 也逐位（补 pes 后）—— 专家三个 GEMM 全对齐
+之前 down 差 1.2e-2 **是我脚本 alpha 漏 per_expert_scale**（我方 down.global 折了 pes，脚本没折）→ 又是脚本错非 kernel。
+脚本 alpha 补 pes[eid] 后：
+```
+gate/up/down GEMM: 12 专家全逐位 rel=0 ✓
+```
+→ **专家三个 NVFP4 GEMM（gate/up/down）全部与 vLLM cutlass 逐位一致**。路由也逐位。
+那整 MoE 0.43% 只剩两处未单独对 vLLM：① act 的 fp4 量化（gelu 输出→down 输入，我方 vs vLLM scaled_fp4_quant）；
+② 加权和（topk_w × 专家 down 输出 的累加顺序/精度）。
+注意：down 对拍喂的是**我方 act dump**；真实全链里若我方 act≠vLLM act，down 会差 → 要查 act 量化。
+下一步：① 比我方 act(gelu输出) vs vLLM 真实 act（需 vLLM 中间，或查 gelu 量化口径）；② 查加权和 scatter_add。
+教训再记：脚本 alpha 必须含我方实际 scale 变换（pes 折法）——第 N 次脚本漏 scale。
