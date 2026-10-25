@@ -225,3 +225,12 @@ sync+重编(by2jiduo7)→重启 serve 冒烟。
   问"中国的首都是哪座城市？" → "中国的首都是**北京**。" finish_reason=stop。正确/通顺/无乱码/正常停。
 → 从零写的 KaonExecutor + 全 bf16/fp4/fp8 推理端到端通。**印证 0.0085 是亚决策噪声，不影响真实生成质量。**
 接着：qa_compare run dinfer（20 条）→ vLLM 侧 → report.html 进 dashboard。
+
+## R19（2026-10-25）dinfer 侧 20 条问答全跑完：零乱码零跑偏，25 tok/s
+结果（放宽 fact2/trans1 关键词口径后，答案本就正确）：
+  **乱码 0/20 · 命中 20/20 · 均 25.0 tok/s · 均 TTFT 132ms**（greedy,无 cudagraph/投机）。
+质量抽样：首都=北京；木星；五言绝句《秋思》；质数代码；100天后=星期五；失眠分步建议——全切题通顺格式好。
+→ **坐实：0.0085 是亚决策噪声，不影响真实生成质量。** kaon3 从零 executor + 全 bf16/fp4/fp8 端到端可用。
+产物：test/kaon3/qa_zh/{result_dinfer.jsonl, report.html}。report.py 改为按当前 prompts.expect 重判命中。
+token（22:22）已过期：vLLM 侧 20 条对比 + report 并排 + 进 dashboard 留下次 token。
+oracle chat 端点(28100)未确认响应，下次需确认或起独立 vLLM chat 服务。

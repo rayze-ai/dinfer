@@ -1,0 +1,192 @@
+<!doctype html><html lang=zh><head><meta charset=utf-8>
+<title>Kaon-V3 生成对比</title><meta name=viewport content="width=device-width,initial-scale=1">
+<style>
+:root{--bg:#fff;--fg:#1a1a1a;--line:#e0e0e0;--bad:#c0392b;--warn:#b8860b;--perf:#2563eb;--muted:#777}
+@media(prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#16181c;--fg:#e6e6e6;--line:#2c2f36;--bad:#ff6b6b;--warn:#e0b050;--perf:#6aa8ff;--muted:#999}}
+body{background:var(--bg);color:var(--fg);font:14px/1.6 system-ui,sans-serif;margin:0;padding:16px}
+h1{font-size:20px} .sum{margin:8px 0;padding:10px;border:1px solid var(--line);border-radius:8px}
+table{border-collapse:collapse;width:100%} td,th{border:1px solid var(--line);padding:8px;vertical-align:top;text-align:left}
+th{position:sticky;top:0;background:var(--bg)} .cat{white-space:nowrap;color:var(--muted)} .q{max-width:220px}
+.txt{white-space:pre-wrap;max-width:420px;font-size:13px} .bad{color:var(--bad);font-weight:600} .warn{color:var(--warn)}
+.perf{color:var(--perf);font-size:12px} .na{color:var(--muted)}
+</style></head><body>
+<h1>Kaon-V3 端到端生成对比 · dinfer vs vLLM</h1>
+<div class=sum><b>汇总</b><br>dinfer: 20 条 · 乱码 0 · 命中 20/20 · 均 25.0 tok/s · 均 TTFT 132ms<br>vllm: 无数据</div>
+<table><thead><tr><th>类</th><th>问题</th><th>dinfer</th><th>vLLM</th></tr></thead>
+<tbody><tr><td class=cat>事实</td><td class=q>中国的首都是哪座城市？</td><td><div class=txt>中国的首都是**北京**。</div> <span class=perf>18.2 tok/s · TTFT 127ms</span></td><td class=na>—</td></tr><tr><td class=cat>事实</td><td class=q>水的化学分子式是什么？</td><td><div class=txt>水的化学分子式是 **$\text{H}_2\text{O}$**。
+
+这表示一个水分子是由两个氢原子（$\text{H}$）和一个氧原子（$\text{O}$）通过共价键结合而成的。</div> <span class=perf>25.5 tok/s · TTFT 120ms</span></td><td class=na>—</td></tr><tr><td class=cat>事实</td><td class=q>太阳系中体积最大的行星是哪一颗？</td><td><div class=txt>太阳系中体积最大的行星是**木星**（Jupiter）。</div> <span class=perf>21.8 tok/s · TTFT 126ms</span></td><td class=na>—</td></tr><tr><td class=cat>事实</td><td class=q>一年有多少天（平年）？</td><td><div class=txt>一年（平年）有 **365** 天。</div> <span class=perf>21.7 tok/s · TTFT 119ms</span></td><td class=na>—</td></tr><tr><td class=cat>推理</td><td class=q>小明有5个苹果，吃了2个，又买了3个，现在有几个？请给出计算过程。</td><td><div class=txt>小明现在有 **6** 个苹果。
+
+**计算过程如下：**
+
+1.  **初始数量：** 5 个
+2.  **吃掉 2 个：** 5 - 2 = 3 个
+3.  **又买了 3 个：** 3 + 3 = 6 个
+
+**综合算式：**
+5 - 2 + 3 = 6 (个)</div> <span class=perf>25.7 tok/s · TTFT 163ms</span></td><td class=na>—</td></tr><tr><td class=cat>推理</td><td class=q>如果今天是星期三，那么100天后是星期几？请说明推理过程。</td><td><div class=txt>如果今天是星期三，那么100天后是**星期五**。
+
+以下是详细的推理过程：
+
+### 1. 理解周期性
+在计算星期几时，我们使用的是一个**7天**的循环周期。这意味着每过7天，星期几都会保持不变。
+
+### 2. 计算余数
+为了找出100天后相对于今天的情况，我们需要计算100天包含了多少个完整的7天周期，以及剩下的天数是多少。我们可以通过除法来计算：
+
+$$100 \div 7 = 14 \dots 2$$
+
+*   **商（14）：** 代表在100天内，星期几会完整地循环14次。
+*   **余数（2）：** 代表在完成14个完整的循环后，还需要再往后数2天。
+
+### 3. 推导结果
+既然14个完整的周期（$14 \times 7 = 98$天）后星期几会回到原点（星期三），那么我们只需要从星期三开始，往后数余数所代表的天数（2天）：
+
+*   第1天后：星期四
+*   **第</div> <span class=perf>26.1 tok/s · TTFT 142ms</span></td><td class=na>—</td></tr><tr><td class=cat>推理</td><td class=q>甲比乙大3岁，乙比丙大2岁，甲今年20岁，丙今年几岁？</td><td><div class=txt>我们可以通过已知条件一步步推算出丙的年龄：
+
+1.  **已知甲的年龄**：甲今年 **20岁**。
+2.  **求乙的年龄**：甲比乙大3岁 $\rightarrow$ 乙 = 20 - 3 = **17岁**。
+3.  **求丙的年龄**：乙比丙大2岁 $\rightarrow$ 丙 = 17 - 2 = **15岁**。
+
+**答：丙今年 15 岁。**</div> <span class=perf>26.0 tok/s · TTFT 142ms</span></td><td class=na>—</td></tr><tr><td class=cat>代码</td><td class=q>用Python写一个函数，判断一个整数是否为质数。</td><td><div class=txt>这是一个完整的Python代码示例，包含了一个判断质数的函数以及测试用例。
+
+```python
+def is_prime(n):
+    &quot;&quot;&quot;
+    判断一个整数是否为质数。
+    
+    参数:
+    n: 待判断的整数
+    
+    返回:
+    True: 是质数
+    False: 不是质数
+    &quot;&quot;&quot;
+    # 质数必须大于 1
+    if n &lt;= 1:
+        return False
+    
+    # 2 是唯一的偶质数
+    if n == 2:
+        return True
+    
+    # 排除所有大于 2 的偶数
+    if n % 2 == 0:
+        return False
+    
+    # 检查从 3 到 sqrt(n) 的所有奇数
+    # 使用平方根是为了提高效率，因为如果 n 有</div> <span class=perf>25.9 tok/s · TTFT 131ms</span></td><td class=na>—</td></tr><tr><td class=cat>代码</td><td class=q>用一句话解释什么是递归，并给一个简单例子。</td><td><div class=txt>**解释：** 递归是指一个函数在定义中调用了自身，从而将问题分解为更小的同类问题。
+
+**例子：** 计算阶乘的函数 `factorial(n)` 会调用 `factorial(n-1)`，直到遇到 `n=0` 的情况。</div> <span class=perf>25.5 tok/s · TTFT 132ms</span></td><td class=na>—</td></tr><tr><td class=cat>写作</td><td class=q>写一首关于秋天的五言绝句。</td><td><div class=txt>为您创作了一首关于秋天的五言绝句：
+
+**《秋思》**
+
+**落叶满阶前，**
+**秋风送远天。**
+**归鸟寻林静，**
+**清晖照水边。**
+
+---
+**【诗意解析】**
+*   **首句**：描写秋天特有的景象——落叶铺满了台阶。
+*   **次句**：秋风吹过，仿佛把天空都送到了眼前，展现了秋天的辽阔。
+*   **三句**：归巢的鸟儿在静谧的林间寻找栖息地，营造出一种宁静的氛围。
+*   **末句**：明亮的月光（或清晨的阳光）洒在水面上，为全诗画上了一个清澈、优美的句点。</div> <span class=perf>26.3 tok/s · TTFT 126ms</span></td><td class=na>—</td></tr><tr><td class=cat>写作</td><td class=q>用三句话介绍一下长城。</td><td><div class=txt>长城是世界上规模最大的古代建筑之一。
+它蜿蜒在中国的崇山峻岭之间，具有重要的历史意义。
+长城也是中华民族坚韧不拔精神的象征。</div> <span class=perf>25.1 tok/s · TTFT 121ms</span></td><td class=na>—</td></tr><tr><td class=cat>写作</td><td class=q>把下面这句话改写得更正式：这事儿我搞不定。</td><td><div class=txt>根据您想要表达的具体语境，可以将“这事儿我搞不定”改写为以下几种不同程度的正式表达：
+
+### 1. 职场通用（委婉表达能力边界）
+这种表达最适合在工作中向领导或同事说明情况，既专业又不显得推卸责任。
+*   **“此事超出了我的能力范围。”**
+*   **“关于这个问题，我目前无法给出满意的解决方案。”**
+*   **“我尝试处理该事项，但遇到了无法克服的困难。”**
+
+### 2. 高度正式（书面报告或正式场合）
+如果您是在撰写正式报告、邮件，或者在非常严肃的会议上发言，建议使用以下表达：
+*   **“本人在处理该项事务时遇到了技术性瓶颈。”**
+*   **“由于缺乏必要的资源/权限，我无法独立完成此项任务。”**
+*   **“该事项的处理超出了我的职权/专业范畴。”**
+
+### 3. 带有“请求帮助”含义（主动寻求支持）
+如果您不仅想表达“搞不定”，还想顺便请人帮忙，可以</div> <span class=perf>26.1 tok/s · TTFT 131ms</span></td><td class=na>—</td></tr><tr><td class=cat>长文</td><td class=q>请分点说明如何养成早起的习惯，至少给出5条建议。</td><td><div class=txt>养成早起的习惯并非一蹴而就，而是需要从**睡眠质量、作息调整、心理建设**等多个维度进行配合。以下是为您整理的6条建议：
+
+### 1. 保证充足的睡眠时长（核心前提）
+早起不等于“牺牲睡眠”。如果你强行早起，但晚上没有保证足够的睡眠时间，身体会产生巨大的疲劳感，从而导致习惯失败。
+*   **做法：** 根据你想要起床的时间，倒推8小时。例如，如果你想7点起床，那么晚上11点前必须入睡。
+
+### 2. 采用“渐进式”调整法（降低难度）
+不要试图一夜之间将作息表提前3小时，这会给身体带来巨大的压力。
+*   **做法：** 每次只提前15-30分钟。例如，第一周7点起床，第二周6点45分起床，以此类推。这种“温水煮青蛙”的方式能让身体更自然地适应新的生物钟。
+
+### 3. 优化入睡前的环境与习惯（提高效率）
+很多时候早不起是因为“睡不着”。睡前如果过度兴奋或环境不佳，会严重影响入睡速度</div> <span class=perf>25.9 tok/s · TTFT 140ms</span></td><td class=na>—</td></tr><tr><td class=cat>长文</td><td class=q>简要解释什么是机器学习，面向完全没有基础的读者，约150字。</td><td><div class=txt>想象一下，你正在教一个机器人识别水果。
+
+传统的编程方式是：你必须写下极其详细的规则，比如“如果颜色是红色的，且形状是圆的，那就是苹果”。如果规则不够完美，机器人就会出错。
+
+而**机器学习**则不同。你不需要写下这些复杂的规则，你只需要给机器人看成千上万张苹果的照片。机器人会通过观察，自己总结出苹果的特征。
+
+简单来说，机器学习就是**让计算机通过大量的数据和经验，自己学会解决问题，而不是死记硬背人类给出的指令。**</div> <span class=perf>26.0 tok/s · TTFT 154ms</span></td><td class=na>—</td></tr><tr><td class=cat>常识</td><td class=q>为什么天空在白天看起来是蓝色的？</td><td><div class=txt>天空之所以在白天看起来是蓝色的，是因为一种物理现象：**光的散射**（特别是**瑞利散射**）。
+
+我们可以把这个过程拆解成三个步骤来理解：
+
+### 1. 太阳光其实是“彩虹色”的
+虽然太阳光看起来是白色的，但它实际上是由各种颜色的光组成的（就像彩虹一样：红、橙、黄、绿、蓝、靛、紫）。每种颜色都有自己的**波长**：
+*   **红色**：波长最长，最“稳”。
+*   **蓝色/紫色**：波长最短，最“活跃”。
+
+### 2. 大气层是一个“障碍物”
+地球周围包裹着一层厚厚的大气层，里面充满了各种微小的粒子，比如**氮气分子**（最主要）、氧气分子以及水蒸气。
+
+当太阳光射向地球时，这些粒子就像一个个小障碍物，挡住了光线。
+
+### 3. 关键点：不同颜色的“躲避方式”不同
+这就是为什么天空变蓝的核心原因：
+
+*   **长波长的光（红色、橙色）**：它们波长很长，能够“穿过”粒子之间的</div> <span class=perf>25.9 tok/s · TTFT 126ms</span></td><td class=na>—</td></tr><tr><td class=cat>常识</td><td class=q>冰箱为什么能让食物保鲜？</td><td><div class=txt>冰箱之所以能让食物保鲜，核心原理可以概括为一句话：**通过降低温度，减缓了食物变质过程中各种化学反应和生物活动的速度。**
+
+我们可以从以下三个维度来详细拆解这个过程：
+
+### 1. 抑制微生物的生长（生物维度）
+食物变质最直接的原因是**细菌、霉菌和酵母菌**的入侵。
+*   **原理：** 微生物的生长需要一定的温度。在冰箱的低温环境下，细菌的代谢活动会变得非常缓慢，甚至处于“休眠”状态。
+*   **结果：** 虽然冰箱不能完全杀死细菌（有些细菌在低温下依然能缓慢繁殖），但它极大地延长了细菌达到“致病浓度”所需的时间，从而保护了食物。
+
+### 2. 减缓化学反应速度（化学维度）
+食物本身含有蛋白质、脂肪、糖类等成分，这些成分在空气中会发生**氧化**和**水解**反应。
+*   **原理：** 根据化学中的**阿伦尼乌斯方程（Arrhenius equation）**，化学反应速</div> <span class=perf>25.9 tok/s · TTFT 127ms</span></td><td class=na>—</td></tr><tr><td class=cat>翻译</td><td class=q>把这句话翻译成英文：知识就是力量。</td><td><div class=txt>这句话最常见的翻译是：
+
+**Knowledge is power.**
+
+如果你想表达得更正式一点，也可以说：
+**Knowledge is strength.** （但不如第一种常用）</div> <span class=perf>24.9 tok/s · TTFT 122ms</span></td><td class=na>—</td></tr><tr><td class=cat>翻译</td><td class=q>把这句英文翻译成中文：The early bird catches the worm.</td><td><div class=txt>这句话最常见的翻译是：
+
+**“早起的鸟儿有食。”**
+
+也可以根据语境翻译为：
+*   **“早起的鸟儿能吃到虫。”**（更直白）
+*   **“先到者得。”**（意译，强调抢占先机）</div> <span class=perf>25.5 tok/s · TTFT 146ms</span></td><td class=na>—</td></tr><tr><td class=cat>对话</td><td class=q>我最近总是失眠，有什么改善建议吗？</td><td><div class=txt>首先，非常理解你现在的状态。**“失眠”本身会带来焦虑，而焦虑又会加剧失眠，形成一个恶性循环。**
+
+为了给你最精准的建议，我需要了解一下：你是**入睡困难**（躺很久睡不着），还是**早醒**（还没到点就醒了），还是**睡眠维持困难**（半夜醒了之后就再也睡不着了）？
+
+在不知道具体情况的前提下，我可以从**行为习惯、环境调节、心理建设**三个维度，给你一些通用的改善方案：
+
+### 一、 行为习惯（最核心的改变）
+
+1.  **不要“努力”去睡觉：** 睡觉不是一项任务。你越想控制它，大脑就越兴奋。
+2.  **建立“床 = 睡眠”的条件反射：**
+    *   **不要在床上玩手机、看书、工作。** 你的大脑必须形成一个认知：只要躺在床上，就是该睡觉的时候。
+    *   **不要在床上焦虑。** 如果躺下20分钟还没睡着，**请立刻起床**，去另一个房间坐一会儿，等有困意了再回</div> <span class=perf>25.9 tok/s · TTFT 123ms</span></td><td class=na>—</td></tr><tr><td class=cat>对话</td><td class=q>推荐三本适合初学者的编程书籍。</td><td><div class=txt>针对初学者，我推荐三本**风格迥异**的书籍。你可以根据自己喜欢的阅读方式（是喜欢看案例、看理论，还是喜欢看逻辑）来选择。
+
+### 1. 最适合“看案例”的学习者
+**书名：** 《Python编程：从入门到实践》（*Python Crash Course*）
+**作者：** Eric Matthes
+
+*   **推荐理由：** 这本书被誉为“初学者的圣经”。它最大的特点是**不废话**。书的前半部分会带你快速完成几个小项目（比如简单的游戏、数据可视化），让你在短时间内获得“我能写代码”的成就感。
+*   **适合人群：** 想要快速上手、喜欢通过动手做项目来学习、对编程有明确目标（比如想做数据分析或简单开发）的人。
+*   **学习建议：** 不要只盯着书上的代码看，一定要在电脑上亲手敲一遍。
+
+### 2. 最适合“打基础”的学习者
+**书名：** 《C语言程序设计》（*C Pro</div> <span class=perf>25.9 tok/s · TTFT 131ms</span></td><td class=na>—</td></tr></tbody></table>
+<p style="color:var(--muted);font-size:12px">乱码=机器判定(异常字符/重复/空)；未命中=expect 关键词不在输出(答非所问初筛)；性能=该条 tok/s 与 TTFT。temp=0 贪心。</p>
+</body></html>

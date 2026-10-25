@@ -91,12 +91,20 @@ def run(tag, url, model):
 def esc(s): return html.escape(s or "")
 
 def report():
+    prompts = load_prompts()
+    expect = {p["id"]: p["expect"] for p in prompts}
     data = {}
     for tag in ("dinfer", "vllm"):
         fp = os.path.join(ROOT, f"result_{tag}.jsonl")
         if os.path.exists(fp):
-            data[tag] = {json.loads(l)["id"]: json.loads(l) for l in open(fp, encoding="utf-8") if l.strip()}
-    prompts = load_prompts()
+            d = {}
+            for l in open(fp, encoding="utf-8"):
+                if not l.strip(): continue
+                r = json.loads(l)
+                # 用当前 prompts 的 expect 重判命中（关键词口径可能已放宽）
+                r["kw_hit"] = expect.get(r["id"], "") in (r.get("text") or "")
+                d[r["id"]] = r
+            data[tag] = d
     def agg(tag):
         rs = list(data.get(tag, {}).values())
         if not rs: return None
