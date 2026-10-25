@@ -109,3 +109,13 @@ q_norm/k_norm/v_norm（给我方 q_proj_raw）              0/0 逐位
 → **4e-3 唯一可能在 qkv fp8 GEMM**（input_norm 输出 → q_proj_raw）。input_norm 排除、head-norm 排除、rope 排除。
 下一步：用 vLLM 真实 op 从 Lm1 重建 raw qkv（batch_invariant norm → fp8 quant → cutlass_scaled_mm），比我方 q_proj_raw，
   确认 4e-3 在 GEMM；再看 BI 下 fp8 qkv 的 quant/matmul 口径与我方差异。
+
+## R5（2026-10-25）：qkv GEMM 也逐位！全链对 vLLM 重建 0/147456——4e-3 vs attn_io 存疑
+用 vLLM 真实 op 从 Lm1 重建 raw qkv（batch_invariant norm → scaled_fp8_quant(0.59375) → cutlass_scaled_mm，**合并 requant 到公共 weight_scale**）：
+```
+我方 q_proj_raw vs vLLM重建 q_merged  不同 0/147456  逐位！
+                    vs q_sep(各自scale) 不同 133585   rel=1.2e-2（证明合并 requant 口径关键，我方做对）
+```
+→ input_norm ✓ + qkv fp8 GEMM（合并）✓ + head-norm ✓ + rope ✓ = **L0 产出链全逐位**（给 BI norm 输入）。
+attn_io.py 确认开了 BI=1。那 k_rope vs attn_io vllm_k 的 4e-3 **存疑**：要么 attn_io 参照边界/捕获有别，要么比较口径错。
+下一步：重建完整 k 链（inn→qkv→k_norm→rope）直接比 attn_io vllm_k 和我方 k_rope，定位 4e-3 真实来源。
