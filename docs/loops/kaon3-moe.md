@@ -161,3 +161,14 @@ ROUTER_RCP_EXACT=1 + 强制 exp2f 精确，topk_w max|d| 仍 8.2201e-3 不变 �
 2. 修后重测 MOE_ISO：topk_w 是否降到末位、MoE out rel 是否 <1e-3。
 3. 若 MoE out 仍有残差 → 隔离专家 NVFP4 GEMM（喂同 hidden+topk 比专家输出）。
 4. 全 L0 对齐后：端到端 24 用例 mean_common_d 应显著下降，记入。
+
+## 第 22 轮判决：我方 route kernel 偏，vLLM 贴真值（fp64 定）
+用 vLLM **自己的** gemma4_routing_function_torch 算 topk_w：
+```
+vLLM 真函数 vs f64真值: max|d|=4.6e-8  ← vLLM 就是真值
+我方 vs vLLM:           max|d|=8.2e-3  ← 我方偏
+row0 vLLM: [0.40838,0.30948,...]  我方: [0.4021,0.31315,...]（第1偏小/第2偏大）
+```
+→ **是我方 route kernel 算偏 8e-3，不是末位/vLLM**。改全体Z归约、精确exp 均无效（topk_w 两版 max|d|=3e-8 没动）。
+疑点转向：我方 softmax 用 `ex2(x·log2e_f32)`（2为底，log2e 乘法 f32 舍入），vLLM torch softmax 用 `expf`（e为底）。
+f32 下 `exp2f(x·log2e)` ≠ `expf(x)`。下一步：route_ex2 精确分支改直接 `expf(x_原始)`（不乘 log2e 走 2 底），对齐 vLLM。
