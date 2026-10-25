@@ -115,3 +115,11 @@ topk_w 路由权重：max|d|=8.2e-3  ‖our‖=2.504 vs ‖vllm‖=2.492（偏�
 → MoE 0.43% 落在 **topk_w 口径**（权重差按比例传到加权和），非专家 GEMM/选择。
 vLLM 路由(gemma4_routing_function_torch)：softmax(全体)→one_hot累加→renorm→×per_expert_scale，全程 fp32。
 下一步：查我方 moe_route_softmax_f32 kernel 的 renorm/per_expert_scale 口径 vs vLLM（哪步舍 bf16 或折法不同）。
+
+## 第 21 轮根因：route kernel 用 sigmoid，vLLM gemma4 用 softmax
+moe.cu:30 route_softmax_kernel 里 `sc = 1/(1+exp(-logit))`（**sigmoid**），再 topk/renorm/scale。
+vLLM gemma4_routing_function：`softmax(全体 logits)` → one_hot 累加 → renorm → ×per_expert_scale。
+**sigmoid vs softmax 不同**→ topk 专家选择因单调性相同（36/36），但**权重值不同**→ topk_w 差 8e-3 → MoE 0.43%。
+注意：layer.rs:977 注释早标"不是 sigmoid（DeepSeek/GLM/K3 口径）"，但 kernel 名叫 moe_route_softmax 实际却是 sigmoid——名实不符。
+修法：kaon3 路由权重走 softmax 口径（全体 softmax 的概率，不是 sigmoid）。moe.cu 公共件，需按口径分支（K3/GLM=sigmoid, gemma4=softmax）。
+待确认：kaon3 调的 moe_route_softmax_f32 是否真走这个 sigmoid kernel，还是有别的 softmax 变体没接上。
