@@ -408,3 +408,12 @@ attention 用 attn_io=compile splitting op 验，均 compile 有效）；**唯 M
   ① 我方 hidden-all dump L0 残差流（compile 口径 probe），与 seg_l0 从 computation_graph 复现的 compile 中间量逐段比；
   ② MoE 段：从 computation_graph.py 读 compile 的 moe_forward 输入/输出表达式，用 seg_l0 式复现（compile 口径）比我方 moe_y；
   ③ 严禁用 moe_io.py EAGER 抓的任何量。
+
+## 第 28 轮：compile 判据的真实边界（诚实）
+moecut（我方 compile dump 输入→vLLM cutlass→比 moe_y）逐 token×专家 1200 次 cutlass op 太慢（autotune），已停。
+且它仍是"同输入对拍"（喂我方 dump），验 kernel 非端到端——不满足"compile 端到端逐位"目标。
+**compile 口径能对的中间量**：norm/qkv/rope/o_proj（seg_l0 从 computation_graph 复现=compile）、attention（attn_io=compile splitting op）→ 均逐位。
+**MoE 在 compile 下是 opaque custom op（单 op 节点）**：无法抓其 compile 中间输出，只能靠端到端 oracle。
+→ compile 端到端 1 层 mean_common_d=0.0085 均匀，是我方整条 Rust 前向 vs vLLM compile 的**累积系统差**，
+  不是单段 kernel 结构错（能对的段 compile 下都逐位）。MoE 段 compile 黑盒，无直接判据。
+真实状态：compile 下可验的全部逐位；端到端 0.0085 是各段 fp8/bf16/fp4 末位沿残差流累积，MoE 因 opaque 无法单独 compile 对拍。
