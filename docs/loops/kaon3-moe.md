@@ -172,3 +172,11 @@ row0 vLLM: [0.40838,0.30948,...]  我方: [0.4021,0.31315,...]（第1偏小/第2
 → **是我方 route kernel 算偏 8e-3，不是末位/vLLM**。改全体Z归约、精确exp 均无效（topk_w 两版 max|d|=3e-8 没动）。
 疑点转向：我方 softmax 用 `ex2(x·log2e_f32)`（2为底，log2e 乘法 f32 舍入），vLLM torch softmax 用 `expf`（e为底）。
 f32 下 `exp2f(x·log2e)` ≠ `expf(x)`。下一步：route_ex2 精确分支改直接 `expf(x_原始)`（不乘 log2e 走 2 底），对齐 vLLM。
+
+## 第 22 轮卡点（诚实记录）：连续 4 改 topk_w 零变化
+改了 ① exp 近似→精确 ② 全体 Z 归约 ③ expf(e底) ④ ROUTER_RCP_EXACT=1，我方 topk_w 一字不变（sd_ex/sd_z/sd_e2 完全同，row0=0.4021）→ **这些都不是 8e-3 的因**。
+排除：sc.logits 是 f32、iso 灌 f32 无降精度；调用链 layer→moe_route_softmax_f32→moe.cu 确认无误。
+我方 row0=[0.4021,0.31315,..] vs vLLM=[0.40838,0.30948,..]：第1偏小/第2偏大 → softmax 相对大小差，非末位。
+**下一步（不猜，插桩）**：kernel dump raw[k]（softmax 概率，renorm 前）比 vLLM router_probabilities，
+定位 exp 出来就差 还是 renorm/pes 后才差。疑点剩：max 用全体 vs vLLM、分母 Z 的实际值、per_expert_scale 乘入点。
+注意：ROUTER_RCP_EXACT 是否真生效待核（static getenv 缓存；probe 新进程应读到，但改 exp 无效可能它压根没进精确分支）。
