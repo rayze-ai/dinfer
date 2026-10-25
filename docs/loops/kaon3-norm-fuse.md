@@ -39,3 +39,20 @@
 ## 迭代记录
 （每轮一行：变量 → k/v rel → 结论）
 - R0 基线 mode0：k=4.0e-3 v=4.5e-3 attn_out=1.86e-2（kaon3-moe 第 30 轮）
+
+## R1（2026-10-25）：embed 排除、norm 约定一致、入口锁定在 input_norm→qkv 融合口径
+- **embed 正确（排除）**：我方 Lm1 == `embed_table[id].bf16() × bf16(sqrt(2816)=53.0)`，0/101376。
+  vLLM gemma4_dspark normalizer = `torch.tensor(hidden**0.5, dtype=bf16)` = 53.0，**同口径**。embed 非入口。
+- **norm 约定一致**：checkpoint 的 q_norm.weight=1.0000（= 已烘 (1+w) 的 identity），我方 `×g` 不再 +1 与 seg_l0 同。
+- **mode0 vs mode2 vs 真实**：
+  - seg_l0（native ref，喂我方正确 Lm1）：mode2 所有 norm=0、mode0=2.6e-3。
+  - 真实 compile（attn_io k/v）：mode0 k=4.0e-3、mode2 k=6.2e-3 → **mode0 更近，mode2 更差**。
+  → **seg_l0 的 native rms_norm ≠ 真实 inductor 融合 norm**；真实是第三口径，mode0/mode2 都没命中。
+- **量级判据**：k 不同 56224/73728（systematic），远超 fp8 GEMM 本身噪声（round7 给同输入仅 13/196608）
+  → 不是 fp8 GEMM 噪声，是 **input_norm 输出系统性偏 ~4e-3**（喂进 qkv 的输入就偏）。
+- **技术现实**：vLLM 的 input_norm 是 inductor 融合（native/fp32），其输出只在 fp8-quant op 边界物化；
+  我方是离散 kernel(input_norm)→fp8 GEMM。要逐位需复刻融合舍入，或 patch fp8-quant op 抓真实 input_norm 输出直接对齐。
+- 停止条件修正：k/v 到 **fp8 GEMM 噪声地板**（~1e-4 级、~十几元素）即可，不苛求绝对 0（fp8 GEMM 本身非逐位）。
+  当前 4e-3 远在地板之上 = 真有系统差（input_norm 口径），仍要攻。
+下一步候选：① patch `scaled_fp8_quant`（cudagraph 关）抓真实 input_norm 输出，与我方逐 bit 比，枚举口径命中；
+  ② 端到端 oracle 量化 mode0 当前 mean_common_d（确认 0.0085 基线）。
