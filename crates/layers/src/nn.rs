@@ -252,6 +252,18 @@ impl Embedding {
     pub fn forward(&self, stream: &Stream, ids: &Tensor<i32>, out: &mut Tensor<bf16>) -> Result<()> {
         k::embedding_bf16(stream, &ids.data, &self.table.data, &mut out.data, self.hidden)
     }
+
+    /// 仅嵌入前 `tokens` 行（`ids` 可长于 tokens，`out` 可为预分配的 `max_tokens` 缓冲）。
+    /// serve 用：executor 的 scratch 按 max_tokens 分配，但每步实际 token 数 < max_tokens。
+    pub fn forward_rows(
+        &self,
+        stream: &Stream,
+        ids: &Tensor<i32>,
+        out: &mut Tensor<bf16>,
+        tokens: usize,
+    ) -> Result<()> {
+        k::embedding_bf16_n(stream, &ids.data, &self.table.data, &mut out.data, tokens, self.hidden)
+    }
 }
 
 /// gate/up 合并为一个 [2I, H] 的 GEMM，再 silu_and_mul，再 down。

@@ -204,3 +204,11 @@ docker run -d 常驻容器 kaon3-serve（GPU0,8131）起成功，/v1/models 正�
 chat 生成报 500：`engine step failed: embedding: out shape mismatch`（dinfer_core::engine）。
 → 子代理从零写的 KaonExecutor 在真实 prefill 的 embedding 调用 shape 不对（代码 bug 非环境）。可定位可修。
 定位：KaonExecutor 调 KaonModel embed/forward 时传的 out 缓冲 shape 与 tokens 不匹配。
+
+## R16（2026-10-25）定位+修 embedding shape mismatch：executor scratch=max_tokens, embed 要 rows 变体
+根因：probe 建 LayerScratch::new(tokens) 精确大小，embed out==ids.len()*hidden 恰好；
+  executor 建 LayerScratch::new(max_tokens)，sc.x=max_tokens*h，但 ids.len()=t<max_tokens → embedding_bf16 的
+  `out.len()==ids.len()*hidden` 断言失败（ops.rs:443）。
+修：crates/layers/src/nn.rs 加 `Embedding::forward_rows(ids,out,tokens)` 调 embedding_bf16_n（out.len()>=tokens*h 即可）；
+  models/kaon3/src/model.rs:119 embed.forward → forward_rows(…, tokens)。sync+重编中(bbiyg7o3c)。
+（同 [[dinfer-linear-forward-rows-trap]]：预分配缓冲按 ids 推行数的坑，embed 版。）

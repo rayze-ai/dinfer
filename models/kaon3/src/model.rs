@@ -116,7 +116,7 @@ impl KaonModel {
         let h = cfg.hidden;
 
         // ---- embedding × sqrt(hidden) ----
-        self.embed.forward(stream, ids, &mut sc.x)?;
+        self.embed.forward_rows(stream, ids, &mut sc.x, tokens)?;
         if self.embed_scale != 1.0 {
             k::ops::scale_bf16_n(stream, &mut sc.x.data, tokens * h, self.embed_scale)?;
         }
