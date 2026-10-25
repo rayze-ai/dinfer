@@ -187,3 +187,8 @@ Python f32 复刻我方口径(m=max全体, Z=Σexp, prob=exp/Z, renorm, ×pes) v
 - 连续 4 改无效的原因找到：我加的"全体 Z"里 raw=exp·invZ 后面又 renorm=Σraw 再除，invZ 被消掉 → 等于没改。
 - 真正 kernel 算 exp_k/Σ_topk exp（topk 分母），数学该 =0.40838，但实际 0.4021 → lane 蝶形归约(line 236-240)或 raw 计算有 bug。
 **下一步**：kernel 插桩 dump raw[k]（renorm 前）与 Σ，对比 Python；查 lane 蝶形求和（ept 分配、K=8 的归约是否漏项/重复）。
+
+## 第 22 轮：kernel 插桩 dump raw/Z/renorm（ROUTE_DBG）
+moe.cu route_softmax_kernel 加 printf dump t=0 的 exact/m/Z/renorm/raw0/tw0/id0/sc0。
+对比 Python f32 复刻（row0 应 m/Z/raw0 一致、tw0=0.40838）。若 kernel 的 Z 或 raw0 就偏 → 定位到 exp/归约；
+若 raw0 对但 tw0=0.4021 → renorm/pes 环节 bug。需 #include <cstdio>（已加）。

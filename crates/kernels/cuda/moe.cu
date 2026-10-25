@@ -1,3 +1,4 @@
+#include <cstdio>
 // MoE 参考 kernel（sm80+）。不追求性能：每 token 一个 block 做路由；专家分组用 count + prefix + scatter。
 //
 //   moe_route_f32        logits[T,E] fp32 → topk_ids[T,K] i32, topk_w[T,K] f32
@@ -257,6 +258,9 @@ __global__ void route_softmax_kernel(const float* __restrict__ logits, const int
     const float sc = per_expert_scale ? to_f32(static_cast<const bf16*>(per_expert_scale)[e]) : 1.f;
     topk_w[t * K + k] = __fmul_rn(__fmul_rn(raw[k], inv), sc);
   }
+  if (t == 0) printf("[ROUTE_DBG] exact=%d m=%.6f Z=%.6f renorm=%.6f raw0=%.6e tw0=%.6f id0=%d sc0=%.6f\n",
+                     exact_rcp, m, Z, renorm, raw[0], topk_w[0],
+                     topk_ids[0], per_expert_scale ? to_f32(static_cast<const bf16*>(per_expert_scale)[topk_ids[0]]) : 1.f);
 }
 
 // 按原始 logits 取 top-k（Gemma4 口径：不看 softmax 概率的大小关系，两者单调等价，但按 logits 可避免
