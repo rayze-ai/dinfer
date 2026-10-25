@@ -95,3 +95,17 @@
   A. 复刻 inductor 对 (input_norm→fp8-quant) 的融合 codegen 舍入——需读 compile 产物（VLLM_DEBUG_DUMP_PATH 的图/代码），工程量大、脆弱；
   B. 承认 mode0 为 fp8-pipeline 实际地板，端到端 0.0085 作为"各段末位沿残差流累积 + attention 放大"的系统噪声接受。
 停止条件评估：严格"k/v 逐位"在 compile 融合+fp8 下不可达且不可观测验证；改为"已定位主贡献段 + 证明非单段结构错"达成。
+
+## R4（2026-10-25）：拿对参照——真实 norm = batch_invariant（BI=1），input_norm/head-norm 全对，4e-3 在 qkv fp8 GEMM
+**之前错在拿 seg_l0 的 native rms_norm 当参照**。真实 compile 下 `RMSNorm.forward_cuda` 在 `VLLM_BATCH_INVARIANT=1`（oracle/attn_io 都开）
+走 `rms_norm_batch_invariant`（Triton `_rms_norm_kernel`），**不是 native**。该 kernel 口径：
+  `inv_rms = 1.0/sqrt(mean_sq+eps)`（非 rsqrt）、`out=(x_f32·inv·w_f32).to(bf16)`（全 fp32 末尾舍 = mode0 结构）。
+用**真实函数** `rms_norm_batch_invariant` 从 Lm1 算，比我方 mode0 dump：
+```
+input_norm  batch_invariant vs mode0  不同 2/101376   rel=3.3e-5  ← 几乎逐位
+q_norm/k_norm/v_norm（给我方 q_proj_raw）              0/0 逐位
+```
+→ **所有 norm op 都对（mode0）**；之前的 2.6e-3 是对错参照（native mid-round）。rope 也逐位（seg_l0）。
+→ **4e-3 唯一可能在 qkv fp8 GEMM**（input_norm 输出 → q_proj_raw）。input_norm 排除、head-norm 排除、rope 排除。
+下一步：用 vLLM 真实 op 从 Lm1 重建 raw qkv（batch_invariant norm → fp8 quant → cutlass_scaled_mm），比我方 q_proj_raw，
+  确认 4e-3 在 GEMM；再看 BI 下 fp8 qkv 的 quant/matmul 口径与我方差异。
