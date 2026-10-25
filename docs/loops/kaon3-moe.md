@@ -508,3 +508,17 @@ pre_ff_norm/pre_ff2_norm/post_ff_norm 均 ~2.8e-3（都带权重）
 注意：历史交接称"RMSNORM_MODE=2 与 vllm.ir rms_norm 0/67584"——即 **MODE=2 对、MODE=0 偏**。verify/全前向用的是 MODE=0 = bug 源。
 下一步：读我方 rmsnorm kernel（MODE=0 路径）vs vLLM gemma_rms_norm 的 (1+w) 口径/dtype/舍入，定位 2.8e-3 来源；
   再用 MODE=2（或修 MODE=0）重跑全前向验 input_norm→0、端到端 0.0085 是否降。
+
+## 第 30 轮修正：seg_l0 的 native rms_norm ≠ 真实 compile 融合 norm（差点错报 MODE=2 是修复）
+MODE=2 下 seg_l0 所有带权重 norm → 0/101376（对上 native）。但拿**真实 compile 参照 attn_io** 复核，MODE=2 反而更差：
+```
+           k rel     v rel     attn_out rel
+MODE=0    4.0e-3    4.5e-3    1.86e-2
+MODE=2    6.2e-3    8.1e-3    2.61e-2   ← 对真实 vLLM 更差
+```
+→ **seg_l0 的 `vllm.ir.ops.layernorm.rms_norm`（native）≠ vLLM 实际 compile 的 inductor 融合 norm**。
+真实 compile 融合保持 fp32（更接近 mode0 无中间舍入）。mode0 比 mode2 贴近真实 vLLM。
+教训（承用户"多测几组/结果先退化检查"）：差点按 seg_l0 native 把 MODE=2 当修复——拿真实 compile 参照（attn_io）才证伪。
+**修正结论**：残差漂移入口仍是 input_norm→qkv 链（mode0 下 k 已 4e-3），但 seg_l0 的 native 不是真实判据；
+真实 compile 融合 norm 是第三种口径，mode0/mode2 都没逐位命中（mode0 最近）。
+要把 4e-3 压到 0，需复刻 inductor 对 input_norm 的融合舍入（非 standalone native）；或直接以 attn_io 的真实 k/v 为判据调 norm 口径。
