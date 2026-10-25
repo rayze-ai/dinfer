@@ -895,6 +895,14 @@ impl Gemma4Layer {
         sub_out: Option<(&std::path::Path, usize)>,
     ) -> Result<()> {
         let h = cfg.hidden;
+        // --- MoE 隔离（MOE_ISO=<dir>，loop kaon3-moe）：喂 vLLM 真实 MoE 输入，纯测路由+专家 ---
+        // 设了就从 dir 读 vllm_moe_logits.bin[T,e] f32 → sc.logits（跳过 router 预处理+GEMM），
+        // 并记下 hidden 待 pre_ff2_norm 处用 vllm_moe_hidden.bin[T,h] 覆盖 sc.h2。比 vLLM moe_out。
+        let moe_iso = std::env::var("MOE_ISO").ok();
+        let rdf_iso = |name: &str| -> Result<Vec<f32>> {
+            let b = std::fs::read(format!("{}/{name}", moe_iso.as_deref().unwrap()))?;
+            Ok(b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+        };
         // router 输入：rmsnorm_no_weight(x) · root_size · scale[hidden]
         //
         // vLLM `Gemma4Router.forward`：
@@ -908,7 +916,15 @@ impl Gemma4Layer {
         // **compile 口径（第 23 轮实测）**：inductor 把 `norm → ×root_size → ×scale` 融成一条 fp32 链，
         // 只在写回时舍入一次。分三步做会多两次 bf16 舍入（实测差 17299/67584）。所以默认走融合算子；
         // `RMSNORM_MODE=1`（eager BI）才退回三步。
+        let e = cfg.num_experts;
+        let kk = cfg.top_k;
         let root_size = f32::from(bf16::from_f32((h as f32).powf(-0.5)));
+        // MOE_ISO：直接灌 vLLM router logits，跳过 router 预处理 + GEMM（纯测专家）。
+        if moe_iso.is_some() {
+            let lg = rdf_iso("vllm_moe_logits.bin")?;
+            ensure!(lg.len() >= tokens * e, "moe_iso logits 太小 {} < {}", lg.len(), tokens * e);
+            stream.htod_into(&lg[..tokens * e].to_vec(), &mut sc.logits.data)?;
+        } else {
         if norm_mode() != 1 {
             k::ops::rmsnorm_scale2_bf16(
                 stream, &sc.x.data, &self.router.scale.data, &mut sc.routed.data, tokens, h, eps, root_size,
@@ -920,8 +936,6 @@ impl Gemma4Layer {
         }
 
         sub_dump_op(stream, sub_out, "router_in", &sc.routed, tokens, h)?;
-        let e = cfg.num_experts;
-        let kk = cfg.top_k;
         // vLLM（容器 0.26.1rc1，sm_120）`GateLinear` 落到 Tier 6：`F.linear`（cuBLAS，bf16 输出）→ `.to(fp32)`
         // （sm_120 不满足 `allow_specialized_router_gemm`，Tier 5 的 fp32 epilogue 不开）。
         // 所以必须走 cuBLASLt bf16 GEMM（`run_lt_default` 钉 `id=21 tile=11 splitk=8`）再 cast；
@@ -974,6 +988,7 @@ impl Gemma4Layer {
         } else {
             k::ops::moe_gate_f32(stream, &sc.routed.data, &self.router.bf16_weight()?.data, &mut sc.logits.data, tokens, e, h)?;
         }
+        } // end !moe_iso（router 预处理+GEMM）
         // Gemma4 路由（vLLM `gemma4.py`）：按**原始 logits** 取 top-k → 全专家 softmax →
         // 只在 top-k 上重新归一化。**不是 sigmoid**（那是 DeepSeekV3/GLM/K3 的 `moe_route_f32` 口径，
         // 2026-10-22 发现此前误用，是短 prompt 翻转率超标的主因之一）。
@@ -1007,6 +1022,13 @@ impl Gemma4Layer {
         // 专家输入 = pre_feedforward_layernorm_2(residual)（router 用自己的无权重 norm，两者不同）；
         // 借 sc.h2 存，循环结束后才被 post_ff_norm_2 的输出覆盖
         rmsnorm_into(stream, ops, &sc.x, &self.pre_ff_norm_2, &mut sc.h2, h, tokens, eps)?;
+        if moe_iso.is_some() {
+            // 专家输入用 vLLM 真实 moe_hidden（覆盖我方 pre_ff2_norm），纯测专家 GEMM
+            let hid = rdf_iso("vllm_moe_hidden.bin")?;
+            ensure!(hid.len() >= tokens * h, "moe_iso hidden 太小");
+            let hb: Vec<bf16> = hid[..tokens * h].iter().map(|&x| bf16::from_f32(x)).collect();
+            stream.htod_into(&hb, &mut sc.h2.data)?;
+        }
         sub_dump(stream, sub_out, "pre_ff2_norm", &sc.h2, tokens, h)?;
         stream.memset_zeros_n(&mut sc.acc.data, tokens * h)?;
         for (eid, start, len) in k::ops::moe_expert_ranges(&offsets) {
