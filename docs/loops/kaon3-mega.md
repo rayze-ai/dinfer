@@ -781,3 +781,11 @@ B4 做不了，真障碍：kaon3 每层 MoE 支路有 cudagraph 捕获期禁止�
 子代理明智未写无法验证的胶水，只逐处定位 + 待办（R42 清单）：MoE 路由(前置) + executor from_vec×7 + model uninit + head_rmsnorm×90 + 采样 D2H，后 4 处照 qwen35 改但须 MoE 先解。
 **修正路线顺序：A ✅ → B1 ✅ → B2 ✅ → 片上①② ✅ → B3(MoE 持久化/device grouped GEMM) → B4(cudagraph) → B5(端到端整体分析)。**
 B3 一石二鸟：megakernel 纳入 MoE + 去 host 路由解锁 cudagraph。是整条路线关键卡口，躲不过。
+
+## R43 2026-10-26 B3 开：MoE host 路由 → device-resident grouped NVFP4 GEMM
+目标（第一版）：去掉 moe_branch 的 D2H(offsets) + host 专家循环，改 device 端 grouped GEMM——
+offsets 留卡上、launch 次数编译期固定（cudagraph 要求）、专家选择靠 device 读 offsets。
+第一版可"128 专家常驻 task、len==0 return"（空转但去 host 路由、固定 launch），性能优化留第二版。
+硬底线：moe_y 逐位一致 0/N（grouped 累加序对齐单专家版）；decode 路径无 D2H（B3 对 B4 的核心交付）。
+复用：A 的 split-K partial/sem + mega_common 持久调度 + gemm_nvfp4_sm120 单专家 kernel。委派子代理(a93d415)。
+这是 megakernel 能否真追 vLLM 非eager 的决定性一步，也是最大工程/最高风险（NVFP4 grouped + 逐位 + 动态路由）。
