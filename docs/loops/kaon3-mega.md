@@ -849,3 +849,10 @@ blockIdx.z=e 按 device offsets 取专家行段，空 CTA return；固定 8 laun
   （子代理大概率也撞到此不一致才卡住，未定位根因。）
 定位范围：捕获体 max_seqlen=1（query 长度，decode 对）；随步增长的是 KV seq_lens/block_table，经 PlanBuffers.upload 每步更新——
   疑点在 graph replay 时 KV 位置/seq_lens 更新与 eager 不同步，或某值被 graph 固化。待深入 forward + PlanBuffers.upload 定准。
+
+## R44 深挖①：定位 graph 数值 bug —— 嫌疑在 attention 的 max_seqlen 标量
+PlanBuffers.upload 对 seq_lens/block_table/cu_seqlens 是每步真实值 push 到固定 device 缓冲（exec.rs:419-438），device buffer 内容每步更新，这部分对。
+捕获假 plan（decode_capture_plan）seq_lens=vec![1]（exec.rs:234）。
+kaon3 attention `paged_win`（layer.rs:1113）收 **`ctx.max_seqlen`（host 标量）** + block_table/seq_lens(device buffer)。
+**疑点**：若 paged_win 内部用 `max_seqlen` 这个**捕获时固定的标量**算 grid/splits/每请求读几 block，则 graph 固化 max_seqlen=1 → replay 时实际 seq 大但只按 1 读 → 多步分叉（短输出对、长输出错，吻合现象）。
+下一步：读 paged_win 本体确认 grid/循环是用标量 max_seqlen 还是读 device seq_lens；若用标量=根因，改成读 device seq_lens（或捕获用足够大的 max_seqlen 使 grid 覆盖最坏情况、kernel 内按 device seq_lens 实际裁剪）。
