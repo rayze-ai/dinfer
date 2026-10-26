@@ -738,3 +738,13 @@ decode 纯批按 batch 行数分桶懒捕获，replay 消 per-step launch 开销
 注意：这是**整个 decode 步**的 graph（含 attn/MoE/采样），不只 megakernel 段——端到端清 launch 开销的正解。
 KAON3_MEGA 与 graph 正交，本步先在默认 serve 路径验 graph，MEGA 叠加留后续。
 验收：graph vs NO_GRAPH 生成文本一致（不改数值）+ bench c1/c8 tok/s 提升。委派子代理(aae1fd02)。
+
+## R42 (进行中) — B4：kaon3 executor 接 CUDA graph 桶捕获
+调研结论（子代理）：
+- 范本 = qwen35 executor（DecodeGraphs 桶 + 懒/eager 捕获 + PlanBuffers 固定缓冲 + 图外 D2H collect）。
+- kaon3 forward 的 decode 路径有 3 处 capture 违规（每步都 alloc / 换缓冲地址，图重放会读错地址）：
+  1. executor.forward_sample：ids/pos/slot/cu/seq/bt/rows 每步 `Tensor::from_vec`（7 处）→ 换 PlanBuffers 固定缓冲 + upload。
+  2. model.forward：`normed = Tensor::uninit`（每步 1）→ 复用 LayerScratch 固定缓冲。
+  3. layer.forward：`head_rmsnorm` 每层 ×3（q/k/v norm）`Tensor::uninit` + `x.data = out.data` 换缓冲身份（90 处/步）→ 改成写固定地址（in-place，rmsnorm 行内先 reduce 后写，in-place CUDA 安全）。
+- D2H：forward_sample 末尾 `dtoh_sync_copy(argmax)` 同步取回 → 图只含 forward+gather+bf16→f32+argmax 到固定 argmax 缓冲；launch 后在图外 collect（照 qwen35）。
+下一步：实现固定缓冲 + capture_decode_graphs + forward_sample 的 use_graph 分支。
