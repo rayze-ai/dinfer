@@ -234,3 +234,9 @@ sync+重编(by2jiduo7)→重启 serve 冒烟。
 产物：test/kaon3/qa_zh/{result_dinfer.jsonl, report.html}。report.py 改为按当前 prompts.expect 重判命中。
 token（22:22）已过期：vLLM 侧 20 条对比 + report 并排 + 进 dashboard 留下次 token。
 oracle chat 端点(28100)未确认响应，下次需确认或起独立 vLLM chat 服务。
+
+## R20（2026-10-26）新 token；dinfer serve 还活；oracle 是 1 层截断模型不能用于生成对比
+dinfer kaon3-serve(8131) Up 13h 正常。oracle kaon-oracle-1 在 28101（非 28100，脚本默认过时），
+但其启动带 `--hf-overrides {"text_config":{"num_hidden_layers":1}}` = **1 层截断**（logprob 探针用）→ chat 立即 EOS 空输出，
+**不能作生成对比**。且两边 chat 模板不同（dinfer prompt=19 token，oracle=20）。
+正解：另起**全层** vLLM chat 服务（GPU2，port 28130，--chat-template 指模型 chat_template.jinja = 与 dinfer 同模板），不动 45h oracle。
