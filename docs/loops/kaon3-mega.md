@@ -772,3 +772,12 @@ CUDA graph 捕获期间禁止 D2H / 同步 / host 依赖的 launch 结构（cuda
 - cudagraph 对 kaon3 decode 端到端**理论上应有大头收益**（R34 实测 vLLM 非 eager 靠 cudagraph+融合碾压 9-29×，其中 launch 开销是重要一块），但**本步无法单独落地并验证**。
 - 建议：按 R35 原定顺序，先做 **B3 MoE 持久化 / device grouped GEMM**（去掉 offsets D2H + host 专家循环），再回到 B4 把上面 2-5 的胶水照 qwen35 接上，两步合起来才能在默认 serve 路径拿到 cudagraph 收益。
 - 本步未改 kernel 数值、未改 executor（避免写无法验证的胶水）；调研定位与清单已记此。
+
+## R42 校读（主会话）：B4 被 B3 卡死——依赖顺序坐实（我之前让先 B4 是错的）
+B4 做不了，真障碍：kaon3 每层 MoE 支路有 cudagraph 捕获期禁止的操作，30 层每层都撞：
+- layer.rs:1207 无条件 `dtoh_sync_copy(offsets)` = D2H 同步（捕获期禁止）
+- layer.rs:1221 host 侧按 offsets 决定每专家 launch 几行 = host 路由决策
+→ 整层 forward 进不了 begin/end_capture。**B3(MoE 去 host 路由→device grouped GEMM)是 B4 唯一前置**（R35 本已写明此序，我让先 B4 反了）。
+子代理明智未写无法验证的胶水，只逐处定位 + 待办（R42 清单）：MoE 路由(前置) + executor from_vec×7 + model uninit + head_rmsnorm×90 + 采样 D2H，后 4 处照 qwen35 改但须 MoE 先解。
+**修正路线顺序：A ✅ → B1 ✅ → B2 ✅ → 片上①② ✅ → B3(MoE 持久化/device grouped GEMM) → B4(cudagraph) → B5(端到端整体分析)。**
+B3 一石二鸟：megakernel 纳入 MoE + 去 host 路由解锁 cudagraph。是整条路线关键卡口，躲不过。
