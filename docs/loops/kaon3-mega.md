@@ -347,3 +347,21 @@ kernel 层 1.37× 是隔离测试里的净收益（`mega_mlp_parity` 同进程 A
 - 即 mega 与"自写 kernel"逐位，但与"生产 cuBLASLt"差 1 ulp，30 层累积 → A/B 文本 0/5 相同（近义替换，无乱码）。
 - **端到端性能对比不受影响**（质量差 1-ulp 级），但"逐位等价生产"这个说法不成立，如实记。
 bench2 干净压测跑中。
+
+## R23 2026-10-26 ✅ 端到端四配置压测完成（干净，0 失败，各独占 GPU + 绑核）
+output tok/s：
+| 负载 | R0 dinfer-eager | R1 dinfer-mega | Ve vLLM-eager | Vn vLLM-非eager |
+|c1       | 25.2 | 23.7 | 11.0 | 209.0 |
+|c8       | 86.5 | 80.3 | 80.4 | 1201.7 |
+|c16      | 131.1| 121.3| 157.7| 2065.9 |
+|c8-p1024 | 38.4 | 39.5 | 84.1 | 964.9 |
+全 0 失败。压测端 16C(96-111) client cpu 待核对<16 核。
+
+**关键结论（诚实）**：
+1. **dense-only megakernel 端到端不划算**：R1 ≈ R0 甚至略慢（23.7<25.2 等），与微基准 1.37× **方向相反**。
+   原因：微基准只测单层 dense MLP 一次 launch；端到端里 dense MLP 只占整层一小块（attn+MoE 各一堆 kernel 没动），
+   消的那几个 launch 被整体淹没，反而多了 buffer memset / 量化一道 → 净收益≈0 或负。**这是真实结论不是失败**。
+2. dinfer-eager vs vLLM-eager 互有胜负：c1 dinfer 快(25 vs 11, Rust 省调度)，c16/长 prompt vLLM-eager 反超。
+3. **vLLM-非eager 碾压 10-17×**（cudagraph+融合）。dinfer 要追它，dense-only megakernel 远不够——
+   需把 **attention + MoE 也 persistent 化**，或先接 **cudagraph**（qwen 系已验证）拿大头。
+下一步：数据进 perf-trend CSV + 曲线 + Dashboard；然后重新评估 megakernel 路线（扩 attn/MoE vs 先上 cudagraph）。
