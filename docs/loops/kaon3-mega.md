@@ -114,3 +114,11 @@ arch.cuh 修正：常量原只在 `#if defined(__CUDA_ARCH__)` 内定义 → hos
 **文件位置**：`crates/kernels/cuda/mega_mlp_sm120.cu`（不是 models/kaon3/cuda —— 那目录没有 build.rs 不参与编译；
   且此 kernel 只吃维度参数 H/I/m + gelu_tanh，**模型无关**，按 CLAUDE.md 规则应放 crates/，已验证零模型名）。
 编译中（5090，CUDA_ARCHS=120）。
+
+## R7 2026-10-26 mega_mlp_sm120 **编译通过**（5090/sm120a）+ 对拍测试已写
+编译错误逐个修完：①缺 `#include <cuda_fp8.h>`；②A 必须先量化成 fp8 才能喂 fp8 GEMM（原直接传 bf16 = 硬 bug）→
+  S_NORM 里同时产出 norm1(bf16) + norm1_q(fp8)；③`StagePlan` 要写 `mega::StagePlan` 限定。
+FFI：`crates/kernels/src/ffi.rs` 加 `mega_mlp_dense_branch`（`cfg(all(not(no_nvcc_stub), sm120))` + 非 sm120 返回 801 stub）。
+对拍：`crates/kernels/tests/mega_mlp_parity.rs`——参考路径用现有逐 op（rmsnorm→gemm_fp8_static(cuBLASLt)×2→
+  gelu_round2→gemm→rmsnorm），mega 一次 launch；先退化检查（两边范数非零同量级）再比 ndiff/max|d|/rel。
+  fp8 量化/累加顺序两路径不同，预期非逐位，应在 fp8 级差(rel<5e-3)；系统性偏差=我的 kernel 逻辑错。

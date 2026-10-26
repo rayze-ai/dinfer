@@ -12,6 +12,7 @@
 // 结构照 `crates/kernels/cuda/mega_sm100.cu` 的 persistent 框架；公共件在 `mega_common.cuh`。
 // fp8 mma/ldmatrix 片段寻址照 `gemm_fp8_sm120.cu`（已验证正确的那份）。
 #include <cstdint>
+#include <cuda_fp8.h>
 #include <cuda_runtime.h>
 
 #include "arch.cuh"
@@ -53,7 +54,8 @@ struct Params {
   float dn_wscale;
   float dn_a_inv;
   // 中间缓冲（调用方分配）
-  bf16* norm1;    // [m, H]
+  bf16* norm1;    // [m, H]  bf16（对拍用）
+  uint8_t* norm1_q;  // [m, H]  fp8（喂 gate/up 的 A）
   bf16* gate_buf;  // [m, I]
   bf16* up_buf;    // [m, I]
   bf16* act_bf;    // [m, I]  gelu·mul 结果
@@ -195,16 +197,22 @@ struct MlpDenseDispatch {
       case S_NORM: {
         __shared__ float red[kWarps];
         if (warp < p.m) {
-          rmsnorm_row_warp(p.x + (long)warp * p.H, p.pre_w, p.norm1 + (long)warp * p.H, p.H, p.eps, lane, red,
-                           warp);
+          bf16* n1 = p.norm1 + (long)warp * p.H;
+          rmsnorm_row_warp(p.x + (long)warp * p.H, p.pre_w, n1, p.H, p.eps, lane, red, warp);
+          // 同时产出喂 fp8 GEMM 的量化副本
+          uint8_t* q = p.norm1_q + (long)warp * p.H;
+          for (int i = lane; i < p.H; i += 32) {
+            const float v = to_f32(n1[i]) * p.gate_a_inv;
+            q[i] = static_cast<uint8_t>(__nv_cvt_float_to_fp8(v, __NV_SATFINITE, __NV_E4M3));
+          }
         }
         return;
       }
       case S_GATE:
-        fp8_gemm_tile<kBN>(p.norm1 ? p.norm1 : p.x, p.gate_w, p.gate_buf, p.m, p.I, p.H, shard, p.gate_wscale, smem);
+        fp8_gemm_tile<kBN>(p.norm1_q, p.gate_w, p.gate_buf, p.m, p.I, p.H, shard, p.gate_wscale, smem);
         return;
       case S_UP:
-        fp8_gemm_tile<kBN>(p.norm1 ? p.norm1 : p.x, p.up_w, p.up_buf, p.m, p.I, p.H, shard, p.up_wscale, smem);
+        fp8_gemm_tile<kBN>(p.norm1_q, p.up_w, p.up_buf, p.m, p.I, p.H, shard, p.up_wscale, smem);
         return;
       case S_ACT: {
         const long n = (long)p.m * p.I;
@@ -243,7 +251,7 @@ extern "C" {
 /// 返回 cudaError_t 数值（0 = 成功）。
 int mega_mlp_dense_branch(const void* x, void* out, const void* pre_w, const void* post_w, const void* gate_w,
                          float gate_wscale, float gate_a_inv, const void* up_w, float up_wscale, float up_a_inv,
-                         const void* dn_w, float dn_wscale, float dn_a_inv, void* norm1, void* gate_buf, void* up_buf,
+                         const void* dn_w, float dn_wscale, float dn_a_inv, void* norm1, void* norm1_q, void* gate_buf, void* up_buf,
                          void* act_bf, void* act, void* down_out, int m, int H, int I, float eps, int n_gu, int n_dn,
                          int* dep, int* count, int* start, int* ready, int pipe, int prof, cudaStream_t stream) {
   using namespace dinfer;
@@ -289,6 +297,7 @@ int mega_mlp_dense_branch(const void* x, void* out, const void* pre_w, const voi
   p.dn_wscale = dn_wscale;
   p.dn_a_inv = dn_a_inv;
   p.norm1 = static_cast<bf16*>(norm1);
+  p.norm1_q = static_cast<uint8_t*>(norm1_q);
   p.gate_buf = static_cast<bf16*>(gate_buf);
   p.up_buf = static_cast<bf16*>(up_buf);
   p.act_bf = static_cast<bf16*>(act_bf);
@@ -325,7 +334,7 @@ int mega_mlp_dense_branch(const void* x, void* out, const void* pre_w, const voi
   if (occ > 1) occ = 1;
   int grid = sms * occ;
   if (grid > acc) grid = acc;
-  kern<<<grid, mega::kThreads, smem, stream>>>(StagePlan{dep, count, start, ready, prof}, p,
+  kern<<<grid, mega::kThreads, smem, stream>>>(mega::StagePlan{dep, count, start, ready, prof}, p,
                                                MlpDenseDispatch{}, acc, S_COUNT, 0);
   return (int)cudaGetLastError();
 }

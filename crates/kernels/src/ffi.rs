@@ -1208,8 +1208,61 @@ pub unsafe fn mega_gdn_layer_decode_sm100(_a: *const MegaLayerArgs, _s: cudaStre
     CUDA_ERROR_NOT_SUPPORTED
 }
 
+/// dense MLP 支路 persistent megakernel（`mega_mlp_sm120.cu`，sm120 单卡）：
+/// pre_norm → gate ‖ up → gelu·mul(round2) → down → post_norm，一次 launch。
+/// 未编入（CUDA_ARCHS 无 120 或 no-nvcc）时返回 CUDA_ERROR_NOT_SUPPORTED。
+#[cfg(all(not(no_nvcc_stub), sm120))]
+extern "C" {
+    #[allow(clippy::too_many_arguments)]
+    pub fn mega_mlp_dense_branch(
+        x: *const c_void,
+        out: *mut c_void,
+        pre_w: *const c_void,
+        post_w: *const c_void,
+        gate_w: *const c_void,
+        gate_wscale: f32,
+        gate_a_inv: f32,
+        up_w: *const c_void,
+        up_wscale: f32,
+        up_a_inv: f32,
+        dn_w: *const c_void,
+        dn_wscale: f32,
+        dn_a_inv: f32,
+        norm1: *mut c_void,
+        norm1_q: *mut c_void,
+        gate_buf: *mut c_void,
+        up_buf: *mut c_void,
+        act_bf: *mut c_void,
+        act: *mut c_void,
+        down_out: *mut c_void,
+        m: i32,
+        h: i32,
+        inter: i32,
+        eps: f32,
+        n_gu: i32,
+        n_dn: i32,
+        dep: *mut i32,
+        count: *mut i32,
+        start: *mut i32,
+        ready: *mut i32,
+        pipe: i32,
+        prof: i32,
+        stream: cudaStream_t,
+    ) -> i32;
+}
+#[cfg(not(all(not(no_nvcc_stub), sm120)))]
+#[allow(clippy::missing_safety_doc, clippy::too_many_arguments)]
+pub unsafe fn mega_mlp_dense_branch(
+    _x: *const c_void, _out: *mut c_void, _pre_w: *const c_void, _post_w: *const c_void, _gate_w: *const c_void,
+    _gw: f32, _ga: f32, _up_w: *const c_void, _uw: f32, _ua: f32, _dn_w: *const c_void, _dw: f32, _da: f32,
+    _n1: *mut c_void, _n1q: *mut c_void, _gb: *mut c_void, _ub: *mut c_void, _ab: *mut c_void, _a: *mut c_void,
+    _do: *mut c_void, _m: i32, _h: i32, _i: i32, _eps: f32, _ngu: i32, _ndn: i32, _dep: *mut i32, _cnt: *mut i32,
+    _st: *mut i32, _rdy: *mut i32, _pipe: i32, _prof: i32, _s: cudaStream_t,
+) -> i32 {
+    CUDA_ERROR_NOT_SUPPORTED
+}
+
 /// tcgen05 工具链探针（`umma_peak_sm100.cu`，r12a）：M=128 N=256、K = 64·k_iters 的最小 UMMA GEMM。
-/// 未编入（CUDA_ARCHS 无 100/103 或 no-nvcc）时返回 CUDA_ERROR_NOT_SUPPORTED。
 #[cfg(all(not(no_nvcc_stub), mega_sm100))]
 extern "C" {
     pub fn umma_peak_launch(a: *const c_void, b: *const c_void, c: *mut c_void, k_iters: i64, blocks: i64,
