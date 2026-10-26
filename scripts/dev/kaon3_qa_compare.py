@@ -15,7 +15,7 @@
   答非所问（初筛）：expect 关键词不在输出里（仅初筛，命中不代表答对，但不命中强提示跑偏）。
   性能：TTFT（首字节到首 token delta）、tok/s（completion_tokens / 总耗时）。
 """
-import sys, os, json, time, re, html, urllib.request
+import sys, os, json, time, re, html, glob, urllib.request
 
 ROOT = os.path.join("test", "kaon3", os.environ.get("QA_DIR", "qa_zh"))
 PROMPTS = os.path.join(ROOT, "prompts.jsonl")
