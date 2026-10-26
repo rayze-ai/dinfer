@@ -594,3 +594,30 @@ B2 stage 链：input_norm→qkv→q/k/v_norm→rope→kv写→**attn(复用 B1 c
   （MoE 仍单独 launch，留 B3；先把 attn+dense 整合跑通）
 顺带解 256/128：一个 256 线程 CTA 打包 2 个 (hk,split) attn shard，两个 128 线程半区各算一个，补上空转。
 验收：逐位一致（对拍现有逐 op 整段）+ 计时（整合 vs 分离）+ 端到端进 perf-trend。委派子代理做。
+
+## R38 2026-10-26 ✅ B2：attn 段 + dense 段 融一个 megakernel（一次 launch），逐位一致
+**目标**：把 attention 段 + A 的 dense 段融进一个 persistent megakernel 一次 launch，省 launch 开销 + 片上衔接中间残差流。
+**做了什么**：
+- 抽 `mega_mlp_core.cuh`（fp8 原语 / `fp8_gemm_tile` 含 split-K / `rmsnorm_row_warp` / `gelu_mul_round2`），dense 段与整层 megakernel 复用**同一份数值**（dense 回归编译干净，数值不变）。
+- `mega_layer_sm120.cu`：15-stage `LayerDispatch<GROUP,DIM>`，链 IN→QKV→QKNORM→ROPE→KVWRITE→ATTN→OQUANT→OPROJ→RES→PRE_FF→GATE‖UP→ACT→DOWN→POST。
+  - attention 复用 B1 `gqa_decode_v3_core`（q 从 qkv_buf 读，q_stride=ΣN=8192；splits=1 直出 attn_buf，不进 merge）。
+  - 中间残差流全走 host 预分配的 scratch global buffer（norm_bf/qkv_buf/attn_buf/o_buf/x2/…），层内复用。
+  - qkv 合并 GEMM（N=ΣN=heads·D+2·nkv·D=8192 一次）；逐头 q/k/v_norm（q 16 头 q_norm、k 8 头 k_norm、v 8 头无权重，warp/头）；rope 复用 rope.cu 的 NEOX 每步舍 bf16 口径；kv_fp8 roundtrip 先于写 cache。
+  - stage 依赖表照 A：GATE/UP 并行（都只依赖 PRE_FF，dep2 处理 ACT 等两支路）；其余严格串。
+- host ABI `mega_layer_forward(p, stage_lo, stage_hi, setup, ...)`：融合 = (0,14,setup=1) 一次 launch 全链；分离基线 = 对每 s 调 (s,s)（流序列化 + ready 累加 = 等价分别 launch）。FFI 加 `MegaLayerParams`（repr(C) 镜像）。
+- 对拍 `mega_layer_parity.rs`：**同一份 kernel**，融合(1 launch) vs 分离(15 launch)，比 qkv/attn/o/x2/out 逐位。
+**结果（5090 GPU0，sliding 档 GROUP=2 D=256，H=2816 I=2112）**：
+- **逐位一致 0/N**（m=1/4/8 全过）：qkv 0/32768、attn 0/16384、o 0/11264、x2 0/11264、out 0/11264，max|d|=0。证明融合不改数值。
+- 分阶段 exec：QKV 37.9% + OPROJ 18.6% + GATE/UP/DOWN 各 ~10% = GEMM 占 ~87%；wait >> exec（串行链 + tiny m，CTA 自旋等依赖）。
+- **计时（融合 vs 分离）**：m=1 179/228us **1.27x**、m=4 247/289us 1.17x、m=8 354/395us 1.12x。省的是 ~48us launch 开销（14 次少 launch），对小 m 占比更大。
+**判断**：
+- 融合**可行且逐位**（结构障碍已清：attn 静态 smem ~16KB + GEMM 动态 smem ~20.7KB 共存 < 100KB，occupancy 够）。
+- 1.1–1.27x 来自省 launch；**没省到"中间 global 往返"**——中间量仍走 global scratch（持久 CTA 跨 stage 不保留片上寄存器/smem，每 stage 读写 global）。真正降耗要靠后续：中间量留片上（需 stage 间 smem 接力，大改）或 cudagraph（B4，消 per-step launch）。
+- 对"attn+dense 整合是否降整段耗时"：**降了（省 launch），但幅度有限**；端到端收益主要还要靠 B4 cudagraph + B3 MoE 整合后整条链一次 graph。
+**结构障碍（如实报告）**：
+1. **full 层 D=512 不支持**：B1 core 只有 D∈{128,256}，Gemma4 full 层 head_dim=512（nkv=2）超出。本步只覆盖 sliding 层（D=256）。full 层要扩 core（KEYS/smem/归约按 D=512 重推），留后续。
+2. **256/128 线程半数空转未解**：ATTN stage 仍沿用 B1 的"256 外壳只 128 活"。一 CTA 打包 2 shard 的填满优化（两个 128 半区各算一个 (hk,split)）需给 core 传 smem 半区 base + 保证两半 ntiles 一致（同 split 不同 hk → ntiles 只随 split/n，天然一致），B1 core 的静态 smem 要改成按半区偏移——有逐位风险，本步未做。ATTN exec 仅 7%，收益不大，优先级低。
+**下一步 B3（MoE）怎么接**：
+- megakernel 输出 ff1（dense 支路）落 `out`，MoE 支路仍单独 launch，两支路 host 侧合并（现有逻辑）。
+- B3 把 MoE 也编进来：动态 top-8 路由是难点。可"128 专家常驻 task、len==0 跳过"（A 的 split 骨架 + 空转 task），或 GPU 侧 scan 写 offsets 进 ready。先评估；若太难，MoE 第一版仍单独 launch，先 B4 cudagraph 把 attn+dense 这段的 per-step launch 消掉。
+- **接 serve 前**：当前对拍是"融合 vs 分离"同码逐位（证融合不破坏数值）；接 serve 要再做 serve 级对拍（vLLM prompt_logprobs / 逐 op 路径），注意 GEMM 用 fp8_gemm_tile 与 cuBLASLt 有 fp8 级差（~1e-3，A 已知），不是 0/N。
