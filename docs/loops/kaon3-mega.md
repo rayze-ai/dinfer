@@ -922,3 +922,9 @@ kaon3 decode 唯一走 cuBLASLt autotune(forward_bf16) 的是 **lm_head**(model.
 - 方案2 落地：kaon3 executor 补 `gemm_tune_entries()`(至少含 lm_head) + 启动 autotune，使同进程 graph/eager 共享 algo 缓存 → 逐位 + 保 autotune。
 - 单进程真实 serve 本就是同一 Gemm/同一 algo 缓存，graph 与 eager fallback 一致；双进程 A/B 是测试引入的干扰。
 下一步：① 落地方案2(补 autotune)并单进程验；② 测 cudagraph 对 decode 的 launch 开销收益(B4 本来的目的)。
+
+## R44 方案2 落地（主会话自己写）
+① model.rs 加 `KaonModel::gemm_tune_entries()`——只含 lm_head（[vocab,hidden] tied embed，唯一 cuBLASLt bf16 GEMM）。
+② executor.rs 新 gemm 后、graph 捕获前调 `gemm.autotune(entries)`（GEMM_TUNE=off 时跳过），照 qwen35。
+作用：lm_head algo 启动定死进 default_algos 缓存，graph 捕获与 eager fallback 共享同 algo → 逐位，且保留 autotune 性能。
+编译中(bman6qqek)。验证：单进程 serve graph 命中步 vs eager fallback 步逐位；再测 cudagraph 的 decode launch 加速。
