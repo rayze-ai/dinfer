@@ -5,65 +5,80 @@
 <text x="48" y="46" font-size="14" font-weight="bold">out tok/s ÷ vLLM（越高越好；虚线 = 1.0）</text>
 <line x1="48" y1="240.0" x2="932" y2="240.0" stroke="#888"/>
 <line x1="48" y1="76" x2="48" y2="240.0" stroke="#888"/>
-<text x="42" y="80" font-size="10" text-anchor="end">0.12</text>
+<text x="42" y="80" font-size="10" text-anchor="end">0.13</text>
 <text x="42" y="244.0" font-size="10" text-anchor="end">0</text>
-<line x1="48" y1="-1073.9306482898862" x2="932" y2="-1073.9306482898862" stroke="#444" stroke-dasharray="4 3"/>
-<text x="936" y="-1069.9306482898862" font-size="10">vLLM = 1.0</text>
-<polyline points="48.0,90.9" fill="none" stroke="#1f77b4" stroke-width="2"/>
-<circle cx="48.0" cy="90.9" r="3" fill="#1f77b4"/>
+<line x1="48" y1="-1042.717934154591" x2="932" y2="-1042.717934154591" stroke="#444" stroke-dasharray="4 3"/>
+<text x="936" y="-1038.717934154591" font-size="10">vLLM = 1.0</text>
+<polyline points="48.0,94.5 932.0,90.9" fill="none" stroke="#1f77b4" stroke-width="2"/>
+<circle cx="48.0" cy="94.5" r="3" fill="#1f77b4"/>
+<circle cx="932.0" cy="90.9" r="3" fill="#1f77b4"/>
 <text x="936" y="94.90909090909093" font-size="10" fill="#1f77b4">c1</text>
-<polyline points="48.0,152.3" fill="none" stroke="#ff7f0e" stroke-width="2"/>
-<circle cx="48.0" cy="152.3" r="3" fill="#ff7f0e"/>
-<text x="936" y="156.27891665653493" font-size="10" fill="#ff7f0e">c8</text>
-<polyline points="48.0,194.4" fill="none" stroke="#2ca02c" stroke-width="2"/>
-<circle cx="48.0" cy="194.4" r="3" fill="#2ca02c"/>
-<text x="936" y="198.4090573147486" font-size="10" fill="#2ca02c">c32</text>
-<polyline points="48.0,186.1" fill="none" stroke="#d62728" stroke-width="2"/>
-<circle cx="48.0" cy="186.1" r="3" fill="#d62728"/>
-<text x="936" y="190.0556796731659" font-size="10" fill="#d62728">c8-long</text>
+<polyline points="48.0,154.4 932.0,151.7" fill="none" stroke="#ff7f0e" stroke-width="2"/>
+<circle cx="48.0" cy="154.4" r="3" fill="#ff7f0e"/>
+<circle cx="932.0" cy="151.7" r="3" fill="#ff7f0e"/>
+<text x="936" y="155.7008270131219" font-size="10" fill="#ff7f0e">c8</text>
+<polyline points="48.0,195.5 932.0,195.8" fill="none" stroke="#2ca02c" stroke-width="2"/>
+<circle cx="48.0" cy="195.5" r="3" fill="#2ca02c"/>
+<circle cx="932.0" cy="195.8" r="3" fill="#2ca02c"/>
+<text x="936" y="199.78959902953903" font-size="10" fill="#2ca02c">c32</text>
+<polyline points="48.0,187.3 932.0,189.5" fill="none" stroke="#d62728" stroke-width="2"/>
+<circle cx="48.0" cy="187.3" r="3" fill="#d62728"/>
+<circle cx="932.0" cy="189.5" r="3" fill="#d62728"/>
+<text x="936" y="193.45392844460991" font-size="10" fill="#d62728">c8-long</text>
 <text x="48.0" y="254.0" font-size="9" text-anchor="middle">bench1</text>
+<text x="932.0" y="254.0" font-size="9" text-anchor="middle">bench3</text>
 <text x="48" y="306" font-size="14" font-weight="bold">TTFT p50 ms（实线 dinfer，虚线 vLLM；越低越好）</text>
 <line x1="48" y1="500.0" x2="932" y2="500.0" stroke="#888"/>
 <line x1="48" y1="336" x2="48" y2="500.0" stroke="#888"/>
 <text x="42" y="340" font-size="10" text-anchor="end">19076.09</text>
 <text x="42" y="504.0" font-size="10" text-anchor="end">0</text>
-<polyline points="48.0,498.1" fill="none" stroke="#1f77b4" stroke-width="2"/>
+<polyline points="48.0,498.1 932.0,498.0" fill="none" stroke="#1f77b4" stroke-width="2"/>
 <circle cx="48.0" cy="498.1" r="3" fill="#1f77b4"/>
-<polyline points="48.0,499.8" fill="none" stroke="#1f77b4" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
-<text x="936" y="502.05253458946083" font-size="10" fill="#1f77b4">c1</text>
-<polyline points="48.0,495.5" fill="none" stroke="#ff7f0e" stroke-width="2"/>
+<circle cx="932.0" cy="498.0" r="3" fill="#1f77b4"/>
+<polyline points="48.0,499.8 932.0,499.8" fill="none" stroke="#1f77b4" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<text x="936" y="502.04874523257837" font-size="10" fill="#1f77b4">c1</text>
+<polyline points="48.0,495.5 932.0,495.5" fill="none" stroke="#ff7f0e" stroke-width="2"/>
 <circle cx="48.0" cy="495.5" r="3" fill="#ff7f0e"/>
-<polyline points="48.0,499.2" fill="none" stroke="#ff7f0e" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
-<text x="936" y="499.54049281369595" font-size="10" fill="#ff7f0e">c8</text>
-<polyline points="48.0,350.9" fill="none" stroke="#2ca02c" stroke-width="2"/>
+<circle cx="932.0" cy="495.5" r="3" fill="#ff7f0e"/>
+<polyline points="48.0,499.2 932.0,499.2" fill="none" stroke="#ff7f0e" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<text x="936" y="499.5473249080333" font-size="10" fill="#ff7f0e">c8</text>
+<polyline points="48.0,350.9 932.0,356.7" fill="none" stroke="#2ca02c" stroke-width="2"/>
 <circle cx="48.0" cy="350.9" r="3" fill="#2ca02c"/>
-<polyline points="48.0,498.5" fill="none" stroke="#2ca02c" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
-<text x="936" y="354.90909090909093" font-size="10" fill="#2ca02c">c32</text>
-<polyline points="48.0,460.8" fill="none" stroke="#d62728" stroke-width="2"/>
+<circle cx="932.0" cy="356.7" r="3" fill="#2ca02c"/>
+<polyline points="48.0,498.5 932.0,498.5" fill="none" stroke="#2ca02c" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<text x="936" y="360.687678823787" font-size="10" fill="#2ca02c">c32</text>
+<polyline points="48.0,460.8 932.0,460.9" fill="none" stroke="#d62728" stroke-width="2"/>
 <circle cx="48.0" cy="460.8" r="3" fill="#d62728"/>
-<polyline points="48.0,498.1" fill="none" stroke="#d62728" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
-<text x="936" y="464.7931020773075" font-size="10" fill="#d62728">c8-long</text>
+<circle cx="932.0" cy="460.9" r="3" fill="#d62728"/>
+<polyline points="48.0,498.1 932.0,498.0" fill="none" stroke="#d62728" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<text x="936" y="464.9326019401757" font-size="10" fill="#d62728">c8-long</text>
 <text x="48.0" y="514.0" font-size="9" text-anchor="middle">bench1</text>
+<text x="932.0" y="514.0" font-size="9" text-anchor="middle">bench3</text>
 <text x="48" y="566" font-size="14" font-weight="bold">TPOT p50 ms（实线 dinfer，虚线 vLLM；越低越好）</text>
 <line x1="48" y1="760.0" x2="932" y2="760.0" stroke="#888"/>
 <line x1="48" y1="596" x2="48" y2="760.0" stroke="#888"/>
-<text x="42" y="600" font-size="10" text-anchor="end">181.98</text>
+<text x="42" y="600" font-size="10" text-anchor="end">192.30</text>
 <text x="42" y="764.0" font-size="10" text-anchor="end">0</text>
-<polyline points="48.0,723.3" fill="none" stroke="#1f77b4" stroke-width="2"/>
-<circle cx="48.0" cy="723.3" r="3" fill="#1f77b4"/>
-<polyline points="48.0,755.8" fill="none" stroke="#1f77b4" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
-<text x="936" y="727.305514739303" font-size="10" fill="#1f77b4">c1</text>
-<polyline points="48.0,669.6" fill="none" stroke="#ff7f0e" stroke-width="2"/>
-<circle cx="48.0" cy="669.6" r="3" fill="#ff7f0e"/>
-<polyline points="48.0,754.6" fill="none" stroke="#ff7f0e" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
-<text x="936" y="673.6156536552264" font-size="10" fill="#ff7f0e">c8</text>
-<polyline points="48.0,641.7" fill="none" stroke="#2ca02c" stroke-width="2"/>
-<circle cx="48.0" cy="641.7" r="3" fill="#2ca02c"/>
-<polyline points="48.0,753.2" fill="none" stroke="#2ca02c" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
-<text x="936" y="645.7195317682188" font-size="10" fill="#2ca02c">c32</text>
-<polyline points="48.0,610.9" fill="none" stroke="#d62728" stroke-width="2"/>
-<circle cx="48.0" cy="610.9" r="3" fill="#d62728"/>
-<polyline points="48.0,754.1" fill="none" stroke="#d62728" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<polyline points="48.0,725.3 932.0,726.1" fill="none" stroke="#1f77b4" stroke-width="2"/>
+<circle cx="48.0" cy="725.3" r="3" fill="#1f77b4"/>
+<circle cx="932.0" cy="726.1" r="3" fill="#1f77b4"/>
+<polyline points="48.0,756.0 932.0,756.0" fill="none" stroke="#1f77b4" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<text x="936" y="730.1348616665753" font-size="10" fill="#1f77b4">c1</text>
+<polyline points="48.0,674.5 932.0,674.9" fill="none" stroke="#ff7f0e" stroke-width="2"/>
+<circle cx="48.0" cy="674.5" r="3" fill="#ff7f0e"/>
+<circle cx="932.0" cy="674.9" r="3" fill="#ff7f0e"/>
+<polyline points="48.0,754.9 932.0,754.9" fill="none" stroke="#ff7f0e" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<text x="936" y="678.9004853678497" font-size="10" fill="#ff7f0e">c8</text>
+<polyline points="48.0,648.1 932.0,652.5" fill="none" stroke="#2ca02c" stroke-width="2"/>
+<circle cx="48.0" cy="648.1" r="3" fill="#2ca02c"/>
+<circle cx="932.0" cy="652.5" r="3" fill="#2ca02c"/>
+<polyline points="48.0,753.6 932.0,753.6" fill="none" stroke="#2ca02c" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+<text x="936" y="656.5403356462907" font-size="10" fill="#2ca02c">c32</text>
+<polyline points="48.0,618.9 932.0,610.9" fill="none" stroke="#d62728" stroke-width="2"/>
+<circle cx="48.0" cy="618.9" r="3" fill="#d62728"/>
+<circle cx="932.0" cy="610.9" r="3" fill="#d62728"/>
+<polyline points="48.0,754.4 932.0,754.5" fill="none" stroke="#d62728" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
 <text x="936" y="614.9090909090909" font-size="10" fill="#d62728">c8-long</text>
 <text x="48.0" y="774.0" font-size="9" text-anchor="middle">bench1</text>
+<text x="932.0" y="774.0" font-size="9" text-anchor="middle">bench3</text>
 </svg>

@@ -11,3 +11,15 @@ bench1,2026-10-26,"R1 基线: R27 的 mega(gate/up 并行,1.66x kernel),dense ML
 bench1,2026-10-26,"R1 基线: R27 的 mega(gate/up 并行,1.66x kernel),dense MLP persistent,无 split-K",c8-long,out_tok_per_s,39.600,964.532,0.041,,higher,main,5090,vllm,dinfer,kaon3
 bench1,2026-10-26,"R1 基线: R27 的 mega(gate/up 并行,1.66x kernel),dense MLP persistent,无 split-K",c8-long,ttft_p50_ms,4560.453,225.214,20.249,,lower,main,5090,vllm,dinfer,kaon3
 bench1,2026-10-26,"R1 基线: R27 的 mega(gate/up 并行,1.66x kernel),dense MLP persistent,无 split-K",c8-long,tpot_p50_ms,165.438,6.543,25.284,,lower,main,5090,vllm,dinfer,kaon3
+bench3,2026-10-26,"R3 split-K sp_gu=4/sp_dn=4/ctas=1: gate/up+down 都切 K,kernel 2.05x(B=1),逐位一致 0/2816",c1,out_tok_per_s,24.287,208.959,0.116,2.4,higher,main,5090,vllm,dinfer,kaon3
+bench3,2026-10-26,"R3 split-K sp_gu=4/sp_dn=4/ctas=1: gate/up+down 都切 K,kernel 2.05x(B=1),逐位一致 0/2816",c1,ttft_p50_ms,226.965,19.114,11.875,-0.2,lower,main,5090,vllm,dinfer,kaon3
+bench3,2026-10-26,"R3 split-K sp_gu=4/sp_dn=4/ctas=1: gate/up+down 都切 K,kernel 2.05x(B=1),逐位一致 0/2816",c1,tpot_p50_ms,39.708,4.674,8.495,2.5,lower,main,5090,vllm,dinfer,kaon3
+bench3,2026-10-26,"R3 split-K sp_gu=4/sp_dn=4/ctas=1: gate/up+down 都切 K,kernel 2.05x(B=1),逐位一致 0/2816",c8,out_tok_per_s,82.543,1199.091,0.069,2.8,higher,main,5090,vllm,dinfer,kaon3
+bench3,2026-10-26,"R3 split-K sp_gu=4/sp_dn=4/ctas=1: gate/up+down 都切 K,kernel 2.05x(B=1),逐位一致 0/2816",c8,ttft_p50_ms,517.925,89.500,5.787,0.2,lower,main,5090,vllm,dinfer,kaon3
+bench3,2026-10-26,"R3 split-K sp_gu=4/sp_dn=4/ctas=1: gate/up+down 都切 K,kernel 2.05x(B=1),逐位一致 0/2816",c8,tpot_p50_ms,99.783,5.989,16.662,0.5,lower,main,5090,vllm,dinfer,kaon3
+bench3,2026-10-26,"R3 split-K sp_gu=4/sp_dn=4/ctas=1: gate/up+down 都切 K,kernel 2.05x(B=1),逐位一致 0/2816",c32,out_tok_per_s,124.154,3602.192,0.034,-0.4,higher,main,5090,vllm,dinfer,kaon3
+bench3,2026-10-26,"R3 split-K sp_gu=4/sp_dn=4/ctas=1: gate/up+down 都切 K,kernel 2.05x(B=1),逐位一致 0/2816",c32,ttft_p50_ms,16669.749,171.104,97.425,3.9,lower,main,5090,vllm,dinfer,kaon3
+bench3,2026-10-26,"R3 split-K sp_gu=4/sp_dn=4/ctas=1: gate/up+down 都切 K,kernel 2.05x(B=1),逐位一致 0/2816",c32,tpot_p50_ms,126.001,7.552,16.684,4.0,lower,main,5090,vllm,dinfer,kaon3
+bench3,2026-10-26,"R3 split-K sp_gu=4/sp_dn=4/ctas=1: gate/up+down 都切 K,kernel 2.05x(B=1),逐位一致 0/2816",c8-long,out_tok_per_s,38.603,979.643,0.039,-2.5,higher,main,5090,vllm,dinfer,kaon3
+bench3,2026-10-26,"R3 split-K sp_gu=4/sp_dn=4/ctas=1: gate/up+down 都切 K,kernel 2.05x(B=1),逐位一致 0/2816",c8-long,ttft_p50_ms,4544.227,227.307,19.992,0.4,lower,main,5090,vllm,dinfer,kaon3
+bench3,2026-10-26,"R3 split-K sp_gu=4/sp_dn=4/ctas=1: gate/up+down 都切 K,kernel 2.05x(B=1),逐位一致 0/2816",c8-long,tpot_p50_ms,174.815,6.470,27.019,-5.7,lower,main,5090,vllm,dinfer,kaon3

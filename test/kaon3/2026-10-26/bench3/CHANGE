@@ -1,0 +1,1 @@
+R3 split-K sp_gu=4/sp_dn=4/ctas=1: gate/up+down 都切 K,kernel 2.05x(B=1),逐位一致 0/2816
