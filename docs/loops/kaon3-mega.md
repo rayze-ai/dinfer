@@ -170,14 +170,19 @@ B=4 逐位一致 + 1.13×；但 B=1/2/8 扫档时崩（STEP8 之后无 STEP9）�
 **教训（值得进 knowledge）**：persistent kernel 里任何 lamdba/helper 只要有线程提前 return，
   而外层后续有 `__syncthreads()`，就是 UB。要么全进要么用谓词包住 body。
 
-## R13 2026-10-26 诊断结论：GEMM 短路后 B=1 正常 → 崩溃在 fp8 GEMM tile（只对 m<4 触发）
-`MEGA_DIAG_NOGEMM`（GEMM 短路成只写 0）下 B=1 **完全正常**（还跑出 speedup=1.38×，说明 norm/gelu/调度部分没问题），
-未短路时 B=1 崩、B=4 正常 → **fp8_gemm_tile 里与 m 相关的问题**。
-嫌疑：`A_SLOTS=128` 个线程搬 A（16 行×8 块），但 **m<16 时上界判断用 `gm < m`，其余行填 0**——这条逻辑本身没错；
-更可能是 `store_a` 之后紧接的 `cp.async.wait_group 0` + `__syncthreads()` 在 m 小时某些 warp 全部线程 tid>=A_SLOTS
-（warp≥4）不参与 A 搬运、但参与 barrier——这没问题。仍待确认（用 MEGA_DIAG 分段：只短路 gate，不短路 down 等）。
-下一步：细粒度二分（NOGEMM_GATE / NOGEMM_UP / NOGEMM_DOWN 三个独立开关）。
-
+## R13 2026-10-26 **【已更正】** 四档 batch 全部逐位一致（原记录有误）
+**原错误记录（作废）**：曾写"GEMM 短路下 B=1 正常、未短路 B=1 崩溃、崩在 fp8 GEMM"。
+**实际**：`build.rs` 里 **0 处 RUSTFLAGS**（已 grep 确认），我加的 `RUSTFLAGS='--cfg MEGA_DIAG_NOGEMM'`
+**根本传不到 nvcc**，所以那次跑的就是没短路的正常 kernel——它当时能过，恰好证明
+**R12 的 `store_a` barrier 修复已经解决了 B=1 崩溃**，不是"诊断开关生效"。
+**正确实测（R12 修复后，同一二进制）**：
+```
+B=1  0/2816  逐位  110.6us → 80.2us   1.38x
+B=2  0/5632  逐位  110.6us → 86.0us   1.29x
+B=4  0/11264 逐位  110.6us → 98.5us   1.12x
+B=8  0/22528 逐位  114.7us → 110.4us  1.04x
+```
+（教训：RUSTFLAGS 只影响 rustc，不影响 build.rs 里的 nvcc 调用；要给 nvcc 传宏得走 build.rs 的 env 或 CUDA_ARCHS 之类。）
 ## R14 2026-10-26 测试口径统一（用户明确）：只讲 **eager / 非 eager**
 用户："vLLM eager / compile 是 eager 和非 eager，统一口径"。此后一律用 eager / 非 eager，不写 compile。
 | 侧 | eager | 非 eager |
