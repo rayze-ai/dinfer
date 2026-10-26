@@ -393,3 +393,21 @@ mega_common.cuh：StagePlan 加 wait_cyc/exec_cyc（可选，prof=1 启用）；
   wait_stage 前后 + dispatch.run 后各记 clock64，thread0 atomicAdd 到对应 stage。null 则不计（兼容）。
 ffi/mega_mlp ABI 加两个 u64* 尾参。parity 测试传真 buf、打印 6 stage 的 exec 周期占比 + wait 周期。
 编译中。跑出后看哪个 stage(norm/gate/up/act/down/post)是瓶颈、等依赖占比多少，指导优化+attention 扩展设计。
+
+## R26 2026-10-26 ✅ 分阶段计时：瓶颈不是 GEMM 本身，是**等依赖(wait)占 2.5×**
+B=1 逐位一致，6 stage exec 周期：
+```
+NORM  2.1%  wait=440
+GATE 31.8%  wait=852854
+UP   31.7%  wait=1621813
+ACT   0.3%  wait=140937
+DOWN 32.4%  wait=3266514   ← wait 是 exec(728733) 的 4.5×
+POST  1.7%  wait=184037
+```
+- 三 GEMM(gate/up/down)占 96% exec（计算确在 GEMM，符合预期）。
+- **但 wait 累计 ~574万 >> exec 累计 ~225万（2.5×）**：阶段串行链 + 1 CTA/SM → 大量 CTA 自旋空等前段 signal。
+  这就是 §14.6"小算子铺上百 CTA 变延迟链"的实证，也是 dense-only 端到端打平的真因——**不是 megakernel 没用，是调度太串**。
+- gate/up 我串了（dep[UP]=GATE），UP 的 wait 含等 GATE；但两者只依赖 norm，**本可并行**。
+**优化方向（指明）**：① gate/up 解串并行；② 降 wait——减 CTA 数提高单 CTA 利用 / 更细的生产者-消费者重叠；
+  ③ 这也是扩 attention 的设计前提：attention 阶段多，若仍串行 wait 会更糟，要从一开始设计成重叠。
+下一步：先解 gate/up 串行（最快见效），重测 wait 变化；再设计 attention 的重叠式阶段表。

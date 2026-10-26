@@ -169,7 +169,9 @@ fn mega_mlp_matches_eager_path() {
       st.ptr_mut(&mut sta) as *mut i32,
       st.ptr_mut(&mut rdy) as *mut i32,
       2,
-      0,
+      1,
+      st.ptr_mut(&mut wc) as *mut u64,
+      st.ptr_mut(&mut ec) as *mut u64,
       st.raw() as _,
     )
   };
