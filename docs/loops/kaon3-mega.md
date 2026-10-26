@@ -322,3 +322,8 @@ R0 重建 Exited(1) = `CUDA_ERROR_OUT_OF_MEMORY`。查 GPU0 已被 **kaon3-base*
 修：R0 挪到空闲 **GPU4**（GPU4-7 全空）。最终 GPU 分配：base=0, R1mega=1, Ve=2, Vn=3, R0=4。
 → 之前 R19 记的"c=32 崩溃是容量 bug"**需修正**：很可能是 GPU0 显存被 base 挤占导致的 OOM，不是纯并发 bug。
   重建到独占 GPU4 后再压 c=32 看是否仍崩，才能定论。
+
+## R21 2026-10-26 四配置全就绪(R0挪GPU4后)，完整压测跑中
+GPU 分配修正后四服务全 ok：R0=GPU4/8133, R1mega=GPU1/8132, Ve=GPU2/28200, Vn=GPU3/28201。各 12C 不重叠，压测端 16C(96-111)。
+压测 bz5wbn2xl 跑中：R0 先压(CPU 99.7%)，串行推进到 R1/vLLM。已出 R0 部分组(c8=87.1 tok/s 等)，含一个 0.00(待查哪组)。
+失败跳过逻辑生效，不会再卡死。跑完统一出四配置对比 + perf-trend CSV/曲线 + Dashboard。
