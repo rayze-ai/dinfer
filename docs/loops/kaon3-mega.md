@@ -817,3 +817,14 @@ offsets 留卡上、launch 次数编译期固定（cudagraph 要求）、专家�
 - **B3 解锁 B4**：是。MoE 支路已无 D2H / 无 host 依赖 launch，launch 次数编译期固定（8 次）。B4 可按 R42 清单接 cudagraph（executor from_vec×7 / uninit / head_rmsnorm / 采样 D2H 照 qwen35）。
 - **grouped GEMM 能逐位**：已证实（0/N，真权重 30 层）。累加序担忧（scatter atomic）实测非问题。
 - 下一步：① B4 cudagraph（现可做）；② grouped GEMM 第二版性能（只调度激活专家 task，去空转；persistent CTA 领 (e,tile)）——留 B3.2，第一版性能已不差。
+
+## R43 完成（主会话校读）：B3 过了——最关键卡口清除
+MoE host 路由 → device-resident grouped NVFP4 GEMM（新 moe_grouped_sm120.cu 3 kernel：row2e/grouped_quant/grouped_gemm，
+blockIdx.z=e 按 device offsets 取专家行段，空 CTA return；固定 8 launch）。MOE_GROUPED=1 开，默认关(A/B)。commit 937e1b7。
+**验证（真权重 Kaon-V3，5090，T=8）**：
+- **逐位一致 0/N**：moe_y/ff2/router + **全 30 层 L0..L29 + final_norm 完全相同**，top-5 同。
+  （scatter-add 原子累加序——我标的唯一真风险——证伪：kk=8 f32 累加与 host 专家序逐位相同。grouped NVFP4 可逐位，非近似。）
+- **D2H 消除**：grouped decode 路径**零 D2H**（host 路由 :1417 不再到达；其余 3 处 dtoh 在 sub_out 调试块，decode 不触发）。
+- 性能(T=8 粗测)：host 228ms → grouped 177ms，**已更快**（朴素全专家 grid，只调度激活专家的优化留 B3.2）。
+**B3 解锁 B4**：MoE 支路无 D2H + 无 host 依赖 launch + launch 次数编译期固定 = cudagraph 三前置齐。R42 的墙拆除。
+下一步：B4 cudagraph（现已解锁，照 R42 清单 + qwen35 范本）。B3.2 性能（只调度激活专家）可后置。
