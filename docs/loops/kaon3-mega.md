@@ -210,3 +210,20 @@ B=8  0/22528 逐位  114.7us → 110.4us  1.04x
   中间缓冲用 `MegaBufs` 自己的，**不碰** `sc.gate_up/act/gelu/dense`（`sub_dump` 对拍要用）。
 
 编译：本地 `cargo build --release -p dinfer --features kaon3` OK；远端 5090 容器 `CUDA_ARCHS=120` 34.45s OK（仅既有 warning）。
+
+## R15 2026-10-26 vLLM 两侧备用环境已重建（等 dinfer 侧）
+容器（远端 5090，`--network host`）：
+- `vllm-eager`  : GPU1, port **28200**, `--enforce-eager`（= eager 口径，与 dinfer eager 对齐）
+- `vllm-noneager`: GPU2, port **28201**, 默认（inductor 融合 + cudagraph = 非 eager）
+- `kaon3-serve` : GPU0, port 8131（子代理在起，可能再加 8132 带 KAON3_MEGA=1）
+两者同镜像同参数，仅 `--enforce-eager` 不同、端口不同；都带 `--chat-template <模型>/chat_template.jinja` 与 dinfer 同模板。
+注：容器刚起（cold），等就绪约 3-5 分钟（eager 164s / 非eager 286s 历史值）。
+压测工具 `bins/bench`（与 vLLM bench serve 同口径）正在 5090 上编。
+
+### R15 端到端 A/B 环境（5090）
+- 基线：`kaon3-serve`（GPU0，:8131，`/w/kserve.sh`，无 KAON3_MEGA）。
+- mega：`kaon3-mega`（GPU3，:8132，`/w/kserve_mega.sh`，`KAON3_MEGA=1`）。
+- **坑**：容器 `--gpus device=N` 已把目标卡映射成容器内 device 0，脚本里再 `export CUDA_VISIBLE_DEVICES=N`
+  → `CUDA_ERROR_NO_DEVICE`（`cuda device 0`）。已改成 `unset CUDA_VISIBLE_DEVICES`。
+- **坑**：模型 id 是 `kaon3` 不是 `kaon`（`/v1/models` 确认）；写错返回 404 `The model ... does not exist`。
+- GPU1/2 被别人的 `vllm-eager`/`vllm-noneager` 占着，mega 用 GPU3。
