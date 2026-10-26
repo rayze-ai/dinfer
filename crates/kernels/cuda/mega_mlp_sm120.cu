@@ -126,7 +126,7 @@ __device__ __forceinline__ void fp8_gemm_tile(const uint8_t* __restrict__ A, con
                                               bf16* __restrict__ D, int m, int N, int K, int n_blk, float wscale,
                                               uint8_t* smem) {
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
-#ifdef MEGA_DIAG_NOGEMM
+#if 0  // 诊断已用完
   // 诊断模式：不碰 smem、不算，只写 0，用以二分定位 SIGSEGV 来源
   const int nrow0d = warp * (BN / kWarps);
   const int r0d = lane >> 2, r1d = r0d + 8, cgd = (lane & 3) * 2;
@@ -295,26 +295,30 @@ int mega_mlp_dense_branch(const void* x, void* out, const void* pre_w, const voi
   // smem：sA(16×RS) + sB(BN×RS)
   const size_t smem = (size_t)(16 + kBN) * (128 + 16);
 
-  count[S_NORM] = 1;
-  count[S_GATE] = n_gu;
-  count[S_UP] = n_gu;
-  count[S_ACT] = 1;
-  count[S_DOWN] = n_dn;
-  count[S_POST] = 1;
-  dep[S_NORM] = -1;
-  dep[S_GATE] = S_NORM;
-  dep[S_UP] = S_NORM;
-  dep[S_ACT] = S_UP;      // 依赖链取较晚者：S_UP 与 S_GATE 都完成后才 act（下面 start 前缀和保证顺序）
-  dep[S_DOWN] = S_ACT;
-  dep[S_POST] = S_DOWN;
+  // **注意**：dep/count/start/ready 是**设备指针**（Rust 侧 st.ptr_mut 传入）。表先在 host 本地算，
+  // 再 cudaMemcpy 拷过去；直接写 *dep 会往设备内存解引用 → SIGSEGV。
+  int h_count[S_COUNT], h_dep[S_COUNT], h_start[S_COUNT];
+  h_count[S_NORM] = 1;
+  h_count[S_GATE] = n_gu;
+  h_count[S_UP] = n_gu;
+  h_count[S_ACT] = 1;
+  h_count[S_DOWN] = n_dn;
+  h_count[S_POST] = 1;
+  h_dep[S_NORM] = -1;
+  h_dep[S_GATE] = S_NORM;
+  h_dep[S_UP] = S_GATE;   // 单 dep 表无法表达"两个前驱"：串行 gate→up（牺牲并行保正确）
+  h_dep[S_ACT] = S_UP;    // 此时 gate 与 up 都已完成
+  h_dep[S_DOWN] = S_ACT;
+  h_dep[S_POST] = S_DOWN;
   int acc = 0;
   for (int s = 0; s < S_COUNT; ++s) {
-    start[s] = acc;
-    acc += count[s];
+    h_start[s] = acc;
+    acc += h_count[s];
   }
-  // S_ACT 必须等 gate 与 up 都完成。上面的单 dep 只等 up；用 ready 语义无法表达"两个前驱"，
-  // 故把 gate 也计入 up 的依赖：让 S_UP 的 dep = S_GATE，变成串行 gate→up（牺牲一点并行、保证正确）。
-  dep[S_UP] = S_GATE;
+  if (cudaMemcpyAsync(count, h_count, sizeof(h_count), cudaMemcpyHostToDevice, stream) != cudaSuccess ||
+      cudaMemcpyAsync(dep, h_dep, sizeof(h_dep), cudaMemcpyHostToDevice, stream) != cudaSuccess ||
+      cudaMemcpyAsync(start, h_start, sizeof(h_start), cudaMemcpyHostToDevice, stream) != cudaSuccess)
+    return (int)cudaGetLastError();
 
   Params p{};
   p.x = static_cast<const bf16*>(x);

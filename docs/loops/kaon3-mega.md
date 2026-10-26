@@ -135,3 +135,9 @@ FFI：`crates/kernels/src/ffi.rs` 加 `mega_mlp_dense_branch`（`cfg(all(not(no_
 加 STEP 打点后确认：**参考路径 7 步全过**（rmsnorm/gate/up/gelu/down/post 都 OK），崩在 **megakernel 内**。
 已修 4 个真 bug（kBN 128 / 尾声补 4 累加器 / syncthreads 分歧 / A smem 越界)。
 仍崩 → 加 `MEGA_DIAG_NOGEMM` 诊断开关（fp8 tile 短路成只写 0），二分"是 GEMM tile 还是调度/其他阶段"。
+
+## R10 2026-10-26 **根因找到**：dep/count/start 是**设备指针**，host 直接写 → SIGSEGV
+Rust 侧用 `st.ptr_mut(&mut dep)` 传的是**设备地址**；我在 C host 代码里 `count[S_NORM]=1;` 直接解引用设备内存 → 段错误。
+诊断法：把 fp8 tile 短路成写 0 仍崩 → 排除 GEMM；加 STEP 打点确认参考路径干净、崩在 megakernel 入口附近 → 定位到 host 填表。
+修：表在 host 本地 `int h_count[S_COUNT]` 算好，`cudaMemcpyAsync` 拷到设备 dep/count/start；`ready` 仍需调用方清零。
+（教训：C ABI 里指针是设备指针还是 host 指针必须在签名注释写清。）
