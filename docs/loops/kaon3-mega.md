@@ -989,3 +989,9 @@ NO_GRAPH 每次真拷正确栈值故正常；graph replay 读失效栈故乱码�
 - `mega_mlp_sm120.cu`：删 h_count/h_dep/h_start 栈数组 + 4 个 per-call cudaMemcpyAsync；acc 按标量 `1+n_gu·sp_gu·2+1+n_dn·sp_dn+1` 算（标量进 graph 安全）。
   dep/count/start/dep2 直接用传入的已填 device 指针。
 → graph 内零 H2D，replay 不再读失效栈。编译中(bx0isler9)。验：全栈 KAON3_MEGA+grouped+graph 冒烟应通顺（不再乱码）。
+
+## R45 ✅ 全栈乱码修复成功——三开关同开通顺+逐位
+全栈 KAON3_MEGA+MOE_GROUPED+graph 同开：md5 **90095598** == NO_GRAPH 下的通顺基线（mega+grouped 无 graph）。
+→ 加 graph == 不加 graph，**逐位一致**，乱码根治（栈数组 H2D → 预填 device 表，graph 内零 H2D）。
+**全栈跑通**：整层 attn+dense megakernel(KAON3_MEGA) + device grouped MoE(B3) + cudagraph(B4) 三者兼容、通顺、逐位。
+下一步 B5：全栈(8142) vs vLLM 非eager(28201) 四配置四负载端到端 bench → perf-trend → **整体分析能否超 vLLM 非eager**（用户一路等的判断时刻）。
