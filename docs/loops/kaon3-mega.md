@@ -935,3 +935,12 @@ autotune 开 + graph 开的 serve：日志 `kaon3 gemm autotune: 725 ms` + `deco
 → **方案2 验证成功**：autotune 让 lm_head algo 启动定死，graph 与 eager 共享 → 结果 == 逐位基线，且保留 autotune 性能（非关掉）。
 **B4 数值问题完成**：cudagraph 捕获成功 + 逐位正确 + 保 autotune。子代理卡的点（graph≠eager）根因是 kaon3 executor 缺 autotune 调用，已补。
 下一步：测 cudagraph 对 decode launch 开销的收益（graph vs NO_GRAPH 同为 autotune 开，bench c1/c8 tok/s）——这才是 B4 的目的。
+
+## R44 B4 完成：cudagraph 加速 +6-8%（全优化栈之上）
+graph vs no-graph（都 autotune 开，只差 NO_GRAPH，全优化栈=MoE grouped+整层 megakernel+片上融合）：
+  c1 53.9 vs 50.1 (+7.6%)；c8 376.6 vs 353.8 (+6.4%)。
+注意基座已升：全优化栈 c1=50-54 tok/s（vs bench2 老 kaon3-self 的 25.2），megakernel+grouped 把基座翻倍。
+**cudagraph 单独只 +6-8%**（比预期小）——因为 megakernel 已把大部分 per-step launch 融掉（整层 1 launch + MoE grouped 固定 8 launch），
+  cudagraph 能省的剩余 launch 本就不多。**反印证 megakernel 路线价值：launch 大头是 megakernel 消的，非 cudagraph。**
+**B4 完成**：cudagraph 捕获 + 逐位(方案2 autotune 共享 algo) + 加速 +6-8%。
+剩：ATTN 256 两半区(入队) + B5 整条前向端到端对比 vLLM 非eager(整体分析)。
