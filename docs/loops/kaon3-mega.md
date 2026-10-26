@@ -94,3 +94,10 @@ arch.cuh 修正：常量原只在 `#if defined(__CUDA_ARCH__)` 内定义 → hos
 **冒烟**：本机 nvcc12.4 不支持 sm_120a/sm_100，用 sm_86 做语法冒烟 → `mega_common.cuh`+`arch.cuh` 编译零错误
   （kernel 只用 sm80+ 指令，符合设计）。真实 sm120a/sm100 编译验证到远端 5090/B300 做。
 下一步：kaon3 侧 Dispatch（Gemma4 阶段表 + attn/dense 任务体），先 attn+dense、MoE 留单独 launch。
+
+## R5 2026-10-26 委派实现第一版（attn+dense 11 阶段）
+子代理 a3c2dc5e 写 `models/kaon3/cuda/mega_kaon3_sm120.cu`（Gemma4 Stage 枚举 + Params + Dispatch 任务体 + host C ABI）
++ Rust 包装 + `KAON3_MEGA=1` env 开关走 megakernel、否则现有路径（便于 A/B）。
+硬要求：编过(远端5090) → 逐子模块对拍(sub_dump) → 打印 speedup(B=1) → **如实报负收益**。
+用户指示：**编过就先对拍看数字**（先不管性能调优）。
+主会话纪律：不抢子代理文件/远端连接，等它报结果再推动。
