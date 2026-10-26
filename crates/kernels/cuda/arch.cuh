@@ -9,31 +9,37 @@
 
 namespace dinfer {
 
+// 设备 pass 有 __CUDA_ARCH__；host pass 没有（host 侧卡型判断走 Rust `ArchProfile`，
+// 这里的常量在 host pass 取保守默认值，不应被 host 代码使用）。
 #if defined(__CUDA_ARCH__)
-// ---- 卡型（编译期选定，仅用于给下面的能力常量取值；kernel 体内不要再用它做逻辑分叉）----
-// sm_80/86/89 = Ampere/Ada 消费/专业；sm_90 = Hopper；sm_100/103 = Blackwell 数据中心（B200/B300）；
-// sm_120 = 消费级 Blackwell（RTX 5090）。
-constexpr bool kArchSm8x = (__CUDA_ARCH__ >= 800 && __CUDA_ARCH__ < 900);
-constexpr bool kArchSm90 = (__CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000);
-constexpr bool kArchSm100 = (__CUDA_ARCH__ >= 1000 && __CUDA_ARCH__ < 1200);
-constexpr bool kArchSm120 = (__CUDA_ARCH__ >= 1200);
+#define DINFER_ARCH_CC (__CUDA_ARCH__)
+#else
+#define DINFER_ARCH_CC (0)
+#endif
 
-/// 每 CTA 可用的动态/静态 smem 上限（B）。仅作粗分档给 host 参考；精确值 host 用
-/// `cudaDeviceGetAttribute` 查，别在 kernel 里拿它算切分。
+// ---- 卡型（仅用于给下面的能力常量取值；kernel 体内不要再用它做逻辑分叉）----
+// sm_80/86/89 = Ampere/Ada；sm_90 = Hopper；sm_100/103 = Blackwell 数据中心（B200/B300）；
+// sm_120 = 消费级 Blackwell（RTX 5090）。
+constexpr bool kArchSm8x = (DINFER_ARCH_CC >= 800 && DINFER_ARCH_CC < 900);
+constexpr bool kArchSm90 = (DINFER_ARCH_CC >= 900 && DINFER_ARCH_CC < 1000);
+constexpr bool kArchSm100 = (DINFER_ARCH_CC >= 1000 && DINFER_ARCH_CC < 1200);
+constexpr bool kArchSm120 = (DINFER_ARCH_CC >= 1200);
+
+/// 每 CTA 可用的 smem 上限（B）的**粗分档**，仅供 kernel 侧做保守上界判断；
+/// host 侧精确值一律用 `cudaDeviceGetAttribute` 查（别在 kernel 里拿它算切分）。
 constexpr int kSmemBytes = kArchSm100 ? (228 * 1024) : (kArchSm90 ? (227 * 1024) : (100 * 1024));
 
-/// 是否有 TMA（`cp.async.bulk` / tensor map）。数据中心 Blackwell / Hopper 有；消费级 Blackwell
-/// 与 Ampere 系第一版不用。megakernel 第一版统一走 `cp.async.cg`（不依赖 TMA）。
+/// 是否有 TMA（`cp.async.bulk` / tensor map）。megakernel 第一版统一走 `cp.async.cg`，不依赖它。
 constexpr bool kHasTma = kArchSm100 || kArchSm90;
 
 /// fp4 块缩放 MMA（`mma.sync...kind::mxf4nvf4.block_scale`，NVFP4）是否可用。
-/// sm120 需 `compute_120a` cubin（build.rs 已按 arch 单独编）；sm100 系列同族。
+/// sm120 需 `compute_120a` cubin（build.rs 已按 arch 单独编）。
 constexpr bool kHasMmaFp4BlockScale = kArchSm100 || kArchSm120;
 
 /// tcgen05（第五代 tensor core，仅数据中心 Blackwell）。
 constexpr bool kHasTcgen05 = kArchSm100;
-#else
-// host 编译单元只看到 `#include`，不参与上面常量；host 侧的卡型判断走 Rust `ArchProfile`。
-#endif
+
+#undef DINFER_ARCH_CC
 
 }  // namespace dinfer
+

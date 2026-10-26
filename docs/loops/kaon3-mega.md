@@ -82,3 +82,15 @@ arch.rs 现**无 Sm120 变体**，`for_cc` 把 `cc>=10` 全归 Sm100 → 5090 �
   megakernel 面向单卡全层（hidden 2816 不分片、128 专家全在卡内、KV 全在本卡）。
 - 因此 persistent 任务表**不含跨卡 allreduce/all-gather 阶段**；MoE 专家分桶沿用单卡版本。
 - 性能验收：**5090 单卡**门禁；不为 B300/多卡做适配而阻塞第一版（sm100 case 保留但非当前目标，不为其改设计）。
+
+## R4 2026-10-26 抽出 mega_common.cuh（模型无关骨架）+ arch.cuh 冒烟通过
+新建 `crates/kernels/cuda/mega_common.cuh`（namespace dinfer::mega），只放模型无关件：
+  同步原语（ld_acquire_gpu / red_release_gpu_add / gtimer）、`StagePlan{dep,count,start,ready,prof}` +
+  `wait_stage/signal_stage`（依赖表由 host 填，不绑任何模型 Stage 枚举）、cp.async(zfill/wait_pipe)、
+  `mma16816`、`swz`、`stage_of`（task→(stage,shard) 二分）、`mega_kernel<Dispatch,OCC>` 持久外壳
+  （blockIdx 轮转领 task → 二分 stage → 等依赖 → dispatch.run → signal）。模型侧只需给 `Dispatch{Params, run()}`。
+arch.cuh 修正：常量原只在 `#if defined(__CUDA_ARCH__)` 内定义 → host pass 取不到；改为 `DINFER_ARCH_CC` 宏
+  （device=__CUDA_ARCH__，host=0），两 pass 都可见；host 侧不用这些常量（走 Rust ArchProfile）。
+**冒烟**：本机 nvcc12.4 不支持 sm_120a/sm_100，用 sm_86 做语法冒烟 → `mega_common.cuh`+`arch.cuh` 编译零错误
+  （kernel 只用 sm80+ 指令，符合设计）。真实 sm120a/sm100 编译验证到远端 5090/B300 做。
+下一步：kaon3 侧 Dispatch（Gemma4 阶段表 + attn/dense 任务体），先 attn+dense、MoE 留单独 launch。
