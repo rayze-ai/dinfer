@@ -246,3 +246,21 @@ kserve.sh 原写死 CUDA_VISIBLE_DEVICES=0/--port 8131，改为认 KAON3_PORT/KA
 |Ve|vllm-eager|2|24-35|28200|-|
 |Vn|vllm-noneager|3|36-47|28201|-|
 压测端 taskset -c 96-111（**16C**）。全部核组不重叠。等加载就绪后重跑 bench1。
+
+### R15 验证结果（2026-10-26）
+
+**kernel 自身（合成权重，`crates/kernels/tests/mega_mlp_parity.rs`）**：B=1/2/4/8 **全 0 差异、逐位一致**，
+speedup 1.37/1.28/1.12/1.03×。证实协调方更正后的记录正确，R12 的 `store_a` barrier 修复已解决 B=1 崩溃。
+
+**真实权重（新测试 `models/kaon3/tests/mega_real_parity.rs`，逐段比）**：
+| m | pre_ff_norm | gate | up | gelu | down | post_ff_norm |
+|---|---|---|---|---|---|---|
+| 1 | 0/2816 | 0/2112 | 0/2112 | 0/2112 | 0/2816 | 0/2816 |
+| 4 | 0 | 0 | 0 | 0 | **1/11264** | **3/11264** |
+
+→ m=1（decode 实际用的形状）**全段逐位一致**。m=4 的 down 有 1 个元素差 0.25（绝对值，非 ulp），
+说明 fp8 GEMM 的累加序在 m>1 时与 cuBLASLt 有极小概率分叉 —— 不是接线错。
+
+**端到端 A/B（serve）**：5 个中文 prompt，base(:8131) vs mega(:8132) **0/5 文本完全相同**，但差异都极早
+（char 0–45，多为近义替换如「分配」/「任务分配」）。两条路径各自**确定**（同输入重复两次 md5 相同）。
+自写 kernel 基线（:8133，`FP8_SELF_KERNEL=1`）与 mega 也不同，差异更大 → 不是"mega 对齐了别的 oracle"。
