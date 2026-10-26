@@ -910,3 +910,15 @@ kaon3 新 gemm 无 tune 表 → 走 cuBLASLt 启发式 → graph 捕获烧进启
 GEMM_TUNE=off 一致，是因为两进程都走纯默认 algo，消除了缓存独立填充的随机。
 → **实际结论**：单进程内 graph 不引入数值差（同 Gemm/同 algo 缓存）。双进程对照 A/B 本身有 algo 缓存独立这个干扰变量。
 下一步正确验证：**同一个 serve 进程**内，graph 命中步 vs 强制 eager 步（如首个未捕获桶）输出对比；或接受"开 autotune 时锁定 algo（kaon3 executor 补 autotune 调用使缓存启动即定）"。
+
+## R44 深挖⑧：✅ 差异源精确到 lm_head —— B4 数值问题定论
+kaon3 decode 唯一走 cuBLASLt autotune(forward_bf16) 的是 **lm_head**(model.rs:240,tied embedding，[1,vocab=262144]×[vocab,2816] 每步算)。
+其余 fp8 投影走自写 kernel(无 algo)、MoE 走自写 grouped、router 走 moe_gate_f32——都无 cuBLASLt algo 选择。
+**∴ graph vs eager 的 1-ulp 差唯一来自 lm_head 的 cuBLASLt algo**：双进程对照时两进程 algo 缓存独立填充选到不同 algo；
+  lm_head algo 不同 → logits 末位不同 → argmax 近并列 token 翻转（数数 margin 大不翻、长城翻）。
+**B4 定论**：
+- cudagraph 逻辑完全正确，GEMM_TUNE=off 下 graph==eager 逐位(eeb2e6cf 证)。
+- 1-ulp 差是 lm_head autotune algo 在不同 Gemm 实例间不一致，**非 graph bug、非逻辑错**，是亚决策噪声（同 0.0085 性质）。
+- 方案2 落地：kaon3 executor 补 `gemm_tune_entries()`(至少含 lm_head) + 启动 autotune，使同进程 graph/eager 共享 algo 缓存 → 逐位 + 保 autotune。
+- 单进程真实 serve 本就是同一 Gemm/同一 algo 缓存，graph 与 eager fallback 一致；双进程 A/B 是测试引入的干扰。
+下一步：① 落地方案2(补 autotune)并单进程验；② 测 cudagraph 对 decode 的 launch 开销收益(B4 本来的目的)。
