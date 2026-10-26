@@ -244,3 +244,7 @@ dinfer kaon3-serve(8131) Up 13h 正常。oracle kaon-oracle-1 在 28101（非 28
 ## R21（2026-10-26）起全层 vLLM chat(GPU2:28130,served=kaon-vllm,gemma模板)跑 vLLM 20 条
 docker run 手误(第一条把模型当镜像)已清；干净重起 b6135。等全模型加载~2min→冒烟→qa_compare run vllm(bi6ioeuwg)。
 两边齐后：report 并排(dinfer 已有 result_dinfer.jsonl 命中20/20零乱码25tok/s) → 挂 dashboard。
+
+## R22（2026-10-26）修 vLLM 启动：镜像 Entrypoint 已是 ["vllm","serve"]，我多传 serve → serve serve 报错
+镜像 Entrypoint=["vllm","serve"]，Cmd 只需 `<model> --port …`（oracle 即如此）。我命令多了个 `serve` → `vllm serve serve $M`，
+模型路径被当 unrecognized。去掉 serve 重起 fb7f6c（GPU2:28130）。等就绪→冒烟→vLLM 20 条(bznxxs24c)。
