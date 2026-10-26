@@ -982,3 +982,10 @@ NO_GRAPH 每次真拷正确栈值故正常；graph replay 读失效栈故乱码�
   C ABI 收已填好的 device 指针，kernel launch 前**不再 memcpy**（graph 里无 H2D）。
 （这也是 cudagraph 铁律：capture 期禁止从临时 host 地址 H2D；B4 清障碍清的是 executor 侧，漏了 dense megakernel 内部这处。）
 下一步：改 mega_mlp_sm120.cu 去掉 per-call H2D + Rust 侧预填 device 表；重验全栈 KAON3_MEGA+grouped+graph 逐位/通顺。
+
+## R45 修复：dense megakernel 去掉 per-call 栈数组 H2D，dep/count/start/dep2 预填 device
+- `layer.rs MegaBufs::new`：构造时算好 count=[1,n_gu·sp_gu,n_gu·sp_gu,1,n_dn·sp_dn,1]、dep=[-1,0,0,1,3,4]、dep2=[-1,-1,-1,2,-1,-1]、start=前缀和，
+  用 `htod_copy` 一次性填进 device 缓冲（非 capture 期）。n_gu/n_dn 改 i32，sem_* alloc 加 as usize。
+- `mega_mlp_sm120.cu`：删 h_count/h_dep/h_start 栈数组 + 4 个 per-call cudaMemcpyAsync；acc 按标量 `1+n_gu·sp_gu·2+1+n_dn·sp_dn+1` 算（标量进 graph 安全）。
+  dep/count/start/dep2 直接用传入的已填 device 指针。
+→ graph 内零 H2D，replay 不再读失效栈。编译中(bx0isler9)。验：全栈 KAON3_MEGA+grouped+graph 冒烟应通顺（不再乱码）。

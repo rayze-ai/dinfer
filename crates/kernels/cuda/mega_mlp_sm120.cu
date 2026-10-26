@@ -192,32 +192,10 @@ int mega_mlp_dense_branch(const void* x, void* out, const void* pre_w, const voi
 
   // **注意**：dep/count/start/ready 是**设备指针**（Rust 侧 st.ptr_mut 传入）。表先在 host 本地算，
   // 再 cudaMemcpy 拷过去；直接写 *dep 会往设备内存解引用 → SIGSEGV。
-  int h_count[S_COUNT], h_dep[S_COUNT], h_start[S_COUNT];
-  h_count[S_NORM] = 1;
-  h_count[S_GATE] = n_gu * sp_gu;  // 每 tile 切 sp_gu 份 split-K
-  h_count[S_UP] = n_gu * sp_gu;
-  h_count[S_ACT] = 1;
-  h_count[S_DOWN] = n_dn * sp_dn;
-  h_count[S_POST] = 1;
-  int h_dep2[S_COUNT];
-  for (int i = 0; i < S_COUNT; ++i) h_dep2[i] = -1;
-  h_dep[S_NORM] = -1;
-  h_dep[S_GATE] = S_NORM;   // gate / up 都只依赖 norm → **并行**（解开原 gate→up 串行）
-  h_dep[S_UP] = S_NORM;
-  h_dep[S_ACT] = S_GATE;    // act 等 gate(dep) 与 up(dep2) 都完成
-  h_dep2[S_ACT] = S_UP;
-  h_dep[S_DOWN] = S_ACT;
-  h_dep[S_POST] = S_DOWN;
-  int acc = 0;
-  for (int s = 0; s < S_COUNT; ++s) {
-    h_start[s] = acc;
-    acc += h_count[s];
-  }
-  if (cudaMemcpyAsync(count, h_count, sizeof(h_count), cudaMemcpyHostToDevice, stream) != cudaSuccess ||
-      cudaMemcpyAsync(dep, h_dep, sizeof(h_dep), cudaMemcpyHostToDevice, stream) != cudaSuccess ||
-      cudaMemcpyAsync(start, h_start, sizeof(h_start), cudaMemcpyHostToDevice, stream) != cudaSuccess ||
-      (dep2 && cudaMemcpyAsync(dep2, h_dep2, sizeof(h_dep2), cudaMemcpyHostToDevice, stream) != cudaSuccess))
-    return (int)cudaGetLastError();
+  // dep/count/start/dep2 现由 **Rust 侧 MegaBufs::new 构造时预填到 device**（内容只依赖形状/split，层内每步不变）。
+  // 不再 per-call 从栈数组 H2D memcpy——该 memcpy 在 CUDA graph capture 期录下**失效栈地址**，replay 读垃圾→dep 表乱→乱码
+  // （kaon3-mega R45 根因）。dep/count/start/dep2 已是传入的常驻 device 指针，kernel 直接用；这里只按标量算总任务数 acc（标量进 graph 安全）。
+  const int acc = 1 + n_gu * sp_gu + n_gu * sp_gu + 1 + n_dn * sp_dn + 1;
 
   Params p{};
   p.x = static_cast<const bf16*>(x);

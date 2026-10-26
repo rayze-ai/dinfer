@@ -681,8 +681,21 @@ impl MegaBufs {
         let sp_gu = std::env::var("MEGA_SPGU").ok().and_then(|v| v.parse().ok()).unwrap_or(1i32).max(1);
         let sp_dn = std::env::var("MEGA_SPDN").ok().and_then(|v| v.parse().ok()).unwrap_or(1i32).max(1);
         let ctas = std::env::var("MEGA_CTAS").ok().and_then(|v| v.parse().ok()).unwrap_or(1i32).max(1);
-        let n_gu = i.div_ceil(128);
-        let n_dn = h.div_ceil(128);
+        let n_gu = (i.div_ceil(128)) as i32;
+        let n_dn = (h.div_ceil(128)) as i32;
+        // dep/count/start/dep2 表**在构造时（非 capture 期）算好并 htod 一次**（内容只依赖形状/split，层内每步不变）。
+        // 原先在 C ABI 里每次调用从**栈数组** H2D memcpy，graph capture 录下栈地址 → replay 读失效栈 → dep 表乱 → 乱码
+        // （kaon3-mega R45 根因）。这里改成常驻 device 表，kernel launch 前不再 memcpy，graph 内零 H2D。
+        // stage 枚举顺序须与 mega_mlp_sm120.cu 的 Stage 一致：NORM=0 GATE=1 UP=2 ACT=3 DOWN=4 POST=5。
+        let count_v: Vec<i32> = vec![1, n_gu * sp_gu, n_gu * sp_gu, 1, n_dn * sp_dn, 1];
+        let dep_v: Vec<i32> = vec![-1, 0, 0, 1, 3, 4]; // NORM 无依赖；GATE/UP 依赖 NORM；ACT 依赖 GATE(+dep2 UP)；DOWN 依赖 ACT；POST 依赖 DOWN
+        let dep2_v: Vec<i32> = vec![-1, -1, -1, 2, -1, -1]; // 仅 ACT 有第二前驱 = UP(2)
+        let mut start_v = vec![0i32; MEGA_STAGES];
+        let mut acc = 0i32;
+        for s in 0..MEGA_STAGES {
+            start_v[s] = acc;
+            acc += count_v[s];
+        }
         Ok(Self {
             norm1: Tensor::uninit(stream, &[MEGA_ROWS, h])?,
             norm1_q: stream.alloc_zeros::<u8>(MEGA_ROWS * h)?,
@@ -691,20 +704,20 @@ impl MegaBufs {
             act_bf: Tensor::uninit(stream, &[MEGA_ROWS, i])?,
             act_q: stream.alloc_zeros::<u8>(MEGA_ROWS * i)?,
             down_out: Tensor::uninit(stream, &[MEGA_ROWS, h])?,
-            dep: stream.alloc_zeros::<i32>(MEGA_STAGES)?,
-            count: stream.alloc_zeros::<i32>(MEGA_STAGES)?,
-            start: stream.alloc_zeros::<i32>(MEGA_STAGES)?,
+            dep: stream.htod_copy(dep_v)?,
+            count: stream.htod_copy(count_v)?,
+            start: stream.htod_copy(start_v)?,
             ready: stream.alloc_zeros::<i32>(MEGA_STAGES)?,
-            dep2: stream.alloc_zeros::<i32>(MEGA_STAGES)?,
+            dep2: stream.htod_copy(dep2_v)?,
             sp_gu,
             sp_dn,
             ctas,
             part_gate: stream.alloc_zeros::<f32>(sp_gu as usize * MEGA_ROWS * i)?,
             part_up: stream.alloc_zeros::<f32>(sp_gu as usize * MEGA_ROWS * i)?,
             part_dn: stream.alloc_zeros::<f32>(sp_dn as usize * MEGA_ROWS * h)?,
-            sem_gate: stream.alloc_zeros::<i32>(n_gu)?,
-            sem_up: stream.alloc_zeros::<i32>(n_gu)?,
-            sem_dn: stream.alloc_zeros::<i32>(n_dn)?,
+            sem_gate: stream.alloc_zeros::<i32>(n_gu as usize)?,
+            sem_up: stream.alloc_zeros::<i32>(n_gu as usize)?,
+            sem_dn: stream.alloc_zeros::<i32>(n_dn as usize)?,
         })
     }
 }
