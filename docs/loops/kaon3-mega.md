@@ -141,3 +141,23 @@ Rust 侧用 `st.ptr_mut(&mut dep)` 传的是**设备地址**；我在 C host 代
 诊断法：把 fp8 tile 短路成写 0 仍崩 → 排除 GEMM；加 STEP 打点确认参考路径干净、崩在 megakernel 入口附近 → 定位到 host 填表。
 修：表在 host 本地 `int h_count[S_COUNT]` 算好，`cudaMemcpyAsync` 拷到设备 dep/count/start；`ready` 仍需调用方清零。
 （教训：C ABI 里指针是设备指针还是 host 指针必须在签名注释写清。）
+
+## R11 2026-10-26 ✅ 第一版 megakernel **逐位一致 0/11264**
+```
+mega rc=0
+[退化检查] ‖ref‖=60.2643 ‖mega‖=60.2643   ← 同量级非零
+[对比] 不同 0/11264  max|d|=0.0  rel=0.0
+VERDICT: 逐位一致
+```
+修掉的第 5 个 bug（也是系统性偏差根因）：**epilogue 漏乘 a_scale**。
+  参考 `gemm_fp8_static_bf16` 把 `w_scale * a_scale` 一起传给 kernel（A 按 1/a_scale 量化，输出要乘回来）；
+  我只乘了 `w_scale` → 系统性偏差 rel=0.40。改为 `w_scale / a_inv`（= w_scale * a_scale）后完全逐位。
+累计修的 5 个真 bug（全在自写 kernel 里）：
+  1. kBN=64（每 warp 要 16 行 N → 需 128）→ smem 越界 SIGSEGV
+  2. 尾声只写 4 个累加器中的 2 个 → 一半列为零
+  3. `__syncthreads()` 在 `if (warp < m)` 分歧分支 → UB
+  4. A 的 smem 只有 16 行，但 256 线程按 tid>>2 写到 63 行 → 越界写
+  5. **dep/count/start 是设备指针，host 直接解引用 → SIGSEGV**（R10 的根因）
+  6. epilogue 漏乘 a_scale → 系统性偏差 0.40
+现状：dense MLP 支路（pre_norm→gate‖up→gelu→down→post_norm）一次 launch，与逐 op 路径**逐位一致**。
+下一步：① 计时 speedup（本 loop 的核心问题：消 kernel 边界值多少）；② 若正收益，再考虑扩到 attn/MoE。

@@ -241,10 +241,13 @@ struct MlpDenseDispatch {
         return;
       }
       case S_GATE:
-        fp8_gemm_tile<kBN>(p.norm1_q, p.gate_w, p.gate_buf, p.m, p.I, p.H, shard, p.gate_wscale, smem);
+        // 口径（照 gemm_fp8_sm120.cu）：out = (A/a_scale · W) * (a_scale * w_scale)。
+        // A 已按 a_inv=1/a_scale 量化，故 epilogue 需乘 (w_scale * a_scale) = w_scale / a_inv。
+        fp8_gemm_tile<kBN>(p.norm1_q, p.gate_w, p.gate_buf, p.m, p.I, p.H, shard,
+                           p.gate_wscale / p.gate_a_inv, smem);
         return;
       case S_UP:
-        fp8_gemm_tile<kBN>(p.norm1_q, p.up_w, p.up_buf, p.m, p.I, p.H, shard, p.up_wscale, smem);
+        fp8_gemm_tile<kBN>(p.norm1_q, p.up_w, p.up_buf, p.m, p.I, p.H, shard, p.up_wscale / p.up_a_inv, smem);
         return;
       case S_ACT: {
         const long n = (long)p.m * p.I;
@@ -257,7 +260,7 @@ struct MlpDenseDispatch {
         return;
       }
       case S_DOWN:
-        fp8_gemm_tile<kBN>(p.act, p.dn_w, p.down_out, p.m, p.H, p.I, shard, p.dn_wscale, smem);
+        fp8_gemm_tile<kBN>(p.act, p.dn_w, p.down_out, p.m, p.H, p.I, shard, p.dn_wscale / p.dn_a_inv, smem);
         return;
       case S_POST: {
         __shared__ float red[kWarps];
