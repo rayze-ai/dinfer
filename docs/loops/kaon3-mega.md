@@ -456,3 +456,27 @@ DOWN wait=230万 仍最大（exec 仅 72万，wait 3.2×）：DOWN 等 ACT、ACT
 split-K 把 K 维切段、各段 f32 partial 再求和 → **fp32 累加顺序改变**。当前全 K 归约恰与 cuBLASLt 逐位一致（0/2816），
   split-K 后极可能变成"fp8 级差（rel<5e-3）"而非逐位 0。parity 测试本身接受 fp8 级差（只断言范数非零 + rc==0），
   但硬约束写"每轮必须逐位一致"。**策略：实测 split-K 的 ndiff 与 rel，若破逐位但 rel 在 fp8 级（<5e-3）如实记录并交主会话定夺；若退化则回退。**
+
+## R30 2026-10-26 ✅ R2/R3 split-K：全配置逐位一致，kernel 1.66×→2.05×（攻 DOWN wait 成功）
+实现（`mega_mlp_sm120.cu`）：`fp8_gemm_tile` 加 split-K——每 CTA 只算 K 的 [k0,k1) 段（按 BK 块均分），
+  f32 partial 写 `partial[split][m][N]`，末到 CTA（`atomicAdd(sem+tile)==splits-1`）按 split 顺序 0→s-1 求和、乘 wscale、写 bf16。
+  **splits==1 走原路径（直接乘 wscale 写 bf16），与改动前逐位一致**。数值走 env `MEGA_SPGU`/`MEGA_SPDN`（默认 1），
+  Rust 侧 MegaBufs 按 env 分配 partial/sem。FFI 尾部加 sp_gu/sp_dn + 3 partial + 3 sem。
+**关键发现：split-K 逐位一致**（不是 fp8 级差）。原担心 fp32 累加序变 → 破逐位，实测 0/2816：
+  因为本实现是**连续 K 段按 split 顺序求和**（0→s-1），与全 K 单调累加的 round 落点一致（fp8·fp8 积精确，分段和再按序加 = 同序）。
+  → 硬约束"每轮逐位一致"**满足**，无需交主会话定夺 fp8 级差问题。
+B=1 sweep（全部 0/2816 逐位一致）：
+```
+sp_gu sp_dn  mega us  speedup   备注
+ 1     1      66.6    1.66x    R1 基线（无 split-K）
+ 2     1      62.0    1.78x
+ 4     1      59.4    1.86x    ← R2（gate/up split-K）DOWN wait 2311k→1772k(-23%)
+ 8     1      63.8    1.73x    过切,GATE wait 爆(691万),反而回退
+ 4     2      56.0    1.97x
+ 4     4      53.9    2.05x    ← R3（+down split-K）最佳,mega 66.6→53.9us
+ 8     4      56.0    1.97x
+```
+机理：split-K 把 17/22 个 N tile 任务 ×splits → 68/88 任务填满 5090 ~170 SM（原来 110+ SM 空转）；
+  DOWN 自己 split 后 exec 分摊、wait 降；gate/up split 后更早出结果、缩短 ACT→DOWN 关键链。
+  sp_gu=8 过切：GATE 的归约串行等 8 份 + 任务 136 超 SM → wait 爆，回退。**sweet spot = 4/4**。
+R2=sp_gu4/sp_dn1（1.86×），R3=sp_gu4/sp_dn4（2.05×）。serve 侧 layer.rs 已补齐 FFI（dep2 真 buf + split-K buf）。

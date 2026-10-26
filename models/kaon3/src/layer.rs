@@ -562,11 +562,26 @@ pub struct MegaBufs {
     pub start: k::cudarc::driver::CudaSlice<i32>,
     /// kernel 的全局阶段计数器；**每次 launch 前必须清零**。
     pub ready: k::cudarc::driver::CudaSlice<i32>,
+    /// 第二前驱表（ACT 等 gate+up）；serve 侧也要传真 buf（R27 后 ffi 签名需要）。
+    pub dep2: k::cudarc::driver::CudaSlice<i32>,
+    /// split-K（R29）：gate/up 份数 sp_gu、down 份数 sp_dn（env `MEGA_SPGU`/`MEGA_SPDN`，默认 1）。
+    pub sp_gu: i32,
+    pub sp_dn: i32,
+    pub part_gate: k::cudarc::driver::CudaSlice<f32>, // [sp_gu, 8, I]
+    pub part_up: k::cudarc::driver::CudaSlice<f32>,   // [sp_gu, 8, I]
+    pub part_dn: k::cudarc::driver::CudaSlice<f32>,   // [sp_dn, 8, H]
+    pub sem_gate: k::cudarc::driver::CudaSlice<i32>,  // [ceil(I/128)]
+    pub sem_up: k::cudarc::driver::CudaSlice<i32>,
+    pub sem_dn: k::cudarc::driver::CudaSlice<i32>,    // [ceil(H/128)]
 }
 
 impl MegaBufs {
     pub fn new(stream: &Stream, cfg: &KaonConfig) -> Result<Self> {
         let (h, i) = (cfg.hidden, cfg.dense_inter);
+        let sp_gu = std::env::var("MEGA_SPGU").ok().and_then(|v| v.parse().ok()).unwrap_or(1i32).max(1);
+        let sp_dn = std::env::var("MEGA_SPDN").ok().and_then(|v| v.parse().ok()).unwrap_or(1i32).max(1);
+        let n_gu = i.div_ceil(128);
+        let n_dn = h.div_ceil(128);
         Ok(Self {
             norm1: Tensor::uninit(stream, &[MEGA_ROWS, h])?,
             norm1_q: stream.alloc_zeros::<u8>(MEGA_ROWS * h)?,
@@ -579,6 +594,15 @@ impl MegaBufs {
             count: stream.alloc_zeros::<i32>(MEGA_STAGES)?,
             start: stream.alloc_zeros::<i32>(MEGA_STAGES)?,
             ready: stream.alloc_zeros::<i32>(MEGA_STAGES)?,
+            dep2: stream.alloc_zeros::<i32>(MEGA_STAGES)?,
+            sp_gu,
+            sp_dn,
+            part_gate: stream.alloc_zeros::<f32>(sp_gu as usize * MEGA_ROWS * i)?,
+            part_up: stream.alloc_zeros::<f32>(sp_gu as usize * MEGA_ROWS * i)?,
+            part_dn: stream.alloc_zeros::<f32>(sp_dn as usize * MEGA_ROWS * h)?,
+            sem_gate: stream.alloc_zeros::<i32>(n_gu)?,
+            sem_up: stream.alloc_zeros::<i32>(n_gu)?,
+            sem_dn: stream.alloc_zeros::<i32>(n_dn)?,
         })
     }
 }
@@ -765,8 +789,19 @@ impl Gemma4Layer {
                 stream.ptr_mut(&mut mb.count) as *mut i32,
                 stream.ptr_mut(&mut mb.start) as *mut i32,
                 stream.ptr_mut(&mut mb.ready) as *mut i32,
+                stream.ptr_mut(&mut mb.dep2) as *mut i32,
                 2, // pipe
                 0, // prof
+                std::ptr::null_mut(), // wait_cyc（serve 不计时）
+                std::ptr::null_mut(), // exec_cyc
+                mb.sp_gu,
+                mb.sp_dn,
+                stream.ptr_mut(&mut mb.part_gate) as *mut std::ffi::c_void,
+                stream.ptr_mut(&mut mb.part_up) as *mut std::ffi::c_void,
+                stream.ptr_mut(&mut mb.part_dn) as *mut std::ffi::c_void,
+                stream.ptr_mut(&mut mb.sem_gate) as *mut i32,
+                stream.ptr_mut(&mut mb.sem_up) as *mut i32,
+                stream.ptr_mut(&mut mb.sem_dn) as *mut i32,
                 stream.raw() as _,
             )
         };
