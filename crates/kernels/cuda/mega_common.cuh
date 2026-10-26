@@ -46,6 +46,9 @@ struct StagePlan {
   // wait_cyc = 等依赖占用；exec_cyc = 任务体执行。为空指针则不计（向后兼容）。
   unsigned long long* wait_cyc;  // [num_stages] 或 nullptr
   unsigned long long* exec_cyc;  // [num_stages] 或 nullptr
+  // 第二前驱（可选）：某 stage 需等两个前段都完成（如 ACT 等 gate+up 并行支路）。
+  // dep2[stage] >= 0 时，除 dep[stage] 外还等 dep2[stage]。为空指针则无第二依赖（兼容）。
+  const int* dep2;  // [num_stages] 或 nullptr
 };
 
 __shared__ unsigned long long s_wait_end;  // prof：本任务依赖等待结束时刻
@@ -63,6 +66,13 @@ __device__ __forceinline__ void wait_stage(const StagePlan& sp, int stage) {
     const int need = sp.count[dep];
     const int* flag = sp.ready + dep;
     while (ld_acquire_gpu(flag) < need) __nanosleep(40);
+    // 第二前驱：再等 dep2（并行支路合流，如 ACT 等 gate 与 up 都完成）
+    const int dep2 = sp.dep2 ? sp.dep2[stage] : -1;
+    if (dep2 >= 0) {
+      const int need2 = sp.count[dep2];
+      const int* flag2 = sp.ready + dep2;
+      while (ld_acquire_gpu(flag2) < need2) __nanosleep(40);
+    }
     if (sp.prof) s_wait_end = gtimer();
   }
   __syncthreads();

@@ -411,3 +411,8 @@ POST  1.7%  wait=184037
 **优化方向（指明）**：① gate/up 解串并行；② 降 wait——减 CTA 数提高单 CTA 利用 / 更细的生产者-消费者重叠；
   ③ 这也是扩 attention 的设计前提：attention 阶段多，若仍串行 wait 会更糟，要从一开始设计成重叠。
 下一步：先解 gate/up 串行（最快见效），重测 wait 变化；再设计 attention 的重叠式阶段表。
+
+## R27 2026-10-26 优化①：gate/up 解串并行（第二前驱依赖）
+mega_common.cuh StagePlan 加 `dep2`（第二前驱）；wait_stage 等 dep 后再等 dep2。
+mega_mlp：gate/up 都只依赖 NORM（并行），ACT 等 GATE(dep)+UP(dep2) 都完成。ffi/test 加 dep2 buffer。
+预期：UP 不再等 GATE（原 UP wait=162万含等 GATE），gate/up 重叠执行，wait 降。编译+跑中(bjr98k5bn)看 wait 变化 + 逐位是否保持。

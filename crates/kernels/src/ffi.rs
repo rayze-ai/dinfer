@@ -1245,6 +1245,7 @@ extern "C" {
         count: *mut i32,
         start: *mut i32,
         ready: *mut i32,
+        dep2: *mut i32,
         pipe: i32,
         prof: i32,
         wait_cyc: *mut u64,
@@ -1259,7 +1260,7 @@ pub unsafe fn mega_mlp_dense_branch(
     _gw: f32, _ga: f32, _up_w: *const c_void, _uw: f32, _ua: f32, _dn_w: *const c_void, _dw: f32, _da: f32,
     _n1: *mut c_void, _n1q: *mut c_void, _gb: *mut c_void, _ub: *mut c_void, _ab: *mut c_void, _a: *mut c_void,
     _do: *mut c_void, _m: i32, _h: i32, _i: i32, _eps: f32, _ngu: i32, _ndn: i32, _dep: *mut i32, _cnt: *mut i32,
-    _st: *mut i32, _rdy: *mut i32, _pipe: i32, _prof: i32, _wc: *mut u64, _ec: *mut u64, _s: cudaStream_t,
+    _st: *mut i32, _rdy: *mut i32, _dep2: *mut i32, _pipe: i32, _prof: i32, _wc: *mut u64, _ec: *mut u64, _s: cudaStream_t,
 ) -> i32 {
     CUDA_ERROR_NOT_SUPPORTED
 }

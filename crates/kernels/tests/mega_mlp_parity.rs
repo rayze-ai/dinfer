@@ -131,6 +131,8 @@ fn mega_mlp_matches_eager_path() {
   let mut cnt = st.alloc_zeros::<i32>(8).unwrap();
   let mut sta = st.alloc_zeros::<i32>(8).unwrap();
   let mut rdy = st.alloc_zeros::<i32>(8).unwrap();
+  let mut dep2 = st.alloc_zeros::<i32>(8).unwrap();
+  let mut dep2b = st.alloc_zeros::<i32>(8).unwrap();
   let mut wc = st.alloc_zeros::<u64>(8).unwrap();
   let mut ec = st.alloc_zeros::<u64>(8).unwrap();
 
@@ -168,6 +170,7 @@ fn mega_mlp_matches_eager_path() {
       st.ptr_mut(&mut cnt) as *mut i32,
       st.ptr_mut(&mut sta) as *mut i32,
       st.ptr_mut(&mut rdy) as *mut i32,
+      st.ptr_mut(&mut dep2) as *mut i32,
       2,
       1,
       st.ptr_mut(&mut wc) as *mut u64,
@@ -245,7 +248,7 @@ fn mega_mlp_matches_eager_path() {
         M as i32, H as i32, I as i32, EPS, n_gu, n_dn,
         st.ptr_mut(&mut dep) as *mut i32, st.ptr_mut(&mut cnt) as *mut i32,
         st.ptr_mut(&mut sta) as *mut i32, st.ptr_mut(&mut rdy2) as *mut i32,
-        2, 0, std::ptr::null_mut(), std::ptr::null_mut(), st.raw() as _,
+        st.ptr_mut(&mut dep2b) as *mut i32, 2, 0, std::ptr::null_mut(), std::ptr::null_mut(), st.raw() as _,
       )
     };
     assert_eq!(rc, 0);

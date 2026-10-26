@@ -292,7 +292,7 @@ int mega_mlp_dense_branch(const void* x, void* out, const void* pre_w, const voi
                          float gate_wscale, float gate_a_inv, const void* up_w, float up_wscale, float up_a_inv,
                          const void* dn_w, float dn_wscale, float dn_a_inv, void* norm1, void* norm1_q, void* gate_buf, void* up_buf,
                          void* act_bf, void* act, void* down_out, int m, int H, int I, float eps, int n_gu, int n_dn,
-                         int* dep, int* count, int* start, int* ready, int pipe, int prof,
+                         int* dep, int* count, int* start, int* ready, int* dep2, int pipe, int prof,
                          unsigned long long* wait_cyc, unsigned long long* exec_cyc, cudaStream_t stream) {
   using namespace dinfer;
   using namespace dinfer::mega_mlp;
@@ -310,10 +310,13 @@ int mega_mlp_dense_branch(const void* x, void* out, const void* pre_w, const voi
   h_count[S_ACT] = 1;
   h_count[S_DOWN] = n_dn;
   h_count[S_POST] = 1;
+  int h_dep2[S_COUNT];
+  for (int i = 0; i < S_COUNT; ++i) h_dep2[i] = -1;
   h_dep[S_NORM] = -1;
-  h_dep[S_GATE] = S_NORM;
-  h_dep[S_UP] = S_GATE;   // 单 dep 表无法表达"两个前驱"：串行 gate→up（牺牲并行保正确）
-  h_dep[S_ACT] = S_UP;    // 此时 gate 与 up 都已完成
+  h_dep[S_GATE] = S_NORM;   // gate / up 都只依赖 norm → **并行**（解开原 gate→up 串行）
+  h_dep[S_UP] = S_NORM;
+  h_dep[S_ACT] = S_GATE;    // act 等 gate(dep) 与 up(dep2) 都完成
+  h_dep2[S_ACT] = S_UP;
   h_dep[S_DOWN] = S_ACT;
   h_dep[S_POST] = S_DOWN;
   int acc = 0;
@@ -323,7 +326,8 @@ int mega_mlp_dense_branch(const void* x, void* out, const void* pre_w, const voi
   }
   if (cudaMemcpyAsync(count, h_count, sizeof(h_count), cudaMemcpyHostToDevice, stream) != cudaSuccess ||
       cudaMemcpyAsync(dep, h_dep, sizeof(h_dep), cudaMemcpyHostToDevice, stream) != cudaSuccess ||
-      cudaMemcpyAsync(start, h_start, sizeof(h_start), cudaMemcpyHostToDevice, stream) != cudaSuccess)
+      cudaMemcpyAsync(start, h_start, sizeof(h_start), cudaMemcpyHostToDevice, stream) != cudaSuccess ||
+      (dep2 && cudaMemcpyAsync(dep2, h_dep2, sizeof(h_dep2), cudaMemcpyHostToDevice, stream) != cudaSuccess))
     return (int)cudaGetLastError();
 
   Params p{};
@@ -378,7 +382,7 @@ int mega_mlp_dense_branch(const void* x, void* out, const void* pre_w, const voi
   if (occ > 1) occ = 1;
   int grid = sms * occ;
   if (grid > acc) grid = acc;
-  kern<<<grid, mega::kThreads, smem, stream>>>(mega::StagePlan{dep, count, start, ready, prof, wait_cyc, exec_cyc}, p,
+  kern<<<grid, mega::kThreads, smem, stream>>>(mega::StagePlan{dep, count, start, ready, prof, wait_cyc, exec_cyc, dep2}, p,
                                                MlpDenseDispatch{}, acc, S_COUNT, 0);
   return (int)cudaGetLastError();
 }
