@@ -126,7 +126,7 @@ __device__ __forceinline__ void fp8_gemm_tile(const uint8_t* __restrict__ A, con
                                               bf16* __restrict__ D, int m, int N, int K, int n_blk, float wscale,
                                               uint8_t* smem) {
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
-#if 0  // 诊断已用完
+#if defined(MEGA_DIAG_NOGEMM)  // 诊断开关：短路 GEMM（二分崩溃来源）
   // 诊断模式：不碰 smem、不算，只写 0，用以二分定位 SIGSEGV 来源
   const int nrow0d = warp * (BN / kWarps);
   const int r0d = lane >> 2, r1d = r0d + 8, cgd = (lane & 3) * 2;

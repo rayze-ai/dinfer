@@ -169,3 +169,11 @@ B=4 逐位一致 + 1.13×；但 B=1/2/8 扫档时崩（STEP8 之后无 STEP9）�
 修：改成 `if (tid < A_SLOTS) {...}` 不再早退。
 **教训（值得进 knowledge）**：persistent kernel 里任何 lamdba/helper 只要有线程提前 return，
   而外层后续有 `__syncthreads()`，就是 UB。要么全进要么用谓词包住 body。
+
+## R13 2026-10-26 诊断结论：GEMM 短路后 B=1 正常 → 崩溃在 fp8 GEMM tile（只对 m<4 触发）
+`MEGA_DIAG_NOGEMM`（GEMM 短路成只写 0）下 B=1 **完全正常**（还跑出 speedup=1.38×，说明 norm/gelu/调度部分没问题），
+未短路时 B=1 崩、B=4 正常 → **fp8_gemm_tile 里与 m 相关的问题**。
+嫌疑：`A_SLOTS=128` 个线程搬 A（16 行×8 块），但 **m<16 时上界判断用 `gm < m`，其余行填 0**——这条逻辑本身没错；
+更可能是 `store_a` 之后紧接的 `cp.async.wait_group 0` + `__syncthreads()` 在 m 小时某些 warp 全部线程 tid>=A_SLOTS
+（warp≥4）不参与 A 搬运、但参与 barrier——这没问题。仍待确认（用 MEGA_DIAG 分段：只短路 gate，不短路 down 等）。
+下一步：细粒度二分（NOGEMM_GATE / NOGEMM_UP / NOGEMM_DOWN 三个独立开关）。
