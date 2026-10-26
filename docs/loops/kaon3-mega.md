@@ -130,3 +130,8 @@ FFI：`crates/kernels/src/ffi.rs` 加 `mega_mlp_dense_branch`（`cfg(all(not(no_
   3. **`__syncthreads()` 出现在 `if (warp < m)` 分支内**（rmsnorm_row_warp 里），是未定义行为/死锁 →
      改为所有 warp 都进函数（行号 ≥m 的 warp 用 store=false 只参与 barrier）。
 仍 SIGSEGV → 上 compute-sanitizer memcheck 定位真实越界（不猜）。
+
+## R9 2026-10-26 二分定位 SIGSEGV（参考路径已证干净）
+加 STEP 打点后确认：**参考路径 7 步全过**（rmsnorm/gate/up/gelu/down/post 都 OK），崩在 **megakernel 内**。
+已修 4 个真 bug（kBN 128 / 尾声补 4 累加器 / syncthreads 分歧 / A smem 越界)。
+仍崩 → 加 `MEGA_DIAG_NOGEMM` 诊断开关（fp8 tile 短路成只写 0），二分"是 GEMM tile 还是调度/其他阶段"。

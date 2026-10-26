@@ -93,8 +93,10 @@ fn mega_mlp_matches_eager_path() {
   let duw = st.htod_copy(uw_q.clone()).unwrap();
   let ddw = st.htod_copy(dw_q.clone()).unwrap();
 
+  eprintln!("STEP1 before rmsnorm");
   let mut norm1 = st.alloc_zeros::<bf16>(M * H).unwrap();
   dinfer_kernels::ops::rmsnorm_bf16_n(&st, &dx, &dpre, &mut norm1, M, H, EPS).unwrap();
+  st.synchronize().unwrap(); eprintln!("STEP2 rmsnorm ok");
 
   let mut gate = st.alloc_zeros::<bf16>(M * I).unwrap();
   let mut up = st.alloc_zeros::<bf16>(M * I).unwrap();
@@ -102,13 +104,19 @@ fn mega_mlp_matches_eager_path() {
   let mut act_bf = st.alloc_zeros::<bf16>(M * I).unwrap();
   let mut ref_out = st.alloc_zeros::<bf16>(M * H).unwrap();
   gemm.forward_fp8(&norm1, gate_as, &dgw, gate_ws, &mut gate, M, I, H).unwrap();
+  st.synchronize().unwrap(); eprintln!("STEP3 gate ok");
   gemm.forward_fp8(&norm1, up_as, &duw, up_ws, &mut up, M, I, H).unwrap();
+  st.synchronize().unwrap(); eprintln!("STEP4 up ok");
   dinfer_kernels::ops::gelu_tanh_mul_round2_bf16(&st, &gate, &up, &mut act_bf, M, I).unwrap();
+  st.synchronize().unwrap(); eprintln!("STEP5 gelu ok");
   gemm.forward_fp8(&act_bf, dn_as, &ddw, dn_ws, &mut dn_out, M, H, I).unwrap();
+  st.synchronize().unwrap(); eprintln!("STEP6 down ok");
   dinfer_kernels::ops::rmsnorm_bf16_n(&st, &dn_out, &dpost, &mut ref_out, M, H, EPS).unwrap();
+  st.synchronize().unwrap(); eprintln!("STEP7 post ok (reference path done)");
   st.synchronize().unwrap();
   let refv = st.dtoh_sync_copy(&ref_out).unwrap();
 
+  eprintln!("STEP8 megakernel start");
   // ---- megakernel 路径 ----
   let mut norm1_m = st.alloc_zeros::<bf16>(M * H).unwrap();
   let mut norm1_q = st.alloc_zeros::<u8>(M * H).unwrap();

@@ -125,32 +125,54 @@ template <int BN>
 __device__ __forceinline__ void fp8_gemm_tile(const uint8_t* __restrict__ A, const uint8_t* __restrict__ B,
                                               bf16* __restrict__ D, int m, int N, int K, int n_blk, float wscale,
                                               uint8_t* smem) {
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+#ifdef MEGA_DIAG_NOGEMM
+  // 诊断模式：不碰 smem、不算，只写 0，用以二分定位 SIGSEGV 来源
+  const int nrow0d = warp * (BN / kWarps);
+  const int r0d = lane >> 2, r1d = r0d + 8, cgd = (lane & 3) * 2;
+  for (int i = 0; i < 2; ++i) {
+    const int g0 = n_blk * BN + nrow0d + cgd + i * 8;
+    if (g0 < N) {
+      if (r0d < m) D[(long)r0d * N + g0] = to_bf16(0.f);
+      if (r1d < m) D[(long)r1d * N + g0] = to_bf16(0.f);
+    }
+    if (g0 + 1 < N) {
+      if (r0d < m) D[(long)r0d * N + g0 + 1] = to_bf16(0.f);
+      if (r1d < m) D[(long)r1d * N + g0 + 1] = to_bf16(0.f);
+    }
+  }
+  return;
+#endif
   constexpr int BK = 128;
   constexpr int RS = BK + 16;
-  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   uint8_t* sA = smem;             // m(≤16) 行 × RS
   uint8_t* sB = smem + 16 * RS;   // BN 行 × RS
 
   float acc[2][4] = {};  // 本 warp 的 2 个 n8 片段 × 4 累加器
   const int nk = (K + BK - 1) / BK;
-  const int a_row = tid >> 2, a_ch = tid & 3;
-  constexpr int B_PER_T = BN * (BK / 16) / kThreads;
+  // A：只有 16 行 × (BK/16) 个 16B 块 = 16*8 = 128 个槽（BK=128）。256 线程只需前 128 个参与，
+  // 否则 a_row = tid>>2 会到 63 行 → 写出 sA（16 行）→ 段错误。
+  constexpr int A_CH = BK / 16;                    // 每行块数
+  constexpr int A_SLOTS = 16 * A_CH;               // 总槽数
+  constexpr int B_PER_T = BN * A_CH / kThreads;
 
   auto load_b = [&](int kb) {
 #pragma unroll
     for (int i = 0; i < B_PER_T; ++i) {
-      const int u = tid + i * kThreads, row = u / (BK / 16), ch = u % (BK / 16);
+      const int u = tid + i * kThreads, row = u / A_CH, ch = u % A_CH;
       const int gn = n_blk * BN + row, gk = kb * BK + ch * 16;
       const uint8_t* g = B + (long)(gn < N ? gn : N - 1) * K + gk;
       mega::cp_async16_zfill(sB + row * RS + ch * 16, g, (gn < N && gk + 15 < K) ? 16 : 0);
     }
   };
   auto store_a = [&](int kb) {
-    const int gm = a_row, gk = kb * BK + a_ch * 16;
+    if (tid >= A_SLOTS) return;  // 只有前 A_SLOTS 个线程搬 A
+    const int ar_ = tid / A_CH, ac_ = tid % A_CH;
+    const int gm = ar_, gk = kb * BK + ac_ * 16;
     const bool ok = gm < m && gk + 15 < K;
     uint4 v = make_uint4(0, 0, 0, 0);
     if (ok) v = *reinterpret_cast<const uint4*>(A + (long)gm * K + gk);
-    *reinterpret_cast<uint4*>(sA + a_row * RS + a_ch * 16) = v;
+    *reinterpret_cast<uint4*>(sA + ar_ * RS + ac_ * 16) = v;
   };
 
   const int nrow0 = warp * (BN / kWarps);  // 每 warp 负责 BN/8 行 N
