@@ -724,3 +724,10 @@ PREFF exec=0 证实融合生效。**整层 megakernel 累计**（分离 15launch
 
 **本步改动文件**：`crates/kernels/cuda/mega_layer_sm120.cu`（+`fuse_ff` 字段 / `fused_res_pre_ff` / S_RES 分支 / host count+dep）、
 `crates/kernels/src/ffi.rs`（MegaLayerParams +`fuse_ff`）、`crates/kernels/tests/mega_layer_parity.rs`（p2 叠加 `fuse_ff=1` + norm1 对拍 + 隔离 fuse_ff 计时段）。
+
+## R41 校读（主会话）：第二处片上融合完成，胶水链摘完
+RES+PRE_FF 融成 on-chip stage `fused_res_pre_ff`（一 warp 一行，pass A 算 post_attn_norm+写x2 同循环顺手累加 pass B 平方和，pass B 续 pre_ff_norm+量化）。逐位 0/N(m=1/4/8)，fuse_ff 净 1.08-1.11×。commit b4394e8。
+**x2 必须留 global**（约束，异于第一处）：layer.rs:1211 MoE 支路 pre_ff_norm_2(sc.x) 吃的就是 x2，dense/MoE 共用；且 H=2816 整行 smem 放不下(44KB/warp>20KB)。融合只省"PRE_FF 重读 x2 + 1 barrier"。
+**整层累计 speedup（分离 15launch → glue+ff 1launch）：m=1 1.47× / m=4 1.53× / m=8 1.60×**，全程逐位一致。
+子代理判断（认可）：胶水链（qkv三连 + RES/PRE_FF）基本融完，剩 OQUANT/ACT/POST 口径不一致或收益≈1%，优先级低。
+**转 B3(MoE 持久化) 或 B4(cudagraph)**，不再抠单 stage。
