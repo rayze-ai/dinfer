@@ -579,3 +579,8 @@ A 的成果（split-K 2.05× 逐位、partial/sem/末到归约骨架、分阶段
   ② 256 线程半数空转要解：B2 可让 attention stage 的一个 CTA 打包 2 个 (hk,split) shard（两个 128 线程半区各算一个），或与相邻 stage 错峰复用；
   ③ attn→o_proj 的残差流用 scratch/global 衔接（照 A 的 partial 骨架），merge 可并进 persistent（末到 CTA 归约，复用 A 的 sem 模式）；
   ④ 依赖链：qkv(GEMM)→rope/kv写→attn(本 stage)→merge→o_proj(GEMM)→残差，StagePlan 串起来，dep2 处理并行支路。
+
+### R36 回归确认（2026-10-26）
+抽 core 后原 v3 入口回归：`ref_tests` 的 `gqa_decode_d128_splitk_ref` + `gqa_decode_d128_b32_direct_ref`
+（对 golden npy，assert_close 1e-2）两个**全过** → 机械抽函数（薄壳 active 恒真）没改原 v3 数值。
+（远端容器无 test/kernel_refs，put 到 host /hf_data/yaochen/dinfer/test 解压后跑；跑完清理。）
