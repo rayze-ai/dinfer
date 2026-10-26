@@ -416,3 +416,16 @@ POST  1.7%  wait=184037
 mega_common.cuh StagePlan 加 `dep2`（第二前驱）；wait_stage 等 dep 后再等 dep2。
 mega_mlp：gate/up 都只依赖 NORM（并行），ACT 等 GATE(dep)+UP(dep2) 都完成。ffi/test 加 dep2 buffer。
 预期：UP 不再等 GATE（原 UP wait=162万含等 GATE），gate/up 重叠执行，wait 降。编译+跑中(bjr98k5bn)看 wait 变化 + 逐位是否保持。
+
+## R27 结果：gate/up 并行 → 1.38×→1.66×（逐位保持）
+```
+          并行前 wait → 并行后 wait
+UP      1621813 → 857341  (-47%, 不再等 GATE)
+DOWN    3266514 → 2303582 (-29%)
+mega 耗时 80.2us → 66.6us   speedup 1.38x → 1.66x   逐位 0/2816 保持
+```
+**证实用户判断**：megakernel 不是不行，是调度没优化好——一个依赖改动 +20%。
+DOWN wait=230万 仍最大（exec 仅 72万，wait 3.2×）：DOWN 等 ACT、ACT 等 gate+up 全完，是**真串行依赖**
+  （down 输入 = gelu(gate)·up，逻辑上无法提前），不是冗余等待。要再降只能让 gate/up/act 这条链本身更快
+  （如 gate/up 的 GEMV tile 更高占用）或 split-K 让多 CTA 分担。
+下一步：① 分析 DOWN 链能否再压（GEMV 占用/ split-K）；② 扩 attention（设计成重叠式，避免重蹈串行 wait）。
