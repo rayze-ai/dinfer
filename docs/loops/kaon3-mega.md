@@ -161,3 +161,11 @@ VERDICT: 逐位一致
   6. epilogue 漏乘 a_scale → 系统性偏差 0.40
 现状：dense MLP 支路（pre_norm→gate‖up→gelu→down→post_norm）一次 launch，与逐 op 路径**逐位一致**。
 下一步：① 计时 speedup（本 loop 的核心问题：消 kernel 边界值多少）；② 若正收益，再考虑扩到 attn/MoE。
+
+## R12 2026-10-26 扫 batch：B=1 崩 → 第 7 个真 bug（store_a 里早 return 跳过 __syncthreads）
+B=4 逐位一致 + 1.13×；但 B=1/2/8 扫档时崩（STEP8 之后无 STEP9）→ 与 m 相关的路径有 UB。
+根因：`store_a` 里 `if (tid >= A_SLOTS) return;` —— 该 lambda 在 `__syncthreads()` **之前**被调用，
+  早退的 128 个线程跳过了后面的 barrier → 屏障计数不匹配 → 段错误。B=4 侥幸未崩（时序），换 m 就暴露。
+修：改成 `if (tid < A_SLOTS) {...}` 不再早退。
+**教训（值得进 knowledge）**：persistent kernel 里任何 lamdba/helper 只要有线程提前 return，
+  而外层后续有 `__syncthreads()`，就是 UB。要么全进要么用谓词包住 body。

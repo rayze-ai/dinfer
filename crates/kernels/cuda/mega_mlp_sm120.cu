@@ -165,14 +165,16 @@ __device__ __forceinline__ void fp8_gemm_tile(const uint8_t* __restrict__ A, con
       mega::cp_async16_zfill(sB + row * RS + ch * 16, g, (gn < N && gk + 15 < K) ? 16 : 0);
     }
   };
+  // **不能早 return**：后面有 __syncthreads()，早退会让部分线程跳过 barrier → 死锁/段错。
   auto store_a = [&](int kb) {
-    if (tid >= A_SLOTS) return;  // 只有前 A_SLOTS 个线程搬 A
-    const int ar_ = tid / A_CH, ac_ = tid % A_CH;
-    const int gm = ar_, gk = kb * BK + ac_ * 16;
-    const bool ok = gm < m && gk + 15 < K;
-    uint4 v = make_uint4(0, 0, 0, 0);
-    if (ok) v = *reinterpret_cast<const uint4*>(A + (long)gm * K + gk);
-    *reinterpret_cast<uint4*>(sA + ar_ * RS + ac_ * 16) = v;
+    if (tid < A_SLOTS) {
+      const int ar_ = tid / A_CH, ac_ = tid % A_CH;
+      const int gm = ar_, gk = kb * BK + ac_ * 16;
+      const bool ok = gm < m && gk + 15 < K;
+      uint4 v = make_uint4(0, 0, 0, 0);
+      if (ok) v = *reinterpret_cast<const uint4*>(A + (long)gm * K + gk);
+      *reinterpret_cast<uint4*>(sA + ar_ * RS + ac_ * 16) = v;
+    }
   };
 
   const int nrow0 = warp * (BN / kWarps);  // 每 warp 负责 BN/8 行 N

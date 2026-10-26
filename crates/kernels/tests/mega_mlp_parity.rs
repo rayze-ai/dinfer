@@ -9,7 +9,7 @@ use std::ffi::c_void;
 
 const H: usize = 2816;
 const I: usize = 2112;
-const M: usize = 4;  // decode batch
+fn m_val() -> usize { std::env::var("MEGA_M").ok().and_then(|v| v.parse().ok()).unwrap_or(4) }
 const EPS: f32 = 1e-6;
 
 fn rand(n: usize, seed: u64) -> Vec<f32> {
@@ -69,6 +69,7 @@ fn mega_mlp_matches_eager_path() {
   let gemm = Gemm::new(&st).unwrap();
 
   // ---- 输入与权重 ----
+  let M = m_val();
   let x = rand(M * H, 11);
   let pre_w = rand(H, 21);
   let post_w = rand(H, 31);
@@ -170,8 +171,8 @@ fn mega_mlp_matches_eager_path() {
       st.raw() as _,
     )
   };
-  st.synchronize().unwrap();
-  println!("mega rc={rc}（0=成功；801=本 arch 未编入）");
+  let se = st.synchronize();
+  eprintln!("STEP9 after mega launch: sync={:?} rc={rc}", se.as_ref().err().map(|e| format!("{e}")));
   assert_eq!(rc, 0, "megakernel 返回 {rc}");
 
   let megav = st.dtoh_sync_copy(&out_m).unwrap();
@@ -195,4 +196,50 @@ fn mega_mlp_matches_eager_path() {
   assert!(nm.sqrt() > 1.0, "mega 范数异常（可能全零）");
   println!("[对比] 不同 {nd}/{} max|d|={mx:.4e} rel={rel:.3e}", M * H);
   println!("VERDICT: {}", if nd == 0 { "逐位一致" } else if rel < 5e-3 { "fp8 级差（可接受）" } else { "有系统性偏差" });
+
+  // ---- 计时：mega（一次 launch）vs 逐 op 路径（6 次 launch） ----
+  const ITERS: usize = 200;
+  // 逐 op 路径
+  st.synchronize().unwrap();
+  let t0 = std::time::Instant::now();
+  for _ in 0..ITERS {
+    dinfer_kernels::ops::rmsnorm_bf16_n(&st, &dx, &dpre, &mut norm1, M, H, EPS).unwrap();
+    gemm.forward_fp8(&norm1, gate_as, &dgw, gate_ws, &mut gate, M, I, H).unwrap();
+    gemm.forward_fp8(&norm1, up_as, &duw, up_ws, &mut up, M, I, H).unwrap();
+    dinfer_kernels::ops::gelu_tanh_mul_round2_bf16(&st, &gate, &up, &mut act_bf, M, I).unwrap();
+    gemm.forward_fp8(&act_bf, dn_as, &ddw, dn_ws, &mut dn_out, M, H, I).unwrap();
+    dinfer_kernels::ops::rmsnorm_bf16_n(&st, &dn_out, &dpost, &mut ref_out, M, H, EPS).unwrap();
+  }
+  st.synchronize().unwrap();
+  let eager_us = t0.elapsed().as_secs_f64() * 1e6 / ITERS as f64;
+  // mega 路径
+  let mut rdy2 = st.alloc_zeros::<i32>(8).unwrap();
+  st.synchronize().unwrap();
+  let t1 = std::time::Instant::now();
+  for _ in 0..ITERS {
+    let rc = unsafe {
+      ffi::mega_mlp_dense_branch(
+        st.ptr(&dx) as *const c_void, st.ptr_mut(&mut out_m) as *mut c_void,
+        st.ptr(&dpre) as *const c_void, st.ptr(&dpost) as *const c_void,
+        st.ptr(&dgw) as *const c_void, gate_ws, 1.0 / gate_as,
+        st.ptr(&duw) as *const c_void, up_ws, 1.0 / up_as,
+        st.ptr(&ddw) as *const c_void, dn_ws, 1.0 / dn_as,
+        st.ptr_mut(&mut norm1_m) as *mut c_void, st.ptr_mut(&mut norm1_q) as *mut c_void,
+        st.ptr_mut(&mut gate_m) as *mut c_void, st.ptr_mut(&mut up_m) as *mut c_void,
+        st.ptr_mut(&mut act_bf_m) as *mut c_void, st.ptr_mut(&mut act_q) as *mut c_void,
+        st.ptr_mut(&mut dn_m) as *mut c_void,
+        M as i32, H as i32, I as i32, EPS, n_gu, n_dn,
+        st.ptr_mut(&mut dep) as *mut i32, st.ptr_mut(&mut cnt) as *mut i32,
+        st.ptr_mut(&mut sta) as *mut i32, st.ptr_mut(&mut rdy2) as *mut i32,
+        2, 0, st.raw() as _,
+      )
+    };
+    assert_eq!(rc, 0);
+    // ready 计数器必须清零才能再次 launch
+    rdy2 = st.alloc_zeros::<i32>(8).unwrap();
+  }
+  st.synchronize().unwrap();
+  let mega_us = t1.elapsed().as_secs_f64() * 1e6 / ITERS as f64;
+  println!("[计时] B={M} 逐op路径={eager_us:.1}us  mega一次launch={mega_us:.1}us  speedup={:.2}x",
+           eager_us / mega_us);
 }
