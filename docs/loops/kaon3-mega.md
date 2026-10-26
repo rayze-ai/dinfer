@@ -269,3 +269,31 @@ speedup 1.37/1.28/1.12/1.03×。证实协调方更正后的记录正确，R12 �
 坑：put 覆盖 run_bench.sh 丢可执行位 → "Permission denied" 空跑（第二次"没看到请求"根因之一）。改 `bash <script>` 调。
 验证通过：kaon3-self(R0) CPU 100%（在 0-11 核组内），压测端 bench psr=96（在 16C 组 96-111 内）→ 绑核生效、互不抢核。
 16 组串行跑中(bc6nu9619)。产物 test/kaon3/2026-10-26/bench1/*.json。
+
+### R15 根因（2026-10-26 定案）：mega kernel 的 fp8 累加序对齐的是**自写 kernel**，生产默认走 **cuBLASLt**
+
+20 组随机真实激活、逐段统计（`models/kaon3/tests/mega_real_parity.rs`）：
+
+| m | 参考路径 | pre_norm | gate | up | gelu | down | post_norm |
+|---|---|---|---|---|---|---|---|
+| 1 | cuBLASLt（生产默认） | 0/56320 | **4** | **2** | **4** | **122** | **112** |
+| 1 | `FP8_SELF_KERNEL=1` | 0/56320 | **0** | **0** | **0** | **3** | **4** |
+| 4 | cuBLASLt | 2 | 9 | 11 | 16 | 1016 | 1032 |
+| 8 | cuBLASLt | 3 | 24 | 24 | 39 | 1038 | 1059 |
+
+**判据 ①**：换自写 kernel 当参考后 gate/up 从 4/2 变成 **0/0**、gelu 4→0 —— 逐位钉死。
+**判据 ②**：cuBLASLt 下 m=1 的 20 组只有 122/56320 = **0.22%** 元素差，且全是 **1 个 bf16 ulp**
+（max|d| 0.25 只出现在跨零值，`max rel` 对这些是 5.6e-2，不是 1.0 那种量级）。
+
+差异为什么在端到端被放大成文本不同：fp8 GEMM 累加序（cuBLASLt 的 split-K/tile 序 vs kernel 的
+单 CTA 逐 BK 累加）在 bf16 舍入中点附近分叉 → 每层 0.2% 元素偏 1 ulp → 30 层累积 → 少数近并列 token 翻转。
+两条路径**各自确定**（同输入两次 md5 相同），所以不是竞态。
+
+**结论**：这不是接线 bug，是 oracle 不一致。
+- 若以 vLLM/cuBLASLt 为验收口径（项目现行口径，见 `docs/progress.md` 的 fp8 cuBLASLt 逐位一致记录），
+  mega 路径的数值与生产路径**不等价**（1-ulp 级）；
+- 若以自写 kernel 为口径，mega 在 m=1 的 norm/gate/up/gelu 上**逐位一致**，down 仍有 3/56320。
+- 想让 mega 与 cuBLASLt 逐位一致，必须让 kernel 的 fp8 累加序复刻 cuBLASLt 的 tile/split-K 选择 —— 属 kernel 改动，不在本轮范围。
+
+端到端实测（5090，30 层真实模型）：5 个中文 prompt，base vs mega **0/5 文本完全相同**，
+差异都在极早位置且是近义替换（「分配」↔「任务分配」），max_tokens=96 内无质量退化。

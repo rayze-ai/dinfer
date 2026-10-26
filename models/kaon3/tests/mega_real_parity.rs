@@ -102,6 +102,8 @@ fn mega_real_weights_matches_eager() {
     let (dw, dw_s, dw_a, _, _) = down.fp8_parts().expect("down 不是 FP8");
 
     let mut total = [0usize; 6];
+    let mut ustep = [0f32; 6];
+    let mut urel = [0f32; 6];
     let mut first_bad: Option<usize> = None;
     let mut dx = dx;
     for it in 0..iters {
@@ -186,7 +188,9 @@ fn mega_real_weights_matches_eager() {
             ("6_post_ff_norm", &ref_ff1.data, &mega_ff1.data, m * h),
         ];
         for (si, (tag, a, b, n)) in stages.iter().enumerate() {
-            let nd = ndiff(&st, a, b, *n);
+            let (nd, md, rl) = ndiff2(&st, a, b, *n);
+        ustep[si] = ustep[si].max(md);
+        urel[si] = urel[si].max(rl);
             total[si] += nd;
             if nd > 0 && first_bad.is_none() {
                 first_bad = Some(si);
@@ -207,16 +211,28 @@ fn mega_real_weights_matches_eager() {
     let mut ok = true;
     for (si, name) in names.iter().enumerate() {
         let denom = iters * if si == 1 || si == 2 || si == 3 { m * inter } else { m * h };
-        println!("  {name}: 累计不同 {}/{}", total[si], denom);
+        println!("  {name}: 累计不同 {}/{}  max|d|={:.3e} max rel={:.3e}", total[si], denom, ustep[si], urel[si]);
         ok &= total[si] == 0;
     }
     println!("VERDICT: {}", if ok { "全段逐位一致" } else { "有段不一致（见上，第一处即根因）" });
     assert!(ok, "真实权重下有段不一致");
 }
 
-/// 只数不一致元素个数（不打印），用于多轮累计。
-fn ndiff(stream: &Stream, a: &CudaSlice<bf16>, b: &CudaSlice<bf16>, n: usize) -> usize {
+/// 数不一致元素个数 + 最大绝对差 + 最大相对差（相对按 1 ulp 口径：|d|/max(|a|,|b|)）。
+fn ndiff2(stream: &Stream, a: &CudaSlice<bf16>, b: &CudaSlice<bf16>, n: usize) -> (usize, f32, f32) {
     let va = stream.dtoh_sync_copy(a).unwrap();
     let vb = stream.dtoh_sync_copy(b).unwrap();
-    (0..n).filter(|&i| va[i].to_bits() != vb[i].to_bits()).count()
+    let (mut nd, mut md, mut mr) = (0usize, 0f32, 0f32);
+    for i in 0..n {
+        if va[i].to_bits() != vb[i].to_bits() {
+            nd += 1;
+            let (x, y) = (va[i].to_f32(), vb[i].to_f32());
+            md = md.max((x - y).abs());
+            let m = x.abs().max(y.abs());
+            if m > 0.0 {
+                mr = mr.max((x - y).abs() / m);
+            }
+        }
+    }
+    (nd, md, mr)
 }
