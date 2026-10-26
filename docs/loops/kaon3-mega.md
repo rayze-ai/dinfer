@@ -928,3 +928,10 @@ kaon3 decode 唯一走 cuBLASLt autotune(forward_bf16) 的是 **lm_head**(model.
 ② executor.rs 新 gemm 后、graph 捕获前调 `gemm.autotune(entries)`（GEMM_TUNE=off 时跳过），照 qwen35。
 作用：lm_head algo 启动定死进 default_algos 缓存，graph 捕获与 eager fallback 共享同 algo → 逐位，且保留 autotune 性能。
 编译中(bman6qqek)。验证：单进程 serve graph 命中步 vs eager fallback 步逐位；再测 cudagraph 的 decode launch 加速。
+
+## R44 方案2 ✅ 成功 + B4 数值问题完成
+autotune 开 + graph 开的 serve：日志 `kaon3 gemm autotune: 725 ms` + `decode graphs captured`；
+长城输出 md5 **eeb2e6cf** = 之前 GEMM_TUNE=off 下 graph==no-graph 的逐位基线值。
+→ **方案2 验证成功**：autotune 让 lm_head algo 启动定死，graph 与 eager 共享 → 结果 == 逐位基线，且保留 autotune 性能（非关掉）。
+**B4 数值问题完成**：cudagraph 捕获成功 + 逐位正确 + 保 autotune。子代理卡的点（graph≠eager）根因是 kaon3 executor 缺 autotune 调用，已补。
+下一步：测 cudagraph 对 decode launch 开销的收益（graph vs NO_GRAPH 同为 autotune 开，bench c1/c8 tok/s）——这才是 B4 的目的。
