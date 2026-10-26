@@ -227,3 +227,11 @@ B=8  0/22528 逐位  114.7us → 110.4us  1.04x
   → `CUDA_ERROR_NO_DEVICE`（`cuda device 0`）。已改成 `unset CUDA_VISIBLE_DEVICES`。
 - **坑**：模型 id 是 `kaon3` 不是 `kaon`（`/v1/models` 确认）；写错返回 404 `The model ... does not exist`。
 - GPU1/2 被别人的 `vllm-eager`/`vllm-noneager` 占着，mega 用 GPU3。
+
+## R16 2026-10-26 端到端四配置压测开跑（已确认请求命中）
+脚本 bug 修复：首版 `set -u` + `set -- $g` 位置参数丢失 → `$2 unbound` 没发请求（用户"没看到请求"）。改 cut 解析。
+四配置：R0 dinfer eager(8133) / R1 dinfer mega(8132,KAON3_MEGA=1) / Ve vLLM eager(28200) / Vn vLLM 非eager(28201)。
+四负载：c1/c8/c32×(p128,o128) + c8×(p1024,o128)。slo ttft500/tpot50 采 goodput。
+**压测端钉核 taskset -c 120-127**（128 核机，服务自由用 0-119，不抢核；client cpu 记进 json 待核对<1核）。
+已确认命中：kaon3-self CPU 升到 100%，日志文件在建。bench1 产物目录 test/kaon3/2026-10-26/bench1。
+跑完出对比表 + perf-trend CSV/曲线 + Dashboard。
