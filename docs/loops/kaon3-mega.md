@@ -190,3 +190,18 @@ B=4 逐位一致 + 1.13×；但 B=1/2/8 扫档时崩（STEP8 之后无 STEP9）�
 - 四组：c1/c8/c32×(p128,o128) + c8×(p1024,o128)，与项目既有趋势表同口径
 - 产物：test/kaon3/<日期>/benchN + perf-trend.{csv,md,svg,html} + Dashboard(8090) 曲线
 工具：bins/bench（与 vLLM bench serve 同口径 TTFT/ITL/TPOT/goodput）+ bench_compare.sh + bench_trend.py。
+
+## R15 2026-10-26 接进真实前向：`KAON3_MEGA=1` 开关（默认关）
+改动只在 `models/kaon3/src/layer.rs`（`crates/` 未动）：
+- `QLinear::fp8_parts()` → `(w, scale, a_scale, n, k)`，kernel 直接吃原始 fp8 指针（绕过 `forward` 的量化暂存）。
+- `MEGA_ROWS=8` / `MEGA_STAGES=6` / `mega_enabled()`（`KAON3_MEGA=1` 开，默认关）。
+- `MegaBufs`：按 **8 行**分配 `norm1`/`norm1_q(u8)`/`gate_buf`/`up_buf`/`act_bf`/`act_q(u8)`/`down_out` + `dep/count/start/ready`（6 个 i32）。
+  `LayerScratch.mega: Option<MegaBufs>`，开关关时 `None`（不占显存）。
+- `Gemma4Layer::mega_dense_branch()`：前置条件 = 开关开 && `0 < tokens <= 8` && 三个投影全 FP8 && 形状匹配；
+  任一不满足返回 `Ok(false)` → 调用方走逐 op 路径（prefill 自动回退）。
+  launch 前 `memset_zeros_n(ready, 6)`（kernel 的阶段计数器是累加的，不清零第二次 launch 会直接跳过等待）。
+  `n_gu = ceil(I/128)`、`n_dn = ceil(H/128)`（kernel kBN=128），`pipe=2`、`prof=0`。
+- `forward` §7：mega 成功 → `sc.norm` 已是 `post_ff_norm_1` 结果，跳过逐 op；`sub_dump("ff1")`、§8 MoE、§9 合并逻辑未动。
+  中间缓冲用 `MegaBufs` 自己的，**不碰** `sc.gate_up/act/gelu/dense`（`sub_dump` 对拍要用）。
+
+编译：本地 `cargo build --release -p dinfer --features kaon3` OK；远端 5090 容器 `CUDA_ARCHS=120` 34.45s OK（仅既有 warning）。

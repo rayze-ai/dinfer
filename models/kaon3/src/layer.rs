@@ -699,6 +699,80 @@ fn sub_dump(stream: &Stream, sub_out: Option<(&std::path::Path, usize)>, name: &
 }
 
 impl Gemma4Layer {
+    /// dense MLP 支路走 megakernel（`KAON3_MEGA=1` 且 `tokens <= MEGA_ROWS` 且三个投影都是 FP8）。
+    ///
+    /// 成功时把 `post_ff_norm_1` 的结果写进 `sc.norm` 并返回 `Ok(true)`；任何前置条件不满足
+    /// （开关关 / prefill 大 batch / 权重不是 FP8）返回 `Ok(false)`，由调用方走逐 op 路径。
+    ///
+    /// 两处硬约束：① kernel host 侧断言 `m <= 8`（更大行数只会在 prefill 出现）；
+    /// ② `ready` 是 kernel 的全局阶段计数器，**每次 launch 前必须清零**，否则第二次 launch 会直接越过等待。
+    fn mega_dense_branch(
+        &self,
+        stream: &Stream,
+        cfg: &KaonConfig,
+        sc: &mut LayerScratch,
+        tokens: usize,
+        eps: f32,
+    ) -> Result<bool> {
+        if !mega_enabled() || tokens == 0 || tokens > MEGA_ROWS {
+            return Ok(false);
+        }
+        let (Some((gw, gw_s, gw_a, gn, gk)), Some((uw, uw_s, uw_a, un, uk)), Some((dw, dw_s, dw_a, dn, dk))) =
+            (self.dense_gate.fp8_parts(), self.dense_up.fp8_parts(), self.dense_down.fp8_parts())
+        else {
+            return Ok(false); // 非 FP8 权重：kernel 只支持 fp8 输入
+        };
+        let (h, inter) = (cfg.hidden, cfg.dense_inter);
+        ensure!(gn == inter && un == inter && gk == h && uk == h, "mega: gate/up 形状 {gn}x{gk} / {un}x{uk} 不是 [{inter},{h}]");
+        ensure!(dn == h && dk == inter, "mega: down 形状 {dn}x{dk} 不是 [{h},{inter}]");
+        let Some(mb) = sc.mega.as_mut() else { return Ok(false) };
+
+        // `ready` 必须从 0 开始（kernel 的 stage 计数器是累加的）。
+        stream.memset_zeros_n(&mut mb.ready, MEGA_STAGES)?;
+
+        let n_gu = (inter.div_ceil(128)) as i32; // kernel kBN = 128
+        let n_dn = (h.div_ceil(128)) as i32;
+        let rc = unsafe {
+            dinfer_kernels::ffi::mega_mlp_dense_branch(
+                stream.ptr(&sc.x.data) as *const std::ffi::c_void,
+                stream.ptr_mut(&mut sc.norm.data) as *mut std::ffi::c_void,
+                stream.ptr(&self.pre_ff_norm.data) as *const std::ffi::c_void,
+                stream.ptr(&self.post_ff_norm_1.data) as *const std::ffi::c_void,
+                stream.ptr(gw) as *const std::ffi::c_void,
+                gw_s,
+                1.0 / gw_a,
+                stream.ptr(uw) as *const std::ffi::c_void,
+                uw_s,
+                1.0 / uw_a,
+                stream.ptr(dw) as *const std::ffi::c_void,
+                dw_s,
+                1.0 / dw_a,
+                stream.ptr_mut(&mut mb.norm1.data) as *mut std::ffi::c_void,
+                stream.ptr_mut(&mut mb.norm1_q) as *mut std::ffi::c_void,
+                stream.ptr_mut(&mut mb.gate_buf.data) as *mut std::ffi::c_void,
+                stream.ptr_mut(&mut mb.up_buf.data) as *mut std::ffi::c_void,
+                stream.ptr_mut(&mut mb.act_bf.data) as *mut std::ffi::c_void,
+                stream.ptr_mut(&mut mb.act_q) as *mut std::ffi::c_void,
+                stream.ptr_mut(&mut mb.down_out.data) as *mut std::ffi::c_void,
+                tokens as i32,
+                h as i32,
+                inter as i32,
+                eps,
+                n_gu,
+                n_dn,
+                stream.ptr_mut(&mut mb.dep) as *mut i32,
+                stream.ptr_mut(&mut mb.count) as *mut i32,
+                stream.ptr_mut(&mut mb.start) as *mut i32,
+                stream.ptr_mut(&mut mb.ready) as *mut i32,
+                2, // pipe
+                0, // prof
+                stream.raw() as _,
+            )
+        };
+        ensure!(rc == 0, "mega_mlp_dense_branch 返回 {rc}（非 sm120 构建为 801）");
+        Ok(true)
+    }
+
     /// 一层的完整前向。`tokens` = 本步 token 数（prefill 多行 / decode 每请求 1 行）。
     #[allow(clippy::too_many_arguments)]
     pub fn forward(
@@ -900,28 +974,34 @@ impl Gemma4Layer {
         k::ops::add_inplace_bf16_n(stream, &sc.norm.data, &mut sc.x.data, tokens * h)?;
 
         // ---- 7. dense MLP 支路（无条件执行）----
-        rmsnorm_into(stream, ops, &sc.x, &self.pre_ff_norm, &mut sc.norm, h, tokens, eps)?;
-        sub_dump(stream, sub_out, "pre_ff_norm", &sc.norm, tokens, h)?;
-        self.dense_gate.forward(gemm, stream, &sc.norm, &mut sc.gate_up, tokens)?;
-        self.dense_up.forward(gemm, stream, &sc.norm, &mut sc.act, tokens)?;
-        if let Some((dir, _)) = sub_out {
-            // mlp_gate_up = [gate | up] 拼起来（vLLM 的 MergedColumnParallelLinear 输出布局）
-            let (g, u) = (sc.gate_up.to_vec_f32(stream)?, sc.act.to_vec_f32(stream)?);
-            let di = cfg.dense_inter;
-            let mut outv = Vec::with_capacity(tokens * 2 * di);
-            for t in 0..tokens {
-                outv.extend_from_slice(&g[t * di..(t + 1) * di]);
-                outv.extend_from_slice(&u[t * di..(t + 1) * di]);
+        // `KAON3_MEGA=1` 且 decode（tokens ≤ 8）时，整条支路走 persistent megakernel 一次 launch：
+        // pre_ff_norm → gate ‖ up → gelu·mul(round2) → down → post_ff_norm_1，输出落在 `sc.norm`。
+        // 与下面逐 op 路径逐位一致（`crates/kernels/tests/mega_mlp_parity.rs`）。prefill / 非 FP8 回退。
+        let mega_done = self.mega_dense_branch(stream, cfg, sc, tokens, eps)?;
+        if !mega_done {
+            rmsnorm_into(stream, ops, &sc.x, &self.pre_ff_norm, &mut sc.norm, h, tokens, eps)?;
+            sub_dump(stream, sub_out, "pre_ff_norm", &sc.norm, tokens, h)?;
+            self.dense_gate.forward(gemm, stream, &sc.norm, &mut sc.gate_up, tokens)?;
+            self.dense_up.forward(gemm, stream, &sc.norm, &mut sc.act, tokens)?;
+            if let Some((dir, _)) = sub_out {
+                // mlp_gate_up = [gate | up] 拼起来（vLLM 的 MergedColumnParallelLinear 输出布局）
+                let (g, u) = (sc.gate_up.to_vec_f32(stream)?, sc.act.to_vec_f32(stream)?);
+                let di = cfg.dense_inter;
+                let mut outv = Vec::with_capacity(tokens * 2 * di);
+                for t in 0..tokens {
+                    outv.extend_from_slice(&g[t * di..(t + 1) * di]);
+                    outv.extend_from_slice(&u[t * di..(t + 1) * di]);
+                }
+                let bytes: Vec<u8> = outv.iter().flat_map(|x| x.to_le_bytes()).collect();
+                std::fs::write(dir.join("mlp_gate_up.bin"), bytes)
+                    .map_err(|err| anyhow::anyhow!("写 mlp_gate_up.bin 失败: {err}"))?;
             }
-            let bytes: Vec<u8> = outv.iter().flat_map(|x| x.to_le_bytes()).collect();
-            std::fs::write(dir.join("mlp_gate_up.bin"), bytes)
-                .map_err(|err| anyhow::anyhow!("写 mlp_gate_up.bin 失败: {err}"))?;
+            gelu_mul(stream, ops, &sc.gate_up.data, &sc.act.data, &mut sc.gelu.data, tokens, cfg.dense_inter)?;
+            sub_dump(stream, sub_out, "mlp_gelu", &sc.gelu, tokens, cfg.dense_inter)?;
+            self.dense_down.forward(gemm, stream, &sc.gelu, &mut sc.dense, tokens)?;
+            sub_dump(stream, sub_out, "dense", &sc.dense, tokens, h)?;
+            rmsnorm_into(stream, ops, &sc.dense, &self.post_ff_norm_1, &mut sc.norm, h, tokens, eps)?;
         }
-        gelu_mul(stream, ops, &sc.gate_up.data, &sc.act.data, &mut sc.gelu.data, tokens, cfg.dense_inter)?;
-        sub_dump(stream, sub_out, "mlp_gelu", &sc.gelu, tokens, cfg.dense_inter)?;
-        self.dense_down.forward(gemm, stream, &sc.gelu, &mut sc.dense, tokens)?;
-        sub_dump(stream, sub_out, "dense", &sc.dense, tokens, h)?;
-        rmsnorm_into(stream, ops, &sc.dense, &self.post_ff_norm_1, &mut sc.norm, h, tokens, eps)?;
         sub_dump(stream, sub_out, "ff1", &sc.norm, tokens, h)?;
 
         // ---- 8. MoE 支路（与 dense 并联）----
