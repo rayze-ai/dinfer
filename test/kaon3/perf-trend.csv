@@ -1,0 +1,13 @@
+round,date,change,group,metric,dinfer,vllm,ratio_dinfer_over_vllm,delta_pct_vs_prev_round,better_is,kind,gpu,baseline,variant,model
+bench1,2026-10-26,"R1 基线: R27 的 mega(gate/up 并行,1.66x kernel),dense MLP persistent,无 split-K",c1,out_tok_per_s,23.717,209.018,0.113,,higher,main,5090,vllm,dinfer,kaon3
+bench1,2026-10-26,"R1 基线: R27 的 mega(gate/up 并行,1.66x kernel),dense MLP persistent,无 split-K",c1,ttft_p50_ms,226.525,18.782,12.061,,lower,main,5090,vllm,dinfer,kaon3
+bench1,2026-10-26,"R1 基线: R27 的 mega(gate/up 并行,1.66x kernel),dense MLP persistent,无 split-K",c1,tpot_p50_ms,40.718,4.674,8.711,,lower,main,5090,vllm,dinfer,kaon3
+bench1,2026-10-26,"R1 基线: R27 的 mega(gate/up 并行,1.66x kernel),dense MLP persistent,无 split-K",c8,out_tok_per_s,80.256,1202.111,0.067,,higher,main,5090,vllm,dinfer,kaon3
+bench1,2026-10-26,"R1 基线: R27 的 mega(gate/up 并行,1.66x kernel),dense MLP persistent,无 split-K",c8,ttft_p50_ms,518.719,89.912,5.769,,lower,main,5090,vllm,dinfer,kaon3
+bench1,2026-10-26,"R1 基线: R27 的 mega(gate/up 并行,1.66x kernel),dense MLP persistent,无 split-K",c8,tpot_p50_ms,100.295,6.010,16.688,,lower,main,5090,vllm,dinfer,kaon3
+bench1,2026-10-26,"R1 基线: R27 的 mega(gate/up 并行,1.66x kernel),dense MLP persistent,无 split-K",c32,out_tok_per_s,124.683,3593.376,0.035,,higher,main,5090,vllm,dinfer,kaon3
+bench1,2026-10-26,"R1 基线: R27 的 mega(gate/up 并行,1.66x kernel),dense MLP persistent,无 split-K",c32,ttft_p50_ms,17341.901,173.151,100.155,,lower,main,5090,vllm,dinfer,kaon3
+bench1,2026-10-26,"R1 基线: R27 的 mega(gate/up 并行,1.66x kernel),dense MLP persistent,无 split-K",c32,tpot_p50_ms,131.249,7.555,17.372,,lower,main,5090,vllm,dinfer,kaon3
+bench1,2026-10-26,"R1 基线: R27 的 mega(gate/up 并行,1.66x kernel),dense MLP persistent,无 split-K",c8-long,out_tok_per_s,39.600,964.532,0.041,,higher,main,5090,vllm,dinfer,kaon3
+bench1,2026-10-26,"R1 基线: R27 的 mega(gate/up 并行,1.66x kernel),dense MLP persistent,无 split-K",c8-long,ttft_p50_ms,4560.453,225.214,20.249,,lower,main,5090,vllm,dinfer,kaon3
+bench1,2026-10-26,"R1 基线: R27 的 mega(gate/up 并行,1.66x kernel),dense MLP persistent,无 split-K",c8-long,tpot_p50_ms,165.438,6.543,25.284,,lower,main,5090,vllm,dinfer,kaon3

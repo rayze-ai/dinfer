@@ -1,0 +1,1 @@
+R1 基线: R27 的 mega(gate/up 并行,1.66x kernel),dense MLP persistent,无 split-K

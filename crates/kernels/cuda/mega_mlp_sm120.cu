@@ -69,6 +69,15 @@ struct Params {
   const int* count;
   const int* start;
   int* ready;
+  // split-K（每 GEMM 各一套；splits==1 时忽略 partial/sem）
+  int sp_gu;        // gate/up 的 split 份数
+  int sp_dn;        // down 的 split 份数
+  float* part_gate; // [sp_gu][m][I]
+  float* part_up;   // [sp_gu][m][I]
+  float* part_dn;   // [sp_dn][m][H]
+  int* sem_gate;    // [n_gu]
+  int* sem_up;      // [n_gu]
+  int* sem_dn;      // [n_dn]
 };
 
 // ---------------------------------------------------------------- fp8 原语（照 gemm_fp8_sm120.cu）
@@ -118,13 +127,17 @@ __device__ __forceinline__ void rmsnorm_row_warp(const bf16* __restrict__ x, con
   for (int i = lane; i < H; i += 32) o[i] = to_bf16(to_f32(x[i]) * inv * to_f32(w[i]));
 }
 
-// ---------------------------------------------------------------- fp8 GEMM tile（M≤16，单 CTA 一个 N tile，不 split-K）
+// ---------------------------------------------------------------- fp8 GEMM tile（M≤16，一个 N tile；可选 split-K）
 // 片段寻址严格照 gemm_fp8_sm120.cu：A 用 ldm_x4（m16k32，每 lane 4×u32），B 用 ldm_x2（n8k32，每 lane 2×u32）。
 // BN：本 tile 的 N 行数；8 warp 分 N 方向。
+// split-K（splits>1）：本 CTA 只算 K 的 [k0, k1) 段（按 BK 块均分），f32 partial 写 `partial[split][m][N]`，
+//   每 tile 一个 `sem`，末到 CTA（atomicAdd==splits-1）把 splits 份 partial f32 求和、乘 wscale、写 bf16。
+//   splits==1 时走原路径（不碰 partial/sem），**与改动前逐位一致**。
 template <int BN>
 __device__ __forceinline__ void fp8_gemm_tile(const uint8_t* __restrict__ A, const uint8_t* __restrict__ B,
                                               bf16* __restrict__ D, int m, int N, int K, int n_blk, float wscale,
-                                              uint8_t* smem) {
+                                              uint8_t* smem, int split, int splits, float* __restrict__ partial,
+                                              int* __restrict__ sem) {
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
 #if defined(MEGA_DIAG_NOGEMM)  // 诊断开关：短路 GEMM（二分崩溃来源）
   // 诊断模式：不碰 smem、不算，只写 0，用以二分定位 SIGSEGV 来源
@@ -150,6 +163,10 @@ __device__ __forceinline__ void fp8_gemm_tile(const uint8_t* __restrict__ A, con
 
   float acc[2][4] = {};  // 本 warp 的 2 个 n8 片段 × 4 累加器
   const int nk = (K + BK - 1) / BK;
+  // split-K：按 BK 块把 nk 均分给 splits 份，本 CTA 只跑 [kb_lo, kb_hi)。splits==1 → 全 K。
+  const int per = (nk + splits - 1) / splits;
+  const int kb_lo = split * per;
+  const int kb_hi = min(kb_lo + per, nk);
   // A：只有 16 行 × (BK/16) 个 16B 块 = 16*8 = 128 个槽（BK=128）。256 线程只需前 128 个参与，
   // 否则 a_row = tid>>2 会到 63 行 → 写出 sA（16 行）→ 段错误。
   constexpr int A_CH = BK / 16;                    // 每行块数
@@ -178,7 +195,7 @@ __device__ __forceinline__ void fp8_gemm_tile(const uint8_t* __restrict__ A, con
   };
 
   const int nrow0 = warp * (BN / kWarps);  // 每 warp 负责 BN/8 行 N
-  for (int kb = 0; kb < nk; ++kb) {
+  for (int kb = kb_lo; kb < kb_hi; ++kb) {
     load_b(kb);
     store_a(kb);
     asm volatile("cp.async.commit_group;\n");
@@ -201,18 +218,56 @@ __device__ __forceinline__ void fp8_gemm_tile(const uint8_t* __restrict__ A, con
 
   // 尾声：r0=lane>>2 / r1=r0+8，列 = nrow0 + (lane&3)*2 + {0,1}（第 i 片段 +8）
   const int r0 = lane >> 2, r1 = r0 + 8, cg = (lane & 3) * 2;
+  if (splits == 1) {
+    // 原路径：直接乘 wscale 写 bf16（**与改动前逐位一致**）
+#pragma unroll
+    for (int i = 0; i < 2; ++i) {
+      const int ncol = nrow0 + cg + i * 8;  // 该片段的起始列（偶）
+      const int g0 = n_blk * BN + ncol, g1 = g0 + 1;
+      if (g0 < N) {
+        if (r0 < m) D[(long)r0 * N + g0] = to_bf16(acc[i][0] * wscale);
+        if (r1 < m) D[(long)r1 * N + g0] = to_bf16(acc[i][2] * wscale);
+      }
+      if (g1 < N) {
+        if (r0 < m) D[(long)r0 * N + g1] = to_bf16(acc[i][1] * wscale);
+        if (r1 < m) D[(long)r1 * N + g1] = to_bf16(acc[i][3] * wscale);
+      }
+    }
+    return;
+  }
+  // split-K：本 split 的 f32 partial 写 partial[split][m][N]（不乘 wscale，归约后统一乘）
+  float* ps = partial + (long)split * m * N;
 #pragma unroll
   for (int i = 0; i < 2; ++i) {
-    const int ncol = nrow0 + cg + i * 8;  // 该片段的起始列（偶）
+    const int ncol = nrow0 + cg + i * 8;
     const int g0 = n_blk * BN + ncol, g1 = g0 + 1;
     if (g0 < N) {
-      if (r0 < m) D[(long)r0 * N + g0] = to_bf16(acc[i][0] * wscale);
-      if (r1 < m) D[(long)r1 * N + g0] = to_bf16(acc[i][2] * wscale);
+      if (r0 < m) ps[(long)r0 * N + g0] = acc[i][0];
+      if (r1 < m) ps[(long)r1 * N + g0] = acc[i][2];
     }
     if (g1 < N) {
-      if (r0 < m) D[(long)r0 * N + g1] = to_bf16(acc[i][1] * wscale);
-      if (r1 < m) D[(long)r1 * N + g1] = to_bf16(acc[i][3] * wscale);
+      if (r0 < m) ps[(long)r0 * N + g1] = acc[i][1];
+      if (r1 < m) ps[(long)r1 * N + g1] = acc[i][3];
     }
+  }
+  // 末到 CTA 做归约：threadfence 保 partial 全局可见 → atomicAdd 到本 tile 的 sem
+  __shared__ int s_last;
+  __syncthreads();
+  if (tid == 0) {
+    __threadfence();
+    s_last = (atomicAdd(sem + n_blk, 1) == splits - 1) ? 1 : 0;
+  }
+  __syncthreads();
+  if (!s_last) return;
+  __threadfence();
+  // 本 tile 的 N 列范围 [n0, n1)，按 split 顺序求和（0..splits-1）→ 乘 wscale → bf16
+  const int n0 = n_blk * BN, n1 = min(n0 + BN, N);
+  const int ncols = n1 - n0;
+  for (int idx = tid; idx < m * ncols; idx += kThreads) {
+    const int r = idx / ncols, c = idx - r * ncols;
+    float s = 0.f;
+    for (int sp = 0; sp < splits; ++sp) s += __ldcg(partial + (long)sp * m * N + (long)r * N + n0 + c);
+    D[(long)r * N + n0 + c] = to_bf16(s * wscale);
   }
 }
 
@@ -242,15 +297,21 @@ struct MlpDenseDispatch {
         }
         return;
       }
-      case S_GATE:
+      case S_GATE: {
         // 口径（照 gemm_fp8_sm120.cu）：out = (A/a_scale · W) * (a_scale * w_scale)。
         // A 已按 a_inv=1/a_scale 量化，故 epilogue 需乘 (w_scale * a_scale) = w_scale / a_inv。
-        fp8_gemm_tile<kBN>(p.norm1_q, p.gate_w, p.gate_buf, p.m, p.I, p.H, shard,
-                           p.gate_wscale / p.gate_a_inv, smem);
+        // split-K：shard = tile·sp_gu + split
+        const int tile = shard / p.sp_gu, split = shard - tile * p.sp_gu;
+        fp8_gemm_tile<kBN>(p.norm1_q, p.gate_w, p.gate_buf, p.m, p.I, p.H, tile,
+                           p.gate_wscale / p.gate_a_inv, smem, split, p.sp_gu, p.part_gate, p.sem_gate);
         return;
-      case S_UP:
-        fp8_gemm_tile<kBN>(p.norm1_q, p.up_w, p.up_buf, p.m, p.I, p.H, shard, p.up_wscale / p.up_a_inv, smem);
+      }
+      case S_UP: {
+        const int tile = shard / p.sp_gu, split = shard - tile * p.sp_gu;
+        fp8_gemm_tile<kBN>(p.norm1_q, p.up_w, p.up_buf, p.m, p.I, p.H, tile, p.up_wscale / p.up_a_inv, smem,
+                           split, p.sp_gu, p.part_up, p.sem_up);
         return;
+      }
       case S_ACT: {
         const long n = (long)p.m * p.I;
         for (long i = tid; i < n; i += kThreads) p.act_bf[i] = gelu_mul_round2(p.gate_buf[i], p.up_buf[i]);
@@ -261,9 +322,12 @@ struct MlpDenseDispatch {
         }
         return;
       }
-      case S_DOWN:
-        fp8_gemm_tile<kBN>(p.act, p.dn_w, p.down_out, p.m, p.H, p.I, shard, p.dn_wscale / p.dn_a_inv, smem);
+      case S_DOWN: {
+        const int tile = shard / p.sp_dn, split = shard - tile * p.sp_dn;
+        fp8_gemm_tile<kBN>(p.act, p.dn_w, p.down_out, p.m, p.H, p.I, tile, p.dn_wscale / p.dn_a_inv, smem,
+                           split, p.sp_dn, p.part_dn, p.sem_dn);
         return;
+      }
       case S_POST: {
         __shared__ float red[kWarps];
         {
@@ -293,22 +357,36 @@ int mega_mlp_dense_branch(const void* x, void* out, const void* pre_w, const voi
                          const void* dn_w, float dn_wscale, float dn_a_inv, void* norm1, void* norm1_q, void* gate_buf, void* up_buf,
                          void* act_bf, void* act, void* down_out, int m, int H, int I, float eps, int n_gu, int n_dn,
                          int* dep, int* count, int* start, int* ready, int* dep2, int pipe, int prof,
-                         unsigned long long* wait_cyc, unsigned long long* exec_cyc, cudaStream_t stream) {
+                         unsigned long long* wait_cyc, unsigned long long* exec_cyc,
+                         int sp_gu, int sp_dn, void* part_gate, void* part_up, void* part_dn,
+                         int* sem_gate, int* sem_up, int* sem_dn, cudaStream_t stream) {
   using namespace dinfer;
   using namespace dinfer::mega_mlp;
   if (m <= 0 || m > 8 || H <= 0 || I <= 0) return (int)cudaErrorInvalidValue;
+  if (sp_gu < 1) sp_gu = 1;
+  if (sp_dn < 1) sp_dn = 1;
   constexpr int kBN = MlpDenseDispatch::kBN;
   // smem：sA(16×RS) + sB(BN×RS)
   const size_t smem = (size_t)(16 + kBN) * (128 + 16);
+
+  // split-K 的 sem 须每次 launch 前清零（partial 不用：每 split 全写自己的区）。
+  if (sp_gu > 1) {
+    if (cudaMemsetAsync(sem_gate, 0, sizeof(int) * n_gu, stream) != cudaSuccess ||
+        cudaMemsetAsync(sem_up, 0, sizeof(int) * n_gu, stream) != cudaSuccess)
+      return (int)cudaGetLastError();
+  }
+  if (sp_dn > 1) {
+    if (cudaMemsetAsync(sem_dn, 0, sizeof(int) * n_dn, stream) != cudaSuccess) return (int)cudaGetLastError();
+  }
 
   // **注意**：dep/count/start/ready 是**设备指针**（Rust 侧 st.ptr_mut 传入）。表先在 host 本地算，
   // 再 cudaMemcpy 拷过去；直接写 *dep 会往设备内存解引用 → SIGSEGV。
   int h_count[S_COUNT], h_dep[S_COUNT], h_start[S_COUNT];
   h_count[S_NORM] = 1;
-  h_count[S_GATE] = n_gu;
-  h_count[S_UP] = n_gu;
+  h_count[S_GATE] = n_gu * sp_gu;  // 每 tile 切 sp_gu 份 split-K
+  h_count[S_UP] = n_gu * sp_gu;
   h_count[S_ACT] = 1;
-  h_count[S_DOWN] = n_dn;
+  h_count[S_DOWN] = n_dn * sp_dn;
   h_count[S_POST] = 1;
   int h_dep2[S_COUNT];
   for (int i = 0; i < S_COUNT; ++i) h_dep2[i] = -1;
@@ -361,6 +439,14 @@ int mega_mlp_dense_branch(const void* x, void* out, const void* pre_w, const voi
   p.count = count;
   p.start = start;
   p.ready = ready;
+  p.sp_gu = sp_gu;
+  p.sp_dn = sp_dn;
+  p.part_gate = static_cast<float*>(part_gate);
+  p.part_up = static_cast<float*>(part_up);
+  p.part_dn = static_cast<float*>(part_dn);
+  p.sem_gate = sem_gate;
+  p.sem_up = sem_up;
+  p.sem_dn = sem_dn;
 
   int dev = 0, sms = 1, max_smem = 0;
   cudaGetDevice(&dev);
