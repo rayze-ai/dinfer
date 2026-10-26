@@ -950,3 +950,14 @@ graph vs no-graph（都 autotune 开，只差 NO_GRAPH，全优化栈=MoE groupe
 首次起 full stack OOM：累积的残留容器(kaon3-b4/mega/base/graph 等多轮没清)占满 7 张 GPU。**教训：每轮 serve 容器用完即清，别累积**。
 清理后 GPU0/1/4/5/6/7 空，vLLM eager/非eager 留 GPU2/3（B5 对照）。重起 kaon3-full 到 GPU0。
 B5 流程：① 验全栈三开关能起+生成+逐位(md5==eeb2e6cf)；② 四配置四负载 bench vs vLLM 非eager；③ 进 perf-trend；④ 整体分析。
+
+## R45 B5 前置发现真 bug：KAON3_MEGA(整层) + MOE_GROUPED + graph 三合一乱码
+全栈三开关同开：serve 起来(autotune+graph 日志正常)，但**生成乱码**："长get own own than Inc로 own로 싶..."，md5 bba1ab08 ≠ 逐位基线 eeb2e6cf。
+**区分清楚**：
+- B3+B4(MOE_GROUPED+graph，**不含 KAON3_MEGA**) = 54 tok/s + 逐位 eeb2e6cf ✓（R44 验过）
+- B2+B3+B4(**加 KAON3_MEGA 整层 megakernel**) = **乱码** ✗（三合一首次，子代理 B2/B4 都说"KAON3_MEGA 与 graph 正交叠加留后续"，现叠加炸）
+→ 整层 megakernel 与 graph 捕获/grouped MoE 组合时数值崩。嫌疑：megakernel 的中间 scratch buffer 在 graph capture/replay 时地址/生命周期没对，
+  或与 grouped MoE 抢 buffer，或 KAON3_MEGA 路径的 forward 在 capture 期有未固定的东西。
+**B5 两条路**：① 修 KAON3_MEGA+graph 组合（让整层 megakernel 进 graph）——是真全栈；
+  ② 先用已验证逐位的 B3+B4（MOE_GROUPED+graph，不开 KAON3_MEGA）跑 B5 端到端对比 vLLM，整层 megakernel 的增量单列。
+下一步：先验 KAON3_MEGA=1 **关 graph**(NO_GRAPH=1)下是否逐位——隔离"是 KAON3_MEGA 本身" vs "KAON3_MEGA 与 graph 组合"。
