@@ -429,3 +429,13 @@ DOWN wait=230万 仍最大（exec 仅 72万，wait 3.2×）：DOWN 等 ACT、ACT
   （down 输入 = gelu(gate)·up，逻辑上无法提前），不是冗余等待。要再降只能让 gate/up/act 这条链本身更快
   （如 gate/up 的 GEMV tile 更高占用）或 split-K 让多 CTA 分担。
 下一步：① 分析 DOWN 链能否再压（GEMV 占用/ split-K）；② 扩 attention（设计成重叠式，避免重蹈串行 wait）。
+
+## R28 2026-10-26 端到端多轮折线（对齐其他模型 perf-trend 格式）
+用户：端到端压测要做成**多轮折线图**（和 qwen3/qwen35 一样：每轮一目录、带卡型、带 CHANGE 本轮改动），megakernel 要迭代多轮看趋势。
+格式（复用 bench_trend.py，不另造）：`test/kaon3/<日期>/benchN/` 每轮含 `dinfer_<group>.json` + `vllm_<group>.json` + `CHANGE` + `GPU`，
+  `python3 -I scripts/dev/bench_trend.py --root test/kaon3` → perf-trend.{csv,md,svg,html}（折线：每组 tok/s、×vLLM 倍数、TTFT/TPOT、相对上轮%）。
+映射：**dinfer = mega serve(8132)**（迭代对象），**vLLM = vLLM 非eager(28201)**（最强基线，追它）。四组 c1/c8/c32/c8-p1024。
+脚本 `kaon3_bench_round.sh <目录> "<改动>"` 已传（钉核 96-111）。
+委派子代理做迭代循环：改 kernel→编译→跑一轮→写 benchN→重生成 perf-trend 折线→进 Dashboard；每轮 CHANGE 记清改了什么。
+主会话把关方向（基于 R26 profiling：先攻 DOWN wait / gate-up 占用，再扩 attention）。
+基线轮（R27 的 mega 1.66×）作为 bench_trend 第 1 轮。
