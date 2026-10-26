@@ -177,3 +177,16 @@ B=4 逐位一致 + 1.13×；但 B=1/2/8 扫档时崩（STEP8 之后无 STEP9）�
 更可能是 `store_a` 之后紧接的 `cp.async.wait_group 0` + `__syncthreads()` 在 m 小时某些 warp 全部线程 tid>=A_SLOTS
 （warp≥4）不参与 A 搬运、但参与 barrier——这没问题。仍待确认（用 MEGA_DIAG 分段：只短路 gate，不短路 down 等）。
 下一步：细粒度二分（NOGEMM_GATE / NOGEMM_UP / NOGEMM_DOWN 三个独立开关）。
+
+## R14 2026-10-26 测试口径统一（用户明确）：只讲 **eager / 非 eager**
+用户："vLLM eager / compile 是 eager 和非 eager，统一口径"。此后一律用 eager / 非 eager，不写 compile。
+| 侧 | eager | 非 eager |
+|---|---|---|
+| dinfer | 现状（逐 kernel launch，`KAON3_MEGA` 关） | ① `KAON3_MEGA=1`（megakernel）② cudagraph（未接） |
+| vLLM | `--enforce-eager` | 默认（inductor+cudagraph） |
+
+端到端测试矩阵（每轮一变量，全部对同一 vLLM eager/非eager 基线）：
+- R0 dinfer eager（baseline） / R1 dinfer + MEGA / V-eager vLLM eager / V-ne vLLM 非eager
+- 四组：c1/c8/c32×(p128,o128) + c8×(p1024,o128)，与项目既有趋势表同口径
+- 产物：test/kaon3/<日期>/benchN + perf-trend.{csv,md,svg,html} + Dashboard(8090) 曲线
+工具：bins/bench（与 vLLM bench serve 同口径 TTFT/ITL/TPOT/goodput）+ bench_compare.sh + bench_trend.py。

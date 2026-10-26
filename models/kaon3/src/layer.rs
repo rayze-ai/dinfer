@@ -121,6 +121,15 @@ impl QLinear {
         }
     }
 
+    /// FP8 权重与两个 per-tensor scale（megakernel 直接吃原始指针，绕过 `forward` 的量化暂存）。
+    /// 返回 `(w, 权重 scale, 激活 scale, n, k)`；非 FP8 权重返回 `None`。
+    pub fn fp8_parts(&self) -> Option<(&dinfer_kernels::cudarc::driver::CudaSlice<u8>, f32, f32, usize, usize)> {
+        match self {
+            Self::Fp8 { w, scale, a_scale, n, k, .. } => Some((w, *scale, *a_scale, *n, *k)),
+            _ => None,
+        }
+    }
+
     /// 本层激活的静态 scale（只有 FP8 才有）；调用方据此决定能否把 norm 与量化融合。
     pub fn a_scale(&self) -> Option<f32> {
         match self {
@@ -527,6 +536,52 @@ impl ActBuf {
     }
 }
 
+/// dense MLP megakernel 一次 launch 的最大行数（kernel host 侧断言 `m <= 8`）。
+pub const MEGA_ROWS: usize = 8;
+/// megakernel 的阶段数（`S_COUNT`，见 `mega_mlp_sm120.cu`）；`ready` 按它清零。
+const MEGA_STAGES: usize = 6;
+
+/// `KAON3_MEGA=1` 时 dense MLP 支路走 persistent megakernel（一次 launch），默认关。
+pub fn mega_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("KAON3_MEGA").map(|v| v.trim() == "1").unwrap_or(false))
+}
+
+/// megakernel 的中间缓冲与阶段表。**只按 [`MEGA_ROWS`] 行分配**（prefill 走原路径）；
+/// 全模型一套复用（逐层串行）。`ready` 每次 launch 前必须清零。
+pub struct MegaBufs {
+    pub norm1: Tensor<bf16>, // [8, H]  pre_ff_norm 的输出（对拍用）
+    pub norm1_q: k::cudarc::driver::CudaSlice<u8>, // [8, H]  喂 gate/up 的 fp8 激活
+    pub gate_buf: Tensor<bf16>, // [8, I]
+    pub up_buf: Tensor<bf16>,   // [8, I]
+    pub act_bf: Tensor<bf16>,   // [8, I]  gelu·mul（bf16）
+    pub act_q: k::cudarc::driver::CudaSlice<u8>, // [8, I]  喂 down 的 fp8 激活
+    pub down_out: Tensor<bf16>, // [8, H]
+    dep: k::cudarc::driver::CudaSlice<i32>,
+    count: k::cudarc::driver::CudaSlice<i32>,
+    start: k::cudarc::driver::CudaSlice<i32>,
+    ready: k::cudarc::driver::CudaSlice<i32>,
+}
+
+impl MegaBufs {
+    pub fn new(stream: &Stream, cfg: &KaonConfig) -> Result<Self> {
+        let (h, i) = (cfg.hidden, cfg.dense_inter);
+        Ok(Self {
+            norm1: Tensor::uninit(stream, &[MEGA_ROWS, h])?,
+            norm1_q: stream.alloc_zeros::<u8>(MEGA_ROWS * h)?,
+            gate_buf: Tensor::uninit(stream, &[MEGA_ROWS, i])?,
+            up_buf: Tensor::uninit(stream, &[MEGA_ROWS, i])?,
+            act_bf: Tensor::uninit(stream, &[MEGA_ROWS, i])?,
+            act_q: stream.alloc_zeros::<u8>(MEGA_ROWS * i)?,
+            down_out: Tensor::uninit(stream, &[MEGA_ROWS, h])?,
+            dep: stream.alloc_zeros::<i32>(MEGA_STAGES)?,
+            count: stream.alloc_zeros::<i32>(MEGA_STAGES)?,
+            start: stream.alloc_zeros::<i32>(MEGA_STAGES)?,
+            ready: stream.alloc_zeros::<i32>(MEGA_STAGES)?,
+        })
+    }
+}
+
 /// 一层 forward 的工作区（按 `max_tokens` 预分配，全模型一套复用）。
 pub struct LayerScratch {
     pub x: Tensor<bf16>,        // 残差主干 [tokens, hidden]
@@ -561,6 +616,8 @@ pub struct LayerScratch {
     pub buckets: k::ops::MoeBuckets,
     /// compile 口径下 input_norm 的**融合量化**结果（e4m3 `[max_tokens, hidden]`），q/k/v 三个投影共用。
     pub preq: std::sync::Mutex<Option<dinfer_kernels::cudarc::driver::CudaSlice<u8>>>,
+    /// `KAON3_MEGA=1` 时 dense MLP 支路的中间缓冲；关时为空（不占显存）。
+    pub mega: Option<MegaBufs>,
 }
 
 impl LayerScratch {
@@ -599,6 +656,7 @@ impl LayerScratch {
             topk_w: Tensor::uninit(stream, &[max_tokens * cfg.top_k])?,
             buckets: k::ops::MoeBuckets::new(stream, cfg.num_experts, max_tokens, cfg.top_k)?,
             preq: std::sync::Mutex::new(None),
+            mega: if mega_enabled() { Some(MegaBufs::new(stream, cfg)?) } else { None },
         })
     }
 }
