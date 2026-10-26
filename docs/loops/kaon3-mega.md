@@ -856,3 +856,12 @@ PlanBuffers.upload 对 seq_lens/block_table/cu_seqlens 是每步真实值 push �
 kaon3 attention `paged_win`（layer.rs:1113）收 **`ctx.max_seqlen`（host 标量）** + block_table/seq_lens(device buffer)。
 **疑点**：若 paged_win 内部用 `max_seqlen` 这个**捕获时固定的标量**算 grid/splits/每请求读几 block，则 graph 固化 max_seqlen=1 → replay 时实际 seq 大但只按 1 读 → 多步分叉（短输出对、长输出错，吻合现象）。
 下一步：读 paged_win 本体确认 grid/循环是用标量 max_seqlen 还是读 device seq_lens；若用标量=根因，改成读 device seq_lens（或捕获用足够大的 max_seqlen 使 grid 覆盖最坏情况、kernel 内按 device seq_lens 实际裁剪）。
+
+## R44 深挖②：排除 attention；bug 是**微小数值差(1ulp级)在近并列token翻转**，非逻辑错
+排除：gqa_paged_impl 直接把 device seq_lens 传 kernel，grid 用固定 num_reqs/max_q_len，kernel 内按 device seq_lens 遍历 KV——**paged attention 对 graph 安全，非根源**。
+新证据：**数数"1到40"graph vs no-graph 100+ token 逐字一致**；但"长城"开放生成 80 token 分叉。
+→ 不是"多步必分叉"，是 **graph 引入极微小数值差（末位/1ulp 级），margin 大的步无害，近并列 token 处翻转**——
+  与当初 dinfer vs vLLM 0.0085 同性质（亚决策噪声，翻近并列 token）。
+→ graph 路径有 1-ulp 级数值差来源（非逻辑 bug）。嫌疑：graph replay vs eager 同串 kernel 下 cuBLASLt algo 选择不同，
+  或 capture 期某 kernel 的非确定性归约。下一步：定位差异来自哪个 stage（关 MEGA 只留基础 kernel？逐 stage 比），
+  或评估这是否"可接受的 graph 噪声"（vLLM 非eager 自己 graph 也有类似，需对比其 graph vs eager 是否也翻）。
