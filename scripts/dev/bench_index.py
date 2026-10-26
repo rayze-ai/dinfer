@@ -10,12 +10,24 @@ ROOT = sys.argv[sys.argv.index("--root") + 1] if "--root" in sys.argv else "test
 GROUPS = [("c1_p128_o128", "c1"), ("c8_p128_o128", "c8"), ("c32_p128_o128", "c32"), ("c8_p1024_o128", "c8-long")]
 
 rows = []
+perf_models = set()
+# 每个模型的质量对比详情页（优先最新一轮 qa_zh2，否则 qa_zh）：model -> 相对路径
+qa_report = {}
+for sub in ("qa_zh2", "qa_zh"):
+    for rp in sorted(glob.glob(os.path.join(ROOT, "*", sub, "report.html"))):
+        m = rp.split(os.sep)[-3]
+        qa_report.setdefault(m, os.path.relpath(rp, ROOT))
+def qa_cell(m):
+    rel = qa_report.get(m)
+    return f'<a href="{html.escape(rel)}">质量详情</a>' if rel else "—"
+
 for jf in sorted(glob.glob(os.path.join(ROOT, "*", "perf-trend.json"))):
     model = os.path.basename(os.path.dirname(jf))
     try:
         rounds = json.load(open(jf))
     except Exception:
         continue
+    perf_models.add(model)
     by_gpu = {}
     for r in rounds:
         by_gpu.setdefault(r.get("gpu", "?"), []).append(r)
@@ -37,18 +49,20 @@ for jf in sorted(glob.glob(os.path.join(ROOT, "*", "perf-trend.json"))):
             chg = "【仅 vLLM 基线，dinfer 侧未就位】" + chg
         rows.append((model, gpu, len(rs), last.get("label", ""), last.get("date", ""), cells, chg))
 
+# 只有质量对比、还没进 perf-trend 的模型（如 kaon3）：也进同一张总表，一行，perf 单元格留空。
+for m in sorted(set(qa_report) - perf_models):
+    rows.append((m, "—", 0, "仅端到端质量对比", "", ["—"] * len(GROUPS), "尚未接入四组 perf bench"))
+
 def td(x): return f"<td>{x}</td>"
 body = "\n".join(
-    f'<tr><td><a href="{html.escape(m)}/perf-trend.html#{html.escape(m)}/{html.escape(g)}/single"><b>{html.escape(m)}</b></a></td>'
-    f'<td><a href="{html.escape(m)}/perf-trend.html#{html.escape(m)}/{html.escape(g)}/single">{html.escape(g)}</a></td>'
-    f"{td(n)}{td(html.escape(lbl))}{td(date)}" + "".join(td(c) for c in cells) + f'<td class=chg>{html.escape(chg)}</td></tr>'
+    (f'<tr><td><a href="{html.escape(m)}/perf-trend.html#{html.escape(m)}/{html.escape(g)}/single"><b>{html.escape(m)}</b></a></td>'
+     if g != "—" else f'<tr><td><b>{html.escape(m)}</b></td>')
+    + (f'<td><a href="{html.escape(m)}/perf-trend.html#{html.escape(m)}/{html.escape(g)}/single">{html.escape(g)}</a></td>'
+       if g != "—" else "<td>—</td>")
+    + f"{td(n)}{td(html.escape(lbl))}{td(date)}" + "".join(td(c) for c in cells)
+    + f"{td(qa_cell(m))}" + f'<td class=chg>{html.escape(chg)}</td></tr>'
     for m, g, n, lbl, date, cells, chg in rows)
-qa_links = []
-for rp in sorted(glob.glob(os.path.join(ROOT, "*", "qa_zh", "report.html"))):
-    _model = rp.split(os.sep)[-3]
-    _rel = os.path.relpath(rp, ROOT)
-    qa_links.append(f'<li><a href="{html.escape(_rel)}">{html.escape(_model)} · 生成质量对比（乱码/答非所问/tok·s/TTFT，dinfer vs vLLM）</a></li>')
-qa_section = ('<h2 style="font-size:16px;margin:20px 0 6px">端到端生成质量对比</h2><ul>' + "".join(qa_links) + "</ul>") if qa_links else ""
+qa_section = ""
 
 page = f"""<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>dinfer perf index</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -64,7 +78,7 @@ th{{background:var(--hl);position:sticky;top:0}} td.chg{{white-space:normal;colo
 </style></head><body>
 <h1>dinfer perf index</h1>
 <div class="sub">每个（模型 × 卡型）一行：最新主线轮次与四组 TPOT p50（ms，括号 = vLLM/dinfer 倍数，&gt;1 为我们快）。点模型或卡型进该模型的趋势页（URL 带 #模型/卡型/页签；页签含 single / pd / tp / dp / other / engine / probe）。数据来自各模型目录的 <code>perf-trend.json</code>。</div>
-<table><thead><tr><th>模型</th><th>卡型</th><th>轮次数</th><th>最新轮</th><th>日期</th><th>c1</th><th>c8</th><th>c32</th><th>c8-long</th><th>最新改动</th></tr></thead>
+<table><thead><tr><th>模型</th><th>卡型</th><th>轮次数</th><th>最新轮</th><th>日期</th><th>c1</th><th>c8</th><th>c32</th><th>c8-long</th><th>质量详情</th><th>最新改动</th></tr></thead>
 <tbody>
 {body}
 </tbody></table>
