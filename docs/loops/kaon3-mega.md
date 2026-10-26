@@ -528,3 +528,25 @@ vLLM 非eager(基线)               209   1202  3593   964      —
 整条 decode 前向作为一个整体 megakernel 跑起来，再测端到端，才有资格谈天花板/是否超 vLLM 非eager。
 **方向：先完整做 B（attention 持久化 → MoE 持久化 → 整层一个 megakernel → cudagraph），做完再整体分析，不中途下结论。**
 A 的成果（split-K 2.05× 逐位、partial/sem/末到归约骨架、分阶段计时框架、perf-trend 折线）全部复用进 B。
+
+## R35 2026-10-26 B 设计：attention 持久化 → 整层 megakernel（分步，不一把梭）
+现状摸底：
+- `gqa_decode_v3.cu`（238 行）：cp.async flash-decode + split(partial→merge)，grid=(batch,Hkv,split)，
+  一个 CTA 处理一个 (b,hk,split)，主体 ~130 行(L68-203) 是 Q·K softmax·V。**可抽成 device 函数**。
+- 现有 kaon3 层：input_norm→qkv→q/k/v_norm→rope→**gqa attn**→o_proj→残差→[dense MLP ∥ MoE]→合并。
+  A 已做 dense MLP 段（pre_ff_norm→gate‖up→gelu→down→post_ff_norm_1）持久化。
+
+### B 分步（每步独立可验，逐位/计时/端到端，不跳步）
+**B1 attention stage 持久化**：把 v3 的 Q·K·V 主体抽成 device 函数，作为 megakernel 的 stage；
+  task shard 解出 (hk, split)（B=1 decode：b=1，靠 split 填 SM，复用 A 的 split-K partial/merge 骨架）。
+  KV cache paged 读、滑窗/全注意力两种。先单独对拍 v3 逐位 + 计时。
+**B2 attn 段并进现有 megakernel**：input_norm→qkv→qk/v_norm→rope→kv写→attn→o_proj→残差 编进一个 launch，
+  与 A 的 dense 段拼接（中间残差流 smem/global 衔接）。对拍现有逐 op。
+**B3 MoE 持久化**（最难，动态 top-8 路由）：第一版可"全 128 专家常驻 task，len==0 跳过"（A 的 split 骨架 + 空转 task），
+  或 GPU 侧 scan 写 offsets 进 ready。先评估可行再做；若太难，MoE 第一版仍单独 launch，attn+dense 先整合。
+**B4 cudagraph**：整层 megakernel 一次 launch 后，用 cudagraph 消 per-step launch 开销（qwen 系已验证路径）。
+**B5 整体端到端**：全部整合后，整条 decode 前向 vs vLLM 非eager 重测端到端 + perf-trend，**此时才整体分析天花板**。
+
+### 硬约束（承前）
+5090 单卡；逐位一致（性能优化不改数值）；arch/env 给调优数值 kernel 不写死；每步进 perf-trend；5090 GPU6 跑 mega、vLLM 非eager GPU3。
+先做 B1（attention stage 持久化 + 对拍 v3），这是 B 的地基和最大不确定性。
