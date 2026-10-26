@@ -961,3 +961,14 @@ B5 流程：① 验全栈三开关能起+生成+逐位(md5==eeb2e6cf)；② 四�
 **B5 两条路**：① 修 KAON3_MEGA+graph 组合（让整层 megakernel 进 graph）——是真全栈；
   ② 先用已验证逐位的 B3+B4（MOE_GROUPED+graph，不开 KAON3_MEGA）跑 B5 端到端对比 vLLM，整层 megakernel 的增量单列。
 下一步：先验 KAON3_MEGA=1 **关 graph**(NO_GRAPH=1)下是否逐位——隔离"是 KAON3_MEGA 本身" vs "KAON3_MEGA 与 graph 组合"。
+
+## R45 隔离定位：乱码根因 = KAON3_MEGA 整层 megakernel 与 **cudagraph 捕获** 的组合
+隔离实验：
+- KAON3_MEGA + MOE_GROUPED + **NO_GRAPH** = **通顺**（90095598 "长城是世界上规模最大的古代建筑群..."正常中文）
+- KAON3_MEGA + MOE_GROUPED + **graph** = 乱码（bba1ab08）
+→ **根因在"整层 megakernel 与 graph capture 的组合"**，不是 mega×grouped 冲突。
+（90095598 vs eeb2e6cf 都通顺但 md5 不同 = mega 路径 vs 非 mega 路径 1-ulp 差，已知非 bug；乱码才是 bug，仅 +graph 出现。）
+嫌疑：KAON3_MEGA 路径 forward 用的中间 scratch / MegaLayerParams 的 dep/count/start/ready 等缓冲，在 graph capture 固化地址或内容，
+  replay 时整层算垃圾。或 mega 的 launch 在 capture 期有未固定量（grid/smem 动态）。
+下一步：查 mega_layer host launch(mega_layer_forward) 在 capture 期是否有 alloc / 每步变化的 host 值被固化；
+  对比 B4 已过的非 mega 路径 forward 为何能捕获。先读 KAON3_MEGA 路径在 executor/layer 怎么被调 + ready 缓冲每步清零是否在 capture 区。
