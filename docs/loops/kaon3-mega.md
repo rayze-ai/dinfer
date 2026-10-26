@@ -798,3 +798,22 @@ offsets 留卡上、launch 次数编译期固定（cudagraph 要求）、专家�
 - grouped_gemm<BK>：grid=(N/BN, ceil(R/BM), E)；blockIdx.z=e 取 [off[e],off[e+1]) 行段，m_blk=off[e]+by*BM，越界 return；B/scale/alpha 从 per-expert device 指针数组取；A 读绝对行偏移。复用 gemm_nvfp4_sm120 的 quant16/mma_fp4/e4m3（逐字复制保逐位）。
 - per-expert 指针数组（per-layer，一次建）：gate/up/down 的 packed[E]/scale[E] + agscale_gu[E]=1/a_scale、alpha_gate/up/down[E]=global*a_scale、agscale_dn[E]。
 逐位风险分析：① GEMM 逐行、K 固定 → 构造上逐位（同 quant16 同归约序）。② scatter_add 单次 launch 的 atomic 顺序 vs host 专家序：kk≤8 项同量级 f32 和通常 exact（现 host 版 0/N 即此因），**需实测确认**；若非 0/N 则报告累加序障碍。
+
+## R43 结果（5090 GPU0，2026-10-26）✅ B3 第一版完成：device-grouped MoE，逐位一致 0/N，D2H 消除
+实现（`MOE_GROUPED=1` 开，默认关做 A/B）：
+- 新 kernel `crates/kernels/cuda/moe_grouped_sm120.cu`：`moe_row2expert`（E blk 读 device offsets 填 row2e[R]，无 D2H）
+  + `moe_grouped_quant`（每行按 row2e 查专家 agscale 量化 A，逐字复制 gemm_nvfp4_sm120 的 quant16）
+  + `moe_grouped_gemm<BK>`（grid=(N/BN, ceil(R/BM), E)，blockIdx.z=e 取 device offsets 行段 [off[e],off[e+1])，越界/空专家 return；
+    B/scale/alpha 从 per-expert device 指针数组取；GEMM 体逐字复制单专家版保逐位）。launch 配置编译期固定 → cudagraph 友好。
+- Rust：`QLinear::nvfp4_parts`；`MoeGrouped`（per-layer 设备指针表，OnceLock 懒建）；`GroupedBufs`（R=max_tokens·top_k 中间缓冲）；
+  `k::ops::moe_row2expert/moe_grouped_quant/moe_grouped_gemm`；moe_branch 加 grouped 分支（bucket 后不 D2H，固定 8 次 launch：row2e→gather→quant_gu→gemm_gate→gemm_up→gelu→quant_dn→gemm_down→scatter）。
+- gate/up 共用一次量化（load 时 a_scale 取 max 置相等）；alpha=global·a_scale（= 单专家 forward_nvfp4 口径）。combine 口径两种都接。
+**逐位对拍（真权重 Kaon-V3-nvpf4-mixed，T=8，GPU0）**：moe_y / ff2 / pre_ff2_norm / router_logits 全 **IDENTICAL 0/N**；
+  **30 层残差流 L0..L29 + final_norm 全 0/N**；top-5 完全一致。→ 构造逐位成立（GEMM 逐行同 quant16 同归约序；scatter atomic 累加序经实测对 kk=8 f32 累加无影响，与 host 专家序逐位同）。
+**D2H 消除**：grouped 分支在 rmsnorm/scatter 后 `return Ok(())`（L1413），不到 host 版的 `dtoh_sync_copy(offsets)`（L1417）；
+  其余 3 处 dtoh 都在 `sub_out` 调试块内（decode 不设 sub_out，不触发）。**grouped decode 路径零 D2H**。→ B4(cudagraph) 前置障碍清除。
+**性能（T=8 prefill 端到端，粗测）**：host 228.4 ms → grouped 177.2 ms（朴素全专家 grid，已快，非最优）。decode 小 batch 下多数专家空转 CTA 直接 return。
+判断：
+- **B3 解锁 B4**：是。MoE 支路已无 D2H / 无 host 依赖 launch，launch 次数编译期固定（8 次）。B4 可按 R42 清单接 cudagraph（executor from_vec×7 / uninit / head_rmsnorm / 采样 D2H 照 qwen35）。
+- **grouped GEMM 能逐位**：已证实（0/N，真权重 30 层）。累加序担忧（scatter atomic）实测非问题。
+- 下一步：① B4 cudagraph（现可做）；② grouped GEMM 第二版性能（只调度激活专家 task，去空转；persistent CTA 领 (e,tile)）——留 B3.2，第一版性能已不差。

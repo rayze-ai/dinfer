@@ -2081,6 +2081,101 @@ pub fn f32_add_to_bf16_n(
     check(unsafe { ffi::f32_add_to_bf16(pa, po, n as i64, stream.raw() as _) }, "f32_add_to_bf16")
 }
 
+/// B3 MoE device-grouped：offsets[E+1] (device) → row2e[R] (device)。R = offsets[E]，host 传 num_experts 即可（不读 offsets 值）。
+pub fn moe_row2expert(
+    stream: &Stream,
+    offsets: &CudaSlice<i32>,
+    row2e: &mut CudaSlice<i32>,
+    num_experts: usize,
+    rows: usize,
+) -> Result<()> {
+    ensure!(offsets.len() >= num_experts + 1 && row2e.len() >= rows, "moe_row2expert: capacity");
+    let po = stream.ptr(offsets) as *const i32;
+    let pr = stream.ptr_mut(row2e) as *mut i32;
+    // SAFETY: 容量已校验；kernel 按 device offsets 填 [off[e],off[e+1])，上界 = offsets[E] ≤ rows 由调用方保证。
+    check(unsafe { ffi::moe_row2expert(po, pr, num_experts as i64, stream.raw() as _) }, "moe_row2expert")
+}
+
+/// B3 grouped A 预量化：a[R,K] bf16 → aq[R,K/2] + a_s[R,K/16]，每行 gs = agscale[row2e[r]]（device）。
+#[allow(clippy::too_many_arguments)]
+pub fn moe_grouped_quant(
+    stream: &Stream,
+    a: &CudaSlice<bf16>,
+    row2e: &CudaSlice<i32>,
+    agscale: &CudaSlice<f32>,
+    aq: &mut CudaSlice<u8>,
+    a_s: &mut CudaSlice<u8>,
+    rows: usize,
+    k: usize,
+    exact_rq: bool,
+) -> Result<()> {
+    ensure!(k % 64 == 0, "moe_grouped_quant: k {k} 不是 64 的倍数");
+    ensure!(
+        a.len() >= rows * k && aq.len() >= rows * (k / 2) && a_s.len() >= rows * (k / 16) && row2e.len() >= rows,
+        "moe_grouped_quant: capacity"
+    );
+    let pa = stream.ptr(a) as *const c_void;
+    let pr = stream.ptr(row2e) as *const i32;
+    let pg = stream.ptr(agscale) as *const f32;
+    let paq = stream.ptr_mut(aq) as *mut c_void;
+    let pas = stream.ptr_mut(a_s) as *mut c_void;
+    // SAFETY: 容量已校验；row2e[r] < E 由 row2expert 保证，agscale 长 ≥ E。
+    check(
+        unsafe {
+            ffi::moe_grouped_quant(pa, pr, pg, paq, pas, rows as i64, k as i64, exact_rq as i32, stream.raw() as _)
+        },
+        "moe_grouped_quant",
+    )
+}
+
+/// B3 grouped NVFP4 GEMM：out[R,N] = alpha[e]·(aq·Bptr[e]ᵀ)，按 device offsets 分专家段。
+/// `bptr`/`sptr` 是 device 端 [E] 个 u64 指针（各专家 packed/scale 的设备地址），`alpha`/`offsets` device。
+/// launch 配置（grid.z=E）编译期固定 → cudagraph 友好。
+#[allow(clippy::too_many_arguments)]
+pub fn moe_grouped_gemm(
+    stream: &Stream,
+    aq: &CudaSlice<u8>,
+    a_s: &CudaSlice<u8>,
+    bptr: &CudaSlice<u64>,
+    sptr: &CudaSlice<u64>,
+    alpha: &CudaSlice<f32>,
+    offsets: &CudaSlice<i32>,
+    out: &mut CudaSlice<bf16>,
+    rows: usize,
+    n: usize,
+    k: usize,
+    num_experts: usize,
+) -> Result<()> {
+    ensure!(k % 64 == 0, "moe_grouped_gemm: k {k} 不是 64 的倍数");
+    ensure!(
+        aq.len() >= rows * (k / 2)
+            && a_s.len() >= rows * (k / 16)
+            && out.len() >= rows * n
+            && bptr.len() >= num_experts
+            && sptr.len() >= num_experts
+            && alpha.len() >= num_experts
+            && offsets.len() >= num_experts + 1,
+        "moe_grouped_gemm: capacity"
+    );
+    let paq = stream.ptr(aq) as *const c_void;
+    let pas = stream.ptr(a_s) as *const c_void;
+    let pb = stream.ptr(bptr) as *const *const c_void;
+    let ps = stream.ptr(sptr) as *const *const c_void;
+    let pal = stream.ptr(alpha) as *const f32;
+    let po = stream.ptr(offsets) as *const i32;
+    let pout = stream.ptr_mut(out) as *mut c_void;
+    // SAFETY: 容量已校验；bptr/sptr 内的设备地址由调用方（layer 建表时）保证有效且各 [N,K/2]/[N,K/16] 大小。
+    check(
+        unsafe {
+            ffi::moe_grouped_gemm(
+                paq, pas, pb, ps, pal, po, pout, rows as i64, n as i64, k as i64, num_experts as i64,
+                stream.raw() as _,
+            )
+        },
+        "moe_grouped_gemm",
+    )
+}
+
 /// 把 D2H 读出的 offsets 变成 (expert, start, len) 列表（只含非空专家）。
 pub fn moe_expert_ranges(offsets: &[i32]) -> Vec<(usize, usize, usize)> {
     let mut v = Vec::new();

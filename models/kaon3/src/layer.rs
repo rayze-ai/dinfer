@@ -130,6 +130,23 @@ impl QLinear {
         }
     }
 
+    /// NVFP4 权重各件（B3 grouped GEMM 建 device 指针表用）：`(packed, scale, global, a_scale, n, k)`。
+    pub fn nvfp4_parts(
+        &self,
+    ) -> Option<(
+        &dinfer_kernels::cudarc::driver::CudaSlice<u8>,
+        &dinfer_kernels::cudarc::driver::CudaSlice<u8>,
+        f32,
+        f32,
+        usize,
+        usize,
+    )> {
+        match self {
+            Self::NvFp4 { packed, scale, global, a_scale, n, k } => Some((packed, scale, *global, *a_scale, *n, *k)),
+            _ => None,
+        }
+    }
+
     /// 本层激活的静态 scale（只有 FP8 才有）；调用方据此决定能否把 norm 与量化融合。
     pub fn a_scale(&self) -> Option<f32> {
         match self {
@@ -219,6 +236,83 @@ pub struct Expert {
     pub down: QLinear,
 }
 
+/// B3 MoE device-grouped 的 per-layer 常驻设备表（专家权重指针 + 标量，一次建，30 层各一份）。
+/// 让 grouped GEMM 在 device 上按 offsets 选专家权重，去掉 host 逐专家 launch。
+pub struct MoeGrouped {
+    /// 各专家 packed/scale 的设备地址（u64）：gate/up/down 各 [E]。
+    pub gate_packed: k::cudarc::driver::CudaSlice<u64>,
+    pub gate_scale: k::cudarc::driver::CudaSlice<u64>,
+    pub up_packed: k::cudarc::driver::CudaSlice<u64>,
+    pub up_scale: k::cudarc::driver::CudaSlice<u64>,
+    pub down_packed: k::cudarc::driver::CudaSlice<u64>,
+    pub down_scale: k::cudarc::driver::CudaSlice<u64>,
+    /// 激活量化网格 gs = 1/a_scale（gate/up 共用一个，down 自己的）。
+    pub agscale_gu: k::cudarc::driver::CudaSlice<f32>,
+    pub agscale_dn: k::cudarc::driver::CudaSlice<f32>,
+    /// 输出乘子 alpha = global · a_scale（= 单专家 forward_nvfp4 的 `global * a_scale`）。
+    pub alpha_gate: k::cudarc::driver::CudaSlice<f32>,
+    pub alpha_up: k::cudarc::driver::CudaSlice<f32>,
+    pub alpha_down: k::cudarc::driver::CudaSlice<f32>,
+    pub n_gate: usize,
+    pub k_gate: usize,
+    pub n_down: usize,
+    pub k_down: usize,
+}
+
+impl MoeGrouped {
+    pub fn build(stream: &Stream, experts: &[Expert]) -> Result<Self> {
+        let e = experts.len();
+        let (mut gp, mut gs, mut up_, mut us, mut dp, mut ds) =
+            (vec![], vec![], vec![], vec![], vec![], vec![]);
+        let (mut ag_gu, mut ag_dn) = (vec![], vec![]);
+        let (mut al_g, mut al_u, mut al_d) = (vec![], vec![], vec![]);
+        let (mut shape_gate, mut shape_down) = (None, None);
+        for ex in experts {
+            let (gpk, gsc, gglobal, ga, gn, gk) =
+                ex.gate.nvfp4_parts().context("grouped MoE 需要 NVFP4 gate 权重")?;
+            let (upk, usc, uglobal, ua, _un, _uk) =
+                ex.up.nvfp4_parts().context("grouped MoE 需要 NVFP4 up 权重")?;
+            let (dpk, dsc, dglobal, da, dn, dk) =
+                ex.down.nvfp4_parts().context("grouped MoE 需要 NVFP4 down 权重")?;
+            // gate/up 的 a_scale 在 load 时已取 max 置相等（见 Layer::load），这里断言一致。
+            ensure!((ga - ua).abs() < 1e-12, "grouped MoE: gate/up a_scale 不一致 {ga} {ua}");
+            gp.push(stream.ptr(gpk));
+            gs.push(stream.ptr(gsc));
+            up_.push(stream.ptr(upk));
+            us.push(stream.ptr(usc));
+            dp.push(stream.ptr(dpk));
+            ds.push(stream.ptr(dsc));
+            ag_gu.push(1.0f32 / ga);
+            ag_dn.push(1.0f32 / da);
+            al_g.push(gglobal * ga);
+            al_u.push(uglobal * ua);
+            al_d.push(dglobal * da);
+            shape_gate.get_or_insert((gn, gk));
+            shape_down.get_or_insert((dn, dk));
+        }
+        ensure!(gp.len() == e, "grouped MoE: 专家数 {}", e);
+        let (n_gate, k_gate) = shape_gate.context("无专家")?;
+        let (n_down, k_down) = shape_down.unwrap();
+        Ok(Self {
+            gate_packed: stream.htod_copy(gp)?,
+            gate_scale: stream.htod_copy(gs)?,
+            up_packed: stream.htod_copy(up_)?,
+            up_scale: stream.htod_copy(us)?,
+            down_packed: stream.htod_copy(dp)?,
+            down_scale: stream.htod_copy(ds)?,
+            agscale_gu: stream.htod_copy(ag_gu)?,
+            agscale_dn: stream.htod_copy(ag_dn)?,
+            alpha_gate: stream.htod_copy(al_g)?,
+            alpha_up: stream.htod_copy(al_u)?,
+            alpha_down: stream.htod_copy(al_d)?,
+            n_gate,
+            k_gate,
+            n_down,
+            k_down,
+        })
+    }
+}
+
 /// MoE 的 router（`proj` 是 BF16，另有 `scale` 与 `per_expert_scale`）。
 pub struct Router {
     pub proj: QLinear,
@@ -257,6 +351,8 @@ pub struct Gemma4Layer {
     pub dense_down: QLinear,
     pub router: Router,
     pub experts: Vec<Expert>,
+    /// B3 MoE device-grouped 的 per-layer 设备指针表（`MOE_GROUPED=1` 时首用懒建）。
+    pub moe_grouped: std::sync::OnceLock<MoeGrouped>,
     /// `per_expert_scale`（host 副本）；`MOE_COMBINE_F32=1` 时不折进 down，在合并时乘进路由权重。
     pub pes: Vec<f32>,
     /// `layer_scalar`，BF16 单元素。
@@ -368,6 +464,7 @@ impl Gemma4Layer {
                 per_expert: load_vec(stream, src, &format!("{router_p}.per_expert_scale"))?,
             },
             experts,
+            moe_grouped: std::sync::OnceLock::new(),
             pes,
             layer_scalar: load_scalar(src, &format!("{p}.layer_scalar"))?,
             head_dim,
@@ -547,6 +644,12 @@ pub fn mega_enabled() -> bool {
     *V.get_or_init(|| std::env::var("KAON3_MEGA").map(|v| v.trim() == "1").unwrap_or(false))
 }
 
+/// B3：MoE device-grouped（去 host 路由 + 去 D2H）。默认关（A/B）；`MOE_GROUPED=1` 开。
+pub fn moe_grouped_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("MOE_GROUPED").map(|v| v.trim() == "1").unwrap_or(false))
+}
+
 /// megakernel 的中间缓冲与阶段表。**只按 [`MEGA_ROWS`] 行分配**（prefill 走原路径）；
 /// 全模型一套复用（逐层串行）。`ready` 每次 launch 前必须清零。
 pub struct MegaBufs {
@@ -647,6 +750,37 @@ pub struct LayerScratch {
     pub preq: std::sync::Mutex<Option<dinfer_kernels::cudarc::driver::CudaSlice<u8>>>,
     /// `KAON3_MEGA=1` 时 dense MLP 支路的中间缓冲；关时为空（不占显存）。
     pub mega: Option<MegaBufs>,
+    /// `MOE_GROUPED=1` 时 device-grouped MoE 的中间缓冲（R=max_tokens·top_k 行）；关时为空。
+    pub grouped: Option<GroupedBufs>,
+}
+
+/// B3 device-grouped MoE 的中间缓冲（`MOE_GROUPED=1`）。R = max_tokens·top_k。
+pub struct GroupedBufs {
+    pub row2e: k::cudarc::driver::CudaSlice<i32>,     // [R]
+    pub aq_gu: k::cudarc::driver::CudaSlice<u8>,      // [R, k_gate/2]
+    pub as_gu: k::cudarc::driver::CudaSlice<u8>,      // [R, k_gate/16]
+    pub aq_dn: k::cudarc::driver::CudaSlice<u8>,      // [R, k_down/2]
+    pub as_dn: k::cudarc::driver::CudaSlice<u8>,      // [R, k_down/16]
+    pub gate_o: Tensor<bf16>,                         // [R, moe_inter]
+    pub up_o: Tensor<bf16>,                           // [R, moe_inter]
+    pub gelu_o: Tensor<bf16>,                         // [R, moe_inter]
+}
+
+impl GroupedBufs {
+    pub fn new(stream: &Stream, cfg: &KaonConfig, max_tokens: usize) -> Result<Self> {
+        let r = max_tokens * cfg.top_k;
+        let (kg, kd, mi) = (cfg.hidden, cfg.moe_inter, cfg.moe_inter);
+        Ok(Self {
+            row2e: stream.alloc_zeros::<i32>(r)?,
+            aq_gu: stream.alloc_zeros::<u8>(r * (kg / 2))?,
+            as_gu: stream.alloc_zeros::<u8>(r * (kg / 16))?,
+            aq_dn: stream.alloc_zeros::<u8>(r * (kd / 2))?,
+            as_dn: stream.alloc_zeros::<u8>(r * (kd / 16))?,
+            gate_o: Tensor::uninit(stream, &[r, mi])?,
+            up_o: Tensor::uninit(stream, &[r, mi])?,
+            gelu_o: Tensor::uninit(stream, &[r, mi])?,
+        })
+    }
 }
 
 impl LayerScratch {
@@ -686,6 +820,7 @@ impl LayerScratch {
             buckets: k::ops::MoeBuckets::new(stream, cfg.num_experts, max_tokens, cfg.top_k)?,
             preq: std::sync::Mutex::new(None),
             mega: if mega_enabled() { Some(MegaBufs::new(stream, cfg)?) } else { None },
+            grouped: if moe_grouped_enabled() { Some(GroupedBufs::new(stream, cfg, max_tokens)?) } else { None },
         })
     }
 }
@@ -1204,7 +1339,6 @@ impl Gemma4Layer {
             std::fs::write(dir.join("topk_w.bin"), wb).ok();
         }
         k::ops::moe_bucket(stream, &sc.topk_ids.data, &mut sc.buckets, tokens, kk)?;
-        let offsets = stream.dtoh_sync_copy(&sc.buckets.offsets)?;
 
         // 专家输入 = pre_feedforward_layernorm_2(residual)（router 用自己的无权重 norm，两者不同）；
         // 借 sc.h2 存，循环结束后才被 post_ff_norm_2 的输出覆盖
@@ -1218,6 +1352,69 @@ impl Gemma4Layer {
         }
         sub_dump(stream, sub_out, "pre_ff2_norm", &sc.h2, tokens, h)?;
         stream.memset_zeros_n(&mut sc.acc.data, tokens * h)?;
+
+        // === B3：device-grouped MoE（去 host 路由 + 去 D2H）。固定 launch 次数，offsets 留 device ===
+        if moe_grouped_enabled() {
+            let r = tokens * kk; // = offsets[E]，host 已知（每 token 选 kk 专家）
+            let mi = cfg.moe_inter;
+            let exact_rq = std::env::var("NQ4_EXACT_RCP").map(|v| v.trim() == "1").unwrap_or(false);
+            let mg = match self.moe_grouped.get() {
+                Some(m) => m,
+                None => {
+                    let m = MoeGrouped::build(stream, &self.experts)?;
+                    let _ = self.moe_grouped.set(m);
+                    self.moe_grouped.get().unwrap()
+                }
+            };
+            let g = sc.grouped.as_mut().expect("MOE_GROUPED=1 但 GroupedBufs 未分配");
+            // 1) row2e[R]：device offsets → 每行专家 id（E blocks，无 D2H）
+            k::ops::moe_row2expert(stream, &sc.buckets.offsets, &mut g.row2e, e, r)?;
+            // 2) gather 全部 R 行（按 sorted 顺序，start=0）
+            k::ops::moe_gather_bf16(stream, &sc.h2.data, &mut sc.xg.data, &sc.buckets.sorted_tok, 0, r, h)?;
+            // 3) gate/up 共用一次量化（a_scale 相等），再两次 grouped GEMM
+            k::ops::moe_grouped_quant(
+                stream, &sc.xg.data, &g.row2e, &mg.agscale_gu, &mut g.aq_gu, &mut g.as_gu, r, mg.k_gate, exact_rq,
+            )?;
+            k::ops::moe_grouped_gemm(
+                stream, &g.aq_gu, &g.as_gu, &mg.gate_packed, &mg.gate_scale, &mg.alpha_gate, &sc.buckets.offsets,
+                &mut g.gate_o.data, r, mg.n_gate, mg.k_gate, e,
+            )?;
+            k::ops::moe_grouped_gemm(
+                stream, &g.aq_gu, &g.as_gu, &mg.up_packed, &mg.up_scale, &mg.alpha_up, &sc.buckets.offsets,
+                &mut g.up_o.data, r, mg.n_gate, mg.k_gate, e,
+            )?;
+            // 4) gelu·mul（全 R 行一次）
+            gelu_mul(stream, ops, &g.gate_o.data, &g.up_o.data, &mut g.gelu_o.data, r, mi)?;
+            // 5) down：量化 + grouped GEMM
+            k::ops::moe_grouped_quant(
+                stream, &g.gelu_o.data, &g.row2e, &mg.agscale_dn, &mut g.aq_dn, &mut g.as_dn, r, mg.k_down, exact_rq,
+            )?;
+            k::ops::moe_grouped_gemm(
+                stream, &g.aq_dn, &g.as_dn, &mg.down_packed, &mg.down_scale, &mg.alpha_down, &sc.buckets.offsets,
+                &mut sc.yg.data, r, mg.n_down, mg.k_down, e,
+            )?;
+            // 6) scatter_add（全 R 行一次，start=0）——累加序与 host 版（专家升序）由 atomic 决定，逐位须实测
+            if !moe_combine_f32() {
+                k::ops::moe_scatter_add_bf16w_f32(
+                    stream, &sc.yg.data, &mut sc.acc.data, &sc.buckets.sorted_tok, &sc.buckets.sorted_k,
+                    &sc.topk_w.data, None, 0, r, kk, h, 1.0,
+                )?;
+            } else {
+                k::ops::moe_scatter_add_f32(
+                    stream, &sc.yg.data, &mut sc.acc.data, &sc.buckets.sorted_tok, &sc.buckets.sorted_k,
+                    &sc.topk_w.data, 0, r, kk, h,
+                )?;
+            }
+            stream.memset_zeros_n(&mut sc.y.data, tokens * h)?;
+            k::ops::f32_add_to_bf16_n(stream, &sc.acc.data, &mut sc.y.data, tokens * h)?;
+            sub_dump(stream, sub_out, "moe_y", &sc.y, tokens, h)?;
+            rmsnorm_into(stream, ops, &sc.y, &self.post_ff_norm_2, &mut sc.h2, h, tokens, eps)?;
+            sub_dump(stream, sub_out, "ff2", &sc.h2, tokens, h)?;
+            return Ok(());
+        }
+
+        // === host 路由版（默认 / A-B 基准）：D2H offsets + host 逐专家 launch ===
+        let offsets = stream.dtoh_sync_copy(&sc.buckets.offsets)?;
         for (eid, start, len) in k::ops::moe_expert_ranges(&offsets) {
             if len == 0 {
                 continue;
