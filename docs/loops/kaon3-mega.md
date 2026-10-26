@@ -865,3 +865,12 @@ kaon3 attention `paged_win`（layer.rs:1113）收 **`ctx.max_seqlen`（host 标�
 → graph 路径有 1-ulp 级数值差来源（非逻辑 bug）。嫌疑：graph replay vs eager 同串 kernel 下 cuBLASLt algo 选择不同，
   或 capture 期某 kernel 的非确定性归约。下一步：定位差异来自哪个 stage（关 MEGA 只留基础 kernel？逐 stage 比），
   或评估这是否"可接受的 graph 噪声"（vLLM 非eager 自己 graph 也有类似，需对比其 graph vs eager 是否也翻）。
+
+## R44 深挖③：**根因锁定**——graph 按桶 nb 行（含 padding），eager 按实际 n 行，padding 行污染
+executor.rs：graph 命中 `upload_plan(plan, nb)` 算 **nb(桶)行**（n 真 + padding），eager `upload_plan(plan, n)` 只算 n 行。
+graph 自身确定（同 prompt 两次 md5 相同 90206b7d）→ 不是非确定性，是 **graph(nb 行) vs eager(n 行) 的固定差**。
+**根因假设**：padding 行（slot=-1/seq_len=1/block_table=0）在 graph 路径参与 MoE router/topk/分桶 + grouped GEMM，
+  若 padding 行被分到专家、与真行同 tile，grouped 归约/scatter 让 padding 的值末位级渗进真行 → 1-ulp 差 → 近并列 token 翻转。
+  eager 无 padding 行故干净。吻合"确定、1-ulp、数数不翻长城翻"。
+下一步：查 graph 路径 padding 行是否隔离——① MoE 分桶/scatter 是否把 padding 行(行号≥n)排除；② 若没排除，
+  让 grouped MoE / scatter 跳过 padding 行（或 capture 时 padding 行的 topk 置空/权重 0），使 nb 行结果的前 n 行与 eager n 行逐位一致。
