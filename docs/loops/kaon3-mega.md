@@ -365,3 +365,25 @@ output tok/s：
 3. **vLLM-非eager 碾压 10-17×**（cudagraph+融合）。dinfer 要追它，dense-only megakernel 远不够——
    需把 **attention + MoE 也 persistent 化**，或先接 **cudagraph**（qwen 系已验证）拿大头。
 下一步：数据进 perf-trend CSV + 曲线 + Dashboard；然后重新评估 megakernel 路线（扩 attn/MoE vs 先上 cudagraph）。
+
+## R24 2026-10-26 用户：不能一次就下结论，深入分析 megakernel 耗时+cache，并扩 attention
+用户判断（对）：理论上 megakernel（消边界+片上流水）能超 vLLM 非eager，一次 dense-only 端到端持平不能否定路线。
+需要先搞清**当前 megakernel 耗时卡在哪、cache 命中如何**，而不是拍脑袋。
+
+### 分析方法（容器无 ncu/nsys → 用 kernel 内计时 + 导出）
+1. **分阶段计时**：mega_mlp kernel 内每个 stage 用 `clock64()`（或 globaltimer）记起止，per-CTA 写全局数组，host 读回聚合。
+   看 6 个 stage（norm/gate/up/act/down/post）各占多少、哪段是瓶颈、依赖等待占比多少。
+2. **cache/访存**：无 ncu 下用两招——① 同一 kernel 跑 N 次测稳态（第 2 次起权重应在 L2，对比首次 vs 稳态）；
+   ② 算理论 HBM 流量（权重 bytes / 实测时间 = 有效带宽），对比 5090 HBM 峰值（~1.8 TB/s）看离带宽上限多远。
+3. **对比基线**：同形状下 mega vs 现有 cuBLASLt 逐 op，分别测 norm/gate/up/down 各段，定位 mega 哪段比 cuBLASLt 慢。
+
+### 关键猜想（待验证，不预设结论）
+- dense-only 端到端持平，可能是：① 1 CTA/SM 占用低（§14.6 根因）→ 测 occupancy；
+  ② 我的 fp8 GEMV tile 对 N=2112/2816 这种形状不如 cuBLASLt 调优 → 分段对比；
+  ③ 阶段依赖串行（gate→up 我串了）→ 看等待占比。
+→ 先定位，再针对性优化；同时扩 attention（attention 每层 ~10 kernel，launch 边界更多，可能 mega 收益更大）。
+
+### 下一步
+A. 给 mega_mlp 加 clock64 分阶段计时 + 带宽估算（独立二进制，不碰正确性）；
+B. 扩 attention 阶段进 megakernel（最大工作量，paged GQA persistent）。
+先做 A（快，定位瓶颈指导 B 的设计），再做 B。
