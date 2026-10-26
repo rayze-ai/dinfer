@@ -521,3 +521,10 @@ vLLM 非eager(基线)               209   1202  3593   964      —
   **这是 B（attention 扩展）的活，等主会话 + 用户看过本趋势再单独开**（本轮按指派只做 A，未碰 B）。
 - 最优配置已设为 serve 默认跑的 env（容器 kaon3-mega: MEGA_SPGU=4 MEGA_SPDN=4 MEGA_CTAS=1）。
   代码默认 env 不设时 sp=1（原路径），不影响其它构建。
+
+## R34 2026-10-26 用户：不认可"A 到头"，先把 B 做完再整体分析
+**收回"dense-only megakernel 天花板已到"的结论**——下早了。端到端持平只证明 dense MLP 占比小，
+不能证明 megakernel 路线上限。只有把 **attn(GQA paged) + MoE 都持久化 + 上 cudagraph**、
+整条 decode 前向作为一个整体 megakernel 跑起来，再测端到端，才有资格谈天花板/是否超 vLLM 非eager。
+**方向：先完整做 B（attention 持久化 → MoE 持久化 → 整层一个 megakernel → cudagraph），做完再整体分析，不中途下结论。**
+A 的成果（split-K 2.05× 逐位、partial/sem/末到归约骨架、分阶段计时框架、perf-trend 折线）全部复用进 B。
