@@ -944,3 +944,9 @@ graph vs no-graph（都 autotune 开，只差 NO_GRAPH，全优化栈=MoE groupe
   cudagraph 能省的剩余 launch 本就不多。**反印证 megakernel 路线价值：launch 大头是 megakernel 消的，非 cudagraph。**
 **B4 完成**：cudagraph 捕获 + 逐位(方案2 autotune 共享 algo) + 加速 +6-8%。
 剩：ATTN 256 两半区(入队) + B5 整条前向端到端对比 vLLM 非eager(整体分析)。
+
+## R45 2026-10-26 B5 前置：全栈三开关组合 + 清残留容器
+全栈 = KAON3_MEGA=1(整层 megakernel) + MOE_GROUPED=1(B3) + graph(B4) 三开关同开（之前各步分开验，三合一未验证）。
+首次起 full stack OOM：累积的残留容器(kaon3-b4/mega/base/graph 等多轮没清)占满 7 张 GPU。**教训：每轮 serve 容器用完即清，别累积**。
+清理后 GPU0/1/4/5/6/7 空，vLLM eager/非eager 留 GPU2/3（B5 对照）。重起 kaon3-full 到 GPU0。
+B5 流程：① 验全栈三开关能起+生成+逐位(md5==eeb2e6cf)；② 四配置四负载 bench vs vLLM 非eager；③ 进 perf-trend；④ 整体分析。
