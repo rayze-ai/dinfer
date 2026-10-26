@@ -480,3 +480,13 @@ sp_gu sp_dn  mega us  speedup   备注
   DOWN 自己 split 后 exec 分摊、wait 降；gate/up split 后更早出结果、缩短 ACT→DOWN 关键链。
   sp_gu=8 过切：GATE 的归约串行等 8 份 + 任务 136 超 SM → wait 爆，回退。**sweet spot = 4/4**。
 R2=sp_gu4/sp_dn1（1.86×），R3=sp_gu4/sp_dn4（2.05×）。serve 侧 layer.rs 已补齐 FFI（dep2 真 buf + split-K buf）。
+
+## R31 2026-10-26 R4 ctas_per_sm=2：**退化，否决**（瓶颈是串行链不是并行度）
+实现：host launch 加 OCC=2 kernel 变体（`mega_kernel<Dispatch,2>`），env `MEGA_CTAS` 选；occ_cap 随之放宽到 2。
+B=1 sp_gu4/sp_dn4：ctas=1 → 2.05×（53.9us），**ctas=2 → 1.72×（64.3us，退化）**。
+  DOWN wait 3.3M → **9.7M**（ctas=2 让每 SM 两个 CTA 抢，更多 CTA 自旋空等前段 signal，wait 爆）。
+  **根因**：dense MLP 链的瓶颈是 NORM→gate‖up→ACT→DOWN→POST 的**串行依赖链**（R27 已定性），不是并行度不足。
+  split-K 已把任务填满 SM；再加 ctas 只增自旋等待者，不缩短关键链。**R4 否决，保持 ctas=1。**
+B=8 验证（sp_gu4/sp_dn4/ctas=1）：speedup 1.34×，2/22528 fp8 级差（rel=7e-7，ACT 在 B>1 的量化噪声，可接受）。
+**三轮结论**：R2（gate/up split-K，1.86×）+ R3（+down split-K，2.05×）有效且逐位一致；R4（ctas=2）退化否决。
+  最优 kernel 配置 = **sp_gu=4, sp_dn=4, ctas=1**（B=1 2.05×，B=8 1.34×）。
