@@ -69,3 +69,10 @@ arch.rs 现**无 Sm120 变体**，`for_cc` 把 `cc>=10` 全归 Sm100 → 5090 �
 1. arch.cuh 能力常量 + arch.rs Sm120/MegaParams（两 case 共同地基）
 2. mega_common.cuh 抽骨架（从 mega_sm100.cu 迁，token 级验证 = 原 Qwen mega_parity 仍过）
 3. mega_kaon3_sm120.cu 第一版阶段表 + 对拍 + 计时
+
+## R2 2026-10-26 地基：arch.rs 加 Sm120 + arch.cuh 能力常量
+- arch.rs：`enum Arch` 加 `Sm120`；`for_cc` 改 `10=>Sm100, _=>Sm120`（原 `_=>Sm100` 会让 5090 cc=12 错用 B300 228KB 参数→launch 失败，即调研说的必修坑）；
+  `mega_params` 给 Sm120 初值 groups=3/stages=2/ctas_per_sm=1（~100KB smem，待 5090 实测调）；其余 Arch 匹配位补 Sm120 保持一致。
+  校验：`cargo check -p dinfer-kernels --features no-nvcc` 里 arch.rs 相关错误 0（余 34 个是既有 no-nvcc stub 生成失败，改动前后同数，与本改无关）。
+- 新建 `crates/kernels/cuda/arch.cuh`：唯一 arch 分叉点，只放有名能力常量（kArchSm8x/90/100/120、kSmemBytes、kHasTma、kHasMmaFp4BlockScale、kHasTcgen05）；
+  规则写明 kernel 体内禁 #if __CUDA_ARCH__、调优数值不落此处（走 ArchProfile）。**待接进 build.rs 编译链并加 smoke 编译验证。**

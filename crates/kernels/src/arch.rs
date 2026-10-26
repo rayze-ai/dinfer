@@ -14,6 +14,9 @@ pub enum Arch {
     Sm90,
     /// sm_100 / 103（B200 / B300）
     Sm100,
+    /// sm_120（RTX 5090 / 消费级 Blackwell）。smem 远小于数据中心 Blackwell（~100KB vs 228KB），
+    /// 且 fp4 的 `mma...block_scale` 需 `compute_120a` cubin。mega 参数必须按卡单独定，不能沿用 Sm100。
+    Sm120,
 }
 
 /// `gdn_recurrent` decode 寄存器版 kernel 的变体（`gdn.cu` 模板开关；C ABI 编码见 `code()`）。
@@ -137,17 +140,18 @@ impl ArchProfile {
         let arch = match cc.0 {
             ..=8 => Arch::Sm8x,
             9 => Arch::Sm90,
-            _ => Arch::Sm100,
+            10 => Arch::Sm100,
+            _ => Arch::Sm120,  // 12.x = 消费级 Blackwell（5090）；**不能**归 Sm100，smem 差 2.28 倍
         };
         let cublaslt_workspace_bytes = if cc.0 >= 9 { 32 << 20 } else { 4 << 20 };
         let gemm_tune = GemmTuneParams {
             m_buckets: vec![1, 2, 4, 8, 16, 32, 64],
             small_m_max: 32,
             lt_candidates: 8,
-            // 小卡（3090 82 SM）1–4 波就够；大卡（B300 148 SM）小 N 形状需要更多 block 才能把 HBM 喂满
+            // 小卡（3090 82 SM / 5090 170 SM）1–4 波就够；大卡（B300 148 SM）小 N 形状需要更多 block 才能把 HBM 喂满
             small_m_wave_targets: match arch {
                 Arch::Sm8x => vec![1, 2, 4],
-                Arch::Sm90 | Arch::Sm100 => vec![1, 2, 4, 8],
+                Arch::Sm90 | Arch::Sm100 | Arch::Sm120 => vec![1, 2, 4, 8],
             },
             small_m_mma_warps: vec![4, 8],
             small_m_mma_stripes: vec![1, 2, 4],
@@ -162,6 +166,8 @@ impl ArchProfile {
     pub fn mega_params(&self) -> MegaParams {
         let mut p = match self.arch {
             Arch::Sm100 => MegaParams { groups: 4, unroll: 4, stages: 3, ctas_per_sm: 1, gdn_waves: 2, gdn_bufs: 2 },
+            // Sm120（5090）：~100KB smem，比 Sm8x 略宽但远小于 Sm100 的 228KB。数值待 5090 实测（启动自调优/`MEGA_PARAMS` 覆盖）。
+            Arch::Sm120 => MegaParams { groups: 3, unroll: 4, stages: 2, ctas_per_sm: 1, gdn_waves: 2, gdn_bufs: 1 },
             Arch::Sm8x | Arch::Sm90 => MegaParams { groups: 2, unroll: 4, stages: 2, ctas_per_sm: 1, gdn_waves: 2, gdn_bufs: 1 },
         };
         if let Ok(s) = std::env::var("MEGA_PARAMS") {
@@ -188,7 +194,7 @@ impl ArchProfile {
     /// Sm100 的默认待 B300 实测后定（先与 Sm8x 一致，`GDN_DECODE_VARIANT=` 覆盖对比）。
     pub fn gdn_decode_variant(&self) -> GdnDecodeVariant {
         match self.arch {
-            Arch::Sm8x | Arch::Sm90 | Arch::Sm100 => GdnDecodeVariant::Tr,
+            Arch::Sm8x | Arch::Sm90 | Arch::Sm100 | Arch::Sm120 => GdnDecodeVariant::Tr,
         }
     }
 
@@ -343,13 +349,14 @@ impl ArchProfile {
             // 原 3464（+FEXP）为速度（6 K 1650→1556µs，~6%），改精确后需过两卡 bench 门禁确认损失可接受。
             Arch::Sm100 => 464,
             Arch::Sm90 => 464,
+            Arch::Sm120 => 464, // 5090 ~100KB smem，与 Sm8x 的 99KB 同量级但实测另定；先取 464（待 5090 量）
             Arch::Sm8x => 0,  // 3090 99 KB 装不下 tile 64（464 需 101 KB），v5 回退；待单独量 432
         }
     }
 
     pub fn gdn_chunk_wy_warps_for(arch: Arch) -> usize {
         match arch {
-            Arch::Sm100 | Arch::Sm8x | Arch::Sm90 => 8,
+            Arch::Sm100 | Arch::Sm8x | Arch::Sm90 | Arch::Sm120 => 8,
         }
     }
 
@@ -397,7 +404,7 @@ impl ArchProfile {
     pub fn gdn_conv_rows_for(arch: Arch, sm_count: usize, tokens: usize, dim: usize, width: usize) -> usize {
         const GDN_CONV_ROWS_CANDIDATES: [usize; 6] = [256, 128, 64, 32, 16, 8];
         let blocks_per_sm: usize = match arch {
-            Arch::Sm100 => 8,
+            Arch::Sm100 | Arch::Sm120 => 8,
             Arch::Sm90 | Arch::Sm8x => 2,
         };
         let dim_blocks = dim.div_ceil(256 * 8).max(1);
