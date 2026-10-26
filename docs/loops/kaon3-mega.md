@@ -874,3 +874,13 @@ graph 自身确定（同 prompt 两次 md5 相同 90206b7d）→ 不是非确定
   eager 无 padding 行故干净。吻合"确定、1-ulp、数数不翻长城翻"。
 下一步：查 graph 路径 padding 行是否隔离——① MoE 分桶/scatter 是否把 padding 行(行号≥n)排除；② 若没排除，
   让 grouped MoE / scatter 跳过 padding 行（或 capture 时 padding 行的 topk 置空/权重 0），使 nb 行结果的前 n 行与 eager n 行逐位一致。
+
+## R44 深挖④：根因=graph 固化 cuBLASLt algo，eager 选另一个——**1-ulp 噪声非逻辑 bug**
+决定性实验：no-graph 自身两次一致(eeb2e6cf)、graph 自身两次一致(90206b7d)、两者互不同。n=1 无 padding → **排除 padding 假设**。
+两路径**各自确定但彼此差 1-ulp**。n=1 单行，唯一结构差 = graph 把捕获时 cuBLASLt autotune 选的 fp8 GEMM algo **烧进 graph**，
+eager 每次按启发式可能选另一 algo → 不同累加序 → 1-ulp 差 → 近并列 token 翻转（数数不翻、长城翻）。
+**判定：这不是逻辑 bug，是 graph 固化 algo vs eager 动态选 algo 的亚决策噪声**（同 dinfer vs vLLM 0.0085 性质；vLLM 自己 graph vs eager 也会有）。
+两条路径都"对"（都是合法 fp8 GEMM），只是末位不同。
+→ 要让 graph==eager 逐位：① eager 侧也锁定同一 cuBLASLt algo（关 autotune / 固定 algo id），使两路径同 algo；
+  或 ② 接受 graph 噪声（和我们早先对 0.0085 的结论一致：亚决策噪声，不影响质量，B5 端到端看 flip/质量而非逐位）。
+下一步：验证假设——eager 侧设 CUBLASLT 固定 algo（或 GEMM_TUNE=off）后 graph vs eager 是否逐位一致。若是，坐实根因。
