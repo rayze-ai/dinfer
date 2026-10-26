@@ -131,6 +131,8 @@ fn mega_mlp_matches_eager_path() {
   let mut cnt = st.alloc_zeros::<i32>(8).unwrap();
   let mut sta = st.alloc_zeros::<i32>(8).unwrap();
   let mut rdy = st.alloc_zeros::<i32>(8).unwrap();
+  let mut wc = st.alloc_zeros::<u64>(8).unwrap();
+  let mut ec = st.alloc_zeros::<u64>(8).unwrap();
 
   let n_gu = I.div_ceil(128) as i32;
   let n_dn = H.div_ceil(128) as i32;
@@ -196,6 +198,16 @@ fn mega_mlp_matches_eager_path() {
   assert!(nm.sqrt() > 1.0, "mega 范数异常（可能全零）");
   println!("[对比] 不同 {nd}/{} max|d|={mx:.4e} rel={rel:.3e}", M * H);
   println!("VERDICT: {}", if nd == 0 { "逐位一致" } else if rel < 5e-3 { "fp8 级差（可接受）" } else { "有系统性偏差" });
+  // 分阶段耗时（clock64 周期，所有 task 累加）：定位瓶颈
+  let wcv = st.dtoh_sync_copy(&wc).unwrap();
+  let ecv = st.dtoh_sync_copy(&ec).unwrap();
+  let names = ["NORM","GATE","UP","ACT","DOWN","POST"];
+  let tot: u64 = ecv[..6].iter().sum();
+  println!("[分阶段 exec 周期]");
+  for i in 0..6 {
+    let pct = if tot>0 {ecv[i] as f64/tot as f64*100.0} else {0.0};
+    println!("  {:5} exec={:>12} ({:5.1}%)  wait={:>12}", names[i], ecv[i], pct, wcv[i]);
+  }
 
   // ---- 计时：mega（一次 launch）vs 逐 op 路径（6 次 launch） ----
   const ITERS: usize = 200;
@@ -231,7 +243,7 @@ fn mega_mlp_matches_eager_path() {
         M as i32, H as i32, I as i32, EPS, n_gu, n_dn,
         st.ptr_mut(&mut dep) as *mut i32, st.ptr_mut(&mut cnt) as *mut i32,
         st.ptr_mut(&mut sta) as *mut i32, st.ptr_mut(&mut rdy2) as *mut i32,
-        2, 0, st.raw() as _,
+        2, 0, std::ptr::null_mut(), std::ptr::null_mut(), st.raw() as _,
       )
     };
     assert_eq!(rc, 0);

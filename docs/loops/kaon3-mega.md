@@ -387,3 +387,9 @@ output tok/s：
 A. 给 mega_mlp 加 clock64 分阶段计时 + 带宽估算（独立二进制，不碰正确性）；
 B. 扩 attention 阶段进 megakernel（最大工作量，paged GQA persistent）。
 先做 A（快，定位瓶颈指导 B 的设计），再做 B。
+
+## R25 2026-10-26 给 megakernel 加分阶段 clock64 计时（定位瓶颈）
+mega_common.cuh：StagePlan 加 wait_cyc/exec_cyc（可选，prof=1 启用）；mega_kernel 外壳在每 task 的
+  wait_stage 前后 + dispatch.run 后各记 clock64，thread0 atomicAdd 到对应 stage。null 则不计（兼容）。
+ffi/mega_mlp ABI 加两个 u64* 尾参。parity 测试传真 buf、打印 6 stage 的 exec 周期占比 + wait 周期。
+编译中。跑出后看哪个 stage(norm/gate/up/act/down/post)是瓶颈、等依赖占比多少，指导优化+attention 扩展设计。

@@ -42,6 +42,10 @@ struct StagePlan {
   const int* start;
   int* ready;  // [num_stages] 全局计数器（host 清零）
   int prof;
+  // 可选计时（prof=1 时启用，host 清零）：每 stage 累加所有 task 的 clock64 周期。
+  // wait_cyc = 等依赖占用；exec_cyc = 任务体执行。为空指针则不计（向后兼容）。
+  unsigned long long* wait_cyc;  // [num_stages] 或 nullptr
+  unsigned long long* exec_cyc;  // [num_stages] 或 nullptr
 };
 
 __shared__ unsigned long long s_wait_end;  // prof：本任务依赖等待结束时刻
@@ -122,11 +126,22 @@ __global__ void __launch_bounds__(kThreads, OCC) mega_kernel(StagePlan sp, typen
                                                              Dispatch dispatch, int total_tasks, int num_stages,
                                                              int start_offset) {
   extern __shared__ uint8_t smem[];
+  const bool prof = sp.prof && (sp.wait_cyc || sp.exec_cyc);
   for (int task = (int)blockIdx.x + start_offset; task < total_tasks; task += (int)gridDim.x) {
     const int stage = stage_of<typename Dispatch::Params>(sp, task, num_stages);
     const int shard = task - sp.start[stage];
+    long long t0 = prof ? clock64() : 0;
     wait_stage<typename Dispatch::Params>(sp, stage);
+    long long t1 = prof ? clock64() : 0;
     dispatch.run(params, shard, stage, smem);
+    if (prof) {
+      long long t2 = clock64();
+      if (threadIdx.x == 0) {
+        // 只 thread 0 记（一个 task 一次），原子累加到该 stage
+        if (sp.wait_cyc) atomicAdd(sp.wait_cyc + stage, (unsigned long long)(t1 - t0));
+        if (sp.exec_cyc) atomicAdd(sp.exec_cyc + stage, (unsigned long long)(t2 - t1));
+      }
+    }
     signal_stage(sp, stage);
   }
 }

@@ -292,7 +292,8 @@ int mega_mlp_dense_branch(const void* x, void* out, const void* pre_w, const voi
                          float gate_wscale, float gate_a_inv, const void* up_w, float up_wscale, float up_a_inv,
                          const void* dn_w, float dn_wscale, float dn_a_inv, void* norm1, void* norm1_q, void* gate_buf, void* up_buf,
                          void* act_bf, void* act, void* down_out, int m, int H, int I, float eps, int n_gu, int n_dn,
-                         int* dep, int* count, int* start, int* ready, int pipe, int prof, cudaStream_t stream) {
+                         int* dep, int* count, int* start, int* ready, int pipe, int prof,
+                         unsigned long long* wait_cyc, unsigned long long* exec_cyc, cudaStream_t stream) {
   using namespace dinfer;
   using namespace dinfer::mega_mlp;
   if (m <= 0 || m > 8 || H <= 0 || I <= 0) return (int)cudaErrorInvalidValue;
@@ -377,7 +378,7 @@ int mega_mlp_dense_branch(const void* x, void* out, const void* pre_w, const voi
   if (occ > 1) occ = 1;
   int grid = sms * occ;
   if (grid > acc) grid = acc;
-  kern<<<grid, mega::kThreads, smem, stream>>>(mega::StagePlan{dep, count, start, ready, prof}, p,
+  kern<<<grid, mega::kThreads, smem, stream>>>(mega::StagePlan{dep, count, start, ready, prof, wait_cyc, exec_cyc}, p,
                                                MlpDenseDispatch{}, acc, S_COUNT, 0);
   return (int)cudaGetLastError();
 }
