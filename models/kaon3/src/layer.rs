@@ -557,10 +557,11 @@ pub struct MegaBufs {
     pub act_bf: Tensor<bf16>,   // [8, I]  gelu·mul（bf16）
     pub act_q: k::cudarc::driver::CudaSlice<u8>, // [8, I]  喂 down 的 fp8 激活
     pub down_out: Tensor<bf16>, // [8, H]
-    dep: k::cudarc::driver::CudaSlice<i32>,
-    count: k::cudarc::driver::CudaSlice<i32>,
-    start: k::cudarc::driver::CudaSlice<i32>,
-    ready: k::cudarc::driver::CudaSlice<i32>,
+    pub dep: k::cudarc::driver::CudaSlice<i32>,
+    pub count: k::cudarc::driver::CudaSlice<i32>,
+    pub start: k::cudarc::driver::CudaSlice<i32>,
+    /// kernel 的全局阶段计数器；**每次 launch 前必须清零**。
+    pub ready: k::cudarc::driver::CudaSlice<i32>,
 }
 
 impl MegaBufs {

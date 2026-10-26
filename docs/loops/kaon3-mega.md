@@ -235,3 +235,14 @@ B=8  0/22528 逐位  114.7us → 110.4us  1.04x
 **压测端钉核 taskset -c 120-127**（128 核机，服务自由用 0-119，不抢核；client cpu 记进 json 待核对<1核）。
 已确认命中：kaon3-self CPU 升到 100%，日志文件在建。bench1 产物目录 test/kaon3/2026-10-26/bench1。
 跑完出对比表 + perf-trend CSV/曲线 + Dashboard。
+
+## R17 2026-10-26 全部容器 kill 重建、启动即绑核（用户：服务12C/压测16C）
+`docker update` 改运行时 cpuset 不彻底（线程池已建）→ 用户要求 kill 重建、创建时就 --cpuset-cpus。
+kserve.sh 原写死 CUDA_VISIBLE_DEVICES=0/--port 8131，改为认 KAON3_PORT/KAON3_MEGA env（GPU 靠 docker --gpus 隔离，容器内恒 0 号）。
+重建（各 12C、各独立 GPU）：
+| 配置 | 容器 | GPU | 核组 | 端口 | MEGA |
+|R0|kaon3-self|0|0-11|8133|0|
+|R1|kaon3-mega|1|12-23|8132|1|
+|Ve|vllm-eager|2|24-35|28200|-|
+|Vn|vllm-noneager|3|36-47|28201|-|
+压测端 taskset -c 96-111（**16C**）。全部核组不重叠。等加载就绪后重跑 bench1。

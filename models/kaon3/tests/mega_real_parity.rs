@@ -59,8 +59,9 @@ fn mega_real_weights_matches_eager() {
     let ops = dinfer_layers::DefaultOps;
 
     let dir = model_dir();
-    let cfg = KaonConfig::from_dir(&dir).expect("读 config 失败");
-    let src = WeightSource::open(&dir).expect("打开权重失败");
+    let dpath = std::path::Path::new(&dir);
+    let cfg = KaonConfig::from_json(&std::fs::read_to_string(dpath.join("config.json")).unwrap()).unwrap();
+    let src = WeightSource::open_dir(dpath).expect("打开权重失败");
     let (h, inter) = (cfg.hidden, cfg.dense_inter);
     let eps = cfg.eps;
     let m = m_val();
@@ -76,24 +77,8 @@ fn mega_real_weights_matches_eager() {
     .unwrap();
     let (gate, up) = (&gu[0], &gu[1]);
     let down = QLinear::load(&st, &src, &format!("{dense}.down_proj.weight")).unwrap();
-    let pre_w = {
-        let v: Vec<bf16> = src
-            .get_bf16(&format!("{p}.pre_feedforward_layernorm.weight"))
-            .unwrap()
-            .into_iter()
-            .map(bf16::from_f32)
-            .collect();
-        st.htod_copy(v).unwrap()
-    };
-    let post_w = {
-        let v: Vec<bf16> = src
-            .get_bf16(&format!("{p}.post_feedforward_layernorm_1.weight"))
-            .unwrap()
-            .into_iter()
-            .map(bf16::from_f32)
-            .collect();
-        st.htod_copy(v).unwrap()
-    };
+    let pre_w = src.load_bf16(&st, &format!("{p}.pre_feedforward_layernorm.weight")).unwrap();
+    let post_w = src.load_bf16(&st, &format!("{p}.post_feedforward_layernorm_1.weight")).unwrap();
 
     // 输入：用确定性伪随机 + 真实量级（Kaon 残差流 ≈ ±1）
     let xv: Vec<bf16> = (0..m * h)
@@ -108,7 +93,7 @@ fn mega_real_weights_matches_eager() {
 
     // ---- 参考路径：与 layer.rs 的逐 op 路径逐字对齐 ----
     let mut ref_norm1 = Tensor::zeros(&st, &[m, h]).unwrap();
-    ops.norm().rmsnorm(&st, &dx, &pre_w, &mut ref_norm1.data, m, h, eps).unwrap();
+    ops.norm().rmsnorm(&st, &dx, &pre_w.data, &mut ref_norm1.data, m, h, eps).unwrap();
     let mut gate_out = Tensor::zeros(&st, &[m, inter]).unwrap();
     let mut up_out = Tensor::zeros(&st, &[m, inter]).unwrap();
     let mut act_bf = Tensor::zeros(&st, &[m, inter]).unwrap();
@@ -119,7 +104,7 @@ fn mega_real_weights_matches_eager() {
     dinfer_kernels::ops::gelu_tanh_mul_round2_bf16(&st, &gate_out.data, &up_out.data, &mut act_bf.data, m, inter)
         .unwrap();
     down.forward(&gemm, &st, &act_bf, &mut dn_out, m).unwrap();
-    ops.norm().rmsnorm(&st, &dn_out, &post_w, &mut ref_ff1.data, m, h, eps).unwrap();
+    ops.norm().rmsnorm(&st, &dn_out.data, &post_w.data, &mut ref_ff1.data, m, h, eps).unwrap();
     st.synchronize().unwrap();
 
     // ---- mega 路径：与 layer.rs::mega_dense_branch 相同的缓冲与参数 ----
@@ -135,8 +120,8 @@ fn mega_real_weights_matches_eager() {
         dinfer_kernels::ffi::mega_mlp_dense_branch(
             st.ptr(&dx) as *const c_void,
             st.ptr_mut(&mut mega_ff1.data) as *mut c_void,
-            st.ptr(&pre_w) as *const c_void,
-            st.ptr(&post_w) as *const c_void,
+            st.ptr(&pre_w.data) as *const c_void,
+            st.ptr(&post_w.data) as *const c_void,
             st.ptr(gw) as *const c_void,
             gw_s,
             1.0 / gw_a,
