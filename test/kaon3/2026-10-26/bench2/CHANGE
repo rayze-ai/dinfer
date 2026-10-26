@@ -1,0 +1,1 @@
+R2 split-K sp_gu=4/sp_dn=1/ctas=1: 仅gate/up切K,kernel 1.86x(B=1),逐位一致 0/2816
