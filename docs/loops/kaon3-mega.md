@@ -584,3 +584,13 @@ A 的成果（split-K 2.05× 逐位、partial/sem/末到归约骨架、分阶段
 抽 core 后原 v3 入口回归：`ref_tests` 的 `gqa_decode_d128_splitk_ref` + `gqa_decode_d128_b32_direct_ref`
 （对 golden npy，assert_close 1e-2）两个**全过** → 机械抽函数（薄壳 active 恒真）没改原 v3 数值。
 （远端容器无 test/kernel_refs，put 到 host /hf_data/yaochen/dinfer/test 解压后跑；跑完清理。）
+
+## R37 2026-10-26 用户：直接开 B2（不纠结 B1 单跑慢）
+用户判断：256/128 线程对齐肯定能解决，且 B2 能把空转的 128 用上，直接开 B2。
+B1 结论复用：attention 持久化可行且逐位（8 配置 0/N），core 已是干净 device 函数 gqa_decode_v3_core<GROUP,D>。
+**B2 目标（megakernel 根本价值）**：把 attention 段 + A 的 dense 段**融进一个 megakernel 一次 launch**，
+  省 launch 开销 + 片上衔接中间残差流（不走 global 来回）。这才是端到端可能降的关键（A 只融 dense 一小段故端到端没动）。
+B2 stage 链：input_norm→qkv→q/k/v_norm→rope→kv写→**attn(复用 B1 core)**→merge→o_proj→残差→pre_ff_norm→gate‖up→gelu→down→post_ff_norm_1。
+  （MoE 仍单独 launch，留 B3；先把 attn+dense 整合跑通）
+顺带解 256/128：一个 256 线程 CTA 打包 2 个 (hk,split) attn shard，两个 128 线程半区各算一个，补上空转。
+验收：逐位一致（对拍现有逐 op 整段）+ 计时（整合 vs 分离）+ 端到端进 perf-trend。委派子代理做。
