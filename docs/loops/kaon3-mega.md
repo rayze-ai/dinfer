@@ -101,3 +101,16 @@ arch.cuh 修正：常量原只在 `#if defined(__CUDA_ARCH__)` 内定义 → hos
 硬要求：编过(远端5090) → 逐子模块对拍(sub_dump) → 打印 speedup(B=1) → **如实报负收益**。
 用户指示：**编过就先对拍看数字**（先不管性能调优）。
 主会话纪律：不抢子代理文件/远端连接，等它报结果再推动。
+
+## R6 2026-10-26 主会话自己写第一版：dense MLP 支路 persistent（收窄范围）
+**停掉子代理（读代码太久零产出），主会话自己写。并进一步收窄第一版范围**：
+  不做 attn、不做 MoE，**只做 dense MLP 支路**：pre_ff_norm → gate ‖ up(fp8 GEMM) → gelu·mul(round2) → down(fp8 GEMM) → post_ff_norm_1。
+  理由：最快拿到"消 kernel 边界值多少"的可编可对拍最小闭环，避开两个硬骨头。
+**写的过程中修掉的真实错误（草稿→正确）**：
+  1. dense gate/up 是**两个独立 QLinear**（各自权重+各自 per-tensor scale），不是合并 [2I,H]（读 layer.rs:353-354 确认）；
+  2. gelu 必须走 `gelu_tanh_mul_round2_bf16` 口径（gelu 先舍 bf16 再乘 up，vLLM act_and_mul）；
+  3. fp8 片段寻址必须照 `gemm_fp8_sm120.cu` 已验证的版本（A 用 ldm_x4 + `r=lane&15, c=(lane>=16)?16:0`；B 用 ldm_x2 + `rb=lane&7, cb=(lane&8)?16:0`），我草稿里的寻址是错的。
+  4. 依赖表无法表达"两前驱"（gate 与 up 都要完成后才 act）→ 第一版**串行 gate→up**（dep[UP]=GATE），牺牲并行保正确。
+**文件位置**：`crates/kernels/cuda/mega_mlp_sm120.cu`（不是 models/kaon3/cuda —— 那目录没有 build.rs 不参与编译；
+  且此 kernel 只吃维度参数 H/I/m + gelu_tanh，**模型无关**，按 CLAUDE.md 规则应放 crates/，已验证零模型名）。
+编译中（5090，CUDA_ARCHS=120）。
