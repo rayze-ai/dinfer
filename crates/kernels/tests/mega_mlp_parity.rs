@@ -4,7 +4,7 @@
 //! `gemm_fp8_static_bf16`(cuBLASLt) 不同，允许 ~1e-3 相对差，但不能有系统性偏差）。
 //!
 //! 跑：`CUDA_ARCHS=120 cargo test --release -p dinfer-kernels --features sm120 --test mega_mlp_parity -- --ignored --nocapture`
-use dinfer_kernels::{bf16, ffi, Device};
+use dinfer_kernels::{bf16, ffi, Device, Gemm};
 use std::ffi::c_void;
 
 const H: usize = 2816;
@@ -66,6 +66,7 @@ fn f32_to_e4m3(y: f32) -> u8 {
 fn mega_mlp_matches_eager_path() {
   let dev = Device::new(0).unwrap();
   let st = dev.default_stream();
+  let gemm = Gemm::new(&st).unwrap();
 
   // ---- 输入与权重 ----
   let x = rand(M * H, 11);
@@ -100,16 +101,16 @@ fn mega_mlp_matches_eager_path() {
   let mut dn_out = st.alloc_zeros::<bf16>(M * H).unwrap();
   let mut act_bf = st.alloc_zeros::<bf16>(M * I).unwrap();
   let mut ref_out = st.alloc_zeros::<bf16>(M * H).unwrap();
-  dinfer_kernels::ops::gemm_fp8_static_bf16(&st, &norm1, gate_as, &dgw, gate_ws, &mut gate, M, I, H).unwrap();
-  dinfer_kernels::ops::gemm_fp8_static_bf16(&st, &norm1, up_as, &duw, up_ws, &mut up, M, I, H).unwrap();
+  gemm.forward_fp8(&norm1, gate_as, &dgw, gate_ws, &mut gate, M, I, H).unwrap();
+  gemm.forward_fp8(&norm1, up_as, &duw, up_ws, &mut up, M, I, H).unwrap();
   dinfer_kernels::ops::gelu_tanh_mul_round2_bf16(&st, &gate, &up, &mut act_bf, M, I).unwrap();
-  dinfer_kernels::ops::gemm_fp8_static_bf16(&st, &act_bf, dn_as, &ddw, dn_ws, &mut dn_out, M, H, I).unwrap();
+  gemm.forward_fp8(&act_bf, dn_as, &ddw, dn_ws, &mut dn_out, M, H, I).unwrap();
   dinfer_kernels::ops::rmsnorm_bf16_n(&st, &dn_out, &dpost, &mut ref_out, M, H, EPS).unwrap();
   st.synchronize().unwrap();
   let refv = st.dtoh_sync_copy(&ref_out).unwrap();
 
   // ---- megakernel 路径 ----
-  let norm1_m = st.alloc_zeros::<bf16>(M * H).unwrap();
+  let mut norm1_m = st.alloc_zeros::<bf16>(M * H).unwrap();
   let mut norm1_q = st.alloc_zeros::<u8>(M * H).unwrap();
   let mut gate_m = st.alloc_zeros::<bf16>(M * I).unwrap();
   let mut up_m = st.alloc_zeros::<bf16>(M * I).unwrap();
@@ -122,8 +123,8 @@ fn mega_mlp_matches_eager_path() {
   let mut sta = st.alloc_zeros::<i32>(8).unwrap();
   let mut rdy = st.alloc_zeros::<i32>(8).unwrap();
 
-  let n_gu = I.div_ceil(64) as i32;
-  let n_dn = H.div_ceil(64) as i32;
+  let n_gu = I.div_ceil(128) as i32;
+  let n_dn = H.div_ceil(128) as i32;
   let rc = unsafe {
     ffi::mega_mlp_dense_branch(
       st.ptr(&dx) as *const c_void,

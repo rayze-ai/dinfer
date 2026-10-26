@@ -103,7 +103,7 @@ __device__ __forceinline__ bf16 gelu_mul_round2(bf16 g, bf16 u) {
 /// 与 `rmsnorm_into`/`norm.cu` 同口径（f32 平方和、末尾舍一次）。
 __device__ __forceinline__ void rmsnorm_row_warp(const bf16* __restrict__ x, const bf16* __restrict__ w,
                                                  bf16* __restrict__ o, int H, float eps, int lane, float* red,
-                                                 int widx) {
+                                                 int widx, bool store) {
   float ss = 0.f;
   for (int i = lane; i < H; i += 32) {
     const float v = to_f32(x[i]);
@@ -114,6 +114,7 @@ __device__ __forceinline__ void rmsnorm_row_warp(const bf16* __restrict__ x, con
   if (lane == 0) red[widx] = ss;
   __syncthreads();
   const float inv = rsqrtf(red[widx] / (float)H + eps);
+  if (!store) return;  // 占位 warp（行号 ≥ m）：只参与 barrier，不写
   for (int i = lane; i < H; i += 32) o[i] = to_bf16(to_f32(x[i]) * inv * to_f32(w[i]));
 }
 
@@ -178,32 +179,41 @@ __device__ __forceinline__ void fp8_gemm_tile(const uint8_t* __restrict__ A, con
   const int r0 = lane >> 2, r1 = r0 + 8, cg = (lane & 3) * 2;
 #pragma unroll
   for (int i = 0; i < 2; ++i) {
-    const int ncol = nrow0 + cg + i * 8;
-    const int gcol = n_blk * BN + ncol;
-    if (gcol >= N) continue;
-    if (r0 < m) D[(long)r0 * N + gcol] = to_bf16(acc[i][0] * wscale);
-    if (r1 < m) D[(long)r1 * N + gcol] = to_bf16(acc[i][2] * wscale);
+    const int ncol = nrow0 + cg + i * 8;  // 该片段的起始列（偶）
+    const int g0 = n_blk * BN + ncol, g1 = g0 + 1;
+    if (g0 < N) {
+      if (r0 < m) D[(long)r0 * N + g0] = to_bf16(acc[i][0] * wscale);
+      if (r1 < m) D[(long)r1 * N + g0] = to_bf16(acc[i][2] * wscale);
+    }
+    if (g1 < N) {
+      if (r0 < m) D[(long)r0 * N + g1] = to_bf16(acc[i][1] * wscale);
+      if (r1 < m) D[(long)r1 * N + g1] = to_bf16(acc[i][3] * wscale);
+    }
   }
 }
 
 // ---------------------------------------------------------------- Dispatch
 struct MlpDenseDispatch {
   using Params = mega_mlp::Params;
-  static constexpr int kBN = 64;
+  static constexpr int kBN = 128;  // 每 warp 16 行 N（b0 8 + b1 8）→ 8 warp × 16 = 128
 
   __device__ void run(Params& p, int shard, int stage, uint8_t* smem) const {
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
     switch (stage) {
       case S_NORM: {
         __shared__ float red[kWarps];
-        if (warp < p.m) {
-          bf16* n1 = p.norm1 + (long)warp * p.H;
-          rmsnorm_row_warp(p.x + (long)warp * p.H, p.pre_w, n1, p.H, p.eps, lane, red, warp);
-          // 同时产出喂 fp8 GEMM 的量化副本
-          uint8_t* q = p.norm1_q + (long)warp * p.H;
-          for (int i = lane; i < p.H; i += 32) {
-            const float v = to_f32(n1[i]) * p.gate_a_inv;
-            q[i] = static_cast<uint8_t>(__nv_cvt_float_to_fp8(v, __NV_SATFINITE, __NV_E4M3));
+        {
+          const bool live = warp < p.m;
+          const int row = live ? warp : 0;
+          bf16* n1 = p.norm1 + (long)row * p.H;
+          rmsnorm_row_warp(p.x + (long)row * p.H, p.pre_w, n1, p.H, p.eps, lane, red, warp, live);
+          if (live) {
+            // 同时产出喂 fp8 GEMM 的量化副本
+            uint8_t* q = p.norm1_q + (long)row * p.H;
+            for (int i = lane; i < p.H; i += 32) {
+              const float v = to_f32(n1[i]) * p.gate_a_inv;
+              q[i] = static_cast<uint8_t>(__nv_cvt_float_to_fp8(v, __NV_SATFINITE, __NV_E4M3));
+            }
           }
         }
         return;
@@ -229,9 +239,11 @@ struct MlpDenseDispatch {
         return;
       case S_POST: {
         __shared__ float red[kWarps];
-        if (warp < p.m) {
-          rmsnorm_row_warp(p.down_out + (long)warp * p.H, p.post_w, p.out + (long)warp * p.H, p.H, p.eps, lane, red,
-                           warp);
+        {
+          const bool live = warp < p.m;
+          const int row = live ? warp : 0;
+          rmsnorm_row_warp(p.down_out + (long)row * p.H, p.post_w, p.out + (long)row * p.H, p.H, p.eps, lane, red,
+                           warp, live);
         }
         return;
       }

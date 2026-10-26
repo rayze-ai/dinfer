@@ -122,3 +122,11 @@ FFI：`crates/kernels/src/ffi.rs` 加 `mega_mlp_dense_branch`（`cfg(all(not(no_
 对拍：`crates/kernels/tests/mega_mlp_parity.rs`——参考路径用现有逐 op（rmsnorm→gemm_fp8_static(cuBLASLt)×2→
   gelu_round2→gemm→rmsnorm），mega 一次 launch；先退化检查（两边范数非零同量级）再比 ndiff/max|d|/rel。
   fp8 量化/累加顺序两路径不同，预期非逐位，应在 fp8 级差(rel<5e-3)；系统性偏差=我的 kernel 逻辑错。
+
+## R8 2026-10-26 对拍跑出 SIGSEGV，逐步排查中
+测试编译过，但运行 SIGSEGV。已修 3 个真实 bug（都出自我自己写的 kernel）：
+  1. **kBN=64 错**：每 warp 算 16 行 N（b0 8 行 + b1 8 行），8 warp 需 BN≥128，否则 sB 越界读 → 段错误。改 kBN=128。
+  2. **尾声只写了 4 个累加器中的 2 个**（acc[i][0]/[2]），列 c0+1 和 c2/c3 全丢 → 一半输出是垃圾。已补 acc[i][1]/[3]。
+  3. **`__syncthreads()` 出现在 `if (warp < m)` 分支内**（rmsnorm_row_warp 里），是未定义行为/死锁 →
+     改为所有 warp 都进函数（行号 ≥m 的 warp 用 store=false 只参与 barrier）。
+仍 SIGSEGV → 上 compute-sanitizer memcheck 定位真实越界（不猜）。
