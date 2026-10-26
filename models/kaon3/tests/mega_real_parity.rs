@@ -80,91 +80,143 @@ fn mega_real_weights_matches_eager() {
     let pre_w = src.load_bf16(&st, &format!("{p}.pre_feedforward_layernorm.weight")).unwrap();
     let post_w = src.load_bf16(&st, &format!("{p}.post_feedforward_layernorm_1.weight")).unwrap();
 
+    let seed0: u64 = std::env::var("KAON3_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let iters: usize = std::env::var("KAON3_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
     // 输入：用确定性伪随机 + 真实量级（Kaon 残差流 ≈ ±1）
     let xv: Vec<bf16> = (0..m * h)
         .map(|i| {
-            let s = (i as u64 * 6364136223846793005 + 1442695040888963407) as u64;
+            let s = (i as u64 + seed0 * 1000003).wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let s = s ^ (s >> 29);
             bf16::from_f32(((s >> 33) as f32 / (1u64 << 31) as f32 - 1.0) * 1.5)
         })
         .collect();
     let dx = st.htod_copy(xv).unwrap();
 
-    println!("m={m} H={h} I={inter} eps={eps}");
-
-    // ---- 参考路径：与 layer.rs 的逐 op 路径逐字对齐 ----
-    let mut ref_norm1 = Tensor::zeros(&st, &[m, h]).unwrap();
-    ops.norm().rmsnorm(&st, &dx, &pre_w.data, &mut ref_norm1.data, m, h, eps).unwrap();
-    let mut gate_out = Tensor::zeros(&st, &[m, inter]).unwrap();
-    let mut up_out = Tensor::zeros(&st, &[m, inter]).unwrap();
-    let mut act_bf = Tensor::zeros(&st, &[m, inter]).unwrap();
-    let mut dn_out = Tensor::zeros(&st, &[m, h]).unwrap();
-    let mut ref_ff1 = Tensor::zeros(&st, &[m, h]).unwrap();
-    gate.forward(&gemm, &st, &ref_norm1, &mut gate_out, m).unwrap();
-    up.forward(&gemm, &st, &ref_norm1, &mut up_out, m).unwrap();
-    dinfer_kernels::ops::gelu_tanh_mul_round2_bf16(&st, &gate_out.data, &up_out.data, &mut act_bf.data, m, inter)
-        .unwrap();
-    down.forward(&gemm, &st, &act_bf, &mut dn_out, m).unwrap();
-    ops.norm().rmsnorm(&st, &dn_out.data, &post_w.data, &mut ref_ff1.data, m, h, eps).unwrap();
-    st.synchronize().unwrap();
+    println!("m={m} H={h} I={inter} eps={eps} iters={iters}");
 
     // ---- mega 路径：与 layer.rs::mega_dense_branch 相同的缓冲与参数 ----
     let mut mb = LayerScratch::new(&st, &cfg, 8).unwrap();
-    let mega = mb.mega.as_mut();
-    let Some(mb) = mega else { panic!("KAON3_MEGA 未开：测试里直接置 env 或改 LayerScratch::new") };
+    let Some(mb) = mb.mega.as_mut() else { panic!("KAON3_MEGA 未开：测试里直接置 env 或改 LayerScratch::new") };
     let (gw, gw_s, gw_a, _, _) = gate.fp8_parts().expect("gate 不是 FP8");
     let (uw, uw_s, uw_a, _, _) = up.fp8_parts().expect("up 不是 FP8");
     let (dw, dw_s, dw_a, _, _) = down.fp8_parts().expect("down 不是 FP8");
-    let mut mega_ff1 = Tensor::zeros(&st, &[m, h]).unwrap();
-    st.memset_zeros_n(&mut mb.ready, 6).unwrap();
-    let rc = unsafe {
-        dinfer_kernels::ffi::mega_mlp_dense_branch(
-            st.ptr(&dx) as *const c_void,
-            st.ptr_mut(&mut mega_ff1.data) as *mut c_void,
-            st.ptr(&pre_w.data) as *const c_void,
-            st.ptr(&post_w.data) as *const c_void,
-            st.ptr(gw) as *const c_void,
-            gw_s,
-            1.0 / gw_a,
-            st.ptr(uw) as *const c_void,
-            uw_s,
-            1.0 / uw_a,
-            st.ptr(dw) as *const c_void,
-            dw_s,
-            1.0 / dw_a,
-            st.ptr_mut(&mut mb.norm1.data) as *mut c_void,
-            st.ptr_mut(&mut mb.norm1_q) as *mut c_void,
-            st.ptr_mut(&mut mb.gate_buf.data) as *mut c_void,
-            st.ptr_mut(&mut mb.up_buf.data) as *mut c_void,
-            st.ptr_mut(&mut mb.act_bf.data) as *mut c_void,
-            st.ptr_mut(&mut mb.act_q) as *mut c_void,
-            st.ptr_mut(&mut mb.down_out.data) as *mut c_void,
-            m as i32,
-            h as i32,
-            inter as i32,
-            eps,
-            inter.div_ceil(128) as i32,
-            h.div_ceil(128) as i32,
-            st.ptr_mut(&mut mb.dep) as *mut i32,
-            st.ptr_mut(&mut mb.count) as *mut i32,
-            st.ptr_mut(&mut mb.start) as *mut i32,
-            st.ptr_mut(&mut mb.ready) as *mut i32,
-            2,
-            0,
-            st.raw() as _,
-        )
-    };
-    assert_eq!(rc, 0, "mega 返回 {rc}");
-    st.synchronize().unwrap();
 
-    // ---- 逐段比较，第一处不一致即根因所在 ----
+    let mut total = [0usize; 6];
+    let mut first_bad: Option<usize> = None;
+    let mut dx = dx;
+    for it in 0..iters {
+        if it > 0 {
+            // 换一组输入（真实权重保持不变）
+            let seed = (it as u64 + seed0) * 1000003;
+            let xv: Vec<bf16> = (0..m * h)
+                .map(|i| {
+                    let s = (i as u64).wrapping_add(seed).wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    let s = s ^ (s >> 29);
+                    bf16::from_f32(((s >> 33) as f32 / (1u64 << 31) as f32 - 1.0) * 1.5)
+                })
+                .collect();
+            dx = st.htod_copy(xv).unwrap();
+        }
+
+        // ---- 参考路径：与 layer.rs 的逐 op 路径逐字对齐 ----
+        let mut ref_norm1 = Tensor::zeros(&st, &[m, h]).unwrap();
+        ops.norm().rmsnorm(&st, &dx, &pre_w.data, &mut ref_norm1.data, m, h, eps).unwrap();
+        let mut gate_out = Tensor::zeros(&st, &[m, inter]).unwrap();
+        let mut up_out = Tensor::zeros(&st, &[m, inter]).unwrap();
+        let mut act_bf = Tensor::zeros(&st, &[m, inter]).unwrap();
+        let mut dn_out = Tensor::zeros(&st, &[m, h]).unwrap();
+        let mut ref_ff1 = Tensor::zeros(&st, &[m, h]).unwrap();
+        gate.forward(&gemm, &st, &ref_norm1, &mut gate_out, m).unwrap();
+        up.forward(&gemm, &st, &ref_norm1, &mut up_out, m).unwrap();
+        dinfer_kernels::ops::gelu_tanh_mul_round2_bf16(&st, &gate_out.data, &up_out.data, &mut act_bf.data, m, inter)
+            .unwrap();
+        down.forward(&gemm, &st, &act_bf, &mut dn_out, m).unwrap();
+        ops.norm().rmsnorm(&st, &dn_out.data, &post_w.data, &mut ref_ff1.data, m, h, eps).unwrap();
+        st.synchronize().unwrap();
+
+        let mut mega_ff1 = Tensor::zeros(&st, &[m, h]).unwrap();
+        st.memset_zeros_n(&mut mb.ready, 6).unwrap();
+        let rc = unsafe {
+            dinfer_kernels::ffi::mega_mlp_dense_branch(
+                st.ptr(&dx) as *const c_void,
+                st.ptr_mut(&mut mega_ff1.data) as *mut c_void,
+                st.ptr(&pre_w.data) as *const c_void,
+                st.ptr(&post_w.data) as *const c_void,
+                st.ptr(gw) as *const c_void,
+                gw_s,
+                1.0 / gw_a,
+                st.ptr(uw) as *const c_void,
+                uw_s,
+                1.0 / uw_a,
+                st.ptr(dw) as *const c_void,
+                dw_s,
+                1.0 / dw_a,
+                st.ptr_mut(&mut mb.norm1.data) as *mut c_void,
+                st.ptr_mut(&mut mb.norm1_q) as *mut c_void,
+                st.ptr_mut(&mut mb.gate_buf.data) as *mut c_void,
+                st.ptr_mut(&mut mb.up_buf.data) as *mut c_void,
+                st.ptr_mut(&mut mb.act_bf.data) as *mut c_void,
+                st.ptr_mut(&mut mb.act_q) as *mut c_void,
+                st.ptr_mut(&mut mb.down_out.data) as *mut c_void,
+                m as i32,
+                h as i32,
+                inter as i32,
+                eps,
+                inter.div_ceil(128) as i32,
+                h.div_ceil(128) as i32,
+                st.ptr_mut(&mut mb.dep) as *mut i32,
+                st.ptr_mut(&mut mb.count) as *mut i32,
+                st.ptr_mut(&mut mb.start) as *mut i32,
+                st.ptr_mut(&mut mb.ready) as *mut i32,
+                2,
+                0,
+                st.raw() as _,
+            )
+        };
+        assert_eq!(rc, 0, "mega 返回 {rc}");
+        st.synchronize().unwrap();
+
+        // ---- 逐段比较，第一处不一致即根因所在（只在首轮打印细节）----
+        let stages: [(&str, &CudaSlice<bf16>, &CudaSlice<bf16>, usize); 6] = [
+            ("1_pre_ff_norm", &ref_norm1.data, &mb.norm1.data, m * h),
+            ("2_gate", &gate_out.data, &mb.gate_buf.data, m * inter),
+            ("3_up", &up_out.data, &mb.up_buf.data, m * inter),
+            ("4_gelu", &act_bf.data, &mb.act_bf.data, m * inter),
+            ("5_down", &dn_out.data, &mb.down_out.data, m * h),
+            ("6_post_ff_norm", &ref_ff1.data, &mega_ff1.data, m * h),
+        ];
+        for (si, (tag, a, b, n)) in stages.iter().enumerate() {
+            let nd = ndiff(&st, a, b, *n);
+            total[si] += nd;
+            if nd > 0 && first_bad.is_none() {
+                first_bad = Some(si);
+                cmp(&st, a, b, *n, tag); // 打印首个不一致段的统计
+            }
+        }
+        if it == 0 {
+            for (si, (tag, a, b, n)) in stages.iter().enumerate() {
+                if total[si] == 0 {
+                    cmp(&st, a, b, *n, tag);
+                }
+            }
+        }
+    }
+
+    let names = ["1_pre_ff_norm", "2_gate", "3_up", "4_gelu", "5_down", "6_post_ff_norm"];
+    println!("---- {iters} 组输入累计（每组 m·维度） ----");
     let mut ok = true;
-    ok &= cmp(&st, &ref_norm1.data, &mb.norm1.data, m * h, "1_pre_ff_norm");
-    ok &= cmp(&st, &gate_out.data, &mb.gate_buf.data, m * inter, "2_gate");
-    ok &= cmp(&st, &up_out.data, &mb.up_buf.data, m * inter, "3_up");
-    ok &= cmp(&st, &act_bf.data, &mb.act_bf.data, m * inter, "4_gelu");
-    ok &= cmp(&st, &dn_out.data, &mb.down_out.data, m * h, "5_down");
-    ok &= cmp(&st, &ref_ff1.data, &mega_ff1.data, m * h, "6_post_ff_norm");
-
+    for (si, name) in names.iter().enumerate() {
+        let denom = iters * if si == 1 || si == 2 || si == 3 { m * inter } else { m * h };
+        println!("  {name}: 累计不同 {}/{}", total[si], denom);
+        ok &= total[si] == 0;
+    }
     println!("VERDICT: {}", if ok { "全段逐位一致" } else { "有段不一致（见上，第一处即根因）" });
     assert!(ok, "真实权重下有段不一致");
+}
+
+/// 只数不一致元素个数（不打印），用于多轮累计。
+fn ndiff(stream: &Stream, a: &CudaSlice<bf16>, b: &CudaSlice<bf16>, n: usize) -> usize {
+    let va = stream.dtoh_sync_copy(a).unwrap();
+    let vb = stream.dtoh_sync_copy(b).unwrap();
+    (0..n).filter(|&i| va[i].to_bits() != vb[i].to_bits()).count()
 }
