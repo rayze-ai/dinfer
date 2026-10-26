@@ -209,6 +209,46 @@ pub fn rmsnorm_bf16_noweight(
     )
 }
 
+/// 原位 RMSNorm：`x = rmsnorm(x)[·w]`（`w = None` → 无权重）。输入输出同缓冲。
+///
+/// 逐位等价于"写到新缓冲再拷回"：每个线程/lane 先把本行的全部 8 元素向量读进寄存器，
+/// 再做 block/warp 归约（`__syncthreads` / `__shfl`）后才写回 out，写不依赖别的线程的 out；
+/// 所以 `out == x` 与 `out != x` 产出完全相同的字节（见 `norm.cu` 的 vec / warp kernel）。
+/// CUDA graph 捕获期不能分配/换缓冲地址，`head_rmsnorm` 用它免掉每层每步的 `Tensor::uninit`。
+pub fn rmsnorm_bf16_inplace(
+    stream: &Stream,
+    x: &mut CudaSlice<bf16>,
+    w: Option<&CudaSlice<bf16>>,
+    tokens: usize,
+    hidden: usize,
+    eps: f32,
+) -> Result<()> {
+    ensure!(x.len() >= tokens * hidden, "rmsnorm_inplace: x.len {} < {}", x.len(), tokens * hidden);
+    if let Some(w) = w {
+        ensure!(w.len() == hidden, "rmsnorm_inplace: w.len {} != hidden {hidden}", w.len());
+    }
+    // 读指针与写指针指向同一缓冲：先取可写指针，再把同地址当只读传入（kernel 先读满寄存器再写回，原位安全）。
+    let p = stream.ptr_mut(x);
+    let pw = w.map_or(std::ptr::null(), |w| stream.ptr(w) as *const c_void);
+    // SAFETY: 长度已校验；原位读写安全性见上。
+    check(
+        unsafe {
+            ffi::rmsnorm_bf16(
+                p as *const c_void,
+                pw,
+                p as *mut c_void,
+                tokens as i64,
+                hidden as i64,
+                eps,
+                rmsnorm_layout(stream, tokens, hidden, None),
+                norm_mode(),
+                stream.raw() as _,
+            )
+        },
+        "rmsnorm_bf16_inplace",
+    )
+}
+
 /// res += x; out = rmsnorm(res) * w。res 原位更新。
 pub fn fused_add_rmsnorm_bf16(
     stream: &Stream,

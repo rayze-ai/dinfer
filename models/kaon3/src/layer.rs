@@ -538,16 +538,11 @@ fn head_rmsnorm(
     head_dim: usize,
     eps: f32,
 ) -> Result<()> {
+    let _ = ops;
+    // 原位 RMSNorm：不分配、不换缓冲身份（CUDA graph 捕获期禁止两者）。逐位等价于旧的
+    // "写新缓冲再换 x.data"（kernel 先把整行读进寄存器再写回，见 `rmsnorm_bf16_inplace`）。
     let tokens = x.numel() / head_dim;
-    let mut out = Tensor::uninit(stream, &x.shape)?;
-    match w {
-        Some(w) => ops
-            .norm()
-            .rmsnorm(stream, &x.data, &w.data, &mut out.data, tokens, head_dim, eps)?,
-        None => ops.norm().rmsnorm_noweight(stream, &x.data, &mut out.data, tokens, head_dim, eps)?,
-    }
-    x.data = out.data;
-    Ok(())
+    k::ops::rmsnorm_bf16_inplace(stream, &mut x.data, w.map(|w| &w.data), tokens, head_dim, eps)
 }
 
 /// 无权重 RMSNorm 到新缓冲（不覆盖输入）：`y = x / rms(x)`。
@@ -718,6 +713,8 @@ impl MegaBufs {
 pub struct LayerScratch {
     pub x: Tensor<bf16>,        // 残差主干 [tokens, hidden]
     pub norm: Tensor<bf16>,     // norm 输出 [tokens, hidden]
+    /// final norm（lm_head 前）的固定缓冲 [max_tokens, hidden]；CUDA graph 捕获期不能每步 `uninit`。
+    pub final_normed: Tensor<bf16>,
     /// q/k/v/attn 按**层型**分两套（滑窗 D=256 / 全注意力 D=512），
     /// 因为 rope 与 attention 都按精确长度校验，不能共用一个大缓冲。
     pub q_s: Tensor<bf16>,
@@ -790,6 +787,7 @@ impl LayerScratch {
         Ok(Self {
             x: Tensor::uninit(stream, &[max_tokens, cfg.hidden])?,
             norm: Tensor::uninit(stream, &[max_tokens, cfg.hidden])?,
+            final_normed: Tensor::uninit(stream, &[max_tokens, cfg.hidden])?,
             q_s: Tensor::uninit(stream, &[max_tokens, cfg.num_heads * cfg.head_dim_sliding])?,
             k_s: Tensor::uninit(stream, &[max_tokens, cfg.nkv_sliding * cfg.head_dim_sliding])?,
             v_s: Tensor::uninit(stream, &[max_tokens, cfg.nkv_sliding * cfg.head_dim_sliding])?,

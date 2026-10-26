@@ -837,3 +837,15 @@ blockIdx.z=e 按 device offsets 取专家行段，空 CTA return；固定 8 laun
   只在 ATTN stage：前 128 线程跑一个 (hk,split)、后 128 跑另一个，**各自是原封不动的 128 线程归约 → 加法顺序逐字节同 → 天然逐位**。
   代价最小（只动 ATTN shard 分配 + smem 按半区偏移）。子代理之前说的"改 core smem 有逐位风险"其实是这步的工程细节，正确做法不破逐位。
 排期：**等 B4(cudagraph) 完成后实现**（收 B1/B2 遗留的 attn 半数空转，补回 ATTN 那 7%）。目标逐位 0/N。
+
+## R44 2026-10-26 B4 主会话接管：cudagraph 捕获成功但发现真 bug（多步 decode graph vs eager 分叉）
+停子代理自己接管。子代理 B4 代码**完整且编过**（executor +254 行：DecodeGraphs+PlanBuffers 固定缓冲+argmax D2H 移图外+NO_GRAPH 开关+5 处捕获障碍都处理，接法同 qwen35）。
+验证（GPU4 graph:8140 MOE_GROUPED=1 vs GPU5 no-graph:8141）：
+- **cudagraph 捕获成功**：日志 `decode graphs captured buckets`（R42 撞墙、B3 解锁后终于捕获成）。生成正常。
+- **但 graph vs no-graph 文本不一致（真 bug，违反硬底线）**：
+  - 短："1加1等于**2**。" 两边**完全一致** ✓
+  - 长："长城..."(80 tok) 第一句就分叉 ✗（graph:古代建筑群 / no-graph:古代军事防御工程）
+- → **多步 decode / 序列变长后 graph replay 与 eager 分叉**。cudagraph 只改 launch 不该改数值，这是必修 bug，**B4 未完成**。
+  （子代理大概率也撞到此不一致才卡住，未定位根因。）
+定位范围：捕获体 max_seqlen=1（query 长度，decode 对）；随步增长的是 KV seq_lens/block_table，经 PlanBuffers.upload 每步更新——
+  疑点在 graph replay 时 KV 位置/seq_lens 更新与 eager 不同步，或某值被 graph 固化。待深入 forward + PlanBuffers.upload 定准。

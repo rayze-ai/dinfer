@@ -225,11 +225,11 @@ impl KaonModel {
         self.kv = kv_cache;
 
         // ---- final norm ----
-        let mut normed = Tensor::uninit(stream, &[tokens, h])?;
-        ops.norm().rmsnorm(stream, &sc.x.data, &self.final_norm.data, &mut normed.data, tokens, h, cfg.eps)?;
+        // 固定缓冲（CUDA graph 捕获期不能每步 `Tensor::uninit`）。
+        ops.norm().rmsnorm(stream, &sc.x.data, &self.final_norm.data, &mut sc.final_normed.data, tokens, h, cfg.eps)?;
         if let Some(dir) = hidden_dir {
             // final norm 之后、lm_head 之前的输入（验证 lm_head GEMM 本身）
-            let v = normed.to_vec_f32(stream)?;
+            let v = sc.final_normed.to_vec_f32(stream)?;
             let bytes: Vec<u8> = v.iter().take(tokens * h).flat_map(|x| x.to_le_bytes()).collect();
             std::fs::write(format!("{dir}/final_norm.bin"), bytes)?;
         }
@@ -238,7 +238,7 @@ impl KaonModel {
         // vocab 262144、hidden 2816：一次全词表 GEMM。decode（tokens 少）时应换 split/分块策略，
         // 阶段 5 调优时再处理（`docs/loops/kaon-v3.md` 的 roofline 一节）。
         gemm.forward_bf16(
-            &normed.data,
+            &sc.final_normed.data,
             &self.embed.table.data,
             None,
             &mut logits.data,

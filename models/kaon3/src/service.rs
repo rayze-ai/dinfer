@@ -30,6 +30,7 @@ pub struct ServeOptions {
     pub num_blocks: u32,
     pub block_size: u32,
     pub enable_chunked_prefill: bool,
+    pub enable_cuda_graph: bool,
     pub device: usize,
 }
 
@@ -44,6 +45,7 @@ impl Default for ServeOptions {
             num_blocks: 2048,
             block_size: 32,
             enable_chunked_prefill: true,
+            enable_cuda_graph: true,
             device: 0,
         }
     }
@@ -111,7 +113,7 @@ impl KaonService {
             num_blocks
         );
 
-        let exec = KaonExecutor::new(s.clone(), gemm, model, max_tokens, max_rows)?;
+        let exec = KaonExecutor::new(s.clone(), gemm, model, max_tokens, max_rows, max_blocks_per_seq, opt.enable_cuda_graph)?;
         t_startup.model_loaded();
         let runner = Runner::new(exec, bs);
 
