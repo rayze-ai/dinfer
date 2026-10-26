@@ -327,3 +327,11 @@ R0 重建 Exited(1) = `CUDA_ERROR_OUT_OF_MEMORY`。查 GPU0 已被 **kaon3-base*
 GPU 分配修正后四服务全 ok：R0=GPU4/8133, R1mega=GPU1/8132, Ve=GPU2/28200, Vn=GPU3/28201。各 12C 不重叠，压测端 16C(96-111)。
 压测 bz5wbn2xl 跑中：R0 先压(CPU 99.7%)，串行推进到 R1/vLLM。已出 R0 部分组(c8=87.1 tok/s 等)，含一个 0.00(待查哪组)。
 失败跳过逻辑生效，不会再卡死。跑完统一出四配置对比 + perf-trend CSV/曲线 + Dashboard。
+
+### R15 性能测量作废（2026-10-26，记录以免后人误读）
+本轮试过的三次 bench **全部不能用作 myu 的收益结论**，原因是同机有别人的 vLLM 压测在跑：
+- 第一次 base(GPU0)/mega(GPU1)：GPU1 上 `vllm-eager` 占着 95% 利用率 → mega TPOT 被拖到 57.46ms（假慢）。
+- 后续两次：容器被反复清理、GPU4/5 被另一路压测打到 93–94%。
+**结论**：引擎层面收益必须在 GPU 独占、无他人压测时测（项目规则 `knowledge/perf-method.md` §7 同款）。
+kernel 层 1.37× 是隔离测试里的净收益（`mega_mlp_parity` 同进程 A/B），这个可信；
+端到端能拿到多少**尚未测**，不要在报告中引用任何端到端加速数字。
