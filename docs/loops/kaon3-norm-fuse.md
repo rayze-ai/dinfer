@@ -240,3 +240,7 @@ dinfer kaon3-serve(8131) Up 13h 正常。oracle kaon-oracle-1 在 28101（非 28
 但其启动带 `--hf-overrides {"text_config":{"num_hidden_layers":1}}` = **1 层截断**（logprob 探针用）→ chat 立即 EOS 空输出，
 **不能作生成对比**。且两边 chat 模板不同（dinfer prompt=19 token，oracle=20）。
 正解：另起**全层** vLLM chat 服务（GPU2，port 28130，--chat-template 指模型 chat_template.jinja = 与 dinfer 同模板），不动 45h oracle。
+
+## R21（2026-10-26）起全层 vLLM chat(GPU2:28130,served=kaon-vllm,gemma模板)跑 vLLM 20 条
+docker run 手误(第一条把模型当镜像)已清；干净重起 b6135。等全模型加载~2min→冒烟→qa_compare run vllm(bi6ioeuwg)。
+两边齐后：report 并排(dinfer 已有 result_dinfer.jsonl 命中20/20零乱码25tok/s) → 挂 dashboard。
