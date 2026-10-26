@@ -1477,6 +1477,8 @@ pub struct MegaLayerParams {
     pub sem_dn: *mut i32,
     /// 片上流水：1 → S_QKNORM 吸收 rope+kv 写（不落 global 中间量）；0 → 原分离三 stage（基线）。
     pub fuse_glue: i32,
+    /// 片上流水（R41）：1 → S_RES 吸收 S_PRE_FF（pre_ff_norm+量化）；0 → 原两 stage（基线）。
+    pub fuse_ff: i32,
 }
 
 /// 整层 megakernel 一次/分段 launch。融合：stage_lo=0,stage_hi=14,setup=1 一次跑全链。

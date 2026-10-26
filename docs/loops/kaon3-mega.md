@@ -701,3 +701,26 @@ KVWRITE 从 qkv_buf 读 q/k/v 再写 cache。**把它们融成一个 stage `fuse
 **关键认知修正（影响后续）**：tiny-m decode 是 **latency-bound 不是 bandwidth-bound**——片上融合降的是 wait barrier + 中间量读回延迟，
   不是 global 带宽（带宽被 weight read 主导）。所以 R39"省 global 往返"提法不准，**真正省的是把 count=1 胶水链融成 on-chip stage 减 barrier/读回延迟**。
 下一处：OPROJ 后的 RES→PRE_FF（都 count=1 胶水）融成一个 on-chip stage，省 barrier + x2/o_buf 读回。不融进 OPROJ epilogue（同 QKV 理由）。
+
+## R41：第二处片上融合 S_RES+S_PRE_FF（fuse_ff）
+把 S_RES（post_attn_norm+残差→x2）与 S_PRE_FF（pre_ff_norm→norm1_bf，量化→norm1_q）融成一个 on-chip stage `fused_res_pre_ff`：
+一 warp 一行，pass A 算 post_attn_norm 平方和→inv_a→写 x2（**仍落 global**，MoE 的 pre_ff_norm_2 吃它）的同一循环里
+顺手从刚存的 bf16 x2 值累加 pass B 的平方和 ssb；pass B 直接 pre_ff_norm(x2)+量化。开关 `p.fuse_ff=1` → S_PRE_FF count=0、
+S_GATE/S_UP dep 改指 S_RES。省掉 S_RES→S_PRE_FF 的 stage barrier + S_PRE_FF 再读一遍 x2（ssb 与"分离路径重读 x2"逐位一致）。
+
+**x2 是否可彻底留片上？否**。`models/kaon3/src/layer.rs:1211` MoE 支路 `pre_ff_norm_2(sc.x)` 吃的就是 attn 后残差（=x2，
+layer.rs 里 `add_inplace` 原地写进 sc.x，dense/MoE 两支共用）。所以 x2 必须落 global，只能省"PRE_FF 再读 x2 这一遍 + 一个 barrier"。
+smem 也放不下整行（H=2816 → 8 warp 各一行 44KB > GEMM 动态 smem 20KB），寄存器档 H 运行时不定档不了——融合收益就是省 barrier+一遍读回，够用。
+
+**结果（5090 sm120，mega_layer_parity，fuse_glue=1 叠加 fuse_ff=1）**：逐位 0/N（qkv/cache/attn/o/x2/**norm1**/out 全 0，max|d|=0），m=1/4/8 都过。
+计时（仅 glue 1launch → glue+ff 1launch）：m=1 169.1→154.9us（1.09x）、m=4 205.0→189.2us（1.08x）、m=8 273.8→247.1us（1.11x）。
+PREFF exec=0 证实融合生效。**整层 megakernel 累计**（分离 15launch → glue+ff 1launch）：m=1 1.47x、m=4 1.53x、m=8 1.60x。
+
+**下一处融合建议**：
+- **S_OQUANT→S_OPROJ 之间 / S_IN 量化**：OQUANT（量化 attn_buf→attn_q，count=1）也是纯胶水，可并进 ATTN 尾声或 OPROJ 前；但 ATTN 是逐 (row,kvhead,split) 分片、OQUANT 是整行，合流口径不一致，收益小、优先级低。
+- **S_ACT（gelu·mul round2 + 量化）**：依赖 GATE+UP 两支 GEMM 合流，epilogue 融需两 GEMM CTA 同步，复杂，优先级低（同 R40 判断）。
+- **S_POST（post_ff_norm_1）**：是 dense 支路尾声但 megakernel 输出 out 后还要和 MoE 支路相加，融进 DOWN epilogue 收益≈1%，不做。
+- 胶水链基本已融完（glue 三连 + RES/PRE_FF）。后续收益应转向 B3（MoE 持久化）/ B4（cudagraph），不再抠单 stage。
+
+**本步改动文件**：`crates/kernels/cuda/mega_layer_sm120.cu`（+`fuse_ff` 字段 / `fused_res_pre_ff` / S_RES 分支 / host count+dep）、
+`crates/kernels/src/ffi.rs`（MegaLayerParams +`fuse_ff`）、`crates/kernels/tests/mega_layer_parity.rs`（p2 叠加 `fuse_ff=1` + norm1 对拍 + 隔离 fuse_ff 计时段）。

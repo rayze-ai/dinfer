@@ -116,6 +116,10 @@ struct Params {
   // 片上流水：1 → S_QKNORM 吸收 rope + kv 写（norm→rope→roundtrip→写 qkv_buf/cache 全程 head 留 smem，
   //   不落 global 中间量），S_ROPE/S_KVWRITE 置 0 task、S_ATTN 直接依赖 S_QKNORM。0 → 原分离三 stage（基线）。
   int fuse_glue;
+  // 片上流水（R41）：1 → S_RES 吸收 S_PRE_FF（post_attn_norm+残差→x2 落 global 后，同 warp 续做 pre_ff_norm+量化，
+  //   x2 的平方和在写 x2 的同一循环累加、免再读一遍），S_PRE_FF 置 0 task、S_GATE/S_UP 直接依赖 S_RES。0 → 原两 stage（基线）。
+  //   x2 仍落 global（MoE 的 pre_ff_norm_2 吃它），只省 S_RES→S_PRE_FF 的 stage barrier + 一遍 x2 读回。
+  int fuse_ff;
 };
 
 // ---------------------------------------------------------------- 小工具
@@ -219,6 +223,54 @@ __device__ __forceinline__ void fused_qkv_glue(Params& p, int lane, int warp, ui
       }
     }
     __syncwarp();
+  }
+}
+
+// ---------------------------------------------------------------- 片上融合 glue（S_RES + S_PRE_FF 一个 CTA）
+// 一 warp 一行，连着做：A) x2 = x + post_attn_norm(o_buf)（写 x2 到 global，MoE 还要用）；
+//   B) pre_ff_norm(x2) → norm1_bf，量化 → norm1_q（gate/up 的 fp8 A）。
+// 数值与"分离 S_RES + S_PRE_FF"**逐位一致**：同一套 rmsnorm（shfl 归约 + red smem roundtrip）/ 残差 / 量化口径，
+//   次序相同。x2 的平方和（pass B 的归约）在 pass A 写 x2 的同一循环里从刚存的 bf16 值累加 —— 与"分离路径
+//   S_PRE_FF 重新读 x2 再平方和"逐位一致（同样的 bf16→f32→平方、同样的 lane 跨步与 shfl 次序），
+//   省掉 S_RES→S_PRE_FF 的 stage barrier + 再读一遍 x2。
+__device__ __forceinline__ void fused_res_pre_ff(mega_layer::Params& p, int lane, int warp, float* red) {
+  const bool live = warp < p.m;
+  const int row = live ? warp : 0;
+  const bf16* o = p.o_buf + (long)row * p.H;
+  const bf16* xin = p.x + (long)row * p.H;
+  bf16* x2 = p.x2 + (long)row * p.H;
+  // ---- pass A: post_attn_norm(o) 的平方和 ----
+  float ssa = 0.f;
+  for (int i = lane; i < p.H; i += 32) { const float v = to_f32(o[i]); ssa += v * v; }
+#pragma unroll
+  for (int off = 16; off > 0; off >>= 1) ssa += __shfl_xor_sync(0xffffffffu, ssa, off);
+  if (lane == 0) red[warp] = ssa;
+  __syncthreads();
+  const float inv_a = rsqrtf(red[warp] / (float)p.H + p.eps);
+  // ---- pass A 写 x2 = post_attn_norm(o) + x，顺手累加 x2 的平方和（pass B 用）----
+  float ssb = 0.f;
+  if (live) {
+    for (int i = lane; i < p.H; i += 32) {
+      const float nrm = to_f32(to_bf16(to_f32(o[i]) * inv_a * to_f32(p.post_attn_w[i])));  // 与 S_RES 逐位同：先舍 bf16
+      const bf16 v = to_bf16(nrm + to_f32(xin[i]));                                         // 再加残差、舍 bf16
+      x2[i] = v;
+      const float vf = to_f32(v);
+      ssb += vf * vf;  // 从刚存的 bf16 值累加 → 与 S_PRE_FF 重读 x2 逐位一致
+    }
+  }
+#pragma unroll
+  for (int off = 16; off > 0; off >>= 1) ssb += __shfl_xor_sync(0xffffffffu, ssb, off);
+  if (lane == 0) red[warp] = ssb;
+  __syncthreads();
+  const float inv_b = rsqrtf(red[warp] / (float)p.H + p.eps);
+  if (!live) return;
+  // ---- pass B: pre_ff_norm(x2) → norm1_bf，量化 → norm1_q ----
+  bf16* nb = p.norm1_bf + (long)row * p.H;
+  uint8_t* q = p.norm1_q + (long)row * p.H;
+  for (int i = lane; i < p.H; i += 32) {
+    const bf16 o1 = to_bf16(to_f32(x2[i]) * inv_b * to_f32(p.pre_ff_w[i]));
+    nb[i] = o1;
+    q[i] = quant_e4m3(to_f32(o1), p.gate_a_inv);
   }
 }
 
@@ -363,6 +415,10 @@ struct LayerDispatch {
       case S_RES: {
         // x2 = x + post_attn_norm(o_buf)。一 warp 一行。
         __shared__ float red[kWarps];
+        if (p.fuse_ff) {  // 片上流水：续做 pre_ff_norm+量化，省 S_RES→S_PRE_FF barrier + 再读一遍 x2
+          fused_res_pre_ff(p, lane, warp, red);
+          return;
+        }
         const bool live = warp < p.m;
         const int row = live ? warp : 0;
         bf16* x2 = p.x2 + (long)row * p.H;
@@ -466,7 +522,7 @@ int mega_layer_forward(const dinfer::mega_layer::Params* p_in, int stage_lo, int
   h_count[S_OQUANT] = 1;
   h_count[S_OPROJ] = n_o * p.sp_o;
   h_count[S_RES] = 1;
-  h_count[S_PRE_FF] = 1;
+  h_count[S_PRE_FF] = p.fuse_ff ? 0 : 1;   // 片上融合：pre_ff_norm+量化已吸进 S_RES，置 0 task
   h_count[S_GATE] = n_gu * p.sp_gu;
   h_count[S_UP] = n_gu * p.sp_gu;
   h_count[S_ACT] = 1;
@@ -482,8 +538,8 @@ int mega_layer_forward(const dinfer::mega_layer::Params* p_in, int stage_lo, int
   h_dep[S_OPROJ] = S_OQUANT;
   h_dep[S_RES] = S_OPROJ;
   h_dep[S_PRE_FF] = S_RES;
-  h_dep[S_GATE] = S_PRE_FF;
-  h_dep[S_UP] = S_PRE_FF;
+  h_dep[S_GATE] = p.fuse_ff ? S_RES : S_PRE_FF;  // 融合时 PRE_FF count=0，GATE/UP 直接等 S_RES
+  h_dep[S_UP] = p.fuse_ff ? S_RES : S_PRE_FF;
   h_dep[S_ACT] = S_GATE;
   h_dep2[S_ACT] = S_UP;
   h_dep[S_DOWN] = S_ACT;
