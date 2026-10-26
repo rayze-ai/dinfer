@@ -972,3 +972,13 @@ B5 流程：① 验全栈三开关能起+生成+逐位(md5==eeb2e6cf)；② 四�
   replay 时整层算垃圾。或 mega 的 launch 在 capture 期有未固定量（grid/smem 动态）。
 下一步：查 mega_layer host launch(mega_layer_forward) 在 capture 期是否有 alloc / 每步变化的 host 值被固化；
   对比 B4 已过的非 mega 路径 forward 为何能捕获。先读 KAON3_MEGA 路径在 executor/layer 怎么被调 + ready 缓冲每步清零是否在 capture 区。
+
+## R45 ✅ 乱码根因坐实：dense megakernel 的 dep/count/start 表用**栈数组 H2D**，graph replay 读失效栈地址
+serve 的 KAON3_MEGA 走 `mega_mlp_dense_branch`(dense-only B2)，非整层(整层只在 parity 测试)。
+`mega_mlp_sm120.cu:195` `int h_count[S_COUNT]` 等是**栈数组**，:216 每次调用 `cudaMemcpyAsync(count, h_count, HostToDevice, stream)`。
+**graph capture 录下"从栈地址 h_count 拷 N 字节"→ 函数返回后栈失效 → replay 读垃圾 → dep/count 表乱 → stage 调度崩 → 乱码**。
+NO_GRAPH 每次真拷正确栈值故正常；graph replay 读失效栈故乱码。完美解释。
+**修法**：dep/count/start/dep2 层内每步不变（形状固定）→ 不该每步 H2D。改为：host(Rust)一次性算好存进 MegaBufs 的 device 缓冲，
+  C ABI 收已填好的 device 指针，kernel launch 前**不再 memcpy**（graph 里无 H2D）。
+（这也是 cudagraph 铁律：capture 期禁止从临时 host 地址 H2D；B4 清障碍清的是 executor 侧，漏了 dense megakernel 内部这处。）
+下一步：改 mega_mlp_sm120.cu 去掉 per-call H2D + Rust 侧预填 device 表；重验全栈 KAON3_MEGA+grouped+graph 逐位/通顺。
