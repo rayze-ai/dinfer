@@ -639,3 +639,57 @@ B2 已证"融一次 launch"只拿到省 launch(1.27×)，**没省到 global 往�
 按 exec/global 往返占比排序融合：QKV(38% exec，后接 qknorm/rope/kvwrite 多个胶水+中间量最多)最该先融；其次 OPROJ→RES。
 每处融合：epilogue 把下游胶水吸进来 → 砍掉中间 global buffer → 逐位对拍 + 计时看 global 流量/耗时降多少。
 硬约束：逐位一致；5090 单卡；kernel 不写死调优数值。委派子代理，先融 QKV→qknorm→rope 一处看收益。
+
+## R40 2026-10-26 ✅ 片上流水第一步：QKNORM+ROPE+KVWRITE 融成一个 on-chip glue stage（逐位一致）
+**目标（承 R39）**：吃到 megakernel 独有的"片上流水"——把 QKV GEMM 后的胶水（逐头 rmsnorm + rope + kv 写）
+在**同一个 CTA 内全程留 smem**做完，消掉中间量的 global 往返（B2 只省了 launch，没省 global 往返）。
+
+**先说结论：把 glue 融进 QKV GEMM 的 epilogue（R39 原设想）有结构障碍，不做；改为把三个 glue stage 融成一个 on-chip stage。**
+
+### 结构障碍（为什么 glue 不能融进 QKV GEMM epilogue）——如实报告
+1. **tile 粒度 vs 整头对齐**：QKV GEMM 的 `fp8_gemm_tile` BN=128，一个 CTA 只算 128 列；而一头 D=256，
+   **一个 tile 只覆盖半头**。逐头 rmsnorm 要整头 D=256 的平方和归约、rope 配对是 (i, i+span=128)（整头两半），
+   半头 tile 两者都做不了。要在 epilogue 融，必须把 QKV tile 粒度改成 BN=256（整头），是 GEMM 片段/累加器布局的大改。
+2. **列并行 vs 行并行的本质冲突**（比 tile 粒度更根本）：GEMM 输出是**列并行**（8 warp 各算 BN/8 列、每 lane 持若干列的
+   m 行片段）；而 rmsnorm 要**行并行**（一行 D 列一起归约）。即便 BN=256，一头的 256 列仍散在 8 warp → epilogue 里做
+   norm 必须先 smem 转置（列并行→行并行）再归约。等于在 epilogue 里重做一遍"写 smem→同步→按行读"，
+   和单开一个 glue stage 从 qkv_buf 读没本质差别，只省掉"qkv_buf 的一次 global 写 + 一次 global 读"。
+3. **值不值得为融合改 tile 粒度？不值**：QKV GEMM 是 **weight-bandwidth-bound**——读 fp8 权重 ΣN×H=8192×2816≈23MB，
+   而中间量 qkv_buf 一行才 8192×2B=16KB（m=8 也就 128KB）。省掉 qkv_buf 一次往返 ≈ 几百 KB，是 23MB 的 ~1%，
+   却要冒 BN=256 GEMM 重写的逐位风险。**epilogue 融 QKV 收益 ≈ 噪声，不做。**
+
+### 实际做了什么（收益真实、风险小）
+三个 glue stage 本来各 count=1（单 CTA），各自从 qkv_buf **读回→算→写回** global：QKNORM 读写全 ΣN、ROPE 读写 q/k、
+KVWRITE 从 qkv_buf 读 q/k/v 再写 cache。**把它们融成一个 stage `fused_qkv_glue`**（`mega_layer_sm120.cu`，`fuse_glue=1` 开）：
+- 一个 warp 领一个 (row, 头槽)：**load 整头 D 进 smem（4KB/CTA，复用 GEMM 动态 smem 首段）→ rmsnorm(smem) → rope(smem, 仅 q/k)
+  → fp8 roundtrip(smem, kv_fp8 时) → 写回 qkv_buf（attn 的 q 从这读）+ 写 KV cache（k/v 头）**。全程 head 留 smem，
+  中间量（norm 后、rope 后）**不落 global**。
+- host 侧 `fuse_glue=1`：S_ROPE/S_KVWRITE 置 0 task，S_ATTN 依赖直接指 S_QKNORM（省 2 个 stage 依赖 barrier）。
+- 数值同口径复用：rmsnorm 用同一套 shfl 归约 + 末尾舍一次、rope 用 rope.cu 的 NEOX 每步舍 bf16、roundtrip 同 S_KVWRITE。
+  **次序严格照分离三 stage（norm→rope→roundtrip→写），所以逐位一致。**
+- FFI 加 `fuse_glue: i32`（`ffi.rs` MegaLayerParams 末尾）。对拍 `mega_layer_parity.rs`：基线 `fuse_glue=0`(15 launch) vs
+  片上融合 `fuse_glue=1`(1 launch)，新增 **kv_cache 逐位比较**（KVWRITE 融进去了，必须对 cache）。
+
+### 结果（5090 GPU0，sliding 档 GROUP=2 D=256，H=2816 I=2112，kv_fp8=1）
+- **逐位一致 0/N**（m=1/4/8 全过）：qkv_buf / **kv_cache** / attn_buf / o_buf / x2 / out 全 0/N，max|d|=0。证明片上融合不改数值。
+- **计时**（三段隔离：分离 15launch → 融 launch 无 glue → 片上融 glue）：
+  | m | 分离(15launch) | 融launch无glue | 片上融glue | 省launch | 片上融glue再降 | 合计 |
+  |---|---|---|---|---|---|---|
+  | 1 | 228.2us | 179.4us | 169.3us | 1.27x | 1.06x | 1.35x |
+  | 4 | 288.6us | 246.6us | 204.6us | 1.17x | 1.21x | 1.41x |
+  | 8 | 394.9us | 353.3us | 273.5us | 1.12x | 1.29x | 1.44x |
+- **片上融 glue 净收益 1.06–1.29x（m 越大越大）**：收益不是来自省 global 带宽（qkv_buf 往返 vs 23MB 权重可忽略），
+  而是**省掉 2 个 stage 的依赖 barrier + 单 CTA 内 norm→rope→write 不再各自从 global 读回**（tiny-m decode 是 latency-bound，
+  glue stage 的 exec 本就小，省的是串行链上的 wait + 读回延迟）。m 越大头槽越多、省的读回越多，故 m=8 收益最大。
+
+### 对"片上融合能否降耗、下一处融哪里"的判断
+- **能降，但来源要认清**：片上融合在 tiny-m decode 降的是 **latency（wait barrier + 中间量读回延迟）**，不是 global 带宽
+  （带宽被 weight read 主导）。所以融"count=1 的胶水 stage 链"（省 barrier + 读回）比融进 GEMM epilogue（只省 ~1% 带宽）划算得多。
+- **下一处：OPROJ→RES→PRE_FF**。RES（post_attn_norm + 残差）与 PRE_FF（pre_ff_norm + 量化）都是 count=1 胶水，
+  且 RES/PRE_FF 之间只隔一个张量 x2——可照本步思路融成一个 on-chip stage（attn_q 量化 OQUANT 也可一起），省 barrier + x2/o_buf 读回。
+  **注意**：OPROJ 本身是 GEMM（和 QKV 同理 epilogue 融不划算），要融的是它**后面**的 RES/PRE_FF 胶水链，不是融进 OPROJ epilogue。
+- GATE/UP 尾声的 silu·mul（ACT）A 的 dense mode2 已是雏形，整层里 ACT 也可融进… 但 ACT 依赖 GATE+UP 两支 GEMM 合流，
+  epilogue 融需两个 GEMM 的 CTA 同步，复杂；优先级低于 RES/PRE_FF。
+
+**改动文件**：`crates/kernels/cuda/mega_layer_sm120.cu`（+`fuse_glue` 字段 / `fused_qkv_glue` / QKNORM 分支 / host count+dep）、
+`crates/kernels/src/ffi.rs`（MegaLayerParams +`fuse_glue`）、`crates/kernels/tests/mega_layer_parity.rs`（`fuse_glue=1` + kv_cache 对拍 + 三段计时）。

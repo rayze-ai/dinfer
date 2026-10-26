@@ -113,6 +113,9 @@ struct Params {
   int sp_qkv, sp_o, sp_gu, sp_dn;
   float *part_qkv, *part_o, *part_gate, *part_up, *part_dn;
   int *sem_qkv, *sem_o, *sem_gate, *sem_up, *sem_dn;
+  // 片上流水：1 → S_QKNORM 吸收 rope + kv 写（norm→rope→roundtrip→写 qkv_buf/cache 全程 head 留 smem，
+  //   不落 global 中间量），S_ROPE/S_KVWRITE 置 0 task、S_ATTN 直接依赖 S_QKNORM。0 → 原分离三 stage（基线）。
+  int fuse_glue;
 };
 
 // ---------------------------------------------------------------- 小工具
@@ -148,6 +151,77 @@ __device__ __forceinline__ void head_rmsnorm_warp(bf16* __restrict__ x, const bf
   }
 }
 
+// ---------------------------------------------------------------- 片上融合 glue（QKNORM+ROPE+KVWRITE 一个 CTA）
+// 一个 warp 处理一个 (row, 头槽)：把该头 D 维 load 进 smem → rmsnorm（q:q_norm / k:k_norm / v:无权重）
+//   → rope（仅 q/k）→ fp8 roundtrip（kv_fp8 时，整头 D）→ 写回 qkv_buf（全部头槽）+ 写 KV cache（k/v 头）。
+// 全程 head 留 smem，**不落 global 中间量**（省 QKNORM 写回 / ROPE 读写 / KVWRITE 从 qkv_buf 读的 global 往返）。
+// 数值与"分离三 stage"**逐位一致**：同一套 rmsnorm（shfl 归约）/ rope（每步舍 bf16）/ roundtrip 口径，次序相同。
+__device__ __forceinline__ void fused_qkv_glue(Params& p, int lane, int warp, uint8_t* smem) {
+  const int sigmaN = p.heads * p.D + 2 * p.nkv * p.D;
+  const int qN = p.heads * p.D, kN = p.nkv * p.D;
+  const int slots_per_row = p.heads + 2 * p.nkv;
+  const int slots = p.m * slots_per_row;
+  // 每 warp 一段 smem 暂存一个头（D 个 bf16）。D=256 → 512 B/warp ×8 = 4KB（< GEMM 动态 smem，复用首段）。
+  bf16* sh = reinterpret_cast<bf16*>(smem) + (long)warp * p.D;
+  const int half = p.rope_dim / 2;
+  for (int s = warp; s < ((slots + kWarps - 1) / kWarps) * kWarps; s += kWarps) {
+    const bool live = s < slots;
+    const int ss = live ? s : 0;
+    const int r = ss / slots_per_row;
+    const int hh = ss % slots_per_row;
+    // 头槽 → qkv_buf 内的列基址 + norm 权重 + 是否 rope + k/v 类别（0=q,1=k,2=v）
+    bf16* base;
+    const bf16* w;
+    int kvkind;   // 0 q, 1 k, 2 v
+    int hk = 0;   // k/v 的 kv 头号
+    if (hh < p.heads) { base = p.qkv_buf + (long)r * sigmaN + (long)hh * p.D; w = p.q_norm_w; kvkind = 0; }
+    else if (hh < p.heads + p.nkv) { hk = hh - p.heads; base = p.qkv_buf + (long)r * sigmaN + qN + (long)hk * p.D; w = p.k_norm_w; kvkind = 1; }
+    else { hk = hh - p.heads - p.nkv; base = p.qkv_buf + (long)r * sigmaN + qN + kN + (long)hk * p.D; w = nullptr; kvkind = 2; }
+    const bool do_rope = live && (kvkind == 0 || kvkind == 1);
+    // 1) load head → smem
+    if (live) for (int i = lane; i < p.D; i += 32) sh[i] = base[i];
+    __syncwarp();
+    // 2) rmsnorm（就地改 smem）——与 head_rmsnorm_warp 同口径（f32 平方和、shfl 归约、末尾舍一次）
+    float ss2 = 0.f;
+    if (live) for (int i = lane; i < p.D; i += 32) { const float v = to_f32(sh[i]); ss2 += v * v; }
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) ss2 += __shfl_xor_sync(0xffffffffu, ss2, off);
+    const float inv = rsqrtf(ss2 / (float)p.D + p.eps);
+    if (live) for (int i = lane; i < p.D; i += 32)
+      sh[i] = to_bf16(to_f32(sh[i]) * inv * (w ? to_f32(w[i]) : 1.f));
+    __syncwarp();
+    // 3) rope（仅 q/k，就地改 smem）——NEOX 每步舍 bf16，与 rope.cu / S_ROPE 同口径
+    if (do_rope) {
+      const float* cs = p.cos_sin + (long)p.positions[r] * p.rope_dim;
+      for (int i = lane; i < half; i += 32) {
+        const float c = cs[i], sv = cs[half + i];
+        int a, b;
+        if (p.rope_neox) { a = i; b = i + p.rope_span; }
+        else { a = 2 * i; b = 2 * i + 1; }
+        const float x0 = to_f32(sh[a]), x1 = to_f32(sh[b]);
+        const float q0 = to_f32(to_bf16(x0 * c)), q1 = to_f32(to_bf16(x1 * sv));
+        const float q2 = to_f32(to_bf16(x1 * c)), q3 = to_f32(to_bf16(x0 * sv));
+        sh[a] = to_bf16(q0 - q1);
+        sh[b] = to_bf16(q2 + q3);
+      }
+      __syncwarp();
+    }
+    // 4) fp8 roundtrip（kv_fp8 时，整头 D；q/k/v 都做，与 S_KVWRITE 口径一致）
+    if (live && p.kv_fp8) for (int i = lane; i < p.D; i += 32) sh[i] = fp8_roundtrip(sh[i]);
+    __syncwarp();
+    // 5) 写回 qkv_buf（所有头槽；attention 的 q 从这里读）+ 写 KV cache（k/v 头）
+    if (live) {
+      for (int i = lane; i < p.D; i += 32) base[i] = sh[i];
+      if (kvkind != 0) {
+        const int64_t slot = p.slot_mapping[r];
+        bf16* dst = p.kv_cache + (slot * p.nkv * 2 + hk * 2 + (kvkind == 2 ? 1 : 0)) * p.D;
+        for (int i = lane; i < p.D; i += 32) dst[i] = sh[i];
+      }
+    }
+    __syncwarp();
+  }
+}
+
 // ---------------------------------------------------------------- Dispatch
 template <int GROUP, int DIM>
 struct LayerDispatch {
@@ -179,6 +253,10 @@ struct LayerDispatch {
         return;
       }
       case S_QKNORM: {
+        if (p.fuse_glue) {  // 片上流水：吸收 rope + kv 写，不落 global 中间量（见 fused_qkv_glue）
+          fused_qkv_glue(p, lane, warp, smem);
+          return;
+        }
         // 逐头 rmsnorm：行号 r∈[0,m)，头 h。q:16 头(q_norm)、k:8 头(k_norm)、v:8 头(无权重)。
         // 一个 warp 处理一个 (r, 头槽)。头槽总数 = m*(heads + 2*nkv)。8 warp 轮转。
         __shared__ float red[kWarps];
@@ -382,8 +460,8 @@ int mega_layer_forward(const dinfer::mega_layer::Params* p_in, int stage_lo, int
   h_count[S_IN] = 1;
   h_count[S_QKV] = n_qkv * p.sp_qkv;
   h_count[S_QKNORM] = 1;
-  h_count[S_ROPE] = 1;
-  h_count[S_KVWRITE] = 1;
+  h_count[S_ROPE] = p.fuse_glue ? 0 : 1;      // 片上融合：rope 已吸进 QKNORM，置 0 task
+  h_count[S_KVWRITE] = p.fuse_glue ? 0 : 1;   // 片上融合：kv 写已吸进 QKNORM，置 0 task
   h_count[S_ATTN] = p.m * p.nkv * p.splits;
   h_count[S_OQUANT] = 1;
   h_count[S_OPROJ] = n_o * p.sp_o;
@@ -399,7 +477,7 @@ int mega_layer_forward(const dinfer::mega_layer::Params* p_in, int stage_lo, int
   h_dep[S_QKNORM] = S_QKV;
   h_dep[S_ROPE] = S_QKNORM;
   h_dep[S_KVWRITE] = S_ROPE;
-  h_dep[S_ATTN] = S_KVWRITE;
+  h_dep[S_ATTN] = p.fuse_glue ? S_QKNORM : S_KVWRITE;  // 融合时 ROPE/KVWRITE count=0，ATTN 直接等 QKNORM
   h_dep[S_OQUANT] = S_ATTN;
   h_dep[S_OPROJ] = S_OQUANT;
   h_dep[S_RES] = S_OPROJ;

@@ -255,6 +255,7 @@ fn mega_layer_fused_matches_separate() {
         sem_gate: std::ptr::null_mut(),
         sem_up: std::ptr::null_mut(),
         sem_dn: std::ptr::null_mut(),
+        fuse_glue: 0,
     };
 
     // 每次运行前把可变缓冲指针填进去（借用检查：集中在一个闭包里）
@@ -312,12 +313,14 @@ fn mega_layer_fused_matches_separate() {
     let attn_sep = st.dtoh_sync_copy(&attn_buf).unwrap();
     let o_sep = st.dtoh_sync_copy(&o_buf).unwrap();
     let x2_sep = st.dtoh_sync_copy(&x2).unwrap();
+    let cache_sep = st.dtoh_sync_copy(&d_cache_buf).unwrap();
 
-    // ================= 融合路径（一次 launch 全链） =================
+    // ================= 片上融合路径（一次 launch 全链；fuse_glue=1：QKNORM 吸收 rope+kv 写）=================
     // 重置 cache（KVWRITE 改了 cache；fp8 roundtrip 幂等但重置更干净）与 ready
     d_cache_buf = st.htod_copy(d_cache_bytes.clone()).unwrap();
     st.memset_zeros_n(&mut rdy, 16).unwrap();
     let mut p2 = build_params(&st);
+    p2.fuse_glue = 1;  // R40：片上流水（norm→rope→roundtrip→写 全程 head 留 smem，不落 global 中间量）
     fill_bufs!(p2, &mut d_cache_buf);
     let rc = unsafe {
         ffi::mega_layer_forward(
@@ -335,6 +338,7 @@ fn mega_layer_fused_matches_separate() {
     let attn_fus = st.dtoh_sync_copy(&attn_buf).unwrap();
     let o_fus = st.dtoh_sync_copy(&o_buf).unwrap();
     let x2_fus = st.dtoh_sync_copy(&x2).unwrap();
+    let cache_fus = st.dtoh_sync_copy(&d_cache_buf).unwrap();
 
     // ---- 逐位比较（退化检查优先）----
     let cmp = |name: &str, a: &[bf16], b: &[bf16]| -> usize {
@@ -351,13 +355,14 @@ fn mega_layer_fused_matches_separate() {
         assert!(nb.sqrt() > 0.1, "{name}: fus 范数异常（可能全零）");
         nd
     };
-    println!("[B2 整层对拍] m={m} n={n} sigmaN={sn}");
+    println!("[R40 片上融合对拍] m={m} n={n} sigmaN={sn}（基线 fuse_glue=0 15launch vs 片上融合 fuse_glue=1 1launch）");
     let nd_qkv = cmp("qkv_buf", &qkv_sep, &qkv_fus);
+    let nd_cache = cmp("kv_cache", &cache_sep, &cache_fus);
     let nd_attn = cmp("attn_buf", &attn_sep, &attn_fus);
     let nd_o = cmp("o_buf", &o_sep, &o_fus);
     let nd_x2 = cmp("x2", &x2_sep, &x2_fus);
     let nd_out = cmp("out", &out_sep, &out_fus);
-    let total = nd_qkv + nd_attn + nd_o + nd_x2 + nd_out;
+    let total = nd_qkv + nd_cache + nd_attn + nd_o + nd_x2 + nd_out;
     println!("VERDICT: {}", if total == 0 { "融合逐位一致（0/N）" } else { "有差异（逐 stage 定位）" });
 
     // ---- 分阶段 exec/wait 周期（融合路径）----
@@ -371,7 +376,7 @@ fn mega_layer_fused_matches_separate() {
         println!("  {:7} exec={:>11} ({:4.1}%)  wait={:>11}", names[i], ecv[i], pct, wcv[i]);
     }
 
-    assert_eq!(total, 0, "融合与分离不逐位一致：qkv={nd_qkv} attn={nd_attn} o={nd_o} x2={nd_x2} out={nd_out}");
+    assert_eq!(total, 0, "片上融合与分离基线不逐位一致：qkv={nd_qkv} cache={nd_cache} attn={nd_attn} o={nd_o} x2={nd_x2} out={nd_out}");
 
     // ---- 计时：融合（一次 launch）vs 分离（15 次 launch） ----
     const ITERS: usize = 200;
@@ -410,6 +415,26 @@ fn mega_layer_fused_matches_separate() {
     }
     st.synchronize().unwrap();
     let fus_us = t1.elapsed().as_secs_f64() * 1e6 / ITERS as f64;
-    println!("[计时] m={m} 分离(15 launch)={sep_us:.1}us  融合(1 launch)={fus_us:.1}us  speedup={:.2}x",
-             sep_us / fus_us);
+
+    // 中间量：融合 launch 但 **不** 片上融 glue（p.fuse_glue=0，一次 launch 全链）——隔离"省 launch" vs "片上融 glue"
+    st.synchronize().unwrap();
+    let t2 = std::time::Instant::now();
+    for _ in 0..ITERS {
+        st.memset_zeros_n(&mut rdy, 16).unwrap();
+        unsafe {
+            ffi::mega_layer_forward(
+                &p as *const MegaLayerParams, 0, 14, 1,
+                st.ptr_mut(&mut dep) as *mut i32, st.ptr_mut(&mut cnt) as *mut i32,
+                st.ptr_mut(&mut sta) as *mut i32, st.ptr_mut(&mut rdy) as *mut i32,
+                st.ptr_mut(&mut dep2) as *mut i32, std::ptr::null_mut(), std::ptr::null_mut(), 0,
+                st.raw() as _,
+            );
+        }
+    }
+    st.synchronize().unwrap();
+    let fus_noglue_us = t2.elapsed().as_secs_f64() * 1e6 / ITERS as f64;
+
+    println!("[计时] m={m} 分离(15launch)={sep_us:.1}us  融合launch无glue(1launch)={fus_noglue_us:.1}us  片上融glue(1launch)={fus_us:.1}us");
+    println!("[计时] 省launch={:.2}x  片上融glue再降={:.2}x  合计={:.2}x",
+             sep_us / fus_noglue_us, fus_noglue_us / fus_us, sep_us / fus_us);
 }
