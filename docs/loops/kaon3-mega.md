@@ -748,3 +748,27 @@ KAON3_MEGA 与 graph 正交，本步先在默认 serve 路径验 graph，MEGA �
   3. layer.forward：`head_rmsnorm` 每层 ×3（q/k/v norm）`Tensor::uninit` + `x.data = out.data` 换缓冲身份（90 处/步）→ 改成写固定地址（in-place，rmsnorm 行内先 reduce 后写，in-place CUDA 安全）。
 - D2H：forward_sample 末尾 `dtoh_sync_copy(argmax)` 同步取回 → 图只含 forward+gather+bf16→f32+argmax 到固定 argmax 缓冲；launch 后在图外 collect（照 qwen35）。
 下一步：实现固定缓冲 + capture_decode_graphs + forward_sample 的 use_graph 分支。
+
+## R42 2026-10-26 B4（cudagraph）结论：被 MoE host 路由硬挡，必须先做 B3
+**如实报告：B4 在默认 serve 路径上做不了，不是 executor 胶水的问题，是 kaon3 forward 的 decode 路径里有 capture 期的 D2H + host 决策，必须先完成 B3（MoE 持久化）才能接 cudagraph。**
+
+### 定位（证据）
+kaon3 每一层都有 MoE 支路（`layer.rs:1049` `moe_branch` 无条件调，128 专家 top-8，`config.rs:247`），MoE 支路里：
+- `layer.rs:1207` `let offsets = stream.dtoh_sync_copy(&sc.buckets.offsets)?;` —— **无条件 D2H 同步**（不在 `sub_out` 调试块内）。
+- `layer.rs:1221` `for (eid, start, len) in k::ops::moe_expert_ranges(&offsets)` —— **host 侧**按 offsets 决定每个专家跑几行、launch 多少个 GEMM（`ops.rs:2085` 返回 `Vec`，纯 host 函数）。
+CUDA graph 捕获期间禁止 D2H / 同步 / host 依赖的 launch 结构（cudarc 要求，见 `exec.rs:99` 注释）。所以**整层 forward 无法被捕获**，30 层每层都撞。这正是 R35 已写明的依赖：**B3（MoE 持久化：动态 top-8 路由进静态 device 任务表）必须在 B4（cudagraph）之前**（`kaon3-mega.md` R35 B3/B4 定义，line 545-547）。
+
+对照：qwen35 能接 cudagraph 是因为它是 dense（GDN + 全注意力），decode forward 全程静态形状、无 host 路由，所以 PlanBuffers 固定缓冲 + 图外 D2H collect 就够。kaon3 的 MoE 结构不同，照搬范本到 forward 层面不成立。
+
+### B4 的完整待办清单（B3 落地后再做，已逐处定位）
+1. **MoE host 路由（B3 前置，最大项）**：`moe_bucket`+`dtoh_sync_copy(offsets)`+host 专家循环 → device-resident grouped GEMM（offsets 留在 device，kernel 内按 device 端 ranges 分桶跑变长专家），彻底去掉 D2H 与 host launch 决策。否则图捕获不可能。
+2. **executor.forward_sample 每步 7 处 `Tensor::from_vec`**（`executor.rs:76-82` ids/pos/slot/cu/seq/bt/rows）→ 换 `dinfer_layers::exec::PlanBuffers` 固定缓冲 + `upload`（qwen35 范本；类型已对齐：slot_mapping 都是 i64）。
+3. **model.forward 每步 1 处 `Tensor::uninit`**（`model.rs:228` final `normed`）→ 复用 LayerScratch 固定缓冲（或加一个 `final_normed` 字段）。
+4. **layer.forward head_rmsnorm 每层 ×3**（`layer.rs:909-911`，`head_rmsnorm` 内 `layer.rs:445` `Tensor::uninit` + `x.data = out.data` 换缓冲身份，90 处/步）→ 改成写固定地址（rmsnorm 行内先 reduce 后写，in-place CUDA 安全）。
+5. **采样 D2H**（`executor.rs:118` `dtoh_sync_copy(argmax)`）→ 图只到固定 argmax 缓冲，launch 后图外 collect（qwen35 `collect` 范本）。
+2-5 是 executor/forward 胶水，单独都能照 qwen35 改；但在 1 没解决前，图捕获第一步（整层 forward 跑进 begin_capture/end_capture）就会被 MoE 的 D2H 打断，2-5 做了也验证不了。
+
+### 判断
+- cudagraph 对 kaon3 decode 端到端**理论上应有大头收益**（R34 实测 vLLM 非 eager 靠 cudagraph+融合碾压 9-29×，其中 launch 开销是重要一块），但**本步无法单独落地并验证**。
+- 建议：按 R35 原定顺序，先做 **B3 MoE 持久化 / device grouped GEMM**（去掉 offsets D2H + host 专家循环），再回到 B4 把上面 2-5 的胶水照 qwen35 接上，两步合起来才能在默认 serve 路径拿到 cudagraph 收益。
+- 本步未改 kernel 数值、未改 executor（避免写无法验证的胶水）；调研定位与清单已记此。
