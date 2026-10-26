@@ -550,3 +550,14 @@ A 的成果（split-K 2.05× 逐位、partial/sem/末到归约骨架、分阶段
 ### 硬约束（承前）
 5090 单卡；逐位一致（性能优化不改数值）；arch/env 给调优数值 kernel 不写死；每步进 perf-trend；5090 GPU6 跑 mega、vLLM 非eager GPU3。
 先做 B1（attention stage 持久化 + 对拍 v3），这是 B 的地基和最大不确定性。
+
+## R36 2026-10-26 B1：attention stage 持久化（抽 core + persistent 对拍 v3）
+开工摸底（子代理）：
+- `gqa_decode_v3_kernel<GROUP,D>` 固定 `V3_THREADS=128`，静态 `__shared__`，(b,hk,split)=blockIdx。
+- `mega::mega_kernel` 固定 `kThreads=256`（8 warp）。**结构障碍**：v3 flash-decode 是 128 线程算法——
+  KEYS=128/LPK（D=128→8、D=256→4）、跨 key 槽归约序都绑 128 线程；改线程数会改 KEYS 和累加序 → 破坏逐位。
+  方案：抽 `gqa_decode_v3_core<GROUP,D>(...,b,hk,split,tid)`，只让 `tid<128` 干活、其余 128 陪跑 `__syncthreads()`
+  （不碰 smem，ks=tid/LPK 会越界）。128 线程 launch 时 active 恒真 → 原 v3 逐位不变。
+- 静态 smem 预算（<48KB 自动）：D=256/G=6 ≈32.2KB、D=128/G=4 ≈24.3KB，均合法。
+- 对拍：ref = gqa_decode_v3_bf16(grid) + merge_v2；mega = persistent attn + merge_v2；比 scratch(attention 直出) + 最终输出，均逐位。
+- 代价记录：persistent 每 CTA 256 线程只 128 活 → attention stage 半数 lane 空转（B2 可考虑一 CTA 打包 2 个 shard）。
