@@ -789,3 +789,12 @@ offsets 留卡上、launch 次数编译期固定（cudagraph 要求）、专家�
 硬底线：moe_y 逐位一致 0/N（grouped 累加序对齐单专家版）；decode 路径无 D2H（B3 对 B4 的核心交付）。
 复用：A 的 split-K partial/sem + mega_common 持久调度 + gemm_nvfp4_sm120 单专家 kernel。委派子代理(a93d415)。
 这是 megakernel 能否真追 vLLM 非eager 的决定性一步，也是最大工程/最高风险（NVFP4 grouped + 逐位 + 动态路由）。
+
+## R43 2026-10-26 B3 开：MoE device-grouped（去 host 路由 + 去 D2H）
+目标（第一版）：去掉 moe_branch 的 `dtoh_sync_copy(offsets)` + host 专家循环，改 device-resident grouped NVFP4 GEMM；逐位一致，性能留后。
+设计（env `MOE_GROUPED=1` 切换，默认关以便 A/B）：
+- 分桶后 **不 D2H**。R=tokens*top_k=offsets[E]（host 已知，无需读 offsets 值）。
+- 固定 launch：row2expert(E blk 读 device offsets) → gather(1) → grouped_quant gate/up 一次(gs=1/a_scale_gu) → grouped_gemm gate(1)+up(1) → gelu_mul(1) → grouped_quant down(gs=1/a_scale_dn) → grouped_gemm down(1) → scatter_add(1, n=R)。
+- grouped_gemm<BK>：grid=(N/BN, ceil(R/BM), E)；blockIdx.z=e 取 [off[e],off[e+1]) 行段，m_blk=off[e]+by*BM，越界 return；B/scale/alpha 从 per-expert device 指针数组取；A 读绝对行偏移。复用 gemm_nvfp4_sm120 的 quant16/mma_fp4/e4m3（逐字复制保逐位）。
+- per-expert 指针数组（per-layer，一次建）：gate/up/down 的 packed[E]/scale[E] + agscale_gu[E]=1/a_scale、alpha_gate/up/down[E]=global*a_scale、agscale_dn[E]。
+逐位风险分析：① GEMM 逐行、K 固定 → 构造上逐位（同 quant16 同归约序）。② scatter_add 单次 launch 的 atomic 顺序 vs host 专家序：kk≤8 项同量级 f32 和通常 exact（现 host 版 0/N 即此因），**需实测确认**；若非 0/N 则报告累加序障碍。
