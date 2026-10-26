@@ -315,3 +315,10 @@ c=1/c=8 正常，**c=32 时 64 请求全失败 + kaon3-self 容器消失**（崩
   → **SAME=0/5**，每处差异都在 char 9–32（第一句内），类型是近义替换，无语法断裂、无重复、无乱码。
 - 两条路径各自确定：同输入重复请求 md5 相同（各测两次）。
 - `logprobs`/`top_logprobs` 在本构建返回空数组（`"logprobs":{"content":[]}`），无法做数值对账 —— 已有 `models/kaon3/tests/mega_real_parity.rs` 的逐段对拍替代。
+
+## R20 2026-10-26 R0 重建失败根因=GPU0 OOM（撞 kaon3-base）；挪 GPU4
+R0 重建 Exited(1) = `CUDA_ERROR_OUT_OF_MEMORY`。查 GPU0 已被 **kaon3-base**（08:58 的 vLLM 基线容器）占 25GB，
+我把 R0 也放 GPU0 → 相加超 32GB → OOM。这也解释了最初 c=32 "崩溃"：R0 在 GPU0 本就与 base 挤显存，高并发 KV 扩张触发 OOM 被杀。
+修：R0 挪到空闲 **GPU4**（GPU4-7 全空）。最终 GPU 分配：base=0, R1mega=1, Ve=2, Vn=3, R0=4。
+→ 之前 R19 记的"c=32 崩溃是容量 bug"**需修正**：很可能是 GPU0 显存被 base 挤占导致的 OOM，不是纯并发 bug。
+  重建到独占 GPU4 后再压 c=32 看是否仍崩，才能定论。
