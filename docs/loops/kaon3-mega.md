@@ -307,3 +307,11 @@ c=1/c=8 正常，**c=32 时 64 请求全失败 + kaon3-self 容器消失**（崩
 → **dinfer serve 高并发（c=32）下崩溃**，是真实容量 bug，不是压测脚本问题。
 （纠正误判：kaon3-base created=08:58 是早存在的 vLLM 基线容器，非外部编排杀我容器；无外部杀容器证据。）
 待办：① 查 c=32 崩溃根因（max_num_seqs/KV/显存/tokio 并发）；② 修了再重跑完整矩阵。
+
+### R15 最终 A/B（干净环境，2026-10-26）
+- 基线 `kaon3-base`（GPU0，:8136，`KAON3_MEGA=0 FP8_SELF_KERNEL=0`）
+- mega `kaon3-mega`（GPU3，:8132，`KAON3_MEGA=1`）
+- 5 个中文 prompt（MoE 解释 / Rust fib / CUDA syncthreads / 中译英 / 显存带宽），`temperature=0, max_tokens=128`
+  → **SAME=0/5**，每处差异都在 char 9–32（第一句内），类型是近义替换，无语法断裂、无重复、无乱码。
+- 两条路径各自确定：同输入重复请求 md5 相同（各测两次）。
+- `logprobs`/`top_logprobs` 在本构建返回空数组（`"logprobs":{"content":[]}`），无法做数值对账 —— 已有 `models/kaon3/tests/mega_real_parity.rs` 的逐段对拍替代。
