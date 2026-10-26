@@ -76,3 +76,8 @@ arch.rs 现**无 Sm120 变体**，`for_cc` 把 `cc>=10` 全归 Sm100 → 5090 �
   校验：`cargo check -p dinfer-kernels --features no-nvcc` 里 arch.rs 相关错误 0（余 34 个是既有 no-nvcc stub 生成失败，改动前后同数，与本改无关）。
 - 新建 `crates/kernels/cuda/arch.cuh`：唯一 arch 分叉点，只放有名能力常量（kArchSm8x/90/100/120、kSmemBytes、kHasTma、kHasMmaFp4BlockScale、kHasTcgen05）；
   规则写明 kernel 体内禁 #if __CUDA_ARCH__、调优数值不落此处（走 ArchProfile）。**待接进 build.rs 编译链并加 smoke 编译验证。**
+
+## R3 2026-10-26 约束（用户）：5090 只考虑单机
+- **不做跨机**：无 TP / PD / 分布式 EP。megakernel 只面向单机单卡全层（hidden 2816 不分片、128 专家全在卡内）。
+- 因此 persistent 任务表**不含跨卡 allreduce/all-gather 阶段**；MoE 专家分桶沿用单卡版本。
+- 性能验收：5090 单机门禁；**不为 B300/多机做适配而阻塞第一版**（sm100 case 保留但非当前目标）。
