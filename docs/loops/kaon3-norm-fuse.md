@@ -272,3 +272,11 @@ index.html 链到 report.html → Dashboard(8090) 可见。
 启动时间：vLLM eager=164s(权重+量化加载)；dinfer=33s(待本轮重测)；vLLM compile 待测(上轮 267s 含编译)。
 prompts.jsonl 第一版内层 ASCII 引号把 JSON 提前闭合→json.dumps 重写(内层用「」)已修。
 跑中：vllm_eager(b8ljqbdqv)→ 之后 vllm_compile → dinfer。
+
+## R25（2026-10-26）第2轮 dinfer+vllm_eager 完成，抓到真实质量差异（同音错字）
+启动：dinfer=37s，vLLM eager=164s，vLLM compile 待测。
+性能（对齐 eager）：dinfer ~25 tok/s vs vLLM eager ~11 tok/s → **对齐 eager 下 dinfer(Rust) 反超 vLLM(Python eager) ~2×**。
+  （vLLM compile ~200 tok/s 是其 cudagraph 优化上限，dinfer 第一版无 graph 尚未优化。）
+精度：14 条均无乱码。**但 s3《红楼梦》作者：vLLM=曹雪芹(对)，dinfer=曹雪琴(错字,芹→琴同音)**。
+→ 修正"0.0085 全无害"：绝大多数无害，但**低概率会把一个 token 翻成同音错字**（s3 命中率 dinfer 13/14 vs vLLM 14/14）。
+  对比确实抓出了真实质量差异，不是纯噪声。待 compile 组齐后出 report/dump/dashboard。
