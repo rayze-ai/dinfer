@@ -1,0 +1,26 @@
+<!doctype html><html lang=zh><head><meta charset=utf-8>
+<title>Kaon-V3 四配置压测</title><meta name=viewport content="width=device-width,initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+:root{--bg:#fff;--fg:#1a1a1a;--line:#e0e0e0;--muted:#777}
+@media(prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#16181c;--fg:#e6e6e6;--line:#2c2f36;--muted:#999}}
+body{background:var(--bg);color:var(--fg);font:14px/1.6 system-ui,sans-serif;margin:0;padding:16px}
+h1{font-size:20px} .grid{display:grid;grid-template-columns:1fr 1fr;gap:20px;max-width:1100px}
+@media(max-width:800px){.grid{grid-template-columns:1fr}}
+.card{border:1px solid var(--line);border-radius:8px;padding:12px} .note{color:var(--muted);font-size:12px;margin-top:10px}
+canvas{max-height:260px}
+</style></head><body>
+<h1>Kaon-V3 端到端压测 · dinfer vs vLLM（5090 单卡，各独占 GPU + 绑核 12C，压测端 16C）</h1>
+<div class=grid><div class=card><canvas id="c0"></canvas></div><div class=card><canvas id="c1"></canvas></div><div class=card><canvas id="c2"></canvas></div><div class=card><canvas id="c3"></canvas></div></div>
+<p class=note>口径：temp=0 贪心、ignore_eos、同 chat 模板。eager=逐 kernel / enforce_eager；非eager=cudagraph+融合(vLLM) 或 megakernel(dinfer)。<br>
+client 开销（应 &lt; 16 核）：dinfer eager/c1 p128: client ? cores | dinfer eager/c8 p128: client ? cores | dinfer eager/c16 p128: client ? cores | dinfer eager/c8 p1024(长): client ? cores | dinfer mega(非eager)/c1 p128: client ? cores | dinfer mega(非eager)/c8 p128: client ? cores | dinfer mega(非eager)/c16 p128: client ? cores | dinfer mega(非eager)/c8 p1024(长): client ? cores</p>
+<script>
+const COLORS=['#2563eb','#16a34a','#b8860b','#c0392b'];
+const charts=[{"title": "输出 tok/s（越高越好）", "labels": ["c1 p128", "c8 p128", "c16 p128", "c8 p1024(长)"], "series": [{"label": "dinfer eager", "data": [25.17951154382528, 86.47167835946028, 131.06219737245462, 38.42128104761535]}, {"label": "dinfer mega(非eager)", "data": [23.728119682351476, 80.26225470848033, 121.3186129759321, 39.52158863807034]}, {"label": "vLLM eager", "data": [10.965624599932214, 80.37661982011443, 157.68874467383984, 84.06473968702171]}, {"label": "vLLM 非eager", "data": [209.00392136473977, 1201.7049998254108, 2065.8609718987996, 964.9438211415301]}]}, {"title": "TTFT p50 ms（越低越好）", "labels": ["c1 p128", "c8 p128", "c16 p128", "c8 p1024(长)"], "series": [{"label": "dinfer eager", "data": [227.891842, 521.883074, 608.480495, 4606.080499]}, {"label": "dinfer mega(非eager)", "data": [226.650698, 518.050079, 601.8837729999999, 4559.111687]}, {"label": "vLLM eager", "data": [191.28261799999999, 289.381712, 304.155717, 291.127108]}, {"label": "vLLM 非eager", "data": [18.744519, 89.492205, 124.265794, 227.663686]}]}, {"title": "TPOT p50 ms（越低越好）", "labels": ["c1 p128", "c8 p128", "c16 p128", "c8 p1024(长)"], "series": [{"label": "dinfer eager", "data": [38.24515406299212, 87.90767888976379, 121.90170399212597, 167.7175525669291]}, {"label": "dinfer mega(非eager)", "data": [40.692120362204726, 100.27688073228346, 127.36010088188975, 164.49586248818898]}, {"label": "vLLM eager", "data": [90.44485648031497, 91.45154088188976, 91.11367941732284, 93.33009940157481]}, {"label": "vLLM 非eager", "data": [4.673995133858268, 5.973090503937008, 6.793051228346458, 6.534925031496064]}]}, {"title": "goodput req/s（SLO 内，越高越好）", "labels": ["c1 p128", "c8 p128", "c16 p128", "c8 p1024(长)"], "series": [{"label": "dinfer eager", "data": [0.196714933936135, 0.0, 0.0, 0.0]}, {"label": "dinfer mega(非eager)", "data": [0.1853759350183709, 0.0, 0.0, 0.0]}, {"label": "vLLM eager", "data": [0.0, 0.0, 0.0, 0.0]}, {"label": "vLLM 非eager", "data": [1.6328431356620294, 9.388320311136022, 16.13953884295937, 7.538623602668204]}]}];
+charts.forEach((ch,i)=>{
+  new Chart(document.getElementById('c'+i),{type:'bar',
+    data:{labels:ch.labels,datasets:ch.series.map((s,j)=>({label:s.label,data:s.data,backgroundColor:COLORS[j]}))},
+    options:{responsive:true,plugins:{title:{display:true,text:ch.title},legend:{position:'bottom'}},
+      scales:{y:{beginAtZero:true}}}});
+});
+</script></body></html>

@@ -21,6 +21,15 @@ def qa_cell(m):
     rel = qa_report.get(m)
     return f'<a href="{html.escape(rel)}">质量详情</a>' if rel else "—"
 
+# 性能压测对比图（*/YYYY-MM-DD/bench*/chart.html），每模型取最新一张
+bench_chart = {}
+for rp in sorted(glob.glob(os.path.join(ROOT, "*", "*", "bench*", "chart.html"))):
+    m = rp.split(os.sep)[-4]
+    bench_chart[m] = os.path.relpath(rp, ROOT)  # 排序靠后=日期新，最后覆盖
+def perf_cell(m):
+    rel = bench_chart.get(m)
+    return f'<a href="{html.escape(rel)}">压测曲线</a>' if rel else "—"
+
 for jf in sorted(glob.glob(os.path.join(ROOT, "*", "perf-trend.json"))):
     model = os.path.basename(os.path.dirname(jf))
     try:
@@ -60,7 +69,7 @@ body = "\n".join(
     + (f'<td><a href="{html.escape(m)}/perf-trend.html#{html.escape(m)}/{html.escape(g)}/single">{html.escape(g)}</a></td>'
        if g != "—" else "<td>—</td>")
     + f"{td(n)}{td(html.escape(lbl))}{td(date)}" + "".join(td(c) for c in cells)
-    + f"{td(qa_cell(m))}" + f'<td class=chg>{html.escape(chg)}</td></tr>'
+    + f"{td(qa_cell(m))}" + f"{td(perf_cell(m))}" + f'<td class=chg>{html.escape(chg)}</td></tr>'
     for m, g, n, lbl, date, cells, chg in rows)
 qa_section = ""
 
@@ -78,7 +87,7 @@ th{{background:var(--hl);position:sticky;top:0}} td.chg{{white-space:normal;colo
 </style></head><body>
 <h1>dinfer perf index</h1>
 <div class="sub">每个（模型 × 卡型）一行：最新主线轮次与四组 TPOT p50（ms，括号 = vLLM/dinfer 倍数，&gt;1 为我们快）。点模型或卡型进该模型的趋势页（URL 带 #模型/卡型/页签；页签含 single / pd / tp / dp / other / engine / probe）。数据来自各模型目录的 <code>perf-trend.json</code>。</div>
-<table><thead><tr><th>模型</th><th>卡型</th><th>轮次数</th><th>最新轮</th><th>日期</th><th>c1</th><th>c8</th><th>c32</th><th>c8-long</th><th>质量详情</th><th>最新改动</th></tr></thead>
+<table><thead><tr><th>模型</th><th>卡型</th><th>轮次数</th><th>最新轮</th><th>日期</th><th>c1</th><th>c8</th><th>c32</th><th>c8-long</th><th>质量详情</th><th>压测曲线</th><th>最新改动</th></tr></thead>
 <tbody>
 {body}
 </tbody></table>
