@@ -43,6 +43,13 @@ body = "\n".join(
     f'<td><a href="{html.escape(m)}/perf-trend.html#{html.escape(m)}/{html.escape(g)}/single">{html.escape(g)}</a></td>'
     f"{td(n)}{td(html.escape(lbl))}{td(date)}" + "".join(td(c) for c in cells) + f'<td class=chg>{html.escape(chg)}</td></tr>'
     for m, g, n, lbl, date, cells, chg in rows)
+qa_links = []
+for rp in sorted(glob.glob(os.path.join(ROOT, "*", "qa_zh", "report.html"))):
+    _model = rp.split(os.sep)[-3]
+    _rel = os.path.relpath(rp, ROOT)
+    qa_links.append(f'<li><a href="{html.escape(_rel)}">{html.escape(_model)} · 生成质量对比（乱码/答非所问/tok·s/TTFT，dinfer vs vLLM）</a></li>')
+qa_section = ('<h2 style="font-size:16px;margin:20px 0 6px">端到端生成质量对比</h2><ul>' + "".join(qa_links) + "</ul>") if qa_links else ""
+
 page = f"""<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>dinfer perf index</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="5">
@@ -61,6 +68,7 @@ th{{background:var(--hl);position:sticky;top:0}} td.chg{{white-space:normal;colo
 <tbody>
 {body}
 </tbody></table>
+{qa_section}
 </body></html>
 """
 out = os.path.join(ROOT, "index.html")

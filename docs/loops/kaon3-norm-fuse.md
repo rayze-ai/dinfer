@@ -248,3 +248,16 @@ docker run 手误(第一条把模型当镜像)已清；干净重起 b6135。等�
 ## R22（2026-10-26）修 vLLM 启动：镜像 Entrypoint 已是 ["vllm","serve"]，我多传 serve → serve serve 报错
 镜像 Entrypoint=["vllm","serve"]，Cmd 只需 `<model> --port …`（oracle 即如此）。我命令多了个 `serve` → `vllm serve serve $M`，
 模型路径被当 unrecognized。去掉 serve 重起 fb7f6c（GPU2:28130）。等就绪→冒烟→vLLM 20 条(bznxxs24c)。
+
+## R23（2026-10-26）两边问答对比完成，进 Dashboard —— 质量一致，性能 vLLM 8×
+修 entrypoint 后 vLLM 全层 chat 正常生成。两边 20 条中文问答结果：
+```
+            乱码    命中      tok/s   TTFT
+dinfer      0/20   20/20     25.0    132ms   （第一版 serve,无 cudagraph/投机）
+vLLM        0/20   19/20     195.8   21ms    （成熟引擎）
+```
+（vLLM write1 未命中="诗"是口径问题，生成了五言绝句；答案均正确切题。）
+**结论**：生成质量两边一致（都零乱码、答案正确），**性能 vLLM ~8× tok/s、~6× TTFT**——dinfer 第一版 serve 未开 cudagraph/投机/优化，有明确提速空间。
+产物：test/kaon3/qa_zh/{result_dinfer,result_vllm}.jsonl + report.html（并排）；bench_index.py 加"端到端生成质量对比"区，
+index.html 链到 report.html → Dashboard(8090) 可见。
+**本 loop 全局收束**：0.0085 坐实为亚决策噪声（不影响生成质量）；kaon3 从零 executor 端到端可用；质量=vLLM，性能待优化。
