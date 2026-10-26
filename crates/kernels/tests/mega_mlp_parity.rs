@@ -141,6 +141,7 @@ fn mega_mlp_matches_eager_path() {
   // split-K 份数（env 可调；默认 1 = 原路径）：MEGA_SPGU / MEGA_SPDN
   let sp_gu = std::env::var("MEGA_SPGU").ok().and_then(|v| v.parse().ok()).unwrap_or(1i32).max(1);
   let sp_dn = std::env::var("MEGA_SPDN").ok().and_then(|v| v.parse().ok()).unwrap_or(1i32).max(1);
+  let ctas = std::env::var("MEGA_CTAS").ok().and_then(|v| v.parse().ok()).unwrap_or(1i32).max(1);
   let mut part_gate = st.alloc_zeros::<f32>(sp_gu as usize * M * I).unwrap();
   let mut part_up = st.alloc_zeros::<f32>(sp_gu as usize * M * I).unwrap();
   let mut part_dn = st.alloc_zeros::<f32>(sp_dn as usize * M * H).unwrap();
@@ -193,6 +194,7 @@ fn mega_mlp_matches_eager_path() {
       st.ptr_mut(&mut sem_gate) as *mut i32,
       st.ptr_mut(&mut sem_up) as *mut i32,
       st.ptr_mut(&mut sem_dn) as *mut i32,
+      ctas,
       st.raw() as _,
     )
   };
@@ -270,7 +272,7 @@ fn mega_mlp_matches_eager_path() {
         sp_gu, sp_dn,
         st.ptr_mut(&mut part_gate) as *mut c_void, st.ptr_mut(&mut part_up) as *mut c_void,
         st.ptr_mut(&mut part_dn) as *mut c_void, st.ptr_mut(&mut sem_gate) as *mut i32,
-        st.ptr_mut(&mut sem_up) as *mut i32, st.ptr_mut(&mut sem_dn) as *mut i32, st.raw() as _,
+        st.ptr_mut(&mut sem_up) as *mut i32, st.ptr_mut(&mut sem_dn) as *mut i32, ctas, st.raw() as _,
       )
     };
     assert_eq!(rc, 0);

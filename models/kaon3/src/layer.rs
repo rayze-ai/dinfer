@@ -567,6 +567,8 @@ pub struct MegaBufs {
     /// split-K（R29）：gate/up 份数 sp_gu、down 份数 sp_dn（env `MEGA_SPGU`/`MEGA_SPDN`，默认 1）。
     pub sp_gu: i32,
     pub sp_dn: i32,
+    /// 每 SM 常驻 CTA 数（R4，env `MEGA_CTAS`，默认 1）；≥2 用 OCC=2 kernel 变体。
+    pub ctas: i32,
     pub part_gate: k::cudarc::driver::CudaSlice<f32>, // [sp_gu, 8, I]
     pub part_up: k::cudarc::driver::CudaSlice<f32>,   // [sp_gu, 8, I]
     pub part_dn: k::cudarc::driver::CudaSlice<f32>,   // [sp_dn, 8, H]
@@ -580,6 +582,7 @@ impl MegaBufs {
         let (h, i) = (cfg.hidden, cfg.dense_inter);
         let sp_gu = std::env::var("MEGA_SPGU").ok().and_then(|v| v.parse().ok()).unwrap_or(1i32).max(1);
         let sp_dn = std::env::var("MEGA_SPDN").ok().and_then(|v| v.parse().ok()).unwrap_or(1i32).max(1);
+        let ctas = std::env::var("MEGA_CTAS").ok().and_then(|v| v.parse().ok()).unwrap_or(1i32).max(1);
         let n_gu = i.div_ceil(128);
         let n_dn = h.div_ceil(128);
         Ok(Self {
@@ -597,6 +600,7 @@ impl MegaBufs {
             dep2: stream.alloc_zeros::<i32>(MEGA_STAGES)?,
             sp_gu,
             sp_dn,
+            ctas,
             part_gate: stream.alloc_zeros::<f32>(sp_gu as usize * MEGA_ROWS * i)?,
             part_up: stream.alloc_zeros::<f32>(sp_gu as usize * MEGA_ROWS * i)?,
             part_dn: stream.alloc_zeros::<f32>(sp_dn as usize * MEGA_ROWS * h)?,
@@ -802,6 +806,7 @@ impl Gemma4Layer {
                 stream.ptr_mut(&mut mb.sem_gate) as *mut i32,
                 stream.ptr_mut(&mut mb.sem_up) as *mut i32,
                 stream.ptr_mut(&mut mb.sem_dn) as *mut i32,
+                mb.ctas,
                 stream.raw() as _,
             )
         };

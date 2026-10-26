@@ -359,7 +359,7 @@ int mega_mlp_dense_branch(const void* x, void* out, const void* pre_w, const voi
                          int* dep, int* count, int* start, int* ready, int* dep2, int pipe, int prof,
                          unsigned long long* wait_cyc, unsigned long long* exec_cyc,
                          int sp_gu, int sp_dn, void* part_gate, void* part_up, void* part_dn,
-                         int* sem_gate, int* sem_up, int* sem_dn, cudaStream_t stream) {
+                         int* sem_gate, int* sem_up, int* sem_dn, int ctas, cudaStream_t stream) {
   using namespace dinfer;
   using namespace dinfer::mega_mlp;
   if (m <= 0 || m > 8 || H <= 0 || I <= 0) return (int)cudaErrorInvalidValue;
@@ -454,22 +454,31 @@ int mega_mlp_dense_branch(const void* x, void* out, const void* pre_w, const voi
   cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
   if ((int)smem > max_smem) return (int)cudaErrorInvalidValue;
 
-  auto kern = mega::mega_kernel<MlpDenseDispatch, 1>;
-  static thread_local int smem_set = 0;
+  // ctas_per_sm：ctas>=2 用 OCC=2 变体（launch_bounds 放宽寄存器上限，允许 2 CTA 常驻），否则 OCC=1。
+  // 实际常驻数再受 occupancy 查询约束（smem / 寄存器）。split-K 后任务数 > SM，多一波常驻能减少自旋空等。
+  const bool want2 = ctas >= 2;
+  auto kern1 = mega::mega_kernel<MlpDenseDispatch, 1>;
+  auto kern2 = mega::mega_kernel<MlpDenseDispatch, 2>;
+  const void* kptr = want2 ? (const void*)kern2 : (const void*)kern1;
+  static thread_local int smem_set1 = 0, smem_set2 = 0;
+  int& smem_set = want2 ? smem_set2 : smem_set1;
   if (smem_set < (int)smem) {
-    if (const int rc = (int)cudaFuncSetAttribute((const void*)kern, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                                 (int)smem))
+    if (const int rc = (int)cudaFuncSetAttribute(kptr, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem))
       return rc;
     smem_set = (int)smem;
   }
   int occ = 0;
-  if (const int rc = (int)cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ, kern, mega::kThreads, smem)) return rc;
+  if (const int rc = (int)cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ, kptr, mega::kThreads, smem)) return rc;
   if (occ <= 0) return (int)cudaErrorInvalidValue;
-  if (occ > 1) occ = 1;
+  const int occ_cap = want2 ? 2 : 1;
+  if (occ > occ_cap) occ = occ_cap;
   int grid = sms * occ;
   if (grid > acc) grid = acc;
-  kern<<<grid, mega::kThreads, smem, stream>>>(mega::StagePlan{dep, count, start, ready, prof, wait_cyc, exec_cyc, dep2}, p,
-                                               MlpDenseDispatch{}, acc, S_COUNT, 0);
+  const mega::StagePlan sp{dep, count, start, ready, prof, wait_cyc, exec_cyc, dep2};
+  if (want2)
+    kern2<<<grid, mega::kThreads, smem, stream>>>(sp, p, MlpDenseDispatch{}, acc, S_COUNT, 0);
+  else
+    kern1<<<grid, mega::kThreads, smem, stream>>>(sp, p, MlpDenseDispatch{}, acc, S_COUNT, 0);
   return (int)cudaGetLastError();
 }
 

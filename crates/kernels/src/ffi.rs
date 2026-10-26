@@ -1258,6 +1258,7 @@ extern "C" {
         sem_gate: *mut i32,
         sem_up: *mut i32,
         sem_dn: *mut i32,
+        ctas: i32,
         stream: cudaStream_t,
     ) -> i32;
 }
@@ -1270,7 +1271,7 @@ pub unsafe fn mega_mlp_dense_branch(
     _do: *mut c_void, _m: i32, _h: i32, _i: i32, _eps: f32, _ngu: i32, _ndn: i32, _dep: *mut i32, _cnt: *mut i32,
     _st: *mut i32, _rdy: *mut i32, _dep2: *mut i32, _pipe: i32, _prof: i32, _wc: *mut u64, _ec: *mut u64,
     _spg: i32, _spd: i32, _pg: *mut c_void, _pu: *mut c_void, _pd: *mut c_void, _sg: *mut i32, _su: *mut i32,
-    _sd: *mut i32, _s: cudaStream_t,
+    _sd: *mut i32, _ctas: i32, _s: cudaStream_t,
 ) -> i32 {
     CUDA_ERROR_NOT_SUPPORTED
 }
