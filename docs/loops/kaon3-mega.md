@@ -893,3 +893,10 @@ eager 每次按启发式可能选另一 algo → 不同累加序 → 1-ulp 差 �
 解法二选一：① serve 跑 graph 时 GEMM_TUNE=off（简单，逐位，略损 GEMM autotune 收益）；
   ② graph 与 eager 共享同一 autotune 定下的 algo（capture 前定 algo，eager 复用）——两全，推荐。
 → B4 数值问题解决。下一步：定方案（①或②）+ 测 graph vs no-graph 的性能提升（cudagraph 对 decode launch 开销的收益，这才是 B4 的目的）。
+
+## R44 深挖⑥：方案2 根因定位——kaon3 executor **根本没调 autotune**（qwen35 有）
+executor.rs:67 `let _ = gemm`(丢传入的已 tune gemm)，:72 新 stream 建全新 gemm。grep autotune=**空**——kaon3 从没 autotune。
+对比 qwen35 executor:144-146 新 gemm 后、graph 捕获前调 `gemm.autotune(&model.gemm_tune_entries())`，所以 graph 与 replay 同 algo 逐位。
+kaon3 新 gemm 无 tune 表 → 走 cuBLASLt 启发式 → graph 捕获烧进启发式 algo A，eager 走启发式 algo B → 1-ulp 差。
+**方案2 实现**：给 KaonModel 加 `gemm_tune_entries()`（遍历每层 fp8 投影 qkv/o_proj/dense gate/up/down 的 (n,k)，照 qwen35），
+  executor 新 gemm 后 graph 捕获前调 `autotune`。这样 graph/eager 共享同套 algo，逐位 + 保 autotune 性能。主会话自己写（不派子代理避免再卡）。
