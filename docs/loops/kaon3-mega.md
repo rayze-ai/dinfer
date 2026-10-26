@@ -884,3 +884,12 @@ eager 每次按启发式可能选另一 algo → 不同累加序 → 1-ulp 差 �
 → 要让 graph==eager 逐位：① eager 侧也锁定同一 cuBLASLt algo（关 autotune / 固定 algo id），使两路径同 algo；
   或 ② 接受 graph 噪声（和我们早先对 0.0085 的结论一致：亚决策噪声，不影响质量，B5 端到端看 flip/质量而非逐位）。
 下一步：验证假设——eager 侧设 CUBLASLT 固定 algo（或 GEMM_TUNE=off）后 graph vs eager 是否逐位一致。若是，坐实根因。
+
+## R44 深挖⑤：✅ 根因 100% 坐实——是 GEMM autotune 不是 graph bug
+`GEMM_TUNE=off` 后 graph vs no-graph **md5 完全相同 eeb2e6cf（逐字一致）**。
+**根因确认**：开 autotune 时 graph 捕获烧进当时选的 cuBLASLt algo，eager 每次动态选，两者 algo 不同 → 1-ulp → 近并列翻转。
+关 autotune 两边走默认 algo → 逐位一致。（tuneoff 输出=原 no-graph 的 eeb2e6cf，证明 eager 本就用默认、是 graph 的 autotune algo 偏了。）
+**B4 cudagraph 本身正确，逐位可达**——数值 bug 不在 graph，在 autotune 的 algo 选择不被 graph 固化同步。
+解法二选一：① serve 跑 graph 时 GEMM_TUNE=off（简单，逐位，略损 GEMM autotune 收益）；
+  ② graph 与 eager 共享同一 autotune 定下的 algo（capture 前定 algo，eager 复用）——两全，推荐。
+→ B4 数值问题解决。下一步：定方案（①或②）+ 测 graph vs no-graph 的性能提升（cudagraph 对 decode launch 开销的收益，这才是 B4 的目的）。
