@@ -900,3 +900,13 @@ executor.rs:67 `let _ = gemm`(丢传入的已 tune gemm)，:72 新 stream 建全
 kaon3 新 gemm 无 tune 表 → 走 cuBLASLt 启发式 → graph 捕获烧进启发式 algo A，eager 走启发式 algo B → 1-ulp 差。
 **方案2 实现**：给 KaonModel 加 `gemm_tune_entries()`（遍历每层 fp8 投影 qkv/o_proj/dense gate/up/down 的 (n,k)，照 qwen35），
   executor 新 gemm 后 graph 捕获前调 `autotune`。这样 graph/eager 共享同套 algo，逐位 + 保 autotune 性能。主会话自己写（不派子代理避免再卡）。
+
+## R44 深挖⑦：澄清——fp8 投影不走 cuBLASLt(自写 kernel 无 algo 选择)；差异是**双进程对照**的 algo 缓存独立
+`forward_fp8` 调自写 `gemm_fp8_static_bf16`(gemm_fp8_sm120.cu)，**不用 cuBLASLt/default_algos**，固定 kernel 无 algo 差。
+走 cuBLASLt+autotune 的是 bf16 GEMM（lm_head / router 等）。autotune 的 default_algos 缓存**按 Gemm 实例**。
+**关键澄清**：我的 graph(8140) vs no-graph(8141) 是**两个独立进程**，各自 Gemm 实例、各自 algo 缓存独立填充 →
+  首次 heuristics 查询时机/GPU 状态微差 → 选到不同 algo → 1-ulp。**这是双进程对照的产物，不是 graph vs eager 本身。**
+真实 serve 里：graph replay 和 eager fallback 是**同一进程同一 Gemm**（executor 持一个 gemm），algo 缓存共享 → 本就一致。
+GEMM_TUNE=off 一致，是因为两进程都走纯默认 algo，消除了缓存独立填充的随机。
+→ **实际结论**：单进程内 graph 不引入数值差（同 Gemm/同 algo 缓存）。双进程对照 A/B 本身有 algo 缓存独立这个干扰变量。
+下一步正确验证：**同一个 serve 进程**内，graph 命中步 vs 强制 eager 步（如首个未捕获桶）输出对比；或接受"开 autotune 时锁定 algo（kaon3 executor 补 autotune 调用使缓存启动即定）"。
