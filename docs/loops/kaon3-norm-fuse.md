@@ -261,3 +261,14 @@ vLLM        0/20   19/20     195.8   21ms    （成熟引擎）
 产物：test/kaon3/qa_zh/{result_dinfer,result_vllm}.jsonl + report.html（并排）；bench_index.py 加"端到端生成质量对比"区，
 index.html 链到 report.html → Dashboard(8090) 可见。
 **本 loop 全局收束**：0.0085 坐实为亚决策噪声（不影响生成质量）；kaon3 从零 executor 端到端可用；质量=vLLM，性能待优化。
+
+## R24（2026-10-26）第2轮：不同长度 + eager/compile 都测 + 对齐 + 带回 prompt/output + dashboard 总表
+用户加码：① case 不同长度（qa_zh2 14 条：短/中/长/长输入，per-prompt max_tokens 32~900）；
+② eager 和 compile 都测，结果注明（dinfer 只 eager；vLLM 两种）；③ 启动/cudagraph/warmup 对齐
+（dinfer=纯 eager 无 graph 无 warmup；vLLM enforce_eager 对齐 + 两边各加一次 warmup 请求消除首请求偏差）；
+④ 带回 prompt+完整 output（dump.md）；⑤ dashboard kaon3 与其他模型**同一张总表**，点进才是详情。
+已做：harness 支持 3 tag(dinfer/vllm_eager/vllm_compile)注明 + per-prompt max_tokens + warmup + dump；
+  bench_index 总表加"质量详情"列，QA-only 模型(kaon3)也进同表一行点进 report.html。
+启动时间：vLLM eager=164s(权重+量化加载)；dinfer=33s(待本轮重测)；vLLM compile 待测(上轮 267s 含编译)。
+prompts.jsonl 第一版内层 ASCII 引号把 JSON 提前闭合→json.dumps 重写(内层用「」)已修。
+跑中：vllm_eager(b8ljqbdqv)→ 之后 vllm_compile → dinfer。
