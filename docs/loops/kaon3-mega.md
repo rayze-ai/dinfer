@@ -621,3 +621,21 @@ B2 stage 链：input_norm→qkv→q/k/v_norm→rope→kv写→**attn(复用 B1 c
 - megakernel 输出 ff1（dense 支路）落 `out`，MoE 支路仍单独 launch，两支路 host 侧合并（现有逻辑）。
 - B3 把 MoE 也编进来：动态 top-8 路由是难点。可"128 专家常驻 task、len==0 跳过"（A 的 split 骨架 + 空转 task），或 GPU 侧 scan 写 offsets 进 ready。先评估；若太难，MoE 第一版仍单独 launch，先 B4 cudagraph 把 attn+dense 这段的 per-step launch 消掉。
 - **接 serve 前**：当前对拍是"融合 vs 分离"同码逐位（证融合不破坏数值）；接 serve 要再做 serve 级对拍（vLLM prompt_logprobs / 逐 op 路径），注意 GEMM 用 fp8_gemm_tile 与 cuBLASLt 有 fp8 级差（~1e-3，A 已知），不是 0/N。
+
+## R39 2026-10-26 用户选 3：深化片上流水（megakernel 独有、vLLM 比不了的价值）
+为什么选 3：cudagraph(B4) vLLM 自己就有，拿它追只追平；**片上流水是 megakernel 独有**——超越 vLLM 非eager 的理论根基。
+B2 已证"融一次 launch"只拿到省 launch(1.27×)，**没省到 global 往返**（每 stage 仍读写 global scratch）。
+
+### 关键分析（persistent 模型的本质约束）
+- persistent 里不同 stage 由**不同 CTA**执行（blockIdx 轮转领 task）→ A 的 CTA 的 smem，B 的 CTA 看不到 → **跨 stage 必须走 global，这是固有限制不是偷懒**。
+- stage 分两类：GEMM stage（count=n×split 几十 task 铺满 SM）vs 胶水 stage（count=1，单 CTA：IN/QKNORM/ROPE/OQUANT/RES/PRE_FF/ACT/POST）。
+- **片上流水的真正机会 = 把胶水融进 GEMM 的 epilogue**（同一 CTA 算完直接在寄存器/smem 做完，不落 global）：
+  - QKV GEMM 尾声直接做 q/k/v_norm + rope（而非写 qkv_buf 再 QKNORM stage 读回）
+  - GATE/UP 尾声直接 gelu·mul + 量化（**A 的 mode2 已是雏形**：gate_up 算完尾声融 silu·mul）
+  - OPROJ 尾声直接 post_attn_norm + 残差
+- 这是 vLLM inductor 做融合、但 megakernel 能做得**更彻底**的点（inductor 受 PyTorch 算子边界限制，megakernel 可任意融）。
+
+### 做法（从收益最大处起，别一次全改）
+按 exec/global 往返占比排序融合：QKV(38% exec，后接 qknorm/rope/kvwrite 多个胶水+中间量最多)最该先融；其次 OPROJ→RES。
+每处融合：epilogue 把下游胶水吸进来 → 砍掉中间 global buffer → 逐位对拍 + 计时看 global 流量/耗时降多少。
+硬约束：逐位一致；5090 单卡；kernel 不写死调优数值。委派子代理，先融 QKV→qknorm→rope 一处看收益。
