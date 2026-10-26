@@ -490,3 +490,9 @@ B=1 sp_gu4/sp_dn4：ctas=1 → 2.05×（53.9us），**ctas=2 → 1.72×（64.3us
 B=8 验证（sp_gu4/sp_dn4/ctas=1）：speedup 1.34×，2/22528 fp8 级差（rel=7e-7，ACT 在 B>1 的量化噪声，可接受）。
 **三轮结论**：R2（gate/up split-K，1.86×）+ R3（+down split-K，2.05×）有效且逐位一致；R4（ctas=2）退化否决。
   最优 kernel 配置 = **sp_gu=4, sp_dn=4, ctas=1**（B=1 2.05×，B=8 1.34×）。
+
+## R32 2026-10-26 端到端 bench（serve 接入 split-K）
+serve 二进制重编（`-p dinfer --features kaon3`，带 split-K FFI）通过——验证 layer.rs 补齐正确。
+kaon3-mega 容器重启带 env `MEGA_SPGU=4 MEGA_SPDN=4 MEGA_CTAS=1`（GPU6，8132），/v1/models + 生成 sanity 正常。
+bench3 = R3 配置端到端四组（dinfer mega vs vLLM 非eager）。R2（sp_gu4/sp_dn1）另跑 bench2。
+R4（ctas=2）kernel 层已明确退化，不单独端到端（省 GPU 轮次），perf-trend 以说明标注。
