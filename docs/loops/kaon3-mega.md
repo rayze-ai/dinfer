@@ -731,3 +731,10 @@ RES+PRE_FF 融成 on-chip stage `fused_res_pre_ff`（一 warp 一行，pass A �
 **整层累计 speedup（分离 15launch → glue+ff 1launch）：m=1 1.47× / m=4 1.53× / m=8 1.60×**，全程逐位一致。
 子代理判断（认可）：胶水链（qkv三连 + RES/PRE_FF）基本融完，剩 OQUANT/ACT/POST 口径不一致或收益≈1%，优先级低。
 **转 B3(MoE 持久化) 或 B4(cudagraph)**，不再抠单 stage。
+
+## R42 2026-10-26 B4 开：kaon3 executor 接 CUDA graph 桶捕获（用户选 B4 先做）
+kaon3 executor 是"第一版无 CUDA graph"。照 qwen35 executor 已验证的 DecodeGraphs 桶捕获接上：
+decode 纯批按 batch 行数分桶懒捕获，replay 消 per-step launch 开销。复用 dinfer_layers::exec（DecodeGraphs/graph_buckets/AsyncResultRing）。
+注意：这是**整个 decode 步**的 graph（含 attn/MoE/采样），不只 megakernel 段——端到端清 launch 开销的正解。
+KAON3_MEGA 与 graph 正交，本步先在默认 serve 路径验 graph，MEGA 叠加留后续。
+验收：graph vs NO_GRAPH 生成文本一致（不改数值）+ bench c1/c8 tok/s 提升。委派子代理(aae1fd02)。
