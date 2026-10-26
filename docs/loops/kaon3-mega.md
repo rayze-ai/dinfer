@@ -561,3 +561,21 @@ A 的成果（split-K 2.05× 逐位、partial/sem/末到归约骨架、分阶段
 - 静态 smem 预算（<48KB 自动）：D=256/G=6 ≈32.2KB、D=128/G=4 ≈24.3KB，均合法。
 - 对拍：ref = gqa_decode_v3_bf16(grid) + merge_v2；mega = persistent attn + merge_v2；比 scratch(attention 直出) + 最终输出，均逐位。
 - 代价记录：persistent 每 CTA 256 线程只 128 活 → attention stage 半数 lane 空转（B2 可考虑一 CTA 打包 2 个 shard）。
+
+### R36 结果（5090 GPU0，2026-10-26）✅ 逐位一致，但 persistent 单 stage 更慢（符合预期）
+实现：抽 `gqa_decode_v3_core.cuh`（v3 Q·K·V flash-decode device 函数，active=tid<128 门控，256 外壳只 128 活）；
+`mega_attn_sm120.cu`（persistent Dispatch<GROUP,D>，shard→(b,hk,split) 调 core）；merge C ABI `gqa_decode_merge_v2_launch`；
+对拍 `mega_attn_parity.rs`（ref=v3 grid+merge，mega=persistent+merge）。编译 23.7s 干净。
+**对拍：8 配置全逐位一致**（scratch partial 0/N + 最终输出 0/N，max|d|=0）：
+  D=256 g=1/2/4/6（n=1024/2048/4096）、D=128 g=1/2/4。证明抽函数 + persistent 调度不改数值。
+**计时（v3 grid vs persistent，µs，B=1）**：
+  D=256: n1024 g2 6.15/9.79(0.63x) · n4096 g2 14.35/18.48(0.78x) · n2048 g4 10.25/14.37(0.71x) · n2048 g6 12.30/16.63(0.74x) · n1024 g1 6.16/12.32(0.50x)
+  D=128: n1024 g2 4.12/9.85(0.42x) · n2048 g4 6.16/10.27(0.60x) · n1024 g1 4.12/10.17(0.41x)
+→ **persistent 单 stage 全程更慢（0.41–0.78x）**。根因：persistent 的价值在"多 stage 融一次 launch 省 launch 开销 + 中间 global 往返"，
+  单跑一个 attention 反而多付：① 256 线程半数 lane 空转（core 是 128 线程算法）② 持久 CTA 领 task 自旋 + 二分 stage + signal 每 task 固定开销
+  ③ task 数（b·Hkv·splits ≤512）不足以摊薄。grid launch 本就把 (b,hk,split) 直接铺满，没有这些开销。
+**结论：attention 持久化本身可行且逐位，但单独跑不值；收益必须靠 B2（attn+qkv+o_proj+dense 融一个 megakernel，省中间 global 往返与多次 launch）兑现。**
+**B2 怎么整合（判断）**：① core 已是干净 device 函数，可直接作为整层 megakernel 的一个 stage，task 体不变；
+  ② 256 线程半数空转要解：B2 可让 attention stage 的一个 CTA 打包 2 个 (hk,split) shard（两个 128 线程半区各算一个），或与相邻 stage 错峰复用；
+  ③ attn→o_proj 的残差流用 scratch/global 衔接（照 A 的 partial 骨架），merge 可并进 persistent（末到 CTA 归约，复用 A 的 sem 模式）；
+  ④ 依赖链：qkv(GEMM)→rope/kv写→attn(本 stage)→merge→o_proj(GEMM)→残差，StagePlan 串起来，dep2 处理并行支路。

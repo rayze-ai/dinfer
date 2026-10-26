@@ -163,10 +163,12 @@ fn run_case(b: usize, h: usize, hk: usize, d: usize, n: usize) {
   let scratch_mv = st.dtoh_sync_copy(&scratch_m).unwrap();
 
   // ---- 退化检查 + 对比 ----
+  // 退化检查：两边范数都非零（非全零比全零），且 ref≈mega 同量级（长序列 softmax 近均匀 → 输出范数本就小）。
   let nr: f64 = refv.iter().map(|v| (v.to_f32() as f64).powi(2)).sum::<f64>().sqrt();
   let nm: f64 = megav.iter().map(|v| (v.to_f32() as f64).powi(2)).sum::<f64>().sqrt();
-  assert!(nr > 1.0, "[{b}x{h}x{hk} d={d} n={n}] 参考输出范数异常 {nr}（可能全零）");
-  assert!(nm > 1.0, "[{b}x{h}x{hk} d={d} n={n}] mega 输出范数异常 {nm}（可能全零）");
+  assert!(nr > 1e-3, "[{b}x{h}x{hk} d={d} n={n}] 参考输出范数异常 {nr}（可能全零）");
+  assert!(nm > 1e-3, "[{b}x{h}x{hk} d={d} n={n}] mega 输出范数异常 {nm}（可能全零）");
+  assert!((nr - nm).abs() / nr.max(1e-30) < 0.5, "[{b}x{h}x{hk} d={d} n={n}] ref/mega 范数不同量级 {nr} vs {nm}");
 
   // scratch（attention 直出 partial）逐位
   let mut sdiff = 0usize;
