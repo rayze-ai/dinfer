@@ -693,3 +693,11 @@ KVWRITE 从 qkv_buf 读 q/k/v 再写 cache。**把它们融成一个 stage `fuse
 
 **改动文件**：`crates/kernels/cuda/mega_layer_sm120.cu`（+`fuse_glue` 字段 / `fused_qkv_glue` / QKNORM 分支 / host count+dep）、
 `crates/kernels/src/ffi.rs`（MegaLayerParams +`fuse_glue`）、`crates/kernels/tests/mega_layer_parity.rs`（`fuse_glue=1` + kv_cache 对拍 + 三段计时）。
+
+## R40 结果校读（主会话）：第一处片上融合完成 + 方向修正
+子代理把 qknorm/rope/kvwrite 三胶水融成一个 on-chip stage `fused_qkv_glue`（一 warp 一头，整头 D 留 smem 做完 norm+rope+fp8+写cache），
+**非**融进 QKV GEMM epilogue（那条路否决，理由硬）：① 半头 tile(BN=128 vs D=256)② GEMM 列并行 vs norm 行并行需转置③ QKV weight-bound(23MB)，qkv_buf 往返仅~1%，融 epilogue 收益≈噪声。
+结果：逐位 0/N(m=1/4/8)；片上融 glue 净 1.06x(m1)/1.21x(m4)/1.29x(m8)，合计省launch 1.35-1.44x。commit 3f415ce。
+**关键认知修正（影响后续）**：tiny-m decode 是 **latency-bound 不是 bandwidth-bound**——片上融合降的是 wait barrier + 中间量读回延迟，
+  不是 global 带宽（带宽被 weight read 主导）。所以 R39"省 global 往返"提法不准，**真正省的是把 count=1 胶水链融成 on-chip stage 减 barrier/读回延迟**。
+下一处：OPROJ 后的 RES→PRE_FF（都 count=1 胶水）融成一个 on-chip stage，省 barrier + x2/o_buf 读回。不融进 OPROJ epilogue（同 QKV 理由）。
