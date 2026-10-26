@@ -70,6 +70,17 @@ impl KaonExecutor {
         dev.disable_event_tracking();
         let stream = dev.new_stream()?;
         let gemm = Gemm::new(&stream).context("cublasLt on executor stream")?;
+        // GEMM 自调优（方案2，kaon3-mega R44）：新 stream 的 gemm 必须在 CUDA graph 捕获前 autotune，
+        // 否则 lm_head(唯一 cuBLASLt bf16 GEMM) 走启发式——graph 捕获烧进一个 algo、eager fallback 另选一个
+        // → logits 末位差 → 近并列 token 翻转。autotune 定死 algo 进 default_algos 缓存，graph/eager 共享。
+        if gemm.tune_enabled() {
+            match gemm.autotune(&model.gemm_tune_entries()) {
+                Ok(r) => tracing::info!("kaon3 gemm autotune: {:.0} ms", r.elapsed_ms),
+                Err(e) => tracing::warn!("kaon3 gemm autotune 失败（回退启发式）: {e}"),
+            }
+        } else {
+            tracing::info!("kaon3 gemm autotune: off (GEMM_TUNE=off)");
+        }
 
         let scratch = LayerScratch::new(&stream, &model.cfg, max_tokens)?;
         let acts = ActBuf::new(&stream, &model.cfg)?;

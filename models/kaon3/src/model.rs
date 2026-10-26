@@ -73,6 +73,19 @@ impl KaonModel {
         })
     }
 
+    /// cuBLASLt autotune 条目：kaon3 decode 唯一走 `forward_bf16`(cuBLASLt) 的是 tied lm_head
+    /// （[tokens, vocab] = final_normed × embed.table^T）。fp8 投影 / MoE grouped 走自写 kernel 无 algo 选择，不入表。
+    /// executor 新 Gemm 后、CUDA graph 捕获前调一次，使 graph 与 eager fallback 共享同一 algo（否则各自启发式选到不同 algo → logits 末位差 → 近并列 token 翻转）。
+    pub fn gemm_tune_entries(&self) -> Vec<dinfer_kernels::GemmTuneEntry<'_>> {
+        vec![dinfer_kernels::GemmTuneEntry {
+            name: "lm_head".to_string(),
+            n: self.embed.vocab,
+            k: self.embed.hidden,
+            w: &self.embed.table.data,
+            bias: None,
+        }]
+    }
+
     /// 按 `num_blocks` 分配每层 KV cache（逐层 head_dim 不同）。
     pub fn alloc_kv(&mut self, stream: &Stream, num_blocks: usize, block_size: usize) -> Result<()> {
         ensure!(block_size > 0 && num_blocks > 0, "kv: 参数非法");
