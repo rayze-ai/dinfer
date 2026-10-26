@@ -439,3 +439,20 @@ DOWN wait=230万 仍最大（exec 仅 72万，wait 3.2×）：DOWN 等 ACT、ACT
 委派子代理做迭代循环：改 kernel→编译→跑一轮→写 benchN→重生成 perf-trend 折线→进 Dashboard；每轮 CHANGE 记清改了什么。
 主会话把关方向（基于 R26 profiling：先攻 DOWN wait / gate-up 占用，再扩 attention）。
 基线轮（R27 的 mega 1.66×）作为 bench_trend 第 1 轮。
+
+## R29 2026-10-26 子代理：split-K 迭代（R2 gate/up / R3 down / R4 ctas_per_sm）—— 攻 DOWN wait
+主会话指派：**只做 A（dense MLP 链性能），不碰 attention（B）**。做完 R2/R3/R4 三轮回报。
+### 现状核对（子代理读码确认）
+- 维度 H=2816, I=2112, kBN=128 → gate/up 各 17 tile、down 22 tile、总任务 ≈ 59；5090 ~170 SM。
+  **grid = min(sms, total_tasks) ≈ 59 → 110+ SM 空转**。这是 DOWN wait 大的根因之一：任务太少，每个 GEMM 的 N tile 单 CTA 全 K 归约，关键链长。
+- `mega_mlp_sm120.cu` 的 `fp8_gemm_tile` 当前**单 CTA 一个 N tile、全 K 归约、不 split-K**（注释 L121 明写）。
+- split-K 参考 = `mega_sm100.cu` `gemv_task`：`partial[splits][m][n]` f32 + `sem[tiles]`，末到 CTA（`atomicAdd==splits-1`）f32 归约写 bf16。
+- **基线复现（子代理实测 B=1）**：逐位一致 0/2816，mega 66.5us，1.66×；6 stage：NORM 2.1% / GATE 31.8%(wait 86万) / UP 31.8%(wait 86万) / ACT 0.3% / DOWN 32.3%(exec 72.7万, **wait 231万**) / POST 1.7%。与 R27 完全一致。
+### ⚠️ 发现 1：serve 路径 FFI 失配（非本轮引入）
+`layer.rs:736` 的调用只传 7 个尾参（dep,count,start,ready,pipe,prof,stream），但 R25/R27 后 `ffi.rs` 签名需 10 个
+  （加了 dep2,wait_cyc,exec_cyc）。即 R25-R27 只编过 `-p dinfer-kernels`（parity 测试），**serve 路径（`-p dinfer --features kaon3`）早已对不上、重编必失败**。
+  任何端到端 bench 前必须先补齐 layer.rs（serve 侧 dep2 传真 buf、wait/exec 传 null）。
+### ⚠️ 发现 2：split-K 与"逐位一致"硬约束冲突
+split-K 把 K 维切段、各段 f32 partial 再求和 → **fp32 累加顺序改变**。当前全 K 归约恰与 cuBLASLt 逐位一致（0/2816），
+  split-K 后极可能变成"fp8 级差（rel<5e-3）"而非逐位 0。parity 测试本身接受 fp8 级差（只断言范数非零 + rc==0），
+  但硬约束写"每轮必须逐位一致"。**策略：实测 split-K 的 ndiff 与 rel，若破逐位但 rel 在 fp8 级（<5e-3）如实记录并交主会话定夺；若退化则回退。**
