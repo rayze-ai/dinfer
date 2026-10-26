@@ -1395,6 +1395,118 @@ pub unsafe fn umma_peak_launch(_a: *const c_void, _b: *const c_void, _c: *mut c_
     CUDA_ERROR_NOT_SUPPORTED
 }
 
+/// kaon3-mega B2：整层 persistent megakernel（`mega_layer_sm120.cu`）的 Params 镜像。
+/// **字段顺序/类型必须与 C++ `dinfer::mega_layer::Params` 逐一对应**（repr(C)）。
+/// 所有设备指针用 `*mut c_void`（指针大小无关具体类型）。
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MegaLayerParams {
+    pub x: *const c_void,
+    pub out: *mut c_void,
+    pub input_w: *const c_void,
+    pub q_norm_w: *const c_void,
+    pub k_norm_w: *const c_void,
+    pub post_attn_w: *const c_void,
+    pub pre_ff_w: *const c_void,
+    pub post_ff1_w: *const c_void,
+    pub qkv_w: *const c_void,
+    pub qkv_wscale: f32,
+    pub qkv_a_inv: f32,
+    pub o_w: *const c_void,
+    pub o_wscale: f32,
+    pub o_a_inv: f32,
+    pub gate_w: *const c_void,
+    pub gate_wscale: f32,
+    pub gate_a_inv: f32,
+    pub up_w: *const c_void,
+    pub up_wscale: f32,
+    pub up_a_inv: f32,
+    pub dn_w: *const c_void,
+    pub dn_wscale: f32,
+    pub dn_a_inv: f32,
+    pub norm_bf: *mut c_void,
+    pub norm_q: *mut c_void,
+    pub qkv_buf: *mut c_void,
+    pub attn_buf: *mut c_void,
+    pub attn_q: *mut c_void,
+    pub o_buf: *mut c_void,
+    pub x2: *mut c_void,
+    pub norm1_bf: *mut c_void,
+    pub norm1_q: *mut c_void,
+    pub gate_buf: *mut c_void,
+    pub up_buf: *mut c_void,
+    pub act_q: *mut c_void,
+    pub down_out: *mut c_void,
+    pub act_scratch: *mut c_void,
+    pub kv_cache: *mut c_void,
+    pub block_table: *const i32,
+    pub seq_lens: *const i32,
+    pub slot_mapping: *const i32,
+    pub attn_scratch: *mut f32,
+    pub cos_sin: *const f32,
+    pub positions: *const i32,
+    pub rope_dim: i32,
+    pub rope_span: i32,
+    pub rope_neox: i32,
+    pub m: i32,
+    pub h: i32,
+    pub i: i32,
+    pub heads: i32,
+    pub nkv: i32,
+    pub d: i32,
+    pub block_size: i32,
+    pub max_blocks: i32,
+    pub eps: f32,
+    pub attn_scale: f32,
+    pub kv_fp8: i32,
+    pub splits: i32,
+    pub keys_per_split: i32,
+    pub sp_qkv: i32,
+    pub sp_o: i32,
+    pub sp_gu: i32,
+    pub sp_dn: i32,
+    pub part_qkv: *mut f32,
+    pub part_o: *mut f32,
+    pub part_gate: *mut f32,
+    pub part_up: *mut f32,
+    pub part_dn: *mut f32,
+    pub sem_qkv: *mut i32,
+    pub sem_o: *mut i32,
+    pub sem_gate: *mut i32,
+    pub sem_up: *mut i32,
+    pub sem_dn: *mut i32,
+}
+
+/// 整层 megakernel 一次/分段 launch。融合：stage_lo=0,stage_hi=14,setup=1 一次跑全链。
+/// 分离基线：对每个 s 调一次 (s,s)，首个 setup=1，其余 0（流序列化 + ready 累加 → 等价分别 launch）。
+#[cfg(all(not(no_nvcc_stub), sm120))]
+extern "C" {
+    #[allow(clippy::too_many_arguments)]
+    pub fn mega_layer_forward(
+        p: *const MegaLayerParams,
+        stage_lo: i32,
+        stage_hi: i32,
+        setup: i32,
+        dep: *mut i32,
+        count: *mut i32,
+        start: *mut i32,
+        ready: *mut i32,
+        dep2: *mut i32,
+        wait_cyc: *mut u64,
+        exec_cyc: *mut u64,
+        prof: i32,
+        stream: cudaStream_t,
+    ) -> i32;
+}
+#[cfg(not(all(not(no_nvcc_stub), sm120)))]
+#[allow(clippy::missing_safety_doc, clippy::too_many_arguments)]
+pub unsafe fn mega_layer_forward(
+    _p: *const MegaLayerParams, _lo: i32, _hi: i32, _setup: i32, _dep: *mut i32, _cnt: *mut i32, _st: *mut i32,
+    _rdy: *mut i32, _dep2: *mut i32, _wc: *mut u64, _ec: *mut u64, _prof: i32, _s: cudaStream_t,
+) -> i32 {
+    CUDA_ERROR_NOT_SUPPORTED
+}
+
 #[cfg(not(all(not(no_nvcc_stub), mega_sm100)))]
 #[allow(clippy::too_many_arguments, clippy::missing_safety_doc)]
 pub unsafe fn gqa_fa_umma_launch(_paged: i32, _max_q: i32, _heads: i32, _num_reqs: i32, _q: *const c_void,
