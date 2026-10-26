@@ -496,3 +496,28 @@ serve 二进制重编（`-p dinfer --features kaon3`，带 split-K FFI）通过�
 kaon3-mega 容器重启带 env `MEGA_SPGU=4 MEGA_SPDN=4 MEGA_CTAS=1`（GPU6，8132），/v1/models + 生成 sanity 正常。
 bench3 = R3 配置端到端四组（dinfer mega vs vLLM 非eager）。R2（sp_gu4/sp_dn1）另跑 bench2。
 R4（ctas=2）kernel 层已明确退化，不单独端到端（省 GPU 轮次），perf-trend 以说明标注。
+
+## R33 2026-10-26 ✅ R2/R3/R4 三轮完成：perf-trend 三轮齐 + 结论
+端到端四组（dinfer mega 8132 vs vLLM 非eager 28201，5090 GPU6，钉核 96-111）：
+```
+轮     配置                      c1    c8    c32   c8-long   kernel speedup(B=1)
+bench1 R1 基线(无split-K)        23.7  80.3  124.7  39.6     1.66x
+bench2 R2(sp_gu4/sp_dn1)         24.2  82.3  123.0  39.3     1.86x
+bench3 R3(sp_gu4/sp_dn4)         24.3  82.5  124.2  38.6     2.05x
+vLLM 非eager(基线)               209   1202  3593   964      —
+```
+**端到端持平（c1/c8/c32/c8-long 全在噪声内 ±2%）**，尽管 kernel 层 1.66→2.05×。
+**根因（证实 R23 + §14.6）**：dense MLP 只是 decode 一步的一小支，attention（GQA paged）+ 128 专家 NVFP4 MoE + 其它
+  才是大头。把 dense MLP 从 ~54us 压到更低，在整步（含 attn/MoE，端到端 c1 TPOT ~41ms/token）里占比太小 → 端到端不动。
+  dinfer mega 端到端离 vLLM 非eager 仍 **~9×（c1）~15×（c8）~29×（c32）**，差距在 **attn/MoE 没 persistent 化 + 没 CUDA graph**，不在 dense MLP。
+
+### 三轮结论（交主会话）
+- **哪个优化最有效**：R3（gate/up + down 都 split-K，sp_gu=4/sp_dn=4）kernel 层最好 **2.05×**，且**全配置逐位一致 0/2816**。
+  R2（仅 gate/up）1.86×。**R4（ctas=2）退化否决**（串行链瓶颈，加 CTA 只增自旋等待）。
+- **离 vLLM 非eager 还差多少**：端到端 **~9–29×**（按并发）。**dense MLP 的 kernel 优化到头也改不动端到端**——
+  瓶颈不在这。split-K 是对的（填满 SM、缩关键链、逐位一致），但 dense-only megakernel 的**天花板已到**。
+- **下一步建议**：要动端到端，必须把 **attention（GQA paged）持久化进 megakernel** + **128 专家 MoE 持久化**（动态 top-8 路由进静态任务表，R1 标的头号拦路虎），
+  并上 **CUDA graph** 消除 per-step launch 开销。split-K 的 partial/sem/末到归约骨架可复用到 attn/MoE 的 GEMV。
+  **这是 B（attention 扩展）的活，等主会话 + 用户看过本趋势再单独开**（本轮按指派只做 A，未碰 B）。
+- 最优配置已设为 serve 默认跑的 env（容器 kaon3-mega: MEGA_SPGU=4 MEGA_SPDN=4 MEGA_CTAS=1）。
+  代码默认 env 不设时 sp=1（原路径），不影响其它构建。
