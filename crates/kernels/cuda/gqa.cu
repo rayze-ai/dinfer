@@ -1540,6 +1540,18 @@ static int decode_keys_per_split() {
   return kps;
 }
 
+// B1（kaon3-mega R36）：单独暴露 split partial → 输出的 merge（gqa_decode_merge_v2_kernel），
+// 供 persistent attention 对拍把 scratch 合并成最终输出（ref 与 mega 两路用同一 merge，口径完全一致）。
+extern "C" int gqa_decode_merge_v2_launch(const float* scratch, const int32_t* cu_seqlens_q, const int32_t* seq_lens,
+                                          void* out, int num_reqs, int heads, int head_dim, int splits,
+                                          int keys_per_split, cudaStream_t stream) {
+  dim3 grid((unsigned)num_reqs, (unsigned)heads);
+  gqa_decode_merge_v2_kernel<<<grid, (unsigned)head_dim, 0, stream>>>(scratch, cu_seqlens_q, seq_lens,
+                                                                      static_cast<bf16*>(out), heads, head_dim, splits,
+                                                                      keys_per_split);
+  return last_err();
+}
+
 // decode 专用（每请求恰 1 行 query，q: [B, H, D]，out 同形）。scratch: ≥ gqa_decode_scratch_len（B × H × 32 × (D + 2)）个 f32。
 // D=128：v2（group ≤ 2）或 v3（group 1/2/4，GQA_DECODE_V3=0 回退 v2）。D=256：只走 v3（group ≤ 6），v2 的寄存器布局不适用。
 extern "C" int gqa_decode_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens,

@@ -369,6 +369,42 @@ extern "C" {
         cu_seqlens_q: *const i32,
         stream: cudaStream_t,
     ) -> i32;
+    // B1（kaon3-mega R36）：v3 decode attention 直入口（splits/keys_per_split 显式传，对拍用）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn gqa_decode_v3_bf16(
+        q: *const c_void,
+        cache: *const c_void,
+        block_table: *const i32,
+        seq_lens: *const i32,
+        cu_seqlens_q: *const i32,
+        scratch: *mut f32,
+        out_direct: *mut c_void,
+        num_reqs: i64,
+        heads: i64,
+        kv_heads: i64,
+        head_dim: i64,
+        block_size: i64,
+        max_blocks: i64,
+        scale: f32,
+        q_stride: i64,
+        splits: i64,
+        keys_per_split: i64,
+        stream: cudaStream_t,
+    ) -> i32;
+    // B1：split partial → 输出 merge（persistent attn 对拍把 scratch 合并成最终输出）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn gqa_decode_merge_v2_launch(
+        scratch: *const f32,
+        cu_seqlens_q: *const i32,
+        seq_lens: *const i32,
+        out: *mut c_void,
+        num_reqs: i32,
+        heads: i32,
+        head_dim: i32,
+        splits: i32,
+        keys_per_split: i32,
+        stream: cudaStream_t,
+    ) -> i32;
     pub fn qkv_post_bf16(
         qkv: *mut c_void,
         wq: *const c_void,
@@ -1272,6 +1308,50 @@ pub unsafe fn mega_mlp_dense_branch(
     _st: *mut i32, _rdy: *mut i32, _dep2: *mut i32, _pipe: i32, _prof: i32, _wc: *mut u64, _ec: *mut u64,
     _spg: i32, _spd: i32, _pg: *mut c_void, _pu: *mut c_void, _pd: *mut c_void, _sg: *mut i32, _su: *mut i32,
     _sd: *mut i32, _ctas: i32, _s: cudaStream_t,
+) -> i32 {
+    CUDA_ERROR_NOT_SUPPORTED
+}
+
+/// B1（kaon3-mega R36）：persistent 版 paged GQA decode attention（`mega_attn_sm120.cu`，sm120 单卡）。
+/// 一次 launch 持久 CTA 调度，数值走与 v3 同一 core（`gqa_decode_v3_core`），应与 gqa_decode_v3_bf16 逐位一致。
+#[cfg(all(not(no_nvcc_stub), sm120))]
+extern "C" {
+    #[allow(clippy::too_many_arguments)]
+    pub fn mega_attn_decode(
+        q: *const c_void,
+        cache: *const c_void,
+        block_table: *const i32,
+        seq_lens: *const i32,
+        cu_seqlens_q: *const i32,
+        scratch: *mut f32,
+        out_direct: *mut c_void,
+        num_reqs: i32,
+        heads: i32,
+        kv_heads: i32,
+        head_dim: i32,
+        block_size: i32,
+        max_blocks: i32,
+        scale: f32,
+        q_stride: i32,
+        splits: i32,
+        keys_per_split: i32,
+        dep: *mut i32,
+        count: *mut i32,
+        start: *mut i32,
+        ready: *mut i32,
+        wait_cyc: *mut u64,
+        exec_cyc: *mut u64,
+        prof: i32,
+        stream: cudaStream_t,
+    ) -> i32;
+}
+#[cfg(not(all(not(no_nvcc_stub), sm120)))]
+#[allow(clippy::missing_safety_doc, clippy::too_many_arguments)]
+pub unsafe fn mega_attn_decode(
+    _q: *const c_void, _cache: *const c_void, _bt: *const i32, _sl: *const i32, _cu: *const i32, _scr: *mut f32,
+    _od: *mut c_void, _nr: i32, _h: i32, _kv: i32, _hd: i32, _bs: i32, _mb: i32, _scale: f32, _qs: i32, _sp: i32,
+    _kps: i32, _dep: *mut i32, _cnt: *mut i32, _st: *mut i32, _rdy: *mut i32, _wc: *mut u64, _ec: *mut u64, _prof: i32,
+    _s: cudaStream_t,
 ) -> i32 {
     CUDA_ERROR_NOT_SUPPORTED
 }

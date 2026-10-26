@@ -159,6 +159,10 @@ int gqa_decode_v3_bf16(const void* q, const void* cache, const int32_t* block_ta
                        const int32_t* cu_seqlens_q, float* scratch, void* out_direct, int64_t num_reqs, int64_t heads,
                        int64_t kv_heads, int64_t head_dim, int64_t block_size, int64_t max_blocks, float scale,
                        int64_t q_stride, int64_t splits, int64_t keys_per_split, cudaStream_t stream);
+// B1（kaon3-mega R36）：split partial → 输出的 merge（gqa_decode_merge_v2_kernel 的 C ABI 入口），persistent attn 对拍用。
+int gqa_decode_merge_v2_launch(const float* scratch, const int32_t* cu_seqlens_q, const int32_t* seq_lens, void* out,
+                               int num_reqs, int heads, int head_dim, int splits, int keys_per_split,
+                               cudaStream_t stream);
 // QKV 后处理融合：q/k per-head RMSNorm + neox RoPE（原地）+ K/V 写 paged cache。
 // 旧入口（Qwen3）：整头 RoPE、普通 RMSNorm（weight 直接用）、无输出门。D 必须 == 128。
 int qkv_post_bf16(void* qkv, const void* wq, const void* wk, const int32_t* positions, const float* cos_sin, void* cache,
