@@ -256,3 +256,12 @@ sp扫描(融合墙钟,逐位全✓):
 - TPOT慢4.6×:decode每步(关键路径+每stage效率,split-K已降14%仍差)。
 **dashboard**:engine-trend/perf-trend.json已更新,bench_index生成test/index.html(8090 HTTP 401=需鉴权文件在,路径对)。数据已进。
 **结论(给用户的真话)**:优化有效(split-K落地)但不够,端到端仍慢2.6×。最大短板是TTFT(prefill/调度)41×,不是decode kernel。下一步该攻prefill/调度而非继续抠GEMM/mega。
+
+## ⚠️ R25 2026-10-27 路径澄清(选下一步前必读):那张profiling表是整层mega测试,不代表serve
+查layer.rs:636-639/877-911:**KAON3_MEGA=1只让dense MLP支路(GATE/UP/DOWN)走megakernel**。serve真实decode一步=独立QKV GEMM → q/k/v_norm+rope → attention → 独立OPROJ GEMM → dense MLP megakernel(GATE/UP/DOWN融合)。
+**→ 那张"QKV38.9%/OPROJ18.8%"表来自mega_layer_parity(整层15 stage全融的测试),serve不走整层mega**。QKV/OPROJ在serve里是**独立kernel**,不在megakernel内,那张表的exec/wait不代表serve真实时间分布。
+**纠正选优化对象的依据**:
+- GATE/UP/DOWN的split-K(MEGA_SPGU/SPDN=4)serve已用(走dense branch megakernel)。
+- QKV/OPROJ是独立kernel,另一套代码(gemm路径),split-K/效率那张表管不着。
+- 要选serve下一步优化,必须**在serve真实路径profile**(独立QKV/attn/OPROJ/dense mega各占多少),不是拿整层mega测试表猜。又差点优化错对象(整层mega非serve路径)。
+**下一步(待定方向)**:在serve decode路径加分段计时(或用nsys),看独立QKV/attention/OPROJ/dense-mega真实占比,再定攻谁。端到端TTFT慢41×(prefill)可能比decode更该先攻(R24)。
