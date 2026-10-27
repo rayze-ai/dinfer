@@ -124,3 +124,23 @@ gemm_small_m(现成微基准,qwen35形状,M=4)三者带宽:
 已杀(pkill -x cargo,cargo=0;pgrep -f匹配到自身非残留)。
 **改对的计时法**:用已验证能跑的**分离模式**(15 stage按依赖顺序launch,mega_layer_parity原有),在每个stage的launch前后插 sync+Instant计时——它走完整依赖链不卡,逐stage墙钟=相邻sync时间差。不单独跑孤立stage。
 **下一步**:删掉死自旋的逐stage段,改在分离模式循环里逐stage sync计时。
+
+## ★★ R13 2026-10-27 逐stage墙钟(用户方法,顺序launch+sync,50轮,由大到小)——分布平,无单一瓶颈
+| stage | 墙钟us | % | 类型 |  | stage | 墙钟us | % |
+|---|---|---|---|---|---|---|---|
+| KVWR | 47.3 | 11.6 | glue(写KV几乎无算) |  | QKV | 25.8 | 6.3 (GEMM,exec占40%那个!) |
+| IN | 37.5 | 9.2 | norm |  | UP | 25.7 | 6.3 |
+| RES | 37.3 | 9.1 | glue |  | POST | 24.3 | 6.0 |
+| OPROJ | 32.3 | 7.9 | GEMM |  | QKNORM | 22.7 | 5.6 |
+| PREFF | 27.2 | 6.7 | glue |  | DOWN | 22.4 | 5.5 |
+| ROPE | 26.5 | 6.5 | glue |  | OQNT | 19.5 | 4.8 |
+| GATE | 25.9 | 6.4 | GEMM |  | ACT | 17.7 | 4.3 |
+|  |  |  |  |  | ATTN | 16.0 | 3.9 |
+合计408us(单launch+sync,含每stage固定开销);对照:分离15launch=296us,融合1launch=252us。
+**决定性读法**:
+1. **分布平,无单一瓶颈**(11.6%→3.9%无独大)。exec占40%的QKV墙钟仅25.8us/6.3%,与其他同量级。
+2. **最耗的KVWR(47us)是trivial glue(只写KV)**→数字被**每stage launch+sync固定开销主导**,非真实计算量。
+3. **这证明融合为何对**:分离15launch 296us→融合1launch 252us,省的=堆叠launch开销。**GEMM非瓶颈**(每GEMM stage仅~6%)。
+**彻底结论(数据说话)**:**无单一瓶颈stage可打,252us平摊15 stage,大头是众多小stage的固定开销非GEMM**。→单kernel优化(GEMM/attn/双缓冲/方向三)都不会有大收益(没有独大stage),完美解释方向三(3.6%)/双缓冲(GEMM非瓶颈)为何都无效=都在打小占比目标。
+**前10轮错因彻底明确**:盯着"GEMM exec占87%"以为GEMM是瓶颈,但exec占比≠墙钟;墙钟平摊,融合已经是对的方向(省launch),真实gap不在任何单个kernel。
+**真要再提速的方向(基于平摊分布)**:①减stage数(更多片上融合glue,已在做:fuse_glue/fuse_ff把KVWR/ROPE/RES/PREFF吸收→252降到209/190);②降每stage固定开销(占大头);不是优化任何单个GEMM/attn。
