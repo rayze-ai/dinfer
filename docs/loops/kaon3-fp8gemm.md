@@ -48,3 +48,11 @@ wait_cyc(mega_common.cuh:56-68)=CTA等依赖stage的自旋(while ld_acquire<need
 插 MEGA_DIAG_GRID printf 查 grid/occ,但输出没出来(31处MEGA_DIAG全是nvcc把printf源码行当warning回显,运行时host printf被cargo test吞/或mega_layer_forward走的launch分支不同)。**又钻进"printf为何不出"的工具兔子洞,偏离攻破GEMM**。清理此插桩。
 **纠正方法**:不靠printf。grid/occ 是确定值可直接算:occ=cudaOccupancyMaxActiveBlocksPerMultiprocessor(kern,256,smem),5090 sms≈170。smem单缓冲20.7KB、256线程/8warp。occ受smem+寄存器+线程约束。**可写一个独立小bin直接查询occ打印**(host函数,printf必出),或读kernel寄存器用量(cargo build -v看ptxas -v)。
 **更该做的**:8×gap先别纠结occ单因素。QKV理论13.5us,整层理论31us实测251us。**最该先隔离:单个GEMM(非整层)的wall时间** → 复活/新建单GEMM微基准。整层251含15stage+glue+attention+stage依赖自旋,混太多。
+
+## ✅ R5 2026-10-27 8×gap第一主因:mega_kernel 158寄存器卡occupancy=1 block/SM
+ptxas -v(NVCC_PREPEND_FLAGS=--ptxas-options=-v):mega_kernel **Used 158 registers, 0 spill, 16592B smem(静态)**。
+occupancy算:sm120每SM 64K寄存器。256线程×158=40448 reg/block → 64K/40448=**1.6→寄存器限1 block/SM**。(smem 16.6静态+20.7动态≈37KB,每SM~100KB非瓶颈。)
+**→ 寄存器158把occupancy卡死1 CTA/SM**。整层mega把15 stage代码全塞一个kernel→寄存器爆→每SM仅1 CTA→GEMM阶段只~170 CTA(sms×1),**无法用更多warp藏HBM延迟→带宽打不满→8×gap**。这是访存瓶颈的真机制:不是带宽物理下界,是occupancy不足导致in-flight访存不够多。
+**修法候选**:①降寄存器(拆kernel/减每线程活/__launch_bounds__(256,2)强制2block但会spill)②persistent本就1CTA/SM设计,但GEMM stage需要更多并行——矛盾:megakernel融合省launch vs GEMM要高occupancy。③GEMM stage单独用高occ kernel(退出megakernel融合,QKV/GATE等走独立launch)。
+**停止条件验证**:降occ到2+后QKV stage wall降、整层us降>3%、逐位0/N。
+**下一步**:试__launch_bounds__(256,2)看occ能否到2且不严重spill;或测独立GEMM launch(高occ)vs megakernel内GEMM的带宽差。参照vLLM:它GEMM不融进megakernel,独立cutlass kernel(高occ)——这正是它小M也快的原因之一。
