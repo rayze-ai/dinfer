@@ -43,8 +43,13 @@ GPU2 可抓取。`put` 有 bug（目标路径不生效），改用 `rsync -az` �
 - ① `max_num_seqs` 16→64：默认 16 太小（vLLM 256），48 请求涌入堆积 TTFT 到 8s。改 64 后 TTFT 降 13×、吞吐 +51%。**生产 KV 池要配套**（max-model-len 降或 num-blocks 够，16384+8192 会 OOM）。
 - ② `ROUTER_GEMM_BI=0`：router 的 batch-invariant persistent matmul 单 block 单 SM 串行 K=2816（为逐位对拍，生产不需要），0.25→0.03ms。单层 decode 降 32%。符合生产口径（[[dinfer-kaon3-prod-config]] 生产不开 BI）。
 
-**三优化点（都做透了，实测钉死，写给下一步手工）**：
-- **MoE（唯一中等收益，推荐先做）**：decode 每步 8 专家各 M=1 的 NVFP4「GEMV」却用 BM=32 GEMM tile kernel（`moe_grouped_sm120.cu` grouped_gemm_kernel）跑 → gemm3 80us = 带宽下界 14us 的 6×，tile 维度全浪费。**优化 = 写 M=1 专用 NVFP4 GEMV kernel**（方案见 loop R65：去 BM 维、1 行 A 常驻 + B 流式、NVFP4 scale 逐位复用；隔离微基准写+对拍原 kernel 逐位→再接 serve）。gemm3 80→~20us 省 decode ~14%。grid.z=128 空 block 已验只占 17%（非大头，别做 compact）。
+**由总到分 + exec/wait 复核（2026-10-27 R66-R70，本次会话，真机实测）**：
+- **真基线找回**：非 eager vLLM 在 **`:28201`**（`:28200` 是 eager 调试态，别测错）。dinfer 594 vs vLLM 946=**63%**，单步 TPOT 51.8 vs 7.57ms=**6.8×**，TTFT 251 vs 31ms。
+- **GPU decode 段 ~100% 利用**：纯 kernel 计算 bound，host 仅 4us（坐实 R58）。单流 TPOT 18.5ms、rate8 batch 51.8ms（batch 摊销每序列 0.96ms，高效非排队浪费）。
+- **各段执行占比**：decode M=1 MoE63/attn19/dense15/oproj3；prefill 大M MoE70/attn14/dense8/oproj5。
+- **★ MoE 真瓶颈（R69 推翻旧 M=1 判断）**：gemm3（3× grouped NVFP4 GEMM）= MoE 86%(大M)/54%(decode) = 整层第一大头。大 M（每专家 M≈132，tile 本应吃满）下仍只 **68 TFLOP/s = NVFP4 峰值 502 的 13%**，权重带宽只需 0.22ms（gemm3 是其 13×）→ **低效与 M 无关，是 grouped NVFP4 GEMM kernel 本身差**（`moe_grouped_sm120.cu`：BM=32 tile、**无 cp.async 无多 stage 流水**、m16n8k64 mma、全 128 专家起 block）。**唯一大杠杆 = 重写/调优 gemm3 逼近 vLLM cutlass grouped 效率**，~~R65 的 M=1 GEMV 特化已降级（只对单流有效、对大 batch/prefill 无效）~~。
+- **dense wait（R55）**：GATE/UP/DOWN wait≈4×exec（持久 kernel 169 CTA 自旋空等），但整段仅 decode 8-15%，全消≈省 10%，ROI 低挂起。
+- **下一步**：子代理正读 vLLM 副本（`/data/ref/vllm-img-v0.28.0-pr455`）定位 Kaon-V3 实际走的 NVFP4 MoE GEMM 路径 + 结构，回来对比我们 gemm3 低效点定改法。
 - **host/调度：排除**。实测 host CPU 仅 ~4us/步（sched 0.3+publish 3.3），decode 步时几乎全是等 GPU。TPOT 大头不是 host，是单步 30 层 GPU 计算（12ms，vLLM 6.6）+ 并发排队（rate8 下 54ms）。**别再往 host/调度/async 投**（R47 曾误判，R58 实测纠正）。
 - **dense wait：架构固有，ROI 低挂起**。GATE/UP/DOWN wait 各 ~4× 是持久 megakernel「CTA 常驻 + 窄 stage（NORM/ACT 单 task）169 CTA 自旋空等 signal」的固有代价，非某 stage 慢。三种改法（铺 task 假忙/拆 kernel 弃融合/减 CTA 降并行）都不划算（dense 仅占 decode 15%）。
 **排查方法教训（整轮栽多次）**：① 显眼机制 ≠ 大头（GEMM exec40%、occupancy、split-K grid、94%空block 全是显眼但实测非大头），必须在真实路径分段实测再改；② **serve ≠ 整层 mega 测试**（serve 只融 dense MLP，QKV/OPROJ 走 cuBLASLt 同 vLLM，MoE 走 NVFP4 grouped；那张 mega_layer_parity 的 wait 表对 serve 无用）；③ 先验证空 block/收益占比再动手（省了几次大改）。
