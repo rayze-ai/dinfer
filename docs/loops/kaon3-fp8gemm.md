@@ -498,3 +498,16 @@ ROUTER_GEMM_BI=0(走cuBLASLt并行)重测:
 → **TPOT 54 vs vLLM 6.6(8×)的大头在每步host/调度开销,不在单层kernel**。这又是一层:我一直测单层GPU时间,但TPOT主要花在host侧(类似之前TTFT是调度非prefill)。
 **下一步**:测TPOT的host vs GPU构成——每decode步的host时间(调度/采样/launch)vs GPU时间。疑点:async调度是否真重叠(之前R16-20绕过)、每步launch开销、采样/D2H。vLLM TPOT 6.6ms说明每步host开销极小,我们54ms必有大host开销。
 **已确认的两配置洞收益(落地)**:max_num_seqs=64(TTFT 3357→254,13×)+ROUTER_GEMM_BI=0(单层decode降32%,端到端TPOT-8%)。吞吐357→573(vLLM的61%)。
+
+## ★★★ R47 2026-10-27 实测TPOT构成(非推断):GPU实算仅24%,76%是host+排队
+硬数据(engine_nobi summary,30层):
+| 层级 | 时间 | 占TPOT |
+|---|---|---|
+| GPU实算(30层×0.43ms单层) | ~12.9ms | 24% |
+| host decode步时(srv自报engine_step_execute_decode均值) | 27.1ms | 50% |
+| 客户端TPOT | 54.5ms | 100% |
+**逐级放大**:①GPU 12.9→host步时27.1=host多14ms(每步调度/launch/采样/finish等待)②host步时27.1→客户端TPOT54.5=又27ms(rate8/48请求/async流水的并发排队延迟)。
+**GPU实算仅占TPOT 24%,76%是host+排队开销**。vLLM TPOT 6.6ms≈其GPU实算,说明vLLM几乎无这些host开销。
+**确认=代码/架构问题非kernel慢**(用户要求测试确认):大头在host侧——每decode步调度/launch/finish等待(14ms)+并发流水效率(27ms)。
+**→ 优化方向彻底转向host/调度**(不再是kernel):①每步host开销14ms(30层×0.47ms/层host?每层launch+同步开销大)②async调度流水是否真重叠(R16-20绕过,现在是大头必须解)。
+**下一步**:测host步时27.1ms里——是30层各自的host launch开销累加,还是finish等待(async没重叠)。若per-layer host开销大→减per-layer launch(cudagraph应该已捕获?查decode是否真走graph);若finish等待大→async没重叠。先查decode是否真走cudagraph(走了host launch应极小,27ms host就反常)。
