@@ -1080,3 +1080,9 @@ NO_GRAPH 每次真拷正确栈值故正常；graph replay 读失效栈故乱码�
 ## 下次 bench 要求(用户 2026-10-27):vLLM 命中率作正式对比项
 当前 summary 里 dinfer cache hit=客户端口径(0.731),vLLM 客户端列 n/a,vLLM 命中率只藏在"srv cache"列(服务端 /metrics,如 0.335)。
 **下次 bench**:把 vLLM 的 prefix cache 命中率提为**正式对比列**,与 dinfer cache hit 并排;两边统一用服务端 /metrics 的 prefix cache hit rate 口径才真正可比(也符合测试可信规则④客户端↔/metrics 对账)。改 bench_engine.sh / summary 生成,让 dinfer 与 vLLM 的命中率同列可比。
+
+## prefix cache 命中数值不一致 ✅ 2026-10-27 判定:可接受硬判决噪声,非 bug(子代理 af76184e)
+根因:命中后请求 mode 从 Prefill→**Paged**(runner.rs:659-665/714-718),kaon3 attention 据 mode 切 kernel(layer.rs:1107-1148):全量走 `prefill_win`(gqa_prefill),命中走 `paged_win`(gqa_fa_v5/6/7)。两套 CUDA kernel 的 softmax 归约/PV 累加**次序不同**→fp32 1-ulp 差→被 FP8 KV 的 P 量化(gqa.cu:932,步长50%)放大→near-tie token argmax 翻转。
+**排除真 bug**:① position/RoPE 正确(runner.rs:669 `start..start+n`,命中从 num_computed 起算);② 复用 KV 是同一物理块、逐字节同源(manager.rs:150-198 get_computed_blocks 直接返缓存块,不重算);③ FP8 量化口径两路一致(只是放大器)。
+**先例**:`docs/pitfalls.md:537-542` 已记录同类现象(prefix cache 开后流式==非流式逐字比较随机失败,paged vs prefill bf16 累加序差 ~1e-2,near-tie 翻转)**判非 bug**;`parity-localization.md:12-15/143-146` kernel 差异+放大器类。
+**结论**:cache hit 0.731 功能正常,数值不一致是双方共有、不可消除的 kernel 累加序噪声。要逐位一致用 `--no-prefix-caching`(main.rs:59)。**无需改代码**。可选对拍(vLLM prompt_logprobs oracle 判 near-tie gap<Δ,方案见子代理报告)留作佐证,非必须。
