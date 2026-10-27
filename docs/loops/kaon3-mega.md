@@ -1118,3 +1118,12 @@ NO_GRAPH 每次真拷正确栈值故正常；graph replay 读失效栈故乱码�
 **→ 重大纠正**:之前 C2fix(31)、c2off(41)、甚至 C1b(246) 的差异**大多是撞上不同 cache 命中的运行,不是代码优劣**!同代码(关异步)能跑出 203(s42b)也能跑出 76(s42a)。**异步/gather-save 的收益无法从这些单次 bench 判断**——bench 在高并发+prefix 下非确定性太强,不可信(撞用户强调的"测试要可信")。
 **修 bench(下一步)**:① warmup 阶段先发共享前缀请求把 KV 灌进 block_pool(消除首个竞争),再计时;或 ② 每配置重复 N 次取中位+报分布;或 ③ 降并发/错开共享前缀到达。改好 bench 才能公平判断 C2 异步/任何性能改动。
 **serve 现状**:关异步,单步健康(单发 2.396s==C1)。异步收益判定挂起到可复现 bench。
+
+## bench 修复 ✅ 2026-10-27:warmup 预热共享前缀 → cache 稳定、吞吐可复现
+改 bins/bench/src/main.rs(commit 60a776f):旧 warmup 用 `make_prompt(seed^0xFFFF)` 与共享前缀 `seed^0x5A5A` 魔数不同、根本没预热;新增 prefix_repeat>0 时发一个 `make_prompt_shared_prefix(seed,0,prompt_len)`(与正式同构)max_tokens=1 请求,把前缀 KV 灌进 block_pool。bench 二进制 md5 b73fa4dc。
+**验证(SEED=42,关异步)**:
+- 旧 bench:s42a 76 tok/s/cache0.52、s42b 203/0.99（同 seed 天差地别,不可复现）
+- 新 bench:**s42c 194.4/0.992、s42d 194.7/0.992**（同 seed 逐位级复现,差 0.15%）
+→ **cache 抖根治,bench 可信**。预热消除了"首个共享前缀请求竞争"的非确定。
+**可复现基线(关异步,rate8,REQS24,seed42)**:≈194 tok/s、cache 0.992、TTFT p50 ~98ms、TPOT ~48ms。
+**下一步(bench 已可信)**:用同 seed 重判 ① C1 真实吞吐(C1b 的 246 需复测,可能当时 cache 偏高) ② 异步 KAON3_ASYNC=1 vs 关 的真实收益(之前 31/41 不可信,作废)。现在有确定性基线可公平对比。
