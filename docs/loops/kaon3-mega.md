@@ -995,3 +995,23 @@ NO_GRAPH 每次真拷正确栈值故正常；graph replay 读失效栈故乱码�
 → 加 graph == 不加 graph，**逐位一致**，乱码根治（栈数组 H2D → 预填 device 表，graph 内零 H2D）。
 **全栈跑通**：整层 attn+dense megakernel(KAON3_MEGA) + device grouped MoE(B3) + cudagraph(B4) 三者兼容、通顺、逐位。
 下一步 B5：全栈(8142) vs vLLM 非eager(28201) 四配置四负载端到端 bench → perf-trend → **整体分析能否超 vLLM 非eager**（用户一路等的判断时刻）。
+
+## B5 2026-10-27 ✅ 判定时刻：全栈 mega(8142) vs vLLM 非eager(28201) 引擎层面对比
+**测试可信**（CLAUDE.md 硬性规则全满足）：三方钉核不重叠（dinfer 服务 0-11 / vLLM 服务 36-47 / 压测 120-127，nproc=128）；
+压测端 self-check PASS（测量误差 TTFT +1.3ms / parse 44µs/req）；客户端与服务端 /metrics 对账在报告里。
+冒烟轮 `test/kaon3/2026-10-27/engine_smoke`：rate=8 泊松开环，REQS=24，混合负载（prompt 128:0.5/1024:0.35/4096:0.15，prefix_repeat=0.5，不 ignore_eos），SLO TTFT≤500ms & TPOT≤20ms。
+
+| rate=8 | 完成/失败 | goodput | req/s | out tok/s | TTFT p50/p99 ms | TPOT p50/p99 ms | cache hit |
+|---|---|---|---|---|---|---|---|
+| **dinfer 全栈 mega** | 24/0 | **0.00 (0/24)** | 0.15 | **40.0** | **65747 / 136628** | 194 / 4956 | **0.000** |
+| **vLLM 非eager** | 24/0 | **3.55 (24/24)** | 3.55 | **1183.6** | 105 / 189 | 9.2 / 12.0 | (srv 0.106) |
+
+单发对照（128 token，temperature=0，无竞争）：dinfer **2.39s≈53 tok/s** vs vLLM **0.62s≈206 tok/s**（dinfer 单序列即慢 ~4×；53 与 R44 记录吻合）。
+
+**判定（用户一路等的结论）：当前全栈 mega 在单序列与并发两个层面都显著落后 vLLM 非eager，远未达到"逼近 200 tok/s 并超越"的目标。** 三层根因（都有数据）：
+1. **无连续批处理增益**：单序列 53 → 并发聚合 40 tok/s（不升反降，并发互相拖累）；vLLM 单序列 206 → 并发 1183（5.7× 批处理增益）。这是最致命缺口。
+2. **prefix cache 0 命中**：混合负载含 4096 长 prompt + 0.5 共享前缀，dinfer cache hit=0.000（每条全量 prefill），vLLM 命中缓存。
+3. **单序列本身慢 ~4×**：mega decode 18.7ms/tok vs vLLM 4.9ms/tok。
+→ mega 路线价值在"batch=1 极限延迟"假设下尚未兑现；真实服务是并发 + 长 prompt + 共享前缀，决定吞吐的是**连续批处理 + prefix cache**（与 mega 正交），这才是和 vLLM 非eager 差 30× 的大头。
+**下一步待用户定方向**（路线级决定）：A 先补 dinfer 连续批处理 + prefix cache（吞吐大头，与 mega 正交）；B 继续攻 mega 的 batch>1/prefix 兼容；C 接受 mega 当前定位只做 batch=1 低延迟。
+（产物 pull 受阻：远端 rsync broken pipe / tag 103，summary.md 已 cat 核对，engine_smoke 目录 + engine-trend 待修好 pull 后补入库。）
