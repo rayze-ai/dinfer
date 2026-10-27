@@ -276,3 +276,14 @@ sp扫描(融合墙钟,逐位全✓):
 5. split-K非均匀细调:各stage task数不同(QKV64/GATE17/DOWN22),分别扫sp_qkv/o/gu/dn找各自最优(非全4),可能再降
 6. 根上:occupancy/CTA调度(但R6单提occ反慢,需和依赖一起治)
 **顺序**:先TTFT(端到端大头)→回来按serve真实路径profile定decode侧攻谁(wait项)。CSV/dashboard子代理处理中。
+
+## ★★ R27 2026-10-27 TTFT根因:并发槽位(max_num_seqs=16)太小+decode慢→排队堆积,非prefill慢
+每请求TTFT:前5个=63-93ms(和vLLM一样快!)→线性涨→后5个=7500-8000ms。客户端=服务端自报(srv TTFT 3403 n=51),真堆积非压测端。
+**机制(数据支持)**:
+1. max_num_seqs=16(main.rs:45默认),vLLM默认256。dinfer最多16请求同时跑。
+2. 每请求生成128token,TPOT40ms→占槽**5.1秒**才释放。
+3. 48请求rate8涌入,16槽很快满,第17起排队等前面跑完(5秒级)→TTFT堆到8秒。
+**vLLM TTFT平81ms**:槽多(256)+TPOT快(8.8ms占槽1.1s)→排空快,prefill不饿死。
+**结论**:非prefill本身慢(首5个80ms不输vLLM)。是**并发槽位16太小 + decode慢(TPOT4.6×)致占槽久**双重叠加堆积。MEGA_ROWS=8不是硬限(超了回退逐op不卡batch)。
+**验证(下一步)**:抬max_num_seqs(16→64/128)重测TTFT——若TTFT降=坐实槽位限流。但注意:decode>8行走非mega逐op路径(mega_dense只≤8),batch大可能decode变慢;需同时看TTFT降vs TPOT变化的净效果。真要追平vLLM还需降TPOT(decode侧,回到wait/split-K挂账项)。
+**双因耦合**:TTFT和TPOT其实是一个问题——decode慢→占槽久→排队→TTFT高。降TPOT同时改善两者。所以decode侧wait优化(挂账项)其实也是TTFT的解,不是两件事。
