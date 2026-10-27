@@ -308,3 +308,19 @@ serve真实decode一步(layer.rs:9-14注释)=qkv独立GEMM→q/k/v_norm+rope→p
 **TPOT现状**:seqs64下59.4ms(vLLM 8.8ms,慢6.7×)。但注意seqs64是batch大TPOT反升(seqs16时40ms),所以TPOT要在**固定batch**下比才公平。
 **攻法(定清再动)**:①先在serve decode加分段CUDA event计时(qkv/attn/oproj/dense/moe各段),实测serve真实TPOT大头(不是拿整层mega表猜);②定位后针对最大段优化。先确认MoE那支——kaon3每层dense+MoE并联,MoE(128专家top8)可能是decode大头(exec重),这是整层mega测试没覆盖的(测试只测sliding dense层)。
 **挂账(R26的wait项)**:仅对"整层mega"有效,serve不走整层,**降级为"若将来serve改走整层mega才用"**;serve当前TPOT优化以实测分段为准。
+
+## R30 2026-10-27 最新exec/wait表(sp=4,用户要求重跑)——split-K重排了wait分布
+当前sp=4代码重跑(wait/exec=5.70×,融合215us):
+| stage | exec% | wait% | wait/exec | 等谁 | vs旧(sp=1) |
+|---|---|---|---|---|---|
+| GATE | 10.8 | **27.4** | 14.5× | PREFF | 17→27↑(新最大) |
+| OPROJ | 18.3 | **24.2** | 7.6× | OQNT | 13→24↑(新第二) |
+| QKV | 40.1 | 17.7 | 2.5× | IN | 9→18↑ |
+| UP | 10.8 | 12.6 | 6.7× | PREFF | 17→13↓ |
+| DOWN | 11.4 | 10.9 | 5.4× | ACT | 24→11↓↓(split-K最有效) |
+| ATTN | 5.6 | 6.4 | 6.6× | KVWR | 15→6↓ |
+**split-K效果**:墙钟251→215(-14%已验),wait分布重排——**DOWN 24→11%(sp_dn切得好)**,但GATE升27%、OPROJ升24%成新大头。
+**exec绝对值(真算最重)**:QKV 40%、OPROJ 18%、GATE/UP/DOWN各~11%。QKV/OPROJ是算力大头。
+**读法**:GATE wait14.5×空等PREFF(但PREFF exec=0?PREFF被fuse_ff吸进RES了,GATE实际等RES);OPROJ wait7.6×空等OQNT(量化)。
+**注意**:仍是整层mega测试,serve只融dense MLP(R25/R29)。此表指导"整层mega"优化;serve TPOT另需serve路径profile。但GATE/OPROJ的wait升暴露split-K非均匀问题:全sp=4后GATE(n_gu=17 task)可能过切或与其他stage抢CTA。
+**下一步候选**:①GATE/OPROJ的wait为何升(sp=4非均匀细调:各stage task数不同,统一sp=4未必对每个最优,R23挂账的非均匀细调);②serve路径实测(R29)定TPOT真大头。
