@@ -763,3 +763,18 @@ MoE合计3.43ms=整层(stage total 4.73)的**70%**;gemm3单独=整层**63%**。
 - **dense mega(8-15%)=真有wait**:R55实测GATE/UP/DOWN wait≈4×exec(持久kernel 169 CTA自旋空等signal),但占比小,全消≈省10%。
 **结论**:用户直觉对一半——确有空耗GPU的"等",但在小头(dense);大头(MoE)是实打实算得慢。**唯一大杠杆=重写/调优NVFP4 grouped GEMM(gemm3)逼近cutlass效率**,非M=1特化(R65降级)非dense wait。
 **ctr容器限制**:默认bridge网络→端口host不可达,bench必须容器内跑;容器cpuset不含60-91→**容器内taskset越界bench静默不跑**(第7次坑)。容器内bench去掉taskset。
+
+## ★★★★★ R71 2026-10-27 读vLLM NVFP4 MoE路径对比gemm3(子代理):低效根因=无软件流水,改法定死
+**vLLM路径(副本/data/ref/vllm-img-v0.28.0-pr455读,sm120+NVFP4 auto)**:选中FlashInfer CUTLASS(`FlashInferExperts`,TRT-LLM血统单launch grouped CUTLASS MoE GEMM);退路vLLM原生`CutlassExpertsFp4`结构同。真CUDA kernel在编译.so(镜像无csrc),tile/stage读不到,但python层结构定死。证据:oracle/nvfp4.py:166-298选择;trtllm_nvfp4_moe.py:208(family100 gate排除sm120);flashinfer_cutlass_moe.py:129-139(选中)/367-391(grouped调用);cutlass_moe.py:498-670(退路grouped)。
+**vLLM比gemm3强在哪(按我们ROI排,已交叉我们实测)**:
+1. **★cp.async/TMA多stage软件流水**(load与mma重叠warp-specialized) —— 我们K循环load→__syncthreads→mma→sync**纯串行无cp.async无多stage**。**这是大M仍13%峰值的根因**(大M无空block/tile吃满还慢=只能是流水停等,同fp8 R13的68%load-bound)。M无关,一招通吃。
+2. gate+up合w13一个GEMM+SiLU+mul+NVFP4 requant融epilogue→只2 GEMM中间量不落HBM;我们3独立grouped_gemm中间量落HBM。省1 GEMM+一次往返。
+3. grouped只对激活专家排CTA(token permute连续)无空block;我们grid.z=128全专家。但**我们R62实测空block只17%**(decode),真实收益有限,大batch才明显。
+4. autotuner按形状选tile;我们固定BM=32/m16n8k64。锦上添花。
+**读不到**:确切CTA tile M/N/K、流水stage数、warp-spec细节、NVFP4 mma shape(都在编译二进制)。高置信推断:单launch只激活专家/runtime autotune/融epilogue/TRT-LLM血统(Blackwell上TMA+warp-spec)。
+**改法定死(按ROI)**:
+- **第一刀=gemm3主循环改cp.async多stage软件流水**(双/三缓冲:cp.async预取下一K块+当前块mma+wait_group错位)。M无关大头,标准优化,不需CUTLASS确切tile。目标有效带宽300GB/s→逼近峰值,gemm3从13%往上。
+- 第二刀=gate+up合并+融epilogue(省1 GEMM+一次HBM往返)。
+- 第3/4(compact grid/autotune tile)收益小后置。
+**动手规矩**:隔离微基准写+对拍原grouped_gemm逐位(NVFP4数学逐字对齐硬门槛)→过了接serve(ops.rs MoE调用)。bench绑核+CSV趋势。
+**ROI**:gemm3=decode 54% of MoE≈整层MoE大头,大M 86% of MoE。流水若把13%→40%峰值,gemm3砍~2/3,MoE砍一半+,TPOT有望从51.8往vLLM 7.57大幅靠近(decode大头就是它)。
