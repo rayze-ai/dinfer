@@ -390,15 +390,13 @@ struct LayerDispatch {
         return;
       }
       case S_ATTN: {
-        // shard = (b*nkv + hk)*splits + split（与 host count 展平一致）。q 从 qkv_buf 读（q_stride=sigmaN）。
-        const int split = shard % p.splits;
-        const int bh = shard / p.splits;
-        const int hk = bh % p.nkv;
-        const int b = bh / p.nkv;
-        gqa_v3::gqa_decode_v3_core<GROUP, DIM>(
+        // 方向三：一个 256 线程 task 跑一对 shard（两半区各一个）。task 号 = shard 对号 → shard_base=2*shard。
+        // b/hk/split 由 core 内部按 shard_base+half 解码（传 0 占位）；n_shards 守界（奇数末对第二半区退出）。
+        const int n_shards = p.m * p.nkv * p.splits;
+        gqa_v3::gqa_decode_v3_core<GROUP, DIM, /*HALVES=*/2>(
             p.qkv_buf, p.kv_cache, p.block_table, p.seq_lens, /*cu_seqlens_q=*/nullptr, p.attn_scratch, p.attn_buf,
-            p.heads, p.nkv, p.block_size, p.max_blocks, p.attn_scale, sigmaN, p.splits, p.keys_per_split, b, hk, split,
-            tid);
+            p.heads, p.nkv, p.block_size, p.max_blocks, p.attn_scale, sigmaN, p.splits, p.keys_per_split,
+            /*b=*/0, /*hk=*/0, /*split=*/0, tid, /*shard_base=*/2 * shard, n_shards);
         return;
       }
       case S_OQUANT: {
@@ -518,7 +516,7 @@ int mega_layer_forward(const dinfer::mega_layer::Params* p_in, int stage_lo, int
   h_count[S_QKNORM] = 1;
   h_count[S_ROPE] = p.fuse_glue ? 0 : 1;      // 片上融合：rope 已吸进 QKNORM，置 0 task
   h_count[S_KVWRITE] = p.fuse_glue ? 0 : 1;   // 片上融合：kv 写已吸进 QKNORM，置 0 task
-  h_count[S_ATTN] = p.m * p.nkv * p.splits;
+  h_count[S_ATTN] = (p.m * p.nkv * p.splits + 1) / 2;  // 方向三：一 task 跑一对 shard（两半区），task 数减半
   h_count[S_OQUANT] = 1;
   h_count[S_OPROJ] = n_o * p.sp_o;
   h_count[S_RES] = 1;
