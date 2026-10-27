@@ -262,7 +262,11 @@ int moe_grouped_gemm(const void* aq, const void* a_s, const void* const* Bptr, c
                      int64_t num_experts, cudaStream_t stream) {
   if (R <= 0 || N <= 0 || K <= 0 || num_experts <= 0) return 0;
   if (K % 64 != 0) return static_cast<int>(cudaErrorInvalidValue);
-  const dim3 grid((unsigned)((N + BN - 1) / BN), (unsigned)((R + BM - 1) / BM), (unsigned)num_experts);
+  // 诊断(MOE_GRID_CAP=<n>)：临时把 grid.z 从 num_experts 压到 n，测空 block 占 gemm3 多少时间。
+  // **结果会错**(只覆盖前 n 个专家),仅用于计时验证"94% 空 block 是否真耗时",测完删。
+  int gz = (int)num_experts;
+  if (const char* cap = getenv("MOE_GRID_CAP")) { int c = atoi(cap); if (c > 0 && c < gz) gz = c; }
+  const dim3 grid((unsigned)((N + BN - 1) / BN), (unsigned)((R + BM - 1) / BM), (unsigned)gz);
   const uint8_t* pa = static_cast<const uint8_t*>(aq);
   const uint8_t* psa = static_cast<const uint8_t*>(a_s);
   const uint8_t* const* pb = reinterpret_cast<const uint8_t* const*>(Bptr);

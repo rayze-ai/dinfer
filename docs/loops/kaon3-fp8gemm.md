@@ -643,3 +643,9 @@ MoE合计~0.178ms(关BI前0.40,router降拉低整体)。
 **grid.z=128浪费(R37读过)**:grid=(N/BN, ceil(R/BM), E=128)。decode R=tokens×top8,单token R=8只激活≤8专家→**120/128=94% block空载return**。3次gemm(gate/up/down)都这样。
 **做透计划(不跳)**:①确认decode激活专家数(路由定,≤8)②grid.z=128→按激活专家compact(或行块映射,R39/R40评估过BM=32跨专家的坑)③改kernel+逐位验+测gemm3降多少→MoE降多少→TPOT降多少。
 **下一步**:读grouped_gemm host launch(moe_grouped_sm120.cu:259-266)+kernel空load机制,定具体改法(compact offsets让grid.z=激活数,graph友好要固定→用上界)。
+
+## R61 2026-10-27 MoE做透(2):先验证"94%空block是否真耗时"再改(别假设)
+grid.z=128,decode R=8激活≤8专家→120空block。但**R41只测grouped_gemm占MoE24%,没测空block占grouped_gemm多少**。94%空block≠94%浪费(空block return可能很快)。**先验证再改**(不再假设显眼机制=大头)。
+加诊断MOE_GRID_CAP=<n>(moe_grouped_sm120.cu:临时cap grid.z,结果会错只测时间)。测MOE_GRID_CAP=8(只起8专家block) vs 不设(128)的gemm3时间差:
+- 若gemm3 0.096→大降=空block真耗时,值得做compact grid.z=激活数;
+- 若几乎不变=0.096是8个实专家真算,改grid.z没用,MoE大头另找(真算/量化/attn)。
