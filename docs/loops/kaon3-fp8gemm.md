@@ -324,3 +324,16 @@ serve真实decode一步(layer.rs:9-14注释)=qkv独立GEMM→q/k/v_norm+rope→p
 **读法**:GATE wait14.5×空等PREFF(但PREFF exec=0?PREFF被fuse_ff吸进RES了,GATE实际等RES);OPROJ wait7.6×空等OQNT(量化)。
 **注意**:仍是整层mega测试,serve只融dense MLP(R25/R29)。此表指导"整层mega"优化;serve TPOT另需serve路径profile。但GATE/OPROJ的wait升暴露split-K非均匀问题:全sp=4后GATE(n_gu=17 task)可能过切或与其他stage抢CTA。
 **下一步候选**:①GATE/OPROJ的wait为何升(sp=4非均匀细调:各stage task数不同,统一sp=4未必对每个最优,R23挂账的非均匀细调);②serve路径实测(R29)定TPOT真大头。
+
+## R31 2026-10-27 非均匀split-K扫描:全4已最优(215us),细调无额外收益,split-K到头
+| 组合(qkv/o/gu/dn) | 融合us |
+|---|---|
+| **4/4/4/4(基线)** | **215.4** ← 最优 |
+| 4/8/8/4(加大GATE/OPROJ) | 220.5↑ |
+| 2/8/8/4(QKV减) | 220.6↑ |
+| 8/8/8/8(全8) | 229.5↑ |
+**全4已最优,所有非均匀方向都更慢**。加大GATE/OPROJ的sp反升。
+**关键教训**:**wait%高≠加split-K能降**。GATE wait27%是"等前序RES"型,给它加sp只是更多task抢CTA更乱,无用。split-K只对"自己task少吃不满SM"的stage有效(DOWN当初如此,sp_dn=4治好),对"等上游"的stage(GATE等RES)无效。R30我以为GATE/OPROJ是split-K新目标,错——它们wait高是依赖等待不是并行度。
+**split-K到头**:全4的215us(相对sp=1的251降14%)是split-K最优,非均匀无额外空间。**这条优化路结束**。
+**剩余真问题(回到本质)**:GATE/OPROJ的wait是"等前序"——要降得缩依赖链或让前序更快,不是split-K。但⚠️仍是整层mega测试,serve不走整层。
+**下一步(转serve真实路径)**:split-K已到头,整层mega测试的优化空间榨干(251→215)。serve TPOT的真大头必须在serve路径实测(R29:qkv独立/attn/oproj独立/dense与MoE并联)。不再在整层mega测试上调参。先给serve decode加分段CUDA event计时,看真大头(疑MoE 128专家)。
