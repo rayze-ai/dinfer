@@ -431,3 +431,16 @@ serve真实decode一层(tok=1,KAON3_STAGE_TIME=1,8次稳定):
 **权衡**:①compact方案(grid.z=激活数,需bucket改)最省但复杂;②简化:grid.z=固定上界(如min(128, max_rows*top_k)),decode max_rows=8→上界64,仍比128省一半,且无需compact,graph友好。先试②(改动小)看MoE降多少,不够再上①。
 **但⚠️**:grid.z压到64,哪64个?仍要映射。最简:**grid.z=128不变,但让空专家block更早退出/不参与**——其实第123行已经return了,空block开销只是launch+return。真问题是**launch 120个空block的开销**有多大?需实测:grid.z=128 vs 人为减小 的MoE时间差,才知道空block launch是不是真瓶颈(可能return很快、开销小,MoE慢另有原因如量化/scatter)。
 **下一步(先验证再改)**:别急着改kernel。先确认"94%空block"到底占多少时间——用NO_GRAPH跑serve+KAON3_MOE_TIME看gemm3 vs scatter+rest占比,或直接grid.z临时改小测MoE变化。先读MoE是不是真卡在grouped_gemm(R38没测出,sync崩了)。
+
+## ★★★ R41 2026-10-27 反转:MoE大头是前处理(router/bucket/gather/quant 74%),非grouped_gemm(24%)
+NO_GRAPH下MoE细分(r=8,event sync合法):
+| MoE内部 | ms | 占MoE |
+|---|---|---|
+| MoE整体(stage-time) | 0.408 | 100% |
+| 3×grouped_gemm(grid.z=128那个) | 0.098 | **24%** |
+| scatter+rest | 0.008 | 2% |
+| **router/bucket/gather/quant(gemm前)** | **0.302** | **74%** |
+moe-time只量"quant后→scatter"=0.106,MoE整体0.408→**前面一段0.302ms(74%)是真大头**:router(moe_gate GEMM+softmax+top-k)+moe_bucket+pre_ff2_norm+moe_gather+moe_grouped_quant。
+**又差点改错地方**:R37-R40花4轮分析grid.z=128空载,但grouped_gemm才占MoE 24%!改grid最多省24%的一部分。真大头74%在**前处理**。幸好R40刹住先验证。
+**教训(再次)**:grid.z=128空载是读代码看到的"显眼机制",但实测它只占24%。**显眼≠大头,必须实测**。我又被一个显眼机制带偏(像之前GEMM exec 40%、occupancy)。
+**真大头74%前处理,下一步细分它**:router(含一个betgate GEMM到128专家logits+softmax+top8)/bucket/gather/quant各占多少。疑点:①router的moe_gate GEMM(N=128专家,小)②moe_bucket/sort(host?D2H?)③gather/quant kernel。细分前处理再定攻谁。先读moe_branch前处理那几步(1340-1405)看有无D2H/host往返(decode最怕D2H同步)。
