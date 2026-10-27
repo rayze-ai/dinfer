@@ -75,3 +75,15 @@ gemm_small_m(现成微基准,qwen35形状,M=4)三者带宽:
 **核心结论(loop攻破)**:**整层megakernel对GEMM占92%的decode层是错误权衡**——融合省~1.2×launch,远抵不过GEMM带宽损失8×。megakernel适合小算子密集(省launch主导),不适合GEMM-bound(occ主导)。
 **注**:参照是bf16 cuBLASLt/qwen35形状,非kaon3 fp8;原理成立(M=4可达峰)但kaon3 fp8独立路径带宽待直接测确认。
 **下一步方向(重大,待定)**:decode层GEMM退出megakernel融合,走独立高occ kernel(如现成gemm_fp8_static_bf16或cuBLASLt),只把小算子(norm/rope/gelu/attention)留融合或也独立。预期GEMM段8×→接近1×,整层可能从251us→大幅降。需重新设计mega边界——这推翻"整层mega"路线,回到"关键算子融合+GEMM独立"。
+
+## ⚠️ R8 2026-10-27 重大纠正:"融合亏GEMM带宽8×"无数据支撑,R5/R7结论作废
+用户要8×的数据支撑。如实交代来源:
+**8×唯一出处=R2**:整层权重52MB/1.7TB/s=理论31us,实测整层融合251us,251/31≈8×。**就这一个比值。**
+**为何不成立(三点)**:
+1. 分子分母跨口径:251us是**整层墙钟**(含attention+glue+15stage+stage间自旋),31us是**纯搬权重**理论。整层÷纯权重的商,不该叫"GEMM带宽倍数"。
+2. **从没单独测过融合里GEMM的墙钟**。只有exec cycle占比(R3自己记了≠墙钟)。融合GEMM实际花多少us=未知。
+3. R7"独立3103GB/s"是**bf16 cuBLASLt/qwen35形状**,非kaon3 fp8 fused。与整层13%并排=苹果比橘子。
+**自相矛盾铁证**:R6把OCC 1→2(寄存器158→128)整层反而**251→277us变慢**。若occupancy=1真卡GEMM带宽,提occ该变快。变慢→occupancy至少非简单主因。R6记了却R7照写"决定性"。
+**作废**:R5"8×gap第一主因=occupancy"、R7"决定性参照/整层mega错权衡"**均无干净数据支撑,撤销结论**。合并本身有实测真收益(parity 1.55× + 逐位正确 + 根治乱码),**不推翻**。
+**唯一能定论的实验(此前从未做)**:同形状同dtype(kaon3 fp8)、同权重,**GEMM融在megakernel里 vs 单独launch**,各测墙钟带宽。在此之前不谈改架构。
+**8×真因仍未知**:可能在attention/glue/stage自旋(wait≫exec的线索),不一定在GEMM。需先把整层251us按墙钟拆到stage级(非cycle占比)。
