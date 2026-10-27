@@ -1099,3 +1099,12 @@ NO_GRAPH 每次真拷正确栈值故正常；graph replay 读失效栈故乱码�
 异步 TPOT 暴涨 13×、吞吐降 8×。**用户 2026-10-27:qwen35 自己都没完全通,只能参考不能为准**——实测证明照搬 qwen35 异步到 kaon3 功能对但性能负收益(印证 R1 调研"不假定会赢"、子代理方案风险③)。
 **根因待查(per-step 开销)**:TPOT 494 暴涨不是重叠失败而是异步路径 per-step 严重开销,嫌疑=AsyncResultRing event wait 阻塞 / engine 异步循环调度开销 / kaon3 decode 已占满 GPU 无 CPU 空闲可重叠(异步只增同步成本)。
 **决定**:异步**默认关**(supports_async 加 KAON3_ASYNC 门,默认 false→走同步 C1 246),保留 token 接力+begin/finish 代码供将来查清 per-step 开销后再启用。serve 回 C1 稳态。
+
+## 排查纠偏 2026-10-27(用户:别急着还回去,先排查是不是你改的):单发证明单步健康,并发崩根因未定
+**用户批评对**:我把 TPOT 暴涨直接归因"异步架构负收益"、又改口"gather/save 拖累同步",都没排查就下结论。
+**关键对照实验**:单发 128tok(同步路径,当前二进制 7b6a7b0d=C1+gather/save+async门)= **2.396s == C1 基线 2.39s,逐步一致**。
+→ **推翻两个结论**:① 我的 gather/save 改动**单步完全无害**;② 图正常(日志 decode graphs captured + decode step via cuda graph);③ 不是"异步负收益"也不是"gather/save 拖累"。
+**真实现象**:单序列健康(53 tok/s),但**并发吞吐在多轮 bench 间剧烈波动**:C1b 246(cache0.731)→ C2fix 31(0.351)→ c2off 41(0.235)。cache 命中同步大幅波动。
+**→ 根因在并发场景**(调度/cache 命中/测试环境/seed),**不在单步代码**。根因**未定位**,不下结论。
+**下一轮排查方法(控制变量)**:固定 seed、钉核、确认无残留负载/独占 GPU0,**同一轮内交替测** ①纯C1二进制(a05909ac,checkout 4421a04 编)②当前(关异步)③当前(KAON3_ASYNC=1),看并发吞吐+cache 是否稳定复现 246 还是也崩——区分"代码退化 vs bench 波动(cache命中随到达时序抖)"。先查 bench 的 cache 命中为何在同配置下从 0.731 抖到 0.235(prefix_repeat/seed/请求交错)。
+**serve 现状**:单步健康,默认关异步(KAON3_ASYNC 未设),走同步。C1 的"并发 246"结论也需上述控制变量复测确认(可能当时环境特殊)。
