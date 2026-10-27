@@ -283,4 +283,25 @@ fn mega_mlp_matches_eager_path() {
   let mega_us = t1.elapsed().as_secs_f64() * 1e6 / ITERS as f64;
   println!("[计时] B={M} 逐op路径={eager_us:.1}us  mega一次launch={mega_us:.1}us  speedup={:.2}x",
            eager_us / mega_us);
+
+  // fp8_gemm_tile 三段 cycle（MEGA_DIAG_GEMMTIME=1 编译时才有符号；否则跳过）。
+  #[cfg(not(feature = "no-nvcc"))]
+  {
+    extern "C" {
+      fn mega_diag_gemmtime_read(out3: *mut u64) -> i32;
+    }
+    let mut cyc = [0u64; 3];
+    let rc = unsafe { mega_diag_gemmtime_read(cyc.as_mut_ptr()) };
+    if rc == 0 && cyc.iter().sum::<u64>() > 0 {
+      let tot = cyc.iter().sum::<u64>() as f64;
+      println!(
+        "[fp8_gemm_tile 三段 cycle(ITERS×3GEMM 累加, tid0)]  载入={} ({:.1}%)  mma={} ({:.1}%)  写出={} ({:.1}%)",
+        cyc[0], cyc[0] as f64 / tot * 100.0,
+        cyc[1], cyc[1] as f64 / tot * 100.0,
+        cyc[2], cyc[2] as f64 / tot * 100.0
+      );
+    } else {
+      println!("[fp8_gemm_tile 三段] 未插桩（需 MEGA_DIAG_GEMMTIME=1 重编）或全 0");
+    }
+  }
 }

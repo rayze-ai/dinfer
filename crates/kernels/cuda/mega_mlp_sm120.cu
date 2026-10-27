@@ -22,6 +22,20 @@
 // device 原语（fp8 mma / fp8_gemm_tile / rmsnorm_row_warp / gelu·mul）抽到共享头，B2 整层 megakernel 复用。
 #include "mega_mlp_core.cuh"
 
+#ifdef MEGA_DIAG_GEMMTIME
+// fp8_gemm_tile 的三段 cycle 累加器（tid==0 across all GEMM tiles）：[载入, mma, 写出]。诊断用，测完回退。
+__device__ unsigned long long g_gemm_cyc[3] = {0, 0, 0};
+extern "C" {
+int mega_diag_gemmtime_read(unsigned long long* out3) {
+  return (int)cudaMemcpyFromSymbol(out3, g_gemm_cyc, sizeof(unsigned long long) * 3);
+}
+int mega_diag_gemmtime_reset() {
+  unsigned long long z[3] = {0, 0, 0};
+  return (int)cudaMemcpyToSymbol(g_gemm_cyc, z, sizeof(unsigned long long) * 3);
+}
+}
+#endif
+
 namespace dinfer {
 namespace mega_mlp {
 

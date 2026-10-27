@@ -142,6 +142,10 @@ fn main() {
                     cmd.arg("-DGQA_PROFILE=1");
                     println!("cargo:rerun-if-env-changed=GQA_PROFILE");
                 }
+                if std::env::var("MEGA_DIAG_GEMMTIME").ok().as_deref() == Some("1") {
+                    cmd.arg("-DMEGA_DIAG_GEMMTIME=1");
+                    println!("cargo:rerun-if-env-changed=MEGA_DIAG_GEMMTIME");
+                }
                 cmd.args(if sm120 { &arch_flags_sm120 } else { &arch_flags });
                 cmd.arg("-o").arg(obj).arg(src);
                 run(&mut cmd, src);
