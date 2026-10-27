@@ -1138,3 +1138,16 @@ NO_GRAPH 每次真拷正确栈值故正常；graph replay 读失效栈故乱码�
 
 ## 澄清:194(可信)vs 246(C1b 旧bench噪声高点)
 用户问"194 还没 C1 修复后 246 快"。**246 不是可信基线**:C1b 用旧 bench(无共享前缀预热),cache 0.731、随机 seed,旧 bench 同 seed 都能 76↔203 乱跳,246 是其一次撞上好命中的高点,**不可复现**。194 是新 bench(预热)cache 0.992、seed42、**逐位可复现**。C1 代码与当前同步路径等价(gather/save 单步无害已证单发2.396s==C1),故 **C1 真实可复现吞吐 ≈194,不是 246**。要再确认可用新 bench 复测 C1 commit,但预期同 194。
+
+## ✅ 可复现 decode 基线 2026-10-27:关cache+固定负载,纯C1 ≈211 tok/s(复现0.9%)
+方法(去掉 cache 噪声源):serve `--no-prefix-caching`(kserve_full.sh exec 行加) + bench 固定负载 `SEED=42 RATES=8 REQS=24 PREFIX_REPEAT=0 MIX=512:1.0 OUT_MIX=128:1.0 ALLOW_EOS=0`(每请求 512 prefill + 128 decode、无共享前缀、ignore_eos)。serve=纯C1(md5 a05909ac)。
+
+| | 吞吐 tok/s | TPOT p50/p99 | TTFT p50 | cache | 完成 |
+|---|---|---|---|---|---|
+| decode_a | 210.2 | 59.7/63.7 | 2314 | 0.000 | 24/24 |
+| decode_b | 212.1 | 59.1/63.2 | 2308 | 0.000 | 24/24 |
+
+**两次差 0.9%,真正可复现**(对比带 cache 的 engine bench 同 seed 76↔203)。cache=0.000 确认关闭。
+**这是 kaon3 第一个站得住的并发性能数**:纯 C1、确定负载、rate8 开环、≈211 tok/s、TPOT ~59ms、TTFT ~2.3s(512 prefill 排队)。
+**下一步**:同条件(关cache、固定负载、同seed)测 vLLM 非eager,才能给出可信的"vs vLLM"定量差距。
+**注**:生产 serve 仍应开 prefix cache(真实负载有共享前缀收益);关 cache 只为测可复现基线,测完 kserve_full.sh 需删回 --no-prefix-caching。
