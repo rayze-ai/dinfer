@@ -56,3 +56,9 @@ occupancy算:sm120每SM 64K寄存器。256线程×158=40448 reg/block → 64K/40
 **修法候选**:①降寄存器(拆kernel/减每线程活/__launch_bounds__(256,2)强制2block但会spill)②persistent本就1CTA/SM设计,但GEMM stage需要更多并行——矛盾:megakernel融合省launch vs GEMM要高occupancy。③GEMM stage单独用高occ kernel(退出megakernel融合,QKV/GATE等走独立launch)。
 **停止条件验证**:降occ到2+后QKV stage wall降、整层us降>3%、逐位0/N。
 **下一步**:试__launch_bounds__(256,2)看occ能否到2且不严重spill;或测独立GEMM launch(高occ)vs megakernel内GEMM的带宽差。参照vLLM:它GEMM不融进megakernel,独立cutlass kernel(高occ)——这正是它小M也快的原因之一。
+
+## R6 2026-10-27 OCC=2试:寄存器158→128(0spill)但整层反慢(277 vs 251)→回退,须隔离单GEMM
+改mega_kernel OCC 1→2:ptxas 158→128寄存器0 spill,occupancy应升2。逐位0/N。**但整层融合 277.7us vs OCC=1 251us,反慢10%**。
+分析:①m=4 task少,2block/SM填不满(task不够);②128寄存器下代码变低效(虽0spill);③持久megakernel 2block自旋竞争增。**整层测试混15stage+glue+attn,GEMM带宽改善被淹没/被别的stage拖累看不清**。
+→ 回退OCC=2。**R4/R6都指向同一结论:必须隔离单GEMM微基准**,整层parity判不了GEMM级优化(task少+混杂)。
+**下一步(不再在整层上试)**:写最小micro-bench直接launch一个高occ的fp8 GEMM kernel(QKV形状M=4/ΣN=8192/K=2816),测wall us vs理论13.5us,且扫occupancy(1/2/4 block)看带宽曲线。这才能干净回答"GEMM独立高occ能否接近带宽"=整层融合该不该让位。
