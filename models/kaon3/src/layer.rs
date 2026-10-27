@@ -672,6 +672,9 @@ pub struct MegaBufs {
     pub part_dn: k::cudarc::driver::CudaSlice<f32>,   // [sp_dn, 8, H]
     pub sem_gate: k::cudarc::driver::CudaSlice<i32>,  // [ceil(I/128)]
     pub sem_up: k::cudarc::driver::CudaSlice<i32>,
+    /// KAON3_DENSE_TIME 分段计时缓冲（6 stage exec/wait cycle，device 累加）。
+    pub wait_cyc: k::cudarc::driver::CudaSlice<u64>,
+    pub exec_cyc: k::cudarc::driver::CudaSlice<u64>,
     pub sem_dn: k::cudarc::driver::CudaSlice<i32>,    // [ceil(H/128)]
 }
 
@@ -717,6 +720,8 @@ impl MegaBufs {
             part_dn: stream.alloc_zeros::<f32>(sp_dn as usize * MEGA_ROWS * h)?,
             sem_gate: stream.alloc_zeros::<i32>(n_gu as usize)?,
             sem_up: stream.alloc_zeros::<i32>(n_gu as usize)?,
+            wait_cyc: stream.alloc_zeros::<u64>(MEGA_STAGES)?,
+            exec_cyc: stream.alloc_zeros::<u64>(MEGA_STAGES)?,
             sem_dn: stream.alloc_zeros::<i32>(n_dn as usize)?,
         })
     }
@@ -904,6 +909,12 @@ impl Gemma4Layer {
 
         // `ready` 必须从 0 开始（kernel 的 stage 计数器是累加的）。
         stream.memset_zeros_n(&mut mb.ready, MEGA_STAGES)?;
+        // KAON3_DENSE_TIME=1：开 dense branch 6-stage exec/wait 计时（每次清零累加缓冲）。
+        let dense_time = std::env::var("KAON3_DENSE_TIME").ok().as_deref() == Some("1");
+        if dense_time {
+            stream.memset_zeros_n(&mut mb.wait_cyc, MEGA_STAGES)?;
+            stream.memset_zeros_n(&mut mb.exec_cyc, MEGA_STAGES)?;
+        }
 
         let n_gu = (inter.div_ceil(128)) as i32; // kernel kBN = 128
         let n_dn = (h.div_ceil(128)) as i32;
@@ -941,9 +952,9 @@ impl Gemma4Layer {
                 stream.ptr_mut(&mut mb.ready) as *mut i32,
                 stream.ptr_mut(&mut mb.dep2) as *mut i32,
                 2, // pipe
-                0, // prof
-                std::ptr::null_mut(), // wait_cyc（serve 不计时）
-                std::ptr::null_mut(), // exec_cyc
+                dense_time as i32, // prof（KAON3_DENSE_TIME=1 开）
+                if dense_time { stream.ptr_mut(&mut mb.wait_cyc) as *mut u64 } else { std::ptr::null_mut() },
+                if dense_time { stream.ptr_mut(&mut mb.exec_cyc) as *mut u64 } else { std::ptr::null_mut() },
                 mb.sp_gu,
                 mb.sp_dn,
                 stream.ptr_mut(&mut mb.part_gate) as *mut std::ffi::c_void,
@@ -956,6 +967,18 @@ impl Gemma4Layer {
                 stream.raw() as _,
             )
         };
+        if dense_time {
+            stream.synchronize()?;
+            let wc = stream.dtoh_sync_copy(&mb.wait_cyc)?;
+            let ec = stream.dtoh_sync_copy(&mb.exec_cyc)?;
+            let sn = ["NORM", "GATE", "UP", "ACT", "DOWN", "POST"];
+            let et: u64 = ec.iter().sum();
+            let wt: u64 = wc.iter().sum();
+            let parts: Vec<String> = (0..MEGA_STAGES.min(6))
+                .map(|i| format!("{}=e{} w{}", sn[i], ec[i], wc[i]))
+                .collect();
+            tracing::info!("[dense-time] tok={tokens} exec合计={et} wait合计={wt} | {}", parts.join(" "));
+        }
         ensure!(rc == 0, "mega_mlp_dense_branch 返回 {rc}（非 sm120 构建为 801）");
         Ok(true)
     }
