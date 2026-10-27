@@ -1238,9 +1238,10 @@ impl Gemma4Layer {
         sub_out: Option<(&std::path::Path, usize)>,
     ) -> Result<()> {
         let h = cfg.hidden;
-        // 前处理计时起点（KAON3_MOE_TIME=1）：量 moe_branch 开头→第一个 grouped_gemm 前(router/bucket/gather/quant)。
+        // 前处理计时（KAON3_MOE_TIME=1）：拆 router / softmax+bucket / norm+gather+quant。
+        // 段:[0]起点 [1]router完 [2]softmax+bucket完 [3]norm+row2e+gather+quant完(=第一个gemm前)。
         let moe_pre_ev = if std::env::var("KAON3_MOE_TIME").ok().as_deref() == Some("1") {
-            Some(stream.new_timing_events(1)?)
+            Some(stream.new_timing_events(4)?)
         } else {
             None
         };
@@ -1356,6 +1357,7 @@ impl Gemma4Layer {
         } else {
             Some(&self.router.per_expert.data)
         };
+        if let Some(e) = &moe_pre_ev { stream.record_timing(&e[1])?; }  // router完
         k::ops::moe_route_softmax_f32(
             stream,
             &sc.logits.data,
@@ -1375,6 +1377,7 @@ impl Gemma4Layer {
             std::fs::write(dir.join("topk_w.bin"), wb).ok();
         }
         k::ops::moe_bucket(stream, &sc.topk_ids.data, &mut sc.buckets, tokens, kk)?;
+        if let Some(e) = &moe_pre_ev { stream.record_timing(&e[2])?; }  // softmax+bucket完
 
         // 专家输入 = pre_feedforward_layernorm_2(residual)（router 用自己的无权重 norm，两者不同）；
         // 借 sc.h2 存，循环结束后才被 post_ff_norm_2 的输出覆盖
@@ -1415,6 +1418,7 @@ impl Gemma4Layer {
                 stream, &sc.xg.data, &g.row2e, &mg.agscale_gu, &mut g.aq_gu, &mut g.as_gu, r, mg.k_gate, exact_rq,
             )?;
             if let Some(ev) = &mt_ev { stream.record_timing(&ev[0])?; }  // 量化后=3gemm前
+            if let Some(e) = &moe_pre_ev { stream.record_timing(&e[3])?; }  // norm+row2e+gather+quant完
             k::ops::moe_grouped_gemm(
                 stream, &g.aq_gu, &g.as_gu, &mg.gate_packed, &mg.gate_scale, &mg.alpha_gate, &sc.buckets.offsets,
                 &mut g.gate_o.data, r, mg.n_gate, mg.k_gate, e,
@@ -1455,11 +1459,13 @@ impl Gemma4Layer {
             if let Some(ev) = &mt_ev {
                 stream.synchronize()?;
                 let ms = |a: usize, b: usize| k::TimingEvent::elapsed_ms(&ev[a], &ev[b]).unwrap_or(0.0);
-                let pre = moe_pre_ev
-                    .as_ref()
-                    .map(|pe| k::TimingEvent::elapsed_ms(&pe[0], &ev[0]).unwrap_or(0.0))
-                    .unwrap_or(0.0);
-                tracing::info!("[moe-time] r={r} pre={pre:.3} gemm3={:.3} scatter+rest={:.3} ms", ms(0, 1), ms(1, 2));
+                let pm = |a: usize, b: usize| {
+                    moe_pre_ev.as_ref().map(|pe| k::TimingEvent::elapsed_ms(&pe[a], &pe[b]).unwrap_or(0.0)).unwrap_or(0.0)
+                };
+                tracing::info!(
+                    "[moe-time] r={r} router={:.3} sm+bucket={:.3} norm+gather+quant={:.3} | gemm3={:.3} scatter={:.3} ms",
+                    pm(0, 1), pm(1, 2), pm(2, 3), ms(0, 1), ms(1, 2)
+                );
             }
             return Ok(());
         }
