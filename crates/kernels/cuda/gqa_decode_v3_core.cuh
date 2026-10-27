@@ -50,12 +50,26 @@ __device__ __forceinline__ int64_t slot_off3(int64_t slot, int kv_heads) { retur
 // （mega::mega_kernel），只有 tid<V3_THREADS 的线程干活、其余陪跑 `__syncthreads()`（不碰 smem、ks 会越界）。
 // 用 `active = tid < V3_THREADS` 门控所有 smem/global 访问；barrier 全体无条件进 → 128 线程 launch 时 active 恒真，逐位不变。
 // 静态 __shared__ 与 mega 外壳的 extern 动态 smem 共存（本函数只用静态 smem，不碰传入的 dyn smem）。
-template <int GROUP, int D>
+// 方向三：一个 256 线程 CTA 两个 128 线程半区各跑一个独立 shard。HALVES=1（默认）= 现状（128 线程算法，
+// 256 外壳只前 128 活 / 128 外壳全活），签名/行为/逐位完全不变；HALVES=2 = 整层 mega S_ATTN 用，
+// half=tid>>7 取 shard_base+half 自己解码 (b,hk,split)，smem 按 half 分区，barrier 用命名 bar.sync(half+1,128) 两半区独立。
+template <int GROUP, int D, int HALVES = 1>
 __device__ __forceinline__ void gqa_decode_v3_core(
     const bf16* __restrict__ q, const bf16* __restrict__ cache, const int32_t* __restrict__ block_table,
     const int32_t* __restrict__ seq_lens, const int32_t* __restrict__ cu_seqlens_q, float* __restrict__ scratch,
     bf16* __restrict__ out_direct, int H, int Hkv, int block_size, int max_blocks, float scale, int q_stride, int splits,
-    int keys_per_split, int b, int hk, int split, int tid) {
+    int keys_per_split, int b, int hk, int split, int tid, int shard_base = -1, int n_shards = -1) {
+  // half/lt：HALVES=2 下 tid 0..255 分两半区（各 128 线程），每半区独立算一个 shard。
+  const int half = (HALVES == 2) ? (tid >> 7) : 0;
+  const int lt = (HALVES == 2) ? (tid & 127) : tid;  // 本半区内 0..127（= 原 128 线程算法的线程号）
+  if (HALVES == 2) {
+    const int shard = shard_base + half;
+    if (n_shards >= 0 && shard >= n_shards) return;  // 奇数末对的越界半区：整半区一起退（独立 barrier 不死锁）
+    split = shard % splits;
+    const int bh = shard / splits;
+    hk = bh % Hkv;
+    b = bh / Hkv;
+  }
   int row = b;
   if (cu_seqlens_q) {
     if (cu_seqlens_q[b + 1] - cu_seqlens_q[b] != 1) return;
@@ -68,15 +82,31 @@ __device__ __forceinline__ void gqa_decode_v3_core(
   const int k_begin = split * seg, k_end = min(n, k_begin + seg);
 
   constexpr int LPK = V3_LPK<D>, KEYS = V3_KEYS<D>;
-  const bool active = tid < V3_THREADS;    // 256 线程外壳下，只有前 128 干活
-  const int ks = tid / LPK;                // 0..KEYS-1：本线程的 key 槽（仅 active 时有效）
-  const int dl = (tid % LPK) * V3_VEC;     // 本线程起始维度
+  // HALVES=1：active=tid<128（128 外壳全活 / 256 外壳前 128 活，同现状）。HALVES=2：lt 恒 0..127 → 全活。
+  const bool active = lt < V3_THREADS;
+  const int ks = lt / LPK;                 // 0..KEYS-1：本线程的 key 槽（仅 active 时有效）
+  const int dl = (lt % LPK) * V3_VEC;      // 本线程起始维度
+  // barrier：HALVES=1 用全块 __syncthreads()（逐位不变）；HALVES=2 用命名 barrier 让两半区各 128 线程独立同步
+  // （两 shard ntiles 不同也不互相死锁）。bar.sync id=half+1（id 0 留给 __syncthreads）。
+  auto bar = [&]() {
+    if (HALVES == 2) {
+      asm volatile("bar.sync %0, 128;\n" ::"r"(half + 1));
+    } else {
+      __syncthreads();
+    }
+  };
   const int32_t* bt = block_table + (int64_t)b * max_blocks;
 
-  __shared__ __align__(16) bf16 s_k[V3_PIPE][KEYS][D];
-  __shared__ __align__(16) bf16 s_v[V3_PIPE][KEYS][D];
-  __shared__ float s_m[GROUP][KEYS], s_l[GROUP][KEYS];
-  __shared__ float s_acc[GROUP][KEYS][D];
+  // smem 按 half 分区：HALVES=1 只用 [0]（与现状同大小、同布局 → 逐位不变）；HALVES=2 两半区各一份不互踩。
+  __shared__ __align__(16) bf16 s_k_all[HALVES][V3_PIPE][KEYS][D];
+  __shared__ __align__(16) bf16 s_v_all[HALVES][V3_PIPE][KEYS][D];
+  __shared__ float s_m_all[HALVES][GROUP][KEYS], s_l_all[HALVES][GROUP][KEYS];
+  __shared__ float s_acc_all[HALVES][GROUP][KEYS][D];
+  auto s_k = s_k_all[half];
+  auto s_v = s_v_all[half];
+  auto s_m = s_m_all[half];
+  auto s_l = s_l_all[half];
+  auto s_acc = s_acc_all[half];
 
   // q：本 lane 的 8 维 × GROUP 个头，预乘 scale（log2 域：用 exp2f 省一次乘）
   float qr[GROUP][V3_VEC];
@@ -126,7 +156,7 @@ __device__ __forceinline__ void gqa_decode_v3_core(
   for (int t = 0; t < ntiles; ++t) {
     const int s = t % V3_PIPE;
     if (active) cp_wait<V3_PIPE - 1>();  // 第 t 组已落地（之后发出的 PIPE-1 组可仍在飞）
-    __syncthreads();
+    bar();
     if (active) {
       const int key = k_begin + t * KEYS + ks;
       const bool valid = key < k_end;
@@ -159,7 +189,7 @@ __device__ __forceinline__ void gqa_decode_v3_core(
         m[g] = m_new;
       }
     }
-    __syncthreads();  // 本 stage 读完才能被下一次 issue 覆盖
+    bar();  // 本 stage 读完才能被下一次 issue 覆盖
     if (active) { if (t + V3_PIPE < ntiles) issue(t + V3_PIPE, s); else cp_commit(); }
   }
   if (active) cp_wait<0>();
@@ -168,15 +198,15 @@ __device__ __forceinline__ void gqa_decode_v3_core(
   if (active) {
 #pragma unroll
     for (int g = 0; g < GROUP; ++g) {
-      if ((tid % LPK) == 0) { s_m[g][ks] = m[g]; s_l[g][ks] = l[g]; }
+      if ((lt % LPK) == 0) { s_m[g][ks] = m[g]; s_l[g][ks] = l[g]; }
 #pragma unroll
       for (int c = 0; c < V3_VEC; ++c) s_acc[g][ks][dl + c] = acc[g][c];
     }
   }
-  __syncthreads();
-  // 合并写：stride=V3_THREADS。256 线程外壳下 tid>=128 会与 active 线程撞同一个 d → 必须门控（无 barrier，安全）。
+  bar();
+  // 合并写：stride=V3_THREADS，索引用 lt（半区内 0..127）。256 外壳 tid>=128 会与 active 撞同一个 d → 必须门控（无 barrier，安全）。
   if (active)
-  for (int d = tid; d < D; d += V3_THREADS) {
+  for (int d = lt; d < D; d += V3_THREADS) {
 #pragma unroll
     for (int g = 0; g < GROUP; ++g) {
       float M = -INFINITY;
