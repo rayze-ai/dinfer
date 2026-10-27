@@ -1201,3 +1201,9 @@
 - **识别指纹**：**两次独立测量的读数逐位相同**（不是"接近"而是每一位都一样）→ 几乎一定是
   "改的东西没被执行"，而不是"效果小"。此时应先做一次单层隔离（`router_logits` 是否变 0），
   用几十秒证明改动生效与否，**不要直接重跑端到端**。
+
+## 2026-10-27 NO_GRAPH serve 起 stage 实验,就绪判定连栽6次都是"serve没问题是我grep误杀"
+现象:起 NO_GRAPH+KAON3_STAGE/DENSE/MOE_TIME 的临时 serve 测分段,连续 6 次报 NOTREADY 并杀掉 serve,但日志显示 serve 每次都在 ~42s 正常 `listening addr=8144`(model_load_ms≈42000)。白加载 6 次(每次 42s)。
+根因(逐个排掉):① `grep "\"data\""` 经 `ctr` 的 SSH→docker→heredoc 多层,引号转义被打乱→永不匹配;② 换 `grep "listening addr"` 仍栽——**tracing 日志带 ANSI 色码**,原始字节是 `listening \x1b[3maddr`,"listening addr"(带空格字面量)被色码打断不匹配;③ GPU4 上一轮 --rm 容器残留占 25GB,新 serve OOM 也会 NOTREADY(复用 GPU 前先 nvidia-smi 查空)。
+解法:就绪判定要么 `sed 's/\x1b\[[0-9;]*m//g'` 去色码再 grep,要么干脆 `sleep 55`(serve 稳定 42s bind)不 grep。读 serve 日志一律先去 ANSI。
+避免:① ctr heredoc 里别用带引号/空格的 grep 字面量(转义+色码双坑);② 判定失败先看 serve 日志证明它到底起没起,别默认"没起"就杀重来——我默认错了方向栽了6次=白等4分钟。
