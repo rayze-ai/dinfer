@@ -78,9 +78,9 @@ th:first-child,td:first-child,td.change,th.change,td.l,th.l{text-align:left}
 
 <script>
 const KNOWN_GPUS=["5090"], DEFAULT_GPU="5090", MODEL="kaon3";
-const GROUPS=["c1","c8","c32","c8-long"], COLORS=["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd","#8c564b"];
+const GROUPS=["c1","c8","c32","c8-long","e2e"], COLORS=["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd","#8c564b"];
 const CATS=["pd","tp","dp","other"];
-const HINT={single:"基线 = vLLM v0.31.0 单卡（同机同配置）。比值 = dinfer out tok/s ÷ vLLM；虚线 1.0 = 追平。TTFT/TPOT 越低越好。只含 benchN 主线轮次。",
+const HINT={single:"基线 = vLLM v0.31.0 单卡（同机同配置）。比值 = dinfer out tok/s ÷ vLLM；虚线 1.0 = 追平。TTFT/TPOT 越低越好。含 benchN（kernel 层闭环 c1/c8/c32/c8-long）与端到端开环轮 r1-r5（group=e2e，rate=8 泊松 / 共享1024前缀 / 128out）。",
   pd:"基线 = single（单机 :8012，同卡同配置的 dinfer 单实例）。变量 = PD 分离的传输方式 / 卡分布（tcp / shm / ipc / 跨卡 / tp）。柱 = 各 variant 并列，灰柱基线。",
   tp:"变量 = dinfer --tp N（多卡张量并行）。基线 = single（同卡 dinfer 单实例，bench_tp_ab.sh）或 vLLM 单卡（bench_tp2），以表中基线列为准。",
   dp:"基线 = vLLM 单卡。变量 = dinfer --dp N（同进程数据并行，按在飞数路由）。",
