@@ -386,3 +386,18 @@ MoE内部(1368):MOE_GROUPED=1(serve已设)走**device-grouped**(非逐专家循�
 - 整层mega测试/那张wait表≠serve路径(serve QKV用cuBLASLt非fp8_gemm_tile)
 **已落地优化**:①max_num_seqs16→64(TTFT 3357→245降13.7×,吞吐357→540)②split-K sp=4(dense mega 251→215,但那是整层mega测试,serve dense branch是否受益待确认)。
 **下一步**:加KAON3_STAGE_TIME分段event,测serve真实TPOT大头。
+
+## ★★★★★ R36 2026-10-27 serve真实decode分段实测:MoE占63%=TPOT真大头(整轮最关键)
+serve真实decode一层(tok=1,KAON3_STAGE_TIME=1,8次稳定):
+| 段 | ms | 占比 |
+|---|---|---|
+| **MoE** | **0.397** | **63%** |
+| attn(qkv/norm/rope/paged) | 0.122 | 19% |
+| dense MLP(gate/up/down) | 0.092 | 15% |
+| oproj | 0.020 | 3% |
+| **total/层** | **0.63** | 100% |
+**MoE一个人占decode每层63%!** 它=NVFP4手写kernel+128专家top8+**整层mega测试0覆盖+前十几轮完全没碰的那块**。我全程抠attn/GEMM(占19%+15%)完全打偏。
+**这是整轮排查最有价值结论**:decode TPOT大头是**MoE(63%)**,不是QKV/attention/dense/整层mega那些我反复折腾的东西。attn+oproj+dense才37%。
+**与vLLM差距的真源头基本锁定**:vLLM的MoE(fused grouped GEMM/cutlass)很可能远快于我们的NVFP4手写grouped。TPOT慢6.7×,MoE占63%——优化MoE是把TPOT拉近vLLM的唯一大杠杆。
+**下一步(终于对了)**:profile MoE内部(moe_branch,MOE_GROUPED路径)——128专家NVFP4 grouped GEMM慢在哪:①是否每专家小GEMM串行②NVFP4量化开销③grouped kernel效率④对比vLLM MoE实现。这才是该花力气的地方。
+**教训总结**:十几轮绕(GEMM 8×/occupancy/split-K/整层mega/那张wait表)全因没先在serve真实路径分段实测。一个KAON3_STAGE_TIME分段,立刻看出MoE 63%。用户"谁慢解决谁"+"读全代码"+"serve不走整层mega"全是对的,我该一开始就分段实测。
