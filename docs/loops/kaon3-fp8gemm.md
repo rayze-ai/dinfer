@@ -346,3 +346,15 @@ serve真实decode一步(layer.rs:9-14注释)=qkv独立GEMM→q/k/v_norm+rope→p
 **关键**:GATE wait**不是给GATE加优化能降的**(加split-K已证反而慢,R31)。它慢因为等前面attention半层。**降GATE空等=让它等的链更快=优化链上exec最重的QKV(40%)/OPROJ(18%)**。即"优化GATE的wait"="优化它前一步"(用户最初"前一步喂不饱后一步"正是此)。
 **→ 攻GATE wait 实际 = 攻 QKV/OPROJ(attention半层的计算大头)**。QKV exec 40%是单个最大真算,它快→RES早出→GATE/UP早开工→它们wait降。
 **下一步**:优化QKV(exec 40%,attention半层+GATE前链的最重计算)。但⚠️整层mega测试,serve QKV是独立kernel——serve的QKV优化和整层mega的QKV是**同一个fp8_gemm_tile代码**(mega_layer case S_QKV调fp8_gemm_tile,serve的QLinear也走fp8 GEMM),优化GEMM本身两边都受益。先看QKV GEMM(exec 40%)能否更快:它是ΣN=8192×H的大fp8 GEMM,之前R13测过它带宽健康(exec占比高是因为它真算量大=合并qkv)。
+
+## ★★ R33 2026-10-27 决定性:serve的QKV/OPROJ走cuBLASLt(非fp8_gemm_tile),与vLLM同款库
+读QLinear::forward(layer.rs:180/223):serve的fp8 GEMM**默认走forward_fp8_cublaslt(cuBLASLt)**,**不是**mega的手写fp8_gemm_tile。第37行注释明说"默认走cuBLASLt:实测vLLM的fp8 GEMM真实命中cuBLAS"。
+**→ 我读半天的fp8_gemm_tile的m16浪费(mma m16n8k32但m=4只25%利用)只影响**mega dense branch(GATE/UP/DOWN)+整层mega测试**,不影响serve的QKV/OPROJ**(它们走cuBLASLt)。
+**serve真实decode GEMM路径(终于分清)**:
+- QKV/OPROJ = cuBLASLt(forward_fp8_cublaslt),与vLLM同库→大概率非serve瓶颈(vLLM也这速度)。
+- GATE/UP/DOWN = mega dense branch的fp8_gemm_tile(手写,有m16浪费)——**这才是serve里可能慢于vLLM的手写部分**。
+- MoE = 128专家top8(forward_nvfp4?)——整层mega测试完全没覆盖。
+- attention = paged gqa。
+**那张wait表(整层mega)和serve是两套GEMM路径**,一路困惑的根源。整层mega测试的QKV用fp8_gemm_tile,serve的QKV用cuBLASLt,不是一回事。
+**重新定位serve TPOT真大头(必须serve路径实测)**:疑点转向①mega dense branch(fp8_gemm_tile m16浪费,serve走这条)②MoE(128专家,整层mega没测)。cuBLASLt的QKV/OPROJ大概率不是问题(同vLLM)。
+**下一步**:serve decode加分段CUDA event(qkv-cublaslt/attn/oproj-cublaslt/dense-mega/moe),实测serve真大头。别再碰整层mega测试(serve不走)。
