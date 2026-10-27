@@ -1030,3 +1030,9 @@ NO_GRAPH 每次真拷正确栈值故正常；graph replay 读失效栈故乱码�
 - mega 路径只做 MLP 支路不碰 KV,prefix cache 命中(复用已算 KV block)应兼容,但要实测逐位/质量不回退。
 
 **停止条件(scripts/verify 可判定)**:rate=8 混合负载下 ① cache 命中 > 0；② 聚合 output tok/s 明显 > 单序列 53(有连续批处理增益,非次线性崩);③ goodput > 0；④ 生成质量不回退(md5/通顺)。最终看与 vLLM 非eager 差距缩小幅度。
+
+## C1 2026-10-27 实施+两个传输/编译坑(别想当然确认每步)
+改 `models/kaon3/src/service.rs`(ServeOptions 加 enable_prefix_caching/decode_exempt_from_budget/long_prefill_token_threshold 三字段+default true/true/0+config 填充用 opt) + `bins/dinfer/src/main.rs`(kaon3 分支从 `let _=(...)` 移出三个 flag 接上,对标 qwen35)。commit ac57d57。
+**坑1 put 落点**:`remote_5090.sh put <本地> <远端>` 的远端是 `rsyncr "$1" "$USER_AT:$2"`,`$2` 相对**登录家目录**不是 /hf_data/yaochen/dinfer。传相对路径 `models/kaon3/src/service.rs` 落到家目录,没进代码树→cargo `Finished 0.11s` 无 Compiling,bin md5 不变(仍 c8cfa32,Oct26)。**put 远端必须用绝对路径** `/hf_data/yaochen/dinfer/...`。
+**坑2 核验**:靠 md5+时间+是否出现 `Compiling dinfer-kaon3` 坐实真重编(memory dinfer-be-careful)。修正后 `prefix字段数=3`、`Compiling dinfer-kaon3/dinfer`、Finished 11.30s、bin md5 c8f5bf37 Oct27 01:29。
+**重起**:kaon3-full 容器挂载 `/hf_data/yaochen->/w`(与 ctr 同处,新 bin 可见);**是 docker 不是 nerdctl**(nerdctl not found,之前 inspect/logs 全静默空=没发现)。`docker restart kaon3-full` 保留原 Cmd/Env(KAON3_MEGA=1 等)/GPU0/挂载,重跑即用新 bin;ready 46s,/v1/models 正常。prefix cache 是否生效看 bench cache hit(日志"single-stream"是旧文案不反映)。
