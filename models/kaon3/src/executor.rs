@@ -295,7 +295,10 @@ impl KaonExecutor {
 
 impl ModelExecutor for KaonExecutor {
     fn supports_async(&self) -> bool {
-        async_sched_enabled()
+        // 异步流水实测在 kaon3 负收益（engine_c2fix：31 vs 同步 246 tok/s，TPOT 494 vs 38.6 ms）——乱码虽已靠
+        // token 接力(gather_inflight/save_chosen)修正，但 per-step 开销暴涨。默认关走同步快路径；
+        // KAON3_ASYNC=1 显式开，用于继续调查 per-step 开销来源（event wait / 调度 / 无 CPU 空闲可重叠）。
+        std::env::var("KAON3_ASYNC").is_ok() && async_sched_enabled()
     }
 
     /// 异步第一段：上传 + forward + 采样 + 异步 D2H（不等 GPU）。runner 只对 async_eligible（纯 decode）调用。
