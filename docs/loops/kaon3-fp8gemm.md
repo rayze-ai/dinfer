@@ -778,3 +778,11 @@ MoE合计3.43ms=整层(stage total 4.73)的**70%**;gemm3单独=整层**63%**。
 - 第3/4(compact grid/autotune tile)收益小后置。
 **动手规矩**:隔离微基准写+对拍原grouped_gemm逐位(NVFP4数学逐字对齐硬门槛)→过了接serve(ops.rs MoE调用)。bench绑核+CSV趋势。
 **ROI**:gemm3=decode 54% of MoE≈整层MoE大头,大M 86% of MoE。流水若把13%→40%峰值,gemm3砍~2/3,MoE砍一半+,TPOT有望从51.8往vLLM 7.57大幅靠近(decode大头就是它)。
+
+## ★★★ R72 2026-10-27 实测修正(用户要求确认CUTLASS):vLLM实际走TRT-LLM fused MoE非CUTLASS
+查两基线容器启动日志(docker logs vllm-noneager/vllm-eager),MoE实际backend**明确打印** `trtllm::fused_moe::gemm2` + flashinfer autotuner(autotuner.py,Saved 162 configs)。两容器一致。
+**修正R72 vs R71**:R71子代理从python选择逻辑推断走FlashInfer **CUTLASS**(认为TRTLLM被family(100)门禁排除sm120);**实测是FlashInfer的TRT-LLM fused MoE kernel**(flashinfer自己的trtllm入口在sm120跑起来了并autotune,与vLLM的FLASHINFER_TRTLLM backend判定不是一回事/版本差)。真身=TRT-LLM fused MoE GEMM,非CUTLASS grouped。
+**关键新事实**:
+- 日志只有 **gemm1 / gemm2 两个GEMM**(TRT-LLM把gate+up合成gemm1),印证我们第二刀(gate+up合并)是对手既定做法;我们现在是gate/up/down三个。
+- 对手**每形状autotune**(gemm1/gemm2各21 config共162),decode小M/prefill大M各有专门tile。
+**对改法判断无影响**:TRT-LLM fused MoE在Blackwell同样TMA/cp.async多stage软件流水+按形状autotune tile+融epilogue。我们缺的还是流水。第一刀(cp.async流水)依然是M无关大头。第二刀(gate+up合gemm1)=对手既定。
