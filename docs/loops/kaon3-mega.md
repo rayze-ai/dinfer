@@ -1073,3 +1073,6 @@ NO_GRAPH 每次真拷正确栈值故正常；graph replay 读失效栈故乱码�
   ③ 或 enqueue_forward 重构本身的锅(需隔离)。
 **下次修法(隔离)**:先测 `supports_async` 返回 false(同步走重构后 forward_sample),若回 C1 正常→乱码是异步 begin/finish 的锅、enqueue_forward 重构 OK;若同步也乱→重构有 bug。再查图内 argmax 与图外 async D2H 的顺序。
 **决定**:回退 C2(revert 41f318a)恢复 C1 稳态(246 tok/s,commit 4421a04),C2 代码存 git 历史待修。
+
+## C2 回退确认 2026-10-27
+`git revert --no-edit 41f318a`(revert commit 已入库)→ executor 回 C1 原始(grep enqueue_forward/begin/supports_async=0)。put(首次 put_rc=1 跳板拒绝,重试 try1 OK)+ 编译 md5 **a05909ac == C1 修复后二进制**(坐实回到 C1)。restart 单发通顺不乱码。**serve 稳在 C1:rate=8 ~246 tok/s、cache 0.731、与 vLLM 非eager 差距 4.9×**。C2 异步流水代码存 git 41f318a,下轮按上条"隔离修法"再做。
