@@ -1061,3 +1061,15 @@ NO_GRAPH 每次真拷正确栈值故正常；graph replay 读失效栈故乱码�
 - **遗留**:①goodput 仍 0(TTFT 5.4s/TPOT 38ms 超 SLO)→ C2 异步流水;②prefix cache 命中数值一致性待对拍。
 - **下一步 C2**:kaon3 executor 实现 supports_async/begin(对标 qwen35 executor.rs:689-695),降 TPOT/TTFT。
 - 产物 engine_c1b 在远端 test/kaon3/2026-10-27/,pull 受阻(rsync broken pipe)待修。
+
+## C2 ✗ 2026-10-27 异步流水导致乱码(正确性bug),全面倒退——回退保C1稳态
+实现(commit 41f318a):kaon3 executor 抽 enqueue_forward helper,加 supports_async/begin/finish(对标 qwen35),begin 入队 forward+采样+异步 D2H(AsyncResultRing depth2 读 self.argmax.data),finish 等事件回填。编译 OK(md5 2819729c)。
+**结果 engine_c2 全面倒退 + 乱码**:
+- 单发(并发1,走异步 begin/finish)**乱码**:`'中国的首 de👬엥📝...媲媲媲'` = token 回填读到错值(正确性bug,非性能)。
+- bench rate=8:吞吐 246→**67** tok/s、TTFT 5396→**54650**ms、TPOT 38.6→**104/p99 11336**ms、len-stop 24/24→**18/24**(6个没eos=生成乱没停)。
+**根因方向(待下轮查)**:异步 begin/finish 在 kaon3 argmax 路径下读到错 token。嫌疑:
+  ① kaon3 argmax 写在**图内**(capture_body:forward+gather+argmax 进图),async D2H(enqueue_d2h)是图外新操作——图 replay 与图外 D2H 的顺序/依赖可能没对(qwen35 的 chosen 采样路径与此不同结构);
+  ② AsyncResultRing pinned slot 的 event 同步 / 单 argmax buffer 被步 n+1 图 replay 覆写(方案风险②假设单流串行保证,但图路径下可能不成立);
+  ③ 或 enqueue_forward 重构本身的锅(需隔离)。
+**下次修法(隔离)**:先测 `supports_async` 返回 false(同步走重构后 forward_sample),若回 C1 正常→乱码是异步 begin/finish 的锅、enqueue_forward 重构 OK;若同步也乱→重构有 bug。再查图内 argmax 与图外 async D2H 的顺序。
+**决定**:回退 C2(revert 41f318a)恢复 C1 稳态(246 tok/s,commit 4421a04),C2 代码存 git 历史待修。
