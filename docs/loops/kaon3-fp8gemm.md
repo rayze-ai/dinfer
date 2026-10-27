@@ -118,3 +118,9 @@ gemm_small_m(现成微基准,qwen35形状,M=4)三者带宽:
 **还不知道(诚实标注)**:251us绝对意义算不算慢,无干净判据。理论31us是纯权重带宽下界(忽略计算+小M现实)非合理目标。要判"整层该多快"需每层预算(N层→端到端tok/s vs vLLM),没算过。
 **结论(不跳步)**:问题从来不是融合伤GEMM,是我反复拿跨口径数据凑8×带歪方向。真优化点=降wait(gate/up等独立stage解串并行,融合内可做;occ要和依赖一起治)。GEMM kernel本身不该动(exec非瓶颈),拆融合是错的(融合净赚)。
 **反省**:前10轮反复推翻的根因=每轮预设结论("GEMM慢")+拿跨口径数据外推,不先摊硬数据。R26一年前已答,我没先翻历史。
+
+## R12 2026-10-27 坑:逐stage单独launch计时会死自旋(卡63分钟)
+我加的"每stage单独launch+sync计时"段卡死63分钟(etimes 3799s)。根因:**单个stage脱离依赖链单独launch时,dep/ready表的need永远等不到前序signal→持久CTA在while ld_acquire<need死自旋**(这正是wait机制,单stage跑必卡)。方法本身错。
+已杀(pkill -x cargo,cargo=0;pgrep -f匹配到自身非残留)。
+**改对的计时法**:用已验证能跑的**分离模式**(15 stage按依赖顺序launch,mega_layer_parity原有),在每个stage的launch前后插 sync+Instant计时——它走完整依赖链不卡,逐stage墙钟=相邻sync时间差。不单独跑孤立stage。
+**下一步**:删掉死自旋的逐stage段,改在分离模式循环里逐stage sync计时。
