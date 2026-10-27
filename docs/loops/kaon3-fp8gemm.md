@@ -300,3 +300,11 @@ sp扫描(融合墙钟,逐位全✓):
 **坑**:max_num_seqs=64需配套降max-model-len(16384→2048,否则KV池OOM)或加num-blocks;生产要按真实并发+序列长设KV池。num-blocks 8192+len16384直接OOM(32GB GPU)。
 **dashboard/CSV**:子代理修好了——engine轮要存`engine_*`命名目录才被engine_trend.py自动扫(e2e_vs_vllm没匹配,加symlink补救);8090是缓存鉴权网关HTTP码不可靠(401↔404乱跳),磁盘文件在才是准的。
 **下一步**:①max_num_seqs/KV池调到最优(64是否够?试128,配KV池)；②剩余差距(吞吐58%、TTFT3×、TPOT慢6.7×)——TPOT是decode侧,回到wait/split-K挂账项（R26）；③这轮进engine-trend入dashboard。
+
+## R29 2026-10-27 攻TPOT(decode侧)前置:那张wait表不适用serve,需serve真实路径profile
+用户再贴wait表(DOWN等ACT12×等),但**R25已澄清:表来自mega_layer_parity整层15stage全融测试,serve只融dense MLP(GATE/UP/DOWN),QKV/OPROJ/attention是独立kernel**。表里"QKV等IN/ATTN等KVWR"在serve里不是同kernel内stage,不能直接拿来优化serve TPOT。
+serve真实decode一步(layer.rs:9-14注释)=qkv独立GEMM→q/k/v_norm+rope→paged attention→o_proj独立GEMM→**dense MLP与MoE并联**(h2=post_norm(moe(pre_norm)),dense一支+MoE一支,kaon3混合模型每层两支都算)。
+**profile手段**:远端无nsys/ncu(只nvcc.profile)。只能代码内分段计时(CUDA event)——大改(serve层加event+重编重起)。
+**TPOT现状**:seqs64下59.4ms(vLLM 8.8ms,慢6.7×)。但注意seqs64是batch大TPOT反升(seqs16时40ms),所以TPOT要在**固定batch**下比才公平。
+**攻法(定清再动)**:①先在serve decode加分段CUDA event计时(qkv/attn/oproj/dense/moe各段),实测serve真实TPOT大头(不是拿整层mega表猜);②定位后针对最大段优化。先确认MoE那支——kaon3每层dense+MoE并联,MoE(128专家top8)可能是decode大头(exec重),这是整层mega测试没覆盖的(测试只测sliding dense层)。
+**挂账(R26的wait项)**:仅对"整层mega"有效,serve不走整层,**降级为"若将来serve改走整层mega才用"**;serve当前TPOT优化以实测分段为准。
