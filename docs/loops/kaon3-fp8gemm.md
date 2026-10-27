@@ -144,3 +144,15 @@ gemm_small_m(现成微基准,qwen35形状,M=4)三者带宽:
 **彻底结论(数据说话)**:**无单一瓶颈stage可打,252us平摊15 stage,大头是众多小stage的固定开销非GEMM**。→单kernel优化(GEMM/attn/双缓冲/方向三)都不会有大收益(没有独大stage),完美解释方向三(3.6%)/双缓冲(GEMM非瓶颈)为何都无效=都在打小占比目标。
 **前10轮错因彻底明确**:盯着"GEMM exec占87%"以为GEMM是瓶颈,但exec占比≠墙钟;墙钟平摊,融合已经是对的方向(省launch),真实gap不在任何单个kernel。
 **真要再提速的方向(基于平摊分布)**:①减stage数(更多片上融合glue,已在做:fuse_glue/fuse_ff把KVWR/ROPE/RES/PREFF吸收→252降到209/190);②降每stage固定开销(占大头);不是优化任何单个GEMM/attn。
+
+## ★★★ R14 2026-10-27 10轮逐stage墙钟(用户要求跑10次+列明细)——极稳,GEMM非瓶颈坐实
+10轮×50iter,大多数stage抖动<2%(r0-r9几乎一模一样),偶发尖刺(r9 KVWR53/r6 ATTN25)是单轮噪声,中位不受影响。
+**汇总(10轮中位,由大到小)**:
+KVWR47.1(11.6%glue写KV) IN37.4(9.2%norm) RES37.1(9.1%glue) OPROJ32.0(7.9%GEMM) PREFF27.1(6.7%glue) ROPE26.4(6.5%glue) QKV25.7(6.3%GEMM) UP25.6(6.3%) GATE25.6(6.3%) POST24.2(6.0%) QKNORM22.6(5.6%) DOWN22.2(5.5%GEMM) OQNT19.4(4.8%) ACT17.6(4.3%) ATTN15.9(3.9%)
+合计中位406us(含每stage launch+sync固定开销);对照分离15launch294.8us,融合1launch251us,glue融合208us,+ff融合192us。
+**10轮坐实**:
+1. **分布极平极稳(抖<2%),无任何单一瓶颈**(11.6%→3.9%)。exec占40%的QKV墙钟仅6.3%,与norm/写KV glue同量级。
+2. 5个GEMM墙钟合计~131us占32%;单个QKV才6.3%。
+3. **最贵前三=KVWR(写KV)/IN/RES=glue+norm,几乎不算数→launch+sync固定开销主导**。
+**彻底定论(10轮硬数据,抖<2%)**:GEMM非瓶颈,无单一瓶颈,251us平摊15stage大头是固定开销。→减stage数(片上融合)才有效(已证251→192),优化任何单GEMM/attn/双缓冲/方向三都无效(都打小占比)。"GEMM慢8×"彻底证伪。
+**注**:此表含每stage launch+sync开销(合计406>真实融合251),绝对值偏大,但相对分布+抖动结论硬。真实融合内各stage占比需看融合态per-stage(exec cycle,R26有);但"无单一瓶颈""GEMM非独大"两个口径一致。
