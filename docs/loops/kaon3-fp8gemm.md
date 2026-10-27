@@ -185,3 +185,10 @@ KVWR47.1(11.6%glue写KV) IN37.4(9.2%norm) RES37.1(9.1%glue) OPROJ32.0(7.9%GEMM) 
 → 纠正R16"GATE/UP解依赖并行"打法:依赖已并行,真问题是**CTA数不够让task并行**。根子还是occupancy=1(158寄存器)。
 **但R6已试OCC=2反而慢**——矛盾待解:occ=1说CTA少,提occ=2又慢。可能OCC=2的128寄存器spill或task调度变差。需重新审视:wait大是因为①CTA总数少(occ low)还是②单stage内task粒度/分配问题。
 **下一步**:先量GATE stage的task数 vs grid CTA数(n_gu·sp_gu vs sms·occ),看是不是task≫CTA导致排队;再看wait到底是"等CTA"还是"等RES这一个前序stage"(若RES慢,GATE/UP等的是RES不是CTA)。
+
+## R18 2026-10-27 算账:GATE task数(17)≪CTA数(170),wait非排队是空转CTA自旋
+算账:n_gu=I/128=2112/128=**17 task**(sp_gu=1)。grid CTA=sms×occ=170×1=**170**。**17 task≪170 CTA**→不存在task排队等CTA。
+→ GATE/UP wait 8×既非依赖串(已并行)也非task排队。只剩:**wait_stage自旋**——GATE阶段170 CTA只17个有task干,**其余153 CTA领不到task却在自旋**(wait_stage等dep signal或空转),wait被灌爆。exec/wait是per-task thread0累加,但空转CTA也可能计入wait。
+**真根因浮现**:持久megakernel每stage只有少量task(n_gu=17/n_dn=22/sp=1),却起了170 CTA→**绝大多数CTA全程空转自旋**,wait虚高且真实浪费SM。这不是"喂不饱后一步",是**CTA数远超task数,大量CTA空占SM自旋**。
+**这解释R6 OCC=2为何更慢**:task本就少,CTA已过剩,再翻倍occ只增空转竞争。也解释wait=5×exec:5×里大半是过剩CTA的空转,非真实数据依赖等待。
+**下一步验证**:看wait_stage(mega_common.cuh:56-74)——领不到task的CTA在干嘛;grid CTA数是否该按task数砍(grid=min(sms·occ, 各stage max task)而非sms·occ)。若砍到~22 CTA,空转消失,wait应暴降。先读mega_kernel的task循环+grid设定。
