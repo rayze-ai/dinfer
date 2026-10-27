@@ -86,6 +86,8 @@ pub struct Engine<E: ModelExecutor> {
     sched: Scheduler,
     /// 异步调度开关（ASYNC_SCHED=0 关；scheduler 的 async_scheduling 必须同步设置）。
     async_sched: bool,
+    /// HOST_TIME=1：每步 host 各段计时(诊断)。
+    host_time: bool,
     /// 在飞的一步：(SchedulerOutput, runner Pending, t_step, t_sched)。
     pending: Option<(crate::sched::output::SchedulerOutput, crate::runner::Pending, std::time::Instant, std::time::Instant)>,
     /// 插队 prefill 开关（CUT_IN=0 关）与计数。
@@ -135,11 +137,13 @@ impl<E: ModelExecutor> Engine<E> {
         let (tx, rx) = crossbeam_channel::unbounded();
         let metrics = Arc::new(Metrics::new());
         let h = EngineHandle { tx, next_id: Arc::new(AtomicU64::new(1)), metrics: metrics.clone() };
+        let host_time = std::env::var("HOST_TIME").map(|v| v == "1").unwrap_or(false);
         let async_sched = std::env::var("ASYNC_SCHED").map(|v| v != "0").unwrap_or(true);
         (
             Self {
                 sched,
                 async_sched,
+                host_time,
                 cut_in: async_sched && std::env::var("CUT_IN").map(|v| v != "0").unwrap_or(true),
                 cut_in_max_rows: std::env::var("CUT_IN_MAX_ROWS").ok().and_then(|v| v.parse().ok()).unwrap_or(8),
                 cut_in_steps: 0,
@@ -591,6 +595,15 @@ impl<E: ModelExecutor> Engine<E> {
                 },
             };
             self.publish_step(&so, &mro, t_step, t_sched, t_exec);
+            // HOST_TIME=1：细分每步 host 各段 us（sched / exec=begin+finish含等GPU / publish），定位 host 开销。
+            if self.host_time && !so.num_scheduled_tokens.is_empty() {
+                let t_pub = std::time::Instant::now();
+                let us = |a: std::time::Instant, b: std::time::Instant| b.duration_since(a).as_secs_f64() * 1e6;
+                tracing::info!(
+                    "[host-time] sched={:.1} exec(begin+finish)={:.1} publish={:.1} total={:.1} us",
+                    us(t_step, t_sched), us(t_sched, t_exec), us(t_exec, t_pub), us(t_step, t_pub)
+                );
+            }
             // 空步退避：有请求却一个都排不进（块不够、全部在飞）时不要满转 CPU；短暂让出等 GPU / 释放
             if so.num_scheduled_tokens.is_empty() && so.kv_import.is_empty() && so.kv_export.is_empty() && self.sched.has_requests() {
                 self.empty_steps += 1;
