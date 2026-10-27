@@ -163,11 +163,16 @@ fn mega_layer_fused_matches_separate() {
     let n_o = H.div_ceil(128);
     let n_gu = I.div_ceil(128);
     let n_dn = H.div_ceil(128);
-    let mut part_qkv = st.alloc_zeros::<f32>(m * sn).unwrap();
-    let mut part_o = st.alloc_zeros::<f32>(m * H).unwrap();
-    let mut part_gate = st.alloc_zeros::<f32>(m * I).unwrap();
-    let mut part_up = st.alloc_zeros::<f32>(m * I).unwrap();
-    let mut part_dn = st.alloc_zeros::<f32>(m * H).unwrap();
+    // split-K partial 需 sp 份（fp8_gemm_tile 写 partial + split*m*N，split∈[0,sp)）。按各自 sp 分配。
+    let spq = envsp("MEGA_SP_QKV") as usize;
+    let spo = envsp("MEGA_SP_O") as usize;
+    let spg = envsp("MEGA_SP_GU") as usize;
+    let spd = envsp("MEGA_SP_DN") as usize;
+    let mut part_qkv = st.alloc_zeros::<f32>(spq * m * sn).unwrap();
+    let mut part_o = st.alloc_zeros::<f32>(spo * m * H).unwrap();
+    let mut part_gate = st.alloc_zeros::<f32>(spg * m * I).unwrap();
+    let mut part_up = st.alloc_zeros::<f32>(spg * m * I).unwrap();
+    let mut part_dn = st.alloc_zeros::<f32>(spd * m * H).unwrap();
     let mut sem_qkv = st.alloc_zeros::<i32>(n_qkv).unwrap();
     let mut sem_o = st.alloc_zeros::<i32>(n_o).unwrap();
     let mut sem_gate = st.alloc_zeros::<i32>(n_gu).unwrap();
