@@ -1015,3 +1015,18 @@ NO_GRAPH 每次真拷正确栈值故正常；graph replay 读失效栈故乱码�
 → mega 路线价值在"batch=1 极限延迟"假设下尚未兑现；真实服务是并发 + 长 prompt + 共享前缀，决定吞吐的是**连续批处理 + prefix cache**（与 mega 正交），这才是和 vLLM 非eager 差 30× 的大头。
 **下一步待用户定方向**（路线级决定）：A 先补 dinfer 连续批处理 + prefix cache（吞吐大头，与 mega 正交）；B 继续攻 mega 的 batch>1/prefix 兼容；C 接受 mega 当前定位只做 batch=1 低延迟。
 （产物 pull 受阻：远端 rsync broken pipe / tag 103，summary.md 已 cat 核对，engine_smoke 目录 + engine-trend 待修好 pull 后补入库。）
+
+## C 2026-10-27 方向=补连续批处理+prefix cache(用户选A)；调研结论:core已实现,kaon3硬关
+子代理调研(a1aa72c8)坐实:两能力 **core 层都已实现且默认启用**,qwen3/qwen35 都接通有命中。问题全在 kaon3 service.rs 硬关:
+- `models/kaon3/src/service.rs:128` `enable_prefix_caching: false`(硬编码)→ cache 命中 0 的直接原因；kaon3 是纯 GQA(非递归),prefix cache 比 qwen35(绑 GDN 快照)更直接,直接 true 即可。
+- `:125-126` `long_prefill_token_threshold: 0` / `decode_exempt_from_budget: false`(qwen35 都是 true)。
+- kaon3 ServeOptions(:24-35)**没有** enable_prefix_caching 等字段；main.rs:374 把 CLI 的 `no_prefix_caching,no_decode_exempt,long_prefill_token_threshold` 丢进 `let _=(...)` 丢弃。
+- kaon3 executor **没实现** `supports_async`/`begin`(qwen35 executor.rs:689-695 有)→ 每步串行,CPU 调度/采样 D2H 不与 GPU forward 重叠 = 并发吞吐不增的另一来源。
+- core 调度器(sched/mod.rs:297 schedule_impl)本身是标准 vLLM 连续批处理,max_num_seqs=16 已启用,**未强制 batch=1**；kaon3 executor 支持 batch>1(mega dense 支路 MEGA_ROWS=8 上限,超了回退逐op仍是批的)。
+
+**修复计划(分步,最小风险先行)**:
+- **C1 打开 prefix cache + decode 预算豁免 + long_prefill 透传**(对标 qwen35,低风险,改 service.rs ServeOptions+default+config 填充 + main.rs kaon3 分支接线)。kaon3 非递归,无需 snapshot。
+- **C2 异步流水**(若 C1 吞吐仍不足):kaon3 executor 实现 supports_async/begin,对标 qwen35 executor.rs:689-695。
+- mega 路径只做 MLP 支路不碰 KV,prefix cache 命中(复用已算 KV block)应兼容,但要实测逐位/质量不回退。
+
+**停止条件(scripts/verify 可判定)**:rate=8 混合负载下 ① cache 命中 > 0；② 聚合 output tok/s 明显 > 单序列 53(有连续批处理增益,非次线性崩);③ goodput > 0；④ 生成质量不回退(md5/通顺)。最终看与 vLLM 非eager 差距缩小幅度。
