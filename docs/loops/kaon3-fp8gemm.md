@@ -511,3 +511,17 @@ ROUTER_GEMM_BI=0(走cuBLASLt并行)重测:
 **确认=代码/架构问题非kernel慢**(用户要求测试确认):大头在host侧——每decode步调度/launch/finish等待(14ms)+并发流水效率(27ms)。
 **→ 优化方向彻底转向host/调度**(不再是kernel):①每步host开销14ms(30层×0.47ms/层host?每层launch+同步开销大)②async调度流水是否真重叠(R16-20绕过,现在是大头必须解)。
 **下一步**:测host步时27.1ms里——是30层各自的host launch开销累加,还是finish等待(async没重叠)。若per-layer host开销大→减per-layer launch(cudagraph应该已捕获?查decode是否真走graph);若finish等待大→async没重叠。先查decode是否真走cudagraph(走了host launch应极小,27ms host就反常)。
+
+## R48 2026-10-27 bench序列(每轮CHANGE,用户要求至少到bench5)+清调试开关
+清掉调试开关(NO_GRAPH/STAGE_TIME/MOE_TIME,它们让bench测不准:NO_GRAPH禁cudagraph decode更慢,event有开销),serve恢复生产态(graph开+MEGA_SPGU/DN=4+ROUTER_GEMM_BI=0+MOE_GROUPED=1+KAON3_MEGA=1)。
+**bench序列(锁死负载seed42/全共享1024/128out/REQS48 vs vLLM,每轮改动说明)**:
+| bench | 改动(CHANGE) | dinfer吞吐 | TTFT p50 | TPOT p50 | vs vLLM |
+|---|---|---|---|---|---|
+| bench1 起点 | max_num_seqs=16默认,未关BI | 357 | 3357ms | - | 38% |
+| bench2 seqs64 | max_num_seqs 16→64 | 540 | 245ms | 59.4 | 57% |
+| bench3 关BI | +ROUTER_GEMM_BI=0(router cuBLASLt) | 573 | 254ms | 54.5 | 61% |
+| bench4/5 生产态 | 子代理跑:graph开+全优化干净态(之前带NO_GRAPH测不准) | 待测 | | | |
+| 基准 vLLM非eager | - | 944 | 25ms | 6.6 | 100% |
+**每轮改动已说明**(用户要求页面也显示CHANGE,子代理改engine_trend.py让html显示)。
+**整轮排查结论(供收口)**:两个配置洞落地(seqs64→TTFT13×、关BI→decode32%),吞吐357→573(vLLM61%)。但**TPOT 54.5 vs vLLM6.6(8×)真源头=host/调度开销(R47实测:GPU实算仅24%,76%是host步时+并发排队)**,非kernel。下一步该攻host/调度(查decode cudagraph是否生效、async是否重叠),不是继续抠kernel。
+**dashboard坑(已知)**:8090被平台HF代理占(非我们的);真dashboard在8192(trend_server.sh);engine轮要engine_*命名才被engine_trend.py扫。子代理修到能访问。
