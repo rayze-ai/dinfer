@@ -628,3 +628,18 @@ HOST_TIME每步host三段(单发tok=1):sched=0.3us, **exec(begin+finish)=12080us
 **透彻结论**:dense wait是持久megakernel"CTA常驻+stage串行推进"的固有代价,窄stage(NORM/ACT单task)时CTA空等。**无廉价改法**:铺多task假忙、拆kernel放弃融合收益、减CTA降GEMM并行,三者都不划算(dense仅15%)。这不是bug是架构权衡。
 **对比vLLM**:vLLM dense MLP用独立cutlass kernel(每个充分并行),无持久CTA空等;我们用megakernel换launch省、代价是窄stage空等。**dense这15%上megakernel可能本就不比独立kernel快**——但15%影响小。
 **dense wait做透了(用户要求)**:从测(R55)→改法(R56)→读kernel根因(R59),结论=持久kernel固有代价无廉价改法,15%不值重构。**不是跳过,是做透后判定**。
+
+## R60 2026-10-27 MoE做透(1):关BI后新构成,gemm3成第一大头54%(router已降)
+关BI后MoE各段:
+| 段 | ms | 占MoE |
+|---|---|---|
+| **gemm3(3×grouped_gemm grid.z=128)** | **0.096** | **54%** |
+| router | 0.030 | 17%(关BI前0.25) |
+| sm+bucket | 0.027 | 15% |
+| norm+gather+quant | 0.017 | 10% |
+| scatter | 0.008 | 4% |
+MoE合计~0.178ms(关BI前0.40,router降拉低整体)。
+**头号变了**:关BI后router 0.25→0.03,**gemm3(grouped_gemm)成MoE第一大头54%=0.096ms**。R40/R41当时说grid.z=128只占MoE 24%没改——那是router还0.25的分母;现在router降了,grouped_gemm占54%,**值得改了**。
+**grid.z=128浪费(R37读过)**:grid=(N/BN, ceil(R/BM), E=128)。decode R=tokens×top8,单token R=8只激活≤8专家→**120/128=94% block空载return**。3次gemm(gate/up/down)都这样。
+**做透计划(不跳)**:①确认decode激活专家数(路由定,≤8)②grid.z=128→按激活专家compact(或行块映射,R39/R40评估过BM=32跨专家的坑)③改kernel+逐位验+测gemm3降多少→MoE降多少→TPOT降多少。
+**下一步**:读grouped_gemm host launch(moe_grouped_sm120.cu:259-266)+kernel空load机制,定具体改法(compact offsets让grid.z=激活数,graph友好要固定→用上界)。
