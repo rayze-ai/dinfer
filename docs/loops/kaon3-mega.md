@@ -1036,3 +1036,17 @@ NO_GRAPH 每次真拷正确栈值故正常；graph replay 读失效栈故乱码�
 **坑1 put 落点**:`remote_5090.sh put <本地> <远端>` 的远端是 `rsyncr "$1" "$USER_AT:$2"`,`$2` 相对**登录家目录**不是 /hf_data/yaochen/dinfer。传相对路径 `models/kaon3/src/service.rs` 落到家目录,没进代码树→cargo `Finished 0.11s` 无 Compiling,bin md5 不变(仍 c8cfa32,Oct26)。**put 远端必须用绝对路径** `/hf_data/yaochen/dinfer/...`。
 **坑2 核验**:靠 md5+时间+是否出现 `Compiling dinfer-kaon3` 坐实真重编(memory dinfer-be-careful)。修正后 `prefix字段数=3`、`Compiling dinfer-kaon3/dinfer`、Finished 11.30s、bin md5 c8f5bf37 Oct27 01:29。
 **重起**:kaon3-full 容器挂载 `/hf_data/yaochen->/w`(与 ctr 同处,新 bin 可见);**是 docker 不是 nerdctl**(nerdctl not found,之前 inspect/logs 全静默空=没发现)。`docker restart kaon3-full` 保留原 Cmd/Env(KAON3_MEGA=1 等)/GPU0/挂载,重跑即用新 bin;ready 46s,/v1/models 正常。prefix cache 是否生效看 bench cache hit(日志"single-stream"是旧文案不反映)。
+
+## C1 ✅ 2026-10-27 结果:prefix cache 生效+连续批处理增益,吞吐 40→246 tok/s(6×),差距 30×→4.9×
+先踩坑:首次 C1(engine_c1)dinfer **0/24 全失败** = `engine step failed: batch of 2050 tokens > max_tokens 2048`——开 decode_exempt 后一步 =2048 prefill chunk + decode 行超 executor buffer。**修复**(commit 4421a04):service.rs max_tokens 在 decode_exempt 时放大为 `max_num_batched_tokens+max_num_seqs`(对标 qwen35:109)。这是原来硬关 decode_exempt 的隐藏原因。
+重测 engine_c1b(rate=8 混合负载,同 B5):
+
+| | 完成 | cache hit | 聚合 tok/s | TTFT p50/p99 | TPOT p50/p99 | goodput |
+|---|---|---|---|---|---|---|
+| B5(前) | 24/0 | 0.000 | 40 | 65747/136628 | 194/4956 | 0/24 |
+| **C1** | **24/0** | **0.731** | **246.4** | 5396/15588 | 38.6/64 | 0/24 |
+| vLLM 非eager | 24/0 | 0.335 | 1207.5 | 85/114 | 8.6/11.7 | 24/24 |
+
+停止条件:①cache>0 ✓(0.731)②吞吐>单序列53有批处理增益 ✓(246,6×)③goodput>0 ✗(TTFT 5.4s/TPOT 38ms 仍超 SLO 500/20)④质量不回退=待确认(24/24 完成 len-stop 24/24,命中路径没崩)。
+**与 vLLM 差距 30×→4.9×**(吞吐 246 vs 1207)。剩余 gap:TPOT 38.6 vs 8.6(decode 每步慢 4.5×=mega decode 本身慢 18.7ms 单序列+并发效率)、TTFT 5.4s(prefill 慢+排队)。
+**下一步 C2**:异步流水(kaon3 executor 实现 supports_async/begin,对标 qwen35 executor.rs:689-695),CPU 调度/采样 D2H 与 GPU forward 重叠,降 TPOT/TTFT。
