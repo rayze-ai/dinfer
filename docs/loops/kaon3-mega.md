@@ -1076,3 +1076,7 @@ NO_GRAPH 每次真拷正确栈值故正常；graph replay 读失效栈故乱码�
 
 ## C2 回退确认 2026-10-27
 `git revert --no-edit 41f318a`(revert commit 已入库)→ executor 回 C1 原始(grep enqueue_forward/begin/supports_async=0)。put(首次 put_rc=1 跳板拒绝,重试 try1 OK)+ 编译 md5 **a05909ac == C1 修复后二进制**(坐实回到 C1)。restart 单发通顺不乱码。**serve 稳在 C1:rate=8 ~246 tok/s、cache 0.731、与 vLLM 非eager 差距 4.9×**。C2 异步流水代码存 git 41f318a,下轮按上条"隔离修法"再做。
+
+## 下次 bench 要求(用户 2026-10-27):vLLM 命中率作正式对比项
+当前 summary 里 dinfer cache hit=客户端口径(0.731),vLLM 客户端列 n/a,vLLM 命中率只藏在"srv cache"列(服务端 /metrics,如 0.335)。
+**下次 bench**:把 vLLM 的 prefix cache 命中率提为**正式对比列**,与 dinfer cache hit 并排;两边统一用服务端 /metrics 的 prefix cache hit rate 口径才真正可比(也符合测试可信规则④客户端↔/metrics 对账)。改 bench_engine.sh / summary 生成,让 dinfer 与 vLLM 的命中率同列可比。
