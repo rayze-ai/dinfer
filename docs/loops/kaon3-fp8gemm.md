@@ -373,3 +373,16 @@ serve真实decode一步(layer.rs:9-14注释)=qkv独立GEMM→q/k/v_norm+rope→p
 1. **MoE(NVFP4手写128专家top8)——最大嫌疑,从没profile过**
 2. dense mega_dense_branch(FP8手写,m16浪费)
 **下一步**:serve decode分段计时,重点量MoE vs dense vs attention vs cuBLASLt-QKV各占TPOT多少。MoE最可疑(手写+128专家+没测过)。别再碰整层mega测试(QKV用fp8_gemm_tile但serve用cuBLASLt,两回事)。
+
+## R35 2026-10-27 serve decode完整分段(读全forward)+计时方案
+serve decode forward(layer.rs:1000-1206)完整序列:
+1. QKV(FP8 cuBLASLt,1021/1023)→ 2. q/k/v_norm+rope → 3. paged attention(gqa) → 4. o_proj(FP8 cuBLASLt,1157) → 5. post_attn_norm+残差 → 6. **dense MLP支路**(1167 mega_dense_branch[FP8手写]或fallback) → 7. **MoE支路**(1195 moe_branch,与dense并联) → 8. 两支相加+post_ff_norm+残差。
+MoE内部(1368):MOE_GROUPED=1(serve已设)走**device-grouped**(非逐专家循环1429);关时逐专家(top8→24个小GEMM串行)。MoE专家=NVFP4手写。
+**计时方案(下一步,完整子任务)**:serve forward各段插CUDA event(qkv/attn/oproj/dense/moe),env开关`KAON3_STAGE_TIME=1`门控(默认关零开销),decode步累加各段ms,serve退出或/metrics打印。重编重起,锁死负载测,看MoE vs dense vs attn vs cuBLASLt-QKV各占TPOT。
+**已确立事实(别再推翻)**:
+- QKV/o_proj走cuBLASLt同vLLM(非瓶颈嫌疑低)
+- dense gate/up/down走mega手写(m16浪费,FP8)
+- MoE走NVFP4手写grouped(128专家,整层mega测试0覆盖)=最大嫌疑
+- 整层mega测试/那张wait表≠serve路径(serve QKV用cuBLASLt非fp8_gemm_tile)
+**已落地优化**:①max_num_seqs16→64(TTFT 3357→245降13.7×,吞吐357→540)②split-K sp=4(dense mega 251→215,但那是整层mega测试,serve dense branch是否受益待确认)。
+**下一步**:加KAON3_STAGE_TIME分段event,测serve真实TPOT大头。
