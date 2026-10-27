@@ -102,8 +102,14 @@ impl KaonService {
 
         let bs = opt.block_size as usize;
         let num_blocks = opt.num_blocks as usize;
-        // 本步最多 token 数（decode 每请求 1 行）。
-        let max_tokens = opt.max_num_batched_tokens.max(opt.max_num_seqs) as usize;
+        // 本步最多 token 数（decode 每请求 1 行）。decode 豁免预算时，一步可含满额 prefill chunk
+        // (max_num_batched_tokens) 再叠所有 running decode 行(≤max_num_seqs)，buffer 要容得下，否则
+        // 调度器放行 2048+decode 行会触发 executor 的 max_tokens 上限（engine step failed: batch > max_tokens）。
+        let max_tokens = if opt.decode_exempt_from_budget {
+            (opt.max_num_batched_tokens + opt.max_num_seqs) as usize
+        } else {
+            opt.max_num_batched_tokens.max(opt.max_num_seqs) as usize
+        };
         let max_rows = opt.max_num_seqs as usize;
 
         let mut model = KaonModel::load(&s, &src, cfg.clone())?;
