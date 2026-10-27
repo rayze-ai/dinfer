@@ -38,6 +38,18 @@ GPU2 可抓取。`put` 有 bug（目标路径不生效），改用 `rsync -az` �
 
 ### Kaon-V3（5090，阶段 1–2 完成，阶段 3 接近打通）
 
+#### 性能优化（2026-10-27，loop `kaon3-fp8gemm`）——两配置洞已落地 + 三优化点待做
+**已落地（配置，非代码，都进 kserve_full.sh）**：吞吐 357→594（vLLM 的 63%）、TTFT 3357→250ms（13×）。
+- ① `max_num_seqs` 16→64：默认 16 太小（vLLM 256），48 请求涌入堆积 TTFT 到 8s。改 64 后 TTFT 降 13×、吞吐 +51%。**生产 KV 池要配套**（max-model-len 降或 num-blocks 够，16384+8192 会 OOM）。
+- ② `ROUTER_GEMM_BI=0`：router 的 batch-invariant persistent matmul 单 block 单 SM 串行 K=2816（为逐位对拍，生产不需要），0.25→0.03ms。单层 decode 降 32%。符合生产口径（[[dinfer-kaon3-prod-config]] 生产不开 BI）。
+
+**三优化点（都做透了，实测钉死，写给下一步手工）**：
+- **MoE（唯一中等收益，推荐先做）**：decode 每步 8 专家各 M=1 的 NVFP4「GEMV」却用 BM=32 GEMM tile kernel（`moe_grouped_sm120.cu` grouped_gemm_kernel）跑 → gemm3 80us = 带宽下界 14us 的 6×，tile 维度全浪费。**优化 = 写 M=1 专用 NVFP4 GEMV kernel**（方案见 loop R65：去 BM 维、1 行 A 常驻 + B 流式、NVFP4 scale 逐位复用；隔离微基准写+对拍原 kernel 逐位→再接 serve）。gemm3 80→~20us 省 decode ~14%。grid.z=128 空 block 已验只占 17%（非大头，别做 compact）。
+- **host/调度：排除**。实测 host CPU 仅 ~4us/步（sched 0.3+publish 3.3），decode 步时几乎全是等 GPU。TPOT 大头不是 host，是单步 30 层 GPU 计算（12ms，vLLM 6.6）+ 并发排队（rate8 下 54ms）。**别再往 host/调度/async 投**（R47 曾误判，R58 实测纠正）。
+- **dense wait：架构固有，ROI 低挂起**。GATE/UP/DOWN wait 各 ~4× 是持久 megakernel「CTA 常驻 + 窄 stage（NORM/ACT 单 task）169 CTA 自旋空等 signal」的固有代价，非某 stage 慢。三种改法（铺 task 假忙/拆 kernel 弃融合/减 CTA 降并行）都不划算（dense 仅占 decode 15%）。
+**排查方法教训（整轮栽多次）**：① 显眼机制 ≠ 大头（GEMM exec40%、occupancy、split-K grid、94%空block 全是显眼但实测非大头），必须在真实路径分段实测再改；② **serve ≠ 整层 mega 测试**（serve 只融 dense MLP，QKV/OPROJ 走 cuBLASLt 同 vLLM，MoE 走 NVFP4 grouped；那张 mega_layer_parity 的 wait 表对 serve 无用）；③ 先验证空 block/收益占比再动手（省了几次大改）。
+**dashboard**：本机（192.168.72.130 即本机）`http://192.168.72.130:8090/kaon3/perf-trend.html#kaon3/5090/single`，8090 根=本机 test/，e2e group 有 r1-r5 带 CHANGE。诊断插桩（KAON3_STAGE_TIME/MOE_TIME/DENSE_TIME/HOST_TIME、MOE_GRID_CAP）都 env 门控默认关，已从 serve 清掉。
+
 - 目标（用户 2026-10-21）：5090 **单卡**适配，性能 ≥ 基线容器 1.2×；**不反量化权重**。
 - **机器**：`host-172-16-20-59`（8×RTX 5090 32GB，sm_120），跳板 `jump.aicloud.paigod.work:2222`。
   **token 一次性**（用户现给 → `~/.ssh/jms_5090_{user,pass}`，第一条命令必须直接
