@@ -401,3 +401,10 @@ serve真实decode一层(tok=1,KAON3_STAGE_TIME=1,8次稳定):
 **与vLLM差距的真源头基本锁定**:vLLM的MoE(fused grouped GEMM/cutlass)很可能远快于我们的NVFP4手写grouped。TPOT慢6.7×,MoE占63%——优化MoE是把TPOT拉近vLLM的唯一大杠杆。
 **下一步(终于对了)**:profile MoE内部(moe_branch,MOE_GROUPED路径)——128专家NVFP4 grouped GEMM慢在哪:①是否每专家小GEMM串行②NVFP4量化开销③grouped kernel效率④对比vLLM MoE实现。这才是该花力气的地方。
 **教训总结**:十几轮绕(GEMM 8×/occupancy/split-K/整层mega/那张wait表)全因没先在serve真实路径分段实测。一个KAON3_STAGE_TIME分段,立刻看出MoE 63%。用户"谁慢解决谁"+"读全代码"+"serve不走整层mega"全是对的,我该一开始就分段实测。
+
+## ★★ R37 2026-10-27 MoE瓶颈机制:grouped_gemm grid.z=128全专家,decode只激活8个→94%block空载
+读moe_grouped_sm120.cu:112-123:grouped_gemm grid=(N/BN, ceil(R/BM), **E=128专家**),blockIdx.z=e,空专家(row_lo==row_hi)第123行直接return。
+**decode R=8行(top_k=8)只激活≤8专家→120/128=94% block启动后立即空载return**。grouped_gemm跑3次(gate/up/down),grid含N/BN×128,N=moe_inter大→海量空block启动开销。
+**与vLLM差距对上**:vLLM MoE只给激活专家起block,我们给全128个→decode 94%浪费。
+**但需确认(别假设)**:stage-time只测MoE整体0.397ms,没细分grouped_gemm vs router/bucket/gather/quant×2/gelu/scatter(MoE有~10 kernel)。grid.z=128浪费是确凿机制,但是否MoE大头待细分。
+**下一步**:moe_branch内部加细分计时(router/gather/quant/3×gemm/scatter各段),确认grouped_gemm(grid.z=128)是否MoE大头;若是→改grid.z=激活专家数(或compact offsets只给非空专家起block),对齐vLLM。这是把TPOT拉近vLLM的核心杠杆(MoE占63%,其中grid浪费94%)。
