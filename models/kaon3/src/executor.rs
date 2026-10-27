@@ -18,7 +18,9 @@ use crate::model::{KaonModel, StepMeta};
 use anyhow::{ensure, Context, Result};
 use dinfer_core::runner::{BatchMode, BatchPlan, ModelExecutor};
 use dinfer_kernels::{self as k, bf16};
-use dinfer_layers::exec::{graph_capture_eager, CapturePhase, DecodeGraphs, PlanBuffers};
+use dinfer_layers::exec::{
+    async_sched_enabled, graph_capture_eager, AsyncResultRing, CapturePhase, DecodeGraphs, PlanBuffers, Ticket,
+};
 use dinfer_layers::{Gemm, PinnedUploader, Stream, Tensor};
 
 pub use dinfer_layers::exec::graph_buckets;
@@ -47,6 +49,9 @@ pub struct KaonExecutor {
     max_rows: usize,
     pub graph_steps: u64,
     pub eager_steps: u64,
+    /// 异步调度：pinned 槽环（depth=2，engine 最多 2 步在飞）+ 在飞票据队列（begin 存、finish 取）。
+    async_ring: AsyncResultRing,
+    async_inflight: std::collections::VecDeque<Ticket>,
 }
 
 impl KaonExecutor {
@@ -96,6 +101,8 @@ impl KaonExecutor {
             gathered: Tensor::uninit(&stream, &[max_rows, v])?,
             gathered_f32: Tensor::zeros(&stream, &[max_rows, v])?,
             argmax: Tensor::zeros(&stream, &[max_rows])?,
+            async_ring: AsyncResultRing::new(&stream, 2, max_rows)?,
+            async_inflight: std::collections::VecDeque::with_capacity(2),
             scratch,
             acts,
             up,
@@ -208,46 +215,9 @@ impl KaonExecutor {
         self.stream.dtoh_sync_copy_view(&self.argmax.data.slice(..k))
     }
 
-    // ---------------------------------------------------------------- CUDA graph
-
-    /// 捕获体：`Prepare` 上传假 decode plan（capture 外），`Body` = forward + gather + argmax（进图）。
-    fn capture_body(&mut self, nb: usize, phase: CapturePhase) -> Result<()> {
-        match phase {
-            CapturePhase::Prepare => {
-                let p = dinfer_layers::exec::decode_capture_plan(nb);
-                self.upload_plan(&p, nb)
-            }
-            CapturePhase::Body => {
-                // 纯 decode：每请求 1 token、1 行，max_seqlen = 1。
-                self.forward_device_mode(BatchMode::Decode, nb, nb, nb, 1)
-            }
-        }
-    }
-
-    /// 启动时一次捕获全部桶。
-    fn capture_decode_graphs(&mut self) -> Result<()> {
-        let mut graphs = std::mem::replace(&mut self.graphs, DecodeGraphs::new(&self.stream, false, 0));
-        let r = graphs.capture_all(|nb, ph| self.capture_body(nb, ph));
-        self.graphs = graphs;
-        r
-    }
-
-    /// 懒捕获：n 行 decode 需要的桶若还没有图，现在捕获。
-    fn ensure_graph(&mut self, n: usize) -> Result<()> {
-        let mut graphs = std::mem::replace(&mut self.graphs, DecodeGraphs::new(&self.stream, false, 0));
-        let r = graphs.ensure(n, |nb, ph| self.capture_body(nb, ph));
-        self.graphs = graphs;
-        r
-    }
-}
-
-impl ModelExecutor for KaonExecutor {
-    fn forward_sample(
-        &mut self,
-        plan: &BatchPlan,
-        generated: &mut Vec<Vec<u32>>,
-        drafts: &mut Vec<Vec<u32>>,
-    ) -> Result<()> {
+    /// 上传 plan + forward + 采样到 `self.argmax`（GPU），不做 D2H；返回要 collect 的行数。
+    /// 同步 `forward_sample` 与异步 `begin` 共用此段（对标 qwen35 `enqueue`）。
+    fn enqueue_forward(&mut self, plan: &BatchPlan) -> Result<usize> {
         // 引擎线程 != 构建线程：绑一次 ctx，否则首个 kernel 报 CUDA_ERROR_INVALID_CONTEXT。
         self.stream.bind_ctx()?;
         let n = plan.num_reqs();
@@ -282,7 +252,77 @@ impl ModelExecutor for KaonExecutor {
             self.eager_steps += 1;
             collect_rows = nrows;
         }
+        Ok(collect_rows)
+    }
 
+    // ---------------------------------------------------------------- CUDA graph
+
+    /// 捕获体：`Prepare` 上传假 decode plan（capture 外），`Body` = forward + gather + argmax（进图）。
+    fn capture_body(&mut self, nb: usize, phase: CapturePhase) -> Result<()> {
+        match phase {
+            CapturePhase::Prepare => {
+                let p = dinfer_layers::exec::decode_capture_plan(nb);
+                self.upload_plan(&p, nb)
+            }
+            CapturePhase::Body => {
+                // 纯 decode：每请求 1 token、1 行，max_seqlen = 1。
+                self.forward_device_mode(BatchMode::Decode, nb, nb, nb, 1)
+            }
+        }
+    }
+
+    /// 启动时一次捕获全部桶。
+    fn capture_decode_graphs(&mut self) -> Result<()> {
+        let mut graphs = std::mem::replace(&mut self.graphs, DecodeGraphs::new(&self.stream, false, 0));
+        let r = graphs.capture_all(|nb, ph| self.capture_body(nb, ph));
+        self.graphs = graphs;
+        r
+    }
+
+    /// 懒捕获：n 行 decode 需要的桶若还没有图，现在捕获。
+    fn ensure_graph(&mut self, n: usize) -> Result<()> {
+        let mut graphs = std::mem::replace(&mut self.graphs, DecodeGraphs::new(&self.stream, false, 0));
+        let r = graphs.ensure(n, |nb, ph| self.capture_body(nb, ph));
+        self.graphs = graphs;
+        r
+    }
+}
+
+impl ModelExecutor for KaonExecutor {
+    fn supports_async(&self) -> bool {
+        async_sched_enabled()
+    }
+
+    /// 异步第一段：上传 + forward + 采样 + 异步 D2H（不等 GPU）。runner 只对 async_eligible（纯 decode）调用。
+    fn begin(&mut self, plan: &BatchPlan) -> Result<()> {
+        // async_eligible 保证纯 decode：collect_rows == n == nrows，argmax 前 n 行即逐请求的下一个 token。
+        let n = self.enqueue_forward(plan)?;
+        let ticket = self.async_ring.enqueue(&self.stream, &self.argmax.data, n)?;
+        self.async_inflight.push_back(ticket);
+        Ok(())
+    }
+
+    /// 异步第二段：等上一步在飞的异步 D2H，回填 token。
+    fn finish(&mut self, generated: &mut Vec<Vec<u32>>, drafts: &mut Vec<Vec<u32>>) -> Result<()> {
+        let ticket = self.async_inflight.pop_front().context("kaon3 finish without begin")?;
+        let am = self.async_ring.wait(ticket)?;
+        generated.clear();
+        drafts.clear();
+        for &c in &am {
+            generated.push(vec![c as u32]);
+            drafts.push(Vec::new());
+        }
+        Ok(())
+    }
+
+    fn forward_sample(
+        &mut self,
+        plan: &BatchPlan,
+        generated: &mut Vec<Vec<u32>>,
+        drafts: &mut Vec<Vec<u32>>,
+    ) -> Result<()> {
+        let n = plan.num_reqs();
+        let collect_rows = self.enqueue_forward(plan)?;
         let am = self.collect(collect_rows)?;
         // 每请求本步的 logits 行区间（无投机 → 恰 1 行）：取该行 argmax 为下一个 token。
         generated.clear();
