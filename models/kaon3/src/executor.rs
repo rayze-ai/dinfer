@@ -18,9 +18,7 @@ use crate::model::{KaonModel, StepMeta};
 use anyhow::{ensure, Context, Result};
 use dinfer_core::runner::{BatchMode, BatchPlan, ModelExecutor};
 use dinfer_kernels::{self as k, bf16};
-use dinfer_layers::exec::{
-    async_sched_enabled, graph_capture_eager, AsyncResultRing, CapturePhase, DecodeGraphs, PlanBuffers, Ticket,
-};
+use dinfer_layers::exec::{graph_capture_eager, CapturePhase, DecodeGraphs, PlanBuffers};
 use dinfer_layers::{Gemm, PinnedUploader, Stream, Tensor};
 
 pub use dinfer_layers::exec::graph_buckets;
@@ -49,9 +47,6 @@ pub struct KaonExecutor {
     max_rows: usize,
     pub graph_steps: u64,
     pub eager_steps: u64,
-    /// 异步调度：pinned 槽环（depth=2，engine 最多 2 步在飞）+ 在飞票据队列（begin 存、finish 取）。
-    async_ring: AsyncResultRing,
-    async_inflight: std::collections::VecDeque<Ticket>,
 }
 
 impl KaonExecutor {
@@ -101,8 +96,6 @@ impl KaonExecutor {
             gathered: Tensor::uninit(&stream, &[max_rows, v])?,
             gathered_f32: Tensor::zeros(&stream, &[max_rows, v])?,
             argmax: Tensor::zeros(&stream, &[max_rows])?,
-            async_ring: AsyncResultRing::new(&stream, 2, max_rows)?,
-            async_inflight: std::collections::VecDeque::with_capacity(2),
             scratch,
             acts,
             up,
@@ -177,9 +170,6 @@ impl KaonExecutor {
     /// `t` = token 数（含 padding），`n` = 请求数（含 padding），`nrows` = logits 行数，`max_seqlen` = 本步每请求最大 query 长。
     fn forward_device_mode(&mut self, mode: BatchMode, t: usize, n: usize, nrows: usize, max_seqlen: usize) -> Result<()> {
         let s = &self.stream;
-        // 异步调度 token 接力：在飞行（上一步 token 尚未回 host）的行 ids[i]=prev_chosen[gather_idx[i]]；
-        // 非异步步 gather_idx 全 -1，用 host 上传的 ids 值，无害。必须在 StepMeta 借 &self.plan 之前做。
-        self.plan.gather_inflight(s, t)?;
         let v = self.model.cfg.vocab_size;
         let meta = StepMeta {
             mode,
@@ -210,54 +200,12 @@ impl KaonExecutor {
         k::ops::gather_rows_bf16(s, &self.logits.data, &mut self.gathered.data, &self.plan.rows.data, nrows, v)?;
         k::ops::bf16_to_f32_n(s, &self.gathered.data, &mut self.gathered_f32.data, nrows * v)?;
         k::argmax_f32_n(s, &self.gathered_f32.data, &mut self.argmax.data, nrows, v)?;
-        // 本步采样 token 存回 prev_chosen，供下一步在飞 decode 的 gather_inflight 取用（图内捕获；非异步无害）。
-        self.plan.save_chosen(s, &self.argmax.data, nrows)?;
         Ok(())
     }
 
     /// argmax 的 D2H（图外）：取前 `k` 行。
     fn collect(&mut self, k: usize) -> Result<Vec<i32>> {
         self.stream.dtoh_sync_copy_view(&self.argmax.data.slice(..k))
-    }
-
-    /// 上传 plan + forward + 采样到 `self.argmax`（GPU），不做 D2H；返回要 collect 的行数。
-    /// 同步 `forward_sample` 与异步 `begin` 共用此段（对标 qwen35 `enqueue`）。
-    fn enqueue_forward(&mut self, plan: &BatchPlan) -> Result<usize> {
-        // 引擎线程 != 构建线程：绑一次 ctx，否则首个 kernel 报 CUDA_ERROR_INVALID_CONTEXT。
-        self.stream.bind_ctx()?;
-        let n = plan.num_reqs();
-        let t = plan.total_tokens();
-        let nrows = plan.logits_rows.len();
-        ensure!(t <= self.max_tokens, "batch of {t} tokens > max_tokens {}", self.max_tokens);
-        ensure!(nrows <= self.max_rows, "rows {nrows} > max_rows {}", self.max_rows);
-        ensure!(plan.max_blocks <= self.plan.max_blocks, "block_table {} > buffer {}", plan.max_blocks, self.plan.max_blocks);
-        ensure!(!plan.sample.any_mask, "kaon3 executor: guided decoding 未接（第一版不做）");
-
-        // 本步可否走图：纯 decode（每请求 1 token、1 行）且无 guided mask。
-        let graph_eligible = plan.mode == BatchMode::Decode && t == n && nrows == n && !plan.sample.any_mask;
-        if graph_eligible {
-            self.ensure_graph(n)?;
-        }
-        let use_graph = graph_eligible && self.graphs.get(n).is_some();
-
-        let collect_rows;
-        if use_graph {
-            let nb = self.graphs.get(n).unwrap().0;
-            self.upload_plan(plan, nb)?;
-            self.graphs.get(n).unwrap().1.launch().context("launch decode graph")?;
-            if self.graph_steps == 0 {
-                tracing::info!(n, bucket = nb, "kaon3: decode step via cuda graph");
-            }
-            self.graph_steps += 1;
-            collect_rows = n; // 图里算了 nb 行，只取前 n 行（logits_row_start[i] == i）
-        } else {
-            self.upload_plan(plan, n)?;
-            let max_seqlen = plan.num_tokens.iter().copied().max().unwrap_or(0).max(1) as usize;
-            self.forward_device_mode(plan.mode, t, n, nrows, max_seqlen)?;
-            self.eager_steps += 1;
-            collect_rows = nrows;
-        }
-        Ok(collect_rows)
     }
 
     // ---------------------------------------------------------------- CUDA graph
@@ -294,43 +242,47 @@ impl KaonExecutor {
 }
 
 impl ModelExecutor for KaonExecutor {
-    fn supports_async(&self) -> bool {
-        // 异步流水实测在 kaon3 负收益（engine_c2fix：31 vs 同步 246 tok/s，TPOT 494 vs 38.6 ms）——乱码虽已靠
-        // token 接力(gather_inflight/save_chosen)修正，但 per-step 开销暴涨。默认关走同步快路径；
-        // KAON3_ASYNC=1 显式开，用于继续调查 per-step 开销来源（event wait / 调度 / 无 CPU 空闲可重叠）。
-        std::env::var("KAON3_ASYNC").is_ok() && async_sched_enabled()
-    }
-
-    /// 异步第一段：上传 + forward + 采样 + 异步 D2H（不等 GPU）。runner 只对 async_eligible（纯 decode）调用。
-    fn begin(&mut self, plan: &BatchPlan) -> Result<()> {
-        // async_eligible 保证纯 decode：collect_rows == n == nrows，argmax 前 n 行即逐请求的下一个 token。
-        let n = self.enqueue_forward(plan)?;
-        let ticket = self.async_ring.enqueue(&self.stream, &self.argmax.data, n)?;
-        self.async_inflight.push_back(ticket);
-        Ok(())
-    }
-
-    /// 异步第二段：等上一步在飞的异步 D2H，回填 token。
-    fn finish(&mut self, generated: &mut Vec<Vec<u32>>, drafts: &mut Vec<Vec<u32>>) -> Result<()> {
-        let ticket = self.async_inflight.pop_front().context("kaon3 finish without begin")?;
-        let am = self.async_ring.wait(ticket)?;
-        generated.clear();
-        drafts.clear();
-        for &c in &am {
-            generated.push(vec![c as u32]);
-            drafts.push(Vec::new());
-        }
-        Ok(())
-    }
-
     fn forward_sample(
         &mut self,
         plan: &BatchPlan,
         generated: &mut Vec<Vec<u32>>,
         drafts: &mut Vec<Vec<u32>>,
     ) -> Result<()> {
+        // 引擎线程 != 构建线程：绑一次 ctx，否则首个 kernel 报 CUDA_ERROR_INVALID_CONTEXT。
+        self.stream.bind_ctx()?;
         let n = plan.num_reqs();
-        let collect_rows = self.enqueue_forward(plan)?;
+        let t = plan.total_tokens();
+        let nrows = plan.logits_rows.len();
+        ensure!(t <= self.max_tokens, "batch of {t} tokens > max_tokens {}", self.max_tokens);
+        ensure!(nrows <= self.max_rows, "rows {nrows} > max_rows {}", self.max_rows);
+        ensure!(plan.max_blocks <= self.plan.max_blocks, "block_table {} > buffer {}", plan.max_blocks, self.plan.max_blocks);
+        ensure!(!plan.sample.any_mask, "kaon3 executor: guided decoding 未接（第一版不做）");
+
+        // 本步可否走图：纯 decode（每请求 1 token、1 行）且无 guided mask。
+        let graph_eligible = plan.mode == BatchMode::Decode && t == n && nrows == n && !plan.sample.any_mask;
+        if graph_eligible {
+            self.ensure_graph(n)?;
+        }
+        let use_graph = graph_eligible && self.graphs.get(n).is_some();
+
+        let collect_rows;
+        if use_graph {
+            let nb = self.graphs.get(n).unwrap().0;
+            self.upload_plan(plan, nb)?;
+            self.graphs.get(n).unwrap().1.launch().context("launch decode graph")?;
+            if self.graph_steps == 0 {
+                tracing::info!(n, bucket = nb, "kaon3: decode step via cuda graph");
+            }
+            self.graph_steps += 1;
+            collect_rows = n; // 图里算了 nb 行，只取前 n 行（logits_row_start[i] == i）
+        } else {
+            self.upload_plan(plan, n)?;
+            let max_seqlen = plan.num_tokens.iter().copied().max().unwrap_or(0).max(1) as usize;
+            self.forward_device_mode(plan.mode, t, n, nrows, max_seqlen)?;
+            self.eager_steps += 1;
+            collect_rows = nrows;
+        }
+
         let am = self.collect(collect_rows)?;
         // 每请求本步的 logits 行区间（无投机 → 恰 1 行）：取该行 argmax 为下一个 token。
         generated.clear();
