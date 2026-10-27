@@ -683,3 +683,20 @@ MOE_GRID_CAP=8(grid.z 128→8,结果错只测时)vs 128:gemm3 **0.096→0.080ms,
 - 真优化=**M=1专用GEMV kernel**(每专家1行,去BM tile浪费,优化B权重访存流水)或decode M攒批(batch>1摊薄)。
 **优化ROI**:gemm3 0.08ms=decode~8%。做GEMV kernel若到带宽下界14us→gemm3 80→~20us,省60us=decode total 430us的14%。中等收益,需新写NVFP4 GEMV kernel(工程量,且逐位对拍)。
 **MoE做透(用户要求,没跳):测构成R60→验空block R62→算下界R63→读kernel根因R64=M=1用GEMM tile。结论=要M=1 GEMV特化,ROI中等(decode14%)。**
+
+## R65 2026-10-27 MoE M=1 GEMV kernel 实现方案(loop交接,跨会话可接续)
+**目标**:decode(M=1/专家)的NVFP4 grouped GEMM改GEMV式,从6×带宽下界(80us)逼近下界(~20us),省decode~14%。
+**现状kernel**(moe_grouped_sm120.cu:114-230 grouped_gemm_kernel<BK>):
+- grid=(N/BN=N/64, ceil(R/BM)=1(decode), E=128), block 256线程。
+- 每block:kb循环(nk=K/BK块)加载sA[BM=32×RSA]+sB[BN=64×RSB]+scale→sync→mma_fp4(m16n8k64)×nbk→sync;尾写D。
+- NVFP4:A量化[R,K/2]nibble+块scale sfa[K/16];B权重packed[N,K/2]+scale Sptr[e];mma_fp4(a,b,sa,sb,acc)用block_scale。alpha[e]=global乘子。逐位硬底线:quant16/mma_fp4/e4m3_f/rcp复制自gemm_nvfp4_sm120.cu。
+- **M=1浪费**:BM=32只用1行(A载31/32废);m16 mma 1行(1/16);grid每block1 N-tile,8专家×N/64 block,M=1行并行度低→带宽~300GB/s<<1.7T。
+**GEMV方案(M=1特化)**:
+- 新kernel grouped_gemv_kernel:grid=(ceil(N/BN_V), E)或(N/BN_V, nnz_experts),**去掉BM维**(M=1)。
+- 每block算1专家的BN_V个N列×全K:1行A(K/2 nibble+K/16 scale)常驻寄存器/smem,B权重[BN_V,K]流式cp.async载入,逐K块点积累加(NVFP4 scale按块)。
+- 关键:M=1用**向量点积**非mma(或m16 mma只填1行但那浪费);更优=每线程负责若干N列,沿K累加,A广播。
+- 数值逐位:复用mma_fp4/e4m3_f/scale布局,或改标量NVFP4解量化点积(需对拍gemm_nvfp4逐位)。
+**停止条件**:①gemm3从80us降(目标<40us)②逐位对拍grouped_gemm原kernel(或vLLM prompt_logprobs)③MoE整体/TPOT端到端降。
+**接续要点**:先在隔离微基准(非serve)写GEMV+对拍原grouped_gemm逐位,过了再接serve mega moe_branch的moe_grouped_gemm调用(ops.rs:2175 + ffi)。NVFP4数学必须逐字对齐(硬底线,改一侧另一侧同步)。
+**风险**:NVFP4 block_scale布局复杂,GEMV重排易错;decode M可能>1(多token同专家)需兼容;逐位对拍是硬门槛。
+**ROI重申**:gemm3 80us=decode~8%,GEMV到20us省60us=decode 430us的14%,端到端吞吐594或再升几%。中等收益大工程。
