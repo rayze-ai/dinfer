@@ -404,15 +404,17 @@ fn mega_layer_fused_matches_separate() {
     st.synchronize().unwrap();
     let sep_us = t0.elapsed().as_secs_f64() * 1e6 / ITERS as f64;
 
-    // 逐 stage 墙钟拆解（每 stage 单独 launch+sync 计时）：定位 251us 大头真在哪（墙钟，非 cycle 占比）。
+    // 逐 stage 墙钟拆解：**按依赖顺序 0..15 跑完整序列**（deps 满足不卡），每 stage launch 前后 sync 计时。
+    // （不能孤立重复跑单 stage——依赖只在前序 signal，孤立跑会死自旋，见 R12。）
     {
         let sn = ["IN","QKV","QKNORM","ROPE","KVWR","ATTN","OQNT","OPROJ","RES","PREFF","GATE","UP","ACT","DOWN","POST"];
         let mut per = [0f64; 15];
-        for s in 0..15i32 {
-            st.synchronize().unwrap();
-            let ts = std::time::Instant::now();
-            for _ in 0..ITERS {
-                st.memset_zeros_n(&mut rdy, 16).unwrap();
+        const ITW: usize = 50;
+        for _ in 0..ITW {
+            st.memset_zeros_n(&mut rdy, 16).unwrap();
+            for s in 0..15i32 {
+                st.synchronize().unwrap();
+                let ts = std::time::Instant::now();
                 unsafe {
                     ffi::mega_layer_forward(
                         &p as *const MegaLayerParams, s, s, if s == 0 { 1 } else { 0 },
@@ -422,16 +424,18 @@ fn mega_layer_fused_matches_separate() {
                         st.raw() as _,
                     );
                 }
+                st.synchronize().unwrap();
+                per[s as usize] += ts.elapsed().as_secs_f64() * 1e6;
             }
-            st.synchronize().unwrap();
-            per[s as usize] = ts.elapsed().as_secs_f64() * 1e6 / ITERS as f64;
         }
+        for v in per.iter_mut() { *v /= ITW as f64; }
         let stot: f64 = per.iter().sum();
-        println!("[逐stage墙钟 us(单launch,含memset+launch开销)]");
-        for i in 0..15 {
+        let mut order: Vec<usize> = (0..15).collect();
+        order.sort_by(|&a, &b| per[b].partial_cmp(&per[a]).unwrap());
+        println!("[逐stage墙钟 us(顺序launch+每stage sync,由大到小)]  合计={stot:.1}us");
+        for &i in &order {
             println!("  {:7} {:7.2}us ({:4.1}%)", sn[i], per[i], per[i] / stot * 100.0);
         }
-        println!("  合计 {stot:.1}us（含每stage memset+launch固定开销，仅看相对大头）");
     }
 
     st.synchronize().unwrap();
