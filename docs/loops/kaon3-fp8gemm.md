@@ -423,3 +423,11 @@ serve真实decode一层(tok=1,KAON3_STAGE_TIME=1,8次稳定):
 前提:row2e[r]已有(moe_row2expert算,1400行),每行知道它的专家id→block按行段定位专家的B/S/alpha。需改grouped_gemm_kernel:blockIdx.z去掉,改用row2e[m_blk起始行]查e。
 **风险**:一个BM行块可能跨两个专家(边界),需按sorted保证同块同专家(buckets.sorted已按专家排序,BM对齐专家边界或块内判专家)。
 **这是对齐vLLM的核心改动**,MoE占63%,grid浪费94%→理论可大幅降MoE。下一步:改kernel按行块分配,重测MoE整体(NO_GRAPH或首decode窗口)。先读row2e/sorted布局确认行块与专家对齐。
+
+## R40 2026-10-27 按行块分配受阻(BM跨专家),改思路:grid.z压到激活专家上界
+读BM=32,decode R=8<BM→每专家段≤1个BM块。但**offsets非BM对齐(专家段紧挨)**→按全局行块切会跨多专家(decode 8行分属8专家挤一个BM=32块),而kernel要加载单专家权重B[e]→**不能简单按行块分配**。R39思路受阻。
+**更可行思路**:grid.z不必=128。decode R=tokens×top_k,**激活专家≤min(128,R)**。decode tokens≤max_rows(serve 8或64),R≤max_rows×8,**激活专家数有小上界**。cudagraph在decode固定batch捕获→**grid.z可固定=该batch的激活专家上界(远<128)**,而非恒128。
+但激活哪些专家是动态的(路由决定),grid.z=激活数还需**compact offsets**(把非空专家排前面,grid.z=非空数)。这要在bucket阶段算compact映射。
+**权衡**:①compact方案(grid.z=激活数,需bucket改)最省但复杂;②简化:grid.z=固定上界(如min(128, max_rows*top_k)),decode max_rows=8→上界64,仍比128省一半,且无需compact,graph友好。先试②(改动小)看MoE降多少,不够再上①。
+**但⚠️**:grid.z压到64,哪64个?仍要映射。最简:**grid.z=128不变,但让空专家block更早退出/不参与**——其实第123行已经return了,空block开销只是launch+return。真问题是**launch 120个空block的开销**有多大?需实测:grid.z=128 vs 人为减小 的MoE时间差,才知道空block launch是不是真瓶颈(可能return很快、开销小,MoE慢另有原因如量化/scatter)。
+**下一步(先验证再改)**:别急着改kernel。先确认"94%空block"到底占多少时间——用NO_GRAPH跑serve+KAON3_MOE_TIME看gemm3 vs scatter+rest占比,或直接grid.z临时改小测MoE变化。先读MoE是不是真卡在grouped_gemm(R38没测出,sync崩了)。
