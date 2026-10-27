@@ -573,3 +573,20 @@ mega_mlp_parity又全零(‖mega‖=0,R38同病,测试坏,范数卡提前return�
 serve的mega_mlp_dense_branch(layer.rs:910)自带wait_cyc/exec_cyc接口(938行现传null,prof=0)。打开它测serve真实dense 6-stage(NORM/GATE/UP/ACT/DOWN/POST)wait。
 prof是device端StagePlan clock64+atomicAdd累加(mega_common),不sync graph安全;但kernel含cudaMemsetAsync(185)说明dense branch本身不被graph capture→serve dense在graph外→prof读回安全。
 **最小改动**:MegaBufs加wait_cyc/exec_cyc缓冲(各6×u64=MEGA_STAGES),env KAON3_DENSE_TIME=1时调用处传prof=1+缓冲,每步后dtoh读回打印NORM/GATE/UP/ACT/DOWN/POST的exec/wait。
+
+## R55 2026-10-27 serve真实dense branch wait实测(非整层mega):GATE/UP/DOWN wait各~4×exec
+serve mega_mlp_dense_branch 6-stage(KAON3_DENSE_TIME,tok=1):
+| stage | exec cyc | wait cyc | wait/exec |
+|---|---|---|---|
+| NORM | 97664 | 780 | 0 |
+| GATE | 1.70M | 6.87M | 4.0× |
+| UP | 1.70M | 6.88M | 4.0× |
+| ACT | 5950 | 133k | 22× |
+| DOWN | 1.36M | 5.28M | 3.9× |
+| POST | 87k | 42k | 0.5× |
+wait合计18.8M=exec 4.9M的3.9×。GATE/UP wait几乎相等(6.87M)=都等NORM(exec仅0.1M很快)但**等CTA腾出**(持久kernel CTA不够,GATE/UP/DOWN三GEMM抢CTA)。
+**与整层mega同构**:dense branch的GATE/UP/DOWN wait也是CTA调度(轮转领task等CTA空闲)非真依赖(NORM/ACT都快)。
+**但绝对量级**:dense整段stage-time实测仅0.09ms=decode 15%。wait cycle是全CTA累加≠墙钟,3.9×看着大但整段0.09ms。**即使dense wait全消除,省的在0.09ms内=decode 15%一小块**。
+**对比MoE(63%,router曾0.25已关BI降0.03)和host/调度(76% R47)**:dense wait收益上限最小。
+**wait方向serve收益排序**:host/调度(76%,未动)>>MoE(已关BI)>dense(15%内,GATE/UP/DOWN等CTA)。dense wait要降=增CTA(但R6 OCC提2反慢)或缩stage(已融NORM+GATE/UP/ACT/DOWN/POST成6 stage很紧)。
+**结论**:dense wait已测清=CTA调度型、量级15%内收益有限。真大头host/调度(76%)。调研测试完成,该转host/调度。
