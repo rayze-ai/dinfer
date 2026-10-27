@@ -1050,3 +1050,14 @@ NO_GRAPH 每次真拷正确栈值故正常；graph replay 读失效栈故乱码�
 停止条件:①cache>0 ✓(0.731)②吞吐>单序列53有批处理增益 ✓(246,6×)③goodput>0 ✗(TTFT 5.4s/TPOT 38ms 仍超 SLO 500/20)④质量不回退=待确认(24/24 完成 len-stop 24/24,命中路径没崩)。
 **与 vLLM 差距 30×→4.9×**(吞吐 246 vs 1207)。剩余 gap:TPOT 38.6 vs 8.6(decode 每步慢 4.5×=mega decode 本身慢 18.7ms 单序列+并发效率)、TTFT 5.4s(prefill 慢+排队)。
 **下一步 C2**:异步流水(kaon3 executor 实现 supports_async/begin,对标 qwen35 executor.rs:689-695),CPU 调度/采样 D2H 与 GPU forward 重叠,降 TPOT/TTFT。
+
+## C1 质量确认(停止条件④)+ 遗留待查
+两次相同长 prompt(temperature=0,第二次命中前缀 cache):输出**都通顺中文、非乱码**(典型 base completion 重复续写),功能质量不回退 ✓。
+**但隐患**:temperature=0 两次输出**不完全逐位一致**(应确定性一致)。疑似 prefix cache 命中时复用 KV block 与重算 KV 有微小数值差 → 贪心 argmax 边界翻转(memory dinfer-hard-decision-parity)。
+**待查(C2 前或并行)**:prefix cache 命中路径 KV 复用是否应逐位——复用 KV 理论上确定,若不一致说明 kaon3 的 KV 写入/读取或 chunked prefill 命中边界有数值问题。先用 vLLM prompt_logprobs 对拍命中 vs 不命中(oracle,Rust验证口径)。非乱码故非 blocker,但生产确定性需解决。
+
+### C1 阶段小结(交接)
+- **达成**:cache 0→0.731、吞吐 40→246 tok/s(6×,有连续批处理增益)、不失败、与 vLLM 差距 30×→4.9×。commit ac57d57/4421a04。
+- **遗留**:①goodput 仍 0(TTFT 5.4s/TPOT 38ms 超 SLO)→ C2 异步流水;②prefix cache 命中数值一致性待对拍。
+- **下一步 C2**:kaon3 executor 实现 supports_async/begin(对标 qwen35 executor.rs:689-695),降 TPOT/TTFT。
+- 产物 engine_c1b 在远端 test/kaon3/2026-10-27/,pull 受阻(rsync broken pipe)待修。
