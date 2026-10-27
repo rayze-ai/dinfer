@@ -415,3 +415,11 @@ serve真实decode一层(tok=1,KAON3_STAGE_TIME=1,8次稳定):
 已关MOE_TIME/STAGE_TIME,serve恢复UP。
 **MoE细分正确测法(graph兼容)**:①用NO_GRAPH=1跑serve(禁graph,event sync合法),测MoE细分——但那不是生产路径;或②在mega_mlp_parity式的独立微基准里测MoE grouped_gemm(不经serve/graph);或③grid.z=128浪费是**读代码确凿的机制**(R37),不一定非要精确计时——可直接改grid试(只给激活专家起block),重测stage-time MoE整体降没降,降了就坐实。
 **下一步**:走③最直接——改grouped_gemm grid.z从128(全专家)到激活专家数,重测MoE整体ms(用NO_GRAPH或首次decode窗口),降了=坐实grid浪费是大头。先读grouped_gemm host launch怎么设grid.z。
+
+## ★★ R39 2026-10-27 MoE grid.z=128根因+优化思路:改按行块分配(graph友好且不空载)
+读moe_grouped_sm120.cu:259-265:grid=(N/BN, ceil(R/BM), num_experts=128),grid.z=128固定是**为cudagraph友好**(graph要求grid维度固定,不能动态=激活专家数)。decode R=8只激活≤8专家→120专家block空载(N/BN×1×128,94%白起)。
+**两难**:decode要cudagraph(固定grid)→grid.z固定128→94%空载。vLLM不用persistent-expert graph故无此问题。
+**优化思路(graph友好且不空载)**:把grid从(N/BN, ceil(R/BM), 128)改**(N/BN, ceil(R/BM))二维,每block用blockIdx.y的行块查row2e定位专家**——**按行块分配而非按专家分配**。R=tokens×top_k固定(=8)→grid固定→graph友好,且**只起R行需要的block(8行→1-2个BM块),不起128专家**。block数从 N/BN×128 降到 N/BN×ceil(R/BM),decode降~64×(128→ceil(8/BM))。
+前提:row2e[r]已有(moe_row2expert算,1400行),每行知道它的专家id→block按行段定位专家的B/S/alpha。需改grouped_gemm_kernel:blockIdx.z去掉,改用row2e[m_blk起始行]查e。
+**风险**:一个BM行块可能跨两个专家(边界),需按sorted保证同块同专家(buckets.sorted已按专家排序,BM对齐专家边界或块内判专家)。
+**这是对齐vLLM的核心改动**,MoE占63%,grid浪费94%→理论可大幅降MoE。下一步:改kernel按行块分配,重测MoE整体(NO_GRAPH或首decode窗口)。先读row2e/sorted布局确认行块与专家对齐。
