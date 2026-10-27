@@ -96,3 +96,8 @@ gemm_small_m(现成微基准,qwen35形状,M=4)三者带宽:
 **结论**:①"融合亏GEMM带宽8×"彻底不成立,撤销;②真瓶颈=stage间等依赖自旋(R26早定位),**这恰是融合调度可优化的**(依赖排布/并行度/split-K平衡wait),不是"融合错了要拆GEMM";③我把方向搞反——该优化的是wait,不是GEMM kernel,更不是拆融合。
 **正确下一步(回到R26方向)**:降wait——看哪些stage串行等待可并行/重叠(dep链)、split-K平衡各stage wait(R2/R3已在做:sp_gu/sp_dn调到4/4使DOWN wait-23%、mega 66.6→53.9us)。继续沿R26/R3的split-K+依赖优化,不是推翻融合。
 **作废本loop的R5/R7方向**(GEMM独立/拆融合)。保留R2带宽账(但它是整层非GEMM)、R5 ptxas寄存器事实(158/occ=1,真的,但非8×主因)。
+
+## R10 2026-10-27 方法纠正(用户):别绕,就"跑10轮抓每stage墙钟,由大到小排"
+用户:"排查没那么复杂,跑10轮每轮把每个环节耗时抓出来,由大到小就定位了"。对。我前9轮绕occupancy/带宽/dtype/拆融合=过度分析。
+**标准动作(以后照做)**:mega_layer_parity 已加逐stage墙钟(每stage单launch+sync计时);跑N轮取均值+看稳定,15 stage由大到小排,大头即瓶颈。当前后台b4h13yyj5在跑(编译完在计时)。
+**判据**:由大到小排完,top1-3 stage就是优化目标;若top是GEMM→优化GEMM,若是wait/attention/glue→优化那个。不预设结论(前9轮预设了"GEMM"才绕歪)。
