@@ -615,3 +615,16 @@ HOST_TIME每步host三段(单发tok=1):sched=0.3us, **exec(begin+finish)=12080us
 **方向彻底澄清(推翻host/调度猜测)**:TPOT慢不是host CPU、不是调度、不是async没重叠——是**单步30层的GPU计算本身比vLLM慢~2×**。回到kernel!但要对的kernel:每层GPU 0.43ms的大头=MoE(含grouped_gemm grid.z=128的24% + 前处理)。
 **并发排队**(TPOT 54 vs 单步12)是rate8下48请求的流水,另一层(吞吐问题非单token延迟)。
 **下一步**:单步GPU 12ms(每层0.43)要降到vLLM级→优化每层最大头。MoE grouped_gemm grid.z=128(R37-40没改,占MoE24%)+ MoE前处理(R43 router已关BI)。或attn 19%。先确认关BI后MoE新占比(router降了MoE构成变了)。
+
+## R59 2026-10-27 dense wait透彻读kernel:NORM/ACT单task本身快,wait是持久kernel固有(169CTA空等)
+读S_NORM(mega_mlp_sm120.cu:93)/S_ACT(126)实现:
+- S_NORM:1 task,warp<p.m(m≤8每warp一行),**1 CTA 8 warp刚好算m=8行**,exec仅0.1M很快。NORM单task合理(m小)。
+- S_ACT:1 task,`for i=tid;i<m*I;i+=kThreads`,1 CTA 256线程扫m*I=16896元素gelu,exec仅5950很快。
+**dense wait真相(透彻)**:NORM/ACT单task本身都快(不是慢)。wait是**持久megakernel架构固有**:170 CTA从头常驻,GATE/UP阶段136 task用得上,但**NORM/ACT/POST单task阶段,169+ CTA在wait_stage `__nanosleep(40)`自旋空等那1个task+signal传播**。GATE/UP wait 6.87M大头=等NORM这个单task stage的signal。
+**能不能改(透彻评估)**:
+(a)窄stage铺多task让CTA别闲——NORM/ACT计算量小(0.1M/5950 cyc),切碎是假忙,反增signal/同步开销,不会降wait墙钟;
+(b)不用持久kernel(每stage独立launch)——放弃megakernel省的launch,且dense只占decode 15%不值;
+(c)减少常驻CTA数(grid小些)——但GATE/UP/DOWN(136/88 task)需要CTA,grid小了这些stage并行度降。
+**透彻结论**:dense wait是持久megakernel"CTA常驻+stage串行推进"的固有代价,窄stage(NORM/ACT单task)时CTA空等。**无廉价改法**:铺多task假忙、拆kernel放弃融合收益、减CTA降GEMM并行,三者都不划算(dense仅15%)。这不是bug是架构权衡。
+**对比vLLM**:vLLM dense MLP用独立cutlass kernel(每个充分并行),无持久CTA空等;我们用megakernel换launch省、代价是窄stage空等。**dense这15%上megakernel可能本就不比独立kernel快**——但15%影响小。
+**dense wait做透了(用户要求)**:从测(R55)→改法(R56)→读kernel根因(R59),结论=持久kernel固有代价无廉价改法,15%不值重构。**不是跳过,是做透后判定**。
