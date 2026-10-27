@@ -484,3 +484,17 @@ ROUTER_GEMM_BI=0(走cuBLASLt并行)重测:
 **根因总结**:BI router用persistent matmul grid=(1,1)单block单SM串行K=2816(为逐位),169 SM闲=0.25ms。cuBLASLt并行化=0.03ms。
 **落地**:kserve_full.sh已加ROUTER_GEMM_BI=0。整层decode 0.63→0.43ms,TPOT应从~59ms(seqs64)相应降。需端到端bench确认TPOT/吞吐提升+质量(prompt_logprobs对拍oracle_nobi)。
 **整轮排查闭环**:TTFT(max_num_seqs 16→64,13.7×)已拿;TPOT真凶=router BI默认开(关掉整层decode降32%)。两个都是**配置洞**(非代码重写),都是serve真实路径实测逼出来的。
+
+## R46 2026-10-27 端到端关BI结果:吞吐540→573(+6%)/TPOT59.4→54.5(-8%),但远小于单层32%
+锁死负载(seed42/全共享1024/128out/REQS48)dinfer全优化 vs vLLM:
+| | 吞吐 | TTFT p50 | TPOT p50 |
+|---|---|---|---|
+| 起点 | 357 | 3357 | - |
+| seqs64 | 540 | 245 | 59.4 |
+| seqs64+关BI | **573** | 254 | **54.5** |
+| vLLM非eager | 944 | 25 | 6.6 |
+**端到端TPOT只降8%(59.4→54.5),远小于单层decode的32%(0.63→0.43)**。诚实落差。
+**关键新发现**:单层decode 0.43ms×层数≈十几ms,但**TPOT 54ms远大于此**→TPOT大头不是单层GPU计算,是**每步host/调度/async/采样开销**。router优化只动了GPU算那块的一小部分。
+→ **TPOT 54 vs vLLM 6.6(8×)的大头在每步host/调度开销,不在单层kernel**。这又是一层:我一直测单层GPU时间,但TPOT主要花在host侧(类似之前TTFT是调度非prefill)。
+**下一步**:测TPOT的host vs GPU构成——每decode步的host时间(调度/采样/launch)vs GPU时间。疑点:async调度是否真重叠(之前R16-20绕过)、每步launch开销、采样/D2H。vLLM TPOT 6.6ms说明每步host开销极小,我们54ms必有大host开销。
+**已确认的两配置洞收益(落地)**:max_num_seqs=64(TTFT 3357→254,13×)+ROUTER_GEMM_BI=0(单层decode降32%,端到端TPOT-8%)。吞吐357→573(vLLM的61%)。
