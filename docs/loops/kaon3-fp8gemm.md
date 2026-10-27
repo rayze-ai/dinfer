@@ -668,3 +668,18 @@ MOE_GRID_CAP=8(grid.z 128→8,结果错只测时)vs 128:gemm3 **0.096→0.080ms,
 **优化方向(MoE做透→改)**:decode M=1是GEMV非GEMM。①专用GEMV kernel(每专家1行,无m16浪费,优化访存流水)②或多token时M攒批提利用率(decode batch>1)。vLLM MoE小M怎么做=cutlass grouped或专用decode kernel。
 **对比全局**:gemm3 80us是cap=8(8专家真算)值;生产grid.z=128时96us(空block+17%)。MoE占decode~15%(关BI后MoE 0.178ms/total~0.43)。gemm3 0.08ms=MoE 54%=decode~8%。
 **下一步**:读grouped_gemm K循环(cp.async流水深度/每block行数),定位6×下界是流水浅还是occupancy;对比能否用GEMV式(M=1特化)提访存效率。
+
+## ★★★ R64 2026-10-27 MoE做透(5)完:gemm3 6×下界根因=M=1用BM=32 GEMM tile(GEMV当GEMM跑)
+读K循环:无cp.async/wait_group,普通smem加载+__syncthreads(同步,每kb块串行:load A/B→sync→mma→sync)。
+**6×带宽下界根因(读码坐实)**:decode M=1但kernel用BM=32 GEMM tile:
+- A加载BM=32行只用1行→**浪费31/32 A访存**(但A小,主浪费在B);
+- 每block处理1专家1 N-tile,8专家×(N/BN)个block,grid小+每block只1有效行→**occupancy/并行度低,搬B权重吃不满带宽**(有效~300GB/s<<1.7T);
+- m16 mma用1行(1/16)算力废(但访存受限时次要)。
+**本质**:decode M=1是**GEMV(1行×权重)**,却用**GEMM tile kernel(BM=32)**跑→tile维度全浪费、带宽吃不满→6×下界。
+**MoE做透完整结论**:
+- MoE占decode关BI后~15%(前processor router已关BI降,gemm3成大头54% of MoE=decode~8%);
+- gemm3大头=8专家M=1 NVFP4 GEMV用GEMM kernel跑,6×带宽下界,kernel结构不适配M=1;
+- grid.z=128空block只17%(R62已排除,非大头);
+- 真优化=**M=1专用GEMV kernel**(每专家1行,去BM tile浪费,优化B权重访存流水)或decode M攒批(batch>1摊薄)。
+**优化ROI**:gemm3 0.08ms=decode~8%。做GEMV kernel若到带宽下界14us→gemm3 80→~20us,省60us=decode total 430us的14%。中等收益,需新写NVFP4 GEMV kernel(工程量,且逐位对拍)。
+**MoE做透(用户要求,没跳):测构成R60→验空block R62→算下界R63→读kernel根因R64=M=1用GEMM tile。结论=要M=1 GEMV特化,ROI中等(decode14%)。**
