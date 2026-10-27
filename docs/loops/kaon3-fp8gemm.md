@@ -178,3 +178,10 @@ KVWR47.1(11.6%glue写KV) IN37.4(9.2%norm) RES37.1(9.1%glue) OPROJ32.0(7.9%GEMM) 
 **与vLLM差距真因对上**:不是GEMM慢(QKV exec38.9%但wait仅1.2×健康),是**CTA调度让各stage空等,wait是exec 5×**→消除等待理论可快到~1/5。这是实打实代码/调度问题,不是"没瓶颈"(我之前R13/R14说"无瓶颈"是错的:墙钟测法打断流水掩盖了wait,融合态wait才暴露)。
 **纠正R13/R14**:逐stage单独sync计时打断流水→测不到wait→误判"无瓶颈分布平"。融合态exec/wait才是真相:**瓶颈=等待(5.12×),不是任何单算子**。
 **优化方向(数据指向,真方向)**:降wait——①GATE/UP解依赖并行(都只依赖norm,别串PREFF);②缩依赖链(ATTN等的KVWR→QKNORM);③ACT→DOWN衔接;④根上:持久CTA调度/occupancy=1让CTA无法重叠不同stage。先啃最大的DOWN(24%wait)和GATE/UP(各17%)。
+
+## R17 2026-10-27 GATE/UP依赖已并行,wait非依赖串是CTA不够(纠正R16打法)
+读dep表(mega_layer_sm120.cu:541-542):`h_dep[S_GATE]=S_RES, h_dep[S_UP]=S_RES`,**GATE/UP都只依赖RES,彼此无依赖=已并行**。R26说的"dep[UP]=GATE串"现已不成立(改过了)。
+**那wait 8×哪来的**:不是依赖串,是**调度**——GATE(n_gu×sp_gu个task)+UP(n_gu×sp_gu个)都在RES完成后ready,但**occupancy=1→CTA少(~170)→两批task排队串行执行**。wait=task等CTA空闲,非等依赖。
+→ 纠正R16"GATE/UP解依赖并行"打法:依赖已并行,真问题是**CTA数不够让task并行**。根子还是occupancy=1(158寄存器)。
+**但R6已试OCC=2反而慢**——矛盾待解:occ=1说CTA少,提occ=2又慢。可能OCC=2的128寄存器spill或task调度变差。需重新审视:wait大是因为①CTA总数少(occ low)还是②单stage内task粒度/分配问题。
+**下一步**:先量GATE stage的task数 vs grid CTA数(n_gu·sp_gu vs sms·occ),看是不是task≫CTA导致排队;再看wait到底是"等CTA"还是"等RES这一个前序stage"(若RES慢,GATE/UP等的是RES不是CTA)。
