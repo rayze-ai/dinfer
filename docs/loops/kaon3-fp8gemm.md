@@ -532,3 +532,10 @@ ROUTER_GEMM_BI=0(走cuBLASLt并行)重测:
 perf-trend.csv格式:round,date,change,group(c1/c8/c32),metric(out_tok_per_s等),dinfer,vllm,ratio,...;tab=single(URL #model/gpu/tab)。是4组闭环bench口径,与engine端到端(单rate8)不同。
 **engine-trend已base64取回本机**(r1-r5在engine-trend.csv),但那是另一个页。
 **下一步**:派子代理把r1-r5端到端数据按perf-trend格式进去(或确认该用哪个页),让用户那个折线图URL能看到5轮+CHANGE。
+
+## R50 2026-10-27 重跑整层mega wait(用户要求)+诚实判断:对serve TPOT无用
+全优化态(sp=4)整层mega exec/wait(与R30一致稳定):GATE wait27.7%(14.7×等RES)、OPROJ24.1%(等OQNT)、QKV17%(2.4×健康)、UP12.8%、DOWN11.2%。wait/exec=5.65×。
+**wait可攻性**:GATE/OPROJ/UP的wait全是"等上游算完"真数据依赖(链后段等QKV→ATTN→OPROJ→RES),给它们本身加split-K已证无效/更慢(R31)。真能降wait=①让上游QKV更快(但serve QKV走cuBLASLt已不慢,整层mega的QKV用fp8_gemm_tile慢但serve不走)②缩依赖链(片上融合,175us<215已证有效)。
+**最关键诚实判断**:**这张wait表是整层mega测试,serve不走整层mega**(serve只融dense MLP GATE/UP/DOWN,QKV/OPROJ cuBLASLt,MoE grouped)。在整层mega测试上抠wait对serve TPOT无用。
+**serve真实TPOT大头(R47实测)=host/调度开销(占76%),GPU实算仅24%**,不是这张表的stage间wait。
+→ **继续优化应攻serve真实路径的host/调度**(R47),不是整层mega测试的wait。wait这个方向在整层mega测试里已到头(片上融合175us是最优,单stage加split-K无效)。
