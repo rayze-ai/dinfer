@@ -177,8 +177,8 @@ int mega_mlp_dense_branch(const void* x, void* out, const void* pre_w, const voi
   if (sp_gu < 1) sp_gu = 1;
   if (sp_dn < 1) sp_dn = 1;
   constexpr int kBN = MlpDenseDispatch::kBN;
-  // smem：sA(16×RS) + sB(BN×RS)
-  const size_t smem = (size_t)(16 + kBN) * (128 + 16);
+  // smem：sA(16×RS) + sB(BN×RS)，双缓冲软件流水用 2 份
+  const size_t smem = (size_t)2 * (16 + kBN) * (128 + 16);
 
   // split-K 的 sem 须每次 launch 前清零（partial 不用：每 split 全写自己的区）。
   if (sp_gu > 1) {

@@ -91,8 +91,10 @@ __device__ __forceinline__ void fp8_gemm_tile(const uint8_t* __restrict__ A, con
 #endif
   constexpr int BK = 128;
   constexpr int RS = BK + 16;
-  uint8_t* sA = smem;             // m(≤16) 行 × RS
-  uint8_t* sB = smem + 16 * RS;   // BN 行 × RS
+  // 双缓冲软件流水：两份 sA/sB（buf 0/1），算 kb 时预取 kb+1，藏访存延迟。smem 布局 = [sA0 sB0 sA1 sB1]。
+  constexpr int TILE_SMEM = (16 + BN) * RS;  // 单份 = sA(16×RS)+sB(BN×RS)
+  uint8_t* sA_buf[2] = {smem, smem + TILE_SMEM};
+  uint8_t* sB_buf[2] = {smem + 16 * RS, smem + TILE_SMEM + 16 * RS};
 
   float acc[2][4] = {};  // 本 warp 的 2 个 n8 片段 × 4 累加器
   const int nk = (K + BK - 1) / BK;
@@ -106,7 +108,8 @@ __device__ __forceinline__ void fp8_gemm_tile(const uint8_t* __restrict__ A, con
   constexpr int A_SLOTS = 16 * A_CH;               // 总槽数
   constexpr int B_PER_T = BN * A_CH / kThreads;
 
-  auto load_b = [&](int kb) {
+  // 发出 kb 的 B（cp.async）+ A（普通写）到 buf。只 active（前 A_SLOTS 线程写 A；全员发 B）。
+  auto load_b = [&](int kb, uint8_t* sB) {
 #pragma unroll
     for (int i = 0; i < B_PER_T; ++i) {
       const int u = tid + i * kThreads, row = u / A_CH, ch = u % A_CH;
@@ -115,8 +118,7 @@ __device__ __forceinline__ void fp8_gemm_tile(const uint8_t* __restrict__ A, con
       mega::cp_async16_zfill(sB + row * RS + ch * 16, g, (gn < N && gk + 15 < K) ? 16 : 0);
     }
   };
-  // **不能早 return**：后面有 __syncthreads()，早退会让部分线程跳过 barrier → 死锁/段错。
-  auto store_a = [&](int kb) {
+  auto store_a = [&](int kb, uint8_t* sA) {
     if (tid < A_SLOTS) {
       const int ar_ = tid / A_CH, ac_ = tid % A_CH;
       const int gm = ar_, gk = kb * BK + ac_ * 16;
@@ -128,12 +130,28 @@ __device__ __forceinline__ void fp8_gemm_tile(const uint8_t* __restrict__ A, con
   };
 
   const int nrow0 = warp * (BN / kWarps);  // 每 warp 负责 BN/8 行 N
-  for (int kb = kb_lo; kb < kb_hi; ++kb) {
-    load_b(kb);
-    store_a(kb);
+  const int nkb = kb_hi - kb_lo;
+  if (nkb > 0) {
+    // 序幕：发出第一块到 buf0。
+    load_b(kb_lo, sB_buf[0]);
+    store_a(kb_lo, sA_buf[0]);
     asm volatile("cp.async.commit_group;\n");
-    asm volatile("cp.async.wait_group 0;\n");
+  }
+  for (int j = 0; j < nkb; ++j) {
+    const int kb = kb_lo + j;
+    const int cur = j & 1, nxt = (j + 1) & 1;
+    // 先发出下一块（kb+1）到另一 buf——它的访存将与本块 mma 重叠。
+    if (j + 1 < nkb) {
+      load_b(kb + 1, sB_buf[nxt]);
+      store_a(kb + 1, sA_buf[nxt]);
+      asm volatile("cp.async.commit_group;\n");
+      asm volatile("cp.async.wait_group 1;\n");  // 等到只剩 1 组在飞（= 本块已落地，下一块可仍在飞）
+    } else {
+      asm volatile("cp.async.wait_group 0;\n");   // 最后一块：等全部落地
+    }
     __syncthreads();
+    uint8_t* sA = sA_buf[cur];
+    uint8_t* sB = sB_buf[cur];
 #pragma unroll
     for (int kc = 0; kc < BK / 32; ++kc) {
       const int kb0 = kc * 32;
