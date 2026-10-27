@@ -265,3 +265,14 @@ sp扫描(融合墙钟,逐位全✓):
 - QKV/OPROJ是独立kernel,另一套代码(gemm路径),split-K/效率那张表管不着。
 - 要选serve下一步优化,必须**在serve真实路径profile**(独立QKV/attn/OPROJ/dense mega各占多少),不是拿整层mega测试表猜。又差点优化错对象(整层mega非serve路径)。
 **下一步(待定方向)**:在serve decode路径加分段计时(或用nsys),看独立QKV/attention/OPROJ/dense-mega真实占比,再定攻谁。端到端TTFT慢41×(prefill)可能比decode更该先攻(R24)。
+
+## R26 2026-10-27 下一步=攻TTFT(主);wait优化项挂账(用户:别忘wait)
+**主攻:TTFT慢41×(3357ms vs vLLM 81ms)**。端到端最大洞,rate8下48请求首token堆3.3秒,量级异常→大概率prefill调度/并发bug(非kernel微优化)。先查TTFT为何3.3秒:prefill请求是否串行/排队、chunked prefill是否生效、首token路径开销。
+**wait优化项(挂账,别忘,用户强调)**——注意:下列来自**整层mega测试**,serve走dense branch非整层,serve真实wait待在serve路径核实后再优化:
+1. DOWN 等 ACT(12.2×):ACT→DOWN衔接空隙
+2. GATE/UP 各等 PREFF(8×):依赖已并行(都dep RES),wait是前段并行度不足→split-K已部分解(sp=4降14%);可各stage非均匀细调sp
+3. ATTN 等 KVWR→QKNORM(11×):依赖链长,可缩
+4. QKV 1.2×健康(不动)
+5. split-K非均匀细调:各stage task数不同(QKV64/GATE17/DOWN22),分别扫sp_qkv/o/gu/dn找各自最优(非全4),可能再降
+6. 根上:occupancy/CTA调度(但R6单提occ反慢,需和依赖一起治)
+**顺序**:先TTFT(端到端大头)→回来按serve真实路径profile定decode侧攻谁(wait项)。CSV/dashboard子代理处理中。
