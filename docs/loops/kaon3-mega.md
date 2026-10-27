@@ -1202,3 +1202,16 @@ NO_GRAPH 每次真拷正确栈值故正常；graph replay 读失效栈故乱码�
 - HALVES=2(仅整层mega S_ATTN):half=tid>>7, lt=tid&127, active 恒真(lt<128), ks=lt/LPK, smem[half], barrier=`bar.sync(half+1,128)` 两半区独立, 合并写 `for d=lt;d<D;d+=V3_THREADS`。b/hk/split **core内解码** `shard=shard_base+half; split=shard%splits; hk=(shard/splits)%Hkv; b=shard/splits/Hkv`。
 - 外壳 mega_layer S_ATTN:领 shard 对,传 shard_base=2*任务号, HALVES=2 调 core;host count[S_ATTN]=ceil(total/2)。奇数末对第二half shard越界→core内 b 解出后 seq_lens[b] 可能越界,需 shard<total_shards 门控(越界半区 active=false 或传 seq=0 走占位)。
 实现顺序:①core模板化(smem[HALVES]+half/lt+命名barrier+解码)②编译验HALVES=1逐位不变(独立壳+mega_attn现有测试)③外壳改HALVES=2④验HALVES=2逐位==HALVES=1⑤测S_ATTN耗时。
+
+## 方向三 ✅实现正确但收益极小 2026-10-27:ATTN仅占整层3.6%,优化上限~1.8%
+mega_layer_parity 通过(fused vs separated 逐位0/N,两条都HALVES=2):**方向三实现正确自洽**——无死锁、命名barrier(bar.sync half+1,128)工作、shard解码对、smem[half]不踩、范数正常非垃圾。工程对。
+**但 per-stage profiling(m=4)是决定性数据**:
+| stage | exec占比 |  | stage | exec占比 |
+|---|---|---|---|---|
+| QKV(fp8GEMM) | **40.6%** |  | GATE | 11.1% |
+| OPROJ | 19.6% |  | UP | 10.6% |
+| DOWN | 10.5% |  | **ATTN** | **仅3.6%** |
+**attention 只占整层 3.6%**。方向三解决的"256外壳128活半数空转"只在这3.6%内,**砍半整层最多省~1.8%**,几乎无用。真正大头是fp8 GEMM(QKV 40.6%+OPROJ 19.6%+GATE/UP/DOWN各~11% = GEMM共~92%)。
+**教训(又一次)**:动手前就该先测 stage 占比定收益上限,而不是花整轮改kernel才发现优化的stage只占3.6%。"256空转128"听着浪费,实际在可忽略的stage里。
+**方向三代码保留**(已逐位正确),默认走它无害(HALVES=2与分离逐位一致);但**不是性能重点**。
+**真正该优化的**:fp8 GEMM(QKV/OPROJ/GATE/UP/DOWN 占~92%)。下一步性能应投这里,不是attention。
