@@ -177,6 +177,9 @@ impl KaonExecutor {
     /// `t` = token 数（含 padding），`n` = 请求数（含 padding），`nrows` = logits 行数，`max_seqlen` = 本步每请求最大 query 长。
     fn forward_device_mode(&mut self, mode: BatchMode, t: usize, n: usize, nrows: usize, max_seqlen: usize) -> Result<()> {
         let s = &self.stream;
+        // 异步调度 token 接力：在飞行（上一步 token 尚未回 host）的行 ids[i]=prev_chosen[gather_idx[i]]；
+        // 非异步步 gather_idx 全 -1，用 host 上传的 ids 值，无害。必须在 StepMeta 借 &self.plan 之前做。
+        self.plan.gather_inflight(s, t)?;
         let v = self.model.cfg.vocab_size;
         let meta = StepMeta {
             mode,
@@ -207,6 +210,8 @@ impl KaonExecutor {
         k::ops::gather_rows_bf16(s, &self.logits.data, &mut self.gathered.data, &self.plan.rows.data, nrows, v)?;
         k::ops::bf16_to_f32_n(s, &self.gathered.data, &mut self.gathered_f32.data, nrows * v)?;
         k::argmax_f32_n(s, &self.gathered_f32.data, &mut self.argmax.data, nrows, v)?;
+        // 本步采样 token 存回 prev_chosen，供下一步在飞 decode 的 gather_inflight 取用（图内捕获；非异步无害）。
+        self.plan.save_chosen(s, &self.argmax.data, nrows)?;
         Ok(())
     }
 
