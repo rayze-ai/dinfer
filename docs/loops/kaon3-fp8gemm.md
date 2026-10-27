@@ -700,3 +700,15 @@ MOE_GRID_CAP=8(grid.z 128→8,结果错只测时)vs 128:gemm3 **0.096→0.080ms,
 **接续要点**:先在隔离微基准(非serve)写GEMV+对拍原grouped_gemm逐位,过了再接serve mega moe_branch的moe_grouped_gemm调用(ops.rs:2175 + ffi)。NVFP4数学必须逐字对齐(硬底线,改一侧另一侧同步)。
 **风险**:NVFP4 block_scale布局复杂,GEMV重排易错;decode M可能>1(多token同专家)需兼容;逐位对拍是硬门槛。
 **ROI重申**:gemm3 80us=decode~8%,GEMV到20us省60us=decode 430us的14%,端到端吞吐594或再升几%。中等收益大工程。
+
+## R66 2026-10-27 真机重跑确认当前数字(由总到分,新会话)——dinfer复现r4,vLLM基线是eager地板非真对手
+环境:dinfer :8142(GPU0,seqs64+BI关+MEGA=1+MOE_GROUPED=1,max-model-len2048),vLLM :28200(**--enforce-eager**,served=kaon-vllm)。交接区那个944/6.6ms非eager基线:28067已不在。bench绑核60-91(client仅0.01核,干净),seed42/全共享1024前缀/128out/warmup3。
+**e2e rate8 /48req**:
+| | 吞吐tok/s | TTFT p50 | TPOT p50 | cache |
+|---|---|---|---|---|
+| dinfer | **594** | 251ms | **51.8ms** | 0.976 |
+| vLLM(eager) | 346 | 238ms | 93.3ms | 未报cache |
+**dinfer稳稳复现r4(594/251/51.8)**。vLLM eager只346=地板(dinfer比它快,已满足"≥eager");**但944/6.6非eager基线没了,这次比较不能当追平/超越依据**(苹果比橘子)。
+**单流concurrency=1(剥离排队)**:TTFT 56.8ms,**TPOT 18.5ms**。
+→ **rate8的TPOT 51.8ms里,单步纯decode只18.5ms,其余2.8×(33ms)是并发排队/批内竞争**。两条优化线分清:①单步18.5ms(kernel,MoE63%大头=R64的M=1 GEMV)②排队33ms(调度/批处理并发,max_num_seqs已64,看批内decode效率)。
+**下一步**:到分——起一个NO_GRAPH+KAON3_STAGE_TIME的serve实例测单步各stage墙钟(确认MoE63%在当前配置是否仍成立),再决定攻单步kernel还是并发排队。
