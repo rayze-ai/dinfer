@@ -737,3 +737,18 @@ NO_GRAPH+KAON3_STAGE_TIME起GPU4 serve(容器坑:ctr默认--gpus device=0,要GPU
 **重要修正(对R64/R65)**:R64说gemm3大头=M=1 GEMV用GEMM tile跑(tile浪费);但**大M(132)下tile应吃满,MoE却仍70%**→MoE低效**不止M=1**,是NVFP4 grouped GEMM本身跨所有M都慢(vs vLLM同FLOPs更快)。R65只修M=1 GEMV→对decode单流有效,但对prefill/大batch的MoE 70%无效。
 **真瓶颈重定位**:MoE(grouped NVFP4 GEMM)是decode(R36:63%)和prefill(R68:70%)双料大头。要拉近vLLM必须整体提MoE grouped GEMM效率(非仅M=1特化)。
 **就绪判定bug**:110s循环查/v1/completions没等到choices就NOTREADY杀serve(其实45s已listening),没跑到bench的decode步。下轮改查/v1/models+留settle再bench拿decode分段。
+
+## ★★★★ R69 2026-10-27 MoE细分大M实测:gemm3=MoE 86%=整层63%,13%峰值效率→彻底推翻"M=1 tile浪费"
+三开关全开(STAGE+DENSE+MOE_TIME)NO_GRAPH跑,warmup prefill r=16896(2112 tok×top8,每专家M≈132):
+| MoE子段 | ms | 占MoE |
+|---|---|---|
+| **gemm3(3×grouped NVFP4 GEMM)** | **2.96** | **86%** |
+| norm+gather+quant | 0.174 | 5% |
+| scatter | 0.139 | 4% |
+| router | 0.057 | 2% |
+| sm+bucket | 0.057 | 2% |
+MoE合计3.43ms=整层(stage total 4.73)的**70%**;gemm3单独=整层**63%**。
+**效率算账(大M=132)**:gemm3 FLOPs≈3×16896×2816×704×2≈0.2TFLOP /2.96ms=**68 TFLOP/s=NVFP4峰值502的13%**;权重带宽380MB/1.7TB=0.22ms,gemm3是它13×→**非带宽非tile,是grouped GEMM kernel本身低效**。
+**彻底推翻R64/R65**:R64说gemm3慢=M=1用BM=32 GEMM tile(tile浪费);但**M=132(tile吃满)下gemm3仍占86%、仍只13%效率**→低效与M无关,是NVFP4 grouped GEMM实现差(vs vLLM cutlass grouped)。
+**真瓶颈最终定位**:gemm3(3×NVFP4 grouped GEMM)=decode(R36 54% of MoE)+prefill(R69 86% of MoE)双料第一大头,13%峰值效率。拉近vLLM的唯一大杠杆=**重写/调优NVFP4 grouped GEMM kernel**(非M=1特化)。对比vLLM MoE路径(cutlass grouped FP8/NVFP4)看它怎么到高效率。
+**就绪判定bug坑**:ctr heredoc多层转义把`grep "\"data\""`打乱→永不匹配→误报NOTREADY杀serve(其实42s已listening)。改`grep kaon3`(模型id,无引号)。GPU4/5残留容器占内存会让新serve OOM→也NOTREADY,复用GPU前先确认nvidia-smi空。
