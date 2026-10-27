@@ -219,3 +219,11 @@ KVWR47.1(11.6%glue写KV) IN37.4(9.2%norm) RES37.1(9.1%glue) OPROJ32.0(7.9%GEMM) 
 - **"为什么等"的答案=前段stage并行度太低没吃满GPU,拖慢关键路径**。非融合/拆问题,是每stage并行度。
 **直接手段=split-K**:K维切sp份→task×sp→用上闲置SM→stage更快→wait降。**R16测wait时sp全=1(split-K关着)!**(parity:244-247 sp_qkv/o/gu/dn=1)。历史R3已验sp_gu/dn=4/4使dense 66.6→53.9us、DOWN wait-23%,方向对,只是测wait用了sp=1。
 改parity:sp_qkv/o/gu/dn 改环境变量可调(envsp,默认1)。**下一步:同测试跑 sp全1 vs sp全4,对比各stage wait——验证split-K降wait(解决为什么等)**。
+
+## R22 2026-10-27 sp=1基线拿到;警觉:wait累加cycle指标会误导,验split-K要看墙钟
+sp=1基线(网关断,sp=4未跑完):wait/exec=5.14×,DOWN wait 24.1%(12.2×)、GATE/UP各17%(8×)、ATTN15.5%、QKV仅9%(1.2×)。与R16一致(稳定)。
+**警觉(别被累加指标带偏)**:wait=所有task thread0累加cycle。DOWN 22 task(sp=1),每个CTA从t=0自旋等前链→22份"等前链"cycle累加→自然巨大。**wait大=依赖深度×并行宽度的累加,不等于"有这么多时间可省"**。
+**sp=4的两种相反可能**:①task×4每stage更快吃满SM→下游少等→wait降;②task×4更多CTA从t=0自旋等前链→wait累加反涨。**wait累加指标本身可能误导**。
+**→ 验split-K必须看墙钟(融合us),不是wait累加**。R3历史已答:sp_gu/dn=4/4使dense 66.6→53.9us(墙钟降)。所以split-K有用,但指标要对。
+**下一步(网关恢复)**:跑 sp=1 vs sp=4 的**融合墙钟us**(测试里"融合launch无glue"那行,251us),看split-K降多少墙钟;扫sp∈{1,2,4,8}找最优(如R3 dense的4/4)。不看wait累加。
+**同时诚实**:wait=5.14×这个"5倍"我之前当"可省5倍"宣传过(R16),现在明确——它是累加指标,真能省多少只能看墙钟。又一个被单指标带偏的教训。
