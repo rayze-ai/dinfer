@@ -156,3 +156,25 @@ KVWR47.1(11.6%glue写KV) IN37.4(9.2%norm) RES37.1(9.1%glue) OPROJ32.0(7.9%GEMM) 
 3. **最贵前三=KVWR(写KV)/IN/RES=glue+norm,几乎不算数→launch+sync固定开销主导**。
 **彻底定论(10轮硬数据,抖<2%)**:GEMM非瓶颈,无单一瓶颈,251us平摊15stage大头是固定开销。→减stage数(片上融合)才有效(已证251→192),优化任何单GEMM/attn/双缓冲/方向三都无效(都打小占比)。"GEMM慢8×"彻底证伪。
 **注**:此表含每stage launch+sync开销(合计406>真实融合251),绝对值偏大,但相对分布+抖动结论硬。真实融合内各stage占比需看融合态per-stage(exec cycle,R26有);但"无单一瓶颈""GEMM非独大"两个口径一致。
+
+## ★★★★ R16 2026-10-27 真问题坐实(用户方向:等待):融合态 wait=exec的5.12×,喂不饱是大头
+融合态(真实1 launch不打断)抓每stage exec vs wait(CTA等依赖自旋),按wait排序:
+**exec合计747万 wait合计3828万 = wait/exec 5.12×**。CTA等前一步的时间是真算的5倍!
+| stage | exec% | wait% | wait/exec | 等谁 |
+|---|---|---|---|---|
+| DOWN | 10.1 | 24.1 | **12.2×** | ACT |
+| GATE | 10.7 | 17.1 | **8.2×** | PREFF |
+| UP | 10.4 | 17.1 | **8.4×** | PREFF |
+| ATTN | 7.1 | 15.5 | **11.2×** | KVWR→QKNORM |
+| OPROJ | 18.8 | 13.4 | 3.7× | OQNT |
+| QKV | 38.9 | 9.0 | **1.2×** | IN |
+**读法(前一步喂不饱后一步)**:
+- QKV wait/exec仅1.2×=唯一喂得饱(依赖IN快,一来就有活)。其余全在空等。
+- DOWN等ACT 12×、ATTN等KVWR→QKNORM 11×、GATE/UP各等PREFF 8×=这些stage绝大部分时间空等前序,真算只占零头。
+**根因=持久megakernel的CTA调度让各stage疯狂空等**:
+1. GATE·UP都等PREFF各8×,但GATE/UP本可并行(都只依赖norm)→调度挤一起等。
+2. DOWN等ACT 12×:ACT(gelu)快但DOWN干等,ACT→DOWN衔接大空隙。
+3. ATTN等KVWR→QKNORM 11×:等KV写完+qknorm链太长。
+**与vLLM差距真因对上**:不是GEMM慢(QKV exec38.9%但wait仅1.2×健康),是**CTA调度让各stage空等,wait是exec 5×**→消除等待理论可快到~1/5。这是实打实代码/调度问题,不是"没瓶颈"(我之前R13/R14说"无瓶颈"是错的:墙钟测法打断流水掩盖了wait,融合态wait才暴露)。
+**纠正R13/R14**:逐stage单独sync计时打断流水→测不到wait→误判"无瓶颈分布平"。融合态exec/wait才是真相:**瓶颈=等待(5.12×),不是任何单算子**。
+**优化方向(数据指向,真方向)**:降wait——①GATE/UP解依赖并行(都只依赖norm,别串PREFF);②缩依赖链(ATTN等的KVWR→QKNORM);③ACT→DOWN衔接;④根上:持久CTA调度/occupancy=1让CTA无法重叠不同stage。先啃最大的DOWN(24%wait)和GATE/UP(各17%)。
