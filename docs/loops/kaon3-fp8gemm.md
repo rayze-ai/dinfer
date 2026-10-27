@@ -658,3 +658,13 @@ MOE_GRID_CAP=8(grid.z 128→8,结果错只测时)vs 128:gemm3 **0.096→0.080ms,
 - 这是decode batch=1场景,8专家各算[~1行×N×K]的NVFP4 GEMM,M极小→和QKV同病(mma m16但m=1,利用率低)。但NVFP4 kernel是否m16待读。
 - vLLM MoE也是NVFP4?它的MoE grouped GEMM在小M怎么做的(cutlass grouped)。
 **下一步(MoE做透继续)**:读grouped_gemm_kernel的mma/BM看8专家真算为何0.08ms(m=1的NVFP4 GEMM效率);对比理论(8专家权重字节/带宽)。先算8专家NVFP4权重量=理论下界,看0.08ms离下界多远(访存受限还是kernel低效)。
+
+## ★★ R63 2026-10-27 MoE做透(4):gemm3大头=M=1 NVFP4 GEMM,6×带宽下界=kernel低效非带宽
+配置:experts=128 topk=8 moe_inter=704 hidden=2816。decode每专家M=1(R=8分8专家各1行)。
+- mma=**m16n8k64**(moe_grouped_sm120.cu:40,M维固定16),decode M=1→**1/16利用率**,15/16废在padding。
+- 8专家NVFP4权重=23.79MB,带宽理论下界=14us,实测gemm3=**80us=6×下界**。有效带宽~300GB/s<<1.7TB/s峰值。
+**坐实**:gemm3大头=8专家M=1 NVFP4 GEMM,**kernel低效(6×带宽下界)非带宽受限**。病因=M=1但m16 mma(同QKV怀疑的病,但QKV走cuBLASLt没事;MoE走手写grid kernel M=1全废)。
+**为何6×下界(待继续)**:M=1时①m16 mma 1/16利用(算力废,但访存受限场景mma废无所谓)②更可能=M=1行太少,cp.async流水/occupancy吃不满带宽(同fp8_gemm_tile R13的68%load-bound)。6×下界说明没搬满带宽=访存效率低,非mma。
+**优化方向(MoE做透→改)**:decode M=1是GEMV非GEMM。①专用GEMV kernel(每专家1行,无m16浪费,优化访存流水)②或多token时M攒批提利用率(decode batch>1)。vLLM MoE小M怎么做=cutlass grouped或专用decode kernel。
+**对比全局**:gemm3 80us是cap=8(8专家真算)值;生产grid.z=128时96us(空block+17%)。MoE占decode~15%(关BI后MoE 0.178ms/total~0.43)。gemm3 0.08ms=MoE 54%=decode~8%。
+**下一步**:读grouped_gemm K循环(cp.async流水深度/每block行数),定位6×下界是流水浅还是occupancy;对比能否用GEMV式(M=1特化)提访存效率。
