@@ -1400,10 +1400,14 @@ impl Gemma4Layer {
             k::ops::moe_row2expert(stream, &sc.buckets.offsets, &mut g.row2e, e, r)?;
             // 2) gather 全部 R 行（按 sorted 顺序，start=0）
             k::ops::moe_gather_bf16(stream, &sc.h2.data, &mut sc.xg.data, &sc.buckets.sorted_tok, 0, r, h)?;
+            // MoE 内部细分计时（KAON3_MOE_TIME=1）：量 3×grouped_gemm vs 其余。
+            let moe_time = std::env::var("KAON3_MOE_TIME").ok().as_deref() == Some("1");
+            let mt_ev = if moe_time { Some(stream.new_timing_events(3)?) } else { None };
             // 3) gate/up 共用一次量化（a_scale 相等），再两次 grouped GEMM
             k::ops::moe_grouped_quant(
                 stream, &sc.xg.data, &g.row2e, &mg.agscale_gu, &mut g.aq_gu, &mut g.as_gu, r, mg.k_gate, exact_rq,
             )?;
+            if let Some(ev) = &mt_ev { stream.record_timing(&ev[0])?; }  // 量化后=3gemm前
             k::ops::moe_grouped_gemm(
                 stream, &g.aq_gu, &g.as_gu, &mg.gate_packed, &mg.gate_scale, &mg.alpha_gate, &sc.buckets.offsets,
                 &mut g.gate_o.data, r, mg.n_gate, mg.k_gate, e,
@@ -1422,6 +1426,7 @@ impl Gemma4Layer {
                 stream, &g.aq_dn, &g.as_dn, &mg.down_packed, &mg.down_scale, &mg.alpha_down, &sc.buckets.offsets,
                 &mut sc.yg.data, r, mg.n_down, mg.k_down, e,
             )?;
+            if let Some(ev) = &mt_ev { stream.record_timing(&ev[1])?; }  // 3×gemm完
             // 6) scatter_add（全 R 行一次，start=0）——累加序与 host 版（专家升序）由 atomic 决定，逐位须实测
             if !moe_combine_f32() {
                 k::ops::moe_scatter_add_bf16w_f32(
@@ -1437,8 +1442,14 @@ impl Gemma4Layer {
             stream.memset_zeros_n(&mut sc.y.data, tokens * h)?;
             k::ops::f32_add_to_bf16_n(stream, &sc.acc.data, &mut sc.y.data, tokens * h)?;
             sub_dump(stream, sub_out, "moe_y", &sc.y, tokens, h)?;
+            if let Some(ev) = &mt_ev { stream.record_timing(&ev[2])?; }  // scatter+合并完
             rmsnorm_into(stream, ops, &sc.y, &self.post_ff_norm_2, &mut sc.h2, h, tokens, eps)?;
             sub_dump(stream, sub_out, "ff2", &sc.h2, tokens, h)?;
+            if let Some(ev) = &mt_ev {
+                stream.synchronize()?;
+                let ms = |a: usize, b: usize| k::TimingEvent::elapsed_ms(&ev[a], &ev[b]).unwrap_or(0.0);
+                tracing::info!("[moe-time] r={r} gemm3={:.3} scatter+rest={:.3} ms", ms(0, 1), ms(1, 2));
+            }
             return Ok(());
         }
 
