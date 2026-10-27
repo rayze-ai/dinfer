@@ -981,6 +981,12 @@ impl Gemma4Layer {
         let eps = cfg.eps;
         ensure!(self.rope_dim <= d, "rope_dim {} > head_dim {d}", self.rope_dim);
 
+        // 分段计时（`KAON3_STAGE_TIME=1`，默认关零开销）：量 serve 真实 decode 各段 GPU 时间。
+        // 段:0入口 1=attn完(含qkv/norm/rope/paged) 2=oproj+残差完 3=dense完 4=moe完。
+        let stage_time = std::env::var("KAON3_STAGE_TIME").ok().as_deref() == Some("1");
+        let st_ev = if stage_time { Some(stream.new_timing_events(5)?) } else { None };
+        if let Some(e) = &st_ev { stream.record_timing(&e[0])?; }
+
         // ---- 1. input_norm ----
         // vLLM **compile 口径**（默认）：inductor 把 RMSNorm 与下游 fp8 量化融成一个 kernel，中间不落 bf16。
         // q/k/v 共用同一个 input_norm 且共用同一个 `input_scale`（实测 L0/L5 三者 scale 相同），
@@ -1154,11 +1160,13 @@ impl Gemma4Layer {
             std::fs::write(dir.join("attn_out.bin"), bytes)
                 .map_err(|err| anyhow::anyhow!("写 attn_out.bin 失败: {err}"))?;
         }
+        if let Some(e) = &st_ev { stream.record_timing(&e[1])?; }  // 段1完=attn(qkv/norm/rope/paged)
         self.o_proj.forward(gemm, stream, attn, &mut sc.o, tokens)?;
         sub_dump(stream, sub_out, "o_proj", &sc.o, tokens, h)?;
         rmsnorm_into(stream, ops, &sc.o, &self.post_attn_norm, &mut sc.norm, h, tokens, eps)?;
         sub_dump(stream, sub_out, "post_attn_norm", &sc.norm, tokens, h)?;
         k::ops::add_inplace_bf16_n(stream, &sc.norm.data, &mut sc.x.data, tokens * h)?;
+        if let Some(e) = &st_ev { stream.record_timing(&e[2])?; }  // 段2完=oproj+post_attn_norm+残差
 
         // ---- 7. dense MLP 支路（无条件执行）----
         // `KAON3_MEGA=1` 且 decode（tokens ≤ 8）时，整条支路走 persistent megakernel 一次 launch：
@@ -1190,9 +1198,11 @@ impl Gemma4Layer {
             rmsnorm_into(stream, ops, &sc.dense, &self.post_ff_norm_1, &mut sc.norm, h, tokens, eps)?;
         }
         sub_dump(stream, sub_out, "ff1", &sc.norm, tokens, h)?;
+        if let Some(e) = &st_ev { stream.record_timing(&e[3])?; }  // 段3完=dense MLP支路
 
         // ---- 8. MoE 支路（与 dense 并联）----
         self.moe_branch(stream, gemm, ops, cfg, sc, tokens, eps, sub_out)?;
+        if let Some(e) = &st_ev { stream.record_timing(&e[4])?; }  // 段4完=MoE支路
 
         // ---- 9. 两条支路相加 → post_ff_norm → 残差 → layer_scalar ----
         k::ops::add_inplace_bf16_n(stream, &sc.h2.data, &mut sc.norm.data, tokens * h)?; // h2 = post_ff_norm_2(moe)
@@ -1202,6 +1212,14 @@ impl Gemma4Layer {
         k::ops::add_inplace_bf16_n(stream, &sc.h2.data, &mut sc.x.data, tokens * h)?;
         if self.layer_scalar != 1.0 {
             k::ops::scale_bf16_n(stream, &mut sc.x.data, tokens * h, self.layer_scalar)?;
+        }
+        if let Some(e) = &st_ev {
+            stream.synchronize()?;
+            let ms = |a: usize, b: usize| k::TimingEvent::elapsed_ms(&e[a], &e[b]).unwrap_or(0.0);
+            tracing::info!(
+                "[stage-time] tok={tokens} attn={:.3} oproj={:.3} dense={:.3} moe={:.3} total={:.3} ms",
+                ms(0, 1), ms(1, 2), ms(2, 3), ms(3, 4), ms(0, 4)
+            );
         }
         Ok(())
     }
