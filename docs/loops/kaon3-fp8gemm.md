@@ -30,3 +30,10 @@
 **kernel级天花板**:只能把30%的mma藏进68.6%的load,≤30%,双缓冲已证occupancy吃不到。
 **→ 环节2/3(权重复用/BK调)对load-once模式无效,跳过。** 真正杠杆:①M攒批(算访比↑,引擎层)②确认load是否已达峰值带宽(达峰=kernel级到顶只剩M攒批;未达=有coalescing/效率bug可修)。
 **下一步**:验load实际带宽 vs 5090峰值(~1.7TB/s)。先算QKV权重字节数(ΣN=8192 × H)。
+
+## R2 2026-10-27 带宽账(推翻R1"带宽下界"早结论):实测251us是理论31us的8×,远未达峰
+真实尺寸:H=2816,I=2112,heads=16,kv=8,head_dim=256 → ΣN=8192。
+权重字节(fp8=1B)/层:QKV ΣN×H=8192×2816=**23MB**(对上qkv requantize 23068672)、OPROJ H×heads·D=2816×4096=11.5MB、GATE/UP各I×H=2112×2816=5.9MB、DOWN H×I=5.9MB → **整层~52MB**。
+5090带宽~1.7TB/s → 纯搬权重理论 **52e6/1.7e12=~31us/层**。实测整层融合 **251us = 8× 理论**。
+**→ 远未达峰值带宽(~13%),不是带宽下界,是kernel低效可挖(R1"带宽下界kernel绕不开"下早了,收回)。** 8×gap来源待查:occupancy不足(mega持久CTA数少)/ cp.async效率 / 非GEMM开销(glue/sync/attention)/ exec cycle%不等于wall%。
+**下一步**:实测达到带宽——QKV单stage wall时间 vs 其23MB理论13.5us。若QKV也8×→确认kernel低效,逐项查occupancy/发射;若接近→251us大头在别处(sync/glue/attention串行等待)。先看wait cycle:之前QKV wait=3.75M远大于exec,DOWN wait=10M——**wait(stage间等待)可能才是真大头,非GEMM本身**。
