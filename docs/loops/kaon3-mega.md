@@ -1172,3 +1172,11 @@ NO_GRAPH 每次真拷正确栈值故正常；graph replay 读失效栈故乱码�
 差异源=输出长度分布(s42c含长输出占slot久)+ 15%的4096超长prompt(prefill重且evict前缀)+ 共享比例 + eos策略。**都不是代码差异**。
 **核心教训**:tok/s **离开具体负载就没意义**。194/291/211/246 不是"同一东西的不同测量",是不同负载各自的吞吐,**互比本身是错的**(我之前并列对比犯了此错)。
 **可比的前提**:锁死负载(固定 prompt/output/prefix_repeat/eos/seed),只变待比的那一个变量。shp组(全共享1024/全128/ignore_eos/seed42)锁死了负载,291 vs 60.9 只切cache才成立。往后任何性能对比必须先声明完整负载口径,且两边同负载。
+
+## 打包2shard 读码纠正 2026-10-27:非"core零改动",需改core三处(但仍逐位安全)
+动手前读 gqa_decode_v3_core.cuh,**纠正前面"打包2shard=core零改动"的错判**(又一次没读透):
+- **拦路1 静态smem(76-79)**:s_k/s_v/s_m/s_l/s_acc 是静态 `__shared__`。两半区各调core→共用同片smem互相踩。必须每半区用不相交smem→改core(加half参数或smem加[2]维)。
+- **拦路2 整块syncthreads(129/162/176)**:循环 `for t<ntiles`,ntiles由该shard seq长定(105)。两shard seq不同→ntiles不同→sync次数不同→**死锁**。需把__syncthreads换命名barrier(bar.sync id,128,两半区各用barrier 0/1独立)→改core。
+**真实情况**:打包2shard 要改core三处(half参数+smem分区+命名barrier),比我说的大;但**每半区仍128线程算法、KEYS/归约序不变→逐位不变**,这是相对方向二(改常量破逐位+重写归约+改smem布局+波及共用core)的关键优势。
+**smem翻倍约束**:两半区各一份smem,D=256/G6 ~32KB×2=64KB>48KB默认,D=128/G4 ~24KB×2=48KB临界——两条路都撞,需动态smem或opt-in。
+**下一步**:若做,改core(half门控smem+命名barrier),外壳run领2shard。先确认实测smem占用定可行档位。待用户定是否按此改动量推进。
