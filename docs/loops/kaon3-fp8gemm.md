@@ -752,3 +752,14 @@ MoE合计3.43ms=整层(stage total 4.73)的**70%**;gemm3单独=整层**63%**。
 **彻底推翻R64/R65**:R64说gemm3慢=M=1用BM=32 GEMM tile(tile浪费);但**M=132(tile吃满)下gemm3仍占86%、仍只13%效率**→低效与M无关,是NVFP4 grouped GEMM实现差(vs vLLM cutlass grouped)。
 **真瓶颈最终定位**:gemm3(3×NVFP4 grouped GEMM)=decode(R36 54% of MoE)+prefill(R69 86% of MoE)双料第一大头,13%峰值效率。拉近vLLM的唯一大杠杆=**重写/调优NVFP4 grouped GEMM kernel**(非M=1特化)。对比vLLM MoE路径(cutlass grouped FP8/NVFP4)看它怎么到高效率。
 **就绪判定bug坑**:ctr heredoc多层转义把`grep "\"data\""`打乱→永不匹配→误报NOTREADY杀serve(其实42s已listening)。改`grep kaon3`(模型id,无引号)。GPU4/5残留容器占内存会让新serve OOM→也NOTREADY,复用GPU前先确认nvidia-smi空。
+
+## R70 2026-10-27 由总到分 exec/wait 分析成形(用户要求打印各段执行+等待,深入分析)
+**总**:dinfer 594 vs vLLM非eager(:28201)946=63%,单步TPOT 51.8 vs 7.57=6.8×;decode段GPU~100%利用→kernel效率差非host。
+**单流vs batch**:单流TPOT 18.5ms,rate8 batch 51.8ms(batch摊销每序列0.96ms,高效,非排队浪费)。
+**各段执行耗时**:decode M=1(R36)MoE63%/attn19%/dense15%/oproj3%;prefill大M(R68/69)MoE70%/attn14%/dense8%/oproj5%。
+**MoE内gemm3=绝对核心**:大M下gemm3=MoE 86%=整层63%,68 TFLOP/s=NVFP4峰值502的**13%**,权重带宽只需0.22ms(gemm3是其13×)→grouped NVFP4 GEMM kernel本身低效,与M无关。
+**两类慢分清(回答用户"Rust该更快是否在等")**:
+- **MoE(63-70%)=纯exec但低效**:GPU 100%忙但只13%峰值,无"等",是算得慢(vs vLLM cutlass grouped);
+- **dense mega(8-15%)=真有wait**:R55实测GATE/UP/DOWN wait≈4×exec(持久kernel 169 CTA自旋空等signal),但占比小,全消≈省10%。
+**结论**:用户直觉对一半——确有空耗GPU的"等",但在小头(dense);大头(MoE)是实打实算得慢。**唯一大杠杆=重写/调优NVFP4 grouped GEMM(gemm3)逼近cutlass效率**,非M=1特化(R65降级)非dense wait。
+**ctr容器限制**:默认bridge网络→端口host不可达,bench必须容器内跑;容器cpuset不含60-91→**容器内taskset越界bench静默不跑**(第7次坑)。容器内bench去掉taskset。
