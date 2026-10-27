@@ -590,3 +590,11 @@ wait合计18.8M=exec 4.9M的3.9×。GATE/UP wait几乎相等(6.87M)=都等NORM(e
 **对比MoE(63%,router曾0.25已关BI降0.03)和host/调度(76% R47)**:dense wait收益上限最小。
 **wait方向serve收益排序**:host/调度(76%,未动)>>MoE(已关BI)>dense(15%内,GATE/UP/DOWN等CTA)。dense wait要降=增CTA(但R6 OCC提2反慢)或缩stage(已融NORM+GATE/UP/ACT/DOWN/POST成6 stage很紧)。
 **结论**:dense wait已测清=CTA调度型、量级15%内收益有限。真大头host/调度(76%)。调研测试完成,该转host/调度。
+
+## R56 2026-10-27 dense wait尝试改:根是持久kernel串行stage点,改需重构;15%收益不值,量化判定
+用户问"dense wait改了吗"——之前只测没改。深入看改法:
+dense wait根因(读mega_mlp_sm120.cu:264 grid + mega_common.cuh:68 wait_stage):grid=min(sms·occ=170, acc=227 task)。GATE68+UP68+DOWN88 task抢170 CTA。真正空等点=**NORM/ACT各仅1 task时,169个CTA在wait_stage `__nanosleep(40)`自旋等这1个task+signal传播**。GATE/UP wait 4×主要是等NORM这个1-task stage。
+**可试改点**:①nanosleep粒度40ns(影响整层+dense都用的wait_stage,未必主因);②NORM融进GATE/UP开头消除1-task串行点(改kernel stage结构,大改);③grid砍到按stage实际task(但GATE/UP/DOWN用得上CTA,砍了并行度降)。
+**量化判定(为何不改)**:dense整段decode 15%(0.09ms)。GATE/UP/DOWN的wait是"等NORM 1-task stage"的固有串行,根治=重构持久kernel的stage barrier(把单task stage融掉或改signal机制),**风险大(逐位/死锁)、收益≤15%一小块**。对比host/调度76%(未动)。
+**诚实结论**:dense wait改法想清了=要重构stage结构,15%收益不值当下做。记为"已分析改法,判定ROI低,挂起"。真优先级=host/调度76%。
+**用户要的闭环**:dense wait从测到改法都过了一遍(不是跳过),结论是改它ROI低。
