@@ -37,3 +37,9 @@
 5090带宽~1.7TB/s → 纯搬权重理论 **52e6/1.7e12=~31us/层**。实测整层融合 **251us = 8× 理论**。
 **→ 远未达峰值带宽(~13%),不是带宽下界,是kernel低效可挖(R1"带宽下界kernel绕不开"下早了,收回)。** 8×gap来源待查:occupancy不足(mega持久CTA数少)/ cp.async效率 / 非GEMM开销(glue/sync/attention)/ exec cycle%不等于wall%。
 **下一步**:实测达到带宽——QKV单stage wall时间 vs 其23MB理论13.5us。若QKV也8×→确认kernel低效,逐项查occupancy/发射;若接近→251us大头在别处(sync/glue/attention串行等待)。先看wait cycle:之前QKV wait=3.75M远大于exec,DOWN wait=10M——**wait(stage间等待)可能才是真大头,非GEMM本身**。
+
+## R3 2026-10-27 wait语义+定位方法:exec/wait是全CTA累加cycle≠墙钟,需隔离单GEMM实测带宽
+wait_cyc(mega_common.cuh:56-68)=CTA等依赖stage的自旋(while ld_acquire<need nanosleep40),**跨所有持久CTA累加**。wait≫exec→大量CTA空等少数干活(并行度/负载不均),但**累加cycle≠wall time**,不能直接换算。
+**定位方法纠正**:251us是墙钟,exec/wait%是cycle占比,两者口径不同。要找8×gap真因必须隔离单GEMM看wall级带宽,排除stage依赖/glue/attention干扰。
+**隔离方案**:mega_mlp_parity(dense branch)全零坏了不能用;mega_attn_parity不含GEMM。→ 需要一个**直接调fp8_gemm_tile单发**的微基准:给定M=4/8、QKV形状(ΣN=8192,K=H=2816),跑N次测wall us,对比理论13.5us(23MB/1.7TB/s)。
+**下一步**:写最小微基准(或复活mega_mlp_parity全零——先查它为何全零,可能是同一类低效/配置问题的线索)。先查mega_mlp dense branch全零根因(R15曾过)——它既是测试也可能暴露GEMM本身bug。
