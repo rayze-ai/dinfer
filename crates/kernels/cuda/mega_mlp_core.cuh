@@ -128,23 +128,12 @@ __device__ __forceinline__ void fp8_gemm_tile(const uint8_t* __restrict__ A, con
   };
 
   const int nrow0 = warp * (BN / kWarps);  // 每 warp 负责 BN/8 行 N
-#ifdef MEGA_DIAG_GEMMTIME
-  extern __device__ unsigned long long g_gemm_cyc[3];  // [载入, mma, 写出]，tid==0 累加
-  unsigned long long _ld = 0, _mm = 0; const bool _rec = (tid == 0);
-#endif
   for (int kb = kb_lo; kb < kb_hi; ++kb) {
-#ifdef MEGA_DIAG_GEMMTIME
-    const unsigned long long _t0 = _rec ? clock64() : 0;
-#endif
     load_b(kb);
     store_a(kb);
     asm volatile("cp.async.commit_group;\n");
     asm volatile("cp.async.wait_group 0;\n");
     __syncthreads();
-#ifdef MEGA_DIAG_GEMMTIME
-    const unsigned long long _t1 = _rec ? clock64() : 0;
-    if (_rec) _ld += _t1 - _t0;
-#endif
 #pragma unroll
     for (int kc = 0; kc < BK / 32; ++kc) {
       const int kb0 = kc * 32;
@@ -158,13 +147,7 @@ __device__ __forceinline__ void fp8_gemm_tile(const uint8_t* __restrict__ A, con
       mma_fp8(a, b1, acc[1]);
     }
     __syncthreads();
-#ifdef MEGA_DIAG_GEMMTIME
-    if (_rec) _mm += clock64() - _t1;
-#endif
   }
-#ifdef MEGA_DIAG_GEMMTIME
-  const unsigned long long _ts = _rec ? clock64() : 0;
-#endif
 
   // 尾声：r0=lane>>2 / r1=r0+8，列 = nrow0 + (lane&3)*2 + {0,1}（第 i 片段 +8）
   const int r0 = lane >> 2, r1 = r0 + 8, cg = (lane & 3) * 2;
@@ -183,13 +166,6 @@ __device__ __forceinline__ void fp8_gemm_tile(const uint8_t* __restrict__ A, con
         if (r1 < m) D[(long)r1 * N + g1] = to_bf16(acc[i][3] * wscale);
       }
     }
-#ifdef MEGA_DIAG_GEMMTIME
-    if (_rec) {
-      atomicAdd(&g_gemm_cyc[0], _ld);
-      atomicAdd(&g_gemm_cyc[1], _mm);
-      atomicAdd(&g_gemm_cyc[2], clock64() - _ts);
-    }
-#endif
     return;
   }
   // split-K：本 split 的 f32 partial 写 partial[split][m][N]（不乘 wscale，归约后统一乘）

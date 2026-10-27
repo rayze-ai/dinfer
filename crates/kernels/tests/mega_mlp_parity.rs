@@ -220,10 +220,7 @@ fn mega_mlp_matches_eager_path() {
   let rel = dot.sqrt() / nr.sqrt().max(1e-30);
   println!("[退化检查] ‖ref‖={:.4} ‖mega‖={:.4}（应同量级非零）", nr.sqrt(), nm.sqrt());
   assert!(nr.sqrt() > 1.0, "参考范数异常（可能全零）");
-  // 诊断期：mega 全零不 panic，继续跑计时+三段 cycle（本轮只为 fp8 GEMM 三段 profiling，parity 正确性另论）。
-  if nm.sqrt() <= 1.0 {
-    eprintln!("[WARN] mega 范数={:.4} 可能全零——parity 不成立，但继续测 fp8 GEMM 三段 cycle", nm.sqrt());
-  }
+  assert!(nm.sqrt() > 1.0, "mega 范数异常（可能全零）");
   println!("[对比] 不同 {nd}/{} max|d|={mx:.4e} rel={rel:.3e}", M * H);
   println!("VERDICT: {}", if nd == 0 { "逐位一致" } else if rel < 5e-3 { "fp8 级差（可接受）" } else { "有系统性偏差" });
   // 分阶段耗时（clock64 周期，所有 task 累加）：定位瓶颈
@@ -286,25 +283,4 @@ fn mega_mlp_matches_eager_path() {
   let mega_us = t1.elapsed().as_secs_f64() * 1e6 / ITERS as f64;
   println!("[计时] B={M} 逐op路径={eager_us:.1}us  mega一次launch={mega_us:.1}us  speedup={:.2}x",
            eager_us / mega_us);
-
-  // fp8_gemm_tile 三段 cycle（MEGA_DIAG_GEMMTIME=1 编译时才有符号；否则跳过）。
-  #[cfg(not(feature = "no-nvcc"))]
-  {
-    extern "C" {
-      fn mega_diag_gemmtime_read(out3: *mut u64) -> i32;
-    }
-    let mut cyc = [0u64; 3];
-    let rc = unsafe { mega_diag_gemmtime_read(cyc.as_mut_ptr()) };
-    if rc == 0 && cyc.iter().sum::<u64>() > 0 {
-      let tot = cyc.iter().sum::<u64>() as f64;
-      println!(
-        "[fp8_gemm_tile 三段 cycle(ITERS×3GEMM 累加, tid0)]  载入={} ({:.1}%)  mma={} ({:.1}%)  写出={} ({:.1}%)",
-        cyc[0], cyc[0] as f64 / tot * 100.0,
-        cyc[1], cyc[1] as f64 / tot * 100.0,
-        cyc[2], cyc[2] as f64 / tot * 100.0
-      );
-    } else {
-      println!("[fp8_gemm_tile 三段] 未插桩（需 MEGA_DIAG_GEMMTIME=1 重编）或全 0");
-    }
-  }
 }

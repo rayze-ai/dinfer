@@ -23,23 +23,7 @@
 #include "common.cuh"
 #include "kernels.h"
 #include "mega_common.cuh"
-#include "mega_mlp_core.cuh"       // fp8_gemm_tile / rmsnorm_row_warp / gelu
-
-// fp8_gemm_tile 三段 cycle 累加器 [载入, mma, 写出]。定义**必须与 fp8_gemm_tile 实例化在同一 TU**
-// （build.rs 无 -rdc=true，__device__ 全局变量不跨编译单元；放 mega_mlp_sm120.cu 会让本 TU 的 atomicAdd 写幻影副本）。
-// 诊断用，测完回退。
-namespace dinfer { namespace mega_mlp {
-__device__ unsigned long long g_gemm_cyc[3] = {0, 0, 0};
-}}
-extern "C" {
-int mega_diag_gemmtime_read(unsigned long long* out3) {
-  return (int)cudaMemcpyFromSymbol(out3, dinfer::mega_mlp::g_gemm_cyc, sizeof(unsigned long long) * 3);
-}
-int mega_diag_gemmtime_reset() {
-  unsigned long long z[3] = {0, 0, 0};
-  return (int)cudaMemcpyToSymbol(dinfer::mega_mlp::g_gemm_cyc, z, sizeof(unsigned long long) * 3);
-}
-}
+#include "mega_mlp_core.cuh"       // fp8_gemm_tile / rmsnorm_row_warp / gelu_mul_round2（dinfer::mega_mlp）
 #include "gqa_decode_v3_core.cuh"  // gqa_decode_v3_core<GROUP,D>（dinfer::gqa_v3）
 
 namespace dinfer {

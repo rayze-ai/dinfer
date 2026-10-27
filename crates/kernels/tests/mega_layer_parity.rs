@@ -380,25 +380,6 @@ fn mega_layer_fused_matches_separate() {
         let pct = if tot > 0 { ecv[i] as f64 / tot as f64 * 100.0 } else { 0.0 };
         println!("  {:7} exec={:>11} ({:4.1}%)  wait={:>11}", names[i], ecv[i], pct, wcv[i]);
     }
-    // fp8_gemm_tile 三段 cycle（MEGA_DIAG_GEMMTIME=1 编译才非零；5 个 GEMM stage 累加）。
-    {
-        extern "C" {
-            fn mega_diag_gemmtime_read(out3: *mut u64) -> i32;
-        }
-        let mut gc = [0u64; 3];
-        let rc = unsafe { mega_diag_gemmtime_read(gc.as_mut_ptr()) };
-        let gt = gc.iter().sum::<u64>();
-        if rc == 0 && gt > 0 {
-            println!(
-                "[fp8_gemm_tile 三段(5 GEMM 累加, tid0)]  载入={} ({:.1}%)  mma={} ({:.1}%)  写出={} ({:.1}%)",
-                gc[0], gc[0] as f64 / gt as f64 * 100.0,
-                gc[1], gc[1] as f64 / gt as f64 * 100.0,
-                gc[2], gc[2] as f64 / gt as f64 * 100.0
-            );
-        } else {
-            println!("[fp8_gemm_tile 三段] 未插桩或全 0（需 MEGA_DIAG_GEMMTIME=1）");
-        }
-    }
 
     assert_eq!(total, 0, "片上融合与分离基线不逐位一致：qkv={nd_qkv} cache={nd_cache} attn={nd_attn} o={nd_o} x2={nd_x2} norm1={nd_norm1} out={nd_out}");
 
