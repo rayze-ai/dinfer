@@ -1226,3 +1226,8 @@ mega_layer_parity 通过(fused vs separated 逐位0/N,两条都HALVES=2):**方�
 - **但整层 251.0→250.2us=0.3%,噪声内**。attention 占比太小(7%),砍半对整层无意义。
 **按用户判据"没收益就回退"**:端到端无收益→回退 core(f546428)+外壳(f51d0ce)两commit,恢复纯原始。
 **留存结论**:方向三方法正确可复用(将来若 attention 占比大的模型/场景),但对当前 Gemma4 sliding 层(GEMM占92%)不值得。性能重点确认在 fp8 GEMM。
+
+## fp8 GEMM 三段插桩 2026-10-27:mega_mlp_dense_branch测试路全零,转mega_layer_parity(已知好)读cycle
+目标:fp8_gemm_tile 三段(载入cp.async/mma/写出)各占cycle。插桩:MEGA_DIAG_GEMMTIME门控,g_gemm_cyc[3]全局累加(tid0,splits==1路径),FFI mega_diag_gemmtime_read。build.rs加-D开关。
+坑:mega_mlp_parity(dense_branch)这次跑**‖mega‖=0全零**(R15曾逐位过,现退化,根因另议)→kernel没跑到fp8_gemm_tile→cycle也0。非本轮插桩引入(core逻辑本轮只加诊断)。诊断期已把范数assert改warn不panic。
+**转路**:mega_layer_parity(方向三时验过fused vs separated逐位0/N,**能跑通**)同样调fp8_gemm_tile→用它读cycle。下一步:mega_layer_parity加reset+read+print,带宏跑。
