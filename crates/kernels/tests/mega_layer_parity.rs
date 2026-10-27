@@ -404,6 +404,36 @@ fn mega_layer_fused_matches_separate() {
     st.synchronize().unwrap();
     let sep_us = t0.elapsed().as_secs_f64() * 1e6 / ITERS as f64;
 
+    // 逐 stage 墙钟拆解（每 stage 单独 launch+sync 计时）：定位 251us 大头真在哪（墙钟，非 cycle 占比）。
+    {
+        let sn = ["IN","QKV","QKNORM","ROPE","KVWR","ATTN","OQNT","OPROJ","RES","PREFF","GATE","UP","ACT","DOWN","POST"];
+        let mut per = [0f64; 15];
+        for s in 0..15i32 {
+            st.synchronize().unwrap();
+            let ts = std::time::Instant::now();
+            for _ in 0..ITERS {
+                st.memset_zeros_n(&mut rdy, 16).unwrap();
+                unsafe {
+                    ffi::mega_layer_forward(
+                        &p as *const MegaLayerParams, s, s, if s == 0 { 1 } else { 0 },
+                        st.ptr_mut(&mut dep) as *mut i32, st.ptr_mut(&mut cnt) as *mut i32,
+                        st.ptr_mut(&mut sta) as *mut i32, st.ptr_mut(&mut rdy) as *mut i32,
+                        st.ptr_mut(&mut dep2) as *mut i32, std::ptr::null_mut(), std::ptr::null_mut(), 0,
+                        st.raw() as _,
+                    );
+                }
+            }
+            st.synchronize().unwrap();
+            per[s as usize] = ts.elapsed().as_secs_f64() * 1e6 / ITERS as f64;
+        }
+        let stot: f64 = per.iter().sum();
+        println!("[逐stage墙钟 us(单launch,含memset+launch开销)]");
+        for i in 0..15 {
+            println!("  {:7} {:7.2}us ({:4.1}%)", sn[i], per[i], per[i] / stot * 100.0);
+        }
+        println!("  合计 {stot:.1}us（含每stage memset+launch固定开销，仅看相对大头）");
+    }
+
     st.synchronize().unwrap();
     let t1 = std::time::Instant::now();
     for _ in 0..ITERS {
