@@ -675,6 +675,18 @@ async fn run(a: &Args) -> Result<Summary> {
             bail!("warmup request failed: {:?}", r.error);
         }
     }
+    // 预热共享长前缀：prefix_repeat>0 时，先发一个与正式共享前缀请求同构(idx=0)的请求并等完成，
+    // 把前缀 KV 灌进 block_pool。否则正式阶段"首个共享前缀请求先算完、后续才命中"是 wall-clock 竞争，
+    // prefix cache 命中率随运行时序在 0.2~0.99 间非确定抖动、吞吐跟着在 40~240 tok/s 乱跳（见 docs/loops/kaon3-mega.md）。
+    // max_tokens=1：只需 prefill 把前缀 KV 写进 pool，无需生成。
+    if a.prefix_repeat > 0.0 {
+        let p = make_prompt_shared_prefix(a.seed, 0, a.prompt_len);
+        let msgs = serde_json::json!([{"role": "user", "content": p}]);
+        let r = one_request(&client, &a.url, &model, &msgs, 1, 1, a).await;
+        if !r.ok {
+            bail!("shared-prefix warmup failed: {:?}", r.error);
+        }
+    }
     let g = Gen {
         mix: if a.prompt_len_mix.is_empty() { Vec::new() } else { parse_len_mix(&a.prompt_len_mix)? },
         omix: if a.output_len_mix.is_empty() { Vec::new() } else { parse_len_mix(&a.output_len_mix)? },
