@@ -358,3 +358,18 @@ serve真实decode一步(layer.rs:9-14注释)=qkv独立GEMM→q/k/v_norm+rope→p
 **那张wait表(整层mega)和serve是两套GEMM路径**,一路困惑的根源。整层mega测试的QKV用fp8_gemm_tile,serve的QKV用cuBLASLt,不是一回事。
 **重新定位serve TPOT真大头(必须serve路径实测)**:疑点转向①mega dense branch(fp8_gemm_tile m16浪费,serve走这条)②MoE(128专家,整层mega没测)。cuBLASLt的QKV/OPROJ大概率不是问题(同vLLM)。
 **下一步**:serve decode加分段CUDA event(qkv-cublaslt/attn/oproj-cublaslt/dense-mega/moe),实测serve真大头。别再碰整层mega测试(serve不走)。
+
+## ★★ R34 2026-10-27 坐实各算子量化+GEMM路径(用户质疑QKV是否真走cuBLASLt)
+读hf_quant_config(MIXED_PRECISION)+QLinear::forward全+serve调用链(layer.rs:1021-1188):
+| 算子 | quant | serve走的GEMM |
+|---|---|---|
+| QKV(q/k/v_proj) | **FP8** | cuBLASLt(默认;FP8_SELF_KERNEL=1才手写fp8_gemm_tile)=**同vLLM** |
+| o_proj | FP8 | cuBLASLt |
+| dense gate/up/down | FP8 | mega_dense_branch手写(mega_done真)或fallback cuBLASLt |
+| **MoE experts** | **NVFP4** | **forward_nvfp4手写**(整层mega测试从没覆盖!) |
+**用户质疑对**:QKV走cuBLASLt是默认forward的行为(203行self_kernel默认false),但要确认serve调forward非别的——1021/1023确实调forward/forward_preq(都cuBLASLt for FP8)。所以QKV确走cuBLASLt(R33对)。
+**但MoE是NVFP4走手写forward_nvfp4(226行)**,不是cuBLASLt——serve每层都跑、整层mega测试完全没覆盖、手写kernel。
+**疑点聚焦(排除同vLLM的cuBLASLt QKV/OPROJ后,serve慢在手写路径)**:
+1. **MoE(NVFP4手写128专家top8)——最大嫌疑,从没profile过**
+2. dense mega_dense_branch(FP8手写,m16浪费)
+**下一步**:serve decode分段计时,重点量MoE vs dense vs attention vs cuBLASLt-QKV各占TPOT多少。MoE最可疑(手写+128专家+没测过)。别再碰整层mega测试(QKV用fp8_gemm_tile但serve用cuBLASLt,两回事)。
