@@ -471,3 +471,16 @@ MoE前处理4段拆解(NO_GRAPH实测稳定):
 → 0.25ms=单block单SM串行44 K-tile。为逐位对齐vLLM BI牺牲全部并行度。
 **BI默认开(ROUTER_GEMM_BI=1,layer.rs:1557)**,但kaon3-compile loop记过"生产不开BI"(用户2026-10-22 dinfer-kaon3-prod-config:生产vLLM不开BI,parity目标oracle_nobi)。**生产既然不要BI逐位,关掉走cuBLASLt(1336)就能并行化**——可能最快大收益(router占decode~40%)。
 **验证**:ROUTER_GEMM_BI=0重测router ms(走cuBLASLt forward_bf16并行)。若router从0.25降到几us→坐实,且符合生产口径(不开BI)。
+
+## ★★★★★ R45 2026-10-27 关BI验证成功:router 0.25→0.03ms(8.4×),整层decode 0.63→0.43(降32%)
+ROUTER_GEMM_BI=0(走cuBLASLt并行)重测:
+| | 关BI前 | 关BI后 | 降 |
+|---|---|---|---|
+| router | 0.253ms | **0.030ms** | 8.4× |
+| MoE整体 | 0.408 | **0.19** | 2.1× |
+| 整层decode total | 0.63 | **0.43** | **32%** |
+生成通顺(中国的项目的活动...非乱码),质量OK。
+**符合生产口径**:memory dinfer-kaon3-prod-config "生产vLLM不开BI,parity目标oracle_nobi"。BI(batch-invariant顺序累加)只为逐位对拍,生产不需要,**却默认开着(ROUTER_GEMM_BI=1)拖慢40% decode**。关掉=生产本该用的配置+大收益。
+**根因总结**:BI router用persistent matmul grid=(1,1)单block单SM串行K=2816(为逐位),169 SM闲=0.25ms。cuBLASLt并行化=0.03ms。
+**落地**:kserve_full.sh已加ROUTER_GEMM_BI=0。整层decode 0.63→0.43ms,TPOT应从~59ms(seqs64)相应降。需端到端bench确认TPOT/吞吐提升+质量(prompt_logprobs对拍oracle_nobi)。
+**整轮排查闭环**:TTFT(max_num_seqs 16→64,13.7×)已拿;TPOT真凶=router BI默认开(关掉整层decode降32%)。两个都是**配置洞**(非代码重写),都是serve真实路径实测逼出来的。
