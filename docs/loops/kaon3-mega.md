@@ -1193,3 +1193,12 @@ NO_GRAPH 每次真拷正确栈值故正常；graph replay 读失效栈故乱码�
 - host(mega_layer host launch count[S_ATTN]):attn task数减半 ceil(total_shards/2)。
 **验证**:①逐位——同输入 方向三 vs 现B1(256外壳128活),out_direct应逐位一致(每半区算法未变);②perf——S_ATTN stage耗时应近半(两shard并行)。先D=256/G=2(sliding)档。
 **风险**:命名barrier(bar.sync named,128)正确性;奇数shard末CTA边界;两shard寄存器压力(半区各GROUP*...寄存器,256线程总寄存器翻倍可能降occupancy)。
+
+## 方向三 b/hk/split 漏洞解法 2026-10-27(动手前又一纠正)
+漏洞:b/hk/split 是标量函数参数,一次 core 调用两半区线程共享同值,**无法让 half0/half1 各取不同 shard**。
+解法(保 HALVES=1 现有调用点签名+逐位不变):
+- core 加**默认模板参 `int HALVES=1`** + **默认函数参 `int shard_base=-1`**(放参数表末尾)。现有调用 `gqa_decode_v3_core<GROUP,D>(...,b,hk,split,tid)` 不变(HALVES默认1、shard_base默认-1 不用)。
+- HALVES=1:half=0, lt=tid, active=tid<V3_THREADS, smem[0], __syncthreads() 全块 → **逐位等于现状**(独立壳128线程 + mega_attn B1 256外壳128活 都不变)。
+- HALVES=2(仅整层mega S_ATTN):half=tid>>7, lt=tid&127, active 恒真(lt<128), ks=lt/LPK, smem[half], barrier=`bar.sync(half+1,128)` 两半区独立, 合并写 `for d=lt;d<D;d+=V3_THREADS`。b/hk/split **core内解码** `shard=shard_base+half; split=shard%splits; hk=(shard/splits)%Hkv; b=shard/splits/Hkv`。
+- 外壳 mega_layer S_ATTN:领 shard 对,传 shard_base=2*任务号, HALVES=2 调 core;host count[S_ATTN]=ceil(total/2)。奇数末对第二half shard越界→core内 b 解出后 seq_lens[b] 可能越界,需 shard<total_shards 门控(越界半区 active=false 或传 seq=0 走占位)。
+实现顺序:①core模板化(smem[HALVES]+half/lt+命名barrier+解码)②编译验HALVES=1逐位不变(独立壳+mega_attn现有测试)③外壳改HALVES=2④验HALVES=2逐位==HALVES=1⑤测S_ATTN耗时。
