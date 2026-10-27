@@ -451,3 +451,17 @@ MoE占decode 63% × 前处理占MoE 74% = **前处理占整层decode ~46%,头号
 前处理步骤(layer.rs):router GEMM(1335 forward_bf16到128专家)或moe_gate_f32(1339)→moe_route_softmax_f32(1359,softmax+top8)→moe_bucket(1377,排序分桶)→pre_ff_norm_2(1381)→moe_row2expert(1407)→moe_gather(1402)→moe_grouped_quant(1404)。
 **下一步:一次性插4段event拆前处理**(router完/softmax+bucket完/gather+quant完),一轮测清谁大头。疑点:①router GEMM(R×128,小但到128专家)②moe_bucket(排序,可能host/原子)③moe_gather+quant(R=8行小应快)。
 **注意**:decode最怕host往返/D2H同步。前处理主路径(非sub_out分支)读过没明显D2H,但moe_bucket内部实现待查(排序若有device-host往返就是元凶)。
+
+## ★★★★★ R43 2026-10-27 最终定位:router=0.253ms=MoE 62%=整层decode~40%,TPOT头号元凶
+MoE前处理4段拆解(NO_GRAPH实测稳定):
+| 段 | ms | 占MoE |
+|---|---|---|
+| **router** | **0.253** | **62%** |
+| sm+bucket | 0.025 | 6% |
+| norm+gather+quant | 0.016 | 4% |
+| gemm3(grid.z=128) | 0.096 | 24% |
+| scatter | 0.008 | 2% |
+**router占MoE 62%、整层decode~40%=TPOT头号元凶**。我前面全程(整层mega/GEMM/occupancy/split-K/grid.z=128)连边都没碰到。
+**router做什么**:算token对128专家logits,layer.rs:1335 `gemm.forward_bf16(routed, router.bf16_weight)` 或1339 moe_gate_f32。形状[R=8,H=2816]×[2816,128]——**一个这么小的GEMM要0.25ms极不正常**(8×2816×128 MAC,纳秒级计算量)。必有问题:低效路径/隐藏同步/host往返/反复量化/权重每次load。
+**下一步深挖router**:读1300-1340 router完整实现,查为何0.25ms:①forward_bf16走哪kernel(bf16 GEMM对128这种小N可能用了通用kernel极低效)②是否每次重新量化/load权重③per_expert bias/norm开销④有无to_vec/dtoh。这是把TPOT拉近vLLM的最大单点(省router可砍decode~40%)。
+**教训汇总(整轮)**:从GEMM 8×绕到occupancy到split-K到grid.z,全是"显眼但非大头";唯有serve真实路径分段实测(R36→R43)一步步逼出router。**该一开始就分段实测,不是读代码猜显眼机制**。
