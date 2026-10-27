@@ -162,6 +162,7 @@ th:first-child,td:first-child,td.l{text-align:left}.muted{color:var(--muted)}
 <h1>engine trend — __MODEL__ <a href="../index.html" style="font-size:13px;font-weight:normal;margin-left:12px">← 全部模型索引</a></h1>
 <div class="sub">引擎层面口径（design §15）：泊松到达率扫描；goodput = 满足 SLO 的完成数/墙钟；SLO 下最大 req/s = good/completed ≥ 0.95 的最大到达率。数据 <code>engine-trend.csv</code>，每 10 s 重读。</div>
 <div class="row"><label>轮次 <select id="round"></select></label><span id="meta" class="muted"></span></div>
+<div class="card" style="margin:8px 0"><h2>各轮改动（CHANGE）</h2><table id="changes"><tr><th>轮</th><th>卡</th><th>改动</th></tr></table></div>
 <div class="grid">
  <div class="card"><h2>goodput（req/s）vs 到达率</h2><canvas id="c-goodput"></canvas></div>
  <div class="card"><h2>TTFT p99（ms）vs 到达率</h2><canvas id="c-ttft"></canvas></div>
@@ -185,9 +186,13 @@ function build(rows){
   const byRound={};rows.forEach(r=>{(byRound[r.round]??={gpu:r.gpu,change:r.change,rows:[]}).rows.push(r)});
   const rounds=Object.keys(byRound);
   const sel=document.getElementById("round");const prev=sel.value||location.hash.slice(1)||rounds[rounds.length-1];
-  sel.innerHTML=rounds.map(r=>`<option ${r===prev?"selected":""}>${r}</option>`).join("");
+  sel.innerHTML=rounds.map(r=>`<option value="${r}" ${r===prev?"selected":""}>${r.split("/").pop()} — ${(byRound[r].change||"").slice(0,48)}</option>`).join("");
   sel.onchange=()=>{location.hash=sel.value;draw(byRound,sel.value)};
   draw(byRound,sel.value);
+  // 各轮 CHANGE 总表（所有轮一眼看全，不用逐个切）
+  const esc=s=>(s||"-").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  document.getElementById("changes").innerHTML="<tr><th>轮</th><th>卡</th><th>改动</th></tr>"+
+    rounds.map(r=>`<tr${r===sel.value?' style="font-weight:600"':''}><td class="l">${r.split("/").pop()}</td><td class="l">${byRound[r].gpu||"?"}</td><td class="l">${esc(byRound[r].change)}</td></tr>`).join("");
   // 各轮最大 req/s 柱图
   const mg=rounds.map(r=>{const o={};byRound[r].rows.filter(x=>x.metric==="max_good_rate").forEach(x=>o[x.side]=+x.value);return o;});
   upsert("c-max",{type:"bar",data:{labels:rounds,datasets:["dinfer","vllm"].map(s=>({label:s,data:mg.map(o=>o[s]??null),backgroundColor:COL[s],borderRadius:4,borderSkipped:"bottom",maxBarThickness:28}))},
