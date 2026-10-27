@@ -1151,3 +1151,16 @@ NO_GRAPH 每次真拷正确栈值故正常；graph replay 读失效栈故乱码�
 **这是 kaon3 第一个站得住的并发性能数**:纯 C1、确定负载、rate8 开环、≈211 tok/s、TPOT ~59ms、TTFT ~2.3s(512 prefill 排队)。
 **下一步**:同条件(关cache、固定负载、同seed)测 vLLM 非eager,才能给出可信的"vs vLLM"定量差距。
 **注**:生产 serve 仍应开 prefix cache(真实负载有共享前缀收益);关 cache 只为测可复现基线,测完 kserve_full.sh 需删回 --no-prefix-caching。
+
+## ✅ 决定性对照 2026-10-27:prefix cache 价值坐实(开291 vs 关60.9,4.8×),cache实现没错
+用户质疑"关cache测基线那cache有什么用,性能低应是你写的问题"。做干净对照——**同一全共享前缀固定负载,只切cache开/关**:
+
+| 全共享1024前缀 seed42 固定负载 | 吞吐 tok/s | TPOT p50 | TTFT p50 | cache | 复现 |
+|---|---|---|---|---|---|
+| 关 cache | 60.9 | 208 | 18822 | 0.000 | 确定 |
+| **开 cache** | **291.0** | **39.6** | **256** | **0.976** | 确定(命中稳) |
+
+**开 cache 比关 cache 快 4.8×、TTFT 降 73×** → **prefix cache 实现正确且价值巨大,不是代码问题**。
+**之前"抖"的真因=负载**:之前混合负载(prefix_repeat=0.5 + 4096长prompt),4096大请求把共享前缀block挤出block_pool(evict)→命中率随时序抖0.2~0.99。换干净全共享负载,命中稳0.976、吞吐稳291。**不是cache代码bug,是测试负载设计让cache命中不稳**。
+**纠正**:"关cache可复现基线211"是 prefix_repeat=0(无共享前缀)的数,把cache价值测没了(用户指出对)。真实共享前缀场景开cache=291 > 211。
+**可信结论汇总**:① prefix cache 正确有效(291 vs 60.9);② 要可复现地体现cache价值,用全共享前缀(prefix_repeat=1.0)而非混合负载;③ 混合负载命中抖=block_pool被长prompt evict,是负载/容量问题非代码。serve已恢复开cache。
