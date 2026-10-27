@@ -723,3 +723,17 @@ MOE_GRID_CAP=8(grid.z 128→8,结果错只测时)vs 128:gemm3 **0.096→0.080ms,
 dinfer=vLLM **63%**,TPOT慢**6.8×**,TTFT慢8×。与交接区944/6.6吻合,**差距真实**。
 **定性**:decode段GPU~100%利用(实测采样)→纯kernel计算效率差,非host/喂不饱(坐实R58)。差距在batch decode单步kernel效率(vLLM~7.57ms/步 vs dinfer 51.8ms/步,同rate8)。
 **下一步**:NO_GRAPH+STAGE_TIME测batch态(M>1)分段,确认MoE是否仍大头(R36是M=1单步的63%;batch态每专家M≈3-4,GEMV收益存疑)。
+
+## ★★★ R68 2026-10-27 NO_GRAPH stage-time prefill实测:MoE大M(132/专家)仍占70%→不止M=1 GEMV问题(修正R64/R65)
+NO_GRAPH+KAON3_STAGE_TIME起GPU4 serve(容器坑:ctr默认--gpus device=0,要GPU=4+容器内CUDA_VISIBLE=0;日志落/w/dinfer挂载路径)。warmup prefill tok=2112稳态(首步1503ms是JIT略):
+| 段 | ms | 占比 |
+|---|---|---|
+| **MoE** | **3.43** | **70%** |
+| attn | 0.70 | 14% |
+| dense | 0.40 | 8% |
+| oproj | 0.26 | 5% |
+| total | 4.87 | 100% |
+**prefill 2112 tok×top8/128专家≈132行/专家(大M,全128专家激活)**,MoE仍占70%。
+**重要修正(对R64/R65)**:R64说gemm3大头=M=1 GEMV用GEMM tile跑(tile浪费);但**大M(132)下tile应吃满,MoE却仍70%**→MoE低效**不止M=1**,是NVFP4 grouped GEMM本身跨所有M都慢(vs vLLM同FLOPs更快)。R65只修M=1 GEMV→对decode单流有效,但对prefill/大batch的MoE 70%无效。
+**真瓶颈重定位**:MoE(grouped NVFP4 GEMM)是decode(R36:63%)和prefill(R68:70%)双料大头。要拉近vLLM必须整体提MoE grouped GEMM效率(非仅M=1特化)。
+**就绪判定bug**:110s循环查/v1/completions没等到choices就NOTREADY杀serve(其实45s已listening),没跑到bench的decode步。下轮改查/v1/models+留settle再bench拿decode分段。
