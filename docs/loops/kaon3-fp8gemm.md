@@ -444,3 +444,10 @@ moe-time只量"quant后→scatter"=0.106,MoE整体0.408→**前面一段0.302ms(
 **又差点改错地方**:R37-R40花4轮分析grid.z=128空载,但grouped_gemm才占MoE 24%!改grid最多省24%的一部分。真大头74%在**前处理**。幸好R40刹住先验证。
 **教训(再次)**:grid.z=128空载是读代码看到的"显眼机制",但实测它只占24%。**显眼≠大头,必须实测**。我又被一个显眼机制带偏(像之前GEMM exec 40%、occupancy)。
 **真大头74%前处理,下一步细分它**:router(含一个betgate GEMM到128专家logits+softmax+top8)/bucket/gather/quant各占多少。疑点:①router的moe_gate GEMM(N=128专家,小)②moe_bucket/sort(host?D2H?)③gather/quant kernel。细分前处理再定攻谁。先读moe_branch前处理那几步(1340-1405)看有无D2H/host往返(decode最怕D2H同步)。
+
+## ★★★ R42 2026-10-27 坐实:MoE前处理0.29ms=MoE 74%=整层decode ~46%,头号矛盾
+MoE 0.40ms分三段(NO_GRAPH实测稳定):pre(router/bucket/gather/quant)0.29ms(74%)、gemm3 0.096(24%)、scatter 0.008(2%)。
+MoE占decode 63% × 前处理占MoE 74% = **前处理占整层decode ~46%,头号矛盾**。幸好R40/R41没冲动改grid(只动24%的gemm)。
+前处理步骤(layer.rs):router GEMM(1335 forward_bf16到128专家)或moe_gate_f32(1339)→moe_route_softmax_f32(1359,softmax+top8)→moe_bucket(1377,排序分桶)→pre_ff_norm_2(1381)→moe_row2expert(1407)→moe_gather(1402)→moe_grouped_quant(1404)。
+**下一步:一次性插4段event拆前处理**(router完/softmax+bucket完/gather+quant完),一轮测清谁大头。疑点:①router GEMM(R×128,小但到128专家)②moe_bucket(排序,可能host/原子)③moe_gather+quant(R=8行小应快)。
+**注意**:decode最怕host往返/D2H同步。前处理主路径(非sub_out分支)读过没明显D2H,但moe_bucket内部实现待查(排序若有device-host往返就是元凶)。
