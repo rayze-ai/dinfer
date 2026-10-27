@@ -242,3 +242,17 @@ sp扫描(融合墙钟,逐位全✓):
 2. **wait累加指标会骗人(R22警觉对)**:墙钟降了(251→215)但wait/exec反从5.12涨5.61!因sp=4后task×4,更多CTA从t0自旋等前链,wait累加涨。**只看wait会误判"split-K更糟",墙钟才是真相**。必须看墙钟。
 **对上R3历史**:R3 dense-only sp_gu/dn=4/4 使66.6→53.9us(-19%);这里整层sp全4 251→215(-14%),一致方向。
 **下一步(继续解决为什么等)**:①sp=4非均匀细调(各stage task数不同:QKV n=64已多可能sp小,GATE/UP n=17少需sp大;分别扫sp_qkv/o/gu/dn找各自最优,非全4);②这是整层默认该开的(service.rs 当前sp默认?需确认kaon3 serve是否已用sp=4);③215us里还有啥等待→继续追关键路径上最慢stage。
+
+## ★★★ R24 2026-10-27 端到端 dinfer vs vLLM非eager(锁死负载,进dashboard)
+可信bench(seed42/全共享1024前缀/128输出/ignore_eos/REQS48,两端同负载),test/kaon3/2026-10-27/e2e_vs_vllm:
+| rate=8 | 完成 | 吞吐tok/s | TTFT p50 | TPOT p50 | cache |
+|---|---|---|---|---|---|
+| **dinfer(splitK4+mega+prefixcache)** | 48/48 | **357** | 3357ms | 40.2ms | 0.983 |
+| **vLLM非eager** | 48/48 | **936** | 81ms | 8.8ms | — |
+**诚实差距:dinfer 357 = vLLM 936 的38%(慢2.6×)**。TPOT 40 vs8.8(慢4.6×)、TTFT 3357 vs81(**慢41×**)。
+**生产已含所有优化**(kserve_full.sh已设MEGA_SPGU=4/SPDN=4/KAON3_MEGA=1,split-K 14%已落地),这357就是优化后真实值,仍慢2.6×。
+**差距拆解(下一步攻哪)**:
+- **TTFT慢41×(3357ms最夸张)**:prefill排队/首token路径——rate8下48请求TTFT堆到3.3秒,远超vLLM 81ms。调度/prefill并发是最大短板,比decode更该先攻。
+- TPOT慢4.6×:decode每步(关键路径+每stage效率,split-K已降14%仍差)。
+**dashboard**:engine-trend/perf-trend.json已更新,bench_index生成test/index.html(8090 HTTP 401=需鉴权文件在,路径对)。数据已进。
+**结论(给用户的真话)**:优化有效(split-K落地)但不够,端到端仍慢2.6×。最大短板是TTFT(prefill/调度)41×,不是decode kernel。下一步该攻prefill/调度而非继续抠GEMM/mega。
