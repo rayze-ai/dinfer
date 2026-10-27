@@ -465,3 +465,9 @@ MoE前处理4段拆解(NO_GRAPH实测稳定):
 **router做什么**:算token对128专家logits,layer.rs:1335 `gemm.forward_bf16(routed, router.bf16_weight)` 或1339 moe_gate_f32。形状[R=8,H=2816]×[2816,128]——**一个这么小的GEMM要0.25ms极不正常**(8×2816×128 MAC,纳秒级计算量)。必有问题:低效路径/隐藏同步/host往返/反复量化/权重每次load。
 **下一步深挖router**:读1300-1340 router完整实现,查为何0.25ms:①forward_bf16走哪kernel(bf16 GEMM对128这种小N可能用了通用kernel极低效)②是否每次重新量化/load权重③per_expert bias/norm开销④有无to_vec/dtoh。这是把TPOT拉近vLLM的最大单点(省router可砍decode~40%)。
 **教训汇总(整轮)**:从GEMM 8×绕到occupancy到split-K到grid.z,全是"显眼但非大头";唯有serve真实路径分段实测(R36→R43)一步步逼出router。**该一开始就分段实测,不是读代码猜显眼机制**。
+
+## ★★★★★ R44 2026-10-27 router根因:BI persistent matmul单block单SM串行K=2816,为逐位牺牲全并行
+读router_gemm_bi.cu:BI_BM=128/BI_BN=128,grid=(ceil(M8/128),ceil(N128/128))=**(1,1)=单block**!这1个block用8warp但M=8只需1warp,在**1个SM**上**串行走完K=2816(44 ktile)顺序累加**(为逐位复刻vLLM batch-invariant顺序累加口径),**其余169 SM全闲**。
+→ 0.25ms=单block单SM串行44 K-tile。为逐位对齐vLLM BI牺牲全部并行度。
+**BI默认开(ROUTER_GEMM_BI=1,layer.rs:1557)**,但kaon3-compile loop记过"生产不开BI"(用户2026-10-22 dinfer-kaon3-prod-config:生产vLLM不开BI,parity目标oracle_nobi)。**生产既然不要BI逐位,关掉走cuBLASLt(1336)就能并行化**——可能最快大收益(router占decode~40%)。
+**验证**:ROUTER_GEMM_BI=0重测router ms(走cuBLASLt forward_bf16并行)。若router从0.25降到几us→坐实,且符合生产口径(不开BI)。
