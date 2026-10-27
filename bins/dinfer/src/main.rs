@@ -371,8 +371,7 @@ async fn main() -> Result<()> {
                 let _ = (
                     &role, kv_port, &peer, pd_wait_ms, pd_pool_bufs, &kv_transport, kv_slots, tp, dp, mtp,
                     &speculative, num_speculative_tokens, ngram_min, ngram_max, kv_host_gib,
-                    gpu_memory_utilization, no_prefix_caching, no_decode_exempt,
-                    long_prefill_token_threshold,
+                    gpu_memory_utilization,
                 );
                 let opt = dinfer_kaon3::service::ServeOptions {
                     model_dir: model,
@@ -383,6 +382,9 @@ async fn main() -> Result<()> {
                     num_blocks: num_blocks.unwrap_or(2048),
                     block_size,
                     enable_chunked_prefill: true,
+                    enable_prefix_caching: !no_prefix_caching,
+                    decode_exempt_from_budget: !no_decode_exempt,
+                    long_prefill_token_threshold,
                     enable_cuda_graph: !no_cuda_graph,
                     device,
                 };
