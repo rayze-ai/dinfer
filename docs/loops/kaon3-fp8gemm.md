@@ -598,3 +598,11 @@ dense wait根因(读mega_mlp_sm120.cu:264 grid + mega_common.cuh:68 wait_stage):
 **量化判定(为何不改)**:dense整段decode 15%(0.09ms)。GATE/UP/DOWN的wait是"等NORM 1-task stage"的固有串行,根治=重构持久kernel的stage barrier(把单task stage融掉或改signal机制),**风险大(逐位/死锁)、收益≤15%一小块**。对比host/调度76%(未动)。
 **诚实结论**:dense wait改法想清了=要重构stage结构,15%收益不值当下做。记为"已分析改法,判定ROI低,挂起"。真优先级=host/调度76%。
 **用户要的闭环**:dense wait从测到改法都过了一遍(不是跳过),结论是改它ROI低。
+
+## R57 2026-10-27 host/调度深入分析(用户:大头先搞):kaon3走同步路径每步host串行等GPU
+三者清单(用户要求都做):①host/调度(76%大头,先搞)②MoE(router已关BI降,剩grouped_gemm grid.z=128占24%)③dense wait(R56判ROI低挂起,要重构)。
+读engine主循环(engine.rs:465-595):同步路径每步host序列=`schedule()→pd_pre_begin→begin()→finish()等GPU→publish_step(采样/回填/推送)`。**kaon3走同步**(R29 executor没实现supports_async,KAON3_ASYNC默认关),begin后last_begin_was_async=false立即finish,**host每步串行,begin-finish间干等GPU不重叠下一步调度**。
+**host 14ms(27.1步时-12.9 GPU)两嫌疑**:①begin/finish间host空等GPU(同步无重叠,async可解但kaon3没实现)②schedule+publish_step(采样/回填/推送)纯CPU开销。
+**要区分**:测schedule/begin/finish/publish各自host耗时。嫌疑①是等GPU(finish本就该等,不可避免除非async重叠);嫌疑②是纯CPU可优化。
+**对比**:qwen35实现了supports_async(R29),engine异步路径(528-561)先begin(n+1)再finish(n),host调度与GPU重叠。kaon3没实现→同步→host全串行。
+**下一步(深入host)**:①先细分host(schedule/begin/finish/publish各ms)定位②若finish等GPU是大头→kaon3实现async让host/GPU重叠(但R16-20试异步乱码+无收益,那是整层mega场景,serve场景需重评)③若publish/schedule CPU大→优化那部分。先给engine step加host细分计时。
