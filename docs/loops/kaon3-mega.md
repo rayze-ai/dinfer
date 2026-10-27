@@ -1231,3 +1231,16 @@ mega_layer_parity 通过(fused vs separated 逐位0/N,两条都HALVES=2):**方�
 目标:fp8_gemm_tile 三段(载入cp.async/mma/写出)各占cycle。插桩:MEGA_DIAG_GEMMTIME门控,g_gemm_cyc[3]全局累加(tid0,splits==1路径),FFI mega_diag_gemmtime_read。build.rs加-D开关。
 坑:mega_mlp_parity(dense_branch)这次跑**‖mega‖=0全零**(R15曾逐位过,现退化,根因另议)→kernel没跑到fp8_gemm_tile→cycle也0。非本轮插桩引入(core逻辑本轮只加诊断)。诊断期已把范数assert改warn不panic。
 **转路**:mega_layer_parity(方向三时验过fused vs separated逐位0/N,**能跑通**)同样调fp8_gemm_tile→用它读cycle。下一步:mega_layer_parity加reset+read+print,带宏跑。
+
+## ✅ fp8 GEMM 三段耗时实测 2026-10-27:68.6%载入/30%mma/1.4%写出——访存瓶颈非算力
+mega_layer_parity + MEGA_DIAG_GEMMTIME 插桩(clock64 tid0,5个GEMM stage累加,splits=1路径):
+| 段 | cycle | 占比 |
+|---|---|---|
+| **载入**(cp.async 载A/B+wait_group+syncthreads) | 8578592 | **68.6%** |
+| **mma**(ldmatrix+mma.sync.fp8 K循环) | 3754341 | **30.0%** |
+| 写出(尾声 to_bf16) | 180991 | 1.4% |
+**结论:fp8 GEMM 2/3 时间在数据载入(cp.async+等待),mma只30%**。访存瓶颈非算力。符合M≤16 decode GEMM特征(矩阵瘦长,M小K大,mma复用少,访存主导)。
+**优化方向(数据指向)**:降载入段——① 加深 cp.async 流水(现 PIPE 级数)让 load 与 mma 更重叠;② 更大 N tile(BN)摊薄 A 的重复载入;③ 查 wait_group 粒度是否过粗(等整组 vs 等自己)。**不该动 mma**(只占30%且是算力)。
+**坑(定位插桩过程)**:__device__ 全局变量跨TU——build.rs无-rdc=true,g_gemm_cyc定义必须与fp8_gemm_tile实例化在**同一TU**(mega_layer_sm120.cu),放mega_mlp_sm120.cu会让mega_layer的atomicAdd写幻影副本读回0。
+**注**:mega_mlp_dense_branch测试路这次‖mega‖=0全零(R15曾过,退化根因未查,与本profiling无关,另议)。
+**诊断插桩测完回退**:MEGA_DIAG_GEMMTIME门控代码+build.rs开关+两测试打印,下步revert。
