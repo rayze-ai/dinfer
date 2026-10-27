@@ -445,10 +445,21 @@ fn mega_layer_fused_matches_separate() {
             lo[s] = v[0];
             hi[s] = v[ROUNDS - 1];
         }
+        // 明细表：每轮每 stage 的墙钟（10 轮全列）
+        println!("[逐stage墙钟明细 us(10轮×50iter,每格=该轮50iter均值)]");
+        print!("{:8}", "round");
+        for i in 0..15 { print!("{:>8}", sn[i]); }
+        println!();
+        for (r, per) in rounds.iter().enumerate() {
+            print!("r{:<7}", r);
+            for i in 0..15 { print!("{:8.2}", per[i]); }
+            println!();
+        }
+        // 汇总：中位 + min/max/抖动，由大到小
         let stot: f64 = med.iter().sum();
         let mut order: Vec<usize> = (0..15).collect();
         order.sort_by(|&a, &b| med[b].partial_cmp(&med[a]).unwrap());
-        println!("[逐stage墙钟 us(10轮×50iter,中位,由大到小)]  合计中位={stot:.1}us");
+        println!("[逐stage墙钟 汇总(10轮中位,由大到小)]  合计中位={stot:.1}us");
         for &i in &order {
             println!("  {:7} 中位{:7.2}us ({:4.1}%)  [min{:.2} max{:.2} 抖{:.1}%]",
                 sn[i], med[i], med[i] / stot * 100.0, lo[i], hi[i],
