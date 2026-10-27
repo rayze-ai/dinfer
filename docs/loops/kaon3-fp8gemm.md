@@ -649,3 +649,12 @@ grid.z=128,decode R=8激活≤8专家→120空block。但**R41只测grouped_gemm
 加诊断MOE_GRID_CAP=<n>(moe_grouped_sm120.cu:临时cap grid.z,结果会错只测时间)。测MOE_GRID_CAP=8(只起8专家block) vs 不设(128)的gemm3时间差:
 - 若gemm3 0.096→大降=空block真耗时,值得做compact grid.z=激活数;
 - 若几乎不变=0.096是8个实专家真算,改grid.z没用,MoE大头另找(真算/量化/attn)。
+
+## ★ R62 2026-10-27 MoE做透(3)验证:grid.z=128空block只占gemm3 17%非大头(幸好先测没盲做compact)
+MOE_GRID_CAP=8(grid.z 128→8,结果错只测时)vs 128:gemm3 **0.096→0.080ms,仅降17%**(稳定值,有一条0.016是graph首步噪声)。
+**验证结论**:94%空block≠94%浪费。**空block只占gemm3 17%**(0.016ms),大头0.080ms是**8个实专家的真算(NVFP4 grouped GEMM本身)**。
+**幸好R61先测没盲做compact**:若直接做compact grid.z=激活数(改bucket+kernel大工程),最多省MoE 54%×17%≈9%,ROI低。又一次"显眼机制(94%空block)≠大头"——像前面GEMM exec40%/occupancy/split-K grid。
+**gemm3真大头=NVFP4 grouped GEMM实算(8专家×3 GEMM)**。要降得优化NVFP4 GEMM kernel本身(mma利用率/量化/tile),或减专家GEMM量。但:
+- 这是decode batch=1场景,8专家各算[~1行×N×K]的NVFP4 GEMM,M极小→和QKV同病(mma m16但m=1,利用率低)。但NVFP4 kernel是否m16待读。
+- vLLM MoE也是NVFP4?它的MoE grouped GEMM在小M怎么做的(cutlass grouped)。
+**下一步(MoE做透继续)**:读grouped_gemm_kernel的mma/BM看8专家真算为何0.08ms(m=1的NVFP4 GEMM效率);对比理论(8专家权重字节/带宽)。先算8专家NVFP4权重量=理论下界,看0.08ms离下界多远(访存受限还是kernel低效)。
