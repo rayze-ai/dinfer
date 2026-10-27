@@ -1180,3 +1180,16 @@ NO_GRAPH 每次真拷正确栈值故正常；graph replay 读失效栈故乱码�
 **真实情况**:打包2shard 要改core三处(half参数+smem分区+命名barrier),比我说的大;但**每半区仍128线程算法、KEYS/归约序不变→逐位不变**,这是相对方向二(改常量破逐位+重写归约+改smem布局+波及共用core)的关键优势。
 **smem翻倍约束**:两半区各一份smem,D=256/G6 ~32KB×2=64KB>48KB默认,D=128/G4 ~24KB×2=48KB临界——两条路都撞,需动态smem或opt-in。
 **下一步**:若做,改core(half门控smem+命名barrier),外壳run领2shard。先确认实测smem占用定可行档位。待用户定是否按此改动量推进。
+
+## 方向三实现方案 2026-10-27:一CTA两128半区各跑一shard(读全代码后)
+**三方向改动量对比(读码坐实)**:整层mega 15 stage,14个GEMM/norm用全256(fp8_gemm_tile按kWarps=8分N),仅S_ATTN是128算法半数空转。
+- 方向一(kWarps8→4):砸14个GEMM(腰斩)+破dense逐位。最差。
+- 方向二(V3_THREADS128→256):破attn逐位golden+重写归约+波及非mega共用core。高风险。
+- **方向三(2×128半区):只动S_ATTN,14个GEMM全不动,每半区仍128算法逐位不变**。最优(用户判定对)。
+**smem实测**:目标sliding层D=256/G=2,core静态smem s_k/s_v各4KB+s_acc 8KB≈16KB,2半区~32KB<48KB,**不撞48KB**(之前担心的在真实档不存在)。
+**改动点(4+2处)**:
+- core(gqa_decode_v3_core.cuh)①smem加[2]半区维或按half偏移(76-79);②`__syncthreads()`(129/162/176)→命名barrier `bar.sync 1/2,128`两半区独立(防两shard ntiles不同死锁);③active/ks/dl/合并写循环(71-73/178-180)的tid改局部 `lt=tid&127`、half=`tid>>7`;④归约尾合并写(178)stride改128。
+- 外壳(mega_layer_sm120.cu S_ATTN case 392-403):task领取映射task t→2 shard(2t,2t+1),half=tid>=128取第二shard;奇数shard末CTA第二half传无效shard(seq置0走占位,core已有空seq占位逻辑185-195写0)。
+- host(mega_layer host launch count[S_ATTN]):attn task数减半 ceil(total_shards/2)。
+**验证**:①逐位——同输入 方向三 vs 现B1(256外壳128活),out_direct应逐位一致(每半区算法未变);②perf——S_ATTN stage耗时应近半(两shard并行)。先D=256/G=2(sliding)档。
+**风险**:命名barrier(bar.sync named,128)正确性;奇数shard末CTA边界;两shard寄存器压力(半区各GROUP*...寄存器,256线程总寄存器翻倍可能降occupancy)。
