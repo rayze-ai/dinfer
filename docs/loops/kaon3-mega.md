@@ -1250,3 +1250,9 @@ mega_layer_parity + MEGA_DIAG_GEMMTIME 插桩(clock64 tid0,5个GEMM stage累加,
 **优化**:双缓冲软件流水——序幕 issue kb_lo 到 buf0;循环内先 issue kb+1 到 buf(kb+1)%2,再 wait_group,再用 buf kb%2 算 mma。访存延迟藏到 mma 后。**mma 顺序/累加序不变 → 逐位安全**。
 **smem**:sA[2]+sB[2] 双份,kBN=128/RS=144 → 单份20.7KB,双份41.3KB<48KB。但 megakernel 持久(grid=sms*occ),smem 翻倍可能降 occupancy → **净收益实测 mega_layer_parity 计时+per-stage QKV/GATE 耗时**。
 **验证**:①逐位(mega_layer_parity fused vs separated 0/N 不变);②QKV/GATE/UP/DOWN stage exec cycle 降幅;③整层计时。若 occupancy 降致净负→回退或调 PIPE/tile。
+
+## fp8 GEMM 双缓冲 ✗ 无效回退 2026-10-27:mma太短盖不住预取访存,shape不利
+双缓冲实现正确(逐位0/N),但**无收益反略慢**:融合256.8us vs 基线~251us;QKV exec 2917555→3073667(略增)。
+**根因**:双缓冲"藏访存延迟"要求**mma 窗口盖得住预取访存**。但此处 mma 仅占30%(载入68.6%)——mma 太短、访存太长,算 kb 的 mma 期间预取 kb+1 的访存**盖不住**,wait_group 1 仍停顿。加上 smem 翻倍41KB 降 occupancy,双重不利。
+**本质**:68.6%载入不是"延迟没藏好",是**访存量/带宽本身就是瓶颈**(M≤16 decode GEMM 瘦长,每字节权重只用于极少 mma,算访比极低)。双缓冲改调度不改访存量,治不了。
+**→ 回退双缓冲**(revert 3014046)。真正要降载入:减少访存量(如 K 维 tile 复用、权重常驻、或 M 攒批提高算访比),不是流水调度。
