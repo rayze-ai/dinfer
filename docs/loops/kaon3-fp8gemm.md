@@ -337,3 +337,12 @@ serve真实decode一步(layer.rs:9-14注释)=qkv独立GEMM→q/k/v_norm+rope→p
 **split-K到头**:全4的215us(相对sp=1的251降14%)是split-K最优,非均匀无额外空间。**这条优化路结束**。
 **剩余真问题(回到本质)**:GATE/OPROJ的wait是"等前序"——要降得缩依赖链或让前序更快,不是split-K。但⚠️仍是整层mega测试,serve不走整层。
 **下一步(转serve真实路径)**:split-K已到头,整层mega测试的优化空间榨干(251→215)。serve TPOT的真大头必须在serve路径实测(R29:qkv独立/attn/oproj独立/dense与MoE并联)。不再在整层mega测试上调参。先给serve decode加分段CUDA event计时,看真大头(疑MoE 128专家)。
+
+## R32 2026-10-27 GATE wait机制:等整个attention半层(真依赖),降GATE wait=优化它前面的QKV/OPROJ
+用户要攻最大的GATE(wait27.4%/14.5×)。读结构:
+- h_dep[S_GATE]=S_RES, GATE的fp8输入norm1_q由RES算(post_attn_norm+残差→x2→pre_ff_norm→量化)。
+- RES等OPROJ等OQNT等ATTN...**GATE必须等整个attention半层(QKV→ATTN→OPROJ→RES)跑完**,因dense MLP输入x2是注意力残差输出。**真物理依赖,改不掉**。
+- GATE有68 task(n_gu17×sp4),task最多且在链后段,68 CTA从启动自旋等前链→68×前链时间累加→wait最大。
+**关键**:GATE wait**不是给GATE加优化能降的**(加split-K已证反而慢,R31)。它慢因为等前面attention半层。**降GATE空等=让它等的链更快=优化链上exec最重的QKV(40%)/OPROJ(18%)**。即"优化GATE的wait"="优化它前一步"(用户最初"前一步喂不饱后一步"正是此)。
+**→ 攻GATE wait 实际 = 攻 QKV/OPROJ(attention半层的计算大头)**。QKV exec 40%是单个最大真算,它快→RES早出→GATE/UP早开工→它们wait降。
+**下一步**:优化QKV(exec 40%,attention半层+GATE前链的最重计算)。但⚠️整层mega测试,serve QKV是独立kernel——serve的QKV优化和整层mega的QKV是**同一个fp8_gemm_tile代码**(mega_layer case S_QKV调fp8_gemm_tile,serve的QLinear也走fp8 GEMM),优化GEMM本身两边都受益。先看QKV GEMM(exec 40%)能否更快:它是ΣN=8192×H的大fp8 GEMM,之前R13测过它带宽健康(exec占比高是因为它真算量大=合并qkv)。
