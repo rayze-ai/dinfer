@@ -525,3 +525,10 @@ ROUTER_GEMM_BI=0(走cuBLASLt并行)重测:
 **每轮改动已说明**(用户要求页面也显示CHANGE,子代理改engine_trend.py让html显示)。
 **整轮排查结论(供收口)**:两个配置洞落地(seqs64→TTFT13×、关BI→decode32%),吞吐357→573(vLLM61%)。但**TPOT 54.5 vs vLLM6.6(8×)真源头=host/调度开销(R47实测:GPU实算仅24%,76%是host步时+并发排队)**,非kernel。下一步该攻host/调度(查decode cudagraph是否生效、async是否重叠),不是继续抠kernel。
 **dashboard坑(已知)**:8090被平台HF代理占(非我们的);真dashboard在8192(trend_server.sh);engine轮要engine_*命名才被engine_trend.py扫。子代理修到能访问。
+
+## R49 2026-10-27 dashboard入口=本机perf-trend.html(非engine-trend),数据没进去
+用户纠正:dashboard入口是 `http://192.168.72.130:8090/kaon3/perf-trend.html#kaon3/5090/single`(折线图,本机8090根=/data/code/dinfer/test,**本机就是192.168.72.130**)。
+**之前所有"8090是5090的HF代理"判断对本机不成立**:本机8090是正常的test/ dashboard,一直在跑。看不到=①我给的URL是engine-trend.html,用户要的是perf-trend.html ②perf-trend.csv是旧bench1-3(kernel层splitK数据,bench_trend.py生成),没有我们这轮端到端r1-r5。
+perf-trend.csv格式:round,date,change,group(c1/c8/c32),metric(out_tok_per_s等),dinfer,vllm,ratio,...;tab=single(URL #model/gpu/tab)。是4组闭环bench口径,与engine端到端(单rate8)不同。
+**engine-trend已base64取回本机**(r1-r5在engine-trend.csv),但那是另一个页。
+**下一步**:派子代理把r1-r5端到端数据按perf-trend格式进去(或确认该用哪个页),让用户那个折线图URL能看到5轮+CHANGE。
