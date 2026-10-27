@@ -571,8 +571,8 @@ int mega_layer_forward(const dinfer::mega_layer::Params* p_in, int stage_lo, int
   const int n_tasks = task_hi - task_lo;
   if (n_tasks <= 0) return (int)cudaErrorInvalidValue;
 
-  // smem：GEMM tile 的 sA(16×RS)+sB(BN×RS)，RS=128+16；双缓冲软件流水用 2 份。
-  const size_t smem = (size_t)2 * (16 + kBN) * (128 + 16);
+  // smem：GEMM tile 的 sA(16×RS)+sB(BN×RS)；RS=128+16。
+  const size_t smem = (size_t)(16 + kBN) * (128 + 16);
   int dev = 0, sms = 1, max_smem = 0;
   cudaGetDevice(&dev);
   cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
