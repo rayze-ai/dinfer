@@ -568,3 +568,8 @@ mega_mlp_parity又全零(‖mega‖=0,R38同病,测试坏,范数卡提前return�
 **用户要的调研测试结论**:serve真实路径wait已摸清——①dense branch(GATE/UP/DOWN wait)仅占15%收益有限②MoE 63%里router曾0.25ms(已关BI降0.03)③剩余TPOT大头=host/调度(R47测76%非GPU)。
 **→ wait方向(dense stage间)对serve收益有限(≤15%内),该转host/调度(76%)**。但转前按用户要求已调研测试完serve各段,不是空转。
 **下一步**:host/调度调研——serve真实decode的host时间(27ms步时含什么:30层launch?async finish等待?采样?)。这是TPOT 76%的真大头。
+
+## R54 2026-10-27 测serve dense branch wait:用其自带prof接口(非坏掉的mega_mlp_parity)
+serve的mega_mlp_dense_branch(layer.rs:910)自带wait_cyc/exec_cyc接口(938行现传null,prof=0)。打开它测serve真实dense 6-stage(NORM/GATE/UP/ACT/DOWN/POST)wait。
+prof是device端StagePlan clock64+atomicAdd累加(mega_common),不sync graph安全;但kernel含cudaMemsetAsync(185)说明dense branch本身不被graph capture→serve dense在graph外→prof读回安全。
+**最小改动**:MegaBufs加wait_cyc/exec_cyc缓冲(各6×u64=MEGA_STAGES),env KAON3_DENSE_TIME=1时调用处传prof=1+缓冲,每步后dtoh读回打印NORM/GATE/UP/ACT/DOWN/POST的exec/wait。
