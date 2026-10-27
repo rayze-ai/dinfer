@@ -1238,6 +1238,13 @@ impl Gemma4Layer {
         sub_out: Option<(&std::path::Path, usize)>,
     ) -> Result<()> {
         let h = cfg.hidden;
+        // 前处理计时起点（KAON3_MOE_TIME=1）：量 moe_branch 开头→第一个 grouped_gemm 前(router/bucket/gather/quant)。
+        let moe_pre_ev = if std::env::var("KAON3_MOE_TIME").ok().as_deref() == Some("1") {
+            Some(stream.new_timing_events(1)?)
+        } else {
+            None
+        };
+        if let Some(e) = &moe_pre_ev { stream.record_timing(&e[0])?; }
         // --- MoE 隔离（MOE_ISO=<dir>，loop kaon3-moe）：喂 vLLM 真实 MoE 输入，纯测路由+专家 ---
         // 设了就从 dir 读 vllm_moe_logits.bin[T,e] f32 → sc.logits（跳过 router 预处理+GEMM），
         // 并记下 hidden 待 pre_ff2_norm 处用 vllm_moe_hidden.bin[T,h] 覆盖 sc.h2。比 vLLM moe_out。
@@ -1448,7 +1455,11 @@ impl Gemma4Layer {
             if let Some(ev) = &mt_ev {
                 stream.synchronize()?;
                 let ms = |a: usize, b: usize| k::TimingEvent::elapsed_ms(&ev[a], &ev[b]).unwrap_or(0.0);
-                tracing::info!("[moe-time] r={r} gemm3={:.3} scatter+rest={:.3} ms", ms(0, 1), ms(1, 2));
+                let pre = moe_pre_ev
+                    .as_ref()
+                    .map(|pe| k::TimingEvent::elapsed_ms(&pe[0], &ev[0]).unwrap_or(0.0))
+                    .unwrap_or(0.0);
+                tracing::info!("[moe-time] r={r} pre={pre:.3} gemm3={:.3} scatter+rest={:.3} ms", ms(0, 1), ms(1, 2));
             }
             return Ok(());
         }
