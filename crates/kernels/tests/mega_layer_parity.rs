@@ -408,33 +408,51 @@ fn mega_layer_fused_matches_separate() {
     // （不能孤立重复跑单 stage——依赖只在前序 signal，孤立跑会死自旋，见 R12。）
     {
         let sn = ["IN","QKV","QKNORM","ROPE","KVWR","ATTN","OQNT","OPROJ","RES","PREFF","GATE","UP","ACT","DOWN","POST"];
-        let mut per = [0f64; 15];
+        const ROUNDS: usize = 10;
         const ITW: usize = 50;
-        for _ in 0..ITW {
-            st.memset_zeros_n(&mut rdy, 16).unwrap();
-            for s in 0..15i32 {
-                st.synchronize().unwrap();
-                let ts = std::time::Instant::now();
-                unsafe {
-                    ffi::mega_layer_forward(
-                        &p as *const MegaLayerParams, s, s, if s == 0 { 1 } else { 0 },
-                        st.ptr_mut(&mut dep) as *mut i32, st.ptr_mut(&mut cnt) as *mut i32,
-                        st.ptr_mut(&mut sta) as *mut i32, st.ptr_mut(&mut rdy) as *mut i32,
-                        st.ptr_mut(&mut dep2) as *mut i32, std::ptr::null_mut(), std::ptr::null_mut(), 0,
-                        st.raw() as _,
-                    );
+        let mut rounds: Vec<[f64; 15]> = Vec::with_capacity(ROUNDS);
+        for _ in 0..ROUNDS {
+            let mut per = [0f64; 15];
+            for _ in 0..ITW {
+                st.memset_zeros_n(&mut rdy, 16).unwrap();
+                for s in 0..15i32 {
+                    st.synchronize().unwrap();
+                    let ts = std::time::Instant::now();
+                    unsafe {
+                        ffi::mega_layer_forward(
+                            &p as *const MegaLayerParams, s, s, if s == 0 { 1 } else { 0 },
+                            st.ptr_mut(&mut dep) as *mut i32, st.ptr_mut(&mut cnt) as *mut i32,
+                            st.ptr_mut(&mut sta) as *mut i32, st.ptr_mut(&mut rdy) as *mut i32,
+                            st.ptr_mut(&mut dep2) as *mut i32, std::ptr::null_mut(), std::ptr::null_mut(), 0,
+                            st.raw() as _,
+                        );
+                    }
+                    st.synchronize().unwrap();
+                    per[s as usize] += ts.elapsed().as_secs_f64() * 1e6;
                 }
-                st.synchronize().unwrap();
-                per[s as usize] += ts.elapsed().as_secs_f64() * 1e6;
             }
+            for v in per.iter_mut() { *v /= ITW as f64; }
+            rounds.push(per);
         }
-        for v in per.iter_mut() { *v /= ITW as f64; }
-        let stot: f64 = per.iter().sum();
+        // 每 stage 10 轮取中位 + min/max 看稳定性
+        let mut med = [0f64; 15];
+        let mut lo = [0f64; 15];
+        let mut hi = [0f64; 15];
+        for s in 0..15 {
+            let mut v: Vec<f64> = rounds.iter().map(|r| r[s]).collect();
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            med[s] = v[ROUNDS / 2];
+            lo[s] = v[0];
+            hi[s] = v[ROUNDS - 1];
+        }
+        let stot: f64 = med.iter().sum();
         let mut order: Vec<usize> = (0..15).collect();
-        order.sort_by(|&a, &b| per[b].partial_cmp(&per[a]).unwrap());
-        println!("[逐stage墙钟 us(顺序launch+每stage sync,由大到小)]  合计={stot:.1}us");
+        order.sort_by(|&a, &b| med[b].partial_cmp(&med[a]).unwrap());
+        println!("[逐stage墙钟 us(10轮×50iter,中位,由大到小)]  合计中位={stot:.1}us");
         for &i in &order {
-            println!("  {:7} {:7.2}us ({:4.1}%)", sn[i], per[i], per[i] / stot * 100.0);
+            println!("  {:7} 中位{:7.2}us ({:4.1}%)  [min{:.2} max{:.2} 抖{:.1}%]",
+                sn[i], med[i], med[i] / stot * 100.0, lo[i], hi[i],
+                if med[i] > 0.0 { (hi[i] - lo[i]) / med[i] * 100.0 } else { 0.0 });
         }
     }
 
