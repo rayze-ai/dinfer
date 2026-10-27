@@ -1164,3 +1164,11 @@ NO_GRAPH 每次真拷正确栈值故正常；graph replay 读失效栈故乱码�
 **之前"抖"的真因=负载**:之前混合负载(prefix_repeat=0.5 + 4096长prompt),4096大请求把共享前缀block挤出block_pool(evict)→命中率随时序抖0.2~0.99。换干净全共享负载,命中稳0.976、吞吐稳291。**不是cache代码bug,是测试负载设计让cache命中不稳**。
 **纠正**:"关cache可复现基线211"是 prefix_repeat=0(无共享前缀)的数,把cache价值测没了(用户指出对)。真实共享前缀场景开cache=291 > 211。
 **可信结论汇总**:① prefix cache 正确有效(291 vs 60.9);② 要可复现地体现cache价值,用全共享前缀(prefix_repeat=1.0)而非混合负载;③ 混合负载命中抖=block_pool被长prompt evict,是负载/容量问题非代码。serve已恢复开cache。
+
+## 口径教训 2026-10-27:tok/s 离开具体负载无意义,194/291/211 是不同负载不可互比
+用户问"刚才194现在怎么291"。查实:两次**都开cache**,差的是**负载**(非代码):
+- s42c(194,cache0.992):prompt混合128/1024/**4096**、output混合128/512/1024、prefix_repeat=0.5、**不**ignore_eos。
+- shp(291,cache0.976):prompt全1024、output全128、prefix_repeat=1.0、ignore_eos。
+差异源=输出长度分布(s42c含长输出占slot久)+ 15%的4096超长prompt(prefill重且evict前缀)+ 共享比例 + eos策略。**都不是代码差异**。
+**核心教训**:tok/s **离开具体负载就没意义**。194/291/211/246 不是"同一东西的不同测量",是不同负载各自的吞吐,**互比本身是错的**(我之前并列对比犯了此错)。
+**可比的前提**:锁死负载(固定 prompt/output/prefix_repeat/eos/seed),只变待比的那一个变量。shp组(全共享1024/全128/ignore_eos/seed42)锁死了负载,291 vs 60.9 只切cache才成立。往后任何性能对比必须先声明完整负载口径,且两边同负载。
