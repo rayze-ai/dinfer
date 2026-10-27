@@ -606,3 +606,12 @@ dense wait根因(读mega_mlp_sm120.cu:264 grid + mega_common.cuh:68 wait_stage):
 **要区分**:测schedule/begin/finish/publish各自host耗时。嫌疑①是等GPU(finish本就该等,不可避免除非async重叠);嫌疑②是纯CPU可优化。
 **对比**:qwen35实现了supports_async(R29),engine异步路径(528-561)先begin(n+1)再finish(n),host调度与GPU重叠。kaon3没实现→同步→host全串行。
 **下一步(深入host)**:①先细分host(schedule/begin/finish/publish各ms)定位②若finish等GPU是大头→kaon3实现async让host/GPU重叠(但R16-20试异步乱码+无收益,那是整层mega场景,serve场景需重评)③若publish/schedule CPU大→优化那部分。先给engine step加host细分计时。
+
+## ★★ R58 2026-10-27 host细分实测纠正R47:host CPU极小(4us),exec=99.9%是等GPU;单步GPU12ms才是问题
+HOST_TIME每步host三段(单发tok=1):sched=0.3us, **exec(begin+finish)=12080us=99.9%**, publish=3.3us。
+**纠正R47"host多花14ms"**:错。host自身CPU开销极小(sched0.3+publish3.3≈4us)。host步时≈全是exec=begin+finish=**12.08ms全在等GPU跑完30层**(finish同步等GPU)。R47的"host 27ms vs GPU 12.9"是rate8并发下TPOT含排队,误读成单步host开销。
+**单步真相**:host CPU不是问题(~4us)。**单发一步GPU=12ms跑30层**,这才是TPOT大头。vLLM TPOT 6.6ms。**单发12ms vs vLLM 6.6ms=我们单步GPU就慢~2×**(不是host/调度,是GPU每步计算)。
+**再对账**:单层stage-time 0.43ms×30层=12.9ms≈这里12.08ms exec。**吻合!** 所以TPOT大头=30层×每层GPU时间,每层0.43ms里MoE占63%(其中grouped_gemm/前处理),dense15%,attn19%。
+**方向彻底澄清(推翻host/调度猜测)**:TPOT慢不是host CPU、不是调度、不是async没重叠——是**单步30层的GPU计算本身比vLLM慢~2×**。回到kernel!但要对的kernel:每层GPU 0.43ms的大头=MoE(含grouped_gemm grid.z=128的24% + 前处理)。
+**并发排队**(TPOT 54 vs 单步12)是rate8下48请求的流水,另一层(吞吐问题非单token延迟)。
+**下一步**:单步GPU 12ms(每层0.43)要降到vLLM级→优化每层最大头。MoE grouped_gemm grid.z=128(R37-40没改,占MoE24%)+ MoE前处理(R43 router已关BI)。或attn 19%。先确认关BI后MoE新占比(router降了MoE构成变了)。
