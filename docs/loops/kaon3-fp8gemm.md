@@ -712,3 +712,14 @@ MOE_GRID_CAP=8(grid.z 128→8,结果错只测时)vs 128:gemm3 **0.096→0.080ms,
 **单流concurrency=1(剥离排队)**:TTFT 56.8ms,**TPOT 18.5ms**。
 → **rate8的TPOT 51.8ms里,单步纯decode只18.5ms,其余2.8×(33ms)是并发排队/批内竞争**。两条优化线分清:①单步18.5ms(kernel,MoE63%大头=R64的M=1 GEMV)②排队33ms(调度/批处理并发,max_num_seqs已64,看批内decode效率)。
 **下一步**:到分——起一个NO_GRAPH+KAON3_STAGE_TIME的serve实例测单步各stage墙钟(确认MoE63%在当前配置是否仍成立),再决定攻单步kernel还是并发排队。
+
+## R67 2026-10-27 真基线找回(用户:去eager重跑):非eager vLLM在:28201一直在跑,我先测错到:28200(eager)
+约定:`:28200`=vLLM eager(parity调试态),`:28201`=vLLM**非eager最强基线**(run_bench.sh:6/kaon3_bench_round.sh)。不用重起,直接测:28201。
+**干净对比(同锁死负载 rate8/48req/全共享1024/128out/warmup3,client绑核60-91)**:
+| | 吞吐tok/s | TTFT p50 | TPOT p50 |
+|---|---|---|---|
+| dinfer | 594 | 251ms | 51.8ms |
+| **vLLM非eager:28201** | **946** | 31ms | **7.57ms** |
+dinfer=vLLM **63%**,TPOT慢**6.8×**,TTFT慢8×。与交接区944/6.6吻合,**差距真实**。
+**定性**:decode段GPU~100%利用(实测采样)→纯kernel计算效率差,非host/喂不饱(坐实R58)。差距在batch decode单步kernel效率(vLLM~7.57ms/步 vs dinfer 51.8ms/步,同rate8)。
+**下一步**:NO_GRAPH+STAGE_TIME测batch态(M>1)分段,确认MoE是否仍大头(R36是M=1单步的63%;batch态每专家M≈3-4,GEMV收益存疑)。
