@@ -539,3 +539,11 @@ perf-trend.csv格式:round,date,change,group(c1/c8/c32),metric(out_tok_per_s等)
 **最关键诚实判断**:**这张wait表是整层mega测试,serve不走整层mega**(serve只融dense MLP GATE/UP/DOWN,QKV/OPROJ cuBLASLt,MoE grouped)。在整层mega测试上抠wait对serve TPOT无用。
 **serve真实TPOT大头(R47实测)=host/调度开销(占76%),GPU实算仅24%**,不是这张表的stage间wait。
 → **继续优化应攻serve真实路径的host/调度**(R47),不是整层mega测试的wait。wait这个方向在整层mega测试里已到头(片上融合175us是最优,单stage加split-K无效)。
+
+## R51 2026-10-27 GATE wait根因算清:等QKV/OPROJ占满CTA,非等RES(RES快)
+算账:GATE单task wait=216795cyc,前置链(IN→QKV→...→RES)总exec=6281026cyc。GATE 68 task(17×sp4)。
+**矛盾解开**:GATE CTA不是从t=0等整条链(那样wait会~前置链)。持久kernel**轮转领task**:前面stage的task先被CTA处理,轮到GATE时前链大部分已算完,每GATE task只等"尾部+CTA空闲"。
+**GATE wait 14.7×真相**:前链exec大头=QKV(40%)+OPROJ(18%)=58% exec,**它们占满170 CTA**,GATE task排后面领不到CTA→wait_stage自旋等CTA空闲+等dep signal。**不是等RES(RES exec仅0.9%很快),是等QKV/OPROJ这些大exec把CTA占着**。
+**→ 降GATE wait = 让QKV/OPROJ(占满CTA的大exec)更快**,或GATE与之并行(有依赖不能)。回到:QKV/OPROJ是真算大头,它们快→GATE少等。
+**但⚠️(反复提醒)**:整层mega测试里QKV用fp8_gemm_tile,**serve的QKV走cuBLASLt(已不慢)**。所以整层mega里"QKV占40% exec拖慢GATE"**在serve不成立**(serve QKV快)。整层mega的GATE wait问题serve没有。
+**结论**:GATE wait在整层mega里的解=加速QKV/OPROJ(fp8_gemm_tile),但serve不走fp8_gemm_tile的QKV→**对serve无用**。整层mega若要独立跑(非serve),可优化其fp8_gemm_tile QKV。serve的TPOT仍回host/调度(R47)。
