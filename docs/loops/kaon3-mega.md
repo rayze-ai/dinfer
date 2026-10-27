@@ -1244,3 +1244,9 @@ mega_layer_parity + MEGA_DIAG_GEMMTIME 插桩(clock64 tid0,5个GEMM stage累加,
 **坑(定位插桩过程)**:__device__ 全局变量跨TU——build.rs无-rdc=true,g_gemm_cyc定义必须与fp8_gemm_tile实例化在**同一TU**(mega_layer_sm120.cu),放mega_mlp_sm120.cu会让mega_layer的atomicAdd写幻影副本读回0。
 **注**:mega_mlp_dense_branch测试路这次‖mega‖=0全零(R15曾过,退化根因未查,与本profiling无关,另议)。
 **诊断插桩测完回退**:MEGA_DIAG_GEMMTIME门控代码+build.rs开关+两测试打印,下步revert。
+
+## fp8 GEMM 载入优化方案 2026-10-27:双缓冲软件流水(藏访存延迟)
+根因确认:`fp8_gemm_tile`(mega_mlp_core.cuh:130-150)是**朴素同步循环**:`load_b+store_a → cp.async.commit → wait_group 0(等全部) → syncthreads → K循环mma → syncthreads → 下一kb`。每轮 mma 单元在 load+wait 期间全空闲 → 68.6% 耗在载入等待。gqa_v3 有 PIPE=2 双缓冲,此处没有。
+**优化**:双缓冲软件流水——序幕 issue kb_lo 到 buf0;循环内先 issue kb+1 到 buf(kb+1)%2,再 wait_group,再用 buf kb%2 算 mma。访存延迟藏到 mma 后。**mma 顺序/累加序不变 → 逐位安全**。
+**smem**:sA[2]+sB[2] 双份,kBN=128/RS=144 → 单份20.7KB,双份41.3KB<48KB。但 megakernel 持久(grid=sms*occ),smem 翻倍可能降 occupancy → **净收益实测 mega_layer_parity 计时+per-stage QKV/GATE 耗时**。
+**验证**:①逐位(mega_layer_parity fused vs separated 0/N 不变);②QKV/GATE/UP/DOWN stage exec cycle 降幅;③整层计时。若 occupancy 降致净负→回退或调 PIPE/tile。
