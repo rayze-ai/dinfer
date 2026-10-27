@@ -20,6 +20,9 @@ const EPS: f32 = 1e-6;
 
 fn sigma_n() -> usize { HEADS * D + 2 * NKV * D } // 8192
 
+fn envsp(k: &str) -> i32 {
+    std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(1i32).max(1)
+}
 fn rand(n: usize, seed: u64) -> Vec<f32> {
     let mut s = seed | 1;
     (0..n)
@@ -241,10 +244,10 @@ fn mega_layer_fused_matches_separate() {
         kv_fp8: 1,
         splits: 1,
         keys_per_split: 32,
-        sp_qkv: 1,
-        sp_o: 1,
-        sp_gu: 1,
-        sp_dn: 1,
+        sp_qkv: envsp("MEGA_SP_QKV"),
+        sp_o: envsp("MEGA_SP_O"),
+        sp_gu: envsp("MEGA_SP_GU"),
+        sp_dn: envsp("MEGA_SP_DN"),
         part_qkv: std::ptr::null_mut(),
         part_o: std::ptr::null_mut(),
         part_gate: std::ptr::null_mut(),

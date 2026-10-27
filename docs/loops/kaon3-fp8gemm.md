@@ -211,3 +211,11 @@ KVWR47.1(11.6%glue写KV) IN37.4(9.2%norm) RES37.1(9.1%glue) OPROJ32.0(7.9%GEMM) 
 **重新解释与vLLM差距**:decode m=4延迟受限(并行度小),拼关键路径短+每stage快。vLLM优势可能是**关键路径上每个kernel本身更优(cutlass)**,非流水重叠。
 **诚实**:我这十几轮反复拿未验证假设往"融合错/GEMM慢/拆开"上靠,被用户逐次驳回。真相朴素:①融合方向对(缩关键路径);②decode m=4 GPU吃不满是本质;③要快=缩链+每stage更快,不是推翻融合。
 **下一步(不再推翻融合)**:沿缩关键路径——①继续融合吸收剩余glue stage(KVWR/ROPE等);②看关键路径上哪个stage的exec(真算)最大可优化(QKV exec 38.9%最大,但前测它带宽健康);③对比vLLM同形状单层wall确认差距绝对值(还没做)。
+
+## ★ R21 2026-10-27 回答"为什么等"(用户):前段stage并行度低(sp=1)没吃满GPU→算得慢→下游等
+用户:"找为什么等,解决为什么等,不是融合/拆"。对。直追:
+- DOWN等12×=领到DOWN task的CTA从t=0自旋等整条前链(QKV→..→ACT)算完。
+- **前链为何慢**:sp=1时每stage task少(QKV=ΣN/128=64,GATE/UP各17,DOWN=22),GPU 170 SM→**150 SM全程闲**,每stage用不满GPU算得慢→下游等久。
+- **"为什么等"的答案=前段stage并行度太低没吃满GPU,拖慢关键路径**。非融合/拆问题,是每stage并行度。
+**直接手段=split-K**:K维切sp份→task×sp→用上闲置SM→stage更快→wait降。**R16测wait时sp全=1(split-K关着)!**(parity:244-247 sp_qkv/o/gu/dn=1)。历史R3已验sp_gu/dn=4/4使dense 66.6→53.9us、DOWN wait-23%,方向对,只是测wait用了sp=1。
+改parity:sp_qkv/o/gu/dn 改环境变量可调(envsp,默认1)。**下一步:同测试跑 sp全1 vs sp全4,对比各stage wait——验证split-K降wait(解决为什么等)**。
