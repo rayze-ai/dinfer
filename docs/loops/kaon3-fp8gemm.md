@@ -547,3 +547,10 @@ perf-trend.csv格式:round,date,change,group(c1/c8/c32),metric(out_tok_per_s等)
 **→ 降GATE wait = 让QKV/OPROJ(占满CTA的大exec)更快**,或GATE与之并行(有依赖不能)。回到:QKV/OPROJ是真算大头,它们快→GATE少等。
 **但⚠️(反复提醒)**:整层mega测试里QKV用fp8_gemm_tile,**serve的QKV走cuBLASLt(已不慢)**。所以整层mega里"QKV占40% exec拖慢GATE"**在serve不成立**(serve QKV快)。整层mega的GATE wait问题serve没有。
 **结论**:GATE wait在整层mega里的解=加速QKV/OPROJ(fp8_gemm_tile),但serve不走fp8_gemm_tile的QKV→**对serve无用**。整层mega若要独立跑(非serve),可优化其fp8_gemm_tile QKV。serve的TPOT仍回host/调度(R47)。
+
+## R52 2026-10-27 深入读纠正(用户:别轻易下结论):serve dense branch确有独立wait,需实测
+读mega_dense_branch(layer.rs:884-960):serve走`mega_mlp_dense_branch`=**6-stage dense megakernel**(NORM→GATE→UP→ACT→DOWN→POST),非整层15 stage。**它内部也有stage依赖wait**(GATE/UP等NORM,DOWN等ACT),与整层mega的GATE wait同构但独立(6 stage版)。
+**纠正R51"serve GATE wait没有"**:错。serve dense branch里GATE/UP/DOWN一样有stage间wait。只是dense branch占decode仅15%(R36 stage-time dense 0.09/total 0.63),GATE wait在这15%内,量级远小于MoE 63%/router 40%。
+**已有测法**:mega_mlp_parity测的正是dense branch 6-stage(=serve真实走的),有NORM/GATE/UP/ACT/DOWN exec/wait打印(R26见过)。**这才是serve真实dense wait,不是整层mega**。但R38记过dense branch测试曾全零(需确认当前能跑)。
+**用户要求的正路**:先调研测试serve真实路径的wait(dense branch用mega_mlp_parity;MoE/router已测=router 0.25ms最大但已靠关BI降到0.03),把serve各部分wait摸清,再决定转host/调度。
+**下一步**:跑mega_mlp_parity看dense branch(serve真实)的GATE/UP/DOWN wait实际多少;若dense branch wait可观且能降(片上融合/依赖),就在serve有收益(不同于整层mega对serve无用)。先确认mega_mlp_parity当前能跑(非全零)。
