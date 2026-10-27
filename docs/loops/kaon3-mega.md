@@ -1086,3 +1086,16 @@ NO_GRAPH 每次真拷正确栈值故正常；graph replay 读失效栈故乱码�
 **排除真 bug**:① position/RoPE 正确(runner.rs:669 `start..start+n`,命中从 num_computed 起算);② 复用 KV 是同一物理块、逐字节同源(manager.rs:150-198 get_computed_blocks 直接返缓存块,不重算);③ FP8 量化口径两路一致(只是放大器)。
 **先例**:`docs/pitfalls.md:537-542` 已记录同类现象(prefix cache 开后流式==非流式逐字比较随机失败,paged vs prefill bf16 累加序差 ~1e-2,near-tie 翻转)**判非 bug**;`parity-localization.md:12-15/143-146` kernel 差异+放大器类。
 **结论**:cache hit 0.731 功能正常,数值不一致是双方共有、不可消除的 kernel 累加序噪声。要逐位一致用 `--no-prefix-caching`(main.rs:59)。**无需改代码**。可选对拍(vLLM prompt_logprobs oracle 判 near-tie gap<Δ,方案见子代理报告)留作佐证,非必须。
+
+## C2 修复 2026-10-27:乱码已修(token接力正确),但异步流水实测负收益→默认关,保C1
+修复(commit d6ddab1):forward_device_mode 补 gather_inflight(forward前)+save_chosen(argmax后),异步在飞步 ids[i]=prev_chosen[gather_idx]。**单发通顺不乱码**(之前 de👬엥媲媲),token 接力正确,根因坐实。
+**但 bench 实测负收益**(engine_c2fix rate=8):
+
+| | cache | 吞吐 tok/s | TTFT p50 | TPOT p50/p99 |
+|---|---|---|---|---|
+| C1 同步 | 0.731 | **246** | 5396 | 38.6/64 |
+| C2fix 异步 | 0.351 | **31** | 35572 | **494/729** |
+
+异步 TPOT 暴涨 13×、吞吐降 8×。**用户 2026-10-27:qwen35 自己都没完全通,只能参考不能为准**——实测证明照搬 qwen35 异步到 kaon3 功能对但性能负收益(印证 R1 调研"不假定会赢"、子代理方案风险③)。
+**根因待查(per-step 开销)**:TPOT 494 暴涨不是重叠失败而是异步路径 per-step 严重开销,嫌疑=AsyncResultRing event wait 阻塞 / engine 异步循环调度开销 / kaon3 decode 已占满 GPU 无 CPU 空闲可重叠(异步只增同步成本)。
+**决定**:异步**默认关**(supports_async 加 KAON3_ASYNC 门,默认 false→走同步 C1 246),保留 token 接力+begin/finish 代码供将来查清 per-step 开销后再启用。serve 回 C1 稳态。
