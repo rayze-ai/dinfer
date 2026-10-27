@@ -87,3 +87,12 @@ gemm_small_m(现成微基准,qwen35形状,M=4)三者带宽:
 **作废**:R5"8×gap第一主因=occupancy"、R7"决定性参照/整层mega错权衡"**均无干净数据支撑,撤销结论**。合并本身有实测真收益(parity 1.55× + 逐位正确 + 根治乱码),**不推翻**。
 **唯一能定论的实验(此前从未做)**:同形状同dtype(kaon3 fp8)、同权重,**GEMM融在megakernel里 vs 单独launch**,各测墙钟带宽。在此之前不谈改架构。
 **8×真因仍未知**:可能在attention/glue/stage自旋(wait≫exec的线索),不一定在GEMM。需先把整层251us按墙钟拆到stage级(非cycle占比)。
+
+## ⚠️ R9 2026-10-27 用户提醒接上R26:瓶颈是wait(等依赖)非GEMM,本轮GEMM叙事整个推翻
+用户："QKV/OPROJ/GATE/UP/DOWN每环节都验证过,时间没那么大"。翻历史坐实:
+- **kaon3-mega R26(2026-10-26)已定论**:"分阶段计时:瓶颈不是GEMM本身,是**等依赖(wait)占大头**";三GEMM占96% exec但**wait≫exec**。
+- dense MLP(GATE+UP+DOWN+norm+gelu)mega一次launch=**53.9us**(R3最佳split-K),**根本无"每GEMM慢8×"**。
+**本轮错误链彻底复盘**:R2拿整层251us÷纯权重理论31us得8×→R3自己发现wait≫exec却没翻R26→R5硬拐到"GEMM occupancy=1"→R7拿bf16参照凑"独立快8×"→R8已自我纠正无数据→**R9接上R26坐实:exec(GEMM真算)不慢,wait(stage间CTA等依赖自旋)才是251us大头**。
+**结论**:①"融合亏GEMM带宽8×"彻底不成立,撤销;②真瓶颈=stage间等依赖自旋(R26早定位),**这恰是融合调度可优化的**(依赖排布/并行度/split-K平衡wait),不是"融合错了要拆GEMM";③我把方向搞反——该优化的是wait,不是GEMM kernel,更不是拆融合。
+**正确下一步(回到R26方向)**:降wait——看哪些stage串行等待可并行/重叠(dep链)、split-K平衡各stage wait(R2/R3已在做:sp_gu/sp_dn调到4/4使DOWN wait-23%、mega 66.6→53.9us)。继续沿R26/R3的split-K+依赖优化,不是推翻融合。
+**作废本loop的R5/R7方向**(GEMM独立/拆融合)。保留R2带宽账(但它是整层非GEMM)、R5 ptxas寄存器事实(158/occ=1,真的,但非8×主因)。
