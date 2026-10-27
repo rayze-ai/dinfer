@@ -287,3 +287,16 @@ sp扫描(融合墙钟,逐位全✓):
 **结论**:非prefill本身慢(首5个80ms不输vLLM)。是**并发槽位16太小 + decode慢(TPOT4.6×)致占槽久**双重叠加堆积。MEGA_ROWS=8不是硬限(超了回退逐op不卡batch)。
 **验证(下一步)**:抬max_num_seqs(16→64/128)重测TTFT——若TTFT降=坐实槽位限流。但注意:decode>8行走非mega逐op路径(mega_dense只≤8),batch大可能decode变慢;需同时看TTFT降vs TPOT变化的净效果。真要追平vLLM还需降TPOT(decode侧,回到wait/split-K挂账项)。
 **双因耦合**:TTFT和TPOT其实是一个问题——decode慢→占槽久→排队→TTFT高。降TPOT同时改善两者。所以decode侧wait优化(挂账项)其实也是TTFT的解,不是两件事。
+
+## ★★★★ R28 2026-10-27 TTFT验证成功:max_num_seqs 16→64,TTFT降13.7×+吞吐涨51%
+同锁死负载(seed42/全共享1024/128out/REQS48),仅改max_num_seqs:
+| max_num_seqs | 吞吐 | TTFT p50 | TPOT p50 | cache |
+|---|---|---|---|---|
+| 16(原默认) | 357 | 3357ms | 40.2 | 0.983 |
+| **64** | **540** | **245ms** | 59.4 | 0.976 |
+| (vLLM非eager) | 936 | 81ms | 8.8 | - |
+**TTFT 3357→245ms降13.7×**(坐实R27槽位限流堆积),**吞吐357→540涨51%**,TPOT略升(batch大decode每步多行)。
+**对vLLM**:吞吐从vLLM的38%→**58%**,TTFT从慢41×→**慢3×**。**改一个配置参数(非代码)**,纯配置洞:serve默认max_num_seqs=16太小(vLLM默认256)致堆积。
+**坑**:max_num_seqs=64需配套降max-model-len(16384→2048,否则KV池OOM)或加num-blocks;生产要按真实并发+序列长设KV池。num-blocks 8192+len16384直接OOM(32GB GPU)。
+**dashboard/CSV**:子代理修好了——engine轮要存`engine_*`命名目录才被engine_trend.py自动扫(e2e_vs_vllm没匹配,加symlink补救);8090是缓存鉴权网关HTTP码不可靠(401↔404乱跳),磁盘文件在才是准的。
+**下一步**:①max_num_seqs/KV池调到最优(64是否够?试128,配KV池)；②剩余差距(吞吐58%、TTFT3×、TPOT慢6.7×)——TPOT是decode侧,回到wait/split-K挂账项（R26）；③这轮进engine-trend入dashboard。
