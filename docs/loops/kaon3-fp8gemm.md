@@ -62,3 +62,16 @@ occupancy算:sm120每SM 64K寄存器。256线程×158=40448 reg/block → 64K/40
 分析:①m=4 task少,2block/SM填不满(task不够);②128寄存器下代码变低效(虽0spill);③持久megakernel 2block自旋竞争增。**整层测试混15stage+glue+attn,GEMM带宽改善被淹没/被别的stage拖累看不清**。
 → 回退OCC=2。**R4/R6都指向同一结论:必须隔离单GEMM微基准**,整层parity判不了GEMM级优化(task少+混杂)。
 **下一步(不再在整层上试)**:写最小micro-bench直接launch一个高occ的fp8 GEMM kernel(QKV形状M=4/ΣN=8192/K=2816),测wall us vs理论13.5us,且扫occupancy(1/2/4 block)看带宽曲线。这才能干净回答"GEMM独立高occ能否接近带宽"=整层融合该不该让位。
+
+## ✅ R7 2026-10-27 决定性参照:独立GEMM M=4达峰值带宽,坐实megakernel融合是错权衡
+gemm_small_m(现成微基准,qwen35形状,M=4)三者带宽:
+| M=4 GEMM | lt_default | small_m | mma |
+|---|---|---|---|
+| attn.qkv 8192×5120 | 3103 GB/s(27us) | 2885 | 4096 |
+| mlp.gate_up 34816×5120 | 1600 | 1655 | 1583 |
+| mlp.down 5120×17408 | 1522 | 1472 | 1560 |
+**独立launch GEMM在M=4就达~1500-3100 GB/s=接近/达5090峰值(~1.7TB/s)**。对比mega融合fp8_gemm_tile=理论1/8(~13%)。
+**坐实R5**:①独立高occ GEMM M=4就打满带宽(硬件+好kernel做得到,非M小的物理限);②mega融合GEMM慢8×是occupancy=1卡的(158寄存器塞15stage)。
+**核心结论(loop攻破)**:**整层megakernel对GEMM占92%的decode层是错误权衡**——融合省~1.2×launch,远抵不过GEMM带宽损失8×。megakernel适合小算子密集(省launch主导),不适合GEMM-bound(occ主导)。
+**注**:参照是bf16 cuBLASLt/qwen35形状,非kaon3 fp8;原理成立(M=4可达峰)但kaon3 fp8独立路径带宽待直接测确认。
+**下一步方向(重大,待定)**:decode层GEMM退出megakernel融合,走独立高occ kernel(如现成gemm_fp8_static_bf16或cuBLASLt),只把小算子(norm/rope/gelu/attention)留融合或也独立。预期GEMM段8×→接近1×,整层可能从251us→大幅降。需重新设计mega边界——这推翻"整层mega"路线,回到"关键算子融合+GEMM独立"。
