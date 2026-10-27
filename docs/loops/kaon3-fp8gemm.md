@@ -408,3 +408,10 @@ serve真实decode一层(tok=1,KAON3_STAGE_TIME=1,8次稳定):
 **与vLLM差距对上**:vLLM MoE只给激活专家起block,我们给全128个→decode 94%浪费。
 **但需确认(别假设)**:stage-time只测MoE整体0.397ms,没细分grouped_gemm vs router/bucket/gather/quant×2/gelu/scatter(MoE有~10 kernel)。grid.z=128浪费是确凿机制,但是否MoE大头待细分。
 **下一步**:moe_branch内部加细分计时(router/gather/quant/3×gemm/scatter各段),确认grouped_gemm(grid.z=128)是否MoE大头;若是→改grid.z=激活专家数(或compact offsets只给非空专家起block),对齐vLLM。这是把TPOT拉近vLLM的核心杠杆(MoE占63%,其中grid浪费94%)。
+
+## R38 2026-10-27 坑:event计时的sync与cudagraph capture冲突,serve崩;MoE细分要换法
+加KAON3_MOE_TIME后serve崩:`CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED`。根因:**serve decode走cudagraph,capture期间任何stream.synchronize()非法**。我的event计时(record+sync读elapsed)与graph冲突。
+**反思R36的0.397ms MoE数据**:stage-time能出数是因serve首次decode(graph未捕获)跑了几次,捕获后崩——那0.397ms是**非graph路径**的,可能偏高(graph省launch开销)。但MoE占63%的**相对结论仍成立**(attn/dense同样非graph,相对比例可比)。
+已关MOE_TIME/STAGE_TIME,serve恢复UP。
+**MoE细分正确测法(graph兼容)**:①用NO_GRAPH=1跑serve(禁graph,event sync合法),测MoE细分——但那不是生产路径;或②在mega_mlp_parity式的独立微基准里测MoE grouped_gemm(不经serve/graph);或③grid.z=128浪费是**读代码确凿的机制**(R37),不一定非要精确计时——可直接改grid试(只给激活专家起block),重测stage-time MoE整体降没降,降了就坐实。
+**下一步**:走③最直接——改grouped_gemm grid.z从128(全专家)到激活专家数,重测MoE整体ms(用NO_GRAPH或首次decode窗口),降了=坐实grid浪费是大头。先读grouped_gemm host launch怎么设grid.z。
