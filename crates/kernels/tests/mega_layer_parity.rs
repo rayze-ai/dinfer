@@ -374,11 +374,20 @@ fn mega_layer_fused_matches_separate() {
     let ecv = st.dtoh_sync_copy(&ec).unwrap();
     let wcv = st.dtoh_sync_copy(&wc).unwrap();
     let names = ["IN","QKV","QKNORM","ROPE","KVWR","ATTN","OQNT","OPROJ","RES","PREFF","GATE","UP","ACT","DOWN","POST"];
-    let tot: u64 = ecv[..15].iter().sum();
-    println!("[融合 分阶段 exec/wait 周期]");
-    for i in 0..15 {
-        let pct = if tot > 0 { ecv[i] as f64 / tot as f64 * 100.0 } else { 0.0 };
-        println!("  {:7} exec={:>11} ({:4.1}%)  wait={:>11}", names[i], ecv[i], pct, wcv[i]);
+    let etot: u64 = ecv[..15].iter().sum();
+    let wtot: u64 = wcv[..15].iter().sum();
+    // 依赖关系（谁等谁）：stage i 的 wait = 等它 dep 的 stage 完成。标出 dep 便于看"前一步喂不饱后一步"。
+    let deps = ["-","IN","QKV","QKNORM","ROPE","KVWR→QKNORM","ATTN","OQNT","OPROJ","RES","PREFF","PREFF","GATE·UP","ACT","DOWN"];
+    println!("[融合 分阶段 exec+wait 周期]  exec合计={etot}  wait合计={wtot}  wait/exec={:.2}×", wtot as f64 / etot.max(1) as f64);
+    // 按 wait 由大到小排——wait 大 = 该 stage 在空等前序（喂不饱）
+    let mut order: Vec<usize> = (0..15).collect();
+    order.sort_by(|&a, &b| wcv[b].cmp(&wcv[a]));
+    println!("{:8}{:>12}{:>7}{:>12}{:>7}{:>8}  {}", "stage", "exec", "e%", "wait", "w%", "w/e", "依赖");
+    for &i in &order {
+        let ep = if etot > 0 { ecv[i] as f64 / etot as f64 * 100.0 } else { 0.0 };
+        let wp = if wtot > 0 { wcv[i] as f64 / wtot as f64 * 100.0 } else { 0.0 };
+        let we = if ecv[i] > 0 { wcv[i] as f64 / ecv[i] as f64 } else { 0.0 };
+        println!("{:8}{:>12}{:6.1}%{:>12}{:6.1}%{:7.1}×  {}", names[i], ecv[i], ep, wcv[i], wp, we, deps[i]);
     }
 
     assert_eq!(total, 0, "片上融合与分离基线不逐位一致：qkv={nd_qkv} cache={nd_cache} attn={nd_attn} o={nd_o} x2={nd_x2} norm1={nd_norm1} out={nd_out}");
