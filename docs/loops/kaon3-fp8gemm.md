@@ -192,3 +192,11 @@ KVWR47.1(11.6%glue写KV) IN37.4(9.2%norm) RES37.1(9.1%glue) OPROJ32.0(7.9%GEMM) 
 **真根因浮现**:持久megakernel每stage只有少量task(n_gu=17/n_dn=22/sp=1),却起了170 CTA→**绝大多数CTA全程空转自旋**,wait虚高且真实浪费SM。这不是"喂不饱后一步",是**CTA数远超task数,大量CTA空占SM自旋**。
 **这解释R6 OCC=2为何更慢**:task本就少,CTA已过剩,再翻倍occ只增空转竞争。也解释wait=5×exec:5×里大半是过剩CTA的空转,非真实数据依赖等待。
 **下一步验证**:看wait_stage(mega_common.cuh:56-74)——领不到task的CTA在干嘛;grid CTA数是否该按task数砍(grid=min(sms·occ, 各stage max task)而非sms·occ)。若砍到~22 CTA,空转消失,wait应暴降。先读mega_kernel的task循环+grid设定。
+
+## ★ R19 2026-10-27 真机制坐实:依赖链串行,后段stage的CTA自旋等前链(非CTA不够)
+读task循环(mega_common.cuh:140)+grid(mega_layer:595):grid=min(sms·occ, **n_tasks=整层所有stage task总和**)。CTA轮转领全局task,`stage_of`映射到stage,**同CTA可跨stage领不同task**。
+**wait真相**:CTA领到靠后stage的task(如DOWN)→`wait_stage`里`while ld_acquire<need __nanosleep(40)`自旋等该stage的dep(ACT)signal完。DOWN数据要等ACT→GATE/UP→RES→OPROJ→...→QKV整条前链算完。**wait 12×=DOWN的CTA等这条长链**。
+**精确机制(前一步喂不饱后一步)**:不是CTA不够(R18错),是**15 stage串成一条依赖链,后段stage的CTA只能干等前段**。持久megakernel用全局task+stage依赖,后段CTA领到task却要自旋等整条前链→wait=exec 5×。
+**R18"CTA空转"部分对**(后段CTA确在自旋)**但归因错**(不是"领不到task空转",是"领到了但等依赖")。
+**这是megakernel范式的固有代价**:单kernel内stage串行,无法像多kernel那样让GPU在stage间流水重叠(多kernel时GPU调度器可让kernel N+1的早期块趁kernel N尾部空闲就上)。megakernel反而把这重叠能力关了——**这可能就是比vLLM慢的结构性原因**:vLLM多kernel独立launch,GPU硬件调度器天然重叠相邻kernel;megakernel串成一条链,后段纯等。
+**下一步(验证这个结构假设)**:对比同形状 megakernel(1launch串链) vs 多kernel(各stage独立launch,让GPU调度器重叠)的墙钟。若多kernel更快=坐实megakernel串链是病根,融合方向要重新权衡(省launch vs 丢硬件流水重叠)。这次别只看cycle,直接比两种launch的wall us(测试里已有:分离294.7 vs 融合251——但分离是顺序launch+我可能没让它重叠,需确认分离是否真并发)。
