@@ -200,3 +200,14 @@ KVWR47.1(11.6%glue写KV) IN37.4(9.2%norm) RES37.1(9.1%glue) OPROJ32.0(7.9%GEMM) 
 **R18"CTA空转"部分对**(后段CTA确在自旋)**但归因错**(不是"领不到task空转",是"领到了但等依赖")。
 **这是megakernel范式的固有代价**:单kernel内stage串行,无法像多kernel那样让GPU在stage间流水重叠(多kernel时GPU调度器可让kernel N+1的早期块趁kernel N尾部空闲就上)。megakernel反而把这重叠能力关了——**这可能就是比vLLM慢的结构性原因**:vLLM多kernel独立launch,GPU硬件调度器天然重叠相邻kernel;megakernel串成一条链,后段纯等。
 **下一步(验证这个结构假设)**:对比同形状 megakernel(1launch串链) vs 多kernel(各stage独立launch,让GPU调度器重叠)的墙钟。若多kernel更快=坐实megakernel串链是病根,融合方向要重新权衡(省launch vs 丢硬件流水重叠)。这次别只看cycle,直接比两种launch的wall us(测试里已有:分离294.7 vs 融合251——但分离是顺序launch+我可能没让它重叠,需确认分离是否真并发)。
+
+## ★ R20 2026-10-27 用户两问驳回R19拆融合:合并是解法非病根,wait多半是m=4并行度小非可回收
+用户:"合并了就不能解决吗?分开launch不是又多了吗?" 两问都对,R19"拆回多kernel"错,撤销。
+**1. wait是数据依赖(物理),合并/拆开都存在**:DOWN必等ACT出输入,拆成多kernel同样等。拆开不消除依赖等待。wait非合并造成。
+**2. 真地板=依赖链关键路径延迟**(QKV→...→DOWN串行,各stage exec之和≈251us)。要快只有:①每stage更快 ②缩链(减stage)。**减stage正是融合在做**(fuse_glue/ff 251→192实测有效)→**合并是对的方向**。
+**3. 拆开两头亏**:launch开销加回+依赖等待没少。拆错。
+**R19错因**:说"vLLM多kernel有硬件流水重叠、mega关掉了"——**单stream上kernel默认串行也等依赖,不成立**。又一次拿没验证的结构假设往"融合错"靠。
+**wait=5×exec真相(重估)**:m=4每stage仅17-22 task,但170 SM→任何时刻只17-22 task能跑,**150 SM本就没活**(合并时自旋计入wait,拆开时闲置不计数,物理浪费一样)。**wait大半是m=4并行度小GPU天然吃不满,非"修调度可快5×"的可回收时间**。
+**重新解释与vLLM差距**:decode m=4延迟受限(并行度小),拼关键路径短+每stage快。vLLM优势可能是**关键路径上每个kernel本身更优(cutlass)**,非流水重叠。
+**诚实**:我这十几轮反复拿未验证假设往"融合错/GEMM慢/拆开"上靠,被用户逐次驳回。真相朴素:①融合方向对(缩关键路径);②decode m=4 GPU吃不满是本质;③要快=缩链+每stage更快,不是推翻融合。
+**下一步(不再推翻融合)**:沿缩关键路径——①继续融合吸收剩余glue stage(KVWR/ROPE等);②看关键路径上哪个stage的exec(真算)最大可优化(QKV exec 38.9%最大,但前测它带宽健康);③对比vLLM同形状单层wall确认差距绝对值(还没做)。
