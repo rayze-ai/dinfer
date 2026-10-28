@@ -841,3 +841,7 @@ decode c1 的 MoE 段 nsys：grouped_gemm gate 18.6 + up 18.6 + down 12.5 + gelu
 - b15 第 4 次：门禁全过，bN **编译失败 E0502**（`model.rs` StepCtx 里 `kv_fp8_store: kv_cache[l].is_fp8` 与 `kv_mut: &mut kv_cache[l].cache.data` 同一结构体字面量里借用冲突）→ 先读 `is_fp8` 到局部再建 ctx。第 5 次起链。
 - b15 第 5 次：门禁过、编译 EXIT=0（marker=0 正常：`kv_elem_f32` 内联无符号），ABAB 跑中。
 - **B16 代码落地**：`grouped_gemm_kernel_pipe4<BK, STAGES>`（A/sfa/B/sfb 全 cp.async、STAGES 级环形、`wait_group STAGES-1`、越界行 zfill 0——有效行输出与 pipe 版逐位同）；host `MOE_GEMM_STAGES`（默认 4，支持 3/4/6，≤2 回退 pipe 双缓冲）；测试 `moe_pipe4_matches_baseline`（gate/up 形状 + down 形状 BK=64 路径，bad=0）。链 `/w/b16.sh` 等 b15 结束起。
+
+## ★★★ D68 2026-10-28 B15 首批 B（KV cache 存 e4m3）：c1 TPOT 6.56（持平 b8d 6.57）；c8 TPOT 11.53 → **11.12（-3.6%）**，但 **c8 TTFT 492 → 1397 ms（2.8×）**，吞吐 437 → 262
+- TTFT 爆是预料中的 B15b 缺口：c8 的 prefill 走混批 `paged_win`（`BatchMode::Paged`），kv_fp8 存储下 `paged_impl` 强制 `cfg=-1` 通用慢路径（D=256 层 25 层）。**c8 TPOT -0.4 ms 证明 KV 读带宽减半有效**（c8 KV 读占比高；c1 KV 总量小、在 L2 里，看不出）。
+- 决定：**B15 的 `KV_FP8_STORE` 默认改关**（等 B15b fa_v5 PAGED 加 e4m3 读后再默认开）；本轮 B 侧 c8 TPOT 数字记 CSV 作负/中性结果说明。英文 raw 输出与 b8d 逐字同（逐位）。
