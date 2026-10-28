@@ -296,8 +296,8 @@ impl ModelExecutor for KaonExecutor {
         if ht {
             let t_col = std::time::Instant::now();
             let us = |a: std::time::Instant, b: std::time::Instant| b.duration_since(a).as_micros();
-            tracing::info!("[host-time] bind+chk={}us upload={}us launch={}us collect(dtoh_sync)={}us total={}us",
-                us(t_bind, t_bind), us(t_bind, t_up), us(t_up, t_launch), us(t_launch, t_col), us(t_bind, t_col));
+            eprintln!("[kaon3-host] upload={}us launch(submit)={}us collect(dtoh_sync)={}us",
+                us(t_bind, t_up), us(t_up, t_launch), us(t_launch, t_col));
         }
         // 每请求本步的 logits 行区间（无投机 → 恰 1 行）：取该行 argmax 为下一个 token。
         generated.clear();
