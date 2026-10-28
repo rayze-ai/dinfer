@@ -726,3 +726,4 @@ A 轮 c8 一次 TPOT p50 19.02 / TTFT 222（其它轮 13.45 / 583）—— 同�
 方案：device 侧先建 tile 表（一个小 kernel，`tiles[t] = (e, m_blk)` 只含有行的块，`ntile` 原子计数；上限 R/BM + E 由 host 算），grouped GEMM grid=(N/BN, ntile_max, 1)，block 读 `tiles[blockIdx.y]`，越过 ntile 的 return。空转 block 从 5.8M 降到 ≤ 44×(R/32+E)。decode（R=8）也少 44×1040×127 的空 block → 可能再省一点。逐位不变（同 tile 同序）。等 B7 结果后做。
 - **B7 对拍通过（`tmp_b7par_RESULT.txt`）**：moe_fp4 4 场景全 ok —— gateup_act 最大误差 0.0000–0.0039（输出量级 ~1，含 gelu 后 bf16 舍入，极小）；down 最大误差 0.015–0.038（超差 0）—— 比 mlp_fp8 的 0.0077 大，因为合成 down 输入是独立随机 fp4×e4m3 块缩放（量级 ~10–30 vs fp8 测试 ~1），相对误差同为 bf16 ulp 级；判据 0.01+0.01|ref| 对此量级合适。mlp_fp8 9 场景（含 B6 的 4 个 gemv 形状）再次全过。ABAB 已起（B 侧 `FP8_GEMV=1 MOE_DECODE_GEMV=1`，含 B6b warp 数改动）。
 - 顺手发现：`moe_grouped_gemm` 里有 `MOE_GRID_CAP` 诊断开关（结果会错，注释写"测完删"）——上会话留下的，B8 做 tile 表时一并删。
+- **B7 链 A 侧口径注意**：`bN.sh` 备份的"旧二进制"是 B6 那次编的（当时 `fp8_gemv_enabled` 默认开）→ A = B6 行为（c1 6.95 / c8 11.59），**不是 B5**。B7 的 B 侧与 **B5 定稿数（7.47 / 10.94）** 比，A 轮只作环境参照。
