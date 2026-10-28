@@ -1013,3 +1013,9 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - 推算 bN c8×64（无 cache）：每波 8 新请求几乎同时到 → 先 cut-in 1 个纯 Prefill（26）、其余 7 个并进下一步成 Paged t≈3000（~480 ms）⇒ TTFT ≈ 500 ms **吻合 545**；首波在空闲 GPU 上更快 → mean 428 < p50 545 也吻合。vLLM 同口径 146。
 - **刀（B26）**：Paged 步的 prefill 行走了什么慢路径？候选：① 滑窗层 attention `paged_win`（fa_v5 PAGED：K/V 经 block_table 装载，grid 按 max_seqlen 分 BQ=64 行块）——t=13 时 query 只有 1 个短 chunk，不该 25 ms；② **D=512 全注意力层 PAGED 路径**：`gqa.cu:1577` `head_dim==512` 的分派 —— 非 paged 走 d512 快 kernel（fa_v6），**paged 可能落到 MAX_D=512 通用慢路径**（nsys D54 曾见 5 层 × 369 us = 1.85 ms/步，那是 decode 的；prefill 行走通用路径按 q_len × seq_len 串行会更惨）；③ 混批时 MoE/dense 的行数 > 8 不走 mega / gemv，正常；④ eager 全程（无 graph）launch 1065 次 ≈ +0.5 ms，不是主项。
 - 验证手段：`KAON3_STAGE_TIME=1` 若只在 decode 生效则扩到 Paged；或 nsys 抓一个 c2 混批（c1 在飞 + 1 新请求）步看 kernel 表。
+
+## ★★★★★ D83 2026-10-28 ttft8b（同服务 c1×8 → c8×64 ×3，plain / HOST_TIME=1 / plain2）：**首次 c8×64（新 prompt）TTFT p50 503–505 ms**，第 2/3 次（prefix cache 命中）71–75 ms；三组一致 ⇒ HOST_TIME 无关，D81 的 75 是 cache 态，**545/505 是真实态**
+- TPOT 也随之：首次 p50 9.9–10.0 / p90 17；cache 态 9.7–9.9 / p90 10.0。bN 口径（c1×8 后 c8×64 一次）= 首次态。
+- 结论链：c8 TTFT 505 = 一波 8 新请求中 7 个并进在飞 decode 行的 **Paged 步**（t≈3000）耗 ~480 ms（D82 表 t=2765 → 476），vs 同 token 纯 Prefill 127 ms。**Paged 步 3.7× 慢 + 25 ms 固定开销 = B26 靶子**。
+- 代码线索（`gqa.cu` paged_win 分派）：`head_dim==256` 有 v6 PAGED 分支、`128/256` 有 v5 PAGED，**`head_dim==512` 在 PAGED 没有任何快分支 → 落到 `gqa_paged_kernel`（grid=(req, head)，每 block 串行 q_len×seq_len×D 标量点积）**；非 paged 的 prefill_win 对 512 走 v6。5 层全注意力 × 3000 行 chunk 串行 = 几百 ms 量级，与 476 吻合；小 t 的 25 ms 固定开销可能也是它（一个 block 做 13 行 × 430 key × 512 维 + 决定性 8 行 decode 不 skip）。
+- 下一步：nsys 抓 c2 混批步 kernel 表定量（`nsys_mixed.sh`），然后 B26 = paged_win 给 D=512 加 v6 PAGED 分支（kv_fp8 时 v6 不读 e4m3 → 要加 KV_FP8 展开或先对 D=512 层用 bf16 cache）。
