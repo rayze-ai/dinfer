@@ -295,3 +295,12 @@ warmup5重测:
 **算一下**:25层滑窗(flash)+5层全注意力(慢路径D=512)。plen128→1024,flash层~线性,慢路径层若O(L²)则5层主导超线性(78×)。
 **待确认**:layer.rs D=512 prefill实际调哪个慢路径kernel,是不是O(L²)无分块。
 **下一步Step B**:①确认D=512慢路径kernel结构(gqa.cu通用慢路径,看是否朴素O(L²));②给D=512补flash(v6已是D=256专用FA2,扩到512?或v5 D=512);③这是Step B要改的——给全注意力层D=512补flash prefill。对标vLLM(flash支持任意D)。
+
+## ★★★★★★★ D24 2026-10-28 根因坐实:D=512全注意力层prefill走gqa_prefill_ref_kernel朴素O(L²)=TTFT 2秒
+gqa.cu:880-881:**通用慢路径=gqa_prefill_ref_kernel旧参考实现,"每(req,q_head)一个block逐query行三遍扫key"**=朴素O(L²)(每行扫全部key)+并行度极低(每req×q_head一个block)。
+**完整根因链**:
+- dinfer prefill:25滑窗层(D=256)走flash v5/v6 ✓;**5个全注意力层(5/11/17/23/29,D=512)走gqa_prefill_ref_kernel朴素O(L²)慢路径** ✗。
+- plen1024这5层O(L²)×低并行爆炸→TTFT 1960ms;vLLM flash全程O(L)仅82ms(慢24×)。
+**Step B靶子(明确且在关键路径,非MoE打偏)**:给D=512全注意力层补flash prefill。v6已是D=256专用FA2(gqa.cu:354,Q进smem/NW/TILE模板化),**扩到D=512**(gqa_fa_v6_kernel模板<D>,v6注释说D=256时Q+O+S寄存器已满,D=512要Q进smem+减TILE,正是v6思路);或v5 D=512。
+**Step A/B成果(终于定对)**:耗时最长=prefill TTFT(plen1024慢vLLM 24×);根因=D=512走O(L²)参考kernel(5层全注意力);改法=补D=512 flash。decode TPOT(慢3.8×)是次要,MoE两刀全打偏(MoE/decode不在关键路径,TTFT才是)。
+**下一步Step B实现**:gqa_fa_v6_kernel<D>扩D=512分派(gqa.cu:347后加head_dim==512→v6<512>);注意D=512寄存器/smem压力(227KB smem,Q 512×2+K/V tile),TILE可能要减。先读v6_launch/v6_kernel看D模板化到哪、512要改什么。改后对拍(prefill数值逐位/对vLLM)+ plen扫TTFT确认线性+端到端bench进CSV(step C)。
