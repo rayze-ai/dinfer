@@ -1,0 +1,43 @@
+   TTFT     mean    29.10  p50    29.17  p90    29.19  p99    29.54  max    29.54  (ms)    TPOT     mean     6.42  p50     6.42  p90     6.42  p99     6.42  max     6.42  (ms) 
+[kaon3-host] upload=20us launch(submit)=3us collect(dtoh_sync)=6347us
+2026-10-28T13:45:07.639082Z  INFO dinfer_core::engine: [host-time] tokens=1 nreq=1 sched=0.2 exec(begin+finish)=6405.8 publish=4.9 total=6410.9 us
+[kaon3-host] upload=18us launch(submit)=3us collect(dtoh_sync)=6347us
+2026-10-28T13:45:07.645494Z  INFO dinfer_core::engine: [host-time] tokens=1 nreq=1 sched=0.2 exec(begin+finish)=6403.8 publish=5.9 total=6409.9 us
+[kaon3-host] upload=19us launch(submit)=3us collect(dtoh_sync)=6360us
+2026-10-28T13:45:07.651920Z  INFO dinfer_core::engine: [host-time] tokens=1 nreq=1 sched=0.2 exec(begin+finish)=6418.1 publish=4.8 total=6423.1 us
+[kaon3-host] upload=19us launch(submit)=3us collect(dtoh_sync)=6349us
+2026-10-28T13:45:07.658338Z  INFO dinfer_core::engine: [host-time] tokens=1 nreq=1 sched=0.2 exec(begin+finish)=6407.2 publish=8.3 total=6415.7 us
+[kaon3-host] upload=22us launch(submit)=8010us collect(dtoh_sync)=18860us
+2026-10-28T13:45:07.687446Z  INFO dinfer_core::engine: [host-time] tokens=429 nreq=1 sched=5.3 exec(begin+finish)=26934.7 publish=13.1 total=26953.1 us
+[kaon3-host] upload=22us launch(submit)=5us collect(dtoh_sync)=6352us
+2026-10-28T13:45:07.693872Z  INFO dinfer_core::engine: [host-time] tokens=1 nreq=1 sched=0.4 exec(begin+finish)=6415.4 publish=5.9 total=6421.7 us
+[kaon3-host] upload=21us launch(submit)=3us collect(dtoh_sync)=6349us
+2026-10-28T13:45:07.700293Z  INFO dinfer_core::engine: [host-time] tokens=1 nreq=1 sched=0.2 exec(begin+finish)=6408.5 publish=5.8 total=6414.6 us
+[kaon3-host] upload=21us launch(submit)=3us collect(dtoh_sync)=6349us
+2026-10-28T13:45:07.706710Z  INFO dinfer_core::engine: [host-time] tokens=1 nreq=1 sched=0.5 exec(begin+finish)=6409.5 publish=5.0 total=6414.9 us
+[kaon3-host] upload=20us launch(submit)=3us collect(dtoh_sync)=6348us
+2026-10-28T13:45:07.713125Z  INFO dinfer_core::engine: [host-time] tokens=1 nreq=1 sched=0.5 exec(begin+finish)=6407.7 publish=4.9 total=6413.1 us
+[kaon3-host] upload=20us launch(submit)=3us collect(dtoh_sync)=6348us
+2026-10-28T13:45:07.719540Z  INFO dinfer_core::engine: [host-time] tokens=1 nreq=1 sched=0.2 exec(begin+finish)=6407.2 publish=5.6 total=6413.0 us
+[kaon3-host] upload=20us launch(submit)=3us collect(dtoh_sync)=6347us
+2026-10-28T13:45:07.725954Z  INFO dinfer_core::engine: [host-time] tokens=1 nreq=1 sched=0.2 exec(begin+finish)=6405.6 publish=5.8 total=6411.6 us
+[kaon3-host] upload=18us launch(submit)=3us collect(dtoh_sync)=6347us
+2026-10-28T13:45:07.732366Z  INFO dinfer_core::engine: [host-time] tokens=1 nreq=1 sched=0.2 exec(begin+finish)=6404.3 publish=5.1 total=6409.6 us
+[kaon3-host] upload=19us launch(submit)=3us collect(dtoh_sync)=6340us
+2026-10-28T13:45:07.738772Z  INFO dinfer_core::engine: [host-time] tokens=1 nreq=1 sched=0.2 exec(begin+finish)=6398.0 publish=5.8 total=6404.0 us
+[kaon3-host] upload=19us launch(submit)=3us collect(dtoh_sync)=6360us
+2026-10-28T13:45:07.745201Z  INFO dinfer_core::engine: [host-time] tokens=1 nreq=1 sched=0.2 exec(begin+finish)=6420.3 publish=5.7 total=6426.2 us
+[kaon3-host] upload=20us launch(submit)=3us collect(dtoh_sync)=6348us
+2026-10-28T13:45:07.751615Z  INFO dinfer_core::engine: [host-time] tokens=1 nreq=1 sched=0.2 exec(begin+finish)=6405.4 publish=5.8 total=6411.3 us
+[kaon3-host] upload=20us launch(submit)=3us collect(dtoh_sync)=6347us
+2026-10-28T13:45:07.758028Z  INFO dinfer_core::engine: [host-time] tokens=1 nreq=1 sched=0.2 exec(begin+finish)=6404.6 publish=6.3 total=6411.0 us
+[kaon3-host] upload=20us launch(submit)=3us collect(dtoh_sync)=6347us
+2026-10-28T13:45:07.764441Z  INFO dinfer_core::engine: [host-time] tokens=1 nreq=1 sched=0.2 exec(begin+finish)=6405.4 publish=4.7 total=6410.3 us
+[kaon3-host] upload=19us launch(submit)=3us collect(dtoh_sync)=6350us
+2026-10-28T13:45:07.770856Z  INFO dinfer_core::engine: [host-time] tokens=1 nreq=1 sched=0.2 exec(begin+finish)=6407.6 publish=4.8 total=6412.6 us
+[kaon3-host] upload=22us launch(submit)=3us collect(dtoh_sync)=6347us
+2026-10-28T13:45:07.777271Z  INFO dinfer_core::engine: [host-time] tokens=1 nreq=1 sched=0.2 exec(begin+finish)=6406.9 publish=5.6 total=6412.7 us
+[kaon3-host] upload=20us launch(submit)=3us collect(dtoh_sync)=6351us
+2026-10-28T13:45:07.783689Z  INFO dinfer_core::engine: [host-time] tokens=1 nreq=1 sched=0.2 exec(begin+finish)=6408.7 publish=7.3 total=6416.2 us
+host(all steps, n=24): upload=20us launch=337us collect=6870us
+DONE
