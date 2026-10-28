@@ -15,6 +15,12 @@
   ③ 用 `--layer-iso` 时**输入必须是上一层的输出**（L0 用 embedding `Lm1`，不是 `L0`），
   传错层会得到 relL2 ≈ 1.0 的"整层全错"的假象。
 
+## 2026-10-28 同一服务上重复跑 bench，第 2 次起 TTFT 掉 7×——是 prefix cache 命中，不是优化
+- 现象：ttft8 探针里 c8×64 TTFT p50 75 ms，而 bN 链同参数 545 ms；差了 7×，一度以为是 HOST_TIME 或"c1 之后"触发了什么。
+- 根因：`bench` 的 prompt 由 `(seed, idx)` 决定性生成，同一服务上同 seed 再跑一遍 → 每条 prompt 都命中 prefix cache，Paged 步只剩 ~13 + ~90 个新 token；bN 每条链新起服务才是"新 prompt 态"。
+- 解法：同服务多次 bench 要换 `--seed`；或看服务日志里 Paged/Prefill 步的 t（命中时 t 远小于 prompt 长度）。
+- 避免：任何"第 N 次比第 1 次快很多"先查 cache 命中（`/metrics` prefix_cache_hits），再谈优化。[[dinfer-prefix-cache-bench-nondeterministic]] 同类。
+
 ## 2026-10-24 `remote_5090.sh ctr` 跑长任务被静默杀掉（`docker run --rm` 随 SSH 会话结束）
 
 - **现象**：`GPU=4 scripts/dev/remote_5090.sh ctr '... python3 capture.py'` 抓参照中间量，
