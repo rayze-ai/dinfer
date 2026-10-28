@@ -126,3 +126,21 @@ base vs DENSE_SKIP+MOE_SKIP(两段都删),带GPU util采样。判据:
 **定论**:固定13ms=30层attn主干(qkv/norm/rope/oproj)+采样的GPU真算(非host/调度)。Step B靶子=这个,且确定GPU kernel层面。
 **机理推测(待验)**:decode M=1,30层×(qkv+3norm逐头+rope+paged+oproj)=一堆小kernel,每个启动开销大算得少=喂不满(同MoE病)。我们开了graph但vLLM融合程度更高(qkv+norm+rope融进更少kernel)。
 **下一步**:attn内部分段定哪个kernel大(qkv cuBLASLt? 逐头norm? rope? paged? oproj?)。逐头q_norm/k_norm(Gemma4特色,每头一个RMSNorm)在decode M=1可能是一堆微kernel大头。先读attn段kernel数+加分段或逐个skip。
+
+## ⚠️ D10 2026-10-28 attn子步全skip也0影响:norm/rope/kvfp8删掉TPOT都不变→反常,需验测量有效性
+plen128+删dense/MoE,再skip norm(6逐头RMSNorm/层)/rope/kvfp8(3 roundtrip/层):
+| | TPOT |
+|---|---|
+| base | 12.92 |
+| skip norm | 12.94 |
+| skip rope | 12.93 |
+| skip kvfp8 | 12.93 |
+**全0影响**。加上D7(dense/MoE删0影响)、D9(全skip 0影响),几乎删什么都不动12.9ms。
+**反常推理**:删这么多kernel TPOT纹丝不动+D9测GPU 99%满。两种可能:
+1. **30层逐层固定launch/调度串行=13ms**,单kernel省掉淹没在层间串行(但GPU 99%满与此矛盾——满说明在算不是等launch);
+2. **测量本身有问题**:plen128全共享前缀(prefix-repeat 1)+prefix cache命中→decode可能根本没真算attn(KV已缓存),或bench TPOT有下限/被别的bound。
+**必须先验测量有效性(别又在假数据上做结论,重蹈NO_GRAPH覆辙)**:
+- 关prefix cache或prefix-repeat 0重测,看TPOT变不变;
+- 加max-tokens拉长看TPOT稳定值;
+- 对比:若连attn主kernel(qkv/paged/oproj)都skip还12.9→确系测量/层串行;若那些skip大降→之前小kernel本就不是大头是对的。
+**不下结论,先验证**。下一步:prefix-repeat 0(不共享前缀,真实KV) + 加qkv/paged/oproj的skip(可能崩,小心)重测。
