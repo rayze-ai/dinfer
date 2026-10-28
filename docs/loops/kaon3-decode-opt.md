@@ -829,3 +829,7 @@ decode c1 的 MoE 段 nsys：grouped_gemm gate 18.6 + up 18.6 + down 12.5 + gelu
 - b15 第二次编译失败：Rust `E0061: 20 vs 19 args`（ffi 调用漏 kv_fp8，定位中）。
 - **B16 预判修正**：kaon3-moe-pipe 第二刀已做过 `MOE_GEMM_DUAL`（gate+up 同 kernel，grid.z 翻倍填 SM）graph 态 A/B：**端到端 <1%**，回滚。说明 MoE GEMM 的 50 us/层不是 "CTA 少填不满 SM" 能解的——mma tile 单 CTA 的 K 链（22 步 × barrier）才是；要缩短 K 链（更深 cp.async 流水 / split-K 跨 CTA 归约）。排在 B15 之后，先 nsys c8 看 grouped_gemm 实际时长。
 - b15 第二次编译失败根因：`ops.rs` 非 win 的 `gqa_paged_impl` 调用漏 `kv_fp8`（我只改了 win 版）；已修并第 3 次起链。`tests/mega_attn_parity.rs` 两处 `ffi::gqa_decode_v3_bf16` 直调也缺参（独立测试目标，不在本链编译范围）——补上以免下次全量 test 编不过。
+
+## ★★★★ D67 2026-10-28 B15 fp8cache 逐位测试：**decode v3 / d512 三场景 bf16 cache vs e4m3 cache 位差 0**（20480 / 40960 / 8192 元素）；paged_slow D=512 位差 0；paged_slow **D=256 位差 135/20480、339/8192**
+- D=256 paged 的差**不是 fp8 读错**：kv_fp8=false 时 D=256 走 `cfg=0` → **fa_v5 PAGED**（tensor-core 流水 kernel）；kv_fp8=true 时 `paged_impl` 强制 `cfg=-1` → 通用慢路径。两条不同 kernel 累加序不同 → bf16 ulp 差（135/20480 = 0.7%，量级与 B3 测试里 v3 vs 慢路径的差同）。D=512 两边都只有慢路径 → 位差 0，正好印证。
+- 测试修：paged 两侧都用 `GQA_PAGED_CFG=-1`（强制慢路径）比；**生产影响**：kv_fp8 存储开时，混批（prefill+decode 同步）D=256 走慢路径（正确但慢）——纯 decode（`gqa_decode_win`）不受影响。**B15b**：fa_v5 PAGED 加 KV_FP8 读（cp16z→cp8z+展开，同 v3 做法）。
