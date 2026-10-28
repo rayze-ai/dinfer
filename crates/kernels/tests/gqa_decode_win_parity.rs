@@ -190,7 +190,16 @@ fn gqa_decode_fp8cache_bitwise() {
                 if path == "decode_win" {
                     dinfer_kernels::gqa_decode_win_bf16(&st, &dq, cache, &dbt, &dseq, &mut out, &mut scratch, b, h, hkv, d, bs, max_blocks, 1.0, 0, None, window, f8).unwrap();
                 } else {
-                    dinfer_kernels::gqa_paged_win_bf16(&st, &dq, cache, &dbt, &dseq, &dcu, &mut out, b, 1, h, hkv, d, bs, max_blocks, 1.0, 0, false, window, false, f8).unwrap();
+                    // 两侧都强制 cfg=-1 通用慢路径（bf16 侧 D=256 默认会走 fa_v5，与慢路径累加序不同 → 不是在比 fp8；D67）
+                    let rc = unsafe {
+                        dinfer_kernels::ffi::gqa_paged_win_bf16(
+                            st.ptr(&dq) as *const std::ffi::c_void, st.ptr(cache) as *const std::ffi::c_void, st.ptr(&dbt) as *const i32,
+                            st.ptr(&dseq) as *const i32, st.ptr(&dcu) as *const i32, st.ptr_mut(&mut out) as *mut std::ffi::c_void,
+                            b as i64, 1, h as i64, hkv as i64, d as i64, bs as i64, max_blocks as i64, 1.0, 0, 0, -1, window as i32, 0,
+                            f8 as i32, st.raw() as _,
+                        )
+                    };
+                    assert_eq!(rc, 0, "gqa_paged_win_bf16 rc");
                 }
                 st.synchronize().unwrap();
                 outs.push(st.dtoh_sync_copy(&out).unwrap());
