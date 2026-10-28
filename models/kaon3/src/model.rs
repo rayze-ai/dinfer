@@ -25,8 +25,8 @@ pub struct LayerKv {
 impl LayerKv {
     pub fn new(stream: &Stream, cfg: &KaonConfig, l: usize, num_blocks: usize, block_size: usize) -> Result<Self> {
         let (head_dim, nkv, _) = cfg.attn_shape(l);
-        // B15：kv_fp8 层默认真存 e4m3（`KV_FP8_STORE=0` 回退 bf16 存 + 往返）。元素总数偶数，按 bf16 分配一半长度。
-        let is_fp8 = cfg.kv_fp8 && std::env::var("KV_FP8_STORE").ok().as_deref() != Some("0");
+        // B15：kv_fp8 层可真存 e4m3（`KV_FP8_STORE=1` 开；D68：混批 prefill 走慢路径 TTFT 2.8×，等 B15b fa_v5 读 e4m3 后再默认开）。
+        let is_fp8 = cfg.kv_fp8 && std::env::var("KV_FP8_STORE").ok().as_deref() == Some("1");
         let elems = num_blocks * block_size * nkv * 2 * head_dim;
         let cache = if is_fp8 {
             Tensor::zeros(stream, &[elems / 2])?
