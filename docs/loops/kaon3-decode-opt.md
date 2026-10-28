@@ -266,3 +266,20 @@ exec=调用executor.forward_sample墙钟=19.3ms=TPOT。调度/publish确实极�
 **结论作废**:之前所有594/63%基于prefix-repeat 1,是虚高。真实负载dinfer差vLLM一个数量级。
 **优化重点彻底改**:**TTFT 2秒(prefill路径)是最大问题**,不是decode TPOT。这2秒在prefill不在decode,和之前纠结的decode瓶颈不同。其次并发扩展崩(c4→c8倒退)。
 **下一步(Step A补全/Step B转向)**:①定位TTFT 2秒固定开销在prefill哪(c1-c4恒定2秒=非计算,像固定串行:编译/同步/首步graph capture/分配?);②并发c4→c8为何倒退(KV块不够?调度?)。TTFT比TPOT优先。
+
+## ★★★★★★★ D21 2026-10-28 TTFT真相:非固定开销非warmup,是prompt长度超线性爆炸(prefill路径)
+warmup5重测:
+| | TTFT |
+|---|---|
+| dinfer plen1024 | 1960ms(warmup5仍2秒,**排除预热**) |
+| dinfer plen128 | **25ms** |
+| vLLM plen1024 | 82ms |
+**TTFT随prompt长度超线性**:plen128=25ms,plen1024=1960ms。8×长度→**78×时间**(prefill正常~O(L)到O(L²),78×远超8×=严重超线性)。
+**真大头定位**:dinfer prefill路径对长prompt超线性爆炸。1024 token prefill花2秒,vLLM 82ms(25×)。非warmup/非固定开销,是**prefill计算本身长序列下爆炸**(疑prefill attention O(L²)无优化/分块差)。
+**这才是最大问题+全新方向**:不是decode TPOT/host(我大半天纠结的),是**prefill attention长序列超线性**。
+**解释D20吞吐虚高**:prefix-repeat 1命中cache跳过prefill,这2秒从没暴露。
+**Step A补全结论(重排优先级)**:
+1. **TTFT/prefill超线性(最大,plen1024慢vLLM 24×)** ← 先攻
+2. 并发扩展崩(c4→c8吞吐倒退)
+3. decode TPOT(单流18 vs 4.8,慢3.8×) ← 之前大半天在这,其实第三位
+**下一步Step B**:定位prefill为何超线性——读kaon3 prefill attention路径(ops.attn().prefill_win,gqa prefill kernel),看是不是O(L²)全量/没分块/没flash。对标vLLM prefill(flash-attn分块O(L))。plen扫prefill TTFT(128/256/512/1024)确认超线性曲线。
