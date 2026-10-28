@@ -828,3 +828,4 @@ decode c1 的 MoE 段 nsys：grouped_gemm gate 18.6 + up 18.6 + down 12.5 + gelu
 - b15 编译失败根因：**又是 `kernels.h` 没同步**（5 个 gqa 入口声明缺 `kv_fp8`，C linkage 重载报错）——同 B8 的错第 2 次。已修。**规矩加一条：改任何 extern "C" 签名，kernels.h / .cu / ffi.rs 三处 grep 同一函数名核对参数数。**
 - b15 第二次编译失败：Rust `E0061: 20 vs 19 args`（ffi 调用漏 kv_fp8，定位中）。
 - **B16 预判修正**：kaon3-moe-pipe 第二刀已做过 `MOE_GEMM_DUAL`（gate+up 同 kernel，grid.z 翻倍填 SM）graph 态 A/B：**端到端 <1%**，回滚。说明 MoE GEMM 的 50 us/层不是 "CTA 少填不满 SM" 能解的——mma tile 单 CTA 的 K 链（22 步 × barrier）才是；要缩短 K 链（更深 cp.async 流水 / split-K 跨 CTA 归约）。排在 B15 之后，先 nsys c8 看 grouped_gemm 实际时长。
+- b15 第二次编译失败根因：`ops.rs` 非 win 的 `gqa_paged_impl` 调用漏 `kv_fp8`（我只改了 win 版）；已修并第 3 次起链。`tests/mega_attn_parity.rs` 两处 `ffi::gqa_decode_v3_bf16` 直调也缺参（独立测试目标，不在本链编译范围）——补上以免下次全量 test 编不过。
