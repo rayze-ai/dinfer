@@ -438,3 +438,10 @@ tagged host-time(tokens标记)拆开:
 **这才是TTFT慢15×的真位置**:不是GPU算(skip全0影响),是**prefill步的begin里有350ms一次性host/capture开销**。
 **下一步(定死)**:读runner.begin对prefill做什么(是否每prefill capture graph/JIT/大alloc)。KAON3_* graph capture日志?serve启动时capture了decode桶,prefill是否也capture或eager?若prefill每次capture→复用/预capture常见prefill长度桶=砍350ms。对比vLLM prefill不capture(直接eager prefill+flash)24ms。
 **ROI**:砍掉prefill的350ms→TTFT 367→~17ms,接近vLLM 24ms,TTFT慢15×→持平。最大缺口可解。
+
+## ★★★★★ D39 2026-10-28 数据证实(纠正D38推断):40条host-time exec分布=35×17ms + 5×~367ms
+实测exec(begin+finish)分布(ms):35条=17 / 5条=362,363,366,367,371(各1)。bench发warmup1+正式4=**5请求**→**每请求首个prefill步~367ms(5条),之后decode步17ms(35条)**。
+**纠正D38**:D38说"每prefill 367ms"方向对但我当时没数证实(扯淡挨批)。现在数证实:**5个367ms对应5个请求的prefill步**,非全局只首次(那样仅1条)。每请求TTFT=它的367ms prefill步,对上bench TTFT mean367。
+**数据证实结论**:prefill步exec 367ms(每请求一次) vs decode步17ms,差350ms,在begin+finish内。
+**仍没拆出(诚实,用户要的完整列)**:exec 350ms没拆成htod/block/graph-capture/wait;带宽/chat模板也没单独测。只有sched(0.2-19us)/exec/publish(微秒)/tokenize(7ms单测)。
+**下一步**:读runner.begin的prefill路径(crate kernels/layers,非engine)看它做什么=graph capture?htod?alloc?——先读懂不加计时(分支加计时前5次都没出,只engine汇合点host-time能出)。读懂后在对的点测,拆这350ms。
