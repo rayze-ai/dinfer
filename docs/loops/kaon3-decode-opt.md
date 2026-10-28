@@ -317,3 +317,16 @@ gqa.cu:880-881:**通用慢路径=gqa_prefill_ref_kernel旧参考实现,"每(req,
 ## ★★★ D26 2026-10-28 v6<512>编译通过(smem/寄存器都过)→验TTFT+输出一致性
 cargo build -p dinfer --features kaon3 EXIT=0,无too much shared/spill/error=v6<512>(o[64][4]=256寄存器+smem~97KB)构建OK。Step B第一关过。
 **第二关A/B**:serve两次,GQA_D512_REF=0(新flash)vs=1(旧ref),对比:①TTFT降没降(plen1024,目标2秒→数十ms)②输出token文本一致(数值对拍,greedy T=0同输入该逐token同)。一致+TTFT降=成立。
+
+## ★★★★★ D27 2026-10-28 D=512 flash A/B:TTFT不变(2052 vs 2051)+输出一致→定位错!2秒不在D=512 attention
+flash(GQA_D512_REF=0) vs ref(=1):
+| | flash | ref |
+|---|---|---|
+| TTFT plen128 | 69ms | 69ms |
+| TTFT plen1024 | 2052ms | 2051ms |
+| 输出 | " the last." | " the last." |
+**输出一致(数值对拍过,flash没算错,v6<512>正确)**。**但TTFT完全不变**→**D24定位错:prefill 2秒根本不在D=512 attention kernel**。换flash纹丝不动=这段非大头。
+**又犯同样的错**:没A/B就按代码推断("D=512走ref O(L²)")断定是瓶颈,结果换掉TTFT不变。**整会话反复教训:代码推断的显眼瓶颈≠真瓶颈,必须A/B/skip实测**。幸好A/B兜住(逐位对拍+TTFT)没白改一堆。
+**v6<512>保留**(逐位对拍过+编译过,零风险,未来D=512 attention真要快时有用;默认走它,GQA_D512_REF=1回ref)。
+**TTFT 2秒真正位置未知**:prefill路径里attention不是,那是什么?(prefill的qkv GEMM?MoE?dense?norm?采样?还是host?)需对prefill做整段skip差分(像decode的D5-D16),别再代码推断。
+**下一步**:prefill路径skip差分——plen1024单请求,逐段skip(prefill的MoE/dense/qkv/attention/采样)看TTFT哪段降。这是定TTFT 2秒的唯一可靠法。注意:prefill每token都过MoE/dense(非decode的1token),prefill的MoE/dense工作量=1024×比decode大→很可能prefill大头是MoE/dense(decode时它们不在关键路径但prefill 1024 token时是)。
