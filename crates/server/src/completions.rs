@@ -131,10 +131,16 @@ pub async fn completions(State(be): State<Backend>, Json(req): Json<CompletionRe
     if !(1..=MAX_N).contains(&n) {
         return err(StatusCode::BAD_REQUEST, format!("n must be in 1..={MAX_N}, got {n}"));
     }
+    let _ht = std::env::var("HOST_TIME").ok().as_deref() == Some("1");
+    let _ht_t0 = std::time::Instant::now();
     let mut prompts = match parse_prompts(be.as_ref(), &req.prompt) {
         Ok(p) => p,
         Err(m) => return err(StatusCode::BAD_REQUEST, m),
     };
+    if _ht {
+        tracing::info!("[cmpl-time] parse_prompts(tokenize)={:.1}us prompt_tokens={}",
+            _ht_t0.elapsed().as_secs_f64() * 1e6, prompts.iter().map(|p| p.len()).sum::<usize>());
+    }
     if prompts.iter().any(|p| p.is_empty()) {
         return err(StatusCode::BAD_REQUEST, "prompt must not be empty");
     }
@@ -179,7 +185,12 @@ pub async fn completions(State(be): State<Backend>, Json(req): Json<CompletionRe
     let want_lp = sp.logprobs.is_some();
     let prompt_tokens: u32 = prompts.iter().map(|p| p.len() as u32).sum();
     let prompt_refs: Vec<&[u32]> = prompts.iter().map(|p| p.as_slice()).collect();
+    let _ht_sub = std::time::Instant::now();
     let (mut merged, mut states, mut guard) = submit_choices(&be, &prompt_refs, &sps, n, None);
+    if _ht {
+        tracing::info!("[cmpl-time] submit_choices={:.1}us (提交engine,不含等首token)",
+            _ht_sub.elapsed().as_secs_f64() * 1e6);
+    }
     let total = states.len();
     // 每个 choice 的 echo 前缀（未下发时 Some）与 logprobs 文本游标
     // Mutex（流式 future 需 Send）：emit / finish 两个闭包都要 take 它
