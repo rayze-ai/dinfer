@@ -512,3 +512,6 @@ c1 decode skip差分(最新二进制probe在,与旧二进制"全0影响"假象�
 **★TPOT慢3×头号=MoE(grouped NVFP4 GEMM)**,其次paged+dense。**回到最早方向**(两刀MoE),但那两刀当时编译失败没进二进制所以测"没收益"=假象。现在编译修好,MoE仍5.3ms大头→说明两刀即使生效也没压下MoE多少(或cp.async流水decode M=1场景之前微基准1.83×但端到端此前没验到)。
 **旧二进制decode skip全0影响作废**:D5-D16那些"删GPU段TPOT不变→瓶颈在host"结论**全建立在旧二进制(skip没生效/改动没编进)**!最新二进制skip生效,证明TPOT确实在GPU(MoE/paged/dense),**不在host**。整会话host方向是旧二进制假象带偏的。
 **Step B真靶子(终于确定)**:①MoE 5.3ms(grouped NVFP4 GEMM,decode M小)—重新评估cp.async流水/gate+up在最新二进制的真实端到端收益(之前没真测);②paged 3.2ms;③dense 2.8ms。
+
+## D46 2026-10-28 集中解决MoE:base vs MOE_GEMM_PIPE(第一刀cp.async流水)最新二进制端到端A/B
+环境干净(前置对齐/二进制最新/skip生效,D45证MoE=decode TPOT 5.3ms头号)。测MOE_GEMM_PIPE=1(第一刀cp.async流水,之前微基准1.83×但端到端从没在能编译二进制验过)对TPOT的真实端到端+输出一致性。base vs pipe,c1 decode。
