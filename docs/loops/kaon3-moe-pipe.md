@@ -155,3 +155,6 @@ graph态A/B(MOE_GEMM_PIPE关/开):
 nsys(nsight-systems-2024.2.3 apt装上)跑完但report无kernel数据。根因:--delay 50 --duration 25窗口(50-75s)内单流请求一次性发完(几秒),没覆盖整个duration;或serve还在加载。修:serve ready后请求循环持续发满整个capture窗口。
 用户批评有理:我前几轮反复"说收益大结果微乎其微"(R69→R75推翻/第一刀说大杠杆结果端到端+0.8%),根子=拿NO_GRAPH STAGE_TIME估收益但生产是graph态(R84证NO_GRAPH系统高估MoE)。
 **第二刀硬门槛(定死,不满足不动手)**:①nsys graph态kernel榜给gate/up/down三GEMM真实占一步decode%;②合并上限用nsys实测单gemm时间+中间量HBM字节算死给区间;③graph端到端预测<3%则不做,老实说不值。不再用软证据说"大杠杆"。
+
+## R87 2026-10-28 nsys跨容器不持久(--rm装的/opt丢)→装+profile合同一容器脚本重跑
+R86修时序版仍NSYS=空:上轮apt装的nsys在容器/opt,--rm新容器没了(挂载盘只/w)。修:apt装nsys+nsys profile serve+持续单流打满15s窗口,全放同一容器脚本。等graph态真实kernel累计时间榜=第二刀第一条硬证据(gate/up/down三GEMM占一步decode真实%)。
