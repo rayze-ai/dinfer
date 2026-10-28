@@ -376,3 +376,17 @@ curl /tokenize 1024词=**7ms**(排除tokenize是TTFT 2秒根因)。但出**4010 
 **这是bench负载配置问题+dinfer超长prompt处理缺陷**,不是prefill慢。锅:--prompt-len是词数,1024词=4010token超2048,我和之前bench都没核对token数vs max-model-len。
 **修正后真实对比待重做**:用≤2048 token的prompt + 相应max-model-len,重测c1/2/4/8 dinfer vs vLLM,才是公平TTFT/吞吐对比。之前D20的"吞吐仅6-16%/TTFT慢24×"可能也受超限负载污染。
 **下一步**:①要么bench prompt控在max-model-len内重测对比;要么把serve max-model-len提到>4010(容纳4010 token)重测。②若要查超长处理慢路径=读engine对>max-model-len的截断/分块。但优先:公平负载重测,看dinfer真实差距到底多少(可能远好于6-16%)。
+
+## ★★★★★★★ D33 2026-10-28 前置条件根本没对齐!之前所有对比不公平(max-model-len 2048 vs 16384 + vLLM其实eager)
+查两端serve cmdline:
+| | vLLM:28201 | dinfer:8142 |
+|---|---|---|
+| max-model-len | **16384** | **2048** |
+| max-num-batched-tokens | 4096 | 默认 |
+| enforce-eager | **有(eager!)** | 无(graph) |
+**两个大锅**:
+1. **max-model-len 差8倍**(16384 vs 2048):4010 token prompt在vLLM合规(82ms),dinfer超限走慢路径(2秒)。"慢24×"纯是不对齐造成。
+2. **:28201带--enforce-eager=eager!** 我一直当它"非eager最强基线"(D67/D20都这么记),**错了**,它是eager。之前所有"vLLM非eager"对比作废。真非eager vLLM可能没在跑/别端口。
+**之前结论大面积要修正**:D20"慢24×/吞吐6-16%"、D67"非eager基线946"全建立在**前置不对齐**(dinfer 2048超限 + vLLM 16384 eager)。既不是同max-model-len,vLLM又是eager。
+**对齐重测(公平前提)**:dinfer max-model-len提16384(对齐vLLM)+ 两端同eager或同graph。再测c1/2/4/8。这才是真实差距。
+**教训(核心,记knowledge)**:对比前必须核对两端前置条件(max-model-len/eager/batched-tokens/block-size)!我和之前bench都没核,在不对齐的畸形条件上跑了一整天结论。用户"要对齐测试前置条件"一针见血。
