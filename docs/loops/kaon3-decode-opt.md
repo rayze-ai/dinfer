@@ -917,3 +917,6 @@ decode c1 的 MoE 段 nsys：grouped_gemm gate 18.6 + up 18.6 + down 12.5 + gelu
 ## B20 预案 2026-10-28：fp8 GEMV（B5/B6c）访存没批量发出 → 延迟绑定
 D72 表：qkv gemv 16.5 us vs 8.6 MB/1.79 TB/s = 4.8 us（3.4×）；dense down 8.7 vs 3.3（2.6×）；gateup 10.2 vs 6.6（1.5×）。`dot2` 内循环 `for (c = lane; c < nvec; c += 32) { load w0; load w1; 转换+FMA }`——循环体含 K 长度相关的不定次数迭代（nvec/32 = 5.5），编译器不展开，每次迭代 2 个 16B 读串行等待（~1 us 一次 HBM 往返 × 6 轮 ≈ 6 us）。pick_warps 把 block 压到 2 warp（768 块）也让每 SM 只 ~9 warp 在飞。
 修：① 内循环改两段——先一次性把本 lane 全部 `ceil(nvec/32)`（≤8）个 uint4 读进寄存器（编译期上限 K ≤ 4096 → 8 个/行，两行 16 个 uint4 = 64 寄存器），再逐个转换+FMA；**累加序不变（同 c 顺序）→ 逐位同**；② pick_warps 的 `block ≥ 4×SM` 条件保留但上限回 4 warp（现在 2）看占用。预期 qkv 16.5 → ~7、down 8.7 → ~5、gateup 10.2 → ~8 ⇒ 三项 -0.5 ms/步。判据：mlp_fp8_decode_parity 位同（已有）+ bN。
+
+## ★★★★★★ D74 2026-10-28 b18 首批 B（B18 rmsnorm 行数 + B19 warp top-k）：c1 TPOT 6.39 → **5.59（-12.7%）**，吞吐 148 → 168；c8 11.35 → **10.28（-9.4%）**，463 req tok/s；TTFT 持平（28.7 / 506）
+预测 -0.8 ms 实得 -0.80 ms（c1）。英文 raw 输出与 b17 逐字同 ⇒ 逐位（两刀都应逐位：行数修正不改真实行；top-k 并列语义同）。累计 c1 **17.07 → 5.59（-67%）**，vs vLLM 4.69 差 **1.19×**。等 A2/B2 入 CSV round b18。
