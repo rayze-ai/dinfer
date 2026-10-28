@@ -691,3 +691,4 @@ h=2816 单行 norm（181 次/步）：Block1024 每线程 1 向量两级归约 6
 - 链 `/w/b5.sh`（GPU0 已启）：先编 + 跑对拍（门禁，不过则停 `PARITY_FAIL`），过了再 `TAG=b5 MARKER=gateup_act_kernel bash /w/bN.sh`（A=B4 二进制 / B=新，c1+c8 ×2 + 固定 prompt）。结果 `tmp_b5par_RESULT.txt` / `tmp_b5_RESULT.txt`。
 - B5 第一次编译失败：extern "C" 块里 `bf16` 未限定（别名在 `dinfer` 命名空间）→ `using dinfer::bf16;`，b3f34d3，链重启。
 - **B6 预案（等 B5 链结束再 put）**：qkv / o_proj fp8 GEMM（nvjet 29.4+15.7 us/层 = 1.31 ms/步，11 MB 权重下限 6 us）decode 时走同一 `mlp_fp8_gemv`：`QLinear::forward` FP8 分支 tokens ≤ 16 且 `M_TILE·K·2 ≤ 96 KB`（K=8192 的全注意力 o_proj 只 m ≤ 4 走）时 quant_fp8 → gemv，`FP8_GEMV_OLD=1` 回退。预期 -0.9 ms/步。
+- **B5 对拍通过（`tmp_b5par_RESULT.txt`，编译 + 测试 17.5 s）**：5 场景全 ok。norm_q fp8 码全同 2816/2816、8448/8448、22528/22528、45055/45056、1280/1280（最大码差 0）；act_q 全同率 99.9%（33768/33792 等，差的那几个也是码差 0 ⇒ 实为 ±0 码——`code_diff` 为 0 但位不同只能是 +0/−0）；down bf16 最大误差 0.0073–0.0077（与 B3 测试同本底），超差 0。与 mega 口径同一组 scale 公式，norm 阶段 ±1 码的担心没出现。ABAB 已起。
