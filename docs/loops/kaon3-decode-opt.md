@@ -853,3 +853,7 @@ decode c1 的 MoE 段 nsys：grouped_gemm gate 18.6 + up 18.6 + down 12.5 + gelu
 ## B17 预案 2026-10-28：prefill（TTFT）下一刀的靶子
 - D54 时 c1 prefill 步（1560 tok）eager 797 kernel、kernel_sum 155 ms、gaps 4.4 ms；其中 down GEMM 空 block 57 ms（B8 已去）。b8c 后 **TTFT c1 29.5 ms**（含 tokenize 1.2 + sched + prefill 步 + 首 decode 采样），说明 prefill 步现 ≈ 25 ms。
 - 剩余大头待 nsys 复抓（prefill 单独一段）：候选 ① MoE grouped GEMM prefill（R=12480 行、BM=32 tile，现在 B16 4 级流水也会受益）；② dense NVFP4 GEMM（1560×2816×2112 ×3，mma tile 已有）；③ attention fa_v5 prefill；④ 797 次 eager launch 的 host 开销（D51：launch 16 ms of 41 ms prefill exec ≈ 40%）—— **prefill 图化**（按 token 桶 capture：512/1024/2048/4096）或 **多流/launch 批量**。④ 可能最大：host 16 ms 现在是 prefill 的一半以上。
+
+## ★★★★ D69 2026-10-28 b16 首批 B（B16 4 级流水 + B15b 代码；KV_FP8_STORE 默认关）：c1 TPOT 6.57 → **6.39（-2.7%）**，c8 11.52 → 11.57（持平），TTFT c1 29.5 → 28.8、c8 492 → 488
+- 预期 -0.9 ms 实得 -0.18 ms：说明 MoE grouped GEMM 的 50 us/层**不全是 K 链延迟**——4 级流水只把每步从 0.85 → ~0.6 us；剩余是每 CTA 的固定开销（tile_lookup、prologue、epilogue）与 N=704 只 11 个 CTA/专家 的并行度。要再降得换 tile 形状（BM=16 + BN=32 让 CTA 数×4）或把 gate/up/down 三 GEMM 融合。记 CSV round b16。
+- A 侧（b15 二进制，当时 KV_FP8_STORE 默认开）c8 TTFT 1395 再现 D68。英文 raw 与 b8d 同（逐位）。
