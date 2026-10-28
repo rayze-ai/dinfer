@@ -764,7 +764,7 @@ int moe_grouped_gemm(const void* aq, const void* a_s, const void* const* Bptr, c
   if (pipe && stages > 2) {
     if (K % 128 == 0) {
       if (stages == 3) grouped_gemm_kernel_pipe4<128, 3><<<grid, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
-      else if (stages == 6) grouped_gemm_kernel_pipe4<128, 6><<<grid, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+      // STAGES=6 × BK=128 静态 smem 50.7 KB > 48 KB 上限 → BK=128 最多 4 级
       else grouped_gemm_kernel_pipe4<128, 4><<<grid, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
     } else {
       if (stages == 3) grouped_gemm_kernel_pipe4<64, 3><<<grid, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
