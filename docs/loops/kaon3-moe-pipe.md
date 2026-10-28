@@ -89,3 +89,14 @@ kaon3-full:net=host(HTTP通,解决临时ctr bridge不通),挂载/hf_data/yaochen
 坑:首版A/B(R78)serve/bench输出都重定向进serve日志→bench的throughput/TPOT丢(docker run -d stdout丢)。修:bench输出grep后>>独立RESULT文件。
 方案:docker run -d --network host --gpus device=4,两serve(:8150关PIPE基线/:8151开PIPE),graph生产态(非NO_GRAPH),各bench rate8/48req/全共享1024/128out/warmup3,结果落tmp_ab_RESULT.txt。等容器完成读。
 kernel侧已坐实:逐位bad=0(R74)+decode gemm3 1.83×(R77)。端到端看TPOT/吞吐能升几%(decode gemm3降约0.04ms/步)。
+
+## ★★★ R80 2026-10-28 端到端rate8 bench:PIPE仅+0.8%(batch下M>1流水救不到)——诚实负结果
+rate8/48req同锁死负载,A/B(graph生产态):
+| | 吞吐 | TTFT p50 | TPOT p50 |
+|---|---|---|---|
+| base(关PIPE) | 584.4 | 260 | 53.27 |
+| pipe(开PIPE) | 588.9 | 265 | 52.83 |
+**端到端仅+0.8%吞吐/-0.8%TPOT**,远小于kernel decode gemm3 1.83×。
+**根因**:rate8稳态~54序列并发,decode每步batch大→**每专家M≈54×8/128≈3-4不是M=1**。微基准证明流水收益只在M=1(M=132大M无效,M=3-4介于、收益已大幅衰减)。rate8 batch下gemm3不在M=1工况,流水救不到。
+**诚实定性**:第一刀对**单流/低并发decode(M=1)**有效(kernel 1.83×),对**rate8吞吐基准(batch大M>1)**几乎无效(+0.8%)。
+**下一步**:测单流(concurrency=1,M=1真实工况)A/B确认TPOT真降——若单流TPOT明显降,则第一刀对低并发/交互式延迟有价值(保留);若连单流也不降,说明serve里gemm3占比/其他开销摊薄。再判要不要转第二刀(gate+up合并,M无关=对batch也有效,更该做)。
