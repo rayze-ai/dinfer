@@ -240,6 +240,10 @@ pub struct Pending {
     req_ids: Vec<RequestId>,
     is_async: bool,
     lps_override: Option<Vec<Vec<TokenLogprobs>>>,
+    /// 同步执行（executor 不支持 async）时本步的采样结果 **随 Pending 走**。B28（loop kaon3-decode-opt D103）：
+    /// 之前结果留在 `self.generated`，engine 在 `finish(pend_n)` 之前先跑 cut-in（`begin_cut_in` 又一次 forward_sample）
+    /// 把它覆盖 → 步 n 的请求拿到 cut-in 请求的 token。async 路径（结果在 executor 内）不受影响。
+    sync_result: Option<(Vec<Vec<u32>>, Vec<Vec<u32>>)>,
 }
 struct PendingRow {
     rid: RequestId,
@@ -370,7 +374,8 @@ impl<E: ModelExecutor> Runner<E> {
         if !so.kv_offload.is_empty() {
             self.exec.kv_offload(&so.kv_offload)?;
         }
-        Ok(Pending { rows, req_ids: self.plan.req_ids.clone(), is_async: use_async, lps_override })
+        let sync_result = if use_async { None } else { Some((std::mem::take(&mut self.generated), std::mem::take(&mut self.drafts))) };
+        Ok(Pending { rows, req_ids: self.plan.req_ids.clone(), is_async: use_async, lps_override, sync_result })
     }
 
     /// 插队 prefill（Q3-o）：在飞 decode 步未 finish 时，同步执行一个只含新请求的步。
@@ -406,13 +411,18 @@ impl<E: ModelExecutor> Runner<E> {
             let base = n - num_draft;
             rows.push(PendingRow { rid, n, num_draft, end_of_seq: st.num_computed + base >= st.token_ids.len() });
         }
-        Ok(Pending { rows, req_ids: self.plan.req_ids.clone(), is_async: false, lps_override: None })
+        let sync_result = Some((std::mem::take(&mut self.generated), std::mem::take(&mut self.drafts)));
+        Ok(Pending { rows, req_ids: self.plan.req_ids.clone(), is_async: false, lps_override: None, sync_result })
     }
 
     /// 第二段：取结果、补 token、产出 ModelRunnerOutput。
-    pub fn finish(&mut self, pending: Pending) -> Result<ModelRunnerOutput> {
+    pub fn finish(&mut self, mut pending: Pending) -> Result<ModelRunnerOutput> {
         if pending.req_ids.is_empty() {
             return Ok(ModelRunnerOutput::default());
+        }
+        if let Some((g, d)) = pending.sync_result.take() {
+            self.generated = g;
+            self.drafts = d;
         }
         if pending.is_async {
             self.generated.clear();
