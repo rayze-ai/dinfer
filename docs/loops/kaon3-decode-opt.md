@@ -362,3 +362,17 @@ curl /tokenize 1024词=**7ms**(排除tokenize是TTFT 2秒根因)。但出**4010 
 **新线索**:prompt 4010 token超max-model-len 2048。serve要么截断要么分块chunked prefill。TTFT 2秒可能与此相关(超长prompt的host分块/截断/多次prefill循环)。vLLM同bench同4010 token才82ms,所以非token数本身,是dinfer对超长prompt的host处理差。
 **排除**:tokenize(7ms)。**2秒在submit→engine→prefill之间的host**。prefill GPU skip全段不降(D28)+tokenize快→2秒在**engine对超长/分块prompt的host调度循环**(chunked prefill分多chunk?每chunk一次调度?O(chunks²)?)。
 **下一步**:①用真正≤2048 token的prompt(--prompt-len 400词≈1600 token)重测TTFT,看是否还2秒(若降→确是超长/分块问题);②扫prompt token数(256/512/1024/2048 token)看TTFT拐点;③读engine prefill对>max-batched-token的分块逻辑(chunked prefill)。
+
+## ★★★★★★★ D32 2026-10-28 决定性!2秒只在prompt超max-model-len(2048),正常长度TTFT完全正常
+换准token长度扫TTFT:
+| prompt | token约 | TTFT |
+|---|---|---|
+| 100词 | ~390 | 19.7ms |
+| 300词 | ~1170 | 42.8ms |
+| 500词 | ~1950 | 50.5ms |
+100→500词(token 5×)TTFT 19.7→50.5(2.5×)=**近线性正常,无2秒**!
+**根因颠覆**:2秒只在prompt**超max-model-len 2048**时出现(1024词=4010 token>2048;500词=1950<2048正常)。dinfer对**超长prompt(>max-model-len)走慢路径**(截断/fallback/错误处理),非prefill本身慢。
+**前面TTFT结论全要修正**:之前"TTFT 2秒/慢vLLM 24×"建立在**超限畸形负载**(bench --prompt-len 1024当词数×3.9=4010 token>max-model-len 2048)。dinfer prefill正常长度(≤2048)TTFT完全正常(50ms)。
+**这是bench负载配置问题+dinfer超长prompt处理缺陷**,不是prefill慢。锅:--prompt-len是词数,1024词=4010token超2048,我和之前bench都没核对token数vs max-model-len。
+**修正后真实对比待重做**:用≤2048 token的prompt + 相应max-model-len,重测c1/2/4/8 dinfer vs vLLM,才是公平TTFT/吞吐对比。之前D20的"吞吐仅6-16%/TTFT慢24×"可能也受超限负载污染。
+**下一步**:①要么bench prompt控在max-model-len内重测对比;要么把serve max-model-len提到>4010(容纳4010 token)重测。②若要查超长处理慢路径=读engine对>max-model-len的截断/分块。但优先:公平负载重测,看dinfer真实差距到底多少(可能远好于6-16%)。
