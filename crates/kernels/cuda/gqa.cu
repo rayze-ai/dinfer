@@ -1394,6 +1394,48 @@ __global__ void gqa_decode_merge_kernel(const float* __restrict__ scratch, bf16*
 
 }  // namespace
 
+// B12（loop kaon3-decode-opt）：FP8 KV 层的 "q/k/v 各一次 fp8 往返 + cache_write" 4 次 launch 融成 1 次。
+// 往返口径逐字同 elementwise.cu fp8_e4m3_roundtrip_kernel（scale=1：bf16(e4m3_satfinite(x))）；k/v 原地写回（后续
+// attention 读的是往返后的值）并写 cache；q 原地往返。grid = tokens。
+__device__ __forceinline__ bf16 fp8_rt(bf16 x) {
+  const __nv_fp8_storage_t q8 = __nv_cvt_float_to_fp8(to_f32(x), __NV_SATFINITE, __NV_E4M3);
+  return to_bf16(__half2float(__half(__nv_cvt_fp8_to_halfraw(q8, __NV_E4M3))));
+}
+__global__ void gqa_cache_write_fp8rt_kernel(bf16* __restrict__ q, bf16* __restrict__ k, bf16* __restrict__ v,
+                                             bf16* __restrict__ cache, const int64_t* __restrict__ slot_mapping,
+                                             int q_heads, int kv_heads, int D, int block_size) {
+  const int64_t t = blockIdx.x;
+  bf16* qs = q + t * q_heads * D;
+  for (int i = threadIdx.x; i < q_heads * D; i += blockDim.x) qs[i] = fp8_rt(qs[i]);
+  const int64_t slot = slot_mapping[t];
+  bf16* ks = k + t * kv_heads * D;
+  bf16* vs = v + t * kv_heads * D;
+  if (slot < 0) {  // 无槽位（padding 行）：只做往返不写 cache，与旧路径一致
+    for (int i = threadIdx.x; i < kv_heads * D; i += blockDim.x) { ks[i] = fp8_rt(ks[i]); vs[i] = fp8_rt(vs[i]); }
+    return;
+  }
+  const int64_t blk = slot / block_size, off = slot % block_size;
+  bf16* dst = cache + slot_off(blk * block_size + off, kv_heads, D);
+  for (int i = threadIdx.x; i < kv_heads * D; i += blockDim.x) {
+    const int h = i / D, d = i % D;
+    const bf16 kk = fp8_rt(ks[i]), vv = fp8_rt(vs[i]);
+    ks[i] = kk;
+    vs[i] = vv;
+    dst[(h * 2 + 0) * D + d] = kk;
+    dst[(h * 2 + 1) * D + d] = vv;
+  }
+}
+extern "C" int gqa_cache_write_fp8rt_bf16(void* q, void* k, void* v, void* cache, const int64_t* slot_mapping,
+                                          int64_t tokens, int64_t q_heads, int64_t kv_heads, int64_t head_dim,
+                                          int64_t block_size, cudaStream_t stream) {
+  if (tokens <= 0) return 0;
+  if (q_heads <= 0 || kv_heads <= 0 || head_dim <= 0 || block_size <= 0) return err(cudaErrorInvalidValue);
+  gqa_cache_write_fp8rt_kernel<<<(unsigned)tokens, 256, 0, stream>>>(
+      static_cast<bf16*>(q), static_cast<bf16*>(k), static_cast<bf16*>(v), static_cast<bf16*>(cache), slot_mapping,
+      (int)q_heads, (int)kv_heads, (int)head_dim, (int)block_size);
+  return last_err();
+}
+
 extern "C" int gqa_cache_write_bf16(const void* k, const void* v, void* cache, const int64_t* slot_mapping,
                                     int64_t tokens, int64_t kv_heads, int64_t head_dim, int64_t block_size,
                                     cudaStream_t stream) {

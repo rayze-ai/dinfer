@@ -128,6 +128,10 @@ int mla_decode_bf16(const void* q, const void* cache, const int32_t* block_table
 // ---- GQA paged attention（gqa.cu）：cache [num_blocks, block_size, kv_heads, 2, D]（K 在 V 前）----
 int gqa_cache_write_bf16(const void* k, const void* v, void* cache, const int64_t* slot_mapping, int64_t tokens,
                          int64_t kv_heads, int64_t head_dim, int64_t block_size, cudaStream_t stream);
+// B12：FP8 KV 层 q/k/v fp8 往返（原地）+ k/v 写 cache，一次 launch（替代 3 次 fp8_e4m3_roundtrip + cache_write）。
+int gqa_cache_write_fp8rt_bf16(void* q, void* k, void* v, void* cache, const int64_t* slot_mapping, int64_t tokens,
+                               int64_t q_heads, int64_t kv_heads, int64_t head_dim, int64_t block_size,
+                               cudaStream_t stream);
 // q_stride / kv_stride：每 token 行的元素跨度（0 = 紧凑 heads·D / kv_heads·D）；允许直接读 qkv GEMM 输出。
 // head_dim ∈ {128, 256} 走 tensor-core tile kernel；其他 D ≤ 256 走通用慢路径。
 // cfg（r11a）：D=256 的 kernel 结构选择 = 版本·1000 + warp 数·100 + tile key 数（版本 0 = v6 Q 进 smem、1 = v7 warp 对分工、
