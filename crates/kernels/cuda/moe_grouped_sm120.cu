@@ -84,6 +84,19 @@ __device__ __forceinline__ void quant16(const bf16* src, bool valid, uint2* out8
 }
 // ---- 复制结束 ----
 
+// cp.async 流水 helper（照搬 gemm_fp8_sm120.cu 的 cp.async.cg 双缓冲范式）。
+__device__ __forceinline__ uint32_t smem_u32(const void* p) {
+  return static_cast<uint32_t>(__cvta_generic_to_shared(p));
+}
+// 16 B 异步拷贝（cg）：bytes=0 → zero-fill 不访问 global（越界行 fill 0，与旧版 ternary 填 0 一致）。
+__device__ __forceinline__ void cp16(uint32_t s, const void* g, int bytes) {
+  asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(s), "l"(g), "r"(bytes));
+}
+// 4 B 异步拷贝（ca）：sfb 每元素 4 B；bytes=0 → zero-fill（越界 sfb fill 0，一致）。
+__device__ __forceinline__ void cp4(uint32_t s, const void* g, int bytes) {
+  asm volatile("cp.async.ca.shared.global [%0], [%1], 4, %2;\n" ::"r"(s), "l"(g), "r"(bytes));
+}
+
 // row2expert[off[e]..off[e+1]] = e。grid=E，block e 填自己的 range（device offsets，无 D2H）。
 __global__ void row2expert_kernel(const int32_t* __restrict__ offsets, int32_t* __restrict__ row2e) {
   const int e = blockIdx.x;
@@ -229,6 +242,175 @@ __global__ void __launch_bounds__(256)
   }
 }
 
+// 流水版（第一刀，R71/R72）：K 循环 cp.async.cg 双缓冲，B 权重异步预取与 mma 重叠。
+// 逐位一致（硬门槛）：落 smem 的字节 / fill / mma 读法 / 归约序与 grouped_gemm_kernel 逐字相同，
+//   只把 B/sfb 的 global→smem 拷贝从「同步 STS」改成「cp.async 预取」；A/sfa 越界 fill 非 0（0x11/0x38），
+//   cp.async zfill 给不了，故 A/sfa 仍走寄存器暂存 + 条件 STS（同 gemm_fp8 的 A 侧路径）。
+template <int BK>
+__global__ void __launch_bounds__(256)
+    grouped_gemm_kernel_pipe(const uint8_t* __restrict__ A, const uint8_t* __restrict__ Asc,
+                             const uint8_t* const* __restrict__ Bptr, const uint8_t* const* __restrict__ Sptr,
+                             const float* __restrict__ alpha, const int32_t* __restrict__ offsets,
+                             bf16* __restrict__ D, int N, int K) {
+  const int e = blockIdx.z;
+  const int row_lo = offsets[e], row_hi = offsets[e + 1];
+  const int m_blk = row_lo + blockIdx.y * BM;
+  if (m_blk >= row_hi) return;
+
+  constexpr int RSA = BK / 2 + PAD, RSB = BK / 2 + PAD;
+  constexpr int NQ4 = BK / 64;
+  constexpr int NB16 = BK / 16;
+  __shared__ uint8_t sA[2][BM * RSA];
+  __shared__ uint8_t sB[2][BN * RSB];
+  __shared__ uint32_t sfa[2][BM * NQ4];
+  __shared__ uint32_t sfb[2][BN * NQ4];
+
+  const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+  const int wm = warp >> 2, wn = warp & 3;
+  const int n_blk = blockIdx.x * BN;
+  const uint8_t* B = Bptr[e];
+  const uint8_t* S = Sptr[e];
+  const float global = alpha[e];
+  const int M = row_hi;
+
+  float acc[4] = {0, 0, 0, 0}, acc2[4] = {0, 0, 0, 0};
+  const int nk = (K + BK - 1) / BK;
+  const int rb = BK / 32;
+
+  // 预取 B/sfb 到 buffer st（cp.async），提交一个 group。布局字节与旧版逐字相同。
+  auto load_b = [&](int st, int kb) {
+    const uint8_t* bsrc = B + static_cast<size_t>(n_blk) * (K / 2) + kb * (BK / 2);
+    for (int i = tid; i < (BN * BK / 2) / 16; i += blockDim.x) {
+      const int r = i / rb, c = i % rb;
+      const bool ok = (n_blk + r < N);
+      cp16(smem_u32(&sB[st][r * RSB + c * 16]),
+           bsrc + (static_cast<size_t>(r) * (K / 32) + c) * 16, ok ? 16 : 0);
+    }
+    for (int i = tid; i < BN * NQ4; i += blockDim.x) {
+      const int r = i / NQ4, q = i % NQ4;
+      const bool ok = (n_blk + r < N);
+      cp4(smem_u32(&sfb[st][r * NQ4 + q]),
+          S + static_cast<size_t>(n_blk + r) * (K / 16) + kb * NB16 + q * 4, ok ? 4 : 0);
+    }
+    asm volatile("cp.async.commit_group;\n");
+  };
+  // A/sfa：读 global 到寄存器（本 block 每线程最多各 1 个，BM*BK/2/16 与 BM*NQ4 ≤ 256）。
+  constexpr int NA = (BM * BK / 2 / 16 + 255) / 256;
+  constexpr int NFA = (BM * NQ4 + 255) / 256;
+  auto conv_a = [&](int kb, uint4 (&areg)[NA], uint32_t (&fareg)[NFA]) {
+    const uint8_t* asrc = A + static_cast<size_t>(m_blk) * (K / 2) + kb * (BK / 2);
+#pragma unroll
+    for (int t = 0; t < NA; ++t) {
+      const int i = tid + t * 256;
+      if (i < (BM * BK / 2) / 16) {
+        const int r = i / rb, c = i % rb;
+        const uint4 z = make_uint4(0x11111111u, 0x11111111u, 0x11111111u, 0x11111111u);
+        areg[t] = (m_blk + r < M)
+                      ? *reinterpret_cast<const uint4*>(asrc + (static_cast<size_t>(r) * (K / 32) + c) * 16)
+                      : z;
+      }
+    }
+#pragma unroll
+    for (int t = 0; t < NFA; ++t) {
+      const int i = tid + t * 256;
+      if (i < BM * NQ4) {
+        const int r = i / NQ4, q = i % NQ4;
+        fareg[t] = (m_blk + r < M)
+                       ? *reinterpret_cast<const uint32_t*>(Asc + static_cast<size_t>(m_blk + r) * (K / 16) +
+                                                            kb * NB16 + q * 4)
+                       : 0x38383838u;
+      }
+    }
+  };
+  auto store_a = [&](int st, const uint4 (&areg)[NA], const uint32_t (&fareg)[NFA]) {
+#pragma unroll
+    for (int t = 0; t < NA; ++t) {
+      const int i = tid + t * 256;
+      if (i < (BM * BK / 2) / 16) {
+        const int r = i / rb, c = i % rb;
+        *reinterpret_cast<uint4*>(&sA[st][r * RSA + c * 16]) = areg[t];
+      }
+    }
+#pragma unroll
+    for (int t = 0; t < NFA; ++t) {
+      const int i = tid + t * 256;
+      if (i < BM * NQ4) {
+        const int r = i / NQ4, q = i % NQ4;
+        sfa[st][r * NQ4 + q] = fareg[t];
+      }
+    }
+  };
+
+  // prologue：buffer 0。
+  uint4 areg[NA];
+  uint32_t fareg[NFA];
+  load_b(0, 0);
+  conv_a(0, areg, fareg);
+  for (int kb = 0; kb < nk; ++kb) {
+    const int cur = kb & 1, nxt = cur ^ 1;
+    uint4 anext[NA];
+    uint32_t fanext[NFA];
+    if (kb + 1 < nk) {
+      load_b(nxt, kb + 1);
+      conv_a(kb + 1, anext, fanext);
+    } else {
+      asm volatile("cp.async.commit_group;\n");
+    }
+    asm volatile("cp.async.wait_group 1;\n");
+    __syncthreads();
+    // buffer cur 的 A/sfa 由上一轮（或 prologue）存入；本轮存 nxt 的 A/sfa。
+    if (kb == 0) store_a(0, areg, fareg);
+    if (kb + 1 < nk) store_a(nxt, anext, fanext);
+
+    const int nbk = BK / 64;
+    for (int b = 0; b < nbk; ++b) {
+      const int kb0 = b * 64;
+      uint32_t a[4], b0[2], b1[2];
+      const int mrow = wm * 16, ncol = wn * 16;
+#pragma unroll
+      for (int g = 0; g < 4; ++g) {
+        const int m = (lane / 4) + 8 * (g % 2);
+        const int kb_ = kb0 + 8 * (lane % 4) + 32 * (g / 2);
+        a[g] = *reinterpret_cast<const uint32_t*>(&sA[cur][(mrow + m) * RSA + kb_ / 2]);
+      }
+      const int brow = lane / 4;
+#pragma unroll
+      for (int g = 0; g < 2; ++g) {
+        const int kb_ = kb0 + 8 * (lane % 4) + 32 * g;
+        b0[g] = *reinterpret_cast<const uint32_t*>(&sB[cur][(ncol + brow) * RSB + kb_ / 2]);
+        b1[g] = *reinterpret_cast<const uint32_t*>(&sB[cur][(ncol + 8 + brow) * RSB + kb_ / 2]);
+      }
+      const int sam = (8 * (lane & 1) + (lane >> 2)) & 15;
+      const uint32_t sa = sfa[cur][(mrow + sam) * NQ4 + b];
+      const uint32_t sb0 = sfb[cur][(ncol + brow) * NQ4 + b];
+      const uint32_t sb1 = sfb[cur][(ncol + 8 + brow) * NQ4 + b];
+      mma_fp4(a, b0, sa, sb0, acc);
+      mma_fp4(a, b1, sa, sb1, acc2);
+    }
+    __syncthreads();
+  }
+
+  const int r0 = lane / 4, cg = (lane % 4) * 2;
+  const int g0 = m_blk + wm * 16 + r0, g1 = g0 + 8;
+  const int c0 = n_blk + wn * 16 + cg, c1 = c0 + 8;
+  if (g0 < M && c0 < N) {
+    D[static_cast<size_t>(g0) * N + c0] = to_bf16(acc[0] * global);
+    if (c0 + 1 < N) D[static_cast<size_t>(g0) * N + c0 + 1] = to_bf16(acc[1] * global);
+  }
+  if (g1 < M && c0 < N) {
+    D[static_cast<size_t>(g1) * N + c0] = to_bf16(acc[2] * global);
+    if (c0 + 1 < N) D[static_cast<size_t>(g1) * N + c0 + 1] = to_bf16(acc[3] * global);
+  }
+  if (g0 < M && c1 < N) {
+    D[static_cast<size_t>(g0) * N + c1] = to_bf16(acc2[0] * global);
+    if (c1 + 1 < N) D[static_cast<size_t>(g0) * N + c1 + 1] = to_bf16(acc2[1] * global);
+  }
+  if (g1 < M && c1 < N) {
+    D[static_cast<size_t>(g1) * N + c1] = to_bf16(acc2[2] * global);
+    if (c1 + 1 < N) D[static_cast<size_t>(g1) * N + c1 + 1] = to_bf16(acc2[3] * global);
+  }
+}
+
 int gerr() { return static_cast<int>(cudaGetLastError()); }
 
 }  // namespace
@@ -271,12 +453,21 @@ int moe_grouped_gemm(const void* aq, const void* a_s, const void* const* Bptr, c
   const uint8_t* psa = static_cast<const uint8_t*>(a_s);
   const uint8_t* const* pb = reinterpret_cast<const uint8_t* const*>(Bptr);
   const uint8_t* const* ps = reinterpret_cast<const uint8_t* const*>(Sptr);
+  const bool pipe = []{ const char* v = getenv("MOE_GEMM_PIPE"); return v && v[0] == '1'; }();
   if (K % 128 == 0) {
-    grouped_gemm_kernel<128><<<grid, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, static_cast<bf16*>(out),
-                                                       (int)N, (int)K);
+    if (pipe)
+      grouped_gemm_kernel_pipe<128><<<grid, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets,
+                                                              static_cast<bf16*>(out), (int)N, (int)K);
+    else
+      grouped_gemm_kernel<128><<<grid, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, static_cast<bf16*>(out),
+                                                         (int)N, (int)K);
   } else {
-    grouped_gemm_kernel<64><<<grid, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, static_cast<bf16*>(out),
-                                                      (int)N, (int)K);
+    if (pipe)
+      grouped_gemm_kernel_pipe<64><<<grid, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets,
+                                                             static_cast<bf16*>(out), (int)N, (int)K);
+    else
+      grouped_gemm_kernel<64><<<grid, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, static_cast<bf16*>(out),
+                                                        (int)N, (int)K);
   }
   return gerr();
 }
