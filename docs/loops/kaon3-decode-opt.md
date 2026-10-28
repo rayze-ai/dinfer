@@ -341,3 +341,14 @@ plen1024 TTFT base 2002ms,skip各段:nomoe 2001/nodense 2001/noqkv 2001/nopaged 
 - 我一整天改的MoE/attention kernel全不在关键路径。
 **skip实测这次对了**:直接排除GPU,没再瞎改kernel(D27 flash白改但A/B兜住)。
 **下一步**:prefill host路径分段计时(Instant在tokenize/模板/htod/alloc/schedule各段),或读server HTTP handler→engine prefill的host代码,定2秒随L超线性在哪。这是纯CPU问题。注意可能在server层(chat模板/tokenize)非engine。
+
+## D29 2026-10-28 render计时加错端点([render-time]0行)+诚实收口:TTFT定位到host prompt路径未到具体段
+[render-time]0行:我加在chat.rs(/v1/chat/completions),但bench的one_request走**/v1/completions(completions.rs)**,加错文件。又一次"计时加错地方没打出来"(host-split错分支/executor host-time被core盖/现在render错端点,共3次)。
+**本会话TTFT定位止于**:确证**TTFT 2秒不在GPU**(prefill skip MoE/dense/qkv/paged全0影响D28+D=512 flash换了不降D27),**在host prompt处理路径,随prompt长度超线性**(plen128=69ms/1024=2002ms),**但没定位到host具体哪段**(render? engine add_request? schedule? 计时反复加错端点/分支)。
+**下次接手TTFT第一步**:计时加到**completions.rs的completions handler**(bench真实走这),量be.render(模板+tokenize)vs engine提交;或直接读completions.rs看prompt处理有无O(L²)(常见:逐token push/反复realloc/O(L²)字符串拼接/tokenizer慢)。vLLM 82ms说明host能薄。
+**本会话总成果(给交接)**:
+1. **最大缺口=TTFT**(真实KV plen1024慢vLLM 24×,2秒),非decode(我大半天纠结的,慢3.8×第三位)。
+2. TTFT 2秒+decode TPOT 19ms**都在host路径,非GPU kernel**(skip实测铁证)。
+3. 之前594/63%是prefix-repeat 1虚高,真实负载dinfer仅vLLM 6-16%。
+4. 一天改的MoE两刀+D=512 flash全不在关键路径(都默认关/对拍过保留,零风险)。
+5. 方法教训(已knowledge):整段skip定关键路径该最先做,别信代码推断/NO_GRAPH分段。
