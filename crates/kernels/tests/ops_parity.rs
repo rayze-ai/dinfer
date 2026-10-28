@@ -637,7 +637,7 @@ fn paged_case(
     let dk = s.htod_copy(k).unwrap();
     let dv = s.htod_copy(v).unwrap();
     let dsl = s.htod_copy(slots.clone()).unwrap();
-    dinfer_kernels::gqa_cache_write_bf16(s, &dk, &dv, &mut cache, &dsl, tk, hk, d, BS).unwrap();
+    dinfer_kernels::gqa_cache_write_bf16(s, &dk, &dv, &mut cache, &dsl, tk, hk, d, BS, false).unwrap();
     let dq = s.htod_copy(q.clone()).unwrap();
     let dbt = s.htod_copy(btf.clone()).unwrap();
     let dseq = s.htod_copy(seq_lens.clone()).unwrap();

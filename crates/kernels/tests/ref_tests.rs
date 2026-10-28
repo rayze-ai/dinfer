@@ -359,12 +359,12 @@ fn gqa_cache_write_and_paged_ref() {
     let dk = s.htod_copy(to_bf16(&k)).unwrap();
     let dv = s.htod_copy(to_bf16(&v)).unwrap();
     let dsl = s.htod_copy(hist_slots.clone()).unwrap();
-    dinfer_kernels::gqa_cache_write_bf16(&s, &dk, &dv, &mut cache, &dsl, hist_slots.len(), hk, d, bs)
+    dinfer_kernels::gqa_cache_write_bf16(&s, &dk, &dv, &mut cache, &dsl, hist_slots.len(), hk, d, bs, false)
         .unwrap();
     let dk2 = s.htod_copy(to_bf16(&k2)).unwrap();
     let dv2 = s.htod_copy(to_bf16(&v2)).unwrap();
     let dsl2 = s.htod_copy(new_slots.clone()).unwrap();
-    dinfer_kernels::gqa_cache_write_bf16(&s, &dk2, &dv2, &mut cache, &dsl2, new_slots.len(), hk, d, bs)
+    dinfer_kernels::gqa_cache_write_bf16(&s, &dk2, &dv2, &mut cache, &dsl2, new_slots.len(), hk, d, bs, false)
         .unwrap();
     assert_close("gqa_cache", &s.dtoh_sync_copy(&cache).unwrap(), &cache_want, 0.0, 0.0);
     // paged attention（req0 3 行带历史 11，req1 1 行 decode 带历史 6）
@@ -421,11 +421,11 @@ fn gqa_paged_d128_flash_ref() {
     let dkh = s.htod_copy(to_bf16(&kh)).unwrap();
     let dvh = s.htod_copy(to_bf16(&vh)).unwrap();
     let dsh = s.htod_copy(sh.clone()).unwrap();
-    dinfer_kernels::gqa_cache_write_bf16(&s, &dkh, &dvh, &mut cache, &dsh, sh.len(), hk, d, bs).unwrap();
+    dinfer_kernels::gqa_cache_write_bf16(&s, &dkh, &dvh, &mut cache, &dsh, sh.len(), hk, d, bs, false).unwrap();
     let dkn = s.htod_copy(to_bf16(&kn)).unwrap();
     let dvn = s.htod_copy(to_bf16(&vn)).unwrap();
     let dsn = s.htod_copy(sn.clone()).unwrap();
-    dinfer_kernels::gqa_cache_write_bf16(&s, &dkn, &dvn, &mut cache, &dsn, sn.len(), hk, d, bs).unwrap();
+    dinfer_kernels::gqa_cache_write_bf16(&s, &dkn, &dvn, &mut cache, &dsn, sn.len(), hk, d, bs, false).unwrap();
     let dq = s.htod_copy(to_bf16(&q)).unwrap();
     let dbt = s.htod_copy(bt).unwrap();
     let dseq = s.htod_copy(seq_lens.clone()).unwrap();
@@ -480,11 +480,11 @@ fn gqa_mixed_d128_ref() {
     let dkh = s.htod_copy(to_bf16(&kh)).unwrap();
     let dvh = s.htod_copy(to_bf16(&vh)).unwrap();
     let dsh = s.htod_copy(sh.clone()).unwrap();
-    dinfer_kernels::gqa_cache_write_bf16(&s, &dkh, &dvh, &mut cache, &dsh, sh.len(), hk, d, bs).unwrap();
+    dinfer_kernels::gqa_cache_write_bf16(&s, &dkh, &dvh, &mut cache, &dsh, sh.len(), hk, d, bs, false).unwrap();
     let dkn = s.htod_copy(to_bf16(&kn)).unwrap();
     let dvn = s.htod_copy(to_bf16(&vn)).unwrap();
     let dsn = s.htod_copy(sn.clone()).unwrap();
-    dinfer_kernels::gqa_cache_write_bf16(&s, &dkn, &dvn, &mut cache, &dsn, sn.len(), hk, d, bs).unwrap();
+    dinfer_kernels::gqa_cache_write_bf16(&s, &dkn, &dvn, &mut cache, &dsn, sn.len(), hk, d, bs, false).unwrap();
     let dq = s.htod_copy(to_bf16(&q)).unwrap();
     let dbt = s.htod_copy(bt).unwrap();
     let dseq = s.htod_copy(seq_lens.clone()).unwrap();
@@ -536,7 +536,7 @@ fn gqa_decode_d128_splitk_ref() {
     let dk = s.htod_copy(to_bf16(&kall)).unwrap();
     let dv = s.htod_copy(to_bf16(&vall)).unwrap();
     let dsl = s.htod_copy(slots.clone()).unwrap();
-    dinfer_kernels::gqa_cache_write_bf16(&s, &dk, &dv, &mut cache, &dsl, slots.len(), hk, d, bs).unwrap();
+    dinfer_kernels::gqa_cache_write_bf16(&s, &dk, &dv, &mut cache, &dsl, slots.len(), hk, d, bs, false).unwrap();
     let dq = s.htod_copy(to_bf16(&q)).unwrap();
     let dbt = s.htod_copy(bt).unwrap();
     let dseq = s.htod_copy(seq_lens.clone()).unwrap();
@@ -584,7 +584,7 @@ fn gqa_decode_d128_b32_direct_ref() {
     let dk = s.htod_copy(to_bf16(&kall)).unwrap();
     let dv = s.htod_copy(to_bf16(&vall)).unwrap();
     let dsl = s.htod_copy(slots.clone()).unwrap();
-    dinfer_kernels::gqa_cache_write_bf16(&s, &dk, &dv, &mut cache, &dsl, slots.len(), hk, d, bs).unwrap();
+    dinfer_kernels::gqa_cache_write_bf16(&s, &dk, &dv, &mut cache, &dsl, slots.len(), hk, d, bs, false).unwrap();
     let dq = s.htod_copy(to_bf16(&q)).unwrap();
     let dbt = s.htod_copy(bt).unwrap();
     let dseq = s.htod_copy(seq_lens.clone()).unwrap();

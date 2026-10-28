@@ -15,7 +15,9 @@ use dinfer_layers::{Embedding, Norm as _, OpSet, Tensor, WeightSource};
 
 /// 一层的 paged KV cache：[num_blocks, block_size, nkv, 2, head_dim]。
 pub struct LayerKv {
+    /// B15：`is_fp8` 时 cache 以 e4m3 字节存，`cache` 的 bf16 长度 = 元素数 / 2（kernel 按 u8 解释）。
     pub cache: Tensor<bf16>,
+    pub is_fp8: bool,
     pub nkv: usize,
     pub head_dim: usize,
 }
@@ -23,11 +25,15 @@ pub struct LayerKv {
 impl LayerKv {
     pub fn new(stream: &Stream, cfg: &KaonConfig, l: usize, num_blocks: usize, block_size: usize) -> Result<Self> {
         let (head_dim, nkv, _) = cfg.attn_shape(l);
-        Ok(Self {
-            cache: Tensor::zeros(stream, &[num_blocks, block_size, nkv, 2, head_dim])?,
-            nkv,
-            head_dim,
-        })
+        // B15：kv_fp8 层默认真存 e4m3（`KV_FP8_STORE=0` 回退 bf16 存 + 往返）。元素总数偶数，按 bf16 分配一半长度。
+        let is_fp8 = cfg.kv_fp8 && std::env::var("KV_FP8_STORE").ok().as_deref() != Some("0");
+        let elems = num_blocks * block_size * nkv * 2 * head_dim;
+        let cache = if is_fp8 {
+            Tensor::zeros(stream, &[elems / 2])?
+        } else {
+            Tensor::zeros(stream, &[num_blocks, block_size, nkv, 2, head_dim])?
+        };
+        Ok(Self { cache, is_fp8, nkv, head_dim })
     }
 }
 
@@ -165,6 +171,7 @@ impl KaonModel {
                     max_seqlen: meta.max_seqlen,
                     block_size: self.block_size,
                     kv_mut: &mut kv_cache[pre].cache.data,
+                    kv_fp8_store: kv_cache[pre].is_fp8,
                 };
                 self.layers[pre].forward(stream, gemm, ops, cfg, &self.ropes, sc, &mut c, tokens, None)?;
             }
@@ -180,6 +187,7 @@ impl KaonModel {
                 max_seqlen: meta.max_seqlen,
                 block_size: self.block_size,
                 kv_mut: &mut kv_cache[l].cache.data,
+                kv_fp8_store: kv_cache[l].is_fp8,
             };
             let so_l: usize = std::env::var("SUB_LAYER").ok().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
             let so = hidden_dir.filter(|_| l == so_l).map(|d| (std::path::Path::new(d), l));
@@ -205,6 +213,7 @@ impl KaonModel {
                 max_seqlen: meta.max_seqlen,
                 block_size: self.block_size,
                 kv_mut: &mut kv_cache[l].cache.data,
+                kv_fp8_store: kv_cache[l].is_fp8,
             };
             // 子模块 dump 的层选择：`SUB_LAYER=<n>` 覆盖，默认第 0 层；
             // `SUB_LAYER=all` 每层都 dump，写到 `<dir>/sub_L{l}/`（逐层 router 真值扫描用）。

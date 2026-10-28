@@ -88,7 +88,7 @@ fn gqa_decode_win_parity() {
         let (dq, dk, dv) = (up(&q), up(&k), up(&v));
         let dsl = st.htod_copy(slots.clone()).unwrap();
         let mut cache = st.alloc_zeros::<bf16>(num_blocks * bs * hkv * 2 * d).unwrap();
-        dinfer_kernels::gqa_cache_write_bf16(&st, &dk, &dv, &mut cache, &dsl, total, hkv, d, bs).unwrap();
+        dinfer_kernels::gqa_cache_write_bf16(&st, &dk, &dv, &mut cache, &dsl, total, hkv, d, bs, false).unwrap();
         let dbt = st.htod_copy(bt).unwrap();
         let dseq = st.htod_copy(seq.iter().map(|&n| n as i32).collect::<Vec<_>>()).unwrap();
         let cu: Vec<i32> = (0..=b as i32).collect();
@@ -98,11 +98,11 @@ fn gqa_decode_win_parity() {
             let mut out = st.alloc_zeros::<bf16>(b * h * d).unwrap();
             let r = if path == "decode_win" {
                 dinfer_kernels::gqa_decode_win_bf16(
-                    &st, &dq, &cache, &dbt, &dseq, &mut out, &mut scratch, b, h, hkv, d, bs, max_blocks, 1.0, 0, None, window,
+                    &st, &dq, &cache, &dbt, &dseq, &mut out, &mut scratch, b, h, hkv, d, bs, max_blocks, 1.0, 0, None, window, false,
                 )
             } else {
                 dinfer_kernels::gqa_paged_win_bf16(
-                    &st, &dq, &cache, &dbt, &dseq, &dcu, &mut out, b, 1, h, hkv, d, bs, max_blocks, 1.0, 0, false, window, false,
+                    &st, &dq, &cache, &dbt, &dseq, &dcu, &mut out, b, 1, h, hkv, d, bs, max_blocks, 1.0, 0, false, window, false, false,
                 )
             };
             st.synchronize().unwrap();

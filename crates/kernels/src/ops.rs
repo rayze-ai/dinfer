@@ -2356,6 +2356,7 @@ pub fn gqa_cache_write_bf16(
     kv_heads: usize,
     head_dim: usize,
     block_size: usize,
+    kv_fp8: bool,
 ) -> Result<()> {
     ensure!(
         k.len() >= tokens * kv_heads * head_dim && v.len() >= tokens * kv_heads * head_dim,
@@ -2378,6 +2379,7 @@ pub fn gqa_cache_write_bf16(
                 kv_heads as i64,
                 head_dim as i64,
                 block_size as i64,
+                kv_fp8 as i32,
                 stream.raw() as _,
             )
         },
@@ -2556,6 +2558,7 @@ fn gqa_paged_impl<Q: DevicePtr<bf16> + ?Sized>(
     skip_single: bool,
     window: usize,
     p_fp8: bool,
+    kv_fp8: bool,
 ) -> Result<()> {
     ensure!(
         block_table.len() >= num_reqs * max_blocks && seq_lens.len() >= num_reqs,
@@ -2593,6 +2596,7 @@ fn gqa_paged_impl<Q: DevicePtr<bf16> + ?Sized>(
                 gqa_prefill_cfg(stream),
                 window as i32,
                 p_fp8 as i32 | (attn_mode_ab() << 1),
+                kv_fp8 as i32,
                 stream.raw() as _,
             )
         },
@@ -2645,8 +2649,9 @@ pub fn gqa_paged_win_bf16<Q: DevicePtr<bf16> + ?Sized>(
     skip_single: bool,
     window: usize,
     p_fp8: bool,
+    kv_fp8: bool,
 ) -> Result<()> {
-    gqa_paged_impl(stream, q, cache, block_table, seq_lens, cu_seqlens_q, out, num_reqs, max_q_len, heads, kv_heads, head_dim, block_size, max_blocks, scale, q_stride, skip_single, window, p_fp8)
+    gqa_paged_impl(stream, q, cache, block_table, seq_lens, cu_seqlens_q, out, num_reqs, max_q_len, heads, kv_heads, head_dim, block_size, max_blocks, scale, q_stride, skip_single, window, p_fp8, kv_fp8)
 }
 
 /// 纯 decode（每请求 1 行）split-K attention（D ∈ {128, 256}）。q: [B, heads, D]，out 同形；`scratch` ≥ `gqa_decode_scratch_len`。
@@ -2729,6 +2734,7 @@ pub fn gqa_decode_win_bf16<Q: DevicePtr<bf16> + ?Sized>(
     q_stride: usize,
     cu_seqlens_q: Option<&CudaSlice<i32>>,
     window: usize,
+    kv_fp8: bool,
 ) -> Result<()> {
     ensure!(matches!(head_dim, 128 | 256 | 512), "gqa_decode_win: head_dim must be 128/256/512");
     ensure!(block_table.len() >= num_reqs * max_blocks && seq_lens.len() >= num_reqs, "gqa_decode_win: table/seq_lens");
@@ -2759,6 +2765,7 @@ pub fn gqa_decode_win_bf16<Q: DevicePtr<bf16> + ?Sized>(
                 q_stride as i64,
                 cu_seqlens_q.map_or(std::ptr::null(), |c| stream.ptr(c) as *const i32),
                 window as i32,
+                kv_fp8 as i32,
                 stream.raw() as _,
             )
         },
@@ -5515,6 +5522,7 @@ pub fn gqa_cache_write_fp8rt_bf16(
     kv_heads: usize,
     head_dim: usize,
     block_size: usize,
+    kv_fp8: bool,
 ) -> Result<()> {
     ensure!(q.len() >= tokens * q_heads * head_dim && k.len() >= tokens * kv_heads * head_dim && v.len() >= tokens * kv_heads * head_dim && slot_mapping.len() >= tokens, "gqa_cache_write_fp8rt: 形状");
     let (pq, pk, pv) = (stream.ptr_mut(q) as *mut c_void, stream.ptr_mut(k) as *mut c_void, stream.ptr_mut(v) as *mut c_void);
@@ -5522,7 +5530,7 @@ pub fn gqa_cache_write_fp8rt_bf16(
     let ps = stream.ptr(slot_mapping) as *const i64;
     // SAFETY: 长度已校验；slot_mapping 值由调用方保证在 cache 范围内（与 gqa_cache_write_bf16 同）。
     check(
-        unsafe { ffi::gqa_cache_write_fp8rt_bf16(pq, pk, pv, pc, ps, tokens as i64, q_heads as i64, kv_heads as i64, head_dim as i64, block_size as i64, stream.raw() as ffi::cudaStream_t) },
+        unsafe { ffi::gqa_cache_write_fp8rt_bf16(pq, pk, pv, pc, ps, tokens as i64, q_heads as i64, kv_heads as i64, head_dim as i64, block_size as i64, kv_fp8 as i32, stream.raw() as ffi::cudaStream_t) },
         "gqa_cache_write_fp8rt_bf16",
     )
 }

@@ -923,6 +923,8 @@ pub struct StepCtx<'a> {
     /// 本层 paged KV cache：[num_blocks, block_size, nkv, 2, D]（`D` = 本层 head_dim）。
     /// 写 KV 与 attention 读同一块，顺序执行；只保留可变引用避免 Rust 的别名冲突。
     pub kv_mut: &'a mut dinfer_kernels::cudarc::driver::CudaSlice<bf16>,
+    /// B15：本层 cache 以 e4m3 字节存（`kv_mut` 的 bf16 长度 = 元素数/2）；kernel 按 u8 解释。
+    pub kv_fp8_store: bool,
 }
 
 
@@ -1219,7 +1221,7 @@ impl Gemma4Layer {
         if kvfp8_fused {
             k::ops::gqa_cache_write_fp8rt_bf16(
                 stream, &mut q.data, &mut kk.data, &mut v.data, &mut *ctx.kv_mut, &ctx.slot_mapping.data, tokens, heads, nkv,
-                d, ctx.block_size,
+                d, ctx.block_size, ctx.kv_fp8_store,
             )?;
         }
         if kvfp8_on && !kvfp8_fused {
@@ -1246,6 +1248,7 @@ impl Gemma4Layer {
                 nkv,
                 d,
                 ctx.block_size,
+                ctx.kv_fp8_store,
             )?;
         }
 
@@ -1319,13 +1322,16 @@ impl Gemma4Layer {
                 matches!(ctx.mode, dinfer_core::runner::BatchMode::Paged),
                 self.window,
                 self.p_fp8,
+                ctx.kv_fp8_store,
             )?,
         }
         } // end !ATTN_SKIP_PAGED
 
         // ---- 6. o_proj + post_attention_norm + 残差 ----
         if let Some((dir, _)) = sub_out {
-            let vv = attn.to_vec_f32(stream)?;
+            let vv = attn.to_vec_f32(stream
+                    ctx.kv_fp8_store,
+                )?;
             let bytes: Vec<u8> = vv.iter().take(tokens * heads * d).flat_map(|x| x.to_le_bytes()).collect();
             std::fs::write(dir.join("attn_out.bin"), bytes)
                 .map_err(|err| anyhow::anyhow!("写 attn_out.bin 失败: {err}"))?;
