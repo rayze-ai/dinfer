@@ -265,11 +265,18 @@ impl ModelExecutor for KaonExecutor {
         }
         let use_graph = graph_eligible && self.graphs.get(n).is_some();
 
+        // HOST_TIME=1：host 各段墙钟计时（纯 CPU Instant，不碰 GPU，graph/eager 都准）。定 13ms host 哪段。
+        let ht = std::env::var("HOST_TIME").ok().as_deref() == Some("1");
+        let t_bind = std::time::Instant::now();
+
         let collect_rows;
+        let (mut t_up, mut t_launch) = (t_bind, t_bind);
         if use_graph {
             let nb = self.graphs.get(n).unwrap().0;
             self.upload_plan(plan, nb)?;
+            t_up = std::time::Instant::now();
             self.graphs.get(n).unwrap().1.launch().context("launch decode graph")?;
+            t_launch = std::time::Instant::now();
             if self.graph_steps == 0 {
                 tracing::info!(n, bucket = nb, "kaon3: decode step via cuda graph");
             }
@@ -277,13 +284,21 @@ impl ModelExecutor for KaonExecutor {
             collect_rows = n; // 图里算了 nb 行，只取前 n 行（logits_row_start[i] == i）
         } else {
             self.upload_plan(plan, n)?;
+            t_up = std::time::Instant::now();
             let max_seqlen = plan.num_tokens.iter().copied().max().unwrap_or(0).max(1) as usize;
             self.forward_device_mode(plan.mode, t, n, nrows, max_seqlen)?;
+            t_launch = std::time::Instant::now();
             self.eager_steps += 1;
             collect_rows = nrows;
         }
 
         let am = self.collect(collect_rows)?;
+        if ht {
+            let t_col = std::time::Instant::now();
+            let us = |a: std::time::Instant, b: std::time::Instant| b.duration_since(a).as_micros();
+            tracing::info!("[host-time] bind+chk={}us upload={}us launch={}us collect(dtoh_sync)={}us total={}us",
+                us(t_bind, t_bind), us(t_bind, t_up), us(t_up, t_launch), us(t_launch, t_col), us(t_bind, t_col));
+        }
         // 每请求本步的 logits 行区间（无投机 → 恰 1 行）：取该行 argmax 为下一个 token。
         generated.clear();
         drafts.clear();
