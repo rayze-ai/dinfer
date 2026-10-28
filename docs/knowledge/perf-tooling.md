@@ -33,3 +33,6 @@
 - 预分配缓冲（max_tokens 行）配 "行数 = len()/hidden" 的包装 = 按满长 launch。每次 nsys 复抓先 `grep 4160`（或你的 max_tokens）——B1 和 B18 两处同病相隔 10 刀才发现，各值 0.5 ms/步（TPOT 的 8%）。
 - 融合的判据是 kernel 时间 ≤ 原各 kernel 之和 + 省下的间隙；B10 单线程 top-k 16 us > 原 7.3+5.6，靠 launch 数省的 0.6 us 盖不住。单 block 融合 kernel 里的串行循环（K×E）要按 warp 并行写。
 - 两刀合计 c1 -12.7%，是全天单链最大收益——**复抓 nsys 的 ROI 高于再写一个 kernel**。
+
+## 22. 验证链的三方钉核要**写进 RESULT 头部**，不然会漏（2026-10-28 B22a）
+kaon3 5090 的 bN/envab 只钉了 bench（60-91），serve 浮动 128 核跑了一整天 20 多轮，没人发现——因为 RESULT 里没有钉核字段。规矩：链脚本第一行写 `serve_taskset= bench_taskset= vllm_taskset=`；serve 绑 GPU 所在 NUMA 的核（`nvidia-smi topo -m` 的 CPU Affinity），与 bench 不重叠。
