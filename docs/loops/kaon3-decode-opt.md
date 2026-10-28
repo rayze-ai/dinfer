@@ -935,3 +935,4 @@ D72 表：qkv gemv 16.5 us vs 8.6 MB/1.79 TB/s = 4.8 us（3.4×）；dense down 
 **排序**：B20（已排队）→ B16b → 小 kernel 融合（rope+rt+cache_write+norm_quant）→ 再 nsys。目标 c1 ≤ 5.0（vLLM 1.07×）。
 - **b18 定稿（两轮）**：c1 6.87/6.88(A, 关 FP8_GEMV) → B **5.59/5.59**；与 b17 定稿 6.39 比 **-12.5%**；c8 11.35 → **10.28/10.28（-9.4%）**；TTFT 28.4 / 505。逐位。CSV round b18。远端队列：nsys_c8 → b20 自动起。
 - **B16b 实现方案**：`tile_off` 缓冲扩成 `2×(E+1)`：前半 BM=32 前缀和（现有），后半 BM=16 前缀和（scan_kernel / 融合路由 kernel 多写一列）；`tile_lookup` 加 `bm` 参数；`grouped_gemm_kernel_pipe4<BK, STAGES, BM_T>`：BM_T=16 时 warp 布局 1×8（`wm=0, wn=warp`，每 warp 一个 n8 片段 acc，无 acc2；mma 的 a 片段 m 行用 lane/4 + 8·(g%2) 同前，行 ≥16 的 A 不存在 → sA 只 16 行，g%2==1 的 a 片读 sA 行 8..15 正常）——**每输出元素 k 序与 BM=32 版同 → 逐位**。host：`rows ≤ 128` 用 BM=16 + tile_off 后半，grid.y 上界 R/16+E。测试 moe_pipe4 加 BM16 场景（rows 22 → 自动走 BM16 路径，与 base 逐位）。
+- nsys c8 抓到（b18 二进制）：64 步合成一个 graph 实例（kernel 66654 → 1041/步）；表待读（归因 c8 +0.5：B8 tile 表 vs B11a）。b20 链已自动起。
