@@ -90,11 +90,13 @@ __device__ __forceinline__ void dot2(const bf16* sa, int K, const uint8_t* __res
     }
   }
 #pragma unroll
-  for (int j = 0; j < 2; ++j)
+  for (int j = 0; j < 2; ++j) {
 #pragma unroll
-    for (int r = 0; r < M_TILE; ++r)
+    for (int r = 0; r < M_TILE; ++r) {
 #pragma unroll
       for (int off = 16; off > 0; off >>= 1) acc[j][r] += __shfl_xor_sync(0xffffffffu, acc[j][r], off);
+    }
+  }
 }
 
 // ---- norm → fp8：q[r][i] = fp8(bf16(x·rsqrt(mean x²+eps)·w) · a_inv)。grid = m，block = 256。
@@ -202,6 +204,7 @@ int launch_gemv(const uint8_t* a, const uint8_t* w, bf16* out, int m, int N, int
 extern "C" {
 int mlp_fp8_norm_quant(const void* x, const void* w, void* q, int64_t m, int64_t h, float eps, float a_inv,
                        cudaStream_t stream) {
+  using dinfer::bf16;
   if (m <= 0) return 0;
   if (h <= 0 || !(a_inv > 0.f)) return (int)cudaErrorInvalidValue;
   dinfer::norm_quant_kernel<<<(unsigned)m, 256, 0, stream>>>((const bf16*)x, (const bf16*)w, (uint8_t*)q, (int)h, eps, a_inv);
