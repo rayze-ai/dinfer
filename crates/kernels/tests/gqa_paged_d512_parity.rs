@@ -3,8 +3,8 @@
 //! 判据：① v6 vs ref max|Δ| ≤ 阈（ref fp32 标量累加 / v6 bf16 mma，不逐位）；② v6 bf16 cache vs v6 e4m3 cache **位差 0**
 //! （cache 元素是往返值，两侧读到同数值，mma 序相同）。
 //! `cargo test --release -p dinfer-kernels --test gqa_paged_d512_parity -- --ignored --nocapture`
-use cudarc::driver::CudaDevice as Device;
-use half::bf16;
+use dinfer_kernels::Device;
+use dinfer_kernels::bf16;
 
 struct Rng(u64);
 impl Rng {
@@ -65,7 +65,7 @@ fn gqa_paged_d512_parity() {
     let dbt = st.htod_copy(bt).unwrap();
     let dseq = st.htod_copy(reqs.iter().map(|r| r.0 as i32).collect::<Vec<_>>()).unwrap();
     let dcu = st.htod_copy(cu).unwrap();
-    let run = |cache: &cudarc::driver::CudaSlice<bf16>, f8: bool, cfg: i32| -> Vec<bf16> {
+    let run = |cache: &dinfer_kernels::CudaSlice<bf16>, f8: bool, cfg: i32| -> Vec<bf16> {
         let mut out = st.alloc_zeros::<bf16>(tq * h * d).unwrap();
         let rc = unsafe {
             dinfer_kernels::ffi::gqa_paged_win_bf16(

@@ -1652,7 +1652,7 @@ static int gqa_paged_impl(const void* q, const void* cache, const int32_t* block
   // 落到 gqa_paged_kernel（grid=(req,head)，每 block 串行 q_len×seq_len×D 标量 FMA）：c8 一波 7 请求并进的
   // Paged 步 476 ms vs 同 token 纯 Prefill 127 ms。与 prefill_win 同配置 v6<512,4,16>；kv_fp8 走 KV_FP8 实例。
   // GQA_D512_REF=1 回退参照（对拍 / A/B）；smem 超限（InvalidConfiguration）也回退。
-  static const bool d512_ref_p = getenv("GQA_D512_REF") != nullptr;
+  static const bool d512_ref_p = getenv("GQA_D512_REF") != nullptr || getenv("GQA_PAGED_D512_V6_OFF") != nullptr;  // marker: paged_d512_v6
   if (cfg >= 0 && head_dim == 512 && !d512_ref_p) {
     const int rc = kv_fp8
         ? v6_launch<true, 512, 4, 16, 1, false, true>((int)max_q_len, (int)heads, (int)num_reqs, stream,
