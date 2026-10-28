@@ -713,3 +713,7 @@ A 轮 c8 一次 TPOT p50 19.02 / TTFT 222（其它轮 13.45 / 583）—— 同�
 - 对拍（`b6par_RESULT.txt`）：独立 gemv 4 形状（N=3072 K=2816 m=16/1、N=2816 K=4096 m=8、K=8192 m=4）对 CPU f64 全过（最大误差 ≤ 0.0118）—— **随机 fp8 字节 + 合成 scale 的对拍过了，生产路径坏** ⇒ 差在接入（A 的量化口径 / scale 公式 / 缓冲）而不是 kernel 算术。
 - c8 变慢的结构原因：每 block 装 M_TILE·K·2 B 的 A 到 smem（m=8,K=2816 → 45 KB）却只服务 4 warp × 2 行 = 8 行权重（22 KB）—— A 装载 > 权重流量，m ≥ 8 时输给 nvjet。要改：每 block 服务更多行（8 warp × 2 行或每 warp 循环多行对），B5 的 dense 也有此问题但基线（mega）太差没暴露。
 - 下一步：① 写直接对拍 `QLinear::forward` 新旧路径（同 `quant_fp8` 产出的 A、同权重，gemv vs `forward_fp8_cublaslt`）定位接入差；② 修 m ≥ 8 的 A 复用。
+- **D62 修正（自我纠错）**：上面"输出坏 ⇒ 接入有差"下得太快。英文 raw prompt 在 B3/B5 每次换累加序都翻（" the last." → "capital of France…" → "the following. Wait…" → "is is is"），vLLM 自己也退化循环，**这不是对错证据**（D58 已定此规则，我又用它判了一次）；中文 chat 四次一致。独立 gemv 对拍（含 K=8192）全过。**B6 的真问题只有 c8 变慢**：block 4 warp 服务 8 行权重，却装 M_TILE·K·2 B 的 A 进 smem（m=8,K=2816 → 45 KB vs 权重 22 KB），A 装载流量 > 权重流量。
+- **B6b 修法（已改两份 .cu）**：每 block warp 数改运行时参数，host `pick_warps`（按 SM 数与形状：M_TILE<16 用 16 warp、=16 用 8；grid 不足 2×SM 时减半）—— 一次 A 装载摊 32 行权重，A/权重流量比 2× → 0.25×。B5 的 dense gateup/down 同样受益（m ≥ 8 时）。kernel 内无卡型数值（SM 数运行时取）。
+- 判据改为：c1 **且 c8** 都不劣于 B5，中文 chat 一致，对拍过；英文 raw prompt 不作判据（记录即可）。
+- B7 已接进 `moe_branch`（`MOE_DECODE_GEMV=1` 开，默认关；R ≤ 128）：gate‖up+gelu 融合写 gelu_o → `moe_grouped_quant` → fp4 gemv down 写 yg。
