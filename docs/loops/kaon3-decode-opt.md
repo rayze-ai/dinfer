@@ -610,3 +610,8 @@ nsys 2026.3.2 + `--cuda-flush-interval=1000` + 不 INT nsys 本体（之前 INT 
 **Step B 第一刀（按最长可修段）**：逐头 norm + rope 的行数改为实际 tokens（纯 launch 边界修正，真实行逐位不变）。预期省 **2.29+0.70−~0.1 ≈ 2.9ms/步（TPOT 16.3→~13.4，-18%）**。
 **后续刀（按收益排）**：② 全注意力 D=512 慢路径 1.85ms（5 层各 369us，16 block）；③ h=2816 rmsnorm 6.8us→~3us ×181 = 0.6ms；④ MoE 小 kernel 融合（减 ~300 launch ≈ 0.45ms 间隙 + 0.4ms）；⑤ gather_rows 0.13ms；⑥ dense mega 2.6ms（用户两想法）。
 **prefill 侧（TTFT，第二优先）**：eager 797 kernel/步，**down GEMM grid=(44,1040,128)=5.8M block，16 次共 57ms（占 prefill 160ms 的 37%）**——grid.y 按 R=tokens×8 全量切，128 专家 ×1040 行块绝大多数空退。
+
+## B1 2026-10-28 第一刀提交（commit 后缀 "B1"）：逐头 norm / rope 行数改实际 tokens，远端编译 + ABAB 对比排队中
+- 改动：`crates/kernels/src/ops.rs` rope_span_bf16 显式收 tokens；`crates/layers/src/nn.rs` Rope::apply 加 tokens；`models/kaon3/src/layer.rs` head_rmsnorm 收 rows=tokens×heads、rope 传 tokens；测试 rope_vllm_parity 同步。
+- 验证链 `/w/b1.sh`：备份旧二进制 → cargo build（看 Compiling 列表 + strings 验 marker）→ A(旧)/B(新)/A2/B2 各 c1+c8 + 固定 prompt 输出一致性。预期 c1 TPOT 16.3→~13.4。
+- 又踩：排队用 `pgrep -f "bash /w/x.sh"` 匹配到等待进程自己 → 死锁 30 分钟（CLAUDE.md 早写"链内用 -x"）。改串行一条 `bash a.sh; bash b.sh`。
