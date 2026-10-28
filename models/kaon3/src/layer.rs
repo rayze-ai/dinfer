@@ -26,6 +26,21 @@ use anyhow::{ensure, Context, Result};
 use dinfer_kernels::{self as k, bf16, Gemm, Stream};
 use dinfer_layers::{Act as _, Attention as _, Norm as _, OpSet, Rope, RopeStyle, Tensor, WeightSource};
 
+/// B17a（loop kaon3-decode-opt）：热路径里的环境变量开关一次读（每层 17 次 getenv ≈ 0.5–1 ms/步 host，prefill 直接吃掉）。
+/// `env_eq!("X", "1")` → `X == "1"`；`env_ne!("X", "1")` → `X != "1"`（未设也为真）。进程内只读一次。
+macro_rules! env_eq {
+    ($name:expr, $val:expr) => {{
+        static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *V.get_or_init(|| std::env::var($name).ok().as_deref() == Some($val))
+    }};
+}
+macro_rules! env_ne {
+    ($name:expr, $val:expr) => {{
+        static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *V.get_or_init(|| std::env::var($name).ok().as_deref() != Some($val))
+    }};
+}
+
 /// 一张量化线性层（权重常驻压缩态，GEMM 内反量化）。
 pub enum QLinear {
     /// BF16 直读（router、小矩阵）。
@@ -200,7 +215,7 @@ impl QLinear {
             Self::Bf16 { w, .. } => gemm.forward_bf16(&x.data, &w.data, None, &mut out.data, tokens, n, kk),
             Self::Fp8 { w, scale, a_scale, quant, scache, .. } => {
                 // 自写 kernel 做 A/B 用（`FP8_SELF_KERNEL=1`）；默认走 cuBLASLt，与 vLLM 逐位一致。
-                let self_kernel = std::env::var("FP8_SELF_KERNEL").map(|v| v == "1").unwrap_or(false);
+                let self_kernel = env_eq!("FP8_SELF_KERNEL", "1");
                 if self_kernel {
                     return gemm.forward_fp8(&x.data, *a_scale, w, *scale, &mut out.data, tokens, n, kk);
                 }
@@ -582,7 +597,7 @@ fn norm_mode() -> i32 {
 /// 说明 inductor 融合链的真实语义还没对上（见 `docs/loops/kaon3-parity.md` 第 20 轮）。留着供继续排查。
 fn fuse_norm_quant() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("NORM_FUSE_QUANT").map(|v| v == "1").unwrap_or(false))
+    *V.get_or_init(|| env_eq!("NORM_FUSE_QUANT", "1"))
 }
 
 fn rmsnorm_into(
@@ -644,32 +659,32 @@ pub const DENSE_GEMV_ROWS: usize = 16;
 /// B13：norm + 残差加融合（默认开；`NORM_ADD_FUSED=0` 回退）。
 fn norm_add_fused_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("NORM_ADD_FUSED").ok().as_deref() != Some("0"))
+    *V.get_or_init(|| env_ne!("NORM_ADD_FUSED", "0"))
 }
 /// B12：kv_fp8 往返 + cache_write 融合（默认开；`KV_FP8_FUSED=0` 回退）。
 fn kv_fp8_fused_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("KV_FP8_FUSED").ok().as_deref() != Some("0"))
+    *V.get_or_init(|| env_ne!("KV_FP8_FUSED", "0"))
 }
 /// B11b：MoE 输出合并融合（默认开；`MOE_COMBINE_OLD=1` 回退 scatter_add 链）。
 fn moe_combine_fused_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("MOE_COMBINE_OLD").ok().as_deref() != Some("1"))
+    *V.get_or_init(|| env_ne!("MOE_COMBINE_OLD", "1"))
 }
 /// B10：MoE 路由前处理融合（默认开；`MOE_ROUTE_FUSED=0` 回退 7 次 launch 的旧链）。
 fn moe_route_fused_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("MOE_ROUTE_FUSED").ok().as_deref() != Some("0"))
+    *V.get_or_init(|| env_ne!("MOE_ROUTE_FUSED", "0"))
 }
 /// B7：MoE decode grouped NVFP4 GEMV（默认关，`MOE_DECODE_GEMV=1` 开）。
 fn moe_decode_gemv_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("MOE_DECODE_GEMV").ok().as_deref() == Some("1"))
+    *V.get_or_init(|| env_eq!("MOE_DECODE_GEMV", "1"))
 }
 /// B6 回滚中（D62：输出坏）：默认关，`FP8_GEMV=1` 才开（排查用）。
 fn fp8_gemv_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("FP8_GEMV").ok().as_deref() == Some("1"))
+    *V.get_or_init(|| env_eq!("FP8_GEMV", "1"))
 }
 /// 与 `mlp_fp8_decode.cu` 的 M_TILE 档位同式（{1,2,4,8,16}），用于算共享内存是否放得下。
 fn fp8_gemv_m_tile(m: usize) -> usize {
@@ -677,7 +692,7 @@ fn fp8_gemv_m_tile(m: usize) -> usize {
 }
 fn dense_gemv_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("DENSE_DECODE_OLD").ok().as_deref() != Some("1"))
+    *V.get_or_init(|| env_ne!("DENSE_DECODE_OLD", "1"))
 }
 pub const MEGA_ROWS: usize = 8;
 /// megakernel 的阶段数（`S_COUNT`，见 `mega_mlp_sm120.cu`）；`ready` 按它清零。
@@ -686,13 +701,13 @@ const MEGA_STAGES: usize = 6;
 /// `KAON3_MEGA=1` 时 dense MLP 支路走 persistent megakernel（一次 launch），默认关。
 pub fn mega_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("KAON3_MEGA").map(|v| v.trim() == "1").unwrap_or(false))
+    *V.get_or_init(|| env_eq!("KAON3_MEGA", "1"))
 }
 
 /// B3：MoE device-grouped（去 host 路由 + 去 D2H）。默认关（A/B）；`MOE_GROUPED=1` 开。
 pub fn moe_grouped_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("MOE_GROUPED").map(|v| v.trim() == "1").unwrap_or(false))
+    *V.get_or_init(|| env_eq!("MOE_GROUPED", "1"))
 }
 
 /// megakernel 的中间缓冲与阶段表。**只按 [`MEGA_ROWS`] 行分配**（prefill 走原路径）；
@@ -1008,7 +1023,7 @@ impl Gemma4Layer {
         // `ready` 必须从 0 开始（kernel 的 stage 计数器是累加的）。
         stream.memset_zeros_n(&mut mb.ready, MEGA_STAGES)?;
         // KAON3_DENSE_TIME=1：开 dense branch 6-stage exec/wait 计时（每次清零累加缓冲）。
-        let dense_time = std::env::var("KAON3_DENSE_TIME").ok().as_deref() == Some("1");
+        let dense_time = env_eq!("KAON3_DENSE_TIME", "1");
         if dense_time {
             stream.memset_zeros_n(&mut mb.wait_cyc, MEGA_STAGES)?;
             stream.memset_zeros_n(&mut mb.exec_cyc, MEGA_STAGES)?;
@@ -1104,7 +1119,7 @@ impl Gemma4Layer {
 
         // 分段计时（`KAON3_STAGE_TIME=1`，默认关零开销）：量 serve 真实 decode 各段 GPU 时间。
         // 段:0入口 1=attn完(含qkv/norm/rope/paged) 2=oproj+残差完 3=dense完 4=moe完。
-        let stage_time = std::env::var("KAON3_STAGE_TIME").ok().as_deref() == Some("1");
+        let stage_time = env_eq!("KAON3_STAGE_TIME", "1");
         let st_ev = if stage_time { Some(stream.new_timing_events(5)?) } else { None };
         if let Some(e) = &st_ev { stream.record_timing(&e[0])?; }
 
@@ -1143,7 +1158,7 @@ impl Gemma4Layer {
         };
         // ---- 2a. 一次合并 GEMM 到 sc.qkv[tokens, ΣN]（vLLM 口径：分开三次差 13 万，合并只差 13）----
         // ATTN_SKIP_QKV=1（纯计时,结果错）：跳过 qkv GEMM,测其 graph 态占比。
-        let attn_skip_qkv = std::env::var("ATTN_SKIP_QKV").ok().as_deref() == Some("1");
+        let attn_skip_qkv = env_eq!("ATTN_SKIP_QKV", "1");
         if attn_skip_qkv {
             // 不跑 GEMM,sc.qkv 留旧值(数值错,纯测时间)
         } else if qkv_preq {
@@ -1184,7 +1199,7 @@ impl Gemma4Layer {
         sub_dump(stream, sub_out, "v_proj_raw", v, tokens, nkv * d)?;
         // ---- 3. 逐头 RMSNorm：q_norm / k_norm 带权重，v_norm 无权重 ----
         // ATTN_SKIP_NORM=1（纯计时,结果错）：跳过 3 个逐头 RMSNorm,测其 graph 态占比。
-        if std::env::var("ATTN_SKIP_NORM").ok().as_deref() != Some("1") {
+        if env_ne!("ATTN_SKIP_NORM", "1") {
             head_rmsnorm(stream, ops, q, Some(&self.q_norm), d, eps, tokens * heads)?;
             head_rmsnorm(stream, ops, kk, Some(&self.k_norm), d, eps, tokens * nkv)?;
             head_rmsnorm(stream, ops, v, None, d, eps, tokens * nkv)?;
@@ -1201,7 +1216,7 @@ impl Gemma4Layer {
         // ---- 4. RoPE（只转前 rope_dim 维；proportional 的分母已由 Ropes 处理）----
         // ATTN_SKIP_ROPE=1（纯计时,结果错）：跳过 rope,测其 graph 态占比。
         let rope = if self.window > 0 { &ropes.sliding } else { &ropes.full };
-        if std::env::var("ATTN_SKIP_ROPE").ok().as_deref() != Some("1") {
+        if env_ne!("ATTN_SKIP_ROPE", "1") {
             rope.apply(stream, q, Some(kk), ctx.positions, tokens, heads, nkv, d)?;
         }
         if let Some((dir, _)) = sub_out {
@@ -1216,7 +1231,7 @@ impl Gemma4Layer {
         // ---- 4a. FP8 KV（vLLM `kv_cache_dtype=fp8_e4m3`，scale 1.0）：attention 读的是量化后的 K/V ----
         // ATTN_SKIP_KVFP8=1（纯计时,结果错）：跳过 3 个 fp8 roundtrip,测其 graph 态占比。
         // B12：kv_fp8 时 q/k/v 往返 + cache_write 融成一次（`KV_FP8_FUSED=0` 回退 4 次 launch）。
-        let kvfp8_on = cfg.kv_fp8 && std::env::var("ATTN_SKIP_KVFP8").ok().as_deref() != Some("1");
+        let kvfp8_on = cfg.kv_fp8 && env_ne!("ATTN_SKIP_KVFP8", "1");
         let kvfp8_fused = kvfp8_on && kv_fp8_fused_enabled();
         if kvfp8_fused {
             k::ops::gqa_cache_write_fp8rt_bf16(
@@ -1255,14 +1270,14 @@ impl Gemma4Layer {
         // ---- 5. attention（滑窗层传 window）----
         // ATTN_SKIP_PAGED=1（纯计时,结果错）：跳过 paged/prefill attention kernel。
         let scale = 1.0f32; // Gemma4：scaling = 1.0，由 QK-norm 隐式承担
-        if std::env::var("ATTN_SKIP_PAGED").ok().as_deref() == Some("1") {
+        if env_eq!("ATTN_SKIP_PAGED", "1") {
             // 不跑 attention,attn 留旧值
         } else {
         match ctx.mode {
             // 纯 decode（每请求 1 行）：split-K flash-decode（v3 / d512，带滑窗、GQA 组共享 K/V）。
             // 之前走 paged_win → 滑窗层 v5 每头 1 block（50 us）、D=512 层通用慢路径（369 us）（B3，nsys D54）。
             // ATTN_DECODE_OLD=1 回退旧路径（A/B 用）。
-            dinfer_core::runner::BatchMode::Decode if std::env::var("ATTN_DECODE_OLD").ok().as_deref() != Some("1") => {
+            dinfer_core::runner::BatchMode::Decode if env_ne!("ATTN_DECODE_OLD", "1") => {
                 k::ops::gqa_decode_win_bf16(
                     stream,
                     &q.data,
@@ -1337,7 +1352,7 @@ impl Gemma4Layer {
         }
         if let Some(e) = &st_ev { stream.record_timing(&e[1])?; }  // 段1完=attn(qkv/norm/rope/paged)
         // ATTN_SKIP_OPROJ=1（纯计时,结果错）：跳过 o_proj GEMM。
-        if std::env::var("ATTN_SKIP_OPROJ").ok().as_deref() != Some("1") {
+        if env_ne!("ATTN_SKIP_OPROJ", "1") {
             self.o_proj.forward(gemm, stream, attn, &mut sc.o, tokens)?;
         }
         sub_dump(stream, sub_out, "o_proj", &sc.o, tokens, h)?;
@@ -1356,7 +1371,7 @@ impl Gemma4Layer {
         // pre_ff_norm → gate ‖ up → gelu·mul(round2) → down → post_ff_norm_1，输出落在 `sc.norm`。
         // 与下面逐 op 路径逐位一致（`crates/kernels/tests/mega_mlp_parity.rs`）。prefill / 非 FP8 回退。
         // DENSE_SKIP=1（纯计时，结果错）：整条 dense 支路不跑，测 graph 态 dense 省掉后 TPOT 掉多少 = dense 真占比。
-        let dense_skip = std::env::var("DENSE_SKIP").ok().as_deref() == Some("1");
+        let dense_skip = env_eq!("DENSE_SKIP", "1");
         let gemv_done = if dense_skip { false } else { self.dense_decode_gemv(stream, cfg, sc, tokens, eps)? };
         if gemv_done {
             rmsnorm_into(stream, ops, &sc.dense, &self.post_ff_norm_1, &mut sc.norm, h, tokens, eps)?;
@@ -1436,11 +1451,11 @@ impl Gemma4Layer {
         sub_out: Option<(&std::path::Path, usize)>,
     ) -> Result<()> {
         // MOE_SKIP=1（纯计时，结果错）：整条 MoE 支路不跑，测 graph 态 MoE 省掉后 TPOT 掉多少 = MoE 真占比。
-        if std::env::var("MOE_SKIP").ok().as_deref() == Some("1") { return Ok(()); }
+        if env_eq!("MOE_SKIP", "1") { return Ok(()); }
         let h = cfg.hidden;
         // 前处理计时（KAON3_MOE_TIME=1）：拆 router / softmax+bucket / norm+gather+quant。
         // 段:[0]起点 [1]router完 [2]softmax+bucket完 [3]norm+row2e+gather+quant完(=第一个gemm前)。
-        let moe_pre_ev = if std::env::var("KAON3_MOE_TIME").ok().as_deref() == Some("1") {
+        let moe_pre_ev = if env_eq!("KAON3_MOE_TIME", "1") {
             Some(stream.new_timing_events(4)?)
         } else {
             None
@@ -1449,7 +1464,10 @@ impl Gemma4Layer {
         // --- MoE 隔离（MOE_ISO=<dir>，loop kaon3-moe）：喂 vLLM 真实 MoE 输入，纯测路由+专家 ---
         // 设了就从 dir 读 vllm_moe_logits.bin[T,e] f32 → sc.logits（跳过 router 预处理+GEMM），
         // 并记下 hidden 待 pre_ff2_norm 处用 vllm_moe_hidden.bin[T,h] 覆盖 sc.h2。比 vLLM moe_out。
-        let moe_iso = std::env::var("MOE_ISO").ok();
+        let moe_iso: Option<String> = {
+            static V: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+            V.get_or_init(|| std::env::var("MOE_ISO").ok()).clone()
+        };
         let rdf_iso = |name: &str| -> Result<Vec<f32>> {
             let b = std::fs::read(format!("{}/{name}", moe_iso.as_deref().unwrap()))?;
             Ok(b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
@@ -1502,7 +1520,7 @@ impl Gemma4Layer {
                     ONCE.call_once(|| eprintln!("[kaon3] router GEMM = BI persistent matmul"));
                 }
                 // 诊断（`ROUTER_GEMM_DIAG=1`）：同一输入下再跑一遍 cuBLAS，比两者差异。
-                if std::env::var("ROUTER_GEMM_DIAG").map(|v| v == "1").unwrap_or(false) {
+                if env_eq!("ROUTER_GEMM_DIAG", "1") {
                     let mut alt = Tensor::uninit(stream, &[tokens, e])?;
                     gemm.forward_bf16(&sc.routed.data, &self.router.bf16_weight()?.data, None, &mut alt.data, tokens, e, h)?;
                     let mut a32 = Tensor::uninit(stream, &[tokens, e])?;
@@ -1611,7 +1629,7 @@ impl Gemma4Layer {
         if moe_grouped_enabled() {
             let r = tokens * kk; // = offsets[E]，host 已知（每 token 选 kk 专家）
             let mi = cfg.moe_inter;
-            let exact_rq = std::env::var("NQ4_EXACT_RCP").map(|v| v.trim() == "1").unwrap_or(false);
+            let exact_rq = env_eq!("NQ4_EXACT_RCP", "1");
             let mg = match self.moe_grouped.get() {
                 Some(m) => m,
                 None => {
@@ -1627,7 +1645,7 @@ impl Gemma4Layer {
             }
             // 2) gather 已融进量化（B11a：量化直接按 sorted_tok 读 h2 行，不再写 xg）
             // MoE 内部细分计时（KAON3_MOE_TIME=1）：量 3×grouped_gemm vs 其余。
-            let moe_time = std::env::var("KAON3_MOE_TIME").ok().as_deref() == Some("1");
+            let moe_time = env_eq!("KAON3_MOE_TIME", "1");
             let mt_ev = if moe_time { Some(stream.new_timing_events(3)?) } else { None };
             // 3) gate/up 共用一次量化（a_scale 相等），再两次 grouped GEMM
             k::ops::moe_grouped_quant(
@@ -1637,7 +1655,10 @@ impl Gemma4Layer {
             if let Some(e) = &moe_pre_ev { stream.record_timing(&e[3])?; }  // norm+row2e+gather+quant完
             // MOE_GEMM_SKIP=gu|dn|all（纯计时，结果错）：只跳 grouped GEMM 本身，路由 / gather / quant / gelu / combine
             // 照跑，graph 态下看 GEMM 在 MoE 段里的真占比（loop kaon3-decode-opt D51）。
-            let gemm_skip = std::env::var("MOE_GEMM_SKIP").unwrap_or_default();
+            let gemm_skip: &str = {
+                static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+                V.get_or_init(|| std::env::var("MOE_GEMM_SKIP").unwrap_or_default()).as_str()
+            };
             let (skip_gu, skip_dn) = (gemm_skip == "gu" || gemm_skip == "all", gemm_skip == "dn" || gemm_skip == "all");
             // 第二刀（MOE_GEMM_DUAL=1）：gate+up 融合单 launch（grid.z=2E 填满 SM）；逐位同分开两次。默认分开。
             // B7（loop kaon3-decode-opt）：decode 小 R 走带宽型 NVFP4 grouped GEMV（gate‖up+gelu 融合 / down），
@@ -1650,7 +1671,7 @@ impl Gemma4Layer {
                     r, mg.n_gate, mg.k_gate, e,
                 )?;
             } else if skip_gu {
-            } else if std::env::var("MOE_GEMM_DUAL").ok().as_deref() == Some("1") {
+            } else if env_eq!("MOE_GEMM_DUAL", "1") {
                 let (gate_o, up_o) = (&mut g.gate_o, &mut g.up_o);
                 k::ops::moe_grouped_gemm_dual(
                     stream, &g.aq_gu, &g.as_gu,
@@ -1828,7 +1849,7 @@ fn moe_combine_f32() -> bool {
         // topk_weight_and_reduce 一致）。loop kaon3-moe 第 25-26 轮：combine_f32=0 时 MoE 与 vLLM 逐位
         // （p08 0/101376、p03 0/87296）；旧默认 true（f32 累加+pes折down）差 0.43%。
         // `MOE_COMBINE_F32=1` 显式退回旧口径（A/B）。
-        let on = std::env::var("MOE_COMBINE_F32").map(|v| v.trim() == "1").unwrap_or(false);
+        let on = env_eq!("MOE_COMBINE_F32", "1");
         if on {
             eprintln!("[kaon3] MOE_COMBINE_F32=1：MoE 合并用 f32 累加+pes折down 旧口径（A/B 用，非 vLLM）");
         }
