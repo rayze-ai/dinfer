@@ -532,3 +532,9 @@ PIPE=1 TPOT c1=16.45ms,base=17.41(D45同条件)。**端到端-5.5%(省~1ms)**。
 **预期vs实际**:decode MoE 5.3ms,微基准cp.async 1.83×该省~2.4ms,端到端只省0.96ms=**拿到预期~40%**。疑decode走CUDA graph,PIPE对图内kernel部分生效部分没进图(D13)。但有收益=至少部分进图。
 **意义**:这是整会话第一个干净环境确凿正收益(之前全被旧二进制污染)。MoE是decode头号(5.3ms),第一刀方向对。
 **下一步继续压MoE**:①查流水为何只40%(图没全进?预捕获图是否含pipe kernel)——补足可能再降;②第二刀gate+up dual(MOE_GEMM_DUAL=1)叠加测;③MoE内gemm3是5.3ms多少。目标把MoE 5.3→~3ms→TPOT 17→~15。
+
+## ★★★★★ D49 2026-10-28 .cu默认开没编进二进制(nvcc未重编)!D48 PIPE=1收益真(老二进制pipe分支),落地走env
+改moe_grouped_sm120.cu默认开(v[0]!='0'),但dfl A/B default=17.40=off=17.41(无16.45)!验证:二进制strings"流水版默认开"=0(没编进),源码远端含(=1)。**nvcc未重编**:touch .cu + cargo build -p dinfer,cargo增量对CUDA(build.rs调nvcc)没触发重跑nvcc,二进制还是旧moe kernel(默认关)。
+**D48的-5.5%是真的**:那次显式MOE_GEMM_PIPE=1,走老二进制里早已编进的pipe分支(默认关/env=1开)。不是假象。
+**落地改走env(可靠)**:老二进制已含pipe分支+env读取,**kserve_full.sh加export MOE_GEMM_PIPE=1**生产就吃到-5.5%,不依赖重编.cu默认。.cu默认改动保留(真重编时也对)但当前编译链路编不进。
+**编译坑再记(第3次相关)**:①cargo -p dinfer不重编依赖crate;②rsync旧mtime;③**改.cu后nvcc增量不重编**(要删target/release/build/dinfer-kernels-*/或touch build.rs强制)。改kernel必strings验二进制含改动。
