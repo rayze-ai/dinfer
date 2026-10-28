@@ -628,7 +628,8 @@ int moe_grouped_gemm(const void* aq, const void* a_s, const void* const* Bptr, c
   const uint8_t* psa = static_cast<const uint8_t*>(a_s);
   const uint8_t* const* pb = reinterpret_cast<const uint8_t* const*>(Bptr);
   const uint8_t* const* ps = reinterpret_cast<const uint8_t* const*>(Sptr);
-  const bool pipe = []{ const char* v = getenv("MOE_GEMM_PIPE"); return v && v[0] == '1'; }();
+  // cp.async 流水版默认开（D48 实测 decode TPOT -5.5%/吞吐+5.7%、逐位一致）；MOE_GEMM_PIPE=0 关（回退旧版）。
+  const bool pipe = []{ const char* v = getenv("MOE_GEMM_PIPE"); return !v || v[0] != '0'; }();
   if (K % 128 == 0) {
     if (pipe)
       grouped_gemm_kernel_pipe<128><<<grid, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets,
