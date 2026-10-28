@@ -330,3 +330,14 @@ flash(GQA_D512_REF=0) vs ref(=1):
 **v6<512>保留**(逐位对拍过+编译过,零风险,未来D=512 attention真要快时有用;默认走它,GQA_D512_REF=1回ref)。
 **TTFT 2秒真正位置未知**:prefill路径里attention不是,那是什么?(prefill的qkv GEMM?MoE?dense?norm?采样?还是host?)需对prefill做整段skip差分(像decode的D5-D16),别再代码推断。
 **下一步**:prefill路径skip差分——plen1024单请求,逐段skip(prefill的MoE/dense/qkv/attention/采样)看TTFT哪段降。这是定TTFT 2秒的唯一可靠法。注意:prefill每token都过MoE/dense(非decode的1token),prefill的MoE/dense工作量=1024×比decode大→很可能prefill大头是MoE/dense(decode时它们不在关键路径但prefill 1024 token时是)。
+
+## ★★★★★★ D28 2026-10-28 prefill skip差分:删MoE/dense/qkv/paged全0影响→TTFT 2秒也不在GPU,在host prompt处理
+plen1024 TTFT base 2002ms,skip各段:nomoe 2001/nodense 2001/noqkv 2001/nopaged 2001=**全不降**。
+**决定性(skip实测非推断)**:prefill 2秒**不在任何GPU计算段**(同decode D16)。换D=512 flash也不降(D27)印证。
+**真位置**:TTFT随L超线性(plen128=69ms,1024=2002ms,D21)+删GPU全段不变→**2秒在host对prompt的per-token处理**:tokenize/chat模板渲染/prompt htod上传/block分配/slot_mapping构造/prefill调度。host对1024 token做了O(L²)或重的per-token工作。vLLM 82ms说明这块能很薄。
+**整会话最终定论(decode+prefill都skip实测)**:dinfer慢vLLM的真因**全在host路径,非任何GPU kernel**:
+- TTFT 2秒=host prompt处理(随L超线性);
+- decode TPOT 19ms=host exec(begin/finish,未拆到底)。
+- 我一整天改的MoE/attention kernel全不在关键路径。
+**skip实测这次对了**:直接排除GPU,没再瞎改kernel(D27 flash白改但A/B兜住)。
+**下一步**:prefill host路径分段计时(Instant在tokenize/模板/htod/alloc/schedule各段),或读server HTTP handler→engine prefill的host代码,定2秒随L超线性在哪。这是纯CPU问题。注意可能在server层(chat模板/tokenize)非engine。
