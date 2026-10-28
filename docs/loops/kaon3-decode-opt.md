@@ -727,3 +727,6 @@ A 轮 c8 一次 TPOT p50 19.02 / TTFT 222（其它轮 13.45 / 583）—— 同�
 - **B7 对拍通过（`tmp_b7par_RESULT.txt`）**：moe_fp4 4 场景全 ok —— gateup_act 最大误差 0.0000–0.0039（输出量级 ~1，含 gelu 后 bf16 舍入，极小）；down 最大误差 0.015–0.038（超差 0）—— 比 mlp_fp8 的 0.0077 大，因为合成 down 输入是独立随机 fp4×e4m3 块缩放（量级 ~10–30 vs fp8 测试 ~1），相对误差同为 bf16 ulp 级；判据 0.01+0.01|ref| 对此量级合适。mlp_fp8 9 场景（含 B6 的 4 个 gemv 形状）再次全过。ABAB 已起（B 侧 `FP8_GEMV=1 MOE_DECODE_GEMV=1`，含 B6b warp 数改动）。
 - 顺手发现：`moe_grouped_gemm` 里有 `MOE_GRID_CAP` 诊断开关（结果会错，注释写"测完删"）——上会话留下的，B8 做 tile 表时一并删。
 - **B7 链 A 侧口径注意**：`bN.sh` 备份的"旧二进制"是 B6 那次编的（当时 `fp8_gemv_enabled` 默认开）→ A = B6 行为（c1 6.95 / c8 11.59），**不是 B5**。B7 的 B 侧与 **B5 定稿数（7.47 / 10.94）** 比，A 轮只作环境参照。
+
+## ★★★ D63 2026-10-28 B7 ABAB：B 侧（FP8_GEMV=1 MOE_DECODE_GEMV=1 + B6b pick_warps）c1 **8.77** / c8 **16.37**，比 B5（7.47 / 10.94）差 17% / 50% → 不合入，拆变量
+A 侧（=B6 行为）6.95 / 11.59 两轮稳定。B 侧三个变量叠在一起（B6 fp8 gemv、B6b warp 数、B7 MoE gemv），用同一二进制 env 开关拆：① 全关（= B5 + B6b 的 dense 受 pick_warps 影响）② 只 MOE_DECODE_GEMV=1 ③ 只 FP8_GEMV=1。中文一致、英文 "is is is" 与 A 同（二进制相同的非 gemv 部分）。
