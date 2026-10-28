@@ -84,3 +84,8 @@ PIPE serve(MOE_GEMM_PIPE=1)编译起成功,warmup prefill态 gemm3=3.08-3.13ms v
 kaon3-full:net=host(HTTP通,解决临时ctr bridge不通),挂载/hf_data/yaochen:/w=**我编译输出同盘**→新PIPE二进制target/release/dinfer已在生产路径。运行中878325是旧二进制(内存,昨起)。
 启动脚本kserve_full.sh:MOE_GROUPED=1 KAON3_MEGA=1 MEGA_SPGU/DN=4 ROUTER_GEMM_BI=0,:8142。
 **A/B方案**:docker exec进kaon3-full起新二进制serve两次(关PIPE=新二进制基线/开MOE_GEMM_PIPE=1),host网络bench(绑核60-91,seed42/全共享1024/128out/rate8)测TPOT/吞吐,进CSV。vLLM非eager:28201作参照。
+
+## R79 2026-10-28 端到端A/B bench(进行中):host网络容器GPU4,关PIPE vs开PIPE,同锁死负载
+坑:首版A/B(R78)serve/bench输出都重定向进serve日志→bench的throughput/TPOT丢(docker run -d stdout丢)。修:bench输出grep后>>独立RESULT文件。
+方案:docker run -d --network host --gpus device=4,两serve(:8150关PIPE基线/:8151开PIPE),graph生产态(非NO_GRAPH),各bench rate8/48req/全共享1024/128out/warmup3,结果落tmp_ab_RESULT.txt。等容器完成读。
+kernel侧已坐实:逐位bad=0(R74)+decode gemm3 1.83×(R77)。端到端看TPOT/吞吐能升几%(decode gemm3降约0.04ms/步)。
