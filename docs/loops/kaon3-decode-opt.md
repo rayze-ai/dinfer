@@ -825,3 +825,4 @@ decode c1 的 MoE 段 nsys：grouped_gemm gate 18.6 + up 18.6 + down 12.5 + gelu
 - **D66 split2（`KV_FP8_FUSED=0` vs 开）**：开 6.57 / 11.54，关 6.59 / 11.55 ⇒ B12 c1 -0.02（3 launch ≈ 0.02 ms，与 0.5–0.7 us/launch 一致）。B12/B13 都保留。
 - B15 全部代码已 commit + put；链 `/w/b15.sh`（门禁含 `gqa_decode_fp8cache_bitwise`）等 split 结束起。**判据**：fp8cache 逐位 0 差；bN B 侧（KV_FP8_STORE 默认开）c1/c8 TPOT 下降（预期 attention -0.2 ms）；**输出与 b8d 逐字同**（存 e4m3 读回 = 往返值，应逐位）。
 - b15 第一次编译失败（nvcc），取错误行中。D66 split2 定稿：B12 开 6.57/11.54 vs 关 6.59/11.55（两轮稳定）。
+- b15 编译失败根因：**又是 `kernels.h` 没同步**（5 个 gqa 入口声明缺 `kv_fp8`，C linkage 重载报错）——同 B8 的错第 2 次。已修。**规矩加一条：改任何 extern "C" 签名，kernels.h / .cu / ffi.rs 三处 grep 同一函数名核对参数数。**
