@@ -107,3 +107,7 @@ chunk 0 正确（`tmp0 = 0.95790` 与参考一致），但 chunk 1 起等的是*
 - 改任何 C ABI 函数签名：`kernels.h` / `.cu` 定义 / `ffi.rs` 声明（+ `stub!`）**三处同改**；提交前 `grep -n '<fn>(' ` 三处核参数个数。漏 kernels.h 的症状是 nvcc "more than one instance of overloaded function has C linkage"。
 - Python 批量编辑脚本：任一 assert 失败 = **该文件全部改动未写盘**（前面文件已写）。每文件独立写盘，脚本末尾对每个目标串 `count` 打印；编译前再 `grep -c`。
 - 不同实现路径的对拍（如 bf16 cache vs e4m3 cache）要**固定同一 kernel**（env 强制 cfg），否则差的是 kernel 累加序不是被测项（D67）。
+
+## 同一算子的两条快路径（v5 / v6）累加序不同：按 cache dtype 分路会让"同 prompt 不同步型"结果不同（2026-10-29，kaon3 D121）
+- kaon3 e4m3 cache 时 D=256 滑窗层 Paged 步退 v5（v6/v7 不读 e4m3），bf16 cache 时走 v6；纯 Prefill 两种都 v6。于是 prefix cache 命中后的 chunk（Paged）与首次 prefill 的 top-1 可差几 ulp，词沙拉 prompt 上贪心翻转 3–4/7，自然语言几乎不翻。不是 bug，但是**非确定性来源**。
+- **规则**：新加 dtype / 布局变体时，优先给**同一个 kernel** 加模板参数（B26 给 v6 加 KV_FP8），不要让某种 dtype 整体退到另一个结构不同的 kernel；对拍测试要比"同一形状 × 两条路径"，不只比"同一路径 × 两种 dtype"（histpar 的位差 0 是 v5 vs v5）。
