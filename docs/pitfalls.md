@@ -15,6 +15,12 @@
   ③ 用 `--layer-iso` 时**输入必须是上一层的输出**（L0 用 embedding `Lm1`，不是 `L0`），
   传错层会得到 relL2 ≈ 1.0 的"整层全错"的假象。
 
+## 2026-10-29 把"批不变性 + prefix cache 命中混杂"当并发 bug 追了一夜（B27/B28/B29 三个修都不解释现象）
+- 现象：同 prompt 串行 vs c2/c8 输出 6–9/8 不同（自然语言也翻）；cache 命中态 chunk vs fresh 也翻；位置确定。
+- 根因：探针的"串行基线"是 fresh、"并发/第二次"是 cache 命中 → 比的是 chunk（m=5）vs 单步（m=21）；`--no-prefix-caching` 后 c8 vs c8 重复 0/8（确定性）、c8 vs serial 仍 6/8 → 批构成 → 按 m 选 algo/tile 的 GEMM/MoE → ulp 累积 30 层 → 贪心翻转，**语义等价**。attention 路径 kernel 测试位差 0。
+- 判据（以后先做）：① 同批构成重复是否逐字确定；② 差异是否语义崩坏；③ 探针必须 `--no-prefix-caching` 或每次换 prompt。满足"确定 + 语义等价" = 批不变性，vLLM 默认同样不保证，不是 bug。
+- 代价：~6 小时、十几条探针链；收获：B27 真修、两个真缺陷（B28/B29）+ 单测、kernel 级 `gqa_chunk_vs_prefill` / `gqa_paged_fp8_hist_parity` 测试、远端队列卫生规则。
+
 ## 2026-10-28 同步 runner 的步 n 采样结果被 cut-in / 提前 begin(n+1) 覆盖，c≥2 每步都错，bench 数字看不出
 - 现象：`mixprobe` A 在飞 + B 插入 → A 从插入那步起输出跑偏（char 1/8/70…随时序）；B 对。`CUT_IN=0` 仍错。
 - 根因：kaon3 executor `supports_async=false`，runner 同步分支把结果留在 `self.generated` 等 `finish`；engine 在 `finish(pend_n)` 前先 `begin_cut_in` 或 `begin(n+1)`（都立刻 forward）覆盖它；行数相同 `ensure!` 过。
