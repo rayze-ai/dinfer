@@ -876,3 +876,7 @@ decode c1 的 MoE 段 nsys：grouped_gemm gate 18.6 + up 18.6 + down 12.5 + gelu
 ## B17 可行性 2026-10-28：prefill 图化
 - plan 缓冲固定上限（`PlanBuffers::alloc(max_tokens, max_rows, max_blocks)`），prefill 时所有 kernel 的 grid/行数来自 host int `tokens/num_reqs/max_seqlen`（不是 device 侧读）→ 图化只能**按 token 桶 capture**（如 256/512/1024/2048/4096，tokens 向上 pad，pad 行 slot=-1 不写 cache、logits 只取有效行），num_reqs=1 的纯 prefill 桶。c1 1560 tok → 2048 桶：多算 31% token 的 GEMM（prefill 是算力型，这 31% 大约 +5 ms）vs 省 host launch 16 ms → **净 -11 ms（TTFT 28.8 → ~18，反超 vLLM 25）**。混批（Paged）仍 eager。
 - 先做 B17a（env 一次读，-~1 ms）看 host 实际还剩多少；再决定是否上桶图（代码量：executor capture 加 Prefill 桶 + 每桶 plan 预填 + runner 选桶；kernel 不改）。
+
+## D71 2026-10-28 b17 首批 B（B17a env 一次读 + KV_FP8_STORE 默认开）：c1 TPOT 6.39 持平、**TTFT 28.99 → 28.97 持平**；c8 = D70 的 B（11.35 / 507）
+- B17a 收益 ≈ 0：510 次 getenv/步在 prefill 里 <0.1 ms（我估 0.5–1 ms 高估了 5–10×）。不过是正确的清理（逐位、零风险），留着。**结论：prefill host 的 16 ms（D51）不在 env 读上；下一步 B17 必须先用 `HOST_TIME=1` 复测 prefill 步的 upload/launch/collect 三段**（D51 以来 B8 等改动可能已经改变分布），再决定图化。
+- 另：`executor.rs forward_sample` 里有一行无条件 `eprintln!("[fwd-sample] ENTER ...")`——每步一次 stderr 写（无锁但 syscall），prefill/decode 都有；顺手删（改 tracing::trace）。
