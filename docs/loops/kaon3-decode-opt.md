@@ -482,3 +482,18 @@ strings二进制:host-time=1(早编进),**fwd-sample=0,begin-split=0**(我新加
 **惊人推论(待确认)**:之前所有"kernel改动没收益"的结论,可能全因**编译一直失败没生效**(旧二进制跑了8小时)。这次编译修复后改动生效,TTFT大降。需确认是哪个改动的功劳(逐个env开关A/B)。
 **现状**:forward_sample首步42ms vs 稳态17ms,首步多25ms(疑首次JIT/alloc,warmup没全消)。TTFT 44ms已接近vLLM 24ms(慢1.8×,非之前15×)。
 **但必须验证(别重蹈覆辙)**:TTFT 367→44这个翻转太大,先确认不是测量/负载差异:重跑确认稳定+看是哪个改动(关MOE_GEMM_PIPE/GQA_D512_REF等逐个A/B)。编译链路坑(rsync mtime+cargo -p依赖+.values编译错)已�corded,下次改代码必strings验二进制含改动+看完整cargo error不grep滤。
+
+## ★★★★★★★ D44 2026-10-28 最新代码完整对比(编译修复后,二进制含probe=3)—TTFT c4+反超vLLM!
+对齐非eager+max-model-len16384+batched4096+prompt1560合规,dinfer vs vLLM p50:
+| 并发 | 吞吐d/v | TTFT d/v | TPOT d/v |
+|---|---|---|---|
+| c1 | 56/200 | 43.6/24 | 17.3/4.7 |
+| c2 | 87/346 | 71/37 | 18.5/5.4 |
+| c4 | 162/543 | **81/88反超** | 19.3/6.1 |
+| c8 | 298/971 | **84/146反超** | 20.0/6.2 |
+| c16 | 416/1550 | **111/220反超** | 20.0/7.0 |
+启动34.6s(旧64s);GPU~100%;tokenize 7ms;prefill forward_sample首步42ms/稳态17ms(begin-split实测:update_states/build_plan微秒,全在forward_sample)。
+**TTFT**:最新代码c4/c8/c16已**反超vLLM**(之前旧二进制恒定367ms慢15×是假象)。c1/c2还慢一点。
+**真实最大差距**:吞吐27-30%(慢~3.5×)+TPOT慢3×(17-20 vs 5-7)。这两项是下一步靶子。
+**★整会话最大坑(定死)**:之前"TTFT367ms/慢15×/kernel改动没收益"全因**旧二进制**(我的计时代码.values()编译错误致build failed,serve跑8小时前旧二进制,而我grep滤掉cargo error没发现)。最新代码编进后TTFT大降+c4反超。教训:改代码必看完整cargo输出(不grep滤error)+strings验二进制含改动+确认mtime更新。
+**下一步**:①吞吐/TPOT是真靶子(慢3×);②确认TTFT反超是哪个kernel改动功劳(逐个env A/B:MOE_GEMM_PIPE/GQA_D512_REF等)还是编译本身;③用户要的数据表已全(本表)。
