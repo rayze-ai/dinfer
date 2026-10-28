@@ -550,3 +550,10 @@ PIPE=1 TPOT c1=16.45ms,base=17.41(D45同条件)。**端到端-5.5%(省~1ms)**。
 ## D50 2026-10-28 Step A 第二轮起跑（环境事故 + 首批数据）
 - 事故：GPU 0 被上会话 22h 前的 dinfer serve（`:8142`，max-model-len 2048，非对齐口径，且是容器 `kaon3-full` 的 PID 1）占 26GB → 新服务 OOM 两次；杀它容器一起停。**重建 `kaon3-full` 为常驻 `sleep infinity`（host 网络、GPU 0）**，以后 `docker exec -d kaon3-full bash /w/xxx.sh` 跑长链不再随进程死。
 - 首批（round1，dinfer 行被 cut 截掉 TTFT/TPOT，已修重跑）：启动 wall 35.1s（model_load_ms 34639，num_blocks 2048）；tokenize+模板 render ≈1.2ms/请求；sched 12–26us、publish 10us、update_states 2us、build_plan 4us（**host 调度链全是微秒级，不是瓶颈**）；prefill 步 exec 41ms（c1，428 tok）= launch 16ms + wait(dtoh_sync) 25ms；c1 decode GPU sm 99% / mem 49%。vLLM c1 TTFT 25 / TPOT 4.68。
+- Step A 修正重跑中（round1 完整数据，c1 / c8）：
+  | | TTFT p50 | TPOT p50 | 吞吐 | GPU sm/mem | prefill 步 exec = launch + wait | decode 步 exec = htod + launch + wait |
+  |---|---|---|---|---|---|---|
+  | c1 | 43.8 (vLLM 25.1) | 17.06 (4.68) | 57 (200) | 98% / 48% | 41.1ms = 16.4 + 24.6 (428 tok) | 17.05ms = 0.02 + 0.38 + 16.6 |
+  | c8 | 88.5 (vLLM ~146) | 19.85 (6.2) | — | 97% / 49% | 153.9ms = 61.0 + 92.8 (787 tok, 4.6 req) | 19.2ms = 0.02 + 0.36 + 18.8 |
+  **读法**：①tokenize+模板 1.2–1.6ms/req、sched/publish/update_states/build_plan 全 <50us → **host 链不是瓶颈**；②decode 步 = graph launch 0.38ms + wait 16.6ms，wait 就是 GPU 跑图的时间（GPU sm 98%）→ **decode 100% GPU 时间，17 vs 4.7**；"wait 该为 0"只有 async 调度能覆盖 0.4ms 的 host（≤2%），GPU 那 16.6ms 要靠 kernel；③prefill 428 tok 一步 41ms，其中 **host launch 16ms**（eager 逐 kernel 提交，30 层 × 几十 kernel），这是 TTFT 慢 vLLM 的主因候选（c1 43.8 vs 25.1）；④decode GPU mem util 48% = 带宽没吃满（MoE/dense 权重 GEMV 形态，M=1 latency bound）。
+- 工具坑：等待脚本里 `remote_5090.sh run '<cmd>'` 的退出码不透传（always 0）→ 两次误判 DONE；改为拉文件到本地 grep。
