@@ -29,3 +29,9 @@ b1,2026-10-28,"B1 逐头norm/rope行数改实际tokens(之前按max_tokens 4160�
 b1,2026-10-28,"B1 逐头norm/rope行数改实际tokens(之前按max_tokens 4160行空跑,nsys定位): c1 TPOT 16.16→13.02 -19.4%, c8 19.55→16.40, 输出一致",c8,out_tok_per_s,328.300,956.000,0.343,,higher,main,5090,vllm,dinfer,kaon3
 b1,2026-10-28,"B1 逐头norm/rope行数改实际tokens(之前按max_tokens 4160行空跑,nsys定位): c1 TPOT 16.16→13.02 -19.4%, c8 19.55→16.40, 输出一致",c8,ttft_p50_ms,587.700,146.400,4.014,,lower,main,5090,vllm,dinfer,kaon3
 b1,2026-10-28,"B1 逐头norm/rope行数改实际tokens(之前按max_tokens 4160行空跑,nsys定位): c1 TPOT 16.16→13.02 -19.4%, c8 19.55→16.40, 输出一致",c8,tpot_p50_ms,16.400,6.240,2.628,,lower,main,5090,vllm,dinfer,kaon3
+b2,2026-10-28,"B2 Sm120 rmsnorm layout Block256(h=2816单行norm 6.8→2.4us×181/步): c1 TPOT 13.03→12.58 -3.4%, c8 16.41→16.01, 中英输出一致",c1,out_tok_per_s,77.000,200.000,0.385,,higher,main,5090,vllm,dinfer,kaon3
+b2,2026-10-28,"B2 Sm120 rmsnorm layout Block256(h=2816单行norm 6.8→2.4us×181/步): c1 TPOT 13.03→12.58 -3.4%, c8 16.41→16.01, 中英输出一致",c1,ttft_p50_ms,38.600,25.000,1.544,,lower,main,5090,vllm,dinfer,kaon3
+b2,2026-10-28,"B2 Sm120 rmsnorm layout Block256(h=2816单行norm 6.8→2.4us×181/步): c1 TPOT 13.03→12.58 -3.4%, c8 16.41→16.01, 中英输出一致",c1,tpot_p50_ms,12.580,4.690,2.682,,lower,main,5090,vllm,dinfer,kaon3
+b2,2026-10-28,"B2 Sm120 rmsnorm layout Block256(h=2816单行norm 6.8→2.4us×181/步): c1 TPOT 13.03→12.58 -3.4%, c8 16.41→16.01, 中英输出一致",c8,out_tok_per_s,334.300,956.000,0.350,,higher,main,5090,vllm,dinfer,kaon3
+b2,2026-10-28,"B2 Sm120 rmsnorm layout Block256(h=2816单行norm 6.8→2.4us×181/步): c1 TPOT 13.03→12.58 -3.4%, c8 16.41→16.01, 中英输出一致",c8,ttft_p50_ms,583.800,146.400,3.988,,lower,main,5090,vllm,dinfer,kaon3
+b2,2026-10-28,"B2 Sm120 rmsnorm layout Block256(h=2816单行norm 6.8→2.4us×181/步): c1 TPOT 13.03→12.58 -3.4%, c8 16.41→16.01, 中英输出一致",c8,tpot_p50_ms,16.010,6.240,2.566,,lower,main,5090,vllm,dinfer,kaon3
