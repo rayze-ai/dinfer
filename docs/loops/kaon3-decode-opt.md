@@ -697,3 +697,4 @@ h=2816 单行 norm（181 次/步）：Block1024 每线程 1 向量两级归约 6
 预测 -1.8 ms 实得 -2.17 ms/步（mega 2.61 ms → GEMV 三 kernel ≈ 0.44 ms，比 25 us/层预期还好）。TTFT 不变（prefill 不走此路径）。
 输出：中文 chat 一致；英文 raw prompt " the capital of France is…"（循环）→ " the following.  Wait, I'm not sure…"——非逐位路径（累加序）在低置信样本上翻 token，与 D58 结论同；对错以 `mlp_fp8_decode_parity`（fp8 码差 0 / bf16 ≤ 0.0077）为准。
 A 轮 c8 一次 TPOT p50 19.02 / TTFT 222（其它轮 13.45 / 583）—— 同一二进制、同参数，是 bench 调度/排队态差异（TTFT 低 TPOT 高 = 请求没叠上），不是代码；看 A2 c8 是否回 13.4x。等 A2/B2。
+- **B5 定稿（ABAB，归档 b5_RESULT.txt / b5par_RESULT.txt）**：c1 9.64/9.64 → **7.47/7.47（-22.5%）**，吞吐 99.1→125.8；c8 13.45/13.45 → 10.94/10.99（-18.5%），373→425。A2 c8 回 13.45 ⇒ A 轮 19.02 是排队态噪声。中文 chat 四次一致；英文 raw prompt 两版各自稳定。**保留**，入 CSV round b5。五刀累计 c1 **17.07 → 7.47（-56%）**，vs vLLM 4.69 差 1.59×。
