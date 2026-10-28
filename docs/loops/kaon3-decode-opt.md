@@ -865,3 +865,8 @@ decode c1 的 MoE 段 nsys：grouped_gemm gate 18.6 + up 18.6 + down 12.5 + gelu
 ## ★★★ D70 2026-10-28 B15b split（b16 二进制，`KV_FP8_STORE=1` vs 关，均 FP8_GEMV=1）首批：c1 6.39/6.39 持平；c8 TPOT 11.58 → **11.35（-2.0%）**，c8 TTFT 488 → **507（+3.9%）**
 - TTFT 回到正常量级（D68 的 1397 是慢路径），但比 bf16 cache 慢 4%：fa_v5 KV_FP8 固定 NBUF=1（bf16 侧 5090 默认也是 1）、多一道展开 barrier/tile + 展开计算。c8 decode 赢 0.23 ms/步（KV 读减半），64 token 输出赢 15 ms，TTFT 赔 19 ms——**c8 本轮净持平**；长输出（真实负载 >64 token）净赢，且 cache 容量翻倍（更多并发 / 更长上下文）。
 - 决定：等 A2/B2 复核后 **`KV_FP8_STORE` 默认开**（vLLM 口径即 fp8 KV），CSV 记 round b15b；fa_v5 KV_FP8 的 TTFT 差留作 B15c（展开并进 ldmatrix 前的 smem 布局、或 staging 直接做 e4m3 ldmatrix + 寄存器内展开）。
+
+## B16b 预案 2026-10-28：MoE grouped GEMM decode 专用 tile BM=16 / BN=32（CTA 数 ×4）
+- 现 tile BM=32×BN=64，8 warp = 2(M)×4(N) 各 16×16。decode 每专家 1 行：M 方向 2 个 warp 里 1 个全白干（行 ≥16 全越界），且每 CTA 每步搬 B 4 KB（BN=64 行 × BK/2），gate/up 只 11 CTA/专家。
+- 新 `grouped_gemm_kernel_pipe4<BK, STAGES, BM_T=16, BN_T=32>`：warp 布局 1(M)×8(N)？不行——8 warp × 16 列 = 128 列 > BN。改 BN_T=32 → 2 warp 够，但要保持 8 warp 的 cp.async 装载并行度……取 **BM=16, BN=64, 8 warp = 1×8 → 每 warp 16×8 列（一个 n8 片段，只 acc 不要 acc2）**：mma 序每个输出元素与现 kernel 同（同 k 序累加），逐位；CTA 数不变但每 CTA 的 M 侧浪费减半、寄存器/smem 减半 → 占用翻倍（每 SM 更多 CTA 并发），等效并行度 ×2。再配 BN=32 版本（CTA 数 ×2）二选一由 bench 定。
+- 判据：moe_pipe4 测试加 BM16 场景 bad=0；bN c1 TPOT。预期 -0.3 ms（MoE 三 GEMM 1.3 ms 的 25%）。
