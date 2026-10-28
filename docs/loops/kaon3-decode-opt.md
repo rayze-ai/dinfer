@@ -115,3 +115,14 @@ base vs DENSE_SKIP+MOE_SKIP(两段都删),带GPU util采样。判据:
 对标vLLM 7.57(约1024):我们19.33=固定13+paged~6,两头都慢。
 **Step B靶子优先级**:①固定13ms(占比最大、plen短时是全部)——先分清GPU算vs host/launch:MOE_SKIP+DENSE_SKIP+plen128压最小GPU活,看TPOT剩多少=纯host/launch地板;②paged attention(长上下文才显著)。
 **下一步**:测 DENSE_SKIP+MOE_SKIP+plen128 的TPOT(最小GPU活)=固定开销里GPU vs host拆分。若还接近13=host/launch主导(调度/同步,非kernel);若大降=固定里GPU算(qkv/norm/oproj)主导。
+
+## ★★★★★ D9 2026-10-28 固定开销拆分:plen128全skip TPOT仍12.9+GPU99%→固定13ms=attn主干GPU真算,非host
+| plen128 | TPOT | util |
+|---|---|---|
+| base | 12.92 | 99% |
+| dense+MoE全skip | 12.93 | 99% |
+**plen128删dense+MoE,TPOT仍12.9+GPU99%满**→固定13ms里dense/MoE 0贡献(同D7),且**GPU 99%满=真算非host空等**。
+**固定13ms=什么**:plen128+删dense/MoE,每步GPU活只剩 attn(qkv/q_norm/k_norm/v_norm逐头/rope/paged)+oproj+2×layernorm+采样,×30层。GPU满算13ms,vLLM整个7.57。
+**定论**:固定13ms=30层attn主干(qkv/norm/rope/oproj)+采样的GPU真算(非host/调度)。Step B靶子=这个,且确定GPU kernel层面。
+**机理推测(待验)**:decode M=1,30层×(qkv+3norm逐头+rope+paged+oproj)=一堆小kernel,每个启动开销大算得少=喂不满(同MoE病)。我们开了graph但vLLM融合程度更高(qkv+norm+rope融进更少kernel)。
+**下一步**:attn内部分段定哪个kernel大(qkv cuBLASLt? 逐头norm? rope? paged? oproj?)。逐头q_norm/k_norm(Gemma4特色,每头一个RMSNorm)在decode M=1可能是一堆微kernel大头。先读attn段kernel数+加分段或逐个skip。
