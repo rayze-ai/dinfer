@@ -1,0 +1,5 @@
+ vLLM serial x2: 6/8 differ [DIFF@2 SAME DIFF@78 DIFF@3 DIFF@182 DIFF@24 DIFF@184 SAME]
+ vLLM c8 vs serial: 5/8 [DIFF@42 SAME DIFF@93 DIFF@25 SAME SAME DIFF@198 DIFF@13]
+ vLLM c8 vs c8(repeat): 7/8 [DIFF@42 SAME DIFF@78 DIFF@52 DIFF@133 DIFF@16 DIFF@4 DIFF@13]
+ vLLM nat0 serial='这里为您提供三个不同侧重点的版本，您可以根据需求选择：\n\n**版本一：宏观概括版（最推荐，涵盖了时间、规模与意义）**\n'
+ vLLM nat0 c8    ='这里为您提供三个不同侧重点的版本，您可以根据需求选择：\n\n**版本一：宏观概括版（最通用）**\n长城的修筑始于春秋战国时'
