@@ -761,3 +761,4 @@ decode c1 的 MoE 段 nsys：grouped_gemm gate 18.6 + up 18.6 + down 12.5 + gelu
 - **B11b** 路由时多产出逆映射 `inv[tok·K+k] = sorted 位置`（B10 融合 kernel 与旧 `fill_kernel` 都写），新 kernel `moe_combine`：grid=tokens，out[tok,d] = bf16(Σ_k w_k·y[inv[tok,k],d])（mode 1：Σ bf16(bf16(w)·v)），替代 memset(acc) + scatter_add(atomic) + memset(y) + f32_add_to_bf16。累加序从 atomic 不定 → 固定 k 升序（旧版本身不确定，不算退化；对拍判据 |Δ| ≤ bf16 ulp）。
 - 省 4 launch/层 = 120/步 ≈ 0.18 ms 间隙 + ~6 us×30 kernel ≈ **-0.35 ms/步**。
 - nsys 里 `fp8_e4m3_roundtrip` 90 次/步（kv_fp8 默认关，来源待查：可能是 `Gemm::forward_fp8`/attention 的 A 往返）—— B12 候选。
+- **b8b 三门禁全过（`tmp_b8bpar_RESULT.txt`）**：moe_pipe_parity 3 测（含 tile 表）bad=0；mlp_fp8 9 场景 ok；**moe_route_fused_parity 5 场景：ids 同、w 位差 0、offsets/tile_off/counts/cursor 同、row2e 同、sorted 区间集合同** ⇒ B10 逐位。ABAB 跑中（A 侧 c8 又出一次 17.14 排队噪声，与 D61 同模式）。
