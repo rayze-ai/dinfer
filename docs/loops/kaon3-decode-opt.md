@@ -1005,3 +1005,11 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - c8×64 窗口：Prefill 1 步 + Decode 631 步（9.0 ms）+ Paged 16 步（35 ms, max_t=97）。Paged 步 t≈97 用 35 ms（比 t=432 的纯 Prefill 还慢 1.3×，**混批慢路径确认**：8 decode 行 + 1 个 ~90 tok chunk）。
 - 关键矛盾：同一二进制、同一 bench 参数，bN 链 c8 TTFT 545 ms（b16b/b25 四轮一致），ttft8 链 75 ms。差别：① HOST_TIME=1（每步两行 eprintln → stderr 重定向文件，还可能改变 async 节拍）；② FP8_LT_TUNE=0（b16b 链 A/B 时 tune 还没进代码 → 不是它）；③ bN 的 c8 跟在 c1 之后同一服务（KV 池 / prefix cache 状态）；④ 端口。**ttft8b 正在跑**：同服务 c1×8 → c8×64 ×3，plain / HOST_TIME=1 / plain2 三组，看是 HOST_TIME 还是"c1 之后"触发 545。
 - 若是"c1 之后"：怀疑 prefix cache / 块回收把后续 waiting 请求卡在 `allocate_slots` 失败 → 等下一步（每步 9 ms × N 步 = TTFT 数百 ms）。若是 HOST_TIME：说明 545 是真实态、75 是计时副作用（不太可能让 TTFT 降 7×）。
+
+## ★★★★★★ D82 2026-10-28 ttft8 步序解读：c8 TTFT 的真凶是 **Paged（混批）步比同 token 数的纯 Prefill 步慢 3×**，且有 ~25 ms 固定开销
+- 步序（`tmp_ttft8_seq.txt`）：c8×64 每波 = `Paged:13 ×1 + Paged:~90 ×1 + Decode:8 ×62`。每波只 ~100 个新 token ⇒ **prompt 命中了前面 c1–c16 探针的 prefix cache**（bench 同 seed 同 idx 生成同 prompt），ttft8 的 c8 TTFT 75 ms **不可与 bN 的 545 比**（bN 每条链新起服务，c1×8 只暖了 idx 0–7）。
+- **Paged 步耗时表**（us，含 host；8 行 decode + 1 个 chunk）：t=10–16 **30–41 ms**、t=79–97 34–39、t=191/199 **59–60**、t=2765 **476**。对照纯 Prefill：t=429 26.4、t=857 42.8、t=3008 127、t=4096 171；纯 Decode t=8 9.0。
+  ⇒ Paged 步 ≈ **25 ms 固定 + 0.16 ms/token**（vs Prefill 0.04 ms/token、Decode 9 ms）。t=2765 的 Paged 476 vs Prefill 3008 的 127 = **3.7×**。
+- 推算 bN c8×64（无 cache）：每波 8 新请求几乎同时到 → 先 cut-in 1 个纯 Prefill（26）、其余 7 个并进下一步成 Paged t≈3000（~480 ms）⇒ TTFT ≈ 500 ms **吻合 545**；首波在空闲 GPU 上更快 → mean 428 < p50 545 也吻合。vLLM 同口径 146。
+- **刀（B26）**：Paged 步的 prefill 行走了什么慢路径？候选：① 滑窗层 attention `paged_win`（fa_v5 PAGED：K/V 经 block_table 装载，grid 按 max_seqlen 分 BQ=64 行块）——t=13 时 query 只有 1 个短 chunk，不该 25 ms；② **D=512 全注意力层 PAGED 路径**：`gqa.cu:1577` `head_dim==512` 的分派 —— 非 paged 走 d512 快 kernel（fa_v6），**paged 可能落到 MAX_D=512 通用慢路径**（nsys D54 曾见 5 层 × 369 us = 1.85 ms/步，那是 decode 的；prefill 行走通用路径按 q_len × seq_len 串行会更惨）；③ 混批时 MoE/dense 的行数 > 8 不走 mega / gemv，正常；④ eager 全程（无 graph）launch 1065 次 ≈ +0.5 ms，不是主项。
+- 验证手段：`KAON3_STAGE_TIME=1` 若只在 decode 生效则扩到 Paged；或 nsys 抓一个 c2 混批（c1 在飞 + 1 新请求）步看 kernel 表。
