@@ -1,0 +1,12 @@
+15:52:21
+EXIT=0
+
+serve_taskset=0-31 bench_taskset=60-91
+new_bin=2026-10-28 15:50 marker=2
+A c1:  2.46 req/s 157.5 output TTFT mean 28.47 p50 28.36 TPOT mean 6.00 p50 6.00 
+
+A c8:  10.58 req/s 677.4 output TTFT mean 128.51 p50 155.93 TPOT mean 9.95 p50 9.80 
+
+A out:  the following.  Wait, I'm not sure.  Wait, I'm not sure.  Wait,
+A out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到两千多年前的春秋战国时期，当时各诸侯国开始修建防御工事。  随后，秦始帝通过大规模的工程将各地的防御墙连接起来，形成了最初的防御体系。  在随后的明朝时期，长城得到了最全面、最坚固的修缮
+DONE

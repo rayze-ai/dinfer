@@ -1,0 +1,10 @@
+bin=2026-10-28 15:50 gpu=0 15:51:36
+== env=[KV_FP8_STORE=1]
+  prompt0 (400 words) DIFF: 1st vs 2nd first diff char 1: 'be be be be be be be be be be ' / 'as it is is is is is is is is '; 2nd==3rd True
+  prompt1 (413 words) SAME
+  prompt2 (1200 words) DIFF: 1st vs 2nd first diff char 1: 'part in his part of it is a bi' / 'eye man hand were it were part'; 2nd==3rd True
+  prompt3 (90 words) DIFF: 1st vs 2nd first diff char 33: 'ign woman is they the that in ' / 'ame the that in are by her wor'; 2nd==3rd True
+  prompt4 (33 words) DIFF: 1st vs 2nd first diff char 6: '-The-The-The-The-The-The-The-T' / 's little bit part one man week'; 2nd==3rd True
+  prompt5 (64 words) SAME
+  prompt6 (65 words) SAME
+  total DIFF 4/7

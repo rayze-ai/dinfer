@@ -1,0 +1,15 @@
+BUILD EXIT=0 15:50:02
+marker=2
+== env=[plain]
+ pair case0 A=400w B=60w/64: A:DIFF@14 B:DIFF@114
+ pair case1 A=1500w B=400w/64: A:SAME B:SAME
+ pair case2 A=400w B=400w/64: A:DIFF@4 B:SAME
+ pair case3 A=400w B=400w/1: A:DIFF@8 B:SAME
+ c8 fresh: r0:DIFF@85 r1:DIFF@9 r2:SAME r3:DIFF@13 r4:DIFF@1 r5:SAME r6:SAME r7:DIFF@81 | 5/8 differ
+c2 vs serial: 6/8 requests differ (cache 态)
+c8 vs serial: 6/8 requests differ (cache 态)
+c8(fresh) vs serial: 3/8 requests differ
+== env=[KV_FP8_STORE=1]
+  total DIFF 4/7
+GATES DONE 15:52:21
+DONE
