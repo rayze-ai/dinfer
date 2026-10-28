@@ -1205,3 +1205,7 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - 新顺序：②a 层内融合（-0.5~0.8 ms）→ ① fp8 gemv 重写（-0.5）→ ③ route（-0.25）→ MoE split-K（-0.3）→ lm_head fp8（-0.4）。合计可到 ~3.5 ms（vLLM 4.69）。
 - D148 c8：64 步/实例，1041 kernel/步，kernel 和 4.81 ms + 间隙 1.02 = 5.8 ms/步（bench TPOT 9.82 的其余 ≈ 4 ms 是插队 prefill，D78）。kernel 构成与 c1 同（gemvx 20%、fp8 gemv 18.6%、MoE gate/up 13%、route 6.5%…每 kernel us 与 c1 持平，M=8 对带宽型免费）⇒ c8 的刀也是 launch 数 + fp8 gemv，再加 `supports_pair`。
 - **动手顺序定稿**：B23（q/k/v 逐头 norm ×3 + rope + cache_write_fp8rt → 1 个 per-token kernel，-4 launch/层 = -120/步，逐位复刻 `rmsnorm_vec<128,1>` 归约树）→ B30（scale/quant_fp8/mul_row/add/gelu 这 6 个逐元素小 kernel 各并进相邻 kernel 的 epilogue）→ B31 fp8 gemv 重写 → route。
+
+## B23 落地 2026-10-29：attention 前段五合一（commit 见 git）
+- `norm.cu` 新 kernel `attn_pre_fused_kernel<VP, STORE_FP8>`：grid=tokens，block=(q+2kv) 个 warp（滑窗层 32 warp、全注意力 20 warp），一 warp 一头行：逐头 RMSNorm（复刻 `rmsnorm_vec_kernel<128,1>` 的蝶形 + 4 段合并序，lane 持向量 lane+32j）→ q/k neox RoPE（复刻 `rope_kernel<true>` 每步舍 bf16）→ fp8 往返写回 → k/v 写 cache（e4m3 / bf16）。smem 每 warp 一行。
+- 接入 `layer.rs`：条件 kv_fp8 层 + 无 ATTN_SKIP_* + 非 dump + KV_FP8_FUSED；`ATTN_PRE_FUSED=0` 回退。门禁 `attn_pre_fused_parity`（4 形状 × e4m3/bf16，q/k/v/cache 四者位差 0）。预期：-4 launch/层 = -120/步，nsys 态 norm 3×1.2 + rope 3.0 + cache_write 4.7 = 11.3 us/层 → ~5 us；含间隙 ≈ -0.4 ms/步。
