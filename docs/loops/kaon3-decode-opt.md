@@ -956,3 +956,6 @@ D72 表：qkv gemv 16.5 us vs 8.6 MB/1.79 TB/s = 4.8 us（3.4×）；dense down 
 - **B16b 代码落地**（moe.cu 两张 tile 表 / `pipe4<BK,STAGES,BM_T>` 1×8 warp 布局 / host `R ≤ 128` → BM16（`MOE_GEMM_BM16=0` 回退）/ ops tile_off 2(E+1) + cpu helper 双表）。测试 moe_pipe4（rows=22 → 自动走 BM16）bad=0 为门禁。
 - **bN.sh / stepB_verify.sh 加 serve 绑核 `taskset -c 0-31`**（SERVE_TASKSET 可覆盖；RESULT 写 `serve_taskset= bench_taskset=`）。注意：**b16b 起的 A/B 两侧都绑核**，与 b20 定稿（不绑）比时要先看 pinsplit 的 Δ 再归因。
 - 队列断了一环：`after_b20.sh`（等 b20 DONE 后起 hosttime_c8）没在跑——`docker exec -d` 起的 watcher 在我 TaskStop 本地监控时被连带杀？（本地 Monitor 与远端 docker exec 无父子关系，更可能是 b20 第一次 PARITY_FAIL 时 after_b20 的 grep "^DONE" 匹到了 par 文件…不对它 grep 的是 tmp_b20_RESULT）。不追了：手动起 hosttime_c8，after_host8 → pinsplit → after_pin → b16b 仍在。**教训：链式 watcher 用一个脚本顺序执行，不要多个 watcher 各等各的。**
+
+## B23 预案 2026-10-28：attention 前段 5 launch → 1（head_rmsnorm q/k/v + rope + fp8rt/cache_write）
+nsys c1b：q/k/v 逐头 norm 0.89+1.09+0.85 us、rope 3.26、cache_write_fp8rt 4.76 ⇒ 10.9 us/层 + 4 个间隙 ≈ 13 us；融成一个 per-token kernel（block=token，warp=头）估 ~5 us → **-0.25 ms/步**。难点：逐位——逐头 norm 现走 `rmsnorm_vec_kernel<128,1>`（Block256 布局：每线程 8 元素组平方和 → block 树归约 `rms_ss_triton`），融合 kernel 要复刻同一归约树（把 `rms_ss_triton`/`rms_inv`/`norm_mid` 抽到共享头）。排 B16b 之后。
