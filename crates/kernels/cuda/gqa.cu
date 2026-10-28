@@ -1564,24 +1564,27 @@ extern "C" int gqa_decode_merge_v2_launch(const float* scratch, const int32_t* c
 
 // decode 专用（每请求恰 1 行 query，q: [B, H, D]，out 同形）。scratch: ≥ gqa_decode_scratch_len（B × H × 32 × (D + 2)）个 f32。
 // D=128：v2（group ≤ 2）或 v3（group 1/2/4，GQA_DECODE_V3=0 回退 v2）。D=256：只走 v3（group ≤ 6），v2 的寄存器布局不适用。
-extern "C" int gqa_decode_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens,
-                               void* out, float* scratch, int64_t num_reqs, int64_t heads, int64_t kv_heads,
-                               int64_t head_dim, int64_t block_size, int64_t max_blocks, float scale, int64_t q_stride,
-                               const int32_t* cu_seqlens_q, cudaStream_t stream) {
+// window>0：滑窗（可见 key = [max(0, n-window), n)）。v3 / d512 原生支持；v2 / v1 不支持（window>0 时报错）。
+// D=512（Kaon-V3 全注意力层，group 1/2/4/8）走 gqa_decode_v3.cu 的 d512 变体（loop kaon3-decode-opt B3）。
+static int gqa_decode_impl(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens,
+                           void* out, float* scratch, int64_t num_reqs, int64_t heads, int64_t kv_heads,
+                           int64_t head_dim, int64_t block_size, int64_t max_blocks, float scale, int64_t q_stride,
+                           const int32_t* cu_seqlens_q, int window, cudaStream_t stream) {
   if (q_stride <= 0) q_stride = heads * head_dim;
   if (num_reqs <= 0) return 0;
-  if ((head_dim != PF_D && head_dim != 256) || heads <= 0 || kv_heads <= 0 || heads % kv_heads != 0 || block_size <= 0)
+  if ((head_dim != PF_D && head_dim != 256 && head_dim != 512) || heads <= 0 || kv_heads <= 0 ||
+      heads % kv_heads != 0 || block_size <= 0)
     return err(cudaErrorInvalidValue);
   const int group = (int)(heads / kv_heads);
-  const bool big = head_dim == 256;  // v2 只支持 D=128；D=256 直接走 v3
-  if (big && block_size % 2 == 0 && group <= 6) {
+  const bool big = head_dim == 256 || head_dim == 512;  // v2 只支持 D=128；D=256/512 直接走 v3 / d512
+  if (big && block_size % 2 == 0 && (head_dim == 256 ? group <= 6 : group <= 8)) {
     int splits = (int)((D2_TARGET_BLOCKS + num_reqs * kv_heads - 1) / (num_reqs * kv_heads));
     splits = splits < 1 ? 1 : (splits > D2_MAX_SPLITS ? D2_MAX_SPLITS : splits);
     const int keys_per_split = decode_keys_per_split();
     dim3 grid1((unsigned)num_reqs, (unsigned)kv_heads, (unsigned)splits);
     bf16* direct = splits == 1 ? static_cast<bf16*>(out) : nullptr;
     int rc = gqa_decode_v3_bf16(q, cache, block_table, seq_lens, cu_seqlens_q, scratch, direct, num_reqs, heads, kv_heads,
-                                head_dim, block_size, max_blocks, scale, q_stride, splits, keys_per_split, stream);
+                                head_dim, block_size, max_blocks, scale, q_stride, splits, keys_per_split, window, stream);
     if (rc) return rc;
     if (splits > 1) {
       dim3 grid2((unsigned)num_reqs, (unsigned)heads);
@@ -1612,7 +1615,7 @@ extern "C" int gqa_decode_bf16(const void* q, const void* cache, const int32_t* 
     if (use_v3 < 0) { const char* e = getenv("GQA_DECODE_V3"); use_v3 = (e && atoi(e) == 0) ? 0 : 1; }
     if (use_v3 && (group == 1 || group == 2 || group == 4)) {
       int rc = gqa_decode_v3_bf16(q, cache, block_table, seq_lens, cu_seqlens_q, scratch, direct, num_reqs, heads, kv_heads,
-                                  head_dim, block_size, max_blocks, scale, q_stride, splits, keys_per_split, stream);
+                                  head_dim, block_size, max_blocks, scale, q_stride, splits, keys_per_split, window, stream);
       if (rc) return rc;
       if (splits > 1) {
         dim3 grid2((unsigned)num_reqs, (unsigned)heads);
@@ -1621,6 +1624,7 @@ extern "C" int gqa_decode_bf16(const void* q, const void* cache, const int32_t* 
       }
       return last_err();
     }
+    if (window > 0) return err(cudaErrorInvalidValue);  // v2 无滑窗
     gqa_decode_v2_kernel<<<grid1, D2_WARPS * 32, 0, stream>>>(
         static_cast<const bf16*>(q), static_cast<const bf16*>(cache), block_table, seq_lens, cu_seqlens_q, scratch, direct,
         (int)heads, (int)kv_heads, (int)block_size, (int)max_blocks, scale, (int)q_stride, splits, keys_per_split);
@@ -1632,6 +1636,7 @@ extern "C" int gqa_decode_bf16(const void* q, const void* cache, const int32_t* 
     return last_err();
   }
   if (cu_seqlens_q) return 3;  // v1 路径不支持混批行映射
+  if (window > 0) return err(cudaErrorInvalidValue);  // v1 无滑窗
   dim3 grid1((unsigned)num_reqs, (unsigned)kv_heads, (unsigned)DC_SPLITS);
   gqa_decode_split_kernel<<<grid1, DC_WARPS * 32, 0, stream>>>(
       static_cast<const bf16*>(q), static_cast<const bf16*>(cache), block_table, seq_lens, scratch, (int)heads,
@@ -1639,4 +1644,19 @@ extern "C" int gqa_decode_bf16(const void* q, const void* cache, const int32_t* 
   dim3 grid2((unsigned)num_reqs, (unsigned)heads);
   gqa_decode_merge_kernel<<<grid2, PF_D, 0, stream>>>(scratch, static_cast<bf16*>(out), (int)heads);
   return last_err();
+}
+extern "C" int gqa_decode_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens,
+                               void* out, float* scratch, int64_t num_reqs, int64_t heads, int64_t kv_heads,
+                               int64_t head_dim, int64_t block_size, int64_t max_blocks, float scale, int64_t q_stride,
+                               const int32_t* cu_seqlens_q, cudaStream_t stream) {
+  return gqa_decode_impl(q, cache, block_table, seq_lens, out, scratch, num_reqs, heads, kv_heads, head_dim, block_size,
+                         max_blocks, scale, q_stride, cu_seqlens_q, 0, stream);
+}
+// 带滑窗的 decode（Kaon-V3 滑窗层 window=1024；全注意力层 window=0）。
+extern "C" int gqa_decode_win_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens,
+                                   void* out, float* scratch, int64_t num_reqs, int64_t heads, int64_t kv_heads,
+                                   int64_t head_dim, int64_t block_size, int64_t max_blocks, float scale,
+                                   int64_t q_stride, const int32_t* cu_seqlens_q, int window, cudaStream_t stream) {
+  return gqa_decode_impl(q, cache, block_table, seq_lens, out, scratch, num_reqs, heads, kv_heads, head_dim, block_size,
+                         max_blocks, scale, q_stride, cu_seqlens_q, window, stream);
 }

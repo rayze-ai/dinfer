@@ -81,6 +81,7 @@ fn run_case(b: usize, h: usize, hk: usize, d: usize, n: usize) {
       0,
       splits,
       keys_per_split,
+      0,
       st.raw() as _,
     )
   };
@@ -201,7 +202,7 @@ fn run_case(b: usize, h: usize, hk: usize, d: usize, n: usize) {
       st.ptr(&dq) as *const c_void, st.ptr(&dcache) as *const c_void, st.ptr(&dbt) as *const i32,
       st.ptr(&seq) as *const i32, st.ptr(&dcu) as *const i32, st.ptr_mut(&mut scratch_ref) as *mut f32,
       std::ptr::null_mut::<c_void>(), b as i64, h as i64, hk as i64, d as i64, bs as i64, max_blocks as i64,
-      scale, 0, splits, keys_per_split, st.raw() as _,
+      scale, 0, splits, keys_per_split, 0, st.raw() as _,
     );
   };
   let mut f_mega = || unsafe {

@@ -748,6 +748,8 @@ pub struct LayerScratch {
     pub k_f: Tensor<bf16>,
     pub v_f: Tensor<bf16>,
     pub attn_f: Tensor<bf16>,
+    /// 纯 decode split-K attention 的 partial 缓冲（B3）：按最大 head_dim 与 max_tokens 行分配。
+    pub decode_scratch: Tensor<f32>,
     pub o: Tensor<bf16>,        // [tokens, hidden]
     pub gate_up: Tensor<bf16>,  // [tokens, 2·dense_inter]
     pub act: Tensor<bf16>,      // [tokens, max(dense_inter, moe_inter)] 专家 up 复用
@@ -817,6 +819,10 @@ impl LayerScratch {
             k_f: Tensor::uninit(stream, &[max_tokens, cfg.nkv_full * cfg.head_dim_full])?,
             v_f: Tensor::uninit(stream, &[max_tokens, cfg.nkv_full * cfg.head_dim_full])?,
             attn_f: Tensor::uninit(stream, &[max_tokens, cfg.num_heads * cfg.head_dim_full])?,
+            decode_scratch: Tensor::zeros(
+                stream,
+                &[k::gqa_decode_scratch_len(max_tokens, cfg.num_heads, cfg.head_dim_full.max(cfg.head_dim_sliding))],
+            )?,
             // 合并 qkv 输出的上界：两层型 q+k+v 的较大者（full: num_heads·D + 2·nkv·D）。
             qkv: Tensor::uninit(stream, &[max_tokens,
                 (cfg.num_heads * cfg.head_dim_sliding + 2 * cfg.nkv_sliding * cfg.head_dim_sliding)
@@ -1152,6 +1158,30 @@ impl Gemma4Layer {
             // 不跑 attention,attn 留旧值
         } else {
         match ctx.mode {
+            // 纯 decode（每请求 1 行）：split-K flash-decode（v3 / d512，带滑窗、GQA 组共享 K/V）。
+            // 之前走 paged_win → 滑窗层 v5 每头 1 block（50 us）、D=512 层通用慢路径（369 us）（B3，nsys D54）。
+            // ATTN_DECODE_OLD=1 回退旧路径（A/B 用）。
+            dinfer_core::runner::BatchMode::Decode if std::env::var("ATTN_DECODE_OLD").ok().as_deref() != Some("1") => {
+                k::ops::gqa_decode_win_bf16(
+                    stream,
+                    &q.data,
+                    &*ctx.kv_mut,
+                    &ctx.block_table.data,
+                    &ctx.seq_lens.data,
+                    &mut attn.data,
+                    &mut sc.decode_scratch.data,
+                    ctx.num_reqs,
+                    heads,
+                    nkv,
+                    d,
+                    ctx.block_size,
+                    ctx.max_blocks,
+                    scale,
+                    0,
+                    None,
+                    self.window,
+                )?
+            }
             dinfer_core::runner::BatchMode::Prefill => ops.attn().prefill_win(
                 stream,
                 &q.data,

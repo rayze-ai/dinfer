@@ -50,7 +50,7 @@ struct AttnDispatch {
     const int b = bh / p.Hkv;
     gqa_v3::gqa_decode_v3_core<GROUP, D>(p.q, p.cache, p.block_table, p.seq_lens, p.cu_seqlens_q, p.scratch,
                                          p.out_direct, p.H, p.Hkv, p.block_size, p.max_blocks, p.scale, p.q_stride,
-                                         p.splits, p.keys_per_split, b, hk, split, (int)threadIdx.x);
+                                         p.splits, p.keys_per_split, /*window=*/0, b, hk, split, (int)threadIdx.x);
   }
 };
 

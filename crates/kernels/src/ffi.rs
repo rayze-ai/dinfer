@@ -389,6 +389,26 @@ extern "C" {
         q_stride: i64,
         splits: i64,
         keys_per_split: i64,
+        window: i32,
+        stream: cudaStream_t,
+    ) -> i32;
+    pub fn gqa_decode_win_bf16(
+        q: *const c_void,
+        cache: *const c_void,
+        block_table: *const i32,
+        seq_lens: *const i32,
+        out: *mut c_void,
+        scratch: *mut f32,
+        num_reqs: i64,
+        heads: i64,
+        kv_heads: i64,
+        head_dim: i64,
+        block_size: i64,
+        max_blocks: i64,
+        scale: f32,
+        q_stride: i64,
+        cu_seqlens_q: *const i32,
+        window: i32,
         stream: cudaStream_t,
     ) -> i32;
     // B1：split partial → 输出 merge（persistent attn 对拍把 scratch 合并成最终输出）。

@@ -158,7 +158,12 @@ int gqa_decode_bf16(const void* q, const void* cache, const int32_t* block_table
 int gqa_decode_v3_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens,
                        const int32_t* cu_seqlens_q, float* scratch, void* out_direct, int64_t num_reqs, int64_t heads,
                        int64_t kv_heads, int64_t head_dim, int64_t block_size, int64_t max_blocks, float scale,
-                       int64_t q_stride, int64_t splits, int64_t keys_per_split, cudaStream_t stream);
+                       int64_t q_stride, int64_t splits, int64_t keys_per_split, int window, cudaStream_t stream);
+// 带滑窗的 decode 入口（window>0 只在 v3 / d512 路径合法；D ∈ {128, 256, 512}）。loop kaon3-decode-opt B3。
+int gqa_decode_win_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens, void* out,
+                        float* scratch, int64_t num_reqs, int64_t heads, int64_t kv_heads, int64_t head_dim,
+                        int64_t block_size, int64_t max_blocks, float scale, int64_t q_stride, const int32_t* cu_seqlens_q,
+                        int window, cudaStream_t stream);
 // B1（kaon3-mega R36）：split partial → 输出的 merge（gqa_decode_merge_v2_kernel 的 C ABI 入口），persistent attn 对拍用。
 int gqa_decode_merge_v2_launch(const float* scratch, const int32_t* cu_seqlens_q, const int32_t* seq_lens, void* out,
                                int num_reqs, int heads, int head_dim, int splits, int keys_per_split,

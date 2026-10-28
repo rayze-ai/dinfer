@@ -397,7 +397,7 @@ struct LayerDispatch {
         const int b = bh / p.nkv;
         gqa_v3::gqa_decode_v3_core<GROUP, DIM>(
             p.qkv_buf, p.kv_cache, p.block_table, p.seq_lens, /*cu_seqlens_q=*/nullptr, p.attn_scratch, p.attn_buf,
-            p.heads, p.nkv, p.block_size, p.max_blocks, p.attn_scale, sigmaN, p.splits, p.keys_per_split, b, hk, split,
+            p.heads, p.nkv, p.block_size, p.max_blocks, p.attn_scale, sigmaN, p.splits, p.keys_per_split, /*window=*/0, b, hk, split,
             tid);
         return;
       }

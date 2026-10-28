@@ -55,17 +55,20 @@ __device__ __forceinline__ void gqa_decode_v3_core(
     const bf16* __restrict__ q, const bf16* __restrict__ cache, const int32_t* __restrict__ block_table,
     const int32_t* __restrict__ seq_lens, const int32_t* __restrict__ cu_seqlens_q, float* __restrict__ scratch,
     bf16* __restrict__ out_direct, int H, int Hkv, int block_size, int max_blocks, float scale, int q_stride, int splits,
-    int keys_per_split, int b, int hk, int split, int tid) {
+    int keys_per_split, int window, int b, int hk, int split, int tid) {
   int row = b;
   if (cu_seqlens_q) {
     if (cu_seqlens_q[b + 1] - cu_seqlens_q[b] != 1) return;
     row = cu_seqlens_q[b];
   }
   const int n = seq_lens[b];
-  const int eff = min(splits, max(1, (n + keys_per_split - 1) / keys_per_split));
+  // 滑窗（window>0）：可见 key = [max(0, n-window), n)，与 gqa_paged_kernel 的 j0 同式（loop kaon3-decode-opt B3）。
+  const int k0 = window > 0 ? max(0, n - window) : 0;
+  const int nk = n - k0;
+  const int eff = min(splits, max(1, (nk + keys_per_split - 1) / keys_per_split));
   if (split >= eff) return;  // 块一致（b/split 全 CTA 同值）：全体一起退，不破 barrier
-  const int seg = (n + eff - 1) / eff;
-  const int k_begin = split * seg, k_end = min(n, k_begin + seg);
+  const int seg = (nk + eff - 1) / eff;
+  const int k_begin = k0 + split * seg, k_end = min(n, k_begin + seg);
 
   constexpr int LPK = V3_LPK<D>, KEYS = V3_KEYS<D>;
   const bool active = tid < V3_THREADS;    // 256 线程外壳下，只有前 128 干活

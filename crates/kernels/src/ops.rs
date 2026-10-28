@@ -2677,6 +2677,64 @@ pub fn gqa_decode_bf16<Q: DevicePtr<bf16> + ?Sized>(
     )
 }
 
+/// 带滑窗的纯 decode split-K attention（D ∈ {128, 256, 512}；window=0 全可见）。Kaon-V3 滑窗层 window=1024、
+/// 全注意力层 D=512 window=0（loop kaon3-decode-opt B3：替代每头 1 block 的 v5 / 通用慢路径）。
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_decode_win_bf16<Q: DevicePtr<bf16> + ?Sized>(
+    stream: &Stream,
+    q: &Q,
+    cache: &CudaSlice<bf16>,
+    block_table: &CudaSlice<i32>,
+    seq_lens: &CudaSlice<i32>,
+    out: &mut CudaSlice<bf16>,
+    scratch: &mut CudaSlice<f32>,
+    num_reqs: usize,
+    heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    block_size: usize,
+    max_blocks: usize,
+    scale: f32,
+    q_stride: usize,
+    cu_seqlens_q: Option<&CudaSlice<i32>>,
+    window: usize,
+) -> Result<()> {
+    ensure!(matches!(head_dim, 128 | 256 | 512), "gqa_decode_win: head_dim must be 128/256/512");
+    ensure!(block_table.len() >= num_reqs * max_blocks && seq_lens.len() >= num_reqs, "gqa_decode_win: table/seq_lens");
+    ensure!(
+        cu_seqlens_q.is_some()
+            || (q.len() >= (num_reqs - 1) * q_stride.max(heads * head_dim) + heads * head_dim
+                && out.len() >= num_reqs * heads * head_dim),
+        "gqa_decode_win: q/out shape"
+    );
+    ensure!(scratch.len() >= gqa_decode_scratch_len(num_reqs, heads, head_dim), "gqa_decode_win: scratch");
+    // SAFETY: 长度已校验；block_table 下标范围由 scheduler 保证。
+    check(
+        unsafe {
+            ffi::gqa_decode_win_bf16(
+                stream.ptr(q) as *const c_void,
+                stream.ptr(cache) as *const c_void,
+                stream.ptr(block_table) as *const i32,
+                stream.ptr(seq_lens) as *const i32,
+                stream.ptr_mut(out) as *mut c_void,
+                stream.ptr_mut(scratch) as *mut f32,
+                num_reqs as i64,
+                heads as i64,
+                kv_heads as i64,
+                head_dim as i64,
+                block_size as i64,
+                max_blocks as i64,
+                scale,
+                q_stride as i64,
+                cu_seqlens_q.map_or(std::ptr::null(), |c| stream.ptr(c) as *const i32),
+                window as i32,
+                stream.raw() as _,
+            )
+        },
+        "gqa_decode_win_bf16",
+    )
+}
+
 /// 混批（prefill 行 + decode 行同一步）attention（D ∈ {128, 256}）：q_len==1 的请求走 split-K decode kernel（按 cu_seqlens_q 定位行），
 /// 其余请求走 paged tensor-core kernel（跳过 q_len==1）。两个 kernel 同流串行，各自只写自己的行。
 #[allow(clippy::too_many_arguments)]
