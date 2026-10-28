@@ -643,3 +643,17 @@ h=2816 单行 norm（181 次/步）：Block1024 每线程 1 向量两级归约 6
 - 第三方参照：vLLM 基线对同一 raw prompt "The capital of France is" 输出也是退化循环（"France is France is…"），中文 chat 结构与我们两版都不同 → raw prompt 本就是低置信样本，**输出变化不是 B3 错误的证据**；对错只认 GPU 对拍测试。
 - B3 自查修一处隐患：`gqa_decode_merge_v2_kernel` 的有效 split 数按 seq_lens 全长算，kernel 侧按窗口内 key 数算；window=1024 / kps=32 时两者都饱和到 32 恰好相等（scratch 零初始化也让多读的 split 贡献 0），但语义不一致 → merge 加 `window` 同式。已 put，随对拍测试一起编。
 - D58 补（同二进制 `ATTN_DECODE_OLD=1` vs 新，ABAB）：旧 12.58 / 16.01（c1/c8，输出同 B2），新 9.79 / 13.63 —— 与 B3 新旧二进制对比一致，**B3 收益 -22% 确凿，归因单一（attention 路径）**。去留等对拍。
+
+## ★★★★★ D59 2026-10-28 B3 GPU 对拍通过 → **B3 定稿保留**（归档 test/kaon3/2026-10-28/{partest,b3env,b3}_RESULT.txt）
+`cargo test --release -p dinfer-kernels --test gqa_decode_win_parity -- --ignored`（5090 sm120，编译 28.5s，测试 0.92s）**EXIT=0**。6 场景全过，判据 |err| ≤ 0.03+0.02|ref|：
+| 场景 | decode_win 最大误差 / 超差 | paged_slow 对照 |
+|---|---|---|
+| D=256 Hkv=8 win=1024 seq=[1600] | 0.0072 / 0/4096 | 0.0072 / 0 |
+| D=256 win=1024 seq=[1600,70,1,1024,1025] amp=2 | 0.0078 / 0/20480 | 0.0080 / 0 |
+| D=256 win=0 seq=[300,1] | 0.0077 / 0/8192 | 0.0077 / 0 |
+| D=512 Hkv=2 win=0 seq=[1600] | 0.0078 / 0/8192 | 0.0078 / 0 |
+| D=512 win=0 seq=[1600,70,1,33,64] amp=2 | 0.0078 / 0/40960 | 0.0078 / 0 |
+| D=512 win=1024 seq=[1600,900] | 0.0078 / 0/16384 | 0.0078 / 0 |
+**读法**：新路径误差与旧慢路径对 CPU f64 的误差同量级（都是 bf16 输入 + fp32 累加的本底 ~0.008），不是新 kernel 引入的偏差；窗口边界 1024/1025、单 token、D=512 多请求都对。
+**结论**：B3 保留。D58 的输出变化判定为"非逐位但等价"（vLLM 对同 raw prompt 同样退化循环）。入 CSV round b3：c1 TPOT 12.58→9.79（-22.2%，吞吐 77.0→97.7）、c8 16.01→13.63（-14.9%，334→370）；TTFT 不变（38.6/583）。三刀累计 c1 **17.07→9.79（-43%）**，vs vLLM 4.69 还差 2.1×。
+**下一刀**：B4（gather_rows 多 block 16B 拷贝，已 commit 4bcfd2a 未编，预期 -0.13ms）编译 + ABAB；之后按 D54 清单：MoE 小 kernel 融合（~700 小 kernel/步 + 1.89ms launch 间隙）、route_topk/softmax/scan 单线程 kernel 0.43ms、dense mega 2.61ms。

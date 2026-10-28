@@ -71,3 +71,9 @@ b2,2026-10-28,"B2 Sm120 rmsnorm layout Block256(h=2816单行norm 6.8→2.4us×18
 b2,2026-10-28,"B2 Sm120 rmsnorm layout Block256(h=2816单行norm 6.8→2.4us×181/步): c1 TPOT 13.03→12.58 -3.4%, c8 16.41→16.01, 中英输出一致",c8,out_tok_per_s,334.300,956.000,0.350,,higher,main,5090,vllm,dinfer,kaon3
 b2,2026-10-28,"B2 Sm120 rmsnorm layout Block256(h=2816单行norm 6.8→2.4us×181/步): c1 TPOT 13.03→12.58 -3.4%, c8 16.41→16.01, 中英输出一致",c8,ttft_p50_ms,583.800,146.400,3.988,,lower,main,5090,vllm,dinfer,kaon3
 b2,2026-10-28,"B2 Sm120 rmsnorm layout Block256(h=2816单行norm 6.8→2.4us×181/步): c1 TPOT 13.03→12.58 -3.4%, c8 16.41→16.01, 中英输出一致",c8,tpot_p50_ms,16.010,6.240,2.566,,lower,main,5090,vllm,dinfer,kaon3
+b3,2026-10-28,"B3 decode专用split-K attention(v3加window+新D512 kernel): c1 TPOT 12.58→9.79 -22%, c8 16.01→13.63; GPU对拍6场景超差0 保留",c1,out_tok_per_s,97.700,200.000,0.488,,higher,main,5090,vllm,dinfer,kaon3
+b3,2026-10-28,"B3 decode专用split-K attention(v3加window+新D512 kernel): c1 TPOT 12.58→9.79 -22%, c8 16.01→13.63; GPU对拍6场景超差0 保留",c1,ttft_p50_ms,38.600,25.000,1.544,,lower,main,5090,vllm,dinfer,kaon3
+b3,2026-10-28,"B3 decode专用split-K attention(v3加window+新D512 kernel): c1 TPOT 12.58→9.79 -22%, c8 16.01→13.63; GPU对拍6场景超差0 保留",c1,tpot_p50_ms,9.790,4.690,2.087,,lower,main,5090,vllm,dinfer,kaon3
+b3,2026-10-28,"B3 decode专用split-K attention(v3加window+新D512 kernel): c1 TPOT 12.58→9.79 -22%, c8 16.01→13.63; GPU对拍6场景超差0 保留",c8,out_tok_per_s,370.300,956.000,0.387,,higher,main,5090,vllm,dinfer,kaon3
+b3,2026-10-28,"B3 decode专用split-K attention(v3加window+新D512 kernel): c1 TPOT 12.58→9.79 -22%, c8 16.01→13.63; GPU对拍6场景超差0 保留",c8,ttft_p50_ms,583.800,146.400,3.988,,lower,main,5090,vllm,dinfer,kaon3
+b3,2026-10-28,"B3 decode专用split-K attention(v3加window+新D512 kernel): c1 TPOT 12.58→9.79 -22%, c8 16.01→13.63; GPU对拍6场景超差0 保留",c8,tpot_p50_ms,13.630,6.240,2.184,,lower,main,5090,vllm,dinfer,kaon3

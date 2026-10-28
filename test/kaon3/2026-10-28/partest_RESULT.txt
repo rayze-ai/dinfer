@@ -1,0 +1,17 @@
+11:00:15
+EXIT=0
+D=256 Hkv=8 win=1024 seq=[1600] amp=1 decode_win: rc=true 最大误差 0.0072 超差 0/4096
+D=256 Hkv=8 win=1024 seq=[1600] amp=1 paged_slow: rc=true 最大误差 0.0072 超差 0/4096
+D=256 Hkv=8 win=1024 seq=[1600, 70, 1, 1024, 1025] amp=2 decode_win: rc=true 最大误差 0.0078 超差 0/20480
+D=256 Hkv=8 win=1024 seq=[1600, 70, 1, 1024, 1025] amp=2 paged_slow: rc=true 最大误差 0.0080 超差 0/20480
+D=256 Hkv=8 win=   0 seq=[300, 1] amp=1 decode_win: rc=true 最大误差 0.0077 超差 0/8192
+D=256 Hkv=8 win=   0 seq=[300, 1] amp=1 paged_slow: rc=true 最大误差 0.0077 超差 0/8192
+D=512 Hkv=2 win=   0 seq=[1600] amp=1 decode_win: rc=true 最大误差 0.0078 超差 0/8192
+D=512 Hkv=2 win=   0 seq=[1600] amp=1 paged_slow: rc=true 最大误差 0.0078 超差 0/8192
+D=512 Hkv=2 win=   0 seq=[1600, 70, 1, 33, 64] amp=2 decode_win: rc=true 最大误差 0.0078 超差 0/40960
+D=512 Hkv=2 win=   0 seq=[1600, 70, 1, 33, 64] amp=2 paged_slow: rc=true 最大误差 0.0078 超差 0/40960
+D=512 Hkv=2 win=1024 seq=[1600, 900] amp=1 decode_win: rc=true 最大误差 0.0078 超差 0/16384
+D=512 Hkv=2 win=1024 seq=[1600, 900] amp=1 paged_slow: rc=true 最大误差 0.0078 超差 0/16384
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.92s
+11:00:45
+DONE

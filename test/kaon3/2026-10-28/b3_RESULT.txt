@@ -1,0 +1,23 @@
+10:48:53
+EXIT=0
+Compiling dinfer-kaon3 
+new_bin=2026-10-28 10:49 marker=9
+A NOTUP
+thread 'tokio-runtime-worker' (21076) panicked at models/kaon3/src/model.rs:207:38:
+Error: task 129 panicked with message "index out of bounds: the len is 0 but the index is 0"
+B c1:  1.53 req/s 97.8 output TTFT mean 38.52 p50 38.53 TPOT mean 9.77 p50 9.77 
+
+B c8:  5.79 req/s 370.7 output TTFT mean 463.83 p50 583.27 TPOT mean 14.55 p50 13.59 
+
+B out:  the capital of France is the capital of France is the capital of France is the capital of France is the capital of Fran
+B out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到两千多年前的春秋战国时期，最初是各诸侯国为了防御而修建的。  到了秦朝，为了统一防御力量，秦始皇帝下令将各地的城墙进行连接与加固，从而形成了最初规模的“万里长城”。  此后，历朝
+A2 NOTUP
+thread 'tokio-runtime-worker' (22101) panicked at models/kaon3/src/model.rs:207:38:
+Error: task 129 panicked with message "index out of bounds: the len is 0 but the index is 0"
+B2 c1:  1.53 req/s 97.7 output TTFT mean 38.55 p50 38.66 TPOT mean 9.78 p50 9.78 
+
+B2 c8:  5.79 req/s 370.4 output TTFT mean 464.01 p50 582.97 TPOT mean 14.57 p50 13.62 
+
+B2 out:  the capital of France is the capital of France is the capital of France is the capital of France is the capital of Fran
+B2 out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到两千多年前的春秋战国时期，最初是各诸侯国为了防御而修建的。  到了秦朝，为了统一防御力量，秦始皇帝下令将各地的城墙进行连接与加固，从而形成了最初规模的“万里长城”。  此后，历朝
+DONE

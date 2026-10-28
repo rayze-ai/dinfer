@@ -1,0 +1,26 @@
+bin=2026-10-28 10:49 A=[ATTN_DECODE_OLD=1] B=[XX=1]
+A c1:  1.20 req/s 77.0 output TTFT mean 38.66 p50 38.64 TPOT mean 12.58 p50 12.58 
+
+A c8:  5.22 req/s 334.3 output TTFT mean 463.85 p50 583.63 TPOT mean 16.94 p50 16.01 
+
+A out:  the last.
+A out2: 这里是用三句话介绍的长城历史：  1. 长城的修建始于春秋战国时期，当时各诸侯国为了防御目的开始修筑城墙。 2. 到了秦朝，秦始帝将各地的城墙进行连接与加固，形成了最初规模宏大的防御体系。 3. 随着明朝时期对长城的全面修缮
+B c1:  1.53 req/s 97.7 output TTFT mean 38.31 p50 38.21 TPOT mean 9.79 p50 9.79 
+
+B c8:  5.79 req/s 370.3 output TTFT mean 464.19 p50 583.82 TPOT mean 14.57 p50 13.63 
+
+B out:  the capital of France is the capital of France is the capital of France is the capital of France is the capital of Fran
+B out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到两千多年前的春秋战国时期，最初是各诸侯国为了防御而修建的。  到了秦朝，为了统一防御力量，秦始皇帝下令将各地的城墙进行连接与加固，从而形成了最初规模的“万里长城”。  此后，历朝
+A2 c1:  1.20 req/s 77.0 output TTFT mean 38.39 p50 38.29 TPOT mean 12.58 p50 12.58 
+
+A2 c8:  5.24 req/s 335.2 output TTFT mean 411.47 p50 581.52 TPOT mean 17.71 p50 16.12 
+
+A2 out:  the last.
+A2 out2: 这里是用三句话介绍的长城历史：  1. 长城的修建始于春秋战国时期，当时各诸侯国为了防御目的开始修筑城墙。 2. 到了秦朝，秦始帝将各地的城墙进行连接与加固，形成了最初规模宏大的防御体系。 3. 随着明朝时期对长城的全面修缮
+B2 c1:  1.53 req/s 97.7 output TTFT mean 38.51 p50 38.52 TPOT mean 9.79 p50 9.78 
+
+B2 c8:  5.79 req/s 370.4 output TTFT mean 463.69 p50 583.84 TPOT mean 14.58 p50 13.63 
+
+B2 out:  the capital of France is the capital of France is the capital of France is the capital of France is the capital of Fran
+B2 out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到两千多年前的春秋战国时期，最初是各诸侯国为了防御而修建的。  到了秦朝，为了统一防御力量，秦始皇帝下令将各地的城墙进行连接与加固，从而形成了最初规模的“万里长城”。  此后，历朝
+DONE
