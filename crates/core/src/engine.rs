@@ -619,8 +619,10 @@ impl<E: ModelExecutor> Engine<E> {
             if self.host_time && !so.num_scheduled_tokens.is_empty() {
                 let t_pub = std::time::Instant::now();
                 let us = |a: std::time::Instant, b: std::time::Instant| b.duration_since(a).as_secs_f64() * 1e6;
+                let toks: usize = so.num_scheduled_tokens.values().sum();
+                let nreq = so.num_scheduled_tokens.len();
                 tracing::info!(
-                    "[host-time] sched={:.1} exec(begin+finish)={:.1} publish={:.1} total={:.1} us",
+                    "[host-time] tokens={toks} nreq={nreq} sched={:.1} exec(begin+finish)={:.1} publish={:.1} total={:.1} us",
                     us(t_step, t_sched), us(t_sched, t_exec), us(t_exec, t_pub), us(t_step, t_pub)
                 );
             }
