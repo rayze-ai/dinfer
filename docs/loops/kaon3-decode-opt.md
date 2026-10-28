@@ -975,3 +975,5 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - **B25 qkv/oproj fp8 cuBLASLt**：66 次 × 249 us；形状 1560×3072×2816 = 27 GF → 22 us 算力下限，**11× 离**。nvjet 64x32x64 tile 对 M=1560 不是最优（Lt 自调优没选对？`GEMM_LT_CANDIDATES`/`GEMM_TUNE` 开关看过没）。先 `GEMM_ALGO_LOG=1` 看 Lt 选了什么，再试 `forward_fp8`（自写 sm120 fp8 kernel，`FP8_SELF_KERNEL=1` A/B）。
 - 两刀若各省 30%，prefill -10 ms → TTFT ~18、c8 TPOT ~8.7。**优先级高于 B23/B16b 之后的 decode 小刀**。
 - **pinsplit pin_a（不绑核，b20 二进制，A/B 同 env）**：c1 5.62/5.63/5.62、c8 10.10/10.03/10.03 —— 同 env 两侧一致（量测噪声 ±0.01/±0.07）。pin_b（绑 0-31）跑中；与 D77 一致，预期持平。钉核的意义是口径合规（CLAUDE.md 规则），不是收益。
+- pin_a 定稿：4 轮 c1 5.62–5.63，c8 10.03–10.10（B2 c8 一次 TTFT 108/TPOT 10.76 = 第 5 次见的"排队态"噢动：TTFT 异常低 + TPOT 异常高同现 ⇒ 是 8 请求没叠上的态，bench 侧现象，不是服务端）。pin_b（绑核）跑中。
+- **B25a 探针**：`GEMM_FP8_DEBUG=1` 起一次 serve 跑 c1，看 fp8 cuBLASLt 对 m=1560 的 qkv/oproj/dense 三形状 pick 了哪个 algo/tile（现 pick 走 `want` 匹配 + heuristic，无计时自调优；bf16 路径有 tune_shape，fp8 没有）。若 pick 是 64x32 小 tile（nsys 看到 nvjet 64x32x64），改为对 fp8 也跑 `tune_shape`（按 M 桶）或直接指定大 tile 候选。
