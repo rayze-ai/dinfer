@@ -730,3 +730,4 @@ A 轮 c8 一次 TPOT p50 19.02 / TTFT 222（其它轮 13.45 / 583）—— 同�
 
 ## ★★★ D63 2026-10-28 B7 ABAB：B 侧（FP8_GEMV=1 MOE_DECODE_GEMV=1 + B6b pick_warps）c1 **8.77** / c8 **16.37**，比 B5（7.47 / 10.94）差 17% / 50% → 不合入，拆变量
 A 侧（=B6 行为）6.95 / 11.59 两轮稳定。B 侧三个变量叠在一起（B6 fp8 gemv、B6b warp 数、B7 MoE gemv），用同一二进制 env 开关拆：① 全关（= B5 + B6b 的 dense 受 pick_warps 影响）② 只 MOE_DECODE_GEMV=1 ③ 只 FP8_GEMV=1。中文一致、英文 "is is is" 与 A 同（二进制相同的非 gemv 部分）。
+- B7 ABAB 定稿（归档 b7_RESULT.txt）：B 两轮 8.77/8.76、16.37/16.42 稳定 ⇒ 真退化不是噪声。拆变量链 `/w/b7split.sh` 已起（同二进制：① MOE_DECODE_GEMV=1 vs 关 ② FP8_GEMV=1 vs 关；"关"= B5 路径 + B6b pick_warps 的 dense）。
