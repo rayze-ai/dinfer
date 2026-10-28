@@ -467,3 +467,11 @@ forward_sample入口第一行无条件eprintln也0行→**prefill根本没走for
 **已给用户的数据(能测的)**:TTFT/TPOT/吞吐 c1-16表(D40)、启动64s、tokenize 7ms、schedule μs、exec(begin+finish) prefill 367ms/decode 17ms、GPU~100%。
 **拆不出的**:exec 367ms内部(chat模板/htod/block/forward各多少)。8次失败,承认做不到。
 **下次接手(关键)**:先读透kaon3 executor.rs的supports_async/begin/forward_device_mode/forward_sample——prefill(非async?)到底走哪个exec入口,在那个入口加计时。executor.rs:336 self.exec.begin(async)是嫌疑,读KaonExecutor的begin实现(不是runner.begin,是exec.begin)看prefill在里面做什么+拆。core的[host-time]能出是因它在engine汇合点;要拆exec必须找到prefill真正执行的那个exec方法。
+
+## ★★★★★★★ D42 2026-10-28 决定性根因!二进制不含我的改动=rsync旧mtime致cargo增量编译跳过(8次失败真因)
+strings二进制:host-time=1(早编进),**fwd-sample=0,begin-split=0**(我新加的全没进二进制!)。
+**8次计时失败真因(定死)**:不是分支错/函数错(那些误诊全作废)——是**rsync put保留源文件旧mtime,cargo增量编译认为没变、跳过重编**,serve跑的是旧二进制(不含我的eprintln)。put成功(源码在)但编译没生效。
+**验证**:host-time(老代码)在二进制,fwd-sample/begin-split(我加的)不在=铁证编译没含改动。
+**修复**:put后`touch`改过的源文件(mtime新于target),或cargo build前touch;或rsync加--no-times。下次改代码:put→touch远端源文件→cargo build,确认strings二进制含新字面量再跑。
+**教训(整会话最大,记knowledge)**:远端rsync同步+增量编译,必须确保mtime更新否则编译跳过。我8次插桩+前面多次"没出"可能全是这个(编译没生效),不是代码逻辑。应早用strings验证二进制含改动。
+**现在**:touch+强制重编,fwd-sample必出,终于能拆prefill 367ms。
