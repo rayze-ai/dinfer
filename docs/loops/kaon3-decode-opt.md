@@ -1052,3 +1052,10 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - D91：mixprobe（GPU 1）plain 组第一条串行请求就 **HTTP 503**（A=400 词 200 out 串行基线）→ 服务侧拒绝（查 503 条件：排队上限 / 引擎未就绪 / max_tokens 超限？）；cacheprobe（GPU 4）同时起，结果待看。先查 503 来源再重跑。
 - D91 解：容器 `kaon3-full` **只挂了 GPU 0**（`CUDA_VISIBLE_DEVICES=1/4` → `CUDA_ERROR_NO_DEVICE`，serve 秒退，脚本继续 curl 到老端口的残留服务 → 503）。两个探针改 GPU 0 串行排在 bN b27 之后（`probes.sh`）。
 - D92：b27 bN DONE（B2 c8 TTFT 155.8 / 吞吐 675 / TPOT 9.82 = b26 同值，B27 性能中性，符合预期）。probes 链（cacheprobe → mixprobe）在 GPU 0 跑。读 v5 PAGED 窗口/hist 掩码（`lo/vis/warp_hi_lo/tile0`）没看出错；runner 带历史 chunk 的 start/positions/slot 也按 `num_computed` 算。等 cacheprobe 定"c1 串行 cache 态是否就错"。
+
+## ★★★★★★ D93 2026-10-28 cacheprobe（c1 **串行**，同 prompt 三次，第 2/3 次 prefix cache 命中 → 带历史 chunk t=11–17 走 Paged 步）：**plain 3/7 prompt 输出改变**（400 词：首字符就变 'be be be…' → 'as it is is…'；33 词：'-The-The-' → 's little bit…'；90 词 char 32 起且第 2≠第 3 次），**`KV_FP8_STORE=0` 0/7 全同**
+- ⇒ **不是并发 bug**。mixparity 的 c2/c8 差异来自同一根因：bench/探针里 prompt 命中 cache 后的 chunk 行（hist>0, q_len 小）在 **e4m3 cache** 下算错；fresh 组 3/8 也可能是 c8 一波里有 cut-in 后"剩余 chunk"（hist = 已算部分）。
+- 步序证据：`Prefill:400 → Decode:1×47 → Paged:16 → Decode …`：第 2 次同 prompt 只算 16 个 token（384 命中），Paged 步 1 请求 16 行、hist=384。
+- 嫌疑链（kv_fp8 + PAGED + hist>0 + q_len>1）：① fa_v5 PAGED KV_FP8 模板（D=256 滑窗层；kv_fp8 时 cfg 从 464 降为 0 → v5）的 cp.async8 staging + expand；② B26 v6 KV_FP8（D=512）；③ `gqa_cache_write` fp8 分支对 chunk 的 slot 写；④ fp8 往返 q 的位置。B15b 的 fp8cache 测试只有 q_len=1 行（decode）和 hist=0 多行，**从没测 hist>0 的多行**。
+- 复现测试 `gqa_paged_fp8_hist_parity.rs`：D=256 win 1024 reqs [(400,16),(413,17),(1200,14),(90,11),(33,33),(1,1)] + [(1300,16),(2100,300)]、D=512 win 0；cfg=0 bf16 vs e4m3 位差 + 逐请求定位 + vs ref。链 `histpar.sh`（等 mixprobe DONE）。
+- 顺带：`KV_FP8_STORE` 默认开是 D70 定的（c8 TPOT -1.9%）；若 kernel 修不快，**先把默认改关**止血（c8 TPOT +0.2 ms，换正确性）。
