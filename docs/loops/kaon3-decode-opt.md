@@ -731,3 +731,9 @@ A 轮 c8 一次 TPOT p50 19.02 / TTFT 222（其它轮 13.45 / 583）—— 同�
 ## ★★★ D63 2026-10-28 B7 ABAB：B 侧（FP8_GEMV=1 MOE_DECODE_GEMV=1 + B6b pick_warps）c1 **8.77** / c8 **16.37**，比 B5（7.47 / 10.94）差 17% / 50% → 不合入，拆变量
 A 侧（=B6 行为）6.95 / 11.59 两轮稳定。B 侧三个变量叠在一起（B6 fp8 gemv、B6b warp 数、B7 MoE gemv），用同一二进制 env 开关拆：① 全关（= B5 + B6b 的 dense 受 pick_warps 影响）② 只 MOE_DECODE_GEMV=1 ③ 只 FP8_GEMV=1。中文一致、英文 "is is is" 与 A 同（二进制相同的非 gemv 部分）。
 - B7 ABAB 定稿（归档 b7_RESULT.txt）：B 两轮 8.77/8.76、16.37/16.42 稳定 ⇒ 真退化不是噪声。拆变量链 `/w/b7split.sh` 已起（同二进制：① MOE_DECODE_GEMV=1 vs 关 ② FP8_GEMV=1 vs 关；"关"= B5 路径 + B6b pick_warps 的 dense）。
+
+## ★★★★ D64 2026-10-28 B7 拆变量（同二进制 env）：`MOE_DECODE_GEMV=1` 单独 → c1 **7.48 → 9.27（+1.8 ms，+24%）** ⇒ **B7 的 MoE GEMV 是退化源，放弃接入**
+- "全关"= B5 路径 + B6b pick_warps：c1 7.48 / c8 11.14（B5 定稿 7.47 / 10.94）⇒ B6b 对 dense 基本中性（c8 +0.2，在噪声边）。
+- **为什么 B7 慢（事后看清）**：decode c1 每专家 1 行时，gate‖up 每 warp 只流 2 行 × 1.4 KB = 2.8 KB、lane 只 6 次迭代；down 每 warp 4 行 × 352 B，lane 只 2 次 —— 工作太碎，每 block 的 A 装载 + barrier + 收尾占大头，根本不是"流式"；而旧 grouped GEMM 的 mma tile 一个 CTA 吃 64 列 × 整 K，kernel 本身 18.6 us 只比下限差 3.6×。**B5 的"warp 一行 GEMV"只在单个大矩阵（N·K ≥ 数 MB、每 warp 流 ≥ 10 KB）有效，MoE 单专家 N=704 不满足。** 正确方向应是把 gate/up/down 三段融进一个 kernel 保 smem 中间量（减 launch 与往返），不是换 GEMV。
+- 另一疑点（查表数组 e2m1 落 local memory / exp2f）已顺手改成 cvt 内建（moe_fp4_decode.cu），但不足以翻盘，B7 不再验证；kernel 与测试留作小 M 参考，`MOE_DECODE_GEMV` 默认关，layer 接入保留（关着不影响）。
+- FP8_GEMV 拆分（split2）结果待出；B6c 已把 gemv 门槛改为 smem ≤ 24 KB（K=2816 → m ≤ 4）。
