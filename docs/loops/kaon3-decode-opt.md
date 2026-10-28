@@ -880,3 +880,4 @@ decode c1 的 MoE 段 nsys：grouped_gemm gate 18.6 + up 18.6 + down 12.5 + gelu
 ## D71 2026-10-28 b17 首批 B（B17a env 一次读 + KV_FP8_STORE 默认开）：c1 TPOT 6.39 持平、**TTFT 28.99 → 28.97 持平**；c8 = D70 的 B（11.35 / 507）
 - B17a 收益 ≈ 0：510 次 getenv/步在 prefill 里 <0.1 ms（我估 0.5–1 ms 高估了 5–10×）。不过是正确的清理（逐位、零风险），留着。**结论：prefill host 的 16 ms（D51）不在 env 读上；下一步 B17 必须先用 `HOST_TIME=1` 复测 prefill 步的 upload/launch/collect 三段**（D51 以来 B8 等改动可能已经改变分布），再决定图化。
 - 另：`executor.rs forward_sample` 里有一行无条件 `eprintln!("[fwd-sample] ENTER ...")`——每步一次 stderr 写（无锁但 syscall），prefill/decode 都有；顺手删（改 tracing::trace）。
+- **b17 定稿**：B 两轮 6.39/6.40、TTFT 28.97/28.90；c8 11.35/11.35、507/507 —— 与 b16+B15b 定稿一致，B17a 中性（清理保留，不入 CSV）。

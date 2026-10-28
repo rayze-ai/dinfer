@@ -1,0 +1,22 @@
+13:38:16
+EXIT=0
+m=1 h=2816 inter=2112: norm_q 全同 2816/2816 最大码差 0 超差 0 | act_q 全同 2112/2112 最大码差 0 超差 0 | down 最大误差 0.0073 超差 0/2816 => ok
+m=3 h=2816 inter=2112: norm_q 全同 8448/8448 最大码差 0 超差 0 | act_q 全同 6332/6336 最大码差 0 超差 0 | down 最大误差 0.0076 超差 0/8448 => ok
+m=8 h=2816 inter=2112: norm_q 全同 22528/22528 最大码差 0 超差 0 | act_q 全同 16887/16896 最大码差 0 超差 0 | down 最大误差 0.0072 超差 0/22528 => ok
+m=16 h=2816 inter=2112: norm_q 全同 45055/45056 最大码差 0 超差 0 | act_q 全同 33768/33792 最大码差 0 超差 0 | down 最大误差 0.0077 超差 0/45056 => ok
+m=5 h=256 inter=160: norm_q 全同 1280/1280 最大码差 0 超差 0 | act_q 全同 797/800 最大码差 0 超差 0 | down 最大误差 0.0001 超差 0/1280 => ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 29.20s
+rmsnorm_add tokens=1 amp=1: 位差 0/2816 => ok
+tokens=1 pes=false: ids true | w 位差 0/8 | offsets/tile_off/counts/cursor true | row2e true | sorted 区间集合 true | combine true => ok
+rmsnorm_add tokens=8 amp=1: 位差 0/22528 => ok
+tokens=7 pes=true: ids true | w 位差 0/56 | offsets/tile_off/counts/cursor true | row2e true | sorted 区间集合 true | combine true => ok
+rmsnorm_add tokens=33 amp=30: 位差 0/92928 => ok
+rmsnorm_add tokens=8 amp=0.01: 位差 0/22528 => ok
+test rmsnorm_add_bitwise ... ok
+tokens=64 pes=true: ids true | w 位差 0/512 | offsets/tile_off/counts/cursor true | row2e true | sorted 区间集合 true | combine true => ok
+tokens=64 pes=false: ids true | w 位差 0/512 | offsets/tile_off/counts/cursor true | row2e true | sorted 区间集合 true | combine true => ok
+tokens=33 pes=true: ids true | w 位差 0/264 | offsets/tile_off/counts/cursor true | row2e true | sorted 区间集合 true | combine true => ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+13:39:16
+PARITY_OK -> bN
+DONE
