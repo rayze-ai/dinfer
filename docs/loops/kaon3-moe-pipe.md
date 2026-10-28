@@ -174,3 +174,7 @@ nsys(2024.2.3)连--cuda-graph-trace=node也"no CUDA kernel data"——5090/sm120
 写完:①kernel grouped_gemm_kernel_dual<BK>(body逐字复制pipe,仅顶部按blockIdx.z前E选gate后E选up)②host moe_grouped_gemm_dual(grid.z=2E)③ffi声明+stub④ops封装⑤layer.rs moe_branch加MOE_GEMM_DUAL=1开关(默认分开两次)。
 **真收益假说(graph吃不掉)**:decode grid小(~8激活×N/BN≈88 block)占不满170 SM,occupancy~半;grid.z翻倍到176填满SM=多并行度,非"同活跑更快"。逐位天然一致(body不变)。
 **诚实**:省多少仍要A/B实测,不动手前拍胸脯(用户批评过)。下一步:put→编→dual逐位对拍(bad=0硬门槛)→graph态A/B(c1/c8,<3%回滚)。
+
+## ★★ R91 2026-10-28 第二刀dual逐位对拍 bad=0/15488(gate+up都0)通过→验收graph态A/B
+分开两次 vs dual一次,gate/up两输出各bad=0。逐位门禁过(body逐字复制保证)。
+下一步:graph态A/B(MOE_GEMM_DUAL关/开,c1/c8 TPOT+吞吐),看填满SM(grid.z翻倍)实际端到端收益。<3%回滚(说到做到,不狡辩)。
