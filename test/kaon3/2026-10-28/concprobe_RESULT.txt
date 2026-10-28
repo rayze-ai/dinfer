@@ -1,0 +1,18 @@
+bin=2026-10-28 16:01 16:38:53
+ serial×2 (no cache): 0/8 differ
+ c2 vs serial: 6/8 [DIFF@2 SAME DIFF@98 DIFF@11 DIFF@83 SAME DIFF@62 DIFF@38]
+ c8 vs serial: 6/8 [DIFF@2 SAME DIFF@98 DIFF@21 DIFF@83 DIFF@10 SAME DIFF@66]
+ c8 vs c8(repeat): 0/8 [SAME SAME SAME SAME SAME SAME SAME SAME]
+   nat0 serial='这里是为您准备的三句话介绍：\n\n长城的历史可以追溯到春秋战国时期，最初是为了抵御外敌而修建的。\n随着秦朝的统一，大规模的'
+         c8    ='这里有三句话介绍长城的历史：\n\n1. 长城的修建始于春秋战国时期，最初是为了防御各方势力。\n2. 到了秦汉时期，长城得到'
+   nat2 serial='To understand a hash table, you first need to understand the'
+         c8    ='To understand a hash table, you first need to understand the'
+   nat3 serial='金风送爽叶渐黄，\n秋意深处韵悠长。\n莫道残红无处觅，\n满山红透正芬芳。'
+         c8    ='金风送爽叶渐黄，\n秋意深处韵悠长。\n莫道残阳无美色，\n满城枫火映辉煌。'
+   nat4 serial='Here are three key differences between TCP and UDP:\n\n### 1. '
+         c8    ='Here are three key differences between TCP and UDP:\n\n### 1. '
+   nat5 serial='太阳系一共有 **8** 颗行星。按照距离太阳由近到远的顺序，它们分别是：\n\n1.  **水星** (Mercury)\n'
+         c8    ='太阳系一共有 **8 颗** 行星。\n\n按照距离太阳由近到远的顺序，它们分别是：\n\n1.  **水星** (Mercur'
+   nat7 serial='To reverse a linked list, you need to iterate through the li'
+         c8    ='To reverse a linked list, you need to iterate through the li'
+DONE
