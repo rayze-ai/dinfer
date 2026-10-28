@@ -1,0 +1,16 @@
+bin=2026-10-28 15:08 15:12:35
+   TTFT     mean    28.32  p50    28.36  p90    28.40  p99    28.50  max    28.50  (ms)
+   TPOT     mean     5.60  p50     5.59  p90     5.60  p99     5.61  max     5.61  (ms)
+== c8 x64 seed 11 (fresh)
+   throughput: 10.10 req/s   646.1 output tok/s   4973.8 total tok/s
+   TTFT     mean   133.79  p50   157.05  p90   157.61  p99   181.68  max   181.69  (ms)
+   TPOT     mean    10.45  p50    10.26  p90    11.64  p99    12.30  max    12.30  (ms)
+  Prefill steps=8 mean_total=45755us max_t=857
+  Decode steps=504 mean_total=9996us max_t=8
+  Paged steps=8 mean_total=114027us max_t=2585
+  -- Paged/Prefill 步 (mode t total_us)，按出现顺序前 40
+Prefill 857 64865;Paged 2585 114466;Prefill 857 42906;Paged 2568 113318;Prefill 857 43054;Paged 2573 113701;Prefill 857 43002;Paged 2585 114023;Prefill 853 43030;Paged 2571 113963;Prefill 855 43046;Paged 2578 114135;Prefill 857 43046;Paged 2574 114256;Prefill 856 43089;Paged 2567 114354;
+  -- 步序 run-length
+Prefill:857x1 Paged:2585x1 Decode:8x62 Decode:6x1 Prefill:857x1 Paged:2568x1 Decode:8x62 Decode:6x1 Prefill:857x1 Paged:2573x1 Decode:8x62 Decode:6x1 Prefill:857x1 Paged:2585x1 Decode:8x62 Decode:6x1 Prefill:853x1 Paged:2571x1 Decode:8x62 Decode:6x1 Prefill:855x1 Paged:2578x1 Decode:8x62 Decode:6x1 Prefill:857x1 Paged:2574x1 Decode:8x62 Decode:6x1 Prefill:856x1 Paged:2567x1 Decode:8x62 Decode:6x1 
+
+DONE

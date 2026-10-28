@@ -1,0 +1,8 @@
+bin=2026-10-28 15:18 15:48:58
+== env=[plain]
+ pair case0 A=400w B=60w/64: A:SAME B:SAME
+ pair case1 A=1500w B=400w/64: A:DIFF@4 B:DIFF@1
+ pair case2 A=400w B=400w/64: A:DIFF@7 B:DIFF@11
+ pair case3 A=400w B=400w/1: A:DIFF@1 B:SAME
+ c8 fresh: r0:SAME r1:SAME r2:SAME r3:DIFF@184 r4:DIFF@1 r5:DIFF@1 r6:DIFF@30 r7:DIFF@108 | 5/8 differ
+DONE

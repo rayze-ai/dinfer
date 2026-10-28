@@ -1,0 +1,22 @@
+bin=2026-10-28 15:18 gpu=0 15:24:59
+== env=[plain]
+ case0 A=400tok/200out B=400tok/64out:
+  A(decode in flight while B prefill): SAME
+  B(prefill in Paged step): SAME
+  A cache-态: SAME
+  B cache-态: SAME
+ case1 A=400tok/200out B=400tok/1out:
+  A(decode in flight while B prefill): DIFF at char 256: serial='place an year number thing it ' conc='an year number thing it world '
+  B(prefill in Paged step): SAME
+  A cache-态: DIFF at char 256: serial='place an year number thing it ' conc='an year number thing it world '
+  B cache-态: SAME
+ case2 A=400tok/200out B=60tok/64out:
+  A(decode in flight while B prefill): DIFF at char 1: serial='had was it was it was it was i' conc='was fact it of the end the end'
+  B(prefill in Paged step): DIFF at char 4: serial='.' conc=' people has by her people has '
+  A cache-态: DIFF at char 1: serial='had was it was it was it was i' conc='was fact it of the end the end'
+  B cache-态: DIFF at char 4: serial='.' conc=' people has by her people has '
+ case3 A=1500tok/200out B=400tok/64out:
+  A(decode in flight while B prefill): DIFF at char 8: serial='but they are in but they are i' conc='are they woman time with woman'
+  B(prefill in Paged step): DIFF at char 2: serial=' to be with woman on place gro' conc='n as but people has company on'
+  A cache-态: DIFF at char 8: serial='but they are in but they are i' conc='are they woman time with woman'
+  B cache-态: DIFF at char 2: serial=' to be with woman on place gro' conc='n as but people has company on'

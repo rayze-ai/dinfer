@@ -1,0 +1,19 @@
+bin=2026-10-28 15:18 gpu=0 15:24:12
+== env=[plain]
+== env=[plain]
+  prompt0 (400 words) DIFF: 1st vs 2nd first diff char 1: 'be be be be be be be be be be ' / 'as it is is is is is is is is '; 2nd==3rd True
+  prompt1 (413 words) SAME
+  prompt2 (1200 words) SAME
+  prompt3 (90 words) DIFF: 1st vs 2nd first diff char 32: 'work woman part is they the th' / 'same the that in are by her wo'; 2nd==3rd False
+  prompt4 (33 words) DIFF: 1st vs 2nd first diff char 6: '-The-The-The-The-The-The-The-T' / 's little bit of a fact that th'; 2nd==3rd True
+  prompt5 (64 words) SAME
+  prompt6 (65 words) SAME
+  total DIFF 3/7
+  prompt0 (400 words) SAME
+  prompt1 (413 words) SAME
+  prompt2 (1200 words) SAME
+  prompt3 (90 words) SAME
+  prompt4 (33 words) SAME
+  prompt5 (64 words) SAME
+  prompt6 (65 words) SAME
+  total DIFF 0/7

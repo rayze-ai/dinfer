@@ -1,0 +1,6 @@
+BUILD EXIT=0
+marker=569
+c2 vs serial: 6/8 requests differ (cache 态)
+c8 vs serial: 6/8 requests differ (cache 态)
+c8(fresh) vs serial: 3/8 requests differ
+DONE
