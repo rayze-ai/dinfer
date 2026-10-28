@@ -1335,7 +1335,7 @@ __global__ void __launch_bounds__(D2_WARPS * 32) gqa_decode_v2_kernel(
 // 注：blockDim = head_dim（运行时），partial 行跨度 = head_dim + 2；D=128 / 256 共用。
 __global__ void gqa_decode_merge_v2_kernel(const float* __restrict__ scratch, const int32_t* __restrict__ cu_seqlens_q,
                                            const int32_t* __restrict__ seq_lens, bf16* __restrict__ out, int H, int D,
-                                           int splits, int keys_per_split) {
+                                           int splits, int keys_per_split, int window) {
   const int b = blockIdx.x, h = blockIdx.y;
   int row = b;
   if (cu_seqlens_q) {
@@ -1344,8 +1344,10 @@ __global__ void gqa_decode_merge_v2_kernel(const float* __restrict__ scratch, co
   }
   const float* base = scratch + ((int64_t)b * H + h) * splits * (D + 2);
   const int d = threadIdx.x;
-  const int n = seq_lens[b];
-  const int eff = min(splits, max(1, (n + keys_per_split - 1) / keys_per_split));  // 与 v2 kernel 同式
+  // 有效 split 数与 kernel 侧同式：滑窗时按窗口内 key 数算（B3），否则会读到没写过的 split。
+  const int n_all = seq_lens[b];
+  const int n = window > 0 ? min(n_all, window) : n_all;
+  const int eff = min(splits, max(1, (n + keys_per_split - 1) / keys_per_split));  // 与 v2 / v3 kernel 同式
   // B4 第 2 轮：splits ≤ D2_MAX_SPLITS 时把全部 (m, l, o_d) 一次读进寄存器再归约——原来 2 × splits 轮串行依赖读，
   // splits 8 → 32 后 B300 上 2.4 → 5.4 µs。
   float ms[D2_MAX_SPLITS], ls[D2_MAX_SPLITS], os[D2_MAX_SPLITS];
@@ -1558,7 +1560,7 @@ extern "C" int gqa_decode_merge_v2_launch(const float* scratch, const int32_t* c
   dim3 grid((unsigned)num_reqs, (unsigned)heads);
   gqa_decode_merge_v2_kernel<<<grid, (unsigned)head_dim, 0, stream>>>(scratch, cu_seqlens_q, seq_lens,
                                                                       static_cast<bf16*>(out), heads, head_dim, splits,
-                                                                      keys_per_split);
+                                                                      keys_per_split, /*window=*/0);
   return last_err();
 }
 
@@ -1589,7 +1591,7 @@ static int gqa_decode_impl(const void* q, const void* cache, const int32_t* bloc
     if (splits > 1) {
       dim3 grid2((unsigned)num_reqs, (unsigned)heads);
       gqa_decode_merge_v2_kernel<<<grid2, (unsigned)head_dim, 0, stream>>>(
-          scratch, cu_seqlens_q, seq_lens, static_cast<bf16*>(out), (int)heads, (int)head_dim, splits, keys_per_split);
+          scratch, cu_seqlens_q, seq_lens, static_cast<bf16*>(out), (int)heads, (int)head_dim, splits, keys_per_split, window);
     }
     return last_err();
   }
@@ -1620,7 +1622,7 @@ static int gqa_decode_impl(const void* q, const void* cache, const int32_t* bloc
       if (splits > 1) {
         dim3 grid2((unsigned)num_reqs, (unsigned)heads);
         gqa_decode_merge_v2_kernel<<<grid2, (unsigned)head_dim, 0, stream>>>(
-            scratch, cu_seqlens_q, seq_lens, static_cast<bf16*>(out), (int)heads, (int)head_dim, splits, keys_per_split);
+            scratch, cu_seqlens_q, seq_lens, static_cast<bf16*>(out), (int)heads, (int)head_dim, splits, keys_per_split, window);
       }
       return last_err();
     }
@@ -1631,7 +1633,7 @@ static int gqa_decode_impl(const void* q, const void* cache, const int32_t* bloc
     if (splits > 1) {
       dim3 grid2((unsigned)num_reqs, (unsigned)heads);
       gqa_decode_merge_v2_kernel<<<grid2, (unsigned)head_dim, 0, stream>>>(
-          scratch, cu_seqlens_q, seq_lens, static_cast<bf16*>(out), (int)heads, (int)head_dim, splits, keys_per_split);
+          scratch, cu_seqlens_q, seq_lens, static_cast<bf16*>(out), (int)heads, (int)head_dim, splits, keys_per_split, window);
     }
     return last_err();
   }
