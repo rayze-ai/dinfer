@@ -242,10 +242,10 @@ __global__ void __launch_bounds__(256)
   }
 }
 
-// 流水版（第一刀，R71/R72）：K 循环 cp.async.cg 双缓冲，B 权重异步预取与 mma 重叠。
-// 逐位一致（硬门槛）：落 smem 的字节 / fill / mma 读法 / 归约序与 grouped_gemm_kernel 逐字相同，
-//   只把 B/sfb 的 global→smem 拷贝从「同步 STS」改成「cp.async 预取」；A/sfa 越界 fill 非 0（0x11/0x38），
-//   cp.async zfill 给不了，故 A/sfa 仍走寄存器暂存 + 条件 STS（同 gemm_fp8 的 A 侧路径）。
+// 流水版（第一刀，R71/R72/R73）：单缓冲 cp.async 版——结构与 grouped_gemm_kernel 逐行一致，
+// 只把 B / sfb 的 global→smem 从「同步 STS」换成「cp.async + commit + wait_group 0」。
+// A/sfa 原样 STS。先验证 cp.async 索引逐位对（wait 0 无重叠，不提速），过了再加双缓冲流水。
+// 逐位硬门槛：落 smem 字节 / fill / mma 读法 / 归约序与旧版逐字相同。
 template <int BK>
 __global__ void __launch_bounds__(256)
     grouped_gemm_kernel_pipe(const uint8_t* __restrict__ A, const uint8_t* __restrict__ Asc,
@@ -260,10 +260,10 @@ __global__ void __launch_bounds__(256)
   constexpr int RSA = BK / 2 + PAD, RSB = BK / 2 + PAD;
   constexpr int NQ4 = BK / 64;
   constexpr int NB16 = BK / 16;
-  __shared__ uint8_t sA[2][BM * RSA];
-  __shared__ uint8_t sB[2][BN * RSB];
-  __shared__ uint32_t sfa[2][BM * NQ4];
-  __shared__ uint32_t sfb[2][BN * NQ4];
+  __shared__ uint8_t sA[BM * RSA];
+  __shared__ uint8_t sB[BN * RSB];
+  __shared__ uint32_t sfa[BM * NQ4];
+  __shared__ uint32_t sfb[BN * NQ4];
 
   const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
   const int wm = warp >> 2, wn = warp & 3;
@@ -277,92 +277,45 @@ __global__ void __launch_bounds__(256)
   const int nk = (K + BK - 1) / BK;
   const int rb = BK / 32;
 
-  // 预取 B/sfb 到 buffer st（cp.async），提交一个 group。布局字节与旧版逐字相同。
-  auto load_b = [&](int st, int kb) {
-    const uint8_t* bsrc = B + static_cast<size_t>(n_blk) * (K / 2) + kb * (BK / 2);
-    for (int i = tid; i < (BN * BK / 2) / 16; i += blockDim.x) {
-      const int r = i / rb, c = i % rb;
-      const bool ok = (n_blk + r < N);
-      cp16(smem_u32(&sB[st][r * RSB + c * 16]),
-           bsrc + (static_cast<size_t>(r) * (K / 32) + c) * 16, ok ? 16 : 0);
-    }
-    for (int i = tid; i < BN * NQ4; i += blockDim.x) {
-      const int r = i / NQ4, q = i % NQ4;
-      const bool ok = (n_blk + r < N);
-      cp4(smem_u32(&sfb[st][r * NQ4 + q]),
-          S + static_cast<size_t>(n_blk + r) * (K / 16) + kb * NB16 + q * 4, ok ? 4 : 0);
-    }
-    asm volatile("cp.async.commit_group;\n");
-  };
-  // A/sfa：读 global 到寄存器（本 block 每线程最多各 1 个，BM*BK/2/16 与 BM*NQ4 ≤ 256）。
-  constexpr int NA = (BM * BK / 2 / 16 + 255) / 256;
-  constexpr int NFA = (BM * NQ4 + 255) / 256;
-  auto conv_a = [&](int kb, uint4 (&areg)[NA], uint32_t (&fareg)[NFA]) {
-    const uint8_t* asrc = A + static_cast<size_t>(m_blk) * (K / 2) + kb * (BK / 2);
-#pragma unroll
-    for (int t = 0; t < NA; ++t) {
-      const int i = tid + t * 256;
-      if (i < (BM * BK / 2) / 16) {
+  for (int kb = 0; kb < nk; ++kb) {
+    // A：原样 STS（越界 fill 0x11 nibble）。
+    {
+      const uint4* sa_src = reinterpret_cast<const uint4*>(A + static_cast<size_t>(m_blk) * (K / 2) + kb * (BK / 2));
+      for (int i = tid; i < (BM * BK / 2) / 16; i += blockDim.x) {
         const int r = i / rb, c = i % rb;
         const uint4 z = make_uint4(0x11111111u, 0x11111111u, 0x11111111u, 0x11111111u);
-        areg[t] = (m_blk + r < M)
-                      ? *reinterpret_cast<const uint4*>(asrc + (static_cast<size_t>(r) * (K / 32) + c) * 16)
-                      : z;
+        *reinterpret_cast<uint4*>(&sA[r * RSA + c * 16]) =
+            (m_blk + r < M) ? sa_src[static_cast<size_t>(r) * (K / 32) + c] : z;
       }
-    }
-#pragma unroll
-    for (int t = 0; t < NFA; ++t) {
-      const int i = tid + t * 256;
-      if (i < BM * NQ4) {
+      for (int i = tid; i < BM * NQ4; i += blockDim.x) {
         const int r = i / NQ4, q = i % NQ4;
-        fareg[t] = (m_blk + r < M)
-                       ? *reinterpret_cast<const uint32_t*>(Asc + static_cast<size_t>(m_blk + r) * (K / 16) +
-                                                            kb * NB16 + q * 4)
-                       : 0x38383838u;
+        sfa[r * NQ4 + q] =
+            (m_blk + r < M)
+                ? *reinterpret_cast<const uint32_t*>(Asc + static_cast<size_t>(m_blk + r) * (K / 16) + kb * NB16 + q * 4)
+                : 0x38383838u;
       }
     }
-  };
-  auto store_a = [&](int st, const uint4 (&areg)[NA], const uint32_t (&fareg)[NFA]) {
-#pragma unroll
-    for (int t = 0; t < NA; ++t) {
-      const int i = tid + t * 256;
-      if (i < (BM * BK / 2) / 16) {
+    // B：cp.async 预取（越界 zfill 0，与旧版 ternary 填 0 一致）。
+    {
+      const uint8_t* bsrc = B + static_cast<size_t>(n_blk) * (K / 2) + kb * (BK / 2);
+      for (int i = tid; i < (BN * BK / 2) / 16; i += blockDim.x) {
         const int r = i / rb, c = i % rb;
-        *reinterpret_cast<uint4*>(&sA[st][r * RSA + c * 16]) = areg[t];
+        const bool ok = (n_blk + r < N);
+        cp16(smem_u32(&sB[r * RSB + c * 16]), bsrc + (static_cast<size_t>(r) * (K / 32) + c) * 16, ok ? 16 : 0);
       }
     }
-#pragma unroll
-    for (int t = 0; t < NFA; ++t) {
-      const int i = tid + t * 256;
-      if (i < BM * NQ4) {
+    // sfb：cp.async 预取（越界 zfill 0）。
+    {
+      for (int i = tid; i < BN * NQ4; i += blockDim.x) {
         const int r = i / NQ4, q = i % NQ4;
-        sfa[st][r * NQ4 + q] = fareg[t];
+        const bool ok = (n_blk + r < N);
+        cp4(smem_u32(&sfb[r * NQ4 + q]), S + static_cast<size_t>(n_blk + r) * (K / 16) + kb * NB16 + q * 4,
+            ok ? 4 : 0);
       }
     }
-  };
-
-  // prologue：buffer 0 的 B(cp.async) + A/sfa（寄存器→STS）。A 在循环首个 __syncthreads 后对 mma 可见。
-  {
-    uint4 areg[NA];
-    uint32_t fareg[NFA];
-    load_b(0, 0);
-    conv_a(0, areg, fareg);
-    store_a(0, areg, fareg);
-  }
-  for (int kb = 0; kb < nk; ++kb) {
-    const int cur = kb & 1, nxt = cur ^ 1;
-    uint4 anext[NA];
-    uint32_t fanext[NFA];
-    if (kb + 1 < nk) {
-      load_b(nxt, kb + 1);
-      conv_a(kb + 1, anext, fanext);
-    } else {
-      asm volatile("cp.async.commit_group;\n");
-    }
-    asm volatile("cp.async.wait_group 1;\n");
+    asm volatile("cp.async.commit_group;\n");
+    asm volatile("cp.async.wait_group 0;\n");
     __syncthreads();
-    // buffer cur 的 A/sfa 由上一轮（或 prologue）存入；本轮存 nxt（下一轮读，中间有 __syncthreads）。
-    if (kb + 1 < nk) store_a(nxt, anext, fanext);
 
     const int nbk = BK / 64;
     for (int b = 0; b < nbk; ++b) {
@@ -373,19 +326,19 @@ __global__ void __launch_bounds__(256)
       for (int g = 0; g < 4; ++g) {
         const int m = (lane / 4) + 8 * (g % 2);
         const int kb_ = kb0 + 8 * (lane % 4) + 32 * (g / 2);
-        a[g] = *reinterpret_cast<const uint32_t*>(&sA[cur][(mrow + m) * RSA + kb_ / 2]);
+        a[g] = *reinterpret_cast<const uint32_t*>(&sA[(mrow + m) * RSA + kb_ / 2]);
       }
       const int brow = lane / 4;
 #pragma unroll
       for (int g = 0; g < 2; ++g) {
         const int kb_ = kb0 + 8 * (lane % 4) + 32 * g;
-        b0[g] = *reinterpret_cast<const uint32_t*>(&sB[cur][(ncol + brow) * RSB + kb_ / 2]);
-        b1[g] = *reinterpret_cast<const uint32_t*>(&sB[cur][(ncol + 8 + brow) * RSB + kb_ / 2]);
+        b0[g] = *reinterpret_cast<const uint32_t*>(&sB[(ncol + brow) * RSB + kb_ / 2]);
+        b1[g] = *reinterpret_cast<const uint32_t*>(&sB[(ncol + 8 + brow) * RSB + kb_ / 2]);
       }
       const int sam = (8 * (lane & 1) + (lane >> 2)) & 15;
-      const uint32_t sa = sfa[cur][(mrow + sam) * NQ4 + b];
-      const uint32_t sb0 = sfb[cur][(ncol + brow) * NQ4 + b];
-      const uint32_t sb1 = sfb[cur][(ncol + 8 + brow) * NQ4 + b];
+      const uint32_t sa = sfa[(mrow + sam) * NQ4 + b];
+      const uint32_t sb0 = sfb[(ncol + brow) * NQ4 + b];
+      const uint32_t sb1 = sfb[(ncol + 8 + brow) * NQ4 + b];
       mma_fp4(a, b0, sa, sb0, acc);
       mma_fp4(a, b1, sa, sb1, acc2);
     }
