@@ -1241,3 +1241,6 @@
 
 ## 2026-10-28 验证链编译失败仍跑 A/B（跑了旧二进制出"结果"）+ 同一链被起两次
 现象：bN.sh 编译 EXIT=101 后照常跑 B 轮，B 侧是上一版二进制 + 新 env，数字像真的；另一次 b8.sh 失败后我又起 b8b.sh，前者的 bN 还没停，RESULT 里 B/A2 重复出现。解法：bN 加 "EXIT≠0 → NOBUILD DONE 退出"；起新链前 `pgrep -ax bash | grep /w/` 看旧链；监控脚本只在 bN 段判 DONE。
+
+## 2026-10-28 验证链 serve 进程没绑核，跑了一天 20 多轮才发现
+现象：CLAUDE.md 要求三方（dinfer / vLLM / 压测端）taskset 不重叠并写进报告；bN.sh/envab.sh 只给 bench 绑了 60-91，serve 在 128 核上浮动（2 NUMA，GPU0 亲和 0-31,64-95）。根因：RESULT 文件没有钉核字段，没人核对。解法：bN/stepB_verify 加 `taskset -c ${SERVE_TASKSET:-0-31}`，RESULT 头部打印钉核口径；c8 图外时间（D75 ~4 ms/步）的归因必须先过绑/不绑 A/B。
