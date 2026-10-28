@@ -17,3 +17,14 @@
 ## 3. 卡型旋钮（norm layout 等）先用现成 env 三态 A/B，再落进 ArchProfile（2026-10-28）
 - **判断**：能用环境变量切的实现选择，先同轮三态 A/B（含输出一致），赢家写进 `ArchProfile` 按 `Arch` 分支，不留 env 依赖。B2：Sm120 h=2816 单行 norm Block256 2.4 us < Block1024 6.8 us < warp，−3.4%。
 - **怎么用**：A/B 脚本每个变体都要抓固定 prompt 的输出；输出坏（"is is is…"）的变体数字作废（D57 `KAON3_MEGA=0` 11.33 ms 就是坏的）。
+
+## 18. 小 M（decode）GEMM 先做 roofline 表，再选结构（2026-10-28 kaon3 B5–B7）
+- 每段：字节/层 ÷ 卡带宽 = 下限，与 nsys 实测比。离下限 >5× 的段才是刀；dense mega 8.7× → 换带宽型 GEMV 一刀 -22%。
+- "warp 一行 GEMV" 只对**单个大矩阵**（每 warp 流 ≥10 KB）有效；MoE 单专家 N=704 每 warp 只 2.8 KB，比 mma tile 慢 1.8 ms（B7 翻车）。结构迁移前先算每 warp 工作量。
+- A 驻 smem 的 GEMV：smem 占用决定 block/SM；m=8,K=2816 的 45 KB 让 c8 反慢（B6），门槛 ≤24 KB。warp 数不是越多越好——block 数（并行度）比 A 复用重要。
+
+## 19. graph 内 launch 间隙 ≈ 0.5–0.7 us，不是 1.5（2026-10-28 D65/D66）
+7 launch → 1 实省 0.16 ms；5 launch → 1 省 0.07。用 NO_GRAPH/eager 的间隙估 graph 态收益会高估 2–3×。减 kernel 数是小刀，>0.2 ms 的刀在 kernel 本身（KV fp8 存、MoE GEMM 流水/tile）。
+
+## 20. ABAB 多变量叠加必拆（2026-10-28 D64/D65/D66）
+一个链里 ≥2 个改动时，用 `envab.sh`（同二进制、env 开关）逐个拆；A 侧二进制是谁（bN 备份的是上一次编的）要写进记录；两个 RESULT 拼在一条输出里按文件名分段读，别按行序归档（D64 错读过）。
