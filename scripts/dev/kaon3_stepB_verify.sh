@@ -12,12 +12,13 @@ cargo build --release -p dinfer --features kaon3 > /w/dinfer/tmp_${TAG}_build.lo
 grep -E "^error" -A4 /w/dinfer/tmp_${TAG}_build.log | head -12 >> $R
 grep -oE "Compiling dinfer-[a-z0-9]+" /w/dinfer/tmp_${TAG}_build.log | sort -u | tr "\n" " " >> $R; echo >> $R
 [ $brc -ne 0 ] && { grep -E "^error" -A8 /w/dinfer/tmp_${TAG}_build.log | head -20 | cut -c1-200 >> $R; echo "NOBUILD DONE" >> $R; exit 1; }   # 编译失败不跑 A/B（b8b 教训：跑了旧二进制出无效数字）
+echo "serve_taskset=${SERVE_TASKSET:-0-31} bench_taskset=60-91" >> $R
 echo "new_bin=$(stat -c %y target/release/dinfer | cut -c1-16) marker=$(strings target/release/dinfer | grep -c "$MARKER")" >> $R
 M=/hf_data/hub/models--kaon-release--Kaon-V3-nvpf4-mixed/snapshots/e268bef12555d299ed7ca02ade5e77f239f27478
 run_one() {
   local tag=$1 bin=$2 benv=${3:-}   # 第 3 参：只给 B/B2 侧的环境开关（如 FP8_GEMV=1），A 侧为空
   export MOE_GROUPED=1 KAON3_MEGA=1 MEGA_SPGU=4 MEGA_SPDN=4 ROUTER_GEMM_BI=0 CUDA_VISIBLE_DEVICES=0
-  env $benv $bin serve --model "$M" --tokenizer "$M" --port $PORT --max-model-len 16384 --max-num-seqs 64 --max-num-batched-tokens 4096 >/w/dinfer/tmp_${TAG}_$tag.log 2>&1 &
+  taskset -c ${SERVE_TASKSET:-0-31} env $benv $bin serve --model   # 三方钉核：serve 0-31(NUMA0=GPU0 亲和) / bench 60-91 / vLLM 容器自管 "$M" --tokenizer "$M" --port $PORT --max-model-len 16384 --max-num-seqs 64 --max-num-batched-tokens 4096 >/w/dinfer/tmp_${TAG}_$tag.log 2>&1 &
   local sp=$!
   for i in $(seq 1 150); do sed "s/\x1b\[[0-9;]*m//g" /w/dinfer/tmp_${TAG}_$tag.log | grep -q "listening addr" && break; sleep 1; done
   sed "s/\x1b\[[0-9;]*m//g" /w/dinfer/tmp_${TAG}_$tag.log | grep -q "listening addr" || { echo "$tag NOTUP" >> $R; sed "s/\x1b\[[0-9;]*m//g" /w/dinfer/tmp_${TAG}_$tag.log | grep -iE "error|panic" | tail -2 | cut -c1-200 >> $R; kill -9 $sp; return; }
