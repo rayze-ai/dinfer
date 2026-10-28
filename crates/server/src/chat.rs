@@ -528,10 +528,16 @@ pub async fn chat_completions(State(be): State<Backend>, Json(req): Json<ChatCom
         add_generation_prompt: add_gen,
         continue_final_message: continue_final,
     };
+    // HOST_TIME=1：量 render(chat 模板 + tokenize)耗时，二分 TTFT 2 秒是 server 层还是 engine/GPU。
+    let _ht_render = std::time::Instant::now();
     let mut prompt = match be.render(&rr) {
         Ok(p) => p,
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("chat template: {e:#}")),
     };
+    if std::env::var("HOST_TIME").ok().as_deref() == Some("1") {
+        tracing::info!("[render-time] render(模板+tokenize)={:.1}us prompt_ids={}",
+            _ht_render.elapsed().as_secs_f64() * 1e6, prompt.ids.len());
+    }
     if let Err(m) = truncate_prompt(&mut prompt.ids, req.sampling.truncate_prompt_tokens) {
         return err(StatusCode::BAD_REQUEST, m);
     }
