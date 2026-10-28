@@ -785,3 +785,4 @@ decode c1 的 MoE 段 nsys：grouped_gemm gate 18.6 + up 18.6 + down 12.5 + gelu
 - 新 kernel `rmsnorm_add_bf16`：`res += bf16(rmsnorm(x)·w)`（一 block 一行，先算 norm 行再原地加 res）。① 用它（o → x）；② 第二段 `post_ff_norm(norm) → h2; x += h2` 用它（但 h2 之后还被用？看 1386 后——h2 下一层重算，不再读 → 可省写 h2）。
 - ② 第一段 `norm += h2` 是 add_inplace，再 norm：用现有 `fused_add_rmsnorm`（res=norm, x=h2, out=tmp）语义 = `norm += h2; tmp = rmsnorm(norm)·w` 正好。
 - 全部逐位（同一 norm 数值、同一 bf16 加）。等 b8c 定稿 + b8d（B12）后做；与 B10/B11/B12 一起把 launch 从 ~1100 → ~900/步。
+- **b8c 定稿（ABAB 两轮稳定，归档 b8c_RESULT.txt）**：c1 TPOT 7.49/7.49 → **6.63/6.64（-11.4%）**，吞吐 125.5→143；**TTFT c1 38.2→29.8（-22%），c8 580→493（-15%）**；c8 TPOT 11.12/11.08 → 11.60/11.60（+4.5%）。中文四次一致。入 CSV round b8（含 B6c/B8/B10/B11 四项，c8 的 +0.5 ms 用 split 拆：`/w/b8csplit.sh` 已起，FP8_GEMV 与 MOE_ROUTE_FUSED=0 各一组）。六刀（B1–B5、b8c）累计 c1 **17.07 → 6.64（-61%）**，vs vLLM 4.69 差 1.42×；TTFT c1 43 → 29.8 已反超 vLLM 25.0 的差距缩到 1.19×。

@@ -1,0 +1,29 @@
+12:46:51
+EXIT=0
+Compiling dinfer-kaon3 Compiling dinfer-kernels Compiling dinfer-layers 
+new_bin=2026-10-28 12:47 marker=19
+A c1:  1.96 req/s 125.5 output TTFT mean 38.54 p50 38.25 TPOT mean 7.49 p50 7.49 
+
+A c8:  6.61 req/s 423.1 output TTFT mean 409.42 p50 579.92 TPOT mean 12.70 p50 11.12 
+
+A out:  the following.  Wait, I'm not sure.  Wait, I'm not sure.  Wait,
+A out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到两千多年前的春秋战国时期，当时各诸侯国开始修建防御工事。  随后，秦始帝通过大规模的工程将各地的防御墙连接起来，形成了最初的防御体系。  在随后的明朝时期，长城得到了最全面、最坚固的修缮
+B c1:  2.23 req/s 143.0 output TTFT mean 29.88 p50 29.79 TPOT mean 6.63 p50 6.63 
+
+B c8:  6.80 req/s 435.2 output TTFT mean 394.30 p50 493.23 TPOT mean 12.41 p50 11.60 
+
+B out:  the following.  Wait, I'm not sure if I should be here.  Wait, I'm not
+B out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到春秋战国时期，最初是为了抵御外敌而修建的。 随着秦朝的统一，大规模的修筑工作开始，并逐渐演变成后来的各个朝代。 明朝时期，长城迎来了最辉煌的建设阶段，形成了我们今天所看到的宏伟规模。
+A2 c1:  1.96 req/s 125.5 output TTFT mean 38.19 p50 38.22 TPOT mean 7.49 p50 7.49 
+
+A2 c8:  6.62 req/s 423.7 output TTFT mean 409.45 p50 580.22 TPOT mean 12.67 p50 11.08 
+
+A2 out:  the following.  Wait, I'm not sure.  Wait, I'm not sure.  Wait,
+A2 out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到两千多年前的春秋战国时期，当时各诸侯国开始修建防御工事。  随后，秦始帝通过大规模的工程将各地的防御墙连接起来，形成了最初的防御体系。  在随后的明朝时期，长城得到了最全面、最坚固的修缮
+B2 c1:  2.23 req/s 142.9 output TTFT mean 29.81 p50 29.77 TPOT mean 6.64 p50 6.64 
+
+B2 c8:  6.80 req/s 435.4 output TTFT mean 394.35 p50 493.31 TPOT mean 12.40 p50 11.60 
+
+B2 out:  the following.  Wait, I'm not sure if I should be here.  Wait, I'm not
+B2 out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到春秋战国时期，最初是为了抵御外敌而修建的。 随着秦朝的统一，大规模的修筑工作开始，并逐渐演变成后来的各个朝代。 明朝时期，长城迎来了最辉煌的建设阶段，形成了我们今天所看到的宏伟规模。
+DONE
