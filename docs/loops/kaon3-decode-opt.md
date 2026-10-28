@@ -313,3 +313,7 @@ gqa.cu:880-881:**通用慢路径=gqa_prefill_ref_kernel旧参考实现,"每(req,
 **风险**:v6 kernel从没编译过D=512,可能有D=256硬编码假设(fragment数/O累加器)→先编译验证纯D参数化;smem 97KB接近上限可能occupancy=0启不动→TILE降8。
 **停止条件**:①编译过(5090 sm120)②逐位对拍ref_kernel(prefill D=512同输入bad=0,或对vLLM prompt_logprobs)③plen扫TTFT从超线性变线性④端到端c1/2/4/8 bench TTFT大降进CSV(step C)。
 **ROI**:TTFT plen1024 1960ms,5个全注意力层走O(L²)是主因,补flash后该从~2秒降到数十ms(接近vLLM 82ms),TTFT是最大缺口(慢24×)。
+
+## ★★★ D26 2026-10-28 v6<512>编译通过(smem/寄存器都过)→验TTFT+输出一致性
+cargo build -p dinfer --features kaon3 EXIT=0,无too much shared/spill/error=v6<512>(o[64][4]=256寄存器+smem~97KB)构建OK。Step B第一关过。
+**第二关A/B**:serve两次,GQA_D512_REF=0(新flash)vs=1(旧ref),对比:①TTFT降没降(plen1024,目标2秒→数十ms)②输出token文本一致(数值对拍,greedy T=0同输入该逐token同)。一致+TTFT降=成立。
