@@ -949,3 +949,6 @@ D72 表：qkv gemv 16.5 us vs 8.6 MB/1.79 TB/s = 4.8 us（3.4×）；dense down 
 - 若 ④⑤⑥ 合计 ~4 ms：刀 = 把 publish/detokenize 挪到独立线程、plan 构建复用缓冲、serve 进程 taskset 到独立核组（bench 已绑 60–91）。
 - **B22a 发现**：bN/envab 里 **dinfer serve 没绑核**（只有 bench `taskset -c 60-91`）——违反 CLAUDE.md "三方钉核不重叠" 规则（vLLM 容器也没查）。机器 2 NUMA（node0: 0-31,64-95；node1: 32-63,96-127），bench 在 node0 的 60-91；serve 的 tokio worker + engine 线程浮动在 128 核上，可能与 bench 同核 / 跨 NUMA 访问 pinned host 内存。c8 时 host 工作 ×8，受影响更大。探针 `/w/pinsplit.sh`（envab 加 `SERVE_TASKSET`）：不绑 vs 绑 0-31，排在 hosttime_c8 之后。**无论结果，bN/envab/stepA 都要补 serve 绑核并写进报告**（规则要求）。
 - b20 A 侧（b18 二进制、不带 FP8_GEMV）c1 6.05（= 5.59 + FP8_GEMV 的 0.46，自洽）；A c8 TTFT 133 / TPOT 16.1 又是排队态噢动（第 4 次见，都在 A 轮首跑：GPU 刚从上一链切换，疑 warmup 不足）。
+
+## ★★★ D76 2026-10-28 b20 首批 B（B20 fp8 gemv 批量预取）：c1 TPOT **5.63**（b18 定稿 5.59 → **+0.7%，中性偏负**）；c8 10.28 → **10.00（-2.7%）**；TTFT 持平
+- 预期 -0.5 ms 没有兑现：c1 持平说明 qkv/dense gemv 的 16.5 / 8.7 us **不是**"逐轮等 HBM"——批量发 8 个 16B 读进寄存器后时间没变 ⇒ 瓶颈在别处（每 block 只 2 warp × 768 block、每 SM 同时 ~9 warp，访存并行度本就够？或 e4m3→f32 转换 ALU：每 uint4 16 次 cvt + 16 FMA×M_TILE，m=1 时 cvt 占主导——qkv 8.6 MB = 8.6M 元素 cvt，5090 ~100 T ops/s 不该是瓶颈…）。待 nsys 复抓看 gemv us/call 是否变（c8 -2.7% 可能来自 m=2..4 的 M_TILE 路径受益）。英文输出变了（"if I'm doing it right"）——**B20 应逐位（同 c 序），输出却变** ⇒ 要么 fmaf 顺序被编译器重排（`#pragma unroll` 后 r0/r1 两行交错？不影响单元素序），要么 m>1 时 M_TILE 路径……对拍 9 场景位同过了。记录，等 A2/B2 + nsys。
