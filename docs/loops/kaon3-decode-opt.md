@@ -959,3 +959,7 @@ D72 表：qkv gemv 16.5 us vs 8.6 MB/1.79 TB/s = 4.8 us（3.4×）；dense down 
 
 ## B23 预案 2026-10-28：attention 前段 5 launch → 1（head_rmsnorm q/k/v + rope + fp8rt/cache_write）
 nsys c1b：q/k/v 逐头 norm 0.89+1.09+0.85 us、rope 3.26、cache_write_fp8rt 4.76 ⇒ 10.9 us/层 + 4 个间隙 ≈ 13 us；融成一个 per-token kernel（block=token，warp=头）估 ~5 us → **-0.25 ms/步**。难点：逐位——逐头 norm 现走 `rmsnorm_vec_kernel<128,1>`（Block256 布局：每线程 8 元素组平方和 → block 树归约 `rms_ss_triton`），融合 kernel 要复刻同一归约树（把 `rms_ss_triton`/`rms_inv`/`norm_mid` 抽到共享头）。排 B16b 之后。
+
+## ★★★★★ D77 2026-10-28 hosttime_c8（b20 二进制，c8 ×64，32 out）：**executor upload=20us launch=4–57us collect(dtoh_sync)=9.7–10.2 ms；engine sched=1us publish=8us total=9.4 ms** ⇒ **c8 每步 host ≈ 0，GPU 占 100%**
+- **D75 "c8 图外 ~4 ms" 作废**：是我拿 nsys 态的 kernel 和（nsys 有开销且 instance 边界不是 bench 的"步"）与非 nsys 态 TPOT 相减。真相：c8 TPOT 10.0 ms 全是 GPU。B22（host 刀）**撤销**；pinsplit 仍跑完当作钉核口径校准，不期待收益。
+- 那 c8 比 c1 多的 4.4 ms（10.0 vs 5.6）在哪些 kernel 上？nsys c8 表（÷64）重算见下；候选：① fp8 gemv 在 m>4 回退 cuBLASLt nvjet（qkv/oproj/dense 三件 ×30 层，nvjet 对 M=8 的效率）；② MoE grouped GEMM R=64 行（tile 数 ×8，CTA 多但每 CTA 仍串 K）；③ attention KV 读 8×（v3 4.7→? d512 18）；④ lm_head gemv 8 行（870 us 不变）。
