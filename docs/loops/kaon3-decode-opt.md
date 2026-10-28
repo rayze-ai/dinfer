@@ -692,3 +692,8 @@ h=2816 单行 norm（181 次/步）：Block1024 每线程 1 向量两级归约 6
 - B5 第一次编译失败：extern "C" 块里 `bf16` 未限定（别名在 `dinfer` 命名空间）→ `using dinfer::bf16;`，b3f34d3，链重启。
 - **B6 预案（等 B5 链结束再 put）**：qkv / o_proj fp8 GEMM（nvjet 29.4+15.7 us/层 = 1.31 ms/步，11 MB 权重下限 6 us）decode 时走同一 `mlp_fp8_gemv`：`QLinear::forward` FP8 分支 tokens ≤ 16 且 `M_TILE·K·2 ≤ 96 KB`（K=8192 的全注意力 o_proj 只 m ≤ 4 走）时 quant_fp8 → gemv，`FP8_GEMV_OLD=1` 回退。预期 -0.9 ms/步。
 - **B5 对拍通过（`tmp_b5par_RESULT.txt`，编译 + 测试 17.5 s）**：5 场景全 ok。norm_q fp8 码全同 2816/2816、8448/8448、22528/22528、45055/45056、1280/1280（最大码差 0）；act_q 全同率 99.9%（33768/33792 等，差的那几个也是码差 0 ⇒ 实为 ±0 码——`code_diff` 为 0 但位不同只能是 +0/−0）；down bf16 最大误差 0.0073–0.0077（与 B3 测试同本底），超差 0。与 mega 口径同一组 scale 公式，norm 阶段 ±1 码的担心没出现。ABAB 已起。
+
+## ★★★★★★ D61 2026-10-28 B5 首批 A/B（A=B4 二进制，B=B5）：c1 TPOT 9.64 → **7.47（-22.5%）**，c8 13.45 → 10.94（-18.7%），吞吐 99.1→125.7 / 373.8→422.4
+预测 -1.8 ms 实得 -2.17 ms/步（mega 2.61 ms → GEMV 三 kernel ≈ 0.44 ms，比 25 us/层预期还好）。TTFT 不变（prefill 不走此路径）。
+输出：中文 chat 一致；英文 raw prompt " the capital of France is…"（循环）→ " the following.  Wait, I'm not sure…"——非逐位路径（累加序）在低置信样本上翻 token，与 D58 结论同；对错以 `mlp_fp8_decode_parity`（fp8 码差 0 / bf16 ≤ 0.0077）为准。
+A 轮 c8 一次 TPOT p50 19.02 / TTFT 222（其它轮 13.45 / 583）—— 同一二进制、同参数，是 bench 调度/排队态差异（TTFT 低 TPOT 高 = 请求没叠上），不是代码；看 A2 c8 是否回 13.4x。等 A2/B2。
