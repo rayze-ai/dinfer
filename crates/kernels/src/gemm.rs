@@ -816,9 +816,9 @@ impl Gemm {
                 // B25（loop kaon3-decode-opt D78）：tile=13 的 want 匹配是**逐位对齐 vLLM** 的口径，对 prefill 的大 M
                 // （m=1560 时 nvjet 64x32 tile）比大 tile 慢 ~3×（nsys 态 qkv 249 us vs 算力下限 22）。m ≥ 64 时对 32 个
                 // 启发式候选各计时 timing_iters 次取最快（在真实缓冲上跑，out 被覆盖多次无副作用），按 (m 桶, n, k) 缓存；
-                // m < 64（decode / 对拍）保持 parity 口径。`FP8_LT_TUNE=0` 关。
+                // m < 64（decode / 对拍）保持 parity 口径。D80：c1 TTFT 持平、c8 TPOT/TTFT +3–4% 两轮同向且中文输出不再逐位 → **默认关**，`FP8_LT_TUNE=1` 开。
                 static TUNE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-                let tune_on = *TUNE.get_or_init(|| std::env::var("FP8_LT_TUNE").map_or(true, |v| v != "0"));
+                let tune_on = *TUNE.get_or_init(|| std::env::var("FP8_LT_TUNE").map_or(false, |v| v == "1"));
                 let pick = if tune_on && m >= 64 && self.tune_enabled() {
                     let iters = self.profile.gemm_tune.timing_iters.max(1);
                     let mut best = (f32::INFINITY, parity_pick);
