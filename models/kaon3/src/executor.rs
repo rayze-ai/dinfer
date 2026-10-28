@@ -47,6 +47,8 @@ pub struct KaonExecutor {
     max_rows: usize,
     pub graph_steps: u64,
     pub eager_steps: u64,
+    /// B29：本步是插队 prefill（cut-in）→ 采样结果不写 prev_chosen（在飞 decode 行的 gather 要上一 decode 步的）。
+    skip_prev_chosen: bool,
 }
 
 impl KaonExecutor {
@@ -103,6 +105,7 @@ impl KaonExecutor {
             max_tokens,
             max_rows,
             graph_steps: 0,
+            skip_prev_chosen: false,
             eager_steps: 0,
             stream,
             gemm,
@@ -171,6 +174,10 @@ impl KaonExecutor {
     fn forward_device_mode(&mut self, mode: BatchMode, t: usize, n: usize, nrows: usize, max_seqlen: usize) -> Result<()> {
         let s = &self.stream;
         let v = self.model.cfg.vocab_size;
+        // B29（loop kaon3-decode-opt D109）：异步调度下在飞行的 token 行 `ids[i] = prev_chosen[gather_idx[i]]`（设备侧）。
+        // 之前 kaon3 只 upload 了 gather_idx 却没 gather、也没 save_chosen → 在飞行 input id = 0，c≥2 每步必错。
+        // 非异步 / 图捕获假 plan：gather_idx 全 -1，空操作（图内安全）。
+        self.plan.gather_inflight(s, t)?;
         let meta = StepMeta {
             mode,
             cu_seqlens: &self.plan.cu,
@@ -200,6 +207,10 @@ impl KaonExecutor {
         k::ops::gather_rows_bf16(s, &self.logits.data, &mut self.gathered.data, &self.plan.rows.data, nrows, v)?;
         k::ops::bf16_to_f32_n(s, &self.gathered.data, &mut self.gathered_f32.data, nrows * v)?;
         k::argmax_f32_n(s, &self.gathered_f32.data, &mut self.argmax.data, nrows, v)?;
+        // B29：本步采样存 prev_chosen 供下一步在飞行 gather（图内 dtod；cut-in 步不写）。无投机 → nrows == n，行 i = 请求 i。
+        if !self.skip_prev_chosen {
+            self.plan.save_chosen(s, &self.argmax.data, nrows)?;
+        }
         Ok(())
     }
 
@@ -259,6 +270,7 @@ impl ModelExecutor for KaonExecutor {
         ensure!(nrows <= self.max_rows, "rows {nrows} > max_rows {}", self.max_rows);
         ensure!(plan.max_blocks <= self.plan.max_blocks, "block_table {} > buffer {}", plan.max_blocks, self.plan.max_blocks);
         ensure!(!plan.sample.any_mask, "kaon3 executor: guided decoding 未接（第一版不做）");
+        self.skip_prev_chosen = plan.skip_prev_chosen;
 
         // 本步可否走图：纯 decode（每请求 1 token、1 行）且无 guided mask。
         let graph_eligible = plan.mode == BatchMode::Decode && t == n && nrows == n && !plan.sample.any_mask;
