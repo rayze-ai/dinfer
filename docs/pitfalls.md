@@ -15,6 +15,12 @@
   ③ 用 `--layer-iso` 时**输入必须是上一层的输出**（L0 用 embedding `Lm1`，不是 `L0`），
   传错层会得到 relL2 ≈ 1.0 的"整层全错"的假象。
 
+## 2026-10-28 混批步 decode 行 attention 被 skip_single 跳过后没人算，c≥2 输出全错，bench 数字照样"正常"
+- 现象：`mixparity`（同 prompt 串行 vs 并发 greedy）c2 6/8、c8 7/8 请求输出不同，乱码级差异；之前几十轮 c8 bench 的吞吐 / TPOT 全在此 bug 下测得。
+- 根因：kaon3 `layer.rs` Paged 分支 `paged_win(skip_single = mode==Paged)`，PAGED kernel 对 q_len==1 直接 return，ops.rs 注释"由 decode kernel 处理"，但调用方没补那一刀。
+- 为什么没早发现：bench 只看 token 数 / 时延；"输出同"检查只做 c1 的两条 curl（c1 永不混批）；c8 TTFT 545 的量级异常才把我拉进 Paged 步。
+- 避免：**每条 bench 链必须带 c≥2 的逐请求输出比对**（`scripts/dev/kaon3_mixparity.sh` 进 bN 前置门禁）；kernel 的"跳过"参数在调用方要有对应的"谁来算"。
+
 ## 2026-10-28 同一服务上重复跑 bench，第 2 次起 TTFT 掉 7×——是 prefix cache 命中，不是优化
 - 现象：ttft8 探针里 c8×64 TTFT p50 75 ms，而 bN 链同参数 545 ms；差了 7×，一度以为是 HOST_TIME 或"c1 之后"触发了什么。
 - 根因：`bench` 的 prompt 由 `(seed, idx)` 决定性生成，同一服务上同 seed 再跑一遍 → 每条 prompt 都命中 prefix cache，Paged 步只剩 ~13 + ~90 个新 token；bN 每条链新起服务才是"新 prompt 态"。

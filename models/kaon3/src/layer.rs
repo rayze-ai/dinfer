@@ -1341,6 +1341,32 @@ impl Gemma4Layer {
                 ctx.kv_fp8_store,
             )?,
         }
+        // B27（loop kaon3-decode-opt D86/D87）：混批 Paged 步里 paged_win 以 skip_single 跳过了 q_len==1 的在飞 decode 行
+        // （三个 PAGED kernel 对 q_len==1 直接 return），ops.rs 口径是"它们由 decode kernel 处理"，但这里之前没有补这一刀 →
+        // 混批步 decode 行的 attn 是上一层残留。补：同 Decode 分支的 split-K decode kernel，带 cu_seqlens_q 只算 q_len==1 的请求、
+        // 行号取 cu_seqlens_q[b]。scratch 按 num_reqs 行（≤ max_num_seqs）。
+        if matches!(ctx.mode, dinfer_core::runner::BatchMode::Paged) && env_ne!("ATTN_DECODE_OLD", "1") {
+            k::ops::gqa_decode_win_bf16(
+                stream,
+                &q.data,
+                &*ctx.kv_mut,
+                &ctx.block_table.data,
+                &ctx.seq_lens.data,
+                &mut attn.data,
+                &mut sc.decode_scratch.data,
+                ctx.num_reqs,
+                heads,
+                nkv,
+                d,
+                ctx.block_size,
+                ctx.max_blocks,
+                scale,
+                0,
+                Some(&ctx.cu_seqlens.data),
+                self.window,
+                ctx.kv_fp8_store,
+            )?;
+        }
         } // end !ATTN_SKIP_PAGED
 
         // ---- 6. o_proj + post_attention_norm + 残差 ----
