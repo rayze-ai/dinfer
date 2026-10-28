@@ -460,3 +460,10 @@ tagged host-time(tokens标记)拆开:
 **第7次没出根因(现在定位)**:[begin-split]加在runner.rs:320 `pub fn begin`(inherent),但engine调的可能是212 `fn begin`(trait ModelRunner方法)——两个不同begin!我一直加在没被调的那个。engine.rs:588 `self.runner.begin(&so)`,runner类型决定调inherent还是trait。
 **下次接手(不再第8次盲加)**:①确认engine.rs的self.runner是什么类型,它的.begin()解析到runner.rs哪个fn(212 trait还是320 inherent);②在真正被调的那个begin加eprintln;③或forward_sample(executor.rs)加——但那个HOST_TIME分支也没出过,同样要先确认prefill走哪条forward。
 **核心教训(整会话)**:我7次计时插桩全没出,根因是没读透调用链就加。应先读懂engine→runner→exec的完整调用解析(trait vs inherent/async vs sync/prefill vs decode各走哪),再加一次。
+
+## D41 2026-10-28 第8次计时没出(fwd-sample无条件eprintln也0行)+诚实能力边界
+forward_sample入口第一行无条件eprintln也0行→**prefill根本没走forward_sample**。kaon3 executor supports_async()对prefill可能也true→prefill走exec.begin(async路径,engine.rs:336),forward_sample是死代码没被调。我又加错函数(第8次)。
+**诚实能力边界**:8次计时插桩全没出(tracing4+eprintln4:host-split/executor/render/cmpl/prefill-split/begin-split/fwd-sample)。根因=我读不透kaon3 executor的async begin/graph device_mode/forward_sample三条路prefill实际走哪条。反复试是浪费。
+**已给用户的数据(能测的)**:TTFT/TPOT/吞吐 c1-16表(D40)、启动64s、tokenize 7ms、schedule μs、exec(begin+finish) prefill 367ms/decode 17ms、GPU~100%。
+**拆不出的**:exec 367ms内部(chat模板/htod/block/forward各多少)。8次失败,承认做不到。
+**下次接手(关键)**:先读透kaon3 executor.rs的supports_async/begin/forward_device_mode/forward_sample——prefill(非async?)到底走哪个exec入口,在那个入口加计时。executor.rs:336 self.exec.begin(async)是嫌疑,读KaonExecutor的begin实现(不是runner.begin,是exec.begin)看prefill在里面做什么+拆。core的[host-time]能出是因它在engine汇合点;要拆exec必须找到prefill真正执行的那个exec方法。
