@@ -1186,3 +1186,20 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 ## 第四轮 2026-10-29（用户确认顺序：① 重抓 nsys → ② MoE decode GEMM split-K → ③ 层内 launch 合并 → ④ supports_pair → ⑤ lm_head fp8）
 - 用户质疑："理论上应该比 vLLM 快"。回答口径：c1 一步带宽下限 ≈ 2.0 ms（lm_head 0.83 + MoE 0.42 + dense 0.3 + qkv/oproj 0.16 + KV），vLLM 4.69 = 2.3×，我们 5.57 = 2.8×；差在 ~1000 launch/步 与 MoE grouped GEMM 占用率（~90 CTA / 170 SM，每 CTA 串 22 个 K 步），不在物理极限。compute overlap 一处没有（单流、`supports_async/pair` 都 false）。B16b 已解决 BM=32 半 warp 空转但只 -1.1%。GQA 已确认与 vLLM 一致（D147）。
 - **D148 重抓 nsys**：链 `nsys_now.sh` = 编译（源含 KV_FP8_STORE 默认开 / INFLIGHT_GATHER 默认关）→ `nsys_c1b.sh` → `nsys_c8.sh`；产物 `tmp_nsys_c1b_RESULT.txt` / `tmp_nsys_c8_RESULT.txt`（kernel 表按 `nsys_kern.py`）。用它刷新 B21 候选表后再动 ②。
+
+## ★★★★★ D148 2026-10-29 nsys c1b（当前二进制：b29 源 + KV_FP8_STORE 默认开 + INFLIGHT_GATHER 关；nsys 态 TPOT 5.95，bench 5.57）：107 步合成一个 graph 实例，**1058 kernel/步，kernel 和 4.89 ms + 间隙 1.32 ms = 6.2 ms/步**
+| 段 | n/步 | us/次 | ms/步 | 带宽下限 ms | 倍数 |
+|---|---|---|---|---|---|
+| lm_head gemvx bf16（+o_proj 全注意力层 5 次） | 31 | 870 / ~3 | 0.96 | 0.83 | 1.1× |
+| **fp8 `gemv_kernel<1>`（dense down ×30 + qkv ×25 + o_proj 滑窗 ×25）** | 85 | 10.7 avg | **0.91** | ~0.25 | **3.6×** |
+| gateup_act（dense gate‖up+gelu，fp8） | 30 | 9.4 | 0.28 | 0.2 | 1.4× |
+| MoE grouped gate/up（BM16 BK128，11×129 grid） | 60 | 10.7 | 0.64 | 0.45 | 1.4× |
+| MoE grouped down（BM16 BK64，44×129） | 30 | 10.7 | 0.32 | 0.22 | 1.5× |
+| **route_bucket_small（1 block）** | 30 | 10.7 | **0.32** | ~0 | B19 后仍 10.7 us |
+| rmsnorm_vec<256,2>（h=2816 单行 ×5/层） | 151 | 1.2 | 0.18 | 0 | launch |
+| cache_write_fp8rt / combine / norm_quant / rope / grouped_quant / rmsnorm<128,1> / merge | 30 each | 1–4.7 | 0.62 | 0 | launch |
+| v3 attn 25 层 / d512 5 层 / nvjet qkv 5 层 | 25/5/5 | 4.6/17.9/21 | 0.31 | ~0.1 | |
+| 其余 ~20 种小 kernel（scale/quant/gelu/mul/add/argmax…） | ~330 | 0.6–1 | 0.25 | 0 | launch |
+| **间隙 1058 launch** | | 1.25 avg | **1.32** | 0 | |
+- **修正我昨晚给用户的排序**：MoE grouped GEMM 已在带宽下限 1.4–1.5×（三次 GEMM 共 40 MB/层 ÷ 1.79 TB/s = 22 us vs 实测 32 us），split-K 最多再省 0.3 ms，**不是最大缺口**。真正的两块：① **fp8 gemv（dense down / qkv / o_proj）3.6× 下限 = 0.65 ms 可省**（B20 批量预取没中，kernel 结构要重写：每 block 处理一段 N、全 block 协作流式读 K、更多字节在飞）；② **launch 数 1058 → 间隙 1.32 ms + 小 kernel 0.6 ms**：每层 35 个 launch，目标 ≤ 15（norm/rope/cache_write/norm_quant 融合、route+bucket+quant 融合、combine 融进 down 的 epilogue）。③ route_bucket_small 0.32 ms 单 block 是第三。
+- 新顺序：②a 层内融合（-0.5~0.8 ms）→ ① fp8 gemv 重写（-0.5）→ ③ route（-0.25）→ MoE split-K（-0.3）→ lm_head fp8（-0.4）。合计可到 ~3.5 ms（vLLM 4.69）。
