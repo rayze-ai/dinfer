@@ -1,0 +1,25 @@
+16:37:26
+EXIT=0
+D=256 win=1024 k_eq_v=false total=21 hist=16 ql=5 cfg=464: chunk vs fresh rows[16..21] max|Δ|=0.0000 nd=0/20480 amax=4.50 => ok
+D=256 win=1024 k_eq_v=false total=21 hist=16 ql=5 cfg=0: chunk vs fresh rows[16..21] max|Δ|=0.0000 nd=0/20480 amax=4.50 => ok
+D=256 win=1024 k_eq_v=false total=21 hist=16 ql=5 cfg=-1: chunk vs fresh rows[16..21] max|Δ|=0.0000 nd=1/20480 amax=4.50 => ok
+D=512 win=0 k_eq_v=true total=21 hist=16 ql=5 cfg=464: chunk vs fresh rows[16..21] max|Δ|=0.0001 nd=2/40960 amax=9.00 => ok
+D=512 win=0 k_eq_v=true total=21 hist=16 ql=5 cfg=0: chunk vs fresh rows[16..21] max|Δ|=0.0001 nd=2/40960 amax=9.00 => ok
+D=512 win=0 k_eq_v=true total=21 hist=16 ql=5 cfg=-1: chunk vs fresh rows[16..21] max|Δ|=0.0586 nd=452/40960 amax=9.00 => ok
+D=256 win=1024 k_eq_v=false total=400 hist=384 ql=16 cfg=464: chunk vs fresh rows[384..400] max|Δ|=0.0000 nd=0/65536 amax=4.50 => ok
+D=256 win=1024 k_eq_v=false total=400 hist=384 ql=16 cfg=0: chunk vs fresh rows[384..400] max|Δ|=0.0000 nd=0/65536 amax=4.50 => ok
+D=256 win=1024 k_eq_v=false total=400 hist=384 ql=16 cfg=-1: chunk vs fresh rows[384..400] max|Δ|=0.0645 nd=4613/65536 amax=4.50 => ok
+D=512 win=0 k_eq_v=true total=400 hist=384 ql=16 cfg=464: chunk vs fresh rows[384..400] max|Δ|=0.0005 nd=14/131072 amax=9.00 => ok
+D=512 win=0 k_eq_v=true total=400 hist=384 ql=16 cfg=0: chunk vs fresh rows[384..400] max|Δ|=0.0005 nd=14/131072 amax=9.00 => ok
+D=512 win=0 k_eq_v=true total=400 hist=384 ql=16 cfg=-1: chunk vs fresh rows[384..400] max|Δ|=0.1328 nd=7434/131072 amax=9.00 => ok
+D=256 win=1024 k_eq_v=false total=1200 hist=1184 ql=16 cfg=464: chunk vs fresh rows[1184..1200] max|Δ|=0.0000 nd=0/65536 amax=3.75 => ok
+D=256 win=1024 k_eq_v=false total=1200 hist=1184 ql=16 cfg=0: chunk vs fresh rows[1184..1200] max|Δ|=0.0000 nd=0/65536 amax=3.75 => ok
+D=256 win=1024 k_eq_v=false total=1200 hist=1184 ql=16 cfg=-1: chunk vs fresh rows[1184..1200] max|Δ|=0.0547 nd=4382/65536 amax=3.75 => ok
+D=256 win=1024 k_eq_v=false total=25 hist=20 ql=5 cfg=464: chunk vs fresh rows[20..25] max|Δ|=0.0000 nd=0/20480 amax=4.00 => ok
+D=256 win=1024 k_eq_v=false total=25 hist=20 ql=5 cfg=0: chunk vs fresh rows[20..25] max|Δ|=0.0000 nd=0/20480 amax=4.00 => ok
+D=256 win=1024 k_eq_v=false total=25 hist=20 ql=5 cfg=-1: chunk vs fresh rows[20..25] max|Δ|=0.0005 nd=1/20480 amax=4.00 => ok
+D=512 win=0 k_eq_v=true total=25 hist=20 ql=5 cfg=464: chunk vs fresh rows[20..25] max|Δ|=0.0000 nd=0/40960 amax=8.00 => ok
+D=512 win=0 k_eq_v=true total=25 hist=20 ql=5 cfg=0: chunk vs fresh rows[20..25] max|Δ|=0.0000 nd=0/40960 amax=8.00 => ok
+D=512 win=0 k_eq_v=true total=25 hist=20 ql=5 cfg=-1: chunk vs fresh rows[20..25] max|Δ|=0.0156 nd=167/40960 amax=8.00 => ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.75s
+DONE
