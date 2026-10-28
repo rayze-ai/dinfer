@@ -161,3 +161,11 @@ R86修时序版仍NSYS=空:上轮apt装的nsys在容器/opt,--rm新容器没了(
 
 ## R88 2026-10-28 nsys空数据根因=cudagraph未展开;修:--cuda-graph-trace=node
 nsys全程包serve仍"no CUDA kernel data"——根因:**cudagraph replay的kernel默认不被nsys CUDA trace展开**(graph node不走常规launch API)。这版nsys(2024.2.3)支持`--cuda-graph-trace=node`展开图内每个kernel。加上重跑→抓到graph态gemm3/attn/各kernel累计时间=第二刀第一条硬证据。
+
+## R89 2026-10-28 nsys在此环境抓不到kernel数据(6轮死磕),放弃nsys;第二刀改务实graph态A/B验收
+nsys(2024.2.3)连--cuda-graph-trace=node也"no CUDA kernel data"——5090/sm120+这版nsys+容器CUPTI组合抓不到,烧6轮。**停止nsys路线**(和工具死磕非产证据)。
+**诚实结论**:无graph态profiling硬证据(nsys抓不到,NO_GRAPH分段系统高估不可信)。
+**第二刀与第一刀的本质区别(可从代码确定,不需profiling)**:
+- 第一刀cp.async=改kernel内部效率(同kernel跑更快),graph态易被图调度吸收→端到端小(实测c1-4.9%/c8-1.3%)。
+- 第二刀gate+up合并=**减kernel数量+HBM流量**(3 grouped GEMM→2,中间up输出不写回HBM再读),图里实打实少1 node+少一遍N×tokens HBM往返,**图调度吸收不掉**。结构性差异。
+**验收路线(不靠估算,用第一刀已验的可信口径)**:第二刀也做开关A/B,改完直接量graph态端到端(host容器c1/c8 TPOT,R84口径可信)。<3%当场说不值+回滚。不再用NO_GRAPH/nsys估算说收益。
