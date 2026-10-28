@@ -20,6 +20,9 @@ int gather_rmsnorm_bf16(const void* x, const int32_t* rows, const void* w, void*
                         int64_t hidden, float eps, int layout, int mode, cudaStream_t stream);
 int rmsnorm_bf16(const void* x, const void* w, void* out, int64_t tokens, int64_t hidden, float eps, int layout,
                  int mode, cudaStream_t stream);
+// B13：out_res += bf16(rmsnorm(x)·w)（norm 与残差加一次 launch）。layout/mode 同 rmsnorm_bf16。
+int rmsnorm_add_bf16(const void* x, const void* w, void* out_res, int64_t tokens, int64_t hidden, float eps, int layout,
+                     int mode, cudaStream_t stream);
 // residual 融合：res[t,:] += x[t,:]; out[t,:] = rmsnorm(res[t,:])。res 原位更新。
 int fused_add_rmsnorm_bf16(const void* x, void* res, const void* w, void* out, int64_t tokens, int64_t hidden,
                            float eps, int layout, int mode, cudaStream_t stream);

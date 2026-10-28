@@ -641,6 +641,11 @@ impl ActBuf {
 /// B5：decode（tokens ≤ 16）dense MLP 走带宽型 fp8 GEMV（`mlp_fp8_decode.cu`），不走 persistent mega。
 /// `DENSE_DECODE_OLD=1` 回退（A/B 用）。
 pub const DENSE_GEMV_ROWS: usize = 16;
+/// B13：norm + 残差加融合（默认开；`NORM_ADD_FUSED=0` 回退）。
+fn norm_add_fused_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("NORM_ADD_FUSED").ok().as_deref() != Some("0"))
+}
 /// B12：kv_fp8 往返 + cache_write 融合（默认开；`KV_FP8_FUSED=0` 回退）。
 fn kv_fp8_fused_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1331,9 +1336,14 @@ impl Gemma4Layer {
             self.o_proj.forward(gemm, stream, attn, &mut sc.o, tokens)?;
         }
         sub_dump(stream, sub_out, "o_proj", &sc.o, tokens, h)?;
-        rmsnorm_into(stream, ops, &sc.o, &self.post_attn_norm, &mut sc.norm, h, tokens, eps)?;
-        sub_dump(stream, sub_out, "post_attn_norm", &sc.norm, tokens, h)?;
-        k::ops::add_inplace_bf16_n(stream, &sc.norm.data, &mut sc.x.data, tokens * h)?;
+        // B13：norm_mode 1（默认）且非对拍 dump 时，post_attn_norm 直接加到 x（一次 launch）；`NORM_ADD_FUSED=0` 回退。
+        if norm_add_fused_enabled() && norm_mode() == 1 && sub_out.is_none() {
+            k::ops::rmsnorm_add_bf16_n(stream, &sc.o.data, &self.post_attn_norm.data, &mut sc.x.data, tokens, h, eps)?;
+        } else {
+            rmsnorm_into(stream, ops, &sc.o, &self.post_attn_norm, &mut sc.norm, h, tokens, eps)?;
+            sub_dump(stream, sub_out, "post_attn_norm", &sc.norm, tokens, h)?;
+            k::ops::add_inplace_bf16_n(stream, &sc.norm.data, &mut sc.x.data, tokens * h)?;
+        }
         if let Some(e) = &st_ev { stream.record_timing(&e[2])?; }  // 段2完=oproj+post_attn_norm+残差
 
         // ---- 7. dense MLP 支路（无条件执行）----
@@ -1379,11 +1389,20 @@ impl Gemma4Layer {
         if let Some(e) = &st_ev { stream.record_timing(&e[4])?; }  // 段4完=MoE支路
 
         // ---- 9. 两条支路相加 → post_ff_norm → 残差 → layer_scalar ----
-        k::ops::add_inplace_bf16_n(stream, &sc.h2.data, &mut sc.norm.data, tokens * h)?; // h2 = post_ff_norm_2(moe)
-        sub_dump(stream, sub_out, "post_ff_in", &sc.norm, tokens, h)?;
-        rmsnorm_into(stream, ops, &sc.norm, &self.post_ff_norm, &mut sc.h2, h, tokens, eps)?;
-        sub_dump(stream, sub_out, "post_ff_norm", &sc.h2, tokens, h)?;
-        k::ops::add_inplace_bf16_n(stream, &sc.h2.data, &mut sc.x.data, tokens * h)?;
+        if norm_add_fused_enabled() && norm_mode() == 1 && sub_out.is_none() {
+            // B13：norm += h2 与 post_ff_norm 一次（fused_add_rmsnorm：res=norm, x=h2, out=h2 复用），再 norm 结果直接加到 x。
+            // 3 launch → 2：fused_add_rmsnorm(h2, norm → h2) ; x += h2。进一步合并需要 "norm 加到 x" 与 "res 累加" 同 kernel，
+            // 这里用 rmsnorm_add 做第二步：x += bf16(rmsnorm(norm)·w)，所以第一步只需 norm += h2（add_inplace）。
+            // 两种拆法都是 2 launch；取后者（rmsnorm_add 已有）。
+            k::ops::add_inplace_bf16_n(stream, &sc.h2.data, &mut sc.norm.data, tokens * h)?;
+            k::ops::rmsnorm_add_bf16_n(stream, &sc.norm.data, &self.post_ff_norm.data, &mut sc.x.data, tokens, h, eps)?;
+        } else {
+            k::ops::add_inplace_bf16_n(stream, &sc.h2.data, &mut sc.norm.data, tokens * h)?; // h2 = post_ff_norm_2(moe)
+            sub_dump(stream, sub_out, "post_ff_in", &sc.norm, tokens, h)?;
+            rmsnorm_into(stream, ops, &sc.norm, &self.post_ff_norm, &mut sc.h2, h, tokens, eps)?;
+            sub_dump(stream, sub_out, "post_ff_norm", &sc.h2, tokens, h)?;
+            k::ops::add_inplace_bf16_n(stream, &sc.h2.data, &mut sc.x.data, tokens * h)?;
+        }
         if self.layer_scalar != 1.0 {
             k::ops::scale_bf16_n(stream, &mut sc.x.data, tokens * h, self.layer_scalar)?;
         }

@@ -5526,3 +5526,26 @@ pub fn gqa_cache_write_fp8rt_bf16(
         "gqa_cache_write_fp8rt_bf16",
     )
 }
+
+/// B13：`out_res[r] = bf16(out_res[r] + bf16(rmsnorm(x[r])·w))`——norm 直接加到残差流，代 `rmsnorm_bf16_n` + `add_inplace_bf16_n`。
+/// layout/mode 与 `rmsnorm_bf16_n` 同源（逐位同口径）。
+pub fn rmsnorm_add_bf16_n(
+    stream: &Stream,
+    x: &CudaSlice<bf16>,
+    w: &CudaSlice<bf16>,
+    out_res: &mut CudaSlice<bf16>,
+    tokens: usize,
+    hidden: usize,
+    eps: f32,
+) -> Result<()> {
+    ensure!(x.len() >= tokens * hidden && out_res.len() >= tokens * hidden && w.len() == hidden, "rmsnorm_add_n: shape");
+    let (px, pw) = (stream.ptr(x) as *const c_void, stream.ptr(w) as *const c_void);
+    let po = stream.ptr_mut(out_res) as *mut c_void;
+    // SAFETY: 缓冲容量已校验。
+    check(
+        unsafe {
+            ffi::rmsnorm_add_bf16(px, pw, po, tokens as i64, hidden as i64, eps, rmsnorm_layout(stream, tokens, hidden, None), norm_mode(), stream.raw() as _)
+        },
+        "rmsnorm_add_bf16",
+    )
+}
