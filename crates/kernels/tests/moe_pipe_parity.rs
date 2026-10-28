@@ -88,9 +88,12 @@ fn moe_pipe_matches_baseline() {
 #[test]
 #[ignore]
 fn moe_pipe_timing() {
-    let (e, n, kk) = (8usize, 704usize, 2816usize);
+    // E=专家数(grid.z), ACT=激活专家数(前 ACT 个各 m_per 行, 其余 0 行 = serve decode 的空 block 场景)
+    let e = std::env::var("MOE_E").ok().and_then(|v| v.parse().ok()).unwrap_or(8usize);
+    let (n, kk) = (704usize, 2816usize);
     let m_per = std::env::var("MOE_M").ok().and_then(|v| v.parse().ok()).unwrap_or(132usize);
-    let lens: Vec<usize> = vec![m_per; e];
+    let act = std::env::var("MOE_ACT").ok().and_then(|v| v.parse().ok()).unwrap_or(e).min(e);
+    let lens: Vec<usize> = (0..e).map(|i| if i < act { m_per } else { 0 }).collect();
     let rows: usize = lens.iter().sum();
     let mut offsets = vec![0i32; e + 1];
     for i in 0..e { offsets[i + 1] = offsets[i] + lens[i] as i32; }
@@ -137,10 +140,10 @@ fn moe_pipe_timing() {
     };
     let base_us = bench(false);
     let pipe_us = bench(true);
-    // 单次 launch = 1 个 grouped GEMM（gate/up/down 中的一个）。有效带宽：e 专家 × N × K/2 字节权重。
-    let wbytes = (e * n * (kk / 2)) as f64;
+    // 有效带宽按激活专家算（空 block 不搬权重）：act × N × K/2 字节。
+    let wbytes = (act * n * (kk / 2)) as f64;
     let gbps = |us: f64| wbytes / (us * 1e-6) / 1e9;
-    println!("MOE_PIPE_TIMING e={e} M/专家={m_per} N={n} K={kk} | base={base_us:.2}us ({:.0}GB/s) pipe={pipe_us:.2}us ({:.0}GB/s) | 加速 {:.2}x",
+    println!("MOE_PIPE_TIMING E={e}(grid.z) ACT={act} M/专家={m_per} N={n} K={kk} rows={rows} | base={base_us:.2}us ({:.0}GB/s) pipe={pipe_us:.2}us ({:.0}GB/s) | 加速 {:.2}x",
              gbps(base_us), gbps(pipe_us), base_us / pipe_us);
     drop(db); drop(ds);
 }
