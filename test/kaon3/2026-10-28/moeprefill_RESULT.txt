@@ -1,0 +1,7 @@
+== STAGES=2 MOE_E=128 MOE_M=98 MOE_ACT=128
+MOE_PIPE_TIMING E=128(grid.z) ACT=128 M/专家=98 N=704 K=2816 rows=12544 | base=292.77us (433GB/s) pipe=295.73us (429GB/s) | 加速 0.99x
+== STAGES=4 MOE_E=128 MOE_M=98 MOE_ACT=128
+MOE_PIPE_TIMING E=128(grid.z) ACT=128 M/专家=98 N=704 K=2816 rows=12544 | base=270.86us (468GB/s) pipe=278.61us (455GB/s) | 加速 0.97x
+== STAGES=4 MOE_M=1 MOE_ACT=8 (decode)
+MOE_PIPE_TIMING E=8(grid.z) ACT=8 M/专家=1 N=704 K=2816 rows=8 | base=12.32us (644GB/s) pipe=12.31us (644GB/s) | 加速 1.00x
+DONE

@@ -1,0 +1,51 @@
+bin=2026-10-28 14:16 14:51:09
+== pf c1 (max_tokens=1, n=4)
+   throughput: 35.02 req/s   35.0 output tok/s   15041.7 total tok/s
+   TTFT     mean    28.47  p50    28.44  p90    29.03  p99    29.03  max    29.03  (ms)
+   TTFT1st  mean    28.47  p50    28.44  p90    29.03  p99    29.03  max    29.03  (ms)
+  Prefill steps=5 mean_total=26445us max_t=432
+== pf c2 (max_tokens=1, n=8)
+   throughput: 32.27 req/s   32.3 output tok/s   13859.7 total tok/s
+   TTFT     mean    58.61  p50    58.79  p90    68.32  p99    73.62  max    73.62  (ms)
+   TTFT1st  mean    58.61  p50    58.79  p90    68.32  p99    73.62  max    73.62  (ms)
+  Prefill steps=4 mean_total=26398us max_t=429
+  Paged steps=5 mean_total=35246us max_t=16
+== pf c4 (max_tokens=1, n=16)
+   throughput: 48.64 req/s   48.6 output tok/s   20899.3 total tok/s
+   TTFT     mean    76.77  p50    85.50  p90   107.59  p99   107.66  max   107.66  (ms)
+   TTFT1st  mean    76.77  p50    85.50  p90   107.59  p99   107.66  max   107.66  (ms)
+  Prefill steps=4 mean_total=48298us max_t=860
+  Paged steps=5 mean_total=33843us max_t=26
+== pf c8 (max_tokens=1, n=32)
+   throughput: 69.86 req/s   69.9 output tok/s   30038.9 total tok/s
+   TTFT     mean   110.34  p50    75.44  p90   155.80  p99   155.90  max   155.90  (ms)
+   TTFT1st  mean   110.34  p50    75.44  p90   155.80  p99   155.90  max   155.90  (ms)
+  Prefill steps=4 mean_total=77199us max_t=3008
+  Paged steps=5 mean_total=36459us max_t=90
+== pf c16 (max_tokens=1, n=64)
+   throughput: 55.95 req/s   56.0 output tok/s   24038.9 total tok/s
+   TTFT     mean   265.44  p50    96.72  p90   647.02  p99   673.23  max   673.29  (ms)
+   TTFT1st  mean   265.44  p50    96.72  p90   647.02  p99   673.23  max   673.29  (ms)
+  Prefill steps=4 mean_total=118718us max_t=4096
+  Paged steps=6 mean_total=116954us max_t=2765
+== c8 x64 max_tokens=64 (bench 口径)
+   throughput: 11.64 req/s   744.9 output tok/s   5733.6 total tok/s
+   TTFT     mean    63.12  p50    74.88  p90    77.24  p99    77.29  max    77.31  (ms)
+   TTFT1st  mean    63.12  p50    74.88  p90    77.24  p99    77.29  max    77.31  (ms)
+   TPOT     mean     9.91  p50    10.05  p90    10.26  p99    10.56  max    10.64  (ms)
+  Prefill steps=1 mean_total=26340us max_t=428
+  Decode steps=631 mean_total=8957us max_t=8
+  Paged steps=16 mean_total=35099us max_t=97
+  -- Prefill/Paged 步按 t 分桶（t, 次数, 均值 us）
+  Paged t=10 n=1 mean=30229us
+  Paged t=15 n=1 mean=39647us
+  Paged t=2 n=1 mean=12312us
+  Paged t=81 n=1 mean=34057us
+  Paged t=82 n=1 mean=35480us
+  Paged t=88 n=1 mean=38846us
+  Paged t=97 n=1 mean=39082us
+  Prefill t=428 n=1 mean=26340us
+  Paged t=79 n=2 mean=36963us
+  Paged t=91 n=2 mean=38857us
+  Paged t=13 n=5 mean=36058us
+DONE

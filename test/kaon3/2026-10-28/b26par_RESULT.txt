@@ -1,0 +1,13 @@
+15:08:26
+EXIT=0
+D=512 PAGED v6(bf16 cache) vs ref: max|Δ|=0.0156 (amax 4.500, tol 0.0900) ndiff=8607/1384448 nonzero=1384385
+D=512 PAGED v6 e4m3 cache vs v6 bf16 cache: 位差 0 max|Δ|=0.0000 => ok
+D=512 PAGED ref e4m3 vs ref bf16: 位差 0 max|Δ|=0.0000（参照自洽）
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+15:08:30
+PARITY_OK
+D=512 PAGED v6(bf16 cache) vs ref: max|Δ|=0.0000 (amax 4.500, tol 0.0900) ndiff=0/1384448 nonzero=1384385
+D=512 PAGED v6 e4m3 cache vs v6 bf16 cache: 位差 0 max|Δ|=0.0000 => ok
+D=512 PAGED ref e4m3 vs ref bf16: 位差 0 max|Δ|=0.0000（参照自洽）
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.42s
+DONE

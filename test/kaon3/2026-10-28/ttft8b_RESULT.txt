@@ -1,0 +1,64 @@
+== plain [] c1 x8
+   TTFT     mean    28.27  p50    28.29  p90    28.49  p99    28.52  max    28.52  (ms)
+   TPOT     mean     5.56  p50     5.56  p90     5.57  p99     5.58  max     5.58  (ms)
+== plain [] c8 x64 #1
+   throughput: 7.43 req/s   475.5 output tok/s   3660.3 total tok/s
+   TTFT     mean   402.77  p50   504.82  p90   526.02  p99   526.12  max   526.14  (ms)
+   TPOT     mean    10.69  p50     9.87  p90    17.12  p99    17.51  max    17.61  (ms)
+== plain [] c8 x64 #2
+   throughput: 11.69 req/s   747.9 output tok/s   5756.4 total tok/s
+   TTFT     mean    63.09  p50    74.84  p90    76.71  p99    76.80  max    76.82  (ms)
+   TPOT     mean     9.86  p50     9.86  p90    10.10  p99    10.33  max    10.48  (ms)
+== plain [] c8 x64 #3
+   throughput: 11.68 req/s   747.7 output tok/s   5755.5 total tok/s
+   TTFT     mean    63.21  p50    74.80  p90    77.58  p99    77.67  max    77.70  (ms)
+   TPOT     mean     9.86  p50     9.86  p90    10.10  p99    10.34  max    10.49  (ms)
+dinfer:time_to_first_token_seconds_count 208
+dinfer:time_per_output_token_seconds_count 13104
+dinfer:e2e_request_latency_seconds_count 208
+dinfer:engine_step_seconds_count 2584
+dinfer:engine_step_schedule_seconds_count 2584
+dinfer:engine_step_execute_seconds_count 2584
+== hosttime [HOST_TIME=1] c1 x8
+   TTFT     mean    28.42  p50    28.35  p90    28.41  p99    29.30  max    29.30  (ms)
+   TPOT     mean     5.59  p50     5.59  p90     5.59  p99     5.59  max     5.59  (ms)
+== hosttime [HOST_TIME=1] c8 x64 #1
+   throughput: 7.46 req/s   477.4 output tok/s   3674.4 total tok/s
+   TTFT     mean   355.68  p50   504.83  p90   513.76  p99   530.74  max   530.80  (ms)
+   TPOT     mean    11.37  p50     9.91  p90    17.05  p99    17.25  max    17.25  (ms)
+== hosttime [HOST_TIME=1] c8 x64 #2
+   throughput: 11.83 req/s   757.0 output tok/s   5827.0 total tok/s
+   TTFT     mean    63.21  p50    74.96  p90    77.40  p99    77.50  max    77.53  (ms)
+   TPOT     mean     9.73  p50     9.56  p90    10.08  p99    10.41  max    10.54  (ms)
+== hosttime [HOST_TIME=1] c8 x64 #3
+   throughput: 11.88 req/s   760.1 output tok/s   5850.7 total tok/s
+   TTFT     mean    62.38  p50    71.28  p90    75.32  p99    75.41  max    75.45  (ms)
+   TPOT     mean     9.70  p50     9.55  p90     9.95  p99    10.30  max    10.41  (ms)
+dinfer:time_to_first_token_seconds_count 208
+dinfer:time_per_output_token_seconds_count 13104
+dinfer:e2e_request_latency_seconds_count 208
+dinfer:engine_step_seconds_count 2584
+dinfer:engine_step_schedule_seconds_count 2584
+dinfer:engine_step_execute_seconds_count 2584
+== plain2 [] c1 x8
+   TTFT     mean    28.58  p50    28.63  p90    28.70  p99    28.82  max    28.82  (ms)
+   TPOT     mean     5.57  p50     5.57  p90     5.57  p99     5.57  max     5.57  (ms)
+== plain2 [] c8 x64 #1
+   throughput: 7.46 req/s   477.4 output tok/s   3674.4 total tok/s
+   TTFT     mean   311.16  p50   503.10  p90   513.31  p99   527.98  max   528.02  (ms)
+   TPOT     mean    12.08  p50    10.01  p90    16.79  p99    16.96  max    16.96  (ms)
+== plain2 [] c8 x64 #2
+   throughput: 11.84 req/s   757.6 output tok/s   5831.1 total tok/s
+   TTFT     mean    62.39  p50    71.43  p90    75.30  p99    75.33  max    75.35  (ms)
+   TPOT     mean     9.73  p50     9.75  p90    10.00  p99    10.27  max    10.28  (ms)
+== plain2 [] c8 x64 #3
+   throughput: 11.83 req/s   757.0 output tok/s   5826.6 total tok/s
+   TTFT     mean    62.54  p50    73.29  p90    75.38  p99    75.44  max    75.45  (ms)
+   TPOT     mean     9.74  p50     9.74  p90    10.00  p99    10.28  max    10.33  (ms)
+dinfer:time_to_first_token_seconds_count 208
+dinfer:time_per_output_token_seconds_count 13104
+dinfer:e2e_request_latency_seconds_count 208
+dinfer:engine_step_seconds_count 2584
+dinfer:engine_step_schedule_seconds_count 2584
+dinfer:engine_step_execute_seconds_count 2584
+DONE
