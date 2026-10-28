@@ -15,6 +15,16 @@
   ③ 用 `--layer-iso` 时**输入必须是上一层的输出**（L0 用 embedding `Lm1`，不是 `L0`），
   传错层会得到 relL2 ≈ 1.0 的"整层全错"的假象。
 
+## 2026-10-28 同步 runner 的步 n 采样结果被 cut-in / 提前 begin(n+1) 覆盖，c≥2 每步都错，bench 数字看不出
+- 现象：`mixprobe` A 在飞 + B 插入 → A 从插入那步起输出跑偏（char 1/8/70…随时序）；B 对。`CUT_IN=0` 仍错。
+- 根因：kaon3 executor `supports_async=false`，runner 同步分支把结果留在 `self.generated` 等 `finish`；engine 在 `finish(pend_n)` 前先 `begin_cut_in` 或 `begin(n+1)`（都立刻 forward）覆盖它；行数相同 `ensure!` 过。
+- 解法：`Pending.sync_result` 随 Pending 走（B28，runner 单测修前 fail）。
+- 避免：两段式 begin/finish 的结果不放共享字段；新 executor 不实现 async 时先想"pending 期间还会 begin 吗"。
+
+## 2026-10-28 远端探针队列一晚卡四次：无 DONE、路径错、GPU 不可见、OOM 503
+- `echo DONE` 没进 trap → python 503 异常后 watcher 永远等；宿主机补写用了容器路径 `/w/...`；容器只挂 GPU 0 却给了 `CUDA_VISIBLE_DEVICES=1/4`（秒退 → 打旧端口 503）；上条链 serve 未退 → OOM。
+- 避免：见 `knowledge/subagent-ops.md` "远端探针队列的卫生"。
+
 ## 2026-10-28 混批步 decode 行 attention 被 skip_single 跳过后没人算，c≥2 输出全错，bench 数字照样"正常"
 - 现象：`mixparity`（同 prompt 串行 vs 并发 greedy）c2 6/8、c8 7/8 请求输出不同，乱码级差异；之前几十轮 c8 bench 的吞吐 / TPOT 全在此 bug 下测得。
 - 根因：kaon3 `layer.rs` Paged 分支 `paged_win(skip_single = mode==Paged)`，PAGED kernel 对 q_len==1 直接 return，ops.rs 注释"由 decode kernel 处理"，但调用方没补那一刀。
