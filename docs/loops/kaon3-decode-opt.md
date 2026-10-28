@@ -738,3 +738,4 @@ A 侧（=B6 行为）6.95 / 11.59 两轮稳定。B 侧三个变量叠在一起�
 - 另一疑点（查表数组 e2m1 落 local memory / exp2f）已顺手改成 cvt 内建（moe_fp4_decode.cu），但不足以翻盘，B7 不再验证；kernel 与测试留作小 M 参考，`MOE_DECODE_GEMV` 默认关，layer 接入保留（关着不影响）。
 - FP8_GEMV 拆分（split2）结果待出；B6c 已把 gemv 门槛改为 smem ≤ 24 KB（K=2816 → m ≤ 4）。
 - D64 补（split2 `FP8_GEMV=1`，B7 二进制含 pick_warps）：c8 **15.96**（关 10.99）—— m=8 走 gemv（K=2816 smem 45 KB、warps=8）比 D62 的 11.56 还差 4.4 ms ⇒ pick_warps 把 warp 数从 4 提到 8 后更慢（smem 不变、block 数减半、SM 填不满）。证实 c8 问题是占用/并行度而非 A 流量；**B6c 门槛 smem ≤ 24 KB（m ≤ 4）** 是对的，c8 不该走 gemv。等 c1。
+- D64 定稿（split2 两轮）：`FP8_GEMV=1`（B7 二进制，pick_warps=8 at m=8）c1 **9.27 / 9.27**（关 7.49）、c8 15.96/16.21 —— **c1 也慢了 1.8 ms**，与 D62 的 c1 6.96（warps=4）相反 ⇒ **pick_warps 把 warp 数提到 16（m=1,K=2816 smem 5.6 KB，qkv 3072 行 → 16 warp → 192 block）是错的**：block 少了 4×，SM 只 1 block/each，权重流读的并行度不够。结论：**warp 多 ≠ 好；小 M 下 block 数（并行度）比 A 复用重要**。pick_warps 改回按 "block ≥ 4×SM" 选、上限 4。

@@ -217,9 +217,11 @@ int pick_warps(int m_tile, long rows_total_per_e, long active_e_est, int rows_pe
     cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
     if (sms <= 0) sms = 1;
   }
-  int w = m_tile >= 16 ? 8 : kMaxWarps;
+  // D64：warp 多会把 block 数压到 < SM 数，权重流读并行度不够，c1 反慢 1.8 ms；小 M 下 block 数比 A 复用重要。
+  // 上限 4 warp，且要求 block ≥ 4×SM。
+  int w = 4;
   const long warps_total = (rows_total_per_e + rows_per_warp - 1) / rows_per_warp * (active_e_est > 0 ? active_e_est : 1);
-  while (w > 1 && warps_total / w < 2L * sms) w >>= 1;
+  while (w > 1 && warps_total / w < 4L * sms) w >>= 1;
   return w;
 }
 template <int M_TILE>
