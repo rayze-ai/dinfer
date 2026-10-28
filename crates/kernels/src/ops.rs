@@ -1931,8 +1931,22 @@ pub struct MoeBuckets {
     pub cursor: CudaSlice<i32>,
     pub sorted_tok: CudaSlice<i32>,
     pub sorted_k: CudaSlice<i32>,
+    /// B8：tile 前缀和 `[E+1]`（BM=32 行一块），grouped GEMM 的一维 tile 表。
+    pub tile_off: CudaSlice<i32>,
     pub num_experts: usize,
     pub max_pairs: usize,
+}
+
+/// `tile_off` 的 CPU 口径（测试 / 自建 offsets 时用）：tile_off[e] = Σ_{e'<e} ceil(len_e'/32)。
+pub fn moe_tile_off_cpu(offsets: &[i32]) -> Vec<i32> {
+    let mut t = Vec::with_capacity(offsets.len());
+    let mut acc = 0i32;
+    for w in offsets.windows(2) {
+        t.push(acc);
+        acc += (w[1] - w[0] + 31) / 32;
+    }
+    t.push(acc);
+    t
 }
 
 impl MoeBuckets {
@@ -1944,6 +1958,7 @@ impl MoeBuckets {
             cursor: stream.alloc_zeros::<i32>(num_experts)?,
             sorted_tok: stream.alloc_zeros::<i32>(max_pairs)?,
             sorted_k: stream.alloc_zeros::<i32>(max_pairs)?,
+            tile_off: stream.alloc_zeros::<i32>(num_experts + 1)?,
             num_experts,
             max_pairs,
         })
@@ -1965,6 +1980,7 @@ pub fn moe_bucket(
     let pcu = stream.ptr_mut(&mut b.cursor) as *mut i32;
     let pst = stream.ptr_mut(&mut b.sorted_tok) as *mut i32;
     let psk = stream.ptr_mut(&mut b.sorted_k) as *mut i32;
+    let pto = stream.ptr_mut(&mut b.tile_off) as *mut i32;
     // SAFETY: 容量已校验。
     check(
         unsafe {
@@ -1975,6 +1991,7 @@ pub fn moe_bucket(
                 pcu,
                 pst,
                 psk,
+                pto,
                 tokens as i64,
                 b.num_experts as i64,
                 topk as i64,
@@ -2184,6 +2201,7 @@ pub fn moe_grouped_gemm(
     sptr: &CudaSlice<u64>,
     alpha: &CudaSlice<f32>,
     offsets: &CudaSlice<i32>,
+    tile_off: &CudaSlice<i32>,
     out: &mut CudaSlice<bf16>,
     rows: usize,
     n: usize,
@@ -2191,6 +2209,7 @@ pub fn moe_grouped_gemm(
     num_experts: usize,
 ) -> Result<()> {
     ensure!(k % 64 == 0, "moe_grouped_gemm: k {k} 不是 64 的倍数");
+    ensure!(tile_off.len() >= num_experts + 1, "moe_grouped_gemm: tile_off");
     ensure!(
         aq.len() >= rows * (k / 2)
             && a_s.len() >= rows * (k / 16)
@@ -2207,12 +2226,13 @@ pub fn moe_grouped_gemm(
     let ps = stream.ptr(sptr) as *const *const c_void;
     let pal = stream.ptr(alpha) as *const f32;
     let po = stream.ptr(offsets) as *const i32;
+    let pto = stream.ptr(tile_off) as *const i32;
     let pout = stream.ptr_mut(out) as *mut c_void;
     // SAFETY: 容量已校验；bptr/sptr 内的设备地址由调用方（layer 建表时）保证有效且各 [N,K/2]/[N,K/16] 大小。
     check(
         unsafe {
             ffi::moe_grouped_gemm(
-                paq, pas, pb, ps, pal, po, pout, rows as i64, n as i64, k as i64, num_experts as i64,
+                paq, pas, pb, ps, pal, po, pto, pout, rows as i64, n as i64, k as i64, num_experts as i64,
                 stream.raw() as _,
             )
         },
@@ -2236,6 +2256,7 @@ pub fn moe_grouped_gemm_dual(
     alpha_u: &CudaSlice<f32>,
     out_u: &mut CudaSlice<bf16>,
     offsets: &CudaSlice<i32>,
+    tile_off: &CudaSlice<i32>,
     rows: usize,
     n: usize,
     k: usize,
@@ -2271,7 +2292,7 @@ pub fn moe_grouped_gemm_dual(
     check(
         unsafe {
             ffi::moe_grouped_gemm_dual(
-                paq, pas, pbg, psg, palg, pog, pbu, psu, palu, pou, po,
+                paq, pas, pbg, psg, palg, pog, pbu, psu, palu, pou, po, stream.ptr(tile_off) as *const i32,
                 rows as i64, n as i64, k as i64, num_experts as i64, stream.raw() as _,
             )
         },

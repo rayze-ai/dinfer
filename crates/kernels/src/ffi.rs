@@ -691,6 +691,7 @@ extern "C" {
         cursor: *mut i32,
         sorted_tok: *mut i32,
         sorted_k: *mut i32,
+        tile_off: *mut i32,
         tokens: i64,
         num_experts: i64,
         topk: i64,
@@ -1587,12 +1588,12 @@ extern "C" {
     pub fn moe_grouped_quant(a: *const c_void, row2e: *const i32, agscale: *const f32, aq: *mut c_void,
                              a_s: *mut c_void, r: i64, k: i64, exact_rq: i32, stream: cudaStream_t) -> i32;
     pub fn moe_grouped_gemm(aq: *const c_void, a_s: *const c_void, bptr: *const *const c_void,
-                            sptr: *const *const c_void, alpha: *const f32, offsets: *const i32, out: *mut c_void,
+                            sptr: *const *const c_void, alpha: *const f32, offsets: *const i32, tile_off: *const i32, out: *mut c_void,
                             r: i64, n: i64, k: i64, num_experts: i64, stream: cudaStream_t) -> i32;
     pub fn moe_grouped_gemm_dual(aq: *const c_void, a_s: *const c_void,
                                  bg: *const *const c_void, sg: *const *const c_void, alpha_g: *const f32, out_g: *mut c_void,
                                  bu: *const *const c_void, su: *const *const c_void, alpha_u: *const f32, out_u: *mut c_void,
-                                 offsets: *const i32, r: i64, n: i64, k: i64, num_experts: i64, stream: cudaStream_t) -> i32;
+                                 offsets: *const i32, tile_off: *const i32, r: i64, n: i64, k: i64, num_experts: i64, stream: cudaStream_t) -> i32;
 }
 #[cfg(not(all(not(no_nvcc_stub), sm120)))]
 #[allow(clippy::too_many_arguments, clippy::missing_safety_doc)]
@@ -1650,7 +1651,7 @@ pub unsafe fn moe_grouped_quant(_a: *const c_void, _r2e: *const i32, _ag: *const
 #[cfg(not(all(not(no_nvcc_stub), sm120)))]
 #[allow(clippy::too_many_arguments, clippy::missing_safety_doc)]
 pub unsafe fn moe_grouped_gemm(_aq: *const c_void, _as: *const c_void, _bp: *const *const c_void,
-                               _sp: *const *const c_void, _al: *const f32, _off: *const i32, _o: *mut c_void,
+                               _sp: *const *const c_void, _al: *const f32, _off: *const i32, _to: *const i32, _o: *mut c_void,
                                _r: i64, _n: i64, _k: i64, _ne: i64, _s: cudaStream_t) -> i32 {
     CUDA_ERROR_NOT_SUPPORTED
 }
@@ -1659,7 +1660,7 @@ pub unsafe fn moe_grouped_gemm(_aq: *const c_void, _as: *const c_void, _bp: *con
 pub unsafe fn moe_grouped_gemm_dual(_aq: *const c_void, _as: *const c_void,
                                     _bg: *const *const c_void, _sg: *const *const c_void, _alg: *const f32, _og: *mut c_void,
                                     _bu: *const *const c_void, _su: *const *const c_void, _alu: *const f32, _ou: *mut c_void,
-                                    _off: *const i32, _r: i64, _n: i64, _k: i64, _ne: i64, _s: cudaStream_t) -> i32 {
+                                    _off: *const i32, _to: *const i32, _r: i64, _n: i64, _k: i64, _ne: i64, _s: cudaStream_t) -> i32 {
     CUDA_ERROR_NOT_SUPPORTED
 }
 
@@ -1709,7 +1710,7 @@ mod stubs {
         => moe_route_softmax_f32, "moe_route_softmax_f32"
         [l, ti, pes, tw, t, e, k, s]);
     stub!(moe_route_f32(l: *const f32, b: *const f32, ti: *mut i32, tw: *mut f32, t: i64, e: i64, k: i64, r: i32, sc: f32, s: cudaStream_t));
-    stub!(moe_bucket(ti: *const i32, c: *mut i32, o: *mut i32, cu: *mut i32, st: *mut i32, sk: *mut i32, t: i64, e: i64, k: i64, s: cudaStream_t));
+    stub!(moe_bucket(ti: *const i32, c: *mut i32, o: *mut i32, cu: *mut i32, st: *mut i32, sk: *mut i32, to: *mut i32, t: i64, e: i64, k: i64, s: cudaStream_t));
     stub!(moe_gather_bf16(x: *const c_void, xg: *mut c_void, st: *const i32, n: i64, h: i64, s: cudaStream_t));
     stub!(moe_scatter_add_f32(y: *const c_void, a: *mut f32, st: *const i32, sk: *const i32, tw: *const f32, n: i64, k: i64, h: i64, s: cudaStream_t));
     stub!(mxfp4_dequant_bf16(p: *const c_void, sc: *const c_void, o: *mut c_void, r: i64, c: i64, g: i64, s: cudaStream_t));

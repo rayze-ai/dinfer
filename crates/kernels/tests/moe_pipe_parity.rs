@@ -33,8 +33,9 @@ fn run(stream: &Stream, pipe: bool, aq: &[u8], a_s: &[u8], bbytes: &[Vec<u8>], s
     let dsp = stream.htod_copy(sptr).unwrap();
     let dal = stream.htod_copy(alpha.to_vec()).unwrap();
     let doff = stream.htod_copy(offsets.to_vec()).unwrap();
+    let dtoff = stream.htod_copy(k::ops::moe_tile_off_cpu(offsets)).unwrap();
     let mut dout = stream.alloc_zeros::<bf16>(rows * n).unwrap();
-    k::ops::moe_grouped_gemm(stream, &daq, &das, &dbp, &dsp, &dal, &doff, &mut dout, rows, n, kk, e).unwrap();
+    k::ops::moe_grouped_gemm(stream, &daq, &das, &dbp, &dsp, &dal, &doff, &dtoff, &mut dout, rows, n, kk, e).unwrap();
     stream.synchronize().unwrap();
     let out = stream.dtoh_sync_copy(&dout).unwrap();
     drop(db); drop(ds);
@@ -125,16 +126,17 @@ fn moe_pipe_timing() {
     let dbp = stream.htod_copy(bptr).unwrap();
     let dsp = stream.htod_copy(sptr).unwrap();
     let dal = stream.htod_copy(alpha).unwrap();
+    let dtoff = stream.htod_copy(k::ops::moe_tile_off_cpu(&offsets)).unwrap();
     let doff = stream.htod_copy(offsets).unwrap();
     let mut dout = stream.alloc_zeros::<bf16>(rows * n).unwrap();
 
     let iters = 200usize;
     let mut bench = |pipe: bool| -> f64 {
         if pipe { std::env::set_var("MOE_GEMM_PIPE", "1"); } else { std::env::remove_var("MOE_GEMM_PIPE"); }
-        for _ in 0..20 { k::ops::moe_grouped_gemm(&stream,&daq,&das,&dbp,&dsp,&dal,&doff,&mut dout,rows,n,kk,e).unwrap(); }
+        for _ in 0..20 { k::ops::moe_grouped_gemm(&stream,&daq,&das,&dbp,&dsp,&dal,&doff,&dtoff,&mut dout,rows,n,kk,e).unwrap(); }
         stream.synchronize().unwrap();
         let t0 = std::time::Instant::now();
-        for _ in 0..iters { k::ops::moe_grouped_gemm(&stream,&daq,&das,&dbp,&dsp,&dal,&doff,&mut dout,rows,n,kk,e).unwrap(); }
+        for _ in 0..iters { k::ops::moe_grouped_gemm(&stream,&daq,&das,&dbp,&dsp,&dal,&doff,&dtoff,&mut dout,rows,n,kk,e).unwrap(); }
         stream.synchronize().unwrap();
         t0.elapsed().as_secs_f64() * 1e6 / iters as f64
     };
@@ -180,6 +182,7 @@ fn moe_dual_matches_separate() {
     std::env::remove_var("MOE_GEMM_PIPE");
     let daq = st.htod_copy(aq).unwrap();
     let das = st.htod_copy(a_s).unwrap();
+    let dtoff = st.htod_copy(k::ops::moe_tile_off_cpu(&offsets)).unwrap();
     let doff = st.htod_copy(offsets).unwrap();
     // 上传 per-expert 权重 + 指针表
     let upload = |bb: &Vec<Vec<u8>>, ss: &Vec<Vec<u8>>| {
@@ -200,15 +203,15 @@ fn moe_dual_matches_separate() {
     // baseline: 分开两次
     let mut og = st.alloc_zeros::<bf16>(rows * n).unwrap();
     let mut ou = st.alloc_zeros::<bf16>(rows * n).unwrap();
-    k::ops::moe_grouped_gemm(&st, &daq, &das, &dbgp, &dsgp, &dalg, &doff, &mut og, rows, n, kk, e).unwrap();
-    k::ops::moe_grouped_gemm(&st, &daq, &das, &dbup, &dsup, &dalu, &doff, &mut ou, rows, n, kk, e).unwrap();
+    k::ops::moe_grouped_gemm(&st, &daq, &das, &dbgp, &dsgp, &dalg, &doff, &dtoff, &mut og, rows, n, kk, e).unwrap();
+    k::ops::moe_grouped_gemm(&st, &daq, &das, &dbup, &dsup, &dalu, &doff, &dtoff, &mut ou, rows, n, kk, e).unwrap();
     st.synchronize().unwrap();
     let bg_out = st.dtoh_sync_copy(&og).unwrap();
     let bu_out = st.dtoh_sync_copy(&ou).unwrap();
     // dual: 一次
     let mut og2 = st.alloc_zeros::<bf16>(rows * n).unwrap();
     let mut ou2 = st.alloc_zeros::<bf16>(rows * n).unwrap();
-    k::ops::moe_grouped_gemm_dual(&st, &daq, &das, &dbgp, &dsgp, &dalg, &mut og2, &dbup, &dsup, &dalu, &mut ou2, &doff, rows, n, kk, e).unwrap();
+    k::ops::moe_grouped_gemm_dual(&st, &daq, &das, &dbgp, &dsgp, &dalg, &mut og2, &dbup, &dsup, &dalu, &mut ou2, &doff, &dtoff, rows, n, kk, e).unwrap();
     st.synchronize().unwrap();
     let dg_out = st.dtoh_sync_copy(&og2).unwrap();
     let du_out = st.dtoh_sync_copy(&ou2).unwrap();

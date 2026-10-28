@@ -78,19 +78,24 @@ __global__ void count_kernel(const int32_t* __restrict__ topk_ids, int32_t* __re
 }
 
 // 单 block exclusive scan（E ≤ 1024）：offsets[0..E] ；并把 cursor[e] = offsets[e] 作为填充游标。
+// 同时产出 tile_off[0..E]：按 BM=32 行一块的 tile 前缀和（tile_off[e] = Σ_{e'<e} ceil(count[e']/32)），
+// 供 grouped GEMM 用一维 tile 表代替 (专家 × 行块) 的满格 grid（loop kaon3-decode-opt B8：空 block 5.8M → 0）。
 __global__ void scan_kernel(const int32_t* __restrict__ counts, int32_t* __restrict__ offsets,
-                            int32_t* __restrict__ cursor, int E) {
+                            int32_t* __restrict__ cursor, int32_t* __restrict__ tile_off, int E) {
   __shared__ int s[MAX_E];
   for (int e = threadIdx.x; e < E; e += blockDim.x) s[e] = counts[e];
   __syncthreads();
   if (threadIdx.x == 0) {
-    int acc = 0;
+    int acc = 0, tacc = 0;
     for (int e = 0; e < E; ++e) {
       offsets[e] = acc;
       cursor[e] = acc;
+      tile_off[e] = tacc;
+      tacc += (s[e] + 31) / 32;
       acc += s[e];
     }
     offsets[E] = acc;
+    tile_off[E] = tacc;
   }
 }
 
@@ -301,14 +306,14 @@ extern "C" int moe_route_softmax_f32(const float* logits, int32_t* topk_ids, con
 }
 
 extern "C" int moe_bucket(const int32_t* topk_ids, int32_t* counts, int32_t* offsets, int32_t* cursor,
-                          int32_t* sorted_tok, int32_t* sorted_k, int64_t tokens, int64_t num_experts, int64_t topk,
-                          cudaStream_t stream) {
+                          int32_t* sorted_tok, int32_t* sorted_k, int32_t* tile_off, int64_t tokens,
+                          int64_t num_experts, int64_t topk, cudaStream_t stream) {
   if (tokens <= 0) return 0;
   if (num_experts <= 0 || num_experts > MAX_E) return err(cudaErrorInvalidValue);
   const int64_t n = tokens * topk;
   if (cudaMemsetAsync(counts, 0, num_experts * sizeof(int32_t), stream) != cudaSuccess) return last_err();
   count_kernel<<<grid_for(n), 256, 0, stream>>>(topk_ids, counts, n);
-  scan_kernel<<<1, 1024, 0, stream>>>(counts, offsets, cursor, (int)num_experts);
+  scan_kernel<<<1, 1024, 0, stream>>>(counts, offsets, cursor, tile_off, (int)num_experts);
   fill_kernel<<<grid_for(n), 256, 0, stream>>>(topk_ids, cursor, sorted_tok, sorted_k, (int)topk, n);
   return last_err();
 }

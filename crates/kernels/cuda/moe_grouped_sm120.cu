@@ -7,7 +7,6 @@
 //   quant16 / mma_fp4 / e4m3_f / rcp_approx **逐字复制自 gemm_nvfp4_sm120.cu**（不共享头避免跨文件漂移；
 //   任一侧改了另一侧要同步）。BM/BN/PAD 同。
 #include <cstdint>
-#include <cstdlib>
 #include <cuda_runtime.h>
 #include <cuda_fp4.h>
 #include <cuda_fp8.h>
@@ -83,6 +82,23 @@ __device__ __forceinline__ void quant16(const bf16* src, bool valid, uint2* out8
   *out_s = sb8;
 }
 // ---- 复制结束 ----
+// B8：一维 tile 表。tile_off[e] = Σ_{e'<e} ceil(len_e'/BM)（moe_bucket 的 scan 产出）；tile t ∈ [0, tile_off[E]) 属于
+// 使 tile_off[e] ≤ t < tile_off[e+1] 的专家 e，行块 m_blk = offsets[e] + (t − tile_off[e])·BM。二分 E=128 只 7 步。
+// grid.y 取 host 上界 R/BM + E，超过 tile_off[E] 的 block 直接退（比旧版 (E × R/BM) 满格 grid 少 >100×）。
+__device__ __forceinline__ bool tile_lookup(const int32_t* __restrict__ offsets, const int32_t* __restrict__ tile_off,
+                                            int E, int t, int& e, int& m_blk, int& row_hi) {
+  if (t >= tile_off[E]) return false;
+  int lo = 0, hi = E;  // 找最大的 e 使 tile_off[e] ≤ t
+  while (hi - lo > 1) {
+    const int mid = (lo + hi) >> 1;
+    if (tile_off[mid] <= t) lo = mid; else hi = mid;
+  }
+  e = lo;
+  m_blk = offsets[e] + (t - tile_off[e]) * BM;
+  row_hi = offsets[e + 1];
+  return true;
+}
+
 
 // cp.async 流水 helper（照搬 gemm_fp8_sm120.cu 的 cp.async.cg 双缓冲范式）。
 __device__ __forceinline__ uint32_t smem_u32(const void* p) {
@@ -128,12 +144,10 @@ template <int BK>
 __global__ void __launch_bounds__(256)
     grouped_gemm_kernel(const uint8_t* __restrict__ A, const uint8_t* __restrict__ Asc,
                         const uint8_t* const* __restrict__ Bptr, const uint8_t* const* __restrict__ Sptr,
-                        const float* __restrict__ alpha, const int32_t* __restrict__ offsets, bf16* __restrict__ D,
-                        int N, int K) {
-  const int e = blockIdx.z;
-  const int row_lo = offsets[e], row_hi = offsets[e + 1];
-  const int m_blk = row_lo + blockIdx.y * BM;
-  if (m_blk >= row_hi) return;  // 该专家没有这一行块（含 len==0 专家：row_lo==row_hi 直接退）
+                        const float* __restrict__ alpha, const int32_t* __restrict__ offsets, const int32_t* __restrict__ tile_off, bf16* __restrict__ D,
+                        int N, int K, int E) {
+  int e, m_blk, row_hi;
+  if (!tile_lookup(offsets, tile_off, E, (int)blockIdx.y, e, m_blk, row_hi)) return;
 
   constexpr int RSA = BK / 2 + PAD, RSB = BK / 2 + PAD;
   constexpr int NQ4 = BK / 64;
@@ -250,12 +264,10 @@ template <int BK>
 __global__ void __launch_bounds__(256)
     grouped_gemm_kernel_pipe(const uint8_t* __restrict__ A, const uint8_t* __restrict__ Asc,
                              const uint8_t* const* __restrict__ Bptr, const uint8_t* const* __restrict__ Sptr,
-                             const float* __restrict__ alpha, const int32_t* __restrict__ offsets,
-                             bf16* __restrict__ D, int N, int K) {
-  const int e = blockIdx.z;
-  const int row_lo = offsets[e], row_hi = offsets[e + 1];
-  const int m_blk = row_lo + blockIdx.y * BM;
-  if (m_blk >= row_hi) return;
+                             const float* __restrict__ alpha, const int32_t* __restrict__ offsets, const int32_t* __restrict__ tile_off,
+                             bf16* __restrict__ D, int N, int K, int E) {
+  int e, m_blk, row_hi;
+  if (!tile_lookup(offsets, tile_off, E, (int)blockIdx.y, e, m_blk, row_hi)) return;
 
   constexpr int RSA = BK / 2 + PAD, RSB = BK / 2 + PAD;
   constexpr int NQ4 = BK / 64;
@@ -423,17 +435,14 @@ __global__ void __launch_bounds__(256)
                              const float* __restrict__ alphaG, bf16* __restrict__ Dg,
                              const uint8_t* const* __restrict__ Bu, const uint8_t* const* __restrict__ Su,
                              const float* __restrict__ alphaU, bf16* __restrict__ Du,
-                             const int32_t* __restrict__ offsets, int N, int K, int E) {
-  const int half = blockIdx.z / E;          // 0=gate 1=up
-  const int e = blockIdx.z - half * E;
+                             const int32_t* __restrict__ offsets, const int32_t* __restrict__ tile_off, int N, int K, int E) {
+  const int half = blockIdx.z;              // 0=gate 1=up
+  int e, m_blk, row_hi;
+  if (!tile_lookup(offsets, tile_off, E, (int)blockIdx.y, e, m_blk, row_hi)) return;
   const uint8_t* const* Bptr = half ? Bu : Bg;
   const uint8_t* const* Sptr = half ? Su : Sg;
   const float* alpha = half ? alphaU : alphaG;
   bf16* D = half ? Du : Dg;
-
-  const int row_lo = offsets[e], row_hi = offsets[e + 1];
-  const int m_blk = row_lo + blockIdx.y * BM;
-  if (m_blk >= row_hi) return;
 
   constexpr int RSA = BK / 2 + PAD, RSB = BK / 2 + PAD;
   constexpr int NQ4 = BK / 64;
@@ -614,16 +623,13 @@ int moe_grouped_quant(const void* a, const int32_t* row2e, const float* agscale,
 
 // grouped GEMM：out[R,N] = alpha[e] * aq · Bptr[e]ᵀ（按专家段）。Bptr/Sptr 是 device 端 [E] 指针数组。
 // grid.y = ceil(R/BM)（R 是各专家段上界的最大可能，单专家最多 R 行）。cudagraph 友好：launch 配置编译期固定。
+// grid = (N/BN, tile 上界 = R/BM + E, 1)：tile 表（B8）代替满格 (R/BM × E)。编译期固定、cudagraph 友好。
 int moe_grouped_gemm(const void* aq, const void* a_s, const void* const* Bptr, const void* const* Sptr,
-                     const float* alpha, const int32_t* offsets, void* out, int64_t R, int64_t N, int64_t K,
-                     int64_t num_experts, cudaStream_t stream) {
+                     const float* alpha, const int32_t* offsets, const int32_t* tile_off, void* out, int64_t R,
+                     int64_t N, int64_t K, int64_t num_experts, cudaStream_t stream) {
   if (R <= 0 || N <= 0 || K <= 0 || num_experts <= 0) return 0;
   if (K % 64 != 0) return static_cast<int>(cudaErrorInvalidValue);
-  // 诊断(MOE_GRID_CAP=<n>)：临时把 grid.z 从 num_experts 压到 n，测空 block 占 gemm3 多少时间。
-  // **结果会错**(只覆盖前 n 个专家),仅用于计时验证"94% 空 block 是否真耗时",测完删。
-  int gz = (int)num_experts;
-  if (const char* cap = getenv("MOE_GRID_CAP")) { int c = atoi(cap); if (c > 0 && c < gz) gz = c; }
-  const dim3 grid((unsigned)((N + BN - 1) / BN), (unsigned)((R + BM - 1) / BM), (unsigned)gz);
+  const dim3 grid((unsigned)((N + BN - 1) / BN), (unsigned)((R + BM - 1) / BM + num_experts), 1u);
   const uint8_t* pa = static_cast<const uint8_t*>(aq);
   const uint8_t* psa = static_cast<const uint8_t*>(a_s);
   const uint8_t* const* pb = reinterpret_cast<const uint8_t* const*>(Bptr);
@@ -632,18 +638,18 @@ int moe_grouped_gemm(const void* aq, const void* a_s, const void* const* Bptr, c
   const bool pipe = []{ const char* v = getenv("MOE_GEMM_PIPE"); return !v || v[0] != '0'; }();
   if (K % 128 == 0) {
     if (pipe)
-      grouped_gemm_kernel_pipe<128><<<grid, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets,
-                                                              static_cast<bf16*>(out), (int)N, (int)K);
+      grouped_gemm_kernel_pipe<128><<<grid, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off,
+                                                              static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
     else
-      grouped_gemm_kernel<128><<<grid, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, static_cast<bf16*>(out),
-                                                         (int)N, (int)K);
+      grouped_gemm_kernel<128><<<grid, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out),
+                                                         (int)N, (int)K, (int)num_experts);
   } else {
     if (pipe)
-      grouped_gemm_kernel_pipe<64><<<grid, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets,
-                                                             static_cast<bf16*>(out), (int)N, (int)K);
+      grouped_gemm_kernel_pipe<64><<<grid, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off,
+                                                             static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
     else
-      grouped_gemm_kernel<64><<<grid, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, static_cast<bf16*>(out),
-                                                        (int)N, (int)K);
+      grouped_gemm_kernel<64><<<grid, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out),
+                                                        (int)N, (int)K, (int)num_experts);
   }
   return gerr();
 }
@@ -653,11 +659,11 @@ int moe_grouped_gemm(const void* aq, const void* a_s, const void* const* Bptr, c
 int moe_grouped_gemm_dual(const void* aq, const void* a_s,
                           const void* const* Bg, const void* const* Sg, const float* alphaG, void* outG,
                           const void* const* Bu, const void* const* Su, const float* alphaU, void* outU,
-                          const int32_t* offsets, int64_t R, int64_t N, int64_t K, int64_t num_experts,
-                          cudaStream_t stream) {
+                          const int32_t* offsets, const int32_t* tile_off, int64_t R, int64_t N, int64_t K,
+                          int64_t num_experts, cudaStream_t stream) {
   if (R <= 0 || N <= 0 || K <= 0 || num_experts <= 0) return 0;
   if (K % 64 != 0) return static_cast<int>(cudaErrorInvalidValue);
-  const dim3 grid((unsigned)((N + BN - 1) / BN), (unsigned)((R + BM - 1) / BM), (unsigned)(2 * num_experts));
+  const dim3 grid((unsigned)((N + BN - 1) / BN), (unsigned)((R + BM - 1) / BM + num_experts), 2u);
   const uint8_t* pa = static_cast<const uint8_t*>(aq);
   const uint8_t* psa = static_cast<const uint8_t*>(a_s);
   const uint8_t* const* pbg = reinterpret_cast<const uint8_t* const*>(Bg);
@@ -666,11 +672,11 @@ int moe_grouped_gemm_dual(const void* aq, const void* a_s,
   const uint8_t* const* psu = reinterpret_cast<const uint8_t* const*>(Su);
   if (K % 128 == 0) {
     grouped_gemm_kernel_dual<128><<<grid, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, static_cast<bf16*>(outG),
-                                                            pbu, psu, alphaU, static_cast<bf16*>(outU), offsets,
+                                                            pbu, psu, alphaU, static_cast<bf16*>(outU), offsets, tile_off,
                                                             (int)N, (int)K, (int)num_experts);
   } else {
     grouped_gemm_kernel_dual<64><<<grid, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, static_cast<bf16*>(outG),
-                                                           pbu, psu, alphaU, static_cast<bf16*>(outU), offsets,
+                                                           pbu, psu, alphaU, static_cast<bf16*>(outU), offsets, tile_off,
                                                            (int)N, (int)K, (int)num_experts);
   }
   return gerr();

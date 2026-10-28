@@ -215,8 +215,9 @@ impl QLinear {
                 };
                 gemm.quant_fp8(&x.data, *a_scale, buf, need)?;
                 // B6（loop kaon3-decode-opt）：decode 小 M 走带宽型 fp8 GEMV（`mlp_fp8_gemv`，与 dense MLP 同 kernel），
-                // 条件：tokens ≤ 16、K % 16 == 0、A 的 bf16 驻留 ≤ 96 KB（M_TILE·K·2；K=8192 只 m ≤ 4）。`FP8_GEMV_OLD=1` 回退 cuBLASLt。
-                if fp8_gemv_enabled() && tokens <= 16 && kk % 16 == 0 && fp8_gemv_m_tile(tokens) * kk * 2 <= 96 * 1024 {
+                // 条件：tokens ≤ 16、K % 16 == 0、A 的 bf16 驻留 M_TILE·K·2 ≤ 24 KB（≥ 4 block/SM 才能把权重流读的延迟藏住；
+                // D62 实测 45 KB（m=8,K=2816）时 c8 反而比 cuBLASLt 慢 5%）。K=2816 → m ≤ 4；K=8192 → m = 1。`FP8_GEMV=1` 开。
+                if fp8_gemv_enabled() && tokens <= 16 && kk % 16 == 0 && fp8_gemv_m_tile(tokens) * kk * 2 <= 24 * 1024 {
                     return k::ops::mlp_fp8_gemv(stream, buf, w, &mut out.data, tokens, n, kk, *scale * *a_scale);
                 }
                 // 两个 per-tensor scale 以设备标量形式传给 cuBLASLt；按 shape 缓存一次即可（每层不同）。
@@ -1589,15 +1590,15 @@ impl Gemma4Layer {
                     stream, &g.aq_gu, &g.as_gu,
                     &mg.gate_packed, &mg.gate_scale, &mg.alpha_gate, &mut gate_o.data,
                     &mg.up_packed, &mg.up_scale, &mg.alpha_up, &mut up_o.data,
-                    &sc.buckets.offsets, r, mg.n_gate, mg.k_gate, e,
+                    &sc.buckets.offsets, &sc.buckets.tile_off, r, mg.n_gate, mg.k_gate, e,
                 )?;
             } else {
                 k::ops::moe_grouped_gemm(
-                    stream, &g.aq_gu, &g.as_gu, &mg.gate_packed, &mg.gate_scale, &mg.alpha_gate, &sc.buckets.offsets,
+                    stream, &g.aq_gu, &g.as_gu, &mg.gate_packed, &mg.gate_scale, &mg.alpha_gate, &sc.buckets.offsets, &sc.buckets.tile_off,
                     &mut g.gate_o.data, r, mg.n_gate, mg.k_gate, e,
                 )?;
                 k::ops::moe_grouped_gemm(
-                    stream, &g.aq_gu, &g.as_gu, &mg.up_packed, &mg.up_scale, &mg.alpha_up, &sc.buckets.offsets,
+                    stream, &g.aq_gu, &g.as_gu, &mg.up_packed, &mg.up_scale, &mg.alpha_up, &sc.buckets.offsets, &sc.buckets.tile_off,
                     &mut g.up_o.data, r, mg.n_gate, mg.k_gate, e,
                 )?;
             }
@@ -1611,12 +1612,12 @@ impl Gemma4Layer {
             )?;
             if moe_gemv {
                 k::ops::moe_fp4_gemv(
-                    stream, &g.aq_dn, &g.as_dn, &mg.down_packed, &mg.down_scale, &mg.alpha_down, &sc.buckets.offsets,
+                    stream, &g.aq_dn, &g.as_dn, &mg.down_packed, &mg.down_scale, &mg.alpha_down, &sc.buckets.offsets, &sc.buckets.tile_off,
                     &mut sc.yg.data, r, mg.n_down, mg.k_down, e,
                 )?;
             } else if !skip_dn {
                 k::ops::moe_grouped_gemm(
-                    stream, &g.aq_dn, &g.as_dn, &mg.down_packed, &mg.down_scale, &mg.alpha_down, &sc.buckets.offsets,
+                    stream, &g.aq_dn, &g.as_dn, &mg.down_packed, &mg.down_scale, &mg.alpha_down, &sc.buckets.offsets, &sc.buckets.tile_off,
                     &mut sc.yg.data, r, mg.n_down, mg.k_down, e,
                 )?;
             }
