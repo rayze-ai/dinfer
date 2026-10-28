@@ -858,3 +858,4 @@ decode c1 的 MoE 段 nsys：grouped_gemm gate 18.6 + up 18.6 + down 12.5 + gelu
 - 预期 -0.9 ms 实得 -0.18 ms：说明 MoE grouped GEMM 的 50 us/层**不全是 K 链延迟**——4 级流水只把每步从 0.85 → ~0.6 us；剩余是每 CTA 的固定开销（tile_lookup、prologue、epilogue）与 N=704 只 11 个 CTA/专家 的并行度。要再降得换 tile 形状（BM=16 + BN=32 让 CTA 数×4）或把 gate/up/down 三 GEMM 融合。记 CSV round b16。
 - A 侧（b15 二进制，当时 KV_FP8_STORE 默认开）c8 TTFT 1395 再现 D68。英文 raw 与 b8d 同（逐位）。
 - **B17a 发现**：`layer.rs` forward 热路径每层 **17 次 `std::env::var`**（ATTN_SKIP_*/DENSE_SKIP/MOE_SKIP/KAON3_*_TIME/MOE_ISO/MOE_GEMM_SKIP/NQ4_EXACT_RCP…）→ 每步 ~510 次 getenv（锁 + 线性扫 environ）≈ 0.5–1 ms host，**prefill（eager，host 在关键路径）直接吃掉**；decode 在图里不受影响（但 graph 外的 route/plan 也有）。改 `OnceLock<bool>` 一次读。零风险，逐位不变。
+- **b16 定稿（两轮）**：c1 6.57 → **6.39/6.40（-2.7%）**，吞吐 144 → 148；c8 11.52 → 11.57/11.58（持平）；TTFT c1 29.5 → 28.8。保留，CSV round b16。累计 c1 **17.07 → 6.39（-62.6%）**，vs vLLM 4.69 差 1.36×。
