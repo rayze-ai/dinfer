@@ -1207,3 +1207,25 @@
 根因(逐个排掉):① `grep "\"data\""` 经 `ctr` 的 SSH→docker→heredoc 多层,引号转义被打乱→永不匹配;② 换 `grep "listening addr"` 仍栽——**tracing 日志带 ANSI 色码**,原始字节是 `listening \x1b[3maddr`,"listening addr"(带空格字面量)被色码打断不匹配;③ GPU4 上一轮 --rm 容器残留占 25GB,新 serve OOM 也会 NOTREADY(复用 GPU 前先 nvidia-smi 查空)。
 解法:就绪判定要么 `sed 's/\x1b\[[0-9;]*m//g'` 去色码再 grep,要么干脆 `sleep 55`(serve 稳定 42s bind)不 grep。读 serve 日志一律先去 ANSI。
 避免:① ctr heredoc 里别用带引号/空格的 grep 字面量(转义+色码双坑);② 判定失败先看 serve 日志证明它到底起没起,别默认"没起"就杀重来——我默认错了方向栽了6次=白等4分钟。
+
+## 2026-10-28 nsys 两个版本都"无 kernel 表"：CUPTI 缓冲只在 cudaProfilerStop 落盘 + INT 了 nsys 本体
+- 现象：`nsys profile -t cuda --cuda-graph-trace=node` 抓 dinfer serve，sqlite 只有加载期 memcpy，无 KERNEL 表；第二次连 .nsys-rep 都没有。
+- 根因：① 诊断表写明 "Buffers holding CUDA trace data will be flushed on CudaProfilerStop()"，dinfer 被 INT 退出不调它；② `kill -INT nsys` 打断报告生成。
+- 解法：`--cuda-flush-interval=1000`；只 INT 被测进程，`wait` nsys 自然退出。脚本 `scripts/dev/kaon3_nsys_decode.sh`。
+- 避免：任何"工具抓不到"先读它自己的诊断表（DIAGNOSTIC_EVENT），别换版本死磕。
+
+## 2026-10-28 排队等待用 `pgrep -f "bash /w/x.sh"` 自匹配 → 两条链各死锁 30 分钟；`pkill -f` 又把自己的壳杀了
+- 现象：等待进程永远不结束；重启链里 `cp` 备份没执行，A 基线用了错的二进制。
+- 根因：`pgrep/pkill -f` 匹配整条命令行，包含发起它的 `bash -c "... pgrep -f ..."` 自身。
+- 解法：串行一条 `bash a.sh; bash b.sh`，或 `until grep -q ^DONE 结果文件`；杀进程按 PID 或 `-x`。CLAUDE.md 早有此规则，第三次踩。
+
+## 2026-10-28 decode split-K attention scratch 按 max_tokens 分配 → 4.4 GB → warmup OOM → kv_cache 空 panic
+- 现象：新二进制起服务 `warmup prefill failed OOM`，随后 `model.rs:207 index out of bounds len 0`。
+- 根因：scratch = B×heads×32 split×(D+2)×4B，B 用了 max_tokens=4160（应是 max_num_seqs=64）。
+- 解法：`LayerScratch::new_with_rows(max_tokens, max_rows)`，68 MB。
+- 避免：按"行数"分配的缓冲都用 max_rows，按"token 数"的才用 max_tokens；新缓冲算一下字节数再上。
+
+## 2026-10-28 `KAON3_MEGA=0`（非 mega dense 路径）与 `MEGA_SPGU=8` 输出 "is is is…"
+- 现象：A/B 里这两档 TPOT 更低（11.33）但输出坏。
+- 根因：未查（不在本 loop 关键路径）；非 mega dense 路径可能自 mega 落地后未再验证。
+- 避免：所有 A/B 变体必抓固定 prompt 输出，输出坏的数字作废；交接区已记 dense 可省 ~1.7 ms 待专刀。
