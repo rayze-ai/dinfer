@@ -51,10 +51,12 @@ pub struct KaonExecutor {
     skip_prev_chosen: bool,
 }
 
-/// B29 开关：异步调度在飞行 token 的设备侧 gather + save_chosen。`INFLIGHT_GATHER=0` 关。
+/// B29 开关：异步调度在飞行 token 的设备侧 gather + save_chosen。`INFLIGHT_GATHER=1` 开（默认关，见函数体注释）。
 fn inflight_gather_enabled() -> bool {
     static IG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *IG.get_or_init(|| std::env::var("INFLIGHT_GATHER").map_or(true, |v| v != "0"))
+    // b29 定稿：同步 runner 下两轮 c8 TPOT 9.80 → 10.05/10.06（+2.5%）、吞吐 -2.5%，c1/TTFT 不变 → **默认关**，`INFLIGHT_GATHER=1` 开；
+    // kaon3 实现 supports_async（在飞行 token 真出现）时必须打开。
+    *IG.get_or_init(|| std::env::var("INFLIGHT_GATHER").map_or(false, |v| v == "1"))
 }
 
 impl KaonExecutor {
