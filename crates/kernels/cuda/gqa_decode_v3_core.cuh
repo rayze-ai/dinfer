@@ -2,6 +2,8 @@
 // 既被 gqa_decode_v3.cu 的原入口 kernel 调，也被 persistent megakernel（mega_attn_sm120.cu）的 Dispatch 调。
 // 放在有名字的 namespace dinfer::gqa_v3，避免匿名 namespace 导致的跨 TU 不可见。
 #pragma once
+#include <cuda_fp8.h>
+
 #include "common.cuh"
 
 namespace dinfer {
@@ -27,6 +29,23 @@ __device__ __forceinline__ void cp16z(void* smem, const void* gmem, int src_byte
   const unsigned a = (unsigned)__cvta_generic_to_shared(smem);
   asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(a), "l"(gmem), "r"(src_bytes));
 }
+// B15（loop kaon3-decode-opt）：KV cache 存 e4m3 时每 key 的 8 维只 8 B，用 8 字节 cp.async（.ca 路径，8 B 合法）。
+__device__ __forceinline__ void cp8z(void* smem, const void* gmem, int src_bytes) {
+  const unsigned a = (unsigned)__cvta_generic_to_shared(smem);
+  asm volatile("cp.async.ca.shared.global [%0], [%1], 8, %2;\n" ::"r"(a), "l"(gmem), "r"(src_bytes));
+}
+// 8 个 e4m3 字节 → 8 个 bf16（e4m3 ⊂ bf16，精确；与写入时的往返值逐位同）
+__device__ __forceinline__ uint4 fp8x8_to_bf16x8(uint2 p) {
+  uint4 o;
+  __nv_bfloat162* ob = reinterpret_cast<__nv_bfloat162*>(&o);
+  const unsigned short* h = reinterpret_cast<const unsigned short*>(&p);
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    const float2 f = __half22float2(__half2(__nv_cvt_fp8x2_to_halfraw2(h[i], __NV_E4M3)));
+    ob[i] = __floats2bfloat162_rn(f.x, f.y);
+  }
+  return o;
+}
 __device__ __forceinline__ void cp_commit() { asm volatile("cp.async.commit_group;\n" ::); }
 template <int N>
 __device__ __forceinline__ void cp_wait() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }
@@ -50,7 +69,7 @@ __device__ __forceinline__ int64_t slot_off3(int64_t slot, int kv_heads) { retur
 // （mega::mega_kernel），只有 tid<V3_THREADS 的线程干活、其余陪跑 `__syncthreads()`（不碰 smem、ks 会越界）。
 // 用 `active = tid < V3_THREADS` 门控所有 smem/global 访问；barrier 全体无条件进 → 128 线程 launch 时 active 恒真，逐位不变。
 // 静态 __shared__ 与 mega 外壳的 extern 动态 smem 共存（本函数只用静态 smem，不碰传入的 dyn smem）。
-template <int GROUP, int D>
+template <int GROUP, int D, bool KV_FP8 = false>
 __device__ __forceinline__ void gqa_decode_v3_core(
     const bf16* __restrict__ q, const bf16* __restrict__ cache, const int32_t* __restrict__ block_table,
     const int32_t* __restrict__ seq_lens, const int32_t* __restrict__ cu_seqlens_q, float* __restrict__ scratch,
@@ -78,6 +97,9 @@ __device__ __forceinline__ void gqa_decode_v3_core(
 
   __shared__ __align__(16) bf16 s_k[V3_PIPE][KEYS][D];
   __shared__ __align__(16) bf16 s_v[V3_PIPE][KEYS][D];
+  // KV_FP8：cp.async 先落 e4m3 暂存，消费前本线程把自己的 8 维展开成 bf16 写回 s_k/s_v（下游代码不变）
+  __shared__ __align__(16) uint8_t s_k8[KV_FP8 ? V3_PIPE : 1][KV_FP8 ? KEYS : 1][KV_FP8 ? D : 8];
+  __shared__ __align__(16) uint8_t s_v8[KV_FP8 ? V3_PIPE : 1][KV_FP8 ? KEYS : 1][KV_FP8 ? D : 8];
   __shared__ float s_m[GROUP][KEYS], s_l[GROUP][KEYS];
   __shared__ float s_acc[GROUP][KEYS][D];
 
@@ -110,15 +132,22 @@ __device__ __forceinline__ void gqa_decode_v3_core(
   // 只 active 线程发：非 active 的 ks 会越界 s_k/s_v；其 cp.async 组计数也不该参与。
   auto issue = [&](int t, int s) {
     const int key = k_begin + t * KEYS + ks;
-    const bf16* slotp = cache;
+    int64_t so = 0;
     int bytes = 0;
     if (key < k_end) {
       const int64_t blk = bt[key / block_size];
-      slotp = cache + slot_off3<D>(blk * block_size + (key % block_size), Hkv);
-      bytes = 16;
+      so = slot_off3<D>(blk * block_size + (key % block_size), Hkv);
+      bytes = KV_FP8 ? 8 : 16;
     }
-    cp16z(&s_k[s][ks][dl], slotp + (hk * 2) * D + dl, bytes);
-    cp16z(&s_v[s][ks][dl], slotp + (hk * 2 + 1) * D + dl, bytes);
+    if (KV_FP8) {
+      const uint8_t* c8 = reinterpret_cast<const uint8_t*>(cache) + so;  // 元素 1 字节：同一偶移量
+      cp8z(&s_k8[s][ks][dl], c8 + (hk * 2) * D + dl, bytes);
+      cp8z(&s_v8[s][ks][dl], c8 + (hk * 2 + 1) * D + dl, bytes);
+    } else {
+      const bf16* slotp = cache + so;
+      cp16z(&s_k[s][ks][dl], slotp + (hk * 2) * D + dl, bytes);
+      cp16z(&s_v[s][ks][dl], slotp + (hk * 2 + 1) * D + dl, bytes);
+    }
     cp_commit();  // 空组也 commit，保证 wait_group 计数一致
   };
   if (active) {
@@ -135,8 +164,14 @@ __device__ __forceinline__ void gqa_decode_v3_core(
       const bool valid = key < k_end;
       float kf[V3_VEC], vf[V3_VEC];
       {
-        const uint4 rk = *reinterpret_cast<const uint4*>(&s_k[s][ks][dl]);
-        const uint4 rv = *reinterpret_cast<const uint4*>(&s_v[s][ks][dl]);
+        uint4 rk, rv;
+        if (KV_FP8) {  // 本线程只展开自己 cp 来的 8 维（无跨线程依赖，不需额外 barrier）
+          rk = fp8x8_to_bf16x8(*reinterpret_cast<const uint2*>(&s_k8[s][ks][dl]));
+          rv = fp8x8_to_bf16x8(*reinterpret_cast<const uint2*>(&s_v8[s][ks][dl]));
+        } else {
+          rk = *reinterpret_cast<const uint4*>(&s_k[s][ks][dl]);
+          rv = *reinterpret_cast<const uint4*>(&s_v[s][ks][dl]);
+        }
         const __nv_bfloat162* pk = reinterpret_cast<const __nv_bfloat162*>(&rk);
         const __nv_bfloat162* pv = reinterpret_cast<const __nv_bfloat162*>(&rv);
 #pragma unroll

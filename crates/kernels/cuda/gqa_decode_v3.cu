@@ -27,13 +27,13 @@ using namespace dinfer::gqa_v3;  // V3_THREADS / V3_LPK / gqa_decode_v3_core 等
 namespace {
 
 // 原入口：grid=(batch,Hkv,split)，128 线程，薄壳调 core（active 恒真 → 行为不变）。
-template <int GROUP, int D>
+template <int GROUP, int D, bool KV_FP8>
 __global__ void __launch_bounds__(V3_THREADS) gqa_decode_v3_kernel(
     const bf16* __restrict__ q, const bf16* __restrict__ cache, const int32_t* __restrict__ block_table,
     const int32_t* __restrict__ seq_lens, const int32_t* __restrict__ cu_seqlens_q, float* __restrict__ scratch,
     bf16* __restrict__ out_direct, int H, int Hkv, int block_size, int max_blocks, float scale, int q_stride, int splits,
     int keys_per_split, int window) {
-  gqa_decode_v3_core<GROUP, D>(q, cache, block_table, seq_lens, cu_seqlens_q, scratch, out_direct, H, Hkv, block_size,
+  gqa_decode_v3_core<GROUP, D, KV_FP8>(q, cache, block_table, seq_lens, cu_seqlens_q, scratch, out_direct, H, Hkv, block_size,
                                max_blocks, scale, q_stride, splits, keys_per_split, window, blockIdx.x, blockIdx.y,
                                blockIdx.z, threadIdx.x);
 }
@@ -49,7 +49,7 @@ constexpr int D5_D = 512;
 constexpr int D5_THREADS = 256;
 constexpr int D5_LPK = D5_D / V3_VEC;          // 64 lane / key
 constexpr int D5_KEYS = D5_THREADS / D5_LPK;   // 4 key / tile
-template <int GROUP>
+template <int GROUP, bool KV_FP8>
 __global__ void __launch_bounds__(D5_THREADS) gqa_decode_d512_kernel(
     const bf16* __restrict__ q, const bf16* __restrict__ cache, const int32_t* __restrict__ block_table,
     const int32_t* __restrict__ seq_lens, const int32_t* __restrict__ cu_seqlens_q, float* __restrict__ scratch,
@@ -75,6 +75,8 @@ __global__ void __launch_bounds__(D5_THREADS) gqa_decode_d512_kernel(
   const int32_t* bt = block_table + (int64_t)b * max_blocks;
   __shared__ __align__(16) bf16 s_k[V3_PIPE][KEYS][D];
   __shared__ __align__(16) bf16 s_v[V3_PIPE][KEYS][D];
+  __shared__ __align__(16) uint8_t s_k8[KV_FP8 ? V3_PIPE : 1][KV_FP8 ? KEYS : 1][KV_FP8 ? D : 8];
+  __shared__ __align__(16) uint8_t s_v8[KV_FP8 ? V3_PIPE : 1][KV_FP8 ? KEYS : 1][KV_FP8 ? D : 8];
   __shared__ float s_part[GROUP][KEYS][2];
   __shared__ float s_m[GROUP][KEYS], s_l[GROUP][KEYS];
   __shared__ float s_acc[KEYS][D];
@@ -100,15 +102,22 @@ __global__ void __launch_bounds__(D5_THREADS) gqa_decode_d512_kernel(
   const int ntiles = (k_end - k_begin + KEYS - 1) / KEYS;
   auto issue = [&](int t, int s) {
     const int key = k_begin + t * KEYS + ks;
-    const bf16* slotp = cache;
+    int64_t so = 0;
     int bytes = 0;
     if (key < k_end) {
       const int64_t blk = bt[key / block_size];
-      slotp = cache + slot_off3<D>(blk * block_size + (key % block_size), Hkv);
-      bytes = 16;
+      so = slot_off3<D>(blk * block_size + (key % block_size), Hkv);
+      bytes = KV_FP8 ? 8 : 16;
     }
-    cp16z(&s_k[s][ks][dl], slotp + (hk * 2) * D + dl, bytes);
-    cp16z(&s_v[s][ks][dl], slotp + (hk * 2 + 1) * D + dl, bytes);
+    if (KV_FP8) {
+      const uint8_t* c8 = reinterpret_cast<const uint8_t*>(cache) + so;
+      cp8z(&s_k8[s][ks][dl], c8 + (hk * 2) * D + dl, bytes);
+      cp8z(&s_v8[s][ks][dl], c8 + (hk * 2 + 1) * D + dl, bytes);
+    } else {
+      const bf16* slotp = cache + so;
+      cp16z(&s_k[s][ks][dl], slotp + (hk * 2) * D + dl, bytes);
+      cp16z(&s_v[s][ks][dl], slotp + (hk * 2 + 1) * D + dl, bytes);
+    }
     cp_commit();
   };
 #pragma unroll
@@ -121,8 +130,14 @@ __global__ void __launch_bounds__(D5_THREADS) gqa_decode_d512_kernel(
     const bool valid = key < k_end;
     float kf[V3_VEC], vf[V3_VEC];
     {
-      const uint4 rk = *reinterpret_cast<const uint4*>(&s_k[s][ks][dl]);
-      const uint4 rv = *reinterpret_cast<const uint4*>(&s_v[s][ks][dl]);
+      uint4 rk, rv;
+      if (KV_FP8) {
+        rk = fp8x8_to_bf16x8(*reinterpret_cast<const uint2*>(&s_k8[s][ks][dl]));
+        rv = fp8x8_to_bf16x8(*reinterpret_cast<const uint2*>(&s_v8[s][ks][dl]));
+      } else {
+        rk = *reinterpret_cast<const uint4*>(&s_k[s][ks][dl]);
+        rv = *reinterpret_cast<const uint4*>(&s_v[s][ks][dl]);
+      }
       const __nv_bfloat162* pk = reinterpret_cast<const __nv_bfloat162*>(&rk);
       const __nv_bfloat162* pv = reinterpret_cast<const __nv_bfloat162*>(&rv);
 #pragma unroll
@@ -194,13 +209,14 @@ extern "C" int gqa_decode_v3_bf16(const void* q, const void* cache, const int32_
                                   const int32_t* cu_seqlens_q, float* scratch, void* out_direct, int64_t num_reqs,
                                   int64_t heads, int64_t kv_heads, int64_t head_dim, int64_t block_size,
                                   int64_t max_blocks, float scale, int64_t q_stride, int64_t splits,
-                                  int64_t keys_per_split, int window, cudaStream_t stream) {
+                                  int64_t keys_per_split, int window, int kv_fp8, cudaStream_t stream) {
   const int group = (int)(heads / kv_heads);
   if (head_dim != 128 && head_dim != 256 && head_dim != 512) return (int)cudaErrorInvalidValue;
   dim3 grid((unsigned)num_reqs, (unsigned)kv_heads, (unsigned)splits);
+  const bool f8 = kv_fp8 != 0;
   if (head_dim == 512) {
 #define D5_LAUNCH(G)                                                                                                   \
-  gqa_decode_d512_kernel<G><<<grid, D5_THREADS, 0, stream>>>(                                                          \
+  (f8 ? gqa_decode_d512_kernel<G, true> : gqa_decode_d512_kernel<G, false>)<<<grid, D5_THREADS, 0, stream>>>(                                                          \
       static_cast<const bf16*>(q), static_cast<const bf16*>(cache), block_table, seq_lens, cu_seqlens_q, scratch,     \
       static_cast<bf16*>(out_direct), (int)heads, (int)kv_heads, (int)block_size, (int)max_blocks, scale,             \
       (int)q_stride, (int)splits, (int)keys_per_split, window)
@@ -215,7 +231,7 @@ extern "C" int gqa_decode_v3_bf16(const void* q, const void* cache, const int32_
     return (int)cudaGetLastError();
   }
 #define V3_LAUNCH(G, DD)                                                                                               \
-  gqa_decode_v3_kernel<G, DD><<<grid, V3_THREADS, 0, stream>>>(                                                        \
+  (f8 ? gqa_decode_v3_kernel<G, DD, true> : gqa_decode_v3_kernel<G, DD, false>)<<<grid, V3_THREADS, 0, stream>>>(                                                        \
       static_cast<const bf16*>(q), static_cast<const bf16*>(cache), block_table, seq_lens, cu_seqlens_q, scratch,     \
       static_cast<bf16*>(out_direct), (int)heads, (int)kv_heads, (int)block_size, (int)max_blocks, scale,             \
       (int)q_stride, (int)splits, (int)keys_per_split, window)

@@ -48,19 +48,31 @@ constexpr int MAX_D = 512;  // 通用慢路径上限；Gemma4 full 层 head_dim 
 
 __device__ __forceinline__ int64_t slot_off(int64_t slot, int kv_heads, int D) { return slot * kv_heads * 2 * D; }
 
+// B15：STORE_FP8 时 cache 元素存 e4m3 字节（输入 k/v 已是往返后的 bf16，再 cvt 一次得同一码），同布局。
+__device__ __forceinline__ uint8_t bf16_to_e4m3(bf16 x) {
+  return static_cast<uint8_t>(__nv_cvt_float_to_fp8(to_f32(x), __NV_SATFINITE, __NV_E4M3));
+}
+template <bool STORE_FP8>
 __global__ void gqa_cache_write_kernel(const bf16* __restrict__ k, const bf16* __restrict__ v, bf16* __restrict__ cache,
                                        const int64_t* __restrict__ slot_mapping, int kv_heads, int D, int block_size) {
   const int64_t t = blockIdx.x;
   const int64_t slot = slot_mapping[t];
   if (slot < 0) return;
   const int64_t blk = slot / block_size, off = slot % block_size;
-  bf16* dst = cache + slot_off(blk * block_size + off, kv_heads, D);
+  const int64_t e0 = slot_off(blk * block_size + off, kv_heads, D);
+  bf16* dst = cache + e0;
+  uint8_t* dst8 = reinterpret_cast<uint8_t*>(cache) + e0;
   const bf16* ks = k + t * kv_heads * D;
   const bf16* vs = v + t * kv_heads * D;
   for (int i = threadIdx.x; i < kv_heads * D; i += blockDim.x) {
     const int h = i / D, d = i % D;
-    dst[(h * 2 + 0) * D + d] = ks[i];
-    dst[(h * 2 + 1) * D + d] = vs[i];
+    if (STORE_FP8) {
+      dst8[(h * 2 + 0) * D + d] = bf16_to_e4m3(ks[i]);
+      dst8[(h * 2 + 1) * D + d] = bf16_to_e4m3(vs[i]);
+    } else {
+      dst[(h * 2 + 0) * D + d] = ks[i];
+      dst[(h * 2 + 1) * D + d] = vs[i];
+    }
   }
 }
 
@@ -951,6 +963,15 @@ __global__ void gqa_prefill_ref_kernel(const bf16* __restrict__ q, const bf16* _
 
 // 一个 (req, q_head) block；q: [Tq, H, D]（Tq = Σ query 长）；cache 见上；cu_seqlens_q: [B+1]；seq_lens: [B] = 本步后总长。
 // query 行 i 的绝对位置 pos = seq_len - q_len + i，可见 key = [0, pos]。decode 即 q_len = 1。
+// B15：KV_FP8 时 cache 元素是 e4m3 字节（同布局、同元素偶移量），读时展开（与写入时的往返值逐位同）。
+__device__ __forceinline__ float kv_elem_f32(const bf16* p, int d, bool fp8) {
+  if (fp8) {
+    const __nv_fp8_storage_t b = reinterpret_cast<const __nv_fp8_storage_t*>(p)[d];
+    return __half2float(__half(__nv_cvt_fp8_to_halfraw(b, __NV_E4M3)));
+  }
+  return to_f32(p[d]);
+}
+template <bool KV_FP8>
 __global__ void gqa_paged_kernel(const bf16* __restrict__ q, const bf16* __restrict__ cache,
                                  const int32_t* __restrict__ block_table, const int32_t* __restrict__ seq_lens,
                                  const int32_t* __restrict__ cu_seqlens_q, bf16* __restrict__ out, int H, int Hkv, int D,
@@ -966,13 +987,16 @@ __global__ void gqa_paged_kernel(const bf16* __restrict__ q, const bf16* __restr
   __shared__ float s_p[GQ_BLOCK];
   __shared__ float s_stat[2];
   const int32_t* bt = block_table + (int64_t)b * max_blocks;
-  auto kptr = [&](int j) {
+  // KV_FP8：元素 1 字节，把 bf16* 表示的元素偶移量换成同数值的字节偶移量；kv_elem_f32 按 fp8 读
+  auto kptr = [&](int j) -> const bf16* {
     const int64_t blk = bt[j / block_size];
-    return cache + slot_off(blk * block_size + (j % block_size), Hkv, D) + (hk * 2 + 0) * D;
+    const int64_t e = slot_off(blk * block_size + (j % block_size), Hkv, D) + (hk * 2 + 0) * D;
+    return KV_FP8 ? reinterpret_cast<const bf16*>(reinterpret_cast<const uint8_t*>(cache) + e) : cache + e;
   };
-  auto vptr = [&](int j) {
+  auto vptr = [&](int j) -> const bf16* {
     const int64_t blk = bt[j / block_size];
-    return cache + slot_off(blk * block_size + (j % block_size), Hkv, D) + (hk * 2 + 1) * D;
+    const int64_t e = slot_off(blk * block_size + (j % block_size), Hkv, D) + (hk * 2 + 1) * D;
+    return KV_FP8 ? reinterpret_cast<const bf16*>(reinterpret_cast<const uint8_t*>(cache) + e) : cache + e;
   };
   for (int i = 0; i < q_len; ++i) {
     const int row = q0 + i;
@@ -985,7 +1009,7 @@ __global__ void gqa_paged_kernel(const bf16* __restrict__ q, const bf16* __restr
     for (int j = j0 + threadIdx.x; j < n; j += GQ_BLOCK) {
       const bf16* kj = kptr(j);
       float s = 0.f;
-      for (int d = 0; d < D; ++d) s += s_q[d] * to_f32(kj[d]);
+      for (int d = 0; d < D; ++d) s += s_q[d] * kv_elem_f32(kj, d, KV_FP8);
       lmax = fmaxf(lmax, s * scale);
     }
     const float m = block_reduce_max<GQ_BLOCK>(lmax);
@@ -993,7 +1017,7 @@ __global__ void gqa_paged_kernel(const bf16* __restrict__ q, const bf16* __restr
     for (int j = j0 + threadIdx.x; j < n; j += GQ_BLOCK) {
       const bf16* kj = kptr(j);
       float s = 0.f;
-      for (int d = 0; d < D; ++d) s += s_q[d] * to_f32(kj[d]);
+      for (int d = 0; d < D; ++d) s += s_q[d] * kv_elem_f32(kj, d, KV_FP8);
       lsum += __expf(s * scale - m);
     }
     const float denom = block_reduce_sum<GQ_BLOCK>(lsum);
@@ -1011,7 +1035,7 @@ __global__ void gqa_paged_kernel(const bf16* __restrict__ q, const bf16* __restr
       if (j < n) {
         const bf16* kj = kptr(j);
         float s = 0.f;
-        for (int d = 0; d < D; ++d) s += s_q[d] * to_f32(kj[d]);
+        for (int d = 0; d < D; ++d) s += s_q[d] * kv_elem_f32(kj, d, KV_FP8);
         p = pq8(__expf(s * scale - s_stat[0])) / s_stat[1];
       }
       s_p[threadIdx.x] = p;
@@ -1019,7 +1043,7 @@ __global__ void gqa_paged_kernel(const bf16* __restrict__ q, const bf16* __restr
       const int cnt = min(GQ_BLOCK, n - base);
       for (int d = threadIdx.x, c = 0; d < D; d += GQ_BLOCK, ++c) {
         float a = 0.f;
-        for (int jj = 0; jj < cnt; ++jj) a += s_p[jj] * to_f32(vptr(base + jj)[d]);
+        for (int jj = 0; jj < cnt; ++jj) a += s_p[jj] * kv_elem_f32(vptr(base + jj), d, KV_FP8);
         acc[c] += a;
       }
       __syncthreads();
@@ -1401,6 +1425,7 @@ __device__ __forceinline__ bf16 fp8_rt(bf16 x) {
   const __nv_fp8_storage_t q8 = __nv_cvt_float_to_fp8(to_f32(x), __NV_SATFINITE, __NV_E4M3);
   return to_bf16(__half2float(__half(__nv_cvt_fp8_to_halfraw(q8, __NV_E4M3))));
 }
+template <bool STORE_FP8>
 __global__ void gqa_cache_write_fp8rt_kernel(bf16* __restrict__ q, bf16* __restrict__ k, bf16* __restrict__ v,
                                              bf16* __restrict__ cache, const int64_t* __restrict__ slot_mapping,
                                              int q_heads, int kv_heads, int D, int block_size) {
@@ -1415,22 +1440,29 @@ __global__ void gqa_cache_write_fp8rt_kernel(bf16* __restrict__ q, bf16* __restr
     return;
   }
   const int64_t blk = slot / block_size, off = slot % block_size;
-  bf16* dst = cache + slot_off(blk * block_size + off, kv_heads, D);
+  const int64_t e0 = slot_off(blk * block_size + off, kv_heads, D);
+  bf16* dst = cache + e0;
+  uint8_t* dst8 = reinterpret_cast<uint8_t*>(cache) + e0;
   for (int i = threadIdx.x; i < kv_heads * D; i += blockDim.x) {
     const int h = i / D, d = i % D;
     const bf16 kk = fp8_rt(ks[i]), vv = fp8_rt(vs[i]);
     ks[i] = kk;
     vs[i] = vv;
-    dst[(h * 2 + 0) * D + d] = kk;
-    dst[(h * 2 + 1) * D + d] = vv;
+    if (STORE_FP8) {  // 往返后再 cvt 得同一 e4m3 码（往返 = cvt∘cvt⁻¹，幂等）
+      dst8[(h * 2 + 0) * D + d] = bf16_to_e4m3(kk);
+      dst8[(h * 2 + 1) * D + d] = bf16_to_e4m3(vv);
+    } else {
+      dst[(h * 2 + 0) * D + d] = kk;
+      dst[(h * 2 + 1) * D + d] = vv;
+    }
   }
 }
 extern "C" int gqa_cache_write_fp8rt_bf16(void* q, void* k, void* v, void* cache, const int64_t* slot_mapping,
                                           int64_t tokens, int64_t q_heads, int64_t kv_heads, int64_t head_dim,
-                                          int64_t block_size, cudaStream_t stream) {
+                                          int64_t block_size, int kv_fp8, cudaStream_t stream) {
   if (tokens <= 0) return 0;
   if (q_heads <= 0 || kv_heads <= 0 || head_dim <= 0 || block_size <= 0) return err(cudaErrorInvalidValue);
-  gqa_cache_write_fp8rt_kernel<<<(unsigned)tokens, 256, 0, stream>>>(
+  (kv_fp8 ? gqa_cache_write_fp8rt_kernel<true> : gqa_cache_write_fp8rt_kernel<false>)<<<(unsigned)tokens, 256, 0, stream>>>(
       static_cast<bf16*>(q), static_cast<bf16*>(k), static_cast<bf16*>(v), static_cast<bf16*>(cache), slot_mapping,
       (int)q_heads, (int)kv_heads, (int)head_dim, (int)block_size);
   return last_err();
@@ -1438,10 +1470,10 @@ extern "C" int gqa_cache_write_fp8rt_bf16(void* q, void* k, void* v, void* cache
 
 extern "C" int gqa_cache_write_bf16(const void* k, const void* v, void* cache, const int64_t* slot_mapping,
                                     int64_t tokens, int64_t kv_heads, int64_t head_dim, int64_t block_size,
-                                    cudaStream_t stream) {
+                                    int kv_fp8, cudaStream_t stream) {
   if (tokens <= 0) return 0;
   if (kv_heads <= 0 || head_dim <= 0 || block_size <= 0) return err(cudaErrorInvalidValue);
-  gqa_cache_write_kernel<<<(unsigned)tokens, 256, 0, stream>>>(static_cast<const bf16*>(k), static_cast<const bf16*>(v),
+  (kv_fp8 ? gqa_cache_write_kernel<true> : gqa_cache_write_kernel<false>)<<<(unsigned)tokens, 256, 0, stream>>>(static_cast<const bf16*>(k), static_cast<const bf16*>(v),
                                                                static_cast<bf16*>(cache), slot_mapping, (int)kv_heads,
                                                                (int)head_dim, (int)block_size);
   return last_err();
@@ -1530,12 +1562,13 @@ extern "C" int gqa_prefill_bf16(const void* q, const void* k, const void* v, voi
 static int gqa_paged_impl(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens,
                               const int32_t* cu_seqlens_q, void* out, int64_t num_reqs, int64_t max_q_len, int64_t heads,
                               int64_t kv_heads, int64_t head_dim, int64_t block_size, int64_t max_blocks, float scale,
-                              int64_t q_stride, int skip_single, int cfg, int window, int p_fp8, cudaStream_t stream) {
+                              int64_t q_stride, int skip_single, int cfg, int window, int p_fp8, int kv_fp8, cudaStream_t stream) {
   { const int pf = p_fp8 & 1, am = p_fp8 >> 1;
     cudaMemcpyToSymbolAsync(g_p_fp8, &pf, sizeof(int), 0, cudaMemcpyHostToDevice, stream);
     cudaMemcpyToSymbolAsync(g_attn_mode, &am, sizeof(int), 0, cudaMemcpyHostToDevice, stream); }
   if (q_stride <= 0) q_stride = heads * head_dim;
   if (num_reqs <= 0) return 0;
+  if (kv_fp8) cfg = -1;  // B15：fa_v5/v6 还不读 e4m3 cache，混批强制通用慢路径（正确优先）
   if (head_dim <= 0 || head_dim > MAX_D || heads <= 0 || kv_heads <= 0 || heads % kv_heads != 0 || block_size <= 0 ||
       max_q_len <= 0)
     return err(cudaErrorInvalidValue);
@@ -1560,7 +1593,7 @@ static int gqa_paged_impl(const void* q, const void* cache, const int32_t* block
                              (int)block_size, (int)max_blocks, skip_single, window);
   }
   dim3 grid((unsigned)num_reqs, (unsigned)heads);
-  gqa_paged_kernel<<<grid, GQ_BLOCK, 0, stream>>>(static_cast<const bf16*>(q), static_cast<const bf16*>(cache),
+  (kv_fp8 ? gqa_paged_kernel<true> : gqa_paged_kernel<false>)<<<grid, GQ_BLOCK, 0, stream>>>(static_cast<const bf16*>(q), static_cast<const bf16*>(cache),
                                                     block_table, seq_lens, cu_seqlens_q, static_cast<bf16*>(out),
                                                     (int)heads, (int)kv_heads, (int)head_dim, (int)block_size,
                                                     (int)max_blocks, scale, (int)q_stride, window);
@@ -1571,16 +1604,16 @@ extern "C" int gqa_paged_win_bf16(const void* q, const void* cache, const int32_
                                   const int32_t* seq_lens, const int32_t* cu_seqlens_q, void* out, int64_t num_reqs,
                                   int64_t max_q_len, int64_t heads, int64_t kv_heads, int64_t head_dim,
                                   int64_t block_size, int64_t max_blocks, float scale, int64_t q_stride,
-                                  int skip_single, int cfg, int window, int p_fp8, cudaStream_t stream) {
+                                  int skip_single, int cfg, int window, int p_fp8, int kv_fp8, cudaStream_t stream) {
   return gqa_paged_impl(q, cache, block_table, seq_lens, cu_seqlens_q, out, num_reqs, max_q_len, heads, kv_heads,
-                        head_dim, block_size, max_blocks, scale, q_stride, skip_single, cfg, window, p_fp8, stream);
+                        head_dim, block_size, max_blocks, scale, q_stride, skip_single, cfg, window, p_fp8, kv_fp8, stream);
 }
 extern "C" int gqa_paged_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens,
                               const int32_t* cu_seqlens_q, void* out, int64_t num_reqs, int64_t max_q_len, int64_t heads,
                               int64_t kv_heads, int64_t head_dim, int64_t block_size, int64_t max_blocks, float scale,
                               int64_t q_stride, int skip_single, int cfg, cudaStream_t stream) {
   return gqa_paged_impl(q, cache, block_table, seq_lens, cu_seqlens_q, out, num_reqs, max_q_len, heads, kv_heads,
-                        head_dim, block_size, max_blocks, scale, q_stride, skip_single, cfg, 0, 0, stream);
+                        head_dim, block_size, max_blocks, scale, q_stride, skip_single, cfg, 0, 0, 0, stream);
 }
 
 // 每个有效 split 至少处理多少 key（kernel 内按 seq_len 算有效 splits）。默认 32：B300 kps 16/32/64 扫描（loop 第 4b 轮）
@@ -1613,7 +1646,7 @@ extern "C" int gqa_decode_merge_v2_launch(const float* scratch, const int32_t* c
 static int gqa_decode_impl(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens,
                            void* out, float* scratch, int64_t num_reqs, int64_t heads, int64_t kv_heads,
                            int64_t head_dim, int64_t block_size, int64_t max_blocks, float scale, int64_t q_stride,
-                           const int32_t* cu_seqlens_q, int window, cudaStream_t stream) {
+                           const int32_t* cu_seqlens_q, int window, int kv_fp8, cudaStream_t stream) {
   if (q_stride <= 0) q_stride = heads * head_dim;
   if (num_reqs <= 0) return 0;
   if ((head_dim != PF_D && head_dim != 256 && head_dim != 512) || heads <= 0 || kv_heads <= 0 ||
@@ -1628,7 +1661,7 @@ static int gqa_decode_impl(const void* q, const void* cache, const int32_t* bloc
     dim3 grid1((unsigned)num_reqs, (unsigned)kv_heads, (unsigned)splits);
     bf16* direct = splits == 1 ? static_cast<bf16*>(out) : nullptr;
     int rc = gqa_decode_v3_bf16(q, cache, block_table, seq_lens, cu_seqlens_q, scratch, direct, num_reqs, heads, kv_heads,
-                                head_dim, block_size, max_blocks, scale, q_stride, splits, keys_per_split, window, stream);
+                                head_dim, block_size, max_blocks, scale, q_stride, splits, keys_per_split, window, kv_fp8, stream);
     if (rc) return rc;
     if (splits > 1) {
       dim3 grid2((unsigned)num_reqs, (unsigned)heads);
@@ -1657,9 +1690,10 @@ static int gqa_decode_impl(const void* q, const void* cache, const int32_t* bloc
     // 收口后由 ArchProfile 选实现，不再读环境变量。
     static int use_v3 = -1;
     if (use_v3 < 0) { const char* e = getenv("GQA_DECODE_V3"); use_v3 = (e && atoi(e) == 0) ? 0 : 1; }
+    if (kv_fp8 && !(use_v3 && (group == 1 || group == 2 || group == 4))) return (int)cudaErrorInvalidValue;  // B15：v2 不读 e4m3
     if (use_v3 && (group == 1 || group == 2 || group == 4)) {
       int rc = gqa_decode_v3_bf16(q, cache, block_table, seq_lens, cu_seqlens_q, scratch, direct, num_reqs, heads, kv_heads,
-                                  head_dim, block_size, max_blocks, scale, q_stride, splits, keys_per_split, window, stream);
+                                  head_dim, block_size, max_blocks, scale, q_stride, splits, keys_per_split, window, kv_fp8, stream);
       if (rc) return rc;
       if (splits > 1) {
         dim3 grid2((unsigned)num_reqs, (unsigned)heads);
@@ -1694,13 +1728,14 @@ extern "C" int gqa_decode_bf16(const void* q, const void* cache, const int32_t* 
                                int64_t head_dim, int64_t block_size, int64_t max_blocks, float scale, int64_t q_stride,
                                const int32_t* cu_seqlens_q, cudaStream_t stream) {
   return gqa_decode_impl(q, cache, block_table, seq_lens, out, scratch, num_reqs, heads, kv_heads, head_dim, block_size,
-                         max_blocks, scale, q_stride, cu_seqlens_q, 0, stream);
+                         max_blocks, scale, q_stride, cu_seqlens_q, 0, 0, stream);
 }
 // 带滑窗的 decode（Kaon-V3 滑窗层 window=1024；全注意力层 window=0）。
 extern "C" int gqa_decode_win_bf16(const void* q, const void* cache, const int32_t* block_table, const int32_t* seq_lens,
                                    void* out, float* scratch, int64_t num_reqs, int64_t heads, int64_t kv_heads,
                                    int64_t head_dim, int64_t block_size, int64_t max_blocks, float scale,
-                                   int64_t q_stride, const int32_t* cu_seqlens_q, int window, cudaStream_t stream) {
+                                   int64_t q_stride, const int32_t* cu_seqlens_q, int window, int kv_fp8,
+                                   cudaStream_t stream) {
   return gqa_decode_impl(q, cache, block_table, seq_lens, out, scratch, num_reqs, heads, kv_heads, head_dim, block_size,
-                         max_blocks, scale, q_stride, cu_seqlens_q, window, stream);
+                         max_blocks, scale, q_stride, cu_seqlens_q, window, kv_fp8, stream);
 }
