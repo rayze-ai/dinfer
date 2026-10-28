@@ -719,3 +719,4 @@ A 轮 c8 一次 TPOT p50 19.02 / TTFT 222（其它轮 13.45 / 583）—— 同�
 - B7 已接进 `moe_branch`（`MOE_DECODE_GEMV=1` 开，默认关；R ≤ 128）：gate‖up+gelu 融合写 gelu_o → `moe_grouped_quant` → fp4 gemv down 写 yg。
 - **B6b + B7 代码（66e179f）**：两份 GEMV .cu 的每 block warp 数改 host `pick_warps`（SM 数运行时取；M_TILE<16 → 16 warp，=16 → 8；grid < 2×SM 则减半）；B7 kernel `moe_fp4_decode.cu` + 对拍测试 `moe_fp4_decode_parity.rs`（4 场景：每专家 1 行 / 含空专家 / 9 行 > M_TILE 走 chunk 循环 / 小形状）。接入 `moe_branch`（`MOE_DECODE_GEMV=1`）。
 - 验证链 `/w/b7.sh`：两个对拍（mlp_fp8 / moe_fp4）门禁 → bN（A=当前二进制默认 = B5 行为；B=新二进制 `FP8_GEMV=1 MOE_DECODE_GEMV=1`）。判据：c1 **且** c8 都 ≤ B5（7.47 / 10.94）、中文一致。
+- B7 链已起（`/w/b7.sh`，GPU0）；远端 `bN.sh` 加 `BENV`（第 3 参，仅 B/B2 侧 `env $benv`），本地 `scripts/dev/kaon3_stepB_verify.sh` 若要同步此改动待收功时 pull。
