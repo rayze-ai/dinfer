@@ -906,3 +906,4 @@ decode c1 的 MoE 段 nsys：grouped_gemm gate 18.6 + up 18.6 + down 12.5 + gelu
 | o_proj gemv | 30 | 18.0 | 0.09（5 层 full）+… | |
 | 其余小 kernel | ~550 | | ~0.6 | |
 **两个意外的大头都是"我自己引入/没查到的"**：① rmsnorm grid=4160（0.51 ms，纯浪费，B18 立刻修）；② B10 融合 kernel 反而慢 0.1 ms/步（B19：top-k 改 warp 并行，每 token 一 warp）。两刀预期 -0.8 ms（6.39 → ~5.6，vs vLLM 4.69 差 1.2×）。
+- **hosttime_c1（b17 二进制，HOST_TIME=1，c1 ×8，16 out）**：全部步均值 upload=20us launch(submit)=**337us** collect(dtoh_sync)=6870us。launch 含 prefill 步（24 步里 8 步 prefill）也只 0.34 ms ⇒ **D51 的"prefill host launch 16 ms" 已不存在**（当时是 host 侧 env/锁/旧代码路径？或被 B8 等改动顺带消掉）。**B17 prefill 图化降级**（省不到 1 ms）。TTFT 29 ms = prefill GPU ~25 ms（nsys eager 段 kernel_sum 83 ms 是 nsys 开销下的；真实 ≈ 25）+ 1.2 tokenize + 首 decode。prefill 下一刀看 nsys 段：grouped_gemm_pipe4 gate/up 18.6+down 13.7 = 32 ms(nsys 态) 占 39%、nvjet qkv 16.4、fa_v6 d512 7.4、fa_v5 6.1。
