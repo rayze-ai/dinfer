@@ -800,3 +800,4 @@ decode c1 的 MoE 段 nsys：grouped_gemm gate 18.6 + up 18.6 + down 12.5 + gelu
 | launch 间隙 | ~1.3 | ~900 kernel × 1.5 us | B12/B13 再 -150 → B14：attention 前后 rope/norm 等 7 个小 kernel 合 1（per-layer "attn_pre"）|
 | 小 kernel 自身 | ~0.5 | | 同上 |
 **最大单项 = B15（KV cache 真 fp8 存）**：decode 每步读 KV = 30 层 × 2(k,v) × 1560 tok × nkv·D × 2 B ≈ 25 层×8×256 + 5 层×2×512 → ~0.8 GB/步 bf16 → fp8 0.4 GB，省 ~0.25 ms；且 cache 容量翻倍。vLLM 就是 fp8 KV（kv_cache_dtype=fp8_e4m3）。需改 cache 布局 + v3/d512 kernel 读路径（e4m3→bf16 展开），attention 数值逐位同（往返值相同）。
+- D65 split2 进行中（`MOE_ROUTE_FUSED=0` vs 开，FP8_GEMV 两边都关）：A（开）7.12 / 11.60。等 B。注意 envab 两组的 "默认" 都没带 FP8_GEMV → 基线是 7.11，不是 b8c 的 6.64；对比只看组内 Δ。
