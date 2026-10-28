@@ -677,3 +677,13 @@ h=2816 单行 norm（181 次/步）：Block1024 每线程 1 向量两级归约 6
 **B5 方案**：decode（M≤16）dense MLP 不走 persistent mega，走 3 个带宽型 kernel：① gate‖up 合一 fp8 GEMV（N=2×2112 行切 CTA，每 warp 若干行、K 连续 16B 向量流读、x 的 M≤16 行驻 smem、warp 内 shuffle 归约，epilogue 直接 gelu·mul 写 act bf16 + fp8 量化）→ ② down fp8 GEMV（N=2816，K=2112）→ norm 沿用。预期 3 launch ≈ 25us/层。保留 mega 路径作 `DENSE_DECODE_OLD=1` 回退；prefill 不动。同样结构可复用到 qkv/oproj（第 2 候选 1.3ms）。
 - **B4 定稿（ABAB，归档 b4_RESULT.txt）**：c1 9.77/9.78 → 9.64/9.64（**-1.4%**，预测 -0.13ms 实得 -0.135ms，吞吐 97.7→99.1）；c8 13.59/13.79 → 13.45/13.47；输出四次逐字相同（对 lm_head 行是纯拷贝，逐位）。保留，入 CSV round b4。四刀累计 c1 17.07→9.64（**-43.5%**）。
 - **口径复核（用户 2026-10-28 晚再提醒）**：所有 B 刀 ABAB 链两端均非 eager；dinfer `--max-model-len 16384 --max-num-seqs 64 --max-num-batched-tokens 4096`；vLLM `vllm-noneager`（:28201 GPU3）`--max-model-len 16384 --max-num-batched-tokens 4096 --block-size 32 --gpu-memory-utilization 0.85` 无 `--enforce-eager`；bench 同二进制同参数（400 词 / 64 out / 8c 请求 / warmup 2 / seed 7 / 绑核 60-91）。**唯一差别**：vLLM 未显式 `--max-num-seqs`（默认 256）vs dinfer 64，c ≤ 16 两端都不触顶、不影响；测 c ≥ 32 前把 dinfer 改 256 对齐。
+
+## B5 2026-10-28 开工：decode dense MLP 带宽型 fp8 GEMV（替代 persistent mega，M ≤ 16）
+设计（模型无关，放 `crates/kernels/cuda/mlp_fp8_decode.cu`，所有 arch 共用，无 mma）：
+1. `mlp_fp8_norm_quant`：一 warp 一行，照 `rmsnorm_row_warp` 口径（f32 平方和 → rsqrt → bf16 舍一次）再 `fp8(bf16·a_inv)`，与 mega S_NORM 逐位同。
+2. `mlp_fp8_gemv_gateup`：A_q fp8 [m,K] 整体驻 smem（16×2816=45 KB），一 warp 负责 gate/up 同一行号各 2 行（4 行权重），lane 16 B 向量流读 K、手写 e4m3→f32 位解码、f32 FMA、warp shuffle 归约；epilogue 照 mega：`g=bf16(acc·ws/a_inv)`，`u` 同，`y=bf16(gelu_tanh(f32 g))`，`act=bf16(y·u)`，`act_q=fp8(f32(act)·dn_a_inv)`。写 act_q（喂 down）。
+3. `mlp_fp8_gemv_down`：同结构，一 warp 1–2 行，输出 bf16 `down_out = bf16(acc·ws/a_inv)`。
+4. post-norm 沿用 `rmsnorm_into`（mega S_POST 同口径）。
+数值：三处 GEMM 的 fp32 累加顺序与 mega 的 mma 不同（非逐位），但同为 fp32 累加、同 fp8 输入 → 差应在 bf16 ulp 级；验证 = Rust GPU 测试 `mlp_fp8_decode_parity`（CPU f64 参照 + mega 路径对照，M∈{1,3,8,16}）。
+接入：`layer.rs` `mega_dense_branch` 前加 `dense_decode_gemv`（`DENSE_DECODE_OLD=1` 回退到 mega），复用 MegaBufs 的 norm1_q / act_q / down_out。
+预期：3 kernel ≈ 25 us/层（权重 17.8 MB @1.79 TB/s = 10 us 下限），vs mega 86.9 → 省 ~1.8 ms/步，TPOT 9.64 → ~7.8。
