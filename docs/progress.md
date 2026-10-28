@@ -43,18 +43,14 @@ GPU2 可抓取。`put` 有 bug（目标路径不生效），改用 `rsync -az` �
 - ① `max_num_seqs` 16→64：默认 16 太小（vLLM 256），48 请求涌入堆积 TTFT 到 8s。改 64 后 TTFT 降 13×、吞吐 +51%。**生产 KV 池要配套**（max-model-len 降或 num-blocks 够，16384+8192 会 OOM）。
 - ② `ROUTER_GEMM_BI=0`：router 的 batch-invariant persistent matmul 单 block 单 SM 串行 K=2816（为逐位对拍，生产不需要），0.25→0.03ms。单层 decode 降 32%。符合生产口径（[[dinfer-kaon3-prod-config]] 生产不开 BI）。
 
-#### ★ 瓶颈定位颠覆（2026-10-28，loop `kaon3-decode-opt`，skip 差分铁证）——MoE kernel 方向全错，瓶颈在 host
-**真基线**：非 eager vLLM 在 **`:28201`**（`:28200` 是 eager 调试态，别测错）。dinfer 594 vs vLLM 946=**63%**，单步 TPOT 51.8 vs 7.57ms=**6.8×**。bench 绑核 60-91（client 0.01 核干净）。host 网络容器 HTTP 通，ctr bridge 容器并发 completion 不进 forward（反复坑）。
-**★★ 铁证结论（eager+graph 双重整段 skip，D5-D16）**：decode 每步**删掉任何/全部 GPU 计算段（dense/MoE/norm/rope/kvfp8/qkv/paged/oproj）TPOT 都不变**（eager 14.8ms、graph 13ms 雷打不动）。→ **decode 瓶颈 100% 在 host/每步固定链，不在任何 GPU kernel**。
-- TPOT 线性：**固定 ~13ms（plen128，与 KV 无关）+ ~4.6ms/1K KV**。固定 13ms 已超 vLLM 全部 7.57ms。随 KV 的 6ms 删 paged 也不降 = 也是 host 侧。
-- core engine host-time：exec(begin+finish)=**19.3ms 占全部**，sched 0.3us/publish 3.6us 微秒级。exec 内 launch(submit) vs collect(dtoh_sync) **未拆开**（executor 层打点没生效，走 core 外层被盖）。
-**两刀 MoE kernel 优化（本会话做的，方向全错，默认关保留零风险）**：
-- 第一刀 cp.async 软件流水（`moe_grouped_sm120.cu` grouped_gemm_kernel_pipe + `MOE_GEMM_PIPE`）：逐位 bad=0、kernel decode 1.83×，但端到端单流 -4.9%/rate8 +0.8%。
-- 第二刀 gate+up 融合单 launch（grouped_gemm_kernel_dual + `MOE_GEMM_DUAL`，grid.z=2E）：逐位 bad=0，端到端全 <1%。
-- 两刀都证：**MoE 不在关键路径**（R71-R92 全基于"MoE 63%"的 NO_GRAPH 分段，是假象）。
-**★ 方法教训（核心，已记 knowledge/memory）**：定关键路径**最硬手段=整段 skip 看端到端动不动**（10 分钟），别信 NO_GRAPH 分段计时（graph 态被摊薄，高估 MoE）。本会话教训=信 NO_GRAPH 的"MoE 63%"做两刀全白费。[[dinfer-nograph-overestimates-graph]][[dinfer-my-recurring-mistakes]]
-**下一步（下次接手第一件事）**：拆 exec 19.3ms 的 launch(submit) vs collect(dtoh_sync)——改 core engine（`crates/core` engine.rs）的 host-time 或确保 kaon3 forward_sample 打点生效。若 collect 占满=在等 GPU（与 skip 0 影响矛盾，dtoh_sync 本身慢?）；若 launch 占=host 提交开销。对标 vLLM 每步 host 更薄。诊断 skip 开关（DENSE_SKIP/MOE_SKIP/ATTN_SKIP_*/HOST_TIME）默认关，保留。
-**dashboard**：`http://192.168.72.130:8090/kaon3/perf-trend.html`，e2e group r1-r5 带 CHANGE（注：r1-r5 是 2 配置洞的 e2e，本会话 D 系列未进 CSV——纯定位无收益改动）。
+#### ★ 2026-10-28 晚（loop `kaon3-decode-opt` 第二轮，用户 step A/B/C 流程）——Step A 定论 + B1 一刀 -19%
+**旧结论作废**：上午"瓶颈 100% 在 host / MoE 不在关键路径"全是旧二进制假象（改动没编进，D42/D45）。**真相：decode 100% 是图内 GPU 时间**（host 链 tokenize 1.1ms + sched/publish/htod 全 <50us；decode 步 = 0.36ms graph 提交 + 16.6ms 等 GPU，sm 96%）。
+**Step A 对齐基线（D51，5 轮 × c1–16 中位数，两端非 eager / 16384 / 4096 / seqs64 / 1560 tok）**：c1 TPOT 17.07 vs vLLM 4.69（3.6×）、c8 19.71 vs 6.24、吞吐 29–34%；TTFT c≥4 已反超 vLLM，c1 慢 18ms（prefill host launch 16ms）。mem util 36–47% → 不是带宽墙，是小 kernel / 并行度。
+**nsys 图内清单（D54，`scripts/dev/kaon3_nsys_decode.sh` + `nsys_kern.py`）**：每步 **1298 kernel**；逐头 norm 2.29ms + rope 0.70ms **按 max_tokens=4160 行空跑**；dense mega 2.61；D=512 全注意力慢路径 1.85（5 层 × 369us，16 block）；h=2816 单行 norm 1.23（181 次 × 6.8us）；3 个 grouped GEMM 仅 1.29（D53 skip 实证）；launch 间隙 1.89。
+**B1（commit B1）**：逐头 norm / rope 行数改实际 tokens → **c1 TPOT 16.16→13.02（-19.4%）**，输出一致。进 e2e-rounds.csv。
+**下一步刀（按收益）**：② D=512 全注意力 decode 专版（v3 不支持 D=512，smem 超限，需 2-pass 或 KEYS=2）~1.4ms；③ h=2816 norm layout（RMSNORM_LAYOUT 三态 A/B 已排队 `normab.sh`）~0.6ms；④ MoE 小 kernel 融合（22 launch/层，3 个单线程 kernel）~0.8ms；⑤ dense mega 2.6ms（用户两想法：wait/overlap + 128→256）；⑥ prefill down GEMM grid 5.8M block（57ms/16 步，占 prefill 37%）→ TTFT。
+**工具坑（都已修进脚本）**：nsys 需 `--cuda-flush-interval` 且不能 INT nsys 本体；`remote_5090.sh put` 现 `--no-times`（否则 cargo 不重编）；排队等待别用 `pgrep -f`（自匹配死锁）；`remote run` 退出码不透传，判 DONE 要拉文件本地 grep；容器 `kaon3-full` 已重建为常驻 `sleep infinity`。
+**CSV/dashboard**：e2e 行改走 `test/kaon3/e2e-rounds.csv`（`scripts/dev/e2e_round.sh` 一行入库，bench_trend 重生成时合并，不再丢）。
 
 - 目标（用户 2026-10-21）：5090 **单卡**适配，性能 ≥ 基线容器 1.2×；**不反量化权重**。
 - **机器**：`host-172-16-20-59`（8×RTX 5090 32GB，sm_120），跳板 `jump.aicloud.paigod.work:2222`。
