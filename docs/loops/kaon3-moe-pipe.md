@@ -67,3 +67,15 @@ PIPE serve(MOE_GEMM_PIPE=1)编译起成功,warmup prefill态 gemm3=3.08-3.13ms v
 **但decode态(小M,真正2.15×受益方)没测到**:临时ctr容器(NO_GRAPH+默认bridge网络)上 /v1/completions 请求不进forward(listening后无tok日志,curl空响应)——反复挡路(第N次),prefill moe-time是warmup产的非请求产的。
 **换法**:别再跟临时容器HTTP死磕。用微基准模拟serve真实gemm3调用(grid.z=128全专家+decode小M,8激活专家各1行+120空),对齐R60 serve场景(gemm3 0.096ms),不经HTTP。改moe_pipe_timing支持可配E与激活数。
 **或**:直接在生产容器kaon3-full(host网络,:8142,HTTP通)上验——但它是旧二进制(无PIPE)。要么重编traffic到生产容器,要么docker cp新二进制。下一步二选一。
+
+## ★★★★ R77 2026-10-28 serve真实场景(grid.z=128)gemm3墙钟:decode 1.83×坐实,第一刀成立有效
+对齐serve真实配置(E=128 grid.z,与serve一致):
+| 场景 | 旧版 | 流水版 | 加速 |
+|---|---|---|---|
+| **decode(ACT=8,M=1)** | 22.6us(352GB/s) | **12.3us(644GB/s)** | **1.83×** |
+| prefill(ACT=128,M=16) | 137us(926GB/s) | 128us(987GB/s) | 1.07× |
+**decode单GEMM 22.6→12.3us=1.83×**(带宽352→644GB/s)。与微基准(2.15×)一致,grid.z=128/激活8的真实场景下仍1.83×。prefill大M仍无效(印证R75)。
+**端到端账(估)**:decode gemm3 3个GEMM~1.8×→serve gemm3 0.096→~0.053ms省0.043;MoE 0.178→0.135;整层decode~0.43→0.39ms。TPOT/吞吐升几个百分点(decode侧)。
+**第一刀结论:逐位bad=0(R74)+decode 1.83×(R77)=成立且有效**。收益集中在decode小M(serve主战场,TPOT大头),prefill无效(但prefill本就带宽高926GB/s没空间)。
+**纠正R69/R75叙事**:R69"大M 13%峰值→低效与M无关"误导;真相=小M(decode)受流水救(访存流水浅),大M本就带宽够(926GB/s)。R64/R65最初盯M=1效率的方向对。
+**下一步**:真实serve端到端bench(吞吐/TPOT进CSV)。临时ctr容器HTTP不通→上生产容器kaon3-full(host网络HTTP通),但它旧二进制,需docker cp新release二进制进去或重起带PIPE。逐位已过可直接上生产。
