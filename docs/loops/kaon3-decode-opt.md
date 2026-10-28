@@ -417,3 +417,13 @@ curl /tokenize 1024词=**7ms**(排除tokenize是TTFT 2秒根因)。但出**4010 
 合规1560token prefill skip:base 367/nomoe 367/nodense 367/nopaged 367/noqkv 367=**全0影响**(同D28但这次合规负载,结论稳非超限假象)。
 **TTFT 380ms不在GPU计算**,在host prefill路径(c1无排队)。GPU skip计算不变=finish等的首token GPU很快,380ms是**host侧串行**(prefill plan构造/block分配/graph/htod)。同decode 19ms的host性质。
 **拆begin/finish定死(用eprintln不靠tracing,前4次tracing没出)**:c1 prefill走engine.rs:581 begin→async存pending→下轮589 finish。在581 begin前后+589 finish前后加eprintln计时。host-split之前加565(pending分支)错了,c1首个prefill走581同步段或589。
+
+## D37 2026-10-28 第5次计时插桩没出(prefill-split eprintln 0行)+诚实:没吃透engine异步调度分支
+[prefill-split]eprintln 0行,TTFT 367正常。**第5次计时没打出**(tracing 4次host-split/executor/render/cmpl + eprintln 1次prefill-split)。
+**系统根因(现在确定)**:bench首个prefill请求走的不是我加计时的engine分支。engine异步调度(async_sched默认开)有多条分支:565 pending finish / 528 cut_in插队 / 581 None→None同步 / 578 sync_done。我一直猜错分支加计时,且`!num_scheduled_tokens.is_empty()`条件可能过滤掉。我没吃透异步调度流程。
+**本会话确凿净成果(交接)**:
+1. **前置对齐后真实差距**(D35,唯一可信):吞吐22-30%/TTFT慢15×(恒定380ms)/TPOT慢3×。
+2. TTFT 380ms+TPOT 19ms**都不在GPU**(skip全段0影响,合规D36+超限D28双验),在host。
+3. **但host内部哪段没拆开**:5次计时插桩全没出,因没吃透engine异步调度请求走哪分支。
+**下次接手(不再盲加计时)**:①先读懂engine.rs异步调度完整流程(step()主循环,c1单prefill请求实际走哪分支:schedule→begin→async?→finish),画出分支;②在确认的分支加eprintln(或core已有的host-time已能出,扩展它拆begin/finish);③或用perf/strace等外部工具量host CPU时间分布,绕过代码插桩。
+**ROI提醒**:TTFT慢15×是最大缺口,值得继续。但先搞懂调度分支,别再第6次盲加。
