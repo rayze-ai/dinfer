@@ -667,6 +667,16 @@ fn attn_pre_fused_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_ne!("ATTN_PRE_FUSED", "0"))
 }
+/// B30a：层尾 add + rmsnorm_add + layer_scalar 三合一（`LAYER_TAIL_FUSED=0` 回退）。
+fn layer_tail_fused_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_ne!("LAYER_TAIL_FUSED", "0"))
+}
+/// B30b：router 预处理 norm + scale + mul 三合一（`ROUTER_PRE_FUSED=0` 回退）。
+fn router_pre_fused_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_ne!("ROUTER_PRE_FUSED", "0"))
+}
 fn kv_fp8_fused_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_ne!("KV_FP8_FUSED", "0"))
@@ -1464,8 +1474,19 @@ impl Gemma4Layer {
             // 3 launch → 2：fused_add_rmsnorm(h2, norm → h2) ; x += h2。进一步合并需要 "norm 加到 x" 与 "res 累加" 同 kernel，
             // 这里用 rmsnorm_add 做第二步：x += bf16(rmsnorm(norm)·w)，所以第一步只需 norm += h2（add_inplace）。
             // 两种拆法都是 2 launch；取后者（rmsnorm_add 已有）。
-            k::ops::add_inplace_bf16_n(stream, &sc.h2.data, &mut sc.norm.data, tokens * h)?;
-            k::ops::rmsnorm_add_bf16_n(stream, &sc.norm.data, &self.post_ff_norm.data, &mut sc.x.data, tokens, h, eps)?;
+            // B30a：再并掉 layer_scalar：norm += h2 ; x = bf16(bf16(x + bf16(rmsnorm(norm)·w)) · layer_scalar) 一次 launch（逐位，
+            // `crates/kernels/tests/layer_tail_fused_parity.rs`）。`LAYER_TAIL_FUSED=0` 回退两步 + scale。
+            if layer_tail_fused_enabled() {
+                k::ops::fused_add_rmsnorm_add_scale_bf16_n(
+                    stream, &sc.h2.data, &mut sc.norm.data, &self.post_ff_norm.data, &mut sc.x.data, tokens, h, eps, self.layer_scalar,
+                )?;
+            } else {
+                k::ops::add_inplace_bf16_n(stream, &sc.h2.data, &mut sc.norm.data, tokens * h)?;
+                k::ops::rmsnorm_add_bf16_n(stream, &sc.norm.data, &self.post_ff_norm.data, &mut sc.x.data, tokens, h, eps)?;
+                if self.layer_scalar != 1.0 {
+                    k::ops::scale_bf16_n(stream, &mut sc.x.data, tokens * h, self.layer_scalar)?;
+                }
+            }
         } else {
             k::ops::add_inplace_bf16_n(stream, &sc.h2.data, &mut sc.norm.data, tokens * h)?; // h2 = post_ff_norm_2(moe)
             sub_dump(stream, sub_out, "post_ff_in", &sc.norm, tokens, h)?;
@@ -1473,7 +1494,7 @@ impl Gemma4Layer {
             sub_dump(stream, sub_out, "post_ff_norm", &sc.h2, tokens, h)?;
             k::ops::add_inplace_bf16_n(stream, &sc.h2.data, &mut sc.x.data, tokens * h)?;
         }
-        if self.layer_scalar != 1.0 {
+        if self.layer_scalar != 1.0 && !(norm_add_fused_enabled() && norm_mode() == 1 && sub_out.is_none()) {
             k::ops::scale_bf16_n(stream, &mut sc.x.data, tokens * h, self.layer_scalar)?;
         }
         if let Some(e) = &st_ev {
@@ -1544,7 +1565,8 @@ impl Gemma4Layer {
             ensure!(lg.len() >= tokens * e, "moe_iso logits 太小 {} < {}", lg.len(), tokens * e);
             stream.htod_into(&lg[..tokens * e].to_vec(), &mut sc.logits.data)?;
         } else {
-        if norm_mode() != 1 {
+        // B30b：mode 1 也走 rmsnorm_scale2（kernel 内复刻三步舍入，逐位；`ROUTER_PRE_FUSED=0` 回退三次 launch）。
+        if norm_mode() != 1 || router_pre_fused_enabled() {
             k::ops::rmsnorm_scale2_bf16(
                 stream, &sc.x.data, &self.router.scale.data, &mut sc.routed.data, tokens, h, eps, root_size,
             )?;

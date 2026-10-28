@@ -5589,6 +5589,33 @@ pub fn attn_pre_fused_bf16(
     )
 }
 
+/// B30a（loop kaon3-decode-opt D149）：层尾三合一 —— `res += x`（写回 res）；`out_res = bf16(bf16(out_res + bf16(rmsnorm(res)·w)) · post_scale)`。
+/// 与 `add_inplace_bf16_n(x, res)` → `rmsnorm_add_bf16_n(res, w, out_res)` → `scale_bf16_n(out_res, post_scale)` 逐位同。
+#[allow(clippy::too_many_arguments)]
+pub fn fused_add_rmsnorm_add_scale_bf16_n(
+    stream: &Stream,
+    x: &CudaSlice<bf16>,
+    res: &mut CudaSlice<bf16>,
+    w: &CudaSlice<bf16>,
+    out_res: &mut CudaSlice<bf16>,
+    tokens: usize,
+    hidden: usize,
+    eps: f32,
+    post_scale: f32,
+) -> Result<()> {
+    ensure!(x.len() >= tokens * hidden && res.len() >= tokens * hidden && out_res.len() >= tokens * hidden && w.len() == hidden, "fused_add_rmsnorm_add_scale: shape");
+    let (px, pw) = (stream.ptr(x) as *const c_void, stream.ptr(w) as *const c_void);
+    let pr = stream.ptr_mut(res) as *mut c_void;
+    let po = stream.ptr_mut(out_res) as *mut c_void;
+    // SAFETY: 缓冲容量已校验。
+    check(
+        unsafe {
+            ffi::fused_add_rmsnorm_add_scale_bf16(px, pr, pw, po, tokens as i64, hidden as i64, eps, post_scale, rmsnorm_layout(stream, tokens, hidden, None), norm_mode(), stream.raw() as ffi::cudaStream_t)
+        },
+        "fused_add_rmsnorm_add_scale_bf16",
+    )
+}
+
 /// B13：`out_res[r] = bf16(out_res[r] + bf16(rmsnorm(x[r])·w))`——norm 直接加到残差流，代 `rmsnorm_bf16_n` + `add_inplace_bf16_n`。
 /// layout/mode 与 `rmsnorm_bf16_n` 同源（逐位同口径）。
 pub fn rmsnorm_add_bf16_n(

@@ -49,6 +49,8 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
 
+    /// B30a：层尾三合一（见 kernels.h）。
+    pub fn fused_add_rmsnorm_add_scale_bf16(x: *const c_void, res: *mut c_void, w: *const c_void, out_res: *mut c_void, tokens: i64, hidden: i64, eps: f32, post_scale: f32, layout: i32, mode: i32, stream: cudaStream_t) -> i32;
     pub fn rmsnorm_scale2_bf16(
         x: *const c_void,
         scale: *const c_void,
@@ -1702,6 +1704,7 @@ mod stubs {
     stub!(rmsnorm_scale2_bf16(x: *const c_void, sc: *const c_void, o: *mut c_void, t: i64, h: i64, e: f32, r: f32, m: i32, s: cudaStream_t));
     stub!(rmsnorm_quant_fp8_bf16(x: *const c_void, w: *const c_void, o: *mut c_void, t: i64, h: i64, e: f32, a: f32, s: cudaStream_t));
     stub!(fused_add_rmsnorm_bf16(x: *const c_void, r: *mut c_void, w: *const c_void, o: *mut c_void, t: i64, h: i64, e: f32, l: i32, m: i32, s: cudaStream_t));
+    stub!(fused_add_rmsnorm_add_scale_bf16(x: *const c_void, r: *mut c_void, w: *const c_void, o: *mut c_void, t: i64, h: i64, e: f32, ps: f32, l: i32, m: i32, s: cudaStream_t));
     stub!(rope_bf16(q: *mut c_void, k: *mut c_void, p: *const i32, cs: *const f32, t: i64, qh: i64, kh: i64, hd: i64, rd: i64, n: i32, s: cudaStream_t));
     stub!(rope_span_bf16(q: *mut c_void, k: *mut c_void, p: *const i32, cs: *const f32, t: i64, qh: i64, kh: i64, hd: i64, rd: i64, sp: i64, n: i32, s: cudaStream_t));
     stub!(attn_pre_fused_bf16(q: *mut c_void, k: *mut c_void, v: *mut c_void, qw: *const c_void, kw: *const c_void, p: *const i32, cs: *const f32, c: *mut c_void, sm: *const i64, t: i64, qh: i64, kh: i64, hd: i64, rd: i64, sp: i64, bs: i64, e: f32, m: i32, f8: i32, s: cudaStream_t));

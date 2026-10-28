@@ -26,6 +26,9 @@ int rmsnorm_add_bf16(const void* x, const void* w, void* out_res, int64_t tokens
 // residual 融合：res[t,:] += x[t,:]; out[t,:] = rmsnorm(res[t,:])。res 原位更新。
 int fused_add_rmsnorm_bf16(const void* x, void* res, const void* w, void* out, int64_t tokens, int64_t hidden,
                            float eps, int layout, int mode, cudaStream_t stream);
+// B30a：层尾三合一 res += x; out_res = bf16(bf16(out_res + bf16(rmsnorm(res)·w)) · post_scale)。
+int fused_add_rmsnorm_add_scale_bf16(const void* x, void* res, const void* w, void* out_res, int64_t tokens, int64_t hidden,
+                                     float eps, float post_scale, int layout, int mode, cudaStream_t stream);
 // norm + fp8 量化融合（vLLM compile 口径）：out[i] = fp8(norm(x)[i] * (1/a_scale))，h % 8 == 0 且 h <= 8192。
 int rmsnorm_quant_fp8_bf16(const void* x, const void* w, void* out, int64_t tokens, int64_t hidden, float eps,
                            float a_scale, cudaStream_t stream);

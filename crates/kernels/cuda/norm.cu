@@ -102,11 +102,22 @@ __device__ __forceinline__ uint4 bf16x8_add(uint4 a, uint4 b) {
   }
   return o;
 }
+__device__ __forceinline__ uint4 bf16x8_scale(uint4 a, float s) {
+  uint4 o;
+  const __nv_bfloat162* pa = reinterpret_cast<const __nv_bfloat162*>(&a);
+  __nv_bfloat162* po = reinterpret_cast<__nv_bfloat162*>(&o);
+#pragma unroll
+  for (int c = 0; c < 4; ++c) {
+    const float2 x = __bfloat1622float2(pa[c]);
+    po[c] = __floats2bfloat162_rn(x.x * s, x.y * s);
+  }
+  return o;
+}
 template <int BLOCK, int VPT, bool FUSED_ADD, bool NORM_ADD>
 __global__ void __launch_bounds__(BLOCK) rmsnorm_vec_kernel(const bf16* __restrict__ x, bf16* __restrict__ res,
                                                            const bf16* __restrict__ w, bf16* __restrict__ out,
                                                            const int32_t* __restrict__ rows, int hidden, float eps,
-                                                           int mode) {
+                                                           int mode, float post_scale) {
   const int64_t row = blockIdx.x;
   const int64_t src_row = rows ? rows[row] : row;
   const uint4* xr = reinterpret_cast<const uint4*>(x + src_row * hidden);
@@ -174,7 +185,7 @@ __global__ void __launch_bounds__(BLOCK) rmsnorm_vec_kernel(const bf16* __restri
         op[c] = __floats2bfloat162_rn(norm_mid(v[j][2 * c] * inv, mode) * g.x,
                                       norm_mid(v[j][2 * c + 1] * inv, mode) * g.y);
       }
-      orow[i] = NORM_ADD ? bf16x8_add(orow[i], ob) : ob;
+      orow[i] = NORM_ADD ? (post_scale != 1.f ? bf16x8_scale(bf16x8_add(orow[i], ob), post_scale) : bf16x8_add(orow[i], ob)) : ob;
     }
   }
 }
@@ -191,7 +202,7 @@ __global__ void __launch_bounds__(kNormWarps * 32) rmsnorm_warp_kernel(const bf1
                                                                         const bf16* __restrict__ w,
                                                                         bf16* __restrict__ out,
                                                                         const int32_t* __restrict__ rows, int hidden,
-                                                                        int64_t tokens, float eps, int mode) {
+                                                                        int64_t tokens, float eps, int mode, float post_scale) {
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
   const int64_t row = (int64_t)blockIdx.x * kNormWarps + warp;
   if (row >= tokens) return;
@@ -247,7 +258,7 @@ __global__ void __launch_bounds__(kNormWarps * 32) rmsnorm_warp_kernel(const bf1
         const float2 g = __bfloat1622float2(wp[c]);
         op[c] = __floats2bfloat162_rn(norm_mid(f.x * inv, mode) * g.x, norm_mid(f.y * inv, mode) * g.y);
       }
-      orow[i] = NORM_ADD ? bf16x8_add(orow[i], ob) : ob;
+      orow[i] = NORM_ADD ? (post_scale != 1.f ? bf16x8_scale(bf16x8_add(orow[i], ob), post_scale) : bf16x8_add(orow[i], ob)) : ob;
     }
   }
 }
@@ -256,7 +267,7 @@ __global__ void __launch_bounds__(kNormWarps * 32) rmsnorm_warp_kernel(const bf1
 template <int BLOCK, bool FUSED_ADD, bool NORM_ADD>
 __global__ void rmsnorm_kernel(const bf16* __restrict__ x, bf16* __restrict__ res, const bf16* __restrict__ w,
                                bf16* __restrict__ out, const int32_t* __restrict__ rows, int hidden, float eps,
-                               int mode) {
+                               int mode, float post_scale) {
   const int64_t row = blockIdx.x;
   const int64_t src_row = rows ? rows[row] : row;
   const bf16* xr = x + src_row * hidden;
@@ -280,7 +291,7 @@ __global__ void rmsnorm_kernel(const bf16* __restrict__ x, bf16* __restrict__ re
   const bf16* src = FUSED_ADD ? rr : xr;
   for (int i = threadIdx.x; i < hidden; i += BLOCK) {
     const bf16 nv = to_bf16(norm_mid(to_f32(src[i]) * inv, mode) * (w ? to_f32(w[i]) : 1.f));
-    orow[i] = NORM_ADD ? to_bf16(to_f32(orow[i]) + to_f32(nv)) : nv;
+    orow[i] = NORM_ADD ? (post_scale != 1.f ? to_bf16(to_f32(to_bf16(to_f32(orow[i]) + to_f32(nv))) * post_scale) : to_bf16(to_f32(orow[i]) + to_f32(nv))) : nv;
   }
 }
 
@@ -388,7 +399,7 @@ __global__ void __launch_bounds__(BLOCK) rmsnorm_scale2_kernel(const bf16* __res
       gs[j] = acc;
     }
   }
-  const float inv = rms_inv_compile(rms_ss_triton<BLOCK, VPT>(gs, nvec), hidden, eps);
+  const float inv = rms_inv(rms_ss_triton<BLOCK, VPT>(gs, nvec), hidden, eps, mode);  // B30b：mode 1 走 BI 口径的 inv
 #pragma unroll
   for (int j = 0; j < VPT; ++j) {
     const int i = threadIdx.x + j * BLOCK;
@@ -402,8 +413,10 @@ __global__ void __launch_bounds__(BLOCK) rmsnorm_scale2_kernel(const bf16* __res
         const float2 g = __bfloat1622float2(sp[c]);
         // mode 0：fp32 全程 norm → ×rs → ×scale，只在写回时舍一次。
         // mode 2：照 FX 图的三次 bf16 舍入（norm 出口、×rs 后、×scale 后）。
-        const float y0 = norm_mid(norm_mid(v[j][2 * c] * inv, mode) * rs, mode) * g.x;
-        const float y1 = norm_mid(norm_mid(v[j][2 * c + 1] * inv, mode) * rs, mode) * g.y;
+        // mode 1（B30b）：复刻 rmsnorm_noweight → scale_bf16 → mul_row 三次 launch 的三个舍入点：bf16(x·inv) → bf16(·rs) → bf16(·g)。
+        const int mm = mode == 1 ? 2 : mode;
+        const float y0 = norm_mid(norm_mid(v[j][2 * c] * inv, mm) * rs, mm) * g.x;
+        const float y1 = norm_mid(norm_mid(v[j][2 * c + 1] * inv, mm) * rs, mm) * g.y;
         op[c] = __floats2bfloat162_rn(y0, y1);
       }
       orow[i] = ob;
@@ -415,7 +428,7 @@ __global__ void __launch_bounds__(BLOCK) rmsnorm_scale2_kernel(const bf16* __res
 // 否则退回 0）；2 一 block(1024 线程) 一行（hidden ≤ 8192）。hidden 不对齐 / > 8192 一律标量版。
 template <bool FUSED_ADD, bool NORM_ADD = false>
 int launch(const void* x, void* res, const void* w, void* out, const int32_t* rows, int64_t tokens, int64_t hidden,
-           float eps, int layout, int mode, cudaStream_t s) {
+           float eps, int layout, int mode, cudaStream_t s, float post_scale = 1.f) {
   if (tokens <= 0) return 0;
   if (hidden <= 0 || hidden > (1 << 20)) return err(cudaErrorInvalidValue);
   const dim3 grid((unsigned)tokens);
@@ -430,36 +443,36 @@ int launch(const void* x, void* res, const void* w, void* out, const int32_t* ro
     const dim3 wgrid((unsigned)((tokens + kNormWarps - 1) / kNormWarps));
     const int h = (int)hidden;
     if (hidden <= 256) {
-      rmsnorm_warp_kernel<1, FUSED_ADD, NORM_ADD><<<wgrid, kNormWarps * 32, 0, s>>>(xp, rp, wp, op, rows, h, tokens, eps, mode);
+      rmsnorm_warp_kernel<1, FUSED_ADD, NORM_ADD><<<wgrid, kNormWarps * 32, 0, s>>>(xp, rp, wp, op, rows, h, tokens, eps, mode, post_scale);
     } else if (hidden <= 1024) {
-      rmsnorm_warp_kernel<4, FUSED_ADD, NORM_ADD><<<wgrid, kNormWarps * 32, 0, s>>>(xp, rp, wp, op, rows, h, tokens, eps, mode);
+      rmsnorm_warp_kernel<4, FUSED_ADD, NORM_ADD><<<wgrid, kNormWarps * 32, 0, s>>>(xp, rp, wp, op, rows, h, tokens, eps, mode, post_scale);
     } else if (hidden <= 2048) {
-      rmsnorm_warp_kernel<8, FUSED_ADD, NORM_ADD><<<wgrid, kNormWarps * 32, 0, s>>>(xp, rp, wp, op, rows, h, tokens, eps, mode);
+      rmsnorm_warp_kernel<8, FUSED_ADD, NORM_ADD><<<wgrid, kNormWarps * 32, 0, s>>>(xp, rp, wp, op, rows, h, tokens, eps, mode, post_scale);
     } else {
-      rmsnorm_warp_kernel<16, FUSED_ADD, NORM_ADD><<<wgrid, kNormWarps * 32, 0, s>>>(xp, rp, wp, op, rows, h, tokens, eps, mode);
+      rmsnorm_warp_kernel<16, FUSED_ADD, NORM_ADD><<<wgrid, kNormWarps * 32, 0, s>>>(xp, rp, wp, op, rows, h, tokens, eps, mode, post_scale);
     }
     return last_err();
   }
   if (aligned && layout == 2 && hidden <= 8192) {
     if (hidden <= 1024) {
-      rmsnorm_vec_kernel<128, 1, FUSED_ADD, NORM_ADD><<<grid, 128, 0, s>>>(xp, rp, wp, op, rows, (int)hidden, eps, mode);
+      rmsnorm_vec_kernel<128, 1, FUSED_ADD, NORM_ADD><<<grid, 128, 0, s>>>(xp, rp, wp, op, rows, (int)hidden, eps, mode, post_scale);
     } else {
       // 1024 线程 × 1 向量（hidden=8192 正好满），归约两级各一次 shuffle
-      rmsnorm_vec_kernel<1024, 1, FUSED_ADD, NORM_ADD><<<grid, 1024, 0, s>>>(xp, rp, wp, op, rows, (int)hidden, eps, mode);
+      rmsnorm_vec_kernel<1024, 1, FUSED_ADD, NORM_ADD><<<grid, 1024, 0, s>>>(xp, rp, wp, op, rows, (int)hidden, eps, mode, post_scale);
     }
     return last_err();
   }
   if (aligned && hidden <= 1024) {
     // ≤ 1024：128 线程 × 1 向量（hidden=1024 正好满），一次访存
-    rmsnorm_vec_kernel<128, 1, FUSED_ADD, NORM_ADD><<<grid, 128, 0, s>>>(xp, rp, wp, op, rows, (int)hidden, eps, mode);
+    rmsnorm_vec_kernel<128, 1, FUSED_ADD, NORM_ADD><<<grid, 128, 0, s>>>(xp, rp, wp, op, rows, (int)hidden, eps, mode, post_scale);
   } else if (aligned && hidden <= 4096) {
-    rmsnorm_vec_kernel<256, 2, FUSED_ADD, NORM_ADD><<<grid, 256, 0, s>>>(xp, rp, wp, op, rows, (int)hidden, eps, mode);
+    rmsnorm_vec_kernel<256, 2, FUSED_ADD, NORM_ADD><<<grid, 256, 0, s>>>(xp, rp, wp, op, rows, (int)hidden, eps, mode, post_scale);
   } else if (aligned && hidden <= 8192) {
-    rmsnorm_vec_kernel<256, 4, FUSED_ADD, NORM_ADD><<<grid, 256, 0, s>>>(xp, rp, wp, op, rows, (int)hidden, eps, mode);
+    rmsnorm_vec_kernel<256, 4, FUSED_ADD, NORM_ADD><<<grid, 256, 0, s>>>(xp, rp, wp, op, rows, (int)hidden, eps, mode, post_scale);
   } else if (hidden <= 1024) {
-    rmsnorm_kernel<256, FUSED_ADD, NORM_ADD><<<grid, 256, 0, s>>>(xp, rp, wp, op, rows, (int)hidden, eps, mode);
+    rmsnorm_kernel<256, FUSED_ADD, NORM_ADD><<<grid, 256, 0, s>>>(xp, rp, wp, op, rows, (int)hidden, eps, mode, post_scale);
   } else {
-    rmsnorm_kernel<1024, FUSED_ADD, NORM_ADD><<<grid, 1024, 0, s>>>(xp, rp, wp, op, rows, (int)hidden, eps, mode);
+    rmsnorm_kernel<1024, FUSED_ADD, NORM_ADD><<<grid, 1024, 0, s>>>(xp, rp, wp, op, rows, (int)hidden, eps, mode, post_scale);
   }
   return last_err();
 }
@@ -623,6 +636,13 @@ extern "C" int gather_rmsnorm_bf16(const void* x, const int32_t* rows, const voi
   return launch<false>(x, nullptr, w, out, rows, num_rows, hidden, eps, layout, mode, stream);
 }
 
+// B30a（loop kaon3-decode-opt D149）：层尾三合一。res[i] = bf16(res[i] + x[i])（写回 res）；out[i] = bf16(bf16(out[i] + bf16(rmsnorm(res)·w)) · s)。
+// 与 add_inplace(x→res) → rmsnorm_add(res, w → out) → scale(out, s) 三次 launch 逐位同（各自的舍入点一个不少）。
+extern "C" int fused_add_rmsnorm_add_scale_bf16(const void* x, void* res, const void* w, void* out_res, int64_t tokens,
+                                                int64_t hidden, float eps, float post_scale, int layout, int mode,
+                                                cudaStream_t stream) {
+  return launch<true, true>(x, res, w, out_res, nullptr, tokens, hidden, eps, layout, mode, stream, post_scale);
+}
 extern "C" int fused_add_rmsnorm_bf16(const void* x, void* res, const void* w, void* out, int64_t tokens,
                                       int64_t hidden, float eps, int layout, int mode, cudaStream_t stream) {
   return launch<true>(x, res, w, out, nullptr, tokens, hidden, eps, layout, mode, stream);
