@@ -758,7 +758,7 @@ int moe_grouped_gemm(const void* aq, const void* a_s, const void* const* Bptr, c
   const uint8_t* const* pb = reinterpret_cast<const uint8_t* const*>(Bptr);
   const uint8_t* const* ps = reinterpret_cast<const uint8_t* const*>(Sptr);
   // cp.async 流水版默认开（D48 实测 decode TPOT -5.5%/吞吐+5.7%、逐位一致）；MOE_GEMM_PIPE=0 关（回退旧版）。
-  const bool pipe = []{ const char* v = getenv("MOE_GEMM_PIPE"); return !v || v[0] != '0'; }();
+  static const bool pipe = []{ const char* v = getenv("MOE_GEMM_PIPE"); return !v || v[0] != '0'; }();  // B17a：一次读
   // B16：MOE_GEMM_STAGES（默认 4）= STAGES 级 cp.async 环形流水；=2 回退 pipe 双缓冲版（A/B 用）。
   static const int stages = []{ const char* v = getenv("MOE_GEMM_STAGES"); const int n = v ? atoi(v) : 4; return (n == 3 || n == 4 || n == 6) ? n : (n <= 2 ? 2 : 4); }();
   if (pipe && stages > 2) {

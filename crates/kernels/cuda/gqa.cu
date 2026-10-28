@@ -1573,7 +1573,8 @@ static int gqa_prefill_impl(const void* q, const void* k, const void* v, void* o
   // D=512（Gemma4 全注意力层 5 层）flash：补 v6（Q 进 smem，NW=4 TILE=16 控 smem/寄存器）。
   // v6 纯 D 参数化；smem 超卡上限/寄存器 spill 启不动则 v6_launch 返回 InvalidConfiguration → 回退 ref。
   // cfg < 0 或 GQA_D512_REF=1 时强制 ref（对拍参照 / A/B）。
-  if (cfg >= 0 && head_dim == 512 && !getenv("GQA_D512_REF")) {
+  static const bool d512_ref = getenv("GQA_D512_REF") != nullptr;  // B17a：每次 prefill 都 getenv → 一次
+  if (cfg >= 0 && head_dim == 512 && !d512_ref) {
     const int rc = v6_launch<false, 512, 4, 16>((int)max_seqlen, (int)heads, (int)num_reqs, stream,
                         static_cast<const bf16*>(q), static_cast<const bf16*>(k), static_cast<const bf16*>(v),
                         nullptr, nullptr, nullptr, cu_seqlens, static_cast<bf16*>(out), (int)heads, (int)kv_heads,
