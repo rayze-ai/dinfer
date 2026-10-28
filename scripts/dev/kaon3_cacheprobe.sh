@@ -7,12 +7,12 @@ export LD_LIBRARY_PATH=$NV/nccl/lib:$NV/cu13/lib
 cd /w/dinfer
 R=/w/dinfer/tmp_cacheprobe_RESULT.txt; : > $R
 M=/hf_data/hub/models--kaon-release--Kaon-V3-nvpf4-mixed/snapshots/e268bef12555d299ed7ca02ade5e77f239f27478
-export MOE_GROUPED=1 KAON3_MEGA=1 MEGA_SPGU=4 MEGA_SPDN=4 ROUTER_GEMM_BI=0 CUDA_VISIBLE_DEVICES=${GPU:-4} FP8_GEMV=1
+export MOE_GROUPED=1 KAON3_MEGA=1 MEGA_SPGU=4 MEGA_SPDN=4 ROUTER_GEMM_BI=0 CUDA_VISIBLE_DEVICES=${GPU:-0} FP8_GEMV=1
 PORT=8391; BIN=${BIN:-./target/release/dinfer}
 echo "bin=$(stat -c %y $BIN | cut -c1-16) gpu=$CUDA_VISIBLE_DEVICES $(date +%T)" >> $R
 for ENVSET in "" "KV_FP8_STORE=0" "GQA_PAGED_D512_V6_OFF=1"; do
   LOG=/w/dinfer/tmp_cacheprobe_${ENVSET:-plain}.log
-  env $ENVSET taskset -c 92-119 $BIN serve --model "$M" --tokenizer "$M" --port $PORT --max-model-len 16384 --max-num-seqs 64 --max-num-batched-tokens 4096 >$LOG 2>&1 &
+  env $ENVSET taskset -c 0-31 $BIN serve --model "$M" --tokenizer "$M" --port $PORT --max-model-len 16384 --max-num-seqs 64 --max-num-batched-tokens 4096 >$LOG 2>&1 &
   SP=$!
   for i in $(seq 1 150); do sed "s/\x1b\[[0-9;]*m//g" $LOG | grep -q "listening addr" && break; sleep 1; done
   echo "== env=[${ENVSET:-plain}]" >> $R
