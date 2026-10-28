@@ -617,3 +617,6 @@ nsys 2026.3.2 + `--cuda-flush-interval=1000` + 不 INT nsys 本体（之前 INT 
 - 又踩：排队用 `pgrep -f "bash /w/x.sh"` 匹配到等待进程自己 → 死锁 30 分钟（CLAUDE.md 早写"链内用 -x"）。改串行一条 `bash a.sh; bash b.sh`。
 - **第二刀调研（全注意力 D=512 层 decode 1.85ms/步 = 5 层 × 369us）**：`gqa.cu:954 gqa_paged_kernel` 通用慢路径，grid=(req, 16 头)=16 block ×256 线程、每 block 对 KV 扫三遍、`for d<512` 标量 f32 点积、无 GQA 组共享（kv_heads=2 的 K/V 被 8 个 q 头各读一遍）。`gqa_decode_v3`（D=128/256，GROUP 1/2/4/6，split-K 多 block，cp.async 双缓冲）不支持 D=512：core 的 `s_acc[GROUP][KEYS][D]` 在 D=512/GROUP=8 时 = 8×32×512×4 = 512KB smem，超限；需要 D=512 专版（LPK=64 lane/key → KEYS=2/block 或改 2 pass）。**先等 B1 结果，再决定第二刀做 D=512 v3 专版（预期 369→~80us/层，省 ~1.4ms）还是 h=2816 norm（0.6ms，简单）**。
 - D53 定稿（PIPE 三态同轮，c1）：PIPE=0 17.08/17.11、PIPE=1 16.15、unset 16.18 → **当前二进制默认=pipe 开，收益 -5.5% 与 D48 一致**。D49 "没编进"是当时未重编 kernels；`kserve_full.sh` 不需要再加 env。
+
+## ★★★★★★★ D55 2026-10-28 B1 首批 A/B（同轮，旧二进制 A vs 新 B，c1）：TPOT 16.16 → 13.02（**-19.4%**），TTFT 42.0 → 39.8
+预测 2.9ms（nsys 逐头 norm 2.29 + rope 0.70）实得 3.14ms。首次 Step B 刀收益达预期。等 c8 / 输出一致 / A2 B2 复测后进 CSV。
