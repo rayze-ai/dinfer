@@ -155,3 +155,16 @@ plen128+删dense/MoE,再skip norm(6逐头RMSNorm/层)/rope/kvfp8(3 roundtrip/层
 **D5-D10结论站得住**:删dense/MoE/norm/rope/kvfp8都不动TPOT是真的;plen128→1024 TPOT 13→19.6真实涨(paged随KV真算)。
 **反常收敛成清晰问题**:固定13ms(plen128)删掉norm/rope/kvfp8/dense/MoE全不变→13ms只能在**没法skip的**:qkv GEMM/copy2d×3/gqa_cache_write/paged/oproj GEMM,×30层。删一堆小kernel不变=小kernel本就不耗时,13ms集中在少数大kernel(qkv/oproj GEMM+paged)或30层固定调度链。
 **下一步(最终定位)**:加ATTN_SKIP_QKV/OPROJ/PAGED skip(坏数值纯计时),看哪个让13ms大降。先qkv+oproj(两个GEMM,最可能)。
+
+## ★★★★★★★ D12 2026-10-28 终极颠覆:qkv/paged/oproj全skip也0影响→TPOT根本不是GPU在算,瓶颈在host/调度
+| | base | noqkv | nopaged | nooproj |
+|---|---|---|---|---|
+| plen128 | 13.07 | 13.07 | 13.08 | 13.07 |
+| plen1024 | 18.87 | 18.87 | 18.88 | 18.87 |
+**qkv/paged/oproj全删TPOT不变,连paged删plen1024都不降(18.87→18.88)**。
+**至此所有GPU计算段都skip过**:dense/MoE/norm/rope/kvfp8/qkv/paged/oproj——**全删TPOT都不动**。
+**终极结论**:13ms(plen128)/19ms(plen1024)**根本不是GPU在算**。推翻D9"GPU真算"(util 99%是假象:采样精度或graph replay固定开销忙)。TPOT由**GPU之外**决定=host/调度/同步/每步固定链/cudagraph launch+sync。
+**plen128→1024涨6ms删paged也不降**→那6ms也非paged kernel,是随seq_len的**host侧**开销(block_table/slot_mapping处理/每步按KV长的host循环)。
+**方向彻底改**:瓶颈不在任何CUDA kernel(两刀MoE+刚要攻的attn kernel全错),在**host/调度/每步固定链**。=R47最早"host开销"方向对(R58用NO_GRAPH否定过,但graph态skip证明R47对,NO_GRAPH又骗了一次)。
+**Step B真靶子(终于)**:host/调度路径——decode每步Rust侧做什么(采样/detokenize/调度/同步/graph launch),为何每步固定13ms+随KV 6ms。vLLM 7.57ms说明host可以很薄。
+**下一步**:读kaon3 executor decode每步host代码(executor.rs decode路径),看每步固定开销(采样/publish/sync/graph replay)+随KV的host循环。这才是真大头。
