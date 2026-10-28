@@ -1,0 +1,48 @@
+12:35:49
+EXIT=101
+error[E0061]: this function takes 12 arguments but 13 arguments were supplied
+    --> models/kaon3/src/layer.rs:1634:17
+     |
+1634 | ...   k::ops::moe_fp4_gemv(
+     |       ^^^^^^^^^^^^^^^^^^^^
+--
+error: could not compile `dinfer-kaon3` (lib) due to 1 previous error; 4 warnings emitted
+warning: build failed, waiting for other jobs to finish...
+Compiling dinfer-kaon3 Compiling dinfer-kernels Compiling dinfer-layers 
+new_bin=2026-10-28 12:18 marker=0
+A c1:  1.96 req/s 125.7 output TTFT mean 38.02 p50 38.15 TPOT mean 7.48 p50 7.48 
+
+A c8:  6.57 req/s 420.7 output TTFT mean 263.15 p50 192.97 TPOT mean 15.13 p50 17.14 
+
+A out:  the following.  Wait, I'm not sure.  Wait, I'm not sure.  Wait,
+A out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到两千多年前的春秋战国时期，当时各诸侯国开始修建防御工事。  随后，秦始帝通过大规模的工程将各地的防御墙连接起来，形成了最初的防御体系。  在随后的明朝时期，长城得到了最全面、最坚固的修缮
+B c1:  2.09 req/s 133.6 output TTFT mean 38.29 p50 37.95 TPOT mean 7.00 p50 7.00 
+
+B c8:  6.46 req/s 413.4 output TTFT mean 463.71 p50 583.04 TPOT mean 12.29 p50 11.39 
+
+B out:  is is is is is is is is is is is is is is is is is is is is is is is is
+B out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到春秋战国时期，最初是为了抵御外敌而修建的。 随着秦朝的统一，大规模的修筑工作开始，并逐渐演变成后来的各个朝代。 明朝时期，长城迎来了最辉煌的建设阶段，形成了我们今天所看到的宏伟规模。
+A2 c1:  1.96 req/s 125.7 output TTFT mean 37.77 p50 37.75 TPOT mean 7.48 p50 7.48 
+
+A2 c8:  6.60 req/s 422.3 output TTFT mean 409.85 p50 580.07 TPOT mean 12.73 p50 11.11 
+
+A2 out:  the following.  Wait, I'm not sure.  Wait, I'm not sure.  Wait,
+A2 out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到两千多年前的春秋战国时期，当时各诸侯国开始修建防御工事。  随后，秦始帝通过大规模的工程将各地的防御墙连接起来，形成了最初的防御体系。  在随后的明朝时期，长城得到了最全面、最坚固的修缮
+B2 c1:  2.09 req/s 133.5 output TTFT mean 38.34 p50 38.32 TPOT mean 7.00 p50 7.00 
+
+B2 c8:  6.46 req/s 413.3 output TTFT mean 463.74 p50 583.09 TPOT mean 12.30 p50 11.39 
+
+B2 out:  is is is is is is is is is is is is is is is is is is is is is is is is
+B2 out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到春秋战国时期，最初是为了抵御外敌而修建的。 随着秦朝的统一，大规模的修筑工作开始，并逐渐演变成后来的各个朝代。 明朝时期，长城迎来了最辉煌的建设阶段，形成了我们今天所看到的宏伟规模。
+B c1:  2.09 req/s 133.7 output TTFT mean 37.85 p50 37.82 TPOT mean 7.00 p50 7.00 
+
+B c8:  6.46 req/s 413.2 output TTFT mean 463.09 p50 582.88 TPOT mean 12.31 p50 11.40 
+
+B out:  is is is is is is is is is is is is is is is is is is is is is is is is
+B out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到春秋战国时期，最初是为了抵御外敌而修建的。 随着秦朝的统一，大规模的修筑工作开始，并逐渐演变成后来的各个朝代。 明朝时期，长城迎来了最辉煌的建设阶段，形成了我们今天所看到的宏伟规模。
+A2 c1:  1.96 req/s 125.4 output TTFT mean 38.34 p50 38.43 TPOT mean 7.49 p50 7.50 
+
+A2 c8:  6.59 req/s 421.6 output TTFT mean 462.88 p50 582.88 TPOT mean 11.93 p50 10.97 
+
+A2 out:  the following.  Wait, I'm not sure.  Wait, I'm not sure.  Wait,
+A2 out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到两千多年前的春秋战国时期，当时各诸侯国开始修建防御工事。  随后，秦始帝通过大规模的工程将各地的防御墙连接起来，形成了最初的防御体系。  在随后的明朝时期，长城得到了最全面、最坚固的修缮

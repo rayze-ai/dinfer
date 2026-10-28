@@ -1,0 +1,15 @@
+12:30:41
+EXIT=101
+error: failed to run custom build command for `dinfer-kernels v0.1.0 (/w/dinfer/crates/kernels)`
+  thread '<unnamed>' (40223) panicked at crates/kernels/build.rs:176:9:
+  thread 'main' (40194) panicked at crates/kernels/build.rs:121:5:
+  a scoped thread panicked
+error: failed to run custom build command for `dinfer-kernels v0.1.0 (/w/dinfer/crates/kernels)`
+
+Caused by:
+  process didn't exit successfully: `/w/dinfer/target/release/build/dinfer-kernels-a44f6df415e2c1fc/build-script-build` (exit status: 101)
+  --- stdout
+  cargo:rerun-if-changed=cuda
+  cargo:rerun-if-env-changed=CUDA_ARCHS
+12:31:04
+PARITY_FAIL DONE

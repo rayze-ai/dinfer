@@ -765,3 +765,5 @@ decode c1 的 MoE 段 nsys：grouped_gemm gate 18.6 + up 18.6 + down 12.5 + gelu
 - b8b 的 bN **B 侧编译失败**（`layer.rs:1634` `moe_fp4_gemv` 多了个 `tile_off`——B8 批量替换 `&mg.alpha_down, &sc.buckets.offsets,\n` 也命中了 B7 的调用），bN 没检查编译 EXIT 就跑 → B 侧用的是 12:18 旧二进制 + `FP8_GEMV=1`，数字 7.00/11.39 = D64 split2 重放，**无效**。已修；下一链（b8c）把 B11 一起带上。**bN.sh 要加 "EXIT≠0 则停"**。
 - **B11 代码落地**：`moe_grouped_quant` 加可空 `sorted_tok`（gather 融进量化，去 `moe_gather_bf16` 与 xg 写）；路由（旧 `fill_kernel` 与 B10 融合 kernel）多写 `inv[tok·K+k]`；新 `moe_combine_bf16`（grid=tokens，mode 同 scatter_add；替代 memset(acc)+scatter_add+memset(y)+f32_add_to_bf16，`MOE_COMBINE_OLD=1` 回退）。grouped 路径每层 -4 launch。
 - `bN.sh`（远端 + 本地 `kaon3_stepB_verify.sh`）加编译失败即停（NOBUILD DONE）。
+- b8b ABAB 归档（`b8b_RESULT.txt`，**B 侧无效**：编译失败跑了旧二进制）；A 侧两轮 7.48 / 11.11 再次确认 B5+pick_warps 基线。
+- **b8c 链**：三门禁 → bN（TAG=b8c，MARKER=combine_kernel，B 侧 `FP8_GEMV=1`；新二进制含 B6c + pick_warps≤4 + B8 tile 表 + B10 路由融合 + B11 gather/combine 融合）。预期 c1 7.48 → ~6.5（B10 -0.6、B11 -0.35、B6c -0.5）、c8 ≤ 11.0、TTFT c8 583 → 明显降（B8）。
