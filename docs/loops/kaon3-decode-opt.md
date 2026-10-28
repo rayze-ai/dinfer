@@ -144,3 +144,14 @@ plen128+删dense/MoE,再skip norm(6逐头RMSNorm/层)/rope/kvfp8(3 roundtrip/层
 - 加max-tokens拉长看TPOT稳定值;
 - 对比:若连attn主kernel(qkv/paged/oproj)都skip还12.9→确系测量/层串行;若那些skip大降→之前小kernel本就不是大头是对的。
 **不下结论,先验证**。下一步:prefix-repeat 0(不共享前缀,真实KV) + 加qkv/paged/oproj的skip(可能崩,小心)重测。
+
+## ★★★ D11 2026-10-28 测量有效性确认:prefix cache与decode TPOT无关,skip结论站得住
+| 配置 | cache命中 | TPOT |
+|---|---|---|
+| 共享前缀 plen1024 | 0.981 | 19.73 |
+| 独立KV plen1024 | 0.000 | 19.64 |
+| 独立KV plen128 | 0.873 | 14.02 |
+**prefix-repeat 0(命中0,真算1024 KV) vs 1(命中0.98),TPOT几乎一样(19.64 vs 19.73)**→decode TPOT与prefix cache无关(cache只省prefill,decode每步照常读KV算attention)。**前面skip测量有效,非假数据**。
+**D5-D10结论站得住**:删dense/MoE/norm/rope/kvfp8都不动TPOT是真的;plen128→1024 TPOT 13→19.6真实涨(paged随KV真算)。
+**反常收敛成清晰问题**:固定13ms(plen128)删掉norm/rope/kvfp8/dense/MoE全不变→13ms只能在**没法skip的**:qkv GEMM/copy2d×3/gqa_cache_write/paged/oproj GEMM,×30层。删一堆小kernel不变=小kernel本就不耗时,13ms集中在少数大kernel(qkv/oproj GEMM+paged)或30层固定调度链。
+**下一步(最终定位)**:加ATTN_SKIP_QKV/OPROJ/PAGED skip(坏数值纯计时),看哪个让13ms大降。先qkv+oproj(两个GEMM,最可能)。
