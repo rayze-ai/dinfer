@@ -1044,7 +1044,11 @@ impl Gemma4Layer {
             (&mut sc.q_f, &mut sc.k_f, &mut sc.v_f, &mut sc.attn_f)
         };
         // ---- 2a. 一次合并 GEMM 到 sc.qkv[tokens, ΣN]（vLLM 口径：分开三次差 13 万，合并只差 13）----
-        if qkv_preq {
+        // ATTN_SKIP_QKV=1（纯计时,结果错）：跳过 qkv GEMM,测其 graph 态占比。
+        let attn_skip_qkv = std::env::var("ATTN_SKIP_QKV").ok().as_deref() == Some("1");
+        if attn_skip_qkv {
+            // 不跑 GEMM,sc.qkv 留旧值(数值错,纯测时间)
+        } else if qkv_preq {
             let g = sc.preq.lock().unwrap();
             let buf = g.as_ref().unwrap();
             self.qkv.forward_preq(gemm, stream, buf, &mut sc.qkv, tokens)?;
@@ -1139,7 +1143,11 @@ impl Gemma4Layer {
         )?;
 
         // ---- 5. attention（滑窗层传 window）----
+        // ATTN_SKIP_PAGED=1（纯计时,结果错）：跳过 paged/prefill attention kernel。
         let scale = 1.0f32; // Gemma4：scaling = 1.0，由 QK-norm 隐式承担
+        if std::env::var("ATTN_SKIP_PAGED").ok().as_deref() == Some("1") {
+            // 不跑 attention,attn 留旧值
+        } else {
         match ctx.mode {
             dinfer_core::runner::BatchMode::Prefill => ops.attn().prefill_win(
                 stream,
@@ -1182,6 +1190,7 @@ impl Gemma4Layer {
                 self.p_fp8,
             )?,
         }
+        } // end !ATTN_SKIP_PAGED
 
         // ---- 6. o_proj + post_attention_norm + 残差 ----
         if let Some((dir, _)) = sub_out {
@@ -1191,7 +1200,10 @@ impl Gemma4Layer {
                 .map_err(|err| anyhow::anyhow!("写 attn_out.bin 失败: {err}"))?;
         }
         if let Some(e) = &st_ev { stream.record_timing(&e[1])?; }  // 段1完=attn(qkv/norm/rope/paged)
-        self.o_proj.forward(gemm, stream, attn, &mut sc.o, tokens)?;
+        // ATTN_SKIP_OPROJ=1（纯计时,结果错）：跳过 o_proj GEMM。
+        if std::env::var("ATTN_SKIP_OPROJ").ok().as_deref() != Some("1") {
+            self.o_proj.forward(gemm, stream, attn, &mut sc.o, tokens)?;
+        }
         sub_dump(stream, sub_out, "o_proj", &sc.o, tokens, h)?;
         rmsnorm_into(stream, ops, &sc.o, &self.post_attn_norm, &mut sc.norm, h, tokens, eps)?;
         sub_dump(stream, sub_out, "post_attn_norm", &sc.norm, tokens, h)?;
