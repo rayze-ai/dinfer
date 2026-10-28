@@ -755,3 +755,9 @@ decode c1 的 MoE 段 nsys：grouped_gemm gate 18.6 + up 18.6 + down 12.5 + gelu
 - B8 第一次编译失败：`kernels.h` 的 `moe_bucket` 声明没带 `tile_off`（Python 编辑脚本在该处 assert 失败后整段未写盘，我只核了 .cu/.rs 没核 .h）→ C linkage 重载报错。已修。**教训：多文件批量编辑后用 grep 逐文件核对目标串，不信脚本的 "ok"。**
 - **B10 代码已提交（2aac32e）**：`moe.cu` 新增 `route_bucket_small_kernel`（单 block 256 线程，smem logits 副本 + counts/cursor；top-k 照旧序、权重调公共 `route_softmax_row`、scan 含 tile_off、fill 用 smem 原子、row2e 二分）；`layer.rs` grouped 路径 tokens ≤ 64 默认走（`MOE_ROUTE_FUSED=0` 回退），跳过旧 softmax/bucket/row2e 三次调用；测试 `moe_route_fused_parity`（5 场景，逐位 + 区间集合）。
 - 链 `/w/b8b.sh`：moe_pipe_parity + mlp_fp8 + moe_route_fused 三门禁 → bN（A=B7 二进制 / B=新：B6c+pick_warps≤4+B8 tile 表+B10 融合，B 侧 `FP8_GEMV=1`）。
+
+## B11 预案 2026-10-28：MoE grouped 路径再减 4 launch/层（gather 并进 quant；memset+scatter_add+memset+f32_add → 1 个 combine）
+- **B11a** `moe_grouped_quant` 加可空 `sorted_tok`：源行 = `A[sorted_tok[r]]`，直接从 h2 读，去掉 `moe_gather_bf16`（xg 中间缓冲不再写）。逐位同（量化同一行数据）。
+- **B11b** 路由时多产出逆映射 `inv[tok·K+k] = sorted 位置`（B10 融合 kernel 与旧 `fill_kernel` 都写），新 kernel `moe_combine`：grid=tokens，out[tok,d] = bf16(Σ_k w_k·y[inv[tok,k],d])（mode 1：Σ bf16(bf16(w)·v)），替代 memset(acc) + scatter_add(atomic) + memset(y) + f32_add_to_bf16。累加序从 atomic 不定 → 固定 k 升序（旧版本身不确定，不算退化；对拍判据 |Δ| ≤ bf16 ulp）。
+- 省 4 launch/层 = 120/步 ≈ 0.18 ms 间隙 + ~6 us×30 kernel ≈ **-0.35 ms/步**。
+- nsys 里 `fp8_e4m3_roundtrip` 90 次/步（kv_fp8 默认关，来源待查：可能是 `Gemm::forward_fp8`/attention 的 A 往返）—— B12 候选。
