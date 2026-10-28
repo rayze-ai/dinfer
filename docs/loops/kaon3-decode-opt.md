@@ -933,3 +933,4 @@ D72 表：qkv gemv 16.5 us vs 8.6 MB/1.79 TB/s = 4.8 us（3.4×）；dense down 
 | cache_write_fp8rt + rope + norm_quant | 0.34 | | 三个按 token 的小 kernel 融合成一个（rope→fp8 往返→cache_write→norm_quant 的 q 侧）：-2 launch/层 + 少两遍读写 q/k/v ≈ -0.1 ms |
 | 间隙 ~1000 launch × 0.6 us | 0.6 | | 继续减 launch 数只能慢慢啃 |
 **排序**：B20（已排队）→ B16b → 小 kernel 融合（rope+rt+cache_write+norm_quant）→ 再 nsys。目标 c1 ≤ 5.0（vLLM 1.07×）。
+- **b18 定稿（两轮）**：c1 6.87/6.88(A, 关 FP8_GEMV) → B **5.59/5.59**；与 b17 定稿 6.39 比 **-12.5%**；c8 11.35 → **10.28/10.28（-9.4%）**；TTFT 28.4 / 505。逐位。CSV round b18。远端队列：nsys_c8 → b20 自动起。
