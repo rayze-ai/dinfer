@@ -176,3 +176,15 @@ plen128+删dense/MoE,再skip norm(6逐头RMSNorm/层)/rope/kvfp8(3 roundtrip/层
 **但注意**:第一刀/第二刀的A/B是env在**serve启动前**设(进程env),capture时就生效,那些A/B有效。只有"运行时想靠env切skip"被图旁路。而我的skip容器都是**启动serve时**export env的→应该capture时生效??需确认capture时env读没读到。
 **必须验证**:NO_GRAPH(eager,每步真执行host)+skip vs graph+skip,对比TPOT。若NO_GRAPH下skip有影响、graph下没有→图旁路坐实,graph态skip作废。若都有/都没有→另说。
 **不下结论,先验**。下一步:NO_GRAPH+DENSE_SKIP+MOE_SKIP vs NO_GRAPH base,看eager态skip到底影响多少(eager一定执行host skip判断)。
+
+## ★★★★★★ D14 2026-10-28 验清D13:NO_GRAPH下skip也0影响→图没旁路,D12成立,瓶颈确系host
+NO_GRAPH(eager,每步真执行host skip判断) plen128:
+| | TPOT |
+|---|---|
+| base | 14.81 |
+| skip dense+MoE | 14.80 |
+**eager下skip dense+MoE仍0影响(14.81→14.80)**→D13"图旁路skip"担心**不成立**(env在eager确实执行,但删GPU大段真不改TPOT)。
+**D12成立坐实**:decode TPOT不是GPU算(eager删GPU大段也不变),瓶颈在host/每步固定开销。NO_GRAPH 14.8 vs graph 13→graph只省~2ms(launch),大头13ms是host本身。
+注:只重验了dense+MoE的eager skip(最大两块GPU活),足够证GPU计算非瓶颈;qkv/paged/oproj的eager skip没重跑但同理。
+**方向彻底锁死**:D5-D14一致指向——decode瓶颈=host/调度/每步固定链,非任何GPU kernel。两刀MoE+要攻的attn全错。R47对。
+**Step B可信地往host挖了(非假数据)**:读executor decode每步host代码(upload_plan/Graph::launch/argmax D2H/采样/detokenize),定13ms host在哪+随KV 6ms的host循环。vLLM 7.57说明host能薄。
