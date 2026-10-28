@@ -824,3 +824,4 @@ decode c1 的 MoE 段 nsys：grouped_gemm gate 18.6 + up 18.6 + down 12.5 + gelu
 - B15 测试 `gqa_decode_fp8cache_bitwise`（在 gqa_decode_win_parity.rs）：k/v 先 GPU 往返 → 写 bf16 cache 与 e4m3 cache → decode v3/d512 与 paged 慢路径各跑两种 cache，**逐位同**为过（3 场景 ×2 路径）。
 - **D66 split2（`KV_FP8_FUSED=0` vs 开）**：开 6.57 / 11.54，关 6.59 / 11.55 ⇒ B12 c1 -0.02（3 launch ≈ 0.02 ms，与 0.5–0.7 us/launch 一致）。B12/B13 都保留。
 - B15 全部代码已 commit + put；链 `/w/b15.sh`（门禁含 `gqa_decode_fp8cache_bitwise`）等 split 结束起。**判据**：fp8cache 逐位 0 差；bN B 侧（KV_FP8_STORE 默认开）c1/c8 TPOT 下降（预期 attention -0.2 ms）；**输出与 b8d 逐字同**（存 e4m3 读回 = 往返值，应逐位）。
+- b15 第一次编译失败（nvcc），取错误行中。D66 split2 定稿：B12 开 6.57/11.54 vs 关 6.59/11.55（两轮稳定）。
