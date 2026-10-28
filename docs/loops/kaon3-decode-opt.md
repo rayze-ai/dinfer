@@ -779,3 +779,9 @@ decode c1 的 MoE 段 nsys：grouped_gemm gate 18.6 + up 18.6 + down 12.5 + gelu
 - b8c 三门禁通过（含 B11b combine vs scatter_add 两 mode 全 ok）；编译 EXIT=0 marker=19；A 侧 7.49 / 11.12。等 B。
 
 ## ★★★★★ D65 2026-10-28 b8c 首批 B（B6c+pick_warps≤4+B8 tile 表+B10 路由融合+B11 gather/combine 融合，`FP8_GEMV=1`）：c1 TPOT 7.49 → **6.63（-11.5%）**，**TTFT c1 38.3 → 29.9（-22%）、c8 580 → 493（-15%）**（B8 tile 表的 prefill 收益）；c8 TPOT 11.12 → 11.60（+4%，疑 FP8_GEMV m≤4 门槛仍伤 c8 或 B10 单 block 在 tokens=8 慢）。中文 chat 一致；英文 raw 变体（非判据）。等 A2/B2，再 env 拆 c8 的 +0.5。
+
+## B13 预案 2026-10-28：norm + 残差加 融合（-3 launch/层 = -90/步 ≈ -0.15 ms）
+每层现有：① `post_attn_norm(o) → norm; x += norm`；② `norm(dense) + h2(moe) → norm; post_ff_norm(norm) → h2; x += h2`；③ `layer_scalar`（scale_bf16_n，条件）。
+- 新 kernel `rmsnorm_add_bf16`：`res += bf16(rmsnorm(x)·w)`（一 block 一行，先算 norm 行再原地加 res）。① 用它（o → x）；② 第二段 `post_ff_norm(norm) → h2; x += h2` 用它（但 h2 之后还被用？看 1386 后——h2 下一层重算，不再读 → 可省写 h2）。
+- ② 第一段 `norm += h2` 是 add_inplace，再 norm：用现有 `fused_add_rmsnorm`（res=norm, x=h2, out=tmp）语义 = `norm += h2; tmp = rmsnorm(norm)·w` 正好。
+- 全部逐位（同一 norm 数值、同一 bf16 加）。等 b8c 定稿 + b8d（B12）后做；与 B10/B11/B12 一起把 launch 从 ~1100 → ~900/步。
