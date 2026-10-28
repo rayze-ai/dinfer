@@ -28,3 +28,8 @@
 
 ## 20. ABAB 多变量叠加必拆（2026-10-28 D64/D65/D66）
 一个链里 ≥2 个改动时，用 `envab.sh`（同二进制、env 开关）逐个拆；A 侧二进制是谁（bN 备份的是上一次编的）要写进记录；两个 RESULT 拼在一条输出里按文件名分段读，别按行序归档（D64 错读过）。
+
+## 21. nsys 全表的 grid 列按 max_tokens 过滤；融合 kernel 要比"被融合的 kernel 之和"（2026-10-28 D72–D74）
+- 预分配缓冲（max_tokens 行）配 "行数 = len()/hidden" 的包装 = 按满长 launch。每次 nsys 复抓先 `grep 4160`（或你的 max_tokens）——B1 和 B18 两处同病相隔 10 刀才发现，各值 0.5 ms/步（TPOT 的 8%）。
+- 融合的判据是 kernel 时间 ≤ 原各 kernel 之和 + 省下的间隙；B10 单线程 top-k 16 us > 原 7.3+5.6，靠 launch 数省的 0.6 us 盖不住。单 block 融合 kernel 里的串行循环（K×E）要按 warp 并行写。
+- 两刀合计 c1 -12.7%，是全天单链最大收益——**复抓 nsys 的 ROI 高于再写一个 kernel**。
