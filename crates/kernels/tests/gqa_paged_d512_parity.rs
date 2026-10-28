@@ -65,7 +65,7 @@ fn gqa_paged_d512_parity() {
     let dbt = st.htod_copy(bt).unwrap();
     let dseq = st.htod_copy(reqs.iter().map(|r| r.0 as i32).collect::<Vec<_>>()).unwrap();
     let dcu = st.htod_copy(cu).unwrap();
-    let run = |cache: &dinfer_kernels::CudaSlice<bf16>, f8: bool, cfg: i32| -> Vec<bf16> {
+    let run = |cache: &dinfer_kernels::cudarc::driver::CudaSlice<bf16>, f8: bool, cfg: i32| -> Vec<bf16> {
         let mut out = st.alloc_zeros::<bf16>(tq * h * d).unwrap();
         let rc = unsafe {
             dinfer_kernels::ffi::gqa_paged_win_bf16(
