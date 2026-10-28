@@ -435,7 +435,7 @@ template <bool FEXP>
 __device__ __forceinline__ float ex2f(float x) {
   return FEXP ? ex2_approx(x) : exp2f(x);
 }
-template <bool PAGED, int D, int NW, int TILE, int NBUF = 1, bool FEXP = false>
+template <bool PAGED, int D, int NW, int TILE, int NBUF = 1, bool FEXP = false, bool KV_FP8 = false>
 __global__ void __launch_bounds__(NW * 32) gqa_fa_v6_kernel(
     const bf16* __restrict__ q, const bf16* __restrict__ k, const bf16* __restrict__ v, const bf16* __restrict__ cache,
     const int32_t* __restrict__ block_table, const int32_t* __restrict__ seq_lens, const int32_t* __restrict__ cu_seqlens,
@@ -483,7 +483,18 @@ __global__ void __launch_bounds__(NW * 32) gqa_fa_v6_kernel(
         if (PAGED) {
           const int pos = k0 + j;
           const int64_t blk = bt[pos / block_size];
-          const bf16* base = cache + slot_off(blk * block_size + pos % block_size, Hkv, D) + (int64_t)hk * 2 * D;
+          const int64_t e = slot_off(blk * block_size + pos % block_size, Hkv, D) + (int64_t)hk * 2 * D;
+          if (KV_FP8) {
+            // B26：e4m3 cache（1 字节/元素，同元素偶移量）同步读 8 B → 展开 bf16x8 直写 smem。不走 cp.async+staging
+            // （D=512 的 v6 smem 97.5 KB 已贴 99 KB 上限，加不起 staging；NBUF=1 本无装载/计算重叠，同步读无损）。
+            const uint8_t* b8 = reinterpret_cast<const uint8_t*>(cache) + e;
+            *reinterpret_cast<uint4*>(sK + (size_t)buf * TILE * LDS + j * LDS + d8) =
+                fp8x8_to_bf16x8_g(*reinterpret_cast<const uint2*>(b8 + d8));
+            *reinterpret_cast<uint4*>(sV + (size_t)buf * TILE * LDS + j * LDS + d8) =
+                fp8x8_to_bf16x8_g(*reinterpret_cast<const uint2*>(b8 + D + d8));
+            continue;
+          }
+          const bf16* base = cache + e;
           pk = base + d8;
           pv = base + D + d8;
         } else {
@@ -648,7 +659,7 @@ __global__ void __launch_bounds__(NW * 32) gqa_fa_v6_kernel(
           : pack_bf16x2(o[nt][2] * inv_b, o[nt][3] * inv_b);
   }
 }
-template <bool PAGED, int D, int NW, int TILE, int NBUF = 1, bool FEXP = false>
+template <bool PAGED, int D, int NW, int TILE, int NBUF = 1, bool FEXP = false, bool KV_FP8 = false>
 static int v6_launch(int max_q, int heads, int num_reqs, cudaStream_t stream, const bf16* q, const bf16* k, const bf16* v,
                      const bf16* cache, const int32_t* bt, const int32_t* seq_lens, const int32_t* cu, bf16* out, int H,
                      int Hkv, float scale_log2, int q_stride, int kv_stride, int block_size, int max_blocks,
@@ -657,13 +668,13 @@ static int v6_launch(int max_q, int heads, int num_reqs, cudaStream_t stream, co
   const size_t smem = (size_t)(BQ + 2 * NBUF * TILE) * LDS * 2;
   static int attr = 0;  // 0 未设 / 1 成功 / -1 失败（smem 超卡上限）
   if (attr == 0) {
-    attr = cudaFuncSetAttribute(gqa_fa_v6_kernel<PAGED, D, NW, TILE, NBUF, FEXP>, cudaFuncAttributeMaxDynamicSharedMemorySize,
+    attr = cudaFuncSetAttribute(gqa_fa_v6_kernel<PAGED, D, NW, TILE, NBUF, FEXP, KV_FP8>, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                 (int)smem) == cudaSuccess ? 1 : -1;
     if (attr < 0) (void)cudaGetLastError();
   }
   if (attr < 0) return (int)cudaErrorInvalidConfiguration;
   dim3 grid((unsigned)((max_q + BQ - 1) / BQ), (unsigned)heads, (unsigned)num_reqs);
-  gqa_fa_v6_kernel<PAGED, D, NW, TILE, NBUF, FEXP><<<grid, NW * 32, smem, stream>>>(q, k, v, cache, bt, seq_lens, cu, out, H, Hkv,
+  gqa_fa_v6_kernel<PAGED, D, NW, TILE, NBUF, FEXP, KV_FP8><<<grid, NW * 32, smem, stream>>>(q, k, v, cache, bt, seq_lens, cu, out, H, Hkv,
                                                                        scale_log2, q_stride, kv_stride, block_size,
                                                                        max_blocks, skip_single, window);
   return (int)cudaGetLastError();
@@ -1637,6 +1648,23 @@ static int gqa_paged_impl(const void* q, const void* cache, const int32_t* block
                              nullptr, static_cast<const bf16*>(cache), block_table, seq_lens, cu_seqlens_q,
                              static_cast<bf16*>(out), (int)heads, (int)kv_heads, scale * LOG2E_F, (int)q_stride, 0,
                              (int)block_size, (int)max_blocks, skip_single, window);
+  // B26（loop kaon3-decode-opt D82/D83）：D=512 全注意力层的 PAGED（混批 / chunked prefill）之前没有快分支，
+  // 落到 gqa_paged_kernel（grid=(req,head)，每 block 串行 q_len×seq_len×D 标量 FMA）：c8 一波 7 请求并进的
+  // Paged 步 476 ms vs 同 token 纯 Prefill 127 ms。与 prefill_win 同配置 v6<512,4,16>；kv_fp8 走 KV_FP8 实例。
+  // GQA_D512_REF=1 回退参照（对拍 / A/B）；smem 超限（InvalidConfiguration）也回退。
+  static const bool d512_ref_p = getenv("GQA_D512_REF") != nullptr;
+  if (cfg >= 0 && head_dim == 512 && !d512_ref_p) {
+    const int rc = kv_fp8
+        ? v6_launch<true, 512, 4, 16, 1, false, true>((int)max_q_len, (int)heads, (int)num_reqs, stream,
+              static_cast<const bf16*>(q), nullptr, nullptr, static_cast<const bf16*>(cache), block_table, seq_lens,
+              cu_seqlens_q, static_cast<bf16*>(out), (int)heads, (int)kv_heads, scale * LOG2E_F, (int)q_stride, 0,
+              (int)block_size, (int)max_blocks, skip_single, window)
+        : v6_launch<true, 512, 4, 16>((int)max_q_len, (int)heads, (int)num_reqs, stream,
+              static_cast<const bf16*>(q), nullptr, nullptr, static_cast<const bf16*>(cache), block_table, seq_lens,
+              cu_seqlens_q, static_cast<bf16*>(out), (int)heads, (int)kv_heads, scale * LOG2E_F, (int)q_stride, 0,
+              (int)block_size, (int)max_blocks, skip_single, window);
+    if (rc != (int)cudaErrorInvalidConfiguration) return rc;
+  }
   if (cfg >= 0 && (head_dim == 128 || head_dim == 256)) {  // cfg < 0：强制通用慢路径（对拍参照）
     const int bq = head_dim == 128 ? V5Cfg<128>::BQ : V5Cfg<256>::BQ;
     dim3 grid((unsigned)((max_q_len + bq - 1) / bq), (unsigned)heads, (unsigned)num_reqs);
