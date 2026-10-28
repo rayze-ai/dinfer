@@ -445,3 +445,18 @@ tagged host-time(tokens标记)拆开:
 **数据证实结论**:prefill步exec 367ms(每请求一次) vs decode步17ms,差350ms,在begin+finish内。
 **仍没拆出(诚实,用户要的完整列)**:exec 350ms没拆成htod/block/graph-capture/wait;带宽/chat模板也没单独测。只有sched(0.2-19us)/exec/publish(微秒)/tokenize(7ms单测)。
 **下一步**:读runner.begin的prefill路径(crate kernels/layers,非engine)看它做什么=graph capture?htod?alloc?——先读懂不加计时(分支加计时前5次都没出,只engine汇合点host-time能出)。读懂后在对的点测,拆这350ms。
+
+## ★★★★★ D40 2026-10-28 完整c1-16表(对齐非eager)+begin-split第7次没出(engine调trait begin非inherent)
+**用户要的指标表(已测)**:
+| 并发 | 吞吐tok/s | TTFT p50 | TPOT p50 |
+|---|---|---|---|
+| c1 | 40.6 | 368 | 17.3 |
+| c2 | 76 | 382 | 18.5 |
+| c4 | 141 | 386 | 19.3 |
+| c8 | 265 | 387 | 20.0 |
+| c16 | 399 | 383 | 20.1 |
+启动 model_load_ms=64113;GPU利用率~100%;tokenize 7ms(单测);schedule 0.2-19us;publish微秒;exec(begin+finish) prefill步367ms/decode步17ms。
+**仍没拆出(7次失败)**:begin内部update_states/build_plan/forward_sample + htod/block/chat模板/wait/带宽。
+**第7次没出根因(现在定位)**:[begin-split]加在runner.rs:320 `pub fn begin`(inherent),但engine调的可能是212 `fn begin`(trait ModelRunner方法)——两个不同begin!我一直加在没被调的那个。engine.rs:588 `self.runner.begin(&so)`,runner类型决定调inherent还是trait。
+**下次接手(不再第8次盲加)**:①确认engine.rs的self.runner是什么类型,它的.begin()解析到runner.rs哪个fn(212 trait还是320 inherent);②在真正被调的那个begin加eprintln;③或forward_sample(executor.rs)加——但那个HOST_TIME分支也没出过,同样要先确认prefill走哪条forward。
+**核心教训(整会话)**:我7次计时插桩全没出,根因是没读透调用链就加。应先读懂engine→runner→exec的完整调用解析(trait vs inherent/async vs sync/prefill vs decode各走哪),再加一次。
