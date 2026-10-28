@@ -59,3 +59,9 @@ a2,2026-10-28,"A2 对齐基线(两端非eager/16384/4096/seqs64,prompt1560tok,5�
 a2,2026-10-28,"A2 对齐基线(两端非eager/16384/4096/seqs64,prompt1560tok,5轮中位,PIPE关): decode图内GPU 17 vs 4.7ms",c16,out_tok_per_s,481.000,1577.000,0.305,,higher,main,5090,vllm,dinfer,kaon3
 a2,2026-10-28,"A2 对齐基线(两端非eager/16384/4096/seqs64,prompt1560tok,5轮中位,PIPE关): decode图内GPU 17 vs 4.7ms",c16,ttft_p50_ms,104.600,177.300,0.590,,lower,main,5090,vllm,dinfer,kaon3
 a2,2026-10-28,"A2 对齐基线(两端非eager/16384/4096/seqs64,prompt1560tok,5轮中位,PIPE关): decode图内GPU 17 vs 4.7ms",c16,tpot_p50_ms,19.680,7.210,2.730,,lower,main,5090,vllm,dinfer,kaon3
+b1,2026-10-28,"B1 逐头norm/rope行数改实际tokens(之前按max_tokens 4160行空跑,nsys定位): c1 TPOT 16.16→13.02 -19.4%, c8 19.55→16.40, 输出一致",c1,out_tok_per_s,74.400,200.000,0.372,,higher,main,5090,vllm,dinfer,kaon3
+b1,2026-10-28,"B1 逐头norm/rope行数改实际tokens(之前按max_tokens 4160行空跑,nsys定位): c1 TPOT 16.16→13.02 -19.4%, c8 19.55→16.40, 输出一致",c1,ttft_p50_ms,39.800,25.000,1.592,,lower,main,5090,vllm,dinfer,kaon3
+b1,2026-10-28,"B1 逐头norm/rope行数改实际tokens(之前按max_tokens 4160行空跑,nsys定位): c1 TPOT 16.16→13.02 -19.4%, c8 19.55→16.40, 输出一致",c1,tpot_p50_ms,13.020,4.690,2.776,,lower,main,5090,vllm,dinfer,kaon3
+b1,2026-10-28,"B1 逐头norm/rope行数改实际tokens(之前按max_tokens 4160行空跑,nsys定位): c1 TPOT 16.16→13.02 -19.4%, c8 19.55→16.40, 输出一致",c8,out_tok_per_s,328.300,956.000,0.343,,higher,main,5090,vllm,dinfer,kaon3
+b1,2026-10-28,"B1 逐头norm/rope行数改实际tokens(之前按max_tokens 4160行空跑,nsys定位): c1 TPOT 16.16→13.02 -19.4%, c8 19.55→16.40, 输出一致",c8,ttft_p50_ms,587.700,146.400,4.014,,lower,main,5090,vllm,dinfer,kaon3
+b1,2026-10-28,"B1 逐头norm/rope行数改实际tokens(之前按max_tokens 4160行空跑,nsys定位): c1 TPOT 16.16→13.02 -19.4%, c8 19.55→16.40, 输出一致",c8,tpot_p50_ms,16.400,6.240,2.628,,lower,main,5090,vllm,dinfer,kaon3
