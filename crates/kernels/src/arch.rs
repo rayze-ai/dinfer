@@ -207,6 +207,11 @@ impl ArchProfile {
         const RMSNORM_ONE_VEC_MAX_HIDDEN: usize = 1024;
         const RMSNORM_BLOCK1024_MAX_HIDDEN: usize = 8192;
         let _ = rows;
+        // Sm120（5090）：hidden=2816 单行实测 Block256 2.4us < Block1024 6.8us < WarpPerRow（1024 线程版
+        // 两级归约 + 一线程一向量的占用开销在小 hidden 上压不住；loop kaon3-decode-opt D56：decode TPOT -3.4%）。
+        if self.arch == Arch::Sm120 {
+            return RmsnormLayout::Block256;
+        }
         if hidden > RMSNORM_ONE_VEC_MAX_HIDDEN && hidden <= RMSNORM_BLOCK1024_MAX_HIDDEN {
             RmsnormLayout::Block1024
         } else {

@@ -621,3 +621,7 @@ nsys 2026.3.2 + `--cuda-flush-interval=1000` + 不 INT nsys 本体（之前 INT 
 ## ★★★★★★★ D55 2026-10-28 B1 首批 A/B（同轮，旧二进制 A vs 新 B，c1）：TPOT 16.16 → 13.02（**-19.4%**），TTFT 42.0 → 39.8
 预测 2.9ms（nsys 逐头 norm 2.29 + rope 0.70）实得 3.14ms。首次 Step B 刀收益达预期。等 c8 / 输出一致 / A2 B2 复测后进 CSV。
 - **D55 定稿（ABAB 四轮）**：A 16.16/16.17 → B 13.02/13.04（c1，-19.4%，吞吐 60.4→74.4）；c8 19.55/19.57 → 16.40/16.44（-16.1%，吞吐 290→328）；TTFT c1 42.0→39.8；输出 "the last." 四次逐字相同。**B1 保留，入 e2e-rounds.csv（round b1）**。注：c8 TTFT p50 ~590ms 是本脚本每次冷起服务 + 8 并发同时涌入排在首个 prefill 批后（Step A 预热后 p50 82ms，p90 593）；对 TPOT/吞吐无影响，TTFT 口径以 Step A 的为准。
+
+## ★★★★ D56 2026-10-28 RMSNORM_LAYOUT 三态（B1 二进制，c1 同轮两遍）：block256 12.58 < default(block1024) 13.02 < warp 13.60，输出一致
+h=2816 单行 norm（181 次/步）：Block1024 每线程 1 向量两级归约 6.8us；Block256 每线程 2 向量快 ~2.4us；warp 版一 warp 一行 11 向量/lane 串行最慢。**-0.44ms/步（-3.4%）**。落地：`ArchProfile::rmsnorm_layout` 对 Sm120 返回 Block256（B2）。
+## D57 2026-10-28 dense mega 旋钮（用户想法廉价验证，进行中）：base 13.02、MEGA_CTAS=2 13.32（每 SM 2 CTA 反而慢 +2.3%）……
