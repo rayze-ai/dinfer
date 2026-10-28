@@ -675,3 +675,4 @@ h=2816 单行 norm（181 次/步）：Block1024 每线程 1 向量两级归约 6
 | lm_head gemv（262144×2816 bf16 = 1.48 GB） | 1.48 GB | 826 us | 870 us | 1.05× ✓ |
 **读法**：lm_head 这种"大 N 一个 gemv"已到带宽；**所有小 M（M=1）GEMM 都离带宽 4–9×**，dense mega 最差（2.61ms/步 = 17.4% 占比，若到带宽 0.3ms → **省 ~2.3ms/步，TPOT 9.6→~7.3，-24%**）。R26 已证 mega 的 wait 是 exec 的 2.5×（persistent 阶段链 1 CTA/SM 自旋），D57 旋钮（CTAS/SP）调不动 → 要换 kernel 结构，不是调参。
 **B5 方案**：decode（M≤16）dense MLP 不走 persistent mega，走 3 个带宽型 kernel：① gate‖up 合一 fp8 GEMV（N=2×2112 行切 CTA，每 warp 若干行、K 连续 16B 向量流读、x 的 M≤16 行驻 smem、warp 内 shuffle 归约，epilogue 直接 gelu·mul 写 act bf16 + fp8 量化）→ ② down fp8 GEMV（N=2816，K=2112）→ norm 沿用。预期 3 launch ≈ 25us/层。保留 mega 路径作 `DENSE_DECODE_OLD=1` 回退；prefill 不动。同样结构可复用到 qkv/oproj（第 2 候选 1.3ms）。
+- **B4 定稿（ABAB，归档 b4_RESULT.txt）**：c1 9.77/9.78 → 9.64/9.64（**-1.4%**，预测 -0.13ms 实得 -0.135ms，吞吐 97.7→99.1）；c8 13.59/13.79 → 13.45/13.47；输出四次逐字相同（对 lm_head 行是纯拷贝，逐位）。保留，入 CSV round b4。四刀累计 c1 17.07→9.64（**-43.5%**）。

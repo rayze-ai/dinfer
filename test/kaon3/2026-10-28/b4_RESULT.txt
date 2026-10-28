@@ -1,0 +1,29 @@
+11:30:45
+EXIT=0
+Compiling dinfer-kaon3 Compiling dinfer-kernels Compiling dinfer-layers 
+new_bin=2026-10-28 11:30 marker=17
+A c1:  1.53 req/s 97.8 output TTFT mean 38.54 p50 38.43 TPOT mean 9.77 p50 9.77 
+
+A c8:  5.80 req/s 370.9 output TTFT mean 463.34 p50 583.11 TPOT mean 14.55 p50 13.59 
+
+A out:  the capital of France is the capital of France is the capital of France is the capital of France is the capital of Fran
+A out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到两千多年前的春秋战国时期，最初是各诸侯国为了防御而修建的。  到了秦朝，为了统一防御力量，秦始皇帝下令将各地的城墙进行连接与加固，从而形成了最初规模的“万里长城”。  此后，历朝
+B c1:  1.55 req/s 99.2 output TTFT mean 38.40 p50 37.99 TPOT mean 9.64 p50 9.64 
+
+B c8:  5.83 req/s 373.1 output TTFT mean 463.66 p50 582.79 TPOT mean 14.42 p50 13.45 
+
+B out:  the capital of France is the capital of France is the capital of France is the capital of France is the capital of Fran
+B out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到两千多年前的春秋战国时期，最初是各诸侯国为了防御而修建的。  到了秦朝，为了统一防御力量，秦始皇帝下令将各地的城墙进行连接与加固，从而形成了最初规模的“万里长城”。  此后，历朝
+A2 c1:  1.53 req/s 97.7 output TTFT mean 38.32 p50 38.35 TPOT mean 9.78 p50 9.78 
+
+A2 c8:  5.81 req/s 371.8 output TTFT mean 363.33 p50 577.28 TPOT mean 16.08 p50 13.79 
+
+A2 out:  the capital of France is the capital of France is the capital of France is the capital of France is the capital of Fran
+A2 out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到两千多年前的春秋战国时期，最初是各诸侯国为了防御而修建的。  到了秦朝，为了统一防御力量，秦始皇帝下令将各地的城墙进行连接与加固，从而形成了最初规模的“万里长城”。  此后，历朝
+B2 c1:  1.55 req/s 99.1 output TTFT mean 38.25 p50 38.39 TPOT mean 9.64 p50 9.64 
+
+B2 c8:  5.83 req/s 373.4 output TTFT mean 460.78 p50 582.57 TPOT mean 14.45 p50 13.47 
+
+B2 out:  the capital of France is the capital of France is the capital of France is the capital of France is the capital of Fran
+B2 out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到两千多年前的春秋战国时期，最初是各诸侯国为了防御而修建的。  到了秦朝，为了统一防御力量，秦始皇帝下令将各地的城墙进行连接与加固，从而形成了最初规模的“万里长城”。  此后，历朝
+DONE

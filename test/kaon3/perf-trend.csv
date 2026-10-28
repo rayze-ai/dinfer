@@ -77,3 +77,9 @@ b3,2026-10-28,"B3 decode专用split-K attention(v3加window+新D512 kernel): c1 
 b3,2026-10-28,"B3 decode专用split-K attention(v3加window+新D512 kernel): c1 TPOT 12.58→9.79 -22%, c8 16.01→13.63; GPU对拍6场景超差0 保留",c8,out_tok_per_s,370.300,956.000,0.387,,higher,main,5090,vllm,dinfer,kaon3
 b3,2026-10-28,"B3 decode专用split-K attention(v3加window+新D512 kernel): c1 TPOT 12.58→9.79 -22%, c8 16.01→13.63; GPU对拍6场景超差0 保留",c8,ttft_p50_ms,583.800,146.400,3.988,,lower,main,5090,vllm,dinfer,kaon3
 b3,2026-10-28,"B3 decode专用split-K attention(v3加window+新D512 kernel): c1 TPOT 12.58→9.79 -22%, c8 16.01→13.63; GPU对拍6场景超差0 保留",c8,tpot_p50_ms,13.630,6.240,2.184,,lower,main,5090,vllm,dinfer,kaon3
+b4,2026-10-28,"B4 gather_rows 多block 16B向量拷贝(lm_head行512KB 1block→64block): c1 TPOT 9.77→9.64 -1.4%, c8 13.59→13.45, 输出逐字一致",c1,out_tok_per_s,99.100,200.000,0.495,,higher,main,5090,vllm,dinfer,kaon3
+b4,2026-10-28,"B4 gather_rows 多block 16B向量拷贝(lm_head行512KB 1block→64block): c1 TPOT 9.77→9.64 -1.4%, c8 13.59→13.45, 输出逐字一致",c1,ttft_p50_ms,38.400,25.000,1.536,,lower,main,5090,vllm,dinfer,kaon3
+b4,2026-10-28,"B4 gather_rows 多block 16B向量拷贝(lm_head行512KB 1block→64block): c1 TPOT 9.77→9.64 -1.4%, c8 13.59→13.45, 输出逐字一致",c1,tpot_p50_ms,9.640,4.690,2.055,,lower,main,5090,vllm,dinfer,kaon3
+b4,2026-10-28,"B4 gather_rows 多block 16B向量拷贝(lm_head行512KB 1block→64block): c1 TPOT 9.77→9.64 -1.4%, c8 13.59→13.45, 输出逐字一致",c8,out_tok_per_s,373.100,956.000,0.390,,higher,main,5090,vllm,dinfer,kaon3
+b4,2026-10-28,"B4 gather_rows 多block 16B向量拷贝(lm_head行512KB 1block→64block): c1 TPOT 9.77→9.64 -1.4%, c8 13.59→13.45, 输出逐字一致",c8,ttft_p50_ms,582.800,146.400,3.981,,lower,main,5090,vllm,dinfer,kaon3
+b4,2026-10-28,"B4 gather_rows 多block 16B向量拷贝(lm_head行512KB 1block→64block): c1 TPOT 9.77→9.64 -1.4%, c8 13.59→13.45, 输出逐字一致",c8,tpot_p50_ms,13.450,6.240,2.155,,lower,main,5090,vllm,dinfer,kaon3
