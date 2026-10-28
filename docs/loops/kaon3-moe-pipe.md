@@ -146,3 +146,7 @@ graph态A/B(MOE_GEMM_PIPE关/开):
 **根因坐实**:**graph态下gemm3实际占比/墙钟远小于NO_GRAPH的STAGE_TIME测量值**——cudagraph把kernel间隙/launch压掉后,gemm3在图里被重叠/摊薄。NO_GRAPH的分段(R36/R83)高估了生产(graph)里MoE/gemm3占比。这是前面所有NO_GRAPH分段的系统性偏差,记knowledge。
 **回滚决断:不删,降级保留**。干净正收益(逐位bad=0+kernel1.83×+单流-4.9%),MOE_GEMM_PIPE默认关零风险,交互式/单流可开。但**不是超vLLM吞吐(946)的刀**(吞吐基准仅+0.8~1.6%)。
 **转第二刀(gate+up合并)**:省整个1个grouped GEMM(3→2)+一次中间量HBM往返,**M无关+graph态也省**(少1次kernel launch+少1块HBM读写,图里实打实少活),vLLM既定(gemm1/gemm2)。这才是吞吐杠杆。
+
+## R85 2026-10-28 用户定:先nsys抓graph态真实大头(NO_GRAPH分段系统高估MoE,别在错靶子做第二刀)
+容器无nsys/ncu,pip装不到nvidia-nsight-compute-cu13。apt可用。方案:apt装nsys到挂载盘/w(持久),或下run包。GPU profiling需--cap-add SYS_ADMIN+perf_event_paranoid。
+目的:graph态包住几步decode的kernel时间线,看生产态真正大头(可能非MoE,R84证NO_GRAPH高估)。抓到真大头再定第二刀靶子。
