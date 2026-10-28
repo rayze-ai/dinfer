@@ -329,7 +329,7 @@ impl<E: ModelExecutor> Runner<E> {
         let _t1 = std::time::Instant::now();
         self.build_plan(so)?;
         let _tbp_us = _t1.elapsed().as_secs_f64() * 1e6;
-        let _toks: usize = so.num_scheduled_tokens.values().sum();
+        let _toks: usize = so.total_num_scheduled_tokens as usize;
         self.generated.clear();
         self.drafts.clear();
         if !so.kv_fetch.is_empty() {

@@ -594,7 +594,7 @@ impl<E: ModelExecutor> Engine<E> {
                             eprintln!("[prefill-split] sched={:.0}us begin={:.0}us tokens={} async={}",
                                 t_sched.duration_since(t_step).as_secs_f64()*1e6,
                                 _ht_beg.elapsed().as_secs_f64()*1e6,
-                                so.num_scheduled_tokens.values().sum::<usize>(),
+                                so.total_num_scheduled_tokens as usize,
                                 self.runner.last_begin_was_async());
                         }
                         if self.async_sched && self.runner.last_begin_was_async() {
@@ -619,7 +619,7 @@ impl<E: ModelExecutor> Engine<E> {
             if self.host_time && !so.num_scheduled_tokens.is_empty() {
                 let t_pub = std::time::Instant::now();
                 let us = |a: std::time::Instant, b: std::time::Instant| b.duration_since(a).as_secs_f64() * 1e6;
-                let toks: usize = so.num_scheduled_tokens.values().sum();
+                let toks: usize = so.total_num_scheduled_tokens as usize;
                 let nreq = so.num_scheduled_tokens.len();
                 tracing::info!(
                     "[host-time] tokens={toks} nreq={nreq} sched={:.1} exec(begin+finish)={:.1} publish={:.1} total={:.1} us",
