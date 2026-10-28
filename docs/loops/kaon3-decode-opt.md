@@ -699,3 +699,12 @@ h=2816 单行 norm（181 次/步）：Block1024 每线程 1 向量两级归约 6
 A 轮 c8 一次 TPOT p50 19.02 / TTFT 222（其它轮 13.45 / 583）—— 同一二进制、同参数，是 bench 调度/排队态差异（TTFT 低 TPOT 高 = 请求没叠上），不是代码；看 A2 c8 是否回 13.4x。等 A2/B2。
 - **B5 定稿（ABAB，归档 b5_RESULT.txt / b5par_RESULT.txt）**：c1 9.64/9.64 → **7.47/7.47（-22.5%）**，吞吐 99.1→125.8；c8 13.45/13.45 → 10.94/10.99（-18.5%），373→425。A2 c8 回 13.45 ⇒ A 轮 19.02 是排队态噪声。中文 chat 四次一致；英文 raw prompt 两版各自稳定。**保留**，入 CSV round b5。五刀累计 c1 **17.07 → 7.47（-56%）**，vs vLLM 4.69 差 1.59×。
 - **B6 链已起（`/w/b6.sh`，GPU0）**：对拍（含 4 个 qkv/o_proj 形状 gemv）门禁 → `TAG=b6 MARKER=fp8_gemv_m_tile bash /w/bN.sh`（A=B5 二进制）。预期 c1 7.47 → ~6.6。
+
+## B7 设计 2026-10-28（等 B6 结果期间写，MoE grouped GEMM 1.49 ms/步 → 带宽型 GEMV）
+**现状**：`moe_grouped_sm120.cu` grid=(N/64, ceil(R/32), E)，decode c1 R=8（8 专家各 1 行）→ 每专家 11（gate/up）/ 44（down）个 CTA，共 88 / 352 CTA，BM=32 的 mma tile 装 1 行；nsys 18.6+18.6+12.5 us/层 vs 权重 25 MB 下限 14 us（3.6×）。与 dense mega 同病：小 M 用 mma tile 结构，CTA 少 + 每 K 步 __syncthreads。
+**方案（同 B5 结构，NVFP4 版）**：`moe_fp4_decode.cu`（模型无关、所有 arch）：
+1. `moe_fp4_gateup_act`：grid=(ceil(I/ kWarps), E)，block 内按专家行段 [off[e], off[e+1]) 以 16 行为 chunk 循环；chunk 的 A（fp4 → bf16 精确）+ A 块缩放（e4m3 → f32）驻 smem；一 warp 同行号 gate+up 两行，lane 一次 u2（16 nibble=一个 16-块）读 + 对应 B 块缩放字节，块内 16 FMA 后乘 sa·sb 累加（与 mma block_scale 口径同式）；epilogue `bf16(acc·alpha_g)`、`bf16(acc·alpha_u)` → gelu_mul round2 → bf16 写 gelu_o[R, I]。去掉 gate_o/up_o 两个中间缓冲和独立 gelu kernel。
+2. `moe_fp4_gemv`（down）：grid=(ceil(N/(4·kWarps)), E)，一 warp 4 行（K=704 只 44 块，4 行让 lane 满），写 bf16 yg[R, N]。
+3. 量化沿用 `moe_grouped_quant`（逐位同）。空专家 CTA 直接 return。host 只在 R ≤ 64（tokens·8）时走，否则原 grouped GEMM；`MOE_DECODE_GEMV_OLD=1` 回退。
+**数值**：fp4·fp4 乘积 ≤ 4 bit 尾数、×两个 e4m3 scale ≤ 10 bit → 单项在 f32 精确；差只在累加序，bf16 ulp 级。对拍 = Rust GPU 测试（CPU f64 参照 + 现 grouped GEMM 对照）。
+**预期**：c1 三 GEMM 50 us/层 → ~20 us，省 ~0.9 ms/步（TPOT 7.47 → ~6.5，与 B6 叠加 → ~5.7）。
