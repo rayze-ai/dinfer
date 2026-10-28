@@ -515,3 +515,8 @@ c1 decode skip差分(最新二进制probe在,与旧二进制"全0影响"假象�
 
 ## D46 2026-10-28 集中解决MoE:base vs MOE_GEMM_PIPE(第一刀cp.async流水)最新二进制端到端A/B
 环境干净(前置对齐/二进制最新/skip生效,D45证MoE=decode TPOT 5.3ms头号)。测MOE_GEMM_PIPE=1(第一刀cp.async流水,之前微基准1.83×但端到端从没在能编译二进制验过)对TPOT的真实端到端+输出一致性。base vs pipe,c1 decode。
+
+## D47 2026-10-28 第一刀MOE_GEMM_PIPE端到端初步:PIPE TPOT 16.45 vs base 17.41(D45)=省0.96ms(-5.5%)
+PIPE=1 TPOT c1=16.45ms,base=17.41(D45同条件)。**端到端-5.5%(省~1ms)**。输出两边一致(the.\n\nThe capital...)=流水数值对没错。
+但微基准曾1.83×(MoE 5.3→~2.9该省2.4ms),端到端只省1ms。疑:decode走CUDA graph,MOE_GEMM_PIPE env运行时改可能不进预捕获的图(老问题D13)——需确认pipe对graph decode是否真生效。
+**需干净同轮重测**(base TPOT别跨轮用D45):base/pipe同容器连测,TPOT grep与completion输出分开(本轮base TPOT行被输出换行污染没抓到)。
