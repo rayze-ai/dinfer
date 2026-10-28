@@ -199,3 +199,15 @@ forward_sample(executor.rs:245)每步:bind_ctx→upload_plan→graph.launch→co
 **一锤定音实验(还没做)**:加FULL_SKIP让整个forward/launch都不跑(只bind+upload+collect dummy),TPOT剩多少=纯host地板。或NO_GRAPH下重跑qkv/paged/oproj skip(eager真生效)看降不降。
 **诚实**:现在还不能断定13ms归属。不在没定死前往host改(重蹈MoE覆辙)。
 **下一步**:NO_GRAPH下重验qkv/paged/oproj skip(eager态,env真生效)——若eager下删这些TPOT大降=GPU确实在算(graph态0影响是图旁路假象,瓶颈其实GPU);若eager下也不降=真host。这个eager重验是关键,之前coreskip是graph态(可能旁路)。
+
+## ★★★★★★★ D16 2026-10-28 一锤定音(eager重验):NO_GRAPH下qkv/paged/oproj skip也0影响→瓶颈100%在host,铁证
+NO_GRAPH(eager,skip env一定生效,无图旁路):
+| | base | noqkv | nopaged | nooproj |
+|---|---|---|---|---|
+| plen128 | 14.80 | 14.80 | 14.80 | 14.80 |
+| plen1024 | 20.60 | 20.60 | 20.59 | 20.60 |
+**eager下删qkv/paged/oproj全0影响**→排除D13图旁路担心(eager无图),**坐实D12**。
+**最终定论(eager+graph双重skip证据,铁)**:decode TPOT根本不由GPU kernel决定,删任何/全部GPU段(dense/MoE/norm/rope/kvfp8/qkv/paged/oproj)eager+graph都不变。瓶颈100%在**host/每步固定链**。plen128→1024涨6ms删paged也不降→那6ms也是host侧随KV开销(非paged kernel)。
+**今天方向全错的铁证**:两刀MoE kernel+要攻的attn kernel全不在关键路径。唯一该做=**host路径优化**。
+**host 13ms(graph)/14.8ms(eager)构成待挖**:forward_sample每步bind_ctx/upload_plan/graph.launch/collect(dtoh_sync阻塞)/采样。但host代码极薄(D15),13ms藏在哪需细测:bind_ctx?upload_plan(htod)?launch开销?dtoh_sync?python/rust调度?
+**下一步(真step B优化前最后定位)**:host内部分段计时(Instant::now在bind/upload/launch/collect各段),定13ms host哪段。这个纯CPU计时不碰GPU,graph/eager都准。对标vLLM 7.57ms(它host也薄但更快)。
