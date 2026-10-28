@@ -254,7 +254,7 @@ impl ModelExecutor for KaonExecutor {
         let t = plan.total_tokens();
         let nrows = plan.logits_rows.len();
         let _fs0 = std::time::Instant::now();
-        eprintln!("[fwd-sample] ENTER mode={:?} t={t} n={n} nrows={nrows}", plan.mode);
+        tracing::trace!(mode = ?plan.mode, t, n, nrows, "fwd-sample enter");  // B17a：原无条件 eprintln 每步一次 stderr syscall
         ensure!(t <= self.max_tokens, "batch of {t} tokens > max_tokens {}", self.max_tokens);
         ensure!(nrows <= self.max_rows, "rows {nrows} > max_rows {}", self.max_rows);
         ensure!(plan.max_blocks <= self.plan.max_blocks, "block_table {} > buffer {}", plan.max_blocks, self.plan.max_blocks);
