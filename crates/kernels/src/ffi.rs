@@ -272,6 +272,9 @@ extern "C" {
         block_size: i64,
         stream: cudaStream_t,
     ) -> i32;
+    /// B12：q/k/v fp8 往返 + k/v 写 cache 一次 launch（见 kernels.h）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn gqa_cache_write_fp8rt_bf16(q: *mut c_void, k: *mut c_void, v: *mut c_void, cache: *mut c_void, slot_mapping: *const i64, tokens: i64, q_heads: i64, kv_heads: i64, head_dim: i64, block_size: i64, stream: cudaStream_t) -> i32;
     pub fn gqa_prefill_bf16(
         q: *const c_void,
         k: *const c_void,

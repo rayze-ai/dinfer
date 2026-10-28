@@ -641,6 +641,11 @@ impl ActBuf {
 /// B5：decode（tokens ≤ 16）dense MLP 走带宽型 fp8 GEMV（`mlp_fp8_decode.cu`），不走 persistent mega。
 /// `DENSE_DECODE_OLD=1` 回退（A/B 用）。
 pub const DENSE_GEMV_ROWS: usize = 16;
+/// B12：kv_fp8 往返 + cache_write 融合（默认开；`KV_FP8_FUSED=0` 回退）。
+fn kv_fp8_fused_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("KV_FP8_FUSED").ok().as_deref() != Some("0"))
+}
 /// B11b：MoE 输出合并融合（默认开；`MOE_COMBINE_OLD=1` 回退 scatter_add 链）。
 fn moe_combine_fused_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1203,7 +1208,16 @@ impl Gemma4Layer {
 
         // ---- 4a. FP8 KV（vLLM `kv_cache_dtype=fp8_e4m3`，scale 1.0）：attention 读的是量化后的 K/V ----
         // ATTN_SKIP_KVFP8=1（纯计时,结果错）：跳过 3 个 fp8 roundtrip,测其 graph 态占比。
-        if cfg.kv_fp8 && std::env::var("ATTN_SKIP_KVFP8").ok().as_deref() != Some("1") {
+        // B12：kv_fp8 时 q/k/v 往返 + cache_write 融成一次（`KV_FP8_FUSED=0` 回退 4 次 launch）。
+        let kvfp8_on = cfg.kv_fp8 && std::env::var("ATTN_SKIP_KVFP8").ok().as_deref() != Some("1");
+        let kvfp8_fused = kvfp8_on && kv_fp8_fused_enabled();
+        if kvfp8_fused {
+            k::ops::gqa_cache_write_fp8rt_bf16(
+                stream, &mut q.data, &mut kk.data, &mut v.data, &mut *ctx.kv_mut, &ctx.slot_mapping.data, tokens, heads, nkv,
+                d, ctx.block_size,
+            )?;
+        }
+        if kvfp8_on && !kvfp8_fused {
             k::ops::fp8_e4m3_roundtrip_bf16_n(stream, &mut kk.data, tokens * nkv * d, 1.0)?;
             k::ops::fp8_e4m3_roundtrip_bf16_n(stream, &mut v.data, tokens * nkv * d, 1.0)?;
             // q 也要量化成 e4m3（vLLM Triton 后端 `supports_quant_query_input = is_cuda()`，
@@ -1216,17 +1230,19 @@ impl Gemma4Layer {
         }
 
         // ---- 4b. 写本层 paged KV（每层 head_dim / nkv 不同）----
-        k::ops::gqa_cache_write_bf16(
-            stream,
-            &kk.data,
-            &v.data,
-            &mut *ctx.kv_mut,
-            &ctx.slot_mapping.data,
-            tokens,
-            nkv,
-            d,
-            ctx.block_size,
-        )?;
+        if !kvfp8_fused {
+            k::ops::gqa_cache_write_bf16(
+                stream,
+                &kk.data,
+                &v.data,
+                &mut *ctx.kv_mut,
+                &ctx.slot_mapping.data,
+                tokens,
+                nkv,
+                d,
+                ctx.block_size,
+            )?;
+        }
 
         // ---- 5. attention（滑窗层传 window）----
         // ATTN_SKIP_PAGED=1（纯计时,结果错）：跳过 paged/prefill attention kernel。

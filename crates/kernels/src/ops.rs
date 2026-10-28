@@ -5500,3 +5500,29 @@ pub fn moe_combine_bf16(
         "moe_combine_bf16",
     )
 }
+
+/// B12：FP8 KV 层：q/k/v 原地 fp8 往返（口径同 `fp8_e4m3_roundtrip_bf16_n(·, 1.0)`）+ k/v 写 cache，一次 launch。
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_cache_write_fp8rt_bf16(
+    stream: &Stream,
+    q: &mut CudaSlice<bf16>,
+    k: &mut CudaSlice<bf16>,
+    v: &mut CudaSlice<bf16>,
+    cache: &mut CudaSlice<bf16>,
+    slot_mapping: &CudaSlice<i64>,
+    tokens: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    block_size: usize,
+) -> Result<()> {
+    ensure!(q.len() >= tokens * q_heads * head_dim && k.len() >= tokens * kv_heads * head_dim && v.len() >= tokens * kv_heads * head_dim && slot_mapping.len() >= tokens, "gqa_cache_write_fp8rt: 形状");
+    let (pq, pk, pv) = (stream.ptr_mut(q) as *mut c_void, stream.ptr_mut(k) as *mut c_void, stream.ptr_mut(v) as *mut c_void);
+    let pc = stream.ptr_mut(cache) as *mut c_void;
+    let ps = stream.ptr(slot_mapping) as *const i64;
+    // SAFETY: 长度已校验；slot_mapping 值由调用方保证在 cache 范围内（与 gqa_cache_write_bf16 同）。
+    check(
+        unsafe { ffi::gqa_cache_write_fp8rt_bf16(pq, pk, pv, pc, ps, tokens as i64, q_heads as i64, kv_heads as i64, head_dim as i64, block_size as i64, stream.raw() as ffi::cudaStream_t) },
+        "gqa_cache_write_fp8rt_bf16",
+    )
+}
