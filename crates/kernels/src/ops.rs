@@ -5317,3 +5317,84 @@ pub fn mlp_fp8_gemv(
         "mlp_fp8_gemv",
     )
 }
+
+// ---------------------------------------------------------------- MoE decode NVFP4 grouped GEMV（`cuda/moe_fp4_decode.cu`）
+
+/// gate‖up grouped GEMV + gelu·mul（round2 口径）→ bf16 `out[rows, inter]`。指针表 / alpha / offsets 与 `moe_grouped_gemm` 同。
+#[allow(clippy::too_many_arguments)]
+pub fn moe_fp4_gateup_act(
+    stream: &Stream,
+    aq: &CudaSlice<u8>,
+    a_s: &CudaSlice<u8>,
+    gate_ptr: &CudaSlice<u64>,
+    gate_sptr: &CudaSlice<u64>,
+    alpha_gate: &CudaSlice<f32>,
+    up_ptr: &CudaSlice<u64>,
+    up_sptr: &CudaSlice<u64>,
+    alpha_up: &CudaSlice<f32>,
+    offsets: &CudaSlice<i32>,
+    out: &mut CudaSlice<bf16>,
+    rows: usize,
+    inter: usize,
+    k: usize,
+    num_experts: usize,
+) -> Result<()> {
+    ensure!(k % 64 == 0, "moe_fp4_gateup_act: k {k} 不是 64 的倍数");
+    ensure!(
+        aq.len() >= rows * (k / 2) && a_s.len() >= rows * (k / 16) && out.len() >= rows * inter
+            && gate_ptr.len() >= num_experts && gate_sptr.len() >= num_experts && alpha_gate.len() >= num_experts
+            && up_ptr.len() >= num_experts && up_sptr.len() >= num_experts && alpha_up.len() >= num_experts
+            && offsets.len() >= num_experts + 1,
+        "moe_fp4_gateup_act: capacity"
+    );
+    // SAFETY: 容量已校验；指针表内地址由 layer 建表时保证。
+    check(
+        unsafe {
+            ffi::moe_fp4_gateup_act(
+                stream.ptr(aq) as *const c_void, stream.ptr(a_s) as *const c_void,
+                stream.ptr(gate_ptr) as *const *const c_void, stream.ptr(gate_sptr) as *const *const c_void, stream.ptr(alpha_gate) as *const f32,
+                stream.ptr(up_ptr) as *const *const c_void, stream.ptr(up_sptr) as *const *const c_void, stream.ptr(alpha_up) as *const f32,
+                stream.ptr(offsets) as *const i32, stream.ptr_mut(out) as *mut c_void,
+                rows as i64, inter as i64, k as i64, num_experts as i64, stream.raw() as ffi::cudaStream_t,
+            )
+        },
+        "moe_fp4_gateup_act",
+    )
+}
+
+/// grouped NVFP4 GEMV（down）→ bf16 `out[rows, n]`。
+#[allow(clippy::too_many_arguments)]
+pub fn moe_fp4_gemv(
+    stream: &Stream,
+    aq: &CudaSlice<u8>,
+    a_s: &CudaSlice<u8>,
+    bptr: &CudaSlice<u64>,
+    sptr: &CudaSlice<u64>,
+    alpha: &CudaSlice<f32>,
+    offsets: &CudaSlice<i32>,
+    out: &mut CudaSlice<bf16>,
+    rows: usize,
+    n: usize,
+    k: usize,
+    num_experts: usize,
+) -> Result<()> {
+    ensure!(k % 64 == 0, "moe_fp4_gemv: k {k} 不是 64 的倍数");
+    ensure!(
+        aq.len() >= rows * (k / 2) && a_s.len() >= rows * (k / 16) && out.len() >= rows * n
+            && bptr.len() >= num_experts && sptr.len() >= num_experts && alpha.len() >= num_experts
+            && offsets.len() >= num_experts + 1,
+        "moe_fp4_gemv: capacity"
+    );
+    // SAFETY: 同上。
+    check(
+        unsafe {
+            ffi::moe_fp4_gemv(
+                stream.ptr(aq) as *const c_void, stream.ptr(a_s) as *const c_void,
+                stream.ptr(bptr) as *const *const c_void, stream.ptr(sptr) as *const *const c_void, stream.ptr(alpha) as *const f32,
+                stream.ptr(offsets) as *const i32, stream.ptr_mut(out) as *mut c_void,
+                rows as i64, n as i64, k as i64, num_experts as i64, stream.raw() as ffi::cudaStream_t,
+            )
+        },
+        "moe_fp4_gemv",
+    )
+}

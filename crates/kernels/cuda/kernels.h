@@ -414,6 +414,15 @@ int mlp_fp8_gateup_act(const void* a_q, const void* gate_w, const void* up_w, vo
                        int64_t k, float gate_scale, float up_scale, float dn_a_inv, cudaStream_t stream);
 int mlp_fp8_gemv(const void* a_q, const void* w, void* out, int64_t m, int64_t n, int64_t k, float scale,
                  cudaStream_t stream);
+// MoE decode 带宽型 NVFP4 grouped GEMV（moe_fp4_decode.cu，K % 64 == 0）：布局/alpha 与 moe_grouped_gemm 同。
+//   gate‖up + gelu·mul → bf16 out[rows, inter]；down → bf16 out[rows, n]。rows = 总行数（选 M_TILE 档位）。
+int moe_fp4_gateup_act(const void* aq, const void* asc, const void* const* gate_ptr, const void* const* gate_sptr,
+                       const float* alpha_gate, const void* const* up_ptr, const void* const* up_sptr,
+                       const float* alpha_up, const int32_t* offsets, void* out, int64_t rows, int64_t inter, int64_t k,
+                       int64_t num_experts, cudaStream_t stream);
+int moe_fp4_gemv(const void* aq, const void* asc, const void* const* bptr, const void* const* sptr, const float* alpha,
+                 const int32_t* offsets, void* out, int64_t rows, int64_t n, int64_t k, int64_t num_experts,
+                 cudaStream_t stream);
 // 小 M bf16 GEMM（decode）：out[M,N] = a[M,K]·w[N,K]^T (+bias)；splits>1 时需 partial[splits,M,N] f32。见 gemm_small_m.cu。
 int gemm_small_m_bf16(const void* a, const void* w, const void* bias, void* out, float* partial, int64_t m,
                       int64_t n, int64_t k, int64_t splits, cudaStream_t stream);

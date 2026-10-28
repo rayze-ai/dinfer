@@ -1173,6 +1173,11 @@ extern "C" {
     pub fn mlp_fp8_gateup_act(a_q: *const c_void, gate_w: *const c_void, up_w: *const c_void, act_q: *mut c_void, m: i64, inter: i64, k: i64, gate_scale: f32, up_scale: f32, dn_a_inv: f32, stream: cudaStream_t) -> i32;
     #[allow(clippy::too_many_arguments)]
     pub fn mlp_fp8_gemv(a_q: *const c_void, w: *const c_void, out: *mut c_void, m: i64, n: i64, k: i64, scale: f32, stream: cudaStream_t) -> i32;
+    /// MoE decode NVFP4 grouped GEMV（`cuda/moe_fp4_decode.cu`）：见 kernels.h。
+    #[allow(clippy::too_many_arguments)]
+    pub fn moe_fp4_gateup_act(aq: *const c_void, asc: *const c_void, gate_ptr: *const *const c_void, gate_sptr: *const *const c_void, alpha_gate: *const f32, up_ptr: *const *const c_void, up_sptr: *const *const c_void, alpha_up: *const f32, offsets: *const i32, out: *mut c_void, rows: i64, inter: i64, k: i64, num_experts: i64, stream: cudaStream_t) -> i32;
+    #[allow(clippy::too_many_arguments)]
+    pub fn moe_fp4_gemv(aq: *const c_void, asc: *const c_void, bptr: *const *const c_void, sptr: *const *const c_void, alpha: *const f32, offsets: *const i32, out: *mut c_void, rows: i64, n: i64, k: i64, num_experts: i64, stream: cudaStream_t) -> i32;
     pub fn gemm_small_m_bf16(
         a: *const c_void,
         w: *const c_void,
@@ -1732,6 +1737,8 @@ mod stubs {
     stub!(mlp_fp8_norm_quant(x: *const c_void, w: *const c_void, q: *mut c_void, m: i64, h: i64, e: f32, ai: f32, s: cudaStream_t));
     stub!(mlp_fp8_gateup_act(a: *const c_void, g: *const c_void, u: *const c_void, o: *mut c_void, m: i64, i: i64, k: i64, gs: f32, us: f32, di: f32, s: cudaStream_t));
     stub!(mlp_fp8_gemv(a: *const c_void, w: *const c_void, o: *mut c_void, m: i64, n: i64, k: i64, sc: f32, s: cudaStream_t));
+    stub!(moe_fp4_gateup_act(a: *const c_void, s: *const c_void, gp: *const *const c_void, gs: *const *const c_void, ag: *const f32, up: *const *const c_void, us: *const *const c_void, au: *const f32, o: *const i32, out: *mut c_void, r: i64, i: i64, k: i64, e: i64, st: cudaStream_t));
+    stub!(moe_fp4_gemv(a: *const c_void, s: *const c_void, bp: *const *const c_void, sp: *const *const c_void, al: *const f32, o: *const i32, out: *mut c_void, r: i64, n: i64, k: i64, e: i64, st: cudaStream_t));
     stub!(gemm_small_m_bf16(a: *const c_void, w: *const c_void, b: *const c_void, o: *mut c_void, p: *mut f32, m: i64, n: i64, k: i64, sp: i64, s: cudaStream_t));
     stub!(gemm_small_m_mma_bf16(a: *const c_void, w: *const c_void, b: *const c_void, o: *mut c_void, p: *mut f32, c: *mut i32, m: i64, n: i64, k: i64, sp: i64, wp: i64, st: i64, s: cudaStream_t));
     stub!(gdn_gated_rmsnorm(x: *const c_void, w: *const c_void, z: *const c_void, o: *mut c_void, r: i64, hd: i64, e: f32, a: i32, h: i64, zs: i64, s: cudaStream_t));
