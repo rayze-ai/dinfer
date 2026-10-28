@@ -635,3 +635,4 @@ h=2816 单行 norm（181 次/步）：Block1024 每线程 1 向量两级归约 6
 - 风险：① d512 kernel 寄存器（qr[8][8]+acc[8][8]=128 float + 其它，256 线程上限 255/线程）可能溢出到 local → 看 ptxas 报告；② 数值口径：online softmax exp2f 与旧慢路径 __expf 三遍扫不逐位，只要求 argmax 输出一致（bench 固定 prompt + 中文 chat）；③ 混批 Paged 仍走旧路径不变。
 - 远端 `TAG=b3 bash /w/bN.sh` 跑编译 + ABAB 中。预期 c1 TPOT 12.58 → ~10.1。
 - B3 第一次验证：编译 EXIT=0（marker=9），但新二进制 **OOM**——`decode_scratch` 按 max_tokens=4160 行 × 16 头 × 32 split × 514 × 4B = **4.4 GB**；warmup prefill OOM 后 model.rs:207 panic（kv_cache 空）。修：`LayerScratch::new_with_rows(max_tokens, max_rows=max_num_seqs)`，scratch 68 MB。重跑中（A=旧二进制备份）。
+- **B4 候选已写（未编）**：`gather_rows_kernel` 改 grid=(width/(256·8), rows) 的 16 B 向量拷贝（原 1 block 逐元素搬 lm_head 行 512 KB = 141 us/步，D54）。预期 -0.13 ms。等 B3 结果后与 B3 一起/分开验（分开验，一刀一数）。

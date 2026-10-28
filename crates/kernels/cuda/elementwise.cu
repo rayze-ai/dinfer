@@ -45,12 +45,21 @@ __global__ void add_inplace_kernel(const bf16* __restrict__ x, bf16* __restrict_
   for (; i < n; i += stride) y[i] = to_bf16(to_f32(y[i]) + to_f32(x[i]));
 }
 
+// grid=(ceil(width/(blockDim·8)), num_rows)：每行多 block、每线程 16 B 向量；旧版每行 1 block 逐元素搬
+// （lm_head 行 262144 bf16 = 512 KB，1 block 要 141 us/步，loop kaon3-decode-opt D54 → B4）。width%8!=0 走标量尾巴。
+template <bool VEC>
 __global__ void gather_rows_kernel(const bf16* __restrict__ src, bf16* __restrict__ dst,
                                    const int32_t* __restrict__ rows, int width) {
-  const int64_t r = blockIdx.x;
+  const int64_t r = blockIdx.y;
   const bf16* s = src + (int64_t)rows[r] * width;
   bf16* d = dst + r * width;
-  for (int i = threadIdx.x; i < width; i += blockDim.x) d[i] = s[i];
+  if (VEC) {
+    const int64_t i0 = ((int64_t)blockIdx.x * blockDim.x + threadIdx.x) * 8;
+    if (i0 + 8 <= width) *reinterpret_cast<uint4*>(d + i0) = *reinterpret_cast<const uint4*>(s + i0);
+  } else {
+    const int64_t i0 = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i0 < width) d[i0] = s[i0];
+  }
 }
 
 // 逐元素乘标量（bf16）：y = a·x。用于 layer_scalar 与 router 预处理的 hidden^-0.5。
@@ -143,8 +152,16 @@ extern "C" int gather_rows_bf16(const void* src, void* dst, const int32_t* rows,
   if (num_rows <= 0) return 0;
   if (width <= 0) return err(cudaErrorInvalidValue);
   const int threads = width >= 256 ? 256 : (int)(((width + 31) / 32) * 32);
-  gather_rows_kernel<<<(unsigned)num_rows, threads, 0, stream>>>(static_cast<const bf16*>(src),
-                                                                 static_cast<bf16*>(dst), rows, (int)width);
+  // 16 B 向量路径要求 width%8==0 且两端基址 16 B 对齐（行基址 = base + row·width，width%8==0 则自动对齐）。
+  const bool vec = width % 8 == 0 && ((reinterpret_cast<uintptr_t>(src) | reinterpret_cast<uintptr_t>(dst)) & 15) == 0;
+  const int64_t per = vec ? (int64_t)threads * 8 : (int64_t)threads;
+  const dim3 grid((unsigned)((width + per - 1) / per), (unsigned)num_rows);
+  if (vec)
+    gather_rows_kernel<true><<<grid, threads, 0, stream>>>(static_cast<const bf16*>(src), static_cast<bf16*>(dst), rows,
+                                                           (int)width);
+  else
+    gather_rows_kernel<false><<<grid, threads, 0, stream>>>(static_cast<const bf16*>(src), static_cast<bf16*>(dst),
+                                                            rows, (int)width);
   return last_err();
 }
 
