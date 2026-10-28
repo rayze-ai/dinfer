@@ -356,3 +356,9 @@ plen1024 TTFT base 2002ms,skip各段:nomoe 2001/nodense 2001/noqkv 2001/nopaged 
 ## D30 2026-10-28 计时日志第4次打不出(cmpl-time/render-time/host-split/executor全0,只core host-time出)+换/tokenize直接量
 [cmpl-time]又0行。4次加tracing::info计时都没打出来(executor/host-split/render/cmpl),只core engine的[host-time]出。**系统问题**:server crate的tracing info可能没启用/被过滤,或bench请求没走到我加的行。我一直假设加info就能看到,错。
 **换法(绕serve日志)**:直接curl /tokenize端点(misc.rs:81,bench不走但能单独量tokenize),time一个1024词prompt的tokenize耗时。若~2秒=tokenize O(L²)是TTFT根因;若快=2秒在别处(engine prefill提交/等)。
+
+## ★★★★ D31 2026-10-28 tokenize排除(1024词7ms)!但发现:1024词=4010 token>max-model-len 2048=prompt被处理超长
+curl /tokenize 1024词=**7ms**(排除tokenize是TTFT 2秒根因)。但出**4010 token > max-model-len 2048**!之前所有"plen1024"其实是4010 token prompt(bench --prompt-len是词数,4010>2048超限)。
+**新线索**:prompt 4010 token超max-model-len 2048。serve要么截断要么分块chunked prefill。TTFT 2秒可能与此相关(超长prompt的host分块/截断/多次prefill循环)。vLLM同bench同4010 token才82ms,所以非token数本身,是dinfer对超长prompt的host处理差。
+**排除**:tokenize(7ms)。**2秒在submit→engine→prefill之间的host**。prefill GPU skip全段不降(D28)+tokenize快→2秒在**engine对超长/分块prompt的host调度循环**(chunked prefill分多chunk?每chunk一次调度?O(chunks²)?)。
+**下一步**:①用真正≤2048 token的prompt(--prompt-len 400词≈1600 token)重测TTFT,看是否还2秒(若降→确是超长/分块问题);②扫prompt token数(256/512/1024/2048 token)看TTFT拐点;③读engine prefill对>max-batched-token的分块逻辑(chunked prefill)。
