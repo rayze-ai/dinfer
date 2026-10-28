@@ -920,3 +920,16 @@ D72 表：qkv gemv 16.5 us vs 8.6 MB/1.79 TB/s = 4.8 us（3.4×）；dense down 
 
 ## ★★★★★★ D74 2026-10-28 b18 首批 B（B18 rmsnorm 行数 + B19 warp top-k）：c1 TPOT 6.39 → **5.59（-12.7%）**，吞吐 148 → 168；c8 11.35 → **10.28（-9.4%）**，463 req tok/s；TTFT 持平（28.7 / 506）
 预测 -0.8 ms 实得 -0.80 ms（c1）。英文 raw 输出与 b17 逐字同 ⇒ 逐位（两刀都应逐位：行数修正不改真实行；top-k 并列语义同）。累计 c1 **17.07 → 5.59（-67%）**，vs vLLM 4.69 差 **1.19×**。等 A2/B2 入 CSV round b18。
+
+## B21 候选 2026-10-28（D74 后 c1 ≈ 5.6 ms 的构成，按 nsys c1b 表扣掉 B18/B19/B20 预期）
+| 段 | ms/步 | 下限 | 刀 |
+|---|---|---|---|
+| lm_head gemvx bf16 | 0.87 | 0.83 | 不动（或 lm_head fp8 存：权重 1.48 GB → 0.74，-0.4 ms，但改模型口径，先不做） |
+| MoE grouped GEMM gate/up+down | 1.04 | 0.42 | **B16b**：BM=16 tile（M 侧浪费减半，占用翻倍）；或 gate‖up 同 CTA 省一次 A 装载 |
+| dense gemv 三件（B20 后） | ~0.9 | 0.3 | B20 验后看剩多少 |
+| qkv/oproj gemv（B20 后） | ~0.3 | 0.16 | 同上 |
+| rmsnorm 2816 单行 ×6/层 | 0.24 | | norm→quant 已有融合（`rmsnorm_quant_fp8`，`NORM_FUSE_QUANT=1`，D-? 时因对拍差关了）；对 router 预处理 `rmsnorm_scale2` 已融合 |
+| route_bucket_small（B19 后） | ~0.2 | | softmax_row 的 Z 循环（E=128 单 lane）也可 warp 并行：exp 顺序要保持 `__fadd_rn` 串行序才逐位——不能并行归约。留 |
+| cache_write_fp8rt + rope + norm_quant | 0.34 | | 三个按 token 的小 kernel 融合成一个（rope→fp8 往返→cache_write→norm_quant 的 q 侧）：-2 launch/层 + 少两遍读写 q/k/v ≈ -0.1 ms |
+| 间隙 ~1000 launch × 0.6 us | 0.6 | | 继续减 launch 数只能慢慢啃 |
+**排序**：B20（已排队）→ B16b → 小 kernel 融合（rope+rt+cache_write+norm_quant）→ 再 nsys。目标 c1 ≤ 5.0（vLLM 1.07×）。
