@@ -85,6 +85,25 @@ fn gqa_paged_fp8_hist_parity() {
         let fast_f8 = run(&cache_f8, true, 0);
         let ref_bf = run(&cache_bf, false, -1);
         let ref_f8 = run(&cache_f8, true, -1);
+        // D136：serve 在 bf16 cache 时 D=256 滑窗层实际走 v6 PAGED（cfg 464 = NW4 TILE64 精确 exp）——此前从未与 ref 对拍过 hist>0+window。
+        if d == 256 {
+            let v6_bf = run(&cache_bf, false, 464);
+            let (m6, n6) = {
+                let mut mx = 0f32; let mut nd = 0;
+                for (x, y) in v6_bf.iter().zip(&ref_bf) { if x.to_bits() != y.to_bits() { nd += 1; } mx = mx.max((x.to_f32() - y.to_f32()).abs()); }
+                (mx, nd)
+            };
+            let amax6 = ref_bf.iter().map(|x| x.to_f32().abs()).fold(0f32, f32::max);
+            let mut per6 = Vec::new();
+            for (i, &(sl, ql)) in reqs.iter().enumerate() {
+                let r0 = cu[i] as usize * h * d; let r1 = cu[i + 1] as usize * h * d;
+                let mut mx = 0f32; let mut nd = 0;
+                for (x, y) in v6_bf[r0..r1].iter().zip(&ref_bf[r0..r1]) { if x.to_bits() != y.to_bits() { nd += 1; } mx = mx.max((x.to_f32() - y.to_f32()).abs()); }
+                per6.push(format!("(seq{sl},q{ql}):nd={nd}/{} mx={mx:.3}", r1 - r0));
+            }
+            println!("  v6 PAGED cfg=464 (bf16) vs ref: nd={n6} mx={m6:.4} (amax {amax6:.3})\n  per-req v6: {}", per6.join(" "));
+            if m6 > (amax6 * 2e-2).max(2e-2) { fails.push(format!("D={d} v6 PAGED win={window} vs ref mx={m6}")); }
+        }
         let stat = |a: &[bf16], c: &[bf16]| -> (f32, usize) {
             let mut mx = 0f32; let mut nd = 0;
             for (x, y) in a.iter().zip(c) { if x.to_bits() != y.to_bits() { nd += 1; } mx = mx.max((x.to_f32() - y.to_f32()).abs()); }
