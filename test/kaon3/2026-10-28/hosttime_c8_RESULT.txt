@@ -1,0 +1,10 @@
+   throughput: 9.79 req/s   313.4 output tok/s   4511.3 total tok/s    TTFT     mean   395.64  p50   505.09  p90   512.23  p99   531.54  max   531.57  (ms)    TPOT     mean    13.57  p50    10.04  p90    24.55  p99    24.99  max    25.00  (ms) 
+executor(n=300): upload=20us launch=3135us collect=19307us
+engine decode(n=283, avg nreq=7.1): sched=1us exec=9373us publish=8us total=9381us
+2026-10-28T14:07:29.341182Z  INFO dinfer_core::engine: [host-time] tokens=8 nreq=8 sched=0.6 exec(begin+finish)=9763.9 publish=17.0 total=9781.5 us
+2026-10-28T14:07:29.351231Z  INFO dinfer_core::engine: [host-time] tokens=8 nreq=8 sched=3.4 exec(begin+finish)=10021.0 publish=15.5 total=10039.9 us
+2026-10-28T14:07:29.361523Z  INFO dinfer_core::engine: [host-time] tokens=6 nreq=6 sched=0.5 exec(begin+finish)=10259.3 publish=27.8 total=10287.6 us
+[kaon3-host] upload=19us launch(submit)=4us collect(dtoh_sync)=9682us
+[kaon3-host] upload=57us launch(submit)=26us collect(dtoh_sync)=9893us
+[kaon3-host] upload=25us launch(submit)=4us collect(dtoh_sync)=10194us
+DONE
