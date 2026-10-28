@@ -168,3 +168,11 @@ plen128+删dense/MoE,再skip norm(6逐头RMSNorm/层)/rope/kvfp8(3 roundtrip/层
 **方向彻底改**:瓶颈不在任何CUDA kernel(两刀MoE+刚要攻的attn kernel全错),在**host/调度/每步固定链**。=R47最早"host开销"方向对(R58用NO_GRAPH否定过,但graph态skip证明R47对,NO_GRAPH又骗了一次)。
 **Step B真靶子(终于)**:host/调度路径——decode每步Rust侧做什么(采样/detokenize/调度/同步/graph launch),为何每步固定13ms+随KV 6ms。vLLM 7.57ms说明host可以很薄。
 **下一步**:读kaon3 executor decode每步host代码(executor.rs decode路径),看每步固定开销(采样/publish/sync/graph replay)+随KV的host循环。这才是真大头。
+
+## ★★★★★★ D13 2026-10-28 严重漏洞!decode走已捕获CUDA graph,运行时skip env被图旁路→D5-D12 graph态skip可能全作废
+读executor.rs:decode走CUDA graph,图**启动时capture_decode_graphs()捕获**,之后Graph::launch只重放捕获时的kernel。
+**致命问题**:我运行时设ATTN_SKIP_*/DENSE_SKIP/MOE_SKIP env,但**图在启动时按不skip捕获好了**,host代码(含我的env判断)在图重放时**根本不执行**→skip env被graph旁路,运行时改env无效!
+**→"skip全0影响"是假象**:图重放捕获时的完整kernel,skip env没生效。D12"GPU段skip 0影响=瓶颈在host"的推论**不成立**(skip压根没skip)。D5-D11的graph态skip同样可疑(dense/MoE的skip也在forward里被图旁路)。
+**但注意**:第一刀/第二刀的A/B是env在**serve启动前**设(进程env),capture时就生效,那些A/B有效。只有"运行时想靠env切skip"被图旁路。而我的skip容器都是**启动serve时**export env的→应该capture时生效??需确认capture时env读没读到。
+**必须验证**:NO_GRAPH(eager,每步真执行host)+skip vs graph+skip,对比TPOT。若NO_GRAPH下skip有影响、graph下没有→图旁路坐实,graph态skip作废。若都有/都没有→另说。
+**不下结论,先验**。下一步:NO_GRAPH+DENSE_SKIP+MOE_SKIP vs NO_GRAPH base,看eager态skip到底影响多少(eager一定执行host skip判断)。
