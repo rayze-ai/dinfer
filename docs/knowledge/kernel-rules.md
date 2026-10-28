@@ -102,3 +102,8 @@ chunk 0 正确（`tmp0 = 0.95790` 与参考一致），但 chunk 1 起等的是*
   同一个概念在不同版本里变量名不同（v5/v6 用 `warp_min_vis`，v7 用 `pair_min_vis`），
   用统一锚点批量替换一定会踩空。
 - 批量替换后先 `grep -c` 数命中数，再编译；nvcc 的 `identifier is undefined` 一次只报一处，来回很慢。
+
+## 改 extern "C" 签名 / 批量脚本编辑的硬规矩（2026-10-28，一天内各犯 2–3 次，每次赔 10 分钟远端编译）
+- 改任何 C ABI 函数签名：`kernels.h` / `.cu` 定义 / `ffi.rs` 声明（+ `stub!`）**三处同改**；提交前 `grep -n '<fn>(' ` 三处核参数个数。漏 kernels.h 的症状是 nvcc "more than one instance of overloaded function has C linkage"。
+- Python 批量编辑脚本：任一 assert 失败 = **该文件全部改动未写盘**（前面文件已写）。每文件独立写盘，脚本末尾对每个目标串 `count` 打印；编译前再 `grep -c`。
+- 不同实现路径的对拍（如 bf16 cache vs e4m3 cache）要**固定同一 kernel**（env 强制 cfg），否则差的是 kernel 累加序不是被测项（D67）。
