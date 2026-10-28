@@ -657,3 +657,8 @@ h=2816 单行 norm（181 次/步）：Block1024 每线程 1 向量两级归约 6
 **读法**：新路径误差与旧慢路径对 CPU f64 的误差同量级（都是 bf16 输入 + fp32 累加的本底 ~0.008），不是新 kernel 引入的偏差；窗口边界 1024/1025、单 token、D=512 多请求都对。
 **结论**：B3 保留。D58 的输出变化判定为"非逐位但等价"（vLLM 对同 raw prompt 同样退化循环）。入 CSV round b3：c1 TPOT 12.58→9.79（-22.2%，吞吐 77.0→97.7）、c8 16.01→13.63（-14.9%，334→370）；TTFT 不变（38.6/583）。三刀累计 c1 **17.07→9.79（-43%）**，vs vLLM 4.69 还差 2.1×。
 **下一刀**：B4（gather_rows 多 block 16B 拷贝，已 commit 4bcfd2a 未编，预期 -0.13ms）编译 + ABAB；之后按 D54 清单：MoE 小 kernel 融合（~700 小 kernel/步 + 1.89ms launch 间隙）、route_topk/softmax/scan 单线程 kernel 0.43ms、dense mega 2.61ms。
+
+## B4 2026-10-28 验证中：`TAG=b4 MARKER=gather_rows_kernelILb1 bash /w/bN.sh`（GPU0，编译 EXIT=0，marker=17），A c1 9.77 基线已出，等 B/A2/B2。结果 `/w/dinfer/tmp_b4_RESULT.txt`。
+- B3 kernel 资源（cuobjdump，无 spill）：d512 kernel REG 161 / smem 33984、v3 kernel REG 54–123 / smem 13–26KB、merge_v2 REG 80。LOCAL 全 0 → 寄存器隐患 ① 排除。
+- 容器里 PID 64/853 两个 `dinfer` 是僵尸（Z，RSS 0，PPID 1=sleep infinity 不收尸），不占 GPU，无需处理；GPU 0 当前只有 b4 链占用。
+- 下一刀 B5 候选：D54 "其余 ~700 小 kernel/步 <2.5us + 1.89ms launch 间隙"。正在从 `tmp_nsys2.sqlite` 导全表看这 700 个是谁（MoE 前处理 route_softmax/bucket/norm/gather/quant 各层 ~23 个？）。
