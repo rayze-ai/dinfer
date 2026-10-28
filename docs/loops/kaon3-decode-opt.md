@@ -4,9 +4,10 @@
 > 根因:靠 NO_GRAPH 分段定靶子(说 MoE 占 63%)是假象,被 cudagraph 摊薄。**改任何 kernel 前必须先验证那段是 graph 态真大头**。
 > 用户批评:"做之前反复强调验证,方案是屁股想出来的" —— 不再未验证就动手。
 
-## 用户定的流程（严格按此，用户 2026-10-28 完善）
-**★ 全程非 eager（graph 生产态）口径。** eager/NO_GRAPH 只作一次性排查手段（验图是否旁路 skip 等），所有判定与收益都以非 eager 为准。测量插桩若与 cudagraph 冲突（event sync），要么找 graph 兼容的测法（core host-time/纯 CPU Instant/整段 skip 看端到端），要么单独 NO_GRAPH 测时明确标注"仅排查、非最终口径"。
-- **Step A（测）**:跑 5 轮,测 dinfer（**非 eager**）的:①启动时间 ②TTFT ③TPOT ④每一步的 exec 时间 ⑤wait 时间 ⑥带宽 ⑦GPU 利用率。
+## 用户定的流程（严格按此，用户 2026-10-28 两次完善）
+**★★ 前置条件（必先对齐,否则结论作废——D33 血的教训）**:dinfer 与 vLLM **两端都非 eager**,且 **max-model-len / max-num-batched-tokens / concurrency 全一致**。vLLM 现 :28201 是 `--enforce-eager`(eager)+max-model-len 16384,**不能直接用**,要起**非 eager** vLLM 且参数对齐 dinfer。bench prompt 的 **token 数**(非词数,词×~3.9)必须 ≤ max-model-len,否则超限走慢路径(D32 的 2 秒假象)。开跑前核对两端 cmdline。
+**★ 全程非 eager（graph 生产态）口径。** eager/NO_GRAPH 只作一次性排查手段。测量插桩与 cudagraph 冲突时用 graph 兼容测法(core host-time / 纯 CPU Instant / 整段 skip 看端到端)。
+- **Step A（测）**:跑 5 轮 × **concurrency = 1,2,4,8,16**,测 dinfer（**非 eager**）的:①启动时间 ②tokenize ③chat 模板 ④htod ⑤block 分配 ⑥schedule ⑦TTFT ⑧TPOT ⑨每步 exec ⑩wait ⑪带宽 ⑫GPU 利用率。
 - **Step B（改）**:针对**耗时最长**的那段,深入分析+优化,提交,编译最新代码运行（非 eager 验）。
 - **Step C（验+回滚，用户 2026-10-28 完善）**:端到端测试。收益差则**回滚**,回 Step B。**但每次结果（含回滚的负结果）都要进 CSV 和 dashboard**（`test/kaon3/perf-trend.*`，带 CHANGE 说明）。Step B↔C 重复 **5 次无进展** → 回 Step A 重新分析,继续跑 loop。
   - CSV/dashboard:`bench_compare` 或直接写 perf-trend.csv 一行(round/change/指标),重生成 html,本机 8090 可看。回滚的轮次也记(change 注明"回滚:端到端 X%<门槛")。
@@ -390,3 +391,8 @@ curl /tokenize 1024词=**7ms**(排除tokenize是TTFT 2秒根因)。但出**4010 
 **之前结论大面积要修正**:D20"慢24×/吞吐6-16%"、D67"非eager基线946"全建立在**前置不对齐**(dinfer 2048超限 + vLLM 16384 eager)。既不是同max-model-len,vLLM又是eager。
 **对齐重测(公平前提)**:dinfer max-model-len提16384(对齐vLLM)+ 两端同eager或同graph。再测c1/2/4/8。这才是真实差距。
 **教训(核心,记knowledge)**:对比前必须核对两端前置条件(max-model-len/eager/batched-tokens/block-size)!我和之前bench都没核,在不对齐的畸形条件上跑了一整天结论。用户"要对齐测试前置条件"一针见血。
+
+## D34 2026-10-28 修正D33:28201其实非eager(我查错进程),但max-model-len仍不对齐(16384 vs dinfer 2048)
+两vLLM:vllm-noneager :28201(pid2592348,无enforce-eager,max-model-len 16384)=**真非eager**;vllm-eager :28200(enforce-eager)。D33查的pid2592177是:28200(eager)查错了。**:28201确实非eager**(D67没错)。
+**但max-model-len不对齐仍成立**:dinfer 2048 vs vLLM 16384。4010 token prompt在dinfer超限=2秒慢路径(D32),在vLLM合规。这才是"慢24×"主因(非eager与否)。
+**对齐方案**:dinfer重起max-model-len 16384非eager serve(:8290),两端非eager+同max-model-len。Step A跑c1/2/4/8/16,prompt token数先用合理值(400词≈1560 token,安全)。
