@@ -1,0 +1,20 @@
+bin=2026-10-28 16:01 16:05:04 
+c2 vs serial: 6/8 requests differ (cache 态)
+  req0: first diff at char 1: serial='it the same for and day man place and no' conc='the person who is in the company thing t'
+  req1: first diff at char 31: serial='in were not world not in were not world ' conc='way which but an by are had for on year '
+  req2: first diff at char 181: serial=' eye people woman as world world eye thi' conc='\n```\n\nIn []:\n```python own hand\n```\n\nIn '
+  req4: first diff at char 1: serial='for with eye an are and of had for with ' conc='of had and of had and of had and of had '
+  req5: first diff at char 1: serial='world not be his world not be his world ' conc='the that be his the that be his the that'
+  req6: first diff at char 1: serial='is why they is why is why is why is why ' conc='way or way to be is had of the but not g'
+c8 vs serial: 6/8 requests differ (cache 态)
+  req0: first diff at char 1: serial='it the same for and day man place and no' conc='the person that was it was child world a'
+  req1: first diff at char 31: serial='in were not world not in were not world ' conc='way which but an by are had for on year '
+  req2: first diff at char 79: serial='life world case point an was place are h' conc='an an was place are hand people time two'
+  req4: first diff at char 77: serial='re and of had for with eye are and of ha' conc='n are and of had for with eye an are and'
+  req6: first diff at char 23: serial='why is why is why is why is why is why i' conc='it it it it it it it it it it it it it i'
+  req7: first diff at char 32: serial='with had thing the at week place on one ' conc='and with had thing the at week place on '
+c8(fresh) vs serial: 3/8 requests differ
+  req0: first diff at char 8: serial='at which were life is was has problem wo' conc='it is has problem work have child were w'
+  req3: first diff at char 9: serial='number has his was it as government part' conc='company of which his problem year on lif'
+  req6: first diff at char 8: serial='n it is in it is in it is in it is in it' conc='t is the have to be it is the have to be'
+DONE

@@ -1,0 +1,33 @@
+BUILD EXIT=0 16:01:50
+marker=546
+== env=[plain]
+ pair case0 A=400w B=60w/64: A:DIFF@1 B:SAME
+ pair case1 A=1500w B=400w/64: A:DIFF@70 B:DIFF@4
+ pair case2 A=400w B=400w/64: A:SAME B:DIFF@13
+ pair case3 A=400w B=400w/1: A:SAME B:SAME
+ c8 fresh: r0:DIFF@9 r1:SAME r2:DIFF@13 r3:DIFF@1 r4:SAME r5:SAME r6:DIFF@81 r7:SAME | 4/8 differ
+== env=[CUT_IN=0]
+ pair case0 A=400w B=60w/64: A:DIFF@25 B:DIFF@50
+ pair case1 A=1500w B=400w/64: A:DIFF@23 B:DIFF@1
+ pair case2 A=400w B=400w/64: A:DIFF@28 B:SAME
+ pair case3 A=400w B=400w/1: A:DIFF@4 B:SAME
+ c8 fresh: r0:DIFF@1 r1:DIFF@1 r2:DIFF@13 r3:DIFF@9 r4:SAME r5:DIFF@13 r6:DIFF@1 r7:SAME | 6/8 differ
+== env=[ATTN_DECODE_OLD=1]
+ pair case0 A=400w B=60w/64: A:SAME B:DIFF@4
+ pair case1 A=1500w B=400w/64: A:DIFF@174 B:DIFF@1
+ pair case2 A=400w B=400w/64: A:SAME B:DIFF@4
+ pair case3 A=400w B=400w/1: A:DIFF@8 B:DIFF@1
+ c8 fresh: r0:SAME r1:DIFF@1 r2:DIFF@1 r3:DIFF@23 r4:DIFF@1 r5:DIFF@15 r6:DIFF@7 r7:DIFF@31 | 7/8 differ
+== env=[NO_GRAPH=1]
+ pair case0 A=400w B=60w/64: A:DIFF@59 B:SAME
+ pair case1 A=1500w B=400w/64: A:DIFF@61 B:DIFF@5
+ pair case2 A=400w B=400w/64: A:DIFF@12 B:SAME
+ pair case3 A=400w B=400w/1: A:DIFF@22 B:SAME
+ c8 fresh: r0:SAME r1:SAME r2:DIFF@1 r3:DIFF@17 r4:DIFF@5 r5:DIFF@18 r6:SAME r7:SAME | 4/8 differ
+c2 vs serial: 6/8 requests differ (cache 态)
+c8 vs serial: 6/8 requests differ (cache 态)
+c8(fresh) vs serial: 3/8 requests differ
+== env=[KV_FP8_STORE=1]
+  total DIFF 4/7
+GATES DONE 16:06:35
+DONE
