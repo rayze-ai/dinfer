@@ -537,12 +537,15 @@ fn head_rmsnorm(
     w: Option<&Tensor<bf16>>,
     head_dim: usize,
     eps: f32,
+    rows: usize,
 ) -> Result<()> {
     let _ = ops;
     // 原位 RMSNorm：不分配、不换缓冲身份（CUDA graph 捕获期禁止两者）。逐位等价于旧的
     // "写新缓冲再换 x.data"（kernel 先把整行读进寄存器再写回，见 `rmsnorm_bf16_inplace`）。
-    let tokens = x.numel() / head_dim;
-    k::ops::rmsnorm_bf16_inplace(stream, &mut x.data, w.map(|w| &w.data), tokens, head_dim, eps)
+    // rows = tokens × heads（实际行数）。缓冲是 max_tokens 满长，按 numel 跑会把 decode 的 1 行放大成
+    // 4160 行（loop kaon3-decode-opt D54：三个逐头 norm 每步白跑 2.3 ms）。
+    ensure!(rows * head_dim <= x.numel(), "head_rmsnorm: rows {rows} × {head_dim} > numel {}", x.numel());
+    k::ops::rmsnorm_bf16_inplace(stream, &mut x.data, w.map(|w| &w.data), rows, head_dim, eps)
 }
 
 /// 无权重 RMSNorm 到新缓冲（不覆盖输入）：`y = x / rms(x)`。
@@ -1087,9 +1090,9 @@ impl Gemma4Layer {
         // ---- 3. 逐头 RMSNorm：q_norm / k_norm 带权重，v_norm 无权重 ----
         // ATTN_SKIP_NORM=1（纯计时,结果错）：跳过 3 个逐头 RMSNorm,测其 graph 态占比。
         if std::env::var("ATTN_SKIP_NORM").ok().as_deref() != Some("1") {
-            head_rmsnorm(stream, ops, q, Some(&self.q_norm), d, eps)?;
-            head_rmsnorm(stream, ops, kk, Some(&self.k_norm), d, eps)?;
-            head_rmsnorm(stream, ops, v, None, d, eps)?;
+            head_rmsnorm(stream, ops, q, Some(&self.q_norm), d, eps, tokens * heads)?;
+            head_rmsnorm(stream, ops, kk, Some(&self.k_norm), d, eps, tokens * nkv)?;
+            head_rmsnorm(stream, ops, v, None, d, eps, tokens * nkv)?;
         }
         if let Some((dir, _)) = sub_out {
             for (nm, buf, rows) in [("q_norm", &*q, heads), ("k_norm", &*kk, nkv), ("v_norm", &*v, nkv)] {
@@ -1104,7 +1107,7 @@ impl Gemma4Layer {
         // ATTN_SKIP_ROPE=1（纯计时,结果错）：跳过 rope,测其 graph 态占比。
         let rope = if self.window > 0 { &ropes.sliding } else { &ropes.full };
         if std::env::var("ATTN_SKIP_ROPE").ok().as_deref() != Some("1") {
-            rope.apply(stream, q, Some(kk), ctx.positions, heads, nkv, d)?;
+            rope.apply(stream, q, Some(kk), ctx.positions, tokens, heads, nkv, d)?;
         }
         if let Some((dir, _)) = sub_out {
             for (nm, buf, rows) in [("q_rope", &*q, heads), ("k_rope", &*kk, nkv)] {

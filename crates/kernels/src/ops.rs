@@ -311,18 +311,22 @@ pub fn rope_bf16(
     rope_dim: usize,
     style: RopeStyle,
 ) -> Result<()> {
-    rope_span_bf16(stream, q, k, positions, cos_sin, q_heads, k_heads, head_dim, rope_dim, rope_dim / 2, style)
+    let tokens = positions.len();
+    rope_span_bf16(stream, q, k, positions, cos_sin, tokens, q_heads, k_heads, head_dim, rope_dim, rope_dim / 2, style)
 }
 
 /// 同 [`rope_bf16`]，neox 配对改为 `(i, i + span)`（`i < rope_dim/2`）。`span = rope_dim/2` 即常规 partial RoPE；
 /// Gemma4 proportional（零频补齐到整头再按 neox 旋转）等价于 `span = head_dim/2`。
 #[allow(clippy::too_many_arguments)]
+/// `tokens`：实际行数（positions 常是满长的 plan 缓冲，decode 时只有前 `tokens` 行有效；
+/// 按缓冲长度跑会把 grid 放大到 max_tokens——loop kaon3-decode-opt D54：每步白跑 0.7 ms）。
 pub fn rope_span_bf16(
     stream: &Stream,
     q: &mut CudaSlice<bf16>,
     k: Option<&mut CudaSlice<bf16>>,
     positions: &CudaSlice<i32>,
     cos_sin: &CudaSlice<f32>,
+    tokens: usize,
     q_heads: usize,
     k_heads: usize,
     head_dim: usize,
@@ -330,7 +334,7 @@ pub fn rope_span_bf16(
     span: usize,
     style: RopeStyle,
 ) -> Result<()> {
-    let tokens = positions.len();
+    ensure!(tokens <= positions.len(), "rope: tokens {tokens} > positions {}", positions.len());
     ensure!(
         span >= rope_dim / 2 && span + rope_dim / 2 <= head_dim,
         "rope: span {span} 越界（rope_dim {rope_dim} / head_dim {head_dim}）"

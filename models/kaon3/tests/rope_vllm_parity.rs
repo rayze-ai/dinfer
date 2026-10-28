@@ -58,7 +58,7 @@ fn gemma4_rope_matches_vllm_semantics() {
         let mut dq = Tensor::from_vec(&st, q.iter().map(|&x| bf16::from_f32(x)).collect(), &[t, hq * d]).unwrap();
         let mut dk = Tensor::from_vec(&st, k.iter().map(|&x| bf16::from_f32(x)).collect(), &[t, hk * d]).unwrap();
         let dp = Tensor::from_vec(&st, positions.to_vec(), &[t]).unwrap();
-        rope.apply(&st, &mut dq, Some(&mut dk), &dp, hq, hk, d).unwrap();
+        rope.apply(&st, &mut dq, Some(&mut dk), &dp, t, hq, hk, d).unwrap();
         let (gq, gk) = (dq.to_vec_f32(&st).unwrap(), dk.to_vec_f32(&st).unwrap());
         let mut worst = 0f32;
         for (got, src, heads) in [(&gq, &q, hq), (&gk, &k, hk)] {
