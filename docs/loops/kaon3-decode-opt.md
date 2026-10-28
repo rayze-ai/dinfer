@@ -767,3 +767,4 @@ decode c1 的 MoE 段 nsys：grouped_gemm gate 18.6 + up 18.6 + down 12.5 + gelu
 - `bN.sh`（远端 + 本地 `kaon3_stepB_verify.sh`）加编译失败即停（NOBUILD DONE）。
 - b8b ABAB 归档（`b8b_RESULT.txt`，**B 侧无效**：编译失败跑了旧二进制）；A 侧两轮 7.48 / 11.11 再次确认 B5+pick_warps 基线。
 - **b8c 链**：三门禁 → bN（TAG=b8c，MARKER=combine_kernel，B 侧 `FP8_GEMV=1`；新二进制含 B6c + pick_warps≤4 + B8 tile 表 + B10 路由融合 + B11 gather/combine 融合）。预期 c1 7.48 → ~6.5（B10 -0.6、B11 -0.35、B6c -0.5）、c8 ≤ 11.0、TTFT c8 583 → 明显降（B8）。
+- b8b 的 bN 实际跑了两遍（RESULT 文件里 B/A2 重复出现；多半是 b8.sh 第一次编译失败后我又起 b8b.sh，而 bN 没停）—— 已 kill（容器内按 pid，`pkill -x bench/dinfer`），**b8c 已起**。监控脚本改为只在 `==bN` 段看 DONE（之前把 par 段的 "PARITY_FAIL DONE" 当终止符）。
