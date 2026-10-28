@@ -1049,3 +1049,4 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - **mixprobe（GPU 1 并行跑，不碰 bN）**：A 先发 200 out；80 ms 后 B 发（必进 Paged 步）；比 A/B 各自 vs 串行；再同 prompt 重发一遍（cache 态：B 变 hist≈400 的 chunk）；三组 env plain / `CUT_IN=0` / `ATTN_DECODE_OLD=1`。期望把"谁错"钉到 A 侧 / B 侧 × fresh / cache 态。
 - **D90 b27 bN 数字作废**：A 侧二进制在链里被我 8 s 后的 cp 换回 b26，A 与 A2 的 c8 TTFT 一个 101 一个 155 ⇒ A 跑的不是同一个二进制。B（b27）：c8 TTFT 118、吞吐 679、TPOT 10.26；c1 不变。B27 的性能影响本来就应 ≈ 0；**正确性没过之前不入 CSV**。
 - 下一步排查并行跑：GPU 1 `mixprobe`（A 在飞 + B 插入，fresh / cache 态，3 env）；GPU 4 `cacheprobe`（**c1 串行**同 prompt 三次：若第 2 次就不同 → 不是并发问题，是**带历史 chunk（prefix cache 命中后 Paged 步）本身错**；env plain / KV_FP8_STORE=0 / GQA_PAGED_D512_V6_OFF=1 分路径）。怀疑点：D=256 滑窗层 **v5 PAGED + KV_FP8 + hist>0 + window** 组合从未被测过（B15b fp8cache 测试全是 q_len=1；Qwen3 的 mixed 是 window=0）。
+- D91：mixprobe（GPU 1）plain 组第一条串行请求就 **HTTP 503**（A=400 词 200 out 串行基线）→ 服务侧拒绝（查 503 条件：排队上限 / 引擎未就绪 / max_tokens 超限？）；cacheprobe（GPU 4）同时起，结果待看。先查 503 来源再重跑。
