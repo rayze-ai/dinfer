@@ -38,7 +38,7 @@ fn gqa_chunk_vs_prefill() {
         // ---- fresh：一次 prefill_win（连续）----
         let cu1 = st.htod_copy(vec![0i32, total as i32]).unwrap();
         let mut out_fresh = st.alloc_zeros::<bf16>(total * h * d).unwrap();
-        dinfer_kernels::gqa_prefill_win_bf16(&st, &dq, &dk, &dv, &mut out_fresh, &cu1, 1, total, h, hkv, d, 1.0, 0, 0, window, true).unwrap();
+        dinfer_kernels::gqa_prefill_win_bf16(&st, &dq, &dk, &dv, &mut out_fresh, &cu1, 1, total, h, hkv, d, 1.0, 0, 0, window, false).unwrap(); // p_fp8=false 与下面 paged_win 的 p_fp8=0 一致
         // ---- chunk：全部 K/V 写 cache（模拟前一步写了 0..hist，本步写 hist..total），paged_win 只算 q 行 hist..total ----
         let nblk = total.div_ceil(bs);
         let bt: Vec<i32> = (1..=nblk as i32).collect();
