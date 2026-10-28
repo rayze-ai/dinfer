@@ -76,6 +76,6 @@ case "${1:-}" in
             --exclude target/ --exclude .git/ ./ "$USER_AT:$REMOTE_DIR/" ;;
   sync)   up >/dev/null; rsyncr ${SYNC_DRY:+-n -i} -R --exclude target/ crates models bins scripts test/kaon3 Cargo.toml Cargo.lock "$USER_AT:$REMOTE_DIR/" ;;
   pull)   shift; up >/dev/null; rsyncr "$USER_AT:$1" "$2" ;;
-  put)    shift; up >/dev/null; rsyncr "$1" "$USER_AT:$2" ;;
+  put)    shift; up >/dev/null; rsyncr --no-times "$1" "$USER_AT:$2" ;;   # 不保留 mtime：远端文件时间=传输时间，cargo 才会重编（D42 根因）
   *) echo "usage: $0 up|status|ssh|run '<cmd>'|ctr '<cmd>'|push|sync|pull <remote> <local>|put <local> <remote>"; exit 2 ;;
 esac

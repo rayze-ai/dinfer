@@ -25,7 +25,7 @@ for i in $(seq 1 150); do sed "s/\x1b\[[0-9;]*m//g" /w/dinfer/tmp_nsys2_serve.lo
 sed "s/\x1b\[[0-9;]*m//g" /w/dinfer/tmp_nsys2_serve.log | grep -q "listening addr" || { echo "serve NOTUP" >> $R; tail -3 /w/dinfer/tmp_nsys2_serve.log >> $R; echo DONE >> $R; kill -9 $NP; exit 1; }
 # c1，400 词 prompt，64 out，3 请求（含预热）→ 约 190 个 decode 步
 taskset -c 60-91 ./target/release/bench --url http://127.0.0.1:8340 --concurrency 1 --num-requests 3 --prompt-len 400 --max-tokens 64 --prefix-repeat 0 --warmup 1 --seed 7 2>&1 | grep -E "TPOT " >> $R
-kill -INT $(pgrep -x dinfer) 2>/dev/null; sleep 3; kill -INT $NP 2>/dev/null; wait $NP 2>/dev/null; sleep 2
+kill -INT $(pgrep -x dinfer) 2>/dev/null; wait $NP 2>/dev/null; sleep 2; ls -la /w/dinfer/tmp_nsys2.nsys-rep >> $R 2>&1
 "$NSYS" export --type sqlite --force-overwrite true -o /w/dinfer/tmp_nsys2.sqlite /w/dinfer/tmp_nsys2.nsys-rep >/dev/null 2>&1
 python3 /w/nsys_kern.py /w/dinfer/tmp_nsys2.sqlite >> $R 2>&1
 echo DONE >> $R
