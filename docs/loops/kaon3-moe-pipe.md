@@ -134,3 +134,15 @@ MoE内:**gemm3=0.145ms=MoE 58%=整层25%**;router0.034/sm+bucket0.029/gather+qua
 **第一刀端到端上限(此并发)**:gemm3 1.83×→0.145→0.079省0.066/层,整层0.57→0.50=**-12%**,TPOT该降~12%。
 **但R80 rate8端到端仅+0.8%——矛盾!** 差异:①R80是rate8/48req稳态~54序列(r~432,M大,gemm3占比/流水收益都变);②R80是**graph态**(此处NO_GRAPH),graph压launch开销后各段绝对时间/占比变。
 **关键下一步**:直接量concurrency=8的**graph态A/B**(非rate8),看TPOT降多少。此并发gemm3占25%、M小(流水有效区),若TPOT明显降=第一刀对中低并发有端到端价值。若仍不降=graph态下gemm3时间被图优化摊薄,第一刀端到端无感→转第二刀。
+
+## ★★★★★ R84 2026-10-28 第一刀端到端定论:真有效但幅度小(单流-4.9%/c8-1.3%/rate8+0.8%),graph摊薄gemm3占比
+graph态A/B(MOE_GEMM_PIPE关/开):
+| 并发 | TPOT base→pipe | 吞吐 |
+|---|---|---|
+| c1单流 | 18.83→17.90 **-4.9%** | 51.4→54.0 +5.1% |
+| c8 | 21.74→21.45 -1.3% | 340→346 +1.6% |
+| rate8(R80) | 53.3→52.8 -0.8% | +0.8% |
+**第一刀真有效但幅度小,并发越高越小**。kernel 1.83×(gemm3 NO_GRAPH占整层25%本应降~11%),但graph态端到端只-1.3%(c8)。
+**根因坐实**:**graph态下gemm3实际占比/墙钟远小于NO_GRAPH的STAGE_TIME测量值**——cudagraph把kernel间隙/launch压掉后,gemm3在图里被重叠/摊薄。NO_GRAPH的分段(R36/R83)高估了生产(graph)里MoE/gemm3占比。这是前面所有NO_GRAPH分段的系统性偏差,记knowledge。
+**回滚决断:不删,降级保留**。干净正收益(逐位bad=0+kernel1.83×+单流-4.9%),MOE_GEMM_PIPE默认关零风险,交互式/单流可开。但**不是超vLLM吞吐(946)的刀**(吞吐基准仅+0.8~1.6%)。
+**转第二刀(gate+up合并)**:省整个1个grouped GEMM(3→2)+一次中间量HBM往返,**M无关+graph态也省**(少1次kernel launch+少1块HBM读写,图里实打实少活),vLLM既定(gemm1/gemm2)。这才是吞吐杠杆。
