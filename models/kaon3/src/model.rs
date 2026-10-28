@@ -26,9 +26,10 @@ impl LayerKv {
     pub fn new(stream: &Stream, cfg: &KaonConfig, l: usize, num_blocks: usize, block_size: usize) -> Result<Self> {
         let (head_dim, nkv, _) = cfg.attn_shape(l);
         // B15/B15b：kv_fp8 层默认真存 e4m3（vLLM fp8 KV 口径；D70：c8 decode -2%、TTFT +4%、cache 容量翻倍）。`KV_FP8_STORE=0` 回退 bf16 存。
-        // D93/D94（loop kaon3-decode-opt）：e4m3 cache 下 prefix-cache 命中后的带历史 chunk（Paged 步 hist>0 多行）输出错，
-        // bf16 cache 全对 → 默认**关**（c8 TPOT +1.9%，换正确性），`KV_FP8_STORE=1` 开；kernel 修好并过 gqa_paged_fp8_hist_parity 后再翻回。
-        let is_fp8 = cfg.kv_fp8 && std::env::var("KV_FP8_STORE").ok().as_deref() == Some("1");
+        // D93→D145（loop kaon3-decode-opt）：曾疑 e4m3 cache 让 prefix-cache 命中态 chunk 输出错而默认关；后证实 bf16 cache 同样、
+        // 且 `gqa_chunk_vs_prefill` / `gqa_paged_fp8_hist_parity` 位差 0 —— 差异是批构成（m）依赖的 GEMM 数值，不是 cache dtype。
+        // 恢复默认**开**（D70：c8 TPOT -1.9%、cache 容量翻倍）；`KV_FP8_STORE=0` 关。
+        let is_fp8 = cfg.kv_fp8 && std::env::var("KV_FP8_STORE").ok().as_deref() != Some("0");
         let elems = num_blocks * block_size * nkv * 2 * head_dim;
         let cache = if is_fp8 {
             Tensor::zeros(stream, &[elems / 2])?
