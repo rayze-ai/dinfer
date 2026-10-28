@@ -116,3 +116,7 @@ rate8/48req同锁死负载,A/B(graph生产态):
 → rate8端到端仅+0.8%**不是M工况问题**,是别的:①gemm3在serve decode整步占比没那么大(graph态下);②或decode真实M分布/激活专家数与微基准不符;③或graph把kernel时间摊了。
 **回滚判断:不回滚**。kernel侧M≤32实打实1.5-1.9×+逐位bad=0=干净正收益,留着(MOE_GEMM_PIPE开关默认关,零风险)。rate8没放大是"端到端为何没传导"的问题,先查清再定。
 **查法**:rate8真实decode每步的M(每专家激活行数)到底多少?serve KAON3_MOE_TIME看rate8并发下gemm3绝对ms+占decode比。若gemm3占比小→流水传导不到端到端属正常,此时第二刀(gate+up合并省1整个GEMM)才是端到端杠杆。
+
+## R82 2026-10-28 查rate8真实gemm3占比(host网络容器):ctr bridge并发completion反复不进forward→改host网络
+ctr bridge容器NO_GRAPH下并发completion再次不触发decode(stage/moe空,bench也没出数)=第N次撞bridge坑。改host网络detached容器(R79验证可行):NO_GRAPH+STAGE+MOE_TIME,concurrency=8 bench打,看batch态stage分布(MoE占decode比)+moe-time的r值(真实batch rows)+gemm3绝对ms。结果落tmp_gshare_RESULT.txt。
+目的:定位rate8端到端+0.8%根因——gemm3占decode步比例(graph/并发下是否被摊薄),定第一刀端到端价值+是否转第二刀。
