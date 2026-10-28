@@ -390,3 +390,15 @@ GPU2 可抓取。`put` 有 bug（目标路径不生效），改用 `rsync -az` �
 定标只在 k=64 做过一次就当通用公式（布局 bug 多绕 3 轮）。
 
 **下一次接手第一件事**：核对 `fp4_dense_probe.py` 里 `a` 与导出的 `a_q/a_s` 是否同一次调用产物。
+
+### 2026-10-28 夜 → 2026-10-29（Kaon-V3 decode-opt 第三轮：B26 落地 + "并发 bug" 追查定案）
+
+**性能**：B26（`gqa_paged_win` D=512 走 v6 PAGED 含 KV_FP8）：c8 TTFT 543 → 156 ms（-71%，vLLM 146 的 1.07×）、c8 吞吐 465 → 672 tok/s（+45%，vLLM 的 70%）、TPOT 持平、c1 不变；CSV round b26。b16b 定稿入 CSV（c1 -1.1%）。b25（fp8 Lt m≥64 自调优）c8 +3% → `FP8_LT_TUNE` 默认关。moe_prefill_timing：流水级数对 prefill MoE GEMM 0.97–0.99× → B24a 前提不成立。
+
+**正确性**：B27 混批 Paged 步 decode 行 attention 之前没人算（自阶段 3 起）→ 补 `gqa_decode_win_bf16(cu_seqlens_q)`（真修）。B28（同步 runner 的采样结果随 Pending 走）、B29（在飞行 token gather/save_chosen）是真缺陷但 kaon3 同步 runner 不触发；B28 有单测；B29 `INFLIGHT_GATHER` 默认关（c8 +2.5%）。
+
+**追查定案（D80–D145，十几条探针链）**：c≥2 / cache 命中 / chunked prefill 下输出与串行不同 —— 最终 `--no-prefix-caching` + 同批构成重复 0/8（确定性）、c8 vs serial 6/8、语义等价；kernel 测试 `gqa_chunk_vs_prefill`、`gqa_paged_fp8_hist_parity`（含 smem 毒化、v6 cfg=464）位差 0 ⇒ **批不变性问题（按 m 选 algo/tile 的 GEMM/MoE），不是功能 bug**；vLLM 默认同样不保证。`KV_FP8_STORE` 默认恢复开。design.md §11 记台账。
+
+**工具 / 规则**：`kaon3_{ttft8,ttft8b,pagedprobe,mixparity,mixprobe,pair2,cacheprobe,cacheprobe3,cacheprobe4,chunkprobe,winprobe,natprobe,natprobe2,concprobe}.sh`；队列卫生（DONE 只在真结尾、每组子 shell、链内不 pkill、链间只靠 DONE、宿主/容器路径、容器只见 GPU 0）进 knowledge/subagent-ops；正确性门禁（同批构成重复 + 无 cache + 自然语言）进 perf-method §15；`bN` 必须独立起不放门禁链尾。
+
+**踩坑 4 条**（pitfalls 顶部）。**下一步**：① vLLM 基线对照翻转率（基线容器 vllm-noneager/eager 当前无监听端口，需重起）；② 性能：B23 attention 前段融合 / lm_head fp8 / prefill qkv nvjet；③ kaon3 `supports_async`（打开 B29，省一步 host）。
