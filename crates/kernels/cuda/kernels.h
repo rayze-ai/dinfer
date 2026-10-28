@@ -358,7 +358,8 @@ int moe_route_f32(const float* logits, const float* bias, int32_t* topk_ids, flo
                   int64_t num_experts, int64_t topk, int renormalize, float scale, cudaStream_t stream);
 // 按专家分桶：counts[E]（内部清零）/ offsets[E+1] / cursor[E] / sorted_tok[T*K] / sorted_k[T*K]
 int moe_bucket(const int32_t* topk_ids, int32_t* counts, int32_t* offsets, int32_t* cursor, int32_t* sorted_tok,
-               int32_t* sorted_k, int64_t tokens, int64_t num_experts, int64_t topk, cudaStream_t stream);
+               int32_t* sorted_k, int32_t* tile_off, int64_t tokens, int64_t num_experts, int64_t topk,
+               cudaStream_t stream);
 // B10：decode 小 batch（tokens ≤ 64）路由前处理一次 launch：top-k + 权重 + counts/offsets/cursor/tile_off + sorted + row2e。
 int moe_route_bucket_small(const float* logits, const void* per_expert_scale, int32_t* topk_ids, float* topk_w,
                            int32_t* counts, int32_t* offsets, int32_t* cursor, int32_t* sorted_tok, int32_t* sorted_k,
