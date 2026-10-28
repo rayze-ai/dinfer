@@ -232,7 +232,7 @@ impl QLinear {
                 // B6（loop kaon3-decode-opt）：decode 小 M 走带宽型 fp8 GEMV（`mlp_fp8_gemv`，与 dense MLP 同 kernel），
                 // 条件：tokens ≤ 16、K % 16 == 0、A 的 bf16 驻留 M_TILE·K·2 ≤ 24 KB（≥ 4 block/SM 才能把权重流读的延迟藏住；
                 // D62 实测 45 KB（m=8,K=2816）时 c8 反而比 cuBLASLt 慢 5%）。K=2816 → m ≤ 4；K=8192 → m = 1。`FP8_GEMV=1` 开。
-                if fp8_gemv_enabled() && tokens <= 16 && kk % 16 == 0 && fp8_gemv_m_tile(tokens) * kk * 2 <= 24 * 1024 {
+                if fp8_gemv_enabled() && tokens <= 16 && kk % 16 == 0 && kk <= 4096 && fp8_gemv_m_tile(tokens) * kk * 2 <= 24 * 1024 {
                     return k::ops::mlp_fp8_gemv(stream, buf, w, &mut out.data, tokens, n, kk, *scale * *a_scale);
                 }
                 // 两个 per-tensor scale 以设备标量形式传给 cuBLASLt；按 shape 缓存一次即可（每层不同）。

@@ -62,32 +62,49 @@ __device__ __forceinline__ void load_a(const uint8_t* __restrict__ a_q, bf16* sa
 }
 
 // 一个 warp：权重两行 w0/w1（各 K 个 fp8）与 A 的 M_TILE 行点积，acc[j][r] 为本 lane 的部分和（未归约）。
+// B20（loop kaon3-decode-opt D72）：先把本 lane 的全部权重向量一次性读进寄存器（≤ kMaxVecPerLane 个/行），再转换+FMA。
+// 原版每轮迭代读 2 个 uint4 就等它回来，K=2816 时 5.5 轮串行 HBM 往返 ≈ 延迟绑定（qkv 16.5 us vs 带宽下限 4.8）。
+// 累加顺序与原版完全相同（同 c 升序）→ 逐位同。K ≤ 16·32·kMaxVecPerLane = 4096。
+constexpr int kMaxVecPerLane = 8;
 template <int M_TILE>
 __device__ __forceinline__ void dot2(const bf16* sa, int K, const uint8_t* __restrict__ w0,
                                      const uint8_t* __restrict__ w1, float (&acc)[2][M_TILE], int lane) {
   const int nvec = K / 16;
-  for (int c = lane; c < nvec; c += 32) {
-    float wf[2][16];
-    e4m3x16_to_f32(__ldg(reinterpret_cast<const uint4*>(w0 + c * 16)), wf[0]);
-    e4m3x16_to_f32(__ldg(reinterpret_cast<const uint4*>(w1 + c * 16)), wf[1]);
+  uint4 r0[kMaxVecPerLane], r1[kMaxVecPerLane];
 #pragma unroll
-    for (int r = 0; r < M_TILE; ++r) {
-      const uint4* ap = reinterpret_cast<const uint4*>(sa + (long)r * K + c * 16);
-      const uint4 a0 = ap[0], a1 = ap[1];
-      const __nv_bfloat162* b0 = reinterpret_cast<const __nv_bfloat162*>(&a0);
-      const __nv_bfloat162* b1 = reinterpret_cast<const __nv_bfloat162*>(&a1);
+  for (int j = 0; j < kMaxVecPerLane; ++j) {
+    const int c = lane + j * 32;
+    if (c < nvec) {
+      r0[j] = __ldg(reinterpret_cast<const uint4*>(w0 + c * 16));
+      r1[j] = __ldg(reinterpret_cast<const uint4*>(w1 + c * 16));
+    }
+  }
 #pragma unroll
-      for (int i = 0; i < 4; ++i) {
-        const float2 x = __bfloat1622float2(b0[i]);
-        const float2 y = __bfloat1622float2(b1[i]);
-        acc[0][r] = fmaf(wf[0][2 * i], x.x, acc[0][r]);
-        acc[0][r] = fmaf(wf[0][2 * i + 1], x.y, acc[0][r]);
-        acc[0][r] = fmaf(wf[0][8 + 2 * i], y.x, acc[0][r]);
-        acc[0][r] = fmaf(wf[0][8 + 2 * i + 1], y.y, acc[0][r]);
-        acc[1][r] = fmaf(wf[1][2 * i], x.x, acc[1][r]);
-        acc[1][r] = fmaf(wf[1][2 * i + 1], x.y, acc[1][r]);
-        acc[1][r] = fmaf(wf[1][8 + 2 * i], y.x, acc[1][r]);
-        acc[1][r] = fmaf(wf[1][8 + 2 * i + 1], y.y, acc[1][r]);
+  for (int j = 0; j < kMaxVecPerLane; ++j) {
+    const int c = lane + j * 32;
+    if (c < nvec) {
+      float wf[2][16];
+      e4m3x16_to_f32(r0[j], wf[0]);
+      e4m3x16_to_f32(r1[j], wf[1]);
+#pragma unroll
+      for (int r = 0; r < M_TILE; ++r) {
+        const uint4* ap = reinterpret_cast<const uint4*>(sa + (long)r * K + c * 16);
+        const uint4 a0 = ap[0], a1 = ap[1];
+        const __nv_bfloat162* b0 = reinterpret_cast<const __nv_bfloat162*>(&a0);
+        const __nv_bfloat162* b1 = reinterpret_cast<const __nv_bfloat162*>(&a1);
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+          const float2 x = __bfloat1622float2(b0[i]);
+          const float2 y = __bfloat1622float2(b1[i]);
+          acc[0][r] = fmaf(wf[0][2 * i], x.x, acc[0][r]);
+          acc[0][r] = fmaf(wf[0][2 * i + 1], x.y, acc[0][r]);
+          acc[0][r] = fmaf(wf[0][8 + 2 * i], y.x, acc[0][r]);
+          acc[0][r] = fmaf(wf[0][8 + 2 * i + 1], y.y, acc[0][r]);
+          acc[1][r] = fmaf(wf[1][2 * i], x.x, acc[1][r]);
+          acc[1][r] = fmaf(wf[1][2 * i + 1], x.y, acc[1][r]);
+          acc[1][r] = fmaf(wf[1][8 + 2 * i], y.x, acc[1][r]);
+          acc[1][r] = fmaf(wf[1][8 + 2 * i + 1], y.y, acc[1][r]);
+        }
       }
     }
   }
@@ -239,7 +256,7 @@ int mlp_fp8_gateup_act(const void* a_q, const void* gate_w, const void* up_w, vo
                        int64_t k, float gate_scale, float up_scale, float dn_a_inv, cudaStream_t stream) {
   using namespace dinfer;
   if (m <= 0) return 0;
-  if (m > kMaxM || inter <= 0 || k <= 0 || (k % 16) != 0) return (int)cudaErrorInvalidValue;
+  if (m > kMaxM || inter <= 0 || k <= 0 || (k % 16) != 0 || k > 16 * 32 * kMaxVecPerLane) return (int)cudaErrorInvalidValue;
   const uint8_t* a = (const uint8_t*)a_q;
   const uint8_t* g = (const uint8_t*)gate_w;
   const uint8_t* u = (const uint8_t*)up_w;
@@ -254,7 +271,7 @@ int mlp_fp8_gemv(const void* a_q, const void* w, void* out, int64_t m, int64_t n
                  cudaStream_t stream) {
   using namespace dinfer;
   if (m <= 0) return 0;
-  if (m > kMaxM || n <= 0 || k <= 0 || (k % 16) != 0) return (int)cudaErrorInvalidValue;
+  if (m > kMaxM || n <= 0 || k <= 0 || (k % 16) != 0 || k > 16 * 32 * kMaxVecPerLane) return (int)cudaErrorInvalidValue;
   const uint8_t* a = (const uint8_t*)a_q;
   const uint8_t* ww = (const uint8_t*)w;
   bf16* o = (bf16*)out;

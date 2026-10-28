@@ -5323,7 +5323,7 @@ pub fn mlp_fp8_gateup_act(
     up_scale: f32,
     dn_a_inv: f32,
 ) -> Result<()> {
-    ensure!(m >= 1 && m <= 16 && k % 16 == 0, "mlp_fp8_gateup_act: m={m} (≤16) k={k} (16 的倍数)");
+    ensure!(m >= 1 && m <= 16 && k % 16 == 0 && k <= 4096, "mlp_fp8_gateup_act: m={m} (≤16) k={k} (16 的倍数, ≤4096)");
     ensure!(a_q.len() >= m * k && gate_w.len() == inter * k && up_w.len() == inter * k && act_q.len() >= m * inter, "mlp_fp8_gateup_act: 形状");
     let (pa, pg, pu) = (stream.ptr(a_q) as *const c_void, stream.ptr(gate_w) as *const c_void, stream.ptr(up_w) as *const c_void);
     let po = stream.ptr_mut(act_q) as *mut c_void;
@@ -5348,7 +5348,7 @@ pub fn mlp_fp8_gemv(
     k: usize,
     scale: f32,
 ) -> Result<()> {
-    ensure!(m >= 1 && m <= 16 && k % 16 == 0, "mlp_fp8_gemv: m={m} (≤16) k={k} (16 的倍数)");
+    ensure!(m >= 1 && m <= 16 && k % 16 == 0 && k <= 4096, "mlp_fp8_gemv: m={m} (≤16) k={k} (16 的倍数, ≤4096)");
     ensure!(a_q.len() >= m * k && w.len() == n * k && out.len() >= m * n, "mlp_fp8_gemv: 形状");
     let (pa, pw) = (stream.ptr(a_q) as *const c_void, stream.ptr(w) as *const c_void);
     let po = stream.ptr_mut(out) as *mut c_void;
