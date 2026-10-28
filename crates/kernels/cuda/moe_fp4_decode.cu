@@ -7,14 +7,13 @@
 // 16 元素块（8 B packed + 1 B scale），块内 16 FMA 后乘 (sa·sb) 累加 —— 与 mma block_scale 口径同式（单项
 // fp4·fp4·e4m3·e4m3 ≤ 10 bit 尾数在 f32 精确，差只在累加序，bf16 ulp 级）；warp shuffle 归约。
 // 布局与 moe_grouped_sm120.cu 同：packed [rows, K/2]（低半字节=偶数 k）、scale [rows, K/16] e4m3、alpha[e] = global·a_scale。
-// 结构常量 kWarps / M_TILE 档位 {1,2,4,8}；无卡型调优数值；所有 arch 共用。限制：K % 64 == 0。
+// 结构常量：每 block warp 数（host 按 SM 数选，kMaxWarps 上限）/ M_TILE 档位 {1,2,4,8}；无卡型调优数值；所有 arch 共用。限制：K % 64 == 0。
 #include "common.cuh"
 #include "kernels.h"
 
 namespace dinfer {
 namespace {
-constexpr int kWarps = 4;
-constexpr int kBlock = kWarps * 32;
+constexpr int kMaxWarps = 16;  // 每 block warp 数由 host 选（pick_warps），kernel 读 blockDim.x
 
 __device__ __forceinline__ float e2m1_f(unsigned n) {
   // 0,0.5,1,1.5,2,3,4,6 + 符号位 3
@@ -53,7 +52,7 @@ template <int M_TILE>
 __device__ __forceinline__ void load_chunk(const uint8_t* __restrict__ aq, const uint8_t* __restrict__ asc, int r0,
                                            int mc, int K, bf16* sa, uint8_t* ssc) {
   const int nblk = K / 16;
-  for (int idx = threadIdx.x; idx < M_TILE * nblk; idx += kBlock) {
+  for (int idx = threadIdx.x; idx < M_TILE * nblk; idx += blockDim.x) {
     const int r = idx / nblk, b = idx % nblk;
     if (r < mc) {
       float f[16];
@@ -116,9 +115,9 @@ __device__ __forceinline__ void dot_fp4(const bf16* sa, const uint8_t* ssc, int 
   }
 }
 
-// ---- gate‖up + gelu·mul：grid=(ceil(I/kWarps), E)；out[R, I] bf16 = bf16(bf16(gelu(bf16(g·αg)))·bf16(u·αu))。
+// ---- gate‖up + gelu·mul：grid=(ceil(I/warps), E)；out[R, I] bf16 = bf16(bf16(gelu(bf16(g·αg)))·bf16(u·αu))。
 template <int M_TILE>
-__global__ void __launch_bounds__(kBlock) gateup_kernel(const uint8_t* __restrict__ aq, const uint8_t* __restrict__ asc,
+__global__ void __launch_bounds__(kMaxWarps * 32) gateup_kernel(const uint8_t* __restrict__ aq, const uint8_t* __restrict__ asc,
                                                         const uint8_t* const* __restrict__ gptr,
                                                         const uint8_t* const* __restrict__ gsptr,
                                                         const float* __restrict__ alpha_g,
@@ -134,7 +133,7 @@ __global__ void __launch_bounds__(kBlock) gateup_kernel(const uint8_t* __restric
   bf16* sa = reinterpret_cast<bf16*>(smem_raw);
   uint8_t* ssc = smem_raw + (long)M_TILE * K * 2;
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-  const int n = blockIdx.x * kWarps + warp;
+  const int n = blockIdx.x * (blockDim.x >> 5) + warp;
   const uint8_t* wr[2] = {gptr[e] + (long)n * (K / 2), uptr[e] + (long)n * (K / 2)};
   const uint8_t* sr[2] = {gsptr[e] + (long)n * (K / 16), usptr[e] + (long)n * (K / 16)};
   const float ag = alpha_g[e], au = alpha_u[e];
@@ -160,9 +159,9 @@ __global__ void __launch_bounds__(kBlock) gateup_kernel(const uint8_t* __restric
   }
 }
 
-// ---- down（通用 grouped GEMV）：grid=(ceil(N/(4·kWarps)), E)，一 warp 4 行；out[R, N] bf16 = bf16(acc·α)。
+// ---- down（通用 grouped GEMV）：grid=(ceil(N/(4·warps)), E)，一 warp 4 行；out[R, N] bf16 = bf16(acc·α)。
 template <int M_TILE>
-__global__ void __launch_bounds__(kBlock) gemv_kernel(const uint8_t* __restrict__ aq, const uint8_t* __restrict__ asc,
+__global__ void __launch_bounds__(kMaxWarps * 32) gemv_kernel(const uint8_t* __restrict__ aq, const uint8_t* __restrict__ asc,
                                                       const uint8_t* const* __restrict__ bptr,
                                                       const uint8_t* const* __restrict__ sptr,
                                                       const float* __restrict__ alpha,
@@ -175,7 +174,7 @@ __global__ void __launch_bounds__(kBlock) gemv_kernel(const uint8_t* __restrict_
   bf16* sa = reinterpret_cast<bf16*>(smem_raw);
   uint8_t* ssc = smem_raw + (long)M_TILE * K * 2;
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-  const int n0 = (blockIdx.x * kWarps + warp) * 4;
+  const int n0 = (blockIdx.x * (blockDim.x >> 5) + warp) * 4;
   const uint8_t* wr[4];
   const uint8_t* sr[4];
 #pragma unroll
@@ -208,33 +207,50 @@ __global__ void __launch_bounds__(kBlock) gemv_kernel(const uint8_t* __restrict_
   }
 }
 
+// host 选每 block warp 数（同 mlp_fp8_decode.cu）：按 SM 数与（活跃专家数估 × 行数）算，不是卡型调优数值。
+// 活跃专家数 host 不知道（offsets 在 device），用 min(rows, E) 估。
+int pick_warps(int m_tile, long rows_total_per_e, long active_e_est, int rows_per_warp) {
+  static int sms = 0;
+  if (!sms) {
+    int dev = 0;
+    cudaGetDevice(&dev);
+    cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
+    if (sms <= 0) sms = 1;
+  }
+  int w = m_tile >= 16 ? 8 : kMaxWarps;
+  const long warps_total = (rows_total_per_e + rows_per_warp - 1) / rows_per_warp * (active_e_est > 0 ? active_e_est : 1);
+  while (w > 1 && warps_total / w < 2L * sms) w >>= 1;
+  return w;
+}
 template <int M_TILE>
 int launch_gateup(const uint8_t* aq, const uint8_t* asc, const uint8_t* const* gp, const uint8_t* const* gs,
                   const float* ag, const uint8_t* const* up, const uint8_t* const* us, const float* au,
-                  const int32_t* off, bf16* out, int I, int K, int E, cudaStream_t s) {
+                  const int32_t* off, bf16* out, int I, int K, int E, long rows, cudaStream_t s) {
   const int smem = M_TILE * K * 2 + M_TILE * (K / 16);
+  const int warps = pick_warps(M_TILE, I, rows < E ? rows : E, 1);
   static int attr_smem = 0;
   if (smem > 48 * 1024 && smem > attr_smem) {
     if (const int rc = (int)cudaFuncSetAttribute(gateup_kernel<M_TILE>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem))
       return rc;
     attr_smem = smem;
   }
-  const dim3 grid((unsigned)((I + kWarps - 1) / kWarps), (unsigned)E);
-  gateup_kernel<M_TILE><<<grid, kBlock, smem, s>>>(aq, asc, gp, gs, ag, up, us, au, off, out, I, K);
+  const dim3 grid((unsigned)((I + warps - 1) / warps), (unsigned)E);
+  gateup_kernel<M_TILE><<<grid, warps * 32, smem, s>>>(aq, asc, gp, gs, ag, up, us, au, off, out, I, K);
   return last_err();
 }
 template <int M_TILE>
 int launch_gemv(const uint8_t* aq, const uint8_t* asc, const uint8_t* const* bp, const uint8_t* const* sp,
-                const float* al, const int32_t* off, bf16* out, int N, int K, int E, cudaStream_t s) {
+                const float* al, const int32_t* off, bf16* out, int N, int K, int E, long rows, cudaStream_t s) {
   const int smem = M_TILE * K * 2 + M_TILE * (K / 16);
+  const int warps = pick_warps(M_TILE, N, rows < E ? rows : E, 4);
   static int attr_smem = 0;
   if (smem > 48 * 1024 && smem > attr_smem) {
     if (const int rc = (int)cudaFuncSetAttribute(gemv_kernel<M_TILE>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem))
       return rc;
     attr_smem = smem;
   }
-  const dim3 grid((unsigned)((N + 4 * kWarps - 1) / (4 * kWarps)), (unsigned)E);
-  gemv_kernel<M_TILE><<<grid, kBlock, smem, s>>>(aq, asc, bp, sp, al, off, out, N, K);
+  const dim3 grid((unsigned)((N + 4 * warps - 1) / (4 * warps)), (unsigned)E);
+  gemv_kernel<M_TILE><<<grid, warps * 32, smem, s>>>(aq, asc, bp, sp, al, off, out, N, K);
   return last_err();
 }
 }  // namespace
@@ -257,10 +273,10 @@ int moe_fp4_gateup_act(const void* aq, const void* asc, const void* const* gate_
   auto us = (const uint8_t* const*)up_sptr;
   bf16* o = (bf16*)out;
   const int I = (int)inter, K = (int)k, E = (int)num_experts;
-  if (rows == 1) return launch_gateup<1>(a, as, gp, gs, alpha_gate, up, us, alpha_up, offsets, o, I, K, E, stream);
-  if (rows == 2) return launch_gateup<2>(a, as, gp, gs, alpha_gate, up, us, alpha_up, offsets, o, I, K, E, stream);
-  if (rows <= 4) return launch_gateup<4>(a, as, gp, gs, alpha_gate, up, us, alpha_up, offsets, o, I, K, E, stream);
-  return launch_gateup<8>(a, as, gp, gs, alpha_gate, up, us, alpha_up, offsets, o, I, K, E, stream);
+  if (rows == 1) return launch_gateup<1>(a, as, gp, gs, alpha_gate, up, us, alpha_up, offsets, o, I, K, E, rows, stream);
+  if (rows == 2) return launch_gateup<2>(a, as, gp, gs, alpha_gate, up, us, alpha_up, offsets, o, I, K, E, rows, stream);
+  if (rows <= 4) return launch_gateup<4>(a, as, gp, gs, alpha_gate, up, us, alpha_up, offsets, o, I, K, E, rows, stream);
+  return launch_gateup<8>(a, as, gp, gs, alpha_gate, up, us, alpha_up, offsets, o, I, K, E, rows, stream);
 }
 int moe_fp4_gemv(const void* aq, const void* asc, const void* const* bptr, const void* const* sptr, const float* alpha,
                  const int32_t* offsets, void* out, int64_t rows, int64_t n, int64_t k, int64_t num_experts,
@@ -274,9 +290,9 @@ int moe_fp4_gemv(const void* aq, const void* asc, const void* const* bptr, const
   auto sp = (const uint8_t* const*)sptr;
   bf16* o = (bf16*)out;
   const int N = (int)n, K = (int)k, E = (int)num_experts;
-  if (rows == 1) return launch_gemv<1>(a, as, bp, sp, alpha, offsets, o, N, K, E, stream);
-  if (rows == 2) return launch_gemv<2>(a, as, bp, sp, alpha, offsets, o, N, K, E, stream);
-  if (rows <= 4) return launch_gemv<4>(a, as, bp, sp, alpha, offsets, o, N, K, E, stream);
-  return launch_gemv<8>(a, as, bp, sp, alpha, offsets, o, N, K, E, stream);
+  if (rows == 1) return launch_gemv<1>(a, as, bp, sp, alpha, offsets, o, N, K, E, rows, stream);
+  if (rows == 2) return launch_gemv<2>(a, as, bp, sp, alpha, offsets, o, N, K, E, rows, stream);
+  if (rows <= 4) return launch_gemv<4>(a, as, bp, sp, alpha, offsets, o, N, K, E, rows, stream);
+  return launch_gemv<8>(a, as, bp, sp, alpha, offsets, o, N, K, E, rows, stream);
 }
 }  // extern "C"

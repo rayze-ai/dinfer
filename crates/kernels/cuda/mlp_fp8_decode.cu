@@ -6,7 +6,7 @@
 // K 维流式扫完；A（fp8 → bf16 精确展开）整体驻共享内存被 block 内所有 warp 复用；f32 FMA 累加、warp shuffle 归约。
 // 数值口径与 mega 一致：fp8 输入、f32 累加、epilogue 乘 (w_scale·a_scale) 后舍 bf16、gelu 先舍 bf16 再乘 up 再舍、
 // fp8 用 SATFINITE。累加顺序不同于 mma，非逐位，差在 bf16 ulp 级（Rust 测试 mlp_fp8_decode_parity）。
-// 结构常量：kWarps（block 内 warp 数）、M_TILE 模板档位 {1,2,4,8,16}（决定共享内存 = M_TILE·K·2 B）。
+// 结构常量：每 block warp 数（host 按 SM 数/形状选，kMaxWarps 上限）、M_TILE 模板档位 {1,2,4,8,16}（决定共享内存 = M_TILE·K·2 B）。
 // 没有卡型调优数值。所有 arch 共用（fp8 转换用 cuda_fp8.h）。限制：K % 16 == 0。
 #include <cuda_fp8.h>
 
@@ -15,9 +15,11 @@
 
 namespace dinfer {
 namespace {
-constexpr int kWarps = 4;
-constexpr int kBlock = kWarps * 32;
 constexpr int kMaxM = 16;
+constexpr int kMaxWarps = 16;  // block 最多 16 warp（launch_bounds 上限）
+// 每 block 的 warp 数由 host 按 M_TILE / N 选（见 pick_warps），kernel 用 blockDim.x 读。
+// 为什么可变：一次 A（M_TILE·K bf16）装进 smem 的流量要被 block 内所有 warp 的权重行摊；4 warp 只摊 8 行时
+// m ≥ 8 的 A 装载反超权重流量（loop kaon3-decode-opt D62）。
 
 __device__ __forceinline__ float gelu_tanh_f32(float x) {
   constexpr float k0 = 0.7978845608028654f;
@@ -42,7 +44,7 @@ __device__ __forceinline__ void e4m3x16_to_f32(uint4 v, float* f) {
 template <int M_TILE>
 __device__ __forceinline__ void load_a(const uint8_t* __restrict__ a_q, bf16* sa, int m, int K) {
   const int nvec = K / 16;
-  for (int idx = threadIdx.x; idx < M_TILE * nvec; idx += kBlock) {
+  for (int idx = threadIdx.x; idx < M_TILE * nvec; idx += blockDim.x) {
     const int r = idx / nvec, c = idx % nvec;
     if (r < m) {
       float f[16];
@@ -124,9 +126,9 @@ __global__ void __launch_bounds__(256) norm_quant_kernel(const bf16* __restrict_
   }
 }
 
-// ---- gate‖up GEMV + gelu·mul → fp8。grid = ceil(I / kWarps)，每 warp 一个行号 n（gate 行 n + up 行 n）。
+// ---- gate‖up GEMV + gelu·mul → fp8。grid = ceil(I / warps)，每 warp 一个行号 n（gate 行 n + up 行 n）。
 template <int M_TILE>
-__global__ void __launch_bounds__(kBlock) gateup_act_kernel(const uint8_t* __restrict__ a_q,
+__global__ void __launch_bounds__(kMaxWarps * 32) gateup_act_kernel(const uint8_t* __restrict__ a_q,
                                                             const uint8_t* __restrict__ gw,
                                                             const uint8_t* __restrict__ uw,
                                                             uint8_t* __restrict__ act_q, int m, int I, int K,
@@ -135,7 +137,7 @@ __global__ void __launch_bounds__(kBlock) gateup_act_kernel(const uint8_t* __res
   bf16* sa = reinterpret_cast<bf16*>(smem_raw);
   load_a<M_TILE>(a_q, sa, m, K);
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-  const int n = blockIdx.x * kWarps + warp;
+  const int n = blockIdx.x * (blockDim.x >> 5) + warp;
   if (n >= I) return;  // load_a 已过 barrier，之后无 barrier
   float acc[2][M_TILE];
 #pragma unroll
@@ -153,15 +155,15 @@ __global__ void __launch_bounds__(kBlock) gateup_act_kernel(const uint8_t* __res
   }
 }
 
-// ---- 通用 fp8 GEMV：out[r][n] = bf16(Σ_k a_q[r][k]·w[n][k] · scale)。grid = ceil(N / (2·kWarps))，每 warp 两行。
+// ---- 通用 fp8 GEMV：out[r][n] = bf16(Σ_k a_q[r][k]·w[n][k] · scale)。grid = ceil(N / (2·warps))，每 warp 两行。
 template <int M_TILE>
-__global__ void __launch_bounds__(kBlock) gemv_kernel(const uint8_t* __restrict__ a_q, const uint8_t* __restrict__ w,
+__global__ void __launch_bounds__(kMaxWarps * 32) gemv_kernel(const uint8_t* __restrict__ a_q, const uint8_t* __restrict__ w,
                                                       bf16* __restrict__ out, int m, int N, int K, float scale) {
   extern __shared__ __align__(16) uint8_t smem_raw[];
   bf16* sa = reinterpret_cast<bf16*>(smem_raw);
   load_a<M_TILE>(a_q, sa, m, K);
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-  const int n0 = (blockIdx.x * kWarps + warp) * 2;
+  const int n0 = (blockIdx.x * (blockDim.x >> 5) + warp) * 2;
   if (n0 >= N) return;
   const bool two = n0 + 1 < N;
   float acc[2][M_TILE];
@@ -177,29 +179,46 @@ __global__ void __launch_bounds__(kBlock) gemv_kernel(const uint8_t* __restrict_
   }
 }
 
+// host 选每 block warp 数：A 装载摊到尽量多行（16 warp），但 M_TILE=16 时寄存器压力大用 8；
+// 并保证 grid 至少 ~2×SM 数的 block（小 N 不丢并行度）。不是卡型调优数值：按 SM 数与形状算。
+int pick_warps(int m_tile, long rows_total, int rows_per_warp) {
+  static int sms = 0;
+  if (!sms) {
+    int dev = 0;
+    cudaGetDevice(&dev);
+    cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
+    if (sms <= 0) sms = 1;
+  }
+  int w = m_tile >= 16 ? 8 : kMaxWarps;
+  const long warps_total = (rows_total + rows_per_warp - 1) / rows_per_warp;
+  while (w > 1 && warps_total / w < 2L * sms) w >>= 1;
+  return w;
+}
 template <int M_TILE>
 int launch_gateup(const uint8_t* a, const uint8_t* g, const uint8_t* u, uint8_t* act, int m, int I, int K, float gs,
                   float us, float dinv, cudaStream_t s) {
   const int smem = M_TILE * K * 2;
+  const int warps = pick_warps(M_TILE, I, 1);
   static int attr_smem = 0;  // 每个模板实例一次（host 侧属性，非流操作；graph 捕获时也只在首次调用）
   if (smem > 48 * 1024 && smem > attr_smem) {
     if (const int rc = (int)cudaFuncSetAttribute(gateup_act_kernel<M_TILE>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem))
       return rc;
     attr_smem = smem;
   }
-  gateup_act_kernel<M_TILE><<<(unsigned)((I + kWarps - 1) / kWarps), kBlock, smem, s>>>(a, g, u, act, m, I, K, gs, us, dinv);
+  gateup_act_kernel<M_TILE><<<(unsigned)((I + warps - 1) / warps), warps * 32, smem, s>>>(a, g, u, act, m, I, K, gs, us, dinv);
   return last_err();
 }
 template <int M_TILE>
 int launch_gemv(const uint8_t* a, const uint8_t* w, bf16* out, int m, int N, int K, float scale, cudaStream_t s) {
   const int smem = M_TILE * K * 2;
+  const int warps = pick_warps(M_TILE, N, 2);
   static int attr_smem = 0;  // 每个模板实例一次（host 侧属性，非流操作；graph 捕获时也只在首次调用）
   if (smem > 48 * 1024 && smem > attr_smem) {
     if (const int rc = (int)cudaFuncSetAttribute(gemv_kernel<M_TILE>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem))
       return rc;
     attr_smem = smem;
   }
-  gemv_kernel<M_TILE><<<(unsigned)((N + 2 * kWarps - 1) / (2 * kWarps)), kBlock, smem, s>>>(a, w, out, m, N, K, scale);
+  gemv_kernel<M_TILE><<<(unsigned)((N + 2 * warps - 1) / (2 * warps)), warps * 32, smem, s>>>(a, w, out, m, N, K, scale);
   return last_err();
 }
 }  // namespace

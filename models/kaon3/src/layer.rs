@@ -640,6 +640,11 @@ impl ActBuf {
 /// B5：decode（tokens ≤ 16）dense MLP 走带宽型 fp8 GEMV（`mlp_fp8_decode.cu`），不走 persistent mega。
 /// `DENSE_DECODE_OLD=1` 回退（A/B 用）。
 pub const DENSE_GEMV_ROWS: usize = 16;
+/// B7：MoE decode grouped NVFP4 GEMV（默认关，`MOE_DECODE_GEMV=1` 开）。
+fn moe_decode_gemv_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("MOE_DECODE_GEMV").ok().as_deref() == Some("1"))
+}
 /// B6 回滚中（D62：输出坏）：默认关，`FP8_GEMV=1` 才开（排查用）。
 fn fp8_gemv_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1568,7 +1573,16 @@ impl Gemma4Layer {
             let gemm_skip = std::env::var("MOE_GEMM_SKIP").unwrap_or_default();
             let (skip_gu, skip_dn) = (gemm_skip == "gu" || gemm_skip == "all", gemm_skip == "dn" || gemm_skip == "all");
             // 第二刀（MOE_GEMM_DUAL=1）：gate+up 融合单 launch（grid.z=2E 填满 SM）；逐位同分开两次。默认分开。
-            if skip_gu {
+            // B7（loop kaon3-decode-opt）：decode 小 R 走带宽型 NVFP4 grouped GEMV（gate‖up+gelu 融合 / down），
+            // 默认关（验证中），`MOE_DECODE_GEMV=1` 开；R ≤ 128（tokens ≤ 16）才走。
+            let moe_gemv = moe_decode_gemv_enabled() && r <= 128 && !skip_gu && !skip_dn;
+            if moe_gemv {
+                k::ops::moe_fp4_gateup_act(
+                    stream, &g.aq_gu, &g.as_gu, &mg.gate_packed, &mg.gate_scale, &mg.alpha_gate,
+                    &mg.up_packed, &mg.up_scale, &mg.alpha_up, &sc.buckets.offsets, &mut g.gelu_o.data,
+                    r, mg.n_gate, mg.k_gate, e,
+                )?;
+            } else if skip_gu {
             } else if std::env::var("MOE_GEMM_DUAL").ok().as_deref() == Some("1") {
                 let (gate_o, up_o) = (&mut g.gate_o, &mut g.up_o);
                 k::ops::moe_grouped_gemm_dual(
@@ -1588,12 +1602,19 @@ impl Gemma4Layer {
                 )?;
             }
             // 4) gelu·mul（全 R 行一次）
-            gelu_mul(stream, ops, &g.gate_o.data, &g.up_o.data, &mut g.gelu_o.data, r, mi)?;
+            if !moe_gemv {
+                gelu_mul(stream, ops, &g.gate_o.data, &g.up_o.data, &mut g.gelu_o.data, r, mi)?;
+            }
             // 5) down：量化 + grouped GEMM
             k::ops::moe_grouped_quant(
                 stream, &g.gelu_o.data, &g.row2e, &mg.agscale_dn, &mut g.aq_dn, &mut g.as_dn, r, mg.k_down, exact_rq,
             )?;
-            if !skip_dn {
+            if moe_gemv {
+                k::ops::moe_fp4_gemv(
+                    stream, &g.aq_dn, &g.as_dn, &mg.down_packed, &mg.down_scale, &mg.alpha_down, &sc.buckets.offsets,
+                    &mut sc.yg.data, r, mg.n_down, mg.k_down, e,
+                )?;
+            } else if !skip_dn {
                 k::ops::moe_grouped_gemm(
                     stream, &g.aq_dn, &g.as_dn, &mg.down_packed, &mg.down_scale, &mg.alpha_down, &sc.buckets.offsets,
                     &mut sc.yg.data, r, mg.n_down, mg.k_down, e,
