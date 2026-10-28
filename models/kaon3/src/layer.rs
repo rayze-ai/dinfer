@@ -1281,6 +1281,7 @@ impl Gemma4Layer {
                     0,
                     None,
                     self.window,
+                    ctx.kv_fp8_store,
                 )?
             }
             dinfer_core::runner::BatchMode::Prefill => ops.attn().prefill_win(
@@ -1329,9 +1330,7 @@ impl Gemma4Layer {
 
         // ---- 6. o_proj + post_attention_norm + 残差 ----
         if let Some((dir, _)) = sub_out {
-            let vv = attn.to_vec_f32(stream
-                    ctx.kv_fp8_store,
-                )?;
+            let vv = attn.to_vec_f32(stream)?;
             let bytes: Vec<u8> = vv.iter().take(tokens * heads * d).flat_map(|x| x.to_le_bytes()).collect();
             std::fs::write(dir.join("attn_out.bin"), bytes)
                 .map_err(|err| anyhow::anyhow!("写 attn_out.bin 失败: {err}"))?;

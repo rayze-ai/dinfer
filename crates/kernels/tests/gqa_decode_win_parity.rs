@@ -125,3 +125,81 @@ fn gqa_decode_win_parity() {
     }
     assert!(fails.is_empty(), "失败：\n{}", fails.join("\n"));
 }
+
+/// B15：KV cache 真存 e4m3 vs bf16 cache（元素为往返值）—— 同一 q/k/v（k/v 先 fp8 往返），decode v3/d512 与 paged 慢路径
+/// 两种 cache 的输出**逐位同**（读路径展开 = 写路径往返的同一 cvt）。场景同上（D=256 窗 1024 / D=512）。
+#[test]
+#[ignore]
+fn gqa_decode_fp8cache_bitwise() {
+    let dev = Device::new(0).unwrap();
+    let st = dev.default_stream();
+    let (h, bs) = (16usize, 32usize);
+    let rt = |x: f32| -> f32 {
+        // e4m3 往返（SATFINITE、RNE）的 CPU 口径：用 GPU 侧同一 cvt 更稳 —— 这里借 kernel：先写 bf16 cache 再读回不方便，
+        // 直接用 dinfer_kernels 的 fp8_e4m3_roundtrip_bf16_n 在 GPU 上做。
+        x
+    };
+    let _ = rt;
+    let mut fails = Vec::new();
+    let cases: Vec<(usize, usize, usize, Vec<usize>, f32)> = vec![
+        (256, 8, 1024, vec![1600, 70, 1, 1024, 1025], 2.0),
+        (512, 2, 0, vec![1600, 70, 1, 33, 64], 2.0),
+        (256, 8, 0, vec![300, 1], 1.0),
+    ];
+    for (d, hkv, window, seq, amp) in cases {
+        let b = seq.len();
+        let total: usize = seq.iter().sum();
+        let mut rng = Rng(0xf8 + d as u64 * 31 + window as u64 + total as u64);
+        let rb = |x: f32| bf16::from_f32(x).to_f32();
+        let q: Vec<f32> = (0..b * h * d).map(|_| rb(amp * rng.normal())).collect();
+        let k: Vec<f32> = (0..total * hkv * d).map(|_| rb(amp * rng.normal())).collect();
+        let v: Vec<f32> = (0..total * hkv * d).map(|_| rb(rng.normal())).collect();
+        let max_blocks = seq.iter().map(|n| n.div_ceil(bs)).max().unwrap();
+        let num_blocks: usize = seq.iter().map(|n| n.div_ceil(bs)).sum::<usize>() + 1;
+        let mut bt = vec![0i32; b * max_blocks];
+        let mut slots = Vec::with_capacity(total);
+        let mut next_blk = 1i32;
+        for (i, &n) in seq.iter().enumerate() {
+            let nb = n.div_ceil(bs);
+            for j in 0..nb { bt[i * max_blocks + j] = next_blk + j as i32; }
+            for t in 0..n { slots.push(((next_blk as usize + t / bs) * bs + t % bs) as i64); }
+            next_blk += nb as i32;
+        }
+        let up = |x: &[f32]| st.htod_copy(x.iter().map(|&f| bf16::from_f32(f)).collect::<Vec<_>>()).unwrap();
+        let dq = up(&q);
+        let mut dk = up(&k);
+        let mut dv = up(&v);
+        // k/v 先 fp8 往返（kv_fp8 层的写入前处理）
+        dinfer_kernels::ops::fp8_e4m3_roundtrip_bf16_n(&st, &mut dk, total * hkv * d, 1.0).unwrap();
+        dinfer_kernels::ops::fp8_e4m3_roundtrip_bf16_n(&st, &mut dv, total * hkv * d, 1.0).unwrap();
+        let dsl = st.htod_copy(slots.clone()).unwrap();
+        let elems = num_blocks * bs * hkv * 2 * d;
+        let mut cache_bf = st.alloc_zeros::<bf16>(elems).unwrap();
+        let mut cache_f8 = st.alloc_zeros::<bf16>(elems / 2).unwrap();
+        dinfer_kernels::gqa_cache_write_bf16(&st, &dk, &dv, &mut cache_bf, &dsl, total, hkv, d, bs, false).unwrap();
+        dinfer_kernels::gqa_cache_write_bf16(&st, &dk, &dv, &mut cache_f8, &dsl, total, hkv, d, bs, true).unwrap();
+        let dbt = st.htod_copy(bt).unwrap();
+        let dseq = st.htod_copy(seq.iter().map(|&n| n as i32).collect::<Vec<_>>()).unwrap();
+        let cu: Vec<i32> = (0..=b as i32).collect();
+        let dcu = st.htod_copy(cu).unwrap();
+        let mut scratch = st.alloc_zeros::<f32>(dinfer_kernels::gqa_decode_scratch_len(b, h, d)).unwrap();
+        for path in ["decode_win", "paged_slow"] {
+            let mut outs = Vec::new();
+            for (cache, f8) in [(&cache_bf, false), (&cache_f8, true)] {
+                let mut out = st.alloc_zeros::<bf16>(b * h * d).unwrap();
+                if path == "decode_win" {
+                    dinfer_kernels::gqa_decode_win_bf16(&st, &dq, cache, &dbt, &dseq, &mut out, &mut scratch, b, h, hkv, d, bs, max_blocks, 1.0, 0, None, window, f8).unwrap();
+                } else {
+                    dinfer_kernels::gqa_paged_win_bf16(&st, &dq, cache, &dbt, &dseq, &dcu, &mut out, b, 1, h, hkv, d, bs, max_blocks, 1.0, 0, false, window, false, f8).unwrap();
+                }
+                st.synchronize().unwrap();
+                outs.push(st.dtoh_sync_copy(&out).unwrap());
+            }
+            let nd = outs[0].iter().zip(&outs[1]).filter(|(a, c)| a.to_bits() != c.to_bits()).count();
+            let nonzero = outs[0].iter().filter(|x| x.to_f32() != 0.0).count();
+            println!("fp8cache D={d} win={window} seq={seq:?} {path}: 位差 {nd}/{} (非零 {nonzero}) => {}", b * h * d, if nd == 0 && nonzero > 0 { "ok" } else { "FAIL" });
+            if nd != 0 || nonzero == 0 { fails.push(format!("D={d} win={window} {path}")); }
+        }
+    }
+    assert!(fails.is_empty(), "失败: {fails:?}");
+}
