@@ -737,3 +737,4 @@ A 侧（=B6 行为）6.95 / 11.59 两轮稳定。B 侧三个变量叠在一起�
 - **为什么 B7 慢（事后看清）**：decode c1 每专家 1 行时，gate‖up 每 warp 只流 2 行 × 1.4 KB = 2.8 KB、lane 只 6 次迭代；down 每 warp 4 行 × 352 B，lane 只 2 次 —— 工作太碎，每 block 的 A 装载 + barrier + 收尾占大头，根本不是"流式"；而旧 grouped GEMM 的 mma tile 一个 CTA 吃 64 列 × 整 K，kernel 本身 18.6 us 只比下限差 3.6×。**B5 的"warp 一行 GEMV"只在单个大矩阵（N·K ≥ 数 MB、每 warp 流 ≥ 10 KB）有效，MoE 单专家 N=704 不满足。** 正确方向应是把 gate/up/down 三段融进一个 kernel 保 smem 中间量（减 launch 与往返），不是换 GEMV。
 - 另一疑点（查表数组 e2m1 落 local memory / exp2f）已顺手改成 cvt 内建（moe_fp4_decode.cu），但不足以翻盘，B7 不再验证；kernel 与测试留作小 M 参考，`MOE_DECODE_GEMV` 默认关，layer 接入保留（关着不影响）。
 - FP8_GEMV 拆分（split2）结果待出；B6c 已把 gemv 门槛改为 smem ≤ 24 KB（K=2816 → m ≤ 4）。
+- D64 补（split2 `FP8_GEMV=1`，B7 二进制含 pick_warps）：c8 **15.96**（关 10.99）—— m=8 走 gemv（K=2816 smem 45 KB、warps=8）比 D62 的 11.56 还差 4.4 ms ⇒ pick_warps 把 warp 数从 4 提到 8 后更慢（smem 不变、block 数减半、SM 填不满）。证实 c8 问题是占用/并行度而非 A 流量；**B6c 门槛 smem ≤ 24 KB（m ≤ 4）** 是对的，c8 不该走 gemv。等 c1。
