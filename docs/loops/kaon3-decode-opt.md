@@ -211,3 +211,14 @@ NO_GRAPH(eager,skip env一定生效,无图旁路):
 **今天方向全错的铁证**:两刀MoE kernel+要攻的attn kernel全不在关键路径。唯一该做=**host路径优化**。
 **host 13ms(graph)/14.8ms(eager)构成待挖**:forward_sample每步bind_ctx/upload_plan/graph.launch/collect(dtoh_sync阻塞)/采样。但host代码极薄(D15),13ms藏在哪需细测:bind_ctx?upload_plan(htod)?launch开销?dtoh_sync?python/rust调度?
 **下一步(真step B优化前最后定位)**:host内部分段计时(Instant::now在bind/upload/launch/collect各段),定13ms host哪段。这个纯CPU计时不碰GPU,graph/eager都准。对标vLLM 7.57ms(它host也薄但更快)。
+
+## D17 2026-10-28 非eager host-time(core engine层):exec=19.3ms占全,sched/publish微秒级
+core engine已有的[host-time](非我加的executor层)plen1024每步:
+- sched=0.3us(调度,忽略) exec(begin+finish)=19317us=**19.3ms(几乎全部)** publish=3.6us(忽略)
+exec=调用executor.forward_sample墙钟=19.3ms=TPOT。调度/publish确实极小(R58对)。**19.3ms全在exec内部**(forward_sample的launch+collect dtoh_sync)。
+**我加的executor层bind/upload/launch/collect细分没打出**(被core的host-time盖/tracing级别)→需确认真打出来拆exec 19.3ms。
+**关键未分清**:exec 19.3ms里 launch(异步提交,应极快) vs collect(dtoh_sync阻塞等GPU graph跑完30层)各占多少?
+- 若collect占满19ms=在等GPU→GPU确实算19ms(那skip 0影响=graph图旁路假象,D13对graph态成立,瓶颈其实GPU!);
+- 若launch占大头=真host开销。
+**这是最终分清点**。D16"瓶颈host"可能又被图旁路骗(graph态skip没生效),但D16有eager复验…eager下collect也阻塞等GPU(eager真跑forward),eager skip 0影响才是硬的——eager删qkv/paged/oproj真跑真跳过TPOT不变=GPU真不是瓶颈。所以collect等的"GPU"其实很快,19ms另有出处??
+**矛盾仍在,必须拆exec**。下一步:确保executor层[host-time]打出(改tracing或eprintln),拆launch vs collect(dtoh_sync)。若collect≈19ms但eager skip GPU又0影响→dtoh_sync本身慢(同步开销/驱动)而非等计算。
