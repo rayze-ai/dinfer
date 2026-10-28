@@ -178,3 +178,15 @@ nsys(2024.2.3)连--cuda-graph-trace=node也"no CUDA kernel data"——5090/sm120
 ## ★★ R91 2026-10-28 第二刀dual逐位对拍 bad=0/15488(gate+up都0)通过→验收graph态A/B
 分开两次 vs dual一次,gate/up两输出各bad=0。逐位门禁过(body逐字复制保证)。
 下一步:graph态A/B(MOE_GEMM_DUAL关/开,c1/c8 TPOT+吞吐),看填满SM(grid.z翻倍)实际端到端收益。<3%回滚(说到做到,不狡辩)。
+
+## ★★★★★ R92 2026-10-28 第二刀端到端定论:全<1%(c8 0%/c1 0%/rate8 +0.2~0.7%)→<3%回滚;两刀共证MoE非graph态瓶颈
+graph态A/B(MOE_GEMM_DUAL关/开):
+| 并发 | TPOT base→dual | 吞吐 |
+|---|---|---|
+| c8 | 21.75→21.74 ~0% | 341.1→341.4 +0.1% |
+| c1 | 18.83→18.83 0% | +0.1% |
+| rate8 | 43.02→42.72 +0.7% | 630.8→632.0 +0.2% |
+**第二刀端到端全<1%,远<3%门槛→按规矩回滚serve接线**(保留kernel+MOE_GEMM_DUAL开关默认关,零风险,同第一刀处理)。
+**"填满SM"假说错了**:grid.z翻倍多了并行度但端到端没动。原因:graph态下gate/up两次launch本就被图并发调度(图内无串行等待),合并没多出真实并行;或MoE graph态占比本就小(同第一刀摊薄)。
+**★两刀共同定论(关键)**:MoE kernel级优化(流水R77 1.83× / 融合R91 grid翻倍)在graph态端到端都<1%。强烈反推=**decode瓶颈不在MoE kernel效率**。改MoE怎么都不动端到端→MoE不是graph态大头(NO_GRAPH分段R36/R83的"MoE 44-63%"是假象,被graph摊薄)。真大头在别处(nsys没抓到,但两刀实测反推成立)。
+**下一步方向(不再碰MoE kernel)**:graph态真大头未知是最大障碍。要么①修nsys/换profiler抓graph态kernel榜(前6轮没成,需换环境/版本);②或从"graph态总步时12ms vs vLLM 7.57"的差,逐段关/换组件做差分(attn? norm? 采样? 调度?)定位。总之MoE kernel这条线到此为止,ROI已证<1%。
