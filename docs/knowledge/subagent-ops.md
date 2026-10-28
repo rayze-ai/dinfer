@@ -68,3 +68,5 @@
 - 容器 `kaon3-full` 只挂 GPU 0；`CUDA_VISIBLE_DEVICES=1` → `CUDA_ERROR_NO_DEVICE` 秒退，脚本继续打到旧端口 → 503，看起来像服务 bug。
 - 上一条链的 serve 没退干净时起下一条 → OOM → 503；链首 `pkill -x dinfer; sleep 2`。
 - bN 的 A 侧二进制：脚本开头 `cp 当前 → prev`；若链里先编译再调 bN，prev 已是新二进制——用 `[ -f prev ] || cp` 变体保留真旧版。
+- **链之间只能靠 DONE 标记串行；链内绝不 `pkill -x dinfer`**（只 kill 自己起的 `$SP`）：2026-10-28 b29.sh 开头的 `pkill -x dinfer` 在 watcher 提前放行时把 b28 bN 的 serve 杀了（bN 只剩 A 组、无 DONE，下游全卡）。
+- 用 `sed s/b28/b29/g` 复制链脚本时，**先 `grep -n "^for i"` 核 watcher 等的是哪个文件再启动**；我把 "等 pair2 DONE" 改成了 "等 b29 自己的 DONE"，watcher 立刻放行。
