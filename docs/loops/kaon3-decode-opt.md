@@ -574,3 +574,8 @@ PIPE=1 TPOT c1=16.45ms,base=17.41(D45同条件)。**端到端-5.5%(省~1ms)**。
 3. **mem util 仅 36–47%**：带宽没吃满 → 不是带宽墙，是延迟 / 并行度 / kernel 数（小 kernel 串行）。这与想法 1"要 overlap"一致，但 overlap 对象是 **图内 kernel 之间**（填满 SM、减少串行 kernel 数），不是 host 与 GPU 之间。
 4. TTFT：c≥4 已反超 vLLM；c1/c2 慢 18ms，其中 prefill **host launch 16ms（eager 逐 kernel 提交，占 prefill 步 40%）** 是 c1 TTFT 差的主因候选，第二优先。
 **Step B 靶子（按用户规则取最长段）= decode 图内 GPU 17ms**。D45 分段：MoE 5.3 / paged 3.2 / dense 2.8 / qkv 0.9 / 其余 ~5。先用 nsys `--cuda-graph-trace=node` 拿**每步 kernel 清单 + 每个 kernel 时长 + 总 kernel 数**（上次 2024.2.3 抓不到 CUDA 13 kernel，换新版），再决定是减 kernel 数（融合）还是提单 kernel 并行度（MoE grouped GEMM 128 专家 grid 只 88 块活、K 串行 22 步）。
+
+## D52 2026-10-28 decode 图内 kernel 清单：nsys 两次失败→第二次加 flush；并行编 MOE_GEMM_SKIP 二进制
+- nsys 2024.2.3（上会话）和 2026.3.2（本次）第一次都"无 kernel 表"：诊断表显示 **"Buffers holding CUDA trace data will be flushed on CudaProfilerStop()"**，只记到权重加载 14k memcpy，kernel 记录在 CUPTI 缓冲里没落盘（dinfer `kill -INT` 直接退，不调 cudaProfilerStop）。修：`--cuda-flush-interval=1000`（每秒 flush）。脚本 `scripts/dev/kaon3_nsys_decode.sh` + 解析 `scripts/dev/nsys_kern.py`（按 graphExecId 聚类取 decode 图实例，逐 kernel 名聚合时长/占比/grid）。
+- 同时容器内编译 `MOE_GEMM_SKIP=gu|dn|all`（只跳 3 个 grouped GEMM，路由/gather/quant/gelu/combine 照跑）版二进制（`/w/build_kaon3.sh`，结果 tmp_build_RESULT.txt；验 strings 含 MOE_GEMM_SKIP）。
+- 用户 2026-10-28 晚：B↔C "5 次"非硬顶，判断需要可加轮次（已写进规格）。

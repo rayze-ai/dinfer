@@ -18,7 +18,7 @@ cd /w/dinfer
 M=/hf_data/hub/models--kaon-release--Kaon-V3-nvpf4-mixed/snapshots/e268bef12555d299ed7ca02ade5e77f239f27478
 export MOE_GROUPED=1 KAON3_MEGA=1 MEGA_SPGU=4 MEGA_SPDN=4 ROUTER_GEMM_BI=0 CUDA_VISIBLE_DEVICES=0 ${EXTRA_ENV:-}
 rm -f /w/dinfer/tmp_nsys2.nsys-rep /w/dinfer/tmp_nsys2.sqlite
-"$NSYS" profile -o /w/dinfer/tmp_nsys2 --force-overwrite true -t cuda --cuda-graph-trace=node --sample none --cpuctxsw none \
+"$NSYS" profile -o /w/dinfer/tmp_nsys2 --force-overwrite true -t cuda --cuda-graph-trace=node --cuda-flush-interval=1000 --sample none --cpuctxsw none \
   ./target/release/dinfer serve --model "$M" --tokenizer "$M" --port 8340 --max-model-len 16384 --max-num-seqs 64 --max-num-batched-tokens 4096 >/w/dinfer/tmp_nsys2_serve.log 2>&1 &
 NP=$!
 for i in $(seq 1 150); do sed "s/\x1b\[[0-9;]*m//g" /w/dinfer/tmp_nsys2_serve.log | grep -q "listening addr" && break; sleep 1; done
