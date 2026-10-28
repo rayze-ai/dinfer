@@ -708,3 +708,8 @@ A 轮 c8 一次 TPOT p50 19.02 / TTFT 222（其它轮 13.45 / 583）—— 同�
 3. 量化沿用 `moe_grouped_quant`（逐位同）。空专家 CTA 直接 return。host 只在 R ≤ 64（tokens·8）时走，否则原 grouped GEMM；`MOE_DECODE_GEMV_OLD=1` 回退。
 **数值**：fp4·fp4 乘积 ≤ 4 bit 尾数、×两个 e4m3 scale ≤ 10 bit → 单项在 f32 精确；差只在累加序，bf16 ulp 级。对拍 = Rust GPU 测试（CPU f64 参照 + 现 grouped GEMM 对照）。
 **预期**：c1 三 GEMM 50 us/层 → ~20 us，省 ~0.9 ms/步（TPOT 7.47 → ~6.5，与 B6 叠加 → ~5.7）。
+
+## ★★★ D62 2026-10-28 B6 ABAB（A=B5，B=B6）：c1 7.47 → 6.96（-6.8%）**但 c8 10.94 → 11.56（+5.7%）且英文输出 "is is is…"（坏输出特征，同 D57 MEGA=0）** → **回滚**（`FP8_GEMV_OLD` 默认改为走旧路径），CSV 记负结果 round b6
+- 对拍（`b6par_RESULT.txt`）：独立 gemv 4 形状（N=3072 K=2816 m=16/1、N=2816 K=4096 m=8、K=8192 m=4）对 CPU f64 全过（最大误差 ≤ 0.0118）—— **随机 fp8 字节 + 合成 scale 的对拍过了，生产路径坏** ⇒ 差在接入（A 的量化口径 / scale 公式 / 缓冲）而不是 kernel 算术。
+- c8 变慢的结构原因：每 block 装 M_TILE·K·2 B 的 A 到 smem（m=8,K=2816 → 45 KB）却只服务 4 warp × 2 行 = 8 行权重（22 KB）—— A 装载 > 权重流量，m ≥ 8 时输给 nvjet。要改：每 block 服务更多行（8 warp × 2 行或每 warp 循环多行对），B5 的 dense 也有此问题但基线（mega）太差没暴露。
+- 下一步：① 写直接对拍 `QLinear::forward` 新旧路径（同 `quant_fp8` 产出的 A、同权重，gemv vs `forward_fp8_cublaslt`）定位接入差；② 修 m ≥ 8 的 A 复用。

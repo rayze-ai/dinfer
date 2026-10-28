@@ -640,9 +640,10 @@ impl ActBuf {
 /// B5：decode（tokens ≤ 16）dense MLP 走带宽型 fp8 GEMV（`mlp_fp8_decode.cu`），不走 persistent mega。
 /// `DENSE_DECODE_OLD=1` 回退（A/B 用）。
 pub const DENSE_GEMV_ROWS: usize = 16;
+/// B6 回滚中（D62：输出坏）：默认关，`FP8_GEMV=1` 才开（排查用）。
 fn fp8_gemv_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("FP8_GEMV_OLD").ok().as_deref() != Some("1"))
+    *V.get_or_init(|| std::env::var("FP8_GEMV").ok().as_deref() == Some("1"))
 }
 /// 与 `mlp_fp8_decode.cu` 的 M_TILE 档位同式（{1,2,4,8,16}），用于算共享内存是否放得下。
 fn fp8_gemv_m_tile(m: usize) -> usize {

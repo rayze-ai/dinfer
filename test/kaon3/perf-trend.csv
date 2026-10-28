@@ -89,3 +89,9 @@ b5,2026-10-28,"B5 decode dense MLP 带宽型 fp8 GEMV 替代 persistent mega(meg
 b5,2026-10-28,"B5 decode dense MLP 带宽型 fp8 GEMV 替代 persistent mega(mega 86.9us/层→3 kernel, 8.7× 离带宽): c1 TPOT 9.64→7.47 -22.5%, c8 13.45→10.94; GPU 对拍 fp8 码差 0 保留",c8,out_tok_per_s,425.300,956.000,0.445,,higher,main,5090,vllm,dinfer,kaon3
 b5,2026-10-28,"B5 decode dense MLP 带宽型 fp8 GEMV 替代 persistent mega(mega 86.9us/层→3 kernel, 8.7× 离带宽): c1 TPOT 9.64→7.47 -22.5%, c8 13.45→10.94; GPU 对拍 fp8 码差 0 保留",c8,ttft_p50_ms,580.000,146.400,3.962,,lower,main,5090,vllm,dinfer,kaon3
 b5,2026-10-28,"B5 decode dense MLP 带宽型 fp8 GEMV 替代 persistent mega(mega 86.9us/层→3 kernel, 8.7× 离带宽): c1 TPOT 9.64→7.47 -22.5%, c8 13.45→10.94; GPU 对拍 fp8 码差 0 保留",c8,tpot_p50_ms,10.940,6.240,1.753,,lower,main,5090,vllm,dinfer,kaon3
+b6,2026-10-28,回滚: B6 qkv/o_proj fp8 GEMM 走 gemv — c1 TPOT 7.47→6.96 但 c8 10.94→11.56 且英文输出坏('is is is'); 独立 gemv 对拍过、生产接入有差,c1,out_tok_per_s,134.300,200.000,0.672,,higher,main,5090,vllm,dinfer,kaon3
+b6,2026-10-28,回滚: B6 qkv/o_proj fp8 GEMM 走 gemv — c1 TPOT 7.47→6.96 但 c8 10.94→11.56 且英文输出坏('is is is'); 独立 gemv 对拍过、生产接入有差,c1,ttft_p50_ms,38.200,25.000,1.528,,lower,main,5090,vllm,dinfer,kaon3
+b6,2026-10-28,回滚: B6 qkv/o_proj fp8 GEMM 走 gemv — c1 TPOT 7.47→6.96 但 c8 10.94→11.56 且英文输出坏('is is is'); 独立 gemv 对拍过、生产接入有差,c1,tpot_p50_ms,6.960,4.690,1.484,,lower,main,5090,vllm,dinfer,kaon3
+b6,2026-10-28,回滚: B6 qkv/o_proj fp8 GEMM 走 gemv — c1 TPOT 7.47→6.96 但 c8 10.94→11.56 且英文输出坏('is is is'); 独立 gemv 对拍过、生产接入有差,c8,out_tok_per_s,409.600,956.000,0.428,,higher,main,5090,vllm,dinfer,kaon3
+b6,2026-10-28,回滚: B6 qkv/o_proj fp8 GEMM 走 gemv — c1 TPOT 7.47→6.96 但 c8 10.94→11.56 且英文输出坏('is is is'); 独立 gemv 对拍过、生产接入有差,c8,ttft_p50_ms,582.600,146.400,3.980,,lower,main,5090,vllm,dinfer,kaon3
+b6,2026-10-28,回滚: B6 qkv/o_proj fp8 GEMM 走 gemv — c1 TPOT 7.47→6.96 但 c8 10.94→11.56 且英文输出坏('is is is'); 独立 gemv 对拍过、生产接入有差,c8,tpot_p50_ms,11.560,6.240,1.853,,lower,main,5090,vllm,dinfer,kaon3
