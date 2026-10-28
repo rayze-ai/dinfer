@@ -808,11 +808,34 @@ impl Gemm {
                     .find(|(tn, tk, _)| *tn == n && *tk == k)
                     .map(|(_, _, s)| *s)
                     .unwrap_or(FALLBACK);
-                let pick = hs
+                let parity_pick = hs
                     .iter()
                     .find(|h| Self::algo_desc_full(&h.algo).starts_with(want))
                     .map(|h| h.algo)
                     .unwrap_or(hs[0].algo);
+                // B25（loop kaon3-decode-opt D78）：tile=13 的 want 匹配是**逐位对齐 vLLM** 的口径，对 prefill 的大 M
+                // （m=1560 时 nvjet 64x32 tile）比大 tile 慢 ~3×（nsys 态 qkv 249 us vs 算力下限 22）。m ≥ 64 时对 32 个
+                // 启发式候选各计时 timing_iters 次取最快（在真实缓冲上跑，out 被覆盖多次无副作用），按 (m 桶, n, k) 缓存；
+                // m < 64（decode / 对拍）保持 parity 口径。`FP8_LT_TUNE=0` 关。
+                static TUNE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                let tune_on = *TUNE.get_or_init(|| std::env::var("FP8_LT_TUNE").map_or(true, |v| v != "0"));
+                let pick = if tune_on && m >= 64 && self.tune_enabled() {
+                    let iters = self.profile.gemm_tune.timing_iters.max(1);
+                    let mut best = (f32::INFINITY, parity_pick);
+                    for h in &hs {
+                        let Ok(us) = self.time_us(iters, || self.run_lt_fp8(&d, &h.algo, a, w, out)) else { continue };
+                        if us < best.0 {
+                            best = (us, h.algo);
+                        }
+                    }
+                    if std::env::var("GEMM_FP8_DEBUG").is_ok() {
+                        eprintln!("[gemm fp8 tune] m={m} n={n} k={k} best={:.1}us pick='{}' parity='{}'", best.0,
+                            Self::algo_desc_full(&best.1), Self::algo_desc_full(&parity_pick));
+                    }
+                    best.1
+                } else {
+                    parity_pick
+                };
                 if std::env::var("GEMM_FP8_DEBUG").is_ok() {
                     let all: Vec<String> = hs.iter().map(|h| Self::algo_desc_full(&h.algo)).collect();
                     eprintln!("[gemm fp8] m={m} n={n} k={k} want='{want}' pick='{}' cands={all:?}", Self::algo_desc_full(&pick));
