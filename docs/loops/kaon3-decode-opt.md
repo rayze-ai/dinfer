@@ -412,3 +412,8 @@ curl /tokenize 1024词=**7ms**(排除tokenize是TTFT 2秒根因)。但出**4010 
 **dinfer启动慢**:max-model-len 16384后model_load_ms=64068(之前2048时42s,KV池大)。
 **对齐教训固化**:这才是公平基线。之前所有数(594/63%/6-16%/慢24×)因前置不对齐(max-model-len/eager/prompt超限)全作废,以本表为准。
 **下一步**:攻TTFT 380ms恒定开销——prompt合规下首token为何380ms(vLLM24ms)。c1无并发无排队=纯prefill+首token路径固定开销。skip差分prefill各段(合规1560token下)或host计时(这次计时加对completions.rs已验bench走这)看380ms在哪。
+
+## ★★★★ D36 2026-10-28 合规负载prefill skip也全0影响→TTFT 380ms也在host(非GPU),稳
+合规1560token prefill skip:base 367/nomoe 367/nodense 367/nopaged 367/noqkv 367=**全0影响**(同D28但这次合规负载,结论稳非超限假象)。
+**TTFT 380ms不在GPU计算**,在host prefill路径(c1无排队)。GPU skip计算不变=finish等的首token GPU很快,380ms是**host侧串行**(prefill plan构造/block分配/graph/htod)。同decode 19ms的host性质。
+**拆begin/finish定死(用eprintln不靠tracing,前4次tracing没出)**:c1 prefill走engine.rs:581 begin→async存pending→下轮589 finish。在581 begin前后+589 finish前后加eprintln计时。host-split之前加565(pending分支)错了,c1首个prefill走581同步段或589。
