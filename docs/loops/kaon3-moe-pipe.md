@@ -158,3 +158,6 @@ nsys(nsight-systems-2024.2.3 apt装上)跑完但report无kernel数据。根因:-
 
 ## R87 2026-10-28 nsys跨容器不持久(--rm装的/opt丢)→装+profile合同一容器脚本重跑
 R86修时序版仍NSYS=空:上轮apt装的nsys在容器/opt,--rm新容器没了(挂载盘只/w)。修:apt装nsys+nsys profile serve+持续单流打满15s窗口,全放同一容器脚本。等graph态真实kernel累计时间榜=第二刀第一条硬证据(gate/up/down三GEMM占一步decode真实%)。
+
+## R88 2026-10-28 nsys空数据根因=cudagraph未展开;修:--cuda-graph-trace=node
+nsys全程包serve仍"no CUDA kernel data"——根因:**cudagraph replay的kernel默认不被nsys CUDA trace展开**(graph node不走常规launch API)。这版nsys(2024.2.3)支持`--cuda-graph-trace=node`展开图内每个kernel。加上重跑→抓到graph态gemm3/attn/各kernel累计时间=第二刀第一条硬证据。
