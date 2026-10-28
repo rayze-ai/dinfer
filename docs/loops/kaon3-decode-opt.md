@@ -849,3 +849,7 @@ decode c1 的 MoE 段 nsys：grouped_gemm gate 18.6 + up 18.6 + down 12.5 + gelu
 - B16 补：`STAGES=6 × BK=128` 静态 smem 50.7 KB 超 48 KB（ptxas 会报 too much shared data）→ BK=128 只 3/4 级，BK=64 可 6 级。b16 链起时该守卫还没 put，若编译失败即此因，重起即可。
 - **b16 门禁**：`MOE_PIPE4_PARITY rows=22 STAGES=4 bad=0/15488`（gate/up 形状逐位）；编译过（STAGES=6×BK=128 实例当时还在，ptxas 没报——静态 smem 50.7 KB 可能按 opt-in 上限算了；守卫仍保留）。等 down 形状行 + fp8cache paged_v5 行 + bN。
 - **b16 门禁全过**：`MOE_PIPE4_PARITY` gate/up bad=0/15488、down bad=0/61952（STAGES=4 逐位）；**fp8cache paged_v5（fa_v5 PAGED KV_FP8）两场景位差 0** ⇒ B15b 逐位。bN 编译过（marker=110），ABAB 跑中。bN 之后起 `/w/b15bsplit.sh`（b16 二进制：`KV_FP8_STORE=1` vs 关，均 FP8_GEMV=1）看 c8 TTFT 是否回 ~490、TPOT 保住 -3.6%。
+
+## B17 预案 2026-10-28：prefill（TTFT）下一刀的靶子
+- D54 时 c1 prefill 步（1560 tok）eager 797 kernel、kernel_sum 155 ms、gaps 4.4 ms；其中 down GEMM 空 block 57 ms（B8 已去）。b8c 后 **TTFT c1 29.5 ms**（含 tokenize 1.2 + sched + prefill 步 + 首 decode 采样），说明 prefill 步现 ≈ 25 ms。
+- 剩余大头待 nsys 复抓（prefill 单独一段）：候选 ① MoE grouped GEMM prefill（R=12480 行、BM=32 tile，现在 B16 4 级流水也会受益）；② dense NVFP4 GEMM（1560×2816×2112 ×3，mma tile 已有）；③ attention fa_v5 prefill；④ 797 次 eager launch 的 host 开销（D51：launch 16 ms of 41 ms prefill exec ≈ 40%）—— **prefill 图化**（按 token 桶 capture：512/1024/2048/4096）或 **多流/launch 批量**。④ 可能最大：host 16 ms 现在是 prefill 的一半以上。
