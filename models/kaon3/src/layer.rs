@@ -632,6 +632,13 @@ impl ActBuf {
 }
 
 /// dense MLP megakernel 一次 launch 的最大行数（kernel host 侧断言 `m <= 8`）。
+/// B5：decode（tokens ≤ 16）dense MLP 走带宽型 fp8 GEMV（`mlp_fp8_decode.cu`），不走 persistent mega。
+/// `DENSE_DECODE_OLD=1` 回退（A/B 用）。
+pub const DENSE_GEMV_ROWS: usize = 16;
+fn dense_gemv_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("DENSE_DECODE_OLD").ok().as_deref() != Some("1"))
+}
 pub const MEGA_ROWS: usize = 8;
 /// megakernel 的阶段数（`S_COUNT`，见 `mega_mlp_sm120.cu`）；`ready` 按它清零。
 const MEGA_STAGES: usize = 6;
@@ -772,6 +779,9 @@ pub struct LayerScratch {
     pub mega: Option<MegaBufs>,
     /// `MOE_GROUPED=1` 时 device-grouped MoE 的中间缓冲（R=max_tokens·top_k 行）；关时为空。
     pub grouped: Option<GroupedBufs>,
+    /// B5 decode dense MLP fp8 GEMV 路径的小 fp8 缓冲（[16, hidden] / [16, dense_inter]）。
+    pub dq16: dinfer_kernels::cudarc::driver::CudaSlice<u8>,
+    pub act_q16: dinfer_kernels::cudarc::driver::CudaSlice<u8>,
 }
 
 /// B3 device-grouped MoE 的中间缓冲（`MOE_GROUPED=1`）。R = max_tokens·top_k。
@@ -851,6 +861,8 @@ impl LayerScratch {
             preq: std::sync::Mutex::new(None),
             mega: if mega_enabled() { Some(MegaBufs::new(stream, cfg)?) } else { None },
             grouped: if moe_grouped_enabled() { Some(GroupedBufs::new(stream, cfg, max_tokens)?) } else { None },
+            dq16: stream.alloc_zeros::<u8>(DENSE_GEMV_ROWS * cfg.hidden)?,
+            act_q16: stream.alloc_zeros::<u8>(DENSE_GEMV_ROWS * cfg.dense_inter)?,
         })
     }
 }
@@ -900,6 +912,36 @@ impl Gemma4Layer {
     ///
     /// 两处硬约束：① kernel host 侧断言 `m <= 8`（更大行数只会在 prefill 出现）；
     /// ② `ready` 是 kernel 的全局阶段计数器，**每次 launch 前必须清零**，否则第二次 launch 会直接越过等待。
+    /// B5：decode dense MLP 带宽型 fp8 路径（norm→fp8 / gate‖up GEMV+gelu·mul→fp8 / down GEMV），写 `sc.dense`
+    /// （未做 post_ff_norm_1，由调用方 `rmsnorm_into` 到 `sc.norm`）。返回 false = 不适用（走 mega / 通用路径）。
+    fn dense_decode_gemv(
+        &self,
+        stream: &Stream,
+        cfg: &KaonConfig,
+        sc: &mut LayerScratch,
+        tokens: usize,
+        eps: f32,
+    ) -> Result<bool> {
+        if !dense_gemv_enabled() || tokens == 0 || tokens > DENSE_GEMV_ROWS {
+            return Ok(false);
+        }
+        let (Some((gw, gw_s, gw_a, gn, gk)), Some((uw, uw_s, uw_a, un, uk)), Some((dw, dw_s, dw_a, dn, dk))) =
+            (self.dense_gate.fp8_parts(), self.dense_up.fp8_parts(), self.dense_down.fp8_parts())
+        else {
+            return Ok(false);
+        };
+        let (h, inter) = (cfg.hidden, cfg.dense_inter);
+        if h % 16 != 0 || inter % 16 != 0 {
+            return Ok(false);
+        }
+        ensure!(gn == inter && un == inter && gk == h && uk == h && dn == h && dk == inter, "dense gemv: 形状");
+        ensure!((gw_a - uw_a).abs() < 1e-12, "dense gemv: gate/up a_scale 不一致 {gw_a} {uw_a}");
+        k::ops::mlp_fp8_norm_quant(stream, &sc.x.data, &self.pre_ff_norm.data, &mut sc.dq16, tokens, h, eps, 1.0 / gw_a)?;
+        k::ops::mlp_fp8_gateup_act(stream, &sc.dq16, gw, uw, &mut sc.act_q16, tokens, inter, h, gw_s * gw_a, uw_s * uw_a, 1.0 / dw_a)?;
+        k::ops::mlp_fp8_gemv(stream, &sc.act_q16, dw, &mut sc.dense.data, tokens, h, inter, dw_s * dw_a)?;
+        Ok(true)
+    }
+
     fn mega_dense_branch(
         &self,
         stream: &Stream,
@@ -1254,7 +1296,11 @@ impl Gemma4Layer {
         // 与下面逐 op 路径逐位一致（`crates/kernels/tests/mega_mlp_parity.rs`）。prefill / 非 FP8 回退。
         // DENSE_SKIP=1（纯计时，结果错）：整条 dense 支路不跑，测 graph 态 dense 省掉后 TPOT 掉多少 = dense 真占比。
         let dense_skip = std::env::var("DENSE_SKIP").ok().as_deref() == Some("1");
-        let mega_done = if dense_skip { true } else { self.mega_dense_branch(stream, cfg, sc, tokens, eps)? };
+        let gemv_done = if dense_skip { false } else { self.dense_decode_gemv(stream, cfg, sc, tokens, eps)? };
+        if gemv_done {
+            rmsnorm_into(stream, ops, &sc.dense, &self.post_ff_norm_1, &mut sc.norm, h, tokens, eps)?;
+        }
+        let mega_done = if dense_skip || gemv_done { true } else { self.mega_dense_branch(stream, cfg, sc, tokens, eps)? };
         if !mega_done {
             rmsnorm_into(stream, ops, &sc.x, &self.pre_ff_norm, &mut sc.norm, h, tokens, eps)?;
             sub_dump(stream, sub_out, "pre_ff_norm", &sc.norm, tokens, h)?;

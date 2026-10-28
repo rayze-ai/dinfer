@@ -404,6 +404,16 @@ int gemm_nvfp4_gs_bf16(const void* a, float a_gscale, const void* packed, const 
 int gemm_nvfp4_bf16(const void* a, const void* packed, const void* scale, float global, void* out, int64_t m, int64_t n,
                     int64_t k, cudaStream_t stream);
 
+// decode dense MLP 带宽型 fp8 路径（mlp_fp8_decode.cu，M ≤ 16，K % 16 == 0）：
+//   norm → fp8：q[m][h] = fp8(bf16(rmsnorm(x)·w) · a_inv)
+//   gate‖up GEMV + gelu·mul → fp8：act_q[m][inter] = fp8(bf16(bf16(gelu(bf16(Σ a·g)·gate_scale))·bf16(Σ a·u·up_scale))·dn_a_inv)
+//   通用 fp8 GEMV：out[m][n] = bf16(Σ a_q·w · scale)。scale = w_scale·a_scale。
+int mlp_fp8_norm_quant(const void* x, const void* w, void* q, int64_t m, int64_t h, float eps, float a_inv,
+                       cudaStream_t stream);
+int mlp_fp8_gateup_act(const void* a_q, const void* gate_w, const void* up_w, void* act_q, int64_t m, int64_t inter,
+                       int64_t k, float gate_scale, float up_scale, float dn_a_inv, cudaStream_t stream);
+int mlp_fp8_gemv(const void* a_q, const void* w, void* out, int64_t m, int64_t n, int64_t k, float scale,
+                 cudaStream_t stream);
 // 小 M bf16 GEMM（decode）：out[M,N] = a[M,K]·w[N,K]^T (+bias)；splits>1 时需 partial[splits,M,N] f32。见 gemm_small_m.cu。
 int gemm_small_m_bf16(const void* a, const void* w, const void* bias, void* out, float* partial, int64_t m,
                       int64_t n, int64_t k, int64_t splits, cudaStream_t stream);

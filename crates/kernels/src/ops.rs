@@ -5242,3 +5242,78 @@ pub fn situ_and_mul_bf16_n(
         "situ_and_mul_bf16",
     )
 }
+
+// ---------------------------------------------------------------- decode dense MLP fp8 路径（`cuda/mlp_fp8_decode.cu`）
+
+/// norm → fp8：`q[m][h] = fp8(bf16(rmsnorm(x)·w) · a_inv)`，a_inv = 1/a_scale。
+pub fn mlp_fp8_norm_quant(
+    stream: &Stream,
+    x: &CudaSlice<bf16>,
+    w: &CudaSlice<bf16>,
+    q: &mut CudaSlice<u8>,
+    m: usize,
+    h: usize,
+    eps: f32,
+    a_inv: f32,
+) -> Result<()> {
+    ensure!(x.len() >= m * h && w.len() == h && q.len() >= m * h, "mlp_fp8_norm_quant: 形状 m={m} h={h}");
+    ensure!(a_inv > 0.0, "mlp_fp8_norm_quant: a_inv={a_inv}");
+    let (px, pw) = (stream.ptr(x) as *const c_void, stream.ptr(w) as *const c_void);
+    let pq = stream.ptr_mut(q) as *mut c_void;
+    // SAFETY: 指针来自有效 CudaSlice，长度已校验。
+    check(
+        unsafe { ffi::mlp_fp8_norm_quant(px, pw, pq, m as i64, h as i64, eps, a_inv, stream.raw() as ffi::cudaStream_t) },
+        "mlp_fp8_norm_quant",
+    )
+}
+
+/// gate‖up fp8 GEMV + gelu·mul → fp8：`act_q[m][inter]`。gate_scale/up_scale = w_scale·a_scale；dn_a_inv = 1/down 的 a_scale。
+#[allow(clippy::too_many_arguments)]
+pub fn mlp_fp8_gateup_act(
+    stream: &Stream,
+    a_q: &CudaSlice<u8>,
+    gate_w: &CudaSlice<u8>,
+    up_w: &CudaSlice<u8>,
+    act_q: &mut CudaSlice<u8>,
+    m: usize,
+    inter: usize,
+    k: usize,
+    gate_scale: f32,
+    up_scale: f32,
+    dn_a_inv: f32,
+) -> Result<()> {
+    ensure!(m >= 1 && m <= 16 && k % 16 == 0, "mlp_fp8_gateup_act: m={m} (≤16) k={k} (16 的倍数)");
+    ensure!(a_q.len() >= m * k && gate_w.len() == inter * k && up_w.len() == inter * k && act_q.len() >= m * inter, "mlp_fp8_gateup_act: 形状");
+    let (pa, pg, pu) = (stream.ptr(a_q) as *const c_void, stream.ptr(gate_w) as *const c_void, stream.ptr(up_w) as *const c_void);
+    let po = stream.ptr_mut(act_q) as *mut c_void;
+    // SAFETY: 同上。
+    check(
+        unsafe {
+            ffi::mlp_fp8_gateup_act(pa, pg, pu, po, m as i64, inter as i64, k as i64, gate_scale, up_scale, dn_a_inv, stream.raw() as ffi::cudaStream_t)
+        },
+        "mlp_fp8_gateup_act",
+    )
+}
+
+/// 通用 fp8 GEMV（M ≤ 16）：`out[m][n] = bf16(Σ_k a_q[m][k]·w[n][k] · scale)`，scale = w_scale·a_scale。
+#[allow(clippy::too_many_arguments)]
+pub fn mlp_fp8_gemv(
+    stream: &Stream,
+    a_q: &CudaSlice<u8>,
+    w: &CudaSlice<u8>,
+    out: &mut CudaSlice<bf16>,
+    m: usize,
+    n: usize,
+    k: usize,
+    scale: f32,
+) -> Result<()> {
+    ensure!(m >= 1 && m <= 16 && k % 16 == 0, "mlp_fp8_gemv: m={m} (≤16) k={k} (16 的倍数)");
+    ensure!(a_q.len() >= m * k && w.len() == n * k && out.len() >= m * n, "mlp_fp8_gemv: 形状");
+    let (pa, pw) = (stream.ptr(a_q) as *const c_void, stream.ptr(w) as *const c_void);
+    let po = stream.ptr_mut(out) as *mut c_void;
+    // SAFETY: 同上。
+    check(
+        unsafe { ffi::mlp_fp8_gemv(pa, pw, po, m as i64, n as i64, k as i64, scale, stream.raw() as ffi::cudaStream_t) },
+        "mlp_fp8_gemv",
+    )
+}
