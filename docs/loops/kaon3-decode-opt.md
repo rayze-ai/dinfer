@@ -352,3 +352,7 @@ plen1024 TTFT base 2002ms,skip各段:nomoe 2001/nodense 2001/noqkv 2001/nopaged 
 3. 之前594/63%是prefix-repeat 1虚高,真实负载dinfer仅vLLM 6-16%。
 4. 一天改的MoE两刀+D=512 flash全不在关键路径(都默认关/对拍过保留,零风险)。
 5. 方法教训(已knowledge):整段skip定关键路径该最先做,别信代码推断/NO_GRAPH分段。
+
+## D30 2026-10-28 计时日志第4次打不出(cmpl-time/render-time/host-split/executor全0,只core host-time出)+换/tokenize直接量
+[cmpl-time]又0行。4次加tracing::info计时都没打出来(executor/host-split/render/cmpl),只core engine的[host-time]出。**系统问题**:server crate的tracing info可能没启用/被过滤,或bench请求没走到我加的行。我一直假设加info就能看到,错。
+**换法(绕serve日志)**:直接curl /tokenize端点(misc.rs:81,bench不走但能单独量tokenize),time一个1024词prompt的tokenize耗时。若~2秒=tokenize O(L²)是TTFT根因;若快=2秒在别处(engine prefill提交/等)。
