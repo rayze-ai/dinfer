@@ -278,6 +278,9 @@ extern "C" {
     /// B12：q/k/v fp8 往返 + k/v 写 cache 一次 launch（见 kernels.h）。
     #[allow(clippy::too_many_arguments)]
     pub fn gqa_cache_write_fp8rt_bf16(q: *mut c_void, k: *mut c_void, v: *mut c_void, cache: *mut c_void, slot_mapping: *const i64, tokens: i64, q_heads: i64, kv_heads: i64, head_dim: i64, block_size: i64, kv_fp8: i32, stream: cudaStream_t) -> i32;
+    /// B23：attention 前段融合（见 kernels.h）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn attn_pre_fused_bf16(q: *mut c_void, k: *mut c_void, v: *mut c_void, q_w: *const c_void, k_w: *const c_void, positions: *const i32, cos_sin: *const f32, cache: *mut c_void, slot_mapping: *const i64, tokens: i64, q_heads: i64, kv_heads: i64, head_dim: i64, rope_dim: i64, span: i64, block_size: i64, eps: f32, mode: i32, kv_fp8: i32, stream: cudaStream_t) -> i32;
     pub fn gqa_prefill_bf16(
         q: *const c_void,
         k: *const c_void,
@@ -1701,6 +1704,7 @@ mod stubs {
     stub!(fused_add_rmsnorm_bf16(x: *const c_void, r: *mut c_void, w: *const c_void, o: *mut c_void, t: i64, h: i64, e: f32, l: i32, m: i32, s: cudaStream_t));
     stub!(rope_bf16(q: *mut c_void, k: *mut c_void, p: *const i32, cs: *const f32, t: i64, qh: i64, kh: i64, hd: i64, rd: i64, n: i32, s: cudaStream_t));
     stub!(rope_span_bf16(q: *mut c_void, k: *mut c_void, p: *const i32, cs: *const f32, t: i64, qh: i64, kh: i64, hd: i64, rd: i64, sp: i64, n: i32, s: cudaStream_t));
+    stub!(attn_pre_fused_bf16(q: *mut c_void, k: *mut c_void, v: *mut c_void, qw: *const c_void, kw: *const c_void, p: *const i32, cs: *const f32, c: *mut c_void, sm: *const i64, t: i64, qh: i64, kh: i64, hd: i64, rd: i64, sp: i64, bs: i64, e: f32, m: i32, f8: i32, s: cudaStream_t));
     stub!(silu_and_mul_bf16(x: *const c_void, o: *mut c_void, t: i64, i: i64, s: cudaStream_t));
     stub!(mul_sigmoid_bf16(x: *mut c_void, g: *const c_void, n: i64, s: cudaStream_t));
     stub!(mul_sigmoid_rows_bf16(x: *mut c_void, g: *const c_void, r: i64, c: i64, gs: i64, s: cudaStream_t));

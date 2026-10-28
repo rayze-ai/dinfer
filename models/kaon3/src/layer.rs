@@ -662,6 +662,11 @@ fn norm_add_fused_enabled() -> bool {
     *V.get_or_init(|| env_ne!("NORM_ADD_FUSED", "0"))
 }
 /// B12：kv_fp8 往返 + cache_write 融合（默认开；`KV_FP8_FUSED=0` 回退）。
+/// B23：attention 前段五合一（`ATTN_PRE_FUSED=0` 回退逐 op）。
+fn attn_pre_fused_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_ne!("ATTN_PRE_FUSED", "0"))
+}
 fn kv_fp8_fused_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_ne!("KV_FP8_FUSED", "0"))
@@ -1199,7 +1204,24 @@ impl Gemma4Layer {
         sub_dump(stream, sub_out, "v_proj_raw", v, tokens, nkv * d)?;
         // ---- 3. 逐头 RMSNorm：q_norm / k_norm 带权重，v_norm 无权重 ----
         // ATTN_SKIP_NORM=1（纯计时,结果错）：跳过 3 个逐头 RMSNorm,测其 graph 态占比。
-        if env_ne!("ATTN_SKIP_NORM", "1") {
+        // B23（loop kaon3-decode-opt D148）：逐头 norm ×3 + rope + fp8rt/cache_write 五次 launch 融成一次（逐位，
+        // `crates/kernels/tests/attn_pre_fused_parity.rs`）。条件：kv_fp8 层、未开任何 ATTN_SKIP_*、非对拍 dump。`ATTN_PRE_FUSED=0` 回退。
+        let attn_pre_fused = attn_pre_fused_enabled()
+            && cfg.kv_fp8
+            && sub_out.is_none()
+            && env_ne!("ATTN_SKIP_NORM", "1")
+            && env_ne!("ATTN_SKIP_ROPE", "1")
+            && env_ne!("ATTN_SKIP_KVFP8", "1")
+            && kv_fp8_fused_enabled();
+        if attn_pre_fused {
+            let rope = if self.window > 0 { &ropes.sliding } else { &ropes.full };
+            k::ops::attn_pre_fused_bf16(
+                stream, &mut q.data, &mut kk.data, &mut v.data, &self.q_norm.data, &self.k_norm.data, &ctx.positions.data,
+                &rope.cos_sin.data, &mut *ctx.kv_mut, &ctx.slot_mapping.data, tokens, heads, nkv, d, rope.rope_dim, rope.span,
+                ctx.block_size, eps, ctx.kv_fp8_store,
+            )?;
+        }
+        if !attn_pre_fused && env_ne!("ATTN_SKIP_NORM", "1") {
             head_rmsnorm(stream, ops, q, Some(&self.q_norm), d, eps, tokens * heads)?;
             head_rmsnorm(stream, ops, kk, Some(&self.k_norm), d, eps, tokens * nkv)?;
             head_rmsnorm(stream, ops, v, None, d, eps, tokens * nkv)?;
@@ -1216,7 +1238,7 @@ impl Gemma4Layer {
         // ---- 4. RoPE（只转前 rope_dim 维；proportional 的分母已由 Ropes 处理）----
         // ATTN_SKIP_ROPE=1（纯计时,结果错）：跳过 rope,测其 graph 态占比。
         let rope = if self.window > 0 { &ropes.sliding } else { &ropes.full };
-        if env_ne!("ATTN_SKIP_ROPE", "1") {
+        if !attn_pre_fused && env_ne!("ATTN_SKIP_ROPE", "1") {
             rope.apply(stream, q, Some(kk), ctx.positions, tokens, heads, nkv, d)?;
         }
         if let Some((dir, _)) = sub_out {
@@ -1233,13 +1255,15 @@ impl Gemma4Layer {
         // B12：kv_fp8 时 q/k/v 往返 + cache_write 融成一次（`KV_FP8_FUSED=0` 回退 4 次 launch）。
         let kvfp8_on = cfg.kv_fp8 && env_ne!("ATTN_SKIP_KVFP8", "1");
         let kvfp8_fused = kvfp8_on && kv_fp8_fused_enabled();
-        if kvfp8_fused {
+        if attn_pre_fused {
+            // B23 已在上面一次做完 norm/rope/fp8rt/cache_write
+        } else if kvfp8_fused {
             k::ops::gqa_cache_write_fp8rt_bf16(
                 stream, &mut q.data, &mut kk.data, &mut v.data, &mut *ctx.kv_mut, &ctx.slot_mapping.data, tokens, heads, nkv,
                 d, ctx.block_size, ctx.kv_fp8_store,
             )?;
         }
-        if kvfp8_on && !kvfp8_fused {
+        if kvfp8_on && !kvfp8_fused && !attn_pre_fused {
             k::ops::fp8_e4m3_roundtrip_bf16_n(stream, &mut kk.data, tokens * nkv * d, 1.0)?;
             k::ops::fp8_e4m3_roundtrip_bf16_n(stream, &mut v.data, tokens * nkv * d, 1.0)?;
             // q 也要量化成 e4m3（vLLM Triton 后端 `supports_quant_query_input = is_cuda()`，
@@ -1252,7 +1276,7 @@ impl Gemma4Layer {
         }
 
         // ---- 4b. 写本层 paged KV（每层 head_dim / nkv 不同）----
-        if !kvfp8_fused {
+        if !kvfp8_fused && !attn_pre_fused {
             k::ops::gqa_cache_write_bf16(
                 stream,
                 &kk.data,

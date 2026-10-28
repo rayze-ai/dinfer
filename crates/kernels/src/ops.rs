@@ -5541,6 +5541,54 @@ pub fn gqa_cache_write_fp8rt_bf16(
     )
 }
 
+/// B23（loop kaon3-decode-opt D148）：attention 前段融合 —— 逐头 RMSNorm（q/k 带权重、v 无权重，口径 = `rmsnorm_bf16_inplace`
+/// 在 Block256 布局 / hidden ≤ 1024 下的实例）→ q/k neox RoPE（`rope_span_bf16` 口径）→ q/k/v fp8 往返 + k/v 写 cache
+/// （`gqa_cache_write_fp8rt_bf16` 口径），一次 launch。head_dim ∈ {256, 512}，q_heads + 2·kv_heads ≤ 32。
+#[allow(clippy::too_many_arguments)]
+pub fn attn_pre_fused_bf16(
+    stream: &Stream,
+    q: &mut CudaSlice<bf16>,
+    k: &mut CudaSlice<bf16>,
+    v: &mut CudaSlice<bf16>,
+    q_w: &CudaSlice<bf16>,
+    k_w: &CudaSlice<bf16>,
+    positions: &CudaSlice<i32>,
+    cos_sin: &CudaSlice<f32>,
+    cache: &mut CudaSlice<bf16>,
+    slot_mapping: &CudaSlice<i64>,
+    tokens: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    rope_dim: usize,
+    span: usize,
+    block_size: usize,
+    eps: f32,
+    kv_fp8: bool,
+) -> Result<()> {
+    ensure!(matches!(head_dim, 256 | 512), "attn_pre_fused: head_dim {head_dim} ∉ {{256,512}}");
+    ensure!(q_heads + 2 * kv_heads <= 32, "attn_pre_fused: q_heads + 2·kv_heads > 32");
+    ensure!(q.len() >= tokens * q_heads * head_dim && k.len() >= tokens * kv_heads * head_dim && v.len() >= tokens * kv_heads * head_dim, "attn_pre_fused: q/k/v 太小");
+    ensure!(q_w.len() == head_dim && k_w.len() == head_dim, "attn_pre_fused: norm 权重长度");
+    ensure!(positions.len() >= tokens && slot_mapping.len() >= tokens, "attn_pre_fused: positions/slot_mapping");
+    ensure!(rope_dim > 0 && rope_dim % 2 == 0 && span >= rope_dim / 2 && span + rope_dim / 2 <= head_dim, "attn_pre_fused: rope_dim/span");
+    ensure!(cos_sin.len() % rope_dim == 0, "attn_pre_fused: cos_sin");
+    let (pq, pk, pv) = (stream.ptr_mut(q) as *mut c_void, stream.ptr_mut(k) as *mut c_void, stream.ptr_mut(v) as *mut c_void);
+    let pc = stream.ptr_mut(cache) as *mut c_void;
+    // SAFETY: 长度已校验；slot_mapping 由调用方保证在 cache 范围内（与 gqa_cache_write_fp8rt_bf16 同）。
+    check(
+        unsafe {
+            ffi::attn_pre_fused_bf16(
+                pq, pk, pv, stream.ptr(q_w) as *const c_void, stream.ptr(k_w) as *const c_void, stream.ptr(positions) as *const i32,
+                stream.ptr(cos_sin) as *const f32, pc, stream.ptr(slot_mapping) as *const i64, tokens as i64, q_heads as i64,
+                kv_heads as i64, head_dim as i64, rope_dim as i64, span as i64, block_size as i64, eps, norm_mode(), kv_fp8 as i32,
+                stream.raw() as ffi::cudaStream_t,
+            )
+        },
+        "attn_pre_fused_bf16",
+    )
+}
+
 /// B13：`out_res[r] = bf16(out_res[r] + bf16(rmsnorm(x[r])·w))`——norm 直接加到残差流，代 `rmsnorm_bf16_n` + `add_inplace_bf16_n`。
 /// layout/mode 与 `rmsnorm_bf16_n` 同源（逐位同口径）。
 pub fn rmsnorm_add_bf16_n(

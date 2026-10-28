@@ -486,6 +486,125 @@ static int launch_scale2(const void* x, const void* scale, void* out, int64_t to
 }
 
 
+
+// ---- B23（loop kaon3-decode-opt D148）：attention 前段融合 ----
+// 一个 token 一个 block，一个 warp 一个头行：逐头 RMSNorm（q/k 带权重、v 无权重）→ 原地 RoPE（q/k，neox，span 配对）
+// → q/k/v fp8 往返（原地写回）→ k/v 写 paged cache（e4m3 或 bf16）。替代 head_rmsnorm×3 + rope + cache_write_fp8rt
+// 共 5 次 launch。每一段都**逐位复刻**原 kernel：
+//  - norm = `rmsnorm_vec_kernel<128,1>`（Sm120 Block256 布局下 hidden ≤ 1024 的实例）：原 kernel 一行一 block 128 线程、
+//    线程 i 持向量 i，warp w 的 32 个向量先 xor 蝶形成 seg[w]，再由线程 0 按 4 段一组 `fadd(tot, fadd(fadd(a0,a2),fadd(a1,a3)))`
+//    累加。这里一 warp 一行，lane 持向量 lane + 32·j（j < D/256），同样的 32 个值、同样的蝶形序 → seg[j] 逐位同，再按同式合并。
+//  - rope = `rope_kernel<true>`（每步舍 bf16），fp8 往返 = `fp8_rt`，cache 布局 = `slot_off`（gqa.cu）。
+//  warp 之间完全独立：无 __syncthreads；smem 每 warp 一行 bf16（≤ 1 KB）。
+__device__ __forceinline__ bf16 fp8_rt_n(bf16 x) {
+  const __nv_fp8_storage_t q8 = __nv_cvt_float_to_fp8(to_f32(x), __NV_SATFINITE, __NV_E4M3);
+  return to_bf16(__half2float(__half(__nv_cvt_fp8_to_halfraw(q8, __NV_E4M3))));
+}
+template <int VP, bool STORE_FP8>
+__global__ void __launch_bounds__(1024) attn_pre_fused_kernel(bf16* __restrict__ q, bf16* __restrict__ k, bf16* __restrict__ v,
+                                                              const bf16* __restrict__ qw, const bf16* __restrict__ kw,
+                                                              const int32_t* __restrict__ pos, const float* __restrict__ cos_sin,
+                                                              bf16* __restrict__ cache, const int64_t* __restrict__ slot_mapping,
+                                                              int q_heads, int kv_heads, int rope_dim, int span, int block_size,
+                                                              float eps, int mode) {
+  constexpr int D = 256 * VP;
+  extern __shared__ __align__(16) uint8_t pre_smem[];
+  const int64_t t = blockIdx.x;
+  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+  const int nrows = q_heads + 2 * kv_heads;
+  if (warp >= nrows) return;
+  int kind, h;
+  bf16* row;
+  const bf16* w;
+  if (warp < q_heads) { kind = 0; h = warp; row = q + (t * q_heads + h) * D; w = qw; }
+  else if (warp < q_heads + kv_heads) { kind = 1; h = warp - q_heads; row = k + (t * kv_heads + h) * D; w = kw; }
+  else { kind = 2; h = warp - q_heads - kv_heads; row = v + (t * kv_heads + h) * D; w = nullptr; }
+  bf16* srow = reinterpret_cast<bf16*>(pre_smem) + (size_t)warp * D;
+  // ---- 1. norm（复刻 rmsnorm_vec_kernel<128,1>）----
+  const uint4* xr = reinterpret_cast<const uint4*>(row);
+  const uint4* wv = reinterpret_cast<const uint4*>(w);
+  float vv[VP][8];
+  uint4 wa[VP];
+  float gs[VP];
+#pragma unroll
+  for (int j = 0; j < VP; ++j) {
+    const int i = lane + 32 * j;
+    uint4 xa = xr[i];
+    wa[j] = w ? wv[i] : make_uint4(0x3F803F80u, 0x3F803F80u, 0x3F803F80u, 0x3F803F80u);
+    const __nv_bfloat162* xp = reinterpret_cast<const __nv_bfloat162*>(&xa);
+#pragma unroll
+    for (int c = 0; c < 4; ++c) { const float2 f = __bfloat1622float2(xp[c]); vv[j][2 * c] = f.x; vv[j][2 * c + 1] = f.y; }
+    float acc = __fmul_rn(vv[j][1], vv[j][1]);
+    acc = __fmaf_rn(vv[j][0], vv[j][0], acc);
+#pragma unroll
+    for (int e = 2; e < 8; ++e) acc = __fmaf_rn(vv[j][e], vv[j][e], acc);
+    gs[j] = acc;
+  }
+  float seg[VP];
+#pragma unroll
+  for (int j = 0; j < VP; ++j) {
+    float g = gs[j];
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) g = __fadd_rn(g, __shfl_xor_sync(0xffffffffu, g, o));
+    seg[j] = g;
+  }
+  float tot = 0.f;
+#pragma unroll
+  for (int c = 0; 4 * c < VP; ++c) {
+    float a[4];
+#pragma unroll
+    for (int kk = 0; kk < 4; ++kk) a[kk] = (4 * c + kk < VP) ? seg[4 * c + kk] : 0.f;
+    tot = __fadd_rn(tot, __fadd_rn(__fadd_rn(a[0], a[2]), __fadd_rn(a[1], a[3])));
+  }
+  const float inv = rms_inv(tot, D, eps, mode);
+  uint4* so = reinterpret_cast<uint4*>(srow);
+#pragma unroll
+  for (int j = 0; j < VP; ++j) {
+    const int i = lane + 32 * j;
+    const __nv_bfloat162* wp = reinterpret_cast<const __nv_bfloat162*>(&wa[j]);
+    uint4 ob;
+    __nv_bfloat162* op = reinterpret_cast<__nv_bfloat162*>(&ob);
+#pragma unroll
+    for (int c = 0; c < 4; ++c) {
+      const float2 g = __bfloat1622float2(wp[c]);
+      op[c] = __floats2bfloat162_rn(norm_mid(vv[j][2 * c] * inv, mode) * g.x, norm_mid(vv[j][2 * c + 1] * inv, mode) * g.y);
+    }
+    so[i] = ob;
+  }
+  __syncwarp();
+  // ---- 2. rope（q/k；复刻 rope_kernel<true>：每步舍 bf16）----
+  if (kind < 2) {
+    const int half = rope_dim / 2;
+    const float* cs = cos_sin + (int64_t)pos[t] * rope_dim;
+    for (int i = lane; i < half; i += 32) {
+      const float c = cs[i], s = cs[half + i];
+      const int a = i, b = i + span;
+      const float x0 = to_f32(srow[a]), x1 = to_f32(srow[b]);
+      const float p0 = to_f32(to_bf16(x0 * c)), p1 = to_f32(to_bf16(x1 * s));
+      const float p2 = to_f32(to_bf16(x1 * c)), p3 = to_f32(to_bf16(x0 * s));
+      srow[a] = to_bf16(p0 - p1);
+      srow[b] = to_bf16(p2 + p3);
+    }
+    __syncwarp();
+  }
+  // ---- 3. fp8 往返写回 + k/v 写 cache（复刻 gqa_cache_write_fp8rt_kernel）----
+  const int64_t slot = slot_mapping[t];
+  bf16* dst = nullptr;
+  uint8_t* dst8 = nullptr;
+  if (kind > 0 && slot >= 0) {
+    const int64_t e0 = slot * (int64_t)kv_heads * 2 * D + (int64_t)(h * 2 + (kind - 1)) * D;
+    dst = cache + e0;
+    dst8 = reinterpret_cast<uint8_t*>(cache) + e0;
+  }
+  for (int d = lane; d < D; d += 32) {
+    const bf16 r = fp8_rt_n(srow[d]);
+    row[d] = r;
+    if (dst8) {
+      if (STORE_FP8) dst8[d] = static_cast<uint8_t>(__nv_cvt_float_to_fp8(to_f32(r), __NV_SATFINITE, __NV_E4M3));
+      else dst[d] = r;
+    }
+  }
+}
 }  // namespace
 
 // B13：out_res[r] = bf16(out_res[r] + bf16(rmsnorm(x[r])·w))——norm 后直接加到残差流（代 rmsnorm + add_inplace 两次 launch）。
@@ -535,4 +654,28 @@ extern "C" int rmsnorm_scale2_bf16(const void* x, const void* scale, void* out, 
   if (hidden <= 2048) return launch_scale2<256, 1>(x, scale, out, tokens, hidden, eps, rs, mode, stream);
   if (hidden <= 4096) return launch_scale2<256, 2>(x, scale, out, tokens, hidden, eps, rs, mode, stream);
   return launch_scale2<256, 4>(x, scale, out, tokens, hidden, eps, rs, mode, stream);
+}
+
+// B23：见 attn_pre_fused_kernel。head_dim ∈ {256, 512}；rope 为 neox 且 span + rope_dim/2 ≤ head_dim；block = (q+2kv) 个 warp ≤ 32。
+extern "C" int attn_pre_fused_bf16(void* q, void* k, void* v, const void* q_w, const void* k_w, const int32_t* positions,
+                                   const float* cos_sin, void* cache, const int64_t* slot_mapping, int64_t tokens,
+                                   int64_t q_heads, int64_t kv_heads, int64_t head_dim, int64_t rope_dim, int64_t span,
+                                   int64_t block_size, float eps, int mode, int kv_fp8, cudaStream_t stream) {
+  if (tokens <= 0) return 0;
+  if (!(head_dim == 256 || head_dim == 512) || q_heads <= 0 || kv_heads <= 0 || q_heads + 2 * kv_heads > 32 ||
+      rope_dim <= 0 || (rope_dim & 1) || rope_dim > head_dim || span < rope_dim / 2 || span + rope_dim / 2 > head_dim ||
+      block_size <= 0 || !q_w || !k_w)
+    return err(cudaErrorInvalidValue);
+  const int nrows = (int)(q_heads + 2 * kv_heads);
+  const size_t smem = (size_t)nrows * head_dim * sizeof(bf16);
+  const dim3 grid((unsigned)tokens), block((unsigned)(nrows * 32));
+#define PRE_LAUNCH(VP, F8) \
+  attn_pre_fused_kernel<VP, F8><<<grid, block, smem, stream>>>( \
+      static_cast<bf16*>(q), static_cast<bf16*>(k), static_cast<bf16*>(v), static_cast<const bf16*>(q_w), \
+      static_cast<const bf16*>(k_w), positions, cos_sin, static_cast<bf16*>(cache), slot_mapping, (int)q_heads, (int)kv_heads, \
+      (int)rope_dim, (int)span, (int)block_size, eps, mode)
+  if (head_dim == 256) { if (kv_fp8) PRE_LAUNCH(1, true); else PRE_LAUNCH(1, false); }
+  else { if (kv_fp8) PRE_LAUNCH(2, true); else PRE_LAUNCH(2, false); }
+#undef PRE_LAUNCH
+  return last_err();
 }
