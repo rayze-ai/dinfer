@@ -14,3 +14,12 @@ r4,2026-10-27,R4 生产态全优化: 573→594; TPOT 54.5→51.9ms TTFT 250ms,e2
 r5,2026-10-27,R5 生产态复现(seed123): dinfer 519 vs vLLM 802,e2e,out_tok_per_s,519.117,802.532,0.647,-12.6,higher,main,5090,vllm,dinfer,kaon3
 r5,2026-10-27,R5 生产态复现(seed123): dinfer 519 vs vLLM 802,e2e,ttft_p50_ms,328.068,82.812,3.962,-30.9,lower,main,5090,vllm,dinfer,kaon3
 r5,2026-10-27,R5 生产态复现(seed123): dinfer 519 vs vLLM 802,e2e,tpot_p50_ms,60.506,9.108,6.643,-16.7,lower,main,5090,vllm,dinfer,kaon3
+a2,2026-10-28,"A2 对齐基线(两端非eager/16384/4096/seqs64,prompt1560tok,5轮中位,PIPE关): decode图内GPU 17 vs 4.7ms",c1,out_tok_per_s,57.000,200.000,0.285,,higher,main,5090,vllm,dinfer,kaon3
+a2,2026-10-28,"A2 对齐基线(两端非eager/16384/4096/seqs64,prompt1560tok,5轮中位,PIPE关): decode图内GPU 17 vs 4.7ms",c1,ttft_p50_ms,43.000,25.000,1.720,,lower,main,5090,vllm,dinfer,kaon3
+a2,2026-10-28,"A2 对齐基线(两端非eager/16384/4096/seqs64,prompt1560tok,5轮中位,PIPE关): decode图内GPU 17 vs 4.7ms",c1,tpot_p50_ms,17.070,4.690,3.640,,lower,main,5090,vllm,dinfer,kaon3
+a2,2026-10-28,"A2 对齐基线(两端非eager/16384/4096/seqs64,prompt1560tok,5轮中位,PIPE关): decode图内GPU 17 vs 4.7ms",c8,out_tok_per_s,324.000,956.000,0.339,,higher,main,5090,vllm,dinfer,kaon3
+a2,2026-10-28,"A2 对齐基线(两端非eager/16384/4096/seqs64,prompt1560tok,5轮中位,PIPE关): decode图内GPU 17 vs 4.7ms",c8,ttft_p50_ms,82.600,146.400,0.564,,lower,main,5090,vllm,dinfer,kaon3
+a2,2026-10-28,"A2 对齐基线(两端非eager/16384/4096/seqs64,prompt1560tok,5轮中位,PIPE关): decode图内GPU 17 vs 4.7ms",c8,tpot_p50_ms,19.710,6.240,3.159,,lower,main,5090,vllm,dinfer,kaon3
+a2,2026-10-28,"A2 对齐基线(两端非eager/16384/4096/seqs64,prompt1560tok,5轮中位,PIPE关): decode图内GPU 17 vs 4.7ms",c16,out_tok_per_s,481.000,1577.000,0.305,,higher,main,5090,vllm,dinfer,kaon3
+a2,2026-10-28,"A2 对齐基线(两端非eager/16384/4096/seqs64,prompt1560tok,5轮中位,PIPE关): decode图内GPU 17 vs 4.7ms",c16,ttft_p50_ms,104.600,177.300,0.590,,lower,main,5090,vllm,dinfer,kaon3
+a2,2026-10-28,"A2 对齐基线(两端非eager/16384/4096/seqs64,prompt1560tok,5轮中位,PIPE关): decode图内GPU 17 vs 4.7ms",c16,tpot_p50_ms,19.680,7.210,2.730,,lower,main,5090,vllm,dinfer,kaon3
