@@ -251,3 +251,18 @@ exec=调用executor.forward_sample墙钟=19.3ms=TPOT。调度/publish确实极�
 - 或nsys换台机器/换版本真抓graph态kernel时间线(此环境6轮失败);
 - 或直接读runner.begin/finish实现(crates/core runner)看begin到底同步否、finish的dtoh_sync具体等什么;
 - 关键问题仍是:19ms到底GPU算/等GPU/host同步开销,哪个。没定死前别改。
+
+## ★★★★★★★ D20 2026-10-28 c1/2/4/8双端对比(真实KV prefix-repeat 0):TTFT爆炸2秒+吞吐虚高+并发崩
+真实KV(prefix-repeat 0,无cache命中)dinfer vs vLLM非eager:
+| 并发 | 吞吐 d/v | TTFT p50 d/v | TPOT p50 d/v |
+|---|---|---|---|
+| c1 | 29.7/185 | **1960**/83 | 18.5/4.8 |
+| c2 | 56/308 | 1982/151 | 19.6/5.4 |
+| c4 | 82/541 | 1998/153 | 20.8/6.2 |
+| c8 | 63/957 | 4116/228 | 90/6.8 |
+**两大颠覆问题**:
+1. **TTFT爆炸**:dinfer c1就1960ms vs vLLM 83ms=**慢24×**。c1-c4 TTFT恒定~2000ms=**一个固定~2秒串行开销卡在首token前(prefill路径)**。之前prefix-repeat 1(共享前缀命中cache)完全掩盖,真实KV暴露。
+2. **吞吐虚高+并发崩**:之前594 tok/s是prefix-repeat 1虚高(prefill被cache跳过)。真实负载dinfer吞吐仅vLLM 6-16%(非之前以为的63%)。dinfer c4→c8吞吐82→63**倒退**,TPOT 21→90暴涨=**并发扩展性崩**,vLLM c8还涨到957。
+**结论作废**:之前所有594/63%基于prefix-repeat 1,是虚高。真实负载dinfer差vLLM一个数量级。
+**优化重点彻底改**:**TTFT 2秒(prefill路径)是最大问题**,不是decode TPOT。这2秒在prefill不在decode,和之前纠结的decode瓶颈不同。其次并发扩展崩(c4→c8倒退)。
+**下一步(Step A补全/Step B转向)**:①定位TTFT 2秒固定开销在prefill哪(c1-c4恒定2秒=非计算,像固定串行:编译/同步/首步graph capture/分配?);②并发c4→c8为何倒退(KV块不够?调度?)。TTFT比TPOT优先。
