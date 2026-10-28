@@ -1,0 +1,27 @@
+bin=2026-10-28 13:29 A=[FP8_GEMV=1] B=[FP8_GEMV=1 KV_FP8_STORE=1]
+A c1:  2.32 req/s 148.2 output TTFT mean 28.91 p50 28.87 TPOT mean 6.39 p50 6.39 
+
+A c8:  6.84 req/s 438.1 output TTFT mean 389.62 p50 487.75 TPOT mean 12.36 p50 11.58 
+
+A out:  the following.  Wait, I'm not sure if I should be here.  Wait, I'm not
+A out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到春秋战国时期，最初是为了抵御外敌而修建的。 随着秦朝的统一，大规模的修筑工作开始，并逐渐演变成后来的各个朝代。 明朝时期，长城迎来了最辉煌的建设阶段，形成了我们今天所看到的宏伟规模。
+B c1:  2.32 req/s 148.2 output TTFT mean 28.99 p50 28.93 TPOT mean 6.39 p50 6.39 
+
+B c8:  6.82 req/s 436.8 output TTFT mean 404.49 p50 507.04 TPOT mean 12.18 p50 11.35 
+
+B out:  the following.  Wait, I'm not sure if I should be here.  Wait, I'm not
+B out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到春秋战国时期，最初是为了抵御外敌而修建的。 随着秦朝的统一，大规模的修筑工作开始，并逐渐演变成后来的各个朝代。 明朝时期，长城迎来了最辉煌的建设阶段，形成了我们今天所看到的宏伟规模。
+A2 c1:  2.31 req/s 147.9 output TTFT mean 29.10 p50 28.94 TPOT mean 6.40 p50 6.40 
+
+A2 c8:  6.85 req/s 438.2 output TTFT mean 389.03 p50 487.05 TPOT mean 12.37 p50 11.56 
+
+A2 out:  the following.  Wait, I'm not sure if I should be here.  Wait, I'm not
+A2 out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到春秋战国时期，最初是为了抵御外敌而修建的。 随着秦朝的统一，大规模的修筑工作开始，并逐渐演变成后来的各个朝代。 明朝时期，长城迎来了最辉煌的建设阶段，形成了我们今天所看到的宏伟规模。
+B2 c1:  2.31 req/s 148.0 output TTFT mean 29.84 p50 29.59 TPOT mean 6.39 p50 6.39 
+
+B2 c8:  6.83 req/s 437.2 output TTFT mean 404.59 p50 506.60 TPOT mean 12.16 p50 11.35 
+
+B2 out:  the following.  Wait, I'm not sure if I should be here.  Wait, I'm not
+B2 out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到春秋战国时期，最初是为了抵御外敌而修建的。 随着秦朝的统一，大规模的修筑工作开始，并逐渐演变成后来的各个朝代。 明朝时期，长城迎来了最辉煌的建设阶段，形成了我们今天所看到的宏伟规模。
+DONE
+ALLDONE

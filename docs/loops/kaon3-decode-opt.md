@@ -871,3 +871,4 @@ decode c1 的 MoE 段 nsys：grouped_gemm gate 18.6 + up 18.6 + down 12.5 + gelu
 - 新 `grouped_gemm_kernel_pipe4<BK, STAGES, BM_T=16, BN_T=32>`：warp 布局 1(M)×8(N)？不行——8 warp × 16 列 = 128 列 > BN。改 BN_T=32 → 2 warp 够，但要保持 8 warp 的 cp.async 装载并行度……取 **BM=16, BN=64, 8 warp = 1×8 → 每 warp 16×8 列（一个 n8 片段，只 acc 不要 acc2）**：mma 序每个输出元素与现 kernel 同（同 k 序累加），逐位；CTA 数不变但每 CTA 的 M 侧浪费减半、寄存器/smem 减半 → 占用翻倍（每 SM 更多 CTA 并发），等效并行度 ×2。再配 BN=32 版本（CTA 数 ×2）二选一由 bench 定。
 - 判据：moe_pipe4 测试加 BM16 场景 bad=0；bN c1 TPOT。预期 -0.3 ms（MoE 三 GEMM 1.3 ms 的 25%）。
 - B16b 不盲写：先 nsys 复抓 c1（`/w/nsys_c1b.sh`，b17 二进制）看 `grouped_gemm_kernel_pipe4` 实际 us/call（B16 前 18.6/12.5；若 ≈12/8 说明流水生效但剩余是固定开销 → BM=16/占用；若仍 ~17 说明 4 级没生效/被别的卡住）。再定 B16b 方向。nsys 在 b17 链之后跑。
+- **D70 定稿（两轮）**：`KV_FP8_STORE=1` c1 6.39/6.39（持平 6.39/6.40）；c8 TPOT 11.35/11.35 vs 11.58/11.56（**-1.9%**）；c8 TTFT 507/507 vs 488/487（+4%）。默认开已 commit，CSV round b15b。
