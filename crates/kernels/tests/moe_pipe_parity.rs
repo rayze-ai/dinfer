@@ -82,3 +82,65 @@ fn moe_pipe_matches_baseline() {
     if let Some((i, b, p)) = first { println!("  first diff @ {i}: base={b:.6e} pipe={p:.6e}"); }
     assert_eq!(bad, 0, "流水版与旧版逐位不一致（应 bad=0）");
 }
+
+// 计时微基准：8 专家各 M=132（模拟 prefill 大 M），旧版 vs 流水版 kernel 墙钟。
+// cargo test -p dinfer-kernels --test moe_pipe_parity -- --ignored --nocapture moe_pipe_timing
+#[test]
+#[ignore]
+fn moe_pipe_timing() {
+    let (e, n, kk) = (8usize, 704usize, 2816usize);
+    let m_per = std::env::var("MOE_M").ok().and_then(|v| v.parse().ok()).unwrap_or(132usize);
+    let lens: Vec<usize> = vec![m_per; e];
+    let rows: usize = lens.iter().sum();
+    let mut offsets = vec![0i32; e + 1];
+    for i in 0..e { offsets[i + 1] = offsets[i] + lens[i] as i32; }
+
+    let mut seed = 0xdead_beef_1234_5678u64;
+    let aq: Vec<u8> = (0..rows * (kk / 2)).map(|_| lcg(&mut seed)).collect();
+    let a_s: Vec<u8> = (0..rows * (kk / 16)).map(|_| 0x38u8.wrapping_add(lcg(&mut seed) & 0x0f)).collect();
+    let mut bbytes = Vec::new();
+    let mut sbytes = Vec::new();
+    for _ in 0..e {
+        bbytes.push((0..n * (kk / 2)).map(|_| lcg(&mut seed)).collect::<Vec<u8>>());
+        sbytes.push((0..n * (kk / 16)).map(|_| 0x38u8.wrapping_add(lcg(&mut seed) & 0x0f)).collect::<Vec<u8>>());
+    }
+    let alpha: Vec<f32> = (0..e).map(|i| 1.0 + 0.01 * i as f32).collect();
+
+    let dev = Device::new(0).expect("cuda");
+    let stream = dev.default_stream();
+    let daq = stream.htod_copy(aq).unwrap();
+    let das = stream.htod_copy(a_s).unwrap();
+    let mut db = Vec::new();
+    let mut ds = Vec::new();
+    let (mut bptr, mut sptr) = (Vec::<u64>::new(), Vec::<u64>::new());
+    for ex in 0..e {
+        let b = stream.htod_copy(bbytes[ex].clone()).unwrap();
+        let s = stream.htod_copy(sbytes[ex].clone()).unwrap();
+        bptr.push(stream.ptr(&b) as u64); sptr.push(stream.ptr(&s) as u64);
+        db.push(b); ds.push(s);
+    }
+    let dbp = stream.htod_copy(bptr).unwrap();
+    let dsp = stream.htod_copy(sptr).unwrap();
+    let dal = stream.htod_copy(alpha).unwrap();
+    let doff = stream.htod_copy(offsets).unwrap();
+    let mut dout = stream.alloc_zeros::<bf16>(rows * n).unwrap();
+
+    let iters = 200usize;
+    let mut bench = |pipe: bool| -> f64 {
+        if pipe { std::env::set_var("MOE_GEMM_PIPE", "1"); } else { std::env::remove_var("MOE_GEMM_PIPE"); }
+        for _ in 0..20 { k::ops::moe_grouped_gemm(&stream,&daq,&das,&dbp,&dsp,&dal,&doff,&mut dout,rows,n,kk,e).unwrap(); }
+        stream.synchronize().unwrap();
+        let t0 = std::time::Instant::now();
+        for _ in 0..iters { k::ops::moe_grouped_gemm(&stream,&daq,&das,&dbp,&dsp,&dal,&doff,&mut dout,rows,n,kk,e).unwrap(); }
+        stream.synchronize().unwrap();
+        t0.elapsed().as_secs_f64() * 1e6 / iters as f64
+    };
+    let base_us = bench(false);
+    let pipe_us = bench(true);
+    // 单次 launch = 1 个 grouped GEMM（gate/up/down 中的一个）。有效带宽：e 专家 × N × K/2 字节权重。
+    let wbytes = (e * n * (kk / 2)) as f64;
+    let gbps = |us: f64| wbytes / (us * 1e-6) / 1e9;
+    println!("MOE_PIPE_TIMING e={e} M/专家={m_per} N={n} K={kk} | base={base_us:.2}us ({:.0}GB/s) pipe={pipe_us:.2}us ({:.0}GB/s) | 加速 {:.2}x",
+             gbps(base_us), gbps(pipe_us), base_us / pipe_us);
+    drop(db); drop(ds);
+}
