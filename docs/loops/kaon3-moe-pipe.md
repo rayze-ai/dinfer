@@ -36,3 +36,9 @@
 
 ## 迭代上限 / 记录
 每轮 put→编→对拍→（过了）bench 进 CSV，写进 loop 末尾 R 编号续 `kaon3-fp8gemm.md`（同一性能线）。
+
+## R73 2026-10-28 第一刀首版(双缓冲)对拍失败 bad=11491/15488(74%),in-range也错→退单缓冲隔离
+流水版首版(cp.async双缓冲B/sfb预取+A/sfa寄存器暂存STS)编译过,对拍 bad=11491/15488 first diff@16 row0(in-range)。
+**in-range也错=不是纯时序竞态,是双缓冲引入数据错位**(prologue/store_a时机或buf索引)。
+**稳妥法(先对再快)**:退成**单缓冲cp.async版**——旧版A/sfa STS原样,只把B/sfb的STS换cp.async+wait_group 0+__syncthreads。这样隔离"cp.async B索引错"vs"双缓冲时序错":单缓冲过了=cp.async索引对,再加双缓冲。
+附带已知小bug(不影响in-range):越界fill z写成make_uint4(0x11111111)应是make_uint4(0x11)(每分量0x00000011);只影响越界行A,不写D故不影响对拍。

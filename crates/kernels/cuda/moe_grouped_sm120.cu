@@ -341,11 +341,14 @@ __global__ void __launch_bounds__(256)
     }
   };
 
-  // prologue：buffer 0。
-  uint4 areg[NA];
-  uint32_t fareg[NFA];
-  load_b(0, 0);
-  conv_a(0, areg, fareg);
+  // prologue：buffer 0 的 B(cp.async) + A/sfa（寄存器→STS）。A 在循环首个 __syncthreads 后对 mma 可见。
+  {
+    uint4 areg[NA];
+    uint32_t fareg[NFA];
+    load_b(0, 0);
+    conv_a(0, areg, fareg);
+    store_a(0, areg, fareg);
+  }
   for (int kb = 0; kb < nk; ++kb) {
     const int cur = kb & 1, nxt = cur ^ 1;
     uint4 anext[NA];
@@ -358,8 +361,7 @@ __global__ void __launch_bounds__(256)
     }
     asm volatile("cp.async.wait_group 1;\n");
     __syncthreads();
-    // buffer cur 的 A/sfa 由上一轮（或 prologue）存入；本轮存 nxt 的 A/sfa。
-    if (kb == 0) store_a(0, areg, fareg);
+    // buffer cur 的 A/sfa 由上一轮（或 prologue）存入；本轮存 nxt（下一轮读，中间有 __syncthreads）。
     if (kb + 1 < nk) store_a(nxt, anext, fanext);
 
     const int nbk = BK / 64;
