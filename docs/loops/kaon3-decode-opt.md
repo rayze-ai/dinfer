@@ -789,3 +789,14 @@ decode c1 的 MoE 段 nsys：grouped_gemm gate 18.6 + up 18.6 + down 12.5 + gelu
 - **B13 实现方案定**：不加新 kernel 文件，`norm.cu` 三个 rmsnorm kernel（vec/warp/scalar）加模板 bool `NORM_ADD`：为真时 `out[i] = bf16(f32(out[i]) + f32(bf16(norm·w)))`（与 `add_inplace_bf16_n` 的 bf16 加同式：先舍 norm 再 f32 加再舍）。launch 多一个 `add_out` 参数，新 extern `rmsnorm_add_bf16(x, w, out_res, …)`。layer：① `post_attn_norm(o) → x +=`；② `post_ff_norm(norm) → x +=`（h2 不再写：下一层 pre_ff_norm_2 重算 h2，1386 后无人读 h2——已核）；③ `norm += h2; post_ff_norm` 用现有 `fused_add_rmsnorm`（res=norm, x=h2, out=tmp）——但 ② 要 x += 而不是写 tmp，所以 ②③ 合成：`fused_add_rmsnorm`(res=norm, x=h2) 产 tmp → 还是要一次 add。改为：③ 用 `fused_add` 产 tmp 到 h2，② 用 `rmsnorm_add`... 两者都是 norm 操作，不能一次。最终每层：`rmsnorm_add`(o→x) 1 次代 2；`fused_add_rmsnorm`(norm+=h2 → h2=norm(norm)) 1 次代 2；`x += h2` 保留 1 次（或并进 layer_scalar：`x = (x + h2)·s` 一个 kernel）。合计 5 → 3 launch/层。
 - **D65 split1（b8c 二进制，`FP8_GEMV` 关 vs 开）**：关 c1 7.11 / c8 11.78；开 6.63 / 11.60 ⇒ **B6c（m ≤ 4 走 gemv）c1 -0.48、c8 -0.18，两边都赚**（c8 的 8 token 请求实际 decode 步常 < 8 行，m ≤ 4 命中）。c8 的 +0.5（11.1 → 11.6）**不是 B6c**，在 B8/B10/B11 里；等 split2（`MOE_ROUTE_FUSED=0`）。
 - **B13 代码落地（commit）**：`norm.cu` vec/warp/scalar 三 kernel 加模板 `NORM_ADD`（`out[i] = bf16(f32(out[i]) + f32(bf16(norm·w)))`，与 add_inplace 同式）、`rmsnorm_add_bf16` extern + ffi/ops；layer：post_attn `rmsnorm_add(o → x)` 代 2 launch；post_ff `norm += h2; rmsnorm_add(norm → x)` 代 3 launch（只在 norm_mode==1 且非 sub_dump 时；`NORM_ADD_FUSED=0` 回退）。-2 launch/层。随 b8d 一起编验（b8d 二进制 = b8c + B12 + B13）；判据：三门禁 + 中文一致 + **英文 raw 输出与 b8c 逐字同**（B12/B13 都应逐位）。
+
+## B14 候选 2026-10-28（b8c 后 c1 6.64 ms 的去向估算，待 nsys 复抓确认）
+| 段 | 估算 ms/步 | 来源 | 下一刀 |
+|---|---|---|---|
+| MoE grouped GEMM gate/up/down | ~1.45 | D54 50 us/层 × 30，B8 tile 表只去空 block（c1 本就少） | 单专家 1 行时 CTA 内 K 流水不够深：BK=128 一步一 barrier；改 BM=16 tile（M=1 浪费减半）+ 3 阶段 cp.async 流水；或 gate‖up 同 CTA（dual 已有但 A 装两次）|
+| attention（B3 后）| ~1.2 | 滑窗 v3 25 层 + D=512 5 层 | 已带宽型；看 KV 读是否 fp8（kv_fp8=on 但 cache 仍 bf16 存 → 读 2× 字节！）→ **B15：cache 真存 e4m3，attention 读 fp8 解码** 省一半 KV 带宽 |
+| nvjet qkv/oproj（m=1 已走 gemv）| ~0.8 | B6c 后 qkv 2816→3072/4096 两种、oproj | gemv 本身 29→? us 待 nsys |
+| lm_head gemv | 0.87 | 带宽 1.05× 下限 | 不动 |
+| launch 间隙 | ~1.3 | ~900 kernel × 1.5 us | B12/B13 再 -150 → B14：attention 前后 rope/norm 等 7 个小 kernel 合 1（per-layer "attn_pre"）|
+| 小 kernel 自身 | ~0.5 | | 同上 |
+**最大单项 = B15（KV cache 真 fp8 存）**：decode 每步读 KV = 30 层 × 2(k,v) × 1560 tok × nkv·D × 2 B ≈ 25 层×8×256 + 5 层×2×512 → ~0.8 GB/步 bf16 → fp8 0.4 GB，省 ~0.25 ms；且 cache 容量翻倍。vLLM 就是 fp8 KV（kv_cache_dtype=fp8_e4m3）。需改 cache 布局 + v3/d512 kernel 读路径（e4m3→bf16 展开），attention 数值逐位同（往返值相同）。
