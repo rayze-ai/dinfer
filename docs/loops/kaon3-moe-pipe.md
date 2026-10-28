@@ -61,3 +61,9 @@
 → 大M瓶颈不是流水(cp.async帮不上),是别的(tile/mma利用率/occupancy);**被流水救的恰是小M(decode)**——R64/R65最初方向(M=1效率)其实对,我R69反而带偏。
 **但要对账(别又误读)**:微基准"大M 35us/225GB/s"与R69 serve实测"大M gemm3 2.96ms"量级差很多——微基准只1个grouped GEMM(grid.z=8激活专家),serve gemm3=3 GEMM×grid.z=128全专家。**不能直接套**。小M decode同理(微基准grid.z=8 vs serve 128)。
 **但方向明确**:decode(serve主战场,TPOT大头)小M流水2.15×是真收益。decode TPOT=51.8ms,MoE 63%,gemm3=MoE 54%→gemm3减半可观。**接serve验**:MOE_GEMM_PIPE=1跑serve,KAON3_MOE_TIME看gemm3降没降,bench看TPOT/吞吐。逐位已过(bad=0)可直接上。
+
+## R76 2026-10-28 接serve验PIPE:prefill gemm3持平(3.08 vs旧2.96,印证大M无效);decode态HTTP不通没测到
+PIPE serve(MOE_GEMM_PIPE=1)编译起成功,warmup prefill态 gemm3=3.08-3.13ms vs R69旧版2.96ms=**大M持平**(印证R75微基准:流水对大M无效)。
+**但decode态(小M,真正2.15×受益方)没测到**:临时ctr容器(NO_GRAPH+默认bridge网络)上 /v1/completions 请求不进forward(listening后无tok日志,curl空响应)——反复挡路(第N次),prefill moe-time是warmup产的非请求产的。
+**换法**:别再跟临时容器HTTP死磕。用微基准模拟serve真实gemm3调用(grid.z=128全专家+decode小M,8激活专家各1行+120空),对齐R60 serve场景(gemm3 0.096ms),不经HTTP。改moe_pipe_timing支持可配E与激活数。
+**或**:直接在生产容器kaon3-full(host网络,:8142,HTTP通)上验——但它是旧二进制(无PIPE)。要么重编traffic到生产容器,要么docker cp新二进制。下一步二选一。
