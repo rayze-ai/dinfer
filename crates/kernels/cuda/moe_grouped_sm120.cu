@@ -122,17 +122,19 @@ __global__ void row2expert_kernel(const int32_t* __restrict__ offsets, int32_t* 
 
 // grouped 预量化：A[R,K] bf16 → packed[R,K/2] + 块缩放 [R,K/16]（自然布局 swz=0）。
 // 每行用自己专家的 gs = agscale[row2e[r]]。一个 16-元素块一个线程（同 quantize_a_kernel）。
+// B11：`sorted_tok` 非空时源行 = A[sorted_tok[r]]（gather 融进量化，去掉 xg 中间缓冲与一次 launch）；空则 A[r]。
 __global__ void grouped_quant_kernel(const bf16* __restrict__ A, const int32_t* __restrict__ row2e,
-                                     const float* __restrict__ agscale, uint8_t* __restrict__ P,
-                                     uint8_t* __restrict__ S, int R, int K, int exact_rq) {
+                                     const int32_t* __restrict__ sorted_tok, const float* __restrict__ agscale,
+                                     uint8_t* __restrict__ P, uint8_t* __restrict__ S, int R, int K, int exact_rq) {
   const int nb = K / 16;
   const long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= (long)R * nb) return;
   const int r = (int)(idx / nb), bi = (int)(idx % nb);
   const float gs = agscale[row2e[r]];
+  const int src_r = sorted_tok ? sorted_tok[r] : r;
   uint2 pk;
   uint8_t sb8;
-  quant16(A + (size_t)r * K + bi * 16, true, &pk, &sb8, gs, exact_rq);
+  quant16(A + (size_t)src_r * K + bi * 16, true, &pk, &sb8, gs, exact_rq);
   *reinterpret_cast<uint2*>(P + (size_t)r * (K / 2) + bi * 8) = pk;
   S[(size_t)r * nb + bi] = sb8;
 }

@@ -773,3 +773,4 @@ decode c1 的 MoE 段 nsys：grouped_gemm gate 18.6 + up 18.6 + down 12.5 + gelu
 - 这是 KV cache fp8 量化口径的"bf16→e4m3→bf16 往返"（与 vLLM fp8 KV 一致）；q 也往返。3 launch/层 + 独立 `gqa_cache_write` 1 launch/层 = 120 launch/步。
 - 融合：① k/v 的往返并进 `gqa_cache_write_kernel`（写 cache 前做 roundtrip，k/v 缓冲本身也要被后续 attention 读 → kernel 顺便写回 k/v）；② q 的往返并进 rope（rope_kernel 末尾对 q 做 roundtrip；k 也在 rope 里，可一起做，这样 cache_write 只管搬）。全部逐位（同一个 cvt 两次）。省 3 launch/层 ≈ -0.15 ms/步。
 - 做法：`rope_span_bf16` 加 `fp8_rt: int` 参数（0/1），`gqa_cache_write_bf16` 加 `fp8_rt`（对 v 做；k 已在 rope 里做了）。等 b8c 结果后做。
+- b8c 编译失败：`grouped_quant_kernel` 的 kernel 体 `sorted_tok` 改动丢了（第一次 B11 脚本在 kernel 体后面的 host 段 assert 失败 → 整个文件未写盘；第二次脚本只补了 host 段）。**同一错误第 3 次**（B8 kernels.h、B8 fp4_gemv、这次）：批量编辑脚本一处 assert 失败 = 该文件全部改动丢失，必须 grep 每个目标串。已修。
