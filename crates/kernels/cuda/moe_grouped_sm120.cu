@@ -87,7 +87,7 @@ __device__ __forceinline__ void quant16(const bf16* src, bool valid, uint2* out8
 // 使 tile_off[e] ≤ t < tile_off[e+1] 的专家 e，行块 m_blk = offsets[e] + (t − tile_off[e])·BM。二分 E=128 只 7 步。
 // grid.y 取 host 上界 R/BM + E，超过 tile_off[E] 的 block 直接退（比旧版 (E × R/BM) 满格 grid 少 >100×）。
 __device__ __forceinline__ bool tile_lookup(const int32_t* __restrict__ offsets, const int32_t* __restrict__ tile_off,
-                                            int E, int t, int& e, int& m_blk, int& row_hi) {
+                                            int E, int t, int& e, int& m_blk, int& row_hi, int bm = BM) {
   if (t >= tile_off[E]) return false;
   int lo = 0, hi = E;  // 找最大的 e 使 tile_off[e] ≤ t
   while (hi - lo > 1) {
@@ -95,7 +95,7 @@ __device__ __forceinline__ bool tile_lookup(const int32_t* __restrict__ offsets,
     if (tile_off[mid] <= t) lo = mid; else hi = mid;
   }
   e = lo;
-  m_blk = offsets[e] + (t - tile_off[e]) * BM;
+  m_blk = offsets[e] + (t - tile_off[e]) * bm;
   row_hi = offsets[e + 1];
   return true;
 }
@@ -432,23 +432,26 @@ __global__ void __launch_bounds__(256)
 // "等上一组落地 → barrier"，decode 每 CTA 每步只搬 ~4 KB，22 步 × (HBM 往返 + barrier) 是延迟绑定（0.85 us/步）。
 // 这里 A/sfa 也改 cp.async（越界行 zfill 0：e2m1 0 × 任何 = 0，且这些行的输出不写；与旧版 0x11/0x38 填充同样不影响有效行），
 // 预取深度 STAGES-1 组在飞，wait_group STAGES-1。mma 序、片段寻址与 pipe 版逐字同 → 有效行逐位一致。
-template <int BK, int STAGES>
+// B16b：BM_T=16（decode）时 8 warp 排 1(M)×8(N)，每 warp 一个 n8 片段（只 acc）；A 只 16 行、smem/寄存器减半、
+// 占用翻倍，M 侧不再为空行算 mma。每个输出元素的 k 累加序与 BM_T=32 版同 → 逐位。tile 表用 tile_off 的第二半（BM=16）。
+template <int BK, int STAGES, int BM_T = BM>
 __global__ void __launch_bounds__(256)
     grouped_gemm_kernel_pipe4(const uint8_t* __restrict__ A, const uint8_t* __restrict__ Asc,
                               const uint8_t* const* __restrict__ Bptr, const uint8_t* const* __restrict__ Sptr,
                               const float* __restrict__ alpha, const int32_t* __restrict__ offsets,
                               const int32_t* __restrict__ tile_off, bf16* __restrict__ D, int N, int K, int E) {
   int e, m_blk, row_hi;
-  if (!tile_lookup(offsets, tile_off, E, (int)blockIdx.y, e, m_blk, row_hi)) return;
+  if (!tile_lookup(offsets, BM_T == BM ? tile_off : tile_off + (E + 1), E, (int)blockIdx.y, e, m_blk, row_hi, BM_T)) return;
   constexpr int RSA = BK / 2 + PAD, RSB = BK / 2 + PAD;
   constexpr int NQ4 = BK / 64;
   constexpr int NB16 = BK / 16;
-  __shared__ __align__(16) uint8_t sA[STAGES][BM * RSA];
+  __shared__ __align__(16) uint8_t sA[STAGES][BM_T * RSA];
   __shared__ __align__(16) uint8_t sB[STAGES][BN * RSB];
-  __shared__ __align__(16) uint32_t sfa[STAGES][BM * NQ4];
+  __shared__ __align__(16) uint32_t sfa[STAGES][BM_T * NQ4];
   __shared__ __align__(16) uint32_t sfb[STAGES][BN * NQ4];
   const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
-  const int wm = warp >> 2, wn = warp & 3;
+  constexpr bool ONE_FRAG = BM_T == 16;              // 1×8 warp 布局：每 warp 一个 n8 片段
+  const int wm = ONE_FRAG ? 0 : (warp >> 2), wn = ONE_FRAG ? warp : (warp & 3);
   const int n_blk = blockIdx.x * BN;
   const uint8_t* B = Bptr[e];
   const uint8_t* S = Sptr[e];
@@ -460,12 +463,12 @@ __global__ void __launch_bounds__(256)
   // 第 kb 块 → stage st：A/sfa/B/sfb 全部 cp.async，提交 1 组
   auto load_stage = [&](int st, int kb) {
     const uint8_t* asrc = A + static_cast<size_t>(m_blk) * (K / 2) + kb * (BK / 2);
-    for (int i = tid; i < (BM * BK / 2) / 16; i += blockDim.x) {
+    for (int i = tid; i < (BM_T * BK / 2) / 16; i += blockDim.x) {
       const int r = i / rb, c = i % rb;
       const bool ok = (m_blk + r < M);
       cp16(smem_u32(&sA[st][r * RSA + c * 16]), asrc + (static_cast<size_t>(r) * (K / 32) + c) * 16, ok ? 16 : 0);
     }
-    for (int i = tid; i < BM * NQ4; i += blockDim.x) {
+    for (int i = tid; i < BM_T * NQ4; i += blockDim.x) {
       const int r = i / NQ4, q = i % NQ4;
       const bool ok = (m_blk + r < M);
       cp4(smem_u32(&sfa[st][r * NQ4 + q]), Asc + static_cast<size_t>(m_blk + r) * (K / 16) + kb * NB16 + q * 4,
@@ -505,7 +508,7 @@ __global__ void __launch_bounds__(256)
     for (int b = 0; b < nbk; ++b) {
       const int kb0 = b * 64;
       uint32_t a[4], b0[2], b1[2];
-      const int mrow = wm * 16, ncol = wn * 16;
+      const int mrow = wm * 16, ncol = ONE_FRAG ? wn * 8 : wn * 16;
 #pragma unroll
       for (int g = 0; g < 4; ++g) {
         const int m = (lane / 4) + 8 * (g % 2);
@@ -517,20 +520,22 @@ __global__ void __launch_bounds__(256)
       for (int g = 0; g < 2; ++g) {
         const int kb_ = kb0 + 8 * (lane % 4) + 32 * g;
         b0[g] = *reinterpret_cast<const uint32_t*>(&sB[cur][(ncol + brow) * RSB + kb_ / 2]);
-        b1[g] = *reinterpret_cast<const uint32_t*>(&sB[cur][(ncol + 8 + brow) * RSB + kb_ / 2]);
+        if (!ONE_FRAG) b1[g] = *reinterpret_cast<const uint32_t*>(&sB[cur][(ncol + 8 + brow) * RSB + kb_ / 2]);
       }
       const int sam = (8 * (lane & 1) + (lane >> 2)) & 15;
       const uint32_t sa = sfa[cur][(mrow + sam) * NQ4 + b];
       const uint32_t sb0 = sfb[cur][(ncol + brow) * NQ4 + b];
-      const uint32_t sb1 = sfb[cur][(ncol + 8 + brow) * NQ4 + b];
       mma_fp4(a, b0, sa, sb0, acc);
-      mma_fp4(a, b1, sa, sb1, acc2);
+      if (!ONE_FRAG) {
+        const uint32_t sb1 = sfb[cur][(ncol + 8 + brow) * NQ4 + b];
+        mma_fp4(a, b1, sa, sb1, acc2);
+      }
     }
     __syncthreads();  // trailing：本 stage 的读全部完成，下一轮可覆盖
   }
   const int r0 = lane / 4, cg = (lane % 4) * 2;
   const int g0 = m_blk + wm * 16 + r0, g1 = g0 + 8;
-  const int c0 = n_blk + wn * 16 + cg, c1 = c0 + 8;
+  const int c0 = n_blk + (ONE_FRAG ? wn * 8 : wn * 16) + cg, c1 = c0 + 8;
   if (g0 < M && c0 < N) {
     D[static_cast<size_t>(g0) * N + c0] = to_bf16(acc[0] * global);
     if (c0 + 1 < N) D[static_cast<size_t>(g0) * N + c0 + 1] = to_bf16(acc[1] * global);
@@ -539,13 +544,15 @@ __global__ void __launch_bounds__(256)
     D[static_cast<size_t>(g1) * N + c0] = to_bf16(acc[2] * global);
     if (c0 + 1 < N) D[static_cast<size_t>(g1) * N + c0 + 1] = to_bf16(acc[3] * global);
   }
-  if (g0 < M && c1 < N) {
-    D[static_cast<size_t>(g0) * N + c1] = to_bf16(acc2[0] * global);
-    if (c1 + 1 < N) D[static_cast<size_t>(g0) * N + c1 + 1] = to_bf16(acc2[1] * global);
-  }
-  if (g1 < M && c1 < N) {
-    D[static_cast<size_t>(g1) * N + c1] = to_bf16(acc2[2] * global);
-    if (c1 + 1 < N) D[static_cast<size_t>(g1) * N + c1 + 1] = to_bf16(acc2[3] * global);
+  if (!ONE_FRAG) {
+    if (g0 < M && c1 < N) {
+      D[static_cast<size_t>(g0) * N + c1] = to_bf16(acc2[0] * global);
+      if (c1 + 1 < N) D[static_cast<size_t>(g0) * N + c1 + 1] = to_bf16(acc2[1] * global);
+    }
+    if (g1 < M && c1 < N) {
+      D[static_cast<size_t>(g1) * N + c1] = to_bf16(acc2[2] * global);
+      if (c1 + 1 < N) D[static_cast<size_t>(g1) * N + c1 + 1] = to_bf16(acc2[3] * global);
+    }
   }
 }
 // 第二刀（R89+）：gate+up 融合单 launch。grid.z = 2E：z<E 跑 gate（Bg/Sg/alphaG/Dg），z>=E 跑 up（Bu/Su/alphaU/Du）。
@@ -762,6 +769,14 @@ int moe_grouped_gemm(const void* aq, const void* a_s, const void* const* Bptr, c
   // B16：MOE_GEMM_STAGES（默认 4）= STAGES 级 cp.async 环形流水；=2 回退 pipe 双缓冲版（A/B 用）。
   static const int stages = []{ const char* v = getenv("MOE_GEMM_STAGES"); const int n = v ? atoi(v) : 4; return (n == 3 || n == 4 || n == 6) ? n : (n <= 2 ? 2 : 4); }();
   if (pipe && stages > 2) {
+    // B16b：decode（R ≤ 128）用 BM=16 tile（tile 表第二半），grid.y 上界 R/16 + E
+    static const bool bm16 = []{ const char* v = getenv("MOE_GEMM_BM16"); return !v || v[0] != '0'; }();
+    if (bm16 && R <= 128) {
+      const dim3 g16((unsigned)((N + BN - 1) / BN), (unsigned)((R + 15) / 16 + num_experts), 1u);
+      if (K % 128 == 0) grouped_gemm_kernel_pipe4<128, 4, 16><<<g16, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+      else grouped_gemm_kernel_pipe4<64, 4, 16><<<g16, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+      return gerr();
+    }
     if (K % 128 == 0) {
       if (stages == 3) grouped_gemm_kernel_pipe4<128, 3><<<grid, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
       // STAGES=6 × BK=128 静态 smem 50.7 KB > 48 KB 上限 → BK=128 最多 4 级

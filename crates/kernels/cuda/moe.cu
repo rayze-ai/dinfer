@@ -86,16 +86,20 @@ __global__ void scan_kernel(const int32_t* __restrict__ counts, int32_t* __restr
   for (int e = threadIdx.x; e < E; e += blockDim.x) s[e] = counts[e];
   __syncthreads();
   if (threadIdx.x == 0) {
-    int acc = 0, tacc = 0;
+    int acc = 0, tacc = 0, tacc16 = 0;
+    int32_t* tile_off16 = tile_off + (E + 1);  // B16b：第二张表 BM=16（decode 用），紧跟 BM=32 表之后
     for (int e = 0; e < E; ++e) {
       offsets[e] = acc;
       cursor[e] = acc;
       tile_off[e] = tacc;
+      tile_off16[e] = tacc16;
       tacc += (s[e] + 31) / 32;
+      tacc16 += (s[e] + 15) / 16;
       acc += s[e];
     }
     offsets[E] = acc;
     tile_off[E] = tacc;
+    tile_off16[E] = tacc16;
   }
 }
 
@@ -362,17 +366,21 @@ __global__ void __launch_bounds__(256) route_bucket_small_kernel(
   }
   __syncthreads();
   if (tid == 0) {
-    int acc = 0, tacc = 0;
+    int acc = 0, tacc = 0, tacc16 = 0;
+    int32_t* tile_off16 = tile_off + (E + 1);
     for (int e = 0; e < E; ++e) {
       counts[e] = s_cnt[e];
       offsets[e] = acc;
       s_cur[e] = acc;
       tile_off[e] = tacc;
+      tile_off16[e] = tacc16;
       tacc += (s_cnt[e] + 31) / 32;
+      tacc16 += (s_cnt[e] + 15) / 16;
       acc += s_cnt[e];
     }
     offsets[E] = acc;
     tile_off[E] = tacc;
+    tile_off16[E] = tacc16;
   }
   __syncthreads();
   for (int t = warp; t < tokens; t += nwarp) {

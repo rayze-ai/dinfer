@@ -1944,13 +1944,16 @@ pub struct MoeBuckets {
 
 /// `tile_off` 的 CPU 口径（测试 / 自建 offsets 时用）：tile_off[e] = Σ_{e'<e} ceil(len_e'/32)。
 pub fn moe_tile_off_cpu(offsets: &[i32]) -> Vec<i32> {
-    let mut t = Vec::with_capacity(offsets.len());
-    let mut acc = 0i32;
-    for w in offsets.windows(2) {
+    // B16b：两张表拼接 [BM=32 (E+1) | BM=16 (E+1)]
+    let mut t = Vec::with_capacity(2 * offsets.len());
+    for bm in [32i32, 16] {
+        let mut acc = 0i32;
+        for w in offsets.windows(2) {
+            t.push(acc);
+            acc += (w[1] - w[0] + bm - 1) / bm;
+        }
         t.push(acc);
-        acc += (w[1] - w[0] + 31) / 32;
     }
-    t.push(acc);
     t
 }
 
@@ -1963,7 +1966,7 @@ impl MoeBuckets {
             cursor: stream.alloc_zeros::<i32>(num_experts)?,
             sorted_tok: stream.alloc_zeros::<i32>(max_pairs)?,
             sorted_k: stream.alloc_zeros::<i32>(max_pairs)?,
-            tile_off: stream.alloc_zeros::<i32>(num_experts + 1)?,
+            tile_off: stream.alloc_zeros::<i32>(2 * (num_experts + 1))?,  // B16b：[BM=32 表 | BM=16 表]
             inv: stream.alloc_zeros::<i32>(max_pairs)?,
             num_experts,
             max_pairs,
@@ -2222,7 +2225,7 @@ pub fn moe_grouped_gemm(
     num_experts: usize,
 ) -> Result<()> {
     ensure!(k % 64 == 0, "moe_grouped_gemm: k {k} 不是 64 的倍数");
-    ensure!(tile_off.len() >= num_experts + 1, "moe_grouped_gemm: tile_off");
+    ensure!(tile_off.len() >= 2 * (num_experts + 1), "moe_grouped_gemm: tile_off(2 表)");
     ensure!(
         aq.len() >= rows * (k / 2)
             && a_s.len() >= rows * (k / 16)
