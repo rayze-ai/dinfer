@@ -120,3 +120,17 @@ rate8/48req同锁死负载,A/B(graph生产态):
 ## R82 2026-10-28 查rate8真实gemm3占比(host网络容器):ctr bridge并发completion反复不进forward→改host网络
 ctr bridge容器NO_GRAPH下并发completion再次不触发decode(stage/moe空,bench也没出数)=第N次撞bridge坑。改host网络detached容器(R79验证可行):NO_GRAPH+STAGE+MOE_TIME,concurrency=8 bench打,看batch态stage分布(MoE占decode比)+moe-time的r值(真实batch rows)+gemm3绝对ms。结果落tmp_gshare_RESULT.txt。
 目的:定位rate8端到端+0.8%根因——gemm3占decode步比例(graph/并发下是否被摊薄),定第一刀端到端价值+是否转第二刀。
+
+## ★★★★ R83 2026-10-28 rate8真实batch分段(host网络NO_GRAPH concurrency=8):MoE占比并发下降到44%,gemm3整层25%
+concurrency=8(tok=7/步,r=56=7×8)真实batch分段:
+| 段 | ms | 占比 |
+|---|---|---|
+| MoE | 0.25 | **44%**(单流63%,并发降) |
+| attn | 0.16 | 28% |
+| dense | 0.14 | 24% |
+| oproj | 0.02 | 3% |
+| total/层 | 0.57 | 100% |
+MoE内:**gemm3=0.145ms=MoE 58%=整层25%**;router0.034/sm+bucket0.029/gather+quant0.016/scatter0.008(前处理合计~0.09=MoE 36%)。
+**第一刀端到端上限(此并发)**:gemm3 1.83×→0.145→0.079省0.066/层,整层0.57→0.50=**-12%**,TPOT该降~12%。
+**但R80 rate8端到端仅+0.8%——矛盾!** 差异:①R80是rate8/48req稳态~54序列(r~432,M大,gemm3占比/流水收益都变);②R80是**graph态**(此处NO_GRAPH),graph压launch开销后各段绝对时间/占比变。
+**关键下一步**:直接量concurrency=8的**graph态A/B**(非rate8),看TPOT降多少。此并发gemm3占25%、M小(流水有效区),若TPOT明显降=第一刀对中低并发有端到端价值。若仍不降=graph态下gemm3时间被图优化摊薄,第一刀端到端无感→转第二刀。
