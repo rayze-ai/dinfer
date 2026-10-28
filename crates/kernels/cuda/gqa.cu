@@ -1442,6 +1442,16 @@ static int gqa_prefill_impl(const void* q, const void* k, const void* v, void* o
                               static_cast<const bf16*>(k), static_cast<const bf16*>(v), nullptr, nullptr, nullptr,
                               cu_seqlens, static_cast<bf16*>(out), (int)heads, (int)kv_heads, scale * LOG2E_F,
                               (int)q_stride, (int)kv_stride, 0, 0, 0, window);
+  // D=512（Gemma4 全注意力层 5 层）flash：补 v6（Q 进 smem，NW=4 TILE=16 控 smem/寄存器）。
+  // v6 纯 D 参数化；smem 超卡上限/寄存器 spill 启不动则 v6_launch 返回 InvalidConfiguration → 回退 ref。
+  // cfg < 0 或 GQA_D512_REF=1 时强制 ref（对拍参照 / A/B）。
+  if (cfg >= 0 && head_dim == 512 && !getenv("GQA_D512_REF")) {
+    const int rc = v6_launch<false, 512, 4, 16>((int)max_seqlen, (int)heads, (int)num_reqs, stream,
+                        static_cast<const bf16*>(q), static_cast<const bf16*>(k), static_cast<const bf16*>(v),
+                        nullptr, nullptr, nullptr, cu_seqlens, static_cast<bf16*>(out), (int)heads, (int)kv_heads,
+                        scale * LOG2E_F, (int)q_stride, (int)kv_stride, 0, 0, 0, window);
+    if (rc != (int)cudaErrorInvalidConfiguration) return rc;  // 成功/真错都返回；仅 smem 超限回退 ref
+  }
   if (cfg >= 0 && (head_dim == 128 || head_dim == 256)) {  // cfg < 0：强制通用慢路径（对拍参照）
     const int bq = head_dim == 128 ? V5Cfg<128>::BQ : V5Cfg<256>::BQ;
     dim3 grid((unsigned)((max_seqlen + bq - 1) / bq), (unsigned)heads, (unsigned)num_reqs);
