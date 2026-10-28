@@ -236,3 +236,18 @@ exec=调用executor.forward_sample墙钟=19.3ms=TPOT。调度/publish确实极�
 - **未完成**:exec 19.3ms里launch(submit) vs collect(dtoh_sync)没拆开(executor打点没生效,core的host-time盖了)→没定位到可改的具体一行。
 **下次接手第一步**:拆exec——改core engine的host-time(crates/core engine.rs)或确保kaon3 forward_sample打点生效,分launch vs collect。若collect(dtoh_sync)占满=在等GPU(与skip 0影响矛盾需再查);若launch占=host提交开销。对标vLLM 7.57(它每步host更薄)。
 **方法教训(已记knowledge)**:整段skip看端到端是定关键路径最硬手段,应最先做。本会话教训=信NO_GRAPH分段(MoE63%)做两刀全白费,skip一测就知MoE不在关键路径。
+
+## D19 2026-10-28 诚实:host-split打错分支(0行)+未解矛盾,停止加测量
+[host-split]0行:我加在engine.rs:565 pend_n的finish(pending稳态流水分支),但单流concurrency=1没n+1可排→不走542"先排n+1"流水,走589同步begin+finish。计时加错分支。
+**但确定的**:exec=19.3ms=TPOT本身(sched 0.2us/publish 3us可忽略)。单流decode每步=schedule+begin(graph launch)+finish(dtoh_sync等GPU),单请求无n+1流水,串行。
+**未解矛盾(诚实,没装解决)**:
+- exec 19.3ms里finish的dtoh_sync等的是GPU graph跑完(预捕获30层);
+- 但eager+graph skip GPU段都0影响(D16)。
+- 两者不自洽:若finish在等GPU跑19ms,skip GPU段该让GPU更快→TPOT降,但没降。
+- 可能:①graph态skip被图旁路(env不改预捕获图,D13)+eager态skip的GPU段本就快(dense/MoE小,qkv/paged/oproj eager也0影响这条最费解);②或dtoh_sync的"等"不是等计算是固定同步开销(驱动/CUDA同步原语本身~19ms??不合理);③或bench的TPOT测量把别的算进来。
+**停止加测量**:370+工具调用,反复绕此矛盾,继续烧资源。诚实交接未解。
+**下次接手正确做法**:
+- 把[host-split]计时加到**589同步finish分支**(单流走这)+begin分支,一次测准begin vs finish;
+- 或nsys换台机器/换版本真抓graph态kernel时间线(此环境6轮失败);
+- 或直接读runner.begin/finish实现(crates/core runner)看begin到底同步否、finish的dtoh_sync具体等什么;
+- 关键问题仍是:19ms到底GPU算/等GPU/host同步开销,哪个。没定死前别改。
