@@ -328,26 +328,37 @@ __global__ void __launch_bounds__(256) route_bucket_small_kernel(
   float* s_val = reinterpret_cast<float*>(smem_raw);           // [tokens][E] 工作副本（top-k 时置 -inf）
   int32_t* s_cnt = reinterpret_cast<int32_t*>(s_val + (size_t)tokens * E);  // [E]
   int32_t* s_cur = s_cnt + E;                                   // [E]
-  const int tid = threadIdx.x;
+  const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, nwarp = blockDim.x >> 5;
   for (int i = tid; i < tokens * E; i += blockDim.x) s_val[i] = logits[i];
   for (int e = tid; e < E; e += blockDim.x) s_cnt[e] = 0;
   __syncthreads();
-  if (tid < tokens) {
-    const int t = tid;
+  // B19（D73）：每 token 一 warp。top-k 第 k 轮：lane 各扫 E/32 个专家取局部 (max, 最小下标)，warp xor 归约
+  // （值大者胜；相等取小下标）—— 与串行 `if (v > bv)` 从 0 扫到 E-1 的结果完全相同（串行也是并列取先出现的小下标）。
+  for (int t = warp; t < tokens; t += nwarp) {
     float* row = s_val + (size_t)t * E;
     int32_t* ids = topk_ids + (size_t)t * K;
     for (int k = 0; k < K; ++k) {
-      int best = -1;
       float bv = -INFINITY;
-      for (int e = 0; e < E; ++e) {
+      int bi = 0x7fffffff;
+      for (int e = lane; e < E; e += 32) {
         const float v = row[e];
-        if (v > bv) { bv = v; best = e; }
+        if (v > bv) { bv = v; bi = e; }
       }
-      ids[k] = best;
-      row[best] = -INFINITY;
-      atomicAdd(&s_cnt[best], 1);
+#pragma unroll
+      for (int off = 16; off > 0; off >>= 1) {
+        const float ov = __shfl_xor_sync(0xffffffffu, bv, off);
+        const int oi = __shfl_xor_sync(0xffffffffu, bi, off);
+        if (ov > bv || (ov == bv && oi < bi)) { bv = ov; bi = oi; }
+      }
+      if (lane == 0) {
+        ids[k] = bi;
+        atomicAdd(&s_cnt[bi], 1);
+      }
+      if (bi >= lane && ((bi - lane) & 31) == 0) row[bi] = -INFINITY;  // 该专家属于本 lane 的扫描区，置 -inf
+      __syncwarp();
     }
-    route_softmax_row(logits + (size_t)t * E, ids, per_expert_scale, topk_w + (size_t)t * K, E, K, exact_rcp);
+    if (lane == 0)
+      route_softmax_row(logits + (size_t)t * E, ids, per_expert_scale, topk_w + (size_t)t * K, E, K, exact_rcp);
   }
   __syncthreads();
   if (tid == 0) {
@@ -364,13 +375,13 @@ __global__ void __launch_bounds__(256) route_bucket_small_kernel(
     tile_off[E] = tacc;
   }
   __syncthreads();
-  if (tid < tokens) {
-    for (int k = 0; k < K; ++k) {
-      const int e = topk_ids[(size_t)tid * K + k];
+  for (int t = warp; t < tokens; t += nwarp) {
+    if (lane < K) {  // 一 lane 一个 (t,k)：原子游标分配位置（区间内顺序不定，与旧版同）
+      const int e = topk_ids[(size_t)t * K + lane];
       const int pos = atomicAdd(&s_cur[e], 1);
-      sorted_tok[pos] = tid;
-      sorted_k[pos] = k;
-      inv[(size_t)tid * K + k] = pos;
+      sorted_tok[pos] = t;
+      sorted_k[pos] = lane;
+      inv[(size_t)t * K + lane] = pos;
     }
   }
   __syncthreads();
