@@ -579,3 +579,12 @@ PIPE=1 TPOT c1=16.45ms,base=17.41(D45同条件)。**端到端-5.5%(省~1ms)**。
 - nsys 2024.2.3（上会话）和 2026.3.2（本次）第一次都"无 kernel 表"：诊断表显示 **"Buffers holding CUDA trace data will be flushed on CudaProfilerStop()"**，只记到权重加载 14k memcpy，kernel 记录在 CUPTI 缓冲里没落盘（dinfer `kill -INT` 直接退，不调 cudaProfilerStop）。修：`--cuda-flush-interval=1000`（每秒 flush）。脚本 `scripts/dev/kaon3_nsys_decode.sh` + 解析 `scripts/dev/nsys_kern.py`（按 graphExecId 聚类取 decode 图实例，逐 kernel 名聚合时长/占比/grid）。
 - 同时容器内编译 `MOE_GEMM_SKIP=gu|dn|all`（只跳 3 个 grouped GEMM，路由/gather/quant/gelu/combine 照跑）版二进制（`/w/build_kaon3.sh`，结果 tmp_build_RESULT.txt；验 strings 含 MOE_GEMM_SKIP）。
 - 用户 2026-10-28 晚：B↔C "5 次"非硬顶，判断需要可加轮次（已写进规格）。
+
+## D53 2026-10-28 MOE_GEMM_SKIP 差分（新二进制 09:58，graph 态 c1，进行中）
+| | TPOT | 省 |
+|---|---|---|
+| base（PIPE 关） | 16.15 | — |
+| skip gate+up GEMM | 15.18 | 0.97 |
+| skip down GEMM | 15.88 | 0.27 |
+初看：**3 个 grouped GEMM 合计只 ~1.2ms，MoE 段 D45 的 5.3ms 里其余 ~4ms 在路由 / bucket / gather / quant / gelu / scatter_add（每层 ≥12 个小 kernel：gate_kernel + route_topk + route_softmax + count/scan/fill ×3 + row2expert + gather + quant ×2 + gelu + scatter_add + memset + f32_add）**。若剩余项证实，Step B 第一刀应是 **MoE 前后处理 kernel 融合（减 launch 数）**，而不是 GEMM 本体。等 all / pipe / pipe_dual / MOE_SKIP 行 + nsys 清单确认。
+（注意 base 16.15 比 Step A 的 17.07 低 0.9ms：bench 参数不同，num-requests 4 vs 8、本轮无 HOST_TIME；只在本表内部比。）
