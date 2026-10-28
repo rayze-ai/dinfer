@@ -1178,3 +1178,5 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - ⇒ 最终结论：**没有并发 bug**（同批构成 → 同输出，逐字确定）；差异 = **批构成改变 → 按 m 选 algo/tile 的 GEMM / MoE grouped GEMM 分组 → 每层 ulp → 30 层累积 → 贪心翻转**（批不变性问题）。chunk/命中态 9/10 与并发 6/8 是同一现象的两种触发。昨天追的 B27（真修）、B28/B29（真缺陷不触发）与这个现象无关。
 - 待决：翻转率是否比 vLLM 高（同 8 条 prompt 对 vLLM 基线 :28067 做 serial vs c8，见下）。若 vLLM 显著更稳 → 我们某个小 m 路径精度差（候选：fp8 gemv fp32 累加 vs Lt、grouped GEMM BM=16/32 tile 序、NVFP4 小 m 块缩放），值得修；否则结案为已知的非批不变，记入 design.md §11 台账（vLLM 默认同样不批不变，BI 模式有性能代价）。
 - **恢复**：`KV_FP8_STORE` 默认改回开（D70 c8 TPOT -1.9%；e4m3 不是原因）。`FP8_LT_TUNE` 保持默认关（b25 实测 c8 +3%）。`INFLIGHT_GATHER` 默认关。
+
+## D146 2026-10-29 vLLM 基线批不变性对照：基线容器 `vllm-noneager` 监听 **:28201**（生产口径，served-model-name `kaon-vllm`）、`vllm-eager` :28200（CLAUDE.md 写的 :28067 已过时 → 更正）。同 8 条自然语言 prompt、同脚本（serial×2 / c8 vs serial / c8 vs c8）。结果归档 `test/kaon3/2026-10-29/vllm_batch_invariance_RESULT.txt`。
