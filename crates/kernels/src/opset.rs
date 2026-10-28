@@ -184,8 +184,8 @@ impl Attention for DefaultOps {
 impl Norm for DefaultOps {
     #[inline]
     #[inline]
-    fn rmsnorm_noweight(&self, stream: &Stream, x: &CudaSlice<bf16>, out: &mut CudaSlice<bf16>, _tokens: usize, hidden: usize, eps: f32) -> Result<()> {
-        ops::rmsnorm_bf16_noweight(stream, x, out, hidden, eps)
+    fn rmsnorm_noweight(&self, stream: &Stream, x: &CudaSlice<bf16>, out: &mut CudaSlice<bf16>, tokens: usize, hidden: usize, eps: f32) -> Result<()> {
+        ops::rmsnorm_bf16_noweight(stream, x, out, tokens, hidden, eps)
     }
     fn rmsnorm(&self, stream: &Stream, x: &CudaSlice<bf16>, w: &CudaSlice<bf16>, out: &mut CudaSlice<bf16>, tokens: usize, hidden: usize, eps: f32) -> Result<()> {
         ops::rmsnorm_bf16_n(stream, x, w, out, tokens, hidden, eps)

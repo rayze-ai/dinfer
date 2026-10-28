@@ -179,16 +179,19 @@ pub fn rmsnorm_bf16(
 ///
 /// kernel 侧把空权重指针当作 1.0（`norm.cu`），所以不需要额外的 C 符号，传 `nullptr` 即可。
 #[allow(clippy::too_many_arguments)]
+/// B18（loop kaon3-decode-opt D73）：行数由调用方给（`tokens`），不再用 `x.len()/hidden`——缓冲按 max_tokens 预分配时
+/// 那样会按 4160 行 launch（kaon3 router 预处理每层 17 us vs 1.3 us，0.47 ms/步纯浪费）。
 pub fn rmsnorm_bf16_noweight(
     stream: &Stream,
     x: &CudaSlice<bf16>,
     out: &mut CudaSlice<bf16>,
+    tokens: usize,
     hidden: usize,
     eps: f32,
 ) -> Result<()> {
-    ensure!(hidden > 0 && x.len() % hidden == 0, "rmsnorm_noweight: x.len {} not multiple of hidden {hidden}", x.len());
-    ensure!(out.len() == x.len(), "rmsnorm_noweight: out 长度不符");
-    let tokens = (x.len() / hidden) as i64;
+    ensure!(hidden > 0 && x.len() >= tokens * hidden, "rmsnorm_noweight: x.len {} < tokens*hidden", x.len());
+    ensure!(out.len() >= tokens * hidden, "rmsnorm_noweight: out 太小");
+    let tokens = tokens as i64;
     let (px, po) = (stream.ptr(x) as *const c_void, stream.ptr_mut(out) as *mut c_void);
     // SAFETY: 指针与长度已校验；w 传空 → kernel 乘 1.0。
     check(
