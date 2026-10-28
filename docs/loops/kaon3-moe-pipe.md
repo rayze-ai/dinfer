@@ -46,3 +46,7 @@
 ## ★ R73c 2026-10-28 单缓冲cp.async版对拍 bad=0/15488 通过→cp.async索引/zfill/布局全对
 退成单缓冲(B/sfb换cp.async+wait_group 0,A/sfa原样STS)后对拍**bad=0**。坐实:cp.async的B/sfb索引、zfill(越界0)、落smem字节与旧版逐字一致。之前R73双缓冲74%错=**双缓冲时序/buf索引**引入,非cp.async本身。
 但单缓冲wait_group 0无load/mma重叠=不提速(只换了拷贝指令)。下一步:在此基础加双缓冲(B/sfb预取[2]buf+错位wait_group 1),重点防R73的坑——compute(cur)时load(nxt)不能覆盖cur的buf,A/sfa也要[2]buf且store时机对。每加一步先对拍bad=0再谈性能。
+
+## ★★ R74 2026-10-28 双缓冲cp.async流水版对拍 bad=0/15488 通过(逐位门禁过)
+照搬已验证fp8范式(prologue存buf0+循环内store nxt在wait_group 1+__syncthreads之后,B/sfb cp.async预取到[2]buf,错位wait_group 1,trailing sync保证下轮写前本轮读完)。修了R73坑(store时机)。对拍**bad=0**。
+逐位硬门槛过。下一步验第二关:gemm3墙钟降没降(大M prefill态每专家M≈132,旧版vs流水版kernel墙钟),确认cp.async重叠真提效率(目标13%峰值往上)。过了再接serve bench进CSV。
