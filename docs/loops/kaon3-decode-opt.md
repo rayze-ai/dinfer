@@ -1028,3 +1028,7 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 
 ## ★★★★ D84 2026-10-28 B26 门禁过：`gqa_paged_d512_parity` v6 PAGED D=512（bf16 cache）vs ref max|Δ| 0.0156（amax 4.5，tol 0.09，ndiff 8607/1.38M = mma 序差几 ulp）；**v6 e4m3 cache vs v6 bf16 cache 位差 0**；ref e4m3 vs bf16 位差 0；`GQA_D512_REF=1` 时 v6 路径 ndiff=0（分支回退生效）。bN TAG=b26 跑中（A 旧二进制 / B 新）。
 - 顺带确认滑窗层（D=256）PAGED 本来就有快分支：cfg≥1000 → v6/v7 PAGED；kv_fp8 时 `cfg=0` → fa_v5 PAGED KV_FP8 模板（B15b 已逐位）。只有 D=512 漏了。
+
+## ★★★★★★ D85 2026-10-28 b26 首批 B（paged_win D=512 v6）：**c8 TTFT p50 542.6 → 155.8（-71%，3.5×）、mean 427 → 130**；c8 吞吐 465 → **672 tok/s（+45%）**、req/s 7.27 → 10.50；c8 TPOT 9.86 → 9.83；c1 TTFT 27.2 → 28.6 / TPOT 5.99 = 5.99（c1 不变——bN 的 A/B 都没带 FP8_GEMV，故 5.99 不是 5.57；与 b16b 链 A 侧 6.04 同口径）
+- vLLM c8 TTFT 146 → 我们 156（1.07×），之前 3.7×。c8 吞吐 vs vLLM 956 → 70%（之前 49%）。
+- 剩余：c8 TTFT 156 ≈ 7 请求 Paged 步 ~130 ms = 纯 Prefill 3008 tok 的 127 + 25 ms 固定开销；小 t Paged 步（t=13 → 36 ms vs decode 9）的 25 ms 固定开销还在（pagedprobe 跑完看）。候选：① Paged 步 eager 1065 launch（~1 ms，不是 25）；② 混批里 decode 行走 `gqa_decode_win` + prefill 行走 paged_win 两套 kernel 都跑全 30 层——各 5 层 D=512；③ MoE route_fused 只到 tokens ≤ 64，Paged t>64 走旧 route；④ dense/qkv 在 8 < tokens ≤ 16 走 fp8 gemv，> 16 走 cuBLASLt tile=13（m 小时 nvjet 慢）。等 pagedprobe 的 t 分桶表再定。
