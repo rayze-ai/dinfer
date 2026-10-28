@@ -31,3 +31,16 @@
 **想法1定位**:wait 高也在 dense mega(R55 GATE/UP/DOWN wait≈4×exec,CTA 自旋空等),缺 compute overlap(第一刀 cp.async 只在 MoE 做了,dense mega 没做)。
 **两想法都指向 dense mega 这一段**。但 dense NO_GRAPH 测只占 decode 8-15%(不可信,graph 摊薄)。
 **按用户 step A/B/C,先不扎进 dense**:Step A 跑 5 轮测全套(启动/TTFT/TPOT/exec/wait/带宽/GPU util),确认 dense 是不是 graph 态耗时最长的段,再 Step B 改。不再未验证就动手。
+
+## D2 2026-10-28 Step A graph态指标(5轮稳定):
+| 指标 | 值 |
+|---|---|
+| 单流TTFT | 58ms |
+| 单流TPOT | **19.33ms** |
+| rate8吞吐 | 624 tok/s |
+| rate8 TPOT | **43ms** |
+| rate8 TTFT | 98-101ms |
+| GPU util(decode) | **~100%**(159×100%/27×99%) |
+对比vLLM非eager TPOT 7.57ms:单流19.33慢2.5×,rate8 43慢5.7×。
+**GPU ~100%满载**:不是在"等"GPU空闲(否则util掉),但util 100%≠高效(CTA自旋也算忙)。分清"真算vs自旋空转"需kernel级exec/wait(step A还缺,下面NO_GRAPH插桩补,标注会摊薄)。
+启动model_load_ms≈42000(前轮日志,此轮grep没中,已知~42s)。
