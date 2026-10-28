@@ -846,3 +846,4 @@ decode c1 的 MoE 段 nsys：grouped_gemm gate 18.6 + up 18.6 + down 12.5 + gelu
 - TTFT 爆是预料中的 B15b 缺口：c8 的 prefill 走混批 `paged_win`（`BatchMode::Paged`），kv_fp8 存储下 `paged_impl` 强制 `cfg=-1` 通用慢路径（D=256 层 25 层）。**c8 TPOT -0.4 ms 证明 KV 读带宽减半有效**（c8 KV 读占比高；c1 KV 总量小、在 L2 里，看不出）。
 - 决定：**B15 的 `KV_FP8_STORE` 默认改关**（等 B15b fa_v5 PAGED 加 e4m3 读后再默认开）；本轮 B 侧 c8 TPOT 数字记 CSV 作负/中性结果说明。英文 raw 输出与 b8d 逐字同（逐位）。
 - **b15 定稿（两轮）**：B c1 6.56/6.57（持平）、c8 TPOT 11.12/11.12（-3.6%）、c8 TTFT 1397（2.8×，混批慢路径）。`KV_FP8_STORE` 默认改关（`=1` 开）；CSV round b15 记"未合入"。B15b 代码落地（fa_v5 PAGED 加 KV_FP8：fp8 staging 区 + 展开 barrier，NBUF 固定 1；`paged_impl` 不再强制 cfg=-1，v6/v7 cfg≥1000 退到 fa_v5），与 B16 同链验。
+- B16 补：`STAGES=6 × BK=128` 静态 smem 50.7 KB 超 48 KB（ptxas 会报 too much shared data）→ BK=128 只 3/4 级，BK=64 可 6 级。b16 链起时该守卫还没 put，若编译失败即此因，重起即可。
