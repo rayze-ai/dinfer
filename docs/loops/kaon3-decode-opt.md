@@ -283,3 +283,8 @@ warmup5重测:
 2. 并发扩展崩(c4→c8吞吐倒退)
 3. decode TPOT(单流18 vs 4.8,慢3.8×) ← 之前大半天在这,其实第三位
 **下一步Step B**:定位prefill为何超线性——读kaon3 prefill attention路径(ops.attn().prefill_win,gqa prefill kernel),看是不是O(L²)全量/没分块/没flash。对标vLLM prefill(flash-attn分块O(L))。plen扫prefill TTFT(128/256/512/1024)确认超线性曲线。
+
+## ★★★★ D22 2026-10-28 prefill kernel是flash(非O(L²)),但Kaon D=256/512可能走"旧参考实现"=真超线性源
+读gqa.cu:prefill已是flash风格(FA2/online softmax/causal只扫对角tile/cp.async),**非朴素O(L²)**,推翻D21"疑O(L²)"。
+**关键线索(gqa.cu:10-12注释)**:"D=128走flash tile kernel,**其他D走旧参考实现**"。Kaon-V3 head_dim=**256(滑窗层)/512(全注意力层)**,非128→**很可能走旧参考实现,不是flash**!旧参考若朴素O(L²)无分块=plen1024慢2秒/24×的根源。
+**待确认**:Kaon prefill(D=256/512)实际分派到flash还是旧参考。查gqa.cu的D分派+ops.rs gqa_prefill_win_bf16。
