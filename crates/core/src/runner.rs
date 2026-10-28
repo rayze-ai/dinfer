@@ -801,6 +801,38 @@ mod tests {
     }
 
     /// n-gram 提案 → 下一步 plan 带 1+K 个 token / logits 行 / 采样行 → 接受 1 拒 2 → num_computed 回退。
+    /// B28（loop kaon3-decode-opt D103）：同步 executor 上，engine 的顺序是 begin(n) → begin_cut_in(c) → finish(c) → finish(n)。
+    /// 之前步 n 的结果留在 `self.generated`，被 cut-in 的 forward 覆盖 → 步 n 拿到 c 的 token。
+    #[test]
+    fn sync_cut_in_does_not_overwrite_pending_step_result() {
+        let mut s = sched_spec(1000, 0);
+        let sp = SamplingParams { max_tokens: 8, temperature: 0.0, ..Default::default() };
+        s.add_request(Request::new(1, vec![1, 2, 3, 4], sp.clone(), 0));
+        let mut r = Runner::new(Echo { plans: vec![] }, 16);
+        // step 1：req 1 prefill（同步 execute）
+        let so1 = s.schedule();
+        let mro1 = r.execute(&so1).unwrap();
+        s.update_from_output(&so1, &mro1);
+        // step n：req 1 decode，begin 后不 finish
+        let so_n = s.schedule();
+        let pend_n = r.begin(&so_n).unwrap();
+        let expect_n = 1000 + r.state(1).unwrap().token_ids.len() as u32 + 0; // Echo: 1000 + seq_len（本步 seq_len = 已有 token 数 + 1 - 1）
+        // 新请求到达 → cut-in（waiting-only 调度，只含 req 2 的 prefill）
+        s.add_request(Request::new(2, vec![9, 9, 9, 9, 9, 9, 9], sp, 0));
+        let so_c = s.schedule_waiting_only();
+        assert_eq!(so_c.num_scheduled_tokens.len(), 1, "cut-in step 只含新请求");
+        let pend_c = r.begin_cut_in(&so_c).unwrap();
+        let mro_c = r.finish(pend_c).unwrap();
+        assert_eq!(mro_c.req_ids, vec![2]);
+        assert_eq!(mro_c.sampled[0], vec![1000 + 7], "cut-in 请求（seq_len 7）的 token");
+        // 再 finish 步 n：必须是 req 1 自己的结果，不是 req 2 的
+        let mro_n = r.finish(pend_n).unwrap();
+        assert_eq!(mro_n.req_ids, vec![1]);
+        let _ = expect_n;
+        assert_ne!(mro_n.sampled[0], vec![1000 + 7], "步 n 的结果被 cut-in 覆盖（B28 修前的 bug）");
+        assert_eq!(mro_n.sampled[0], vec![1000 + 5], "req 1 本步 seq_len = 4 prompt + 1 已生成 = 5");
+    }
+
     #[test]
     fn ngram_drafts_flow_through_plan_and_rollback() {
         let mut s = sched_spec(1000, 3);
