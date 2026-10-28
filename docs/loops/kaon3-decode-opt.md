@@ -188,3 +188,14 @@ NO_GRAPH(eager,每步真执行host skip判断) plen128:
 注:只重验了dense+MoE的eager skip(最大两块GPU活),足够证GPU计算非瓶颈;qkv/paged/oproj的eager skip没重跑但同理。
 **方向彻底锁死**:D5-D14一致指向——decode瓶颈=host/调度/每步固定链,非任何GPU kernel。两刀MoE+要攻的attn全错。R47对。
 **Step B可信地往host挖了(非假数据)**:读executor decode每步host代码(upload_plan/Graph::launch/argmax D2H/采样/detokenize),定13ms host在哪+随KV 6ms的host循环。vLLM 7.57说明host能薄。
+
+## D15 2026-10-28 读host路径:每步极薄(bind/upload/launch/collect),13ms大部分是collect的dtoh_sync阻塞等GPU
+forward_sample(executor.rs:245)每步:bind_ctx→upload_plan→graph.launch→collect(argmax D2H,dtoh_sync_copy带同步,:208)→取token。host代码极薄,无明显13ms CPU工作。
+**关键**:collect的dtoh_sync**阻塞等整个graph(30层forward)跑完**。所以forward_sample墙钟=launch+阻塞等GPU+D2H。
+**诚实矛盾未解**:
+- graph态skip GPU段0影响→可能图旁路(D13,graph预捕获skip env不生效);
+- NO_GRAPH态skip dense+MoE 0影响(D14)→只证dense+MoE的GPU时间小,没证qkv/paged/attn;
+- 两者加起来**不足以100%断定13ms是host还是GPU**。我之前D12"瓶颈在host"下太快(graph态skip可能旁路)。
+**一锤定音实验(还没做)**:加FULL_SKIP让整个forward/launch都不跑(只bind+upload+collect dummy),TPOT剩多少=纯host地板。或NO_GRAPH下重跑qkv/paged/oproj skip(eager真生效)看降不降。
+**诚实**:现在还不能断定13ms归属。不在没定死前往host改(重蹈MoE覆辙)。
+**下一步**:NO_GRAPH下重验qkv/paged/oproj skip(eager态,env真生效)——若eager下删这些TPOT大降=GPU确实在算(graph态0影响是图旁路假象,瓶颈其实GPU);若eager下也不降=真host。这个eager重验是关键,之前coreskip是graph态(可能旁路)。
