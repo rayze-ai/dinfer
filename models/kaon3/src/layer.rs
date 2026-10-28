@@ -1081,9 +1081,12 @@ impl Gemma4Layer {
         sub_dump(stream, sub_out, "k_proj_raw", kk, tokens, nkv * d)?;
         sub_dump(stream, sub_out, "v_proj_raw", v, tokens, nkv * d)?;
         // ---- 3. 逐头 RMSNorm：q_norm / k_norm 带权重，v_norm 无权重 ----
-        head_rmsnorm(stream, ops, q, Some(&self.q_norm), d, eps)?;
-        head_rmsnorm(stream, ops, kk, Some(&self.k_norm), d, eps)?;
-        head_rmsnorm(stream, ops, v, None, d, eps)?;
+        // ATTN_SKIP_NORM=1（纯计时,结果错）：跳过 3 个逐头 RMSNorm,测其 graph 态占比。
+        if std::env::var("ATTN_SKIP_NORM").ok().as_deref() != Some("1") {
+            head_rmsnorm(stream, ops, q, Some(&self.q_norm), d, eps)?;
+            head_rmsnorm(stream, ops, kk, Some(&self.k_norm), d, eps)?;
+            head_rmsnorm(stream, ops, v, None, d, eps)?;
+        }
         if let Some((dir, _)) = sub_out {
             for (nm, buf, rows) in [("q_norm", &*q, heads), ("k_norm", &*kk, nkv), ("v_norm", &*v, nkv)] {
                 let vv = buf.to_vec_f32(stream)?;
@@ -1094,8 +1097,11 @@ impl Gemma4Layer {
         }
 
         // ---- 4. RoPE（只转前 rope_dim 维；proportional 的分母已由 Ropes 处理）----
+        // ATTN_SKIP_ROPE=1（纯计时,结果错）：跳过 rope,测其 graph 态占比。
         let rope = if self.window > 0 { &ropes.sliding } else { &ropes.full };
-        rope.apply(stream, q, Some(kk), ctx.positions, heads, nkv, d)?;
+        if std::env::var("ATTN_SKIP_ROPE").ok().as_deref() != Some("1") {
+            rope.apply(stream, q, Some(kk), ctx.positions, heads, nkv, d)?;
+        }
         if let Some((dir, _)) = sub_out {
             for (nm, buf, rows) in [("q_rope", &*q, heads), ("k_rope", &*kk, nkv)] {
                 let vv = buf.to_vec_f32(stream)?;
@@ -1106,7 +1112,8 @@ impl Gemma4Layer {
         }
 
         // ---- 4a. FP8 KV（vLLM `kv_cache_dtype=fp8_e4m3`，scale 1.0）：attention 读的是量化后的 K/V ----
-        if cfg.kv_fp8 {
+        // ATTN_SKIP_KVFP8=1（纯计时,结果错）：跳过 3 个 fp8 roundtrip,测其 graph 态占比。
+        if cfg.kv_fp8 && std::env::var("ATTN_SKIP_KVFP8").ok().as_deref() != Some("1") {
             k::ops::fp8_e4m3_roundtrip_bf16_n(stream, &mut kk.data, tokens * nkv * d, 1.0)?;
             k::ops::fp8_e4m3_roundtrip_bf16_n(stream, &mut v.data, tokens * nkv * d, 1.0)?;
             // q 也要量化成 e4m3（vLLM Triton 后端 `supports_quant_query_input = is_cuda()`，
