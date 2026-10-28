@@ -1563,7 +1563,9 @@ impl Gemma4Layer {
             stream.htod_into(&hb, &mut sc.h2.data)?;
         }
         sub_dump(stream, sub_out, "pre_ff2_norm", &sc.h2, tokens, h)?;
-        stream.memset_zeros_n(&mut sc.acc.data, tokens * h)?;
+        if !(moe_grouped_enabled() && moe_combine_fused_enabled()) {
+            stream.memset_zeros_n(&mut sc.acc.data, tokens * h)?;  // B11b combine 不用 acc，省一次 memset
+        }
 
         // === B3：device-grouped MoE（去 host 路由 + 去 D2H）。固定 launch 次数，offsets 留 device ===
         if moe_grouped_enabled() {
