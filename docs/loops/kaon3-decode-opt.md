@@ -881,3 +881,9 @@ decode c1 的 MoE 段 nsys：grouped_gemm gate 18.6 + up 18.6 + down 12.5 + gelu
 - B17a 收益 ≈ 0：510 次 getenv/步在 prefill 里 <0.1 ms（我估 0.5–1 ms 高估了 5–10×）。不过是正确的清理（逐位、零风险），留着。**结论：prefill host 的 16 ms（D51）不在 env 读上；下一步 B17 必须先用 `HOST_TIME=1` 复测 prefill 步的 upload/launch/collect 三段**（D51 以来 B8 等改动可能已经改变分布），再决定图化。
 - 另：`executor.rs forward_sample` 里有一行无条件 `eprintln!("[fwd-sample] ENTER ...")`——每步一次 stderr 写（无锁但 syscall），prefill/decode 都有；顺手删（改 tracing::trace）。
 - **b17 定稿**：B 两轮 6.39/6.40、TTFT 28.97/28.90；c8 11.35/11.35、507/507 —— 与 b16+B15b 定稿一致，B17a 中性（清理保留，不入 CSV）。
+
+## B16b 设计定稿 2026-10-28（等 nsys c1b 期间）：grouped GEMM decode 用 BM=16 tile
+- pipe4 现 BM=32：8 warp = 2(M)×4(N)，每 warp 16×16（两个 n8 片段 acc/acc2）。decode 每专家 ≤16 行时 wm=1 的 4 个 warp 全算零行（mma 对 zfill 的 A）——**一半算力白干**，smem/寄存器也按 32 行占。
+- BM=16 变体：8 warp = 1(M)×8(N)，每 warp 16×8（一个 n8 片段，只 acc）；B 片段 b0 = ncol=warp*8；A 片段同（mrow=0）。**每个输出元素的 k 序累加与 BM=32 版逐位同**（同 lane 同 k 顺序，只是少算一个片段）→ bad=0 可测。smem 每级 16·72+64·72+4·(16+64) = 6.1 KB（原 8.4）；寄存器少 acc2 → 占用 ↑。
+- tile 表：`tile_off` 现按 BM=32 算（scan_kernel/fused route 都写死 `/32`）。加第二张 `tile_off16`（同一 scan 多写一列，`(cnt+15)/16`），MoeBuckets 加字段，`moe_grouped_gemm` 多收一个指针，host 按 `rows ≤ 128`（decode 口径）选 BM=16 + tile_off16，否则 BM=32 + tile_off。grid.y 上界 R/16+E。
+- 预期：gate/up 每 CTA 算量减半 → 18.6→~11 us（若固定开销占一半则 ~14）；三 GEMM -0.3~-0.5 ms/步。先等 nsys 看 pipe4 现值再动手。
