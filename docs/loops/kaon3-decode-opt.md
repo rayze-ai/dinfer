@@ -396,3 +396,19 @@ curl /tokenize 1024词=**7ms**(排除tokenize是TTFT 2秒根因)。但出**4010 
 两vLLM:vllm-noneager :28201(pid2592348,无enforce-eager,max-model-len 16384)=**真非eager**;vllm-eager :28200(enforce-eager)。D33查的pid2592177是:28200(eager)查错了。**:28201确实非eager**(D67没错)。
 **但max-model-len不对齐仍成立**:dinfer 2048 vs vLLM 16384。4010 token prompt在dinfer超限=2秒慢路径(D32),在vLLM合规。这才是"慢24×"主因(非eager与否)。
 **对齐方案**:dinfer重起max-model-len 16384非eager serve(:8290),两端非eager+同max-model-len。Step A跑c1/2/4/8/16,prompt token数先用合理值(400词≈1560 token,安全)。
+
+## ★★★★★★ D35 2026-10-28 对齐后第一次公平基线(两端非eager+max-model-len16384+prompt1560token合规)
+| 并发 | 吞吐d/v tok/s | d/v% | TTFT p50 d/v | TPOT p50 d/v |
+|---|---|---|---|---|
+| c1 | 44/200 | 22% | 368/24 | 17.4/4.7 |
+| c2 | 82/346 | 24% | 384/37 | 18.4/5.4 |
+| c4 | 154/543 | 28% | 384/88 | 19.3/6.1 |
+| c8 | 289/971 | 30% | 383/146 | 20.0/6.2 |
+| c16 | 463/1550 | 30% | 392/220 | 19.9/7.0 |
+**真实差距(对齐后,非污染)**:吞吐**22-30%**(非之前6-16%污染/63%虚高);TTFT dinfer c1就368ms vLLM24ms=**慢15×**且**几乎不随并发变(368→392恒定)**;TPOT慢~3×(17vs5)。
+**两靶子**:
+1. **★TTFT恒定~380ms**(c1就有不随并发变=固定开销,vLLM24ms随并发涨):prompt合规(1560<16384)下dinfer prefill首token仍380ms。**非之前2秒(那是超限),这380ms是合规负载真实prefill开销=真问题,最该先攻**。
+2. 吞吐22-30%+TPOT慢3×。
+**dinfer启动慢**:max-model-len 16384后model_load_ms=64068(之前2048时42s,KV池大)。
+**对齐教训固化**:这才是公平基线。之前所有数(594/63%/6-16%/慢24×)因前置不对齐(max-model-len/eager/prompt超限)全作废,以本表为准。
+**下一步**:攻TTFT 380ms恒定开销——prompt合规下首token为何380ms(vLLM24ms)。c1无并发无排队=纯prefill+首token路径固定开销。skip差分prefill各段(合规1560token下)或host计时(这次计时加对completions.rs已验bench走这)看380ms在哪。
