@@ -1104,3 +1104,4 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - 顺带：pair2 只跑了 plain 一组就 DONE（trap EXIT 在 python 之后？第 2 组 serve 端口未释放 → NOTUP？），natprobe 每组前 `pkill -x dinfer; sleep 3`。
 - **D112 队列事故**：b28 bN 只跑完 A（c1 6.00 / c8 TTFT 155.9 TPOT 9.80 = b27 B 同值）就没了 B/A2/B2，无 DONE；b29.sh 卡在等 b28 DONE，natprobe 卡在等 b29。嫌疑：我排的每条新链开头 `pkill -x dinfer`（b29.sh / natprobe.sh / chain3）会杀**别的链正在跑的 serve**——bN 的 serve 被杀 → bench 失败 → 脚本中断。规则补进 knowledge：**链之间只能用 DONE 标记串行，链内不许 `pkill -x dinfer`**（只 kill 自己起的 `$SP`）。
 - 处理：b28 bN 不补跑（B28 对 kaon3 现状不生效，数字应 = b27）；b29 链的 A 侧改成 **b27 二进制**（`/w/dinfer_prev_b28` 就是 b27 的；复制为 `/w/dinfer_prev_b29`），让 b29 链自然启动。b29 bN = b27 vs b29（含 B28+B29，预期持平）。
+- D113（2026-10-29 00:0x）：b29 链 watcher 仍在等（b28 DONE 已由我补写，但容器内 `/w/dinfer/tmp_b28_RESULT.txt` 与宿主 `/hf_data/yaochen/dinfer/...` 是同一文件——待核是否 bind mount 延迟/路径不同）。natprobe 排在 b29 后。本轮已 commit 到位，等待期间不再改代码。
