@@ -5419,3 +5419,45 @@ pub fn moe_fp4_gemv(
         "moe_fp4_gemv",
     )
 }
+
+/// B10：decode 小 batch（tokens ≤ 64）的 MoE 路由前处理一次 launch：
+/// top-k（口径同 `moe_route_softmax_f32`，逐位同）+ bucket（同 `moe_bucket`：counts/offsets/cursor/sorted/tile_off）+ row2e。
+/// sorted 区间内顺序与旧版一样"不定"（smem 原子游标）。
+#[allow(clippy::too_many_arguments)]
+pub fn moe_route_bucket_small(
+    stream: &Stream,
+    logits: &CudaSlice<f32>,
+    per_expert_scale: Option<&CudaSlice<bf16>>,
+    topk_ids: &mut CudaSlice<i32>,
+    topk_w: &mut CudaSlice<f32>,
+    b: &mut MoeBuckets,
+    row2e: &mut CudaSlice<i32>,
+    tokens: usize,
+    topk: usize,
+) -> Result<()> {
+    let e = b.num_experts;
+    ensure!(tokens >= 1 && tokens <= 64, "moe_route_bucket_small: tokens={tokens} (≤64)");
+    ensure!(logits.len() >= tokens * e && topk_ids.len() >= tokens * topk && topk_w.len() >= tokens * topk, "moe_route_bucket_small: logits/out");
+    ensure!(tokens * topk <= b.max_pairs && row2e.len() >= tokens * topk, "moe_route_bucket_small: capacity");
+    if let Some(p) = per_expert_scale {
+        ensure!(p.len() == e, "moe_route_bucket_small: per_expert_scale len");
+    }
+    let pl = stream.ptr(logits) as *const f32;
+    let pp = per_expert_scale.map_or(std::ptr::null(), |p| stream.ptr(p) as *const c_void);
+    let pi = stream.ptr_mut(topk_ids) as *mut i32;
+    let pw = stream.ptr_mut(topk_w) as *mut f32;
+    let pc = stream.ptr_mut(&mut b.counts) as *mut i32;
+    let po = stream.ptr_mut(&mut b.offsets) as *mut i32;
+    let pcu = stream.ptr_mut(&mut b.cursor) as *mut i32;
+    let pst = stream.ptr_mut(&mut b.sorted_tok) as *mut i32;
+    let psk = stream.ptr_mut(&mut b.sorted_k) as *mut i32;
+    let pto = stream.ptr_mut(&mut b.tile_off) as *mut i32;
+    let pr = stream.ptr_mut(row2e) as *mut i32;
+    // SAFETY: 容量已校验；per_expert_scale 可为 null。
+    check(
+        unsafe {
+            ffi::moe_route_bucket_small(pl, pp, pi, pw, pc, po, pcu, pst, psk, pto, pr, tokens as i64, e as i64, topk as i64, stream.raw() as ffi::cudaStream_t)
+        },
+        "moe_route_bucket_small",
+    )
+}

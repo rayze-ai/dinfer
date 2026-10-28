@@ -641,6 +641,11 @@ impl ActBuf {
 /// B5：decode（tokens ≤ 16）dense MLP 走带宽型 fp8 GEMV（`mlp_fp8_decode.cu`），不走 persistent mega。
 /// `DENSE_DECODE_OLD=1` 回退（A/B 用）。
 pub const DENSE_GEMV_ROWS: usize = 16;
+/// B10：MoE 路由前处理融合（默认开；`MOE_ROUTE_FUSED=0` 回退 7 次 launch 的旧链）。
+fn moe_route_fused_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("MOE_ROUTE_FUSED").ok().as_deref() != Some("0"))
+}
 /// B7：MoE decode grouped NVFP4 GEMV（默认关，`MOE_DECODE_GEMV=1` 开）。
 fn moe_decode_gemv_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1508,16 +1513,27 @@ impl Gemma4Layer {
             Some(&self.router.per_expert.data)
         };
         if let Some(e) = &moe_pre_ev { stream.record_timing(&e[1])?; }  // router完
-        k::ops::moe_route_softmax_f32(
-            stream,
-            &sc.logits.data,
-            pes_route,
-            &mut sc.topk_ids.data,
-            &mut sc.topk_w.data,
-            tokens,
-            e,
-            kk,
-        )?;
+        // B10：grouped 路径 + tokens ≤ 64 → 路由前处理 7 次 launch 融合成 1 次（topk/权重/bucket/tile_off/row2e 一起）。
+        // `MOE_ROUTE_FUSED=0` 回退旧链（A/B 用）。
+        let route_fused = moe_grouped_enabled() && tokens <= 64 && moe_route_fused_enabled() && sc.grouped.is_some();
+        if route_fused {
+            let g = sc.grouped.as_mut().unwrap();
+            k::ops::moe_route_bucket_small(
+                stream, &sc.logits.data, pes_route, &mut sc.topk_ids.data, &mut sc.topk_w.data, &mut sc.buckets,
+                &mut g.row2e, tokens, kk,
+            )?;
+        } else {
+            k::ops::moe_route_softmax_f32(
+                stream,
+                &sc.logits.data,
+                pes_route,
+                &mut sc.topk_ids.data,
+                &mut sc.topk_w.data,
+                tokens,
+                e,
+                kk,
+            )?;
+        }
         if let Some((dir, _)) = sub_out {
             let ids = stream.dtoh_sync_copy(&sc.topk_ids.data)?;
             let ws = stream.dtoh_sync_copy(&sc.topk_w.data)?;
@@ -1526,7 +1542,9 @@ impl Gemma4Layer {
             std::fs::write(dir.join("topk_ids.bin"), ib).ok();
             std::fs::write(dir.join("topk_w.bin"), wb).ok();
         }
-        k::ops::moe_bucket(stream, &sc.topk_ids.data, &mut sc.buckets, tokens, kk)?;
+        if !route_fused {
+            k::ops::moe_bucket(stream, &sc.topk_ids.data, &mut sc.buckets, tokens, kk)?;
+        }
         if let Some(e) = &moe_pre_ev { stream.record_timing(&e[2])?; }  // softmax+bucket完
 
         // 专家输入 = pre_feedforward_layernorm_2(residual)（router 用自己的无权重 norm，两者不同）；
@@ -1557,7 +1575,9 @@ impl Gemma4Layer {
             };
             let g = sc.grouped.as_mut().expect("MOE_GROUPED=1 但 GroupedBufs 未分配");
             // 1) row2e[R]：device offsets → 每行专家 id（E blocks，无 D2H）
-            k::ops::moe_row2expert(stream, &sc.buckets.offsets, &mut g.row2e, e, r)?;
+            if !route_fused {
+                k::ops::moe_row2expert(stream, &sc.buckets.offsets, &mut g.row2e, e, r)?;
+            }
             // 2) gather 全部 R 行（按 sorted 顺序，start=0）
             k::ops::moe_gather_bf16(stream, &sc.h2.data, &mut sc.xg.data, &sc.buckets.sorted_tok, 0, r, h)?;
             // MoE 内部细分计时（KAON3_MOE_TIME=1）：量 3×grouped_gemm vs 其余。

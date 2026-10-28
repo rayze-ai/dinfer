@@ -218,12 +218,11 @@ __device__ __forceinline__ float route_rcp(float x) {
 __device__ __forceinline__ float route_inv(float x, int exact) {
   return exact ? __frcp_rn(x) : route_rcp(x);
 }
-__global__ void route_softmax_kernel(const float* __restrict__ logits, const int32_t* __restrict__ topk_ids,
-                                     const void* __restrict__ per_expert_scale, float* __restrict__ topk_w, int E,
-                                     int K, int exact_rcp) {
-  if (threadIdx.x != 0) return;
-  const int64_t t = blockIdx.x;
-  const float* lg = logits + t * E;
+// 一行 token 的 Gemma4 路由权重（口径见上注释）；单线程执行。route_softmax_kernel 与融合版 moe_route_bucket_small 共用，
+// 保两条路径逐位同。lg = 该 token 的 logits 行（E 个），ids = 该 token 的 top-k id（K 个），写 w[K]。
+__device__ __forceinline__ void route_softmax_row(const float* __restrict__ lg, const int32_t* __restrict__ ids,
+                                                  const void* __restrict__ per_expert_scale, float* __restrict__ w,
+                                                  int E, int K, int exact_rcp) {
   float m = -INFINITY;
   for (int e = 0; e < E; ++e) m = fmaxf(m, lg[e]);
   // vLLM gemma4：全体 E 个专家 softmax 概率（prob_e = exp(l_e-m)/Z，Z=全体和），再 gather top-k、renorm。
@@ -234,7 +233,7 @@ __global__ void route_softmax_kernel(const float* __restrict__ logits, const int
   const float invZ = route_inv(Z, exact_rcp);
   float raw[MAX_K];
   for (int k = 0; k < K; ++k)
-    raw[k] = __fmul_rn(route_exp_e(__fsub_rn(lg[topk_ids[t * K + k]], m), exact_rcp), invZ);
+    raw[k] = __fmul_rn(route_exp_e(__fsub_rn(lg[ids[k]], m), exact_rcp), invZ);
   int block_e = 1;
   while (block_e < E) block_e <<= 1;
   const int ept = block_e >= 32 ? block_e / 32 : 1;
@@ -258,12 +257,18 @@ __global__ void route_softmax_kernel(const float* __restrict__ logits, const int
   const float renorm = lane[0] > 0.f ? lane[0] : 1.f;
   const float inv = route_inv(renorm, exact_rcp);
   for (int k = 0; k < K; ++k) {
-    const int e = topk_ids[t * K + k];
+    const int e = ids[k];
     const float sc = per_expert_scale ? to_f32(static_cast<const bf16*>(per_expert_scale)[e]) : 1.f;
-    topk_w[t * K + k] = __fmul_rn(__fmul_rn(raw[k], inv), sc);
+    w[k] = __fmul_rn(__fmul_rn(raw[k], inv), sc);
   }
 }
-
+__global__ void route_softmax_kernel(const float* __restrict__ logits, const int32_t* __restrict__ topk_ids,
+                                     const void* __restrict__ per_expert_scale, float* __restrict__ topk_w, int E,
+                                     int K, int exact_rcp) {
+  if (threadIdx.x != 0) return;
+  const int64_t t = blockIdx.x;
+  route_softmax_row(logits + t * E, topk_ids + t * K, per_expert_scale, topk_w + t * K, E, K, exact_rcp);
+}
 // 按原始 logits 取 top-k（Gemma4 口径：不看 softmax 概率的大小关系，两者单调等价，但按 logits 可避免
 // exp 下溢导致全 0 时排序不稳定）。
 __global__ void route_topk_ids_kernel(const float* __restrict__ logits, int32_t* __restrict__ topk_ids, int E,
@@ -303,6 +308,107 @@ extern "C" int moe_route_softmax_f32(const float* logits, int32_t* topk_ids, con
   route_softmax_kernel<<<(unsigned)tokens, 256, 0, stream>>>(logits, topk_ids, per_expert_scale, topk_w,
                                                              (int)num_experts, (int)topk, exact_rcp);
   return 0;
+}
+
+// ---------------------------------------------------------------------------
+// B10（loop kaon3-decode-opt）：decode 小 batch 的路由前处理一次 launch 做完：
+//   top-k（照 route_topk_ids_kernel 的选择顺序）→ 权重（route_softmax_row，逐位同）→ counts/offsets/cursor/tile_off
+//   → sorted_tok/sorted_k → row2e。替代 route_topk_ids + route_softmax + memset + count + scan + fill + row2expert 7 次。
+// 单 block；tokens ≤ kRouteSmallMaxTok；每线程一个 token（≤ blockDim）。sorted 区间内顺序由 smem 原子决定（与旧版一样"不定"）。
+constexpr int kRouteSmallMaxTok = 64;
+__global__ void __launch_bounds__(256) route_bucket_small_kernel(
+    const float* __restrict__ logits, const void* __restrict__ per_expert_scale, int32_t* __restrict__ topk_ids,
+    float* __restrict__ topk_w, int32_t* __restrict__ counts, int32_t* __restrict__ offsets,
+    int32_t* __restrict__ cursor, int32_t* __restrict__ sorted_tok, int32_t* __restrict__ sorted_k,
+    int32_t* __restrict__ tile_off, int32_t* __restrict__ row2e, int tokens, int E, int K, int exact_rcp) {
+  extern __shared__ __align__(16) uint8_t smem_raw[];
+  float* s_val = reinterpret_cast<float*>(smem_raw);           // [tokens][E] 工作副本（top-k 时置 -inf）
+  int32_t* s_cnt = reinterpret_cast<int32_t*>(s_val + (size_t)tokens * E);  // [E]
+  int32_t* s_cur = s_cnt + E;                                   // [E]
+  const int tid = threadIdx.x;
+  for (int i = tid; i < tokens * E; i += blockDim.x) s_val[i] = logits[i];
+  for (int e = tid; e < E; e += blockDim.x) s_cnt[e] = 0;
+  __syncthreads();
+  if (tid < tokens) {
+    const int t = tid;
+    float* row = s_val + (size_t)t * E;
+    int32_t* ids = topk_ids + (size_t)t * K;
+    for (int k = 0; k < K; ++k) {
+      int best = -1;
+      float bv = -INFINITY;
+      for (int e = 0; e < E; ++e) {
+        const float v = row[e];
+        if (v > bv) { bv = v; best = e; }
+      }
+      ids[k] = best;
+      row[best] = -INFINITY;
+      atomicAdd(&s_cnt[best], 1);
+    }
+    route_softmax_row(logits + (size_t)t * E, ids, per_expert_scale, topk_w + (size_t)t * K, E, K, exact_rcp);
+  }
+  __syncthreads();
+  if (tid == 0) {
+    int acc = 0, tacc = 0;
+    for (int e = 0; e < E; ++e) {
+      counts[e] = s_cnt[e];
+      offsets[e] = acc;
+      s_cur[e] = acc;
+      tile_off[e] = tacc;
+      tacc += (s_cnt[e] + 31) / 32;
+      acc += s_cnt[e];
+    }
+    offsets[E] = acc;
+    tile_off[E] = tacc;
+  }
+  __syncthreads();
+  if (tid < tokens) {
+    for (int k = 0; k < K; ++k) {
+      const int e = topk_ids[(size_t)tid * K + k];
+      const int pos = atomicAdd(&s_cur[e], 1);
+      sorted_tok[pos] = tid;
+      sorted_k[pos] = k;
+    }
+  }
+  __syncthreads();
+  // cursor 终值 = offsets[e+1]（旧版 fill 完成后的状态）；row2e[r] = 所在区间
+  for (int e = tid; e < E; e += blockDim.x) cursor[e] = s_cur[e];
+  const int R = tokens * K;
+  for (int r = tid; r < R; r += blockDim.x) {
+    int lo = 0, hi = E;
+    while (hi - lo > 1) {
+      const int mid = (lo + hi) >> 1;
+      if (offsets[mid] <= r) lo = mid; else hi = mid;
+    }
+    row2e[r] = lo;
+  }
+}
+
+extern "C" int moe_route_bucket_small(const float* logits, const void* per_expert_scale, int32_t* topk_ids,
+                                      float* topk_w, int32_t* counts, int32_t* offsets, int32_t* cursor,
+                                      int32_t* sorted_tok, int32_t* sorted_k, int32_t* tile_off, int32_t* row2e,
+                                      int64_t tokens, int64_t num_experts, int64_t topk, cudaStream_t stream) {
+  if (tokens <= 0) return 0;
+  if (tokens > kRouteSmallMaxTok || num_experts <= 0 || num_experts > MAX_E || topk <= 0 || topk > MAX_K ||
+      topk > num_experts)
+    return err(cudaErrorInvalidValue);
+  static const int exact_rcp = [] {
+    const char* e = getenv("ROUTER_RCP_EXACT");
+    return (e && e[0] == '1') ? 1 : 0;
+  }();
+  const size_t smem = (size_t)tokens * num_experts * sizeof(float) + 2 * (size_t)num_experts * sizeof(int32_t);
+  if (smem > 48 * 1024) {
+    static size_t attr = 0;
+    if (smem > attr) {
+      if (cudaFuncSetAttribute(route_bucket_small_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem) !=
+          cudaSuccess)
+        return last_err();
+      attr = smem;
+    }
+  }
+  route_bucket_small_kernel<<<1, 256, smem, stream>>>(logits, per_expert_scale, topk_ids, topk_w, counts, offsets,
+                                                      cursor, sorted_tok, sorted_k, tile_off, row2e, (int)tokens,
+                                                      (int)num_experts, (int)topk, exact_rcp);
+  return last_err();
 }
 
 extern "C" int moe_bucket(const int32_t* topk_ids, int32_t* counts, int32_t* offsets, int32_t* cursor,
