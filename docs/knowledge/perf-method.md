@@ -125,3 +125,12 @@ attn 的 QK 是"16 条 K=16 全部累加到同一个 TMEM 累加器 → 必须�
 **用法**：给 GEMM 选结构时先看"发射/依赖比"——K 越长、commit 越少，越适合 1 CTA/SM 的 UMMA。
 GDN 的 chunk 内 GEMM（K=128 连续、state 现成在 smem）属于好的那一类；attention 的 QK/PV 属于坏的那一类。
 
+
+## 15. 性能 bench 查不出"输出错"：每条链必须带 c≥2 的逐请求输出比对（2026-10-28，kaon3 D87/D103）
+- 几十轮 c8 bench 的吞吐 / TPOT 全是在**两处正确性 bug** 下测的（混批步在飞 decode 行 attention 没人算；同步 runner 的步 n 采样结果被 cut-in / 提前 begin(n+1) 覆盖）：token 数、步数、时延一个不变，输出乱码。c1 的两条 curl 永远对（c1 不混批、无 pending）。
+- **怎么用**：bN 链前置 `scripts/dev/kaon3_pair2.sh`（2 路/8 路同时发 vs 串行，env 变体）+ `kaon3_mixparity.sh`（同 prompt 串行 vs c2/c8）+ `kaon3_cacheprobe.sh`（c1 同 prompt 三次 = prefix cache 命中后的带历史 chunk）；三者全 SAME 才允许比性能。差异从 **char 1** 起 = 首 token 就错 = 采样行/结果映射问题，不是数值精度。
+- 同服务同 seed 重跑 bench 命中 prefix cache，TTFT 掉 7× 是假象；多次 bench 换 seed（见 pitfalls 2026-10-28）。
+
+## 16. "快路径缺一个分支"类慢：先看分派表再看 kernel（2026-10-28，kaon3 B26）
+- c8 TTFT 545 ms（vLLM 146）根因是 `gqa_paged_win` 对 D=512 没有快分支，落到 grid=(req,head) 的串行标量 kernel；一个 Paged 步 476 ms vs 同 token 纯 Prefill 127 ms。补 v6 PAGED 分支后 TTFT -71%、吞吐 +45%。
+- **判法**：某类步（混批 / chunked / 某 head_dim）比同 token 数的"正常"步慢 ≥ 3× 且有固定开销，先 grep 分派函数里每个 `head_dim ==` / `cfg >=` 分支，列"形状 × 路径"表，找落到 `_ref` / `generic` 的格子；比 nsys 快。

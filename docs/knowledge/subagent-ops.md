@@ -61,3 +61,10 @@
 - `ssh run 'until ! pgrep -f "gdn_parity"; do sleep 5; done; …'` **会匹配到自己**：`pgrep -f` 看整条命令行，而外层 `bash -c` 的命令行里就含 "gdn_parity"，于是永远不退出——两个后台作业各空转 20 min，GPU 7 全程空闲，表面看像"还在跑"。`pkill -f` 同理会把自己杀掉（整条链 exit 1、日志文件都没建）。
 - 正确做法：按**二进制路径**等（`pgrep -f "^/data/.../release/deps/gdn_parity-"`，锚定行首，bash -c 的命令行不会以它开头），或干脆不排队：一个后台作业把 build / parity / bench / ncu 串在同一条链里顺序跑。
 - 排队作业启动后 1–2 min 要回头看一次产物文件是否已建（`ls -la bootstrap/<log>`）；没建 = 还在等 = 多半自锁。
+
+## 远端探针队列的卫生（2026-10-28，一晚踩四次）
+- 探针脚本 `echo DONE` 放 `trap … EXIT`，否则 python 异常 / serve 503 后 watcher 永远等；watcher 一律带超时（`for i in $(seq 1 N)`）。
+- 宿主机路径 `/hf_data/yaochen/...` ≠ 容器路径 `/w/...`：在宿主机补写 DONE 标记要用宿主路径。
+- 容器 `kaon3-full` 只挂 GPU 0；`CUDA_VISIBLE_DEVICES=1` → `CUDA_ERROR_NO_DEVICE` 秒退，脚本继续打到旧端口 → 503，看起来像服务 bug。
+- 上一条链的 serve 没退干净时起下一条 → OOM → 503；链首 `pkill -x dinfer; sleep 2`。
+- bN 的 A 侧二进制：脚本开头 `cp 当前 → prev`；若链里先编译再调 bN，prev 已是新二进制——用 `[ -f prev ] || cp` 变体保留真旧版。

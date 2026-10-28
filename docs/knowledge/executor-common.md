@@ -38,3 +38,11 @@
 
 ## 下一步（design.md §14.5）
 任务图抽象：模型 crate 声明层结构 → 公共层生成图 → 同一张图可喂 megakernel 或退化成逐 kernel launch。`DecodeGraphs` 的闭包捕获体是它的前身。
+
+## 混批 attention 两半都要：paged 行 + decode 行（2026-10-28，kaon3 B27）
+- `paged_win(skip_single=true)` 让 PAGED kernel 跳过 q_len==1 行，**调用方必须**再为这些行调 decode kernel（`gqa_decode_win_bf16(cu_seqlens_q=Some)`，kernel 内按 cu_seqlens 过滤 q_len==1 行）。qwen3 的 `ops.attn().mixed` 封装了两半；kaon3 自己拼时只搬了一半，从阶段 3 起混批步 decode 行 attn 是残留值。
+- **规则**：任何"跳过某些行"的 kernel 参数，调用处要能指出"谁算这些行"；新模型接 attention 直接用 `mixed`，别手拼。
+
+## 同步 executor 的两段式结果必须随 Pending 走（2026-10-28，kaon3 B28）
+- engine 在 `finish(pend_n)` 之前会 ① 跑 cut-in（`begin_cut_in` → forward_sample）② `async_sched` 下提前 `begin(n+1)`（同步 runner 上立刻 forward）。结果若留在 runner 共享字段（`self.generated`），步 n 的 token 被覆盖且 `ensure!(len)` 查不出（行数相同）。修法：`Pending.sync_result` 随 Pending 走（runner.rs，单测 `sync_cut_in_does_not_overwrite_pending_step_result`）。
+- 不实现 `supports_async` 的 executor 是放大器：每步都走同步分支。kaon3 应补 async（prev_chosen gather + `save_chosen`），省一步 host 等待（TODO）。
