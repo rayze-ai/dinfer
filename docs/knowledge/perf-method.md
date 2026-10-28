@@ -134,3 +134,4 @@ GDN 的 chunk 内 GEMM（K=128 连续、state 现成在 smem）属于好的那�
 ## 16. "快路径缺一个分支"类慢：先看分派表再看 kernel（2026-10-28，kaon3 B26）
 - c8 TTFT 545 ms（vLLM 146）根因是 `gqa_paged_win` 对 D=512 没有快分支，落到 grid=(req,head) 的串行标量 kernel；一个 Paged 步 476 ms vs 同 token 纯 Prefill 127 ms。补 v6 PAGED 分支后 TTFT -71%、吞吐 +45%。
 - **判法**：某类步（混批 / chunked / 某 head_dim）比同 token 数的"正常"步慢 ≥ 3× 且有固定开销，先 grep 分派函数里每个 `head_dim ==` / `cfg >=` 分支，列"形状 × 路径"表，找落到 `_ref` / `generic` 的格子；比 nsys 快。
+- **§15 补（2026-10-29）**：并发 / cache 命中 / chunked prefill 三种触发下的输出差异，先用 `--no-prefix-caching` + 同批构成重复（c8 vs c8）判**确定性**；确定 + 语义等价 ⇒ 批不变性（m 依赖数值），不是功能 bug。真正的功能 bug 形态：同批构成不确定、或乱码 / 语义崩坏（如 B27 修前的混批 decode 行）。
