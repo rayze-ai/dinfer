@@ -183,19 +183,22 @@ fn gqa_decode_fp8cache_bitwise() {
         let cu: Vec<i32> = (0..=b as i32).collect();
         let dcu = st.htod_copy(cu).unwrap();
         let mut scratch = st.alloc_zeros::<f32>(dinfer_kernels::gqa_decode_scratch_len(b, h, d)).unwrap();
-        for path in ["decode_win", "paged_slow"] {
+        // B15b：fa_v5 PAGED（cfg=0）两侧同 kernel 结构（bf16 vs KV_FP8 模板），只 D=256（fa_v5 支持 128/256）
+        let paths: Vec<&str> = if d == 256 { vec!["decode_win", "paged_slow", "paged_v5"] } else { vec!["decode_win", "paged_slow"] };
+        for path in paths {
             let mut outs = Vec::new();
             for (cache, f8) in [(&cache_bf, false), (&cache_f8, true)] {
                 let mut out = st.alloc_zeros::<bf16>(b * h * d).unwrap();
                 if path == "decode_win" {
                     dinfer_kernels::gqa_decode_win_bf16(&st, &dq, cache, &dbt, &dseq, &mut out, &mut scratch, b, h, hkv, d, bs, max_blocks, 1.0, 0, None, window, f8).unwrap();
                 } else {
-                    // 两侧都强制 cfg=-1 通用慢路径（bf16 侧 D=256 默认会走 fa_v5，与慢路径累加序不同 → 不是在比 fp8；D67）
+                    // paged_slow：两侧都强制 cfg=-1 通用慢路径（D67）；paged_v5：两侧 cfg=0 → fa_v5 PAGED（bf16 / KV_FP8 模板同结构）
+                    let cfg = if path == "paged_slow" { -1 } else { 0 };
                     let rc = unsafe {
                         dinfer_kernels::ffi::gqa_paged_win_bf16(
                             st.ptr(&dq) as *const std::ffi::c_void, st.ptr(cache) as *const std::ffi::c_void, st.ptr(&dbt) as *const i32,
                             st.ptr(&dseq) as *const i32, st.ptr(&dcu) as *const i32, st.ptr_mut(&mut out) as *mut std::ffi::c_void,
-                            b as i64, 1, h as i64, hkv as i64, d as i64, bs as i64, max_blocks as i64, 1.0, 0, 0, -1, window as i32, 0,
+                            b as i64, 1, h as i64, hkv as i64, d as i64, bs as i64, max_blocks as i64, 1.0, 0, 0, cfg, window as i32, 0,
                             f8 as i32, st.raw() as _,
                         )
                     };
