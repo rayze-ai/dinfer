@@ -84,6 +84,50 @@ fn moe_pipe_matches_baseline() {
     assert_eq!(bad, 0, "流水版与旧版逐位不一致（应 bad=0）");
 }
 
+/// B16：STAGES=4 环形流水 vs 旧版（无流水）逐位。注意 host 的 MOE_GEMM_STAGES 是进程内 static 一次读取，
+/// 本测试单独进程跑：`cargo test -p dinfer-kernels --test moe_pipe_parity -- --ignored --exact moe_pipe4_matches_baseline`
+/// （与其它测试同进程时以第一个读到的值为准）。
+#[test]
+#[ignore]
+fn moe_pipe4_matches_baseline() {
+    std::env::set_var("MOE_GEMM_STAGES", "4");
+    let (e, n, kk) = (8usize, 704usize, 2816usize);
+    let lens = [1usize, 1, 2, 3, 1, 5, 1, 8];
+    let rows: usize = lens.iter().sum();
+    let mut offsets = vec![0i32; e + 1];
+    for i in 0..e { offsets[i + 1] = offsets[i] + lens[i] as i32; }
+    let mut seed = 0x0b16_5678_9abc_def0u64;
+    let aq: Vec<u8> = (0..rows * (kk / 2)).map(|_| lcg(&mut seed)).collect();
+    let a_s: Vec<u8> = (0..rows * (kk / 16)).map(|_| 0x38u8.wrapping_add(lcg(&mut seed) & 0x0f)).collect();
+    let mut bbytes = Vec::new();
+    let mut sbytes = Vec::new();
+    for _ in 0..e {
+        bbytes.push((0..n * (kk / 2)).map(|_| lcg(&mut seed)).collect::<Vec<u8>>());
+        sbytes.push((0..n * (kk / 16)).map(|_| 0x38u8.wrapping_add(lcg(&mut seed) & 0x0f)).collect::<Vec<u8>>());
+    }
+    let alpha: Vec<f32> = (0..e).map(|i| 1.0 + 0.01 * i as f32).collect();
+    let dev = Device::new(0).expect("cuda");
+    let stream = dev.default_stream();
+    let base = run(&stream, false, &aq, &a_s, &bbytes, &sbytes, &alpha, &offsets, rows, n, kk, e);
+    let p4 = run(&stream, true, &aq, &a_s, &bbytes, &sbytes, &alpha, &offsets, rows, n, kk, e);
+    let bad = base.iter().zip(&p4).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+    println!("MOE_PIPE4_PARITY rows={rows} n={n} k={kk} e={e} STAGES=4 | bad={bad}/{}", base.len());
+    assert_eq!(bad, 0, "4 级流水与旧版逐位不一致（应 bad=0）");
+    // down 形状（K=704, BK=64 路径）
+    let (n2, kk2) = (2816usize, 704usize);
+    let aq2: Vec<u8> = (0..rows * (kk2 / 2)).map(|_| lcg(&mut seed)).collect();
+    let a_s2: Vec<u8> = (0..rows * (kk2 / 16)).map(|_| 0x38u8.wrapping_add(lcg(&mut seed) & 0x0f)).collect();
+    let mut bb2 = Vec::new(); let mut sb2 = Vec::new();
+    for _ in 0..e {
+        bb2.push((0..n2 * (kk2 / 2)).map(|_| lcg(&mut seed)).collect::<Vec<u8>>());
+        sb2.push((0..n2 * (kk2 / 16)).map(|_| 0x38u8.wrapping_add(lcg(&mut seed) & 0x0f)).collect::<Vec<u8>>());
+    }
+    let base2 = run(&stream, false, &aq2, &a_s2, &bb2, &sb2, &alpha, &offsets, rows, n2, kk2, e);
+    let p42 = run(&stream, true, &aq2, &a_s2, &bb2, &sb2, &alpha, &offsets, rows, n2, kk2, e);
+    let bad2 = base2.iter().zip(&p42).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+    println!("MOE_PIPE4_PARITY(down) rows={rows} n={n2} k={kk2} e={e} STAGES=4 | bad={bad2}/{}", base2.len());
+    assert_eq!(bad2, 0, "4 级流水(down 形状)与旧版逐位不一致");
+}
 // 计时微基准：8 专家各 M=132（模拟 prefill 大 M），旧版 vs 流水版 kernel 墙钟。
 // cargo test -p dinfer-kernels --test moe_pipe_parity -- --ignored --nocapture moe_pipe_timing
 #[test]

@@ -7,6 +7,7 @@
 //   quant16 / mma_fp4 / e4m3_f / rcp_approx **逐字复制自 gemm_nvfp4_sm120.cu**（不共享头避免跨文件漂移；
 //   任一侧改了另一侧要同步）。BM/BN/PAD 同。
 #include <cstdint>
+#include <cstdlib>
 #include <cuda_runtime.h>
 #include <cuda_fp4.h>
 #include <cuda_fp8.h>
@@ -427,6 +428,126 @@ __global__ void __launch_bounds__(256)
   }
 }
 
+// B16（loop kaon3-decode-opt）：STAGES 级 cp.async 环形流水（默认 4）。pipe 版是 2 级双缓冲 + 每 BK 步一次
+// "等上一组落地 → barrier"，decode 每 CTA 每步只搬 ~4 KB，22 步 × (HBM 往返 + barrier) 是延迟绑定（0.85 us/步）。
+// 这里 A/sfa 也改 cp.async（越界行 zfill 0：e2m1 0 × 任何 = 0，且这些行的输出不写；与旧版 0x11/0x38 填充同样不影响有效行），
+// 预取深度 STAGES-1 组在飞，wait_group STAGES-1。mma 序、片段寻址与 pipe 版逐字同 → 有效行逐位一致。
+template <int BK, int STAGES>
+__global__ void __launch_bounds__(256)
+    grouped_gemm_kernel_pipe4(const uint8_t* __restrict__ A, const uint8_t* __restrict__ Asc,
+                              const uint8_t* const* __restrict__ Bptr, const uint8_t* const* __restrict__ Sptr,
+                              const float* __restrict__ alpha, const int32_t* __restrict__ offsets,
+                              const int32_t* __restrict__ tile_off, bf16* __restrict__ D, int N, int K, int E) {
+  int e, m_blk, row_hi;
+  if (!tile_lookup(offsets, tile_off, E, (int)blockIdx.y, e, m_blk, row_hi)) return;
+  constexpr int RSA = BK / 2 + PAD, RSB = BK / 2 + PAD;
+  constexpr int NQ4 = BK / 64;
+  constexpr int NB16 = BK / 16;
+  __shared__ __align__(16) uint8_t sA[STAGES][BM * RSA];
+  __shared__ __align__(16) uint8_t sB[STAGES][BN * RSB];
+  __shared__ __align__(16) uint32_t sfa[STAGES][BM * NQ4];
+  __shared__ __align__(16) uint32_t sfb[STAGES][BN * NQ4];
+  const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+  const int wm = warp >> 2, wn = warp & 3;
+  const int n_blk = blockIdx.x * BN;
+  const uint8_t* B = Bptr[e];
+  const uint8_t* S = Sptr[e];
+  const float global = alpha[e];
+  const int M = row_hi;
+  float acc[4] = {0, 0, 0, 0}, acc2[4] = {0, 0, 0, 0};
+  const int nk = (K + BK - 1) / BK;
+  const int rb = BK / 32;
+  // 第 kb 块 → stage st：A/sfa/B/sfb 全部 cp.async，提交 1 组
+  auto load_stage = [&](int st, int kb) {
+    const uint8_t* asrc = A + static_cast<size_t>(m_blk) * (K / 2) + kb * (BK / 2);
+    for (int i = tid; i < (BM * BK / 2) / 16; i += blockDim.x) {
+      const int r = i / rb, c = i % rb;
+      const bool ok = (m_blk + r < M);
+      cp16(smem_u32(&sA[st][r * RSA + c * 16]), asrc + (static_cast<size_t>(r) * (K / 32) + c) * 16, ok ? 16 : 0);
+    }
+    for (int i = tid; i < BM * NQ4; i += blockDim.x) {
+      const int r = i / NQ4, q = i % NQ4;
+      const bool ok = (m_blk + r < M);
+      cp4(smem_u32(&sfa[st][r * NQ4 + q]), Asc + static_cast<size_t>(m_blk + r) * (K / 16) + kb * NB16 + q * 4,
+          ok ? 4 : 0);
+    }
+    const uint8_t* bsrc = B + static_cast<size_t>(n_blk) * (K / 2) + kb * (BK / 2);
+    for (int i = tid; i < (BN * BK / 2) / 16; i += blockDim.x) {
+      const int r = i / rb, c = i % rb;
+      const bool ok = (n_blk + r < N);
+      cp16(smem_u32(&sB[st][r * RSB + c * 16]), bsrc + (static_cast<size_t>(r) * (K / 32) + c) * 16, ok ? 16 : 0);
+    }
+    for (int i = tid; i < BN * NQ4; i += blockDim.x) {
+      const int r = i / NQ4, q = i % NQ4;
+      const bool ok = (n_blk + r < N);
+      cp4(smem_u32(&sfb[st][r * NQ4 + q]), S + static_cast<size_t>(n_blk + r) * (K / 16) + kb * NB16 + q * 4,
+          ok ? 4 : 0);
+    }
+    asm volatile("cp.async.commit_group;\n");
+  };
+  // prologue：前 STAGES-1 块
+#pragma unroll
+  for (int st = 0; st < STAGES - 1; ++st) {
+    if (st < nk) load_stage(st, st);
+    else asm volatile("cp.async.commit_group;\n");
+  }
+  for (int kb = 0; kb < nk; ++kb) {
+    // 发出第 kb+STAGES-1 块（其 stage 在上轮 trailing barrier 后已无读者）
+    {
+      const int kn = kb + STAGES - 1;
+      if (kn < nk) load_stage(kn % STAGES, kn);
+      else asm volatile("cp.async.commit_group;\n");
+    }
+    asm volatile("cp.async.wait_group %0;\n" ::"n"(STAGES - 1));  // 第 kb 组已落地
+    __syncthreads();
+    const int cur = kb % STAGES;
+    const int nbk = BK / 64;
+    for (int b = 0; b < nbk; ++b) {
+      const int kb0 = b * 64;
+      uint32_t a[4], b0[2], b1[2];
+      const int mrow = wm * 16, ncol = wn * 16;
+#pragma unroll
+      for (int g = 0; g < 4; ++g) {
+        const int m = (lane / 4) + 8 * (g % 2);
+        const int kb_ = kb0 + 8 * (lane % 4) + 32 * (g / 2);
+        a[g] = *reinterpret_cast<const uint32_t*>(&sA[cur][(mrow + m) * RSA + kb_ / 2]);
+      }
+      const int brow = lane / 4;
+#pragma unroll
+      for (int g = 0; g < 2; ++g) {
+        const int kb_ = kb0 + 8 * (lane % 4) + 32 * g;
+        b0[g] = *reinterpret_cast<const uint32_t*>(&sB[cur][(ncol + brow) * RSB + kb_ / 2]);
+        b1[g] = *reinterpret_cast<const uint32_t*>(&sB[cur][(ncol + 8 + brow) * RSB + kb_ / 2]);
+      }
+      const int sam = (8 * (lane & 1) + (lane >> 2)) & 15;
+      const uint32_t sa = sfa[cur][(mrow + sam) * NQ4 + b];
+      const uint32_t sb0 = sfb[cur][(ncol + brow) * NQ4 + b];
+      const uint32_t sb1 = sfb[cur][(ncol + 8 + brow) * NQ4 + b];
+      mma_fp4(a, b0, sa, sb0, acc);
+      mma_fp4(a, b1, sa, sb1, acc2);
+    }
+    __syncthreads();  // trailing：本 stage 的读全部完成，下一轮可覆盖
+  }
+  const int r0 = lane / 4, cg = (lane % 4) * 2;
+  const int g0 = m_blk + wm * 16 + r0, g1 = g0 + 8;
+  const int c0 = n_blk + wn * 16 + cg, c1 = c0 + 8;
+  if (g0 < M && c0 < N) {
+    D[static_cast<size_t>(g0) * N + c0] = to_bf16(acc[0] * global);
+    if (c0 + 1 < N) D[static_cast<size_t>(g0) * N + c0 + 1] = to_bf16(acc[1] * global);
+  }
+  if (g1 < M && c0 < N) {
+    D[static_cast<size_t>(g1) * N + c0] = to_bf16(acc[2] * global);
+    if (c0 + 1 < N) D[static_cast<size_t>(g1) * N + c0 + 1] = to_bf16(acc[3] * global);
+  }
+  if (g0 < M && c1 < N) {
+    D[static_cast<size_t>(g0) * N + c1] = to_bf16(acc2[0] * global);
+    if (c1 + 1 < N) D[static_cast<size_t>(g0) * N + c1 + 1] = to_bf16(acc2[1] * global);
+  }
+  if (g1 < M && c1 < N) {
+    D[static_cast<size_t>(g1) * N + c1] = to_bf16(acc2[2] * global);
+    if (c1 + 1 < N) D[static_cast<size_t>(g1) * N + c1 + 1] = to_bf16(acc2[3] * global);
+  }
+}
 // 第二刀（R89+）：gate+up 融合单 launch。grid.z = 2E：z<E 跑 gate（Bg/Sg/alphaG/Dg），z>=E 跑 up（Bu/Su/alphaU/Du）。
 // decode grid 小（~8激活×N/BN）占不满 170 SM；翻倍 grid.z 填满 SM = graph 吃不掉的并行度。
 // body 与 grouped_gemm_kernel_pipe 逐字相同（仅 e/B/S/global/D 按 half 选）→ 逐位天然一致。
@@ -638,6 +759,20 @@ int moe_grouped_gemm(const void* aq, const void* a_s, const void* const* Bptr, c
   const uint8_t* const* ps = reinterpret_cast<const uint8_t* const*>(Sptr);
   // cp.async 流水版默认开（D48 实测 decode TPOT -5.5%/吞吐+5.7%、逐位一致）；MOE_GEMM_PIPE=0 关（回退旧版）。
   const bool pipe = []{ const char* v = getenv("MOE_GEMM_PIPE"); return !v || v[0] != '0'; }();
+  // B16：MOE_GEMM_STAGES（默认 4）= STAGES 级 cp.async 环形流水；=2 回退 pipe 双缓冲版（A/B 用）。
+  static const int stages = []{ const char* v = getenv("MOE_GEMM_STAGES"); const int n = v ? atoi(v) : 4; return (n == 3 || n == 4 || n == 6) ? n : (n <= 2 ? 2 : 4); }();
+  if (pipe && stages > 2) {
+    if (K % 128 == 0) {
+      if (stages == 3) grouped_gemm_kernel_pipe4<128, 3><<<grid, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+      else if (stages == 6) grouped_gemm_kernel_pipe4<128, 6><<<grid, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+      else grouped_gemm_kernel_pipe4<128, 4><<<grid, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+    } else {
+      if (stages == 3) grouped_gemm_kernel_pipe4<64, 3><<<grid, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+      else if (stages == 6) grouped_gemm_kernel_pipe4<64, 6><<<grid, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+      else grouped_gemm_kernel_pipe4<64, 4><<<grid, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+    }
+    return gerr();
+  }
   if (K % 128 == 0) {
     if (pipe)
       grouped_gemm_kernel_pipe<128><<<grid, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off,
