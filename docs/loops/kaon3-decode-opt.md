@@ -637,3 +637,6 @@ h=2816 单行 norm（181 次/步）：Block1024 每线程 1 向量两级归约 6
 - B3 第一次验证：编译 EXIT=0（marker=9），但新二进制 **OOM**——`decode_scratch` 按 max_tokens=4160 行 × 16 头 × 32 split × 514 × 4B = **4.4 GB**；warmup prefill OOM 后 model.rs:207 panic（kv_cache 空）。修：`LayerScratch::new_with_rows(max_tokens, max_rows=max_num_seqs)`，scratch 68 MB。重跑中（A=旧二进制备份）。
 - **B4 候选已写（未编）**：`gather_rows_kernel` 改 grid=(width/(256·8), rows) 的 16 B 向量拷贝（原 1 block 逐元素搬 lm_head 行 512 KB = 141 us/步，D54）。预期 -0.13 ms。等 B3 结果后与 B3 一起/分开验（分开验，一刀一数）。
 - B3 重跑事故：重启命令里 `pkill -f "bash /w/bN.sh"` 把自己的 `docker exec bash -c` 壳杀掉（命令行含该串），后续 `cp` 备份没跑 → 本轮 A/A2 用的是 OOM 版 B3 二进制（NOTUP，无效），B/B2 = 修好的新二进制有效。pre-B3（B2）二进制已被覆盖丢失；同轮基线改用 `/w/dinfer_prev_b2`（B1 二进制，12.58 前一档 13.02）补跑。**第三次踩 pgrep/pkill -f（记忆 #7 已写）：以后链内一律 `pkill -x` 或按 PID。**
+
+## ★★★★★ D58 2026-10-28 B3 新二进制（c1 / c8，A 轮因旧 OOM 二进制无效）：TPOT 12.58 → **9.77（-22%）**、c8 16.38 → 13.59（-17%），吞吐 77→97.8
+但输出变了：英文 " the last." → "the capital of France is the capital of…"（循环），中文 chat 连贯但措辞不同。B3 设计上非逐位（在线 softmax exp2f + split-K merge vs 三遍扫 __expf），变化本身不能定对错 → 按 Rust 验证规则写 GPU 对拍 `crates/kernels/tests/gqa_decode_win_parity.rs`（6 个场景：D=256 窗 1024 / D=512 全窗 + 窗 1024，多请求含 1 / 33 / 64 / 1024 / 1025 边界，amp 1.0 / 2.0；判据 |err| ≤ 0.03+0.02|ref|，同时跑慢路径对照）。排队：同二进制 `ATTN_DECODE_OLD=1` vs 新 ABAB（`tmp_b3env`）→ 对拍测试（`tmp_partest`）。对拍不过则 B3 回滚（CSV 照记负结果）。
