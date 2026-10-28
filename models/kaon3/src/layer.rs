@@ -1195,7 +1195,9 @@ impl Gemma4Layer {
         // `KAON3_MEGA=1` 且 decode（tokens ≤ 8）时，整条支路走 persistent megakernel 一次 launch：
         // pre_ff_norm → gate ‖ up → gelu·mul(round2) → down → post_ff_norm_1，输出落在 `sc.norm`。
         // 与下面逐 op 路径逐位一致（`crates/kernels/tests/mega_mlp_parity.rs`）。prefill / 非 FP8 回退。
-        let mega_done = self.mega_dense_branch(stream, cfg, sc, tokens, eps)?;
+        // DENSE_SKIP=1（纯计时，结果错）：整条 dense 支路不跑，测 graph 态 dense 省掉后 TPOT 掉多少 = dense 真占比。
+        let dense_skip = std::env::var("DENSE_SKIP").ok().as_deref() == Some("1");
+        let mega_done = if dense_skip { true } else { self.mega_dense_branch(stream, cfg, sc, tokens, eps)? };
         if !mega_done {
             rmsnorm_into(stream, ops, &sc.x, &self.pre_ff_norm, &mut sc.norm, h, tokens, eps)?;
             sub_dump(stream, sub_out, "pre_ff_norm", &sc.norm, tokens, h)?;
@@ -1260,6 +1262,8 @@ impl Gemma4Layer {
         eps: f32,
         sub_out: Option<(&std::path::Path, usize)>,
     ) -> Result<()> {
+        // MOE_SKIP=1（纯计时，结果错）：整条 MoE 支路不跑，测 graph 态 MoE 省掉后 TPOT 掉多少 = MoE 真占比。
+        if std::env::var("MOE_SKIP").ok().as_deref() == Some("1") { return Ok(()); }
         let h = cfg.hidden;
         // 前处理计时（KAON3_MOE_TIME=1）：拆 router / softmax+bucket / norm+gather+quant。
         // 段:[0]起点 [1]router完 [2]softmax+bucket完 [3]norm+row2e+gather+quant完(=第一个gemm前)。
