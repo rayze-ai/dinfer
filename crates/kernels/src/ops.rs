@@ -1933,6 +1933,8 @@ pub struct MoeBuckets {
     pub sorted_k: CudaSlice<i32>,
     /// B8：tile 前缀和 `[E+1]`（BM=32 行一块），grouped GEMM 的一维 tile 表。
     pub tile_off: CudaSlice<i32>,
+    /// B11：逆映射 `inv[tok·K+k]` = sorted 位置（`moe_combine_bf16` 用）。
+    pub inv: CudaSlice<i32>,
     pub num_experts: usize,
     pub max_pairs: usize,
 }
@@ -1959,6 +1961,7 @@ impl MoeBuckets {
             sorted_tok: stream.alloc_zeros::<i32>(max_pairs)?,
             sorted_k: stream.alloc_zeros::<i32>(max_pairs)?,
             tile_off: stream.alloc_zeros::<i32>(num_experts + 1)?,
+            inv: stream.alloc_zeros::<i32>(max_pairs)?,
             num_experts,
             max_pairs,
         })
@@ -1981,6 +1984,7 @@ pub fn moe_bucket(
     let pst = stream.ptr_mut(&mut b.sorted_tok) as *mut i32;
     let psk = stream.ptr_mut(&mut b.sorted_k) as *mut i32;
     let pto = stream.ptr_mut(&mut b.tile_off) as *mut i32;
+    let pinv = stream.ptr_mut(&mut b.inv) as *mut i32;
     // SAFETY: 容量已校验。
     check(
         unsafe {
@@ -1992,6 +1996,7 @@ pub fn moe_bucket(
                 pst,
                 psk,
                 pto,
+                pinv,
                 tokens as i64,
                 b.num_experts as i64,
                 topk as i64,
@@ -2163,6 +2168,7 @@ pub fn moe_grouped_quant(
     stream: &Stream,
     a: &CudaSlice<bf16>,
     row2e: &CudaSlice<i32>,
+    sorted_tok: Option<&CudaSlice<i32>>,
     agscale: &CudaSlice<f32>,
     aq: &mut CudaSlice<u8>,
     a_s: &mut CudaSlice<u8>,
@@ -2172,18 +2178,22 @@ pub fn moe_grouped_quant(
 ) -> Result<()> {
     ensure!(k % 64 == 0, "moe_grouped_quant: k {k} 不是 64 的倍数");
     ensure!(
-        a.len() >= rows * k && aq.len() >= rows * (k / 2) && a_s.len() >= rows * (k / 16) && row2e.len() >= rows,
+        (sorted_tok.is_some() || a.len() >= rows * k) && aq.len() >= rows * (k / 2) && a_s.len() >= rows * (k / 16) && row2e.len() >= rows,
         "moe_grouped_quant: capacity"
     );
     let pa = stream.ptr(a) as *const c_void;
     let pr = stream.ptr(row2e) as *const i32;
+    let pst = sorted_tok.map_or(std::ptr::null(), |t| stream.ptr(t) as *const i32);
+    if let Some(t) = sorted_tok {
+        ensure!(t.len() >= rows, "moe_grouped_quant: sorted_tok");
+    }
     let pg = stream.ptr(agscale) as *const f32;
     let paq = stream.ptr_mut(aq) as *mut c_void;
     let pas = stream.ptr_mut(a_s) as *mut c_void;
-    // SAFETY: 容量已校验；row2e[r] < E 由 row2expert 保证，agscale 长 ≥ E。
+    // SAFETY: 容量已校验；row2e[r] < E 由 row2expert 保证，agscale 长 ≥ E；sorted_tok 可为 null（源行 = r）。
     check(
         unsafe {
-            ffi::moe_grouped_quant(pa, pr, pg, paq, pas, rows as i64, k as i64, exact_rq as i32, stream.raw() as _)
+            ffi::moe_grouped_quant(pa, pr, pst, pg, paq, pas, rows as i64, k as i64, exact_rq as i32, stream.raw() as _)
         },
         "moe_grouped_quant",
     )
@@ -5452,12 +5462,41 @@ pub fn moe_route_bucket_small(
     let pst = stream.ptr_mut(&mut b.sorted_tok) as *mut i32;
     let psk = stream.ptr_mut(&mut b.sorted_k) as *mut i32;
     let pto = stream.ptr_mut(&mut b.tile_off) as *mut i32;
+    let pinv = stream.ptr_mut(&mut b.inv) as *mut i32;
     let pr = stream.ptr_mut(row2e) as *mut i32;
     // SAFETY: 容量已校验；per_expert_scale 可为 null。
     check(
         unsafe {
-            ffi::moe_route_bucket_small(pl, pp, pi, pw, pc, po, pcu, pst, psk, pto, pr, tokens as i64, e as i64, topk as i64, stream.raw() as ffi::cudaStream_t)
+            ffi::moe_route_bucket_small(pl, pp, pi, pw, pc, po, pcu, pst, psk, pto, pr, pinv, tokens as i64, e as i64, topk as i64, stream.raw() as ffi::cudaStream_t)
         },
         "moe_route_bucket_small",
+    )
+}
+
+/// B11：MoE 输出合并一次 launch：`out[tok] = bf16(Σ_k w·y[inv[tok,k]])`（mode 1 = vLLM bf16 权重口径）。
+/// 替代 memset(acc)+scatter_add+memset(y)+f32_add_to_bf16；累加序固定 k 升序。
+#[allow(clippy::too_many_arguments)]
+pub fn moe_combine_bf16(
+    stream: &Stream,
+    y: &CudaSlice<bf16>,
+    topk_w: &CudaSlice<f32>,
+    inv: &CudaSlice<i32>,
+    per_expert: Option<&CudaSlice<bf16>>,
+    topk_ids: &CudaSlice<i32>,
+    w_scale: f32,
+    out: &mut CudaSlice<bf16>,
+    tokens: usize,
+    topk: usize,
+    hidden: usize,
+    mode: i32,
+) -> Result<()> {
+    ensure!(y.len() >= tokens * topk * hidden && topk_w.len() >= tokens * topk && inv.len() >= tokens * topk && topk_ids.len() >= tokens * topk && out.len() >= tokens * hidden, "moe_combine: capacity");
+    let pp = per_expert.map_or(std::ptr::null(), |p| stream.ptr(p) as *const c_void);
+    // SAFETY: 容量已校验；inv[·] < tokens·topk 由路由保证。
+    check(
+        unsafe {
+            ffi::moe_combine_bf16(stream.ptr(y) as *const c_void, stream.ptr(topk_w) as *const f32, stream.ptr(inv) as *const i32, pp, stream.ptr(topk_ids) as *const i32, w_scale, stream.ptr_mut(out) as *mut c_void, tokens as i64, topk as i64, hidden as i64, mode, stream.raw() as ffi::cudaStream_t)
+        },
+        "moe_combine_bf16",
     )
 }

@@ -358,13 +358,17 @@ int moe_route_f32(const float* logits, const float* bias, int32_t* topk_ids, flo
                   int64_t num_experts, int64_t topk, int renormalize, float scale, cudaStream_t stream);
 // 按专家分桶：counts[E]（内部清零）/ offsets[E+1] / cursor[E] / sorted_tok[T*K] / sorted_k[T*K]
 int moe_bucket(const int32_t* topk_ids, int32_t* counts, int32_t* offsets, int32_t* cursor, int32_t* sorted_tok,
-               int32_t* sorted_k, int32_t* tile_off, int64_t tokens, int64_t num_experts, int64_t topk,
+               int32_t* sorted_k, int32_t* tile_off, int32_t* inv, int64_t tokens, int64_t num_experts, int64_t topk,
                cudaStream_t stream);
+// B11：MoE 输出合并一次 launch（替代 memset+scatter_add+memset+f32_add_to_bf16），inv = 路由产出的 (tok,k)→sorted 位置。
+int moe_combine_bf16(const void* y, const float* topk_w, const int32_t* inv, const void* per_expert,
+                     const int32_t* topk_ids, float w_scale, void* out, int64_t tokens, int64_t topk, int64_t hidden,
+                     int mode, cudaStream_t stream);
 // B10：decode 小 batch（tokens ≤ 64）路由前处理一次 launch：top-k + 权重 + counts/offsets/cursor/tile_off + sorted + row2e。
 int moe_route_bucket_small(const float* logits, const void* per_expert_scale, int32_t* topk_ids, float* topk_w,
                            int32_t* counts, int32_t* offsets, int32_t* cursor, int32_t* sorted_tok, int32_t* sorted_k,
-                           int32_t* tile_off, int32_t* row2e, int64_t tokens, int64_t num_experts, int64_t topk,
-                           cudaStream_t stream);
+                           int32_t* tile_off, int32_t* row2e, int32_t* inv, int64_t tokens, int64_t num_experts,
+                           int64_t topk, cudaStream_t stream);
 int moe_gather_bf16(const void* x, void* xg, const int32_t* sorted_tok, int64_t n, int64_t hidden, cudaStream_t stream);
 // acc[tok] += topk_w[tok,k] * y[i]（fp32 累加器，调用方清零）
 // MoE 输出合并：acc[tok] += w * y[i]（i 为 sorted 下标）。mode 0 = f32 权重/乘积；

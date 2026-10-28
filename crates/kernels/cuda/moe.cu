@@ -101,7 +101,8 @@ __global__ void scan_kernel(const int32_t* __restrict__ counts, int32_t* __restr
 
 // 把 (t, k) 对填到其专家的区间；区间内顺序不定（无需稳定：归约是加法）。
 __global__ void fill_kernel(const int32_t* __restrict__ topk_ids, int32_t* __restrict__ cursor,
-                            int32_t* __restrict__ sorted_tok, int32_t* __restrict__ sorted_k, int K, int64_t n) {
+                            int32_t* __restrict__ sorted_tok, int32_t* __restrict__ sorted_k,
+                            int32_t* __restrict__ inv, int K, int64_t n) {
   int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
   const int64_t stride = (int64_t)gridDim.x * blockDim.x;
   for (; i < n; i += stride) {
@@ -109,6 +110,7 @@ __global__ void fill_kernel(const int32_t* __restrict__ topk_ids, int32_t* __res
     const int pos = atomicAdd(&cursor[e], 1);
     sorted_tok[pos] = (int32_t)(i / K);
     sorted_k[pos] = (int32_t)(i % K);
+    inv[i] = pos;  // B11：逆映射 (tok,k) → sorted 位置，combine 用
   }
 }
 
@@ -320,7 +322,8 @@ __global__ void __launch_bounds__(256) route_bucket_small_kernel(
     const float* __restrict__ logits, const void* __restrict__ per_expert_scale, int32_t* __restrict__ topk_ids,
     float* __restrict__ topk_w, int32_t* __restrict__ counts, int32_t* __restrict__ offsets,
     int32_t* __restrict__ cursor, int32_t* __restrict__ sorted_tok, int32_t* __restrict__ sorted_k,
-    int32_t* __restrict__ tile_off, int32_t* __restrict__ row2e, int tokens, int E, int K, int exact_rcp) {
+    int32_t* __restrict__ tile_off, int32_t* __restrict__ row2e, int32_t* __restrict__ inv, int tokens, int E, int K,
+    int exact_rcp) {
   extern __shared__ __align__(16) uint8_t smem_raw[];
   float* s_val = reinterpret_cast<float*>(smem_raw);           // [tokens][E] 工作副本（top-k 时置 -inf）
   int32_t* s_cnt = reinterpret_cast<int32_t*>(s_val + (size_t)tokens * E);  // [E]
@@ -367,6 +370,7 @@ __global__ void __launch_bounds__(256) route_bucket_small_kernel(
       const int pos = atomicAdd(&s_cur[e], 1);
       sorted_tok[pos] = tid;
       sorted_k[pos] = k;
+      inv[(size_t)tid * K + k] = pos;
     }
   }
   __syncthreads();
@@ -386,7 +390,8 @@ __global__ void __launch_bounds__(256) route_bucket_small_kernel(
 extern "C" int moe_route_bucket_small(const float* logits, const void* per_expert_scale, int32_t* topk_ids,
                                       float* topk_w, int32_t* counts, int32_t* offsets, int32_t* cursor,
                                       int32_t* sorted_tok, int32_t* sorted_k, int32_t* tile_off, int32_t* row2e,
-                                      int64_t tokens, int64_t num_experts, int64_t topk, cudaStream_t stream) {
+                                      int32_t* inv, int64_t tokens, int64_t num_experts, int64_t topk,
+                                      cudaStream_t stream) {
   if (tokens <= 0) return 0;
   if (tokens > kRouteSmallMaxTok || num_experts <= 0 || num_experts > MAX_E || topk <= 0 || topk > MAX_K ||
       topk > num_experts)
@@ -406,13 +411,13 @@ extern "C" int moe_route_bucket_small(const float* logits, const void* per_exper
     }
   }
   route_bucket_small_kernel<<<1, 256, smem, stream>>>(logits, per_expert_scale, topk_ids, topk_w, counts, offsets,
-                                                      cursor, sorted_tok, sorted_k, tile_off, row2e, (int)tokens,
+                                                      cursor, sorted_tok, sorted_k, tile_off, row2e, inv, (int)tokens,
                                                       (int)num_experts, (int)topk, exact_rcp);
   return last_err();
 }
 
 extern "C" int moe_bucket(const int32_t* topk_ids, int32_t* counts, int32_t* offsets, int32_t* cursor,
-                          int32_t* sorted_tok, int32_t* sorted_k, int32_t* tile_off, int64_t tokens,
+                          int32_t* sorted_tok, int32_t* sorted_k, int32_t* tile_off, int32_t* inv, int64_t tokens,
                           int64_t num_experts, int64_t topk, cudaStream_t stream) {
   if (tokens <= 0) return 0;
   if (num_experts <= 0 || num_experts > MAX_E) return err(cudaErrorInvalidValue);
@@ -420,7 +425,7 @@ extern "C" int moe_bucket(const int32_t* topk_ids, int32_t* counts, int32_t* off
   if (cudaMemsetAsync(counts, 0, num_experts * sizeof(int32_t), stream) != cudaSuccess) return last_err();
   count_kernel<<<grid_for(n), 256, 0, stream>>>(topk_ids, counts, n);
   scan_kernel<<<1, 1024, 0, stream>>>(counts, offsets, cursor, tile_off, (int)num_experts);
-  fill_kernel<<<grid_for(n), 256, 0, stream>>>(topk_ids, cursor, sorted_tok, sorted_k, (int)topk, n);
+  fill_kernel<<<grid_for(n), 256, 0, stream>>>(topk_ids, cursor, sorted_tok, sorted_k, inv, (int)topk, n);
   return last_err();
 }
 
@@ -445,6 +450,44 @@ extern "C" int moe_scatter_add_f32(const void* y, float* acc, const int32_t* sor
 }
 
 // out[:n] (bf16) += acc[:n] (fp32)
+// B11：MoE 输出合并一次 launch：out[tok,:] = bf16(Σ_k w·y[inv[tok,k],:])，替代 memset(acc)+scatter_add(atomic)+memset(y)+f32_add_to_bf16。
+// mode 同 scatter_add_kernel（1 = vLLM bf16 权重口径：Σ f32(bf16(bf16(w)·v))；0 = f32）。末尾与 f32_add_to_bf16 同：
+// bf16(f32(bf16(acc)) + 0)。累加序固定 k 升序（旧版 atomic 顺序不定）。grid = tokens。
+__global__ void combine_kernel(const bf16* __restrict__ y, const float* __restrict__ topk_w,
+                               const int32_t* __restrict__ inv, const void* __restrict__ per_expert,
+                               const int32_t* __restrict__ topk_ids, float w_scale, bf16* __restrict__ out, int K,
+                               int H, int mode) {
+  const int64_t tok = blockIdx.x;
+  float w[MAX_K];
+  int32_t pos[MAX_K];
+  for (int k = 0; k < K; ++k) {
+    float ww = topk_w[tok * K + k];
+    if (per_expert) ww *= to_f32(static_cast<const bf16*>(per_expert)[topk_ids[tok * K + k]]) * w_scale;
+    else ww *= w_scale;
+    w[k] = mode == 1 ? to_f32(to_bf16(ww)) : ww;
+    pos[k] = inv[tok * K + k];
+  }
+  for (int d = threadIdx.x; d < H; d += blockDim.x) {
+    float acc = 0.f;
+    for (int k = 0; k < K; ++k) {
+      const float v = to_f32(y[(int64_t)pos[k] * H + d]);
+      acc += mode == 1 ? to_f32(to_bf16(w[k] * v)) : w[k] * v;
+    }
+    out[tok * H + d] = to_bf16(to_f32(to_bf16(acc)));
+  }
+}
+extern "C" int moe_combine_bf16(const void* y, const float* topk_w, const int32_t* inv, const void* per_expert,
+                                const int32_t* topk_ids, float w_scale, void* out, int64_t tokens, int64_t topk,
+                                int64_t hidden, int mode, cudaStream_t stream) {
+  if (tokens <= 0) return 0;
+  if (topk <= 0 || topk > MAX_K) return err(cudaErrorInvalidValue);
+  const int threads = hidden >= 256 ? 256 : (int)(((hidden + 31) / 32) * 32);
+  combine_kernel<<<(unsigned)tokens, threads, 0, stream>>>(static_cast<const bf16*>(y), topk_w, inv, per_expert,
+                                                           topk_ids, w_scale, static_cast<bf16*>(out), (int)topk,
+                                                           (int)hidden, mode);
+  return last_err();
+}
+
 extern "C" int f32_add_to_bf16(const float* acc, void* out, int64_t n, cudaStream_t stream) {
   if (n <= 0) return 0;
   f32_add_to_bf16_kernel<<<grid_for(n), 256, 0, stream>>>(acc, static_cast<bf16*>(out), n);

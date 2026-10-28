@@ -676,7 +676,7 @@ extern "C" {
     /// （与 `moe_route_f32` 的 sigmoid 语义不同，见 `cuda/moe.cu` 注释与 vLLM `gemma4.py`。）
     /// B10：路由前处理融合（见 kernels.h）。
     #[allow(clippy::too_many_arguments)]
-    pub fn moe_route_bucket_small(logits: *const f32, per_expert_scale: *const c_void, topk_ids: *mut i32, topk_w: *mut f32, counts: *mut i32, offsets: *mut i32, cursor: *mut i32, sorted_tok: *mut i32, sorted_k: *mut i32, tile_off: *mut i32, row2e: *mut i32, tokens: i64, num_experts: i64, topk: i64, stream: cudaStream_t) -> i32;
+    pub fn moe_route_bucket_small(logits: *const f32, per_expert_scale: *const c_void, topk_ids: *mut i32, topk_w: *mut f32, counts: *mut i32, offsets: *mut i32, cursor: *mut i32, sorted_tok: *mut i32, sorted_k: *mut i32, tile_off: *mut i32, row2e: *mut i32, inv: *mut i32, tokens: i64, num_experts: i64, topk: i64, stream: cudaStream_t) -> i32;
     pub fn moe_route_softmax_f32(
         logits: *const f32,
         topk_ids: *mut i32,
@@ -695,11 +695,15 @@ extern "C" {
         sorted_tok: *mut i32,
         sorted_k: *mut i32,
         tile_off: *mut i32,
+        inv: *mut i32,
         tokens: i64,
         num_experts: i64,
         topk: i64,
         stream: cudaStream_t,
     ) -> i32;
+    /// B11：MoE 输出合并（见 kernels.h）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn moe_combine_bf16(y: *const c_void, topk_w: *const f32, inv: *const i32, per_expert: *const c_void, topk_ids: *const i32, w_scale: f32, out: *mut c_void, tokens: i64, topk: i64, hidden: i64, mode: i32, stream: cudaStream_t) -> i32;
     pub fn moe_gather_bf16(
         x: *const c_void,
         xg: *mut c_void,
@@ -1588,7 +1592,7 @@ extern "C" {
                               out: *mut c_void, m: i64, n: i64, k: i64, stream: cudaStream_t) -> i32;
     /// MoE device-grouped（B3）：offsets 留 device、无 D2H。
     pub fn moe_row2expert(offsets: *const i32, row2e: *mut i32, num_experts: i64, stream: cudaStream_t) -> i32;
-    pub fn moe_grouped_quant(a: *const c_void, row2e: *const i32, agscale: *const f32, aq: *mut c_void,
+    pub fn moe_grouped_quant(a: *const c_void, row2e: *const i32, sorted_tok: *const i32, agscale: *const f32, aq: *mut c_void,
                              a_s: *mut c_void, r: i64, k: i64, exact_rq: i32, stream: cudaStream_t) -> i32;
     pub fn moe_grouped_gemm(aq: *const c_void, a_s: *const c_void, bptr: *const *const c_void,
                             sptr: *const *const c_void, alpha: *const f32, offsets: *const i32, tile_off: *const i32, out: *mut c_void,
@@ -1647,7 +1651,7 @@ pub unsafe fn moe_row2expert(_o: *const i32, _r: *mut i32, _ne: i64, _s: cudaStr
 }
 #[cfg(not(all(not(no_nvcc_stub), sm120)))]
 #[allow(clippy::too_many_arguments, clippy::missing_safety_doc)]
-pub unsafe fn moe_grouped_quant(_a: *const c_void, _r2e: *const i32, _ag: *const f32, _aq: *mut c_void,
+pub unsafe fn moe_grouped_quant(_a: *const c_void, _r2e: *const i32, _st: *const i32, _ag: *const f32, _aq: *mut c_void,
                                 _as: *mut c_void, _r: i64, _k: i64, _ex: i32, _s: cudaStream_t) -> i32 {
     CUDA_ERROR_NOT_SUPPORTED
 }
@@ -1709,12 +1713,13 @@ mod stubs {
     stub!(scatter_head_bf16(a: *const c_void, b: *mut c_void, t: i64, h: i64, w: i64, hd: i64, c0: i64, wd: i64, s: cudaStream_t));
     stub!(moe_gate_f32(x: *const c_void, w: *const c_void, l: *mut f32, t: i64, e: i64, h: i64, s: cudaStream_t));
     stub!(router_gemm_bi_f32(x: *const c_void, w: *const c_void, o: *mut f32, t: i64, e: i64, h: i64, s: cudaStream_t));
-    stub!(moe_route_bucket_small(l: *const f32, pes: *const c_void, ti: *mut i32, tw: *mut f32, c: *mut i32, o: *mut i32, cu: *mut i32, st: *mut i32, sk: *mut i32, to: *mut i32, r2e: *mut i32, t: i64, e: i64, k: i64, s: cudaStream_t));
+    stub!(moe_combine_bf16(y: *const c_void, tw: *const f32, iv: *const i32, pe: *const c_void, ti: *const i32, ws: f32, o: *mut c_void, t: i64, k: i64, h: i64, m: i32, s: cudaStream_t));
+    stub!(moe_route_bucket_small(l: *const f32, pes: *const c_void, ti: *mut i32, tw: *mut f32, c: *mut i32, o: *mut i32, cu: *mut i32, st: *mut i32, sk: *mut i32, to: *mut i32, r2e: *mut i32, iv: *mut i32, t: i64, e: i64, k: i64, s: cudaStream_t));
     stub!(moe_route_softmax_f32(l: *const f32, ti: *mut i32, pes: *const c_void, tw: *mut f32, t: i64, e: i64, k: i64, s: cudaStream_t)
         => moe_route_softmax_f32, "moe_route_softmax_f32"
         [l, ti, pes, tw, t, e, k, s]);
     stub!(moe_route_f32(l: *const f32, b: *const f32, ti: *mut i32, tw: *mut f32, t: i64, e: i64, k: i64, r: i32, sc: f32, s: cudaStream_t));
-    stub!(moe_bucket(ti: *const i32, c: *mut i32, o: *mut i32, cu: *mut i32, st: *mut i32, sk: *mut i32, to: *mut i32, t: i64, e: i64, k: i64, s: cudaStream_t));
+    stub!(moe_bucket(ti: *const i32, c: *mut i32, o: *mut i32, cu: *mut i32, st: *mut i32, sk: *mut i32, to: *mut i32, iv: *mut i32, t: i64, e: i64, k: i64, s: cudaStream_t));
     stub!(moe_gather_bf16(x: *const c_void, xg: *mut c_void, st: *const i32, n: i64, h: i64, s: cudaStream_t));
     stub!(moe_scatter_add_f32(y: *const c_void, a: *mut f32, st: *const i32, sk: *const i32, tw: *const f32, n: i64, k: i64, h: i64, s: cudaStream_t));
     stub!(mxfp4_dequant_bf16(p: *const c_void, sc: *const c_void, o: *mut c_void, r: i64, c: i64, g: i64, s: cudaStream_t));

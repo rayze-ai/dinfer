@@ -8,9 +8,10 @@ TAG=${TAG:-bN}; MARKER=${MARKER:-xxx}; PORT=${PORT:-8390}
 R=/w/dinfer/tmp_${TAG}_RESULT.txt; : > $R
 cp -f target/release/dinfer /w/dinfer_prev_$TAG
 date +%T >> $R
-cargo build --release -p dinfer --features kaon3 > /w/dinfer/tmp_${TAG}_build.log 2>&1; echo "EXIT=$?" >> $R
+cargo build --release -p dinfer --features kaon3 > /w/dinfer/tmp_${TAG}_build.log 2>&1; brc=$?; echo "EXIT=$brc" >> $R
 grep -E "^error" -A4 /w/dinfer/tmp_${TAG}_build.log | head -12 >> $R
 grep -oE "Compiling dinfer-[a-z0-9]+" /w/dinfer/tmp_${TAG}_build.log | sort -u | tr "\n" " " >> $R; echo >> $R
+[ $brc -ne 0 ] && { grep -E "^error" -A8 /w/dinfer/tmp_${TAG}_build.log | head -20 | cut -c1-200 >> $R; echo "NOBUILD DONE" >> $R; exit 1; }   # 编译失败不跑 A/B（b8b 教训：跑了旧二进制出无效数字）
 echo "new_bin=$(stat -c %y target/release/dinfer | cut -c1-16) marker=$(strings target/release/dinfer | grep -c "$MARKER")" >> $R
 M=/hf_data/hub/models--kaon-release--Kaon-V3-nvpf4-mixed/snapshots/e268bef12555d299ed7ca02ade5e77f239f27478
 run_one() {

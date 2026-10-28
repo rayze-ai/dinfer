@@ -609,13 +609,13 @@ int moe_row2expert(const int32_t* offsets, int32_t* row2e, int64_t num_experts, 
 }
 
 // grouped A 预量化：A[R,K] bf16 → aq[R,K/2] + a_s[R,K/16]，每行 gs=agscale[row2e[r]]。
-int moe_grouped_quant(const void* a, const int32_t* row2e, const float* agscale, void* aq, void* a_s, int64_t R,
-                      int64_t K, int exact_rq, cudaStream_t stream) {
+int moe_grouped_quant(const void* a, const int32_t* row2e, const int32_t* sorted_tok, const float* agscale, void* aq,
+                      void* a_s, int64_t R, int64_t K, int exact_rq, cudaStream_t stream) {
   if (R <= 0) return 0;
   if (K % 64 != 0) return static_cast<int>(cudaErrorInvalidValue);
   const long blocks = (long)R * (K / 16);
   const unsigned g = (unsigned)((blocks + 255) / 256);
-  grouped_quant_kernel<<<g, 256, 0, stream>>>(static_cast<const bf16*>(a), row2e, agscale,
+  grouped_quant_kernel<<<g, 256, 0, stream>>>(static_cast<const bf16*>(a), row2e, sorted_tok, agscale,
                                               static_cast<uint8_t*>(aq), static_cast<uint8_t*>(a_s), (int)R, (int)K,
                                               exact_rq);
   return gerr();

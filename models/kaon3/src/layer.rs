@@ -641,6 +641,11 @@ impl ActBuf {
 /// B5：decode（tokens ≤ 16）dense MLP 走带宽型 fp8 GEMV（`mlp_fp8_decode.cu`），不走 persistent mega。
 /// `DENSE_DECODE_OLD=1` 回退（A/B 用）。
 pub const DENSE_GEMV_ROWS: usize = 16;
+/// B11b：MoE 输出合并融合（默认开；`MOE_COMBINE_OLD=1` 回退 scatter_add 链）。
+fn moe_combine_fused_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("MOE_COMBINE_OLD").ok().as_deref() != Some("1"))
+}
 /// B10：MoE 路由前处理融合（默认开；`MOE_ROUTE_FUSED=0` 回退 7 次 launch 的旧链）。
 fn moe_route_fused_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1578,14 +1583,13 @@ impl Gemma4Layer {
             if !route_fused {
                 k::ops::moe_row2expert(stream, &sc.buckets.offsets, &mut g.row2e, e, r)?;
             }
-            // 2) gather 全部 R 行（按 sorted 顺序，start=0）
-            k::ops::moe_gather_bf16(stream, &sc.h2.data, &mut sc.xg.data, &sc.buckets.sorted_tok, 0, r, h)?;
+            // 2) gather 已融进量化（B11a：量化直接按 sorted_tok 读 h2 行，不再写 xg）
             // MoE 内部细分计时（KAON3_MOE_TIME=1）：量 3×grouped_gemm vs 其余。
             let moe_time = std::env::var("KAON3_MOE_TIME").ok().as_deref() == Some("1");
             let mt_ev = if moe_time { Some(stream.new_timing_events(3)?) } else { None };
             // 3) gate/up 共用一次量化（a_scale 相等），再两次 grouped GEMM
             k::ops::moe_grouped_quant(
-                stream, &sc.xg.data, &g.row2e, &mg.agscale_gu, &mut g.aq_gu, &mut g.as_gu, r, mg.k_gate, exact_rq,
+                stream, &sc.h2.data, &g.row2e, Some(&sc.buckets.sorted_tok), &mg.agscale_gu, &mut g.aq_gu, &mut g.as_gu, r, mg.k_gate, exact_rq,
             )?;
             if let Some(ev) = &mt_ev { stream.record_timing(&ev[0])?; }  // 量化后=3gemm前
             if let Some(e) = &moe_pre_ev { stream.record_timing(&e[3])?; }  // norm+row2e+gather+quant完
@@ -1628,7 +1632,7 @@ impl Gemma4Layer {
             }
             // 5) down：量化 + grouped GEMM
             k::ops::moe_grouped_quant(
-                stream, &g.gelu_o.data, &g.row2e, &mg.agscale_dn, &mut g.aq_dn, &mut g.as_dn, r, mg.k_down, exact_rq,
+                stream, &g.gelu_o.data, &g.row2e, None, &mg.agscale_dn, &mut g.aq_dn, &mut g.as_dn, r, mg.k_down, exact_rq,
             )?;
             if moe_gemv {
                 k::ops::moe_fp4_gemv(
@@ -1643,19 +1647,27 @@ impl Gemma4Layer {
             }
             if let Some(ev) = &mt_ev { stream.record_timing(&ev[1])?; }  // 3×gemm完
             // 6) scatter_add（全 R 行一次，start=0）——累加序与 host 版（专家升序）由 atomic 决定，逐位须实测
-            if !moe_combine_f32() {
-                k::ops::moe_scatter_add_bf16w_f32(
-                    stream, &sc.yg.data, &mut sc.acc.data, &sc.buckets.sorted_tok, &sc.buckets.sorted_k,
-                    &sc.topk_w.data, None, 0, r, kk, h, 1.0,
+            // B11b：一次 combine 替代 memset(acc)+scatter_add(atomic)+memset(y)+f32_add_to_bf16（`MOE_COMBINE_OLD=1` 回退）。
+            if moe_combine_fused_enabled() {
+                k::ops::moe_combine_bf16(
+                    stream, &sc.yg.data, &sc.topk_w.data, &sc.buckets.inv, None, &sc.topk_ids.data, 1.0, &mut sc.y.data,
+                    tokens, kk, h, if moe_combine_f32() { 0 } else { 1 },
                 )?;
             } else {
-                k::ops::moe_scatter_add_f32(
-                    stream, &sc.yg.data, &mut sc.acc.data, &sc.buckets.sorted_tok, &sc.buckets.sorted_k,
-                    &sc.topk_w.data, 0, r, kk, h,
-                )?;
+                if !moe_combine_f32() {
+                    k::ops::moe_scatter_add_bf16w_f32(
+                        stream, &sc.yg.data, &mut sc.acc.data, &sc.buckets.sorted_tok, &sc.buckets.sorted_k,
+                        &sc.topk_w.data, None, 0, r, kk, h, 1.0,
+                    )?;
+                } else {
+                    k::ops::moe_scatter_add_f32(
+                        stream, &sc.yg.data, &mut sc.acc.data, &sc.buckets.sorted_tok, &sc.buckets.sorted_k,
+                        &sc.topk_w.data, 0, r, kk, h,
+                    )?;
+                }
+                stream.memset_zeros_n(&mut sc.y.data, tokens * h)?;
+                k::ops::f32_add_to_bf16_n(stream, &sc.acc.data, &mut sc.y.data, tokens * h)?;
             }
-            stream.memset_zeros_n(&mut sc.y.data, tokens * h)?;
-            k::ops::f32_add_to_bf16_n(stream, &sc.acc.data, &mut sc.y.data, tokens * h)?;
             sub_dump(stream, sub_out, "moe_y", &sc.y, tokens, h)?;
             if let Some(ev) = &mt_ev { stream.record_timing(&ev[2])?; }  // scatter+合并完
             rmsnorm_into(stream, ops, &sc.y, &self.post_ff_norm_2, &mut sc.h2, h, tokens, eps)?;
