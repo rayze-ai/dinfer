@@ -26,7 +26,9 @@ impl LayerKv {
     pub fn new(stream: &Stream, cfg: &KaonConfig, l: usize, num_blocks: usize, block_size: usize) -> Result<Self> {
         let (head_dim, nkv, _) = cfg.attn_shape(l);
         // B15/B15b：kv_fp8 层默认真存 e4m3（vLLM fp8 KV 口径；D70：c8 decode -2%、TTFT +4%、cache 容量翻倍）。`KV_FP8_STORE=0` 回退 bf16 存。
-        let is_fp8 = cfg.kv_fp8 && std::env::var("KV_FP8_STORE").ok().as_deref() != Some("0");
+        // D93/D94（loop kaon3-decode-opt）：e4m3 cache 下 prefix-cache 命中后的带历史 chunk（Paged 步 hist>0 多行）输出错，
+        // bf16 cache 全对 → 默认**关**（c8 TPOT +1.9%，换正确性），`KV_FP8_STORE=1` 开；kernel 修好并过 gqa_paged_fp8_hist_parity 后再翻回。
+        let is_fp8 = cfg.kv_fp8 && std::env::var("KV_FP8_STORE").ok().as_deref() == Some("1");
         let elems = num_blocks * block_size * nkv * 2 * head_dim;
         let cache = if is_fp8 {
             Tensor::zeros(stream, &[elems / 2])?
