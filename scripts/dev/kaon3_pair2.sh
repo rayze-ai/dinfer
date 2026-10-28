@@ -6,7 +6,7 @@ mkdir -p /tmp/stub; ln -sf $NV/nccl/lib/libnccl.so.2 /tmp/stub/libnccl.so; ln -s
 export LD_LIBRARY_PATH=$NV/nccl/lib:$NV/cu13/lib
 cd /w/dinfer
 R=/w/dinfer/tmp_pair2_RESULT.txt; : > $R
-trap 'echo DONE >> $R' EXIT
+# DONE 只在脚本真正结尾写（trap EXIT 会在 timeout 子进程退出时提前触发，D113）
 M=/hf_data/hub/models--kaon-release--Kaon-V3-nvpf4-mixed/snapshots/e268bef12555d299ed7ca02ade5e77f239f27478
 export MOE_GROUPED=1 KAON3_MEGA=1 MEGA_SPGU=4 MEGA_SPDN=4 ROUTER_GEMM_BI=0 CUDA_VISIBLE_DEVICES=0 FP8_GEMV=1 KV_FP8_STORE=0
 PORT=8389; BIN=${BIN:-./target/release/dinfer}
@@ -19,7 +19,7 @@ mkdir -p /tmp/stub; ln -sf $NV/nccl/lib/libnccl.so.2 /tmp/stub/libnccl.so; ln -s
 export LD_LIBRARY_PATH=$NV/nccl/lib:$NV/cu13/lib
 cd /w/dinfer
 R=/w/dinfer/tmp_pair2_RESULT.txt; : > $R
-trap 'echo DONE >> $R' EXIT
+# DONE 只在脚本真正结尾写（trap EXIT 会在 timeout 子进程退出时提前触发，D113）
 M=/hf_data/hub/models--kaon-release--Kaon-V3-nvpf4-mixed/snapshots/e268bef12555d299ed7ca02ade5e77f239f27478
 export MOE_GROUPED=1 KAON3_MEGA=1 MEGA_SPGU=4 MEGA_SPDN=4 ROUTER_GEMM_BI=0 CUDA_VISIBLE_DEVICES=0 FP8_GEMV=1 KV_FP8_STORE=0
 PORT=8389; BIN=${BIN:-./target/release/dinfer}
@@ -62,3 +62,4 @@ PY
   kill -INT $SP 2>/dev/null; sleep 2; kill -KILL $SP 2>/dev/null; sleep 2
 )
 done
+echo DONE >> $R
