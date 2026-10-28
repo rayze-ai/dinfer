@@ -640,3 +640,4 @@ h=2816 单行 norm（181 次/步）：Block1024 每线程 1 向量两级归约 6
 
 ## ★★★★★ D58 2026-10-28 B3 新二进制（c1 / c8，A 轮因旧 OOM 二进制无效）：TPOT 12.58 → **9.77（-22%）**、c8 16.38 → 13.59（-17%），吞吐 77→97.8
 但输出变了：英文 " the last." → "the capital of France is the capital of…"（循环），中文 chat 连贯但措辞不同。B3 设计上非逐位（在线 softmax exp2f + split-K merge vs 三遍扫 __expf），变化本身不能定对错 → 按 Rust 验证规则写 GPU 对拍 `crates/kernels/tests/gqa_decode_win_parity.rs`（6 个场景：D=256 窗 1024 / D=512 全窗 + 窗 1024，多请求含 1 / 33 / 64 / 1024 / 1025 边界，amp 1.0 / 2.0；判据 |err| ≤ 0.03+0.02|ref|，同时跑慢路径对照）。排队：同二进制 `ATTN_DECODE_OLD=1` vs 新 ABAB（`tmp_b3env`）→ 对拍测试（`tmp_partest`）。对拍不过则 B3 回滚（CSV 照记负结果）。
+- 第三方参照：vLLM 基线对同一 raw prompt "The capital of France is" 输出也是退化循环（"France is France is…"），中文 chat 结构与我们两版都不同 → raw prompt 本就是低置信样本，**输出变化不是 B3 错误的证据**；对错只认 GPU 对拍测试。
