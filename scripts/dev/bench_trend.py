@@ -408,6 +408,16 @@ with open(os.path.join(ROOT, "perf-trend.csv"), "w", newline="") as f:
                 bv = e["base"][k]
                 w.writerow([e["round"], e["date"], e["change"], e["group"], k, f"{av:.3f}", f"{bv:.3f}", f"{(av / bv):.3f}" if bv else "", "", BETTER[k],
                             e["kind"], e["gpu"], e["baseline"], name, MODEL])
+    # 手工端到端轮次（Step C 每轮一行一指标，含回滚的负结果）：<ROOT>/e2e-rounds.csv，列与本表相同，原样合并。
+    # 用 scripts/dev/e2e_round.sh 追加，不要直接改 perf-trend.csv（本脚本每次重写）。
+    fe = os.path.join(ROOT, "e2e-rounds.csv")
+    if os.path.exists(fe):
+        with open(fe, newline="") as g:
+            rd = csv.reader(g)
+            hdr = next(rd, None)
+            for row in rd:
+                if row:
+                    w.writerow(row)
 
 # ---------------------------------------------------------------------------
 # HTML 面板：静态页，fetch 同目录 perf-trend.csv，每 10 s 重画；Chart.js 走 cdnjs；卡型按钮 + 切页纯 JS，hash = #<gpu>/<tab>

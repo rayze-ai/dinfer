@@ -1,0 +1,16 @@
+round,date,change,group,metric,dinfer,vllm,ratio_dinfer_over_vllm,delta_pct_vs_prev_round,better_is,kind,gpu,baseline,variant,model
+r1,2026-10-27,R1 起点 max_num_seqs=16 + BI开(ROUTER_GEMM_BI默认) 调试态: dinfer 357 vs vLLM 936; TTFT p50 3357ms(槽位不足排队),e2e,out_tok_per_s,357.148,936.413,0.381,,higher,main,5090,vllm,dinfer,kaon3
+r1,2026-10-27,R1 起点 max_num_seqs=16 + BI开(ROUTER_GEMM_BI默认) 调试态: dinfer 357 vs vLLM 936; TTFT p50 3357ms(槽位不足排队),e2e,ttft_p50_ms,3356.583,81.124,41.376,,lower,main,5090,vllm,dinfer,kaon3
+r1,2026-10-27,R1 起点 max_num_seqs=16 + BI开(ROUTER_GEMM_BI默认) 调试态: dinfer 357 vs vLLM 936; TTFT p50 3357ms(槽位不足排队),e2e,tpot_p50_ms,40.244,8.768,4.590,,lower,main,5090,vllm,dinfer,kaon3
+r2,2026-10-27,R2 max_num_seqs 16→64: TTFT 3357→245ms(13×) 吞吐 357→540; 仅改并发槽位,e2e,out_tok_per_s,539.710,947.492,0.570,51.1,higher,main,5090,vllm,dinfer,kaon3
+r2,2026-10-27,R2 max_num_seqs 16→64: TTFT 3357→245ms(13×) 吞吐 357→540; 仅改并发槽位,e2e,ttft_p50_ms,245.163,50.887,4.818,92.7,lower,main,5090,vllm,dinfer,kaon3
+r2,2026-10-27,R2 max_num_seqs 16→64: TTFT 3357→245ms(13×) 吞吐 357→540; 仅改并发槽位,e2e,tpot_p50_ms,59.366,7.961,7.457,-47.5,lower,main,5090,vllm,dinfer,kaon3
+r3,2026-10-27,R3 +关BI (ROUTER_GEMM_BI=0): 540→573; TPOT 59.4→54.5ms,e2e,out_tok_per_s,572.846,944.228,0.607,6.1,higher,main,5090,vllm,dinfer,kaon3
+r3,2026-10-27,R3 +关BI (ROUTER_GEMM_BI=0): 540→573; TPOT 59.4→54.5ms,e2e,ttft_p50_ms,254.399,25.331,10.043,-3.8,lower,main,5090,vllm,dinfer,kaon3
+r3,2026-10-27,R3 +关BI (ROUTER_GEMM_BI=0): 540→573; TPOT 59.4→54.5ms,e2e,tpot_p50_ms,54.509,6.598,8.262,8.2,lower,main,5090,vllm,dinfer,kaon3
+r4,2026-10-27,R4 生产态全优化: 573→594; TPOT 54.5→51.9ms TTFT 250ms,e2e,out_tok_per_s,594.057,946.177,0.628,3.7,higher,main,5090,vllm,dinfer,kaon3
+r4,2026-10-27,R4 生产态全优化: 573→594; TPOT 54.5→51.9ms TTFT 250ms,e2e,ttft_p50_ms,250.663,25.318,9.901,1.5,lower,main,5090,vllm,dinfer,kaon3
+r4,2026-10-27,R4 生产态全优化: 573→594; TPOT 54.5→51.9ms TTFT 250ms,e2e,tpot_p50_ms,51.869,6.425,8.073,4.8,lower,main,5090,vllm,dinfer,kaon3
+r5,2026-10-27,R5 生产态复现(seed123): dinfer 519 vs vLLM 802,e2e,out_tok_per_s,519.117,802.532,0.647,-12.6,higher,main,5090,vllm,dinfer,kaon3
+r5,2026-10-27,R5 生产态复现(seed123): dinfer 519 vs vLLM 802,e2e,ttft_p50_ms,328.068,82.812,3.962,-30.9,lower,main,5090,vllm,dinfer,kaon3
+r5,2026-10-27,R5 生产态复现(seed123): dinfer 519 vs vLLM 802,e2e,tpot_p50_ms,60.506,9.108,6.643,-16.7,lower,main,5090,vllm,dinfer,kaon3
