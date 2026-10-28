@@ -567,7 +567,7 @@ impl<E: ModelExecutor> Engine<E> {
                         Ok(m) => {
                             if self.host_time {
                                 let fin_us = t_before_finish_n.elapsed().as_secs_f64() * 1e6;
-                                tracing::info!("[host-split] finish(n)_dtoh_sync={:.1}us (等n的graph跑完)", fin_us);
+                                eprintln!("[prefill-split] finish(n)_dtoh_sync={:.0}us 等GPU", fin_us);
                             }
                             m
                         }
@@ -590,8 +590,8 @@ impl<E: ModelExecutor> Engine<E> {
                             Ok(p) => p,
                             Err(e) => return self.fail_step(e),
                         };
-                        if self.host_time && !so.num_scheduled_tokens.is_empty() {
-                            eprintln!("[prefill-split] sched={:.0}us begin={:.0}us tokens={} (async={})",
+                        if self.host_time {
+                            eprintln!("[prefill-split] sched={:.0}us begin={:.0}us tokens={} async={}",
                                 t_sched.duration_since(t_step).as_secs_f64()*1e6,
                                 _ht_beg.elapsed().as_secs_f64()*1e6,
                                 so.num_scheduled_tokens.values().sum::<usize>(),
