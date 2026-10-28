@@ -1229,3 +1229,15 @@
 - 现象：A/B 里这两档 TPOT 更低（11.33）但输出坏。
 - 根因：未查（不在本 loop 关键路径）；非 mega dense 路径可能自 mega 落地后未再验证。
 - 避免：所有 A/B 变体必抓固定 prompt 输出，输出坏的数字作废；交接区已记 dense 可省 ~1.7 ms 待专刀。
+
+## 2026-10-28 批量编辑脚本一处 assert 失败 = 该文件全部改动丢失（3 次，各赔 10 分钟远端编译）
+现象：Python 脚本连改多文件，某文件中途 assert 失败→异常退出，**前面文件已写盘、该文件一字未改**，我只看到前面的 "ok" 就 put 去编。根因：改动都在内存，写盘在末尾。解法：每文件独立写盘；脚本末尾对每个目标串打印 count；编译前 `grep -c`。
+
+## 2026-10-28 改 extern "C" 签名漏 kernels.h（2 次）
+现象：nvcc "more than one instance of overloaded function has C linkage"。根因：只改了 .cu 定义和 ffi.rs 声明。解法：kernels.h / .cu / ffi.rs（+stub!）三处同改，`grep -n '<fn>('` 核参数个数。
+
+## 2026-10-28 对拍把两条不同 kernel 当成"同一算法两种输入"比
+现象：fp8 cache vs bf16 cache 的 paged 路径 D=256 位差 135/20480，D=512 位差 0。根因：bf16 侧 D=256 默认走 fa_v5，fp8 侧被强制慢路径——差的是两 kernel 的累加序，不是 fp8。解法：对拍时 env 强制同一 cfg/kernel；D=512 两侧都慢路径所以恰好 0 是线索。
+
+## 2026-10-28 验证链编译失败仍跑 A/B（跑了旧二进制出"结果"）+ 同一链被起两次
+现象：bN.sh 编译 EXIT=101 后照常跑 B 轮，B 侧是上一版二进制 + 新 env，数字像真的；另一次 b8.sh 失败后我又起 b8b.sh，前者的 bN 还没停，RESULT 里 B/A2 重复出现。解法：bN 加 "EXIT≠0 → NOBUILD DONE 退出"；起新链前 `pgrep -ax bash | grep /w/` 看旧链；监控脚本只在 bN 段判 DONE。
