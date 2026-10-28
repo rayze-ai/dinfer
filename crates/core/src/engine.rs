@@ -585,18 +585,31 @@ impl<E: ModelExecutor> Engine<E> {
                             self.fail_step(e)?;
                             continue;
                         }
+                        let _ht_beg = std::time::Instant::now();
                         let pend = match self.runner.begin(&so) {
                             Ok(p) => p,
                             Err(e) => return self.fail_step(e),
                         };
+                        if self.host_time && !so.num_scheduled_tokens.is_empty() {
+                            eprintln!("[prefill-split] sched={:.0}us begin={:.0}us tokens={} (async={})",
+                                t_sched.duration_since(t_step).as_secs_f64()*1e6,
+                                _ht_beg.elapsed().as_secs_f64()*1e6,
+                                so.num_scheduled_tokens.values().sum::<usize>(),
+                                self.runner.last_begin_was_async());
+                        }
                         if self.async_sched && self.runner.last_begin_was_async() {
                             self.pending = Some((so, pend, t_step, t_sched));
                             continue; // 下一轮循环：先排 n+1 再等 n
                         }
+                        let _ht_fin = std::time::Instant::now();
                         let mro = match self.runner.finish(pend) {
                             Ok(m) => m,
                             Err(e) => return self.fail_step(e),
                         };
+                        if self.host_time && !so.num_scheduled_tokens.is_empty() {
+                            eprintln!("[prefill-split] finish(sync,含等GPU)={:.0}us",
+                                _ht_fin.elapsed().as_secs_f64()*1e6);
+                        }
                         (so, mro, t_step, t_sched, std::time::Instant::now())
                     }
                 },
