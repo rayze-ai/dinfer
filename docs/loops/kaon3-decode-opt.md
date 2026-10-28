@@ -1209,3 +1209,5 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 ## B23 落地 2026-10-29：attention 前段五合一（commit 见 git）
 - `norm.cu` 新 kernel `attn_pre_fused_kernel<VP, STORE_FP8>`：grid=tokens，block=(q+2kv) 个 warp（滑窗层 32 warp、全注意力 20 warp），一 warp 一头行：逐头 RMSNorm（复刻 `rmsnorm_vec_kernel<128,1>` 的蝶形 + 4 段合并序，lane 持向量 lane+32j）→ q/k neox RoPE（复刻 `rope_kernel<true>` 每步舍 bf16）→ fp8 往返写回 → k/v 写 cache（e4m3 / bf16）。smem 每 warp 一行。
 - 接入 `layer.rs`：条件 kv_fp8 层 + 无 ATTN_SKIP_* + 非 dump + KV_FP8_FUSED；`ATTN_PRE_FUSED=0` 回退。门禁 `attn_pre_fused_parity`（4 形状 × e4m3/bf16，q/k/v/cache 四者位差 0）。预期：-4 launch/层 = -120/步，nsys 态 norm 3×1.2 + rope 3.0 + cache_write 4.7 = 11.3 us/层 → ~5 us；含间隙 ≈ -0.4 ms/步。
+- **D149 B23 门禁过**：`attn_pre_fused_parity` 8 组（D=256/512 × tokens 1/13/400 × e4m3/bf16）q/k/v/cache **位差全 0**。bN TAG=b23 已起（A=b29 二进制，B=B23）。
+- **B30 候选（层尾 / 路由）**：层尾 `add_inplace(h2→norm) + rmsnorm_add(norm→x) + scale(x)`：3 launch → 1（fused_add_rmsnorm 已有 NORM_ADD 变体，再加 layer_scalar 乘）；路由前 `rmsnorm_noweight + scale + mul_row`：3 → 1（`rmsnorm_scale2` 已有，但 mode 1 口径走分开三步，需对拍确认 scale2 在 mode 1 也逐位）；post_attn `o_proj → rmsnorm_add` 已融。合计每层再 -4 launch。
