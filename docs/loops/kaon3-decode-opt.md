@@ -636,3 +636,4 @@ h=2816 单行 norm（181 次/步）：Block1024 每线程 1 向量两级归约 6
 - 远端 `TAG=b3 bash /w/bN.sh` 跑编译 + ABAB 中。预期 c1 TPOT 12.58 → ~10.1。
 - B3 第一次验证：编译 EXIT=0（marker=9），但新二进制 **OOM**——`decode_scratch` 按 max_tokens=4160 行 × 16 头 × 32 split × 514 × 4B = **4.4 GB**；warmup prefill OOM 后 model.rs:207 panic（kv_cache 空）。修：`LayerScratch::new_with_rows(max_tokens, max_rows=max_num_seqs)`，scratch 68 MB。重跑中（A=旧二进制备份）。
 - **B4 候选已写（未编）**：`gather_rows_kernel` 改 grid=(width/(256·8), rows) 的 16 B 向量拷贝（原 1 block 逐元素搬 lm_head 行 512 KB = 141 us/步，D54）。预期 -0.13 ms。等 B3 结果后与 B3 一起/分开验（分开验，一刀一数）。
+- B3 重跑事故：重启命令里 `pkill -f "bash /w/bN.sh"` 把自己的 `docker exec bash -c` 壳杀掉（命令行含该串），后续 `cp` 备份没跑 → 本轮 A/A2 用的是 OOM 版 B3 二进制（NOTUP，无效），B/B2 = 修好的新二进制有效。pre-B3（B2）二进制已被覆盖丢失；同轮基线改用 `/w/dinfer_prev_b2`（B1 二进制，12.58 前一档 13.02）补跑。**第三次踩 pgrep/pkill -f（记忆 #7 已写）：以后链内一律 `pkill -x` 或按 PID。**
