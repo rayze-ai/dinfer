@@ -803,3 +803,12 @@ decode c1 的 MoE 段 nsys：grouped_gemm gate 18.6 + up 18.6 + down 12.5 + gelu
 - D65 split2 进行中（`MOE_ROUTE_FUSED=0` vs 开，FP8_GEMV 两边都关）：A（开）7.12 / 11.60。等 B。注意 envab 两组的 "默认" 都没带 FP8_GEMV → 基线是 7.11，不是 b8c 的 6.64；对比只看组内 Δ。
 - **D65 split2（`MOE_ROUTE_FUSED=0` vs 开）**：关 7.28 / 11.67，开 7.12 / 11.60 ⇒ **B10 c1 -0.16、c8 -0.07，两边都赚**（比预估的 -0.6 小：7 launch → 1 实省 0.16 ms ⇒ 单 launch 间隙在 graph 内约 0.7 us，不是 1.5 us；D54 的 1.9 ms 间隙估算偏高）。c8 +0.5 的归因只剩 B8（tile 表：每 block 多一次 offsets/tile_off 读 + 7 步二分，c8 R=64 时 block 数 ~ 2×；但 TTFT -15% 是它）或 B11（combine 单 block/token 串行 K=8 读）。下一链 b8d 带 `MOE_COMBINE_OLD=1` 的 split。
 - **修正 launch 间隙模型**：graph 内 ~0.7 us/launch ⇒ 剩 ~900 launch ≈ 0.6 ms，不是 1.3；B12/B13 预期各 -0.06/-0.04 ms（小），B15（KV fp8 存）和 MoE GEMM 深流水才是 >0.2 ms 级的刀。
+
+## B15 设计 2026-10-28：KV cache 真存 e4m3（kv_fp8 层）—— decode KV 读带宽减半、cache 容量翻倍
+现状：`cfg.kv_fp8` 只做 bf16→e4m3→bf16 **往返**，cache 仍 `Tensor<bf16>`（`model.rs:27`，`service.rs dtype_bytes: 2`）；attention 读 bf16。vLLM `kv_cache_dtype=fp8_e4m3` 真存 1 字节。
+方案（Kaon-V3 scale=1，无 per-tensor kv scale 要带）：
+1. cache 元素类型按层：kv_fp8 时 `Tensor<u8>`，`dtype_bytes: 1`（KvCacheSpec），布局不变 `[blocks, bs, nkv, 2, D]`。
+2. 写：`gqa_cache_write_fp8rt_kernel`（B12）直接写 e4m3 字节（q/k/v 原地往返保留，供本步 attention 的 K/V bf16 输入）。
+3. 读：`gqa_decode_v3_core.cuh` / `gqa_decode_v3.cu`(d512) / `gqa.cu` 通用慢路径 + prefill 路径（含 fa_v5 读历史 KV）—— 模板加 `KV_FP8`：cp.async 搬 8 B（16 个 e4m3）到 smem 的 fp8 区，用前 `__nv_cvt_fp8x2_to_halfraw2` 展开成 bf16（与往返值逐位同，因为往返 = 同一 cvt）。smem K/V 区可改存 e4m3（省一半 smem → KEYS 翻倍）或展开后存 bf16（改动最小）。先做"展开后存 bf16"。
+4. 对拍：`gqa_decode_win_parity` 加 KV_FP8 场景：cache 字节 = e4m3(k)，参照 = 用往返后 k/v 的 CPU f64 → 应与 bf16 cache + 往返输入的结果**逐位同**。
+预期：c1 decode KV 读 ~0.8 GB/步 → 0.4 GB，attention 1.2 → ~0.95 ms（-0.25）；c8 更多（KV 读占比更高）；prefill 不变。工作量：4 个 kernel 读路径 + spec/alloc + 测试，≈ 半天。排 b8d 之后。
