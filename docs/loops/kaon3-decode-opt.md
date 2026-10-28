@@ -288,3 +288,10 @@ warmup5重测:
 读gqa.cu:prefill已是flash风格(FA2/online softmax/causal只扫对角tile/cp.async),**非朴素O(L²)**,推翻D21"疑O(L²)"。
 **关键线索(gqa.cu:10-12注释)**:"D=128走flash tile kernel,**其他D走旧参考实现**"。Kaon-V3 head_dim=**256(滑窗层)/512(全注意力层)**,非128→**很可能走旧参考实现,不是flash**!旧参考若朴素O(L²)无分块=plen1024慢2秒/24×的根源。
 **待确认**:Kaon prefill(D=256/512)实际分派到flash还是旧参考。查gqa.cu的D分派+ops.rs gqa_prefill_win_bf16。
+
+## ★★★★★ D23 2026-10-28 更正:v5/v6 flash只支持D=128/256,**D=512全注意力层(5层)走慢路径**=超线性源
+更正D22:gqa.cu:342-352分派只有 head_dim==128/256(都有flash v5/v6),**非128/256直接cudaErrorInvalidValue**。Kaon-V3:滑窗层D=256(走flash OK),**全注意力层(5/11/17/23/29共5层)D=512**(gqa.cu:47 MAX_D=512 Gemma4 full层)。
+**超线性源锁定**:D=512的5个全注意力层prefill**走不了v5/v6 flash(只支持128/256)**→走通用慢路径(layer.rs提过"MAX_D提512走慢路径")。长prompt下这5层慢路径爆炸=TTFT 2秒。滑窗层D=256走flash没事。
+**算一下**:25层滑窗(flash)+5层全注意力(慢路径D=512)。plen128→1024,flash层~线性,慢路径层若O(L²)则5层主导超线性(78×)。
+**待确认**:layer.rs D=512 prefill实际调哪个慢路径kernel,是不是O(L²)无分块。
+**下一步Step B**:①确认D=512慢路径kernel结构(gqa.cu通用慢路径,看是否朴素O(L²));②给D=512补flash(v6已是D=256专用FA2,扩到512?或v5 D=512);③这是Step B要改的——给全注意力层D=512补flash prefill。对标vLLM(flash支持任意D)。
