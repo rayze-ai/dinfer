@@ -720,3 +720,7 @@ A 轮 c8 一次 TPOT p50 19.02 / TTFT 222（其它轮 13.45 / 583）—— 同�
 - **B6b + B7 代码（66e179f）**：两份 GEMV .cu 的每 block warp 数改 host `pick_warps`（SM 数运行时取；M_TILE<16 → 16 warp，=16 → 8；grid < 2×SM 则减半）；B7 kernel `moe_fp4_decode.cu` + 对拍测试 `moe_fp4_decode_parity.rs`（4 场景：每专家 1 行 / 含空专家 / 9 行 > M_TILE 走 chunk 循环 / 小形状）。接入 `moe_branch`（`MOE_DECODE_GEMV=1`）。
 - 验证链 `/w/b7.sh`：两个对拍（mlp_fp8 / moe_fp4）门禁 → bN（A=当前二进制默认 = B5 行为；B=新二进制 `FP8_GEMV=1 MOE_DECODE_GEMV=1`）。判据：c1 **且** c8 都 ≤ B5（7.47 / 10.94）、中文一致。
 - B7 链已起（`/w/b7.sh`，GPU0）；远端 `bN.sh` 加 `BENV`（第 3 参，仅 B/B2 侧 `env $benv`），本地 `scripts/dev/kaon3_stepB_verify.sh` 若要同步此改动待收功时 pull。
+
+## B8 预案 2026-10-28（prefill 侧 TTFT，D54 已证 down GEMM grid=(44,1040,128)=5.8M block 占 prefill 37%）
+根因：`moe_grouped_sm120.cu` grid.y = ceil(R/BM) 按**总行数** R 切、grid.z = E=128，每个 (e, by) 块先读 offsets 再判 `m_blk ≥ row_hi → return`；R=8320 时 1040×128 = 133k 个 (e,by) 里只有 Σ_e ceil(len_e/32) ≈ 8320/32+128 ≈ 390 个有活，**99.7% 的 block 空转**，×44 个 N 块 = 5.8M 次启动。
+方案：device 侧先建 tile 表（一个小 kernel，`tiles[t] = (e, m_blk)` 只含有行的块，`ntile` 原子计数；上限 R/BM + E 由 host 算），grouped GEMM grid=(N/BN, ntile_max, 1)，block 读 `tiles[blockIdx.y]`，越过 ntile 的 return。空转 block 从 5.8M 降到 ≤ 44×(R/32+E)。decode（R=8）也少 44×1040×127 的空 block → 可能再省一点。逐位不变（同 tile 同序）。等 B7 结果后做。
