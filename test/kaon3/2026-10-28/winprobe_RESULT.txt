@@ -1,0 +1,16 @@
+bin=2026-10-28 16:01 16:29:38
+== v6_base [ budget=4096]
+  saved
+== v6_chunk16 [ budget=16]
+  saved
+== v5_base [GQA_PREFILL_CFG=0 budget=4096]
+  saved
+== v5_chunk16 [GQA_PREFILL_CFG=0 budget=16]
+  saved
+== d512ref_chunk16 [GQA_D512_REF=1 budget=16]
+  saved
+  v6: chunk16 vs base: 9/10 [DIFF@0 SAME DIFF@148 DIFF@4 DIFF@83 DIFF@17 DIFF@4 DIFF@162 DIFF@19 DIFF@30]
+  v5(GQA_PREFILL_CFG=0): chunk16 vs base: 9/10 [DIFF@0 SAME DIFF@148 DIFF@4 DIFF@83 DIFF@17 DIFF@4 DIFF@162 DIFF@19 DIFF@30]
+  v5_base vs v6_base: 0/10 [SAME SAME SAME SAME SAME SAME SAME SAME SAME SAME]
+  d512ref chunk16 vs v6_base: 9/10 [DIFF@0 SAME DIFF@98 DIFF@4 DIFF@187 DIFF@0 DIFF@39 DIFF@38 DIFF@58 DIFF@12]
+DONE

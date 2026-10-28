@@ -1,0 +1,21 @@
+bin=2026-10-28 16:01 16:24:56
+== base4096 [budget=4096 --no-prefix-caching]
+  saved 10
+  steps: Decode:1×368 Prefill:25×2 Prefill:24×2 Prefill:22×2 Prefill:20×2 Prefill:23×1 
+== chunk16 [budget=16 --no-prefix-caching]
+  saved 10
+  steps: Decode:1×383 Prefill:16×10 Paged:9×2 Paged:8×2 Paged:6×2 Paged:4×2 
+== chunk32 [budget=32 --no-prefix-caching]
+  saved 10
+  steps: Decode:1×368 Prefill:25×2 Prefill:24×2 Prefill:22×2 Prefill:20×2 Prefill:23×1 
+== chunk8 [budget=8 --no-prefix-caching]
+  saved 10
+  steps: Decode:1×385 Paged:8×14 Prefill:8×10 Paged:6×2 Paged:4×2 Paged:7×1 
+== pc4096 [budget=4096 ]
+  saved 10
+  steps: Decode:1×368 Prefill:25×2 Prefill:24×2 Prefill:22×2 Prefill:20×2 Prefill:23×1 
+  chunk16 vs base4096: 9/10 differ [DIFF@0 SAME DIFF@148 DIFF@4 DIFF@83 DIFF@17 DIFF@4 DIFF@162 DIFF@19 DIFF@30]
+  chunk32 vs base4096: 0/10 differ [SAME SAME SAME SAME SAME SAME SAME SAME SAME SAME]
+  chunk8 vs base4096: 9/10 differ [DIFF@0 SAME DIFF@148 DIFF@4 DIFF@83 DIFF@17 DIFF@4 DIFF@179 DIFF@13 DIFF@30]
+  pc4096 vs base4096: 0/10 differ [SAME SAME SAME SAME SAME SAME SAME SAME SAME SAME]
+DONE

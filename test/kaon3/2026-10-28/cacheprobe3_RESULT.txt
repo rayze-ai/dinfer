@@ -1,0 +1,26 @@
+bin=2026-10-28 16:01 16:15:49
+== env=[KV_FP8_STORE=1]
+  nat0 DIFF: 1st vs 2nd first diff char 0: '这里是为您准备的三句话介绍：\n\n长城的历史可以追溯到春秋战国' / '长城的历史可以概括为以下三点：\n\n1. **起源与初建**：'; 2nd==3rd True
+  nat1 SAME
+  nat2 DIFF: 1st vs 2nd first diff char 148: 'box of 100 different items (li' / 'giant box of 1,000 different i'; 2nd==3rd True
+  nat3 DIFF: 1st vs 2nd first diff char 4: '叶渐黄，\n秋意深处韵悠长。\n莫道残红无处觅，\n满山红透正芬芳' / '意，\n红叶映秋光。\n大地收敛处，\n岁寒将至长。'; 2nd==3rd True
+  nat4 DIFF: 1st vs 2nd first diff char 206: 'detect the loss' / 're-send'; 2nd==3rd True
+  nat5 DIFF: 1st vs 2nd first diff char 17: '按照距离太阳由近到远的顺序，它们分别是：\n\n1.  **水星' / '\n\n按照距离太阳由近到远的顺序，它们分别是：\n\n1.  **'; 2nd==3rd True
+  nat6 DIFF: 1st vs 2nd first diff char 86: 'end ultimately forces their fa' / 'misunderstanding leads to both'; 2nd==3rd True
+  nat7 DIFF: 1st vs 2nd first diff char 54: 'the list and change the `next`' / 'it and change the `next` point'; 2nd==3rd True
+  nat8 DIFF: 1st vs 2nd first diff char 34: '明确一点：**“量子纠缠”并不是科幻电影里的那种超能力，而是' / '打破一个观念：**量子纠缠并不是某种“超能力”，它其实是微观'; 2nd==3rd True
+  nat9 DIFF: 1st vs 2nd first diff char 26: 'Deepest secrets of the sea,\nEn' / 'Endless deep beneath the sun,\n'; 2nd==3rd True
+  total DIFF 9/10
+== env=[plain]
+  nat0 DIFF: 1st vs 2nd first diff char 0: '这里是为您准备的三句话介绍：\n\n长城的历史可以追溯到春秋战国' / '长城的历史可以概括为以下三点：\n\n1. **起源与初建**：'; 2nd==3rd True
+  nat1 SAME
+  nat2 DIFF: 1st vs 2nd first diff char 148: 'box of 100 different items (li' / 'giant box of 1,000 different i'; 2nd==3rd True
+  nat3 DIFF: 1st vs 2nd first diff char 4: '叶渐黄，\n秋意深处韵悠长。\n莫道残红无处觅，\n满山红透正芬芳' / '意，\n红叶映秋光。\n大地收敛处，\n岁寒将至长。'; 2nd==3rd True
+  nat4 DIFF: 1st vs 2nd first diff char 206: 'detect the loss' / 're-send'; 2nd==3rd True
+  nat5 DIFF: 1st vs 2nd first diff char 17: '按照距离太阳由近到远的顺序，它们分别是：\n\n1.  **水星' / '\n\n按照距离太阳由近到远的顺序，它们分别是：\n\n1.  **'; 2nd==3rd True
+  nat6 DIFF: 1st vs 2nd first diff char 86: 'end ultimately forces their fa' / 'misunderstanding leads to both'; 2nd==3rd True
+  nat7 DIFF: 1st vs 2nd first diff char 54: 'the list and change the `next`' / 'it and change the `next` point'; 2nd==3rd True
+  nat8 DIFF: 1st vs 2nd first diff char 34: '明确一点：**“量子纠缠”并不是科幻电影里的那种超能力，而是' / '打破一个观念：**量子纠缠并不是某种“超能力”，它其实是微观'; 2nd==3rd True
+  nat9 DIFF: 1st vs 2nd first diff char 26: 'Deepest secrets of the sea,\nEn' / 'Endless deep beneath the sun,\n'; 2nd==3rd True
+  total DIFF 9/10
+DONE

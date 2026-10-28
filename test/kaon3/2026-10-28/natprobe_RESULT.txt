@@ -1,0 +1,32 @@
+bin=2026-10-28 16:01 16:14:01
+== env=[plain]
+ natural: c2 7/8 differ [DIFF@0 SAME DIFF@98 DIFF@13 DIFF@206 DIFF@17 DIFF@86 DIFF@54] | c8 6/8 differ [DIFF@0 SAME DIFF@98 DIFF@21 DIFF@83 DIFF@10 SAME DIFF@66]
+   nat0 serial='这里是为您准备的三句话介绍：\n\n长城的历史可以追溯到春秋战国时期，最初是为了抵御外敌而修建的。\n随着秦朝的统一，大规模的'
+          c8    ='长城的历史可以概括为以下三点：\n\n1. **起源与初建**：长城的雏形可以追溯到春秋战国时期，由各诸侯国为了防御彼此而修'
+   nat2 serial='To understand a hash table, you first need to understand the'
+          c8    ='To understand a hash table, you first need to understand the'
+   nat3 serial='金风送爽叶渐黄，\n秋意深处韵悠长。\n莫道残红无处觅，\n满山红透正芬芳。'
+          c8    ='金风送爽叶渐黄，\n秋意深处韵悠长。\n莫道残阳无美色，\n满城枫火映辉煌。'
+   nat4 serial='Here are three key differences between TCP and UDP:\n\n### 1. '
+          c8    ='Here are three key differences between TCP and UDP:\n\n### 1. '
+   nat5 serial='太阳系一共有 **8** 颗行星。按照距离太阳由近到远的顺序，它们分别是：\n\n1.  **水星** (Mercury)\n'
+          c8    ='太阳系一共有 **8 颗** 行星。\n\n按照距离太阳由近到远的顺序，它们分别是：\n\n1.  **水星** (Mercur'
+   nat7 serial='To reverse a linked list, you need to iterate through the li'
+          c8    ='To reverse a linked list, you need to iterate through the li'
+ salad: c2 8/8 differ [DIFF@133 DIFF@66 DIFF@26 DIFF@61 DIFF@111 DIFF@29 DIFF@0 DIFF@19] | c8 8/8 differ [DIFF@61 DIFF@142 DIFF@65 DIFF@61 DIFF@111 DIFF@29 DIFF@56 DIFF@95]
+== env=[NO_GRAPH=1]
+ natural: c2 7/8 differ [DIFF@0 SAME DIFF@98 DIFF@20 DIFF@187 DIFF@17 DIFF@86 DIFF@54] | c8 6/8 differ [DIFF@26 SAME DIFF@98 DIFF@21 DIFF@83 DIFF@10 SAME DIFF@66]
+   nat0 serial='这里是为您准备的三句话介绍：\n\n长城的历史可以追溯到春秋战国时期，最初是为了抵御外敌而修建的。\n随着秦朝的统一，大规模的'
+          c8    ='这里是为您准备的三句话介绍：\n\n长城的历史可以追溯到两千多年前的春秋战国时期，当时各诸侯国开始修建防御工事。\n随后，秦朝'
+   nat2 serial='To understand a hash table, you first need to understand the'
+          c8    ='To understand a hash table, you first need to understand the'
+   nat3 serial='金风送爽叶渐黄，\n秋意深处韵悠长。\n莫道残红无处觅，\n满山红透正芬芳。'
+          c8    ='金风送爽叶渐黄，\n秋意深处韵悠长。\n莫道残阳无美色，\n满城枫火映辉煌。'
+   nat4 serial='Here are three key differences between TCP and UDP:\n\n### 1. '
+          c8    ='Here are three key differences between TCP and UDP:\n\n### 1. '
+   nat5 serial='太阳系一共有 **8** 颗行星。按照距离太阳由近到远的顺序，它们分别是：\n\n1.  **水星** (Mercury)\n'
+          c8    ='太阳系一共有 **8 颗** 行星。\n\n按照距离太阳由近到远的顺序，它们分别是：\n\n1.  **水星** (Mercur'
+   nat7 serial='To reverse a linked list, you need to iterate through the li'
+          c8    ='To reverse a linked list, you need to iterate through the li'
+ salad: c2 8/8 differ [DIFF@261 DIFF@66 DIFF@26 DIFF@61 DIFF@111 DIFF@29 DIFF@0 DIFF@19] | c8 8/8 differ [DIFF@61 DIFF@142 DIFF@65 DIFF@61 DIFF@111 DIFF@29 DIFF@56 DIFF@95]
+DONE
