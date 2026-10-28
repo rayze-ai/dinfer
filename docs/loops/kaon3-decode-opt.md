@@ -662,3 +662,16 @@ h=2816 单行 norm（181 次/步）：Block1024 每线程 1 向量两级归约 6
 - B3 kernel 资源（cuobjdump，无 spill）：d512 kernel REG 161 / smem 33984、v3 kernel REG 54–123 / smem 13–26KB、merge_v2 REG 80。LOCAL 全 0 → 寄存器隐患 ① 排除。
 - 容器里 PID 64/853 两个 `dinfer` 是僵尸（Z，RSS 0，PPID 1=sleep infinity 不收尸），不占 GPU，无需处理；GPU 0 当前只有 b4 链占用。
 - 下一刀 B5 候选：D54 "其余 ~700 小 kernel/步 <2.5us + 1.89ms launch 间隙"。正在从 `tmp_nsys2.sqlite` 导全表看这 700 个是谁（MoE 前处理 route_softmax/bucket/norm/gather/quant 各层 ~23 个？）。
+
+## ★★★★ D60 2026-10-28 nsys 全表（45 种 kernel，`tmp_nsys2_full.txt`）+ 带宽 roofline → 下一刀定 **dense mega**（B5），不是小 kernel 融合
+全表（c1 一步 1298 kernel，kernel 和 14.96ms，span 16.84ms → 空隙 1.9ms）。"其余 ~700 小 kernel" 拆开：add_inplace 90 次 0.8us、rmsnorm 1024 单行 151 次 1.3us、scatter_add/gather/grouped_quant/scan/count/row2expert/scale/mul_row/fill/f32_add 各 30 次 0.6–2.5us —— **合计只 ~0.6ms**，融合顶多省 0.4ms + 部分空隙，ROI 低。
+**roofline（5090 1.79 TB/s）**：
+| 段 | 字节/层 | 带宽下限/层 | 实测/层 | 差 |
+|---|---|---|---|---|
+| dense MLP fp8 gate+up+down（2816×2112×3 = 17.8 MB） | 17.8 MB | 10 us | **86.9 us** | **8.7×** |
+| MoE 8 专家 NVFP4 gate/up/down（8×3×2816×704×0.5 = 23.8 MB+scale） | ~25 MB | 14 us | 18.6+12.5+18.6 = 50 us | 3.6× |
+| qkv/oproj fp8 nvjet（2816×(2048+1024)+... ≈ 11 MB） | 11 MB | 6 us | 29.4+15.7 = 45 us | 7× |
+| router gemv（2816×128 bf16 = 0.7 MB） | 0.7 MB | 0.4 us | 3.8 us | 10× |
+| lm_head gemv（262144×2816 bf16 = 1.48 GB） | 1.48 GB | 826 us | 870 us | 1.05× ✓ |
+**读法**：lm_head 这种"大 N 一个 gemv"已到带宽；**所有小 M（M=1）GEMM 都离带宽 4–9×**，dense mega 最差（2.61ms/步 = 17.4% 占比，若到带宽 0.3ms → **省 ~2.3ms/步，TPOT 9.6→~7.3，-24%**）。R26 已证 mega 的 wait 是 exec 的 2.5×（persistent 阶段链 1 CTA/SM 自旋），D57 旋钮（CTAS/SP）调不动 → 要换 kernel 结构，不是调参。
+**B5 方案**：decode（M≤16）dense MLP 不走 persistent mega，走 3 个带宽型 kernel：① gate‖up 合一 fp8 GEMV（N=2×2112 行切 CTA，每 warp 若干行、K 连续 16B 向量流读、x 的 M≤16 行驻 smem、warp 内 shuffle 归约，epilogue 直接 gelu·mul 写 act bf16 + fp8 量化）→ ② down fp8 GEMV（N=2816，K=2112）→ norm 沿用。预期 3 launch ≈ 25us/层。保留 mega 路径作 `DENSE_DECODE_OLD=1` 回退；prefill 不动。同样结构可复用到 qkv/oproj（第 2 候选 1.3ms）。
