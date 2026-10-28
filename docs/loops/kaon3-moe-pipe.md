@@ -50,3 +50,14 @@
 ## ★★ R74 2026-10-28 双缓冲cp.async流水版对拍 bad=0/15488 通过(逐位门禁过)
 照搬已验证fp8范式(prologue存buf0+循环内store nxt在wait_group 1+__syncthreads之后,B/sfb cp.async预取到[2]buf,错位wait_group 1,trailing sync保证下轮写前本轮读完)。修了R73坑(store时机)。对拍**bad=0**。
 逐位硬门槛过。下一步验第二关:gemm3墙钟降没降(大M prefill态每专家M≈132,旧版vs流水版kernel墙钟),确认cp.async重叠真提效率(目标13%峰值往上)。过了再接serve bench进CSV。
+
+## ★★★ R75 2026-10-28 gemm3墙钟微基准:cp.async流水decode(小M)2.15×,prefill(大M)无效——与R69预期相反
+逐位bad=0后测墙钟(8专家,N=704,K=2816,200迭代):
+| 态 | 旧版 | 流水版 | 加速 |
+|---|---|---|---|
+| **小M=1(decode)** | 22.3us(356GB/s) | **10.35us(766GB/s)** | **2.15×** |
+| 大M=132(prefill) | 35.2us(225GB/s) | 35.96us(221GB/s) | **0.98×无效** |
+**与R69预期相反**:R69说"大M仍13%峰值→低效与M无关→否定M=1特化"。微基准显示**cp.async流水只救小M(decode),大M没用**。
+→ 大M瓶颈不是流水(cp.async帮不上),是别的(tile/mma利用率/occupancy);**被流水救的恰是小M(decode)**——R64/R65最初方向(M=1效率)其实对,我R69反而带偏。
+**但要对账(别又误读)**:微基准"大M 35us/225GB/s"与R69 serve实测"大M gemm3 2.96ms"量级差很多——微基准只1个grouped GEMM(grid.z=8激活专家),serve gemm3=3 GEMM×grid.z=128全专家。**不能直接套**。小M decode同理(微基准grid.z=8 vs serve 128)。
+**但方向明确**:decode(serve主战场,TPOT大头)小M流水2.15×是真收益。decode TPOT=51.8ms,MoE 63%,gemm3=MoE 54%→gemm3减半可观。**接serve验**:MOE_GEMM_PIPE=1跑serve,KAON3_MOE_TIME看gemm3降没降,bench看TPOT/吞吐。逐位已过(bad=0)可直接上。
