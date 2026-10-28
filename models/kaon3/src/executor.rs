@@ -82,7 +82,7 @@ impl KaonExecutor {
             tracing::info!("kaon3 gemm autotune: off (GEMM_TUNE=off)");
         }
 
-        let scratch = LayerScratch::new(&stream, &model.cfg, max_tokens)?;
+        let scratch = LayerScratch::new_with_rows(&stream, &model.cfg, max_tokens, max_rows)?;
         let acts = ActBuf::new(&stream, &model.cfg)?;
         // grouped MoE 关时图无法捕获（host 路由有 D2H）：禁用图并打一行说明。
         let grouped = moe_grouped_enabled();

@@ -805,6 +805,11 @@ impl GroupedBufs {
 
 impl LayerScratch {
     pub fn new(stream: &Stream, cfg: &KaonConfig, max_tokens: usize) -> Result<Self> {
+        Self::new_with_rows(stream, cfg, max_tokens, max_tokens.min(64))
+    }
+    /// `max_decode_rows`：纯 decode 一步最多多少请求（= max_num_seqs），只决定 decode_scratch 大小
+    /// （B×heads×32×(D+2) f32；按 max_tokens 分配会是 4.4 GB → OOM，B3 第一次验证踩过）。
+    pub fn new_with_rows(stream: &Stream, cfg: &KaonConfig, max_tokens: usize, max_decode_rows: usize) -> Result<Self> {
         let (h, d, nkv) = (cfg.hidden, cfg.head_dim_full, cfg.nkv_full);
         let _ = (d, nkv);
         Ok(Self {
@@ -821,7 +826,7 @@ impl LayerScratch {
             attn_f: Tensor::uninit(stream, &[max_tokens, cfg.num_heads * cfg.head_dim_full])?,
             decode_scratch: Tensor::zeros(
                 stream,
-                &[k::gqa_decode_scratch_len(max_tokens, cfg.num_heads, cfg.head_dim_full.max(cfg.head_dim_sliding))],
+                &[k::gqa_decode_scratch_len(max_decode_rows.max(1), cfg.num_heads, cfg.head_dim_full.max(cfg.head_dim_sliding))],
             )?,
             // 合并 qkv 输出的上界：两层型 q+k+v 的较大者（full: num_heads·D + 2·nkv·D）。
             qkv: Tensor::uninit(stream, &[max_tokens,
