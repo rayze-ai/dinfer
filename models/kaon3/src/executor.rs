@@ -253,6 +253,8 @@ impl ModelExecutor for KaonExecutor {
         let n = plan.num_reqs();
         let t = plan.total_tokens();
         let nrows = plan.logits_rows.len();
+        let _fs0 = std::time::Instant::now();
+        eprintln!("[fwd-sample] ENTER mode={:?} t={t} n={n} nrows={nrows}", plan.mode);
         ensure!(t <= self.max_tokens, "batch of {t} tokens > max_tokens {}", self.max_tokens);
         ensure!(nrows <= self.max_rows, "rows {nrows} > max_rows {}", self.max_rows);
         ensure!(plan.max_blocks <= self.plan.max_blocks, "block_table {} > buffer {}", plan.max_blocks, self.plan.max_blocks);
@@ -307,6 +309,7 @@ impl ModelExecutor for KaonExecutor {
             generated.push(vec![am[r0] as u32]);
             drafts.push(Vec::new());
         }
+        eprintln!("[fwd-sample] EXIT mode={:?} t={t} total={:.0}us", plan.mode, _fs0.elapsed().as_secs_f64()*1e6);
         Ok(())
     }
 }
