@@ -1050,3 +1050,4 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - **D90 b27 bN 数字作废**：A 侧二进制在链里被我 8 s 后的 cp 换回 b26，A 与 A2 的 c8 TTFT 一个 101 一个 155 ⇒ A 跑的不是同一个二进制。B（b27）：c8 TTFT 118、吞吐 679、TPOT 10.26；c1 不变。B27 的性能影响本来就应 ≈ 0；**正确性没过之前不入 CSV**。
 - 下一步排查并行跑：GPU 1 `mixprobe`（A 在飞 + B 插入，fresh / cache 态，3 env）；GPU 4 `cacheprobe`（**c1 串行**同 prompt 三次：若第 2 次就不同 → 不是并发问题，是**带历史 chunk（prefix cache 命中后 Paged 步）本身错**；env plain / KV_FP8_STORE=0 / GQA_PAGED_D512_V6_OFF=1 分路径）。怀疑点：D=256 滑窗层 **v5 PAGED + KV_FP8 + hist>0 + window** 组合从未被测过（B15b fp8cache 测试全是 q_len=1；Qwen3 的 mixed 是 window=0）。
 - D91：mixprobe（GPU 1）plain 组第一条串行请求就 **HTTP 503**（A=400 词 200 out 串行基线）→ 服务侧拒绝（查 503 条件：排队上限 / 引擎未就绪 / max_tokens 超限？）；cacheprobe（GPU 4）同时起，结果待看。先查 503 来源再重跑。
+- D91 解：容器 `kaon3-full` **只挂了 GPU 0**（`CUDA_VISIBLE_DEVICES=1/4` → `CUDA_ERROR_NO_DEVICE`，serve 秒退，脚本继续 curl 到老端口的残留服务 → 503）。两个探针改 GPU 0 串行排在 bN b27 之后（`probes.sh`）。
