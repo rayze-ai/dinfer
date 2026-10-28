@@ -127,7 +127,8 @@ fn mlp_fp8_decode_parity() {
         if !ok { fails.push(format!("m={m} h={h} inter={inter}")); }
     }
     // ---- B6：qkv / o_proj 形状的纯 GEMV（N, K, m）----
-    for (n, kk, m) in [(3072usize, 2816usize, 16usize), (2816, 4096, 8), (2816, 8192, 4), (3072, 2816, 1)] {
+    // B20：kernel 限 K ≤ 4096（每 lane ≤ 8 个 uint4 批量预取）；K=8192 的全注意力 o_proj 走 cuBLASLt，不在此测
+    for (n, kk, m) in [(3072usize, 2816usize, 16usize), (2816, 4096, 8), (2816, 4096, 1), (3072, 2816, 1)] {
         let mut rng = Rng(0xb6 + n as u64 * 31 + kk as u64 + m as u64);
         let (ws, a_s) = (0.0023f32, 0.06f32);
         let aq: Vec<u8> = (0..m * kk).map(|_| { let e = 3 + (rng.uni() * 9.0) as u8; let mant = (rng.uni() * 8.0) as u8 & 7; let sg = if rng.uni() < 0.5 { 0x80 } else { 0 }; sg | (e << 3) | mant }).collect();
