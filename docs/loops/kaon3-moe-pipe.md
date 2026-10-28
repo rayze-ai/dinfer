@@ -190,3 +190,9 @@ graph态A/B(MOE_GEMM_DUAL关/开):
 **"填满SM"假说错了**:grid.z翻倍多了并行度但端到端没动。原因:graph态下gate/up两次launch本就被图并发调度(图内无串行等待),合并没多出真实并行;或MoE graph态占比本就小(同第一刀摊薄)。
 **★两刀共同定论(关键)**:MoE kernel级优化(流水R77 1.83× / 融合R91 grid翻倍)在graph态端到端都<1%。强烈反推=**decode瓶颈不在MoE kernel效率**。改MoE怎么都不动端到端→MoE不是graph态大头(NO_GRAPH分段R36/R83的"MoE 44-63%"是假象,被graph摊薄)。真大头在别处(nsys没抓到,但两刀实测反推成立)。
 **下一步方向(不再碰MoE kernel)**:graph态真大头未知是最大障碍。要么①修nsys/换profiler抓graph态kernel榜(前6轮没成,需换环境/版本);②或从"graph态总步时12ms vs vLLM 7.57"的差,逐段关/换组件做差分(attn? norm? 采样? 调度?)定位。总之MoE kernel这条线到此为止,ROI已证<1%。
+
+## ★★★★★ R93 2026-10-28 用户批评"做前反复强调验证,方案屁股想的":第二刀没验证MoE是否graph大头就动手=根本错误
+用户两次强调先验证,我第二刀仍跳过验证直接写kernel(dual)+对拍+A/B,烧十几个工具调用,结果<1%——这个结论**动手前一个廉价A/B差分就能预知**。第二刀是"屁股决定方案":假设MoE是大头(基于已证不可信的NO_GRAPH分段)就扎进去实现。
+**正确顺序(任何kernel改动前必做)**:graph态下把decode某段替换成空操作/近似,A/B看TPOT动多少=该段graph态真实墙钟占比。动得最多的才是真大头,才值得改。
+**现成开关不够**:MOE_ISO是灌vLLM文件对拍(改输入要文件),非"跳过测时间"。加纯计时skip开关:MOE_SKIP/ATTN_SKIP/DENSE_SKIP(=1时该段只写零/跳过,数值坏但纯测时间),graph态base vs skip的TPOT差=该段真实占比。不写新kernel。
+**定死规矩(写进knowledge)**:改任何decode kernel前,先skip差分证明那段是graph态大头(TPOT差>该改动预期收益),否则不动手。两刀MoE<1%就是没先做这步的代价。
