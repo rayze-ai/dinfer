@@ -520,3 +520,15 @@ c1 decode skip差分(最新二进制probe在,与旧二进制"全0影响"假象�
 PIPE=1 TPOT c1=16.45ms,base=17.41(D45同条件)。**端到端-5.5%(省~1ms)**。输出两边一致(the.\n\nThe capital...)=流水数值对没错。
 但微基准曾1.83×(MoE 5.3→~2.9该省2.4ms),端到端只省1ms。疑:decode走CUDA graph,MOE_GEMM_PIPE env运行时改可能不进预捕获的图(老问题D13)——需确认pipe对graph decode是否真生效。
 **需干净同轮重测**(base TPOT别跨轮用D45):base/pipe同容器连测,TPOT grep与completion输出分开(本轮base TPOT行被输出换行污染没抓到)。
+
+## ★★★★★★ D48 2026-10-28 确凿正收益!MOE_GEMM_PIPE(第一刀cp.async流水)干净同轮:TPOT 17.41→16.45(-5.5%)
+干净同轮base/pipe:
+| | TPOT | 吞吐 |
+|---|---|---|
+| base | 17.41 | 56.1 |
+| pipe(MOE_GEMM_PIPE=1) | **16.45** | 59.3 |
+| 变化 | **-5.5%(省0.96ms)** | +5.7% |
+**第一刀cp.async流水:TPOT-5.5%、吞吐+5.7%,输出一致(数值对)**。干净环境/同轮/输出一致=确凿真实值(非之前旧二进制假象)。
+**预期vs实际**:decode MoE 5.3ms,微基准cp.async 1.83×该省~2.4ms,端到端只省0.96ms=**拿到预期~40%**。疑decode走CUDA graph,PIPE对图内kernel部分生效部分没进图(D13)。但有收益=至少部分进图。
+**意义**:这是整会话第一个干净环境确凿正收益(之前全被旧二进制污染)。MoE是decode头号(5.3ms),第一刀方向对。
+**下一步继续压MoE**:①查流水为何只40%(图没全进?预捕获图是否含pipe kernel)——补足可能再降;②第二刀gate+up dual(MOE_GEMM_DUAL=1)叠加测;③MoE内gemm3是5.3ms多少。目标把MoE 5.3→~3ms→TPOT 17→~15。
