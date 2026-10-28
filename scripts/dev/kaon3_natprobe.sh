@@ -11,7 +11,21 @@ M=/hf_data/hub/models--kaon-release--Kaon-V3-nvpf4-mixed/snapshots/e268bef12555d
 export MOE_GROUPED=1 KAON3_MEGA=1 MEGA_SPGU=4 MEGA_SPDN=4 ROUTER_GEMM_BI=0 CUDA_VISIBLE_DEVICES=0 FP8_GEMV=1
 PORT=8388; BIN=${BIN:-./target/release/dinfer}
 echo "bin=$(stat -c %y $BIN | cut -c1-16) $(date +%T)" >> $R
+#!/usr/bin/env bash
+# D111：区分"并发 bug"与"批尺寸数值噪声翻转贪心"。自然语言 prompt（分布尖）串行 vs c2/c8 应 SAME；
+# 词沙拉 prompt（分布平）作对照。同一服务；每组换 prompt 避免 cache。env 组 plain / NO_GRAPH=1。
+NV=/usr/local/lib/python3.12/dist-packages/nvidia
+mkdir -p /tmp/stub; ln -sf $NV/nccl/lib/libnccl.so.2 /tmp/stub/libnccl.so; ln -sf $NV/cu13/lib/libnvrtc.so.13 /tmp/stub/libnvrtc.so
+export LD_LIBRARY_PATH=$NV/nccl/lib:$NV/cu13/lib
+cd /w/dinfer
+R=/w/dinfer/tmp_natprobe_RESULT.txt; : > $R
+trap 'echo DONE >> $R' EXIT
+M=/hf_data/hub/models--kaon-release--Kaon-V3-nvpf4-mixed/snapshots/e268bef12555d299ed7ca02ade5e77f239f27478
+export MOE_GROUPED=1 KAON3_MEGA=1 MEGA_SPGU=4 MEGA_SPDN=4 ROUTER_GEMM_BI=0 CUDA_VISIBLE_DEVICES=0 FP8_GEMV=1
+PORT=8388; BIN=${BIN:-./target/release/dinfer}
+echo "bin=$(stat -c %y $BIN | cut -c1-16) $(date +%T)" >> $R
 for ENVSET in "" "NO_GRAPH=1"; do
+( # subshell：子进程被杀 / timeout 不影响外层循环（D113）
   pkill -x dinfer; sleep 3
   LOG=/w/dinfer/tmp_natprobe_${ENVSET:-plain}.log
   env $ENVSET taskset -c 0-31 $BIN serve --model "$M" --tokenizer "$M" --port $PORT --max-model-len 16384 --max-num-seqs 64 --max-num-batched-tokens 4096 >$LOG 2>&1 &
@@ -45,4 +59,5 @@ for tag, prompts in [("natural", nat), ("salad", [salad(900 + i) for i in range(
             if s != c: print(f"   nat{i} serial={s[:60]!r}\n          c8    ={c[:60]!r}")
 PY
   kill -INT $SP 2>/dev/null; sleep 2; kill -KILL $SP 2>/dev/null; sleep 2
+)
 done
