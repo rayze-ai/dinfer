@@ -562,8 +562,15 @@ impl<E: ModelExecutor> Engine<E> {
                             self.sync_done.push_back((so_next, mro_next, t_step, t_sched));
                         }
                     }
+                    let t_before_finish_n = std::time::Instant::now();
                     let mro_n = match self.runner.finish(pend_n) {
-                        Ok(m) => m,
+                        Ok(m) => {
+                            if self.host_time {
+                                let fin_us = t_before_finish_n.elapsed().as_secs_f64() * 1e6;
+                                tracing::info!("[host-split] finish(n)_dtoh_sync={:.1}us (等n的graph跑完)", fin_us);
+                            }
+                            m
+                        }
                         Err(e) => return self.fail_step(e),
                     };
                     (so_n, mro_n, t_step_n, t_sched_n, std::time::Instant::now())
