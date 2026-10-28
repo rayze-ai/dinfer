@@ -1182,3 +1182,7 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 ## D146 2026-10-29 vLLM 基线批不变性对照：基线容器 `vllm-noneager` 监听 **:28201**（生产口径，served-model-name `kaon-vllm`）、`vllm-eager` :28200（CLAUDE.md 写的 :28067 已过时 → 更正）。同 8 条自然语言 prompt、同脚本（serial×2 / c8 vs serial / c8 vs c8）。结果归档 `test/kaon3/2026-10-29/vllm_batch_invariance_RESULT.txt`。
 - **D146 结果（vLLM 基线 :28201，同 8 条 prompt）**：serial×2 **6/8 不同**（同 prompt 串行重跑都不稳）、c8 vs serial 5/8、c8 vs c8 重复 **7/8**；nat0 两版都是"三个版本…"语义等价。**vLLM 比我们更不确定**（我们 serial×2 0/8、c8×2 0/8、c8 vs serial 6/8）。⇒ **结案**：kaon3 的翻转率不高于 vLLM，且在同批构成下严格确定（vLLM 连这点都没有，大概是其 MoE/FlashInfer 内核的非确定归约）。批不变性作为可选优化留台账，不是缺陷。
 - 收尾：CLAUDE.md 基线端口 :28067 → :28201（noneager，生产口径）/ :28200（eager）。
+
+## 第四轮 2026-10-29（用户确认顺序：① 重抓 nsys → ② MoE decode GEMM split-K → ③ 层内 launch 合并 → ④ supports_pair → ⑤ lm_head fp8）
+- 用户质疑："理论上应该比 vLLM 快"。回答口径：c1 一步带宽下限 ≈ 2.0 ms（lm_head 0.83 + MoE 0.42 + dense 0.3 + qkv/oproj 0.16 + KV），vLLM 4.69 = 2.3×，我们 5.57 = 2.8×；差在 ~1000 launch/步 与 MoE grouped GEMM 占用率（~90 CTA / 170 SM，每 CTA 串 22 个 K 步），不在物理极限。compute overlap 一处没有（单流、`supports_async/pair` 都 false）。B16b 已解决 BM=32 半 warp 空转但只 -1.1%。GQA 已确认与 vLLM 一致（D147）。
+- **D148 重抓 nsys**：链 `nsys_now.sh` = 编译（源含 KV_FP8_STORE 默认开 / INFLIGHT_GATHER 默认关）→ `nsys_c1b.sh` → `nsys_c8.sh`；产物 `tmp_nsys_c1b_RESULT.txt` / `tmp_nsys_c8_RESULT.txt`（kernel 表按 `nsys_kern.py`）。用它刷新 B21 候选表后再动 ②。
