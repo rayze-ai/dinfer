@@ -2624,7 +2624,7 @@ pub fn gqa_paged_bf16<Q: DevicePtr<bf16> + ?Sized>(
     q_stride: usize,
     skip_single: bool,
 ) -> Result<()> {
-    gqa_paged_impl(stream, q, cache, block_table, seq_lens, cu_seqlens_q, out, num_reqs, max_q_len, heads, kv_heads, head_dim, block_size, max_blocks, scale, q_stride, skip_single, 0, false)
+    gqa_paged_impl(stream, q, cache, block_table, seq_lens, cu_seqlens_q, out, num_reqs, max_q_len, heads, kv_heads, head_dim, block_size, max_blocks, scale, q_stride, skip_single, 0, false, false)
 }
 
 /// 带滑窗的 paged attention：可见 key ∈ `[pos - window + 1, pos]`；`window = 0` 等价全注意力。
