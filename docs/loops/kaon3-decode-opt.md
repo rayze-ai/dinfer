@@ -887,3 +887,22 @@ decode c1 的 MoE 段 nsys：grouped_gemm gate 18.6 + up 18.6 + down 12.5 + gelu
 - BM=16 变体：8 warp = 1(M)×8(N)，每 warp 16×8（一个 n8 片段，只 acc）；B 片段 b0 = ncol=warp*8；A 片段同（mrow=0）。**每个输出元素的 k 序累加与 BM=32 版逐位同**（同 lane 同 k 顺序，只是少算一个片段）→ bad=0 可测。smem 每级 16·72+64·72+4·(16+64) = 6.1 KB（原 8.4）；寄存器少 acc2 → 占用 ↑。
 - tile 表：`tile_off` 现按 BM=32 算（scan_kernel/fused route 都写死 `/32`）。加第二张 `tile_off16`（同一 scan 多写一列，`(cnt+15)/16`），MoeBuckets 加字段，`moe_grouped_gemm` 多收一个指针，host 按 `rows ≤ 128`（decode 口径）选 BM=16 + tile_off16，否则 BM=32 + tile_off。grid.y 上界 R/16+E。
 - 预期：gate/up 每 CTA 算量减半 → 18.6→~11 us（若固定开销占一半则 ~14）；三 GEMM -0.3~-0.5 ms/步。先等 nsys 看 pipe4 现值再动手。
+
+## ★★★★★★ D72 2026-10-28 nsys c1b（b17 二进制，FP8_GEMV=1，KV e4m3）：每步 ~1065 kernel，kernel 和 ≈ 5.7 ms + 间隙 ≈ 1.4 ms = TPOT 6.78（归档 tmp_nsys_c1b_full.txt；87 步合成一个 graph 实例，表中 n 要 ÷87）
+| 段 | n/步 | us/次 | ms/步 | 说明 |
+|---|---|---|---|---|
+| lm_head gemvx | 1 | 870 | 0.87 | 带宽下限，不动 |
+| grouped_gemm_pipe4 gate/up | 60 | 11.7 | 0.70 | B16 后 18.6→11.7（-37%）；grid.y=129（R/32+E 上界，空 block 多）|
+| grouped_gemm_pipe4 down | 30 | 10.9 | 0.33 | 12.5→10.9 |
+| dense gemv（B5 down）| 60 | 8.7 | 0.53 | |
+| **rmsnorm_vec<256,2> grid=4160** | 30 | **17.1** | **0.51** | **按 max_tokens 行跑（1 行实际）**——B1 修了逐头 norm，这里还有一处 h=2816 的 norm 按 4160 行 launch！|
+| **route_bucket_small（B10）** | 30 | **16.2** | **0.49** | 单 block 单线程循环 8×128 + softmax 32-lane 树 → 比原 topk 7.3+softmax 5.6 还慢！融合省了 launch 但把并行度打没了 |
+| qkv gemv（B6c）| 25 | 16.5 | 0.42 | 3072×2816 fp8 = 8.6 MB → 下限 4.8 us，3.4× |
+| gateup_act（B5）| 30 | 10.2 | 0.31 | |
+| rmsnorm 2816 单行 ×6/层 | 181 | 1.3 | 0.24 | |
+| cache_write_fp8rt | 30 | 4.8 | 0.14 | |
+| v3 attention（25 层）| 25 | 5.2 | 0.13 | KV e4m3 后很快 |
+| d512 attention（5 层）| 5 | 18.3 | 0.09 | |
+| o_proj gemv | 30 | 18.0 | 0.09（5 层 full）+… | |
+| 其余小 kernel | ~550 | | ~0.6 | |
+**两个意外的大头都是"我自己引入/没查到的"**：① rmsnorm grid=4160（0.51 ms，纯浪费，B18 立刻修）；② B10 融合 kernel 反而慢 0.1 ms/步（B19：top-k 改 warp 并行，每 token 一 warp）。两刀预期 -0.8 ms（6.39 → ~5.6，vs vLLM 4.69 差 1.2×）。
