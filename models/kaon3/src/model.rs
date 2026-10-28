@@ -159,6 +159,7 @@ impl KaonModel {
             // 前置各层照跑，为第 l 层的注意力填好 KV（它们的输出不进入本层输入，输入是被灌进去的）。
             for pre in 0..skip {
                 if pre == l { continue; }  // 第 l 层自己只跑一次（用灌入的输入）
+                let kv_fp8_pre = kv_cache[pre].is_fp8;
                 let mut c = StepCtx {
                     mode: meta.mode,
                     cu_seqlens: &meta.cu_seqlens,
@@ -171,10 +172,11 @@ impl KaonModel {
                     max_seqlen: meta.max_seqlen,
                     block_size: self.block_size,
                     kv_mut: &mut kv_cache[pre].cache.data,
-                    kv_fp8_store: kv_cache[pre].is_fp8,
+                    kv_fp8_store: kv_fp8_pre,
                 };
                 self.layers[pre].forward(stream, gemm, ops, cfg, &self.ropes, sc, &mut c, tokens, None)?;
             }
+            let kv_fp8_l = kv_cache[l].is_fp8;
             let mut ctx = StepCtx {
                 mode: meta.mode,
                 cu_seqlens: &meta.cu_seqlens,
@@ -187,7 +189,7 @@ impl KaonModel {
                 max_seqlen: meta.max_seqlen,
                 block_size: self.block_size,
                 kv_mut: &mut kv_cache[l].cache.data,
-                kv_fp8_store: kv_cache[l].is_fp8,
+                kv_fp8_store: kv_fp8_l,
             };
             let so_l: usize = std::env::var("SUB_LAYER").ok().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
             let so = hidden_dir.filter(|_| l == so_l).map(|d| (std::path::Path::new(d), l));
@@ -201,6 +203,7 @@ impl KaonModel {
         // KV cache 逐层不同（head_dim 256/512），写与读都要按层取。
         let mut kv_cache = std::mem::take(&mut self.kv);
         for (l, layer) in self.layers.iter().enumerate() {
+            let kv_fp8_l = kv_cache[l].is_fp8;
             let mut ctx = StepCtx {
                 mode: meta.mode,
                 cu_seqlens: &meta.cu_seqlens,
@@ -213,7 +216,7 @@ impl KaonModel {
                 max_seqlen: meta.max_seqlen,
                 block_size: self.block_size,
                 kv_mut: &mut kv_cache[l].cache.data,
-                kv_fp8_store: kv_cache[l].is_fp8,
+                kv_fp8_store: kv_fp8_l,
             };
             // 子模块 dump 的层选择：`SUB_LAYER=<n>` 覆盖，默认第 0 层；
             // `SUB_LAYER=all` 每层都 dump，写到 `<dir>/sub_L{l}/`（逐层 router 真值扫描用）。
