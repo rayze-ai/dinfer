@@ -106,3 +106,35 @@ fn moe_route_fused_parity() {
     }
     assert!(fails.is_empty(), "失败: {fails:?}");
 }
+
+/// B13：`rmsnorm_add_bf16_n`（norm 直接加到残差）vs `rmsnorm_bf16_n` + `add_inplace_bf16_n` 两步，逐位。
+/// 形状 = Kaon-V3 hidden 2816，tokens ∈ {1, 8, 33}；x / res 正态 ×{1, 30}（含大幅值行）。
+#[test]
+#[ignore]
+fn rmsnorm_add_bitwise() {
+    let dev = Device::new(0).unwrap();
+    let st = dev.default_stream();
+    let h = 2816usize;
+    let mut fails = Vec::new();
+    for (tokens, amp) in [(1usize, 1.0f32), (8, 1.0), (33, 30.0), (8, 0.01)] {
+        let mut rng = Rng(0xb13 + tokens as u64 * 7 + amp as u64);
+        let g = |r: &mut Rng| (r.uni() + r.uni() + r.uni() + r.uni() - 2.0) * 1.732;
+        let x: Vec<bf16> = (0..tokens * h).map(|_| bf16::from_f32(g(&mut rng) * amp)).collect();
+        let w: Vec<bf16> = (0..h).map(|_| bf16::from_f32(1.0 + 0.3 * g(&mut rng))).collect();
+        let res: Vec<bf16> = (0..tokens * h).map(|_| bf16::from_f32(g(&mut rng) * 2.0)).collect();
+        let dx = st.htod_copy(x).unwrap();
+        let dw = st.htod_copy(w).unwrap();
+        let mut r_old = st.htod_copy(res.clone()).unwrap();
+        let mut r_new = st.htod_copy(res).unwrap();
+        let mut tmp = st.alloc_zeros::<bf16>(tokens * h).unwrap();
+        ops::rmsnorm_bf16_n(&st, &dx, &dw, &mut tmp, tokens, h, 1e-6).unwrap();
+        ops::add_inplace_bf16_n(&st, &tmp, &mut r_old, tokens * h).unwrap();
+        ops::rmsnorm_add_bf16_n(&st, &dx, &dw, &mut r_new, tokens, h, 1e-6).unwrap();
+        st.synchronize().unwrap();
+        let (a, b) = (st.dtoh_sync_copy(&r_old).unwrap(), st.dtoh_sync_copy(&r_new).unwrap());
+        let nd = a.iter().zip(&b).filter(|(p, q)| p.to_bits() != q.to_bits()).count();
+        println!("rmsnorm_add tokens={tokens} amp={amp}: 位差 {nd}/{} => {}", tokens * h, if nd == 0 { "ok" } else { "FAIL" });
+        if nd != 0 { fails.push(format!("tokens={tokens} amp={amp}")); }
+    }
+    assert!(fails.is_empty(), "失败: {fails:?}");
+}
