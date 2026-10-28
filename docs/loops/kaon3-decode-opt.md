@@ -861,3 +861,7 @@ decode c1 的 MoE 段 nsys：grouped_gemm gate 18.6 + up 18.6 + down 12.5 + gelu
 - **b16 定稿（两轮）**：c1 6.57 → **6.39/6.40（-2.7%）**，吞吐 144 → 148；c8 11.52 → 11.57/11.58（持平）；TTFT c1 29.5 → 28.8。保留，CSV round b16。累计 c1 **17.07 → 6.39（-62.6%）**，vs vLLM 4.69 差 1.36×。
 - B17a 扩：C++ host 每次 launch 都 `getenv`：`gqa.cu` `GQA_D512_REF`（每层 prefill）、`moe_grouped_sm120.cu` `MOE_GEMM_PIPE`（每层 3 次）→ static once；Rust `ops.rs` `gqa_prefill_cfg`（每层）/ `rmsnorm_layout`（每次 norm ×~8/层）内 `env::var` → 看实现后缓存。总计 prefill 每层再省 ~12 次 getenv。
 - B17a 核：`ops.rs` 的 `gqa_prefill_cfg` / `rmsnorm_layout` 已是 OnceLock（误报），其余 ops.rs env 读在 GDN（Qwen3.5）路径，与 kaon3 无关。B17a 落地范围 = layer.rs 17 处 + C++ 2 处。随 b17 链验（预期 prefill host 省 ~1 ms → TTFT c1 28.8 → ~27.5；decode 图内无影响）。
+
+## ★★★ D70 2026-10-28 B15b split（b16 二进制，`KV_FP8_STORE=1` vs 关，均 FP8_GEMV=1）首批：c1 6.39/6.39 持平；c8 TPOT 11.58 → **11.35（-2.0%）**，c8 TTFT 488 → **507（+3.9%）**
+- TTFT 回到正常量级（D68 的 1397 是慢路径），但比 bf16 cache 慢 4%：fa_v5 KV_FP8 固定 NBUF=1（bf16 侧 5090 默认也是 1）、多一道展开 barrier/tile + 展开计算。c8 decode 赢 0.23 ms/步（KV 读减半），64 token 输出赢 15 ms，TTFT 赔 19 ms——**c8 本轮净持平**；长输出（真实负载 >64 token）净赢，且 cache 容量翻倍（更多并发 / 更长上下文）。
+- 决定：等 A2/B2 复核后 **`KV_FP8_STORE` 默认开**（vLLM 口径即 fp8 KV），CSV 记 round b15b；fa_v5 KV_FP8 的 TTFT 差留作 B15c（展开并进 ldmatrix 前的 smem 布局、或 staging 直接做 e4m3 ldmatrix + 寄存器内展开）。
