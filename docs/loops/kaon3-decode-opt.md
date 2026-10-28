@@ -304,3 +304,12 @@ gqa.cu:880-881:**通用慢路径=gqa_prefill_ref_kernel旧参考实现,"每(req,
 **Step B靶子(明确且在关键路径,非MoE打偏)**:给D=512全注意力层补flash prefill。v6已是D=256专用FA2(gqa.cu:354,Q进smem/NW/TILE模板化),**扩到D=512**(gqa_fa_v6_kernel模板<D>,v6注释说D=256时Q+O+S寄存器已满,D=512要Q进smem+减TILE,正是v6思路);或v5 D=512。
 **Step A/B成果(终于定对)**:耗时最长=prefill TTFT(plen1024慢vLLM 24×);根因=D=512走O(L²)参考kernel(5层全注意力);改法=补D=512 flash。decode TPOT(慢3.8×)是次要,MoE两刀全打偏(MoE/decode不在关键路径,TTFT才是)。
 **下一步Step B实现**:gqa_fa_v6_kernel<D>扩D=512分派(gqa.cu:347后加head_dim==512→v6<512>);注意D=512寄存器/smem压力(227KB smem,Q 512×2+K/V tile),TILE可能要减。先读v6_launch/v6_kernel看D模板化到哪、512要改什么。改后对拍(prefill数值逐位/对vLLM)+ plen扫TTFT确认线性+端到端bench进CSV(step C)。
+
+## ★★★ D25 2026-10-28 Step B实现计划:给D=512补v6 flash prefill(最小可测低风险)
+分派坐实(gqa.cu:1433-1457):head_dim 128/256→flash,**512→落ref_kernel朴素O(L²)**(1453-1457)。
+**基座选v6非v5**:v6=template<PAGED,D,NW,TILE,NBUF,FEXP>,D参数化(LDS=D+8,O按D);v6 Q进smem正为解决D大寄存器溢出(D=256 v5已spill,512更甚)。v6_dispatch现硬编码256。
+**smem算**:v6=(NW*16+2*NBUF*TILE)*(D+8)*2。D=512/NW=4/TILE=16/NBUF=1→(64+32)*520*2≈**97KB**(5090~100KB上限内);TILE=8→81KB更稳。
+**改法(最小)**:gqa_prefill_impl(1445前)加`head_dim==512 && cfg>=0`→直接v6_launch<false,512,4,TILE>(保守TILE=16或8),ref留fallback+对拍参照。
+**风险**:v6 kernel从没编译过D=512,可能有D=256硬编码假设(fragment数/O累加器)→先编译验证纯D参数化;smem 97KB接近上限可能occupancy=0启不动→TILE降8。
+**停止条件**:①编译过(5090 sm120)②逐位对拍ref_kernel(prefill D=512同输入bad=0,或对vLLM prompt_logprobs)③plen扫TTFT从超线性变线性④端到端c1/2/4/8 bench TTFT大降进CSV(step C)。
+**ROI**:TTFT plen1024 1960ms,5个全注意力层走O(L²)是主因,补flash后该从~2秒降到数十ms(接近vLLM 82ms),TTFT是最大缺口(慢24×)。
