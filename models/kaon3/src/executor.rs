@@ -51,6 +51,12 @@ pub struct KaonExecutor {
     skip_prev_chosen: bool,
 }
 
+/// B29 开关：异步调度在飞行 token 的设备侧 gather + save_chosen。`INFLIGHT_GATHER=0` 关。
+fn inflight_gather_enabled() -> bool {
+    static IG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *IG.get_or_init(|| std::env::var("INFLIGHT_GATHER").map_or(true, |v| v != "0"))
+}
+
 impl KaonExecutor {
     /// 默认开 decode 图（`NO_GRAPH` 环境变量 / `enable_graphs=false` 关）。
     pub fn new(
@@ -177,7 +183,11 @@ impl KaonExecutor {
         // B29（loop kaon3-decode-opt D109）：异步调度下在飞行的 token 行 `ids[i] = prev_chosen[gather_idx[i]]`（设备侧）。
         // 之前 kaon3 只 upload 了 gather_idx 却没 gather、也没 save_chosen → 在飞行 input id = 0，c≥2 每步必错。
         // 非异步 / 图捕获假 plan：gather_idx 全 -1，空操作（图内安全）。
-        self.plan.gather_inflight(s, t)?;
+        // `INFLIGHT_GATHER=0` 关（同步 runner 下 gather_idx 永远全 -1，这两步只有开销；kaon3 实现 supports_async 前可关）。
+        let inflight_gather = inflight_gather_enabled();
+        if inflight_gather {
+            self.plan.gather_inflight(s, t)?;
+        }
         let meta = StepMeta {
             mode,
             cu_seqlens: &self.plan.cu,
@@ -208,7 +218,7 @@ impl KaonExecutor {
         k::ops::bf16_to_f32_n(s, &self.gathered.data, &mut self.gathered_f32.data, nrows * v)?;
         k::argmax_f32_n(s, &self.gathered_f32.data, &mut self.argmax.data, nrows, v)?;
         // B29：本步采样存 prev_chosen 供下一步在飞行 gather（图内 dtod；cut-in 步不写）。无投机 → nrows == n，行 i = 请求 i。
-        if !self.skip_prev_chosen {
+        if inflight_gather && !self.skip_prev_chosen {
             self.plan.save_chosen(s, &self.argmax.data, nrows)?;
         }
         Ok(())
