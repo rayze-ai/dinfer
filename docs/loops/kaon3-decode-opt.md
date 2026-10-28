@@ -475,3 +475,10 @@ strings二进制:host-time=1(早编进),**fwd-sample=0,begin-split=0**(我新加
 **修复**:put后`touch`改过的源文件(mtime新于target),或cargo build前touch;或rsync加--no-times。下次改代码:put→touch远端源文件→cargo build,确认strings二进制含新字面量再跑。
 **教训(整会话最大,记knowledge)**:远端rsync同步+增量编译,必须确保mtime更新否则编译跳过。我8次插桩+前面多次"没出"可能全是这个(编译没生效),不是代码逻辑。应早用strings验证二进制含改动。
 **现在**:touch+强制重编,fwd-sample必出,终于能拆prefill 367ms。
+
+## ★★★★★★★ D43 2026-10-28 重大翻转!编译修复后TTFT 367→44ms + begin-split拆出(全在forward_sample)
+二进制含probe=3(终于编进)。**begin-split拆出**:update_states 0-3us/build_plan 1-22us(都忽略)/**forward_sample 首步42304us/后续17200us**。367ms(或本次首步42ms)全在forward_sample,其余微秒。
+**★重大翻转**:本次TTFT=**43.9ms**(之前旧二进制367ms)!我这次改的=计时代码(.values()修复)+**之前编译失败没生效的kernel改动(cp.async流水R74/D=512 flash D26/gate+up dual R91)这次一起编进生效**→TTFT 367→44ms(8×)。
+**惊人推论(待确认)**:之前所有"kernel改动没收益"的结论,可能全因**编译一直失败没生效**(旧二进制跑了8小时)。这次编译修复后改动生效,TTFT大降。需确认是哪个改动的功劳(逐个env开关A/B)。
+**现状**:forward_sample首步42ms vs 稳态17ms,首步多25ms(疑首次JIT/alloc,warmup没全消)。TTFT 44ms已接近vLLM 24ms(慢1.8×,非之前15×)。
+**但必须验证(别重蹈覆辙)**:TTFT 367→44这个翻转太大,先确认不是测量/负载差异:重跑确认稳定+看是哪个改动(关MOE_GEMM_PIPE/GQA_D512_REF等逐个A/B)。编译链路坑(rsync mtime+cargo -p依赖+.values编译错)已�corded,下次改代码必strings验二进制含改动+看完整cargo error不grep滤。
