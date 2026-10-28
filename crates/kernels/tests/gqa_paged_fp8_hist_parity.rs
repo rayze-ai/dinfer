@@ -60,8 +60,14 @@ fn gqa_paged_fp8_hist_parity() {
         let dbt = st.htod_copy(bt).unwrap();
         let dseq = st.htod_copy(reqs.iter().map(|r| r.0 as i32).collect::<Vec<_>>()).unwrap();
         let dcu = st.htod_copy(cu.clone()).unwrap();
+        // D99：POISON=1 时每次 attention 前把全卡 smem 写满 NaN 位型（1024 block × 96 KB），模拟 serve 里的前任 kernel 残留
+        let poison = std::env::var("POISON").ok().as_deref() == Some("1");
         let run = |cache: &dinfer_kernels::cudarc::driver::CudaSlice<bf16>, f8: bool, cfg: i32| -> Vec<bf16> {
             let mut out = st.alloc_zeros::<bf16>(tq * h * d).unwrap();
+            if poison {
+                let rc = unsafe { dinfer_kernels::ffi::smem_poison(96 * 1024, 1024, st.raw() as _) };
+                assert_eq!(rc, 0, "smem_poison rc");
+            }
             let rc = unsafe {
                 dinfer_kernels::ffi::gqa_paged_win_bf16(
                     st.ptr(&dq) as *const std::ffi::c_void, st.ptr(cache) as *const std::ffi::c_void, st.ptr(&dbt) as *const i32,
@@ -97,7 +103,7 @@ fn gqa_paged_fp8_hist_parity() {
             let (mx, nd) = stat(&fast_f8[r0..r1], &fast_bf[r0..r1]);
             per.push(format!("(seq{sl},q{ql}):nd={nd}/{} mx={mx:.3}", r1 - r0));
         }
-        println!("D={d} win={window} reqs={reqs:?}\n  fast e4m3 vs fast bf16: nd={n1} mx={m1:.4} | fast bf16 vs ref: nd={n2} mx={m2:.4} (tol {tol:.3}) | fast e4m3 vs ref: mx={m3:.4} nd={n3} | ref e4m3 vs ref bf16: nd={n4} mx={m4:.4}\n  per-req: {}", per.join(" "));
+        println!("D={d} win={window} poison={poison} reqs={reqs:?}\n  fast e4m3 vs fast bf16: nd={n1} mx={m1:.4} | fast bf16 vs ref: nd={n2} mx={m2:.4} (tol {tol:.3}) | fast e4m3 vs ref: mx={m3:.4} nd={n3} | ref e4m3 vs ref bf16: nd={n4} mx={m4:.4}\n  per-req: {}", per.join(" "));
         if n1 != 0 { fails.push(format!("D={d} fast e4m3≠bf16 nd={n1}")); }
         if m2 > tol { fails.push(format!("D={d} fast vs ref mx={m2}")); }
         if n4 != 0 { fails.push(format!("D={d} ref e4m3≠bf16 nd={n4}")); }

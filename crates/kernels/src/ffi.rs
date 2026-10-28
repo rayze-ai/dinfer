@@ -335,6 +335,8 @@ extern "C" {
         cfg: i32,
         stream: cudaStream_t,
     ) -> i32;
+    /// D99 调试：把每 SM 动态 smem 写满 NaN 位型（测 kernel 对 smem 残留的敏感性）。
+    pub fn smem_poison(bytes: i64, blocks: i32, stream: cudaStream_t) -> i32;
     pub fn gqa_paged_win_bf16(
         q: *const c_void,
         cache: *const c_void,

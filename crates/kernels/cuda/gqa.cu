@@ -1820,3 +1820,18 @@ extern "C" int gqa_decode_win_bf16(const void* q, const void* cache, const int32
   return gqa_decode_impl(q, cache, block_table, seq_lens, out, scratch, num_reqs, heads, kv_heads, head_dim, block_size,
                          max_blocks, scale, q_stride, cu_seqlens_q, window, kv_fp8, stream);
 }
+
+// ---- 调试：把每个 SM 的动态 smem 写满 NaN 位型（D99：验 "smem 残留让 v6 KV_FP8 在 serve 里错、测试里对"）----
+__global__ void smem_poison_kernel(int words) {
+  extern __shared__ unsigned v_poison[];
+  for (int i = threadIdx.x; i < words; i += blockDim.x) v_poison[i] = (i & 1) ? 0x7fc07fc0u : 0xffffffffu;  // bf16 NaN / NaN
+  __syncthreads();
+  if (threadIdx.x == 0 && v_poison[words - 1] == 0u) asm volatile("trap;");  // 防优化掉
+}
+extern "C" int smem_poison(int64_t bytes, int blocks, cudaStream_t stream) {
+  if (bytes < 1024 || blocks <= 0) return err(cudaErrorInvalidValue);
+  if (cudaFuncSetAttribute(smem_poison_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)bytes) != cudaSuccess)
+    return (int)cudaGetLastError();
+  smem_poison_kernel<<<blocks, 256, (size_t)bytes, stream>>>((int)(bytes / 4));
+  return last_err();
+}
