@@ -982,3 +982,8 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - **B25 实现**：`forward_fp8_cublaslt` 的 algo 选择：m < 64 维持 want 匹配（tile=13 逐位口径）；m ≥ 64 且 `FP8_LT_TUNE != 0` 时，首次遇到 (m 桶=next_pow2, n, k) 对 32 个启发式候选各计时 `tune.timing_iters` 次（复用 `time_us` + `run_lt_fp8`，在真实缓冲上跑，输出会被覆盖多次——无副作用），取最快，缓存到 `default_algos`（key 带 m 桶）。
 - **b16b 门禁全过**：MOE_PIPE4（rows=22 → host 走 BM=16 路径）gate/up bad=0/15488、down bad=0/61952 ⇒ BM=16 tile 逐位。bN 跑中（A/B 都绑核 0-31）。队列：b16b → fp8algo_probe（Lt pick 看一眼）→ b25（fp8 Lt m≥64 自调优）→ moe_prefill_timing（prefill 形状 pipe 2 级 vs 4 级微基准，定 B24 方向）。
 - **B24 量化**：prefill gate GEMM 一次 582 us（nsys 态）：R=12480 N=704 K=2816 = 49.5 GFLOP → **85 TF/s = 5090 NVFP4 峰值（~1.6 PF）的 5%**。4290 CTA / 170 SM = 25 波，每 CTA 23 us / 22 K 步 ≈ **1 us/步** —— 与 decode 一样是每步一次 HBM/L2 往返 + barrier 的延迟绑定（pipe 2 级）。B16 的 4 级流水在 prefill 同样生效（nsys c1b 的 prefill 段用的已是 pipe4：582 us 是 pipe4 的数！）⇒ 4 级还不够，或 tile 太小让每步 mma 只 2 片段（算力利用低）。方向：① BM=64×BN=128 tile（每 CTA 每步 mma ×4，CTA 数 /4，K 链不变）；② STAGES=6（BK=64 路径可以，BK=128 smem 超）；③ 换 BK=64 + 6 级。先等 moe_prefill_timing（pipe vs pipe4 at R=12544）看 4 级到底省了多少。
+
+## B24a 设计 2026-10-28：pipe4 加 BN_T=128（prefill，R > 128 时）
+- 现 BM=32×BN=64：每 CTA 每 K 步装 A 2.3 KB + B 4.6 KB，算 8 warp × 2 mma = 16 mma(m16n8k64)。BN=128：装 A 2.3 + B 9.2 KB，算 32 mma —— **每字节装载的 mma 翻倍**，CTA 数减半（11 → 6 个 N 块），K 链不变。warp 布局保持 2(M)×4(N)，每 warp 16×32 = 4 个 n8 片段（acc[4][4]），**每输出元素 k 序不变 → 逐位**。smem/级：32·80 + 128·80 + 4·(32·2 + 128·2) = 14 KB → 4 级 56 KB 超 48 KB 静态 → 用 **3 级**（42 KB）或改 dynamic smem。先 3 级。
+- 只在 `R > 128`（prefill）走；decode 仍 BM16/BN64。门禁：moe_pipe4 测试加 R=12544 大形状逐位（与 pipe 2 级比）；bench 看 TTFT。
+- 等 moe_prefill_timing 出 pipe vs pipe4 的差再决定做不做（若 4 级已把 582 → 300，大 tile 再 -30%；若没差，说明不是流水/算力比，是别的）。
