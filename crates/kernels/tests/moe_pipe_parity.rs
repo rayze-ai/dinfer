@@ -147,3 +147,75 @@ fn moe_pipe_timing() {
              gbps(base_us), gbps(pipe_us), base_us / pipe_us);
     drop(db); drop(ds);
 }
+
+// 第二刀 dual 逐位对拍:分开两次 moe_grouped_gemm(gate,up) vs 一次 moe_grouped_gemm_dual,断言两输出各逐字节相等。
+// cargo test -p dinfer-kernels --test moe_pipe_parity -- --ignored --nocapture moe_dual_matches
+#[test]
+#[ignore]
+fn moe_dual_matches_separate() {
+    let (e, n, kk) = (8usize, 704usize, 2816usize);
+    let lens = [1usize, 1, 2, 3, 1, 5, 1, 8];
+    let rows: usize = lens.iter().sum();
+    let mut offsets = vec![0i32; e + 1];
+    for i in 0..e { offsets[i + 1] = offsets[i] + lens[i] as i32; }
+    let mut seed = 0xabcd_1234_5678_9999u64;
+    let aq: Vec<u8> = (0..rows * (kk / 2)).map(|_| lcg(&mut seed)).collect();
+    let a_s: Vec<u8> = (0..rows * (kk / 16)).map(|_| 0x38u8.wrapping_add(lcg(&mut seed) & 0x0f)).collect();
+    // gate / up 各一套 per-expert 权重
+    let mkw = |seed: &mut u64| {
+        let mut bb = Vec::new(); let mut ss = Vec::new();
+        for _ in 0..e {
+            bb.push((0..n * (kk / 2)).map(|_| lcg(seed)).collect::<Vec<u8>>());
+            ss.push((0..n * (kk / 16)).map(|_| 0x38u8.wrapping_add(lcg(seed) & 0x0f)).collect::<Vec<u8>>());
+        }
+        (bb, ss)
+    };
+    let (bg, sg) = mkw(&mut seed);
+    let (bu, su) = mkw(&mut seed);
+    let alpha_g: Vec<f32> = (0..e).map(|i| 1.0 + 0.01 * i as f32).collect();
+    let alpha_u: Vec<f32> = (0..e).map(|i| 1.0 + 0.02 * i as f32).collect();
+
+    let dev = Device::new(0).expect("cuda");
+    let st = dev.default_stream();
+    std::env::remove_var("MOE_GEMM_PIPE");
+    let daq = st.htod_copy(aq).unwrap();
+    let das = st.htod_copy(a_s).unwrap();
+    let doff = st.htod_copy(offsets).unwrap();
+    // 上传 per-expert 权重 + 指针表
+    let upload = |bb: &Vec<Vec<u8>>, ss: &Vec<Vec<u8>>| {
+        let mut db = Vec::new(); let mut ds = Vec::new();
+        let (mut bp, mut sp) = (Vec::<u64>::new(), Vec::<u64>::new());
+        for ex in 0..e {
+            let b = st.htod_copy(bb[ex].clone()).unwrap();
+            let s = st.htod_copy(ss[ex].clone()).unwrap();
+            bp.push(st.ptr(&b) as u64); sp.push(st.ptr(&s) as u64);
+            db.push(b); ds.push(s);
+        }
+        (db, ds, st.htod_copy(bp).unwrap(), st.htod_copy(sp).unwrap())
+    };
+    let (_dbg, _dsg, dbgp, dsgp) = upload(&bg, &sg);
+    let (_dbu, _dsu, dbup, dsup) = upload(&bu, &su);
+    let dalg = st.htod_copy(alpha_g).unwrap();
+    let dalu = st.htod_copy(alpha_u).unwrap();
+    // baseline: 分开两次
+    let mut og = st.alloc_zeros::<bf16>(rows * n).unwrap();
+    let mut ou = st.alloc_zeros::<bf16>(rows * n).unwrap();
+    k::ops::moe_grouped_gemm(&st, &daq, &das, &dbgp, &dsgp, &dalg, &doff, &mut og, rows, n, kk, e).unwrap();
+    k::ops::moe_grouped_gemm(&st, &daq, &das, &dbup, &dsup, &dalu, &doff, &mut ou, rows, n, kk, e).unwrap();
+    st.synchronize().unwrap();
+    let bg_out = st.dtoh_sync_copy(&og).unwrap();
+    let bu_out = st.dtoh_sync_copy(&ou).unwrap();
+    // dual: 一次
+    let mut og2 = st.alloc_zeros::<bf16>(rows * n).unwrap();
+    let mut ou2 = st.alloc_zeros::<bf16>(rows * n).unwrap();
+    k::ops::moe_grouped_gemm_dual(&st, &daq, &das, &dbgp, &dsgp, &dalg, &mut og2, &dbup, &dsup, &dalu, &mut ou2, &doff, rows, n, kk, e).unwrap();
+    st.synchronize().unwrap();
+    let dg_out = st.dtoh_sync_copy(&og2).unwrap();
+    let du_out = st.dtoh_sync_copy(&ou2).unwrap();
+    let cnt = |a: &[bf16], b: &[bf16]| a.iter().zip(b).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
+    let bad_g = cnt(&bg_out, &dg_out);
+    let bad_u = cnt(&bu_out, &du_out);
+    println!("MOE_DUAL_PARITY rows={rows} n={n} k={kk} e={e} | gate bad={bad_g}/{} up bad={bad_u}/{}", bg_out.len(), bu_out.len());
+    assert_eq!(bad_g, 0, "dual gate 与分开不一致");
+    assert_eq!(bad_u, 0, "dual up 与分开不一致");
+}
