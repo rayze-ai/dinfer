@@ -64,7 +64,7 @@ GPU2 可抓取。`put` 有 bug（目标路径不生效），改用 `rsync -az` �
 - 目标（用户 2026-10-21）：5090 **单卡**适配，性能 ≥ 基线容器 1.2×；**不反量化权重**。
 - **机器**：`host-172-16-20-59`（8×RTX 5090 32GB，sm_120），跳板 `jump.aicloud.paigod.work:2222`。
   **token 一次性**（用户现给 → `~/.ssh/jms_5090_{user,pass}`，第一条命令必须直接
-  `scripts/dev/remote_5090.sh up`，不能先探活）。**GPU 7 跑基线（`:28067`），绝不占用**；0–6 可用。
+  `scripts/dev/remote_5090.sh up`，不能先探活）。**GPU 2/3 跑基线容器 `vllm-noneager` **`:28201`**（生产口径，served-model-name `kaon-vllm`）/ `vllm-eager` `:28200`（2026-10-29 更正，旧 `:28067` 已失效），绝不占用**；0–6 可用。
   工作目录 **`/hf_data/yaochen`**，远端仓库 `/hf_data/yaochen/dinfer`（**rsync 树、无 `.git`**，
   一律本地写 → `put` 单文件 → 远端编）。代理 `172.17.0.1:1081`。
 - **容器命令（每个新容器都要重做，`/tmp/stub` 不持久）**：`--entrypoint bash` 必带；
@@ -118,7 +118,7 @@ GPU2 可抓取。`put` 有 bug（目标路径不生效），改用 `rsync -az` �
 - **模型勘察**：Gemma4 MoE 多模态，30 层 / 128 专家 top-8 / 滑窗 1024 + 5 层全注意力 /
   vocab 262144 tied；`MIXED_PRECISION` 量化（专家 NVFP4、其余 FP8、KV FP8），16 GB。
   读 vLLM `gemma4.py` 1708 行核实语义，写进 `docs/loops/kaon-v3.md`。
-- **基线**：vLLM 0.28.0-pegaflow TP=1 `:28067`。c1 TPOT 8.34 ms / 108 tok/s；c8 758；c32 2261；
+- **基线**：vLLM 0.28.0-pegaflow TP=1 `:28201`（noneager；旧 `:28067` 失效）。c1 TPOT 8.34 ms / 108 tok/s；c8 758；c32 2261；
   6K TTFT **244.6 ms**。发现裸 prompt 输出退化，必须走 chat 模板。
 - **阶段 1（NVFP4 GEMM）**：`kind::mxf4nvf4.block_scale` **只在 `compute_120a` 且必须显式 gencode**。
   寄存器映射打通，随机值全矩阵 **bad=0**。吞吐 21 → 80 → 351 → **502 TF/s**（padding 后）。
