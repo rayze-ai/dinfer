@@ -538,3 +538,15 @@ PIPE=1 TPOT c1=16.45ms,base=17.41(D45同条件)。**端到端-5.5%(省~1ms)**。
 **D48的-5.5%是真的**:那次显式MOE_GEMM_PIPE=1,走老二进制里早已编进的pipe分支(默认关/env=1开)。不是假象。
 **落地改走env(可靠)**:老二进制已含pipe分支+env读取,**kserve_full.sh加export MOE_GEMM_PIPE=1**生产就吃到-5.5%,不依赖重编.cu默认。.cu默认改动保留(真重编时也对)但当前编译链路编不进。
 **编译坑再记(第3次相关)**:①cargo -p dinfer不重编依赖crate;②rsync旧mtime;③**改.cu后nvcc增量不重编**(要删target/release/build/dinfer-kernels-*/或touch build.rs强制)。改kernel必strings验二进制含改动。
+
+## ═══ 第二轮（2026-10-28 晚，会话因 Input too long 重启，用户重申 step A/B/C）═══
+**用户原话要点**：前置=两端非 eager + concurrency / max-model-len / max-num-batched-tokens 一致；Step A 5 轮 c=1,2,4,8,16 测启动/TTFT/TPOT/带宽/GPU util + 每步 tokenize/chat 模板/htod/block 分配/schedule/exec/wait；Step B 攻最长段→提交→编最新→跑；Step C 端到端差则回滚但数据进 CSV+dashboard，B↔C 5 次无进展回 A。
+**★ 纠正上一轮对用户两想法的结论（"ROI≈0"作废）**：那结论建立在 D5–D16 "dense 整段 skip TPOT 不变"，D45 已证那批 skip 跑的是旧二进制（改动没编进）。新二进制 D45：dense skip 省 2.81ms（16%）、MoE 5.28（30%）、paged 3.15（18%）、qkv 0.89（5%）。**dense 在关键路径上**，所以：
+1. wait/overlap（dense mega 持久 kernel CTA 自旋 wait≈4×exec）——真有 2.8ms 可压的空间，排 Step B 第三（按段大小 MoE→paged→dense）。
+2. 128→256（`mega_mlp_core.cuh:103` A 加载只 128 槽）——同上，进 Step B dense 刀，A/B 实测说话，不再凭推理下结论。
+**测量手段（二进制 16:21 已含，strings 验过）**：`HOST_TIME=1` → `[render-time]`(chat 模板+tokenize) / `[host-time]`(sched 含 block 分配 / exec / publish) / `[begin-split]`(update_states / build_plan / forward_sample) / `[kaon3-host]`(upload=htod / launch=submit / collect=dtoh_sync=wait)；GPU util/带宽 = `nvidia-smi dmon -s u`（sm% / mem%，mem% 作带宽代理，真 GB/s 要 ncu）；启动 = `model_load_ms`。
+**Step A 脚本**：`scripts/dev/kaon3_stepA.sh`（put 到 `/hf_data/yaochen/stepA3.sh`，`docker exec -d kaon3-full bash /w/stepA3.sh`，结果 `/w/dinfer/tmp_stepA3_RESULT.txt`）。
+
+## D50 2026-10-28 Step A 第二轮起跑（环境事故 + 首批数据）
+- 事故：GPU 0 被上会话 22h 前的 dinfer serve（`:8142`，max-model-len 2048，非对齐口径，且是容器 `kaon3-full` 的 PID 1）占 26GB → 新服务 OOM 两次；杀它容器一起停。**重建 `kaon3-full` 为常驻 `sleep infinity`（host 网络、GPU 0）**，以后 `docker exec -d kaon3-full bash /w/xxx.sh` 跑长链不再随进程死。
+- 首批（round1，dinfer 行被 cut 截掉 TTFT/TPOT，已修重跑）：启动 wall 35.1s（model_load_ms 34639，num_blocks 2048）；tokenize+模板 render ≈1.2ms/请求；sched 12–26us、publish 10us、update_states 2us、build_plan 4us（**host 调度链全是微秒级，不是瓶颈**）；prefill 步 exec 41ms（c1，428 tok）= launch 16ms + wait(dtoh_sync) 25ms；c1 decode GPU sm 99% / mem 49%。vLLM c1 TTFT 25 / TPOT 4.68。
