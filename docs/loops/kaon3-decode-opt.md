@@ -497,3 +497,18 @@ strings二进制:host-time=1(早编进),**fwd-sample=0,begin-split=0**(我新加
 **真实最大差距**:吞吐27-30%(慢~3.5×)+TPOT慢3×(17-20 vs 5-7)。这两项是下一步靶子。
 **★整会话最大坑(定死)**:之前"TTFT367ms/慢15×/kernel改动没收益"全因**旧二进制**(我的计时代码.values()编译错误致build failed,serve跑8小时前旧二进制,而我grep滤掉cargo error没发现)。最新代码编进后TTFT大降+c4反超。教训:改代码必看完整cargo输出(不grep滤error)+strings验二进制含改动+确认mtime更新。
 **下一步**:①吞吐/TPOT是真靶子(慢3×);②确认TTFT反超是哪个kernel改动功劳(逐个env A/B:MOE_GEMM_PIPE/GQA_D512_REF等)还是编译本身;③用户要的数据表已全(本表)。
+
+## ★★★★★★★ D45 2026-10-28 decode TPOT真分段(最新二进制,skip终于生效)—MoE 5.3ms是头号
+c1 decode skip差分(最新二进制probe在,与旧二进制"全0影响"假象完全不同):
+| skip | TPOT | 省 | 该段占 |
+|---|---|---|---|
+| base | 17.41 | — | — |
+| MoE | 12.13 | **5.28** | **MoE 30%** |
+| paged attn | 14.26 | 3.15 | paged 18% |
+| dense | 14.60 | 2.81 | dense 16% |
+| qkv | 16.52 | 0.89 | qkv 5% |
+剩~5ms=norm/rope/oproj/gather/argmax/graph。
+**TPOT 17.4ms真构成**:MoE 5.3(头号)+paged 3.2+dense 2.8+qkv 0.9+其余5。vLLM decode一步5-7ms,我们光MoE 5.3ms。
+**★TPOT慢3×头号=MoE(grouped NVFP4 GEMM)**,其次paged+dense。**回到最早方向**(两刀MoE),但那两刀当时编译失败没进二进制所以测"没收益"=假象。现在编译修好,MoE仍5.3ms大头→说明两刀即使生效也没压下MoE多少(或cp.async流水decode M=1场景之前微基准1.83×但端到端此前没验到)。
+**旧二进制decode skip全0影响作废**:D5-D16那些"删GPU段TPOT不变→瓶颈在host"结论**全建立在旧二进制(skip没生效/改动没编进)**!最新二进制skip生效,证明TPOT确实在GPU(MoE/paged/dense),**不在host**。整会话host方向是旧二进制假象带偏的。
+**Step B真靶子(终于确定)**:①MoE 5.3ms(grouped NVFP4 GEMM,decode M小)—重新评估cp.async流水/gate+up在最新二进制的真实端到端收益(之前没真测);②paged 3.2ms;③dense 2.8ms。
