@@ -427,3 +427,14 @@ curl /tokenize 1024词=**7ms**(排除tokenize是TTFT 2秒根因)。但出**4010 
 3. **但host内部哪段没拆开**:5次计时插桩全没出,因没吃透engine异步调度请求走哪分支。
 **下次接手(不再盲加计时)**:①先读懂engine.rs异步调度完整流程(step()主循环,c1单prefill请求实际走哪分支:schedule→begin→async?→finish),画出分支;②在确认的分支加eprintln(或core已有的host-time已能出,扩展它拆begin/finish);③或用perf/strace等外部工具量host CPU时间分布,绕过代码插桩。
 **ROI提醒**:TTFT慢15×是最大缺口,值得继续。但先搞懂调度分支,别再第6次盲加。
+
+## ★★★★★★★ D38 2026-10-28 TTFT根因拆出!每个prefill步exec=367ms(=TTFT),稳态decode步17ms→prefill首步慢21×
+tagged host-time(tokens标记)拆开:
+- **prefill步(第一条) exec(begin+finish)=366736us=367ms=就是TTFT**;
+- 后续(decode)每步 exec=17ms。sched/publish都微秒。
+**bench TTFT mean=367(4请求都367)→每个prefill请求首步都367ms**,非全局冷启动(warmup消不掉)。
+**367ms全在exec(begin+finish)**,比decode步(17ms)多350ms。vLLM prefill首token 24ms。
+**最可能根因**:prefill每次**capture CUDA graph**(prefill长度可变,不同seqlen要重新capture,每个prefill请求capture一次≈350ms);或prefill首步某一次性重操作(JIT/alloc/池化)在begin里。decode走已capture的图(bucket)所以17ms。
+**这才是TTFT慢15×的真位置**:不是GPU算(skip全0影响),是**prefill步的begin里有350ms一次性host/capture开销**。
+**下一步(定死)**:读runner.begin对prefill做什么(是否每prefill capture graph/JIT/大alloc)。KAON3_* graph capture日志?serve启动时capture了decode桶,prefill是否也capture或eager?若prefill每次capture→复用/预capture常见prefill长度桶=砍350ms。对比vLLM prefill不capture(直接eager prefill+flash)24ms。
+**ROI**:砍掉prefill的350ms→TTFT 367→~17ms,接近vLLM 24ms,TTFT慢15×→持平。最大缺口可解。
