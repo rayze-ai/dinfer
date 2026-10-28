@@ -1173,3 +1173,8 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - ⇒ **attention 的 cache 写→读路径与连续路径逐位等价**。chunk ≠ fresh 的差异只能来自 **attention 之外、按行数 m 变化的算子**：qkv/o_proj/dense 的 cuBLASLt fp8（algo 按 `Key{m,n,k}` 选，m=5 vs 21 不同 algo/tile）、MoE grouped GEMM（每专家行数分组不同）、route/bucket；每层几 ulp → 30 层累积 → 贪心翻转。**这是批不变性问题，不是功能 bug**。vLLM 同样不批不变（生产 `ROUTER_GEMM_BI=0`）。
 - 但 9/10 自然语言翻转仍偏高 → 量化它：① `concprobe`（无 cache、同 fresh：串行 vs c2/c8 vs c8 重复）—— 若 c8 vs 串行也 ~9/8 翻则是普遍的"m 依赖"，若 0/8 则 chunk 的 m=5 特别敏感（小 m 走 fp8 gemv / split-K）；② 对照 vLLM：同 prompt fresh vs 命中态（vLLM 开 prefix cache）是否也翻——若 vLLM 稳定而我们翻，说明我们某个小 m 路径精度差（候选：fp8 gemv dot2 的 fp32 累加 vs cuBLASLt、grouped GEMM BM=16 tile 的累加序、NVFP4 块缩放在小 m 的 rounding）。
 - 今天的"并发正确性 bug"叙事到此修正：B27 是真修（混批 decode 行确实没人算，影响 c≥2 的 Paged 步）；B28/B29 是真缺陷但不触发；其余差异 = chunk/命中态的 m 依赖数值。
+
+## ★★★★★★ D145 2026-10-29 concprobe（`--no-prefix-caching`，全部 fresh）：**serial×2 0/8；c8 vs c8 重复 0/8（确定性）；c2 vs serial 6/8、c8 vs serial 6/8**（nat0 两版都是通顺的"三句话介绍长城"，措辞不同；nat3 四行诗后两句不同）
+- ⇒ 最终结论：**没有并发 bug**（同批构成 → 同输出，逐字确定）；差异 = **批构成改变 → 按 m 选 algo/tile 的 GEMM / MoE grouped GEMM 分组 → 每层 ulp → 30 层累积 → 贪心翻转**（批不变性问题）。chunk/命中态 9/10 与并发 6/8 是同一现象的两种触发。昨天追的 B27（真修）、B28/B29（真缺陷不触发）与这个现象无关。
+- 待决：翻转率是否比 vLLM 高（同 8 条 prompt 对 vLLM 基线 :28067 做 serial vs c8，见下）。若 vLLM 显著更稳 → 我们某个小 m 路径精度差（候选：fp8 gemv fp32 累加 vs Lt、grouped GEMM BM=16/32 tile 序、NVFP4 小 m 块缩放），值得修；否则结案为已知的非批不变，记入 design.md §11 台账（vLLM 默认同样不批不变，BI 模式有性能代价）。
+- **恢复**：`KV_FP8_STORE` 默认改回开（D70 c8 TPOT -1.9%；e4m3 不是原因）。`FP8_LT_TUNE` 保持默认关（b25 实测 c8 +3%）。`INFLIGHT_GATHER` 默认关。
