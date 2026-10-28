@@ -872,3 +872,7 @@ decode c1 的 MoE 段 nsys：grouped_gemm gate 18.6 + up 18.6 + down 12.5 + gelu
 - 判据：moe_pipe4 测试加 BM16 场景 bad=0；bN c1 TPOT。预期 -0.3 ms（MoE 三 GEMM 1.3 ms 的 25%）。
 - B16b 不盲写：先 nsys 复抓 c1（`/w/nsys_c1b.sh`，b17 二进制）看 `grouped_gemm_kernel_pipe4` 实际 us/call（B16 前 18.6/12.5；若 ≈12/8 说明流水生效但剩余是固定开销 → BM=16/占用；若仍 ~17 说明 4 级没生效/被别的卡住）。再定 B16b 方向。nsys 在 b17 链之后跑。
 - **D70 定稿（两轮）**：`KV_FP8_STORE=1` c1 6.39/6.39（持平 6.39/6.40）；c8 TPOT 11.35/11.35 vs 11.58/11.56（**-1.9%**）；c8 TTFT 507/507 vs 488/487（+4%）。默认开已 commit，CSV round b15b。
+
+## B17 可行性 2026-10-28：prefill 图化
+- plan 缓冲固定上限（`PlanBuffers::alloc(max_tokens, max_rows, max_blocks)`），prefill 时所有 kernel 的 grid/行数来自 host int `tokens/num_reqs/max_seqlen`（不是 device 侧读）→ 图化只能**按 token 桶 capture**（如 256/512/1024/2048/4096，tokens 向上 pad，pad 行 slot=-1 不写 cache、logits 只取有效行），num_reqs=1 的纯 prefill 桶。c1 1560 tok → 2048 桶：多算 31% token 的 GEMM（prefill 是算力型，这 31% 大约 +5 ms）vs 省 host launch 16 ms → **净 -11 ms（TTFT 28.8 → ~18，反超 vLLM 25）**。混批（Paged）仍 eager。
+- 先做 B17a（env 一次读，-~1 ms）看 host 实际还剩多少；再决定是否上桶图（代码量：executor capture 加 Prefill 桶 + 每桶 plan 预填 + runner 选桶；kernel 不改）。
