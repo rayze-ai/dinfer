@@ -142,13 +142,29 @@ __device__ __forceinline__ uint32_t pack_bf16x2(float x, float y) {
   return *reinterpret_cast<uint32_t*>(&v);
 }
 // cp.async 16 B：src_bytes=0 时零填充（越界 key）
+// B15b：8 字节 cp.async（.ca）+ e4m3×8 → bf16×8 精确展开（与 gqa_decode_v3_core.cuh 同口径）
+__device__ __forceinline__ void cp_async8(void* smem, const void* gmem, int src_bytes) {
+  const unsigned a = (unsigned)__cvta_generic_to_shared(smem);
+  asm volatile("cp.async.ca.shared.global [%0], [%1], 8, %2;\n" ::"r"(a), "l"(gmem), "r"(src_bytes));
+}
+__device__ __forceinline__ uint4 fp8x8_to_bf16x8_g(uint2 p) {
+  uint4 o;
+  __nv_bfloat162* ob = reinterpret_cast<__nv_bfloat162*>(&o);
+  const unsigned short* hh = reinterpret_cast<const unsigned short*>(&p);
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    const float2 f = __half22float2(__half2(__nv_cvt_fp8x2_to_halfraw2(hh[i], __NV_E4M3)));
+    ob[i] = __floats2bfloat162_rn(f.x, f.y);
+  }
+  return o;
+}
 __device__ __forceinline__ void cp_async16(void* smem, const void* gmem, int src_bytes) {
   uint32_t a = (uint32_t)__cvta_generic_to_shared(smem);
   asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(a), "l"(gmem), "r"(src_bytes));
 }
 __device__ __forceinline__ void cp_async_commit() { asm volatile("cp.async.commit_group;\n" ::); }
 __device__ __forceinline__ void cp_async_wait_all() { asm volatile("cp.async.wait_group 0;\n" ::); }
-template <bool PAGED, int D, int NBUF>
+template <bool PAGED, int D, int NBUF, bool KV_FP8 = false>
 __global__ void __launch_bounds__(V4_THREADS) gqa_fa_v5_kernel(
     const bf16* __restrict__ q, const bf16* __restrict__ k, const bf16* __restrict__ v, const bf16* __restrict__ cache,
     const int32_t* __restrict__ block_table, const int32_t* __restrict__ seq_lens, const int32_t* __restrict__ cu_seqlens,
@@ -160,6 +176,9 @@ __global__ void __launch_bounds__(V4_THREADS) gqa_fa_v5_kernel(
   extern __shared__ __align__(128) unsigned char v5_smem[];
   bf16* sKb = reinterpret_cast<bf16*>(v5_smem);
   bf16* sVb = sKb + (size_t)NBUF * TILE * LDS;
+  // B15b：KV_FP8 时 cache 元素是 e4m3，cp.async 先落 fp8 staging（紧跟 sV 之后，[NBUF][2][TILE][D] 字节），
+  // 落地后每线程把自己搬的 8 字节展开成 bf16 写进 sK/sV（多一道 barrier），之后 ldmatrix/mma 不变。
+  uint8_t* s8b = reinterpret_cast<uint8_t*>(sVb + (size_t)NBUF * TILE * LDS);
   const int b = blockIdx.z, h = blockIdx.y;
   const int group = H / Hkv, hk = h / group;
   const int q0 = cu_seqlens[b], q_len = cu_seqlens[b + 1] - q0;
@@ -206,6 +225,8 @@ __global__ void __launch_bounds__(V4_THREADS) gqa_fa_v5_kernel(
     const int kn = min(TILE, seq_len - k0);
     bf16* sK = sKb + (size_t)buf * TILE * LDS;
     bf16* sV = sVb + (size_t)buf * TILE * LDS;
+    uint8_t* s8k = s8b + (size_t)buf * 2 * TILE * D;
+    uint8_t* s8v = s8k + (size_t)TILE * D;
 #pragma unroll
     for (int i = 0; i < V5_ITERS<D>; ++i) {
       const int c = tid + V4_THREADS * i, j = c >> V5_LOGU<D>, d8 = (c & (V5_U<D> - 1)) * 8;
@@ -216,8 +237,9 @@ __global__ void __launch_bounds__(V4_THREADS) gqa_fa_v5_kernel(
         if (PAGED) {
           const int pos = k0 + j;
           const int64_t blk = bt[pos / block_size];
-          pk = cache + slot_off(blk * block_size + (pos % block_size), Hkv, D) + (hk * 2) * D + d8;
-          pv = pk + D;
+          const int64_t e = slot_off(blk * block_size + (pos % block_size), Hkv, D) + (hk * 2) * D + d8;
+          pk = KV_FP8 ? reinterpret_cast<const bf16*>(reinterpret_cast<const uint8_t*>(cache) + e) : cache + e;
+          pv = KV_FP8 ? reinterpret_cast<const bf16*>(reinterpret_cast<const uint8_t*>(pk) + D) : pk + D;
         } else {
           const int64_t off = (int64_t)(q0 + k0 + j) * kv_stride + (int64_t)hk * D + d8;
           pk = k + off; pv = v + off;
@@ -225,10 +247,29 @@ __global__ void __launch_bounds__(V4_THREADS) gqa_fa_v5_kernel(
       } else {
         pk = PAGED ? cache : k; pv = PAGED ? cache : v;  // 合法地址，0 字节
       }
-      cp_async16(sK + j * LDS + d8, pk, bytes);
-      cp_async16(sV + j * LDS + d8, pv, bytes);
+      if (KV_FP8 && PAGED) {
+        cp_async8(s8k + j * D + d8, pk, bytes ? 8 : 0);
+        cp_async8(s8v + j * D + d8, pv, bytes ? 8 : 0);
+      } else {
+        cp_async16(sK + j * LDS + d8, pk, bytes);
+        cp_async16(sV + j * LDS + d8, pv, bytes);
+      }
     }
     cp_async_commit();
+  };
+  // B15b：fp8 staging → bf16 sK/sV（每线程只展开自己 cp 来的 8 字节；调用方在 wait_all + barrier 之后调，之后再 barrier）
+  auto expand_tile = [&](int buf) {
+    if (!(KV_FP8 && PAGED)) return;
+    bf16* sK = sKb + (size_t)buf * TILE * LDS;
+    bf16* sV = sVb + (size_t)buf * TILE * LDS;
+    const uint8_t* s8k = s8b + (size_t)buf * 2 * TILE * D;
+    const uint8_t* s8v = s8k + (size_t)TILE * D;
+#pragma unroll
+    for (int i = 0; i < V5_ITERS<D>; ++i) {
+      const int c = tid + V4_THREADS * i, j = c >> V5_LOGU<D>, d8 = (c & (V5_U<D> - 1)) * 8;
+      *reinterpret_cast<uint4*>(sK + j * LDS + d8) = fp8x8_to_bf16x8_g(*reinterpret_cast<const uint2*>(s8k + j * D + d8));
+      *reinterpret_cast<uint4*>(sV + j * LDS + d8) = fp8x8_to_bf16x8_g(*reinterpret_cast<const uint2*>(s8v + j * D + d8));
+    }
   };
   load_tile(tile0, 0);
   for (int tile = tile0; tile < n_tiles; ++tile) {
@@ -236,6 +277,10 @@ __global__ void __launch_bounds__(V4_THREADS) gqa_fa_v5_kernel(
     const int buf = NBUF == 1 ? 0 : ((tile - tile0) & 1);
     cp_async_wait_all();
     __syncthreads();  // 本 tile 对全 block 可见；上一 tile 的计算都已结束（NBUF=2 时才能安全覆盖另一缓冲）
+    if (KV_FP8 && PAGED) {
+      expand_tile(buf);
+      __syncthreads();
+    }
     if (NBUF == 2 && tile + 1 < n_tiles) load_tile(tile + 1, buf ^ 1);
     const bf16* sK = sKb + (size_t)buf * TILE * LDS;
     const bf16* sV = sVb + (size_t)buf * TILE * LDS;
@@ -328,19 +373,19 @@ static int v5_nbuf() {
   if (n == 0) { const char* e = getenv("GQA_PREFILL_NBUF"); n = (e && e[0] == '2') ? 2 : 1; }  // 默认 1：3090/4090 实测双缓冲更慢（每 SM 1 block）
   return n;
 }
-template <bool PAGED, int D, int NBUF>
+template <bool PAGED, int D, int NBUF, bool KV_FP8 = false>
 static int v5_launch(dim3 grid, cudaStream_t stream, const bf16* q, const bf16* k, const bf16* v, const bf16* cache,
                      const int32_t* bt, const int32_t* seq_lens, const int32_t* cu, bf16* out, int H, int Hkv,
                      float scale_log2, int q_stride, int kv_stride, int block_size, int max_blocks, int skip_single, int window) {
-  const size_t smem = 2 * NBUF * V5_TILE_BYTES<D>;
+  const size_t smem = 2 * NBUF * V5_TILE_BYTES<D> + (KV_FP8 ? (size_t)NBUF * 2 * V5_TILE<D> * D : 0);
   static bool attr = false;
   if (!attr && smem > 48 * 1024) {
-    if (cudaFuncSetAttribute(gqa_fa_v5_kernel<PAGED, D, NBUF>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem) !=
+    if (cudaFuncSetAttribute(gqa_fa_v5_kernel<PAGED, D, NBUF, KV_FP8>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem) !=
         cudaSuccess)
       return 2;
     attr = true;
   }
-  gqa_fa_v5_kernel<PAGED, D, NBUF><<<grid, V4_THREADS, smem, stream>>>(q, k, v, cache, bt, seq_lens, cu, out, H, Hkv,
+  gqa_fa_v5_kernel<PAGED, D, NBUF, KV_FP8><<<grid, V4_THREADS, smem, stream>>>(q, k, v, cache, bt, seq_lens, cu, out, H, Hkv,
                                                                       scale_log2, q_stride, kv_stride, block_size,
                                                                       max_blocks, skip_single, window);
   return (int)cudaGetLastError();
@@ -350,13 +395,20 @@ template <bool PAGED>
 static int v5_dispatch(int head_dim, dim3 grid, cudaStream_t stream, const bf16* q, const bf16* k, const bf16* v,
                        const bf16* cache, const int32_t* bt, const int32_t* seq_lens, const int32_t* cu, bf16* out,
                        int H, int Hkv, float scale_log2, int q_stride, int kv_stride, int block_size, int max_blocks,
-                       int skip_single, int window) {
+                       int skip_single, int window, int kv_fp8 = 0) {
+  // B15b：e4m3 cache 只在 PAGED 下有意义；fp8 staging 多 TILE·D·2 字节/缓冲，固定 NBUF=1（D=256 两缓冲 >99 KB）
   if (head_dim == 128) {
+    if (PAGED && kv_fp8)
+      return v5_launch<PAGED, 128, 1, true>(grid, stream, q, k, v, cache, bt, seq_lens, cu, out, H, Hkv, scale_log2, q_stride,
+                                            kv_stride, block_size, max_blocks, skip_single, window);
     auto f = v5_nbuf() == 1 ? v5_launch<PAGED, 128, 1> : v5_launch<PAGED, 128, 2>;
     return f(grid, stream, q, k, v, cache, bt, seq_lens, cu, out, H, Hkv, scale_log2, q_stride, kv_stride, block_size,
              max_blocks, skip_single, window);
   }
   if (head_dim == 256) {
+    if (PAGED && kv_fp8)
+      return v5_launch<PAGED, 256, 1, true>(grid, stream, q, k, v, cache, bt, seq_lens, cu, out, H, Hkv, scale_log2, q_stride,
+                                            kv_stride, block_size, max_blocks, skip_single, window);
     auto f = v5_nbuf() == 1 ? v5_launch<PAGED, 256, 1> : v5_launch<PAGED, 256, 2>;
     return f(grid, stream, q, k, v, cache, bt, seq_lens, cu, out, H, Hkv, scale_log2, q_stride, kv_stride, block_size,
              max_blocks, skip_single, window);
@@ -1568,7 +1620,7 @@ static int gqa_paged_impl(const void* q, const void* cache, const int32_t* block
     cudaMemcpyToSymbolAsync(g_attn_mode, &am, sizeof(int), 0, cudaMemcpyHostToDevice, stream); }
   if (q_stride <= 0) q_stride = heads * head_dim;
   if (num_reqs <= 0) return 0;
-  if (kv_fp8) cfg = -1;  // B15：fa_v5/v6 还不读 e4m3 cache，混批强制通用慢路径（正确优先）
+  if (kv_fp8 && cfg >= 1000) cfg = 0;  // B15b：v6/v7 不读 e4m3，退到 fa_v5（PAGED+KV_FP8）；cfg<0 仍走慢路径
   if (head_dim <= 0 || head_dim > MAX_D || heads <= 0 || kv_heads <= 0 || heads % kv_heads != 0 || block_size <= 0 ||
       max_q_len <= 0)
     return err(cudaErrorInvalidValue);
@@ -1590,7 +1642,7 @@ static int gqa_paged_impl(const void* q, const void* cache, const int32_t* block
     return v5_dispatch<true>(head_dim, grid, stream, static_cast<const bf16*>(q), nullptr, nullptr,
                              static_cast<const bf16*>(cache), block_table, seq_lens, cu_seqlens_q,
                              static_cast<bf16*>(out), (int)heads, (int)kv_heads, scale * LOG2E_F, (int)q_stride, 0,
-                             (int)block_size, (int)max_blocks, skip_single, window);
+                             (int)block_size, (int)max_blocks, skip_single, window, kv_fp8);
   }
   dim3 grid((unsigned)num_reqs, (unsigned)heads);
   (kv_fp8 ? gqa_paged_kernel<true> : gqa_paged_kernel<false>)<<<grid, GQ_BLOCK, 0, stream>>>(static_cast<const bf16*>(q), static_cast<const bf16*>(cache),
