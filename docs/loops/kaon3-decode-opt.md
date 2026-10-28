@@ -222,3 +222,13 @@ exec=调用executor.forward_sample墙钟=19.3ms=TPOT。调度/publish确实极�
 - 若launch占大头=真host开销。
 **这是最终分清点**。D16"瓶颈host"可能又被图旁路骗(graph态skip没生效),但D16有eager复验…eager下collect也阻塞等GPU(eager真跑forward),eager skip 0影响才是硬的——eager删qkv/paged/oproj真跑真跳过TPOT不变=GPU真不是瓶颈。所以collect等的"GPU"其实很快,19ms另有出处??
 **矛盾仍在,必须拆exec**。下一步:确保executor层[host-time]打出(改tracing或eprintln),拆launch vs collect(dtoh_sync)。若collect≈19ms但eager skip GPU又0影响→dtoh_sync本身慢(同步开销/驱动)而非等计算。
+
+## D18 2026-10-28 executor层打点没生效(kaon3-host 0行,core host-time 192行)→forward_sample的HOST_TIME分支没执行到
+我在kaon3 executor.rs forward_sample加的[kaon3-host] eprintln 0行,但core engine的[host-time] 192行。说明decode计时走core engine外层,我改的kaon3 forward_sample的HOST_TIME分支没进(或core先读HOST_TIME打了core的)。exec 19.3ms里launch vs collect细分**未测出**。
+**但不影响主结论**(eager+graph双重skip铁证):decode瓶颈在host exec路径(launch+等GPU返回+采样),非任何GPU kernel。
+**本会话最终定论(给下次接手)**:
+- Step A/B定位完成:decode TPOT=固定~13ms+paged~4.6ms/1K,**全在host exec,删所有GPU段(dense/MoE/norm/rope/kvfp8/qkv/paged/oproj)eager+graph都0影响**。
+- 今天两刀MoE kernel优化(cp.async流水/gate+up融合)方向全错(MoE不在关键路径),逐位都对+默认关保留,零风险。
+- **未完成**:exec 19.3ms里launch(submit) vs collect(dtoh_sync)没拆开(executor打点没生效,core的host-time盖了)→没定位到可改的具体一行。
+**下次接手第一步**:拆exec——改core engine的host-time(crates/core engine.rs)或确保kaon3 forward_sample打点生效,分launch vs collect。若collect(dtoh_sync)占满=在等GPU(与skip 0影响矛盾需再查);若launch占=host提交开销。对标vLLM 7.57(它每步host更薄)。
+**方法教训(已记knowledge)**:整段skip看端到端是定关键路径最硬手段,应最先做。本会话教训=信NO_GRAPH分段(MoE63%)做两刀全白费,skip一测就知MoE不在关键路径。
