@@ -687,3 +687,5 @@ h=2816 单行 norm（181 次/步）：Block1024 每线程 1 向量两级归约 6
 数值：三处 GEMM 的 fp32 累加顺序与 mega 的 mma 不同（非逐位），但同为 fp32 累加、同 fp8 输入 → 差应在 bf16 ulp 级；验证 = Rust GPU 测试 `mlp_fp8_decode_parity`（CPU f64 参照 + mega 路径对照，M∈{1,3,8,16}）。
 接入：`layer.rs` `mega_dense_branch` 前加 `dense_decode_gemv`（`DENSE_DECODE_OLD=1` 回退到 mega），复用 MegaBufs 的 norm1_q / act_q / down_out。
 预期：3 kernel ≈ 25 us/层（权重 17.8 MB @1.79 TB/s = 10 us 下限），vs mega 86.9 → 省 ~1.8 ms/步，TPOT 9.64 → ~7.8。
+- **B5 代码已提交（8e4cf70）并 put 到 5090**：`crates/kernels/cuda/mlp_fp8_decode.cu`（3 kernel：norm_quant / gateup_act<M_TILE> / gemv<M_TILE>，M_TILE∈{1,2,4,8,16} 决定 smem = M_TILE·K·2 B，>48 KB 时 cudaFuncSetAttribute）+ kernels.h / ffi.rs（含 no-nvcc stub）/ ops.rs 三包装 + `tests/mlp_fp8_decode_parity.rs`（5 场景：m∈{1,3,8,16}×(2816,2112) + (5,256,160)；判据 fp8 码差 ≤1、down |err| ≤ 0.01+0.01|ref|）+ `models/kaon3/src/layer.rs`（`dense_decode_gemv` 在 `mega_dense_branch` 前，tokens ≤ 16 且 fp8 权重时走；`DENSE_DECODE_OLD=1` 回退；新增 `dq16`/`act_q16` 小缓冲）。
+- 链 `/w/b5.sh`（GPU0 已启）：先编 + 跑对拍（门禁，不过则停 `PARITY_FAIL`），过了再 `TAG=b5 MARKER=gateup_act_kernel bash /w/bN.sh`（A=B4 二进制 / B=新，c1+c8 ×2 + 固定 prompt）。结果 `tmp_b5par_RESULT.txt` / `tmp_b5_RESULT.txt`。
