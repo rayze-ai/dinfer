@@ -907,3 +907,7 @@ decode c1 的 MoE 段 nsys：grouped_gemm gate 18.6 + up 18.6 + down 12.5 + gelu
 | 其余小 kernel | ~550 | | ~0.6 | |
 **两个意外的大头都是"我自己引入/没查到的"**：① rmsnorm grid=4160（0.51 ms，纯浪费，B18 立刻修）；② B10 融合 kernel 反而慢 0.1 ms/步（B19：top-k 改 warp 并行，每 token 一 warp）。两刀预期 -0.8 ms（6.39 → ~5.6，vs vLLM 4.69 差 1.2×）。
 - **hosttime_c1（b17 二进制，HOST_TIME=1，c1 ×8，16 out）**：全部步均值 upload=20us launch(submit)=**337us** collect(dtoh_sync)=6870us。launch 含 prefill 步（24 步里 8 步 prefill）也只 0.34 ms ⇒ **D51 的"prefill host launch 16 ms" 已不存在**（当时是 host 侧 env/锁/旧代码路径？或被 B8 等改动顺带消掉）。**B17 prefill 图化降级**（省不到 1 ms）。TTFT 29 ms = prefill GPU ~25 ms（nsys eager 段 kernel_sum 83 ms 是 nsys 开销下的；真实 ≈ 25）+ 1.2 tokenize + 首 decode。prefill 下一刀看 nsys 段：grouped_gemm_pipe4 gate/up 18.6+down 13.7 = 32 ms(nsys 态) 占 39%、nvjet qkv 16.4、fa_v6 d512 7.4、fa_v5 6.1。
+
+## ★★★★★ D73 2026-10-28 两个热点根因
+- **B18**：`ops::rmsnorm_bf16_noweight` 不收 `tokens`，用 `x.len()/hidden` 当行数 → kaon3 router 预处理（`rmsnorm_noweight_into`，norm_mode==1 默认路径）每层按 **max_tokens=4160 行**跑（17 us vs 单行 1.3 us）。B1 修的是逐头 norm 的同类病，这处漏了（是 `DefaultOps::rmsnorm_noweight` 直接忽略了 `_tokens` 参数）。修：ops 加 `tokens` 参数，opset 透传。省 **0.47 ms/步**，逐位不变（真实行结果同）。
+- **B19**：B10 融合 kernel 的 top-k 是**单线程**扫 K×E=1024 次 smem + 128 次原子（原 route_topk_ids 用 256 线程装 smem 后单线程扫，也是单线程，但 topk 7.3 + softmax 5.6 = 12.9 < 16.2 的差来自融合 kernel 还串了 softmax_row 的 Z 全体循环 + bucket 段）。修：每 token 一 warp——top-k 用 32 lane 各扫 4 专家 + shuffle 归约（并列取小下标，与串行 `v > bv` 语义同）→ 8 轮 ×（4 次比较 + 5 步 shuffle）；softmax_row 仍 lane 0 单线程（口径逐位）。预期 16 → ~7 us，省 0.27 ms/步。
