@@ -318,12 +318,18 @@ impl<E: ModelExecutor> Runner<E> {
     /// 第一段：更新状态、建 plan、入队。异步合格时不等 GPU；返回的 `Pending` 交给 `finish`。
     /// 状态里的 `num_computed` 在这里就推进（下一步 build_plan 需要），token_ids 在 finish 时补。
     pub fn begin(&mut self, so: &SchedulerOutput) -> Result<Pending> {
+        let _bt = std::env::var("HOST_TIME").ok().as_deref() == Some("1");
+        let _t0 = std::time::Instant::now();
         self.update_states(so)?;
+        let _t_us = _t0.elapsed().as_secs_f64() * 1e6;
         if so.num_scheduled_tokens.is_empty() {
             self.last_async = false;
             return Ok(Pending::default());
         }
+        let _t1 = std::time::Instant::now();
         self.build_plan(so)?;
+        let _tbp_us = _t1.elapsed().as_secs_f64() * 1e6;
+        let _toks: usize = so.num_scheduled_tokens.values().sum();
         self.generated.clear();
         self.drafts.clear();
         if !so.kv_fetch.is_empty() {
@@ -332,6 +338,7 @@ impl<E: ModelExecutor> Runner<E> {
         let use_async = self.exec.supports_async() && self.plan.async_eligible();
         self.last_async = use_async;
         let mut lps_override = None;
+        let _t2 = std::time::Instant::now();
         if use_async {
             self.exec.begin(&self.plan)?;
         } else {
@@ -340,6 +347,10 @@ impl<E: ModelExecutor> Runner<E> {
             if lps_override.is_none() {
                 self.exec.forward_sample(&self.plan, &mut self.generated, &mut self.drafts)?;
             }
+        }
+        if _bt {
+            eprintln!("[begin-split] tokens={_toks} async={use_async} update_states={_t_us:.0}us build_plan={_tbp_us:.0}us forward_sample={:.0}us",
+                _t2.elapsed().as_secs_f64() * 1e6);
         }
         // 记录每行的 (rid, n, num_draft, end_of_seq, row)，并推进 num_computed（token 值稍后补）
         let mut rows = Vec::with_capacity(self.plan.num_reqs());
