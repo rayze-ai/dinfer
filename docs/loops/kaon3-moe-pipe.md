@@ -79,3 +79,8 @@ PIPE serve(MOE_GEMM_PIPE=1)编译起成功,warmup prefill态 gemm3=3.08-3.13ms v
 **第一刀结论:逐位bad=0(R74)+decode 1.83×(R77)=成立且有效**。收益集中在decode小M(serve主战场,TPOT大头),prefill无效(但prefill本就带宽高926GB/s没空间)。
 **纠正R69/R75叙事**:R69"大M 13%峰值→低效与M无关"误导;真相=小M(decode)受流水救(访存流水浅),大M本就带宽够(926GB/s)。R64/R65最初盯M=1效率的方向对。
 **下一步**:真实serve端到端bench(吞吐/TPOT进CSV)。临时ctr容器HTTP不通→上生产容器kaon3-full(host网络HTTP通),但它旧二进制,需docker cp新release二进制进去或重起带PIPE。逐位已过可直接上生产。
+
+## R78 2026-10-28 端到端bench方案:生产容器kaon3-full(net=host HTTP通)+挂载同盘→新PIPE二进制已就位
+kaon3-full:net=host(HTTP通,解决临时ctr bridge不通),挂载/hf_data/yaochen:/w=**我编译输出同盘**→新PIPE二进制target/release/dinfer已在生产路径。运行中878325是旧二进制(内存,昨起)。
+启动脚本kserve_full.sh:MOE_GROUPED=1 KAON3_MEGA=1 MEGA_SPGU/DN=4 ROUTER_GEMM_BI=0,:8142。
+**A/B方案**:docker exec进kaon3-full起新二进制serve两次(关PIPE=新二进制基线/开MOE_GEMM_PIPE=1),host网络bench(绑核60-91,seed42/全共享1024/128out/rate8)测TPOT/吞吐,进CSV。vLLM非eager:28201作参照。
