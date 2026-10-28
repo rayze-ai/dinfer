@@ -1160,3 +1160,9 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - D138：确认 serve 的 Paged 路径 cfg = `gqa_prefill_cfg` = 464（Sm120）→ 滑窗层 bf16 cache 时走 `v6_dispatch<PAGED=true>` NW4/TILE64；runner `seq_lens = start+n`、slot 按 pos；全对。winprobe（v5 强制）与 histpar3（cfg=464 vs ref）跑中，二者任一命中即可定位到 v6 PAGED D=256。
 - D139：并行核 core 的 chunk 边界语义：中间 chunk 的采样 token 必须丢弃（`end_of_seq=false` 行），下一 chunk 的 input 必须来自 prompt 原 token（runner `token_ids.get(pos)`）；`next_known` 用于 prompt_logprobs。若 runner/sched 把中间 chunk 的采样当成输出 append、或 num_computed 多推 1 → 下一 chunk 从错位置起 → 与 kernel 无关、与 cache 无关、确定性、v5/v6 都错 ⇒ **这与 winprobe 若"v5 也 9/10"的结果完全吻合**。读 runner.rs 455–482 / sched 652–690。
 - D140：core chunk 语义核对**正确**：runner 中间 chunk `num_computed += n`、不 append token（`out.sampled=[]`）；sched 对空 generated 不 append；下一 chunk input 来自 `token_ids.get(pos)`、positions=pos、slot 按 block。⇒ 剩 kaon3 层内与 kernel。winprobe v5_chunk16 已出，等比对行。
+
+## ★★★★★★ D141 2026-10-29 winprobe + histpar3：**attention kernel 无罪**
+- winprobe（无 cache）：v6 chunk16 vs base 9/10；**v5（GQA_PREFILL_CFG=0）chunk16 vs base 9/10，首差位置与 v6 逐条相同**；v5_base == v6_base 0/10；d512ref chunk16 也 9/10。histpar3：v6 PAGED cfg=464 win1024 vs ref max 0.0156（ulp 级）。
+- ⇒ 三种 attention 实现（v5 / v6 / 通用 ref）对同一 chunk 步给出**同样的"错"结果** → 错不在 attention kernel 内部，而在它们**共同的输入**：① 从 paged cache 读到的 K/V（vs fresh 时从连续 k/v 缓冲读）—— cache 内容 / slot_mapping / block_ids；② chunk 行自身的 q/k/v（上游 GEMM/norm/rope 对 5 行 vs 21 行）；③ 或 attention 之后（o_proj…）对 Paged 步的行有别。
+- 最可疑：**runner 对 running 请求追加新块（`cached_reqs.new_block_ids`）→ `st.block_ids`**；若 chunk 步的 slot_mapping 指到错块，chunk 行 K/V 写错位置、attention 读不到自己/邻居的 K/V → 确定性、语义级错误、与 kernel 无关。但 decode 每 32 token 也走同路径且 c1 一直对……除非 prefill-chunk 时的块追加时序不同（块在 chunk 步**同一步**分配并立刻使用）。
+- **定位手段**：逐层 dump 比对 fresh（21 行 Prefill）第 16–20 行 vs chunk 步（5 行 Paged）第 0–4 行，从 input_norm → q/k/v → rope → attn_out → o_proj → dense → moe，第一个分叉的 op 即根因所在。
