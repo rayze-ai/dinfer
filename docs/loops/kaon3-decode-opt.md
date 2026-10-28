@@ -987,3 +987,6 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - 现 BM=32×BN=64：每 CTA 每 K 步装 A 2.3 KB + B 4.6 KB，算 8 warp × 2 mma = 16 mma(m16n8k64)。BN=128：装 A 2.3 + B 9.2 KB，算 32 mma —— **每字节装载的 mma 翻倍**，CTA 数减半（11 → 6 个 N 块），K 链不变。warp 布局保持 2(M)×4(N)，每 warp 16×32 = 4 个 n8 片段（acc[4][4]），**每输出元素 k 序不变 → 逐位**。smem/级：32·80 + 128·80 + 4·(32·2 + 128·2) = 14 KB → 4 级 56 KB 超 48 KB 静态 → 用 **3 级**（42 KB）或改 dynamic smem。先 3 级。
 - 只在 `R > 128`（prefill）走；decode 仍 BM16/BN64。门禁：moe_pipe4 测试加 R=12544 大形状逐位（与 pipe 2 级比）；bench 看 TTFT。
 - 等 moe_prefill_timing 出 pipe vs pipe4 的差再决定做不做（若 4 级已把 582 → 300，大 tile 再 -30%；若没差，说明不是流水/算力比，是别的）。
+
+## ★★★ D79 2026-10-28 b16b 首批 B（BM=16 decode tile）：c1 TPOT 5.63 → **5.57（-1.1%）**，c8 10.03 → **9.82（-2.1%）**；但 **c8 TTFT 506 → 545（+7.6%）**，c1 TTFT mean 31.4 / p50 26.85（散布大）
+- BM=16 只在 R ≤ 128（decode 步）走，prefill（R=12480）仍 BM=32 → TTFT 不该变。c8 TTFT +39 ms 可能是：① 混批步（Paged，decode 行 + prefill 行同步，R = 8 + 12480 > 128 → BM=32，不受影响）……② tile_off 缓冲 2(E+1) 后 B8 的 BM=32 表位置不变、BM=16 表接在后面——prefill 没碰；③ 噪声（c1 TTFT mean 31.4 vs p50 26.85 说明有一两次慢请求拉高）。等 B2 看 TTFT 是否复现；若复现则 c8 TTFT 的 +39 要归因（排队态？）。
