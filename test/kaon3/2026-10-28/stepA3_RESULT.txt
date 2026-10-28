@@ -1,0 +1,173 @@
+bin=2026-10-28 08:21 probes=3
+vllm:{"object":"list","data":[{"id":"kaon-vllm","object":"model","created":1793180485,"owned_by":"vllm","root":"/hf_data/hub/
+startup: wall=36.1s model_load_ms=34911 num_blocks=2048
+=== round=1 concurrency=1 ===
+  [dinfer]  throughput: 0.89 req/s 57.2 output tok/s 440.5 total tok/s client: cpu 0.01s (user 0.00 sys 0.01) = 0.00 cores avg over 8.9s wall; rss 4 MiB; 33 threads; cpus 60-91 (32); parse 1.4 ms total / 0.174 ms per req TTFT mean 43.62 p50 43.81 p90 44.22 p99 44.75 max 44.75 (ms) TPOT mean 17.06 p50 17.06 p90 17.07 p99 17.07 max 17.07 (ms) 
+
+  [gpu] sm=98% mem=48% samples=109
+  [host] render=1597us(n=10) || prefill: steps=10 toks/step=428 nreq=1.0 sched=21 exec=41074 publish=11 total=41106 | upd=2 build=6 fwd=41046 | htod=26 launch=16356 wait=24633 || decode: steps=630 toks/step=1 nreq=1.0 sched=0 exec=17046 publish=4 total=17050 | upd=0 build=1 fwd=17028 | htod=18 launch=383 wait=16608
+  [vllm]  throughput: 3.12 req/s 199.9 output tok/s 1541.5 total tok/s TTFT mean 25.19 p50 25.06 p90 25.25 p99 26.00 max 26.00 (ms) TPOT mean 4.68 p50 4.68 p90 4.68 p99 4.70 max 4.70 (ms) 
+
+=== round=1 concurrency=2 ===
+  [dinfer]  throughput: 1.46 req/s 93.6 output tok/s 720.3 total tok/s client: cpu 0.03s (user 0.03 sys 0.01) = 0.00 cores avg over 10.9s wall; rss 4 MiB; 33 threads; cpus 60-91 (32); parse 3.3 ms total / 0.207 ms per req TTFT mean 148.29 p50 69.14 p90 413.42 p99 418.36 max 418.36 (ms) TPOT mean 19.34 p50 18.06 p90 23.51 p99 23.59 max 23.59 (ms) 
+
+  [gpu] sm=95% mem=44% samples=130
+  [host] render=1342us(n=18) || prefill: steps=18 toks/step=198 nreq=1.4 sched=13 exec=111479 publish=9 total=111501 | upd=1 build=4 fwd=115614 | htod=23 launch=46295 wait=69270 || decode: steps=630 toks/step=2 nreq=1.8 sched=0 exec=17695 publish=4 total=17700 | upd=0 build=1 fwd=17714 | htod=17 launch=378 wait=17300
+  [vllm]  throughput: 5.41 req/s 346.1 output tok/s 2669.9 total tok/s TTFT mean 32.79 p50 36.56 p90 37.54 p99 41.69 max 41.69 (ms) TPOT mean 5.34 p50 5.37 p90 5.44 p99 5.47 max 5.47 (ms) 
+
+=== round=1 concurrency=4 ===
+  [dinfer]  throughput: 2.73 req/s 174.6 output tok/s 1344.7 total tok/s client: cpu 0.07s (user 0.03 sys 0.04) = 0.01 cores avg over 11.7s wall; rss 5 MiB; 33 threads; cpus 60-91 (32); parse 6.6 ms total / 0.206 ms per req TTFT mean 220.25 p50 77.97 p90 473.05 p99 475.11 max 475.11 (ms) TPOT mean 19.77 p50 18.97 p90 25.30 p99 25.63 max 25.63 (ms) 
+
+  [gpu] sm=96% mem=40% samples=137
+  [host] render=1261us(n=34) || prefill: steps=18 toks/step=395 nreq=2.3 sched=26 exec=126034 publish=14 total=126074 | upd=3 build=6 fwd=131023 | htod=25 launch=52202 wait=78768 || decode: steps=630 toks/step=3 nreq=3.4 sched=1 exec=18526 publish=5 total=18532 | upd=0 build=2 fwd=18541 | htod=19 launch=373 wait=18129
+  [vllm]  throughput: 8.48 req/s 542.8 output tok/s 4189.1 total tok/s TTFT mean 90.46 p50 89.08 p90 93.81 p99 97.08 max 97.08 (ms) TPOT mean 6.05 p50 6.05 p90 6.08 p99 6.09 max 6.09 (ms) 
+
+=== round=1 concurrency=8 ===
+  [dinfer]  throughput: 5.06 req/s 323.7 output tok/s 2491.3 total tok/s client: cpu 0.12s (user 0.05 sys 0.08) = 0.01 cores avg over 12.7s wall; rss 6 MiB; 33 threads; cpus 60-91 (32); parse 13.5 ms total / 0.211 ms per req TTFT mean 270.99 p50 88.46 p90 593.08 p99 599.08 max 599.09 (ms) TPOT mean 20.80 p50 19.85 p90 27.37 p99 28.13 max 28.13 (ms) 
+
+  [gpu] sm=97% mem=49% samples=148
+  [host] render=1190us(n=66) || prefill: steps=18 toks/step=787 nreq=4.6 sched=42 exec=153871 publish=21 total=153933 | upd=4 build=10 fwd=153834 | htod=29 launch=60984 wait=92791 || decode: steps=630 toks/step=7 nreq=6.6 sched=1 exec=19193 publish=8 total=19202 | upd=0 build=3 fwd=19173 | htod=20 launch=363 wait=18770
+  [vllm]  throughput: 14.92 req/s 955.2 output tok/s 7367.0 total tok/s TTFT mean 140.61 p50 147.76 p90 160.70 p99 161.93 max 161.98 (ms) TPOT mean 6.27 p50 6.24 p90 7.03 p99 7.09 max 7.13 (ms) 
+
+=== round=1 concurrency=16 ===
+  [dinfer]  throughput: 7.51 req/s 480.9 output tok/s 3701.1 total tok/s client: cpu 0.23s (user 0.08 sys 0.15) = 0.01 cores avg over 17.0s wall; rss 6 MiB; 33 threads; cpus 60-91 (32); parse 27.4 ms total / 0.214 ms per req TTFT mean 596.29 p50 103.92 p90 1363.05 p99 1627.57 max 1627.58 (ms) TPOT mean 24.30 p50 19.62 p90 31.33 p99 40.95 max 44.55 (ms) 
+
+  [gpu] sm=99% mem=47% samples=191
+  [host] render=1175us(n=130) || prefill: steps=22 toks/step=1285 nreq=9.0 sched=57 exec=331312 publish=33 total=331402 | upd=7 build=17 fwd=331263 | htod=34 launch=130460 wait=200739 || decode: steps=627 toks/step=13 nreq=13.0 sched=2 exec=19054 publish=11 total=19067 | upd=0 build=5 fwd=19030 | htod=23 launch=232 wait=18755
+  [vllm]  throughput: 24.60 req/s 1574.2 output tok/s 12138.7 total tok/s TTFT mean 183.68 p50 183.11 p90 224.50 p99 245.18 max 245.21 (ms) TPOT mean 7.39 p50 7.07 p90 8.28 p99 10.17 max 10.18 (ms) 
+
+=== round=2 concurrency=1 ===
+  [dinfer]  throughput: 0.89 req/s 57.2 output tok/s 440.4 total tok/s client: cpu 0.01s (user 0.00 sys 0.01) = 0.00 cores avg over 8.9s wall; rss 4 MiB; 33 threads; cpus 60-91 (32); parse 1.4 ms total / 0.177 ms per req TTFT mean 43.21 p50 43.18 p90 43.37 p99 44.03 max 44.03 (ms) TPOT mean 17.06 p50 17.07 p90 17.07 p99 17.07 max 17.07 (ms) 
+
+  [gpu] sm=93% mem=46% samples=109
+  [host] render=1260us(n=10) || prefill: steps=10 toks/step=428 nreq=1.0 sched=19 exec=41016 publish=10 total=41046 | upd=2 build=5 fwd=40990 | htod=23 launch=16312 wait=24627 || decode: steps=630 toks/step=1 nreq=1.0 sched=0 exec=17055 publish=3 total=17059 | upd=0 build=1 fwd=17037 | htod=18 launch=364 wait=16637
+  [vllm]  throughput: 3.12 req/s 199.7 output tok/s 1540.2 total tok/s TTFT mean 25.10 p50 25.02 p90 25.25 p99 25.66 max 25.66 (ms) TPOT mean 4.69 p50 4.68 p90 4.69 p99 4.70 max 4.70 (ms) 
+
+=== round=2 concurrency=2 ===
+  [dinfer]  throughput: 1.46 req/s 93.5 output tok/s 720.1 total tok/s client: cpu 0.03s (user 0.01 sys 0.02) = 0.00 cores avg over 10.9s wall; rss 4 MiB; 33 threads; cpus 60-91 (32); parse 3.1 ms total / 0.194 ms per req TTFT mean 148.15 p50 69.12 p90 413.05 p99 417.83 max 417.83 (ms) TPOT mean 19.35 p50 18.07 p90 23.52 p99 23.59 max 23.59 (ms) 
+
+  [gpu] sm=97% mem=41% samples=130
+  [host] render=1110us(n=18) || prefill: steps=18 toks/step=198 nreq=1.4 sched=15 exec=111381 publish=8 total=111404 | upd=2 build=3 fwd=111356 | htod=22 launch=44568 wait=66741 || decode: steps=630 toks/step=2 nreq=1.8 sched=0 exec=17704 publish=4 total=17709 | upd=0 build=1 fwd=17687 | htod=17 launch=356 wait=17294
+  [vllm]  throughput: 5.40 req/s 345.7 output tok/s 2667.0 total tok/s TTFT mean 32.70 p50 36.70 p90 37.51 p99 41.60 max 41.60 (ms) TPOT mean 5.35 p50 5.41 p90 5.43 p99 5.47 max 5.47 (ms) 
+
+=== round=2 concurrency=4 ===
+  [dinfer]  throughput: 2.73 req/s 174.7 output tok/s 1345.7 total tok/s client: cpu 0.06s (user 0.01 sys 0.04) = 0.00 cores avg over 11.7s wall; rss 5 MiB; 33 threads; cpus 60-91 (32); parse 6.5 ms total / 0.203 ms per req TTFT mean 219.55 p50 76.92 p90 472.80 p99 474.96 max 474.96 (ms) TPOT mean 19.76 p50 18.96 p90 25.31 p99 25.62 max 25.62 (ms) 
+
+  [gpu] sm=97% mem=46% samples=137
+  [host] render=1067us(n=34) || prefill: steps=18 toks/step=395 nreq=2.3 sched=21 exec=125808 publish=11 total=125840 | upd=2 build=5 fwd=125780 | htod=22 launch=50103 wait=75630 || decode: steps=630 toks/step=3 nreq=3.4 sched=1 exec=18522 publish=5 total=18527 | upd=0 build=1 fwd=18504 | htod=17 launch=343 wait=18124
+  [vllm]  throughput: 8.51 req/s 544.5 output tok/s 4202.6 total tok/s TTFT mean 90.19 p50 88.95 p90 93.09 p99 96.15 max 96.15 (ms) TPOT mean 6.03 p50 6.05 p90 6.09 p99 6.10 max 6.10 (ms) 
+
+=== round=2 concurrency=8 ===
+  [dinfer]  throughput: 5.07 req/s 324.5 output tok/s 2497.7 total tok/s client: cpu 0.11s (user 0.04 sys 0.07) = 0.01 cores avg over 12.6s wall; rss 5 MiB; 33 threads; cpus 60-91 (32); parse 13.3 ms total / 0.207 ms per req TTFT mean 301.46 p50 80.67 p90 598.23 p99 598.29 max 598.37 (ms) TPOT mean 20.25 p50 19.66 p90 20.03 p99 28.25 max 28.32 (ms) 
+
+  [gpu] sm=94% mem=44% samples=146
+  [host] render=1118us(n=66) || prefill: steps=18 toks/step=786 nreq=4.1 sched=41 exec=153362 publish=17 total=153420 | upd=4 build=10 fwd=153325 | htod=28 launch=60886 wait=92382 || decode: steps=630 toks/step=7 nreq=6.6 sched=1 exec=19158 publish=7 total=19166 | upd=0 build=3 fwd=19138 | htod=20 launch=359 wait=18739
+  [vllm]  throughput: 14.90 req/s 953.7 output tok/s 7356.1 total tok/s TTFT mean 139.33 p50 146.37 p90 159.04 p99 160.53 max 160.59 (ms) TPOT mean 6.30 p50 6.26 p90 7.04 p99 7.14 max 7.16 (ms) 
+
+=== round=2 concurrency=16 ===
+  [dinfer]  throughput: 7.51 req/s 480.8 output tok/s 3700.0 total tok/s client: cpu 0.22s (user 0.09 sys 0.13) = 0.01 cores avg over 17.0s wall; rss 6 MiB; 33 threads; cpus 60-91 (32); parse 28.1 ms total / 0.219 ms per req TTFT mean 596.20 p50 105.24 p90 1363.44 p99 1622.31 max 1622.39 (ms) TPOT mean 24.31 p50 19.60 p90 31.35 p99 41.02 max 44.55 (ms) 
+
+  [gpu] sm=96% mem=36% samples=191
+  [host] render=1112us(n=130) || prefill: steps=22 toks/step=1285 nreq=9.0 sched=60 exec=331189 publish=31 total=331280 | upd=6 build=16 fwd=331142 | htod=34 launch=130399 wait=200679 || decode: steps=627 toks/step=13 nreq=13.0 sched=2 exec=19071 publish=10 total=19083 | upd=0 build=5 fwd=19048 | htod=23 launch=238 wait=18766
+  [vllm]  throughput: 24.51 req/s 1568.7 output tok/s 12096.2 total tok/s TTFT mean 172.97 p50 181.17 p90 235.94 p99 243.96 max 243.97 (ms) TPOT mean 7.59 p50 7.23 p90 9.24 p99 10.43 max 10.45 (ms) 
+
+=== round=3 concurrency=1 ===
+  [dinfer]  throughput: 0.89 req/s 57.2 output tok/s 440.5 total tok/s client: cpu 0.01s (user 0.01 sys 0.00) = 0.00 cores avg over 8.9s wall; rss 4 MiB; 33 threads; cpus 60-91 (32); parse 1.3 ms total / 0.167 ms per req TTFT mean 43.01 p50 43.03 p90 43.13 p99 43.94 max 43.94 (ms) TPOT mean 17.06 p50 17.07 p90 17.07 p99 17.08 max 17.08 (ms) 
+
+  [gpu] sm=96% mem=47% samples=109
+  [host] render=1174us(n=10) || prefill: steps=10 toks/step=428 nreq=1.0 sched=20 exec=41007 publish=9 total=41036 | upd=2 build=5 fwd=40980 | htod=24 launch=16302 wait=24626 || decode: steps=630 toks/step=1 nreq=1.0 sched=0 exec=17057 publish=3 total=17060 | upd=0 build=1 fwd=17039 | htod=17 launch=361 wait=16642
+  [vllm]  throughput: 3.12 req/s 199.7 output tok/s 1540.2 total tok/s TTFT mean 25.05 p50 24.95 p90 25.11 p99 25.84 max 25.84 (ms) TPOT mean 4.69 p50 4.69 p90 4.69 p99 4.71 max 4.71 (ms) 
+
+=== round=3 concurrency=2 ===
+  [dinfer]  throughput: 1.46 req/s 93.5 output tok/s 719.9 total tok/s client: cpu 0.03s (user 0.02 sys 0.02) = 0.00 cores avg over 10.9s wall; rss 4 MiB; 33 threads; cpus 60-91 (32); parse 3.2 ms total / 0.199 ms per req TTFT mean 148.19 p50 69.18 p90 413.34 p99 418.18 max 418.18 (ms) TPOT mean 19.36 p50 18.07 p90 23.53 p99 23.60 max 23.60 (ms) 
+
+  [gpu] sm=93% mem=41% samples=130
+  [host] render=1103us(n=18) || prefill: steps=18 toks/step=198 nreq=1.4 sched=14 exec=111413 publish=9 total=111436 | upd=2 build=3 fwd=111388 | htod=22 launch=44585 wait=66756 || decode: steps=630 toks/step=2 nreq=1.8 sched=0 exec=17710 publish=4 total=17714 | upd=0 build=1 fwd=17692 | htod=17 launch=353 wait=17303
+  [vllm]  throughput: 5.40 req/s 345.3 output tok/s 2663.8 total tok/s TTFT mean 32.63 p50 36.71 p90 37.43 p99 41.25 max 41.25 (ms) TPOT mean 5.36 p50 5.42 p90 5.45 p99 5.48 max 5.48 (ms) 
+
+=== round=3 concurrency=4 ===
+  [dinfer]  throughput: 2.73 req/s 174.8 output tok/s 1346.6 total tok/s client: cpu 0.07s (user 0.03 sys 0.04) = 0.01 cores avg over 11.7s wall; rss 5 MiB; 33 threads; cpus 60-91 (32); parse 7.1 ms total / 0.221 ms per req TTFT mean 219.97 p50 78.02 p90 472.57 p99 475.21 max 475.21 (ms) TPOT mean 19.74 p50 18.95 p90 25.30 p99 25.62 max 25.62 (ms) 
+
+  [gpu] sm=97% mem=43% samples=137
+  [host] render=1088us(n=34) || prefill: steps=18 toks/step=395 nreq=2.3 sched=27 exec=125979 publish=13 total=126018 | upd=3 build=6 fwd=131232 | htod=25 launch=52283 wait=78896 || decode: steps=630 toks/step=3 nreq=3.4 sched=1 exec=18505 publish=5 total=18510 | upd=0 build=1 fwd=18514 | htod=19 launch=381 wait=18095
+  [vllm]  throughput: 8.48 req/s 542.9 output tok/s 4190.0 total tok/s TTFT mean 90.53 p50 89.42 p90 95.42 p99 98.58 max 98.58 (ms) TPOT mean 6.04 p50 6.05 p90 6.07 p99 6.11 max 6.11 (ms) 
+
+=== round=3 concurrency=8 ===
+  [dinfer]  throughput: 5.07 req/s 324.3 output tok/s 2496.4 total tok/s client: cpu 0.12s (user 0.06 sys 0.06) = 0.01 cores avg over 12.6s wall; rss 5 MiB; 33 threads; cpus 60-91 (32); parse 13.3 ms total / 0.207 ms per req TTFT mean 301.79 p50 82.57 p90 598.03 p99 598.08 max 598.15 (ms) TPOT mean 20.26 p50 19.69 p90 20.06 p99 28.26 max 28.31 (ms) 
+
+  [gpu] sm=97% mem=44% samples=145
+  [host] render=1133us(n=66) || prefill: steps=18 toks/step=786 nreq=4.1 sched=40 exec=153535 publish=20 total=153594 | upd=4 build=10 fwd=153497 | htod=28 launch=60950 wait=92492 || decode: steps=630 toks/step=7 nreq=6.6 sched=1 exec=19164 publish=7 total=19173 | upd=0 build=3 fwd=19144 | htod=20 launch=367 wait=18736
+  [vllm]  throughput: 14.94 req/s 956.2 output tok/s 7375.3 total tok/s TTFT mean 139.86 p50 147.28 p90 159.40 p99 160.68 max 160.83 (ms) TPOT mean 6.27 p50 6.19 p90 6.98 p99 7.14 max 7.14 (ms) 
+
+=== round=3 concurrency=16 ===
+  [dinfer]  throughput: 7.52 req/s 481.3 output tok/s 3704.1 total tok/s client: cpu 0.23s (user 0.08 sys 0.15) = 0.01 cores avg over 17.0s wall; rss 6 MiB; 33 threads; cpus 60-91 (32); parse 26.7 ms total / 0.208 ms per req TTFT mean 596.37 p50 108.33 p90 1362.54 p99 1621.15 max 1621.26 (ms) TPOT mean 24.28 p50 19.73 p90 31.08 p99 40.66 max 44.22 (ms) 
+
+  [gpu] sm=97% mem=35% samples=189
+  [host] render=1122us(n=130) || prefill: steps=22 toks/step=1285 nreq=9.0 sched=60 exec=331179 publish=31 total=331269 | upd=5 build=15 fwd=331134 | htod=33 launch=130339 wait=200731 || decode: steps=627 toks/step=13 nreq=13.0 sched=2 exec=19039 publish=11 total=19052 | upd=0 build=5 fwd=19015 | htod=24 launch=232 wait=18738
+  [vllm]  throughput: 25.33 req/s 1621.2 output tok/s 12501.0 total tok/s TTFT mean 157.06 p50 167.99 p90 184.44 p99 245.61 max 245.61 (ms) TPOT mean 7.51 p50 7.29 p90 9.16 p99 9.58 max 9.94 (ms) 
+
+=== round=4 concurrency=1 ===
+  [dinfer]  throughput: 0.89 req/s 57.2 output tok/s 440.4 total tok/s client: cpu 0.01s (user 0.01 sys 0.01) = 0.00 cores avg over 8.9s wall; rss 4 MiB; 33 threads; cpus 60-91 (32); parse 1.3 ms total / 0.168 ms per req TTFT mean 42.88 p50 43.00 p90 43.08 p99 43.08 max 43.08 (ms) TPOT mean 17.07 p50 17.07 p90 17.08 p99 17.10 max 17.10 (ms) 
+
+  [gpu] sm=94% mem=46% samples=109
+  [host] render=1065us(n=10) || prefill: steps=10 toks/step=428 nreq=1.0 sched=26 exec=41057 publish=9 total=41092 | upd=2 build=5 fwd=41030 | htod=24 launch=16319 wait=24659 || decode: steps=630 toks/step=1 nreq=1.0 sched=0 exec=17061 publish=3 total=17065 | upd=0 build=1 fwd=17043 | htod=17 launch=357 wait=16650
+  [vllm]  throughput: 3.12 req/s 199.7 output tok/s 1539.9 total tok/s TTFT mean 25.06 p50 24.90 p90 25.03 p99 26.14 max 26.14 (ms) TPOT mean 4.69 p50 4.69 p90 4.69 p99 4.71 max 4.71 (ms) 
+
+=== round=4 concurrency=2 ===
+  [dinfer]  throughput: 1.46 req/s 93.5 output tok/s 720.0 total tok/s client: cpu 0.03s (user 0.01 sys 0.02) = 0.00 cores avg over 10.9s wall; rss 4 MiB; 33 threads; cpus 60-91 (32); parse 3.1 ms total / 0.196 ms per req TTFT mean 148.09 p50 69.19 p90 413.40 p99 417.41 max 417.41 (ms) TPOT mean 19.36 p50 18.08 p90 23.52 p99 23.60 max 23.60 (ms) 
+
+  [gpu] sm=98% mem=43% samples=129
+  [host] render=1083us(n=18) || prefill: steps=18 toks/step=198 nreq=1.4 sched=15 exec=111372 publish=9 total=111396 | upd=2 build=3 fwd=111348 | htod=23 launch=44565 wait=66734 || decode: steps=630 toks/step=2 nreq=1.8 sched=0 exec=17710 publish=4 total=17714 | upd=0 build=1 fwd=17691 | htod=18 launch=358 wait=17297
+  [vllm]  throughput: 5.40 req/s 345.4 output tok/s 2664.3 total tok/s TTFT mean 32.73 p50 36.68 p90 37.78 p99 41.50 max 41.50 (ms) TPOT mean 5.36 p50 5.41 p90 5.45 p99 5.47 max 5.47 (ms) 
+
+=== round=4 concurrency=4 ===
+  [dinfer]  throughput: 2.73 req/s 174.7 output tok/s 1345.5 total tok/s client: cpu 0.06s (user 0.03 sys 0.03) = 0.00 cores avg over 11.7s wall; rss 5 MiB; 33 threads; cpus 60-91 (32); parse 6.7 ms total / 0.210 ms per req TTFT mean 219.39 p50 76.59 p90 472.89 p99 475.02 max 475.02 (ms) TPOT mean 19.77 p50 18.97 p90 25.31 p99 25.63 max 25.63 (ms) 
+
+  [gpu] sm=97% mem=47% samples=138
+  [host] render=1124us(n=34) || prefill: steps=18 toks/step=395 nreq=2.3 sched=25 exec=125741 publish=12 total=125778 | upd=3 build=7 fwd=125710 | htod=26 launch=50092 wait=75565 || decode: steps=630 toks/step=3 nreq=3.4 sched=1 exec=18530 publish=5 total=18535 | upd=0 build=1 fwd=18511 | htod=18 launch=359 wait=18115
+  [vllm]  throughput: 8.47 req/s 542.0 output tok/s 4183.3 total tok/s TTFT mean 90.21 p50 89.01 p90 93.37 p99 96.67 max 96.67 (ms) TPOT mean 6.06 p50 6.07 p90 6.10 p99 6.10 max 6.10 (ms) 
+
+=== round=4 concurrency=8 ===
+  [dinfer]  throughput: 5.07 req/s 324.4 output tok/s 2496.6 total tok/s client: cpu 0.11s (user 0.03 sys 0.09) = 0.01 cores avg over 12.6s wall; rss 5 MiB; 33 threads; cpus 60-91 (32); parse 13.5 ms total / 0.210 ms per req TTFT mean 301.46 p50 80.53 p90 597.83 p99 597.91 max 597.99 (ms) TPOT mean 20.27 p50 19.71 p90 20.05 p99 28.24 max 28.30 (ms) 
+
+  [gpu] sm=96% mem=42% samples=146
+  [host] render=1072us(n=66) || prefill: steps=18 toks/step=786 nreq=4.1 sched=42 exec=153399 publish=19 total=153459 | upd=4 build=10 fwd=153362 | htod=28 launch=60900 wait=92406 || decode: steps=630 toks/step=7 nreq=6.6 sched=1 exec=19168 publish=7 total=19175 | upd=0 build=3 fwd=19148 | htod=20 launch=352 wait=18756
+  [vllm]  throughput: 14.98 req/s 958.5 output tok/s 7392.7 total tok/s TTFT mean 139.18 p50 146.10 p90 159.79 p99 160.74 max 160.78 (ms) TPOT mean 6.26 p50 6.16 p90 6.96 p99 7.11 max 7.12 (ms) 
+
+=== round=4 concurrency=16 ===
+  [dinfer]  throughput: 7.52 req/s 481.3 output tok/s 3703.6 total tok/s client: cpu 0.22s (user 0.08 sys 0.14) = 0.01 cores avg over 17.0s wall; rss 7 MiB; 33 threads; cpus 60-91 (32); parse 26.7 ms total / 0.209 ms per req TTFT mean 595.92 p50 103.83 p90 1363.03 p99 1624.85 max 1624.89 (ms) TPOT mean 24.29 p50 19.75 p90 31.25 p99 40.71 max 44.39 (ms) 
+
+  [gpu] sm=96% mem=37% samples=190
+  [host] render=1099us(n=130) || prefill: steps=22 toks/step=1285 nreq=9.0 sched=65 exec=331186 publish=33 total=331284 | upd=6 build=16 fwd=331136 | htod=37 launch=130389 wait=200678 || decode: steps=627 toks/step=13 nreq=13.0 sched=2 exec=19044 publish=11 total=19057 | upd=0 build=5 fwd=19020 | htod=24 launch=236 wait=18738
+  [vllm]  throughput: 24.69 req/s 1580.2 output tok/s 12185.1 total tok/s TTFT mean 171.12 p50 173.53 p90 237.58 p99 244.88 max 244.91 (ms) TPOT mean 7.54 p50 7.20 p90 8.92 p99 9.99 max 10.16 (ms) 
+
+=== round=5 concurrency=1 ===
+  [dinfer]  throughput: 0.89 req/s 57.2 output tok/s 440.3 total tok/s client: cpu 0.01s (user 0.01 sys 0.01) = 0.00 cores avg over 8.9s wall; rss 4 MiB; 33 threads; cpus 60-91 (32); parse 1.3 ms total / 0.169 ms per req TTFT mean 43.04 p50 43.02 p90 43.29 p99 43.45 max 43.45 (ms) TPOT mean 17.07 p50 17.07 p90 17.08 p99 17.10 max 17.10 (ms) 
+
+  [gpu] sm=95% mem=47% samples=110
+  [host] render=1075us(n=10) || prefill: steps=10 toks/step=428 nreq=1.0 sched=21 exec=41046 publish=9 total=41077 | upd=2 build=6 fwd=41018 | htod=23 launch=16320 wait=24647 || decode: steps=630 toks/step=1 nreq=1.0 sched=0 exec=17063 publish=3 total=17067 | upd=0 build=1 fwd=17045 | htod=18 launch=374 wait=16634
+  [vllm]  throughput: 3.12 req/s 199.7 output tok/s 1539.7 total tok/s TTFT mean 25.11 p50 25.04 p90 25.08 p99 25.93 max 25.93 (ms) TPOT mean 4.69 p50 4.69 p90 4.69 p99 4.71 max 4.71 (ms) 
+
+=== round=5 concurrency=2 ===
+  [dinfer]  throughput: 1.46 req/s 93.5 output tok/s 720.0 total tok/s client: cpu 0.03s (user 0.02 sys 0.01) = 0.00 cores avg over 10.9s wall; rss 4 MiB; 33 threads; cpus 60-91 (32); parse 3.2 ms total / 0.202 ms per req TTFT mean 148.20 p50 69.20 p90 413.07 p99 418.37 max 418.37 (ms) TPOT mean 19.35 p50 18.07 p90 23.51 p99 23.61 max 23.61 (ms) 
+
+  [gpu] sm=97% mem=45% samples=129
+  [host] render=1161us(n=18) || prefill: steps=18 toks/step=198 nreq=1.4 sched=15 exec=111392 publish=9 total=111416 | upd=2 build=3 fwd=111368 | htod=22 launch=44567 wait=66754 || decode: steps=630 toks/step=2 nreq=1.8 sched=0 exec=17709 publish=4 total=17713 | upd=0 build=1 fwd=17691 | htod=18 launch=374 wait=17280
+  [vllm]  throughput: 5.41 req/s 346.0 output tok/s 2669.0 total tok/s TTFT mean 32.74 p50 36.71 p90 37.49 p99 41.48 max 41.48 (ms) TPOT mean 5.35 p50 5.37 p90 5.44 p99 5.47 max 5.47 (ms) 
+
+=== round=5 concurrency=4 ===
+  [dinfer]  throughput: 2.73 req/s 174.6 output tok/s 1345.1 total tok/s client: cpu 0.06s (user 0.03 sys 0.03) = 0.01 cores avg over 11.7s wall; rss 5 MiB; 33 threads; cpus 60-91 (32); parse 6.6 ms total / 0.207 ms per req TTFT mean 219.67 p50 77.58 p90 472.89 p99 475.02 max 475.02 (ms) TPOT mean 19.77 p50 18.96 p90 25.32 p99 25.62 max 25.62 (ms) 
+
+  [gpu] sm=98% mem=44% samples=137
+  [host] render=1220us(n=34) || prefill: steps=18 toks/step=395 nreq=2.3 sched=24 exec=125819 publish=14 total=125858 | upd=3 build=5 fwd=125789 | htod=25 launch=50098 wait=75640 || decode: steps=630 toks/step=3 nreq=3.4 sched=1 exec=18532 publish=5 total=18538 | upd=0 build=2 fwd=18511 | htod=19 launch=379 wait=18092
+  [vllm]  throughput: 8.50 req/s 543.7 output tok/s 4196.6 total tok/s TTFT mean 89.09 p50 87.56 p90 92.71 p99 95.78 max 95.78 (ms) TPOT mean 6.06 p50 6.06 p90 6.09 p99 6.12 max 6.12 (ms) 
+
+=== round=5 concurrency=8 ===
+  [dinfer]  throughput: 5.06 req/s 323.6 output tok/s 2490.7 total tok/s client: cpu 0.12s (user 0.06 sys 0.06) = 0.01 cores avg over 12.7s wall; rss 5 MiB; 33 threads; cpus 60-91 (32); parse 12.8 ms total / 0.200 ms per req TTFT mean 271.06 p50 88.51 p90 593.08 p99 600.08 max 600.08 (ms) TPOT mean 20.80 p50 19.85 p90 27.34 p99 28.16 max 28.16 (ms) 
+
+  [gpu] sm=97% mem=42% samples=147
+  [host] render=1068us(n=66) || prefill: steps=18 toks/step=787 nreq=4.6 sched=42 exec=153902 publish=20 total=153964 | upd=4 build=10 fwd=153865 | htod=26 launch=60987 wait=92823 || decode: steps=630 toks/step=7 nreq=6.6 sched=1 exec=19201 publish=7 total=19209 | upd=0 build=3 fwd=19180 | htod=20 launch=347 wait=18791
+  [vllm]  throughput: 15.53 req/s 993.8 output tok/s 7664.8 total tok/s TTFT mean 99.56 p50 99.39 p90 158.45 p99 160.11 max 160.26 (ms) TPOT mean 6.57 p50 6.25 p90 7.47 p99 8.12 max 8.29 (ms) 
+
+=== round=5 concurrency=16 ===
+  [dinfer] 

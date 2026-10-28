@@ -1465,8 +1465,13 @@ impl Gemma4Layer {
             )?;
             if let Some(ev) = &mt_ev { stream.record_timing(&ev[0])?; }  // 量化后=3gemm前
             if let Some(e) = &moe_pre_ev { stream.record_timing(&e[3])?; }  // norm+row2e+gather+quant完
+            // MOE_GEMM_SKIP=gu|dn|all（纯计时，结果错）：只跳 grouped GEMM 本身，路由 / gather / quant / gelu / combine
+            // 照跑，graph 态下看 GEMM 在 MoE 段里的真占比（loop kaon3-decode-opt D51）。
+            let gemm_skip = std::env::var("MOE_GEMM_SKIP").unwrap_or_default();
+            let (skip_gu, skip_dn) = (gemm_skip == "gu" || gemm_skip == "all", gemm_skip == "dn" || gemm_skip == "all");
             // 第二刀（MOE_GEMM_DUAL=1）：gate+up 融合单 launch（grid.z=2E 填满 SM）；逐位同分开两次。默认分开。
-            if std::env::var("MOE_GEMM_DUAL").ok().as_deref() == Some("1") {
+            if skip_gu {
+            } else if std::env::var("MOE_GEMM_DUAL").ok().as_deref() == Some("1") {
                 let (gate_o, up_o) = (&mut g.gate_o, &mut g.up_o);
                 k::ops::moe_grouped_gemm_dual(
                     stream, &g.aq_gu, &g.as_gu,
@@ -1490,10 +1495,12 @@ impl Gemma4Layer {
             k::ops::moe_grouped_quant(
                 stream, &g.gelu_o.data, &g.row2e, &mg.agscale_dn, &mut g.aq_dn, &mut g.as_dn, r, mg.k_down, exact_rq,
             )?;
-            k::ops::moe_grouped_gemm(
-                stream, &g.aq_dn, &g.as_dn, &mg.down_packed, &mg.down_scale, &mg.alpha_down, &sc.buckets.offsets,
-                &mut sc.yg.data, r, mg.n_down, mg.k_down, e,
-            )?;
+            if !skip_dn {
+                k::ops::moe_grouped_gemm(
+                    stream, &g.aq_dn, &g.as_dn, &mg.down_packed, &mg.down_scale, &mg.alpha_down, &sc.buckets.offsets,
+                    &mut sc.yg.data, r, mg.n_down, mg.k_down, e,
+                )?;
+            }
             if let Some(ev) = &mt_ev { stream.record_timing(&ev[1])?; }  // 3×gemm完
             // 6) scatter_add（全 R 行一次，start=0）——累加序与 host 版（专家升序）由 atomic 决定，逐位须实测
             if !moe_combine_f32() {

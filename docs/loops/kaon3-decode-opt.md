@@ -9,7 +9,7 @@
 **★ 全程非 eager（graph 生产态）口径。** eager/NO_GRAPH 只作一次性排查手段。测量插桩与 cudagraph 冲突时用 graph 兼容测法(core host-time / 纯 CPU Instant / 整段 skip 看端到端)。
 - **Step A（测）**:跑 5 轮 × **concurrency = 1,2,4,8,16**,测 dinfer（**非 eager**）的:①启动时间 ②tokenize ③chat 模板 ④htod ⑤block 分配 ⑥schedule ⑦TTFT ⑧TPOT ⑨每步 exec ⑩wait ⑪带宽 ⑫GPU 利用率。
 - **Step B（改）**:针对**耗时最长**的那段,深入分析+优化,提交,编译最新代码运行（非 eager 验）。
-- **Step C（验+回滚，用户 2026-10-28 完善）**:端到端测试。收益差则**回滚**,回 Step B。**但每次结果（含回滚的负结果）都要进 CSV 和 dashboard**（`test/kaon3/perf-trend.*`，带 CHANGE 说明）。Step B↔C 重复 **5 次无进展** → 回 Step A 重新分析,继续跑 loop。
+- **Step C（验+回滚，用户 2026-10-28 完善）**:端到端测试。收益差则**回滚**,回 Step B。**但每次结果（含回滚的负结果）都要进 CSV 和 dashboard**（`test/kaon3/perf-trend.*`，带 CHANGE 说明）。Step B↔C 重复 **5 次无进展** → 回 Step A 重新分析,继续跑 loop。（用户 2026-10-28 晚补充：5 次不是硬顶，我明确判断某方向还需要轮次时可以适当增加，但要在 loop 里写明理由。）
   - CSV/dashboard:`bench_compare` 或直接写 perf-trend.csv 一行(round/change/指标),重生成 html,本机 8090 可看。回滚的轮次也记(change 注明"回滚:端到端 X%<门槛")。
 
 ## 用户的两个想法（本会话已查证，结论如下）
@@ -557,3 +557,20 @@ PIPE=1 TPOT c1=16.45ms,base=17.41(D45同条件)。**端到端-5.5%(省~1ms)**。
   | c8 | 88.5 (vLLM ~146) | 19.85 (6.2) | — | 97% / 49% | 153.9ms = 61.0 + 92.8 (787 tok, 4.6 req) | 19.2ms = 0.02 + 0.36 + 18.8 |
   **读法**：①tokenize+模板 1.2–1.6ms/req、sched/publish/update_states/build_plan 全 <50us → **host 链不是瓶颈**；②decode 步 = graph launch 0.38ms + wait 16.6ms，wait 就是 GPU 跑图的时间（GPU sm 98%）→ **decode 100% GPU 时间，17 vs 4.7**；"wait 该为 0"只有 async 调度能覆盖 0.4ms 的 host（≤2%），GPU 那 16.6ms 要靠 kernel；③prefill 428 tok 一步 41ms，其中 **host launch 16ms**（eager 逐 kernel 提交，30 层 × 几十 kernel），这是 TTFT 慢 vLLM 的主因候选（c1 43.8 vs 25.1）；④decode GPU mem util 48% = 带宽没吃满（MoE/dense 权重 GEMV 形态，M=1 latency bound）。
 - 工具坑：等待脚本里 `remote_5090.sh run '<cmd>'` 的退出码不透传（always 0）→ 两次误判 DONE；改为拉文件到本地 grep。
+
+## ★★★★★★ D51 2026-10-28 Step A 第二轮定论（5 轮 × c1–16，24 窗口有效，中位数；归档 test/kaon3/2026-10-28/stepA3_RESULT.txt）
+前置已对齐：两端非 eager、max-model-len 16384、max-num-batched-tokens 4096、max-num-seqs 64、prompt 400 词≈1560 tok、64 out、bench 绑核 60-91（client 0.00 核）。**注意本轮 MOE_GEMM_PIPE 没开**（D49 说"已加进 kserve_full.sh"核实为假：grep rc=1；默认二进制 pipe 关）。
+| c | 吞吐 d/v (%) | TTFT p50 d/v | TPOT p50 d/v | sm/mem% | render | prefill 步 exec=launch+wait (tok/步) | decode 步 exec=htod+launch+wait (nreq) | TPOT 5 轮散布 |
+|---|---|---|---|---|---|---|---|---|
+| c1 | 57/200 (29%) | 43.0/25.0 | 17.07/4.69 (3.6×) | 95/47 | 1.2ms | 41.0=16.3+24.6 (428) | 17.06=0.02+0.36+16.64 (1.0) | ±0.0% |
+| c2 | 94/346 (27%) | 69.2/36.7 | 18.07/5.41 (3.3×) | 97/43 | 1.1ms | 111.4=44.6+66.8 (198) | 17.71=0.02+0.36+17.30 (1.8) | ±0.1% |
+| c4 | 175/543 (32%) | 77.6/89.0 | 18.96/6.05 (3.1×) | 97/44 | 1.1ms | 125.8=50.1+75.6 (395) | 18.53=0.02+0.37+18.11 (3.4) | ±0.1% |
+| c8 | 324/956 (34%) | 82.6/146.4 | 19.71/6.24 (3.2×) | 97/44 | 1.1ms | 153.5=61.0+92.5 (786) | 19.17=0.02+0.36+18.76 (6.6) | ±0.5% |
+| c16 | 481/1577 (31%) | 104.6/177.3 | 19.68/7.21 (2.7×) | 96/36 | 1.1ms | 331.2=130.4+200.7 (1285) | 19.05=0.02+0.23+18.75 (13.0) | ±0.4% |
+（启动 36.1s wall / model_load_ms 34911 / num_blocks 2048；sched 0–42us、publish 4–21us、update_states ≤4us、build_plan ≤10us、htod 20–30us，全部窗口如此。）
+**定论**：
+1. **host 链（tokenize/模板 1.1ms、schedule/block 分配/publish/htod 全 <50us）不是瓶颈**，5 轮稳定。
+2. **decode 步 = 0.36ms graph 提交 + 16.6–18.8ms 等 GPU（sm 96%）**。"wait 该为 0"：这里的 wait 是 GPU 真算的时间，不是空等；能被 overlap 掉的只有 0.36ms（2%）。**差距 100% 在 decode 图内 GPU 时间：17 vs 4.7ms（3.6×）**，且几乎不随并发涨（17→19），vLLM 也是（4.7→7.2）→ 两边都是权重带宽 / 延迟形态，我们每步多花 12ms。
+3. **mem util 仅 36–47%**：带宽没吃满 → 不是带宽墙，是延迟 / 并行度 / kernel 数（小 kernel 串行）。这与想法 1"要 overlap"一致，但 overlap 对象是 **图内 kernel 之间**（填满 SM、减少串行 kernel 数），不是 host 与 GPU 之间。
+4. TTFT：c≥4 已反超 vLLM；c1/c2 慢 18ms，其中 prefill **host launch 16ms（eager 逐 kernel 提交，占 prefill 步 40%）** 是 c1 TTFT 差的主因候选，第二优先。
+**Step B 靶子（按用户规则取最长段）= decode 图内 GPU 17ms**。D45 分段：MoE 5.3 / paged 3.2 / dense 2.8 / qkv 0.9 / 其余 ~5。先用 nsys `--cuda-graph-trace=node` 拿**每步 kernel 清单 + 每个 kernel 时长 + 总 kernel 数**（上次 2024.2.3 抓不到 CUDA 13 kernel，换新版），再决定是减 kernel 数（融合）还是提单 kernel 并行度（MoE grouped GEMM 128 专家 grid 只 88 块活、K 串行 22 步）。
