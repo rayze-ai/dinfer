@@ -214,6 +214,11 @@ impl QLinear {
                     }
                 };
                 gemm.quant_fp8(&x.data, *a_scale, buf, need)?;
+                // B6（loop kaon3-decode-opt）：decode 小 M 走带宽型 fp8 GEMV（`mlp_fp8_gemv`，与 dense MLP 同 kernel），
+                // 条件：tokens ≤ 16、K % 16 == 0、A 的 bf16 驻留 ≤ 96 KB（M_TILE·K·2；K=8192 只 m ≤ 4）。`FP8_GEMV_OLD=1` 回退 cuBLASLt。
+                if fp8_gemv_enabled() && tokens <= 16 && kk % 16 == 0 && fp8_gemv_m_tile(tokens) * kk * 2 <= 96 * 1024 {
+                    return k::ops::mlp_fp8_gemv(stream, buf, w, &mut out.data, tokens, n, kk, *scale * *a_scale);
+                }
                 // 两个 per-tensor scale 以设备标量形式传给 cuBLASLt；按 shape 缓存一次即可（每层不同）。
                 let mut sc = scache.lock().unwrap();
                 if sc.is_none() {
@@ -635,6 +640,14 @@ impl ActBuf {
 /// B5：decode（tokens ≤ 16）dense MLP 走带宽型 fp8 GEMV（`mlp_fp8_decode.cu`），不走 persistent mega。
 /// `DENSE_DECODE_OLD=1` 回退（A/B 用）。
 pub const DENSE_GEMV_ROWS: usize = 16;
+fn fp8_gemv_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("FP8_GEMV_OLD").ok().as_deref() != Some("1"))
+}
+/// 与 `mlp_fp8_decode.cu` 的 M_TILE 档位同式（{1,2,4,8,16}），用于算共享内存是否放得下。
+fn fp8_gemv_m_tile(m: usize) -> usize {
+    match m { 0 | 1 => 1, 2 => 2, 3 | 4 => 4, 5..=8 => 8, _ => 16 }
+}
 fn dense_gemv_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| std::env::var("DENSE_DECODE_OLD").ok().as_deref() != Some("1"))

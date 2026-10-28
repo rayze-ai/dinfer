@@ -181,9 +181,11 @@ template <int M_TILE>
 int launch_gateup(const uint8_t* a, const uint8_t* g, const uint8_t* u, uint8_t* act, int m, int I, int K, float gs,
                   float us, float dinv, cudaStream_t s) {
   const int smem = M_TILE * K * 2;
-  if (smem > 48 * 1024) {
+  static int attr_smem = 0;  // 每个模板实例一次（host 侧属性，非流操作；graph 捕获时也只在首次调用）
+  if (smem > 48 * 1024 && smem > attr_smem) {
     if (const int rc = (int)cudaFuncSetAttribute(gateup_act_kernel<M_TILE>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem))
       return rc;
+    attr_smem = smem;
   }
   gateup_act_kernel<M_TILE><<<(unsigned)((I + kWarps - 1) / kWarps), kBlock, smem, s>>>(a, g, u, act, m, I, K, gs, us, dinv);
   return last_err();
@@ -191,9 +193,11 @@ int launch_gateup(const uint8_t* a, const uint8_t* g, const uint8_t* u, uint8_t*
 template <int M_TILE>
 int launch_gemv(const uint8_t* a, const uint8_t* w, bf16* out, int m, int N, int K, float scale, cudaStream_t s) {
   const int smem = M_TILE * K * 2;
-  if (smem > 48 * 1024) {
+  static int attr_smem = 0;  // 每个模板实例一次（host 侧属性，非流操作；graph 捕获时也只在首次调用）
+  if (smem > 48 * 1024 && smem > attr_smem) {
     if (const int rc = (int)cudaFuncSetAttribute(gemv_kernel<M_TILE>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem))
       return rc;
+    attr_smem = smem;
   }
   gemv_kernel<M_TILE><<<(unsigned)((N + 2 * kWarps - 1) / (2 * kWarps)), kBlock, smem, s>>>(a, w, out, m, N, K, scale);
   return last_err();

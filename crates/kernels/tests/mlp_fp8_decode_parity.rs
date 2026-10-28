@@ -126,5 +126,27 @@ fn mlp_fp8_decode_parity() {
         );
         if !ok { fails.push(format!("m={m} h={h} inter={inter}")); }
     }
+    // ---- B6：qkv / o_proj 形状的纯 GEMV（N, K, m）----
+    for (n, kk, m) in [(3072usize, 2816usize, 16usize), (2816, 4096, 8), (2816, 8192, 4), (3072, 2816, 1)] {
+        let mut rng = Rng(0xb6 + n as u64 * 31 + kk as u64 + m as u64);
+        let (ws, a_s) = (0.0023f32, 0.06f32);
+        let aq: Vec<u8> = (0..m * kk).map(|_| { let e = 3 + (rng.uni() * 9.0) as u8; let mant = (rng.uni() * 8.0) as u8 & 7; let sg = if rng.uni() < 0.5 { 0x80 } else { 0 }; sg | (e << 3) | mant }).collect();
+        let wq: Vec<u8> = (0..n * kk).map(|_| { let e = 4 + (rng.uni() * 8.0) as u8; let mant = (rng.uni() * 8.0) as u8 & 7; let sg = if rng.uni() < 0.5 { 0x80 } else { 0 }; sg | (e << 3) | mant }).collect();
+        let mut refv = vec![0f32; m * n];
+        for r in 0..m { for c in 0..n {
+            let s: f64 = (0..kk).map(|i| e4m3_dec(aq[r * kk + i]) as f64 * e4m3_dec(wq[c * kk + i]) as f64).sum();
+            refv[r * n + c] = (s * (ws * a_s) as f64) as f32;
+        } }
+        let da = st.htod_copy(aq).unwrap();
+        let dw = st.htod_copy(wq).unwrap();
+        let mut dout = st.alloc_zeros::<bf16>(m * n).unwrap();
+        ops::mlp_fp8_gemv(&st, &da, &dw, &mut dout, m, n, kk, ws * a_s).unwrap();
+        st.synchronize().unwrap();
+        let got = st.dtoh_sync_copy(&dout).unwrap();
+        let (mut bad, mut worst) = (0usize, 0f32);
+        for (g, r) in got.iter().zip(&refv) { let e = (g.to_f32() - r).abs(); worst = worst.max(e); if e > 0.01 + 0.01 * r.abs() { bad += 1; } }
+        println!("gemv N={n} K={kk} m={m}: 最大误差 {worst:.4} 超差 {bad}/{} => {}", m * n, if bad == 0 { "ok" } else { "FAIL" });
+        if bad != 0 { fails.push(format!("gemv N={n} K={kk} m={m}")); }
+    }
     assert!(fails.is_empty(), "失败: {fails:?}");
 }
