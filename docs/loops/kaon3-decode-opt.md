@@ -990,3 +990,4 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 
 ## ★★★ D79 2026-10-28 b16b 首批 B（BM=16 decode tile）：c1 TPOT 5.63 → **5.57（-1.1%）**，c8 10.03 → **9.82（-2.1%）**；但 **c8 TTFT 506 → 545（+7.6%）**，c1 TTFT mean 31.4 / p50 26.85（散布大）
 - BM=16 只在 R ≤ 128（decode 步）走，prefill（R=12480）仍 BM=32 → TTFT 不该变。c8 TTFT +39 ms 可能是：① 混批步（Paged，decode 行 + prefill 行同步，R = 8 + 12480 > 128 → BM=32，不受影响）……② tile_off 缓冲 2(E+1) 后 B8 的 BM=32 表位置不变、BM=16 表接在后面——prefill 没碰；③ 噪声（c1 TTFT mean 31.4 vs p50 26.85 说明有一两次慢请求拉高）。等 B2 看 TTFT 是否复现；若复现则 c8 TTFT 的 +39 要归因（排队态？）。
+- B24a 可行性补：b16b 二进制 `grouped_gemm_kernel_pipe4` 各实例 REG 58–81、LOCAL 0（无 spill）、smem 16–35 KB；BN=128 四片段版多 8 个 acc + 4 个 b 寄存器 ≈ 95 REG，仍 < 128（2 CTA/SM 256 线程占满 64K 寄存器文件的边界是 128），可行。
