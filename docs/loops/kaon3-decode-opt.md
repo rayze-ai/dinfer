@@ -4,22 +4,26 @@
 > 根因:靠 NO_GRAPH 分段定靶子(说 MoE 占 63%)是假象,被 cudagraph 摊薄。**改任何 kernel 前必须先验证那段是 graph 态真大头**。
 > 用户批评:"做之前反复强调验证,方案是屁股想出来的" —— 不再未验证就动手。
 
-## 用户定的流程（严格按此）
-- **Step A（测）**:跑 5 轮,测 dinfer 的:①启动时间 ②TTFT ③TPOT ④每一步的 exec 时间 ⑤wait 时间 ⑥带宽 ⑦GPU 利用率。
-- **Step B（改）**:针对**耗时最长**的那段,深入分析+优化,提交,编译最新代码运行。
+## 用户定的流程（严格按此，用户 2026-10-28 完善）
+**★ 全程非 eager（graph 生产态）口径。** eager/NO_GRAPH 只作一次性排查手段（验图是否旁路 skip 等），所有判定与收益都以非 eager 为准。测量插桩若与 cudagraph 冲突（event sync），要么找 graph 兼容的测法（core host-time/纯 CPU Instant/整段 skip 看端到端），要么单独 NO_GRAPH 测时明确标注"仅排查、非最终口径"。
+- **Step A（测）**:跑 5 轮,测 dinfer（**非 eager**）的:①启动时间 ②TTFT ③TPOT ④每一步的 exec 时间 ⑤wait 时间 ⑥带宽 ⑦GPU 利用率。
+- **Step B（改）**:针对**耗时最长**的那段,深入分析+优化,提交,编译最新代码运行（非 eager 验）。
 - **Step C（验+回滚，用户 2026-10-28 完善）**:端到端测试。收益差则**回滚**,回 Step B。**但每次结果（含回滚的负结果）都要进 CSV 和 dashboard**（`test/kaon3/perf-trend.*`，带 CHANGE 说明）。Step B↔C 重复 **5 次无进展** → 回 Step A 重新分析,继续跑 loop。
   - CSV/dashboard:`bench_compare` 或直接写 perf-trend.csv 一行(round/change/指标),重生成 html,本机 8090 可看。回滚的轮次也记(change 注明"回滚:端到端 X%<门槛")。
 
-## 用户的两个想法（待验证,不臆测）
-1. **wait 不该有,高效计算要 compute overlap**:之前说 dense mega 的 wait 高(R55: GATE/UP/DOWN wait≈4×exec,CTA 自旋空等)。用户认为高效计算就不该有 wait,要让计算 overlap 起来(像第一刀 cp.async 在 MoE 做的,但 dense mega 没做)。→ Step A 测清 wait 到底多大、在哪段;若真大且是 overlap 缺失,Step B 做 overlap。
-2. **"256/block 有 128 空转,两步填满有没有收益,128 改 256"**:待查清用户指哪个参数(MEGA_CTAS? BN? 线程数? grid?),查到用数据回答"128改256"的收益,不臆测。
+## 用户的两个想法（本会话已查证，结论如下）
+1. **wait 不该有,高效计算要 compute overlap**:dense mega wait 确实高（R55 GATE/UP/DOWN wait≈4×exec，持久 kernel CTA 自旋空等，机理 D4=decode task 少喂不满 CTA）。**但 D16 铁证 dense 整段 skip 掉 TPOT 都不变→dense/wait 不在 decode 关键路径**，改 dense overlap 端到端无感。用户"要 overlap"的直觉对（dense 确缺 overlap），但该段不是瓶颈，ROI≈0。**真瓶颈在 host exec，非 GPU overlap**。
+2. **"256/block 128 空转,128 改 256"**:查清（D4）=`mega_mlp_core.cuh:103` dense mega kernel 256 线程但加载 A 只 128 槽、后 128 线程空转。**这是线程维（kernel 内部），与 wait（CTA/task 维）无关；且 dense 整段 skip TPOT 都不变→改它端到端无感**。128→256 对 TPOT 无收益（dense 不在关键路径）。诚实结论：这个优化点不值得做。
+**两想法共同结论**：都指向 dense mega，但 dense 整段都不在 decode 关键路径（host 才是），所以两个想法虽方向有道理，实际 ROI≈0。
 
 ## 测量手段现状（诚实）
 - 启动时间:serve 日志 `model_load_ms` ✓
 - TTFT/TPOT/吞吐:`bench`(绑核 60-91,seed42/全共享1024/128out) ✓
 - GPU 利用率:nvidia-smi 采样(graph 态可测,decode 实测 ~100%) ✓
-- **每步 exec/wait**:dense mega 有 `KAON3_DENSE_TIME`(wait_cyc/exec_cyc)、MoE 有 `KAON3_MOE_TIME`、各段 `KAON3_STAGE_TIME`——**但都 NO_GRAPH 态**(graph 态插桩与 cudagraph 冲突)。graph 态 kernel 级:nsys 在此环境抓不到(6轮失败)。→ exec/wait 只能 NO_GRAPH 测,结果标注"NO_GRAPH,graph 态会摊薄",与 graph 态 GPU util/TPOT 交叉判断。
-- 带宽:kernel 时间 + 字节算(微基准),或 stage 时间反推。
+- **每步 host exec/wait（非 eager 可测）**:core engine 的 `[host-time]`（sched/exec/publish，纯 CPU Instant，graph 态准，D17 实测 exec=19.3ms 占全）。要拆 exec 内 launch(submit) vs collect(dtoh_sync) 需改 core engine host-time 或让 kaon3 forward_sample 打点生效（本会话没拆成，下次第一步）。
+- **kernel 级 exec/wait**:`KAON3_DENSE_TIME`/`MOE_TIME`/`STAGE_TIME` 与 cudagraph 冲突→仅 NO_GRAPH（标注仅排查）；nsys 在此环境抓不到（6轮失败，放弃）。**但本会话结论=GPU kernel 全不是瓶颈（整段 skip 铁证），kernel 级 exec/wait 已不重要**。
+- **整段 skip 看端到端（最硬，graph/eager 都准）**:DENSE_SKIP/MOE_SKIP/ATTN_SKIP_{NORM,ROPE,KVFP8,QKV,PAGED,OPROJ}（纯计时默认关）。这是定关键路径的首选，应最先用。
+- 带宽:kernel 时间 + 字节算(微基准),或 stage 时间反推（kernel 不是瓶颈，带宽已非重点）。
 
 ## 环境
 5090 GPU4(复用前确认 nvidia-smi 空),host 网络 detached 容器跑 serve(bench HTTP 通);NO_GRAPH 插桩态单独跑。生产态:graph 开 + MEGA_SPGU/DN=4 + ROUTER_GEMM_BI=0 + MOE_GROUPED=1 + KAON3_MEGA=1。
