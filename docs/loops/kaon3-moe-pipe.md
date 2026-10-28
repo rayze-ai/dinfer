@@ -169,3 +169,8 @@ nsys(2024.2.3)连--cuda-graph-trace=node也"no CUDA kernel data"——5090/sm120
 - 第一刀cp.async=改kernel内部效率(同kernel跑更快),graph态易被图调度吸收→端到端小(实测c1-4.9%/c8-1.3%)。
 - 第二刀gate+up合并=**减kernel数量+HBM流量**(3 grouped GEMM→2,中间up输出不写回HBM再读),图里实打实少1 node+少一遍N×tokens HBM往返,**图调度吸收不掉**。结构性差异。
 **验收路线(不靠估算,用第一刀已验的可信口径)**:第二刀也做开关A/B,改完直接量graph态端到端(host容器c1/c8 TPOT,R84口径可信)。<3%当场说不值+回滚。不再用NO_GRAPH/nsys估算说收益。
+
+## R90 2026-10-28 第二刀写完(gate+up融合单launch,grid.z翻倍填满SM):用户要求先验证再改,A/B收
+写完:①kernel grouped_gemm_kernel_dual<BK>(body逐字复制pipe,仅顶部按blockIdx.z前E选gate后E选up)②host moe_grouped_gemm_dual(grid.z=2E)③ffi声明+stub④ops封装⑤layer.rs moe_branch加MOE_GEMM_DUAL=1开关(默认分开两次)。
+**真收益假说(graph吃不掉)**:decode grid小(~8激活×N/BN≈88 block)占不满170 SM,occupancy~半;grid.z翻倍到176填满SM=多并行度,非"同活跑更快"。逐位天然一致(body不变)。
+**诚实**:省多少仍要A/B实测,不动手前拍胸脯(用户批评过)。下一步:put→编→dual逐位对拍(bad=0硬门槛)→graph态A/B(c1/c8,<3%回滚)。

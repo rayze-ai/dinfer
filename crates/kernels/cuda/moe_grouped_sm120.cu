@@ -413,6 +413,179 @@ __global__ void __launch_bounds__(256)
   }
 }
 
+// 第二刀（R89+）：gate+up 融合单 launch。grid.z = 2E：z<E 跑 gate（Bg/Sg/alphaG/Dg），z>=E 跑 up（Bu/Su/alphaU/Du）。
+// decode grid 小（~8激活×N/BN）占不满 170 SM；翻倍 grid.z 填满 SM = graph 吃不掉的并行度。
+// body 与 grouped_gemm_kernel_pipe 逐字相同（仅 e/B/S/global/D 按 half 选）→ 逐位天然一致。
+template <int BK>
+__global__ void __launch_bounds__(256)
+    grouped_gemm_kernel_dual(const uint8_t* __restrict__ A, const uint8_t* __restrict__ Asc,
+                             const uint8_t* const* __restrict__ Bg, const uint8_t* const* __restrict__ Sg,
+                             const float* __restrict__ alphaG, bf16* __restrict__ Dg,
+                             const uint8_t* const* __restrict__ Bu, const uint8_t* const* __restrict__ Su,
+                             const float* __restrict__ alphaU, bf16* __restrict__ Du,
+                             const int32_t* __restrict__ offsets, int N, int K, int E) {
+  const int half = blockIdx.z / E;          // 0=gate 1=up
+  const int e = blockIdx.z - half * E;
+  const uint8_t* const* Bptr = half ? Bu : Bg;
+  const uint8_t* const* Sptr = half ? Su : Sg;
+  const float* alpha = half ? alphaU : alphaG;
+  bf16* D = half ? Du : Dg;
+
+  const int row_lo = offsets[e], row_hi = offsets[e + 1];
+  const int m_blk = row_lo + blockIdx.y * BM;
+  if (m_blk >= row_hi) return;
+
+  constexpr int RSA = BK / 2 + PAD, RSB = BK / 2 + PAD;
+  constexpr int NQ4 = BK / 64;
+  constexpr int NB16 = BK / 16;
+  __shared__ uint8_t sA[2][BM * RSA];
+  __shared__ uint8_t sB[2][BN * RSB];
+  __shared__ uint32_t sfa[2][BM * NQ4];
+  __shared__ uint32_t sfb[2][BN * NQ4];
+
+  const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+  const int wm = warp >> 2, wn = warp & 3;
+  const int n_blk = blockIdx.x * BN;
+  const uint8_t* B = Bptr[e];
+  const uint8_t* S = Sptr[e];
+  const float global = alpha[e];
+  const int M = row_hi;
+
+  float acc[4] = {0, 0, 0, 0}, acc2[4] = {0, 0, 0, 0};
+  const int nk = (K + BK - 1) / BK;
+  const int rb = BK / 32;
+  constexpr int NA = (BM * BK / 2 / 16 + 255) / 256;
+  constexpr int NFA = (BM * NQ4 + 255) / 256;
+
+  auto load_b = [&](int st, int kb) {
+    const uint8_t* bsrc = B + static_cast<size_t>(n_blk) * (K / 2) + kb * (BK / 2);
+    for (int i = tid; i < (BN * BK / 2) / 16; i += blockDim.x) {
+      const int r = i / rb, c = i % rb;
+      const bool ok = (n_blk + r < N);
+      cp16(smem_u32(&sB[st][r * RSB + c * 16]), bsrc + (static_cast<size_t>(r) * (K / 32) + c) * 16, ok ? 16 : 0);
+    }
+    for (int i = tid; i < BN * NQ4; i += blockDim.x) {
+      const int r = i / NQ4, q = i % NQ4;
+      const bool ok = (n_blk + r < N);
+      cp4(smem_u32(&sfb[st][r * NQ4 + q]), S + static_cast<size_t>(n_blk + r) * (K / 16) + kb * NB16 + q * 4,
+          ok ? 4 : 0);
+    }
+    asm volatile("cp.async.commit_group;\n");
+  };
+  auto conv_a = [&](int kb, uint4 (&ar)[NA], uint32_t (&fr)[NFA]) {
+    const uint8_t* asrc = A + static_cast<size_t>(m_blk) * (K / 2) + kb * (BK / 2);
+#pragma unroll
+    for (int t = 0; t < NA; ++t) {
+      const int i = tid + t * 256;
+      if (i < (BM * BK / 2) / 16) {
+        const int r = i / rb, c = i % rb;
+        const uint4 z = make_uint4(0x11111111u, 0x11111111u, 0x11111111u, 0x11111111u);
+        ar[t] = (m_blk + r < M)
+                    ? *reinterpret_cast<const uint4*>(asrc + (static_cast<size_t>(r) * (K / 32) + c) * 16)
+                    : z;
+      }
+    }
+#pragma unroll
+    for (int t = 0; t < NFA; ++t) {
+      const int i = tid + t * 256;
+      if (i < BM * NQ4) {
+        const int r = i / NQ4, q = i % NQ4;
+        fr[t] = (m_blk + r < M)
+                    ? *reinterpret_cast<const uint32_t*>(Asc + static_cast<size_t>(m_blk + r) * (K / 16) +
+                                                         kb * NB16 + q * 4)
+                    : 0x38383838u;
+      }
+    }
+  };
+  auto store_a = [&](int st, const uint4 (&ar)[NA], const uint32_t (&fr)[NFA]) {
+#pragma unroll
+    for (int t = 0; t < NA; ++t) {
+      const int i = tid + t * 256;
+      if (i < (BM * BK / 2) / 16) {
+        const int r = i / rb, c = i % rb;
+        *reinterpret_cast<uint4*>(&sA[st][r * RSA + c * 16]) = ar[t];
+      }
+    }
+#pragma unroll
+    for (int t = 0; t < NFA; ++t) {
+      const int i = tid + t * 256;
+      if (i < BM * NQ4) {
+        const int r = i / NQ4, q = i % NQ4;
+        sfa[st][r * NQ4 + q] = fr[t];
+      }
+    }
+  };
+
+  {
+    uint4 ar[NA];
+    uint32_t fr[NFA];
+    load_b(0, 0);
+    conv_a(0, ar, fr);
+    store_a(0, ar, fr);
+  }
+  for (int kb = 0; kb < nk; ++kb) {
+    const int cur = kb & 1, nxt = cur ^ 1;
+    uint4 anext[NA];
+    uint32_t fanext[NFA];
+    if (kb + 1 < nk) {
+      load_b(nxt, kb + 1);
+      conv_a(kb + 1, anext, fanext);
+    } else {
+      asm volatile("cp.async.commit_group;\n");
+    }
+    asm volatile("cp.async.wait_group 1;\n");
+    __syncthreads();
+    if (kb + 1 < nk) store_a(nxt, anext, fanext);
+
+    const int nbk = BK / 64;
+    for (int b = 0; b < nbk; ++b) {
+      const int kb0 = b * 64;
+      uint32_t a[4], b0[2], b1[2];
+      const int mrow = wm * 16, ncol = wn * 16;
+#pragma unroll
+      for (int g = 0; g < 4; ++g) {
+        const int m = (lane / 4) + 8 * (g % 2);
+        const int kb_ = kb0 + 8 * (lane % 4) + 32 * (g / 2);
+        a[g] = *reinterpret_cast<const uint32_t*>(&sA[cur][(mrow + m) * RSA + kb_ / 2]);
+      }
+      const int brow = lane / 4;
+#pragma unroll
+      for (int g = 0; g < 2; ++g) {
+        const int kb_ = kb0 + 8 * (lane % 4) + 32 * g;
+        b0[g] = *reinterpret_cast<const uint32_t*>(&sB[cur][(ncol + brow) * RSB + kb_ / 2]);
+        b1[g] = *reinterpret_cast<const uint32_t*>(&sB[cur][(ncol + 8 + brow) * RSB + kb_ / 2]);
+      }
+      const int sam = (8 * (lane & 1) + (lane >> 2)) & 15;
+      const uint32_t sa = sfa[cur][(mrow + sam) * NQ4 + b];
+      const uint32_t sb0 = sfb[cur][(ncol + brow) * NQ4 + b];
+      const uint32_t sb1 = sfb[cur][(ncol + 8 + brow) * NQ4 + b];
+      mma_fp4(a, b0, sa, sb0, acc);
+      mma_fp4(a, b1, sa, sb1, acc2);
+    }
+    __syncthreads();
+  }
+
+  const int r0 = lane / 4, cg = (lane % 4) * 2;
+  const int g0 = m_blk + wm * 16 + r0, g1 = g0 + 8;
+  const int c0 = n_blk + wn * 16 + cg, c1 = c0 + 8;
+  if (g0 < M && c0 < N) {
+    D[static_cast<size_t>(g0) * N + c0] = to_bf16(acc[0] * global);
+    if (c0 + 1 < N) D[static_cast<size_t>(g0) * N + c0 + 1] = to_bf16(acc[1] * global);
+  }
+  if (g1 < M && c0 < N) {
+    D[static_cast<size_t>(g1) * N + c0] = to_bf16(acc[2] * global);
+    if (c0 + 1 < N) D[static_cast<size_t>(g1) * N + c0 + 1] = to_bf16(acc[3] * global);
+  }
+  if (g0 < M && c1 < N) {
+    D[static_cast<size_t>(g0) * N + c1] = to_bf16(acc2[0] * global);
+    if (c1 + 1 < N) D[static_cast<size_t>(g0) * N + c1 + 1] = to_bf16(acc2[1] * global);
+  }
+  if (g1 < M && c1 < N) {
+    D[static_cast<size_t>(g1) * N + c1] = to_bf16(acc2[2] * global);
+    if (c1 + 1 < N) D[static_cast<size_t>(g1) * N + c1 + 1] = to_bf16(acc2[3] * global);
+  }
+}
+
 int gerr() { return static_cast<int>(cudaGetLastError()); }
 
 }  // namespace
@@ -470,6 +643,34 @@ int moe_grouped_gemm(const void* aq, const void* a_s, const void* const* Bptr, c
     else
       grouped_gemm_kernel<64><<<grid, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, static_cast<bf16*>(out),
                                                         (int)N, (int)K);
+  }
+  return gerr();
+}
+
+// 第二刀：gate+up 融合单 launch。grid.z=2E（前 E gate、后 E up）。两路共用 aq/a_s/offsets，权重/scale/alpha/out 各一套。
+// K%128==0 用 pipe body(BK=128)。逐位与分开两次 moe_grouped_gemm 一致（body 逐字同 pipe）。
+int moe_grouped_gemm_dual(const void* aq, const void* a_s,
+                          const void* const* Bg, const void* const* Sg, const float* alphaG, void* outG,
+                          const void* const* Bu, const void* const* Su, const float* alphaU, void* outU,
+                          const int32_t* offsets, int64_t R, int64_t N, int64_t K, int64_t num_experts,
+                          cudaStream_t stream) {
+  if (R <= 0 || N <= 0 || K <= 0 || num_experts <= 0) return 0;
+  if (K % 64 != 0) return static_cast<int>(cudaErrorInvalidValue);
+  const dim3 grid((unsigned)((N + BN - 1) / BN), (unsigned)((R + BM - 1) / BM), (unsigned)(2 * num_experts));
+  const uint8_t* pa = static_cast<const uint8_t*>(aq);
+  const uint8_t* psa = static_cast<const uint8_t*>(a_s);
+  const uint8_t* const* pbg = reinterpret_cast<const uint8_t* const*>(Bg);
+  const uint8_t* const* psg = reinterpret_cast<const uint8_t* const*>(Sg);
+  const uint8_t* const* pbu = reinterpret_cast<const uint8_t* const*>(Bu);
+  const uint8_t* const* psu = reinterpret_cast<const uint8_t* const*>(Su);
+  if (K % 128 == 0) {
+    grouped_gemm_kernel_dual<128><<<grid, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, static_cast<bf16*>(outG),
+                                                            pbu, psu, alphaU, static_cast<bf16*>(outU), offsets,
+                                                            (int)N, (int)K, (int)num_experts);
+  } else {
+    grouped_gemm_kernel_dual<64><<<grid, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, static_cast<bf16*>(outG),
+                                                           pbu, psu, alphaU, static_cast<bf16*>(outU), offsets,
+                                                           (int)N, (int)K, (int)num_experts);
   }
   return gerr();
 }

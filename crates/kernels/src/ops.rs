@@ -2216,6 +2216,65 @@ pub fn moe_grouped_gemm(
     )
 }
 
+/// 第二刀：gate+up 融合单 launch（grid.z=2E）。两路共用 aq/a_s/offsets，权重/scale/alpha/out 各一套。
+/// 逐位与分开两次 moe_grouped_gemm 一致（kernel body 逐字相同）。
+#[allow(clippy::too_many_arguments)]
+pub fn moe_grouped_gemm_dual(
+    stream: &Stream,
+    aq: &CudaSlice<u8>,
+    a_s: &CudaSlice<u8>,
+    bg: &CudaSlice<u64>,
+    sg: &CudaSlice<u64>,
+    alpha_g: &CudaSlice<f32>,
+    out_g: &mut CudaSlice<bf16>,
+    bu: &CudaSlice<u64>,
+    su: &CudaSlice<u64>,
+    alpha_u: &CudaSlice<f32>,
+    out_u: &mut CudaSlice<bf16>,
+    offsets: &CudaSlice<i32>,
+    rows: usize,
+    n: usize,
+    k: usize,
+    num_experts: usize,
+) -> Result<()> {
+    ensure!(k % 64 == 0, "moe_grouped_gemm_dual: k {k} 不是 64 的倍数");
+    ensure!(
+        aq.len() >= rows * (k / 2)
+            && a_s.len() >= rows * (k / 16)
+            && out_g.len() >= rows * n
+            && out_u.len() >= rows * n
+            && bg.len() >= num_experts
+            && sg.len() >= num_experts
+            && alpha_g.len() >= num_experts
+            && bu.len() >= num_experts
+            && su.len() >= num_experts
+            && alpha_u.len() >= num_experts
+            && offsets.len() >= num_experts + 1,
+        "moe_grouped_gemm_dual: capacity"
+    );
+    let paq = stream.ptr(aq) as *const c_void;
+    let pas = stream.ptr(a_s) as *const c_void;
+    let pbg = stream.ptr(bg) as *const *const c_void;
+    let psg = stream.ptr(sg) as *const *const c_void;
+    let palg = stream.ptr(alpha_g) as *const f32;
+    let pog = stream.ptr_mut(out_g) as *mut c_void;
+    let pbu = stream.ptr(bu) as *const *const c_void;
+    let psu = stream.ptr(su) as *const *const c_void;
+    let palu = stream.ptr(alpha_u) as *const f32;
+    let pou = stream.ptr_mut(out_u) as *mut c_void;
+    let po = stream.ptr(offsets) as *const i32;
+    // SAFETY: 容量已校验；bg/sg/bu/su 内设备地址由调用方保证有效。
+    check(
+        unsafe {
+            ffi::moe_grouped_gemm_dual(
+                paq, pas, pbg, psg, palg, pog, pbu, psu, palu, pou, po,
+                rows as i64, n as i64, k as i64, num_experts as i64, stream.raw() as _,
+            )
+        },
+        "moe_grouped_gemm_dual",
+    )
+}
+
 /// 把 D2H 读出的 offsets 变成 (expert, start, len) 列表（只含非空专家）。
 pub fn moe_expert_ranges(offsets: &[i32]) -> Vec<(usize, usize, usize)> {
     let mut v = Vec::new();

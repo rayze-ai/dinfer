@@ -1442,14 +1442,25 @@ impl Gemma4Layer {
             )?;
             if let Some(ev) = &mt_ev { stream.record_timing(&ev[0])?; }  // 量化后=3gemm前
             if let Some(e) = &moe_pre_ev { stream.record_timing(&e[3])?; }  // norm+row2e+gather+quant完
-            k::ops::moe_grouped_gemm(
-                stream, &g.aq_gu, &g.as_gu, &mg.gate_packed, &mg.gate_scale, &mg.alpha_gate, &sc.buckets.offsets,
-                &mut g.gate_o.data, r, mg.n_gate, mg.k_gate, e,
-            )?;
-            k::ops::moe_grouped_gemm(
-                stream, &g.aq_gu, &g.as_gu, &mg.up_packed, &mg.up_scale, &mg.alpha_up, &sc.buckets.offsets,
-                &mut g.up_o.data, r, mg.n_gate, mg.k_gate, e,
-            )?;
+            // 第二刀（MOE_GEMM_DUAL=1）：gate+up 融合单 launch（grid.z=2E 填满 SM）；逐位同分开两次。默认分开。
+            if std::env::var("MOE_GEMM_DUAL").ok().as_deref() == Some("1") {
+                let (gate_o, up_o) = (&mut g.gate_o, &mut g.up_o);
+                k::ops::moe_grouped_gemm_dual(
+                    stream, &g.aq_gu, &g.as_gu,
+                    &mg.gate_packed, &mg.gate_scale, &mg.alpha_gate, &mut gate_o.data,
+                    &mg.up_packed, &mg.up_scale, &mg.alpha_up, &mut up_o.data,
+                    &sc.buckets.offsets, r, mg.n_gate, mg.k_gate, e,
+                )?;
+            } else {
+                k::ops::moe_grouped_gemm(
+                    stream, &g.aq_gu, &g.as_gu, &mg.gate_packed, &mg.gate_scale, &mg.alpha_gate, &sc.buckets.offsets,
+                    &mut g.gate_o.data, r, mg.n_gate, mg.k_gate, e,
+                )?;
+                k::ops::moe_grouped_gemm(
+                    stream, &g.aq_gu, &g.as_gu, &mg.up_packed, &mg.up_scale, &mg.alpha_up, &sc.buckets.offsets,
+                    &mut g.up_o.data, r, mg.n_gate, mg.k_gate, e,
+                )?;
+            }
             // 4) gelu·mul（全 R 行一次）
             gelu_mul(stream, ops, &g.gate_o.data, &g.up_o.data, &mut g.gelu_o.data, r, mi)?;
             // 5) down：量化 + grouped GEMM
