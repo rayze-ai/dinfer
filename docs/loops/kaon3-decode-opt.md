@@ -762,3 +762,4 @@ decode c1 的 MoE 段 nsys：grouped_gemm gate 18.6 + up 18.6 + down 12.5 + gelu
 - 省 4 launch/层 = 120/步 ≈ 0.18 ms 间隙 + ~6 us×30 kernel ≈ **-0.35 ms/步**。
 - nsys 里 `fp8_e4m3_roundtrip` 90 次/步（kv_fp8 默认关，来源待查：可能是 `Gemm::forward_fp8`/attention 的 A 往返）—— B12 候选。
 - **b8b 三门禁全过（`tmp_b8bpar_RESULT.txt`）**：moe_pipe_parity 3 测（含 tile 表）bad=0；mlp_fp8 9 场景 ok；**moe_route_fused_parity 5 场景：ids 同、w 位差 0、offsets/tile_off/counts/cursor 同、row2e 同、sorted 区间集合同** ⇒ B10 逐位。ABAB 跑中（A 侧 c8 又出一次 17.14 排队噪声，与 D61 同模式）。
+- b8b 的 bN **B 侧编译失败**（`layer.rs:1634` `moe_fp4_gemv` 多了个 `tile_off`——B8 批量替换 `&mg.alpha_down, &sc.buckets.offsets,\n` 也命中了 B7 的调用），bN 没检查编译 EXIT 就跑 → B 侧用的是 12:18 旧二进制 + `FP8_GEMV=1`，数字 7.00/11.39 = D64 split2 重放，**无效**。已修；下一链（b8c）把 B11 一起带上。**bN.sh 要加 "EXIT≠0 则停"**。

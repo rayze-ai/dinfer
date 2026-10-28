@@ -1632,7 +1632,7 @@ impl Gemma4Layer {
             )?;
             if moe_gemv {
                 k::ops::moe_fp4_gemv(
-                    stream, &g.aq_dn, &g.as_dn, &mg.down_packed, &mg.down_scale, &mg.alpha_down, &sc.buckets.offsets, &sc.buckets.tile_off,
+                    stream, &g.aq_dn, &g.as_dn, &mg.down_packed, &mg.down_scale, &mg.alpha_down, &sc.buckets.offsets,
                     &mut sc.yg.data, r, mg.n_down, mg.k_down, e,
                 )?;
             } else if !skip_dn {
