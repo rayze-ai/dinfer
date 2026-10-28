@@ -590,3 +590,23 @@ PIPE=1 TPOT c1=16.45ms,base=17.41(D45同条件)。**端到端-5.5%(省~1ms)**。
 （注意 base 16.15 比 Step A 的 17.07 低 0.9ms：bench 参数不同，num-requests 4 vs 8、本轮无 HOST_TIME；只在本表内部比。）
 - D53 补：`all`（跳 3 个 GEMM）14.86 → **3 个 grouped GEMM 合计 1.29ms/步（30 层，每层 43us）**；`MOE_GEMM_PIPE=1` 16.18 vs base 16.15 → **本二进制 pipe 已是默认（源码默认开已编进，D49 的"没编进"是当时 build 没重编 kernels；本次 build.log 显示 Compiling dinfer-kernels）**，PIPE=1 无额外收益，正常。
 - MoE 支路每层 kernel 清单（读源码 `moe.cu` / `moe_grouped_sm120.cu` / `layer.rs:1296-1530`，decode M=1）：router 前 rmsnorm_noweight + scale + mul（3）→ router GEMM（cuBLASLt 1 + bf16→f32 1）→ route_topk_ids（1 block，thread0 串行 8×128）→ route_softmax（1 block，thread0 串行）→ bucket：memset + count + scan（1 block thread0 串行 128）+ fill（4）→ memset acc → row2expert（128 blocks）→ gather → quant_gu → gate GEMM → up GEMM → gelu → quant_dn → down GEMM → scatter_add（atomic）→ memset y → f32_add_to_bf16。**≈22 个 launch/层 × 30 = 660 launch/步只为 MoE**，其中 route_topk/softmax/scan 三个是单线程串行 kernel。
+
+## ★★★★★★★ D54 2026-10-28 nsys 终于抓到 decode 图内 kernel 清单（c1，224 步，TPOT 16.29）—— 每步 1298 kernel，两处按 4160 行空跑
+nsys 2026.3.2 + `--cuda-flush-interval=1000` + 不 INT nsys 本体（之前 INT 打断报告生成=无 .nsys-rep）。脚本 `scripts/dev/kaon3_nsys_decode.sh` / `nsys_kern.py`。224 个 decode 步共 290782 kernel = **1298 kernel/步**；kernel 时间和 14.96ms/步 + 节点间隙 1.89ms/步 = 16.85 ≈ TPOT。
+| 每步 | n/步 | 单次 us | ms/步 | 占 | 说明 |
+|---|---|---|---|---|---|
+| mega_kernel dense MLP (170 CTA) | 30 | 86.9 | **2.61** | 17.4% | D45 dense 2.8 吻合 |
+| **rmsnorm_vec<128> grid=66560** | 90 (q/k/v 逐头 ×30) | 25.4 | **2.29** | 15.3% | **按 4160×16 行跑，实际 1×16 行**（`head_rmsnorm` 用 `x.numel()/head_dim`） |
+| gqa_paged_kernel grid=(1,16) D=512 全注意力慢路径 | 5 | 369 | **1.85** | 12.4% | 只 16 block |
+| gqa_fa_v5 (滑窗 decode) | 25 | 50.5 | 1.26 | 8.4% | |
+| rmsnorm_vec<1024> grid=1 (h=2816) | 181 (6/层) | 6.8 | 1.23 | 8.2% | 单行 2816 用 6.8us 偏慢 |
+| grouped_gemm_pipe<128>+<64> | 60+30 | 18.6 / 12.5 | 1.49 | 10% | D53 skip 1.29 吻合 |
+| cuBLAS gemvx | 31 | 31.8 avg | 0.99 | 6.6% | =30 router(~5us)+1 lm_head(~0.8ms 带宽) |
+| nvjet fp8 64x64 / 64x32 (qkv/oproj) | 25 / 35 | 29.4 / 16.5 | 1.31 | 8.8% | |
+| **rope_kernel grid=4160** | 30 | 23.5 | **0.70** | 4.7% | **按 4160 行跑，实际 1 行**（`tokens = positions.len()`=plan 缓冲满长） |
+| route_topk + route_softmax + scan（单线程 kernel） | 90 | 7.3/5.6/1.4 | 0.43 | 2.9% | |
+| gather_rows (logits 1 行 ×262144, 1 block) | 1 | 141 | 0.14 | 0.9% | 1 block 搬 512KB |
+| 其余 ~45 小 kernel/层 | ~700 | <2.5 | ~0.6 | | launch 间隙另计 1.89ms |
+**Step B 第一刀（按最长可修段）**：逐头 norm + rope 的行数改为实际 tokens（纯 launch 边界修正，真实行逐位不变）。预期省 **2.29+0.70−~0.1 ≈ 2.9ms/步（TPOT 16.3→~13.4，-18%）**。
+**后续刀（按收益排）**：② 全注意力 D=512 慢路径 1.85ms（5 层各 369us，16 block）；③ h=2816 rmsnorm 6.8us→~3us ×181 = 0.6ms；④ MoE 小 kernel 融合（减 ~300 launch ≈ 0.45ms 间隙 + 0.4ms）；⑤ gather_rows 0.13ms；⑥ dense mega 2.6ms（用户两想法）。
+**prefill 侧（TTFT，第二优先）**：eager 797 kernel/步，**down GEMM grid=(44,1040,128)=5.8M block，16 次共 57ms（占 prefill 160ms 的 37%）**——grid.y 按 R=tokens×8 全量切，128 专家 ×1040 行块绝大多数空退。
