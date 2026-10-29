@@ -692,7 +692,7 @@ extern "C" {
     /// （与 `moe_route_f32` 的 sigmoid 语义不同，见 `cuda/moe.cu` 注释与 vLLM `gemma4.py`。）
     /// B10：路由前处理融合（见 kernels.h）。
     #[allow(clippy::too_many_arguments)]
-    pub fn moe_route_bucket_small(logits: *const f32, per_expert_scale: *const c_void, topk_ids: *mut i32, topk_w: *mut f32, counts: *mut i32, offsets: *mut i32, cursor: *mut i32, sorted_tok: *mut i32, sorted_k: *mut i32, tile_off: *mut i32, row2e: *mut i32, inv: *mut i32, tokens: i64, num_experts: i64, topk: i64, stream: cudaStream_t) -> i32;
+    pub fn moe_route_bucket_small(logits: *const c_void, logits_bf16: i32, per_expert_scale: *const c_void, topk_ids: *mut i32, topk_w: *mut f32, counts: *mut i32, offsets: *mut i32, cursor: *mut i32, sorted_tok: *mut i32, sorted_k: *mut i32, tile_off: *mut i32, row2e: *mut i32, inv: *mut i32, tokens: i64, num_experts: i64, topk: i64, stream: cudaStream_t) -> i32;
     pub fn moe_route_softmax_f32(
         logits: *const f32,
         topk_ids: *mut i32,
@@ -1733,7 +1733,7 @@ mod stubs {
     stub!(moe_gate_f32(x: *const c_void, w: *const c_void, l: *mut f32, t: i64, e: i64, h: i64, s: cudaStream_t));
     stub!(router_gemm_bi_f32(x: *const c_void, w: *const c_void, o: *mut f32, t: i64, e: i64, h: i64, s: cudaStream_t));
     stub!(moe_combine_bf16(y: *const c_void, tw: *const f32, iv: *const i32, pe: *const c_void, ti: *const i32, ws: f32, o: *mut c_void, t: i64, k: i64, h: i64, m: i32, s: cudaStream_t));
-    stub!(moe_route_bucket_small(l: *const f32, pes: *const c_void, ti: *mut i32, tw: *mut f32, c: *mut i32, o: *mut i32, cu: *mut i32, st: *mut i32, sk: *mut i32, to: *mut i32, r2e: *mut i32, iv: *mut i32, t: i64, e: i64, k: i64, s: cudaStream_t));
+    stub!(moe_route_bucket_small(l: *const c_void, lb: i32, pes: *const c_void, ti: *mut i32, tw: *mut f32, c: *mut i32, o: *mut i32, cu: *mut i32, st: *mut i32, sk: *mut i32, to: *mut i32, r2e: *mut i32, iv: *mut i32, t: i64, e: i64, k: i64, s: cudaStream_t));
     stub!(moe_route_softmax_f32(l: *const f32, ti: *mut i32, pes: *const c_void, tw: *mut f32, t: i64, e: i64, k: i64, s: cudaStream_t)
         => moe_route_softmax_f32, "moe_route_softmax_f32"
         [l, ti, pes, tw, t, e, k, s]);

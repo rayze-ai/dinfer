@@ -5447,9 +5447,14 @@ pub fn moe_fp4_gemv(
 /// top-k（口径同 `moe_route_softmax_f32`，逐位同）+ bucket（同 `moe_bucket`：counts/offsets/cursor/sorted/tile_off）+ row2e。
 /// sorted 区间内顺序与旧版一样"不定"（smem 原子游标）。
 #[allow(clippy::too_many_arguments)]
+/// B33c：`logits` 可为 bf16（router GEMM 直接输出）或 f32；bf16 时 kernel 内 cast，与先 `bf16_to_f32_n` 再传 f32 逐位同。
+pub enum RouteLogits<'a> {
+    F32(&'a CudaSlice<f32>),
+    Bf16(&'a CudaSlice<bf16>),
+}
 pub fn moe_route_bucket_small(
     stream: &Stream,
-    logits: &CudaSlice<f32>,
+    logits: RouteLogits<'_>,
     per_expert_scale: Option<&CudaSlice<bf16>>,
     topk_ids: &mut CudaSlice<i32>,
     topk_w: &mut CudaSlice<f32>,
@@ -5460,12 +5465,15 @@ pub fn moe_route_bucket_small(
 ) -> Result<()> {
     let e = b.num_experts;
     ensure!(tokens >= 1 && tokens <= 64, "moe_route_bucket_small: tokens={tokens} (≤64)");
-    ensure!(logits.len() >= tokens * e && topk_ids.len() >= tokens * topk && topk_w.len() >= tokens * topk, "moe_route_bucket_small: logits/out");
+    let (pl, lg_bf16, llen) = match logits {
+        RouteLogits::F32(l) => (stream.ptr(l) as *const c_void, 0i32, l.len()),
+        RouteLogits::Bf16(l) => (stream.ptr(l) as *const c_void, 1i32, l.len()),
+    };
+    ensure!(llen >= tokens * e && topk_ids.len() >= tokens * topk && topk_w.len() >= tokens * topk, "moe_route_bucket_small: logits/out");
     ensure!(tokens * topk <= b.max_pairs && row2e.len() >= tokens * topk, "moe_route_bucket_small: capacity");
     if let Some(p) = per_expert_scale {
         ensure!(p.len() == e, "moe_route_bucket_small: per_expert_scale len");
     }
-    let pl = stream.ptr(logits) as *const f32;
     let pp = per_expert_scale.map_or(std::ptr::null(), |p| stream.ptr(p) as *const c_void);
     let pi = stream.ptr_mut(topk_ids) as *mut i32;
     let pw = stream.ptr_mut(topk_w) as *mut f32;
@@ -5480,7 +5488,7 @@ pub fn moe_route_bucket_small(
     // SAFETY: 容量已校验；per_expert_scale 可为 null。
     check(
         unsafe {
-            ffi::moe_route_bucket_small(pl, pp, pi, pw, pc, po, pcu, pst, psk, pto, pr, pinv, tokens as i64, e as i64, topk as i64, stream.raw() as ffi::cudaStream_t)
+            ffi::moe_route_bucket_small(pl, lg_bf16, pp, pi, pw, pc, po, pcu, pst, psk, pto, pr, pinv, tokens as i64, e as i64, topk as i64, stream.raw() as ffi::cudaStream_t)
         },
         "moe_route_bucket_small",
     )

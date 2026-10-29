@@ -380,7 +380,8 @@ int moe_combine_bf16(const void* y, const float* topk_w, const int32_t* inv, con
                      const int32_t* topk_ids, float w_scale, void* out, int64_t tokens, int64_t topk, int64_t hidden,
                      int mode, cudaStream_t stream);
 // B10：decode 小 batch（tokens ≤ 64）路由前处理一次 launch：top-k + 权重 + counts/offsets/cursor/tile_off + sorted + row2e。
-int moe_route_bucket_small(const float* logits, const void* per_expert_scale, int32_t* topk_ids, float* topk_w,
+// B33c：logits_bf16=1 时 logits 是 bf16（router GEMM 的 bf16 输出），kernel 内 cast（与 bf16_to_f32_n 逐位同），省一次 launch。
+int moe_route_bucket_small(const void* logits, int logits_bf16, const void* per_expert_scale, int32_t* topk_ids, float* topk_w,
                            int32_t* counts, int32_t* offsets, int32_t* cursor, int32_t* sorted_tok, int32_t* sorted_k,
                            int32_t* tile_off, int32_t* row2e, int32_t* inv, int64_t tokens, int64_t num_experts,
                            int64_t topk, cudaStream_t stream);

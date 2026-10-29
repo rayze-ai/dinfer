@@ -42,7 +42,25 @@ fn moe_route_fused_parity() {
         let mut w_b = st.alloc_zeros::<f32>(tokens * k).unwrap();
         let mut b_b = ops::MoeBuckets::new(&st, e, 64, k).unwrap();
         let mut r2e_b = st.alloc_zeros::<i32>(tokens * k).unwrap();
-        ops::moe_route_bucket_small(&st, &d_lg, pes_opt, &mut ids_b, &mut w_b, &mut b_b, &mut r2e_b, tokens, k).unwrap();
+        ops::moe_route_bucket_small(&st, ops::RouteLogits::F32(&d_lg), pes_opt, &mut ids_b, &mut w_b, &mut b_b, &mut r2e_b, tokens, k).unwrap();
+        // B33c：bf16 logits 入口 vs f32（logits 先舍 bf16 后两路应逐位同）
+        {
+            let lg16: Vec<bf16> = lg.iter().map(|&x| bf16::from_f32(x)).collect();
+            let d16 = st.htod_copy(lg16.clone()).unwrap();
+            let d32 = st.htod_copy(lg16.iter().map(|x| x.to_f32()).collect::<Vec<f32>>()).unwrap();
+            let mut b_c = ops::MoeBuckets::new(&st, e, 64, k).unwrap();
+            let mut b_d = ops::MoeBuckets::new(&st, e, 64, k).unwrap();
+            let (mut ic, mut wc, mut rc) = (st.alloc_zeros::<i32>(tokens * k).unwrap(), st.alloc_zeros::<f32>(tokens * k).unwrap(), st.alloc_zeros::<i32>(tokens * k).unwrap());
+            let (mut id, mut wd, mut rd) = (st.alloc_zeros::<i32>(tokens * k).unwrap(), st.alloc_zeros::<f32>(tokens * k).unwrap(), st.alloc_zeros::<i32>(tokens * k).unwrap());
+            ops::moe_route_bucket_small(&st, ops::RouteLogits::F32(&d32), pes_opt, &mut ic, &mut wc, &mut b_c, &mut rc, tokens, k).unwrap();
+            ops::moe_route_bucket_small(&st, ops::RouteLogits::Bf16(&d16), pes_opt, &mut id, &mut wd, &mut b_d, &mut rd, tokens, k).unwrap();
+            st.synchronize().unwrap();
+            let (xc, xd) = (st.dtoh_sync_copy(&ic).unwrap(), st.dtoh_sync_copy(&id).unwrap());
+            let (yc, yd) = (st.dtoh_sync_copy(&wc).unwrap(), st.dtoh_sync_copy(&wd).unwrap());
+            let wb = yc.iter().zip(&yd).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+            println!("bf16-logits tokens={tokens}: ids_eq={} w_bits_diff={wb}", xc == xd);
+            if xc != xd || wb != 0 { fails.push(format!("bf16 logits tokens={tokens}")); }
+        }
         st.synchronize().unwrap();
         let g = |x: &dinfer_kernels::cudarc::driver::CudaSlice<i32>| st.dtoh_sync_copy(x).unwrap();
         let (ia, ib) = (g(&ids_a), g(&ids_b));

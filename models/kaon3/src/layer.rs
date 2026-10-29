@@ -678,6 +678,11 @@ fn router_pre_fused_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_ne!("ROUTER_PRE_FUSED", "0"))
 }
+/// B33c：route_fused 直接读 router GEMM 的 bf16 logits，省 bf16→f32 cast 一次 launch（`ROUTER_LOGITS_BF16=0` 回退）。
+fn route_logits_bf16_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_ne!("ROUTER_LOGITS_BF16", "0"))
+}
 fn kv_fp8_fused_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_ne!("KV_FP8_FUSED", "0"))
@@ -1566,6 +1571,7 @@ impl Gemma4Layer {
         let kk = cfg.top_k;
         let root_size = f32::from(bf16::from_f32((h as f32).powf(-0.5)));
         // MOE_ISO：直接灌 vLLM router logits，跳过 router 预处理 + GEMM（纯测专家）。
+        let mut route_logits_bf16_ok = false;  // B33c：本步 route_fused 是否可直接读 bf16 logits
         if moe_iso.is_some() {
             let lg = rdf_iso("vllm_moe_logits.bin")?;
             ensure!(lg.len() >= tokens * e, "moe_iso logits 太小 {} < {}", lg.len(), tokens * e);
@@ -1592,6 +1598,9 @@ impl Gemma4Layer {
             // `linear.py:209` 显式走 `linear_batch_invariant` → `matmul_persistent`（Triton），
             // **sm_120 也一样**（不装 dispatcher patch 但照样显式调用）。与 cuBLAS 在同形状上
             // 43% 元素不同 → 必须用同归约结构的 kernel（`docs/loops/kaon3-compile.md` 第 5 轮）。
+            route_logits_bf16_ok = !(router_gemm_bi() && h % 64 == 0 && e % 8 == 0)
+                && route_logits_bf16_enabled()
+                && moe_grouped_enabled() && tokens <= 64 && moe_route_fused_enabled() && sc.grouped.is_some();
             if router_gemm_bi() && h % 64 == 0 && e % 8 == 0 {
                 {
                     static ONCE: std::sync::Once = std::sync::Once::new();
@@ -1630,7 +1639,10 @@ impl Gemma4Layer {
                 )?;
             } else {
                 gemm.forward_bf16(&sc.routed.data, &self.router.bf16_weight()?.data, None, &mut sc.logits_bf16.data, tokens, e, h)?;
-                k::ops::bf16_to_f32_n(stream, &sc.logits_bf16.data, &mut sc.logits.data, tokens * e)?;
+                // B33c：route_fused 路径直接读 bf16 logits（kernel 内 cast，逐位同），省这一次 launch；dump / 旧链仍需 f32。
+                if !(route_logits_bf16_ok && sub_out.is_none()) {
+                    k::ops::bf16_to_f32_n(stream, &sc.logits_bf16.data, &mut sc.logits.data, tokens * e)?;
+                }
             }
         } else {
             k::ops::moe_gate_f32(stream, &sc.routed.data, &self.router.bf16_weight()?.data, &mut sc.logits.data, tokens, e, h)?;
@@ -1659,8 +1671,13 @@ impl Gemma4Layer {
         let route_fused = moe_grouped_enabled() && tokens <= 64 && moe_route_fused_enabled() && sc.grouped.is_some();
         if route_fused {
             let g = sc.grouped.as_mut().unwrap();
+            let lg = if route_logits_bf16_ok && sub_out.is_none() {
+                k::ops::RouteLogits::Bf16(&sc.logits_bf16.data)
+            } else {
+                k::ops::RouteLogits::F32(&sc.logits.data)
+            };
             k::ops::moe_route_bucket_small(
-                stream, &sc.logits.data, pes_route, &mut sc.topk_ids.data, &mut sc.topk_w.data, &mut sc.buckets,
+                stream, lg, pes_route, &mut sc.topk_ids.data, &mut sc.topk_w.data, &mut sc.buckets,
                 &mut g.row2e, tokens, kk,
             )?;
         } else {

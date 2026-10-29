@@ -273,11 +273,14 @@ __device__ __forceinline__ void route_softmax_row(const float* __restrict__ lg, 
 //  - Z：单 lane 版是 e=0..E-1 顺序 `__fadd_rn`。warp 版 lane l 先算自己段 [l·ept, (l+1)·ept) 的 exp，再由 lane 0 按 e 升序
 //    从 shfl 取值顺序累加（exp 并行算、求和仍串行 → 位同，但 exp（E 次 __expf/MUFU）并行化掉了 128→4 次/lane）；
 //  - raw/renorm/w 与原版同式（K ≤ 32，一 lane 一个 k）。
-__device__ __forceinline__ void route_softmax_row_warp(const float* __restrict__ lg, const int32_t* __restrict__ ids,
+__device__ __forceinline__ float route_lg(const void* __restrict__ lg, int e, int lg_bf16) {
+  return lg_bf16 ? to_f32(static_cast<const bf16*>(lg)[e]) : static_cast<const float*>(lg)[e];
+}
+__device__ __forceinline__ void route_softmax_row_warp(const void* __restrict__ lg, const int32_t* __restrict__ ids,
                                                        const void* __restrict__ per_expert_scale, float* __restrict__ w,
-                                                       int E, int K, int exact_rcp, int lane) {
+                                                       int E, int K, int exact_rcp, int lane, int lg_bf16) {
   float m = -INFINITY;
-  for (int e = lane; e < E; e += 32) m = fmaxf(m, lg[e]);
+  for (int e = lane; e < E; e += 32) m = fmaxf(m, route_lg(lg, e, lg_bf16));
 #pragma unroll
   for (int o = 16; o > 0; o >>= 1) m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, o));
   int block_e = 1;
@@ -287,7 +290,7 @@ __device__ __forceinline__ void route_softmax_row_warp(const float* __restrict__
 #pragma unroll
   for (int j = 0; j < 32; ++j) {
     const int e = lane * ept + j;
-    ex[j] = (j < ept && e < E) ? route_exp_e(__fsub_rn(lg[e], m), exact_rcp) : 0.f;
+    ex[j] = (j < ept && e < E) ? route_exp_e(__fsub_rn(route_lg(lg, e, lg_bf16), m), exact_rcp) : 0.f;
   }
   // Z：e 升序串行累加（与单 lane 版同序）。全 warp 同步做（每 lane 得到同一个 Z），依次从 lane l 取 ex[j]。
   float Z = 0.f;
@@ -303,7 +306,7 @@ __device__ __forceinline__ void route_softmax_row_warp(const float* __restrict__
   const float invZ = route_inv(Z, exact_rcp);
   // raw[k]（一 lane 一个 k）：exp 重算一次（与原版同一表达式 → 同值）
   float rawk = 0.f;
-  if (lane < K) rawk = __fmul_rn(route_exp_e(__fsub_rn(lg[ids[lane]], m), exact_rcp), invZ);
+  if (lane < K) rawk = __fmul_rn(route_exp_e(__fsub_rn(route_lg(lg, ids[lane], lg_bf16), m), exact_rcp), invZ);
   // renorm：原版把 raw[0..K) 按 pos = l·ept' + j 分到 32 个 lane 槽后蝶形求和（ept' 按 block_e 算）。K ≤ ept' 时每槽最多 1 个
   // → 槽 l 的值 = raw[l]（l<K）或 0，蝶形序 xor 16..1 与原版同。K > ept' 时原版槽内顺序累加——Kaon K=8、E=128 → ept'=4，
   // 槽 l 含 raw[4l..4l+4)：这里按同序先在 lane 内做不出来（raw 在不同 lane）→ 用 shfl 把 raw[4l..4l+4) 拉到 lane l 顺序加。
@@ -384,17 +387,17 @@ extern "C" int moe_route_softmax_f32(const float* logits, int32_t* topk_ids, con
 // 单 block；tokens ≤ kRouteSmallMaxTok；每线程一个 token（≤ blockDim）。sorted 区间内顺序由 smem 原子决定（与旧版一样"不定"）。
 constexpr int kRouteSmallMaxTok = 64;
 __global__ void __launch_bounds__(256) route_bucket_small_kernel(
-    const float* __restrict__ logits, const void* __restrict__ per_expert_scale, int32_t* __restrict__ topk_ids,
+    const void* __restrict__ logits, const void* __restrict__ per_expert_scale, int32_t* __restrict__ topk_ids,
     float* __restrict__ topk_w, int32_t* __restrict__ counts, int32_t* __restrict__ offsets,
     int32_t* __restrict__ cursor, int32_t* __restrict__ sorted_tok, int32_t* __restrict__ sorted_k,
     int32_t* __restrict__ tile_off, int32_t* __restrict__ row2e, int32_t* __restrict__ inv, int tokens, int E, int K,
-    int exact_rcp) {
+    int exact_rcp, int lg_bf16) {
   extern __shared__ __align__(16) uint8_t smem_raw[];
   float* s_val = reinterpret_cast<float*>(smem_raw);           // [tokens][E] 工作副本（top-k 时置 -inf）
   int32_t* s_cnt = reinterpret_cast<int32_t*>(s_val + (size_t)tokens * E);  // [E]
   int32_t* s_cur = s_cnt + E;                                   // [E]
   const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, nwarp = blockDim.x >> 5;
-  for (int i = tid; i < tokens * E; i += blockDim.x) s_val[i] = logits[i];
+  for (int i = tid; i < tokens * E; i += blockDim.x) s_val[i] = route_lg(logits, i, lg_bf16);  // B33c：bf16 logits 直接读
   for (int e = tid; e < E; e += blockDim.x) s_cnt[e] = 0;
   __syncthreads();
   // B19（D73）：每 token 一 warp。top-k 第 k 轮：lane 各扫 E/32 个专家取局部 (max, 最小下标)，warp xor 归约
@@ -423,7 +426,9 @@ __global__ void __launch_bounds__(256) route_bucket_small_kernel(
       __syncwarp();
     }
     __syncwarp();
-    route_softmax_row_warp(logits + (size_t)t * E, ids, per_expert_scale, topk_w + (size_t)t * K, E, K, exact_rcp, lane);
+    route_softmax_row_warp(lg_bf16 ? static_cast<const void*>(static_cast<const bf16*>(logits) + (size_t)t * E)
+                                   : static_cast<const void*>(static_cast<const float*>(logits) + (size_t)t * E),
+                           ids, per_expert_scale, topk_w + (size_t)t * K, E, K, exact_rcp, lane, lg_bf16);
   }
   __syncthreads();
   if (tid == 0) {
@@ -467,7 +472,7 @@ __global__ void __launch_bounds__(256) route_bucket_small_kernel(
   }
 }
 
-extern "C" int moe_route_bucket_small(const float* logits, const void* per_expert_scale, int32_t* topk_ids,
+extern "C" int moe_route_bucket_small(const void* logits, int logits_bf16, const void* per_expert_scale, int32_t* topk_ids,
                                       float* topk_w, int32_t* counts, int32_t* offsets, int32_t* cursor,
                                       int32_t* sorted_tok, int32_t* sorted_k, int32_t* tile_off, int32_t* row2e,
                                       int32_t* inv, int64_t tokens, int64_t num_experts, int64_t topk,
@@ -492,7 +497,7 @@ extern "C" int moe_route_bucket_small(const float* logits, const void* per_exper
   }
   route_bucket_small_kernel<<<1, 256, smem, stream>>>(logits, per_expert_scale, topk_ids, topk_w, counts, offsets,
                                                       cursor, sorted_tok, sorted_k, tile_off, row2e, inv, (int)tokens,
-                                                      (int)num_experts, (int)topk, exact_rcp);
+                                                      (int)num_experts, (int)topk, exact_rcp, logits_bf16);
   return last_err();
 }
 
