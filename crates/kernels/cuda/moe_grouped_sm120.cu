@@ -522,7 +522,9 @@ __global__ void __launch_bounds__(256)
 // 预取深度 STAGES-1 组在飞，wait_group STAGES-1。mma 序、片段寻址与 pipe 版逐字同 → 有效行逐位一致。
 // B16b：BM_T=16（decode）时 8 warp 排 1(M)×8(N)，每 warp 一个 n8 片段（只 acc）；A 只 16 行、smem/寄存器减半、
 // 占用翻倍，M 侧不再为空行算 mma。每个输出元素的 k 累加序与 BM_T=32 版同 → 逐位。tile 表用 tile_off 的第二半（BM=16）。
-template <int BK, int STAGES, int BM_T = BM>
+// B41（loop kaon3-decode-opt D183）：BN_T 模板化（默认 BN=64）。decode 可用 BN_T=32 + 4 warp（blockDim 128）：CTA 数翻倍、
+// 每 CTA smem 减半 → 每 SM 常驻 CTA 翻倍、在飞字节翻倍；每个输出元素的 k 累加序不变 → 逐位同。
+template <int BK, int STAGES, int BM_T = BM, int BN_T = BN>
 __global__ void __launch_bounds__(256)
     grouped_gemm_kernel_pipe4(const uint8_t* __restrict__ A, const uint8_t* __restrict__ Asc,
                               const uint8_t* const* __restrict__ Bptr, const uint8_t* const* __restrict__ Sptr,
@@ -538,13 +540,14 @@ __global__ void __launch_bounds__(256)
   constexpr int NQ4 = BK / 64;
   constexpr int NB16 = BK / 16;
   __shared__ __align__(16) uint8_t sA[STAGES][BM_T * RSA];
-  __shared__ __align__(16) uint8_t sB[STAGES][BN * RSB];
+  __shared__ __align__(16) uint8_t sB[STAGES][BN_T * RSB];
   __shared__ __align__(16) uint32_t sfa[STAGES][BM_T * NQ4];
-  __shared__ __align__(16) uint32_t sfb[STAGES][BN * NQ4];
+  __shared__ __align__(16) uint32_t sfb[STAGES][BN_T * NQ4];
   const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
   constexpr bool ONE_FRAG = BM_T == 16;              // 1×8 warp 布局：每 warp 一个 n8 片段
   const int wm = ONE_FRAG ? 0 : (warp >> 2), wn = ONE_FRAG ? warp : (warp & 3);
-  const int n_blk = blockIdx.x * BN;
+  const int n_blk = blockIdx.x * BN_T;
+  static_assert(BN_T == BN || (BM_T == 16 && BN_T % 8 == 0), "BN_T 只在 BM16 布局下可变");
   const uint8_t* B = Bptr[e];
   const uint8_t* S = Sptr[e];
   const float global = alpha[e];
@@ -567,12 +570,12 @@ __global__ void __launch_bounds__(256)
           ok ? 4 : 0);
     }
     const uint8_t* bsrc = B + static_cast<size_t>(n_blk) * (K / 2) + kb * (BK / 2);
-    for (int i = tid; i < (BN * BK / 2) / 16; i += blockDim.x) {
+    for (int i = tid; i < (BN_T * BK / 2) / 16; i += blockDim.x) {
       const int r = i / rb, c = i % rb;
       const bool ok = (n_blk + r < N) && (kb * BK + c * 32 < K);
       cp16(smem_u32(&sB[st][r * RSB + c * 16]), bsrc + (static_cast<size_t>(r) * (K / 32) + c) * 16, ok ? 16 : 0);
     }
-    for (int i = tid; i < BN * NQ4; i += blockDim.x) {
+    for (int i = tid; i < BN_T * NQ4; i += blockDim.x) {
       const int r = i / NQ4, q = i % NQ4;
       const bool ok = (n_blk + r < N) && (kb * NB16 + q * 4 < K / 16);
       cp4(smem_u32(&sfb[st][r * NQ4 + q]), S + static_cast<size_t>(n_blk + r) * (K / 16) + kb * NB16 + q * 4,
@@ -819,6 +822,11 @@ __global__ void __launch_bounds__(256)
 
 int gerr() { return static_cast<int>(cudaGetLastError()); }
 // B40：decode（R ≤ 128）pipe4 的 K 块大小。默认 256；`MOE_GEMM_BK=64|128` 回退（A/B 用）。
+// B41：decode pipe4 的 N 块宽（仅 BK=256 路径）。默认 64；`MOE_GEMM_BN=32` → 4 warp CTA，CTA 数翻倍（A/B 用，赢了再改默认）。
+static int dec_bn() {
+  static const int v = []{ const char* e = getenv("MOE_GEMM_BN"); const int n = e ? atoi(e) : 64; return n == 32 ? 32 : 64; }();
+  return v;
+}
 static int dec_bk() {
   static const int v = []{ const char* e = getenv("MOE_GEMM_BK"); const int n = e ? atoi(e) : 256; return (n == 64 || n == 128) ? n : 256; }();
   return v;
@@ -872,7 +880,11 @@ int moe_grouped_gemm(const void* aq, const void* a_s, const void* const* Bptr, c
       const dim3 g16((unsigned)((N + BN - 1) / BN), (unsigned)((R + 15) / 16 + num_experts), 1u);
       // B40（D181）：decode 的 pipe4 是串行 K 链瓶颈（22 迭代 × ~0.7 us），BK=256 把迭代减半；K 尾块零填充（K % 64 == 0 即可）。
       // 累加序仍 k 升序 → 与 BK=64/128 逐位同。`MOE_GEMM_BK=64|128|256`，默认 256。
-      if (dec_bk() == 256) grouped_gemm_kernel_pipe4<256, 3, 16><<<g16, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+      if (dec_bk() == 256 && dec_bn() == 32) {
+        const dim3 g32((unsigned)((N + 31) / 32), g16.y, 1u);
+        grouped_gemm_kernel_pipe4<256, 3, 16, 32><<<g32, 128, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+      }
+      else if (dec_bk() == 256) grouped_gemm_kernel_pipe4<256, 3, 16><<<g16, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
       else if (dec_bk() == 128 && K % 128 == 0) grouped_gemm_kernel_pipe4<128, 4, 16><<<g16, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
       else grouped_gemm_kernel_pipe4<64, 4, 16><<<g16, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
       return gerr();
@@ -927,7 +939,11 @@ int moe_grouped_gemm_dual(const void* aq, const void* a_s,
   static const bool dual_pipe4 = []{ const char* v = getenv("MOE_DUAL_PIPE4"); return !v || v[0] != '0'; }();
   if (dual_pipe4 && R <= 128) {
     const dim3 g16((unsigned)((N + BN - 1) / BN), (unsigned)((R + 15) / 16 + num_experts), 2u);
-    if (dec_bk() == 256)
+    if (dec_bk() == 256 && dec_bn() == 32) {
+      const dim3 g32((unsigned)((N + 31) / 32), g16.y, 2u);
+      grouped_gemm_kernel_pipe4<256, 3, 16, 32><<<g32, 128, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
+    }
+    else if (dec_bk() == 256)
       grouped_gemm_kernel_pipe4<256, 3, 16><<<g16, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
     else if (dec_bk() == 128 && K % 128 == 0)
       grouped_gemm_kernel_pipe4<128, 4, 16><<<g16, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
