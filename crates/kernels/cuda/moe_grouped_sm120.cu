@@ -881,6 +881,12 @@ static int dec_bn() {
   static const int v = []{ const char* e = getenv("MOE_GEMM_BN"); const int n = e ? atoi(e) : 64; return n == 32 ? 32 : 64; }();
   return v;
 }
+// D197：decode 快路径（BM16 / BK256 / STAGES3，dual pipe4）的行数上限。默认 128；`MOE_DEC_RMAX=512` 让 c16–c64（R ≤ 512）也走它
+// （M=32 激活 ~100 专家、每专家 2–3 行，BM=32 旧体 tile 93% 空：nsys M=32 dual<128> 108 us/层）。
+static int dec_rmax() {
+  static const int v = []{ const char* e = getenv("MOE_DEC_RMAX"); const int n = e ? atoi(e) : 128; return (n >= 16 && n <= 4096) ? n : 128; }();
+  return v;
+}
 static int dec_bk() {
   static const int v = []{ const char* e = getenv("MOE_GEMM_BK"); const int n = e ? atoi(e) : 256; return (n == 64 || n == 128) ? n : 256; }();
   return v;
@@ -930,7 +936,7 @@ int moe_grouped_gemm(const void* aq, const void* a_s, const void* const* Bptr, c
   if (pipe && stages > 2) {
     // B16b：decode（R ≤ 128）用 BM=16 tile（tile 表第二半），grid.y 上界 R/16 + E
     static const bool bm16 = []{ const char* v = getenv("MOE_GEMM_BM16"); return !v || v[0] != '0'; }();
-    if (bm16 && R <= 128) {
+    if (bm16 && R <= dec_rmax()) {
       const dim3 g16((unsigned)((N + BN - 1) / BN), (unsigned)((R + 15) / 16 + num_experts), 1u);
       // B40（D181）：decode 的 pipe4 是串行 K 链瓶颈（22 迭代 × ~0.7 us），BK=256 把迭代减半；K 尾块零填充（K % 64 == 0 即可）。
       // 累加序仍 k 升序 → 与 BK=64/128 逐位同。`MOE_GEMM_BK=64|128|256`，默认 256。
@@ -991,7 +997,7 @@ int moe_grouped_gemm_dual(const void* aq, const void* a_s,
   // B36：decode（R ≤ 128）走 pipe4 BM=16 的 dual（grid.z=2；每个输出元素 k 累加序与单路 pipe4<BM16> 同 → 逐位）。
   // 旧 dual body 是 BM=32 的 pipe 体，decode 时丢了 B16b 的占用收益。`MOE_DUAL_PIPE4=0` 回退旧 body。
   static const bool dual_pipe4 = []{ const char* v = getenv("MOE_DUAL_PIPE4"); return !v || v[0] != '0'; }();
-  if (dual_pipe4 && R <= 128) {
+  if (dual_pipe4 && R <= dec_rmax()) {
     const dim3 g16((unsigned)((N + BN - 1) / BN), (unsigned)((R + 15) / 16 + num_experts), 2u);
     if (dec_bk() == 256 && dec_bn() == 32) {
       const dim3 g32((unsigned)((N + 31) / 32), g16.y, 2u);

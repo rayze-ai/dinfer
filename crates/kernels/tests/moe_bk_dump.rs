@@ -17,7 +17,9 @@ fn moe_bk_dump() {
     let dev = Device::new(0).expect("cuda");
     let st = dev.default_stream();
     let e = 8usize;
-    let lens = [1usize, 1, 2, 3, 1, 5, 1, 8];
+    // D197：`MOE_BK_MULT=n` 把每专家行数 ×n（n=12 → 264 行，越过 128 的 decode 快路径门槛，用来对拍 MOE_DEC_RMAX 两侧）。
+    let mult: usize = std::env::var("MOE_BK_MULT").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+    let lens: Vec<usize> = [1usize, 1, 2, 3, 1, 5, 1, 8].iter().map(|l| l * mult).collect();
     let rows: usize = lens.iter().sum();
     let mut offsets = vec![0i32; e + 1];
     for i in 0..e { offsets[i + 1] = offsets[i] + lens[i] as i32; }
