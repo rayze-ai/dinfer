@@ -83,14 +83,14 @@ fn moe_gemm_timing() {
         let bytes_dn = active as f64 * per_expert_dn;
         let gbs = |bytes: f64, us: f64| bytes / us / 1e3;
         let us = time(&mut || { k::ops::moe_grouped_gemm_dual(&st, &daq_gu, &das_gu, &pbg, &psg, &dal, &mut og, &pbu, &psu, &dal, &mut ou, &doff, &dtoff, rows, n_gu, k_gu, e).unwrap(); });
-        eprintln!("MOE_GEMM_TIMING {name} active={active} rows={rows} gate‖up dual:      {us:7.2} us  {:6.0} GB/s  (下限 {:.2} us @1.79TB/s)", gbs(bytes_gu, us), bytes_gu / 1.79e3);
+        eprintln!("MOE_GEMM_TIMING {name} active={active} rows={rows} gate‖up dual:      {us:7.2} us  {:6.0} GB/s  (DRAM 下限 {:.2} us @1.79TB/s)", gbs(bytes_gu, us), bytes_gu / 1.79e6);
         let us = time(&mut || {
             k::ops::moe_grouped_gemm(&st, &daq_gu, &das_gu, &pbg, &psg, &dal, &doff, &dtoff, &mut og, rows, n_gu, k_gu, e).unwrap();
             k::ops::moe_grouped_gemm(&st, &daq_gu, &das_gu, &pbu, &psu, &dal, &doff, &dtoff, &mut ou, rows, n_gu, k_gu, e).unwrap();
         });
         eprintln!("MOE_GEMM_TIMING {name} active={active} rows={rows} gate‖up 2×grouped: {us:7.2} us  {:6.0} GB/s", gbs(bytes_gu, us));
         let us = time(&mut || { k::ops::moe_grouped_gemm(&st, &daq_dn, &das_dn, &pbd, &psd, &dal, &doff, &dtoff, &mut od, rows, n_dn, k_dn, e).unwrap(); });
-        eprintln!("MOE_GEMM_TIMING {name} active={active} rows={rows} down grouped:      {us:7.2} us  {:6.0} GB/s  (下限 {:.2} us)", gbs(bytes_dn, us), bytes_dn / 1.79e3);
+        eprintln!("MOE_GEMM_TIMING {name} active={active} rows={rows} down grouped:      {us:7.2} us  {:6.0} GB/s  (DRAM 下限 {:.2} us)", gbs(bytes_dn, us), bytes_dn / 1.79e6);
         let mut oact = st.alloc_zeros::<bf16>(rows * n_gu).unwrap();
         let us = time(&mut || { k::ops::moe_fp4_gateup_act(&st, &daq_gu, &das_gu, &pbg, &psg, &dal, &pbu, &psu, &dal, &doff, &mut oact, rows, n_gu, k_gu, e).unwrap(); });
         eprintln!("MOE_GEMM_TIMING {name} active={active} rows={rows} B7 gateup_act:     {us:7.2} us  {:6.0} GB/s", gbs(bytes_gu, us));

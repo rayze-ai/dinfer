@@ -557,24 +557,24 @@ __global__ void __launch_bounds__(256)
     const uint8_t* asrc = A + static_cast<size_t>(m_blk) * (K / 2) + kb * (BK / 2);
     for (int i = tid; i < (BM_T * BK / 2) / 16; i += blockDim.x) {
       const int r = i / rb, c = i % rb;
-      const bool ok = (m_blk + r < M);
+      const bool ok = (m_blk + r < M) && (kb * BK + c * 32 < K);  // B40：K 尾块越界零填充
       cp16(smem_u32(&sA[st][r * RSA + c * 16]), asrc + (static_cast<size_t>(r) * (K / 32) + c) * 16, ok ? 16 : 0);
     }
     for (int i = tid; i < BM_T * NQ4; i += blockDim.x) {
       const int r = i / NQ4, q = i % NQ4;
-      const bool ok = (m_blk + r < M);
+      const bool ok = (m_blk + r < M) && (kb * NB16 + q * 4 < K / 16);
       cp4(smem_u32(&sfa[st][r * NQ4 + q]), Asc + static_cast<size_t>(m_blk + r) * (K / 16) + kb * NB16 + q * 4,
           ok ? 4 : 0);
     }
     const uint8_t* bsrc = B + static_cast<size_t>(n_blk) * (K / 2) + kb * (BK / 2);
     for (int i = tid; i < (BN * BK / 2) / 16; i += blockDim.x) {
       const int r = i / rb, c = i % rb;
-      const bool ok = (n_blk + r < N);
+      const bool ok = (n_blk + r < N) && (kb * BK + c * 32 < K);
       cp16(smem_u32(&sB[st][r * RSB + c * 16]), bsrc + (static_cast<size_t>(r) * (K / 32) + c) * 16, ok ? 16 : 0);
     }
     for (int i = tid; i < BN * NQ4; i += blockDim.x) {
       const int r = i / NQ4, q = i % NQ4;
-      const bool ok = (n_blk + r < N);
+      const bool ok = (n_blk + r < N) && (kb * NB16 + q * 4 < K / 16);
       cp4(smem_u32(&sfb[st][r * NQ4 + q]), S + static_cast<size_t>(n_blk + r) * (K / 16) + kb * NB16 + q * 4,
           ok ? 4 : 0);
     }
@@ -818,6 +818,11 @@ __global__ void __launch_bounds__(256)
 }
 
 int gerr() { return static_cast<int>(cudaGetLastError()); }
+// B40：decode（R ≤ 128）pipe4 的 K 块大小。默认 256；`MOE_GEMM_BK=64|128` 回退（A/B 用）。
+static int dec_bk() {
+  static const int v = []{ const char* e = getenv("MOE_GEMM_BK"); const int n = e ? atoi(e) : 256; return (n == 64 || n == 128) ? n : 256; }();
+  return v;
+}
 
 }  // namespace
 
@@ -865,7 +870,10 @@ int moe_grouped_gemm(const void* aq, const void* a_s, const void* const* Bptr, c
     static const bool bm16 = []{ const char* v = getenv("MOE_GEMM_BM16"); return !v || v[0] != '0'; }();
     if (bm16 && R <= 128) {
       const dim3 g16((unsigned)((N + BN - 1) / BN), (unsigned)((R + 15) / 16 + num_experts), 1u);
-      if (K % 128 == 0) grouped_gemm_kernel_pipe4<128, 4, 16><<<g16, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+      // B40（D181）：decode 的 pipe4 是串行 K 链瓶颈（22 迭代 × ~0.7 us），BK=256 把迭代减半；K 尾块零填充（K % 64 == 0 即可）。
+      // 累加序仍 k 升序 → 与 BK=64/128 逐位同。`MOE_GEMM_BK=64|128|256`，默认 256。
+      if (dec_bk() == 256) grouped_gemm_kernel_pipe4<256, 3, 16><<<g16, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+      else if (dec_bk() == 128 && K % 128 == 0) grouped_gemm_kernel_pipe4<128, 4, 16><<<g16, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
       else grouped_gemm_kernel_pipe4<64, 4, 16><<<g16, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
       return gerr();
     }
@@ -919,7 +927,9 @@ int moe_grouped_gemm_dual(const void* aq, const void* a_s,
   static const bool dual_pipe4 = []{ const char* v = getenv("MOE_DUAL_PIPE4"); return !v || v[0] != '0'; }();
   if (dual_pipe4 && R <= 128) {
     const dim3 g16((unsigned)((N + BN - 1) / BN), (unsigned)((R + 15) / 16 + num_experts), 2u);
-    if (K % 128 == 0)
+    if (dec_bk() == 256)
+      grouped_gemm_kernel_pipe4<256, 3, 16><<<g16, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
+    else if (dec_bk() == 128 && K % 128 == 0)
       grouped_gemm_kernel_pipe4<128, 4, 16><<<g16, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
     else
       grouped_gemm_kernel_pipe4<64, 4, 16><<<g16, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
