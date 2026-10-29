@@ -6,7 +6,7 @@ cp -f /w/stage43/mlp_fp8_decode.cu crates/kernels/cuda/mlp_fp8_decode.cu
 NV=/usr/local/lib/python3.12/dist-packages/nvidia
 mkdir -p /tmp/stub; ln -sf $NV/nccl/lib/libnccl.so.2 /tmp/stub/libnccl.so; ln -sf $NV/cu13/lib/libnvrtc.so.13 /tmp/stub/libnvrtc.so
 export LIBRARY_PATH=/tmp/stub LD_LIBRARY_PATH=$NV/nccl/lib:$NV/cu13/lib PATH=/root/.cargo/bin:/usr/local/cuda/bin:$PATH CUDA_ARCHS=120 CUDA_HOME=/usr/local/cuda CUDA_VISIBLE_DEVICES=0
-[ -f /w/dinfer_prev_b43 ] || cp -f target/release/dinfer /w/dinfer_prev_b43   # A = b41 二进制（编译前 target）
+[ -f /w/dinfer_prev_b43 ] || cp -f target/release/dinfer /w/dinfer_prev_b43   # A = b42 二进制（= b41 + BN_T 模板，默认 BN=64 ⇒ 行为同 b41；bN b42 A 侧 4.77/7.18 已证）
 R=/w/dinfer/tmp_b43par_RESULT.txt; : > $R; date +%T >> $R
 echo "A_md5=$(md5sum /w/dinfer_prev_b43 | cut -c1-12)" >> $R
 cargo test --release -p dinfer-kernels --test mlp_fp8_decode_parity --test fp8_gemv_timing -- --ignored --nocapture > /w/dinfer/tmp_b43par.log 2>&1; rc=$?; echo "EXIT(A8 on)=$rc" >> $R
