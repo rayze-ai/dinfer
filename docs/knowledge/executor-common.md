@@ -55,3 +55,4 @@
 - 执行器只需实现 `supports_prefill_async / begin_prefill_async(plan) -> Option<handle> / harvest_prefill(handle) -> Option<handle>`；句柄 `Box<dyn Any + Send>`，模型 crate 自定（kaon3：rows + Event + logits_row_start）。
 - core 三处状态必须同步推进，少一处就是 hang：① runner `states[rid].num_computed += base`（begin 时，与 scheduler 同步）；② scheduler `awaiting` 集合（不排 token、不当抢占受害者）；③ `update_from_output` 收到 token 时清 awaiting。E2 第一跑漏了 ①② 各一次：症状分别是 `in-flight token without last_row` 整步失败、与给未收割请求排 decode 行。
 - 收割在 `finish()` 末尾（含空步）非阻塞 `Event::is_done`；收割到的请求追加进同一个 `ModelRunnerOutput`，publish 路径零改动。
+- **结果（b62/b63）**：异步收割单独 0 收益（SM 被 prefill 驻满），配 decode 主流最高优先级后 c16 −8.6% / c64 −5.7%（对不开的现状），TTFT 用掉对 vLLM 余量的一半。两件事必须一起开；模型 crate 的流由 `Device::new_stream_with_priority` 建。
