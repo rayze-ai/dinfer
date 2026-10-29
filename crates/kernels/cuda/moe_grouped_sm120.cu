@@ -708,7 +708,7 @@ __global__ void __launch_bounds__(256)
 // 每 warp 2×2 个 m16n8 片段（A 片段在 n 向复用、B 片段在 m 向复用 → 每 mma 的 smem 读量减半，算力型形状下 CTA 数不再是
 // 2148 行 × 11 列 × 2 = 2.4 万个 BM=32 小块）。K 累加序仍按 k 升序、每输出元素与 BM=32/BM=16 版同一条 mma 链 → 逐位一致。
 // tile 表用第三张（BM=64，tile_off + 2(E+1)）。grid.z=2 时 half=1 走 up 指针（与 pipe4 同）。
-template <int BK, int STAGES>
+template <int BK, int STAGES, int BN_T = 64>
 __global__ void __launch_bounds__(256)
     grouped_gemm_kernel_p64(const uint8_t* __restrict__ A, const uint8_t* __restrict__ Asc,
                             const uint8_t* const* __restrict__ Bptr, const uint8_t* const* __restrict__ Sptr,
@@ -716,7 +716,9 @@ __global__ void __launch_bounds__(256)
                             const int32_t* __restrict__ tile_off, bf16* __restrict__ D, int N, int K, int E,
                             const uint8_t* const* __restrict__ Bu = nullptr, const uint8_t* const* __restrict__ Su = nullptr,
                             const float* __restrict__ alphaU = nullptr, bf16* __restrict__ Du = nullptr) {
-  constexpr int BM_T = 64, BN_T = 64;
+  constexpr int BM_T = 64;
+  constexpr int NJ = BN_T / 16;                             // 每 warp n 片段数：BN64 → 4、BN128 → 8（B48c）
+  static_assert(BN_T == 64 || BN_T == 128, "p64: BN_T 64|128");
   int e, m_blk, row_hi;
   if (!tile_lookup(offsets, tile_off + 2 * (E + 1), E, (int)blockIdx.y, e, m_blk, row_hi, BM_T)) return;
   if (blockIdx.z) { Bptr = Bu; Sptr = Su; alpha = alphaU; D = Du; }
@@ -728,13 +730,13 @@ __global__ void __launch_bounds__(256)
   __shared__ __align__(16) uint32_t sfa[STAGES][BM_T * NQ4];
   __shared__ __align__(16) uint32_t sfb[STAGES][BN_T * NQ4];
   const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
-  const int wm = warp >> 1, wn = warp & 1;                  // 4 × 2 warps；warp tile 16 行 × 32 列
+  const int wm = warp >> 1, wn = warp & 1;                  // 4 × 2 warps；warp tile 16 行 × (BN_T/2) 列
   const int n_blk = blockIdx.x * BN_T;
   const uint8_t* B = Bptr[e];
   const uint8_t* S = Sptr[e];
   const float global = alpha[e];
   const int M = row_hi;
-  float acc[4][4] = {};                                      // [n 片段 j=0..3][4]
+  float acc[NJ][4] = {};                                     // [n 片段 j][4]
   const int nk = (K + BK - 1) / BK;
   const int rb = BK / 32;
   auto load_stage = [&](int st, int kb) {
@@ -777,7 +779,7 @@ __global__ void __launch_bounds__(256)
     __syncthreads();
     const int cur = kb % STAGES;
     constexpr int nbk = BK / 64;
-    const int mrow = wm * 16, ncol = wn * 32;
+    const int mrow = wm * 16, ncol = wn * (BN_T / 2);
 #pragma unroll
     for (int b = 0; b < nbk; ++b) {
       const int kb0 = b * 64;
@@ -792,7 +794,7 @@ __global__ void __launch_bounds__(256)
       const uint32_t sa = sfa[cur][(mrow + sam) * NQ4 + b];
       const int brow = lane / 4;
 #pragma unroll
-      for (int j = 0; j < 4; ++j) {
+      for (int j = 0; j < NJ; ++j) {
         uint32_t bb[2];
 #pragma unroll
         for (int g = 0; g < 2; ++g) {
@@ -808,8 +810,8 @@ __global__ void __launch_bounds__(256)
   const int r0 = lane / 4, cg = (lane % 4) * 2;
   const int g0 = m_blk + wm * 16 + r0, g1 = g0 + 8;
 #pragma unroll
-  for (int j = 0; j < 4; ++j) {
-    const int c = n_blk + wn * 32 + 8 * j + cg;
+  for (int j = 0; j < NJ; ++j) {
+    const int c = n_blk + wn * (BN_T / 2) + 8 * j + cg;
     if (g0 < M && c < N) {
       D[static_cast<size_t>(g0) * N + c] = to_bf16(acc[j][0] * global);
       if (c + 1 < N) D[static_cast<size_t>(g0) * N + c + 1] = to_bf16(acc[j][1] * global);
@@ -823,6 +825,11 @@ __global__ void __launch_bounds__(256)
 // B48：prefill 大 tile 开关（默认开；`MOE_PREFILL_P64=0` 回退 BM=32 旧体，A/B 用）。
 static bool prefill_p64() {
   static const bool v = []{ const char* e = getenv("MOE_PREFILL_P64"); return !e || e[0] != '0'; }();
+  return v;
+}
+// B48c：prefill 大 tile 的 N 宽（64 默认 | 128；`MOE_PREFILL_BN=128` A/B 用，赢了再改默认）。
+static int prefill_bn() {
+  static const int v = []{ const char* e = getenv("MOE_PREFILL_BN"); return (e && atoi(e) == 128) ? 128 : 64; }();
   return v;
 }
 // 第二刀（R89+）：gate+up 融合单 launch。grid.z = 2E：z<E 跑 gate（Bg/Sg/alphaG/Dg），z>=E 跑 up（Bu/Su/alphaU/Du）。
@@ -1071,10 +1078,16 @@ int moe_grouped_gemm(const void* aq, const void* a_s, const void* const* Bptr, c
       else grouped_gemm_kernel_pipe4<64, 4, 16><<<g16, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
       return gerr();
     }
-    if (prefill_p64() && R > dec_rmax()) {  // B48：prefill 大 tile（K%128 走 BK=128/3 级；否则 BK=64/4 级，down K=704）
-      const dim3 g64((unsigned)((N + 63) / 64), (unsigned)((R + 63) / 64 + num_experts), 1u);
-      if (K % 128 == 0) grouped_gemm_kernel_p64<128, 3><<<g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
-      else grouped_gemm_kernel_p64<64, 4><<<g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+    if (prefill_p64() && R > dec_rmax()) {  // B48：prefill 大 tile（K%128 走 BK=128/3 级；否则 BK=64/4 级，down K=704）；B48c BN=128
+      const int bn = prefill_bn();
+      const dim3 g64((unsigned)((N + bn - 1) / bn), (unsigned)((R + 63) / 64 + num_experts), 1u);
+      if (bn == 128) {
+        if (K % 128 == 0) grouped_gemm_kernel_p64<128, 3, 128><<<g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+        else grouped_gemm_kernel_p64<64, 4, 128><<<g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+      } else {
+        if (K % 128 == 0) grouped_gemm_kernel_p64<128, 3><<<g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+        else grouped_gemm_kernel_p64<64, 4><<<g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+      }
       return static_cast<int>(cudaGetLastError());
     }
     if (K % 128 == 0) {
@@ -1139,10 +1152,16 @@ int moe_grouped_gemm_dual(const void* aq, const void* a_s,
       grouped_gemm_kernel_pipe4<64, 4, 16><<<g16, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
     return gerr();
   }
-  if (prefill_p64() && R > dec_rmax()) {  // B48：prefill 大 tile（gate‖up grid.z=2）
-    const dim3 g64((unsigned)((N + 63) / 64), (unsigned)((R + 63) / 64 + num_experts), 2u);
-    if (K % 128 == 0) grouped_gemm_kernel_p64<128, 3><<<g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
-    else grouped_gemm_kernel_p64<64, 4><<<g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
+  if (prefill_p64() && R > dec_rmax()) {  // B48：prefill 大 tile（gate‖up grid.z=2）；B48c BN=128
+    const int bn = prefill_bn();
+    const dim3 g64((unsigned)((N + bn - 1) / bn), (unsigned)((R + 63) / 64 + num_experts), 2u);
+    if (bn == 128) {
+      if (K % 128 == 0) grouped_gemm_kernel_p64<128, 3, 128><<<g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
+      else grouped_gemm_kernel_p64<64, 4, 128><<<g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
+    } else {
+      if (K % 128 == 0) grouped_gemm_kernel_p64<128, 3><<<g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
+      else grouped_gemm_kernel_p64<64, 4><<<g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
+    }
     return static_cast<int>(cudaGetLastError());
   }
   if (K % 128 == 0) {
