@@ -827,9 +827,10 @@ static bool prefill_p64() {
   static const bool v = []{ const char* e = getenv("MOE_PREFILL_P64"); return !e || e[0] != '0'; }();
   return v;
 }
-// B48c：prefill 大 tile 的 N 宽（64 默认 | 128；`MOE_PREFILL_BN=128` A/B 用，赢了再改默认）。
+// B48c：prefill 大 tile 的 N 宽。b53（loop kaon3-decode-opt D217）两轮：BN=128 c64 TPOT −2%、TTFT −4%、吞吐 +2%，微基准 −6/−9% → **默认 128**；
+// `MOE_PREFILL_BN=64` 回退（A/B 用）。
 static int prefill_bn() {
-  static const int v = []{ const char* e = getenv("MOE_PREFILL_BN"); return (e && atoi(e) == 128) ? 128 : 64; }();
+  static const int v = []{ const char* e = getenv("MOE_PREFILL_BN"); return (e && atoi(e) == 64) ? 64 : 128; }();
   return v;
 }
 // 第二刀（R89+）：gate+up 融合单 launch。grid.z = 2E：z<E 跑 gate（Bg/Sg/alphaG/Dg），z>=E 跑 up（Bu/Su/alphaU/Du）。
