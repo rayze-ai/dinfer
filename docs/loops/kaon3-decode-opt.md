@@ -1510,3 +1510,9 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 | kernel 和 / span | 102 / 108 | | gaps 6 ms | |
 - **结论**：混批 prefill 步 = **GEMM 吞吐问题，不是 attention**。MoE 占 39%（40 ms）、GEMM 43%。M=2148 的 MoE：行数 ≈ 2148 × 8 = 17 K 行分到 ~全部专家，dual 791 us/层 → 算力利用率低（NVFP4 5090 峰值远高）；fp8 Lt 的 nvjet 153 us × 125 次也偏慢（qkv 2148×2816×(q+k+v) 应 < 50 us）。
 - **Step B 排序**：(b) 调度限流（`--long-prefill-token-threshold`）零代码先跑（lpt 链已起）→ 期望把 98 ms 大步切成 ≤ 512 tok 的小步，TPOT 差额 2.7 / 5.4 / 15 ms 大部分回收；(a) 再做 MoE prefill tile（BM=64/128 大 tile + 更多 stage）与 fp8 Lt M>64 自调优（FP8_LT_TUNE）。
+
+## ★★★★★ D205 2026-10-29 混批步 nsys 按 grid 复核：**lm_head 按全部 tokens 行算（cutlass Kernel2 3.0 ms/步，grid (56,256)=2148 行 × 262144 vocab）+ softcap 0.38 ms**，而本步只需 10 行
+- 单步 kernel 和 ~24 ms（nsys 态，含 3 步平均 ÷ 内核数 ≈958/步）：MoE dual 5.7（30 × 190 us，grid (11,234,2) = BM32 旧体）、down 3.8（30 × 128 us）、**lm_head Kernel2 3.0（1 × 3018 us）**、fp8 Lt nvjet 2.2+1.7+1.5+0.5（M=424 行 qkv/o/dense）、attention 1.5、softcap 0.38、norm/route/combine 等 ~2。
+- 注意：nsys 2 ms 切出的"步"是 424 tok（HOST_TIME 2148 tok 的步 = 多个这类片段，nsys 态内核膨胀）。按比例：lm_head + softcap ≈ **14% 的混批步时间** = c16 每步 ~14 ms、c64 ~22 ms（3380 行 × 262144 = 1.77 GFLOP·2816 ≈ 5 TFLOP → 5090 bf16 ~200 TFLOPS 下限 25 ms！**c64 的 154 ms 混批步里 lm_head 占 1/6**）。
+- vLLM：`logits_indices = query_start_loc[1:] - 1`，只对采样行算 logits（`gpu_model_runner.py:2324`）。我们 `model.rs:268` `gemm.forward_bf16(final_normed, embed, tokens, vocab)` 按全部 tokens 算再 `gather_rows`（executor.rs:298）。
+- **B46**：lm_head 前先 gather `final_normed` 的 `logits_rows` 行（h=2816，nrows ≤ 64）→ GEMM 只算 nrows 行 → softcap nrows×V → 直接写 `gathered`。纯 decode（tokens == nrows，图内）路径不变（行一一对应，不 gather，保证逐位不动）。预期：c16 混批步 −14 ms（98 → 84）、c64 −22；TPOT c16 −0.4 / c64 −2.2 ms；单请求 prefill TTFT −（1560 行 lm_head ≈ 2.3 ms）。"采用 vLLM 做得对的"，进 design §11 台账。
