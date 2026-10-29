@@ -46,3 +46,7 @@
 ## 25. 混批步耗时 ≈ prefill token 数 ÷ 单步 prefill 吞吐，与并进的 decode 行数无关（2026-10-29 kaon3 D236）
 - HOST_TIME 按 (tokens, nreq) 分组：3800 tok 的混批步 11 / 23 / 55 个请求都是 95–108 ms；decode 行从 1 到 55 只加 ~5 ms。c16 混批步 2148 tok 59 ms = 37 tok/ms。
 - **怎么用**：TPOT − 纯 decode 步 = 混批步摊入量，拆成两半：(a) prefill 单步吞吐差（我们 37 vs vLLM 50 tok/ms）、(b) decode 行在混批步里停转。(a) 靠 GEMM；(b) 靠异步收割。两半各占一半，别只做一边。
+
+## 26. "decode 不等 prefill" ≠ "decode 不被 prefill 拖"：大 M prefill GEMM 把 SM 驻留槽占满时，另一条流上的 decode 图照样排队（2026-10-29 kaon3 E3）
+- E1 异步收割机制完全正确（late_begin == late_harvest、输出同），TPOT 却持平 / 略升：p64 一次 launch 4752 CTA、每 SM 只驻 2 个（smem 49.5 KB）、14 波，decode 图的 800 个小 kernel 在 pending 队列里等 CTA 槽。两流并行的前提是**有空 SM**，不是"有另一条流"。
+- **怎么用**：做跨流并行前先算对方 kernel 的 CTA 数 / 驻留数 / 波数；波数 ≫ 1 时要么流优先级（只影响 pending 顺序，CTA 边界抢占，最多省一个 CTA 时长的等待），要么限对方每次 launch 的 CTA 数留口子，要么别做。E4 验证流优先级够不够。
