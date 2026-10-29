@@ -15,6 +15,16 @@
   ③ 用 `--layer-iso` 时**输入必须是上一层的输出**（L0 用 embedding `Lm1`，不是 `L0`），
   传错层会得到 relL2 ≈ 1.0 的"整层全错"的假象。
 
+## 2026-10-29 远端 bench 链"跑到一半静默消失"追了 4 个假根因，真因是 detached exec 管道 SIGPIPE；补救的 setsid 又污染了基线
+- 现象：六条链都在 A 组后无 B log、无 DONE、无报错；只有 `bash -x … >trace 2>&1` 起的链能跑完。
+- 假根因依次：cut-in 覆盖（B28，真缺陷但不触发）、跨链 pkill、trap EXIT 提前 DONE、serve SIGINT 波及进程组（setsid）。
+- 真因：`docker exec -d C bash x.sh` 的 stdout/stderr 接在断开的管道上，`kill -KILL $sp` 对已死进程的报错写 stderr → bash 收 SIGPIPE 静默退出。
+- 连带：`setsid prog &` 让 `$!` 指向已退出的父进程，`kill -INT $sp` 杀不到 serve → 残留服务与下一组同卡，A 侧 5.15 测成 5.76（b33 作废）。多个 watcher 又因旧 RESULT 里的 DONE 提前放行叠出两套 serve。
+- 解法/规则：起脚本一律 `>file 2>&1`；不用 setsid；只允许一个串行编排器；每段前 `pkill -x dinfer` + `nvidia-smi` 核无残留。详见 knowledge/subagent-ops。
+
+## 2026-10-29 nsys 把 5–10 us 小 kernel 时长膨胀 2×，据此定的"fp8 gemv 3.6× 下限"是假靶子
+- 微基准（cargo test 计时）m=1 实为 0.8–1.0× 下限；把 B31 整刀排第一差点白做。小 kernel 的占比与倍数先跑 `*_timing.rs` 再写。
+
 ## 2026-10-29 把"批不变性 + prefix cache 命中混杂"当并发 bug 追了一夜（B27/B28/B29 三个修都不解释现象）
 - 现象：同 prompt 串行 vs c2/c8 输出 6–9/8 不同（自然语言也翻）；cache 命中态 chunk vs fresh 也翻；位置确定。
 - 根因：探针的"串行基线"是 fresh、"并发/第二次"是 cache 命中 → 比的是 chunk（m=5）vs 单步（m=21）；`--no-prefix-caching` 后 c8 vs c8 重复 0/8（确定性）、c8 vs serial 仍 6/8 → 批构成 → 按 m 选 algo/tile 的 GEMM/MoE → ulp 累积 30 层 → 贪心翻转，**语义等价**。attention 路径 kernel 测试位差 0。
