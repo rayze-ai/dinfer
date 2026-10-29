@@ -153,3 +153,17 @@ G 编号（接 D/E）。
 - **vLLM 基线实际后端（启动日志）**：MoE = `FLASHINFER_CUTLASS` NvFp4（kernel 名应为 `cutlass::device_kernel<…GemmUniversal…>`，即 G7 里的 CUTLASS 行）；dense fp8 = `FlashInferFP8ScaledMMLinearKernel`（底层仍是 cuBLASLt nvjet / `sm89_xmma_gemm_e4m3`）；attention = **`TRITON_ATTN`**（`kernel_unified_attention` = Triton）。所以可比的"同功能 kernel"：MoE ↔ CUTLASS device_kernel；attention ↔ kernel_unified_attention；fp8 dense ↔ nvjet。
 - vstep2 的 gridY 14..26 筛出 0 步：vLLM chunked prefill 每步 ≤ 4096 tok 但**一波 16 个请求的 prefill 被切成多步、每步 1–4 个请求（iteration_tokens_mean 97）**，所以 vLLM 的 prefill 步 gridY 代理多在 4–8（430–860 行），不是 2148。要按它自己的分布比。
 - vstep3：vLLM 的 MoE kernel `cutlass::device_kernel<GemmUniversal<GroupProblemShape…>>` grid **(1,170,1) = 170 SM 一块一个 → persistent grouped GEMM**，与行数无关，gridY 代理失效；按 nvjet（dense fp8）的 gridY × 128 估行数重分桶（`vstep4.py` / `ostep4.py`），两边同桶比每步 MoE / fp8 / attention 的 ms。vLLM 每步 MoE ≈ 14.8 次 × 157 us（每层 ~0.5 次？= 30 层每步只有一半层在这个 bucket…待按桶看）。
+
+## ★★★★★★ G8 2026-10-29 Step A 定靶（两边稳态、按 nvjet 行数分桶、按**每层每次调用** 比；vLLM 的"步"是被 decode 图切碎的片段 ≈ 3 层，我们的是整个 prefill 子批）
+| 项 | 我们（p64 / fa_v5 / nvjet） | vLLM（CUTLASS persistent grouped / Triton unified_attention / nvjet） | 比 |
+|---|---|---|---|
+| **MoE gate‖up + down，每层** | 2 × 464–562 us = **0.93–1.12 ms** | 2 × 157–207 us = **0.31–0.41 ms** | **≈ 3×** |
+| attention prefill，每次 | 115–128 us | 92–114 us | ≈ 1.1× |
+| fp8 dense（qkv / o / dense MLP），每次 | nvjet 128x128 等，同 tile | 同 nvjet 家族 + 少量 `sm89_xmma_e4m3` | ≈ 1× |
+| 小 kernel（norm / quant / combine / route / gelu） | ~0.4 ms/层 | ~0.3 ms/层（`finalizeMoeRouting` / `doActivation` / triton fused） | ≈ 1.3× |
+- vLLM 的 MoE：`cutlass::device_kernel<GemmUniversal<GroupProblemShape…>>`，grid **(1,170,1)**（每 SM 一个 persistent CTA，TMA + warp-specialized，FlashInfer CUTLASS 后端），157 us 处理 ~2 K tok × 8 专家 → 权重 256 MB / 157 us = **1.6 TB/s ≈ 带宽上限**（所以 vLLM 的 MoE prefill 已经是 memory-bound 下限）。我们 p64 464–562 us = 0.5 TB/s。
+- **结论**：prefill 37 vs 50 tok/ms 的差，**MoE grouped GEMM 一项就解释了全部**（每层多 0.6–0.7 ms × 30 层 = 18–21 ms/步 vs 混批步差 ~20 ms）。attention / fp8 / 小 kernel 不是靶子（G1/G3a 中性与此一致）。
+- **两条路**（用户决策）：
+  (a) **采用**：接 CUTLASS grouped GEMM（vLLM 同款，`GroupProblemShape` + TMA + persistent）——要把 CUTLASS 头文件进 `crates/kernels/cuda`（nvcc 编 sm_120a），NVFP4 block-scaled 的 CUTLASS 实例 + scale 布局要和我们的 `tile_off/offsets` 对接；逐位不同（累加序），走"批不变性"口径验收。工时 1–2 天。
+  (b) **自写到 CUTLASS 水平**：p64 → persistent CTA（grid = SM 数、循环取 tile）+ TMA 多 stage（smem 不走寄存器）+ BM128。G1 已证 LDS 不是瓶颈、G2 BM128 预期 ≤ 1.3×；要到 3× 必须 TMA + persistent，等于重写一个 kernel，工时 2–3 天，且 5090 的 TMA/UMMA 路径（blackwell-mma.md）我们只做过 dense。
+  按"目标是超越不是重写、vLLM 做得对的直接采用"，**建议 (a)**。

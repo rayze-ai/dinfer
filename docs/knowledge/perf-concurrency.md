@@ -58,3 +58,7 @@
 ## 28. 异步收割合入后 HOST_TIME 的"混批步 exec"只剩 decode 子批 + 收割：prefill 真实时长在副流上**不可见**（2026-10-29 E6）
 - stepA7 的 (2149 tok, 12.7 req) 混批步 exec 43 ms 不是 prefill 时长（prefill 在副流跑、主线程不等）。要量 prefill 单步吞吐，用 `[late-begin]` → `[late-harvest]` 的墙钟差（含等待下一步 finish 的离散误差 ≤ 1 个 decode 步）或 nsys 副流 kernel 和。
 - **判断**：改了执行结构后先重审每个探针量的是什么，再读数。否则会把 43 ms 当成 prefill 吞吐 50 tok/ms 的"证据"。
+
+## 29. 和 vLLM 比 kernel 要按"每层每次调用"比，不能按"步"（2026-10-29 kaon3 G7/G8）
+- vLLM 的 prefill 在 nsys 里是被 decode 图切碎的 ~3 层片段；我们是整个子批一步。按步比会得出离谱倍数（G7 第一版 "attention 4×" 就是这么来的——其实 1.1×）。流程：两边都按 dense GEMM 的 gridY 估行数分桶 → 同桶内按 kernel 名聚合 → 除以调用次数得每次 us → 乘每层调用数。
+- 启动期（autotune / cudagraph 捕获 `delayStreamKernel` / 视觉塔 warmup）必须切掉：看 top kernel 的 first/last 时间戳。
