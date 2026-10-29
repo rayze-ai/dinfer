@@ -15,3 +15,4 @@
 每轮判定与数字在 `docs/loops/kaon3-decode-opt.md`，CSV 在 `test/kaon3/e2e-rounds.csv`（round 列 = 目录名）。
 | b61/ | B52 复测 | 顺序反转 split/fused：c32/c64 收益确认，c16 两轮 −3.5% / 0% → 判噪声级 |
 | stepA6/ | Step A v6 | 九刀后 3 轮对标 + 各阶段耗时（D239） |
+| b62/ | E1 prefill 异步收割 | 机制正确但无收益（decode 图被 prefill 副流抢 SM），默认关；下一步流优先级 |

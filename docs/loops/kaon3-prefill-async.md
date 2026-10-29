@@ -71,3 +71,15 @@ E1 …（接 kaon3-decode-opt 的 D 编号体系，本 loop 用 E）
 - **E2 根因**：`engine step failed: req 12: in-flight token without last_row`。late 路径把 prefill 行从本步 Pending 剔除后，runner 的 `states[rid].num_computed` **没推进**（原 pair 路径由 `finish` 的 `st.num_computed += base` 推进），而 scheduler 在 schedule 时已记成算完 → 下一步 scheduler 给它排 1 个 decode token，runner 这边 `start + 1 == len + 1` 被当成异步在飞行、要 `last_row` → ensure 失败 → 整步失败、后续请求全挂。**修**：`begin_prefill_async` 成功后立刻 `st.num_computed += n − num_draft`（与 scheduler 同步）；收割只 `+= 接受的 draft 数` 并 append token。
 - 单测：`late_prefill_advances_state_and_harvests`（Echo 式 mock 执行器：`supports_prefill_async` 真、`begin` 存句柄、第二次 `harvest` 才完成）。
 - **单测抓到第二个 bug**：scheduler 对"已下发未收割"的请求没有任何标记，`num_computed == num_tokens` 且无 placeholder 时 `num_new = num_tokens − computed = 0`… 实测它仍排了 1 个 token（`num_tokens_with_spec + placeholders − computed` 在首 token 未 append 前确实是 0——但 running 循环里 prefill 整段算完的请求下一步 `num_new` 应为 0；测试显示排了 (2,1)，说明 computed 口径与我以为的不同：scheduler 的 `num_computed_tokens` 是 "本步结束后"值 = num_tokens，而 `num_tokens` 在 scheduler 侧… ）。不再推断：**显式集合** `Scheduler.awaiting: IdHashSet`，runner `take_late_started()` → engine `mark_awaiting` → `schedule()` 跳过（不排 token、不当受害者）→ `update_from_output` 收到 token 时移除。单测 `late_prefill_advances_state_and_harvests` 覆盖 begin / 跳过 / 收割 / 恢复 decode 四步。
+
+## ★★★ E3 2026-10-29 b62 定稿（A = XSTREAM=0 现状 / B = PREFILL_ASYNC=1 XSTREAM=1；二进制 eff4408b；两轮）
+| c | A tpot / ttft / tps | B tpot / ttft / tps | Δ |
+|---|---|---|---|
+| 8 | 7.08 / 94 / 949 | 7.28 / 87 / 934 | TPOT **+2.8%**，TTFT −8%，tps −1.6% |
+| 16 | 9.46 / 116 / 1424 | 9.58 / 108 / 1410 | TPOT +1.3%，TTFT −7%，tps −1% |
+| 32 | 12.28 / 193 / 2115 | 12.77 / 149 / 2089 | TPOT **+4%**，TTFT **−23%**，tps −1.2% |
+| 64 | 19.73 / 206 / 2814 | 19.52 / 220 / 2776 | TPOT −1%，TTFT +7%，tps −1.4% |
+- 机制正确：`late_begin=50/51 == late_harvest`（77 混批步里 2/3 走了 late，其余是中间 chunk → pair）；输出逐字同；无 ERROR。
+- **收益没出来，判负（默认留关）**。解释（E2 预登记 ①）：prefill 副流（2148 tok 的 p64 GEMM，grid 5052 CTA）把 SM 占满，decode 图在它旁边跑不动——decode 行不再"等 prefill 完"，但"和 prefill 抢 SM"结果一样慢，还多付两流同步 + 收割晚一步。TTFT c8–c32 降是因为 prefill 不再排在 decode 图后面；c64 TTFT 升是 late 只允许一个在飞、第二波 prefill 要等。
+- **下一步只有一条路**：让 prefill 让 SM —— (a) prefill 流低优先级 + decode 流高优先级（硬件抢占粒度是 CTA 边界，p64 一个 CTA 几十 us，decode 图 ~800 个小 kernel 应能插进去）；(b) 不够再限 prefill grid（分块 launch）。cudarc 0.18 没暴露 `cuStreamCreateWithPriority`，在 kernels crate 用 sys 直接建流（`Stream::with_priority`）。
+- CSV：b62 记负结果（c16 +1.3% / c32 +4%）。

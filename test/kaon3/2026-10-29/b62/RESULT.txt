@@ -1,0 +1,33 @@
+09:09:22
+BUILD EXIT=0 md5=eff4408b1d90 marker=1 09:09:37
+r1 A startup: model_load_ms=34075
+r1 A c8:   tps=947.0 ttft_p50=94.37 ttft_p99=95.94 tpot_p50=7.08 tpot_p99=8.26
+r1 A c16:   tps=1424.4 ttft_p50=115.55 ttft_p99=182.87 tpot_p50=9.51 tpot_p99=11.04
+r1 A c32:   tps=2113.1 ttft_p50=192.44 ttft_p99=327.67 tpot_p50=12.34 tpot_p99=14.81
+r1 A c64:   tps=2822.2 ttft_p50=205.15 ttft_p99=719.67 tpot_p50=19.66 tpot_p99=22.28
+r1 A out:  is is is is is is is is is is is is is is is is is is is is is is is is
+r1 A out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到春秋战国时期，最初是为了抵御外敌而修建的。 随着秦朝的统一，大规模的修筑工作开始，并逐渐演变为防御体系。 在明朝时期，长城
+r1 B startup: model_load_ms=34701
+r1 B c8:   tps=929.9 ttft_p50=86.54 ttft_p99=102.76 tpot_p50=7.32 tpot_p99=7.99
+r1 B c16:   tps=1409.3 ttft_p50=108.32 ttft_p99=195.65 tpot_p50=9.57 tpot_p99=10.47
+r1 B c32:   tps=2091.5 ttft_p50=149.69 ttft_p99=364.45 tpot_p50=12.67 tpot_p99=14.04
+r1 B c64:   tps=2780.5 ttft_p50=218.80 ttft_p99=748.18 tpot_p50=19.50 tpot_p99=21.78
+r1 B out:  is is is is is is is is is is is is is is is is is is is is is is is is
+r1 B out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到春秋战国时期，最初是为了抵御外敌而修建的。 随着秦朝的统一，大规模的修筑工作开始，并逐渐演变为防御体系。 在明朝时期，长城
+r2 A startup: model_load_ms=34121
+r2 A c8:   tps=950.8 ttft_p50=94.46 ttft_p99=96.47 tpot_p50=7.08 tpot_p99=8.18
+r2 A c16:   tps=1424.4 ttft_p50=115.90 ttft_p99=183.16 tpot_p50=9.40 tpot_p99=11.04
+r2 A c32:   tps=2116.4 ttft_p50=194.05 ttft_p99=328.59 tpot_p50=12.22 tpot_p99=14.79
+r2 A c64:   tps=2805.9 ttft_p50=205.88 ttft_p99=726.24 tpot_p50=19.79 tpot_p99=22.39
+r2 A out:  is is is is is is is is is is is is is is is is is is is is is is is is
+r2 A out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到春秋战国时期，最初是为了抵御外敌而修建的。 随着秦朝的统一，大规模的修筑工作开始，并逐渐演变为防御体系。 在明朝时期，长城
+r2 B startup: model_load_ms=34776
+r2 B c8:   tps=938.3 ttft_p50=86.64 ttft_p99=103.28 tpot_p50=7.24 tpot_p99=7.95
+r2 B c16:   tps=1410.6 ttft_p50=108.43 ttft_p99=195.20 tpot_p50=9.59 tpot_p99=10.35
+r2 B c32:   tps=2087.0 ttft_p50=149.25 ttft_p99=359.10 tpot_p50=12.86 tpot_p99=14.21
+r2 B c64:   tps=2772.0 ttft_p50=220.98 ttft_p99=750.90 tpot_p50=19.53 tpot_p99=21.95
+r2 B out:  is is is is is is is is is is is is is is is is is is is is is is is is
+r2 B out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到春秋战国时期，最初是为了抵御外敌而修建的。 随着秦朝的统一，大规模的修筑工作开始，并逐渐演变为防御体系。 在明朝时期，长城
+2026-10-29T09:11:46.692171Z  INFO dinfer_core::runner: runner step mix (cumulative) steps=2000 mixed=77 pair=27 prefill_only=10 late_begin=50 late_harvest=50
+2026-10-29T09:14:13.929236Z  INFO dinfer_core::runner: runner step mix (cumulative) steps=2000 mixed=77 pair=26 prefill_only=10 late_begin=51 late_harvest=51
+B62_DONE
