@@ -1205,6 +1205,7 @@ extern "C" {
     pub fn mlp_fp8_norm_quant(x: *const c_void, w: *const c_void, q: *mut c_void, m: i64, h: i64, eps: f32, a_inv: f32, stream: cudaStream_t) -> i32;
     #[allow(clippy::too_many_arguments)]
     pub fn mlp_fp8_gateup_act(a_q: *const c_void, gate_w: *const c_void, up_w: *const c_void, act_q: *mut c_void, m: i64, inter: i64, k: i64, gate_scale: f32, up_scale: f32, dn_a_inv: f32, stream: cudaStream_t) -> i32;
+    pub fn mlp_fp8_gemv_a_bytes() -> i32;
     #[allow(clippy::too_many_arguments)]
     pub fn mlp_fp8_gemv(a_q: *const c_void, w: *const c_void, out: *mut c_void, m: i64, n: i64, k: i64, scale: f32, stream: cudaStream_t) -> i32;
     /// MoE decode NVFP4 grouped GEMV（`cuda/moe_fp4_decode.cu`）：见 kernels.h。
@@ -1794,6 +1795,7 @@ mod stubs {
     stub!(gdn_recurrent(mq: *const c_void, g: *const f32, be: *const f32, ar: *const c_void, br: *const c_void, al: *const f32, db: *const f32, o: *mut c_void, st: *mut c_void, cu: *const i32, si: *const i32, ns: i64, hk: i64, hv: i64, k: i64, v: i64, gp: i64, sc: f32, sst: i64, fg: i32, vs: i64, dbv: i64, dv: i32, dg: i64, abs: i64, s: cudaStream_t));
     stub!(mlp_fp8_norm_quant(x: *const c_void, w: *const c_void, q: *mut c_void, m: i64, h: i64, e: f32, ai: f32, s: cudaStream_t));
     stub!(mlp_fp8_gateup_act(a: *const c_void, g: *const c_void, u: *const c_void, o: *mut c_void, m: i64, i: i64, k: i64, gs: f32, us: f32, di: f32, s: cudaStream_t));
+    stub!(mlp_fp8_gemv_a_bytes());
     stub!(mlp_fp8_gemv(a: *const c_void, w: *const c_void, o: *mut c_void, m: i64, n: i64, k: i64, sc: f32, s: cudaStream_t));
     stub!(moe_fp4_gateup_act(a: *const c_void, s: *const c_void, gp: *const *const c_void, gs: *const *const c_void, ag: *const f32, up: *const *const c_void, us: *const *const c_void, au: *const f32, o: *const i32, out: *mut c_void, r: i64, i: i64, k: i64, e: i64, st: cudaStream_t));
     stub!(moe_fp4_gemv(a: *const c_void, s: *const c_void, bp: *const *const c_void, sp: *const *const c_void, al: *const f32, o: *const i32, out: *mut c_void, r: i64, n: i64, k: i64, e: i64, st: cudaStream_t));

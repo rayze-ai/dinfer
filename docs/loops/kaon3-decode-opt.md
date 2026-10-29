@@ -1329,3 +1329,4 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 
 ## ★★★ D176 2026-10-29 b38 首批 B（B34③ gelu·mul + down 量化融合，A = b37b 二进制）：c1 4.99 → **4.96**，c8 8.43 → **8.42**；parity 6 组 aq/a_s 位差 0；输出同。等 A2/B2。
 - 下一刀 **A8**（c8 专项，D171 o_proj 项）：fp8 gemv 的 A 改成 e4m3 驻留 smem（M_TILE·K·1 B，M=8/K=4096 = 32 KB ≤ 48 KB 门槛），dot2 内每 16 元素一次 `e4m3x16_to_f32`（原 bf16 路径也要 `__bfloat1622float2` 解包，ALU 量同级）；e4m3 → bf16 → f32 与 e4m3 → f32 值相同 → **逐位同**（`mlp_fp8_decode_parity` 已有 (2816,4096,8) 形状）。开关 `FP8_GEMV_A8`，默认开；A/B 用 envab。
+- **b38 定稿（两轮）**：c1 4.99/5.00 → **4.96/4.97（-0.6%）**，c8 8.43/8.40 → **8.42/8.39**，吞吐 767；输出同。**合入**（CSV round b38）。

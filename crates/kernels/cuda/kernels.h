@@ -443,6 +443,8 @@ int mlp_fp8_gateup_act(const void* a_q, const void* gate_w, const void* up_w, vo
                        int64_t k, float gate_scale, float up_scale, float dn_a_inv, cudaStream_t stream);
 int mlp_fp8_gemv(const void* a_q, const void* w, void* out, int64_t m, int64_t n, int64_t k, float scale,
                  cudaStream_t stream);
+// A8 口径：fp8 gemv 里 A 每元素在 smem 占的字节数（1 = e4m3 驻留，默认；2 = bf16 驻留，FP8_GEMV_A8=0）。
+int mlp_fp8_gemv_a_bytes(void);
 // MoE decode 带宽型 NVFP4 grouped GEMV（moe_fp4_decode.cu，K % 64 == 0）：布局/alpha 与 moe_grouped_gemm 同。
 //   gate‖up + gelu·mul → bf16 out[rows, inter]；down → bf16 out[rows, n]。rows = 总行数（选 M_TILE 档位）。
 int moe_fp4_gateup_act(const void* aq, const void* asc, const void* const* gate_ptr, const void* const* gate_sptr,

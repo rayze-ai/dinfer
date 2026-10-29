@@ -5433,6 +5433,11 @@ pub fn mlp_fp8_gateup_act(
 
 /// 通用 fp8 GEMV（M ≤ 16）：`out[m][n] = bf16(Σ_k a_q[m][k]·w[n][k] · scale)`，scale = w_scale·a_scale。
 #[allow(clippy::too_many_arguments)]
+/// A8 口径查询：fp8 gemv 的 A 在 smem 里每元素字节数（1 或 2），调用方据此算 `M_TILE·K·bytes ≤ 门槛`。
+pub fn mlp_fp8_gemv_a_bytes() -> usize {
+    // SAFETY: 纯 host 查询，无指针。
+    (unsafe { ffi::mlp_fp8_gemv_a_bytes() }).max(1) as usize
+}
 pub fn mlp_fp8_gemv(
     stream: &Stream,
     a_q: &CudaSlice<u8>,

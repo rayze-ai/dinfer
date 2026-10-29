@@ -41,6 +41,18 @@ __device__ __forceinline__ void e4m3x16_to_f32(uint4 v, float* f) {
 }
 
 // A_q [m][K] fp8 → 共享内存 bf16 [M_TILE][K]（e4m3 ⊂ bf16，精确）；行 ≥ m 不读不写。末尾 __syncthreads。
+// A8（loop kaon3-decode-opt D176）：A 以 e4m3 原样驻留 smem（M_TILE·K 字节，是 bf16 版的一半），dot2_a8 里按 16 元素
+// 一次 `e4m3x16_to_f32` 解包。e4m3→f32 与 e4m3→bf16→f32 值完全相同，fma 顺序同 → 与 bf16 驻留版逐位同。
+// 为什么：M_TILE=8×K=4096 的 o_proj（sliding 层）bf16 驻留要 64 KB > 48 KB 门槛，退回 cuBLASLt split-K（M=8 时 11.7 us ×30 call/步）。
+template <int M_TILE>
+__device__ __forceinline__ void load_a8(const uint8_t* __restrict__ a_q, uint8_t* sa, int m, int K) {
+  const int nvec = K / 16;
+  for (int idx = threadIdx.x; idx < M_TILE * nvec; idx += blockDim.x) {
+    const int r = idx / nvec, c = idx % nvec;
+    if (r < m) *reinterpret_cast<uint4*>(sa + (long)r * K + c * 16) = *reinterpret_cast<const uint4*>(a_q + (long)r * K + c * 16);
+  }
+  __syncthreads();
+}
 template <int M_TILE>
 __device__ __forceinline__ void load_a(const uint8_t* __restrict__ a_q, bf16* sa, int m, int K) {
   const int nvec = K / 16;
@@ -119,6 +131,58 @@ __device__ __forceinline__ void dot2(const bf16* sa, int K, const uint8_t* __res
 }
 
 // ---- norm → fp8：q[r][i] = fp8(bf16(x·rsqrt(mean x²+eps)·w) · a_inv)。grid = m，block = 256。
+// A8 版 dot2：A 从 smem 以 e4m3 读（见 load_a8）。累加序与 dot2 完全相同。
+template <int M_TILE>
+__device__ __forceinline__ void dot2_a8(const uint8_t* sa, int K, const uint8_t* __restrict__ w0,
+                                     const uint8_t* __restrict__ w1, float (&acc)[2][M_TILE], int lane) {
+  const int nvec = K / 16;
+  uint4 r0[kMaxVecPerLane], r1[kMaxVecPerLane];
+#pragma unroll
+  for (int j = 0; j < kMaxVecPerLane; ++j) {
+    const int c = lane + j * 32;
+    if (c < nvec) {
+      r0[j] = __ldg(reinterpret_cast<const uint4*>(w0 + c * 16));
+      r1[j] = __ldg(reinterpret_cast<const uint4*>(w1 + c * 16));
+    }
+  }
+#pragma unroll
+  for (int j = 0; j < kMaxVecPerLane; ++j) {
+    const int c = lane + j * 32;
+    if (c < nvec) {
+      float wf[2][16];
+      e4m3x16_to_f32(r0[j], wf[0]);
+      e4m3x16_to_f32(r1[j], wf[1]);
+#pragma unroll
+      for (int r = 0; r < M_TILE; ++r) {
+        float af[16];
+        e4m3x16_to_f32(*reinterpret_cast<const uint4*>(sa + (long)r * K + c * 16), af);
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+          const float2 x = make_float2(af[2 * i], af[2 * i + 1]);
+          const float2 y = make_float2(af[8 + 2 * i], af[8 + 2 * i + 1]);
+          acc[0][r] = fmaf(wf[0][2 * i], x.x, acc[0][r]);
+          acc[0][r] = fmaf(wf[0][2 * i + 1], x.y, acc[0][r]);
+          acc[0][r] = fmaf(wf[0][8 + 2 * i], y.x, acc[0][r]);
+          acc[0][r] = fmaf(wf[0][8 + 2 * i + 1], y.y, acc[0][r]);
+          acc[1][r] = fmaf(wf[1][2 * i], x.x, acc[1][r]);
+          acc[1][r] = fmaf(wf[1][2 * i + 1], x.y, acc[1][r]);
+          acc[1][r] = fmaf(wf[1][8 + 2 * i], y.x, acc[1][r]);
+          acc[1][r] = fmaf(wf[1][8 + 2 * i + 1], y.y, acc[1][r]);
+        }
+      }
+    }
+  }
+#pragma unroll
+  for (int j = 0; j < 2; ++j) {
+#pragma unroll
+    for (int r = 0; r < M_TILE; ++r) {
+#pragma unroll
+      for (int off = 16; off > 0; off >>= 1) acc[j][r] += __shfl_xor_sync(0xffffffffu, acc[j][r], off);
+    }
+  }
+}
+
+// ---- norm → fp8：q[r][i] = fp8(bf16(x·rsqrt(mean x²+eps)·w) · a_inv)。grid = m，block = 256。
 __global__ void __launch_bounds__(256) norm_quant_kernel(const bf16* __restrict__ x, const bf16* __restrict__ w,
                                                          uint8_t* __restrict__ q, int H, float eps, float a_inv) {
   __shared__ float red[8];
@@ -144,7 +208,7 @@ __global__ void __launch_bounds__(256) norm_quant_kernel(const bf16* __restrict_
 }
 
 // ---- gate‖up GEMV + gelu·mul → fp8。grid = ceil(I / warps)，每 warp 一个行号 n（gate 行 n + up 行 n）。
-template <int M_TILE>
+template <int M_TILE, bool A8 = false>
 __global__ void __launch_bounds__(kMaxWarps * 32) gateup_act_kernel(const uint8_t* __restrict__ a_q,
                                                             const uint8_t* __restrict__ gw,
                                                             const uint8_t* __restrict__ uw,
@@ -152,14 +216,15 @@ __global__ void __launch_bounds__(kMaxWarps * 32) gateup_act_kernel(const uint8_
                                                             float gs, float us, float dn_a_inv) {
   extern __shared__ __align__(16) uint8_t smem_raw[];
   bf16* sa = reinterpret_cast<bf16*>(smem_raw);
-  load_a<M_TILE>(a_q, sa, m, K);
+  if constexpr (A8) load_a8<M_TILE>(a_q, smem_raw, m, K); else load_a<M_TILE>(a_q, sa, m, K);
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   const int n = blockIdx.x * (blockDim.x >> 5) + warp;
   if (n >= I) return;  // load_a 已过 barrier，之后无 barrier
   float acc[2][M_TILE];
 #pragma unroll
   for (int r = 0; r < M_TILE; ++r) acc[0][r] = acc[1][r] = 0.f;
-  dot2<M_TILE>(sa, K, gw + (long)n * K, uw + (long)n * K, acc, lane);
+  if constexpr (A8) dot2_a8<M_TILE>(smem_raw, K, gw + (long)n * K, uw + (long)n * K, acc, lane);
+  else dot2<M_TILE>(sa, K, gw + (long)n * K, uw + (long)n * K, acc, lane);
 #pragma unroll
   for (int r = 0; r < M_TILE; ++r) {
     if (lane == r && r < m) {
@@ -173,12 +238,12 @@ __global__ void __launch_bounds__(kMaxWarps * 32) gateup_act_kernel(const uint8_
 }
 
 // ---- 通用 fp8 GEMV：out[r][n] = bf16(Σ_k a_q[r][k]·w[n][k] · scale)。grid = ceil(N / (2·warps))，每 warp 两行。
-template <int M_TILE>
+template <int M_TILE, bool A8 = false>
 __global__ void __launch_bounds__(kMaxWarps * 32) gemv_kernel(const uint8_t* __restrict__ a_q, const uint8_t* __restrict__ w,
                                                       bf16* __restrict__ out, int m, int N, int K, float scale) {
   extern __shared__ __align__(16) uint8_t smem_raw[];
   bf16* sa = reinterpret_cast<bf16*>(smem_raw);
-  load_a<M_TILE>(a_q, sa, m, K);
+  if constexpr (A8) load_a8<M_TILE>(a_q, smem_raw, m, K); else load_a<M_TILE>(a_q, sa, m, K);
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   const int n0 = (blockIdx.x * (blockDim.x >> 5) + warp) * 2;
   if (n0 >= N) return;
@@ -186,7 +251,8 @@ __global__ void __launch_bounds__(kMaxWarps * 32) gemv_kernel(const uint8_t* __r
   float acc[2][M_TILE];
 #pragma unroll
   for (int r = 0; r < M_TILE; ++r) acc[0][r] = acc[1][r] = 0.f;
-  dot2<M_TILE>(sa, K, w + (long)n0 * K, w + (long)(two ? n0 + 1 : n0) * K, acc, lane);
+  if constexpr (A8) dot2_a8<M_TILE>(smem_raw, K, w + (long)n0 * K, w + (long)(two ? n0 + 1 : n0) * K, acc, lane);
+  else dot2<M_TILE>(sa, K, w + (long)n0 * K, w + (long)(two ? n0 + 1 : n0) * K, acc, lane);
 #pragma unroll
   for (int r = 0; r < M_TILE; ++r) {
     if (lane == r && r < m) {
@@ -220,32 +286,48 @@ int pick_warps(int m_tile, long rows_total, int rows_per_warp) {
   while (w > 1 && warps_total / w < 4L * sms) w >>= 1;
   return w;
 }
-template <int M_TILE>
-int launch_gateup(const uint8_t* a, const uint8_t* g, const uint8_t* u, uint8_t* act, int m, int I, int K, float gs,
-                  float us, float dinv, cudaStream_t s) {
-  const int smem = M_TILE * K * 2;
+// A8 开关：`FP8_GEMV_A8=0` 回 bf16 驻留。Rust 侧 `fp8_gemv_a_bytes()` 同步此口径算门槛。
+static bool a8_enabled() {
+  static const bool on = []{ const char* v = getenv("FP8_GEMV_A8"); return !v || v[0] != '0'; }();
+  return on;
+}
+template <int M_TILE, bool A8>
+int launch_gateup_t(const uint8_t* a, const uint8_t* g, const uint8_t* u, uint8_t* act, int m, int I, int K, float gs,
+                    float us, float dinv, cudaStream_t s) {
+  const int smem = M_TILE * K * (A8 ? 1 : 2);
   const int warps = pick_warps(M_TILE, I, 1);
   static int attr_smem = 0;  // 每个模板实例一次（host 侧属性，非流操作；graph 捕获时也只在首次调用）
   if (smem > 48 * 1024 && smem > attr_smem) {
-    if (const int rc = (int)cudaFuncSetAttribute(gateup_act_kernel<M_TILE>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem))
+    if (const int rc = (int)cudaFuncSetAttribute(gateup_act_kernel<M_TILE, A8>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem))
       return rc;
     attr_smem = smem;
   }
-  gateup_act_kernel<M_TILE><<<(unsigned)((I + warps - 1) / warps), warps * 32, smem, s>>>(a, g, u, act, m, I, K, gs, us, dinv);
+  gateup_act_kernel<M_TILE, A8><<<(unsigned)((I + warps - 1) / warps), warps * 32, smem, s>>>(a, g, u, act, m, I, K, gs, us, dinv);
+  return last_err();
+}
+template <int M_TILE>
+int launch_gateup(const uint8_t* a, const uint8_t* g, const uint8_t* u, uint8_t* act, int m, int I, int K, float gs,
+                  float us, float dinv, cudaStream_t s) {
+  return a8_enabled() ? launch_gateup_t<M_TILE, true>(a, g, u, act, m, I, K, gs, us, dinv, s)
+                      : launch_gateup_t<M_TILE, false>(a, g, u, act, m, I, K, gs, us, dinv, s);
+}
+template <int M_TILE, bool A8>
+int launch_gemv_t(const uint8_t* a, const uint8_t* w, bf16* out, int m, int N, int K, float scale, cudaStream_t s) {
+  const int smem = M_TILE * K * (A8 ? 1 : 2);
+  const int warps = pick_warps(M_TILE, N, 2);
+  static int attr_smem = 0;  // 每个模板实例一次（host 侧属性，非流操作；graph 捕获时也只在首次调用）
+  if (smem > 48 * 1024 && smem > attr_smem) {
+    if (const int rc = (int)cudaFuncSetAttribute(gemv_kernel<M_TILE, A8>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem))
+      return rc;
+    attr_smem = smem;
+  }
+  gemv_kernel<M_TILE, A8><<<(unsigned)((N + 2 * warps - 1) / (2 * warps)), warps * 32, smem, s>>>(a, w, out, m, N, K, scale);
   return last_err();
 }
 template <int M_TILE>
 int launch_gemv(const uint8_t* a, const uint8_t* w, bf16* out, int m, int N, int K, float scale, cudaStream_t s) {
-  const int smem = M_TILE * K * 2;
-  const int warps = pick_warps(M_TILE, N, 2);
-  static int attr_smem = 0;  // 每个模板实例一次（host 侧属性，非流操作；graph 捕获时也只在首次调用）
-  if (smem > 48 * 1024 && smem > attr_smem) {
-    if (const int rc = (int)cudaFuncSetAttribute(gemv_kernel<M_TILE>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem))
-      return rc;
-    attr_smem = smem;
-  }
-  gemv_kernel<M_TILE><<<(unsigned)((N + 2 * warps - 1) / (2 * warps)), warps * 32, smem, s>>>(a, w, out, m, N, K, scale);
-  return last_err();
+  return a8_enabled() ? launch_gemv_t<M_TILE, true>(a, w, out, m, N, K, scale, s)
+                      : launch_gemv_t<M_TILE, false>(a, w, out, m, N, K, scale, s);
 }
 }  // namespace
 }  // namespace dinfer
@@ -274,6 +356,8 @@ int mlp_fp8_gateup_act(const void* a_q, const void* gate_w, const void* up_w, vo
   if (m <= 8) return launch_gateup<8>(a, g, u, o, (int)m, (int)inter, (int)k, gate_scale, up_scale, dn_a_inv, stream);
   return launch_gateup<16>(a, g, u, o, (int)m, (int)inter, (int)k, gate_scale, up_scale, dn_a_inv, stream);
 }
+// A8 口径查询：每个 A 元素在 smem 里占几字节（1 = e4m3 驻留，2 = bf16 驻留）。Rust 侧据此算 M_TILE·K·bytes ≤ 门槛。
+int mlp_fp8_gemv_a_bytes() { return dinfer::a8_enabled() ? 1 : 2; }
 int mlp_fp8_gemv(const void* a_q, const void* w, void* out, int64_t m, int64_t n, int64_t k, float scale,
                  cudaStream_t stream) {
   using namespace dinfer;

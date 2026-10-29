@@ -190,7 +190,7 @@ impl QLinear {
                 }
                 let (a_s, w_s) = sc.as_ref().unwrap();
                 // B33a：预量化路径同样走 fp8 gemv（条件与 forward 同），否则 NORM_FUSE_QUANT 会把 qkv 退回 cuBLASLt。
-                if fp8_gemv_enabled() && tokens <= 16 && kk % 16 == 0 && kk <= 4096 && fp8_gemv_m_tile(tokens) * kk * 2 <= fp8_gemv_smem_cap() {
+                if fp8_gemv_enabled() && tokens <= 16 && kk % 16 == 0 && kk <= 4096 && fp8_gemv_m_tile(tokens) * kk * fp8_gemv_a_bytes() <= fp8_gemv_smem_cap() {
                     return k::ops::mlp_fp8_gemv(stream, a, w, &mut out.data, tokens, n, kk, *scale * *a_scale);
                 }
                 gemm.forward_fp8_cublaslt(a, a_s, w, w_s, &mut out.data, tokens, n, kk)
@@ -236,7 +236,7 @@ impl QLinear {
                 // 条件：tokens ≤ 16、K % 16 == 0、A 的 bf16 驻留 M_TILE·K·2 ≤ 24 KB（≥ 4 block/SM 才能把权重流读的延迟藏住；
                 // D62 实测 45 KB（m=8,K=2816）时 c8 反而比 cuBLASLt 慢 5%）。K=2816 → m ≤ 4；K=8192 → m = 1。`FP8_GEMV=1` 开。
                 // B31b：A 驻留门槛 24 KB → 48 KB（8 warp/block 后 m=8/K=2816 的 45 KB 实测 12.3 us < cuBLASLt nvjet 21.4 us；D62 的 45 KB 退化是 2 warp 时的）。
-                if fp8_gemv_enabled() && tokens <= 16 && kk % 16 == 0 && kk <= 4096 && fp8_gemv_m_tile(tokens) * kk * 2 <= fp8_gemv_smem_cap() {
+                if fp8_gemv_enabled() && tokens <= 16 && kk % 16 == 0 && kk <= 4096 && fp8_gemv_m_tile(tokens) * kk * fp8_gemv_a_bytes() <= fp8_gemv_smem_cap() {
                     return k::ops::mlp_fp8_gemv(stream, buf, w, &mut out.data, tokens, n, kk, *scale * *a_scale);
                 }
                 // 两个 per-tensor scale 以设备标量形式传给 cuBLASLt；按 shape 缓存一次即可（每层不同）。
@@ -741,6 +741,11 @@ fn fp8_gemv_enabled() -> bool {
 fn fp8_gemv_smem_cap() -> usize {
     static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *V.get_or_init(|| std::env::var("FP8_GEMV_SMEM_KB").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(48) * 1024)
+}
+/// A8（D176）：fp8 gemv 的 A 驻留字节数（kernel 侧 `FP8_GEMV_A8` 决定，启动后不变）。
+fn fp8_gemv_a_bytes() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(k::ops::mlp_fp8_gemv_a_bytes)
 }
 fn fp8_gemv_m_tile(m: usize) -> usize {
     match m { 0 | 1 => 1, 2 => 2, 3 | 4 => 4, 5..=8 => 8, _ => 16 }
