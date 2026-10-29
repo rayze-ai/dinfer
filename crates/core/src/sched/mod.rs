@@ -379,7 +379,16 @@ impl Scheduler {
                 if let Some(b) = self.kv.allocate_slots(slot, r, num_new, 0, None, num_lookahead) {
                     break Some(b);
                 }
-                let victim = *self.running.last().unwrap();
+                // E1（prefill 异步收割）：running 末尾若是"prefill 已下发、首 token 未收割"的请求（computed == num_tokens 且无
+                // 输出），它的 KV 正被副流写，不能当抢占受害者；换成它前面第一个可抢占的。找不到则按原逻辑（会落到自己 → 跳过）。
+                let mut vi = self.running.len() - 1;
+                while vi > 0 {
+                    let v = &self.slab[self.running[vi]].as_ref().unwrap().req;
+                    let awaiting = v.num_computed_tokens >= v.num_tokens() && v.num_output_placeholders == 0 && v.num_output_tokens() == 0;
+                    if !awaiting { break; }
+                    vi -= 1;
+                }
+                let victim = self.running[vi];
                 if victim == slot {
                     // 末尾就是自己。若还有别的 running（排在前面、本步已拿到块），本步跳过我、不抢占：
                     // 下一步别人释放 / 完成后再试（vLLM 同样 "不自抢占"）。
@@ -399,7 +408,7 @@ impl Scheduler {
                     self.force_finished.push((rid, FinishReason::Length));
                     break None;
                 }
-                self.running.pop();
+                self.running.remove(vi);
                 self.preempt(victim);
                 any_preempted = true;
             };

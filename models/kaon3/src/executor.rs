@@ -54,6 +54,8 @@ pub struct KaonExecutor {
     /// 主流上一步结束事件：副流 prefill 开始前等它（KV 块复用 / 残差缓冲安全）。
     main_done: Option<dinfer_kernels::Event>,
     pub pair_steps: u64,
+    /// E1：副流上在飞的异步 prefill（一次只允许一个：AltSet 只有一套缓冲）。
+    late_busy: bool,
 }
 
 /// B35（loop kaon3-decode-opt）：副套 = 一条流 + 该流上的全部可变缓冲（与 qwen3 `AltSet` 同构）。模型权重与 KV cache 共享：
@@ -70,6 +72,13 @@ struct AltSet {
     argmax: Tensor<i32>,
     scratch: LayerScratch,
     acts: ActBuf,
+}
+
+/// E1：副流上在飞的 prefill 子批句柄（rows = 要 collect 的 argmax 行数，done = 副流完成事件，starts = logits_row_start）。
+struct LateHandle {
+    rows: usize,
+    done: dinfer_kernels::Event,
+    starts: Vec<usize>,
 }
 
 /// B29 开关：异步调度在飞行 token 的设备侧 gather + save_chosen。`INFLIGHT_GATHER=1` 开（默认关，见函数体注释）。
@@ -148,6 +157,7 @@ impl KaonExecutor {
             alt: None,
             main_done: None,
             pair_steps: 0,
+            late_busy: false,
         };
         // B35：副套（跨流 prefill/decode 并行）。B50（loop kaon3-decode-opt D225，b56 两轮）：**默认关**——c16–c64 下 prefill 2148 tok
         // 占满 SM，decode 图挤不进，pair 步只多付两流同步 + 一套 AltSet；单流 Paged 混批全档 TPOT 低 0.4–1.3%。`XSTREAM=1` 开（A/B 用）。
@@ -403,6 +413,53 @@ impl ModelExecutor for KaonExecutor {
         fill(decode, &am_d, gen_d, dr_d);
         fill(prefill, &am_p, gen_p, dr_p);
         Ok((vec![Vec::new(); decode.num_reqs()], vec![Vec::new(); prefill.num_reqs()]))
+    }
+    fn supports_prefill_async(&self) -> bool {
+        self.alt.is_some()
+    }
+    /// E1（loop kaon3-prefill-async）：prefill 子批入队副流，不等。与 B35 pair 的区别：主流**不**等 `prefill_done`，副流也**不**等
+    /// `main_done`——两流只共享只读权重与互不重叠的 KV slot，无需同步。一次只允许一个在飞（AltSet 单套缓冲）。
+    fn begin_prefill_async(&mut self, plan: &BatchPlan) -> Result<Option<Box<dyn std::any::Any + Send>>> {
+        if self.alt.is_none() || self.late_busy {
+            return Ok(None);
+        }
+        self.swap_alt();
+        let r = (|| -> Result<(usize, dinfer_kernels::Event)> {
+            self.stream.bind_ctx()?;
+            let rows = self.enqueue(plan, false)?;
+            Ok((rows, self.stream.record_event()?))
+        })();
+        self.swap_alt();
+        let (rows, done) = r?;
+        self.late_busy = true;
+        let starts: Vec<usize> = plan.logits_row_start.clone();
+        Ok(Some(Box::new(LateHandle { rows, done, starts })))
+    }
+    fn harvest_prefill(
+        &mut self,
+        h: Box<dyn std::any::Any + Send>,
+        gen: &mut Vec<Vec<u32>>,
+        dr: &mut Vec<Vec<u32>>,
+    ) -> Result<Option<Box<dyn std::any::Any + Send>>> {
+        let h = h.downcast::<LateHandle>().map_err(|_| anyhow::anyhow!("harvest_prefill: handle type"))?;
+        if !h.done.is_done()? {
+            return Ok(Some(h));
+        }
+        self.swap_alt();
+        let r = (|| -> Result<Vec<i32>> {
+            self.stream.bind_ctx()?;
+            self.collect(h.rows)
+        })();
+        self.swap_alt();
+        let am = r?;
+        self.late_busy = false;
+        gen.clear();
+        dr.clear();
+        for i in 0..h.starts.len().saturating_sub(1) {
+            gen.push(vec![am[h.starts[i]] as u32]);
+            dr.push(Vec::new());
+        }
+        Ok(None)
     }
     fn forward_sample(
         &mut self,

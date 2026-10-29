@@ -228,6 +228,24 @@ pub trait ModelExecutor {
     }
 
     /// 上一次 `forward_sample` 的 logprobs（与 req_ids 平行；不要 logprobs 的请求为空 Vec）。默认：不支持 → 全空。
+    /// prefill 异步收割（loop kaon3-prefill-async E1）：把 **prefill 子批**入队到执行器自己的副流并**不等**，返回不透明句柄；
+    /// `Ok(None)` = 这次不能异步（副流忙 / 不支持），调用方退回同步 pair / 单前向。只在 `supports_prefill_async()` 为真时调用。
+    /// 约束：plan 里每个请求都是"最后一个 chunk"（有 token 可采样），调用方保证。
+    fn begin_prefill_async(&mut self, _plan: &BatchPlan) -> Result<Option<Box<dyn std::any::Any + Send>>> {
+        Ok(None)
+    }
+    /// 非阻塞收割：完成 → 读回采样（每请求 push 一个 `gen` / `dr`），返回 `Ok(None)`；未完成 → 原句柄返还 `Ok(Some(h))`。
+    fn harvest_prefill(
+        &mut self,
+        h: Box<dyn std::any::Any + Send>,
+        _gen: &mut Vec<Vec<u32>>,
+        _dr: &mut Vec<Vec<u32>>,
+    ) -> Result<Option<Box<dyn std::any::Any + Send>>> {
+        Ok(Some(h))
+    }
+    fn supports_prefill_async(&self) -> bool {
+        false
+    }
     fn take_logprobs(&mut self, num_reqs: usize) -> Vec<Vec<TokenLogprobs>> {
         vec![Vec::new(); num_reqs]
     }
@@ -267,6 +285,18 @@ pub struct Runner<E: ModelExecutor> {
     steps_mixed: u64,
     steps_pair: u64,
     steps_prefill_only: u64,
+    /// prefill 异步收割（E1）：副流上在飞的 prefill 子批。`handle` 由 executor 给；`rows` 是这些请求的 PendingRow。
+    late: Option<LatePrefill>,
+    steps_late_begin: u64,
+    steps_late_harvest: u64,
+    prefill_async: bool,
+}
+
+/// 副流上在飞、尚未收割的 prefill 子批。
+struct LatePrefill {
+    handle: Box<dyn std::any::Any + Send>,
+    rows: Vec<PendingRow>,
+    req_ids: Vec<RequestId>,
 }
 
 impl<E: ModelExecutor> Runner<E> {
@@ -284,6 +314,11 @@ impl<E: ModelExecutor> Runner<E> {
             steps_mixed: 0,
             steps_pair: 0,
             steps_prefill_only: 0,
+            late: None,
+            steps_late_begin: 0,
+            steps_late_harvest: 0,
+            // E1：默认关；`PREFILL_ASYNC=1` 开（A/B 期用 env，定稿后改 CLI）。
+            prefill_async: std::env::var("PREFILL_ASYNC").map(|v| v == "1").unwrap_or(false),
         }
     }
 
@@ -418,7 +453,10 @@ impl<E: ModelExecutor> Runner<E> {
     /// 第二段：取结果、补 token、产出 ModelRunnerOutput。
     pub fn finish(&mut self, mut pending: Pending) -> Result<ModelRunnerOutput> {
         if pending.req_ids.is_empty() {
-            return Ok(ModelRunnerOutput::default());
+            // 空步也要试收割（在飞 prefill 可能在这一步完成）
+            let mut out = ModelRunnerOutput::default();
+            self.harvest_late(&mut out)?;
+            return Ok(out);
         }
         if let Some((g, d)) = pending.sync_result.take() {
             self.generated = g;
@@ -499,7 +537,38 @@ impl<E: ModelExecutor> Runner<E> {
                 out.logprobs.push(Vec::new());
             }
         }
+        self.harvest_late(&mut out)?;
         Ok(out)
+    }
+
+    /// E1：非阻塞收割副流上的 prefill 子批；完成则把这些请求的首 token 追加进 `out`（与本步其它请求一同 publish）。
+    fn harvest_late(&mut self, out: &mut ModelRunnerOutput) -> Result<()> {
+        let Some(late) = self.late.take() else { return Ok(()) };
+        let mut gen = Vec::with_capacity(late.rows.len());
+        let mut dr = Vec::with_capacity(late.rows.len());
+        match self.exec.harvest_prefill(late.handle, &mut gen, &mut dr)? {
+            Some(h) => {
+                self.late = Some(LatePrefill { handle: h, rows: late.rows, req_ids: late.req_ids });
+            }
+            None => {
+                ensure!(gen.len() == late.rows.len(), "harvest_prefill returned {} entries for {} requests", gen.len(), late.rows.len());
+                self.steps_late_harvest += 1;
+                for (i, row) in late.rows.iter().enumerate() {
+                    let g = std::mem::take(&mut gen[i]);
+                    let d = if i < dr.len() { std::mem::take(&mut dr[i]) } else { Vec::new() };
+                    if let Some(st) = self.states.get_mut(&row.rid) {
+                        ensure!(!g.is_empty() && g.len() <= 1 + row.num_draft, "late req {}: executor returned {} tokens", row.rid, g.len());
+                        st.num_computed += row.n - row.num_draft + (g.len() - 1);
+                        st.token_ids.extend_from_slice(&g);
+                    }
+                    out.req_ids.push(row.rid);
+                    out.sampled.push(g);
+                    out.drafts.push(d);
+                    out.logprobs.push(Vec::new());
+                }
+            }
+        }
+        Ok(())
     }
 
     fn update_states(&mut self, so: &SchedulerOutput) -> Result<()> {
@@ -572,8 +641,38 @@ impl<E: ModelExecutor> Runner<E> {
                 mixed = self.steps_mixed,
                 pair = self.steps_pair,
                 prefill_only = self.steps_prefill_only,
+                late_begin = self.steps_late_begin,
+                late_harvest = self.steps_late_harvest,
                 "runner step mix (cumulative)"
             );
+        }
+        // E1：prefill 异步收割。条件：开关开、executor 支持、混批、副流空闲、prefill 行都是最后一个 chunk（有 token 可采）。
+        let can_late = self.prefill_async
+            && mixed
+            && self.late.is_none()
+            && self.exec.supports_prefill_async()
+            && rows.iter().enumerate().all(|(i, &(rid, n))| {
+                decode_mask[i] || self.states.get(&rid).is_some_and(|st| st.num_computed + n as usize >= st.token_ids.len())
+            });
+        if can_late {
+            let full = std::mem::take(&mut self.plan);
+            self.build_plan(&Self::filter_output(so, |i| !decode_mask[i]))?;
+            let plan_p = std::mem::take(&mut self.plan);
+            self.plan = full;
+            if let Some(h) = self.exec.begin_prefill_async(&plan_p)? {
+                self.steps_late_begin += 1;
+                let mut lrows = Vec::with_capacity(plan_p.num_reqs());
+                for (i, &rid) in plan_p.req_ids.iter().enumerate() {
+                    let n = plan_p.num_tokens[i] as usize;
+                    lrows.push(PendingRow { rid, n, num_draft: plan_p.spec_tokens[i].len(), end_of_seq: true });
+                }
+                self.late = Some(LatePrefill { handle: h, rows: lrows, req_ids: plan_p.req_ids.clone() });
+                // 主 plan 只剩 decode 行，照常（图）执行；本步 Pending 只含 decode 行
+                self.build_plan(&Self::filter_output(so, |i| decode_mask[i]))?;
+                self.exec.forward_sample(&self.plan, &mut self.generated, &mut self.drafts)?;
+                return Ok(Some(self.exec.take_logprobs(self.plan.num_reqs())));
+            }
+            // 执行器这次不接：退回下面的 pair / 单前向
         }
         if !(self.exec.supports_pair() && mixed) {
             return Ok(None);

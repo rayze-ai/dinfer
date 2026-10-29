@@ -55,3 +55,9 @@ E1 …（接 kaon3-decode-opt 的 D 编号体系，本 loop 用 E）
 - `harvest_prefill`：`done.is_done()?` 假 → 返还；真 → `swap_alt`；`collect(rows)`；`swap_alt`；`late_busy = false`；按 `logits_row_start` 填 gen/dr。
 - 流优先级：第一版不做（cudarc 0.18 没暴露 `cuStreamCreateWithPriority`，CudaStream 字段私有）；若 A/B 显示 decode 图被 prefill 挤（decode 步 exec 从 8 ms 涨到 ≫ 8），再在 kernels crate 加 `Stream::with_priority`（走 sys）。
 **门禁 / 观察**：`envab_c` ABAB `PREFILL_ASYNC=0/1`，c8–c64 两轮；HOST_TIME 看混批步 exec 应降到 ≈ 纯 decode 步 + 收割步出现；TTFT 不升 > 5%；固定 prompt 输出同；核心单测 + `cargo test -p dinfer-kaon3`。
+
+## E1 落地（2026-10-29，commit 见下）
+- core：`ModelExecutor::{supports_prefill_async, begin_prefill_async, harvest_prefill}`（默认不支持）；`Runner.late: Option<LatePrefill>`；`try_execute_pair` 在 `PREFILL_ASYNC=1` 且副流空闲且 prefill 行全是末 chunk 时：prefill 子批 `begin_prefill_async`，decode 子批照常走图，本步 Pending 只含 decode 行；`finish()` 末尾（含空步）`harvest_late` 非阻塞收割 → 追加进 `ModelRunnerOutput`。scheduler 只加抢占受害者守卫（跳过"已下发未收割"的请求）。`runner step mix` 日志加 `late_begin / late_harvest`。
+- kaon3：`late_busy` + `LateHandle{rows, done: Event, starts}`；`begin_prefill_async` = swap_alt → enqueue(eager) → record_event → swap 回（**不**等 main_done，主流**不**等 prefill_done）；`harvest_prefill` = `done.is_done()` → collect → 填 gen。
+- 流优先级未做（cudarc 0.18 不暴露）。第一轮 A/B 看 decode 步 exec 是否被 prefill 挤。
+- 链 b62：A = `XSTREAM=0`（现状）/ B = `PREFILL_ASYNC=1 XSTREAM=1`。
