@@ -50,3 +50,8 @@
 ## 跨流 pair 步（decode 主流 + prefill 副流）的隐藏代价：decode 等 prefill（2026-10-29 kaon3 D219）
 - **判断**：pair 步让 prefill 不抢 decode 的 SM，但 `forward_sample_pair` 末尾主流 `wait_event(prefill_done)` 再 collect → 这一步的 decode 行要等整个 prefill 子批（c16 65 ms）才 publish。闭环 bench 下每 64 步一次 ≈ TPOT +1.0 ms（c16）/ +2.3 ms（c64），是对 vLLM 剩余差额里"调度结构"的那一半。
 - **怎么用**：量法 = bench TPOT − HOST_TIME 纯 decode 步 exec；> 1 ms 就是这个。解法是"prefill 异步收割"（结果晚到：Pending 允许部分请求在后续步并入），规格 `docs/loops/kaon3-prefill-async.md`。切步配额（B47）不是解法（每个混批步固定开销 5–8 ms，切 N 段付 N 次）。
+
+## prefill 异步收割的 core 契约（2026-10-29 E1，`loops/kaon3-prefill-async.md`）
+- 执行器只需实现 `supports_prefill_async / begin_prefill_async(plan) -> Option<handle> / harvest_prefill(handle) -> Option<handle>`；句柄 `Box<dyn Any + Send>`，模型 crate 自定（kaon3：rows + Event + logits_row_start）。
+- core 三处状态必须同步推进，少一处就是 hang：① runner `states[rid].num_computed += base`（begin 时，与 scheduler 同步）；② scheduler `awaiting` 集合（不排 token、不当抢占受害者）；③ `update_from_output` 收到 token 时清 awaiting。E2 第一跑漏了 ①② 各一次：症状分别是 `in-flight token without last_row` 整步失败、与给未收割请求排 decode 行。
+- 收割在 `finish()` 末尾（含空步）非阻塞 `Event::is_done`；收割到的请求追加进同一个 `ModelRunnerOutput`，publish 路径零改动。
