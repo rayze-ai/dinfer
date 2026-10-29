@@ -22,11 +22,11 @@ rm -f /w/dinfer/tmp_nsys_c16d.nsys-rep /w/dinfer/tmp_nsys_c16d.sqlite
 "$NSYS" profile -o /w/dinfer/tmp_nsys_c16d --force-overwrite true -t cuda --cuda-graph-trace=node --cuda-flush-interval=1000 --sample none --cpuctxsw none \
   ./target/release/dinfer serve --model "$M" --tokenizer "$M" --port 8353 --max-model-len 16384 --max-num-seqs 64 --max-num-batched-tokens 4096 >/w/dinfer/tmp_nsys_c16d_serve.log 2>&1 &
 NP=$!
-for i in $(seq 1 150); do sed "s/\x1b\[[0-9;]*m//g" /w/dinfer/tmp_nsys_c16d_serve.log | grep -q "listening addr" && break; sleep 1; done
+for i in $(seq 1 400); do sed "s/\x1b\[[0-9;]*m//g" /w/dinfer/tmp_nsys_c16d_serve.log | grep -q "listening addr" && break; sleep 1; done
 sed "s/\x1b\[[0-9;]*m//g" /w/dinfer/tmp_nsys_c16d_serve.log | grep -q "listening addr" || { echo "serve NOTUP" >> $R; tail -3 /w/dinfer/tmp_nsys_c16d_serve.log >> $R; echo DONE >> $R; kill -9 $NP; exit 1; }
 # c1，400 词 prompt，64 out，3 请求（含预热）→ 约 190 个 decode 步
 taskset -c 60-91 ./target/release/bench --url http://127.0.0.1:8353 --concurrency 16 --num-requests 64 --prompt-len 400 --max-tokens 64 --prefix-repeat 0 --warmup 1 --seed 7016 2>&1 | grep -E "TPOT " >> $R
-kill -INT $(pgrep -x dinfer) 2>/dev/null; wait $NP 2>/dev/null; sleep 2; ls -la /w/dinfer/tmp_nsys_c16d.nsys-rep >> $R 2>&1
+kill -INT $(fuser 8353/tcp 2>/dev/null | tr -d " " | head -1) 2>/dev/null; wait $NP 2>/dev/null; sleep 2; ls -la /w/dinfer/tmp_nsys_c16d.nsys-rep >> $R 2>&1
 "$NSYS" export --type sqlite --force-overwrite true -o /w/dinfer/tmp_nsys_c16d.sqlite /w/dinfer/tmp_nsys_c16d.nsys-rep >/dev/null 2>&1
 taskset -c 100-127 python3 /w/nsys_kern.py /w/dinfer/tmp_nsys_c16d.sqlite --all >> $R 2>&1
 echo DONE >> $R
