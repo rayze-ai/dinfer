@@ -329,3 +329,6 @@ b56,2026-10-29,B50 XSTREAM 默认关(单流 Paged 混批) b56 两轮均值 vs A(
 b56,2026-10-29,B50 XSTREAM 默认关(单流 Paged 混批) b56 两轮均值 vs A(pair 步): c8 7.09→7.05 c16 10.68→10.60 c32 13.06→12.98 c64 21.40→21.17(-1.1%); TTFT -1-3%; 吞吐 +1-2%; vLLM 列 = stepA5 中位数,c64,out_tok_per_s,2645.000,3355.000,0.788,,higher,main,5090,vllm,dinfer,kaon3
 b56,2026-10-29,B50 XSTREAM 默认关(单流 Paged 混批) b56 两轮均值 vs A(pair 步): c8 7.09→7.05 c16 10.68→10.60 c32 13.06→12.98 c64 21.40→21.17(-1.1%); TTFT -1-3%; 吞吐 +1-2%; vLLM 列 = stepA5 中位数,c64,ttft_p50_ms,206.000,241.000,0.855,,lower,main,5090,vllm,dinfer,kaon3
 b56,2026-10-29,B50 XSTREAM 默认关(单流 Paged 混批) b56 两轮均值 vs A(pair 步): c8 7.09→7.05 c16 10.68→10.60 c32 13.06→12.98 c64 21.40→21.17(-1.1%); TTFT -1-3%; 吞吐 +1-2%; vLLM 列 = stepA5 中位数,c64,tpot_p50_ms,21.170,15.430,1.372,,lower,main,5090,vllm,dinfer,kaon3
+b55,2026-10-29,"回滚: B48d p64 STAGES=4 微基准判负(P2148 gate‖up +5%, down 持平), 未起端到端; 默认 3; 数字 = b53 B 侧(同二进制) 占位",c64,out_tok_per_s,2390.000,3367.000,0.710,,higher,main,5090,vllm,dinfer,kaon3
+b55,2026-10-29,"回滚: B48d p64 STAGES=4 微基准判负(P2148 gate‖up +5%, down 持平), 未起端到端; 默认 3; 数字 = b53 B 侧(同二进制) 占位",c64,ttft_p50_ms,254.000,247.000,1.028,,lower,main,5090,vllm,dinfer,kaon3
+b55,2026-10-29,"回滚: B48d p64 STAGES=4 微基准判负(P2148 gate‖up +5%, down 持平), 未起端到端; 默认 3; 数字 = b53 B 侧(同二进制) 占位",c64,tpot_p50_ms,23.050,15.340,1.503,,lower,main,5090,vllm,dinfer,kaon3
