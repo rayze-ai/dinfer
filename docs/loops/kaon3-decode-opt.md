@@ -1283,3 +1283,4 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 ## ★★★ D167 2026-10-29 envab dual_b33（b33 二进制，A 默认 / B `MOE_GEMM_DUAL=1`）首批：c1 5.20 → **5.13（-1.3%）**，c8 8.99 → **8.88（-1.2%）**（gate+up 单 launch，grid.z=2E，注释称逐位）。等 A2/B2；两轮同向则 `MOE_GEMM_DUAL` 默认开（再 -30 launch/步）。
 - 注：`moe_grouped_gemm_dual` 走的是旧 2 级 `pipe` body（BM=32，非 pipe4/BM16），仍比两次 pipe4<BM16> 快 1.3%——说明 decode 下 launch 数/grid 填充比流水级数重要。若 A2/B2 确认：先把 `MOE_GEMM_DUAL` 默认开（零代码），再做 pipe4<BM16> 的 dual 变体（预期再 -1%）。
 - **dual_b33 定稿（两轮）**：`MOE_GEMM_DUAL=1` c1 5.20/5.20 → **5.13/5.13（-1.3%）**，c8 8.99/8.98 → **8.88/8.82（-1.5%）**，输出同。**默认开**（已进 stage36/layer.rs，b36 一并测）。
+- **D168 smemcap_nat（b31b 二进制，`FP8_GEMV_SMEM_KB=24` vs 默认 48，无 cache，10 条自然语言 chat + 2 条 raw 补全含 "The capital of France is"）：0/12 不同** ⇒ B31b 的门槛改动不改变输出；bN 里 A（b2330）→ B（b31b）raw 输出从 "Wait, I'm not sure…" 变 "is is is…" 不是门槛引起（两个二进制还差 pick_warps 8 warp：数值上同序，理论不该变）。未解；自然语言 10/10 同，先记为待查（下次用 envnat 直接比两个二进制：`BIN=` 两次）。
