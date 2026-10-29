@@ -294,6 +294,17 @@ impl Scheduler {
 
     /// 只调度 waiting 里的新请求（跳过 running），预算全给它们；running 行一个都不动。
     /// 用于插队 prefill（Q3-o）：在飞 decode 步未结束时为新请求单独跑一步。
+    /// H1（loop kaon3-pd-balance）：运行时改每步 prefill 新 token 配额（0 = 不限）；控制器每步末调用。
+    pub fn set_prefill_tokens_per_step(&mut self, q: u32) {
+        self.p.sched.prefill_tokens_per_step = q;
+    }
+    pub fn prefill_tokens_per_step(&self) -> u32 {
+        self.p.sched.prefill_tokens_per_step
+    }
+    /// waiting 队首（最老）请求已等待的纳秒数；无 waiting 时 0。TTFT 压力信号。
+    pub fn oldest_wait_ns(&self, now_ns: u64) -> u64 {
+        self.waiting.front().map_or(0, |&slot| now_ns.saturating_sub(self.slab[slot].as_ref().unwrap().req.arrival_ns))
+    }
     /// E1：runner 把这些请求的 prefill 下发到副流（结果晚到）；在收到它们的 token 前不再给它们排 token。
     pub fn mark_awaiting(&mut self, ids: &[RequestId]) {
         for id in ids {

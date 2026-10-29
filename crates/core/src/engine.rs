@@ -51,6 +51,72 @@ enum Cmd {
 
 /// 跨线程句柄：提交 / 取消请求 / 读指标。
 #[derive(Clone)]
+/// H1（loop kaon3-pd-balance）：prefill / decode 资源分配的闭环控制器（模型无关）。
+/// 可调量：scheduler 每步 prefill token 配额（Q1）。信号：waiting 队首等待时长（TTFT 压力）与纯 decode 步 exec 滑动中位（TPOT 压力）。
+/// 控制律：u ∈ [0,1] 为给 prefill 的份额，u += k·(e_ttft − e_tpot)，死区 ±5%，两边都不饿时向 0.5 回归；quota = lerp(512, 4096, u)。
+/// 开关：`PD_BALANCE_SLO_TTFT_MS` 与 `PD_BALANCE_SLO_TPOT_MS` 都 > 0 才启用（A/B 期 env；定稿后改 CLI `--slo-ttft-ms/--slo-tpot-ms`）。
+struct PdBalance {
+    slo_ttft_ms: f64,
+    slo_tpot_ms: f64,
+    k: f64,
+    u: f64,
+    quota_min: u32,
+    quota_max: u32,
+    decode_exec_ms: std::collections::VecDeque<f64>,
+    steps: u64,
+    period: u64,
+    last_quota: u32,
+}
+impl PdBalance {
+    fn from_env() -> Option<Self> {
+        let g = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+        let (t, p) = (g("PD_BALANCE_SLO_TTFT_MS"), g("PD_BALANCE_SLO_TPOT_MS"));
+        if t <= 0.0 || p <= 0.0 {
+            return None;
+        }
+        let k = std::env::var("PD_BALANCE_K").ok().and_then(|v| v.parse().ok()).unwrap_or(0.1);
+        let period = std::env::var("PD_BALANCE_PERIOD").ok().and_then(|v| v.parse().ok()).unwrap_or(20);
+        tracing::info!(slo_ttft_ms = t, slo_tpot_ms = p, k, period, "pd-balance 控制器开");
+        Some(Self { slo_ttft_ms: t, slo_tpot_ms: p, k, u: 0.5, quota_min: 512, quota_max: 4096, decode_exec_ms: Default::default(), steps: 0, period, last_quota: 0 })
+    }
+    fn quota(&self) -> u32 {
+        (self.quota_min as f64 + (self.quota_max - self.quota_min) as f64 * self.u).round() as u32
+    }
+    /// 每步末喂一次：`decode_exec_ms` 只在纯 decode 步给 Some。返回 Some(新配额) 表示要写回 scheduler。
+    fn step(&mut self, decode_exec_ms: Option<f64>, oldest_wait_ms: f64, host_time: bool) -> Option<u32> {
+        if let Some(e) = decode_exec_ms {
+            self.decode_exec_ms.push_back(e);
+            if self.decode_exec_ms.len() > 64 {
+                self.decode_exec_ms.pop_front();
+            }
+        }
+        self.steps += 1;
+        if self.steps % self.period != 0 || self.decode_exec_ms.len() < 8 {
+            return None;
+        }
+        let mut v: Vec<f64> = self.decode_exec_ms.iter().copied().collect();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let dec_p50 = v[v.len() / 2];
+        let e_ttft = (oldest_wait_ms - self.slo_ttft_ms) / self.slo_ttft_ms;
+        let e_tpot = (dec_p50 - self.slo_tpot_ms) / self.slo_tpot_ms;
+        let d = e_ttft - e_tpot;
+        if e_ttft <= 0.0 && e_tpot <= 0.0 {
+            self.u += (0.5 - self.u) * self.k; // 都不饿：向中点回归
+        } else if d.abs() > 0.05 {
+            self.u = (self.u + self.k * d).clamp(0.0, 1.0);
+        }
+        let q = self.quota();
+        if q != self.last_quota {
+            self.last_quota = q;
+            if host_time {
+                eprintln!("[pd-balance] u={:.2} quota={q} e_ttft={e_ttft:+.2} e_tpot={e_tpot:+.2} oldest_wait={oldest_wait_ms:.0}ms dec_p50={dec_p50:.2}ms", self.u);
+            }
+            return Some(q);
+        }
+        None
+    }
+}
+
 pub struct EngineHandle {
     tx: crossbeam_channel::Sender<Cmd>,
     next_id: Arc<AtomicU64>,
@@ -93,6 +159,8 @@ pub struct Engine<E: ModelExecutor> {
     /// 插队 prefill 开关（CUT_IN=0 关）与计数。
     cut_in: bool,
     cut_in_max_rows: usize,
+    /// H1（loop kaon3-pd-balance）：prefill/decode 动态均衡控制器；None = 关（E6 静态行为）。
+    pd_balance: Option<PdBalance>,
     cut_in_steps: u64,
     /// 连续空步计数（退避 + 诊断）。
     empty_steps: u64,
@@ -146,6 +214,7 @@ impl<E: ModelExecutor> Engine<E> {
                 host_time,
                 cut_in: async_sched && std::env::var("CUT_IN").map(|v| v != "0").unwrap_or(true),
                 cut_in_max_rows: std::env::var("CUT_IN_MAX_ROWS").ok().and_then(|v| v.parse().ok()).unwrap_or(8),
+                pd_balance: PdBalance::from_env(),
                 cut_in_steps: 0,
                 empty_steps: 0,
                 pending: None,
@@ -617,6 +686,18 @@ impl<E: ModelExecutor> Engine<E> {
                 },
             };
             self.publish_step(&so, &mro, t_step, t_sched, t_exec);
+            // H1：均衡控制器（关时零开销）
+            if let Some(pb) = self.pd_balance.as_mut() {
+                let dec = match mro.mode {
+                    Some(crate::runner::BatchMode::Decode) => Some((t_exec - t_sched).as_secs_f64() * 1e3),
+                    _ => None,
+                };
+                let now_ns = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0);
+                let oldest_ms = self.sched.oldest_wait_ns(now_ns) as f64 / 1e6;
+                if let Some(q) = pb.step(dec, oldest_ms, self.host_time) {
+                    self.sched.set_prefill_tokens_per_step(q);
+                }
+            }
             // HOST_TIME=1：细分每步 host 各段 us（sched / exec=begin+finish含等GPU / publish），定位 host 开销。
             if self.host_time && !so.num_scheduled_tokens.is_empty() {
                 let t_pub = std::time::Instant::now();
@@ -914,5 +995,36 @@ mod pd_tests {
         assert_eq!(dh.metrics().pd_fallback_total.load(Ordering::Relaxed), 1);
         ph.shutdown();
         dh.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod pd_balance_tests {
+    use super::PdBalance;
+    fn mk() -> PdBalance {
+        PdBalance { slo_ttft_ms: 200.0, slo_tpot_ms: 12.0, k: 0.2, u: 0.5, quota_min: 512, quota_max: 4096, decode_exec_ms: Default::default(), steps: 0, period: 1, last_quota: 0 }
+    }
+    #[test]
+    fn prefill_starved_raises_quota() {
+        let mut c = mk();
+        for _ in 0..8 { c.step(Some(8.0), 0.0, false); } // decode 不饿
+        let q = (0..10).filter_map(|_| c.step(Some(8.0), 600.0, false)).last().unwrap(); // waiting 等了 600 ms > SLO
+        assert!(q > 2304, "quota 应上调: {q}");
+        assert!(c.u > 0.5);
+    }
+    #[test]
+    fn decode_starved_lowers_quota() {
+        let mut c = mk();
+        for _ in 0..8 { c.step(Some(8.0), 0.0, false); }
+        let q = (0..10).filter_map(|_| c.step(Some(30.0), 0.0, false)).last().unwrap(); // decode 步 30 ms > SLO 12
+        assert!(q < 2304, "quota 应下调: {q}");
+    }
+    #[test]
+    fn both_ok_returns_to_middle() {
+        let mut c = mk();
+        c.u = 0.9;
+        for _ in 0..8 { c.step(Some(8.0), 0.0, false); }
+        for _ in 0..30 { c.step(Some(8.0), 50.0, false); }
+        assert!((c.u - 0.5).abs() < 0.05, "u 应回归 0.5: {}", c.u);
     }
 }
