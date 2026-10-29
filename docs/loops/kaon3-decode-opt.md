@@ -1281,3 +1281,4 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - **b33 定稿（两轮，A=b32 二进制）**：B c1 5.20/5.20、c8 8.92/8.96 —— 比 b31b（5.15/8.58）慢，**B33 不合入现状**，D166 修了 B33c 的 local 数组（softmax 改读 smem 副本）；连同 B34①（norm+grouped quant 融合，parity 测试 `moe_norm_quant_fused_parity`）与 B35 一起放 `stage36/`。下一条链 **b36** = stage36 入树 → parity ×5（moe_route_fused / norm_quant_fused / moe_norm_quant_fused / mlp_fp8 / attn_pre）→ bN（A = b31b 二进制 `/w/dinfer_prev_b32`，两侧 FP8_GEMV=1）→ 若仍慢再拆 B33a/B33c/B34①/B35 四个开关。
 
 ## ★★★ D167 2026-10-29 envab dual_b33（b33 二进制，A 默认 / B `MOE_GEMM_DUAL=1`）首批：c1 5.20 → **5.13（-1.3%）**，c8 8.99 → **8.88（-1.2%）**（gate+up 单 launch，grid.z=2E，注释称逐位）。等 A2/B2；两轮同向则 `MOE_GEMM_DUAL` 默认开（再 -30 launch/步）。
+- 注：`moe_grouped_gemm_dual` 走的是旧 2 级 `pipe` body（BM=32，非 pipe4/BM16），仍比两次 pipe4<BM16> 快 1.3%——说明 decode 下 launch 数/grid 填充比流水级数重要。若 A2/B2 确认：先把 `MOE_GEMM_DUAL` 默认开（零代码），再做 pipe4<BM16> 的 dual 变体（预期再 -1%）。
