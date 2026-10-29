@@ -1578,3 +1578,7 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - 剩余差额分析：c16 TPOT 10.76 vs 纯 decode 步 8.67 → prefill 插入仍 2.1 ms；c64 21.88 vs 11.83 → 10 ms。混批步从 98 ms 应已降到 ~70 ms（待 hosttime 复核）。下一刀：B48c BN=128（b53 跑中）→ 再 nsys 一次混批步看新的大头。
 
 ## D216 2026-10-29 b53 微基准（B48c BN=128 vs 64，CHECKSUM 全同 GATE=0，二进制 md5 8db4c1a2）：P2148 gate‖up 538 → **508（−6%）**、down 410 → **375（−9%）**；P424 gate‖up 237 → 230、down 141 → 147（+4%，BN=128 时 N=2816 只 22 列块 × 行块，CTA 少了）。增益小 → smem 片段读不是唯一瓶颈；剩下的是 cp.async 装载量（每 CTA 每 BK 块装 A 64×64 B + B 128×64 B）与 mma 发射密度。ABAB 跑中，端到端 ≥ 1% 才改默认。
+
+## ★★★ D217 2026-10-29 b53 定稿：**B48c 合入**（BN=128 默认，`MOE_PREFILL_BN=64` 回退；A = BN64，二进制 8db4c1a2 = FP8_LT_TUNE 仍是默认关的版本）：c8 7.01（持平）、c16 10.78（持平）、c32 13.48（−1%）、c64 **23.05（−1.7%）**；TTFT −4%；吞吐 +1…+2%；输出逐字同。CSV b53。小刀，但两轮同向、微基准 −6/−9%，合入。
+- 注意 b53 的 A/B 都在 FP8_LT_TUNE 关的二进制上；B49 默认开后的合成基线以 b54 nsys 链的 serve 为准。
+- **疑点**（D218 查）：b52 B 侧 serve 日志里 `grep "gemm fp8"` = 0 行 —— `[gemm fp8 tune]` 的 eprintln 没出现在日志。要么 stderr 没进 serve.log（但 `[kaon3-host]` 等 eprintln 都在），要么 `tune_enabled()` 为假、tune 分支没走 → 那 B49 的收益来自别处（2 的幂桶 key 让 m ≥ 64 的形状第一次走 `parity_pick` 查表时… 不对，parity_pick 不依赖 key）。必须查清再说"B49 是自调优的功劳"。
