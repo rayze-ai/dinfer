@@ -1527,3 +1527,7 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - B46：`model.forward` 新参 `sample_rows: Option<(&CudaSlice<i32>, nrows)>`；nrows < tokens 且非 hidden_dir 时 gather `final_normed` → `sc.lm_in`（[max_rows, h]）→ lm_head GEMM / softcap 只算 nrows 行 → executor dtod 拷进 `gathered`。纯 decode（nrows == tokens，图内）与 probe 路径原样。`LM_HEAD_ROWS_ONLY=0` 回退。
 - B47：`SchedulerParams.prefill_tokens_per_step`（CLI `--prefill-tokens-per-step`，默认 0）；running 的 prefill 续算与 waiting 新请求合计 ≤ N，配额满时 running 行 `i += 1; continue`（不抢占），waiting 停接。核心单测跑过。
 - 预期：B 比 A c16 TPOT −0.4 / c64 −2 ms（lm_head 去掉）、TTFT 略降；C 比 B c16/c32/c64 TPOT 再降但 TTFT 升——按停止条件 ① 看 TPOT 比值，TTFT 不许超 vLLM 1.5×。
+
+## D208 2026-10-29 b49 跑中（A 侧 r1 = 与 stepA4 一致：c8 7.06 / c16 11.36 / c32 14.69 / c64 27.26，基线稳）；下一刀准备
+- 混批步 roofline（c16 一步 2148 tok，nsys 态 424 tok 片段 ×5）：MoE gate‖up dual `grouped_gemm_kernel_dual<128>` 190 us/层 @ M=424×8=3392 行、N=704×2、K=2816 → 2 × 3392 × 1408 × 2816 × 2 = **54 GFLOP → 5090 NVFP4 密集 ~1 PFLOPS 下限 ~55 us**，实测 190 us = 29%；down 128 us @ N=2816 K=704 同量级 → 27 GFLOP 下限 27 us，实测 21%。两者 BM=32/BN=64/BK=128 双缓冲（非 pipe4），每 CTA 8 warp 各 1 个 m16n8 片 → 算力型 GEMM 用的是 decode 的小 tile。**B48 候选**：prefill（R > RMAX）走 BM=64 或 128 / BN=128 / STAGES 3–4 的 pipe4 实例（模板已有 BM_T/BN_T 参数），tile 表第一半按 BM 重算。微基准 `moe_gemm_timing` 加 M=3392 行（每专家 ~26 行）形状先量。
+- fp8 Lt：nvjet 64x32x64 153 us × 125 次/步（M=424 时）。qkv N=2816+2×... K=2816：2 × 424 × 2816 × 4224 ≈ 10 GFLOP → fp8 ~1.6 PFLOPS 下限 6 us，实测 36 us（nsys 态）= 17%。**B49 候选**：`FP8_LT_TUNE=1`（m ≥ 64 自调优，D80 时因 c8 +3% 关掉，但那是 M=8；现在只在 prefill M≥64 生效）env A/B 零代码。
