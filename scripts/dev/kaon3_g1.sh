@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# g1（D214）：G1 p64 ldmatrix。编 → 微基准（MOE_PREFILL_BN=64/128 两进程：P424/P2148 us + CHECKSUM 门禁）→ envab_c ABAB（A=BN64 默认，B=BN=128）。
-# 结果 tmp_g1_RESULT.txt，标记 G1_DONE。前置：b52 已结束（GPU0 空）。
+# g1（loop kaon3-prefill-gemm G1）：p64 ldmatrix 片段取。编 → 微基准（MOE_P64_LDSM=0/1 两进程：P424/P2148 us + CHECKSUM 门禁）→ envab_c ABAB（A=关，B=开）。
+# 结果 tmp_g1_RESULT.txt，标记 G1_DONE。前置：GPU0 空。
 NV=/usr/local/lib/python3.12/dist-packages/nvidia
 mkdir -p /tmp/stub; ln -sf $NV/nccl/lib/libnccl.so.2 /tmp/stub/libnccl.so; ln -sf $NV/cu13/lib/libnvrtc.so.13 /tmp/stub/libnvrtc.so
 export LIBRARY_PATH=/tmp/stub LD_LIBRARY_PATH=$NV/nccl/lib:$NV/cu13/lib PATH=/root/.cargo/bin:/usr/local/cuda/bin:$PATH CUDA_ARCHS=120 CUDA_HOME=/usr/local/cuda CUDA_VISIBLE_DEVICES=0

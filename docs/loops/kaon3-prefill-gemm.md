@@ -37,3 +37,11 @@ G 编号（接 D/E）。
 - 口径注：墙钟 = 下发到收割的 host 时间，含 (a) 等下一个 decode 步 finish 的离散（≤ 1 步 8–11 ms）、(b) **低优先级下被 decode 图抢占的时间**。所以 18–30 tok/ms 是"被让位后"的有效吞吐，低于 D236 单流混批测的 37 tok/ms——这正是 E4 换 TPOT 付出的 prefill 时长（prefill 3600 tok 从 ~100 ms 拖到 200 ms，与 E5 的 120 → 177 一致）。
 - 结论：**prefill GEMM 本体越快，让位期间的拖长也越短**（CTA 波少）；G1/G2 的价值比单流时更大。微基准仍以 P2148 为准（gate‖up 538 / down 410 us）。
 - nsys 副流 kernel 表：nsysp16c 已抓（见下）。
+- **nsysp16c 副流（stream 15，prefill）kernel 表**（最长步 kernel 和 164 ms / span 170，这是 nsys 态 + 被 decode 图让位后的一个大 prefill 步）：
+  | 段 | ms | 占比 | 次数 × us |
+  |---|---|---|---|
+  | **fp8 cuBLASLt**（nvjet 128x128 37.1 + 64x64 19.7 + 64x32 17.0 + 128x64 16.3） | **90.1** | **55%** | 215×172 + 60×328 + 36×473 + 60×272 |
+  | MoE p64 gate‖up + down | 44.5 | 27% | 60 × 742 |
+  | norm 7.2 / attention 6.3 / quant 4.5 / moe_misc 4.4 / route 1.5 | ~24 | 15% | |
+  - **大头变了**：D204/D219 时 MoE 45% / Lt 24%；现在 **Lt 55% / MoE 27%**。原因：Lt 自调优（B49）在 m=4160 桶选的 128x128 tile 在**让位（低优先级）** 下吃亏更重（大 tile 单 CTA 长、CTA 少，被 decode 图抢占后恢复慢），且 `64x32x64_4`（473 us × 36）/ `64x64x64_3`（328 × 60）这两个形状仍是小 tile——是哪两个 GEMM？按次数 36 = 可能 dense down（N=2816 K=2112，36 = 30 层 + 6?）、60 = qkv / o_proj。
+  - **Step B 顺序改为**：**G3 先做**（fp8 Lt：对 m ≥ 64 桶把候选数 32 → 64 并把 timing 放在"有并发 decode 图"的真实环境测——现在 autotune 在空 GPU 上量，选出的 tile 在让位场景不一定最优；或直接对 4160 桶强制 128x128 + 看 splitk），**G1 ldmatrix 次之**（已写、g1 跑中），G2 BM128 再后。
