@@ -2264,6 +2264,39 @@ pub fn moe_grouped_quant(
     )
 }
 
+/// B34③：gelu·mul（mode 1，两次舍入）+ grouped NVFP4 量化一次 launch；与 `gelu_tanh_mul_round2_bf16 → moe_grouped_quant` 逐位同。
+pub fn moe_gelu_grouped_quant(
+    stream: &Stream,
+    gate: &CudaSlice<bf16>,
+    up: &CudaSlice<bf16>,
+    row2e: &CudaSlice<i32>,
+    agscale: &CudaSlice<f32>,
+    aq: &mut CudaSlice<u8>,
+    a_s: &mut CudaSlice<u8>,
+    rows: usize,
+    k: usize,
+    exact_rq: bool,
+) -> Result<()> {
+    ensure!(k % 64 == 0, "moe_gelu_grouped_quant: k {k} 不是 64 的倍数");
+    ensure!(
+        gate.len() >= rows * k && up.len() >= rows * k && aq.len() >= rows * (k / 2) && a_s.len() >= rows * (k / 16) && row2e.len() >= rows,
+        "moe_gelu_grouped_quant: capacity"
+    );
+    let pg = stream.ptr(gate) as *const c_void;
+    let pu = stream.ptr(up) as *const c_void;
+    let pr = stream.ptr(row2e) as *const i32;
+    let pa = stream.ptr(agscale) as *const f32;
+    let paq = stream.ptr_mut(aq) as *mut c_void;
+    let pas = stream.ptr_mut(a_s) as *mut c_void;
+    // SAFETY: 容量已校验；row2e[r] < E 由 row2expert 保证。
+    check(
+        unsafe {
+            ffi::moe_gelu_grouped_quant(pg, pu, pr, pa, paq, pas, rows as i64, k as i64, exact_rq as i32, stream.raw() as _)
+        },
+        "moe_gelu_grouped_quant",
+    )
+}
+
 /// B3 grouped NVFP4 GEMM：out[R,N] = alpha[e]·(aq·Bptr[e]ᵀ)，按 device offsets 分专家段。
 /// `bptr`/`sptr` 是 device 端 [E] 个 u64 指针（各专家 packed/scale 的设备地址），`alpha`/`offsets` device。
 /// launch 配置（grid.z=E）编译期固定 → cudagraph 友好。

@@ -691,6 +691,16 @@ fn route_logits_bf16_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_ne!("ROUTER_LOGITS_BF16", "0"))
 }
+/// B34③：MoE 的 gelu·mul 融进 down 的 grouped quant（`MOE_GELU_QUANT_FUSED=0` 回退）。
+fn moe_gelu_quant_fused_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_ne!("MOE_GELU_QUANT_FUSED", "0"))
+}
+/// gelu 两次舍入口径（默认，vLLM act_and_mul；`GELU_F32=1` 关）。
+fn gelu_round2_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("GELU_F32").map(|v| v.trim() != "1").unwrap_or(true))
+}
 /// B34①：MoE 的 pre_ff_norm_2 融进 grouped quant（`MOE_NORM_QUANT_FUSED=0` 回退）。
 fn moe_norm_quant_fused_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1825,14 +1835,21 @@ impl Gemma4Layer {
                     &mut g.up_o.data, r, mg.n_gate, mg.k_gate, e,
                 )?;
             }
-            // 4) gelu·mul（全 R 行一次）
-            if !moe_gemv {
-                gelu_mul(stream, ops, &g.gate_o.data, &g.up_o.data, &mut g.gelu_o.data, r, mi)?;
+            // 4)+5) B34③：gelu·mul + down 量化一次 launch（gelu mode 1 口径；`MOE_GELU_QUANT_FUSED=0` 或 GELU_F32=1 回退两步）。
+            if !moe_gemv && moe_gelu_quant_fused_enabled() && gelu_round2_enabled() {
+                k::ops::moe_gelu_grouped_quant(
+                    stream, &g.gate_o.data, &g.up_o.data, &g.row2e, &mg.agscale_dn, &mut g.aq_dn, &mut g.as_dn, r, mg.k_down, exact_rq,
+                )?;
+            } else {
+                // 4) gelu·mul（全 R 行一次）
+                if !moe_gemv {
+                    gelu_mul(stream, ops, &g.gate_o.data, &g.up_o.data, &mut g.gelu_o.data, r, mi)?;
+                }
+                // 5) down：量化 + grouped GEMM
+                k::ops::moe_grouped_quant(
+                    stream, &g.gelu_o.data, &g.row2e, None, &mg.agscale_dn, &mut g.aq_dn, &mut g.as_dn, r, mg.k_down, exact_rq,
+                )?;
             }
-            // 5) down：量化 + grouped GEMM
-            k::ops::moe_grouped_quant(
-                stream, &g.gelu_o.data, &g.row2e, None, &mg.agscale_dn, &mut g.aq_dn, &mut g.as_dn, r, mg.k_down, exact_rq,
-            )?;
             if moe_gemv {
                 k::ops::moe_fp4_gemv(
                     stream, &g.aq_dn, &g.as_dn, &mg.down_packed, &mg.down_scale, &mg.alpha_down, &sc.buckets.offsets,

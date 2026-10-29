@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # b38 链（B34③ gelu·mul + down quant 融合）：stage38 入树 → parity（gelu_quant_fused + moe_stage）→ bN TAG=b38（A = 编译前 target；B = MOE_GELU_QUANT_FUSED 默认开）
 cd /w/dinfer
-cp -f /w/stage38/moe_grouped_sm120.cu crates/kernels/cuda/; cp -f /w/stage38/kernels.h crates/kernels/cuda/kernels.h
+cp -f /w/stage38/moe_grouped_sm120.cu crates/kernels/cuda/
 cp -f /w/stage38/ffi.rs crates/kernels/src/ffi.rs; cp -f /w/stage38/ops.rs crates/kernels/src/ops.rs
 cp -f /w/stage38/moe_gelu_quant_fused_parity.rs crates/kernels/tests/; cp -f /w/stage38/layer.rs models/kaon3/src/layer.rs
 NV=/usr/local/lib/python3.12/dist-packages/nvidia

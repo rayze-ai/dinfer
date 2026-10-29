@@ -1620,6 +1620,9 @@ extern "C" {
     pub fn moe_row2expert(offsets: *const i32, row2e: *mut i32, num_experts: i64, stream: cudaStream_t) -> i32;
     pub fn moe_grouped_quant(a: *const c_void, row2e: *const i32, sorted_tok: *const i32, agscale: *const f32, aq: *mut c_void,
                              a_s: *mut c_void, r: i64, k: i64, exact_rq: i32, stream: cudaStream_t) -> i32;
+    /// B34③：gelu·mul(mode 1) + grouped quant 一次 launch。
+    pub fn moe_gelu_grouped_quant(gate: *const c_void, up: *const c_void, row2e: *const i32, agscale: *const f32,
+                                  aq: *mut c_void, a_s: *mut c_void, r: i64, k: i64, exact_rq: i32, stream: cudaStream_t) -> i32;
     /// B34①：pre_ff_norm_2 + grouped quant 一次 launch（x 按 sorted_tok 间接读；mode = RMSNORM_MODE 口径）。
     pub fn moe_rmsnorm_grouped_quant(x: *const c_void, w: *const c_void, row2e: *const i32, sorted_tok: *const i32, agscale: *const f32,
                                      aq: *mut c_void, a_s: *mut c_void, r: i64, k: i64, eps: f32, mode: i32, exact_rq: i32, stream: cudaStream_t) -> i32;
@@ -1682,6 +1685,12 @@ pub unsafe fn moe_row2expert(_o: *const i32, _r: *mut i32, _ne: i64, _s: cudaStr
 #[allow(clippy::too_many_arguments, clippy::missing_safety_doc)]
 pub unsafe fn moe_grouped_quant(_a: *const c_void, _r2e: *const i32, _st: *const i32, _ag: *const f32, _aq: *mut c_void,
                                 _as: *mut c_void, _r: i64, _k: i64, _ex: i32, _s: cudaStream_t) -> i32 {
+    CUDA_ERROR_NOT_SUPPORTED
+}
+#[cfg(not(all(not(no_nvcc_stub), sm120)))]
+#[allow(clippy::too_many_arguments, clippy::missing_safety_doc)]
+pub unsafe fn moe_gelu_grouped_quant(_g: *const c_void, _u: *const c_void, _r2e: *const i32, _ag: *const f32,
+                                     _aq: *mut c_void, _as: *mut c_void, _r: i64, _k: i64, _ex: i32, _s: cudaStream_t) -> i32 {
     CUDA_ERROR_NOT_SUPPORTED
 }
 #[cfg(not(all(not(no_nvcc_stub), sm120)))]
