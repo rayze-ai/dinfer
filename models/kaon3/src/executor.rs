@@ -49,6 +49,27 @@ pub struct KaonExecutor {
     pub eager_steps: u64,
     /// B29：本步是插队 prefill（cut-in）→ 采样结果不写 prev_chosen（在飞 decode 行的 gather 要上一 decode 步的）。
     skip_prev_chosen: bool,
+    /// B35：跨流 prefill/decode 并行的副套资源（`XSTREAM=0` 关 → None → runner 不拆 plan）。
+    alt: Option<AltSet>,
+    /// 主流上一步结束事件：副流 prefill 开始前等它（KV 块复用 / 残差缓冲安全）。
+    main_done: Option<dinfer_kernels::Event>,
+    pub pair_steps: u64,
+}
+
+/// B35（loop kaon3-decode-opt）：副套 = 一条流 + 该流上的全部可变缓冲（与 qwen3 `AltSet` 同构）。模型权重与 KV cache 共享：
+/// 两步写不同 slot、decode 只读历史、prefill 只写自己的 slot，无数据冲突。
+struct AltSet {
+    stream: Stream,
+    gemm: Gemm,
+    plan: PlanBuffers,
+    up: PinnedUploader,
+    logits: Tensor<bf16>,
+    hidden: Tensor<bf16>,
+    gathered: Tensor<bf16>,
+    gathered_f32: Tensor<f32>,
+    argmax: Tensor<i32>,
+    scratch: LayerScratch,
+    acts: ActBuf,
 }
 
 /// B29 开关：异步调度在飞行 token 的设备侧 gather + save_chosen。`INFLIGHT_GATHER=1` 开（默认关，见函数体注释）。
@@ -118,7 +139,21 @@ impl KaonExecutor {
             stream,
             gemm,
             model,
+            alt: None,
+            main_done: None,
+            pair_steps: 0,
         };
+        // B35：副套（跨流 prefill/decode 并行）。`XSTREAM=0` 关；分配失败只告警（退回单流）。
+        if std::env::var("XSTREAM").map(|v| v != "0").unwrap_or(true) {
+            let t0 = std::time::Instant::now();
+            match AltSet::new(&dev, &ex.model, max_tokens, max_rows, max_blocks) {
+                Ok(a) => {
+                    tracing::info!(alloc_ms = t0.elapsed().as_millis() as u64, "kaon3 xstream: alt set ready");
+                    ex.alt = Some(a);
+                }
+                Err(e) => tracing::warn!(err = %e, "kaon3 xstream: alt set 分配失败，退回单流"),
+            }
+        }
         if !grouped && enable_graphs && std::env::var("NO_GRAPH").is_err() {
             tracing::info!("kaon3: decode graphs disabled（MOE_GROUPED 未开：host 路由 MoE 有 D2H，整层 forward 不可捕获）");
         }
@@ -138,6 +173,50 @@ impl KaonExecutor {
         Ok(ex)
     }
 
+    /// B35：主套 ↔ 副套整体互换（流、GEMM、plan 列、上传器、logits/gather/argmax、scratch、acts）。
+    fn swap_alt(&mut self) {
+        let mut a = self.alt.take().expect("alt set");
+        std::mem::swap(&mut self.stream, &mut a.stream);
+        std::mem::swap(&mut self.gemm, &mut a.gemm);
+        std::mem::swap(&mut self.plan, &mut a.plan);
+        std::mem::swap(&mut self.up, &mut a.up);
+        std::mem::swap(&mut self.logits, &mut a.logits);
+        std::mem::swap(&mut self.hidden, &mut a.hidden);
+        std::mem::swap(&mut self.gathered, &mut a.gathered);
+        std::mem::swap(&mut self.gathered_f32, &mut a.gathered_f32);
+        std::mem::swap(&mut self.argmax, &mut a.argmax);
+        std::mem::swap(&mut self.scratch, &mut a.scratch);
+        std::mem::swap(&mut self.acts, &mut a.acts);
+        self.alt = Some(a);
+    }
+    /// 上传 + 入队（forward + gather + argmax），不等结果；返回要 collect 的行数。图只在主套上（副套永远 eager）。
+    fn enqueue(&mut self, plan: &BatchPlan, allow_graph: bool) -> Result<usize> {
+        let n = plan.num_reqs();
+        let t = plan.total_tokens();
+        let nrows = plan.logits_rows.len();
+        ensure!(t <= self.max_tokens, "batch of {t} tokens > max_tokens {}", self.max_tokens);
+        ensure!(nrows <= self.max_rows, "rows {nrows} > max_rows {}", self.max_rows);
+        ensure!(plan.max_blocks <= self.plan.max_blocks, "block_table {} > buffer {}", plan.max_blocks, self.plan.max_blocks);
+        ensure!(!plan.sample.any_mask, "kaon3 executor: guided decoding 未接（第一版不做）");
+        self.skip_prev_chosen = plan.skip_prev_chosen;
+        let graph_eligible = allow_graph && plan.mode == BatchMode::Decode && t == n && nrows == n && !plan.sample.any_mask;
+        if graph_eligible {
+            self.ensure_graph(n)?;
+        }
+        if graph_eligible && self.graphs.get(n).is_some() {
+            let nb = self.graphs.get(n).unwrap().0;
+            self.upload_plan(plan, nb)?;
+            self.graphs.get(n).unwrap().1.launch().context("launch decode graph")?;
+            self.graph_steps += 1;
+            Ok(n)
+        } else {
+            self.upload_plan(plan, n)?;
+            let max_seqlen = plan.num_tokens.iter().copied().max().unwrap_or(0).max(1) as usize;
+            self.forward_device_mode(plan.mode, t, n, nrows, max_seqlen)?;
+            self.eager_steps += 1;
+            Ok(nrows)
+        }
+    }
     /// 启动预热：一条 max_tokens 长的假 prefill 请求跑一次 forward（slot=-1 不写 KV、结果丢弃），
     /// 把所有按形状懒分配的缓冲（FP8 量化暂存等）一次撑到上限，并建好 MoE grouped 的 per-layer 设备表。
     fn warmup_prefill(&mut self) -> Result<()> {
@@ -265,6 +344,53 @@ impl KaonExecutor {
 }
 
 impl ModelExecutor for KaonExecutor {
+    fn supports_pair(&self) -> bool {
+        self.alt.is_some()
+    }
+    /// B35：decode 批走主流（graph），prefill 批走副流（eager），两流只在"主流上一步结束 → 副流开始"与
+    /// "副流 prefill 结束 → 主流 collect 后"两处用事件同步；KV cache 共享（写不同 slot）。
+    fn forward_sample_pair(
+        &mut self,
+        decode: &BatchPlan,
+        prefill: &BatchPlan,
+        gen_d: &mut Vec<Vec<u32>>,
+        dr_d: &mut Vec<Vec<u32>>,
+        gen_p: &mut Vec<Vec<u32>>,
+        dr_p: &mut Vec<Vec<u32>>,
+    ) -> Result<dinfer_core::runner::PairLogprobs> {
+        ensure!(self.alt.is_some(), "forward_sample_pair without alt set");
+        self.stream.bind_ctx()?;
+        let rows_d = self.enqueue(decode, true)?;
+        if let Some(prev) = &self.main_done {
+            self.alt.as_ref().unwrap().stream.wait_event(prev)?;
+        }
+        // 副流：prefill
+        self.swap_alt();
+        let r = (|| -> Result<(Vec<i32>, dinfer_kernels::Event)> {
+            self.stream.bind_ctx()?;
+            let rows_p = self.enqueue(prefill, false)?;
+            let done = self.stream.record_event()?;
+            Ok((self.collect(rows_p)?, done))
+        })();
+        self.swap_alt();
+        let (am_p, prefill_done) = r?;
+        self.stream.wait_event(&prefill_done)?;
+        let am_d = self.collect(rows_d)?;
+        self.main_done = Some(self.stream.record_event()?);
+        self.pair_steps += 1;
+        let fill = |plan: &BatchPlan, am: &[i32], gen: &mut Vec<Vec<u32>>, dr: &mut Vec<Vec<u32>>| {
+            gen.clear();
+            dr.clear();
+            for i in 0..plan.num_reqs() {
+                let r0 = plan.logits_row_start[i];
+                gen.push(vec![am[r0] as u32]);
+                dr.push(Vec::new());
+            }
+        };
+        fill(decode, &am_d, gen_d, dr_d);
+        fill(prefill, &am_p, gen_p, dr_p);
+        Ok((vec![Vec::new(); decode.num_reqs()], vec![Vec::new(); prefill.num_reqs()]))
+    }
     fn forward_sample(
         &mut self,
         plan: &BatchPlan,
@@ -333,7 +459,38 @@ impl ModelExecutor for KaonExecutor {
             generated.push(vec![am[r0] as u32]);
             drafts.push(Vec::new());
         }
+        if self.alt.is_some() {
+            self.main_done = Some(self.stream.record_event()?);
+        }
         eprintln!("[fwd-sample] EXIT mode={:?} t={t} total={:.0}us", plan.mode, _fs0.elapsed().as_secs_f64()*1e6);
         Ok(())
+    }
+}
+
+impl AltSet {
+    fn new(dev: &dinfer_kernels::Device, model: &KaonModel, max_tokens: usize, max_rows: usize, max_blocks: usize) -> Result<Self> {
+        let stream = dev.new_stream()?;
+        let gemm = Gemm::new(&stream).context("cublasLt on alt stream")?;
+        if gemm.tune_enabled() {
+            if let Err(e) = gemm.autotune(&model.gemm_tune_entries()) {
+                tracing::warn!("kaon3 alt gemm autotune 失败（回退启发式）: {e}");
+            }
+        }
+        let v = model.cfg.vocab_size;
+        let h = model.cfg.hidden;
+        let up = PinnedUploader::new(&stream, PlanBuffers::uploader_bytes(max_tokens, max_rows, max_blocks, 1 << 20))?;
+        Ok(Self {
+            plan: PlanBuffers::alloc(&stream, max_tokens, max_rows, max_blocks)?,
+            up,
+            logits: Tensor::uninit(&stream, &[max_tokens, v])?,
+            hidden: Tensor::uninit(&stream, &[max_tokens, h])?,
+            gathered: Tensor::uninit(&stream, &[max_rows, v])?,
+            gathered_f32: Tensor::zeros(&stream, &[max_rows, v])?,
+            argmax: Tensor::zeros(&stream, &[max_rows])?,
+            scratch: LayerScratch::new_with_rows(&stream, &model.cfg, max_tokens, max_rows)?,
+            acts: ActBuf::new(&stream, &model.cfg)?,
+            gemm,
+            stream,
+        })
     }
 }
