@@ -148,3 +148,11 @@ GDN 的 chunk 内 GEMM（K=128 连续、state 现成在 smem）属于好的那�
 
 ## 19. prefill / 混批步的 lm_head 要只算采样行（2026-10-29 kaon3 D205）
 - nsys 混批步里 `cutlass Kernel2 grid (56,256)` = 2148 行 × 262144 词表全算再 gather，占步时 14%（c64 1/6）。按 grid 复核"行数是不是 tokens"这一条（perf-tooling §21）对 lm_head 同样适用。vLLM 用 `logits_indices` 只算最后行；接新模型时 lm_head 一律按采样行算（B46 模式：gather hidden → GEMM nrows 行）。
+
+## 20. "把大步切小"只在每步固定开销可忽略时成立；eager 混批步固定开销 5–8 ms，切 N 段就付 N 次（2026-10-29 kaon3 D209）
+- B47 整步 prefill 配额 1024：TTFT p50 −60–75%，但 TPOT 全档 +10–26%、吞吐降。切出来的每个混批步都是 eager 副流 + 主流等待，launch 2900 个 kernel 的 host 开销 + 两流同步没被摊。vLLM 的 chunked prefill 能便宜是因为它的 prefill 单步吞吐高（50 tok/ms），不是因为切得细。
+- **判断**：改调度前先量"一个混批步的固定开销"（HOST_TIME 的 exec − nsys kernel 和），> 2 ms 就别靠切步。根治在 prefill 步 GEMM 效率。
+
+## 21. decode 调出来的 GEMM tile 不要直接给 prefill 用：M > 1000 行时 BM=32 tile 只有算力峰值的 1/4（2026-10-29 kaon3 D211/D212）
+- MoE grouped NVFP4 GEMM 为 decode 优化到 BM=16/32（CTA 数多、单 CTA 工作少），prefill 17184 行时同一个 kernel 724 us = 190 TFLOPS；换 BM=64×BN=64、每 warp 2×2 片段（A 片段 n 向复用 4 次）→ 549 us（−24%）、端到端 c64 TPOT −4% / TTFT −8%，逐位一致（k 累加序不变）。
+- **判断**：grouped GEMM 至少两套 tile（decode 小 M 占用型 / prefill 大 M 算力型），按 R 阈值分派；两套的 k 累加序保持一致才能逐位互换。微基准（`moe_gemm_timing` P424/P2148）+ 两进程 CHECKSUM 是门禁。再往上是 BN=128 / ldmatrix，smem 片段读是下一瓶颈。
