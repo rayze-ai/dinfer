@@ -1282,3 +1282,9 @@
 
 ## 2026-10-28 验证链 serve 进程没绑核，跑了一天 20 多轮才发现
 现象：CLAUDE.md 要求三方（dinfer / vLLM / 压测端）taskset 不重叠并写进报告；bN.sh/envab.sh 只给 bench 绑了 60-91，serve 在 128 核上浮动（2 NUMA，GPU0 亲和 0-31,64-95）。根因：RESULT 文件没有钉核字段，没人核对。解法：bN/stepB_verify 加 `taskset -c ${SERVE_TASKSET:-0-31}`，RESULT 头部打印钉核口径；c8 图外时间（D75 ~4 ms/步）的归因必须先过绑/不绑 A/B。
+
+## 2026-10-29 "c8 多出的 4 ms 是插队 prefill" 定性错了一天：nsys 只报最常见图组、TPOT 没按批形状分组
+- 现象：D78 用 nsys c8 得出"每 kernel us 与 c1 持平 → 多出来的是 prefill 插队"，据此做了 B35 跨流 pair（c8 一点没动）。
+- 根因：① `nsys_kern.py` 只报"kernel 数最常见"的 graph 实例，c8 bench 尾段 M=1 的步最多，M=8 的桶在另一个 graphId 里没看；② 旧 `nsys_c8.sh` 是 `--num-requests 3`，实际并发 3；③ 没有按 (tokens,nreq) 分组看每步 wall 时间。
+- 解法：`HOST_TIME=1` + `scripts/dev/kaon3_hosttime.sh` 按批形状分组 p50/p90 + cadence；`nsys_kern.py --all` 每个 graphId 一组；nsys 抓 c8 用 `--num-requests ≥ 3×并发`。
+- 避免：说"X 占 Y ms"之前先问三件事——这一组样本的 M 是多少、二进制是哪个、分组键是什么。
