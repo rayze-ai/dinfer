@@ -32,6 +32,10 @@ impl Hasher for IdHasher {
 
 pub type IdHashMap<V> = HashMap<u64, V, BuildHasherDefault<IdHasher>>;
 
+pub type IdHashSet<K = u64> = std::collections::HashSet<K, BuildHasherDefault<IdHasher>>;
+pub fn id_hash_set<K>() -> IdHashSet<K> {
+    std::collections::HashSet::with_hasher(BuildHasherDefault::default())
+}
 pub fn id_hash_map<V>(capacity: usize) -> IdHashMap<V> {
     HashMap::with_capacity_and_hasher(capacity, BuildHasherDefault::default())
 }

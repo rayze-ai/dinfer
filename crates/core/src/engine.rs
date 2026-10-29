@@ -551,6 +551,7 @@ impl<E: ModelExecutor> Engine<E> {
                             Ok(p) => p,
                             Err(e) => return self.fail_step(e),
                         };
+                        self.sched.mark_awaiting(&self.runner.take_late_started());
                         if self.runner.last_begin_was_async() {
                             self.pending = Some((so_next, pend_next, t_step, t_sched));
                         } else {
@@ -590,6 +591,7 @@ impl<E: ModelExecutor> Engine<E> {
                             Ok(p) => p,
                             Err(e) => return self.fail_step(e),
                         };
+                        self.sched.mark_awaiting(&self.runner.take_late_started());
                         if self.host_time {
                             eprintln!("[prefill-split] sched={:.0}us begin={:.0}us tokens={} async={}",
                                 t_sched.duration_since(t_step).as_secs_f64()*1e6,

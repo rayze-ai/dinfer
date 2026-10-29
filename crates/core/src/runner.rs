@@ -287,6 +287,8 @@ pub struct Runner<E: ModelExecutor> {
     steps_prefill_only: u64,
     /// prefill 异步收割（E1）：副流上在飞的 prefill 子批。`handle` 由 executor 给；`rows` 是这些请求的 PendingRow。
     late: Option<LatePrefill>,
+    /// 本步刚下发到副流的请求 id（engine 取走后交给 scheduler `mark_awaiting`）。
+    late_started: Vec<RequestId>,
     steps_late_begin: u64,
     steps_late_harvest: u64,
     prefill_async: bool,
@@ -315,6 +317,7 @@ impl<E: ModelExecutor> Runner<E> {
             steps_pair: 0,
             steps_prefill_only: 0,
             late: None,
+            late_started: Vec::new(),
             steps_late_begin: 0,
             steps_late_harvest: 0,
             // E1：默认关；`PREFILL_ASYNC=1` 开（A/B 期用 env，定稿后改 CLI）。
@@ -322,6 +325,15 @@ impl<E: ModelExecutor> Runner<E> {
         }
     }
 
+    /// E1：取走本步刚下发到副流的请求 id（engine 在 `begin` 后调，交给 scheduler `mark_awaiting`）。
+    pub fn take_late_started(&mut self) -> Vec<RequestId> {
+        std::mem::take(&mut self.late_started)
+    }
+    /// E1：显式开关 prefill 异步收割（默认跟 `PREFILL_ASYNC` env；测试 / CLI 用）。
+    pub fn with_prefill_async(mut self, on: bool) -> Self {
+        self.prefill_async = on;
+        self
+    }
     /// 启用 n-gram 提案（`--speculative ngram`）。
     pub fn with_ngram(mut self, p: NgramProposer) -> Self {
         self.spec = Some(p);
@@ -672,6 +684,7 @@ impl<E: ModelExecutor> Runner<E> {
                     }
                     lrows.push(PendingRow { rid, n, num_draft, end_of_seq: true });
                 }
+                self.late_started.extend_from_slice(&plan_p.req_ids);
                 self.late = Some(LatePrefill { handle: h, rows: lrows, req_ids: plan_p.req_ids.clone() });
                 // 主 plan 只剩 decode 行，照常（图）执行；本步 Pending 只含 decode 行
                 self.build_plan(&Self::filter_output(so, |i| decode_mask[i]))?;
@@ -1123,5 +1136,83 @@ mod tests {
         assert_eq!(r.exec.plans[2].mode, BatchMode::Decode);
         assert_eq!(r.exec.plans[2].input_ids, vec![1020, 1004]);
         s.update_from_output(&so, &mro);
+    }
+
+    /// E1：假执行器——支持 prefill 异步：`begin_prefill_async` 存句柄，第 `ready_after` 次 `harvest` 才完成。
+    struct LateEcho {
+        plans: Vec<BatchPlan>,
+        late_plans: Vec<BatchPlan>,
+        polls: usize,
+        ready_after: usize,
+    }
+    impl ModelExecutor for LateEcho {
+        fn forward_sample(&mut self, plan: &BatchPlan, generated: &mut Vec<Vec<u32>>, drafts: &mut Vec<Vec<u32>>) -> Result<()> {
+            self.plans.push(plan.clone());
+            for &s in &plan.seq_lens {
+                generated.push(vec![1000 + s as u32]);
+                drafts.push(Vec::new());
+            }
+            Ok(())
+        }
+        fn supports_prefill_async(&self) -> bool {
+            true
+        }
+        fn begin_prefill_async(&mut self, plan: &BatchPlan) -> Result<Option<Box<dyn std::any::Any + Send>>> {
+            self.late_plans.push(plan.clone());
+            Ok(Some(Box::new(plan.seq_lens.clone())))
+        }
+        fn harvest_prefill(&mut self, h: Box<dyn std::any::Any + Send>, gen: &mut Vec<Vec<u32>>, dr: &mut Vec<Vec<u32>>) -> Result<Option<Box<dyn std::any::Any + Send>>> {
+            self.polls += 1;
+            if self.polls < self.ready_after {
+                return Ok(Some(h));
+            }
+            let seq: Box<Vec<i32>> = h.downcast().unwrap();
+            for &s in seq.iter() {
+                gen.push(vec![2000 + s as u32]);
+                dr.push(Vec::new());
+            }
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn late_prefill_advances_state_and_harvests() {
+        // 请求 1 先 prefill 完进入 decode；请求 2 加入 → 混批步：请求 1 decode 行 + 请求 2 prefill 行。
+        // 期望：混批步只返回请求 1 的 token；请求 2 在 late；下一步 scheduler 仍给请求 2 排 decode（它认为 prefill 已算完），
+        // runner 不报 in-flight 错；第 2 次 finish 收割 → 请求 2 的首 token 并进那一步的输出。
+        let mut s = sched(64);
+        let sp = SamplingParams { max_tokens: 8, temperature: 0.0, ..Default::default() };
+        s.add_request(Request::new(1, vec![1, 2, 3, 4], sp.clone(), 0));
+        let mut r = Runner::new(LateEcho { plans: vec![], late_plans: vec![], polls: 0, ready_after: 2 }, 16).with_prefill_async(true);
+        let so = s.schedule();
+        let mro = r.execute(&so).unwrap();
+        s.update_from_output(&so, &mro);
+        assert_eq!(mro.req_ids, vec![1]);
+        s.add_request(Request::new(2, vec![9, 9, 9, 9, 9, 9], sp.clone(), 0));
+        let so = s.schedule(); // 混批：(1,1) decode + (2,6) prefill
+        assert_eq!(so.num_scheduled_tokens.len(), 2);
+        let mro = r.execute(&so).unwrap();
+        s.mark_awaiting(&r.take_late_started());
+        assert_eq!(mro.req_ids, vec![1], "混批步只 publish decode 行，prefill 行进 late");
+        assert_eq!(r.exec.late_plans.len(), 1);
+        assert_eq!(r.exec.late_plans[0].req_ids, vec![2]);
+        s.update_from_output(&so, &mro);
+        // 下一步：请求 2 在 awaiting 集合里 → scheduler 不排它。
+        let so = s.schedule();
+        assert_eq!(so.num_scheduled_tokens, vec![(1, 1)], "等待收割的请求本步不排: {:?}", so.num_scheduled_tokens);
+        let mro = r.execute(&so).unwrap(); // polls=1 → 未完成
+        assert_eq!(mro.req_ids, vec![1]);
+        s.update_from_output(&so, &mro);
+        let so = s.schedule();
+        let mro = r.execute(&so).unwrap(); // polls=2 → 收割
+        assert_eq!(mro.req_ids, vec![1, 2], "收割步把请求 2 的首 token 并入: {:?}", mro.req_ids);
+        assert_eq!(mro.sampled[1], vec![2006]);
+        let res = s.update_from_output(&so, &mro);
+        assert!(res.items.iter().any(|it| it.req_id == 2), "scheduler 收到请求 2 的 token");
+        // 再下一步：请求 2 正常进入 decode（1 行），runner 不报错
+        let so = s.schedule();
+        assert!(so.num_scheduled_tokens.contains(&(2, 1)), "{:?}", so.num_scheduled_tokens);
+        let mro = r.execute(&so).unwrap();
+        assert!(mro.req_ids.contains(&2));
     }
 }

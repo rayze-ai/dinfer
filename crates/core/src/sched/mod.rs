@@ -23,7 +23,7 @@ pub use output::{
 use crate::config::{CacheConfig, SchedulerConfig};
 use crate::kv::{GroupInfo, KvBlocks, KvCacheManager};
 use crate::request::{FinishReason, PdRole, Request, RequestId, RequestStatus};
-use crate::util::{id_hash_map, IdHashMap};
+use crate::util::{id_hash_map, id_hash_set, IdHashMap, IdHashSet};
 use std::collections::VecDeque;
 
 #[derive(Debug, Clone)]
@@ -86,6 +86,9 @@ pub struct Scheduler {
     host_tier_fetched: u64,
     /// scheduler 自行结束的请求（分不到块且无人可抢占）：engine 每步取走并推 Finished 事件。
     force_finished: Vec<(RequestId, FinishReason)>,
+    /// E1（prefill 异步收割）：prefill 已下发到副流、首 token 尚未收割的请求。`schedule()` 跳过它们（不排 token、不当抢占受害者），
+    /// 收到其 token（`update_from_output`）时移除。由 runner 经 engine `mark_awaiting` 填入。
+    awaiting: IdHashSet<RequestId>,
     /// PD：Export 请求 finish 时先推这里，下一次 `schedule()` 搬进 `out.kv_export`（runner 在 begin 最前面导出）。
     pd_pending_export: Vec<(RequestId, KvBlocks)>,
     /// 递归状态快照池（design §15.7；`recurrent_snapshot_tokens > 0 && slots > 0` 时存在）。
@@ -126,6 +129,7 @@ impl Scheduler {
             prefix_cache_hits: 0,
             host_tier_fetched: 0,
             force_finished: Vec::new(),
+            awaiting: id_hash_set(),
             pd_pending_export: Vec::new(),
             snapshots,
             snapshot_resume_misses: 0,
@@ -290,6 +294,12 @@ impl Scheduler {
 
     /// 只调度 waiting 里的新请求（跳过 running），预算全给它们；running 行一个都不动。
     /// 用于插队 prefill（Q3-o）：在飞 decode 步未结束时为新请求单独跑一步。
+    /// E1：runner 把这些请求的 prefill 下发到副流（结果晚到）；在收到它们的 token 前不再给它们排 token。
+    pub fn mark_awaiting(&mut self, ids: &[RequestId]) {
+        for id in ids {
+            self.awaiting.insert(*id);
+        }
+    }
     pub fn schedule_waiting_only(&mut self) -> SchedulerOutput {
         self.schedule_impl(true)
     }
@@ -332,6 +342,10 @@ impl Scheduler {
         while !waiting_only && i < self.running.len() {
             let slot = self.running[i];
             let r = &self.slab[slot].as_ref().unwrap().req;
+            if self.awaiting.contains(&r.id) {
+                i += 1;
+                continue; // E1：首 token 在副流上还没收割，本步不排
+            }
             // decode 行（算 1 个 token 且已有历史）在 exempt 模式下不占预算；其余行预算用完就停
             let is_decode = r.num_tokens_with_spec() + r.num_output_placeholders - r.num_computed_tokens == 1
                 && r.num_computed_tokens > 0;
@@ -382,10 +396,7 @@ impl Scheduler {
                 // E1（prefill 异步收割）：running 末尾若是"prefill 已下发、首 token 未收割"的请求（computed == num_tokens 且无
                 // 输出），它的 KV 正被副流写，不能当抢占受害者；换成它前面第一个可抢占的。找不到则按原逻辑（会落到自己 → 跳过）。
                 let mut vi = self.running.len() - 1;
-                while vi > 0 {
-                    let v = &self.slab[self.running[vi]].as_ref().unwrap().req;
-                    let awaiting = v.num_computed_tokens >= v.num_tokens() && v.num_output_placeholders == 0 && v.num_output_tokens() == 0;
-                    if !awaiting { break; }
+                while vi > 0 && self.awaiting.contains(&self.slab[self.running[vi]].as_ref().unwrap().req.id) {
                     vi -= 1;
                 }
                 let victim = self.running[vi];
@@ -672,6 +683,7 @@ impl Scheduler {
         let eos = std::mem::take(&mut self.p.eos_token_ids);
 
         for (idx, &rid) in mro.req_ids.iter().enumerate() {
+            self.awaiting.remove(&rid);
             let Some(&slot) = self.id_to_slot.get(&rid) else { continue };
             let r = &mut self.slab[slot].as_mut().unwrap().req;
             if r.status == RequestStatus::Preempted {
