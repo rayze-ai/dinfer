@@ -1557,3 +1557,8 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - p64 smem：3 stage × (64×80 + 64×80 + 64×8 + 64×8) B = 33.8 KB → 占用 2–3 CTA/SM；8 warp 每 BK=128 块每 warp 8 次 mma 对 16 次 32-bit smem 读（A 4 + B 8 + 2 scale），**smem 读仍是主要开销**（ldmatrix 没用、片段每次从 smem 取）。下一档：BN=128（每 warp 2×4 片段，B 片段再翻倍复用 A）或 ldmatrix.x4。
 - **down 要加 BK=64 实例**（K=704 = 11 × 64）：`grouped_gemm_kernel_p64<64, 4>`。
 - ABAB 跑中。
+
+## ★★★★ D212 2026-10-29 b50 定稿：**B48 合入**（两轮同向；A = `MOE_PREFILL_P64=0`）：c8 7.00/7.00（持平）、c16 10.99 → 10.93、c32 14.07 → **13.79（−2%）**、c64 24.89 → **23.90（−4%）**；TTFT **−7…−9%** 全档；吞吐 +2…+5%；输出逐字同。CSV round b50，`test/kaon3/2026-10-29/b50/`。
+- 只有 gate‖up 走了 p64（down K=704 % 128 ≠ 0）；B48b 加 `p64<64,4>` 让 down 也走（commit 已入，b51 链验）。
+- 现状对 vLLM：c16 **1.53×** / c32 1.48× / c64 1.56×；吞吐 77% / 73% / 68%。
+- b51 链 = B48b 门禁 + ABAB；b52 = `FP8_LT_TUNE=0/1`（B49，m ≥ 64 自调优 + 2 的幂桶缓存）。

@@ -1,0 +1,64 @@
+06:50:41
+TEST BUILD EXIT=0
+P64=0 MOE_GEMM_TIMING M=8 active=28 rows=64 gate‖up dual:        20.52 us    3043 GB/s  (DRAM 下限 34.89 us @1.79TB/s)
+P64=0 MOE_GEMM_TIMING M=8 rows=64 CHECKSUM gate=8528a063422fd45d up=5f57f906d2184a33
+P64=0 MOE_GEMM_TIMING M=8 active=28 rows=64 down grouped:        16.42 us    1902 GB/s  (DRAM 下限 17.44 us)
+P64=0 MOE_GEMM_TIMING P424 active=128 rows=3392 gate‖up dual:       263.59 us    1083 GB/s  (DRAM 下限 159.48 us @1.79TB/s)
+P64=0 MOE_GEMM_TIMING P424 rows=3392 CHECKSUM gate=75c33e8071b4d486 up=6bd3823a1d813a13
+P64=0 MOE_GEMM_TIMING P424 active=128 rows=3392 down grouped:       144.99 us     984 GB/s  (DRAM 下限 79.74 us)
+P64=0 MOE_GEMM_TIMING P2148 active=128 rows=17184 gate‖up dual:       723.70 us     394 GB/s  (DRAM 下限 159.48 us @1.79TB/s)
+P64=0 MOE_GEMM_TIMING P2148 rows=17184 CHECKSUM gate=dff8babb267a72fd up=7359d2bcd51f4e0f
+P64=0 MOE_GEMM_TIMING P2148 active=128 rows=17184 down grouped:       495.15 us     288 GB/s  (DRAM 下限 79.74 us)
+P64=1 MOE_GEMM_TIMING M=8 active=28 rows=64 gate‖up dual:        20.52 us    3043 GB/s  (DRAM 下限 34.89 us @1.79TB/s)
+P64=1 MOE_GEMM_TIMING M=8 rows=64 CHECKSUM gate=8528a063422fd45d up=5f57f906d2184a33
+P64=1 MOE_GEMM_TIMING M=8 active=28 rows=64 down grouped:        16.43 us    1901 GB/s  (DRAM 下限 17.44 us)
+P64=1 MOE_GEMM_TIMING P424 active=128 rows=3392 gate‖up dual:       237.16 us    1204 GB/s  (DRAM 下限 159.48 us @1.79TB/s)
+P64=1 MOE_GEMM_TIMING P424 rows=3392 CHECKSUM gate=75c33e8071b4d486 up=6bd3823a1d813a13
+P64=1 MOE_GEMM_TIMING P424 active=128 rows=3392 down grouped:       144.95 us     985 GB/s  (DRAM 下限 79.74 us)
+P64=1 MOE_GEMM_TIMING P2148 active=128 rows=17184 gate‖up dual:       549.18 us     520 GB/s  (DRAM 下限 159.48 us @1.79TB/s)
+P64=1 MOE_GEMM_TIMING P2148 rows=17184 CHECKSUM gate=dff8babb267a72fd up=7359d2bcd51f4e0f
+P64=1 MOE_GEMM_TIMING P2148 active=128 rows=17184 down grouped:       500.03 us     285 GB/s  (DRAM 下限 79.74 us)
+GATE=0 mismatch=
+BUILD EXIT=0 md5=2e0a01effe32 marker=1 06:51:51
+serve_taskset=0-31 bench_taskset=60-91 A=MOE_PREFILL_P64=0 B=default
+r1 A c8:   tps=891.3 ttft_p50=130.19 ttft_p99=132.68 tpot_p50=7.05 tpot_p99=8.68
+ || prefill: steps=18 toks/step=1571 nreq=4.1 sched=39 exec=60438|| decode: steps=630 toks/step=7 nreq=6.6 sched=1 exec=6555
+r1 A c16:   tps=1181.3 ttft_p50=165.59 ttft_p99=261.71 tpot_p50=10.98 tpot_p99=13.28
+ || prefill: steps=26 toks/step=2147 nreq=10.0 sched=56 exec=82816|| decode: steps=623 toks/step=13 nreq=12.9 sched=1 exec=8665
+r1 A c32:   tps=1744.1 ttft_p50=290.22 ttft_p99=500.16 tpot_p50=14.01 tpot_p99=17.81
+ || prefill: steps=42 toks/step=2647 nreq=24.1 sched=63 exec=102949|| decode: steps=609 toks/step=25 nreq=25.5 sched=2 exec=9326
+r1 A c64:   tps=2181.0 ttft_p50=300.74 ttft_p99=1063.52 tpot_p50=24.87 tpot_p99=28.92
+ || prefill: steps=66 toks/step=3379 nreq=51.8 sched=87 exec=131154|| decode: steps=588 toks/step=50 nreq=50.2 sched=5 exec=11841
+r1 A out:  is is is is is is is is is is is is is is is is is is is is is is is is
+r1 A out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到春秋战国时期，最初是为了抵御外敌而修建的。 随着秦朝的统一，大规模的修筑工作开始，并逐渐演变为防御体系。 在明朝时期，长城
+r1 B c8:   tps=913.1 ttft_p50=120.98 ttft_p99=122.06 tpot_p50=7.01 tpot_p99=8.50
+ || prefill: steps=18 toks/step=1569 nreq=4.1 sched=38 exec=56131|| decode: steps=630 toks/step=7 nreq=6.6 sched=1 exec=6501
+r1 B c16:   tps=1210.2 ttft_p50=153.03 ttft_p99=242.32 tpot_p50=10.93 tpot_p99=12.89
+ || prefill: steps=26 toks/step=2148 nreq=10.0 sched=50 exec=76729|| decode: steps=623 toks/step=13 nreq=12.9 sched=2 exec=8650
+r1 B c32:   tps=1808.2 ttft_p50=263.90 ttft_p99=443.74 tpot_p50=13.73 tpot_p99=17.32
+ || prefill: steps=42 toks/step=2648 nreq=23.8 sched=63 exec=94593|| decode: steps=609 toks/step=25 nreq=25.5 sched=2 exec=9355
+r1 B c64:   tps=2288.8 ttft_p50=276.15 ttft_p99=971.90 tpot_p50=23.89 tpot_p99=27.53
+ || prefill: steps=66 toks/step=3380 nreq=51.8 sched=93 exec=120422|| decode: steps=588 toks/step=50 nreq=50.2 sched=5 exec=11835
+r1 B out:  is is is is is is is is is is is is is is is is is is is is is is is is
+r1 B out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到春秋战国时期，最初是为了抵御外敌而修建的。 随着秦朝的统一，大规模的修筑工作开始，并逐渐演变为防御体系。 在明朝时期，长城
+r2 A c8:   tps=902.8 ttft_p50=130.42 ttft_p99=131.99 tpot_p50=6.95 tpot_p99=8.65
+ || prefill: steps=18 toks/step=1570 nreq=4.1 sched=38 exec=60495|| decode: steps=630 toks/step=7 nreq=6.6 sched=1 exec=6460
+r2 A c16:   tps=1179.3 ttft_p50=166.04 ttft_p99=264.29 tpot_p50=10.99 tpot_p99=13.25
+ || prefill: steps=26 toks/step=2146 nreq=10.0 sched=56 exec=82980|| decode: steps=623 toks/step=13 nreq=12.9 sched=1 exec=8674
+r2 A c32:   tps=1734.7 ttft_p50=290.61 ttft_p99=484.39 tpot_p50=14.13 tpot_p99=18.09
+ || prefill: steps=42 toks/step=2648 nreq=23.8 sched=64 exec=103288|| decode: steps=609 toks/step=25 nreq=25.5 sched=2 exec=9388
+r2 A c64:   tps=2180.4 ttft_p50=301.09 ttft_p99=1065.99 tpot_p50=24.91 tpot_p99=28.98
+ || prefill: steps=66 toks/step=3379 nreq=51.8 sched=84 exec=131237|| decode: steps=588 toks/step=50 nreq=50.2 sched=5 exec=11838
+r2 A out:  is is is is is is is is is is is is is is is is is is is is is is is is
+r2 A out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到春秋战国时期，最初是为了抵御外敌而修建的。 随着秦朝的统一，大规模的修筑工作开始，并逐渐演变为防御体系。 在明朝时期，长城
+r2 B c8:   tps=914.2 ttft_p50=121.14 ttft_p99=122.58 tpot_p50=7.00 tpot_p99=8.55
+ || prefill: steps=18 toks/step=1571 nreq=4.1 sched=40 exec=56214|| decode: steps=630 toks/step=7 nreq=6.6 sched=1 exec=6489
+r2 B c16:   tps=1208.9 ttft_p50=152.87 ttft_p99=246.47 tpot_p50=10.93 tpot_p99=12.96
+ || prefill: steps=26 toks/step=2144 nreq=10.0 sched=56 exec=76892|| decode: steps=623 toks/step=13 nreq=12.9 sched=1 exec=8656
+r2 B c32:   tps=1797.2 ttft_p50=266.26 ttft_p99=444.67 tpot_p50=13.85 tpot_p99=17.46
+ || prefill: steps=42 toks/step=2648 nreq=23.8 sched=67 exec=95233|| decode: steps=609 toks/step=25 nreq=25.5 sched=2 exec=9401
+r2 B c64:   tps=2285.8 ttft_p50=276.07 ttft_p99=977.69 tpot_p50=23.90 tpot_p99=27.58
+ || prefill: steps=66 toks/step=3379 nreq=51.8 sched=89 exec=120638|| decode: steps=588 toks/step=50 nreq=50.2 sched=5 exec=11844
+r2 B out:  is is is is is is is is is is is is is is is is is is is is is is is is
+r2 B out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到春秋战国时期，最初是为了抵御外敌而修建的。 随着秦朝的统一，大规模的修筑工作开始，并逐渐演变为防御体系。 在明朝时期，长城
+B50_DONE
