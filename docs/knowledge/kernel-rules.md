@@ -111,3 +111,9 @@ chunk 0 正确（`tmp0 = 0.95790` 与参考一致），但 chunk 1 起等的是*
 ## 同一算子的两条快路径（v5 / v6）累加序不同：按 cache dtype 分路会让"同 prompt 不同步型"结果不同（2026-10-29，kaon3 D121）
 - kaon3 e4m3 cache 时 D=256 滑窗层 Paged 步退 v5（v6/v7 不读 e4m3），bf16 cache 时走 v6；纯 Prefill 两种都 v6。于是 prefix cache 命中后的 chunk（Paged）与首次 prefill 的 top-1 可差几 ulp，词沙拉 prompt 上贪心翻转 3–4/7，自然语言几乎不翻。不是 bug，但是**非确定性来源**。
 - **规则**：新加 dtype / 布局变体时，优先给**同一个 kernel** 加模板参数（B26 给 v6 加 KV_FP8），不要让某种 dtype 整体退到另一个结构不同的 kernel；对拍测试要比"同一形状 × 两条路径"，不只比"同一路径 × 两种 dtype"（histpar 的位差 0 是 v5 vs v5）。
+
+## 小 M grouped GEMM（MoE decode）：先量 L2 热微基准，再看"链长"（2026-10-29 kaon3 D180–D183）
+- **判断**：decode（每专家 1–8 行）的 mma tile grouped GEMM 不是带宽瓶颈而是**每 CTA 的串行 K 链**：CTA 数 ≈ 激活专家 × N 块（~176–616），每 CTA 串行 K/BK 次 {cp.async wait + 2 sync + mma}，每次 ~0.2 us（L2 热）/更多（DRAM 冷）。
+- **证据**：M=1 权重 18 MB 全在 L2 热时仍只 ~1 TB/s；BK 128 → 256（迭代 22 → 11）微基准 -15%，端到端 c1 -3.8% / c8 -10.6%（冷数据下链长代价更大）。
+- **怎么用**：① 先用 `moe_gemm_timing` 一类 nsys 外微基准（真实 decode 形状、下限按 DRAM 算，但注意 L2 热会高估）；② 刀的顺序：加大 BK（smem 允许时，K 尾块零填充保持 `K % 64 == 0` 即可）→ 减 BN/加 CTA（在飞字节）→ split-K；每一刀都用"四进程 dump cmp"做位同门禁（启动器 env 是 static once，同进程扫不动）。
+- **反例**：B7 的带宽型 GEMV（warp 一行、lane 流式）在这种形状慢 4–8×：工作太碎，每 block 装载 + barrier 占大头。
