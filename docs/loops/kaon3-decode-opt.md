@@ -1673,3 +1673,7 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 ## D230 2026-10-29 b60 跑中：B53 `DENSE_GEMV_MAX_M` 16 → 8（dense gateup_act<16> 24.3 us + down gemv 走 Lt 自调优；M=16 下限 ~10 us/层 → 预期 c16 −0.4 ms）。两侧其余默认（含 B51/B52）。
 - 之后 M=16 decode 步剩余（D227 表）：attention v3 21.7 us × 25（下限 KV 读 16 req × 1.5K tok × 2 × 256 × 2 B = 25 MB → 14 us；离下限 1.5×，中刀）；norm/quant/merge 小 kernel 合计 ~0.9 ms（融合候选，每个 2–3 us）；lm_head bf16 0.89（不动）。MoE 2.8 已在带宽下限。
 - 结构性差额（混批步 decode 全停，c16 1.9 / c64 9.4 ms）仍是最大单项 → `kaon3-prefill-async`。
+
+## D231 2026-10-29 疑点（b60 跑中）：b60 A 侧（= b59 B 侧同配置、`envab_c` 同 seed 13116）c16 TPOT **9.85**，而 b59 B 侧两轮 9.60 / 9.60；c8 7.09 vs 7.08 同。
+- 唯二差别：二进制（b59 8664d06c 之前的那枚 vs b60 8664d06c：源码差 B51 默认改 8/9 + B53 env 读取——B51 默认值在 b59 时通过 env 给的，等价）；以及 b60 A 侧多了 `DENSE_GEMV_MAX_M=16` 显式 env（= 默认，等价）。
+- 若 b60 两轮 A 都 ~9.85：b59 的 c16 −3% 可能是**同机噪声 / 顺序效应**（b59 A→B→A→B，c16 B 两轮都 9.60 但 A 9.90/9.92；b60 A 9.85），c16 真实收益可能只 −0.5%；c32/c64 的 −5% / −6.8% 量级大于噪声，仍可信。等 b60 全部出来再对账；必要时 b61 = 同二进制 ROUTE_SPLIT_MIN_TOK 0/9 复测（顺序 B→A→B→A）。
