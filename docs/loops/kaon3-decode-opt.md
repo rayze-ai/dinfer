@@ -1614,3 +1614,10 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 
 ## D222 2026-10-29 b55 微基准：**B48d STAGES=4 判负**（P2148 gate‖up 503 → 526 us（+5%），down 373 → 375，P424 持平；CHECKSUM 同）。4 级 smem 45 KB 把 BN128 的占用从 2 CTA/SM 压到 1。默认留 3，env 实例保留（A/B 用）。ABAB 不跑（微基准已负），链停，直接起 b56。CSV 不记（没跑端到端）。
 - p64 的下一档不是 stage 数，是 **ldmatrix / 更大 BM（128）** 或 **A 片段驻寄存器复用 2 个 n 半区**——留给下一轮；当前 MoE prefill GEMM 在混批步里 ~40%，但混批步本身只占 c16 TPOT 的 18%（1.9/10.6），结构性差额优先。
+
+## D223 2026-10-29 第四轮小结（D199–D222，供下次开场）
+- **Step A（stepA4，5 轮）→ 靶子 = 混批 prefill 步**（c16 98 ms / 2146 tok；占 TPOT 差额 64–130%）。nsys：GEMM 吞吐（MoE 39% + Lt 43%）+ lm_head 全 tokens（14%）。
+- **Step B 七刀**：B46 lm_head 采样行 ✓（c64 −8.5%）；B47 整步 prefill 配额 ✗（TPOT +10–26%，默认 0）；B48 MoE p64 BM64 ✓（−4%）；B48b down 也走 ✓（−6%）；B48c BN=128 ✓（−1.7%）；B48d STAGES=4 ✗（微基准 +5%）；B49 fp8 Lt 自调优 ✓（−7%，TTFT −15%）。全部进 CSV（b49/b49c/b50/b51/b52/b53/a5）。
+- **Step C 总账（stepA5）**：c64 TPOT 27.07 → 21.24（−22%）、吞吐 +33%；c16 1.59× → 1.50×；**TTFT 全档反超 vLLM**；混批步 98 → 59 ms（22 → 36 tok/ms）。输出全程逐字同。
+- **未达停止条件**（c16 ≤ 1.10×）。剩余差额定性：① pair 步 decode 等 prefill（c16 1.9 / c64 9.4 ms，占剩余的 53–160%）→ `kaon3-prefill-async`；② M=16 纯 decode 步 8.74 vs M=8 6.56（+2.2 ms，vLLM 全步 7.09）。b56（pair vs 单流混批）在跑，结果决定 ① 的路线。
+- 知识已落：`knowledge/perf-concurrency.md`（新页 §15–22）、perf-tooling §23、executor-common pair 步代价、infra 僵尸 pgrep；design §11 四行；pitfalls 一条。
