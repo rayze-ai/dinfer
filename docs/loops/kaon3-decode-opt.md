@@ -1473,3 +1473,7 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - **环节判定**：✓ 领先/持平：c1 decode 步、TTFT c≤8、render 1 ms、sched/publish/htod < 40 us（vLLM sched 490 us/call）。✗ 落后：① **多请求 prefill 吞吐**（c16–64 TPOT 差额的 60–100%，最大项）；② 纯 decode 步 M=16/32/64 比 vLLM 慢 ~1.2×（8.67 vs ~7.0）。
 - **Step B 靶子 = ①**：pair 步（decode 主流 + prefill 副流）的 prefill 2147 tok 98 ms。先 nsys 一个 c16 prefill 步看 kernel 表（候选：gqa_prefill 按请求循环 / MoE 大 M 路径 / fp8 GEMM 形状），再改。
 - 工具修正：stepA4 的 dinfer `/metrics` 名带 `dinfer:` 前缀，首轮 dinfer-metrics 全 0（脚本已修，下次链用 `stepA4b.sh`）。
+
+## D201 2026-10-29 Step B 定靶准备：现有 nsys c32b 里几乎没有混批 prefill 步（只 1660 个 eager kernel，是启动 warmup + autotune）→ 需要专抓
+- `scripts/dev/nsys_prefill_steps.py`（eager kernel 按间隙切步、最长 3 步聚合、按家族汇总）；`scripts/dev/kaon3_nsys_prefill16.sh`（stepA4 口径 c16 × 128 请求抓 pair 步 prefill 副流）。stepA4 跑完 GPU0 空出后起。
+- c32b 的 warmup prefill（4096 tok 单请求）kernel 表给了一个基准：14 层 MoE dual 1315 us/call + pipe4 872 us/call ≈ 2.2 ms/层（4096 行 → **1.9 tok/us**），gqa_fa_v6 3.7 ms/call（D=512 两层）。
