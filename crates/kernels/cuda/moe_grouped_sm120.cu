@@ -1,15 +1,4 @@
-//// B34①：见 rmsnorm_grouped_quant_kernel。K % 64 == 0 且 K ≤ 4096（vec<256,2> 口径）。
-extern "C" int moe_rmsnorm_grouped_quant(const void* x, const void* w, const int32_t* row2e, const int32_t* sorted_tok,
-                                         const float* agscale, void* aq, void* a_s, int64_t rows, int64_t k, float eps,
-                                         int mode, int exact_rq, cudaStream_t stream) {
-  if (rows <= 0) return 0;
-  if (k <= 0 || k % 64 != 0 || k > 4096) return static_cast<int>(cudaErrorInvalidValue);
-  rmsnorm_grouped_quant_kernel<<<(unsigned)rows, 256, 0, stream>>>(static_cast<const bf16*>(x), static_cast<const bf16*>(w),
-                                                                   row2e, sorted_tok, agscale, static_cast<uint8_t*>(aq),
-                                                                   static_cast<uint8_t*>(a_s), (int)rows, (int)k, eps, mode, exact_rq);
-  return gerr();
-}
- MoE device-grouped NVFP4 GEMM（sm_120 专用，B3：去 host 路由 + 去 D2H）。
+// MoE device-grouped NVFP4 GEMM（sm_120 专用，B3：去 host 路由 + 去 D2H）。
 // 现状（host 版 models/kaon3/src/layer.rs moe_branch）：D2H 读 offsets → host 循环逐专家 launch gate/up/down。
 // 本文件：offsets 留 device，一个 kernel（grid.z=专家）按 device 端 ranges 跑变长专家的 grouped GEMM，
 //   launch 次数编译期固定（cudagraph 前置，B4）。
@@ -916,6 +905,19 @@ int moe_grouped_gemm_dual(const void* aq, const void* a_s,
                                                            pbu, psu, alphaU, static_cast<bf16*>(outU), offsets, tile_off,
                                                            (int)N, (int)K, (int)num_experts);
   }
+  return gerr();
+}
+
+
+// B34①：见 rmsnorm_grouped_quant_kernel。K % 64 == 0 且 K ≤ 4096（vec<256,2> 口径）。
+extern "C" int moe_rmsnorm_grouped_quant(const void* x, const void* w, const int32_t* row2e, const int32_t* sorted_tok,
+                                         const float* agscale, void* aq, void* a_s, int64_t rows, int64_t k, float eps,
+                                         int mode, int exact_rq, cudaStream_t stream) {
+  if (rows <= 0) return 0;
+  if (k <= 0 || k % 64 != 0 || k > 4096) return static_cast<int>(cudaErrorInvalidValue);
+  rmsnorm_grouped_quant_kernel<<<(unsigned)rows, 256, 0, stream>>>(static_cast<const bf16*>(x), static_cast<const bf16*>(w),
+                                                                   row2e, sorted_tok, agscale, static_cast<uint8_t*>(aq),
+                                                                   static_cast<uint8_t*>(a_s), (int)rows, (int)k, eps, mode, exact_rq);
   return gerr();
 }
 
