@@ -1409,3 +1409,5 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 
 ## D192 2026-10-29 B45（待编待验）：combine + post_ff_norm_2 一次 launch（`combine_norm_kernel`：block=token、256 线程持 2 个 8 元素组，combine 同式 → 写 y → 平方和同序 → rms_inv(nmode) → h2），与 `combine_kernel → rmsnorm_vec<256,2>` 逐位同；`MOE_COMBINE_NORM=0` 回退；-30 launch/步。门禁 `moe_combine_norm_parity`。链 b46（A = b44）。
 - b44 nsys 对照（c1b 新抓，M=1，每步 797 kernel）：lm_head gemvx 870 us（20.8%）、fp8 gemv<1> 85 call 10.1 us（20.6%）、MoE pipe4 dual+down 60 call ≈ 12.2 us 均（17.5%）、dense gateup 9.3、route 8.8、combine 4.1、v3 attn 4.6、norm_quant 3.2、d512 attn 18、< 3 us 的 norm/quant/merge/gelu_quant/router 共 ~12 个/层。b46 融 combine+norm_2（-30 launch）；之后候选：router_gemv+route（-30）、rmsnorm_grouped_quant 并进 route（-30）、merge+quant（-25）。
+
+## D193 2026-10-29 排队（master6，b46 后）：envab `FP8_GEMV_WARPS=4` / `=16` on b46 二进制 —— 看 gemv<8>（qkv M=8 21.9 us，grid 512×256 线程）是否是波次量化（2 块/SM × 170 = 340 槽，512 块 = 1.5 波）；c1 也会变（force 对所有 M_TILE 生效），只按 c8 判，赢了就改 `pick_warps` 的 `m_tile >= 4` 分支。
