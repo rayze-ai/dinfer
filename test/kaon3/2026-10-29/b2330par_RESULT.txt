@@ -1,0 +1,31 @@
+00:04:26
+EXIT=0
+D=256 nkv=8 rope=256/span128 tokens=13 kv_fp8=true: q nd=0 mx=0.0000 | k nd=0 mx=0.0000 | v nd=0 mx=0.0000 | cache nd=0 mx=0.0000 => ok
+D=256 nkv=8 rope=256/span128 tokens=13 kv_fp8=false: q nd=0 mx=0.0000 | k nd=0 mx=0.0000 | v nd=0 mx=0.0000 | cache nd=0 mx=0.0000 => ok
+D=512 nkv=2 rope=128/span256 tokens=13 kv_fp8=true: q nd=0 mx=0.0000 | k nd=0 mx=0.0000 | v nd=0 mx=0.0000 | cache nd=0 mx=0.0000 => ok
+D=512 nkv=2 rope=128/span256 tokens=13 kv_fp8=false: q nd=0 mx=0.0000 | k nd=0 mx=0.0000 | v nd=0 mx=0.0000 | cache nd=0 mx=0.0000 => ok
+D=256 nkv=8 rope=256/span128 tokens=1 kv_fp8=true: q nd=0 mx=0.0000 | k nd=0 mx=0.0000 | v nd=0 mx=0.0000 | cache nd=0 mx=0.0000 => ok
+D=256 nkv=8 rope=256/span128 tokens=1 kv_fp8=false: q nd=0 mx=0.0000 | k nd=0 mx=0.0000 | v nd=0 mx=0.0000 | cache nd=0 mx=0.0000 => ok
+D=512 nkv=2 rope=128/span256 tokens=400 kv_fp8=true: q nd=0 mx=0.0000 | k nd=0 mx=0.0000 | v nd=0 mx=0.0000 | cache nd=0 mx=0.0000 => ok
+D=512 nkv=2 rope=128/span256 tokens=400 kv_fp8=false: q nd=0 mx=0.0000 | k nd=0 mx=0.0000 | v nd=0 mx=0.0000 | cache nd=0 mx=0.0000 => ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.72s
+FP8_GEMV_TIMING dense_down N=2816 K=2112 m=1: 4.12 us  1443 GB/s  (下限 3.32 us @1.79TB/s)
+FP8_GEMV_TIMING dense_down N=2816 K=2112 m=8: 18.46 us  322 GB/s  (下限 3.32 us @1.79TB/s)
+FP8_GEMV_TIMING qkv_sliding N=3072 K=2816 m=1: 6.16 us  1405 GB/s  (下限 4.83 us @1.79TB/s)
+FP8_GEMV_TIMING qkv_sliding N=3072 K=2816 m=8: 23.84 us  363 GB/s  (下限 4.83 us @1.79TB/s)
+FP8_GEMV_TIMING oproj_sliding N=2816 K=4096 m=1: 6.17 us  1870 GB/s  (下限 6.44 us @1.79TB/s)
+FP8_GEMV_TIMING oproj_sliding N=2816 K=4096 m=8: 47.14 us  245 GB/s  (下限 6.44 us @1.79TB/s)
+FP8_GEMV_TIMING dense_gateup_half N=2112 K=2816 m=1: 6.16 us  966 GB/s  (下限 3.32 us @1.79TB/s)
+FP8_GEMV_TIMING dense_gateup_half N=2112 K=2816 m=8: 43.01 us  138 GB/s  (下限 3.32 us @1.79TB/s)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.57s
+tail tokens=1 s=1: norm nd=0 mx=0.0000 | x nd=0 mx=0.0000 => ok
+tail tokens=1 s=0.70703125: norm nd=0 mx=0.0000 | x nd=0 mx=0.0000 => ok
+router tokens=1: nd=0 mx=0.0000 => ok
+tail tokens=8 s=1: norm nd=0 mx=0.0000 | x nd=0 mx=0.0000 => ok
+tail tokens=8 s=0.70703125: norm nd=0 mx=0.0000 | x nd=0 mx=0.0000 => ok
+router tokens=8: nd=0 mx=0.0000 => ok
+tail tokens=400 s=1: norm nd=0 mx=0.0000 | x nd=0 mx=0.0000 => ok
+tail tokens=400 s=0.70703125: norm nd=0 mx=0.0000 | x nd=0 mx=0.0000 => ok
+router tokens=400: nd=0 mx=0.0000 => ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+DONE
