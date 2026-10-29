@@ -1,0 +1,16 @@
+03:17:59
+A_md5=4abcec9402e3
+EXIT=0
+EXIT(ROUTE_SOFTMAX_WARP=0)=0
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 26.75s
+rmsnorm_add tokens=1 amp=1: 位差 0/2816 => ok
+rmsnorm_add tokens=8 amp=1: 位差 0/22528 => ok
+tokens=1 pes=false: ids true | w 位差 0/8 | offsets/tile_off/counts/cursor true | row2e true | sorted 区间集合 true | combine true => ok
+rmsnorm_add tokens=33 amp=30: 位差 0/92928 => ok
+tokens=7 pes=true: ids true | w 位差 0/56 | offsets/tile_off/counts/cursor true | row2e true | sorted 区间集合 true | combine true => ok
+rmsnorm_add tokens=8 amp=0.01: 位差 0/22528 => ok
+tokens=64 pes=true: ids true | w 位差 0/512 | offsets/tile_off/counts/cursor true | row2e true | sorted 区间集合 true | combine true => ok
+tokens=64 pes=false: ids true | w 位差 0/512 | offsets/tile_off/counts/cursor true | row2e true | sorted 区间集合 true | combine true => ok
+tokens=33 pes=true: ids true | w 位差 0/264 | offsets/tile_off/counts/cursor true | row2e true | sorted 区间集合 true | combine true => ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+B44_DONE

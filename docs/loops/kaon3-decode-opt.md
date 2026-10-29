@@ -1393,3 +1393,7 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 
 ## D188 2026-10-29 用户问：若只剩 megakernel 一条路怎么做、改动多大 → 开子代理做数据支撑（只读 nsys sqlite + 现有 mega_* 骨架，不碰 GPU），产物 `docs/loops/kaon3-megakernel-study.md`
 - 主会话预判（待数据验证）：不做一步一 kernel；做"分段 persistent"（norm→qkv→rope/cache→attention→o_proj→层尾 一段），MoE grouped GEMM / lm_head 留独立 kernel；改动 ~1000 行 + 3–4 轮 A/B；门槛 = "< 8 us kernel 总时长 + gaps − 每级屏障 3–10 us × 级数" ≥ 0.5 ms 才开工。
+
+## ★★★★★★ D189 2026-10-29 **b44 定稿（B42c 预取只对 M_TILE≤2 + B43 route 并行 exp/warp 扫描；A = b43 二进制）**：c1 TPOT 4.73/4.74 → **4.65/4.65**，c8 7.53/7.54 → **7.13/7.13**，c8 吞吐 835 → **870**；相对 b41 定稿（4.78 / 7.19 / 867）：**c1 -2.7%、c8 -0.8%**。parity 全过（route 与单线程版逐位、A8 开关各一遍）；输出同。**合入**（CSV round b44）。
+- **c1 4.65 < vLLM 4.69（0.99×）——首次反超**。c8 7.13 vs 6.24（1.14×），吞吐 91%。
+- B42b 的教训：同一改动 M=1 赢、M=8 输（寄存器跨 barrier 常驻压占用）——gemv 类改动必须按 M_TILE 分档决定，微基准 m=8 没看出差异（L2 热），端到端才暴露。

@@ -1,0 +1,30 @@
+03:03:17
+A_md5=1441c3733d1a
+EXIT(A8 on)=0
+EXIT(A8 off)=0
+     | |_- rustdoc does not generate documentation for extern blocks
+     = help: use `//` for a plain comment
+     = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+     | |_- rustdoc does not generate documentation for extern blocks
+     = help: use `//` for a plain comment
+     | |_- rustdoc does not generate documentation for extern blocks
+     = help: use `//` for a plain comment
+1592 | | /// 判据与 build.rs 的 `cargo:rustc-cfg=sm120` 同源：CUDA_ARCHS 含 120 / 120a。
+     | |_- rustdoc does not generate documentation for extern blocks
+     = help: use `//` for a plain comment
+    = note: `#[warn(unused_attributes)]` (part of `#[warn(unused)]`) on by default
+FP8_GEMV_TIMING dense_down N=2816 K=2112 m=1: 4.12 us  1443 GB/s  (下限 3.32 us @1.79TB/s)
+FP8_GEMV_TIMING dense_down N=2816 K=2112 m=8: 10.26 us  580 GB/s  (下限 3.32 us @1.79TB/s)
+FP8_GEMV_TIMING qkv_sliding N=3072 K=2816 m=1: 6.16 us  1405 GB/s  (下限 4.83 us @1.79TB/s)
+FP8_GEMV_TIMING qkv_sliding N=3072 K=2816 m=8: 12.30 us  703 GB/s  (下限 4.83 us @1.79TB/s)
+FP8_GEMV_TIMING oproj_sliding N=2816 K=4096 m=1: 6.16 us  1874 GB/s  (下限 6.44 us @1.79TB/s)
+FP8_GEMV_TIMING oproj_sliding N=2816 K=4096 m=8: 14.35 us  804 GB/s  (下限 6.44 us @1.79TB/s)
+FP8_GEMV_TIMING dense_gateup_half N=2112 K=2816 m=1: 4.12 us  1442 GB/s  (下限 3.32 us @1.79TB/s)
+FP8_GEMV_TIMING dense_gateup_half N=2112 K=2816 m=8: 8.21 us  725 GB/s  (下限 3.32 us @1.79TB/s)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.62s
+gemv N=3072 K=2816 m=16: 最大误差 0.0078 超差 0/49152 => ok
+gemv N=2816 K=4096 m=8: 最大误差 0.0078 超差 0/22528 => ok
+gemv N=2816 K=4096 m=1: 最大误差 0.0067 超差 0/2816 => ok
+gemv N=3072 K=2816 m=1: 最大误差 0.0072 超差 0/3072 => ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 26.34s
+DONE
