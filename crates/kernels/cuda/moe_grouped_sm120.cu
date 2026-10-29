@@ -509,9 +509,13 @@ __global__ void __launch_bounds__(256)
     grouped_gemm_kernel_pipe4(const uint8_t* __restrict__ A, const uint8_t* __restrict__ Asc,
                               const uint8_t* const* __restrict__ Bptr, const uint8_t* const* __restrict__ Sptr,
                               const float* __restrict__ alpha, const int32_t* __restrict__ offsets,
-                              const int32_t* __restrict__ tile_off, bf16* __restrict__ D, int N, int K, int E) {
+                              const int32_t* __restrict__ tile_off, bf16* __restrict__ D, int N, int K, int E,
+                              // B36（gate‖up dual，grid.z=2）：blockIdx.z==1 的 block 改用第二套（up）指针。grid.z=1 时不触碰。
+                              const uint8_t* const* __restrict__ Bu = nullptr, const uint8_t* const* __restrict__ Su = nullptr,
+                              const float* __restrict__ alphaU = nullptr, bf16* __restrict__ Du = nullptr) {
   int e, m_blk, row_hi;
   if (!tile_lookup(offsets, BM_T == BM ? tile_off : tile_off + (E + 1), E, (int)blockIdx.y, e, m_blk, row_hi, BM_T)) return;
+  if (blockIdx.z) { Bptr = Bu; Sptr = Su; alpha = alphaU; D = Du; }
   constexpr int RSA = BK / 2 + PAD, RSB = BK / 2 + PAD;
   constexpr int NQ4 = BK / 64;
   constexpr int NB16 = BK / 16;
@@ -892,6 +896,17 @@ int moe_grouped_gemm_dual(const void* aq, const void* a_s,
   const uint8_t* const* psg = reinterpret_cast<const uint8_t* const*>(Sg);
   const uint8_t* const* pbu = reinterpret_cast<const uint8_t* const*>(Bu);
   const uint8_t* const* psu = reinterpret_cast<const uint8_t* const*>(Su);
+  // B36：decode（R ≤ 128）走 pipe4 BM=16 的 dual（grid.z=2；每个输出元素 k 累加序与单路 pipe4<BM16> 同 → 逐位）。
+  // 旧 dual body 是 BM=32 的 pipe 体，decode 时丢了 B16b 的占用收益。`MOE_DUAL_PIPE4=0` 回退旧 body。
+  static const bool dual_pipe4 = []{ const char* v = getenv("MOE_DUAL_PIPE4"); return !v || v[0] != '0'; }();
+  if (dual_pipe4 && R <= 128) {
+    const dim3 g16((unsigned)((N + BN - 1) / BN), (unsigned)((R + 15) / 16 + num_experts), 2u);
+    if (K % 128 == 0)
+      grouped_gemm_kernel_pipe4<128, 4, 16><<<g16, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
+    else
+      grouped_gemm_kernel_pipe4<64, 4, 16><<<g16, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
+    return gerr();
+  }
   if (K % 128 == 0) {
     grouped_gemm_kernel_dual<128><<<grid, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, static_cast<bf16*>(outG),
                                                             pbu, psu, alphaU, static_cast<bf16*>(outU), offsets, tile_off,
