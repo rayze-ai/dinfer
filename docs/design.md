@@ -589,6 +589,7 @@ finish, stash_sync_result}` 与 pinned 原语 `PinnedSlot` 本来就是公共的
 | 2026-10-29 | prefill 分摊到多步（vLLM chunked prefill 每步 prefill 量小、与 decode 混批） | **改进**：vLLM 只有单请求上限 `long_prefill_token_threshold`；我们加整步配额 `--prefill-tokens-per-step`（B47），一波多请求 prefill 不再一步 98 ms | **判负**：TTFT p50 −60–75% 但 TPOT +10–26%（每个切出的混批步付 5–8 ms 固定开销，loop D209）；默认 0 留作 SLO 旋钮 |
 | 2026-10-29 | prefill 大 M 的 MoE grouped GEMM 用算力型 tile（vLLM/CUTLASS grouped GEMM 按 M 选 tile） | **改进**：自写 NVFP4 grouped GEMM 加 BM64×BN64 p64 实例（每 warp 2×2 片段、k 序不变 → 与 decode tile 逐位互换），R > RMAX 分派（B48/B48b） | 微基准 gate‖up −24% / down −16%；端到端 c64 TPOT −10%、TTFT −19%（b50+b51，loop D212/D214）；BN=128 再 −2%（b53，D217）；混批步 101 → 65 ms（D219） |
 | 2026-10-29 | cuBLASLt fp8 GEMM algo 按形状实测选（vLLM 走 torch `_scaled_mm` 启发式默认） | **改进**：m ≥ 64 时 32 候选实测取最快，按 (m 2 的幂桶, n, k) 缓存；m < 64 保持与 vLLM 逐位对齐的 parity algo（B49） | c64 TPOT −7%、TTFT 全档 −15%、吞吐 +9%（b52，loop D215）；TODO 挪到启动 warmup |
+| 2026-10-29 | 混批 = 一个前向（vLLM 把 prefill chunk 与 decode 行放同一 batch 单次 forward） | **采用**：kaon3 `XSTREAM` 默认关，回到单流 Paged 混批；自研的 pair 步（prefill 副流 ‖ decode 主流图，B35）在大 M prefill 下无并行收益（SM 已满）反多付同步（B50） | c64 TPOT −1.1%、少一套 AltSet 显存（b56，loop D225）；pair 代码留 `XSTREAM=1` |
 
 ## 12. 整体功能待办路线图（2026-10-18 盘点，不分模型）
 
