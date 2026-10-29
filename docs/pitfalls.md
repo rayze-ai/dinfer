@@ -1293,3 +1293,8 @@
 - 现象：b40b 串行跑 expstats2 → moetime，我另起的 nsys 链 `until grep -q '^DONE' tmp_b40b_RESULT.txt` 在 expstats2 的 RESULT（自带 DONE）被 cat 进 b40b_RESULT 时就放行，`pkill -x dinfer` 杀了 moetime 的服务，moetime RESULT 只剩表头。
 - 根因：子脚本 RESULT 各自以 DONE 结尾，父脚本原样拼接；等待方的匹配串没有唯一性。
 - 解法 / 避免：父链结束标记用唯一字面量（`B40B_DONE` / `MOETIME_DONE`），等待方匹配唯一标记；拼接子 RESULT 时 `grep -v '^DONE'`；排队前 `grep -c` 看目标文件里该标记当前出现几次。
+
+## 2026-10-29 `until ! pgrep -x nsys` 永远不放行：容器里 8 个 `[nsys] <defunct>` 僵尸（父进程 docker exec -d 已退，没人 wait）
+- 现象：排队脚本等 nsys 结束再起探针，卡了 20 分钟；`ps -C nsys` 全是 defunct。
+- 根因：`docker exec -d bash -c '... nsys profile ... &'` 的 nsys 子进程退出后父 bash 早已不在，僵尸条目一直留在 PID 表里，`pgrep -x` 照样匹配。
+- 避免：等"进程结束"不用 pgrep 名字，用结果文件里的唯一标记；必须用进程时 `pgrep -x nsys | xargs -r ps -o stat= -p | grep -v Z`。
