@@ -51,31 +51,40 @@ impl Device {
 
     /// 带优先级的非阻塞流（loop kaon3-prefill-async E4：decode 图流高优先级 / prefill 副流低优先级）。
     ///
-    /// cudarc 0.18 没暴露 `cuStreamCreateWithPriority`，`CudaStream` 的字段是 `pub(crate)`：这里用 sys 建流，再按 cudarc
-    /// 0.18.2 的 `CudaStream { cu_stream: CUstream, ctx: Arc<CudaContext> }` 布局构造（`size_of` 断言守着；Cargo.lock 锁 0.18.2）。
-    /// Drop 仍由 cudarc 走 `cuStreamDestroy`（它检查非空且非 legacy 句柄），与普通流一致。
+    /// cudarc 0.18 没暴露 `cuStreamCreateWithPriority`，`CudaStream` 字段 `pub(crate)`、`repr(Rust)`（字段顺序不保证——
+    /// 直接按源码顺序 transmute 在本机 SIGSEGV，E4 第一版）。做法：先让 cudarc 正常 `new_stream()` 得到一个合法的
+    /// `Arc<CudaStream>`（ctx 引用计数、num_streams 都对），再用 sys 建带优先级的流，在结构体的两个 8 字节字里**按值**找到等于旧
+    /// `cu_stream` 句柄的那个字、销毁旧句柄、原地写入新句柄。Drop 仍由 cudarc 走 `cuStreamDestroy`（销毁的是新句柄）。
     pub fn new_stream_with_priority(&self, priority: i32) -> Result<Stream> {
         self.ctx.bind_to_thread()?;
+        let base: Arc<CudaStream> = self.ctx.new_stream()?;
+        let old = base.cu_stream();
         let mut cu_stream: sys::CUstream = std::ptr::null_mut();
         // SAFETY: 出参有效；flags = NON_BLOCKING（与 cudarc new_stream 同）。
         let r = unsafe {
             sys::cuStreamCreateWithPriority(&mut cu_stream, sys::CUstream_flags::CU_STREAM_NON_BLOCKING as u32, priority)
         };
         anyhow::ensure!(r == sys::cudaError_enum::CUDA_SUCCESS, "cuStreamCreateWithPriority({priority}): {r:?}");
-        #[repr(C)]
-        struct Raw {
-            cu_stream: sys::CUstream,
-            ctx: Arc<CudaContext>,
+        const _: () = assert!(std::mem::size_of::<CudaStream>() == 2 * std::mem::size_of::<usize>());
+        // SAFETY: `base` 刚创建、无其它引用；结构体恰两个指针宽的字，其中一个按值等于 `old`（另一个是 Arc<CudaContext> 指针，
+        // 两者分属不同分配，不可能相等）。找到后先销毁旧流再写入新句柄；写的是 Arc 内部数据，Arc 本身与引用计数不动。
+        let words = Arc::as_ptr(&base) as *mut usize;
+        let mut hit = None;
+        for k in 0..2 {
+            if unsafe { *words.add(k) } == old as usize {
+                hit = Some(k);
+            }
         }
-        const _: () = assert!(std::mem::size_of::<Raw>() == std::mem::size_of::<CudaStream>());
-        const _: () = assert!(std::mem::align_of::<Raw>() == std::mem::align_of::<CudaStream>());
-        let raw = Raw { cu_stream, ctx: self.ctx.clone() };
-        // SAFETY: 大小 / 对齐已静态断言；字段顺序与 cudarc 0.18.2 `CudaStream` 源码一致（cu_stream, ctx）。Rust 对 repr(Rust)
-        // 结构体字段顺序不作保证，但两个字段大小不同（8 vs 8 的 Arc 指针…同为 8 字节），若重排则 Drop 会把 ctx 指针当流销毁 —
-        // 因此下面做一次运行时自检：通过 `cu_stream()` 读回必须等于我们创建的句柄。
-        let inner: CudaStream = unsafe { std::mem::transmute::<Raw, CudaStream>(raw) };
-        anyhow::ensure!(inner.cu_stream() == cu_stream, "CudaStream 字段布局与 cudarc 0.18.2 不一致（升级 cudarc 后请改用其公开 API）");
-        Ok(Stream { inner: Arc::new(inner) })
+        let Some(k) = hit else {
+            // 找不到：不碰 base，销毁我们建的流，报错（cudarc 布局变了）。
+            unsafe { sys::cuStreamDestroy_v2(cu_stream) };
+            anyhow::bail!("CudaStream 布局与 cudarc 0.18.2 假设不符（找不到 cu_stream 字），请改用其公开 API");
+        };
+        let rd = unsafe { sys::cuStreamDestroy_v2(old) };
+        anyhow::ensure!(rd == sys::cudaError_enum::CUDA_SUCCESS, "cuStreamDestroy(old): {rd:?}");
+        unsafe { *words.add(k) = cu_stream as usize };
+        anyhow::ensure!(base.cu_stream() == cu_stream, "cu_stream 回读不一致");
+        Ok(Stream { inner: base })
     }
 
     pub fn name(&self) -> Result<String> {
