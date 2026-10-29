@@ -34,3 +34,7 @@
 ## 22. cuBLASLt 启发式第 0 候选对 prefill 大 M 不是最快：m ≥ 64 实测选 algo、按 m 2 的幂桶缓存（2026-10-29 kaon3 D215）
 - fp8 Lt 为逐位对齐 vLLM 锁死的 `tile=13` 配置在 M=2148 走 nvjet 64x32 小 tile（153 us × 125 次/步）。m ≥ 64 对 32 候选各计时 5 次取最快 → c64 TPOT −7%、TTFT 全档 −15%、吞吐 +9%；m < 64 保持 parity 配置不动，输出逐字同。
 - **判断**：对拍口径的 algo 只锁 decode（m < 64）；prefill 形状必须实测。缓存 key 用 m 的 2 的幂桶（混批步 m 每步不同，逐 m 调会每步付 32×5 次计时）。调优应挪到启动 warmup（按桶 × 形状预跑），别在首批请求里付。
+
+## 23. "prefill 副流 ‖ decode 主流图" 在 prefill 占满 SM 时没有并行收益，单流混批反而略好（2026-10-29 kaon3 b56 D224）
+- 同二进制 ABAB：`XSTREAM=0`（单流 Paged 混批，decode 行并进 prefill 的 eager 前向）比 `XSTREAM=1`（pair 步）全档 TPOT 低 0.4–1.3%、吞吐高 1–2%。prefill 2148 tok 的 GEMM 把 170 SM 填满，decode 图只能排队；两流还多付事件同步 + 一套 AltSet 显存。
+- **判断**：跨流并行只在"小 kernel 填不满 SM"时有收益（Q3 qwen3 小模型是这种）；大 M prefill 场景下要并行就得让 prefill **让 SM**（低优先级流 + 限 grid / 分块 launch），否则不如单流。先量 prefill 步的 SM 占用再决定两流。
