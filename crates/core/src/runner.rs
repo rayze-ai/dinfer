@@ -1183,7 +1183,7 @@ mod tests {
         let mut s = sched(64);
         let sp = SamplingParams { max_tokens: 8, temperature: 0.0, ..Default::default() };
         s.add_request(Request::new(1, vec![1, 2, 3, 4], sp.clone(), 0));
-        let mut r = Runner::new(LateEcho { plans: vec![], late_plans: vec![], polls: 0, ready_after: 2 }, 16).with_prefill_async(true);
+        let mut r = Runner::new(LateEcho { plans: vec![], late_plans: vec![], polls: 0, ready_after: 3 }, 16).with_prefill_async(true);
         let so = s.schedule();
         let mro = r.execute(&so).unwrap();
         s.update_from_output(&so, &mro);
@@ -1200,11 +1200,11 @@ mod tests {
         // 下一步：请求 2 在 awaiting 集合里 → scheduler 不排它。
         let so = s.schedule();
         assert_eq!(so.num_scheduled_tokens, vec![(1, 1)], "等待收割的请求本步不排: {:?}", so.num_scheduled_tokens);
-        let mro = r.execute(&so).unwrap(); // polls=1 → 未完成
+        let mro = r.execute(&so).unwrap(); // polls=2 → 未完成（混批步 finish 已 poll 过一次）
         assert_eq!(mro.req_ids, vec![1]);
         s.update_from_output(&so, &mro);
         let so = s.schedule();
-        let mro = r.execute(&so).unwrap(); // polls=2 → 收割
+        let mro = r.execute(&so).unwrap(); // polls=3 → 收割
         assert_eq!(mro.req_ids, vec![1, 2], "收割步把请求 2 的首 token 并入: {:?}", mro.req_ids);
         assert_eq!(mro.sampled[1], vec![2006]);
         let res = s.update_from_output(&so, &mro);
