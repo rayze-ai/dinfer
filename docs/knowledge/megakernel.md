@@ -28,3 +28,7 @@
   不够抵消 (1)(2)。依赖等待不是瓶颈（Σwait 10–30%）。**判断**：在"权重流下限 + graph"这个基线上，减 kernel 数的收益上限 ≈ 边界效应
   占比，27B 级模型 < 20%，不值一次架构重写；质变要靶向字节（NVFP4）或算子融合本身（K3 MoE 路径）。证据：`docs/loops/mega-sm100.md`。
 
+## Kaon-V3 / 5090 整步 megakernel 可行性（2026-10-29，`docs/loops/kaon3-megakernel-study.md`，只读 nsys 数据）
+- **判断**：no-go。边界效应（<8 us kernel + gaps）上限 c1 1.1 ms（23%）/ c8 0.9 ms（12%）；整步 persistent 要付 30 层 × 14 级 ≈ 420 个阶段屏障 × 实测 3–10 us = 1.3–4.2 ms，期望为负；本卡 dense persistent 已输 5.8×。
+- **怎么用**：以后再有"做 megakernel"的提议，先算三个数：边界效应上限（nsys 小 kernel + gaps，折半）、阶段屏障数 × 3–10 us、现状/DRAM 下限比。前者 − 中者 ≤ 0 就不开工。vLLM 与我们都在下限 2.4×，边界是共有的，赢对手不需要它。
+- **替代**：继续融 < 3 us kernel（每层还有 ~12 个）与大 kernel 的带宽效率（MoE split-K、gemv 占用）。
