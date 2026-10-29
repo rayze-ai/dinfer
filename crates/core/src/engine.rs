@@ -797,7 +797,7 @@ mod pd_tests {
     }
     fn sched() -> Scheduler {
         let p = SchedulerParams {
-            sched: SchedulerConfig { max_num_seqs: 8, max_num_batched_tokens: 1024, enable_chunked_prefill: true, long_prefill_token_threshold: 0, decode_exempt_from_budget: false },
+            sched: SchedulerConfig { max_num_seqs: 8, max_num_batched_tokens: 1024, enable_chunked_prefill: true, long_prefill_token_threshold: 0, decode_exempt_from_budget: false, prefill_tokens_per_step: 0 },
             cache: CacheConfig { block_size: 16, hash_block_size: 16, ..Default::default() },
             max_model_len: 256,
             num_spec_tokens: 0,

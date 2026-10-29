@@ -312,6 +312,9 @@ impl Scheduler {
         }
 
         let mut token_budget = self.p.sched.max_num_batched_tokens;
+        // B47：整步 prefill 新 token 配额（0 = 不限）。只约束 prefill 行（含 running 里的 chunk 续算与 waiting 新请求），decode 行不计。
+        let mut prefill_quota =
+            if self.p.sched.prefill_tokens_per_step > 0 { self.p.sched.prefill_tokens_per_step } else { u32::MAX };
         let num_lookahead = self.p.num_spec_tokens;
         let max_num_seqs = self.p.sched.max_num_seqs as usize;
         let max_model_len = self.p.max_model_len;
@@ -352,6 +355,13 @@ impl Scheduler {
             }
             if charge_budget {
                 num_new = num_new.min(token_budget);
+            }
+            if !is_decode {
+                num_new = num_new.min(prefill_quota);
+                if num_new == 0 {
+                    i += 1;
+                    continue; // 本步 prefill 配额用完：这条留到下一步（不抢占、不出队）
+                }
             }
             // 不超过 max_model_len（留出本 step 要采样的 1 个 token）。
             num_new = num_new.min(max_model_len.saturating_sub(r.num_computed_tokens + 1));
@@ -399,6 +409,9 @@ impl Scheduler {
             let rid = r.id;
             out.num_scheduled_tokens.push((rid, num_new));
             self.sched_slots.push(slot);
+            if !is_decode {
+                prefill_quota -= num_new;
+            }
             if charge_budget {
                 token_budget -= num_new;
             }
@@ -511,7 +524,7 @@ impl Scheduler {
                 if long_prefill_threshold > 0 && num_new > long_prefill_threshold {
                     num_new = long_prefill_threshold;
                 }
-                num_new = num_new.min(token_budget);
+                num_new = num_new.min(token_budget).min(prefill_quota);
                 num_new = self.cap_to_snapshot_grain(num_computed, num_new, r.num_prompt_tokens());
                 if num_new == 0 {
                     break;
@@ -549,6 +562,7 @@ impl Scheduler {
                 self.running.push(slot);
                 out.num_scheduled_tokens.push((rid, num_new));
                 self.sched_slots.push(slot);
+                prefill_quota -= num_new;
                 token_budget -= num_new;
 
                 // 合并命中块 + 新块作为 worker 看到的全量 block 表。
@@ -795,6 +809,7 @@ mod tests {
                 enable_chunked_prefill: true,
                 long_prefill_token_threshold: 0,
                 decode_exempt_from_budget: false,
+                prefill_tokens_per_step: 0,
             },
             cache: CacheConfig { block_size: 16, hash_block_size: 16, ..Default::default() },
             max_model_len: 4096,

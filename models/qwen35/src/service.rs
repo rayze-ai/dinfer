@@ -176,6 +176,7 @@ impl Qwen35Service {
                 max_num_batched_tokens: opt.max_num_batched_tokens,
                 enable_chunked_prefill: opt.enable_chunked_prefill,
                 long_prefill_token_threshold: opt.long_prefill_token_threshold,
+                prefill_tokens_per_step: 0,
                 decode_exempt_from_budget: opt.decode_exempt_from_budget,
             },
             CacheConfig {

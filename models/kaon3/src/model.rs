@@ -133,6 +133,11 @@ impl KaonModel {
         // 第 `layer` 层的输入，只跑 `layer` 这一层（`skip` 个层先跳过），输出写 `hidden_dir/L{layer}.bin`。
         // 用来把逐层累积误差剥掉，单独判断某一层的实现对不对（输入取自参照，输出与参照比）。
         inject: Option<(&[f32], usize, usize)>,
+        // B46（loop kaon3-decode-opt D205）：`Some((rows, nrows))` 且 nrows < tokens 时，lm_head 只算这 nrows 个采样行
+        // （先 gather `final_normed` 的行，再 GEMM / softcap），结果写在 `logits` 的前 nrows 行；调用方不再 gather logits。
+        // 采用 vLLM `logits_indices` 的做法：混批 / prefill 步 2148 行 × 262144 词表的 lm_head 占步时 14%，只需 10 行。
+        // `None` 或 nrows == tokens（纯 decode，图内）：按全部 tokens 算，行为逐位不变。
+        sample_rows: Option<(&k::cudarc::driver::CudaSlice<i32>, usize)>,
     ) -> Result<()> {
         let cfg = &self.cfg;
         let h = cfg.hidden;
@@ -265,12 +270,22 @@ impl KaonModel {
         // ---- tied lm_head ----
         // vocab 262144、hidden 2816：一次全词表 GEMM。decode（tokens 少）时应换 split/分块策略，
         // 阶段 5 调优时再处理（`docs/loops/kaon-v3.md` 的 roofline 一节）。
+        // B46：只算采样行（见参数注释）。
+        let lm_rows = match sample_rows {
+            Some((rows, nrows)) if nrows < tokens && hidden_dir.is_none() => {
+                ensure!(nrows <= sc.lm_in.numel() / h, "lm_head sample rows {nrows} > buffer");
+                k::ops::gather_rows_bf16(stream, &sc.final_normed.data, &mut sc.lm_in.data, rows, nrows, h)?;
+                nrows
+            }
+            _ => tokens,
+        };
+        let lm_in = if lm_rows == tokens { &sc.final_normed.data } else { &sc.lm_in.data };
         gemm.forward_bf16(
-            &sc.final_normed.data,
+            lm_in,
             &self.embed.table.data,
             None,
             &mut logits.data,
-            tokens,
+            lm_rows,
             cfg.vocab_size,
             h,
         )?;
@@ -279,7 +294,7 @@ impl KaonModel {
         // 舍入次数：**单次**（`to_bf16(c*tanhf(v/c))`）。曾按 vLLM `LogitsProcessor` 的
         // `/c → tanh → *c` 三步各回 bf16 做过 A/B，实测对 parity 指标无影响
         // （翻转率 15.32% 不变、Δlp 1.2220→1.2228），已回滚，不留分支。
-        k::ops::softcap_bf16_n(stream, &mut logits.data, tokens * cfg.vocab_size, cfg.softcap)?;
+        k::ops::softcap_bf16_n(stream, &mut logits.data, lm_rows * cfg.vocab_size, cfg.softcap)?;
         let _ = hidden;
         Ok(())
     }

@@ -43,6 +43,11 @@ pub struct SchedulerConfig {
     /// 代价：一步的总 token 数上限 = 预算 + max_num_seqs（executor 的 max_tokens 按此分配）。
     #[serde(default)]
     pub decode_exempt_from_budget: bool,
+    /// B47（loop kaon3-decode-opt D206）：一步里**所有 prefill 行合计**的新 token 上限（0 = 不限 = 只受 max_num_batched_tokens）。
+    /// 与 `long_prefill_token_threshold`（单请求上限）不同：这是整步 prefill 配额，把一波涌入的多请求 prefill 摊到多步，
+    /// 让混批步别从 ~9 ms 跳到 98 ms（c16：一步 10 请求 2148 tok）。vLLM 把 prefill chunk 混进每个 decode 步只多 1–2 ms 就是这个效果。
+    #[serde(default)]
+    pub prefill_tokens_per_step: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +82,7 @@ impl Default for SchedulerConfig {
             enable_chunked_prefill: true,
             long_prefill_token_threshold: 0,
             decode_exempt_from_budget: false,
+            prefill_tokens_per_step: 0,
         }
     }
 }

@@ -274,7 +274,7 @@ fn forward(
     if let Some(d) = hidden_all {
         std::fs::create_dir_all(d)?;
     }
-    model.forward(&stream, &gemm, &ops, &ids_t, &meta, &mut sc, &mut acts, &mut logits, &mut hidden, tokens, dump_layer, hidden_all, None)?;
+    model.forward(&stream, &gemm, &ops, &ids_t, &meta, &mut sc, &mut acts, &mut logits, &mut hidden, tokens, dump_layer, hidden_all, None, None)?;
     stream.synchronize()?;
     println!("一次前向（T={tokens}）{:.1} ms", t1.elapsed().as_secs_f64() * 1e3);
 
@@ -635,7 +635,7 @@ fn run_layer_iso(ctx: &mut Ctx, ids: &[i32], l: usize, data: &[f32], dir: &str) 
         max_seqlen: tokens,
     };
     model.forward(stream, gemm, &ops, &ids_t, &meta, &mut sc, &mut acts, &mut logits, &mut hidden,
-                  tokens, None, Some(dir), Some((data, l, 0)))?;
+                  tokens, None, Some(dir), Some((data, l, 0)), None)?;
     stream.synchronize()?;
     // 隔离结果写到 `iso_L{l}.bin`（不与 `--hidden-all` 写的逐层残差流抢同一个文件名）
     let v = hidden.to_vec_f32(stream)?;

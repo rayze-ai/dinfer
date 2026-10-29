@@ -34,6 +34,8 @@ pub struct ServeOptions {
     pub decode_exempt_from_budget: bool,
     /// 单条 prefill 每步最多 token（0 = 不限）；vLLM `long_prefill_token_threshold`
     pub long_prefill_token_threshold: u32,
+    /// 一步内全部 prefill 行合计的新 token 上限（0 = 不限；B47）。
+    pub prefill_tokens_per_step: u32,
     pub enable_cuda_graph: bool,
     pub device: usize,
 }
@@ -52,6 +54,7 @@ impl Default for ServeOptions {
             enable_prefix_caching: true,
             decode_exempt_from_budget: true,
             long_prefill_token_threshold: 0,
+            prefill_tokens_per_step: 0,
             enable_cuda_graph: true,
             device: 0,
         }
@@ -136,6 +139,7 @@ impl KaonService {
                 max_num_batched_tokens: opt.max_num_batched_tokens,
                 enable_chunked_prefill: opt.enable_chunked_prefill,
                 long_prefill_token_threshold: opt.long_prefill_token_threshold,
+                prefill_tokens_per_step: opt.prefill_tokens_per_step,
                 decode_exempt_from_budget: opt.decode_exempt_from_budget,
             },
             CacheConfig { block_size: opt.block_size, enable_prefix_caching: opt.enable_prefix_caching, ..Default::default() },

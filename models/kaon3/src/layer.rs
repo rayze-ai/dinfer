@@ -873,6 +873,8 @@ pub struct LayerScratch {
     pub norm: Tensor<bf16>,     // norm 输出 [tokens, hidden]
     /// final norm（lm_head 前）的固定缓冲 [max_tokens, hidden]；CUDA graph 捕获期不能每步 `uninit`。
     pub final_normed: Tensor<bf16>,
+    /// B46：lm_head 只算采样行时 gather 出来的输入行 [max_rows, hidden]。
+    pub lm_in: Tensor<bf16>,
     /// q/k/v/attn 按**层型**分两套（滑窗 D=256 / 全注意力 D=512），
     /// 因为 rope 与 attention 都按精确长度校验，不能共用一个大缓冲。
     pub q_s: Tensor<bf16>,
@@ -961,6 +963,7 @@ impl LayerScratch {
             x: Tensor::uninit(stream, &[max_tokens, cfg.hidden])?,
             norm: Tensor::uninit(stream, &[max_tokens, cfg.hidden])?,
             final_normed: Tensor::uninit(stream, &[max_tokens, cfg.hidden])?,
+            lm_in: Tensor::uninit(stream, &[max_decode_rows.max(1), cfg.hidden])?,
             q_s: Tensor::uninit(stream, &[max_tokens, cfg.num_heads * cfg.head_dim_sliding])?,
             k_s: Tensor::uninit(stream, &[max_tokens, cfg.nkv_sliding * cfg.head_dim_sliding])?,
             v_s: Tensor::uninit(stream, &[max_tokens, cfg.nkv_sliding * cfg.head_dim_sliding])?,

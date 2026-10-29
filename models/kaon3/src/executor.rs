@@ -73,6 +73,12 @@ struct AltSet {
 }
 
 /// B29 开关：异步调度在飞行 token 的设备侧 gather + save_chosen。`INFLIGHT_GATHER=1` 开（默认关，见函数体注释）。
+/// B46：lm_head 只算采样行（默认开；`LM_HEAD_ROWS_ONLY=0` 回退全 tokens 行，A/B 用）。
+fn lm_head_rows_only() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("LM_HEAD_ROWS_ONLY").map(|v| v != "0").unwrap_or(true))
+}
+
 fn inflight_gather_enabled() -> bool {
     static IG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     // b29 定稿：同步 runner 下两轮 c8 TPOT 9.80 → 10.05/10.06（+2.5%）、吞吐 -2.5%，c1/TTFT 不变 → **默认关**，`INFLIGHT_GATHER=1` 开；
@@ -294,8 +300,14 @@ impl KaonExecutor {
             None,
             None,
             None,
+            // B46：混批 / prefill（nrows < t）只算采样行，logits 前 nrows 行即结果；纯 decode（nrows == t）照旧算全部再 gather（图内路径不变）。
+            if nrows < t && lm_head_rows_only() { Some((&self.plan.rows.data, nrows)) } else { None },
         )?;
-        k::ops::gather_rows_bf16(s, &self.logits.data, &mut self.gathered.data, &self.plan.rows.data, nrows, v)?;
+        if nrows < t && lm_head_rows_only() {
+            s.dtod_copy_n(&self.logits.data, &mut self.gathered.data, nrows * v)?;
+        } else {
+            k::ops::gather_rows_bf16(s, &self.logits.data, &mut self.gathered.data, &self.plan.rows.data, nrows, v)?;
+        }
         k::ops::bf16_to_f32_n(s, &self.gathered.data, &mut self.gathered_f32.data, nrows * v)?;
         k::argmax_f32_n(s, &self.gathered_f32.data, &mut self.argmax.data, nrows, v)?;
         // B29：本步采样存 prev_chosen 供下一步在飞行 gather（图内 dtod；cut-in 步不写）。无投机 → nrows == n，行 i = 请求 i。
