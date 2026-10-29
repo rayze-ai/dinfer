@@ -1071,9 +1071,10 @@ int moe_grouped_gemm(const void* aq, const void* a_s, const void* const* Bptr, c
       else grouped_gemm_kernel_pipe4<64, 4, 16><<<g16, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
       return gerr();
     }
-    if (prefill_p64() && R > dec_rmax() && K % 128 == 0) {  // B48：prefill 大 tile
+    if (prefill_p64() && R > dec_rmax()) {  // B48：prefill 大 tile（K%128 走 BK=128/3 级；否则 BK=64/4 级，down K=704）
       const dim3 g64((unsigned)((N + 63) / 64), (unsigned)((R + 63) / 64 + num_experts), 1u);
-      grouped_gemm_kernel_p64<128, 3><<<g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+      if (K % 128 == 0) grouped_gemm_kernel_p64<128, 3><<<g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+      else grouped_gemm_kernel_p64<64, 4><<<g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
       return static_cast<int>(cudaGetLastError());
     }
     if (K % 128 == 0) {
@@ -1138,9 +1139,10 @@ int moe_grouped_gemm_dual(const void* aq, const void* a_s,
       grouped_gemm_kernel_pipe4<64, 4, 16><<<g16, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
     return gerr();
   }
-  if (prefill_p64() && R > dec_rmax() && K % 128 == 0) {  // B48：prefill 大 tile（gate‖up grid.z=2）
+  if (prefill_p64() && R > dec_rmax()) {  // B48：prefill 大 tile（gate‖up grid.z=2）
     const dim3 g64((unsigned)((N + 63) / 64), (unsigned)((R + 63) / 64 + num_experts), 2u);
-    grouped_gemm_kernel_p64<128, 3><<<g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
+    if (K % 128 == 0) grouped_gemm_kernel_p64<128, 3><<<g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
+    else grouped_gemm_kernel_p64<64, 4><<<g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
     return static_cast<int>(cudaGetLastError());
   }
   if (K % 128 == 0) {
