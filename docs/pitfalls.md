@@ -1334,3 +1334,4 @@
 ## 2026-10-29 nsys 抓 6 秒的服务，一半是启动期自调优 / warmup，被我当成稳态 prefill 表读了三轮（D219 / G0 / g3）
 - 现象：副流 eager kernel 表里 `Kernel2 (8,2048)` 912 us × 131、`small_m_mma` 1040 us × 252 等——全是 alt Gemm 的 lm_head autotune 候选扫描（0.1–5.9 s 连发、gap 0.9 ms），我先当成 "lm_head 按全 tokens 算" 立了 G5。
 - 规矩：nsys 服务类 kernel 表必须 `--delay <启动+autotune 秒数>` 或按时间窗过滤（第一个 bench 请求之后），且请求数要让稳态 ≥ 80% 时长；读表前先看 top kernel 的 first/last 时间戳是不是集中在开头。
+- 补（同日，vllm_nsys2）：容器里 `vllm serve` 的真进程 cmdline 是 `/usr/bin/python3 /usr/local/bin/vllm serve …`，我的匹配 `^vllm serve|/bin/vllm serve` 都不中 → INT 没发出去，nsys 等不到退出，脚本卡 10 分钟；又因 `nohup … &` 起了两次脚本并存。规矩：匹配用 `grep -qE "vllm serve .*--port $PORT"`（不锚定开头）；起长链前 `pgrep -f` 查重。
