@@ -1371,3 +1371,7 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - **结论**：M=1 权重在 L2 热的情况下仍只 ~1 TB/s ⇒ **不是 DRAM 带宽瓶颈，是每 CTA 的串行 K 链**：gate‖up grid = 8 专家 × 11 N 块 × 2 = 176 CTA（1 CTA/SM，8 warp/SM），每 CTA 串行 22 个 BK=128 迭代（每迭代 wait_group + 2 次 __syncthreads + 4 次 mma ≈ 0.7 us）→ 18 us 几乎全是链长 × 迭代固定开销。M=8 CTA 更多（616）反而每专家更便宜，同一结论。
 - **B40 刀**：① **BK=256**（迭代 22 → 11；smem 12.8 KB/stage，STAGES=3 → 38 KB < 48 KB；K 尾块加谓词零填充，让 down K=704 也能走 BK=256 → 3 迭代；累加序 k 升序不变 → 逐位同，`moe_pipe_parity` 带 `MOE_GEMM_BK=256` 跑一遍即门禁）；② 若还不够：split-K ×2–4（grid 翻倍，fp32 partial 固定序归约，批不变）。moetime2（eager+sync）r=8 gemm3 = 39 us/层、r=64 106 us/层，与 nsys 一致（c1 MoE GEMM 30 × 39 = 1.2 ms、c8 3.2 ms）。
 - **D181 门禁过**：BK=64/128/256 与旧 body（MOE_GEMM_PIPE=0）dump 逐字节 SAME（gate K=2816 + down K=704 含尾块零填充，单路 + dual 各半），`moe_dual_matches` 在 BK=256 下 ok。moebench2（BK 扫）+ bN b41 跑中。
+
+## ★★★★ D182 2026-10-29 moebench2（BK 扫，L2 热）：**BK=256 vs 128**：M=1 gate‖up **14.4 → 12.3 us**（DRAM 下限 10.0）、down 10.1 → 8.2（下限 5.0）；M=8 gate‖up **26.7 → 20.5**、down 18.9 → 16.4。BK=64 M=1 gate‖up 28 us（旧默认 down 走的就是 BK=64，因 704 % 128 ≠ 0）。
+- 串行 K 链定性成立但只占一半：M=1 gate‖up 22 迭代 → 11 迭代省 2 us（≈0.2 us/迭代，不是估的 0.7）；剩下 12.3 − 10.0 = 2.3 us 是启动 / 尾部 / 首 stage 延迟。预期端到端：c1 MoE 30 × (2.1 + 1.9) ≈ **-0.12 ms**（4.97 → ~4.85），c8 30 × (6.2 + 2.5) ≈ **-0.26 ms**（8.04 → ~7.8）。bN b41 跑中。
+- 再往下的刀（M=8 真实服务权重不在 L2，DRAM 下限 52 us/层 vs 现 ~75）：split-K×2 让 gate‖up grid 从 616 CTA 翻到 1232（每 CTA 5–6 迭代，更多 CTA 并发读 → 吃满 DRAM 并行度）；down K=704 只 3 迭代，split 无意义，改 BN=32（CTA ×2）。
