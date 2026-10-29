@@ -1269,3 +1269,4 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 
 ## ★★★★ D162 2026-10-29 链尾死因**真**根因：`docker exec -d … bash x.sh` 起的脚本 stdout/stderr 接在已断开的 exec 管道上，`kill -KILL $sp`（进程已被 INT 结束）向 stderr 写 "No such process" → **SIGPIPE 杀掉 bash**。证据：所有完整跑完的链（b23 独立、b2330、b31b、b32 的 bN）都是 `bash -x … >trace 2>&1` 重定向了输出；所有死在 A 组之后的（b28/b29/b23 首次/fp8gemv 首次/dual）都没重定向；D157 的 setsid 不是原因（dual 用了 setsid 版 envab 仍死）。
 - **规则**：远端起任何脚本一律 `docker exec -d C bash -c "setsid bash /w/x.sh </dev/null >/w/dinfer/tmp_x.out 2>&1 &"`；链内调用子脚本也 `>log 2>&1`。进 knowledge/subagent-ops。
+- **D163 b33 门禁全过**：mlp_fp8（含 m=8/16）超差 0；bf16-logits 入口 ids 同 / w 位差 0（5 组）；norm+quant mode 1 融合 fp8 码位差 0（9 组）。bN b33 跑中（marker=0 是 strings 没匹配到 `route_lg`——内联函数名不在二进制里，无碍；A=b31b 带 FP8_GEMV=1，B=默认开）。
