@@ -1642,3 +1642,18 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - ② c1/c8 不退化 > 3%：**✓**（c1 4.65 不动；c8 7.06 → 7.05）。
 - ③ 每刀进 CSV 含负结果：**✓**（b49 / b49c / b50 / b51 / b52 / b53 / b56 / a5；b55 微基准判负未起端到端、未记 CSV——按规矩应记一行"微基准判负未跑端到端"，下次补）。
 - Step B 连续 5 刀无进展的回 Step A 条件未触发（六刀五正）。本轮以 b57（M=16 decode 步定位）收尾，下一轮进 `kaon3-prefill-async`。
+
+## ★★★★★ D227 2026-10-29 b57：c16 纯 decode 步 nsys（graph id=14，189 步，kernel 和 9.17 ms/步 nsys 态；HOST_TIME 8.74）—— M=16 比 M=8 多的 2.2 ms 在哪
+| 段 | ms/步 | 占比 | 次数/步 × us | 下限（权重字节 / 1.79 TB/s） | 判定 |
+|---|---|---|---|---|---|
+| MoE gate‖up + down `pipe4<256,3,16,64>` | **2.80** | 30.5% | 60 × 46.7 | ~50–80 激活专家 × 3 MB × 30 层 ≈ 4.5–7 GB → **2.5–4 ms** | **已在物理下限**（M↑ 激活专家↑，vLLM 同样） |
+| fp8 gemv<16>（qkv / o_proj） | **1.90** | 20.8% | 60 × 31.7 | 35 MB/层 × 30 = 1.04 GB → **0.58 ms** | **3.3× 离下限**（M=8 时 21.9 us；M=16 的 warp-行结构变 issue 瓶颈） |
+| lm_head bf16 wmma 16x16 | 0.89 | 9.7% | 1 × 888 | 1.48 GB → 0.83 ms | 下限（fp8 lm_head 可半，parity 风险，不动） |
+| dense `gateup_act<16>` | 0.73 | 7.9% | 30 × 24.3 | 11.9 MB/层 → 6.6 us | **3.7× 离下限** |
+| attention v3 + d512 | 0.84 | 9.1% | 25 × 21.7 + 5 × 59 | | 中 |
+| `route_bucket_small`（单 block） | **0.53** | 5.8% | 30 × 17.7 | M=8 时 9.2 us，随 token 线性 | D197 ② route 拆两段 → ~8 us，省 0.3 |
+| nvjet 64x32（dense down，Lt parity tile） | 0.41 | 4.5% | 30 × 13.7 | 5.9 MB → 3.3 us | 4× 离下限 |
+| router_gemv / combine_norm / norm×5 / quant / merge 等 | ~0.9 | 10% | | | 小 |
+- **结论**：M=16 的 MoE 已是带宽物理账（vLLM 同），不是靶子；**小 M fp8 GEMM（gemv<16> / gateup_act<16> / nvjet 64x32）合计 3.0 ms，下限 ~0.8 ms**，是 M=16 decode 步的真靶子（c16 TPOT 10.6 里 ~2 ms 可拿）；route 单 block 0.3 ms 次之。
+- **B51 候选（env 旋钮，零 kernel 改动先 A/B）**：`FP8_GEMV_MAX_M`（默认 16 → 8：M=9..16 不走 gemv 走 cuBLASLt）+ `FP8_LT_TUNE_MIN_M`（默认 64 → 9：M ≥ 9 自调优选大 tile）。parity 口径只锁 m=1（oracle c1），M=16 的 c≥2 输出本来批变。若 Lt 自调优在 M=16 选到 ~15 us 级 tile → qkv/o 1.9 → ~0.9 ms。
+- **B52 候选**：route 拆两段（D197 ②，grid=tokens），固定 −0.3 ms（c16），c32/c64 更多（32 us / 64 us 单 block）。
