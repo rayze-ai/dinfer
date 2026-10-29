@@ -92,3 +92,5 @@ G 编号（接 D/E）。
 ## Step A 补（2026-10-29）：vLLM 同口径 kernel 表
 - 容器 kaon3-full 自带 vllm 0.26.1rc1（与基线镜像同版）+ nsys；在 **GPU3**（空）起 `vllm serve` 同基线参数、c16 × 128 请求同 bench，`--cuda-graph-trace=node`。产出：decode 图 kernel 表（`nsys_kern.py --all`）+ eager prefill 步 kernel 表（`nsys_prefill_steps.py`）。与我们的 b57（decode）/ nsysp16c（prefill 副流）对照：同形状 fp8 GEMM 各走什么 kernel、多少 us；MoE NVFP4 走 cutlass/flashinfer 哪个、每层 us。
 - 这是本 loop 真正的 Step A 缺口：之前所有判断都只看我们自己的表。
+- g3 第一跑：链脚本 `$((… [ ] …))` 语法错，两侧没跑（pitfalls 已记），修后重排。
+- vLLM-in-kaon3-full 第一跑：`Triton is installed but 0 active driver(s) found` → 模型注册 `Gemma4ForConditionalGeneration` 子进程失败。kaon3-full 容器的 vllm 0.26 环境缺 Triton 可用的驱动接口（容器是 pegaflow 镜像衍生，自带 vllm 但没按 vLLM 方式起过）。**改法**：用基线镜像 `image.paigpu.com/library/vllm-openai:v0.28.0-pegaflow-pr455-51261c6-cu130` 在 GPU3 起一个新容器（同 vllm-noneager 的参数 + `-v /hf_data/yaochen:/w`），把 kaon3-full 里的 nsys 目录 bind 进去（`/opt/nvidia/nsight-systems/2026.3.2`），容器内 `nsys profile vllm serve …`。需要宿主 docker 权限（有）。
