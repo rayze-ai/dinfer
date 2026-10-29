@@ -36,3 +36,9 @@
 
 ## 22. 验证链的三方钉核要**写进 RESULT 头部**，不然会漏（2026-10-28 B22a）
 kaon3 5090 的 bN/envab 只钉了 bench（60-91），serve 浮动 128 核跑了一整天 20 多轮，没人发现——因为 RESULT 里没有钉核字段。规矩：链脚本第一行写 `serve_taskset= bench_taskset= vllm_taskset=`；serve 绑 GPU 所在 NUMA 的核（`nvidia-smi topo -m` 的 CPU Affinity），与 bench 不重叠。
+
+## 23. 一刀一链的固定模板（2026-10-29 kaon3 b49–b53）
+- `scripts/dev/kaon3_envab_c.sh`：同二进制 env/args ABAB（c8–c64 两轮交错、每窗口换 seed、固定 prompt 输出、HOST_TIME 混批步统计、启动时间），`TAG/AENV/BENV/AARGS/BARGS/CS` 参数化，结束标记 `<TAG>_DONE`。
+- kernel 改动前置门禁：微基准（`moe_gemm_timing` 的 P424/P2148 形状）两进程 env 开/关各跑一次，**输出 CHECKSUM 必须逐位同**（`GATE=0`）才编主二进制起 ABAB；门禁失败链直接退出不占 GPU。
+- 结果入库：`scripts/dev/e2e_round.sh kaon3 <round> "<一句话>" <group> d_tps v_tps d_ttft v_ttft d_tpot v_tpot`（vLLM 列用 stepA4 中位数、注明），每刀 4 行（c8/16/32/64），负结果也进（round 名加后缀如 `b49c`）。
+- 一天 5 刀的节奏：写 → 本地 `cargo check`（Rust 侧）+ `CUDA_ARCHS=86 cargo build -p dinfer-kernels`（nvcc 语法）→ `sync` → 远端链 → 等的时候写下一刀 / 记录 / 知识。
