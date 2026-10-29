@@ -1323,3 +1323,6 @@
 ## 2026-10-29 transmute 构造第三方 `repr(Rust)` 结构体 → SIGSEGV（cudarc CudaStream）
 - 现象：按 cudarc 0.18.2 源码里 `CudaStream { cu_stream, ctx }` 的顺序 transmute 一个 `#[repr(C)]` 同形结构，`cu_stream()` 回读正确（碰巧），下一次用 ctx 就段错误——编译器把两个字段换了位置。
 - 规矩：对 `repr(Rust)` 外部类型不假设字段顺序。要塞一个值进去，先用正常构造函数拿合法实例，再按**值**定位要改的字（两个字段值域不重叠时可行）原地替换；不行就 `[patch]` 该 crate。
+
+## 2026-10-29 链脚本里 `$((8368 + ([ $side = B ] && echo 1 || echo 0)))` 语法错 → 两侧都没跑，RESULT 只剩 DONE
+- bash 算术展开里不能放 `[ ]` 命令替换（要 `$(...)`）。链脚本 `bash -n` 过不了这种运行期错误。规矩：端口 / 变体表用 `if/else` 或关联数组写死，链开头 `set -u` 并在每个变体结束后 `grep -q` 自己的结果行，缺了就 echo FAIL 退出，别让 DONE 标记掩盖空跑。
