@@ -1326,3 +1326,6 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 
 ## ★★★★★ D175 2026-10-29 **b37b 定稿（R1 v2 router bf16 gemv：block/专家、8 warp split-K、固定序；A = b36 二进制）**：c1 TPOT **5.04/5.05 → 5.00/4.99（-1%）**，c8 **8.42/8.47 → 8.42/8.39**，c8 吞吐 762 → 766；输出逐字同。微基准 m=1/2/4/8：gemv 3.98/3.78/3.94/3.98 us vs cuBLAS 6.51/12.31/12.31/9.35；m=16 6.16 vs 9.39（仍赢，ulp 1 —— M ≤ 16 全开）。**c1 ≤ 5.0 停止条件首次达到**（vLLM 4.69 的 1.07×）。CSV round b37b。
 - 下一条：B34③ gelu·mul + down 量化融合（b38，已写待编）；之后 c8 专项（M=8：o_proj fp8 gemv K 切分、MoE pipe4 M=8）。
+
+## ★★★ D176 2026-10-29 b38 首批 B（B34③ gelu·mul + down 量化融合，A = b37b 二进制）：c1 4.99 → **4.96**，c8 8.43 → **8.42**；parity 6 组 aq/a_s 位差 0；输出同。等 A2/B2。
+- 下一刀 **A8**（c8 专项，D171 o_proj 项）：fp8 gemv 的 A 改成 e4m3 驻留 smem（M_TILE·K·1 B，M=8/K=4096 = 32 KB ≤ 48 KB 门槛），dot2 内每 16 元素一次 `e4m3x16_to_f32`（原 bf16 路径也要 `__bfloat1622float2` 解包，ALU 量同级）；e4m3 → bf16 → f32 与 e4m3 → f32 值相同 → **逐位同**（`mlp_fp8_decode_parity` 已有 (2816,4096,8) 形状）。开关 `FP8_GEMV_A8`，默认开；A/B 用 envab。
