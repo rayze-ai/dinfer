@@ -5,6 +5,7 @@
 | 页 | 内容 | 适用时机 |
 |---|---|---|
 | [perf-method.md](perf-method.md) | 性能迭代方法论：先 profile 再优化、口径、门禁、常见误读 | 任何性能 loop 开工前 |
+| [perf-concurrency.md](perf-concurrency.md) | 并发差距定位：环节 × 并发对标表、prefill 步 GEMM tile、调度旋钮语义、pair 步 decode 等 prefill、lm_head 采样行 | c ≥ 8 的 TPOT / 吞吐差距开工前 |
 | [perf-tooling.md](perf-tooling.md) | 把测量做对：改动必验二进制、nsys 图内 kernel 清单抓法、卡型旋钮 A/B 脚本 | 任何 Step A 测量 / Step B 验证前 |
 | [kernel-rules.md](kernel-rules.md) | 写 / 改 CUDA kernel 的硬规则与已验证的结构选择（按卡型） | 动 `crates/kernels` 前 |
 | [blackwell-mma.md](blackwell-mma.md) | sm_100/103/120 低精度 MMA：gencode、NVFP4/FP8 指令与布局、实测吞吐 | 写 Blackwell MMA 前 |
