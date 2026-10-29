@@ -706,20 +706,26 @@ __global__ void __launch_bounds__(256) combine_norm_kernel(const bf16* __restric
     const int i = threadIdx.x + j * BLOCK;
     gs[j] = 0.f;
     if (i < nvec) {
+      // D194：每 k 一次 16 B 向量读（lane 间连续 → 合并），逐元素累加序仍 k 升序 → 与 combine_kernel 逐位同。
+      float acc8[8];
+#pragma unroll
+      for (int e = 0; e < 8; ++e) acc8[e] = 0.f;
+      for (int k = 0; k < K; ++k) {
+        const uint4 ya = reinterpret_cast<const uint4*>(y_in + (int64_t)pos[k] * H)[i];
+        const __nv_bfloat162* yp = reinterpret_cast<const __nv_bfloat162*>(&ya);
+#pragma unroll
+        for (int c = 0; c < 4; ++c) {
+          const float2 f = __bfloat1622float2(yp[c]);
+          acc8[2 * c] += mode == 1 ? to_f32(to_bf16(wk[k] * f.x)) : wk[k] * f.x;
+          acc8[2 * c + 1] += mode == 1 ? to_f32(to_bf16(wk[k] * f.y)) : wk[k] * f.y;
+        }
+      }
       uint4 ob;
       __nv_bfloat162* op = reinterpret_cast<__nv_bfloat162*>(&ob);
 #pragma unroll
-      for (int e = 0; e < 8; ++e) {
-        const int d = i * 8 + e;
-        float acc = 0.f;
-        for (int k = 0; k < K; ++k) {
-          const float t = to_f32(y_in[(int64_t)pos[k] * H + d]);
-          acc += mode == 1 ? to_f32(to_bf16(wk[k] * t)) : wk[k] * t;
-        }
-        const bf16 yb = to_bf16(to_f32(to_bf16(acc)));
-        v[j][e] = to_f32(yb);
-        if (e & 1) op[e >> 1] = __floats2bfloat162_rn(v[j][e - 1], v[j][e]);
-      }
+      for (int e = 0; e < 8; ++e) v[j][e] = to_f32(to_bf16(to_f32(to_bf16(acc8[e]))));
+#pragma unroll
+      for (int c = 0; c < 4; ++c) op[c] = __floats2bfloat162_rn(v[j][2 * c], v[j][2 * c + 1]);
       reinterpret_cast<uint4*>(y_out + tok * H)[i] = ob;
       float acc = __fmul_rn(v[j][1], v[j][1]);
       acc = __fmaf_rn(v[j][0], v[j][0], acc);

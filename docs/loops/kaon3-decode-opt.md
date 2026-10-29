@@ -1411,3 +1411,5 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - b44 nsys 对照（c1b 新抓，M=1，每步 797 kernel）：lm_head gemvx 870 us（20.8%）、fp8 gemv<1> 85 call 10.1 us（20.6%）、MoE pipe4 dual+down 60 call ≈ 12.2 us 均（17.5%）、dense gateup 9.3、route 8.8、combine 4.1、v3 attn 4.6、norm_quant 3.2、d512 attn 18、< 3 us 的 norm/quant/merge/gelu_quant/router 共 ~12 个/层。b46 融 combine+norm_2（-30 launch）；之后候选：router_gemv+route（-30）、rmsnorm_grouped_quant 并进 route（-30）、merge+quant（-25）。
 
 ## D193 2026-10-29 排队（master6，b46 后）：envab `FP8_GEMV_WARPS=4` / `=16` on b46 二进制 —— 看 gemv<8>（qkv M=8 21.9 us，grid 512×256 线程）是否是波次量化（2 块/SM × 170 = 340 槽，512 块 = 1.5 波）；c1 也会变（force 对所有 M_TILE 生效），只按 c8 判，赢了就改 `pick_warps` 的 `m_tile >= 4` 分支。
+
+## ★★ D194 2026-10-29 b46 首版 B45（combine+norm_2 融合，两轮）：c1 4.65 → **4.70（+1%）**，c8 7.12 → **7.24（+1.7%）**，TTFT +3 ms —— 退化（parity 全过、输出同）。原因：融合版 gather 用标量 bf16 读 `y_in[pos*H + i*8+e]`，lane 间步长 16 B、每次 2 B → 合并率 1/8，K=8 × 2 向量 = 16 次坏读/线程；原 combine_kernel 按 d 跨线程连续读是合并的。修：每 k 一次 uint4（8 bf16）读，逐元素累加序不变 → 仍逐位同。b47 重测（A = b46 二进制 = 默认走融合版 … **注意**：b46 二进制 `MOE_COMBINE_NORM` 默认开，A 侧要 `MOE_COMBINE_NORM=0` 才等于 b44；用 bN A 侧 env 变体）。
