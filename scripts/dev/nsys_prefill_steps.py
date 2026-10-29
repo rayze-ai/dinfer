@@ -4,7 +4,8 @@
 做法：取 graphId==0（eager）的 kernel，按时间间隙 > 2 ms 切成"步"；步内 kernel 数 ≥ 阈值的当 prefill 步；
 对最长的 3 个步给 span / kernel 和 / 空隙，再按 kernel 名聚合（次数、总时长、均值、占比）与按家族汇总。"""
 import sqlite3, sys, collections, re
-db = sys.argv[1]; thr = int(sys.argv[2]) if len(sys.argv) > 2 else 200; top = int(sys.argv[3]) if len(sys.argv) > 3 else 25; GAP = int(float(sys.argv[4]) * 1e6) if len(sys.argv) > 4 else 2_000_000
+_pos = [a for a in sys.argv[1:] if not a.startswith('--') and not (sys.argv[sys.argv.index(a) - 1] == '--stream')]
+db = _pos[0]; thr = int(_pos[1]) if len(_pos) > 1 else 200; top = int(_pos[2]) if len(_pos) > 2 else 25; GAP = int(float(_pos[3]) * 1e6) if len(_pos) > 3 else 2_000_000
 c = sqlite3.connect(db)
 K = "CUPTI_ACTIVITY_KIND_KERNEL"
 cols = {r[1] for r in c.execute(f"pragma table_info({K})")}
