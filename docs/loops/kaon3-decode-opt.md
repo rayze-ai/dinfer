@@ -1361,3 +1361,12 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - **结论 1**：c8 比 c1 多的 3.07 ms 里 **MoE 两段占 2.13**，fp8 gemv 四段合计 0.44，其余 ~0.5 是 attention / 小 kernel。D171 的"router cuBLAS / o_proj 退 Lt"已修完（router 3.1 us、o_proj 9.2 us），剩下就是 MoE。
 - **结论 2（更重要）**：MoE grouped GEMM 的带宽效率 **M=1 与 M=8 一样只有 ~50%**：M=1 gate/up 读 8 专家 × 2 × 1.11 MB = 17.8 MB / 20.1 us = 0.89 TB/s；M=8 读 28.3 × 2 × 1.11 = 63 MB / 63.6 us = 0.99 TB/s；down 同样 ~0.85 TB/s。不是"M=8 退化"，是 **pipe4 对这种 64 行 × 64 B 小段的流式读只吃到一半带宽**。若做到 80%：c1 MoE 0.92 → 0.58（**c1 4.97 → ~4.6**）、c8 3.05 → 1.9（**c8 8.04 → ~6.9**）。这是 c1/c8 共同的最大一刀（B40）。
 - 候选：① 已有的 `moe_fp4_gemv`（`moe_fp4_decode.cu`，带宽型 grouped GEMV，`MOE_GEMV` 开关）——先查它当时为什么没赢、现在跑分；② pipe4 BK=128 → 每行每 stage 64 B 的离散读改成每行 ≥128–256 B 连续（BK=256 或 stage 内合并 2 个 BK）；③ 每 CTA 多 N 块（BN=128）减少 B 行重读…先做①的微基准（nsys 外）再定。
+
+## ★★★★★ D181 2026-10-29 moebench（nsys 外微基准，真实 decode 形状；注意权重集 18–62 MB **全在 L2 里是热的**，数字是"L2 热"上限，不是 DRAM 口径）
+| 场景 | gate‖up dual | 2×grouped | down | B7 gateup_act | B7 down gemv |
+|---|---|---|---|---|---|
+| M=1（8 专家 8 行） | **18.3 us**（0.98 TB/s） | 24.6 | **8.2**（1.08 TB/s） | 74.4 | 36.9 |
+| M=8（28 专家 64 行） | **28.7**（"2.2 TB/s" = L2 热） | 28.7 | 18.9 | 227 | 95 |
+- STAGES 3/4 无差；`MOE_DUAL_PIPE4=0`（旧 BM32 体）M=1 慢 2 us、M=8 慢 1.8 us（B36 收益确认）。B7 GEMV 慢 4–8×，彻底放弃。
+- **结论**：M=1 权重在 L2 热的情况下仍只 ~1 TB/s ⇒ **不是 DRAM 带宽瓶颈，是每 CTA 的串行 K 链**：gate‖up grid = 8 专家 × 11 N 块 × 2 = 176 CTA（1 CTA/SM，8 warp/SM），每 CTA 串行 22 个 BK=128 迭代（每迭代 wait_group + 2 次 __syncthreads + 4 次 mma ≈ 0.7 us）→ 18 us 几乎全是链长 × 迭代固定开销。M=8 CTA 更多（616）反而每专家更便宜，同一结论。
+- **B40 刀**：① **BK=256**（迭代 22 → 11；smem 12.8 KB/stage，STAGES=3 → 38 KB < 48 KB；K 尾块加谓词零填充，让 down K=704 也能走 BK=256 → 3 迭代；累加序 k 升序不变 → 逐位同，`moe_pipe_parity` 带 `MOE_GEMM_BK=256` 跑一遍即门禁）；② 若还不够：split-K ×2–4（grid 翻倍，fp32 partial 固定序归约，批不变）。moetime2（eager+sync）r=8 gemm3 = 39 us/层、r=64 106 us/层，与 nsys 一致（c1 MoE GEMM 30 × 39 = 1.2 ms、c8 3.2 ms）。
