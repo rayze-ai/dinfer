@@ -149,8 +149,9 @@ impl KaonExecutor {
             main_done: None,
             pair_steps: 0,
         };
-        // B35：副套（跨流 prefill/decode 并行）。`XSTREAM=0` 关；分配失败只告警（退回单流）。
-        if std::env::var("XSTREAM").map(|v| v != "0").unwrap_or(true) {
+        // B35：副套（跨流 prefill/decode 并行）。B50（loop kaon3-decode-opt D225，b56 两轮）：**默认关**——c16–c64 下 prefill 2148 tok
+        // 占满 SM，decode 图挤不进，pair 步只多付两流同步 + 一套 AltSet；单流 Paged 混批全档 TPOT 低 0.4–1.3%。`XSTREAM=1` 开（A/B 用）。
+        if std::env::var("XSTREAM").map(|v| v == "1").unwrap_or(false) {
             let t0 = std::time::Instant::now();
             match AltSet::new(&dev, &ex.model, max_tokens, max_rows, max_blocks) {
                 Ok(a) => {
