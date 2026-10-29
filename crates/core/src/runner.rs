@@ -565,6 +565,9 @@ impl<E: ModelExecutor> Runner<E> {
             None => {
                 ensure!(gen.len() == late.rows.len(), "harvest_prefill returned {} entries for {} requests", gen.len(), late.rows.len());
                 self.steps_late_harvest += 1;
+                if std::env::var("HOST_TIME").ok().as_deref() == Some("1") {
+                    eprintln!("[late-harvest] reqs={}", late.rows.len());
+                }
                 for (i, row) in late.rows.iter().enumerate() {
                     let g = std::mem::take(&mut gen[i]);
                     let d = if i < dr.len() { std::mem::take(&mut dr[i]) } else { Vec::new() };
@@ -685,6 +688,9 @@ impl<E: ModelExecutor> Runner<E> {
                     lrows.push(PendingRow { rid, n, num_draft, end_of_seq: true });
                 }
                 self.late_started.extend_from_slice(&plan_p.req_ids);
+                if std::env::var("HOST_TIME").ok().as_deref() == Some("1") {
+                    eprintln!("[late-begin] prefill_tokens={} prefill_reqs={} decode_reqs={}", plan_p.total_tokens(), plan_p.num_reqs(), decode_mask.iter().filter(|&&d| d).count());
+                }
                 self.late = Some(LatePrefill { handle: h, rows: lrows, req_ids: plan_p.req_ids.clone() });
                 // 主 plan 只剩 decode 行，照常（图）执行；本步 Pending 只含 decode 行
                 self.build_plan(&Self::filter_output(so, |i| decode_mask[i]))?;
