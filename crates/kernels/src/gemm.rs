@@ -786,7 +786,7 @@ impl Gemm {
         // B49（loop kaon3-decode-opt D212）：m ≥ 64 时按 m 的 2 的幂桶缓存（64/128/…/4096）——混批步的 m 每步都不同
         // （2148 / 2646 / 3378…），逐 m 调优会让每个新形状都付 32 候选 × timing_iters 的代价；同桶内 algo 选择基本一致。
         // m < 64（decode / 对拍）仍按精确 m（parity 口径不变）。
-        let key = Key::fp8(if m >= 64 { m.next_power_of_two() } else { m }, n, k);
+        let key = Key::fp8(if m >= 64 { m.next_power_of_two() } else { m }, n, k);  // m < 64 精确 m（decode 桶本就是 2 的幂）
         let cached = self.default_algos.lock().unwrap().get(&key).copied();
         let algo = match cached {
             Some(al) => al,
@@ -824,7 +824,10 @@ impl Gemm {
                 // B49（loop kaon3-decode-opt D215，b52 两轮）：默认**开**。m ≥ 64 只在 prefill / 混批出现，自调优让 nvjet 64x32 小 tile
                 // 换成大 tile：c64 TPOT −7%、TTFT 全档 −14…−16%、吞吐 +2…+9%，decode（m < 64）口径不变。`FP8_LT_TUNE=0` 回退。
                 let tune_on = *TUNE.get_or_init(|| std::env::var("FP8_LT_TUNE").map_or(true, |v| v != "0"));
-                let pick = if tune_on && m >= 64 && self.tune_enabled() {
+                // B51：自调优的 m 下限（默认 64；`FP8_LT_TUNE_MIN_M=9` 让 decode M=9..16 也实测选 algo——m < 下限保持 parity 口径）。
+                static MIN_M: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+                let min_m = *MIN_M.get_or_init(|| std::env::var("FP8_LT_TUNE_MIN_M").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(64));
+                let pick = if tune_on && m >= min_m && self.tune_enabled() {
                     let iters = self.profile.gemm_tune.timing_iters.max(1);
                     let mut best = (f32::INFINITY, parity_pick);
                     for h in &hs {
