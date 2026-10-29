@@ -1522,3 +1522,8 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - vLLM 为什么每步只多 1–2 ms：它每步 prefill 新 token 也可到 4096 预算，但 per-req prefill 113 ms / 36 步 ⇒ 平均每步 prefill 量 ≈ 96 tok（iter_tokens_mean）—— **它的 prefill 单步吞吐高**（50 tok/ms vs 我们 22），所以一步就算塞满也只是 ~80 ms，而且被 decode 步数摊薄。我们的瓶颈仍是 prefill 步本身的 GEMM 效率（D204/D205）。
 - **B47（整步 prefill 配额 `--prefill-tokens-per-step N`）**：新增 `SchedulerParams.prefill_tokens_per_step`（0 = 不限），running 续算与 waiting 新请求的 prefill 行合计 ≤ N；配额满时 running 的 prefill 行跳过（不出队不抢占）、waiting 不再接。这是把 98 ms 大步切成 ~N/22 ms 的小步 → decode 行每步只多 N/22 ms，但 TTFT 变长（整波 prefill 总时长不变甚至更长）。**不是根治**，是在 prefill GEMM 效率修好前的调度缓冲；A/B 时同时看 TPOT 与 TTFT，不许只看 TPOT。
 - **B46（lm_head 只算采样行）**是真减工作量：c16 混批步 −14%、c64 −1/6。两者同一个二进制，`LM_HEAD_ROWS_ONLY=0` / `--prefill-tokens-per-step 0` 作 A 侧。
+
+## D207 2026-10-29 B46 + B47 已写（commit e7f64497），b49 链起（编 → marker → A/B/C × 2 轮，c8–c64）
+- B46：`model.forward` 新参 `sample_rows: Option<(&CudaSlice<i32>, nrows)>`；nrows < tokens 且非 hidden_dir 时 gather `final_normed` → `sc.lm_in`（[max_rows, h]）→ lm_head GEMM / softcap 只算 nrows 行 → executor dtod 拷进 `gathered`。纯 decode（nrows == tokens，图内）与 probe 路径原样。`LM_HEAD_ROWS_ONLY=0` 回退。
+- B47：`SchedulerParams.prefill_tokens_per_step`（CLI `--prefill-tokens-per-step`，默认 0）；running 的 prefill 续算与 waiting 新请求合计 ≤ N，配额满时 running 行 `i += 1; continue`（不抢占），waiting 停接。核心单测跑过。
+- 预期：B 比 A c16 TPOT −0.4 / c64 −2 ms（lm_head 去掉）、TTFT 略降；C 比 B c16/c32/c64 TPOT 再降但 TTFT 升——按停止条件 ① 看 TPOT 比值，TTFT 不许超 vLLM 1.5×。
