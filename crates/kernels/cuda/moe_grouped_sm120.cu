@@ -833,6 +833,11 @@ static int prefill_bn() {
   static const int v = []{ const char* e = getenv("MOE_PREFILL_BN"); return (e && atoi(e) == 64) ? 64 : 128; }();
   return v;
 }
+// B48d：p64 BK=128 路径的 cp.async 级数（3 默认 | 4；`MOE_PREFILL_STAGES=4` A/B 用。4 级 smem ≈ 45 KB（BN128）→ 2 CTA/SM 仍成立）。
+static int prefill_stages() {
+  static const int v = []{ const char* e = getenv("MOE_PREFILL_STAGES"); return (e && atoi(e) == 4) ? 4 : 3; }();
+  return v;
+}
 // 第二刀（R89+）：gate+up 融合单 launch。grid.z = 2E：z<E 跑 gate（Bg/Sg/alphaG/Dg），z>=E 跑 up（Bu/Su/alphaU/Du）。
 // decode grid 小（~8激活×N/BN）占不满 170 SM；翻倍 grid.z 填满 SM = graph 吃不掉的并行度。
 // body 与 grouped_gemm_kernel_pipe 逐字相同（仅 e/B/S/global/D 按 half 选）→ 逐位天然一致。
@@ -1083,8 +1088,10 @@ int moe_grouped_gemm(const void* aq, const void* a_s, const void* const* Bptr, c
       const int bn = prefill_bn();
       const dim3 g64((unsigned)((N + bn - 1) / bn), (unsigned)((R + 63) / 64 + num_experts), 1u);
       if (bn == 128) {
-        if (K % 128 == 0) grouped_gemm_kernel_p64<128, 3, 128><<<g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
-        else grouped_gemm_kernel_p64<64, 4, 128><<<g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+        if (K % 128 == 0) {
+          if (prefill_stages() == 4) grouped_gemm_kernel_p64<128, 4, 128><<<g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+          else grouped_gemm_kernel_p64<128, 3, 128><<<g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+        } else grouped_gemm_kernel_p64<64, 4, 128><<<g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
       } else {
         if (K % 128 == 0) grouped_gemm_kernel_p64<128, 3><<<g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
         else grouped_gemm_kernel_p64<64, 4><<<g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
@@ -1157,8 +1164,10 @@ int moe_grouped_gemm_dual(const void* aq, const void* a_s,
     const int bn = prefill_bn();
     const dim3 g64((unsigned)((N + bn - 1) / bn), (unsigned)((R + 63) / 64 + num_experts), 2u);
     if (bn == 128) {
-      if (K % 128 == 0) grouped_gemm_kernel_p64<128, 3, 128><<<g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
-      else grouped_gemm_kernel_p64<64, 4, 128><<<g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
+      if (K % 128 == 0) {
+        if (prefill_stages() == 4) grouped_gemm_kernel_p64<128, 4, 128><<<g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
+        else grouped_gemm_kernel_p64<128, 3, 128><<<g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
+      } else grouped_gemm_kernel_p64<64, 4, 128><<<g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
     } else {
       if (K % 128 == 0) grouped_gemm_kernel_p64<128, 3><<<g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
       else grouped_gemm_kernel_p64<64, 4><<<g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
