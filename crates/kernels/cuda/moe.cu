@@ -268,6 +268,67 @@ __device__ __forceinline__ void route_softmax_row(const float* __restrict__ lg, 
     w[k] = __fmul_rn(__fmul_rn(raw[k], inv), sc);
   }
 }
+// B32（loop kaon3-decode-opt D148）：route_softmax_row 的 warp 版。全 32 lane 协作；**数值与单 lane 版逐位同**：
+//  - m：max 的归约序无关（max 可交换结合）；
+//  - Z：单 lane 版是 e=0..E-1 顺序 `__fadd_rn`。warp 版 lane l 先算自己段 [l·ept, (l+1)·ept) 的 exp，再由 lane 0 按 e 升序
+//    从 shfl 取值顺序累加（exp 并行算、求和仍串行 → 位同，但 exp（E 次 __expf/MUFU）并行化掉了 128→4 次/lane）；
+//  - raw/renorm/w 与原版同式（K ≤ 32，一 lane 一个 k）。
+__device__ __forceinline__ void route_softmax_row_warp(const float* __restrict__ lg, const int32_t* __restrict__ ids,
+                                                       const void* __restrict__ per_expert_scale, float* __restrict__ w,
+                                                       int E, int K, int exact_rcp, int lane) {
+  float m = -INFINITY;
+  for (int e = lane; e < E; e += 32) m = fmaxf(m, lg[e]);
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1) m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, o));
+  int block_e = 1;
+  while (block_e < E) block_e <<= 1;
+  const int ept = block_e >= 32 ? block_e / 32 : 1;   // 每 lane 连续 ept 个专家（E=128 → 4）
+  float ex[32];  // ept ≤ 32（E ≤ 1024）；下标全部编译期展开（避免落 local memory）
+#pragma unroll
+  for (int j = 0; j < 32; ++j) {
+    const int e = lane * ept + j;
+    ex[j] = (j < ept && e < E) ? route_exp_e(__fsub_rn(lg[e], m), exact_rcp) : 0.f;
+  }
+  // Z：e 升序串行累加（与单 lane 版同序）。全 warp 同步做（每 lane 得到同一个 Z），依次从 lane l 取 ex[j]。
+  float Z = 0.f;
+  for (int l = 0; l < 32; ++l) {
+#pragma unroll
+    for (int j = 0; j < 32; ++j) {
+      if (j < ept) {
+        const float v = __shfl_sync(0xffffffffu, ex[j], l);
+        if (l * ept + j < E) Z = __fadd_rn(Z, v);
+      }
+    }
+  }
+  const float invZ = route_inv(Z, exact_rcp);
+  // raw[k]（一 lane 一个 k）：exp 重算一次（与原版同一表达式 → 同值）
+  float rawk = 0.f;
+  if (lane < K) rawk = __fmul_rn(route_exp_e(__fsub_rn(lg[ids[lane]], m), exact_rcp), invZ);
+  // renorm：原版把 raw[0..K) 按 pos = l·ept' + j 分到 32 个 lane 槽后蝶形求和（ept' 按 block_e 算）。K ≤ ept' 时每槽最多 1 个
+  // → 槽 l 的值 = raw[l]（l<K）或 0，蝶形序 xor 16..1 与原版同。K > ept' 时原版槽内顺序累加——Kaon K=8、E=128 → ept'=4，
+  // 槽 l 含 raw[4l..4l+4)：这里按同序先在 lane 内做不出来（raw 在不同 lane）→ 用 shfl 把 raw[4l..4l+4) 拉到 lane l 顺序加。
+  float slot = 0.f;
+  {
+    bool first = true;
+#pragma unroll
+    for (int j = 0; j < 32; ++j) {
+      if (j < ept) {
+        const int pos = lane * ept + j;
+        const float v = __shfl_sync(0xffffffffu, rawk, pos < 32 ? pos : 0);
+        if (pos < K) { slot = first ? v : __fadd_rn(slot, v); first = false; }
+      }
+    }
+  }
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1) slot = __fadd_rn(slot, __shfl_xor_sync(0xffffffffu, slot, o));
+  const float renorm = slot > 0.f ? slot : 1.f;
+  const float inv = route_inv(renorm, exact_rcp);
+  if (lane < K) {
+    const int e = ids[lane];
+    const float sc = per_expert_scale ? to_f32(static_cast<const bf16*>(per_expert_scale)[e]) : 1.f;
+    w[lane] = __fmul_rn(__fmul_rn(rawk, inv), sc);
+  }
+}
 __global__ void route_softmax_kernel(const float* __restrict__ logits, const int32_t* __restrict__ topk_ids,
                                      const void* __restrict__ per_expert_scale, float* __restrict__ topk_w, int E,
                                      int K, int exact_rcp) {
@@ -361,8 +422,8 @@ __global__ void __launch_bounds__(256) route_bucket_small_kernel(
       if (bi >= lane && ((bi - lane) & 31) == 0) row[bi] = -INFINITY;  // 该专家属于本 lane 的扫描区，置 -inf
       __syncwarp();
     }
-    if (lane == 0)
-      route_softmax_row(logits + (size_t)t * E, ids, per_expert_scale, topk_w + (size_t)t * K, E, K, exact_rcp);
+    __syncwarp();
+    route_softmax_row_warp(logits + (size_t)t * E, ids, per_expert_scale, topk_w + (size_t)t * K, E, K, exact_rcp, lane);
   }
   __syncthreads();
   if (tid == 0) {
