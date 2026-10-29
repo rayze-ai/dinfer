@@ -1669,3 +1669,7 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - **八刀累计**（B46/B48/B48b/B48c/B49/B50/B51/B52）对 stepA4：c16 11.36 → **9.60（−15.5%）**、c32 14.67 → **12.22（−16.7%）**、c64 27.07 → **19.73（−27%）**；吞吐 c64 1980 → 2811（+42%）。对 vLLM：c8 1.15× / **c16 1.35× / c32 1.33× / c64 1.28×**；吞吐 96% / 89% / 87% / 84%。TTFT 全档仍反超。
 - 停止条件 ①（c16 ≤ 1.10×、c32/64 ≤ 1.25×）仍未达；c64 已到 1.28×，差 0.03。
 - 下一刀候选（M=16 decode 步剩余，按 D227 表）：**B53 dense MLP M=9..16 也走 Lt**（`gateup_act<16>` 24 us + gemv down 走 Lt 3.3 us 下限；`DENSE_GEMV_ROWS` 16 → 8 env A/B）；attention v3 M=16 21.7 us × 25。
+
+## D230 2026-10-29 b60 跑中：B53 `DENSE_GEMV_MAX_M` 16 → 8（dense gateup_act<16> 24.3 us + down gemv 走 Lt 自调优；M=16 下限 ~10 us/层 → 预期 c16 −0.4 ms）。两侧其余默认（含 B51/B52）。
+- 之后 M=16 decode 步剩余（D227 表）：attention v3 21.7 us × 25（下限 KV 读 16 req × 1.5K tok × 2 × 256 × 2 B = 25 MB → 14 us；离下限 1.5×，中刀）；norm/quant/merge 小 kernel 合计 ~0.9 ms（融合候选，每个 2–3 us）；lm_head bf16 0.89（不动）。MoE 2.8 已在带宽下限。
+- 结构性差额（混批步 decode 全停，c16 1.9 / c64 9.4 ms）仍是最大单项 → `kaon3-prefill-async`。
