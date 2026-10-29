@@ -13,3 +13,4 @@
 | b59/ | B52 | route 拆两段 ✓（c16 收益待 b61 复核） |
 | b60/ | B53 | dense MLP M=9..16 走 Lt ✓ |
 每轮判定与数字在 `docs/loops/kaon3-decode-opt.md`，CSV 在 `test/kaon3/e2e-rounds.csv`（round 列 = 目录名）。
+| b61/ | B52 复测 | 顺序反转 split/fused：c32/c64 收益确认，c16 两轮 −3.5% / 0% → 判噪声级 |
