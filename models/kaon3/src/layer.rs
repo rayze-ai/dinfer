@@ -772,6 +772,11 @@ fn fp8_gemv_max_m() -> usize {
 fn fp8_gemv_m_tile(m: usize) -> usize {
     match m { 0 | 1 => 1, 2 => 2, 3 | 4 => 4, 5..=8 => 8, _ => 16 }
 }
+/// B53（loop kaon3-decode-opt D229）：dense MLP gemv 路径的 token 上限（默认 = DENSE_GEMV_ROWS 16；`DENSE_GEMV_MAX_M=8` 让 M=9..16 走 cuBLASLt 自调优 A/B）。
+fn dense_gemv_max_m() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("DENSE_GEMV_MAX_M").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(DENSE_GEMV_ROWS).min(DENSE_GEMV_ROWS))
+}
 fn dense_gemv_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_ne!("DENSE_DECODE_OLD", "1"))
@@ -1070,7 +1075,7 @@ impl Gemma4Layer {
         tokens: usize,
         eps: f32,
     ) -> Result<bool> {
-        if !dense_gemv_enabled() || tokens == 0 || tokens > DENSE_GEMV_ROWS {
+        if !dense_gemv_enabled() || tokens == 0 || tokens > dense_gemv_max_m() {
             return Ok(false);
         }
         let (Some((gw, gw_s, gw_a, gn, gk)), Some((uw, uw_s, uw_a, un, uk)), Some((dw, dw_s, dw_a, dn, dk))) =
