@@ -94,3 +94,4 @@ G 编号（接 D/E）。
 - 这是本 loop 真正的 Step A 缺口：之前所有判断都只看我们自己的表。
 - g3 第一跑：链脚本 `$((… [ ] …))` 语法错，两侧没跑（pitfalls 已记），修后重排。
 - vLLM-in-kaon3-full 第一跑：`Triton is installed but 0 active driver(s) found` → 模型注册 `Gemma4ForConditionalGeneration` 子进程失败。kaon3-full 容器的 vllm 0.26 环境缺 Triton 可用的驱动接口（容器是 pegaflow 镜像衍生，自带 vllm 但没按 vLLM 方式起过）。**改法**：用基线镜像 `image.paigpu.com/library/vllm-openai:v0.28.0-pegaflow-pr455-51261c6-cu130` 在 GPU3 起一个新容器（同 vllm-noneager 的参数 + `-v /hf_data/yaochen:/w`），把 kaon3-full 里的 nsys 目录 bind 进去（`/opt/nvidia/nsight-systems/2026.3.2`），容器内 `nsys profile vllm serve …`。需要宿主 docker 权限（有）。
+- Step A 补 v2（`kaon3_vllm_nsys2.sh`，宿主）：基线镜像临时容器 `vllm-nsys` @ GPU3，nsys 目录从 kaon3-full `docker cp` 到 `/hf_data/yaochen/nsys` 再 bind；nsys 自带 libcupti，目标镜像不需装。与 g3（GPU0）并行。
