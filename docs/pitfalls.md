@@ -1330,3 +1330,7 @@
 ## 2026-10-29 G3a 用没验证的 "tile=20 == 128x128" 映射写过滤，排除掉的其实是 64x64
 - 现象：`FP8_LT_PREFER_SMALL_TILE` 过滤 `CUBLASLT_ALGO_CONFIG_TILE_ID == 20`，nsys 显示 B 侧 128x128 nvjet 原样在，反而把 n=2816 的小 GEMM 推去更慢的 128x64。
 - 规矩：cuBLASLt 的 TILE_ID 枚举值与 nvjet kernel 名里的 tile 尺寸没有公开对应表，要用 `GEMM_FP8_DEBUG=1` 把每个候选的 desc 与同一次 nsys 里出现的 kernel 名按时序对上再写规则；或直接按实测 us 排除而不是按 id。
+
+## 2026-10-29 nsys 抓 6 秒的服务，一半是启动期自调优 / warmup，被我当成稳态 prefill 表读了三轮（D219 / G0 / g3）
+- 现象：副流 eager kernel 表里 `Kernel2 (8,2048)` 912 us × 131、`small_m_mma` 1040 us × 252 等——全是 alt Gemm 的 lm_head autotune 候选扫描（0.1–5.9 s 连发、gap 0.9 ms），我先当成 "lm_head 按全 tokens 算" 立了 G5。
+- 规矩：nsys 服务类 kernel 表必须 `--delay <启动+autotune 秒数>` 或按时间窗过滤（第一个 bench 请求之后），且请求数要让稳态 ≥ 80% 时长；读表前先看 top kernel 的 first/last 时间戳是不是集中在开头。
