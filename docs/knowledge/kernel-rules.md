@@ -118,3 +118,6 @@ chunk 0 正确（`tmp0 = 0.95790` 与参考一致），但 chunk 1 起等的是*
 - **怎么用**：① 先用 `moe_gemm_timing` 一类 nsys 外微基准（真实 decode 形状、下限按 DRAM 算，但注意 L2 热会高估）；② 刀的顺序：加大 BK（smem 允许时，K 尾块零填充保持 `K % 64 == 0` 即可）→ 减 BN/加 CTA（在飞字节）→ split-K；每一刀都用"四进程 dump cmp"做位同门禁（启动器 env 是 static once，同进程扫不动）。
 - **反例**：B7 的带宽型 GEMV（warp 一行、lane 流式）在这种形状慢 4–8×：工作太碎，每 block 装载 + barrier 占大头。
 - **融合改线程→元素映射时先核合并率**（2026-10-29 kaon3 D194）：把"按 d 跨线程连续"改成"线程持 8 元素组"后，标量 bf16 读的 warp 合并率 1/8，parity 过但端到端退化 1–2%；改成每线程一次 16 B 向量读即可，累加序不变。
+
+## 换 ldmatrix 前先量 LDS 占比：p64（BM64×BN128 NVFP4，每 mma 2+2 次 LDS）换 ldmatrix 只 −7%（2026-10-29 kaon3 G1）
+- 片段读指令减半不等于时间减半：mma.sync m16n8k64 本身 + 等 cp.async 到位占了大头。算力型 grouped GEMM 的下一档是更大 warp tile（BM128：A 片段复用 B ×2）或更深流水 / TMA，不是 LDS。端到端 c16–c64 噪声内，默认关。
