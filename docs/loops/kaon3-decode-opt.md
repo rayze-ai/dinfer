@@ -1370,3 +1370,4 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - STAGES 3/4 无差；`MOE_DUAL_PIPE4=0`（旧 BM32 体）M=1 慢 2 us、M=8 慢 1.8 us（B36 收益确认）。B7 GEMV 慢 4–8×，彻底放弃。
 - **结论**：M=1 权重在 L2 热的情况下仍只 ~1 TB/s ⇒ **不是 DRAM 带宽瓶颈，是每 CTA 的串行 K 链**：gate‖up grid = 8 专家 × 11 N 块 × 2 = 176 CTA（1 CTA/SM，8 warp/SM），每 CTA 串行 22 个 BK=128 迭代（每迭代 wait_group + 2 次 __syncthreads + 4 次 mma ≈ 0.7 us）→ 18 us 几乎全是链长 × 迭代固定开销。M=8 CTA 更多（616）反而每专家更便宜，同一结论。
 - **B40 刀**：① **BK=256**（迭代 22 → 11；smem 12.8 KB/stage，STAGES=3 → 38 KB < 48 KB；K 尾块加谓词零填充，让 down K=704 也能走 BK=256 → 3 迭代；累加序 k 升序不变 → 逐位同，`moe_pipe_parity` 带 `MOE_GEMM_BK=256` 跑一遍即门禁）；② 若还不够：split-K ×2–4（grid 翻倍，fp32 partial 固定序归约，批不变）。moetime2（eager+sync）r=8 gemm3 = 39 us/层、r=64 106 us/层，与 nsys 一致（c1 MoE GEMM 30 × 39 = 1.2 ms、c8 3.2 ms）。
+- **D181 门禁过**：BK=64/128/256 与旧 body（MOE_GEMM_PIPE=0）dump 逐字节 SAME（gate K=2816 + down K=704 含尾块零填充，单路 + dual 各半），`moe_dual_matches` 在 BK=256 下 ok。moebench2（BK 扫）+ bN b41 跑中。
