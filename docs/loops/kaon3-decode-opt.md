@@ -1319,3 +1319,7 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 
 ## ★★ D173 2026-10-29 R2 envab smem64_b36（b36 二进制，`FP8_GEMV_SMEM_KB=64`：让 M_TILE=8×K=4096 的 o_proj 留在自写 gemv）：c1 5.05 = 5.05（不涉及），c8 **8.45 → 8.65（+2.4%）退化** → **不采用**，48 KB 门槛保留
 - 解释：M_TILE=8、K=4096 时 smem 64 KB/块 → 每 SM 只能放 3 块（228 KB），8 warp 块 × 3 = 24 warp/SM，权重流并行度不够；cuBLASLt nvjet split-K（11.7 us）反而更好。真正的解法是 gemv 做 K 切分（split-K 两段 + 归约）或 A 放寄存器而不是 smem；先做 R1/R3，再回头。
+
+## ★★★ D174 2026-10-29 b37 首批 B（R1 router gemv v1：warp 一专家行，grid = E/4 = 32 块）：c1 5.04 → **5.09（+1%）**，c8 8.46 → **8.89（+5%）** —— **退化**，parity 过（ulp 0、批不变）
+- 原因：grid 只有 32 块 × 4 warp，170 个 SM 用了 19%，每 lane 串行 11 个 chunk（4 展开），latency-bound；M=8 时每 chunk 再读 8 次 x，链更长。比 cuBLAS gemvx（M=1 3.4 us）还慢。
+- v2：grid = E（128 块）× 8 warp，warp 内 split-K（每 warp K/8 = 44 chunk，lane 1–2 个），warp 内 xor 树 + smem 固定序跨 warp 求和（累加序与 M/grid 无关 → 仍批不变）；加微基准（`router_gemv_timing`）在 nsys 外量 v2 vs cuBLAS，M=1/8，**达不到 cuBLAS M=1 的 3.4 us 就只在 M ≥ 2 启用**。
