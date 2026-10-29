@@ -53,7 +53,7 @@
 
 ## 27. CUDA 流优先级能把 decode 图塞进 prefill 的 CTA 波之间，代价是 prefill 慢 ~50%（2026-10-29 kaon3 E5）
 - decode 主流最高优先级（-5）、prefill 副流默认（0）：c16 TPOT −2.7% / c32 −4.5% / c64 −5.2%，decode 步 p50 8.34 → 8.00；prefill 步 120 → 177 ms，TTFT c32 152 → 228（+50%）。
-- **判断**：这是 TPOT↔TTFT 的硬 tradeoff，不是免费的；只有 TTFT 有余量（我们对 vLLM 有 16–37%）时才开。合入前后都要用 stepA 口径核 TTFT 不越过基线；余量不够就把优先级差缩小（prefill 用 -2）。
+- **判断**：这是 TPOT↔TTFT 的硬 tradeoff，不是免费的；只有 TTFT 有余量（我们对 vLLM 有 16–37%）时才开。合入前后都要用 stepA 口径核 TTFT 不越过基线。**中间档位无效**（E7：prefill 用 -2 与 0 无差，5090 调度器只区分 greatest 与其它），想要更细的 tradeoff 得限 prefill grid 而不是调优先级。
 
 ## 28. 异步收割合入后 HOST_TIME 的"混批步 exec"只剩 decode 子批 + 收割：prefill 真实时长在副流上**不可见**（2026-10-29 E6）
 - stepA7 的 (2149 tok, 12.7 req) 混批步 exec 43 ms 不是 prefill 时长（prefill 在副流跑、主线程不等）。要量 prefill 单步吞吐，用 `[late-begin]` → `[late-harvest]` 的墙钟差（含等待下一步 finish 的离散误差 ≤ 1 个 decode 步）或 nsys 副流 kernel 和。
