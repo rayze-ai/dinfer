@@ -711,6 +711,11 @@ fn moe_norm_quant_fused_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_ne!("MOE_NORM_QUANT_FUSED", "0"))
 }
+/// B44（D190）：decode gate‖up split-K 份数（`MOE_SPLITK`，默认 1 = 关；2/4 实验）。
+fn moe_splitk() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("MOE_SPLITK").ok().and_then(|v| v.parse::<usize>().ok()).filter(|&k| (1..=4).contains(&k)).unwrap_or(1))
+}
 /// MoE gate+up 单 launch（grid.z=2E）。D167（2026-10-29）：envab 两轮 c1 -1.3% / c8 -1.2%，逐位（`moe_dual_matches_separate`）→ 默认开；`MOE_GEMM_DUAL=0` 关。
 fn moe_gemm_dual_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -916,6 +921,7 @@ pub struct GroupedBufs {
     pub gate_o: Tensor<bf16>,                         // [R, moe_inter]
     pub up_o: Tensor<bf16>,                           // [R, moe_inter]
     pub gelu_o: Tensor<bf16>,                         // [R, moe_inter]
+    pub part_gu: k::cudarc::driver::CudaSlice<f32>,   // B44 split-K 部分和 [2·4][min(R,128), moe_inter]
 }
 
 impl GroupedBufs {
@@ -931,6 +937,8 @@ impl GroupedBufs {
             gate_o: Tensor::uninit(stream, &[r, mi])?,
             up_o: Tensor::uninit(stream, &[r, mi])?,
             gelu_o: Tensor::uninit(stream, &[r, mi])?,
+            // B44 split-K 部分和 [2·ksplit_max][r][mi] fp32（ksplit_max = 4；decode r ≤ 128 时才用，按 max_tokens 配）
+            part_gu: stream.alloc_zeros::<f32>(2 * 4 * r.min(128) * mi)?,
         })
     }
 }
@@ -1832,6 +1840,7 @@ impl Gemma4Layer {
             // B7（loop kaon3-decode-opt）：decode 小 R 走带宽型 NVFP4 grouped GEMV（gate‖up+gelu 融合 / down），
             // 默认关（验证中），`MOE_DECODE_GEMV=1` 开；R ≤ 128（tokens ≤ 16）才走。
             let moe_gemv = moe_decode_gemv_enabled() && r <= 128 && !skip_gu && !skip_dn;
+            let mut gu_done_splitk = false;
             if moe_gemv {
                 k::ops::moe_fp4_gateup_act(
                     stream, &g.aq_gu, &g.as_gu, &mg.gate_packed, &mg.gate_scale, &mg.alpha_gate,
@@ -1839,6 +1848,19 @@ impl Gemma4Layer {
                     r, mg.n_gate, mg.k_gate, e,
                 )?;
             } else if skip_gu {
+            } else if moe_splitk() > 1 && r <= 128 && moe_gelu_quant_fused_enabled() && gelu_round2_enabled() {
+                // B44 split-K（D190）：gate‖up 写 fp32 部分和（grid ×ksplit，在飞字节翻倍），gelu+down 量化 kernel 顺带归约 + alpha。
+                // 归约序固定（split 升序 fp32 加）→ 批不变；与非 split 路径差只在 fp32 加法序（不逐位，门禁 ulp 级 + 端到端输出）。
+                k::ops::moe_grouped_gemm_dual_splitk(
+                    stream, &g.aq_gu, &g.as_gu,
+                    &mg.gate_packed, &mg.gate_scale, &mg.alpha_gate,
+                    &mg.up_packed, &mg.up_scale, &mg.alpha_up,
+                    &sc.buckets.offsets, &sc.buckets.tile_off, &mut g.part_gu, r, mg.n_gate, mg.k_gate, e, moe_splitk(),
+                )?;
+                k::ops::moe_gelu_grouped_quant_splitk(
+                    stream, &g.part_gu, moe_splitk(), &mg.alpha_gate, &mg.alpha_up, &g.row2e, &mg.agscale_dn, &mut g.aq_dn, &mut g.as_dn, r, mg.k_down, exact_rq,
+                )?;
+                gu_done_splitk = true;
             } else if moe_gemm_dual_enabled() {
                 let (gate_o, up_o) = (&mut g.gate_o, &mut g.up_o);
                 k::ops::moe_grouped_gemm_dual(
@@ -1858,7 +1880,9 @@ impl Gemma4Layer {
                 )?;
             }
             // 4)+5) B34③：gelu·mul + down 量化一次 launch（gelu mode 1 口径；`MOE_GELU_QUANT_FUSED=0` 或 GELU_F32=1 回退两步）。
-            if !moe_gemv && moe_gelu_quant_fused_enabled() && gelu_round2_enabled() {
+            if gu_done_splitk {
+                // B44：split-K 路径已在上面归约 + gelu + 量化
+            } else if !moe_gemv && moe_gelu_quant_fused_enabled() && gelu_round2_enabled() {
                 k::ops::moe_gelu_grouped_quant(
                     stream, &g.gate_o.data, &g.up_o.data, &g.row2e, &mg.agscale_dn, &mut g.aq_dn, &mut g.as_dn, r, mg.k_down, exact_rq,
                 )?;

@@ -1399,3 +1399,7 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - B42b 的教训：同一改动 M=1 赢、M=8 输（寄存器跨 barrier 常驻压占用）——gemv 类改动必须按 M_TILE 分档决定，微基准 m=8 没看出差异（L2 热），端到端才暴露。
 - **D188 结论（`kaon3-megakernel-study.md`）**：**no-go**。边界效应上限 c1 ≈ 1.1 ms（23%）/ c8 ≈ 0.9 ms（12%）；megakernel 要付 30 层 × 14 级 = 420 个阶段屏障 × 3–10 us = 1.3–4.2 ms > 能拿回的 1.1；dense persistent 版在本卡已输 5.8×（D60/D61）、B300 单层输 0.91/0.82/0.59×；c8 的差距 65% 在 > 20 us 的大 kernel（MoE pipe4、gemv<8>），常驻 grid 只会更差。规模 3.5–4k 新 LOC + ≥ 11 轮 A/B。若硬要做：只融滑窗层 attention 段（8 kernel）一轮，判据 c1 ≥ -0.3 ms 且 c8 不退。**替代路线**：再融 6–8 个 < 3 us kernel/层（merge+quant、router+route、grouped_quant 进 route、gelu_quant 进 MoE epilogue、combine+norm+res、post-down 三 norm）≈ c1 -0.3…-0.4；c8 走 MoE split-K×2 + gemv<8> 占用 ≈ -0.4。
 - nsys 重抓（b44 二进制）：c1b 85287 kernel/107 步 ≈ **797/步**，kernel 和 4.97 ms + gaps 1.37（nsys 态；bench 4.65）；c8b id=11 97922/122 ≈ 803/步，7.93 + 3.7（gaps 含 nsys 膨胀）。供 split-K 后对照。
+
+## D190 2026-10-29 B44 split-K（待编待验）：decode gate‖up dual 的 pipe4 加 `ksplit`（grid.z = 2·ksplit，各 split 只算自己的 K 块段，写 fp32 部分和 P[2·ksplit][R][N]，不乘 alpha）；新 `gelu_grouped_quant_splitk` 在消费端做 Σ_s + alpha + bf16 舍入 + gelu + 量化（与 B34③ 同式）。`MOE_SPLITK=2|4`（默认 1 = 关，走原路径）。
+- 口径：ksplit=1 与原路径逐位同；ksplit≥2 fp32 加法序不同 → 非逐位，门禁 `moe_splitk_parity`：fp4 码差 ≤ 2% 且 worst ≤ 1、a_s 差 ≤ 2%；端到端看输出。归约序 split 升序固定 → 批不变。
+- 预期：gate‖up CTA 616 → 1232（M=8）/ 176 → 352（M=1），每 CTA 6 迭代；DRAM 冷场景在飞字节翻倍；c8 目标 7.13 → ~6.8。链 b45（B 侧 env MOE_SPLITK=2，A = b44）。

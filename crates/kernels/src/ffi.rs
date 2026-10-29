@@ -1630,6 +1630,14 @@ extern "C" {
     pub fn moe_grouped_gemm(aq: *const c_void, a_s: *const c_void, bptr: *const *const c_void,
                             sptr: *const *const c_void, alpha: *const f32, offsets: *const i32, tile_off: *const i32, out: *mut c_void,
                             r: i64, n: i64, k: i64, num_experts: i64, stream: cudaStream_t) -> i32;
+    /// B44 split-K：gate‖up dual 写 fp32 部分和 P[2·ksplit][R][N]（不乘 alpha）；配 moe_gelu_grouped_quant_splitk 消费。
+    pub fn moe_grouped_gemm_dual_splitk(aq: *const c_void, a_s: *const c_void,
+                                        bg: *const *const c_void, sg: *const *const c_void, alpha_g: *const f32,
+                                        bu: *const *const c_void, su: *const *const c_void, alpha_u: *const f32,
+                                        offsets: *const i32, tile_off: *const i32, p: *mut f32,
+                                        r: i64, n: i64, k: i64, num_experts: i64, ksplit: i32, stream: cudaStream_t) -> i32;
+    pub fn moe_gelu_grouped_quant_splitk(p: *const f32, ksplit: i32, alpha_g: *const f32, alpha_u: *const f32, row2e: *const i32,
+                                         agscale: *const f32, aq: *mut c_void, a_s: *mut c_void, r: i64, k: i64, exact_rq: i32, stream: cudaStream_t) -> i32;
     pub fn moe_grouped_gemm_dual(aq: *const c_void, a_s: *const c_void,
                                  bg: *const *const c_void, sg: *const *const c_void, alpha_g: *const f32, out_g: *mut c_void,
                                  bu: *const *const c_void, su: *const *const c_void, alpha_u: *const f32, out_u: *mut c_void,
@@ -1686,6 +1694,19 @@ pub unsafe fn moe_row2expert(_o: *const i32, _r: *mut i32, _ne: i64, _s: cudaStr
 #[allow(clippy::too_many_arguments, clippy::missing_safety_doc)]
 pub unsafe fn moe_grouped_quant(_a: *const c_void, _r2e: *const i32, _st: *const i32, _ag: *const f32, _aq: *mut c_void,
                                 _as: *mut c_void, _r: i64, _k: i64, _ex: i32, _s: cudaStream_t) -> i32 {
+    CUDA_ERROR_NOT_SUPPORTED
+}
+#[cfg(not(all(not(no_nvcc_stub), sm120)))]
+#[allow(clippy::too_many_arguments, clippy::missing_safety_doc)]
+pub unsafe fn moe_grouped_gemm_dual_splitk(_aq: *const c_void, _as: *const c_void, _bg: *const *const c_void, _sg: *const *const c_void, _alg: *const f32,
+                                           _bu: *const *const c_void, _su: *const *const c_void, _alu: *const f32, _off: *const i32, _to: *const i32, _p: *mut f32,
+                                           _r: i64, _n: i64, _k: i64, _ne: i64, _ks: i32, _s: cudaStream_t) -> i32 {
+    CUDA_ERROR_NOT_SUPPORTED
+}
+#[cfg(not(all(not(no_nvcc_stub), sm120)))]
+#[allow(clippy::too_many_arguments, clippy::missing_safety_doc)]
+pub unsafe fn moe_gelu_grouped_quant_splitk(_p: *const f32, _ks: i32, _alg: *const f32, _alu: *const f32, _r2e: *const i32, _ag: *const f32,
+                                            _aq: *mut c_void, _as: *mut c_void, _r: i64, _k: i64, _ex: i32, _s: cudaStream_t) -> i32 {
     CUDA_ERROR_NOT_SUPPORTED
 }
 #[cfg(not(all(not(no_nvcc_stub), sm120)))]

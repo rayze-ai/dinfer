@@ -170,6 +170,41 @@ __global__ void gelu_grouped_quant_kernel(const bf16* __restrict__ G, const bf16
   S[(size_t)r * nb + bi] = sb8;
 }
 
+// B44（split-K，D190）：gelu_grouped_quant 的 split-K 消费版：gate = bf16((Σ_s Pg[s])·alphaG[e])、up 同；其余与
+// gelu_grouped_quant_kernel 同式。P 布局 [2·ksplit][Rtot][K]（前 ksplit 份 gate，后 ksplit 份 up）。
+__global__ void gelu_grouped_quant_splitk_kernel(const float* __restrict__ P, int ksplit, int Rtot,
+                                                 const float* __restrict__ alphaG, const float* __restrict__ alphaU,
+                                                 const int32_t* __restrict__ row2e, const float* __restrict__ agscale,
+                                                 uint8_t* __restrict__ Pq, uint8_t* __restrict__ S, int R, int K, int exact_rq) {
+  const int nb = K / 16;
+  const long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= (long)R * nb) return;
+  const int r = (int)(idx / nb), bi = (int)(idx % nb);
+  const int ex = row2e[r];
+  const float gs = agscale[ex];
+  const float ag = alphaG[ex], au = alphaU[ex];
+  const size_t plane = static_cast<size_t>(Rtot) * K;
+  const float* pg = P + static_cast<size_t>(r) * K + bi * 16;
+  const float* pu = P + static_cast<size_t>(ksplit) * plane + static_cast<size_t>(r) * K + bi * 16;
+  bf16 y[16];
+#pragma unroll
+  for (int i = 0; i < 16; ++i) {
+    float sg = 0.f, su = 0.f;
+    for (int sp = 0; sp < ksplit; ++sp) { sg += __ldcg(pg + sp * plane + i); su += __ldcg(pu + sp * plane + i); }
+    const float f = to_f32(to_bf16(sg * ag));
+    const float u = to_f32(to_bf16(su * au));
+    const float x_cube = f * f * f;
+    const float inner = 0.7978845608028654f * (f + 0.044715f * x_cube);
+    const float a = to_f32(to_bf16(0.5f * f * (1.f + tanhf(inner))));
+    y[i] = to_bf16(a * u);
+  }
+  uint2 pk;
+  uint8_t sb8;
+  quant16(y, true, &pk, &sb8, gs, exact_rq);
+  *reinterpret_cast<uint2*>(Pq + (size_t)r * (K / 2) + bi * 8) = pk;
+  S[(size_t)r * nb + bi] = sb8;
+}
+
 // B34①（loop kaon3-decode-opt D160）：pre_ff_norm_2 + grouped_quant 一次 launch。一 block 一行 r（源 token = sorted_tok[r]），
 // 256 线程：① 复刻 `rmsnorm_vec_kernel<256,2>`（hidden ≤ 4096）的平方和（线程 t 持向量 t、t+256；gs 同序；`rms_ss_triton<256,2>`）
 // 与 `rms_inv(mode)`；② 每线程若干 16 元素块：y = bf16(norm_mid(x·inv)·w)（与 vec kernel 逐元素同式）→ `quant16`（与
@@ -532,10 +567,16 @@ __global__ void __launch_bounds__(256)
                               const int32_t* __restrict__ tile_off, bf16* __restrict__ D, int N, int K, int E,
                               // B36（gate‖up dual，grid.z=2）：blockIdx.z==1 的 block 改用第二套（up）指针。grid.z=1 时不触碰。
                               const uint8_t* const* __restrict__ Bu = nullptr, const uint8_t* const* __restrict__ Su = nullptr,
-                              const float* __restrict__ alphaU = nullptr, bf16* __restrict__ Du = nullptr) {
+                              const float* __restrict__ alphaU = nullptr, bf16* __restrict__ Du = nullptr,
+                              // B44（split-K，D190）：ksplit > 1 时 grid.z = half·ksplit + split，各 split 只算自己的 K 段，
+                              // 把**未乘 alpha 的 fp32 部分和**写到 P[(half·ksplit+split)][Rtot][N]（不写 D）；归约与 alpha、bf16
+                              // 舍入由消费 kernel（gelu_grouped_quant_splitk）做。ksplit == 1 时行为与原版完全同。
+                              int ksplit = 1, float* __restrict__ P = nullptr, int Rtot = 0) {
   int e, m_blk, row_hi;
   if (!tile_lookup(offsets, BM_T == BM ? tile_off : tile_off + (E + 1), E, (int)blockIdx.y, e, m_blk, row_hi, BM_T)) return;
-  if (blockIdx.z) { Bptr = Bu; Sptr = Su; alpha = alphaU; D = Du; }
+  const int half = ksplit > 1 ? (int)blockIdx.z / ksplit : (int)blockIdx.z;
+  const int split = ksplit > 1 ? (int)blockIdx.z % ksplit : 0;
+  if (half) { Bptr = Bu; Sptr = Su; alpha = alphaU; D = Du; }
   constexpr int RSA = BK / 2 + PAD, RSB = BK / 2 + PAD;
   constexpr int NQ4 = BK / 64;
   constexpr int NB16 = BK / 16;
@@ -553,7 +594,10 @@ __global__ void __launch_bounds__(256)
   const float global = alpha[e];
   const int M = row_hi;
   float acc[4] = {0, 0, 0, 0}, acc2[4] = {0, 0, 0, 0};
-  const int nk = (K + BK - 1) / BK;
+  const int nk_total = (K + BK - 1) / BK;
+  const int nk_per = (nk_total + ksplit - 1) / ksplit;
+  const int kb_base = split * nk_per;
+  const int nk = kb_base < nk_total ? ((nk_total - kb_base) < nk_per ? (nk_total - kb_base) : nk_per) : 0;  // 本 split 的 K 块数
   const int rb = BK / 32;
   // 第 kb 块 → stage st：A/sfa/B/sfb 全部 cp.async，提交 1 组
   auto load_stage = [&](int st, int kb) {
@@ -586,14 +630,14 @@ __global__ void __launch_bounds__(256)
   // prologue：前 STAGES-1 块
 #pragma unroll
   for (int st = 0; st < STAGES - 1; ++st) {
-    if (st < nk) load_stage(st, st);
+    if (st < nk) load_stage(st, kb_base + st);
     else asm volatile("cp.async.commit_group;\n");
   }
   for (int kb = 0; kb < nk; ++kb) {
     // 发出第 kb+STAGES-1 块（其 stage 在上轮 trailing barrier 后已无读者）
     {
       const int kn = kb + STAGES - 1;
-      if (kn < nk) load_stage(kn % STAGES, kn);
+      if (kn < nk) load_stage(kn % STAGES, kb_base + kn);
       else asm volatile("cp.async.commit_group;\n");
     }
     asm volatile("cp.async.wait_group %0;\n" ::"n"(STAGES - 1));  // 第 kb 组已落地
@@ -631,6 +675,16 @@ __global__ void __launch_bounds__(256)
   const int r0 = lane / 4, cg = (lane % 4) * 2;
   const int g0 = m_blk + wm * 16 + r0, g1 = g0 + 8;
   const int c0 = n_blk + (ONE_FRAG ? wn * 8 : wn * 16) + cg, c1 = c0 + 8;
+  if (P) {  // split-K：fp32 部分和，不乘 alpha
+    float* Pp = P + (static_cast<size_t>(half * ksplit + split) * Rtot) * N;
+    if (g0 < M && c0 < N) { Pp[static_cast<size_t>(g0) * N + c0] = acc[0]; if (c0 + 1 < N) Pp[static_cast<size_t>(g0) * N + c0 + 1] = acc[1]; }
+    if (g1 < M && c0 < N) { Pp[static_cast<size_t>(g1) * N + c0] = acc[2]; if (c0 + 1 < N) Pp[static_cast<size_t>(g1) * N + c0 + 1] = acc[3]; }
+    if (!ONE_FRAG) {
+      if (g0 < M && c1 < N) { Pp[static_cast<size_t>(g0) * N + c1] = acc2[0]; if (c1 + 1 < N) Pp[static_cast<size_t>(g0) * N + c1 + 1] = acc2[1]; }
+      if (g1 < M && c1 < N) { Pp[static_cast<size_t>(g1) * N + c1] = acc2[2]; if (c1 + 1 < N) Pp[static_cast<size_t>(g1) * N + c1 + 1] = acc2[3]; }
+    }
+    return;
+  }
   if (g0 < M && c0 < N) {
     D[static_cast<size_t>(g0) * N + c0] = to_bf16(acc[0] * global);
     if (c0 + 1 < N) D[static_cast<size_t>(g0) * N + c0 + 1] = to_bf16(acc[1] * global);
@@ -986,6 +1040,38 @@ extern "C" int moe_gelu_grouped_quant(const void* gate, const void* up, const in
   gelu_grouped_quant_kernel<<<g, 256, 0, stream>>>(static_cast<const bf16*>(gate), static_cast<const bf16*>(up), row2e,
                                                    agscale, static_cast<uint8_t*>(aq), static_cast<uint8_t*>(a_s),
                                                    (int)R, (int)K, exact_rq);
+  return gerr();
+}
+
+// B44（split-K，D190）：decode（R ≤ 128）gate‖up 的 split-K 版 dual：grid.z = 2·ksplit，输出 fp32 部分和 P[2·ksplit][R][N]（不乘 alpha）。
+// 只走 BK=256/BM16 路径（ksplit·256 ≤ K 才有意义；K=2816 → ksplit ≤ 11）。
+extern "C" int moe_grouped_gemm_dual_splitk(const void* aq, const void* a_s,
+                                            const void* const* Bg, const void* const* Sg, const float* alphaG,
+                                            const void* const* Bu, const void* const* Su, const float* alphaU,
+                                            const int32_t* offsets, const int32_t* tile_off, float* P,
+                                            int64_t R, int64_t N, int64_t K, int64_t num_experts, int ksplit, cudaStream_t stream) {
+  if (R <= 0 || N <= 0 || K <= 0 || num_experts <= 0) return 0;
+  if (K % 64 != 0 || R > 128 || ksplit < 1 || ksplit > 8) return static_cast<int>(cudaErrorInvalidValue);
+  const uint8_t* pa = static_cast<const uint8_t*>(aq);
+  const uint8_t* psa = static_cast<const uint8_t*>(a_s);
+  const uint8_t* const* pbg = reinterpret_cast<const uint8_t* const*>(Bg);
+  const uint8_t* const* psg = reinterpret_cast<const uint8_t* const*>(Sg);
+  const uint8_t* const* pbu = reinterpret_cast<const uint8_t* const*>(Bu);
+  const uint8_t* const* psu = reinterpret_cast<const uint8_t* const*>(Su);
+  const dim3 g((unsigned)((N + BN - 1) / BN), (unsigned)((R + 15) / 16 + num_experts), (unsigned)(2 * ksplit));
+  grouped_gemm_kernel_pipe4<256, 3, 16><<<g, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, nullptr, (int)N, (int)K, (int)num_experts,
+                                                              pbu, psu, alphaU, nullptr, ksplit, P, (int)R);
+  return gerr();
+}
+extern "C" int moe_gelu_grouped_quant_splitk(const float* P, int ksplit, const float* alphaG, const float* alphaU,
+                                             const int32_t* row2e, const float* agscale, void* aq, void* a_s,
+                                             int64_t R, int64_t K, int exact_rq, cudaStream_t stream) {
+  if (R <= 0) return 0;
+  if (K % 64 != 0 || ksplit < 1) return static_cast<int>(cudaErrorInvalidValue);
+  const long blocks = (long)R * (K / 16);
+  const unsigned g = (unsigned)((blocks + 255) / 256);
+  gelu_grouped_quant_splitk_kernel<<<g, 256, 0, stream>>>(P, ksplit, (int)R, alphaG, alphaU, row2e, agscale,
+                                                          static_cast<uint8_t*>(aq), static_cast<uint8_t*>(a_s), (int)R, (int)K, exact_rq);
   return gerr();
 }
 

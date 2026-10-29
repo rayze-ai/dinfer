@@ -2297,6 +2297,81 @@ pub fn moe_gelu_grouped_quant(
     )
 }
 
+/// B44 split-K（D190）：gate‖up dual 的 split-K 版，写 fp32 部分和 `p[2·ksplit][rows][n]`（前 ksplit 份 gate，后 ksplit 份 up，均未乘 alpha）。
+pub fn moe_grouped_gemm_dual_splitk(
+    stream: &Stream,
+    aq: &CudaSlice<u8>,
+    a_s: &CudaSlice<u8>,
+    bg: &CudaSlice<u64>,
+    sg: &CudaSlice<u64>,
+    alpha_g: &CudaSlice<f32>,
+    bu: &CudaSlice<u64>,
+    su: &CudaSlice<u64>,
+    alpha_u: &CudaSlice<f32>,
+    offsets: &CudaSlice<i32>,
+    tile_off: &CudaSlice<i32>,
+    p: &mut CudaSlice<f32>,
+    rows: usize,
+    n: usize,
+    k: usize,
+    num_experts: usize,
+    ksplit: usize,
+) -> Result<()> {
+    ensure!(k % 64 == 0 && rows <= 128 && (1..=8).contains(&ksplit), "moe_grouped_gemm_dual_splitk: k/rows/ksplit");
+    ensure!(
+        aq.len() >= rows * (k / 2) && a_s.len() >= rows * (k / 16) && p.len() >= 2 * ksplit * rows * n
+            && bg.len() >= num_experts && sg.len() >= num_experts && alpha_g.len() >= num_experts
+            && bu.len() >= num_experts && su.len() >= num_experts && alpha_u.len() >= num_experts
+            && offsets.len() >= num_experts + 1 && tile_off.len() >= 2 * (num_experts + 1),
+        "moe_grouped_gemm_dual_splitk: capacity"
+    );
+    // SAFETY: 容量已校验；指针表内地址由 layer 建表时保证。
+    check(
+        unsafe {
+            ffi::moe_grouped_gemm_dual_splitk(
+                stream.ptr(aq) as *const c_void, stream.ptr(a_s) as *const c_void,
+                stream.ptr(bg) as *const *const c_void, stream.ptr(sg) as *const *const c_void, stream.ptr(alpha_g) as *const f32,
+                stream.ptr(bu) as *const *const c_void, stream.ptr(su) as *const *const c_void, stream.ptr(alpha_u) as *const f32,
+                stream.ptr(offsets) as *const i32, stream.ptr(tile_off) as *const i32, stream.ptr_mut(p) as *mut f32,
+                rows as i64, n as i64, k as i64, num_experts as i64, ksplit as i32, stream.raw() as _,
+            )
+        },
+        "moe_grouped_gemm_dual_splitk",
+    )
+}
+/// B44 split-K 消费：gate/up = bf16(Σ_s P[s]·alpha[e])，再 gelu·mul（mode 1）+ grouped quant；输出口径同 `moe_gelu_grouped_quant`。
+pub fn moe_gelu_grouped_quant_splitk(
+    stream: &Stream,
+    p: &CudaSlice<f32>,
+    ksplit: usize,
+    alpha_g: &CudaSlice<f32>,
+    alpha_u: &CudaSlice<f32>,
+    row2e: &CudaSlice<i32>,
+    agscale: &CudaSlice<f32>,
+    aq: &mut CudaSlice<u8>,
+    a_s: &mut CudaSlice<u8>,
+    rows: usize,
+    k: usize,
+    exact_rq: bool,
+) -> Result<()> {
+    ensure!(k % 64 == 0 && ksplit >= 1, "moe_gelu_grouped_quant_splitk: k/ksplit");
+    ensure!(
+        p.len() >= 2 * ksplit * rows * k && aq.len() >= rows * (k / 2) && a_s.len() >= rows * (k / 16) && row2e.len() >= rows,
+        "moe_gelu_grouped_quant_splitk: capacity"
+    );
+    // SAFETY: 容量已校验；row2e[r] < E 由 row2expert 保证。
+    check(
+        unsafe {
+            ffi::moe_gelu_grouped_quant_splitk(
+                stream.ptr(p) as *const f32, ksplit as i32, stream.ptr(alpha_g) as *const f32, stream.ptr(alpha_u) as *const f32,
+                stream.ptr(row2e) as *const i32, stream.ptr(agscale) as *const f32,
+                stream.ptr_mut(aq) as *mut c_void, stream.ptr_mut(a_s) as *mut c_void, rows as i64, k as i64, exact_rq as i32, stream.raw() as _,
+            )
+        },
+        "moe_gelu_grouped_quant_splitk",
+    )
+}
+
 /// B3 grouped NVFP4 GEMM：out[R,N] = alpha[e]·(aq·Bptr[e]ᵀ)，按 device offsets 分专家段。
 /// `bptr`/`sptr` 是 device 端 [E] 个 u64 指针（各专家 packed/scale 的设备地址），`alpha`/`offsets` device。
 /// launch 配置（grid.z=E）编译期固定 → cudagraph 友好。
