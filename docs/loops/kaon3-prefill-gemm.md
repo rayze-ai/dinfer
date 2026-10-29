@@ -121,3 +121,16 @@ G 编号（接 D/E）。
 - Step A 缺口两项并行补：① 我们副流稳态 kernel 表（`nsysp16s`，delay 20 s，32×16 请求）；② vLLM 同口径 kernel 表（`vllm-nsys` @GPU4）。对比脚本 `nsys_family_compare.py`。
 - 判据不变：`[late-harvest] wall_ms` tok/ms（G0：2.5K 档 28 → ≥ 36）与 c16 TPOT ≤ 8.5。
 - vLLM 在 nsys 下的 c16 bench（GPU4，同 bench 参数）：TPOT p50 **8.08 / 8.13**（无 nsys 基线 :28201 是 7.1–7.2）、TTFT 261、1320 tok/s；我们在 nsys 下（nsysp16s）TPOT ~8.9、1419 tok/s。**nsys 态两边都膨胀**（vLLM +13%，我们 +0 ~ −1%——我们 decode 走图、nsys 节点级开销小；vLLM 的 FULL cudagraph 同理但 prefill eager 多）。kernel 表只比相对占比与同形状 us，不比绝对 TPOT。
+
+## ★★★★ G6 2026-10-29 我们的**稳态**副流表（nsysp16s：delay 20 s、c16 × 512 请求、26 s 窗口、eager kernel 7944 ms = 窗口 30%；host-time 混批步 98 × 2254 tok 47 ms）
+| 家族 | ms | 占比 | 主 kernel（次 × us） |
+|---|---|---|---|
+| **MoE p64** | 3053 | **38%** | 5902 × 516 |
+| **fp8 Lt** | 2398 | **30%** | nvjet 128x128 14925 × 96；Kernel2 3550 × 155（bf16 router GEMM）；small_m_mma 505 × 1039（**alt Gemm 的 lm_head m=16..64 桶自调优残留？delay 20 s 后仍有 505 次——待查，可能是 late 收割步 lm_head 走 small_m 路径）|
+| other | 869 | 11% | |
+| norm | 713 | 9% | rmsnorm_grouped_quant 3161 × 66、rmsnorm_vec 12631 × 15、combine_norm 3161 × 76 |
+| attention | 627 | 8% | fa_v5 2460 × 111、fa_v6 492 × 414 |
+| route / quant / elem | 284 | 4% | |
+- 每个 prefill 步（98 步）：eager 和 81 ms / 步 ≈ 2254 tok → **28 tok/ms（nsys 态）**，host-time 47 ms（主流视角，不含副流）；G0 的 late 墙钟 28–30 tok/ms 一致。
+- 与启动期污染的 D219/G0 表比：p64 从 27% 回到 38%、Lt 55% → 30%。**MoE p64 是稳态第一项**（3053 ms / 98 步 = 31 ms/步，占 prefill 步 38%）。
+- 等 vLLM 表（export 中）对比同家族。
