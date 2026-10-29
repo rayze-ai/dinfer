@@ -1477,3 +1477,21 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 ## D201 2026-10-29 Step B 定靶准备：现有 nsys c32b 里几乎没有混批 prefill 步（只 1660 个 eager kernel，是启动 warmup + autotune）→ 需要专抓
 - `scripts/dev/nsys_prefill_steps.py`（eager kernel 按间隙切步、最长 3 步聚合、按家族汇总）；`scripts/dev/kaon3_nsys_prefill16.sh`（stepA4 口径 c16 × 128 请求抓 pair 步 prefill 副流）。stepA4 跑完 GPU0 空出后起。
 - c32b 的 warmup prefill（4096 tok 单请求）kernel 表给了一个基准：14 层 MoE dual 1315 us/call + pipe4 872 us/call ≈ 2.2 ms/层（4096 行 → **1.9 tok/us**），gqa_fa_v6 3.7 ms/call（D=512 两层）。
+
+## ★★★★★★ D202 2026-10-29 Step A v4 定稿（5 轮中位数，`test/kaon3/2026-10-29/stepA4/`）——**靶子 = 多请求 prefill 步**
+| c | TPOT d/v（×） | TTFT d/v | tok/s d/v（×） | dinfer 纯 decode 步 | dinfer prefill 步 exec（tok, nreq, 步数） | TPOT−decode 步 | vLLM prefill 步数 / per-req prefill ms / iter tok 均 / sched us |
+|---|---|---|---|---|---|---|---|
+| 1 | 4.65/4.69（0.99） | 27/25 | 200/200 | 4.64 | 25.1（428, 1.0, 10） | 0 | 10 / 20 / 7.7 / 84 |
+| 2 | 5.42/5.37（1.01） | 52/36 | 338/346 | 5.07 | 26.1（428, 1.4, 18） | 0.35 | 18 / 22 / 14 / 145 |
+| 4 | 5.89/6.06（0.97） | 86/89 | 565/544 | 5.58 | 41.0（810, 2.3, 18） | 0.31 | 18 / 73 / 26 / 188 |
+| 8 | 7.06/6.14（1.15） | 154/149 | 858/971（0.88） | 6.54 | 71.2（1571, 4.1, 18） | 0.52 | 23 / 93 / 50 / 292 |
+| 16 | 11.36/7.14（**1.59**） | 197/179 | 1116/1574（0.71） | 8.67 | **98.4（2146, 10.0, 26）** | **2.69** | 36 / 113 / 96 / 490 |
+| 32 | 14.67/9.31（**1.58**） | 346/231 | 1612/2470（0.65） | 9.31 | **121.8（2649, 23.8, 42）** | **5.36** | 46 / 133 / 193 / 843 |
+| 64 | 27.07/15.34（**1.76**） | 360/247 | 1980/3367（0.59） | 11.83 | **154.4（3378, 51.8, 66）** | **15.24** | 74 / 153 / 381 / 1496 |
+
+**逐环节判定（用户新原则：劣势优化、优势保留）**
+- ✓ 领先 / 持平（**改动不许丢**）：c1–c4 TPOT、c≤8 TTFT、render（chat 模板 + tokenize）1.0 ms、sched 0–6 us（vLLM 84–1496 us/步）、publish ≤ 10 us、htod 15–38 us、launch 21–65 us、启动 wall ~60 s。
+- ✗ 落后 ①（**最大项**）：**混批 / prefill 步**。c16 一步 2146 tok × 10 请求 = 98 ms = **22 tok/ms**；c64 3378 tok × 52 请求 154 ms（含 50 在飞 decode 行）。TPOT − 纯 decode 步 = 2.7 / 5.4 / 15.2 ms，占 TPOT 差额（4.2 / 5.4 / 11.7）的 **64% / 100% / 130%**。vLLM 同口径 per-req prefill 113–153 ms 但摊在 36–74 个混批步里（每步 ~96–381 tok），每步只多 1–2 ms。
+- ✗ 落后 ②：纯 decode 步 M=16/32/64 = 8.67 / 9.31 / 11.83 vs vLLM 全步（含 prefill 摊入）7.1 / 9.3 / 15.3 → M=16 慢 ~1.2×，M≥32 已持平或领先。先放着。
+- 两者机理不同：dinfer 的 pair 步让 prefill 子批独占副流，**decode 主流必须等 prefill 完**（`forward_sample_pair` wait_event）→ 一步 98 ms 直接抬 10 个请求的 TPOT；vLLM 把 prefill 切成小 chunk 混进每个 decode 步，每步只慢 1–2 ms。
+- **Step B 方向（两条，按 ROI 排）**：(a) **prefill 步本身 22 tok/ms → 单请求 62 tok/ms 的差距**（nsysp16 抓 kernel 表定是 attention 按请求 / MoE 大 M / GEMM 形状哪个）；(b) **调度：限制每步 prefill 新 token 数**（vLLM `long_prefill_token_threshold` 思路：dinfer 已有同名参数默认 0 = 不限；先 A/B `--long-prefill-token-threshold 512`，零代码），让 prefill 分摊到多步而不是一步塞 10 个请求 2146 tok。(b) 是"采用 vLLM 做得对的"，进 design.md §11 台账。
