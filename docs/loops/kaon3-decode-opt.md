@@ -1297,7 +1297,8 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - 修 b36 编译错：`moe_grouped_sm120.cu` 的 B34① launcher 被 D166 的编辑误插到文件头（吃掉首行 `//`），nvcc "extended character 。 is not valid in an identifier"。挪回文件尾（`}  // extern "C"` 前）。
 
 ## ★★★★★ D171 2026-10-29 重读 nsys c8（D148 抓的 `tmp_nsys_c8.sqlite`，`nsys_kern.py --all`）：**M=8 的 decode 步在另一个 graphId（桶 8）里，D148/D78 只看了"最常见 kernel 数"的那组 = M=1 尾段**，所以得出"每 kernel us 与 c1 持平"的错误结论
-- graph id=8（M=8，34 步）vs graph id=2（M=1，63 步），每 call p50（nsys 态）：
+- **口径更正**：`nsys_c8.sh` 是 `--concurrency 8 --num-requests 3` → 实际并发 3，graph id=8 的 34 步是 **M=3**（不是 8），且二进制是 D148 时的 b29（pick_warps 旧版）。表里的方向性结论（router cuBLAS 挑了慢 kernel、MoE 每专家行数少效率低）成立，绝对值要以 b37 后重抓的 `nsys_c8b.sh`（24 请求，真 M=8）为准。
+- graph id=8（M=3，34 步）vs graph id=2（M=1，63 步），每 call p50（nsys 态）：
   | kernel | M=1 | M=8 | 每步差（×30 层） |
   |---|---|---|---|
   | MoE gate/up `pipe4<128,4,16>` | 10.7 us | **22.0** | +340 us（+3780 call 的 2.1×） |
