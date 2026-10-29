@@ -1,0 +1,16 @@
+01:39:03
+EXIT=0
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+     Running tests/router_gemv_parity.rs (target/release/deps/router_gemv_parity-03d25589d1d759a3)
+router_gemv: worst |ulp|=0 bad(>1 ulp)=0
+test router_gemv_matches_reference_and_is_batch_invariant ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+     Running tests/router_gemv_timing.rs (target/release/deps/router_gemv_timing-576f7ca79bce1de4)
+router_gemv m=1: gemv 3.98 us  cublas 6.51 us  worst|ulp| vs cublas=0
+router_gemv m=2: gemv 3.78 us  cublas 12.31 us  worst|ulp| vs cublas=0
+router_gemv m=4: gemv 3.94 us  cublas 12.31 us  worst|ulp| vs cublas=0
+router_gemv m=8: gemv 3.98 us  cublas 9.35 us  worst|ulp| vs cublas=0
+router_gemv m=16: gemv 6.16 us  cublas 9.39 us  worst|ulp| vs cublas=1
+test router_gemv_vs_cublas ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+DONE

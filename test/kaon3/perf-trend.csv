@@ -191,3 +191,9 @@ b36,2026-10-29,"b36: B33 修正 + B34① norm+grouped_quant 融合 + B35 xstream
 b36,2026-10-29,"b36: B33 修正 + B34① norm+grouped_quant 融合 + B35 xstream + dual 默认开 + B36 dual→pipe4<BM16>; A=b33: c1 5.15→5.04 -2.1%, c8 8.66→8.46 -2.5%, 输出同",c8,out_tok_per_s,760.800,956.000,0.796,,higher,main,5090,vllm,dinfer,kaon3
 b36,2026-10-29,"b36: B33 修正 + B34① norm+grouped_quant 融合 + B35 xstream + dual 默认开 + B36 dual→pipe4<BM16>; A=b33: c1 5.15→5.04 -2.1%, c8 8.66→8.46 -2.5%, 输出同",c8,ttft_p50_ms,155.430,146.400,1.062,,lower,main,5090,vllm,dinfer,kaon3
 b36,2026-10-29,"b36: B33 修正 + B34① norm+grouped_quant 融合 + B35 xstream + dual 默认开 + B36 dual→pipe4<BM16>; A=b33: c1 5.15→5.04 -2.1%, c8 8.66→8.46 -2.5%, 输出同",c8,tpot_p50_ms,8.460,6.240,1.356,,lower,main,5090,vllm,dinfer,kaon3
+b37b,2026-10-29,"R1 v2 router 小 M bf16 gemv(block/专家 8 warp split-K 固定序, ROUTER_GEMV 默认开); A=b36: c1 5.04→5.00, c8 8.42→8.39",c1,out_tok_per_s,187.300,200.000,0.937,,higher,main,5090,vllm,dinfer,kaon3
+b37b,2026-10-29,"R1 v2 router 小 M bf16 gemv(block/专家 8 warp split-K 固定序, ROUTER_GEMV 默认开); A=b36: c1 5.04→5.00, c8 8.42→8.39",c1,ttft_p50_ms,26.960,25.000,1.078,,lower,main,5090,vllm,dinfer,kaon3
+b37b,2026-10-29,"R1 v2 router 小 M bf16 gemv(block/专家 8 warp split-K 固定序, ROUTER_GEMV 默认开); A=b36: c1 5.04→5.00, c8 8.42→8.39",c1,tpot_p50_ms,5.000,4.690,1.066,,lower,main,5090,vllm,dinfer,kaon3
+b37b,2026-10-29,"R1 v2 router 小 M bf16 gemv(block/专家 8 warp split-K 固定序, ROUTER_GEMV 默认开); A=b36: c1 5.04→5.00, c8 8.42→8.39",c8,out_tok_per_s,766.600,956.000,0.802,,higher,main,5090,vllm,dinfer,kaon3
+b37b,2026-10-29,"R1 v2 router 小 M bf16 gemv(block/专家 8 warp split-K 固定序, ROUTER_GEMV 默认开); A=b36: c1 5.04→5.00, c8 8.42→8.39",c8,ttft_p50_ms,156.890,146.400,1.072,,lower,main,5090,vllm,dinfer,kaon3
+b37b,2026-10-29,"R1 v2 router 小 M bf16 gemv(block/专家 8 warp split-K 固定序, ROUTER_GEMV 默认开); A=b36: c1 5.04→5.00, c8 8.42→8.39",c8,tpot_p50_ms,8.390,6.240,1.345,,lower,main,5090,vllm,dinfer,kaon3

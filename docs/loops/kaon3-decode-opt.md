@@ -1323,3 +1323,6 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 ## ★★★ D174 2026-10-29 b37 首批 B（R1 router gemv v1：warp 一专家行，grid = E/4 = 32 块）：c1 5.04 → **5.09（+1%）**，c8 8.46 → **8.89（+5%）** —— **退化**，parity 过（ulp 0、批不变）
 - 原因：grid 只有 32 块 × 4 warp，170 个 SM 用了 19%，每 lane 串行 11 个 chunk（4 展开），latency-bound；M=8 时每 chunk 再读 8 次 x，链更长。比 cuBLAS gemvx（M=1 3.4 us）还慢。
 - v2：grid = E（128 块）× 8 warp，warp 内 split-K（每 warp K/8 = 44 chunk，lane 1–2 个），warp 内 xor 树 + smem 固定序跨 warp 求和（累加序与 M/grid 无关 → 仍批不变）；加微基准（`router_gemv_timing`）在 nsys 外量 v2 vs cuBLAS，M=1/8，**达不到 cuBLAS M=1 的 3.4 us 就只在 M ≥ 2 启用**。
+
+## ★★★★★ D175 2026-10-29 **b37b 定稿（R1 v2 router bf16 gemv：block/专家、8 warp split-K、固定序；A = b36 二进制）**：c1 TPOT **5.04/5.05 → 5.00/4.99（-1%）**，c8 **8.42/8.47 → 8.42/8.39**，c8 吞吐 762 → 766；输出逐字同。微基准 m=1/2/4/8：gemv 3.98/3.78/3.94/3.98 us vs cuBLAS 6.51/12.31/12.31/9.35；m=16 6.16 vs 9.39（仍赢，ulp 1 —— M ≤ 16 全开）。**c1 ≤ 5.0 停止条件首次达到**（vLLM 4.69 的 1.07×）。CSV round b37b。
+- 下一条：B34③ gelu·mul + down 量化融合（b38，已写待编）；之后 c8 专项（M=8：o_proj fp8 gemv K 切分、MoE pipe4 M=8）。

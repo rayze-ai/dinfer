@@ -141,6 +141,35 @@ __global__ void grouped_quant_kernel(const bf16* __restrict__ A, const int32_t* 
   S[(size_t)r * nb + bi] = sb8;
 }
 
+// B34③（loop kaon3-decode-opt D175）：gelu·mul + down 的 grouped_quant 一次 launch。一个线程一个 16 元素块（同 grouped_quant_kernel），
+// 先按 `gelu_tanh_mul_kernel` mode 1 的逐元素式算 y = bf16(bf16(gelu_tanh(g)) · u)（舍入两次，与 vLLM act_and_mul 同），再 `quant16`。
+// 与 `gelu_tanh_mul_bf16(mode 1) → moe_grouped_quant` 两步逐位同（`moe_gelu_quant_fused_parity`）。省 gelu_o 一写一读 + 1 launch/层。
+__global__ void gelu_grouped_quant_kernel(const bf16* __restrict__ G, const bf16* __restrict__ U,
+                                          const int32_t* __restrict__ row2e, const float* __restrict__ agscale,
+                                          uint8_t* __restrict__ P, uint8_t* __restrict__ S, int R, int K, int exact_rq) {
+  const int nb = K / 16;
+  const long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= (long)R * nb) return;
+  const int r = (int)(idx / nb), bi = (int)(idx % nb);
+  const float gs = agscale[row2e[r]];
+  const bf16* g = G + (size_t)r * K + bi * 16;
+  const bf16* u = U + (size_t)r * K + bi * 16;
+  bf16 y[16];
+#pragma unroll
+  for (int i = 0; i < 16; ++i) {
+    const float f = to_f32(g[i]);
+    const float x_cube = f * f * f;
+    const float inner = 0.7978845608028654f * (f + 0.044715f * x_cube);
+    const float a = to_f32(to_bf16(0.5f * f * (1.f + tanhf(inner))));
+    y[i] = to_bf16(a * to_f32(u[i]));
+  }
+  uint2 pk;
+  uint8_t sb8;
+  quant16(y, true, &pk, &sb8, gs, exact_rq);
+  *reinterpret_cast<uint2*>(P + (size_t)r * (K / 2) + bi * 8) = pk;
+  S[(size_t)r * nb + bi] = sb8;
+}
+
 // B34①（loop kaon3-decode-opt D160）：pre_ff_norm_2 + grouped_quant 一次 launch。一 block 一行 r（源 token = sorted_tok[r]），
 // 256 线程：① 复刻 `rmsnorm_vec_kernel<256,2>`（hidden ≤ 4096）的平方和（线程 t 持向量 t、t+256；gs 同序；`rms_ss_triton<256,2>`）
 // 与 `rms_inv(mode)`；② 每线程若干 16 元素块：y = bf16(norm_mid(x·inv)·w)（与 vec kernel 逐元素同式）→ `quant16`（与
@@ -918,6 +947,19 @@ extern "C" int moe_rmsnorm_grouped_quant(const void* x, const void* w, const int
   rmsnorm_grouped_quant_kernel<<<(unsigned)rows, 256, 0, stream>>>(static_cast<const bf16*>(x), static_cast<const bf16*>(w),
                                                                    row2e, sorted_tok, agscale, static_cast<uint8_t*>(aq),
                                                                    static_cast<uint8_t*>(a_s), (int)rows, (int)k, eps, mode, exact_rq);
+  return gerr();
+}
+
+// B34③：见 gelu_grouped_quant_kernel（gelu mode 1 口径）。
+extern "C" int moe_gelu_grouped_quant(const void* gate, const void* up, const int32_t* row2e, const float* agscale, void* aq,
+                                      void* a_s, int64_t R, int64_t K, int exact_rq, cudaStream_t stream) {
+  if (R <= 0) return 0;
+  if (K % 64 != 0) return static_cast<int>(cudaErrorInvalidValue);
+  const long blocks = (long)R * (K / 16);
+  const unsigned g = (unsigned)((blocks + 255) / 256);
+  gelu_grouped_quant_kernel<<<g, 256, 0, stream>>>(static_cast<const bf16*>(gate), static_cast<const bf16*>(up), row2e,
+                                                   agscale, static_cast<uint8_t*>(aq), static_cast<uint8_t*>(a_s),
+                                                   (int)R, (int)K, exact_rq);
   return gerr();
 }
 
