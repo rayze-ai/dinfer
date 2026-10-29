@@ -1460,3 +1460,16 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - 带宽：vLLM 用其自报 read bytes / 窗口时间；dinfer 用权重字节/步（= 已知 ~2.6 GB fp4+fp8 混合 / 步）÷ 步时间反推；两边都标"估计"。
 
 **停止条件（本轮）**：① c16 TPOT ≤ vLLM × 1.10 且 c32 / c64 ≤ 1.25×（吞吐 ≥ 80%）；② c1 / c8 不退化（> 3% 回滚）；③ 每刀进 CSV（含负结果）。Step B 连续 5 刀无进展 → 回 Step A。
+
+## ★★★★ D200 2026-10-29 Step A v4 第 1 轮速读（HEAD 二进制 md5 9046f6ef，RMAX 默认 512；完整 5 轮见 `test/kaon3/2026-10-29/stepA4/`）
+| c | dinfer TPOT | vLLM TPOT | dinfer 纯 decode 步 exec | dinfer prefill 步 | TPOT − decode 步（= prefill 插入） |
+|---|---|---|---|---|---|
+| 1 | 4.65 | 4.69(D196) | 4.64 | — | 0 |
+| 8 | 7.07 | 6.15 | 6.54 | — | 0.5 |
+| 16 | 11.04 | 7.06 | 8.67 | 26 步 × 98.5 ms（2147 tok/步 = **22 tok/ms**） | **2.4** |
+| 32 | 14.6 | 9.2(D196) | 9.29 | | **5.3** |
+| 64 | 27.0 | 15.4(D196) | 11.83 | | **15.2** |
+- vLLM c16：33 prefill 步 + 655 decode 步，5.2 s wall → **7.5 ms/步 含 prefill**（chunked prefill 混进 decode 步，几乎不抬步时）；per_req prefill 126 ms ⇒ 6400 tok/126 ms ≈ **50 tok/ms**（边 decode 边 prefill）。dinfer prefill 22 tok/ms，单请求 1560 tok 25 ms = 62 tok/ms（D197）→ **多请求 prefill 比单请求慢 3×，比 vLLM 慢 2.3×**。
+- **环节判定**：✓ 领先/持平：c1 decode 步、TTFT c≤8、render 1 ms、sched/publish/htod < 40 us（vLLM sched 490 us/call）。✗ 落后：① **多请求 prefill 吞吐**（c16–64 TPOT 差额的 60–100%，最大项）；② 纯 decode 步 M=16/32/64 比 vLLM 慢 ~1.2×（8.67 vs ~7.0）。
+- **Step B 靶子 = ①**：pair 步（decode 主流 + prefill 副流）的 prefill 2147 tok 98 ms。先 nsys 一个 c16 prefill 步看 kernel 表（候选：gqa_prefill 按请求循环 / MoE 大 M 路径 / fp8 GEMM 形状），再改。
+- 工具修正：stepA4 的 dinfer `/metrics` 名带 `dinfer:` 前缀，首轮 dinfer-metrics 全 0（脚本已修，下次链用 `stepA4b.sh`）。

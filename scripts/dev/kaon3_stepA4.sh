@@ -34,6 +34,7 @@ for l in sys.stdin:
     m=re.match(r"([a-zA-Z_:]+)(\{[^}]*\})?\s+([0-9.eE+-]+)",l)
     if not m: continue
     k,lab,v=m.group(1),m.group(2) or "",float(m.group(3))
+    if k.startswith("dinfer:"): k=k[7:]
     if "_bucket" in k or "_created" in k: continue
     if k.endswith(("_total","_sum","_count")): out[k]=out.get(k,0)+v
 print(" ".join(f"{k}={v:.6g}" for k,v in sorted(out.items())))'; }
@@ -56,7 +57,10 @@ if "vllm:decode_steps_total" in d:
     o.append(f"iter_tokens_mean={it/itn:.1f}")
     o.append(f"read_bytes={g('vllm:estimated_read_bytes_per_gpu_total')/1e9:.1f}GB gen_tok={g('vllm:generation_tokens_total'):.0f} prefix_hit={g('vllm:prefix_cache_hits_total'):.0f}/{g('vllm:prefix_cache_queries_total'):.0f} preempt={g('vllm:num_preemptions_total'):.0f}")
 else:
-    o.append(f"steps={g('engine_steps_total'):.0f} gen_tok={g('generation_tokens_total'):.0f} prompt_tok={g('prompt_tokens_total'):.0f} prefix_hit={g('prefix_cache_hits_total'):.0f}/{g('prefix_cache_queries_total'):.0f} preempt={g('num_preemptions_total'):.0f}")
+    st=g("engine_steps_total") or 1; n=g("request_success_total") or 1
+    o.append(f"steps={st:.0f} step_ms={1e3*g('engine_step_seconds_sum')/st:.2f} sched={1e6*g('engine_step_schedule_seconds_sum')/st:.0f}us exec={1e3*g('engine_step_execute_seconds_sum')/st:.2f}ms")
+    o.append(f"per_req ttft={1e3*g('time_to_first_token_seconds_sum')/n:.1f}ms e2e={1e3*g('e2e_request_latency_seconds_sum')/n:.1f}ms tpot={1e3*g('time_per_output_token_seconds_sum')/(g('time_per_output_token_seconds_count') or 1):.2f}ms")
+    o.append(f"gen_tok={g('generation_tokens_total'):.0f} prompt_tok={g('prompt_tokens_total'):.0f} prefix_hit={g('prefix_cache_hits_total'):.0f}/{g('prefix_cache_queries_total'):.0f} preempt={g('num_preemptions_total'):.0f}")
 print(" | ".join(o))
 PY
 }
@@ -74,12 +78,14 @@ for r in $(seq 1 $ROUNDS); do
     echo "  [dinfer] $(bench http://127.0.0.1:$PORT $c $seed)" >> $R
     echo "  [dinfer-gpu] $(smi_stop $P)" >> $R
     HI=$(wc -l < $LOG); S1=$(snap http://127.0.0.1:$PORT)
+    echo "r$r c$c dinfer S0 $S0" >> /w/dinfer/tmp_${TAG}_snaps.txt; echo "r$r c$c dinfer S1 $S1" >> /w/dinfer/tmp_${TAG}_snaps.txt
     echo "  [dinfer-metrics] $(diffm "$S0" "$S1")" >> $R
     echo "  [dinfer-host] $(python3 -I /w/kaon3_hosttime_parse.py $LOG $LO $HI 2>&1 | cut -c1-900)" >> $R
     V0=$(snap http://127.0.0.1:$VPORT); P=$(smi_start $VGPU)
     echo "  [vllm] $(bench http://127.0.0.1:$VPORT $c $seed)" >> $R
     echo "  [vllm-gpu] $(smi_stop $P)" >> $R
     V1=$(snap http://127.0.0.1:$VPORT)
+    echo "r$r c$c vllm S0 $V0" >> /w/dinfer/tmp_${TAG}_snaps.txt; echo "r$r c$c vllm S1 $V1" >> /w/dinfer/tmp_${TAG}_snaps.txt
     echo "  [vllm-metrics] $(diffm "$V0" "$V1")" >> $R
   done
 done
