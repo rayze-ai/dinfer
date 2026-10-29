@@ -1390,3 +1390,6 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 
 ## ★★★ D186 2026-10-29 b43 定稿（B42b 权重预取提前，两轮）：c1 4.77/4.78 → **4.73/4.73（-0.8%）**，c8 7.19/7.19 → **7.54/7.54（+4.9%）**。微基准 m=8 不变（10.3/12.3/14.4/8.2）—— 退化只在端到端：M_TILE=8 时每线程 16 个 uint4（64 寄存器）跨 barrier 常驻，占用掉一档，权重流并行度反降。**改法**：`PRE = M_TILE <= 2` 编译期选（c1 路径预取、M≥4 原序）。与 B43 一起进 b44。
 ## D187 2026-10-29 B43：route_bucket_small 两处并行化（逐位同）：① softmax 的 128 次串行 exp 改 warp 并行算到 smem 行，Z 仍 lane 0 按 e 升序 `__fadd_rn`（序不变）；② counts → offsets/tile_off/tile_off16/cursor 的单线程 128 轮前缀和改 warp 0 整数 shfl_up 扫描。`ROUTE_SOFTMAX_WARP=2`（默认）/1（B32）/0（单线程）。门禁 `moe_route_fused_parity`（与 route_softmax 单线程路径逐位比）。预期 route 11.8 → ~6 us ⇒ c1/c8 各 -0.17 ms。
+
+## D188 2026-10-29 用户问：若只剩 megakernel 一条路怎么做、改动多大 → 开子代理做数据支撑（只读 nsys sqlite + 现有 mega_* 骨架，不碰 GPU），产物 `docs/loops/kaon3-megakernel-study.md`
+- 主会话预判（待数据验证）：不做一步一 kernel；做"分段 persistent"（norm→qkv→rope/cache→attention→o_proj→层尾 一段），MoE grouped GEMM / lm_head 留独立 kernel；改动 ~1000 行 + 3–4 轮 A/B；门槛 = "< 8 us kernel 总时长 + gaps − 每级屏障 3–10 us × 级数" ≥ 0.5 ms 才开工。
