@@ -1798,7 +1798,7 @@ impl Gemma4Layer {
                 static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                 let n = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if n % 200 == 0 {
-                    let c = sc.buckets.counts.to_vec(stream)?;
+                    let c = stream.dtoh_sync_copy(&sc.buckets.counts)?;
                     let active = c.iter().take(e).filter(|&&v| v > 0).count();
                     let max_c = c.iter().take(e).copied().max().unwrap_or(0);
                     tracing::info!(tokens, rows = r, active_experts = active, max_rows_per_expert = max_c, "moe expert stats");
