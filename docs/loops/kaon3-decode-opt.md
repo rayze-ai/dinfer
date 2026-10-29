@@ -1259,3 +1259,8 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - b32 门禁过：`moe_route_fused_parity` 全部 ok（w 位差 0、combine 位同）。bN b32 排队/跑中。
 
 ## ★★★ D161 2026-10-29 b32 首批 B（route softmax warp 版）：c1 5.15 → **5.33（+3.5%）**，c8 8.66 → **8.89（+2.7%）** —— **退化**。原因：Z 串行累加改成 32×4 次 `__shfl_sync` 链（每次 shfl 等 lane 同步）+ `ex[32]`/循环展开寄存器压力，比单 lane 128 次 MUFU exp 还慢；10.7 us 里主要不是 exp。**B32 默认关**（`ROUTE_SOFTMAX_WARP=1` 开），单 lane 路径保留 bf16 logits 支持（B33c 用）。stage33/moe.cu 已更新。route 的真正优化应是把 route+bucket 的 **block 级**串行（tid 0 扫 128 专家 ×2 表、二分 row2e）并行化，而不是 softmax。
+
+## B35 设计 2026-10-29：kaon3 `supports_pair`（prefill / decode 跨流并行，用户顺序第 ④ 刀；c8 TPOT 里 ~3 ms 是插队 prefill）
+- 参照 qwen3 `AltSet`：第二套 {stream, Gemm, PlanBuffers+uploader, logits/gathered/argmax, LayerScratch, ActBuf}，`forward_sample_pair(decode, prefill)`：主流入队 decode（graph）→ 副流等主流上一步事件 → 入队 prefill → 记事件 → 主流等它 → 两边 collect → 按原行序合并。KV cache 共享（两步写不同 slot，读互不依赖：decode 读历史、prefill 写自己）。
+- **kaon3 特有障碍**：`QLinear::Fp8 { quant: Mutex<Option<CudaSlice<u8>>>, scache }` 与 `LayerScratch.preq` 是**按层共享的 lazy 缓冲**，两条流同时 forward 会写同一块 quant 缓冲 → race。改法：quant 缓冲移出 QLinear 进 LayerScratch（每套 scratch 各一份，按 max_tokens 预分配 `Σ 层型 K` 的最大值一块复用），`forward(..)` 多收一个 `&mut CudaSlice<u8>`；`scache`（两个 device 标量）只读可共享。`Gemm` 带 cuBLASLt handle + workspace → 副流自己一套（qwen3 同）。显存：副套 LayerScratch 按 prefill max_tokens 4096 分配 ≈ 1–2 GB，5090 32 GB 现用 11 GB，可行。
+- 预期：c8 TPOT 8.58 → ~6.5（去掉 prefill 插队的 ~2–3 ms，vLLM 6.24），c8 TTFT 不变或略升（prefill 与 decode 争 SM）。c1 无影响。工作量：executor +150 行、layer.rs quant 缓冲重构 +60 行、parity 用现有 c8 mixparity（输出同批构成确定性）+ bN。
