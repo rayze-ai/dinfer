@@ -766,7 +766,8 @@ fn fp8_gemv_a_bytes() -> usize {
 /// `FP8_GEMV_MAX_M=8` 让 M=9..16 走 cuBLASLt（配 `FP8_LT_TUNE_MIN_M=9` 自调优）A/B。
 fn fp8_gemv_max_m() -> usize {
     static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("FP8_GEMV_MAX_M").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(16))
+    // b58 定稿（D228，两轮）：默认 8——M=9..16 走 cuBLASLt 自调优（`FP8_LT_TUNE_MIN_M=9`）：c16 TPOT 10.69 → 9.86（−7.6%）、吞吐 +7%；c8/c32/c64 持平。
+    *V.get_or_init(|| std::env::var("FP8_GEMV_MAX_M").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(8))
 }
 fn fp8_gemv_m_tile(m: usize) -> usize {
     match m { 0 | 1 => 1, 2 => 2, 3 | 4 => 4, 5..=8 => 8, _ => 16 }

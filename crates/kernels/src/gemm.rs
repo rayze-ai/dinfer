@@ -826,7 +826,7 @@ impl Gemm {
                 let tune_on = *TUNE.get_or_init(|| std::env::var("FP8_LT_TUNE").map_or(true, |v| v != "0"));
                 // B51：自调优的 m 下限（默认 64；`FP8_LT_TUNE_MIN_M=9` 让 decode M=9..16 也实测选 algo——m < 下限保持 parity 口径）。
                 static MIN_M: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-                let min_m = *MIN_M.get_or_init(|| std::env::var("FP8_LT_TUNE_MIN_M").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(64));
+                let min_m = *MIN_M.get_or_init(|| std::env::var("FP8_LT_TUNE_MIN_M").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(9));  // b58 定稿：9（m=1..8 保持 parity 配置）
                 let pick = if tune_on && m >= min_m && self.tune_enabled() {
                     let iters = self.profile.gemm_tune.timing_iters.max(1);
                     let mut best = (f32::INFINITY, parity_pick);
