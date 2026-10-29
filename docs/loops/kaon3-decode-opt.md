@@ -1516,3 +1516,9 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - 注意：nsys 2 ms 切出的"步"是 424 tok（HOST_TIME 2148 tok 的步 = 多个这类片段，nsys 态内核膨胀）。按比例：lm_head + softcap ≈ **14% 的混批步时间** = c16 每步 ~14 ms、c64 ~22 ms（3380 行 × 262144 = 1.77 GFLOP·2816 ≈ 5 TFLOP → 5090 bf16 ~200 TFLOPS 下限 25 ms！**c64 的 154 ms 混批步里 lm_head 占 1/6**）。
 - vLLM：`logits_indices = query_start_loc[1:] - 1`，只对采样行算 logits（`gpu_model_runner.py:2324`）。我们 `model.rs:268` `gemm.forward_bf16(final_normed, embed, tokens, vocab)` 按全部 tokens 算再 `gather_rows`（executor.rs:298）。
 - **B46**：lm_head 前先 gather `final_normed` 的 `logits_rows` 行（h=2816，nrows ≤ 64）→ GEMM 只算 nrows 行 → softcap nrows×V → 直接写 `gathered`。纯 decode（tokens == nrows，图内）路径不变（行一一对应，不 gather，保证逐位不动）。预期：c16 混批步 −14 ms（98 → 84）、c64 −22；TPOT c16 −0.4 / c64 −2.2 ms；单请求 prefill TTFT −（1560 行 lm_head ≈ 2.3 ms）。"采用 vLLM 做得对的"，进 design §11 台账。
+
+## ★★★ D206 2026-10-29 Step B(b) 结果：`--long-prefill-token-threshold` 512 / 1024 **零效果**（两轮 c8–c64 全部持平，`test/kaon3/2026-10-29/lpt/`）
+- 原因显而易见、事先该想到：该参数是**单请求**上限，而 bench 的 prompt 只 428 tok < 512，一步 2148 tok 是 **10 个请求各一整条**。c16 混批步 hosttime 仍 26 步 × 2146 tok × 10 请求 × 99 ms。
+- vLLM 为什么每步只多 1–2 ms：它每步 prefill 新 token 也可到 4096 预算，但 per-req prefill 113 ms / 36 步 ⇒ 平均每步 prefill 量 ≈ 96 tok（iter_tokens_mean）—— **它的 prefill 单步吞吐高**（50 tok/ms vs 我们 22），所以一步就算塞满也只是 ~80 ms，而且被 decode 步数摊薄。我们的瓶颈仍是 prefill 步本身的 GEMM 效率（D204/D205）。
+- **B47（整步 prefill 配额 `--prefill-tokens-per-step N`）**：新增 `SchedulerParams.prefill_tokens_per_step`（0 = 不限），running 续算与 waiting 新请求的 prefill 行合计 ≤ N；配额满时 running 的 prefill 行跳过（不出队不抢占）、waiting 不再接。这是把 98 ms 大步切成 ~N/22 ms 的小步 → decode 行每步只多 N/22 ms，但 TTFT 变长（整波 prefill 总时长不变甚至更长）。**不是根治**，是在 prefill GEMM 效率修好前的调度缓冲；A/B 时同时看 TPOT 与 TTFT，不许只看 TPOT。
+- **B46（lm_head 只算采样行）**是真减工作量：c16 混批步 −14%、c64 −1/6。两者同一个二进制，`LM_HEAD_ROWS_ONLY=0` / `--prefill-tokens-per-step 0` 作 A 侧。

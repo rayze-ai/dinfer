@@ -1,0 +1,56 @@
+serve_taskset=0-31 bench_taskset=60-91 bin=2026-10-29 06:12 md5=9046f6efbd8d vars=[0 512 1024] 06:28:03
+r1 t0 c8:    throughput: 13.45 req/s   860.7 output tok/s   6611.1 total tok/s    TTFT     mean   138.36  p50   153.43  TPOT     mean     7.24  p50     7.04 
+ || prefill: steps=18 toks/step=1568 nreq=4.1 sched=40 exec=70961|| decode: steps=630 toks/step=7 nreq=6.6 sched=1 exec=6519
+r1 t0 c16:    throughput: 17.46 req/s   1117.5 output tok/s   8601.4 total tok/s    TTFT     mean   222.32  p50   197.73  TPOT     mean    11.00  p50    11.33 
+ || prefill: steps=26 toks/step=2148 nreq=10.0 sched=54 exec=98946|| decode: steps=623 toks/step=13 nreq=12.9 sched=1 exec=8635
+r1 t0 c32:    throughput: 25.05 req/s   1602.9 output tok/s   12321.1 total tok/s    TTFT     mean   305.59  p50   349.85  TPOT     mean    15.40  p50    14.75 
+ || prefill: steps=42 toks/step=2646 nreq=23.8 sched=61 exec=122938|| decode: steps=609 toks/step=25 nreq=25.5 sched=2 exec=9314
+r1 t0 c64:    throughput: 30.69 req/s   1963.9 output tok/s   15108.0 total tok/s    TTFT     mean   387.94  p50   362.87  TPOT     mean    26.88  p50    27.23 
+ || prefill: steps=66 toks/step=3380 nreq=51.8 sched=97 exec=156359|| decode: steps=588 toks/step=50 nreq=50.2 sched=5 exec=11838
+r1 t0 out:  is is is is is is is is is is is is is is is is is is is is is is is is
+r1 t512 c8:    throughput: 13.45 req/s   860.5 output tok/s   6620.9 total tok/s    TTFT     mean   139.20  p50   154.49  TPOT     mean     7.23  p50     6.98 
+ || prefill: steps=18 toks/step=1572 nreq=4.1 sched=44 exec=71381|| decode: steps=630 toks/step=7 nreq=6.6 sched=1 exec=6510
+r1 t512 c16:    throughput: 17.35 req/s   1110.4 output tok/s   8539.9 total tok/s    TTFT     mean   222.61  p50   197.93  TPOT     mean    11.09  p50    11.43 
+ || prefill: steps=26 toks/step=2146 nreq=10.0 sched=52 exec=99134|| decode: steps=623 toks/step=13 nreq=12.9 sched=1 exec=8703
+r1 t512 c32:    throughput: 24.95 req/s   1597.1 output tok/s   12282.1 total tok/s    TTFT     mean   304.25  p50   352.15  TPOT     mean    15.49  p50    14.82 
+ || prefill: steps=42 toks/step=2648 nreq=24.1 sched=71 exec=123289|| decode: steps=609 toks/step=25 nreq=25.5 sched=2 exec=9351
+r1 t512 c64:    throughput: 30.61 req/s   1959.2 output tok/s   15067.2 total tok/s    TTFT     mean   388.82  p50   363.12  TPOT     mean    26.95  p50    27.35 
+ || prefill: steps=66 toks/step=3378 nreq=51.8 sched=85 exec=156761|| decode: steps=588 toks/step=50 nreq=50.2 sched=5 exec=11865
+r1 t512 out:  is is is is is is is is is is is is is is is is is is is is is is is is
+r1 t1024 c8:    throughput: 13.43 req/s   859.2 output tok/s   6604.1 total tok/s    TTFT     mean   139.19  p50   154.58  TPOT     mean     7.25  p50     7.05 
+ || prefill: steps=18 toks/step=1570 nreq=4.1 sched=39 exec=71388|| decode: steps=630 toks/step=7 nreq=6.6 sched=1 exec=6522
+r1 t1024 c16:    throughput: 17.32 req/s   1108.2 output tok/s   8524.3 total tok/s    TTFT     mean   214.70  p50   216.24  TPOT     mean    11.25  p50    11.13 
+ || prefill: steps=26 toks/step=2147 nreq=10.4 sched=59 exec=99020|| decode: steps=623 toks/step=13 nreq=12.9 sched=2 exec=8731
+r1 t1024 c32:    throughput: 24.97 req/s   1598.0 output tok/s   12292.2 total tok/s    TTFT     mean   307.41  p50   352.58  TPOT     mean    15.43  p50    14.78 
+ || prefill: steps=42 toks/step=2649 nreq=23.8 sched=64 exec=123515|| decode: steps=609 toks/step=25 nreq=25.5 sched=2 exec=9327
+r1 t1024 c64:    throughput: 30.62 req/s   1959.6 output tok/s   15076.9 total tok/s    TTFT     mean   388.70  p50   363.41  TPOT     mean    26.94  p50    27.27 
+ || prefill: steps=66 toks/step=3380 nreq=51.8 sched=92 exec=156662|| decode: steps=588 toks/step=50 nreq=50.2 sched=6 exec=11867
+r1 t1024 out:  is is is is is is is is is is is is is is is is is is is is is is is is
+r2 t0 c8:    throughput: 13.42 req/s   858.8 output tok/s   6605.0 total tok/s    TTFT     mean   138.84  p50   154.04  TPOT     mean     7.26  p50     7.06 
+ || prefill: steps=18 toks/step=1571 nreq=4.1 sched=38 exec=71213|| decode: steps=630 toks/step=7 nreq=6.6 sched=1 exec=6530
+r2 t0 c16:    throughput: 17.34 req/s   1109.7 output tok/s   8534.1 total tok/s    TTFT     mean   222.93  p50   198.19  TPOT     mean    11.10  p50    11.43 
+ || prefill: steps=26 toks/step=2146 nreq=10.0 sched=48 exec=99187|| decode: steps=623 toks/step=13 nreq=12.9 sched=1 exec=8708
+r2 t0 c32:    throughput: 24.92 req/s   1594.8 output tok/s   12267.7 total tok/s    TTFT     mean   307.26  p50   352.94  TPOT     mean    15.48  p50    14.83 
+ || prefill: steps=42 toks/step=2648 nreq=23.8 sched=72 exec=123583|| decode: steps=609 toks/step=25 nreq=25.5 sched=3 exec=9356
+r2 t0 c64:    throughput: 30.58 req/s   1957.0 output tok/s   15053.5 total tok/s    TTFT     mean   389.01  p50   363.41  TPOT     mean    26.98  p50    27.35 
+ || prefill: steps=66 toks/step=3379 nreq=51.8 sched=89 exec=156803|| decode: steps=588 toks/step=50 nreq=50.2 sched=6 exec=11892
+r2 t0 out:  is is is is is is is is is is is is is is is is is is is is is is is is
+r2 t512 c8:    throughput: 13.38 req/s   856.5 output tok/s   6581.3 total tok/s    TTFT     mean   139.34  p50   154.80  TPOT     mean     7.28  p50     7.00 
+ || prefill: steps=18 toks/step=1569 nreq=4.1 sched=43 exec=71454|| decode: steps=630 toks/step=7 nreq=6.6 sched=1 exec=6544
+r2 t512 c16:    throughput: 17.34 req/s   1109.8 output tok/s   8538.3 total tok/s    TTFT     mean   224.06  p50   199.21  TPOT     mean    11.08  p50    11.44 
+ || prefill: steps=26 toks/step=2147 nreq=10.0 sched=59 exec=99604|| decode: steps=623 toks/step=13 nreq=12.9 sched=2 exec=8689
+r2 t512 c32:    throughput: 24.94 req/s   1596.4 output tok/s   12282.4 total tok/s    TTFT     mean   307.12  p50   352.52  TPOT     mean    15.46  p50    14.79 
+ || prefill: steps=42 toks/step=2649 nreq=23.8 sched=66 exec=123539|| decode: steps=609 toks/step=25 nreq=25.5 sched=2 exec=9341
+r2 t512 c64:    throughput: 30.64 req/s   1960.8 output tok/s   15086.8 total tok/s    TTFT     mean   388.61  p50   363.47  TPOT     mean    26.92  p50    27.25 
+ || prefill: steps=66 toks/step=3380 nreq=51.8 sched=86 exec=156687|| decode: steps=588 toks/step=50 nreq=50.2 sched=5 exec=11850
+r2 t512 out:  is is is is is is is is is is is is is is is is is is is is is is is is
+r2 t1024 c8:    throughput: 13.31 req/s   851.9 output tok/s   6553.9 total tok/s    TTFT     mean   128.59  p50   155.33  TPOT     mean     7.49  p50     7.14 
+ || prefill: steps=18 toks/step=1571 nreq=4.6 sched=42 exec=71833|| decode: steps=630 toks/step=7 nreq=6.6 sched=1 exec=6573
+r2 t1024 c16:    throughput: 17.39 req/s   1112.9 output tok/s   8553.9 total tok/s    TTFT     mean   212.83  p50   214.60  TPOT     mean    11.21  p50    11.11 
+ || prefill: steps=26 toks/step=2145 nreq=10.4 sched=53 exec=98211|| decode: steps=623 toks/step=13 nreq=12.9 sched=1 exec=8716
+r2 t1024 c32:    throughput: 24.98 req/s   1598.8 output tok/s   12292.4 total tok/s    TTFT     mean   306.06  p50   351.33  TPOT     mean    15.44  p50    14.78 
+ || prefill: steps=42 toks/step=2647 nreq=23.8 sched=71 exec=123135|| decode: steps=609 toks/step=25 nreq=25.5 sched=2 exec=9344
+r2 t1024 c64:    throughput: 30.61 req/s   1959.1 output tok/s   15068.6 total tok/s    TTFT     mean   388.88  p50   363.42  TPOT     mean    26.95  p50    27.31 
+ || prefill: steps=66 toks/step=3379 nreq=51.8 sched=83 exec=156780|| decode: steps=588 toks/step=50 nreq=50.2 sched=5 exec=11867
+r2 t1024 out:  is is is is is is is is is is is is is is is is is is is is is is is is
+LPT_DONE
