@@ -1285,8 +1285,8 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - **dual_b33 定稿（两轮）**：`MOE_GEMM_DUAL=1` c1 5.20/5.20 → **5.13/5.13（-1.3%）**，c8 8.99/8.98 → **8.88/8.82（-1.5%）**，输出同。**默认开**（已进 stage36/layer.rs，b36 一并测）。
 - **D168 smemcap_nat（b31b 二进制，`FP8_GEMV_SMEM_KB=24` vs 默认 48，无 cache，10 条自然语言 chat + 2 条 raw 补全含 "The capital of France is"）：0/12 不同** ⇒ B31b 的门槛改动不改变输出；bN 里 A（b2330）→ B（b31b）raw 输出从 "Wait, I'm not sure…" 变 "is is is…" 不是门槛引起（两个二进制还差 pick_warps 8 warp：数值上同序，理论不该变）。未解；自然语言 10/10 同，先记为待查（下次用 envnat 直接比两个二进制：`BIN=` 两次）。
 
-## ★★★★ D169 2026-10-29 b36（远端 stage 名 b35；B = stage36：B33 修正 + B34① + B35 xstream + dual 默认开；A = `prev_b35` 二进制 = b33 源 + dual 默认开，无 xstream）：**A/B 完全同**（c1 5.20/5.20，c8 TPOT 9.12/9.13，吞吐 731/730；A2/B2 复现），门禁 concprobe 0/8 差
+## ★★★★ D169 2026-10-29 **b35**（master 末段实际跑的是 `b35.sh` = stage35：只换 executor.rs/layer.rs，即 **B35 xstream**；stage36 的 kernel（B33 修正 / B34① / dual 默认开）**没进树、没跑**，`tmp_b36_*` 不存在；A = `prev_b35` = 编译前 target = b33 二进制）：**A/B 完全同**（c1 5.20/5.20，c8 TPOT 9.12/9.13，吞吐 731/730；A2/B2 复现），门禁 concprobe 0/8 差
 - **B35 没起作用的原因（关键发现）**：B 服务日志 `runner step mix (cumulative) steps=1000 mixed=4 pair=4 prefill_only=16`——c8 bench 里 **混批步只有 4/1000**，prefill 几乎全是 **prefill-only 步（16 = 8 轮 × 2 chunk）**。bench c8×64 的 8 条请求同 prompt-len / 同 max-tokens，同步完成 → 下一批 8 条同时到 → scheduler 出纯 prefill 步，decode 行此时为空。`supports_pair` 只对混批生效，所以 c8 TPOT 一点没动。
 - 推论：D78 "c8 TPOT 多 3–4 ms 是 decode 步之间插队的 prefill" 在这个 bench 形态下**不成立**（decode 行在 prefill 时根本不存在，TPOT 口径 = (总时 − TTFT)/(out−1) 不含别人的 prefill）。**c8 比 c1 多的 ~4 ms 另有来源**，要用服务端 `/metrics` step_time 直方图 + 每步 wall 时间定性（D170）。
-- B33 修正 + B34① 在 c1 上也没体现（5.20 = 5.20）：launch 数再减没换来时间，说明 c1 已不是 launch-bound（或 B34① 的 norm+quant 融合 kernel 本身更慢抵消）。
+- c1 5.20 = b33 定稿数（dual 未默认开）。B35 对 c1 无影响符合预期。stage36 kernel 另起链 **b36**（含 B36 dual→pipe4<BM16>，`moe_pipe_parity` dual 用例 rows=22 覆盖新路径）。
 - binnat（b2330 vs b31b，自然语言 10 + raw 2，无 cache）：**0/12 差**，bN 里 raw "Wait, I'm not sure" → "is is is" 的差异不是二进制差异（两个二进制同输入同输出），是 bN 第一条 raw 请求前服务态（bench 之后 prefix cache / 批构成）的批不变性现象，归 D157 结案口径。
