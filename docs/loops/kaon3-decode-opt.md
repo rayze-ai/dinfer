@@ -1250,3 +1250,4 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - **fp8gemv_b2330 定稿（两轮，setsid 起的链完整跑完 → D157 判断成立）**：A（无 FP8_GEMV）c1 5.57/5.58、c8 9.37/9.37；B（FP8_GEMV=1）c1 **5.16/5.16**、c8 9.39/9.37。c1 -7.4%，c8 持平。**`FP8_GEMV` 应改默认开**（c1 稳定收益、c8 中性、输出同 — mlp_fp8 parity 已过）；c8 的收益等 B31b（M_TILE≥4 8 warp + 48 KB 门槛）。
 - **B33a 落地（commit）**：`rmsnorm_quant_fp8` 加 `mode`：mode 1 = `bf16(norm_mid(x·inv)·w)` 再 `×inv_scale → e4m3`，与 `rmsnorm_bf16_inplace + quant_fp8` 两步逐位（`norm_quant_fused_parity`）；`NORM_FUSE_QUANT` 默认开（旧"更差"记录是 compile 口径）；`forward_preq` 也走 fp8 gemv（否则 preq 退回 Lt 抵消收益）。-1 launch/层。stage33 已更新（含 B33c、FP8_GEMV 默认开）。
 - **B33 链计划**：b32 bN DONE → stage33 入树 → parity（moe_route_fused + norm_quant_fused + mlp_fp8）→ bN TAG=b33（A=b32 二进制）。
+- **D159 b31b 门禁过**：mlp_fp8 parity m=8/16 超差 0；gemv timing m=8：dense_down 18.5 → **10.3**、qkv 23.8 → **12.3**、o_proj 47.1 → **16.4**、gateup 43.0 → **8.2** us（8 warp）。bN b31b 跑中（两侧 FP8_GEMV=1，A=b2330）。
