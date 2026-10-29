@@ -9,9 +9,15 @@ c = sqlite3.connect(db)
 K = "CUPTI_ACTIVITY_KIND_KERNEL"
 cols = {r[1] for r in c.execute(f"pragma table_info({K})")}
 gcol = "graphId" if "graphId" in cols else None
-q = f"select k.start, k.end, s.value{', k.'+gcol if gcol else ''} from {K} k join StringIds s on k.shortName = s.id order by k.start"
+q = f"select k.start, k.end, s.value, k.streamId{', k.'+gcol if gcol else ''} from {K} k join StringIds s on k.shortName = s.id order by k.start"
 rows = c.execute(q).fetchall()
-eager = [(a, b, n) for a, b, n, *g in rows if not gcol or (g and g[0] in (0, None))]
+# --stream <id>：只看该流（E6 后 prefill 在副流；先用 --streams 列出各流 kernel 数）
+if "--streams" in sys.argv:
+    import collections as _c
+    cnt = _c.Counter(r[3] for r in rows); print("streams (id: kernels):", dict(cnt.most_common(8))); sys.exit(0)
+want = int(sys.argv[sys.argv.index("--stream") + 1]) if "--stream" in sys.argv else None
+rows = [r for r in rows if want is None or r[3] == want]
+eager = [(a, b, n) for a, b, n, _sid, *g in rows if not gcol or (g and g[0] in (0, None))]
 # 稳态：最后一次大 H2D 之后（权重加载）
 try:
     big = [r[0] for r in c.execute("select end from CUPTI_ACTIVITY_KIND_MEMCPY where bytes >= 8000000 and copyKind=1").fetchall()]
