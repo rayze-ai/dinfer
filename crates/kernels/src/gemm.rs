@@ -783,7 +783,10 @@ impl Gemm {
             return Ok(());
         }
         let d = self.make_descs_fp8(m, n, k, self.stream.ptr(a_scale), self.stream.ptr(w_scale))?;
-        let key = Key::fp8(m, n, k);
+        // B49（loop kaon3-decode-opt D212）：m ≥ 64 时按 m 的 2 的幂桶缓存（64/128/…/4096）——混批步的 m 每步都不同
+        // （2148 / 2646 / 3378…），逐 m 调优会让每个新形状都付 32 候选 × timing_iters 的代价；同桶内 algo 选择基本一致。
+        // m < 64（decode / 对拍）仍按精确 m（parity 口径不变）。
+        let key = Key::fp8(if m >= 64 { m.next_power_of_two() } else { m }, n, k);
         let cached = self.default_algos.lock().unwrap().get(&key).copied();
         let algo = match cached {
             Some(al) => al,
