@@ -71,33 +71,37 @@ __global__ void gate_kernel(const bf16* __restrict__ x, const bf16* __restrict__
   if (threadIdx.x == 0) logits[t * E + e] = acc;
 }
 
-// R1（loop kaon3-decode-opt D171）：router 小 M bf16 gemv。logits_bf16[t,e] = bf16(Σ_d f32(x[t,d])·f32(w[e,d]))。
+// R1 v2（loop kaon3-decode-opt D174）：router 小 M bf16 gemv。logits_bf16[t,e] = bf16(Σ_d f32(x[t,d])·f32(w[e,d]))。
 // 为什么：M=8/N=128/K=2816 这个形状 cuBLAS 选 cutlass wmma 16x16（grid 8 个 CTA）16.7 us，M=1 的 gemvx 3.4 us；
-// 权重只有 720 KB，带宽下限 < 1 us，是 launch/并行度问题不是带宽问题。
-// 一个 warp 一个专家行：lane 按 8 个 bf16（16 B）跨步读 w 与 M 行 x（x 共 ≤ 90 KB，L1/L2 命中），fp32 累加，
-// xor 树归约——累加序固定（与 M、grid 无关）→ 批不变。M_TILE ∈ {1,2,4,8,16}，H % 8 == 0。
+// 权重只有 720 KB，带宽下限 < 1 us，是并行度 / 延迟问题。v1（warp 一行、grid 32 块）latency-bound 反而更慢（D174）。
+// v2：一个 block 一个专家行，8 warp 在 K 上切片（warp w 取 chunk w, w+8, …），lane 按 16 B 跨步读 w 与 M 行 x，
+// fp32 累加；warp 内 xor 树归约 → smem[8][M] → warp 0 按固定顺序求和。累加序只依赖 K 与模板 M_TILE，不依赖 M/grid → 批不变。
+// M_TILE ∈ {1,2,4,8,16}，H % 8 == 0。
+constexpr int kRouterWarps = 8;
 template <int M_TILE>
-__global__ void __launch_bounds__(128) router_gemv_kernel(const bf16* __restrict__ x, const bf16* __restrict__ w,
-                                                          bf16* __restrict__ out, int M, int E, int H) {
+__global__ void __launch_bounds__(kRouterWarps * 32) router_gemv_kernel(const bf16* __restrict__ x, const bf16* __restrict__ w,
+                                                                        bf16* __restrict__ out, int M, int E, int H) {
+  __shared__ float part[kRouterWarps][M_TILE];
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-  const int e = blockIdx.x * (blockDim.x >> 5) + warp;
-  if (e >= E) return;
+  const int e = blockIdx.x;
   const uint4* wr = reinterpret_cast<const uint4*>(w + (int64_t)e * H);
   const int nchunk = H >> 3;
   float acc[M_TILE];
 #pragma unroll
   for (int t = 0; t < M_TILE; ++t) acc[t] = 0.f;
-#pragma unroll 4
-  for (int c = lane; c < nchunk; c += 32) {
+  for (int c = warp * 32 + lane; c < nchunk; c += kRouterWarps * 32) {
     const uint4 wv = __ldg(wr + c);
     const bf16* w8 = reinterpret_cast<const bf16*>(&wv);
+    float wf[8];
+#pragma unroll
+    for (int i = 0; i < 8; ++i) wf[i] = to_f32(w8[i]);
 #pragma unroll
     for (int t = 0; t < M_TILE; ++t) {
       if (t < M) {
         const uint4 xv = __ldg(reinterpret_cast<const uint4*>(x + (int64_t)t * H) + c);
         const bf16* x8 = reinterpret_cast<const bf16*>(&xv);
 #pragma unroll
-        for (int i = 0; i < 8; ++i) acc[t] = fmaf(to_f32(x8[i]), to_f32(w8[i]), acc[t]);
+        for (int i = 0; i < 8; ++i) acc[t] = fmaf(to_f32(x8[i]), wf[i], acc[t]);
       }
     }
   }
@@ -105,11 +109,13 @@ __global__ void __launch_bounds__(128) router_gemv_kernel(const bf16* __restrict
   for (int t = 0; t < M_TILE; ++t) {
 #pragma unroll
     for (int o = 16; o > 0; o >>= 1) acc[t] += __shfl_xor_sync(0xffffffffu, acc[t], o);
+    if (lane == 0) part[warp][t] = acc[t];
   }
-  if (lane < M_TILE && lane < M) {
+  __syncthreads();
+  if (warp == 0 && lane < M_TILE && lane < M) {
     float v = 0.f;
 #pragma unroll
-    for (int t = 0; t < M_TILE; ++t) if (t == lane) v = acc[t];
+    for (int k = 0; k < kRouterWarps; ++k) v += part[k][lane];
     out[(int64_t)lane * E + e] = to_bf16(v);
   }
 }
@@ -228,8 +234,8 @@ extern "C" int router_gemv_bf16(const void* x, const void* w, void* out, int64_t
                                 int64_t hidden, cudaStream_t stream) {
   if (tokens <= 0) return 0;
   if (tokens > 16 || hidden % 8 != 0 || num_experts <= 0) return err(cudaErrorInvalidValue);
-  const int warps = 4;
-  const dim3 grid((unsigned)((num_experts + warps - 1) / warps));
+  const int warps = kRouterWarps;
+  const dim3 grid((unsigned)num_experts);
   const bf16* px = static_cast<const bf16*>(x);
   const bf16* pw = static_cast<const bf16*>(w);
   bf16* po = static_cast<bf16*>(out);
