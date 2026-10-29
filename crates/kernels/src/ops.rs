@@ -2169,6 +2169,39 @@ pub fn moe_row2expert(
     check(unsafe { ffi::moe_row2expert(po, pr, num_experts as i64, stream.raw() as _) }, "moe_row2expert")
 }
 
+/// B34①（loop kaon3-decode-opt D160）：`pre_ff_norm_2`（无残差、带权重）+ grouped NVFP4 量化一次 launch：
+/// `aq[r] = quant16(bf16(norm_mid(x[sorted_tok[r]]·inv)·w))`，与 `rmsnorm_bf16(x→h2)` + `moe_grouped_quant(h2)` 逐位同
+/// （`moe_norm_quant_fused_parity`）。K % 64 == 0 且 K ≤ 4096。
+#[allow(clippy::too_many_arguments)]
+pub fn moe_rmsnorm_grouped_quant(
+    stream: &Stream,
+    x: &CudaSlice<bf16>,
+    w: &CudaSlice<bf16>,
+    row2e: &CudaSlice<i32>,
+    sorted_tok: Option<&CudaSlice<i32>>,
+    agscale: &CudaSlice<f32>,
+    aq: &mut CudaSlice<u8>,
+    a_s: &mut CudaSlice<u8>,
+    rows: usize,
+    k: usize,
+    eps: f32,
+    exact_rq: bool,
+) -> Result<()> {
+    ensure!(k % 64 == 0 && k <= 4096, "moe_rmsnorm_grouped_quant: k {k}");
+    ensure!(w.len() == k && (sorted_tok.is_some() || x.len() >= rows * k) && aq.len() >= rows * (k / 2) && a_s.len() >= rows * (k / 16) && row2e.len() >= rows, "moe_rmsnorm_grouped_quant: capacity");
+    if let Some(t) = sorted_tok { ensure!(t.len() >= rows, "moe_rmsnorm_grouped_quant: sorted_tok"); }
+    let pst = sorted_tok.map_or(std::ptr::null(), |t| stream.ptr(t) as *const i32);
+    // SAFETY: 容量已校验；row2e[r] < E、sorted_tok[r] < tokens 由路由 kernel 保证。
+    check(
+        unsafe {
+            ffi::moe_rmsnorm_grouped_quant(stream.ptr(x) as *const c_void, stream.ptr(w) as *const c_void, stream.ptr(row2e) as *const i32, pst,
+                stream.ptr(agscale) as *const f32, stream.ptr_mut(aq) as *mut c_void, stream.ptr_mut(a_s) as *mut c_void, rows as i64, k as i64,
+                eps, norm_mode(), exact_rq as i32, stream.raw() as ffi::cudaStream_t)
+        },
+        "moe_rmsnorm_grouped_quant",
+    )
+}
+
 /// B3 grouped A 预量化：a[R,K] bf16 → aq[R,K/2] + a_s[R,K/16]，每行 gs = agscale[row2e[r]]（device）。
 #[allow(clippy::too_many_arguments)]
 pub fn moe_grouped_quant(

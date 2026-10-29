@@ -1,4 +1,15 @@
-// MoE device-grouped NVFP4 GEMM（sm_120 专用，B3：去 host 路由 + 去 D2H）。
+//// B34①：见 rmsnorm_grouped_quant_kernel。K % 64 == 0 且 K ≤ 4096（vec<256,2> 口径）。
+extern "C" int moe_rmsnorm_grouped_quant(const void* x, const void* w, const int32_t* row2e, const int32_t* sorted_tok,
+                                         const float* agscale, void* aq, void* a_s, int64_t rows, int64_t k, float eps,
+                                         int mode, int exact_rq, cudaStream_t stream) {
+  if (rows <= 0) return 0;
+  if (k <= 0 || k % 64 != 0 || k > 4096) return static_cast<int>(cudaErrorInvalidValue);
+  rmsnorm_grouped_quant_kernel<<<(unsigned)rows, 256, 0, stream>>>(static_cast<const bf16*>(x), static_cast<const bf16*>(w),
+                                                                   row2e, sorted_tok, agscale, static_cast<uint8_t*>(aq),
+                                                                   static_cast<uint8_t*>(a_s), (int)rows, (int)k, eps, mode, exact_rq);
+  return gerr();
+}
+ MoE device-grouped NVFP4 GEMM（sm_120 专用，B3：去 host 路由 + 去 D2H）。
 // 现状（host 版 models/kaon3/src/layer.rs moe_branch）：D2H 读 offsets → host 循环逐专家 launch gate/up/down。
 // 本文件：offsets 留 device，一个 kernel（grid.z=专家）按 device 端 ranges 跑变长专家的 grouped GEMM，
 //   launch 次数编译期固定（cudagraph 前置，B4）。
@@ -13,6 +24,7 @@
 #include <cuda_fp8.h>
 
 #include "common.cuh"
+#include "rmsnorm_core.cuh"
 
 using namespace dinfer;
 
@@ -138,6 +150,64 @@ __global__ void grouped_quant_kernel(const bf16* __restrict__ A, const int32_t* 
   quant16(A + (size_t)src_r * K + bi * 16, true, &pk, &sb8, gs, exact_rq);
   *reinterpret_cast<uint2*>(P + (size_t)r * (K / 2) + bi * 8) = pk;
   S[(size_t)r * nb + bi] = sb8;
+}
+
+// B34①（loop kaon3-decode-opt D160）：pre_ff_norm_2 + grouped_quant 一次 launch。一 block 一行 r（源 token = sorted_tok[r]），
+// 256 线程：① 复刻 `rmsnorm_vec_kernel<256,2>`（hidden ≤ 4096）的平方和（线程 t 持向量 t、t+256；gs 同序；`rms_ss_triton<256,2>`）
+// 与 `rms_inv(mode)`；② 每线程若干 16 元素块：y = bf16(norm_mid(x·inv)·w)（与 vec kernel 逐元素同式）→ `quant16`（与
+// grouped_quant 同）。结果与 `rmsnorm_bf16 → moe_grouped_quant` 两步逐位同（`moe_norm_quant_fused_parity`）。省 h2 一写一读。
+__global__ void __launch_bounds__(256) rmsnorm_grouped_quant_kernel(const bf16* __restrict__ X, const bf16* __restrict__ W,
+                                                                   const int32_t* __restrict__ row2e,
+                                                                   const int32_t* __restrict__ sorted_tok,
+                                                                   const float* __restrict__ agscale, uint8_t* __restrict__ P,
+                                                                   uint8_t* __restrict__ S, int R, int K, float eps, int mode,
+                                                                   int exact_rq) {
+  constexpr int BLOCK = 256, VPT = 2;
+  const int r = blockIdx.x;
+  if (r >= R) return;
+  const int src_r = sorted_tok ? sorted_tok[r] : r;
+  const bf16* x = X + (size_t)src_r * K;
+  const uint4* xr = reinterpret_cast<const uint4*>(x);
+  const int nvec = K / 8;
+  float gs[VPT];
+#pragma unroll
+  for (int j = 0; j < VPT; ++j) {
+    const int i = threadIdx.x + j * BLOCK;
+    gs[j] = 0.f;
+    if (i < nvec) {
+      const uint4 xa = xr[i];
+      const __nv_bfloat162* xp = reinterpret_cast<const __nv_bfloat162*>(&xa);
+      float v[8];
+#pragma unroll
+      for (int c = 0; c < 4; ++c) { const float2 f = __bfloat1622float2(xp[c]); v[2 * c] = f.x; v[2 * c + 1] = f.y; }
+      float acc = __fmul_rn(v[1], v[1]);
+      acc = __fmaf_rn(v[0], v[0], acc);
+#pragma unroll
+      for (int e = 2; e < 8; ++e) acc = __fmaf_rn(v[e], v[e], acc);
+      gs[j] = acc;
+    }
+  }
+  const float inv = rms_inv(rms_ss_triton<BLOCK, VPT>(gs, nvec), K, eps, mode);
+  const float gsc = agscale[row2e[r]];
+  const int nb = K / 16;
+  for (int bi = threadIdx.x; bi < nb; bi += BLOCK) {
+    bf16 y[16];
+    const bf16* xs = x + bi * 16;
+    const bf16* ws = W + bi * 16;
+#pragma unroll
+    for (int e = 0; e < 16; e += 2) {
+      const __nv_bfloat162 xx = *reinterpret_cast<const __nv_bfloat162*>(xs + e);
+      const __nv_bfloat162 ww = *reinterpret_cast<const __nv_bfloat162*>(ws + e);
+      const float2 fx = __bfloat1622float2(xx), fw = __bfloat1622float2(ww);
+      const __nv_bfloat162 o = __floats2bfloat162_rn(norm_mid(fx.x * inv, mode) * fw.x, norm_mid(fx.y * inv, mode) * fw.y);
+      y[e] = o.x; y[e + 1] = o.y;
+    }
+    uint2 pk;
+    uint8_t sb8;
+    quant16(y, true, &pk, &sb8, gsc, exact_rq);
+    *reinterpret_cast<uint2*>(P + (size_t)r * (K / 2) + bi * 8) = pk;
+    S[(size_t)r * nb + bi] = sb8;
+  }
 }
 
 // grouped prequant GEMM：A 已量化 [R,K/2]+块缩放 [R,K/16]（swz=0）。

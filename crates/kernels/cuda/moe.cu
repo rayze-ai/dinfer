@@ -332,17 +332,6 @@ __device__ __forceinline__ void route_softmax_row_warp(const void* __restrict__ 
     w[lane] = __fmul_rn(__fmul_rn(rawk, inv), sc);
   }
 }
-// 单 lane 版（原 route_softmax_row）对 bf16 logits 的包装：行先 cast 进寄存器数组再走原函数（E ≤ MAX_E）。
-__device__ __forceinline__ void route_softmax_row_any(const void* __restrict__ logits, int lg_bf16, int t,
-                                                      const int32_t* __restrict__ ids, const void* __restrict__ pes,
-                                                      float* __restrict__ w, int E, int K, int exact_rcp) {
-  if (!lg_bf16) { route_softmax_row(static_cast<const float*>(logits) + (size_t)t * E, ids, pes, w, E, K, exact_rcp); return; }
-  // bf16：逐元素 cast 的值与 bf16_to_f32_n 相同；route_softmax_row 只按下标读 lg[e]，用局部数组承接（E ≤ 1024 → 4 KB 局部，仅 lane 0）
-  float row[MAX_E];
-  const bf16* src = static_cast<const bf16*>(logits) + (size_t)t * E;
-  for (int e = 0; e < E; ++e) row[e] = to_f32(src[e]);
-  route_softmax_row(row, ids, pes, w, E, K, exact_rcp);
-}
 __global__ void route_softmax_kernel(const float* __restrict__ logits, const int32_t* __restrict__ topk_ids,
                                      const void* __restrict__ per_expert_scale, float* __restrict__ topk_w, int E,
                                      int K, int exact_rcp) {
@@ -405,10 +394,11 @@ __global__ void __launch_bounds__(256) route_bucket_small_kernel(
     int exact_rcp, int lg_bf16, int warp_softmax) {
   extern __shared__ __align__(16) uint8_t smem_raw[];
   float* s_val = reinterpret_cast<float*>(smem_raw);           // [tokens][E] 工作副本（top-k 时置 -inf）
-  int32_t* s_cnt = reinterpret_cast<int32_t*>(s_val + (size_t)tokens * E);  // [E]
+  float* s_raw = s_val + (size_t)tokens * E;                    // [tokens][E] 原始 logits（softmax 用；D166）
+  int32_t* s_cnt = reinterpret_cast<int32_t*>(s_raw + (size_t)tokens * E);  // [E]
   int32_t* s_cur = s_cnt + E;                                   // [E]
   const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, nwarp = blockDim.x >> 5;
-  for (int i = tid; i < tokens * E; i += blockDim.x) s_val[i] = route_lg(logits, i, lg_bf16);  // B33c：bf16 logits 直接读
+  for (int i = tid; i < tokens * E; i += blockDim.x) { const float v = route_lg(logits, i, lg_bf16); s_val[i] = v; s_raw[i] = v; }  // B33c：bf16 logits 直接读
   for (int e = tid; e < E; e += blockDim.x) s_cnt[e] = 0;
   __syncthreads();
   // B19（D73）：每 token 一 warp。top-k 第 k 轮：lane 各扫 E/32 个专家取局部 (max, 最小下标)，warp xor 归约
@@ -438,12 +428,12 @@ __global__ void __launch_bounds__(256) route_bucket_small_kernel(
     }
     __syncwarp();
     // B32（D161）：warp 版 softmax 实测 c1 +3.5% / c8 +2.7%（Z 串行 shfl 链 + ex[32] 寄存器压力），默认关；`ROUTE_SOFTMAX_WARP=1` 开。
+    // D166：softmax 读 smem 里已 cast 的整行副本 s_raw（与 s_val 同源、未被 top-k 置 -inf），bf16/f32 入口一致，无 local 数组。
+    const float* lgrow = s_raw + (size_t)t * E;
     if (warp_softmax) {
-      route_softmax_row_warp(lg_bf16 ? static_cast<const void*>(static_cast<const bf16*>(logits) + (size_t)t * E)
-                                     : static_cast<const void*>(static_cast<const float*>(logits) + (size_t)t * E),
-                             ids, per_expert_scale, topk_w + (size_t)t * K, E, K, exact_rcp, lane, lg_bf16);
+      route_softmax_row_warp(lgrow, ids, per_expert_scale, topk_w + (size_t)t * K, E, K, exact_rcp, lane, 0);
     } else if (lane == 0) {
-      route_softmax_row_any(logits, lg_bf16, t, ids, per_expert_scale, topk_w + (size_t)t * K, E, K, exact_rcp);
+      route_softmax_row(lgrow, ids, per_expert_scale, topk_w + (size_t)t * K, E, K, exact_rcp);
     }
   }
   __syncthreads();
@@ -502,7 +492,7 @@ extern "C" int moe_route_bucket_small(const void* logits, int logits_bf16, const
     const char* e = getenv("ROUTER_RCP_EXACT");
     return (e && e[0] == '1') ? 1 : 0;
   }();
-  const size_t smem = (size_t)tokens * num_experts * sizeof(float) + 2 * (size_t)num_experts * sizeof(int32_t);
+  const size_t smem = 2 * (size_t)tokens * num_experts * sizeof(float) + 2 * (size_t)num_experts * sizeof(int32_t);  // D166：s_val + s_raw
   if (smem > 48 * 1024) {
     static size_t attr = 0;
     if (smem > attr) {
