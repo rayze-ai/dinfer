@@ -1562,3 +1562,6 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - 只有 gate‖up 走了 p64（down K=704 % 128 ≠ 0）；B48b 加 `p64<64,4>` 让 down 也走（commit 已入，b51 链验）。
 - 现状对 vLLM：c16 **1.53×** / c32 1.48× / c64 1.56×；吞吐 77% / 73% / 68%。
 - b51 链 = B48b 门禁 + ABAB；b52 = `FP8_LT_TUNE=0/1`（B49，m ≥ 64 自调优 + 2 的幂桶缓存）。
+
+## D213 2026-10-29 b51 微基准（B48b：p64 加 `<64,4>` 实例给 down）：P2148 gate‖up 723 → 550（同 b50），**down 495 → 414（−16%）**，CHECKSUM 全同 GATE=0；二进制 md5 0c18bcb8；ABAB 跑中，接着 b52 FP8_LT_TUNE。
+- down 还是 414 us = 68 GFLOP → 164 TFLOPS；gate‖up 550 → 248 TFLOPS。**B48c 候选：BN=128**（每 warp 16×64 = 8 个 n8 片段，A 片段复用 8 次，smem 读/mma 再减 ~40%；smem 3 stage ≈ 44 KB → 2 CTA/SM）。
