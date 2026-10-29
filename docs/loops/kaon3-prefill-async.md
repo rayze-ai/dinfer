@@ -83,3 +83,9 @@ E1 …（接 kaon3-decode-opt 的 D 编号体系，本 loop 用 E）
 - **收益没出来，判负（默认留关）**。解释（E2 预登记 ①）：prefill 副流（2148 tok 的 p64 GEMM，grid 5052 CTA）把 SM 占满，decode 图在它旁边跑不动——decode 行不再"等 prefill 完"，但"和 prefill 抢 SM"结果一样慢，还多付两流同步 + 收割晚一步。TTFT c8–c32 降是因为 prefill 不再排在 decode 图后面；c64 TTFT 升是 late 只允许一个在飞、第二波 prefill 要等。
 - **下一步只有一条路**：让 prefill 让 SM —— (a) prefill 流低优先级 + decode 流高优先级（硬件抢占粒度是 CTA 边界，p64 一个 CTA 几十 us，decode 图 ~800 个小 kernel 应能插进去）；(b) 不够再限 prefill grid（分块 launch）。cudarc 0.18 没暴露 `cuStreamCreateWithPriority`，在 kernels crate 用 sys 直接建流（`Stream::with_priority`）。
 - CSV：b62 记负结果（c16 +1.3% / c32 +4%）。
+
+## E4 2026-10-29 流优先级（E3 的唯一出路）
+- kernels crate：`Device::new_stream_with_priority(prio)`——cudarc 0.18 没暴露 `cuStreamCreateWithPriority`，`CudaStream` 字段 `pub(crate)`；用 `sys::cuStreamCreateWithPriority(NON_BLOCKING, prio)` 建流，再按 `CudaStream { cu_stream, ctx }` 的内存布局 `transmute` 成 `Arc<CudaStream>`（`#[repr(Rust)]` 两字段，与 cudarc 同版本锁定 0.18.2，加 `size_of` 断言；Drop 走 cudarc 自己的 destroy，正确）。`Device::stream_priority_range()` 给 (least, greatest)。
+- kaon3：`MAIN_STREAM_PRIO=1` 时主流（decode 图）用 greatest（数值最小 = 最高）优先级建，alt（prefill）用默认（最低）。只在 kaon3 executor 构造处生效，其它模型不变。
+- 原理：CUDA 流优先级在 CTA 边界抢占——高优先级流的 pending CTA 先于低优先级流的 pending CTA 被调度。p64 一个 CTA 几十 us、5052 个 CTA 排队 → decode 图的 ~800 小 kernel 应能插进去。
+- 链 b63：A = `PREFILL_ASYNC=1 XSTREAM=1`（E1 无优先级，= b62 B）；B = `PREFILL_ASYNC=1 XSTREAM=1 MAIN_STREAM_PRIO=1`。看 B 的纯 decode 步 exec 在 prefill 期间是否接近无 prefill 时（HOST_TIME 的 decode 步 p90 从 12.4 降），TPOT 是否真降。
