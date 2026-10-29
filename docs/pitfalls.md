@@ -1309,3 +1309,7 @@
 - 现象：`envab_cN.sh` c16 → c32 → c64 同 seed 7，c32 的 TTFT p50 从 cN 表的 345 ms 变 45 ms，TPOT 也低 30%。
 - 根因：bench 的 prompt 由 (seed, idx) 决定性生成，c32 的 128 条里前 64 条与 c16 完全同文；同服务连跑 = cache 态（同 [[dinfer-bench-same-seed-prefix-cache]]）。
 - 解法：每档 `--seed $((7 + c))`（已改）；对照表只认 `cN.sh`（每档每轮独立 seed）口径；同 seed 的 A/B 仍可看方向。
+
+## 2026-10-29 "等 GPU 空"的门用 `pgrep -x dinfer | wc -l` 判，41 个 `<defunct>` 僵尸让它永远非 0，链卡了 20 分钟
+- 现象：b54 结束后 stepA5 没起；`pgrep -x dinfer` = 41 但 nvidia-smi 1 MiB、`ps` 全是 `Z`（容器里 `docker exec -d` 起的 serve 被 KILL 后无人 wait）。
+- 解法：GPU 空闲判据用 `nvidia-smi --query-gpu=memory.used -i 0` < 500 MiB，或 `ps -eo stat,args | grep -w dinfer | grep -vc Z`；`pgrep` 只用来找要 kill 的活进程。链脚本模板已改。
