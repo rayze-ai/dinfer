@@ -26,6 +26,9 @@
 - 性能改动过**两卡门禁**（4090 sm89 + B300 sm_103，任一卡退化 > 3% 不合入）；kernel 内不写卡型 / 模型调优数值（`ArchProfile` + 启动自调优，环境变量只覆盖）。
 - 证据：`.claude/CLAUDE.md` 硬性规则；`scripts/verify/bench_compare.sh`。
 
+- **并发 TPOT 差异先按批形状分组**（2026-10-29 kaon3 D170/D171）：bench 的 c8 TPOT 可能全部来自 M=8 的 decode 步本身（不是别人的 prefill 插队）。`HOST_TIME=1` 把每步按 (tokens,nreq) 分组看 p50/cadence；nsys 用 `nsys_kern.py --all` 看每个 graphId（不同桶 = 不同图），抓取请求数 ≥ 3×并发。只看"最常见图组"会把 M=1 尾段当成 c8。
+- **cuBLAS 对小 M 形状会挑错 kernel**：M=1 走 gemvx 3.4 us，M=3–8 同形状走 cutlass wmma 16x16 grid=8 CTA 16.7 us；权重 720 KB 的 GEMM 应自写 gemv（warp 一行、固定归约序 → 批不变）。
+
 ## 6. 常见误读清单
 | 现象 | 错误结论 | 真因 | 证据 |
 |---|---|---|---|
