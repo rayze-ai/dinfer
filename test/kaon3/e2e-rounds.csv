@@ -125,3 +125,9 @@ b2330,2026-10-29,"B23 attention 前段五合一 + B30a 层尾三合一 + B30b ro
 b2330,2026-10-29,"B23 attention 前段五合一 + B30a 层尾三合一 + B30b router 预处理三合一(-8 launch/层, 全部逐位): c1 TPOT 5.99→5.57 -7%, c8 9.82→9.37 -6.8%, c8 吞吐 673→703; bN 口径不带 FP8_GEMV",c8,out_tok_per_s,703.200,956.000,0.736,,higher,main,5090,vllm,dinfer,kaon3
 b2330,2026-10-29,"B23 attention 前段五合一 + B30a 层尾三合一 + B30b router 预处理三合一(-8 launch/层, 全部逐位): c1 TPOT 5.99→5.57 -7%, c8 9.82→9.37 -6.8%, c8 吞吐 673→703; bN 口径不带 FP8_GEMV",c8,ttft_p50_ms,151.520,146.400,1.035,,lower,main,5090,vllm,dinfer,kaon3
 b2330,2026-10-29,"B23 attention 前段五合一 + B30a 层尾三合一 + B30b router 预处理三合一(-8 launch/层, 全部逐位): c1 TPOT 5.99→5.57 -7%, c8 9.82→9.37 -6.8%, c8 吞吐 673→703; bN 口径不带 FP8_GEMV",c8,tpot_p50_ms,9.370,6.240,1.502,,lower,main,5090,vllm,dinfer,kaon3
+b2330g,2026-10-29,"b2330 + FP8_GEMV=1(改默认开): c1 TPOT 5.57→5.16 -7.4%(vLLM 4.69 的 1.10×), c8 持平 9.37",c1,out_tok_per_s,181.600,200.000,0.908,,higher,main,5090,vllm,dinfer,kaon3
+b2330g,2026-10-29,"b2330 + FP8_GEMV=1(改默认开): c1 TPOT 5.57→5.16 -7.4%(vLLM 4.69 的 1.10×), c8 持平 9.37",c1,ttft_p50_ms,27.260,25.000,1.090,,lower,main,5090,vllm,dinfer,kaon3
+b2330g,2026-10-29,"b2330 + FP8_GEMV=1(改默认开): c1 TPOT 5.57→5.16 -7.4%(vLLM 4.69 的 1.10×), c8 持平 9.37",c1,tpot_p50_ms,5.160,4.690,1.100,,lower,main,5090,vllm,dinfer,kaon3
+b2330g,2026-10-29,"b2330 + FP8_GEMV=1(改默认开): c1 TPOT 5.57→5.16 -7.4%(vLLM 4.69 的 1.10×), c8 持平 9.37",c8,out_tok_per_s,703.300,956.000,0.736,,higher,main,5090,vllm,dinfer,kaon3
+b2330g,2026-10-29,"b2330 + FP8_GEMV=1(改默认开): c1 TPOT 5.57→5.16 -7.4%(vLLM 4.69 的 1.10×), c8 持平 9.37",c8,ttft_p50_ms,150.770,146.400,1.030,,lower,main,5090,vllm,dinfer,kaon3
+b2330g,2026-10-29,"b2330 + FP8_GEMV=1(改默认开): c1 TPOT 5.57→5.16 -7.4%(vLLM 4.69 的 1.10×), c8 持平 9.37",c8,tpot_p50_ms,9.390,6.240,1.505,,lower,main,5090,vllm,dinfer,kaon3
