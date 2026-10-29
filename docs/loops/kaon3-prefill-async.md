@@ -119,3 +119,4 @@ E1 …（接 kaon3-decode-opt 的 D 编号体系，本 loop 用 E）
 - 默认：`PREFILL_ASYNC=1`、kaon3 `MAIN_STREAM_PRIO=1`、`XSTREAM=1`（late 需要 AltSet）；各自 `=0` 回退。E7 旋钮 `PREFILL_STREAM_PRIO=<int>` 已加（prefill 副流中间优先级，默认不设 = least），用于 TTFT 越线时缩差。
 - 现状对 vLLM（估）：c16 8.93 / 7.13 = **1.25×**、c32 11.87 / 9.23 = **1.29×**、c64 18.47 / 15.45 = **1.20×**；用 stepA7（3 轮 c1–64，新默认）复核并核 TTFT。
 - CSV b63。
+- **E6 对上一波的影响（用户问）**：只动 TTFT——九刀后 TTFT 低于 vLLM 16–37%，E4 回吐一部分（c8 95 → 106、c32 192 → 228、c64 203 → 223），c32 对 vLLM 231 只剩 3 ms 余量；c1–c4 无混批步、不触发，不变；纯 decode kernel / 九刀 GEMM 改动全保留；三个 env `=0` 可整体回到上一波。stepA7 核全档 TTFT；越线则 E7 `PREFILL_STREAM_PRIO=-2`。
