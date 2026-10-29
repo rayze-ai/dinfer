@@ -1228,3 +1228,7 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 | gate/up 一半 2112×2816 | 6.16（3.32） | 966 | **43.0** | 138 |
 - **m=1 已在带宽下限 0.8–1.0×**（nsys 的 10.7 us 是 nsys 态膨胀，D75 教训再犯一次：小 kernel 的 nsys 时长不能当真）。c1 的 fp8 gemv 没有 0.65 ms 可省，B31 对 c1 **作废**。
 - **m=8 慢 4.5–7.6×**：M_TILE=8 时 smem 45 KB/块、每 warp 8 行 FMA 串行、occupancy 掉到 1–2 block/SM。这正是 D62 加 24 KB 门槛的原因——所以 c8 的 dense/qkv 实际走哪条？nsys c8 显示 `gemv_kernel<1>` 84/步与 c1 同 → **c8 里 dense_decode_gemv 可能按行拆成 m=1 调用**（或模板实参被 nsys 截断）。要核 `dense_decode_gemv` / `launch_gemv` 对 m=8 的分派；若 c8 真走 m=8 慢路径，修它是 c8 TPOT 的大刀（85 次 × (25−6) us ≈ 1.6 ms/步）。
+
+## ★★★★★ D154 2026-10-29 b2330 首批 B（B23 + B30a + B30b，bN 口径不带 FP8_GEMV）：c1 TPOT 5.98 → **5.57（-6.9%）**，吞吐 158 → 169；c8 TPOT 10.05 → **9.37（-6.8%）**，吞吐 678 → 703，c8 TTFT 133 → 151（A 侧 133 是排队态噢动，正常 ~155）；英文/中文输出与 A 逐字同
+- -8 launch/层 = -240 launch/步，实测 -0.41 ms/步 ≈ 每 launch 1.7 us（含 kernel 自身 + 间隙），与 D148 估的 1.25 us 间隙 + 小 kernel 时长吻合。**launch 数路线验证成立**：剩余 ~800 launch 还有 ~1 ms 可挖。
+- 注意口径：bN 的 A/B 都没带 `FP8_GEMV=1`；之前 c1 5.57 是带它的数。B23+B30 叠加 FP8_GEMV 预计 ~5.2，等 A2/B2 后用 envab 补一组。
