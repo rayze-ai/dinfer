@@ -1,0 +1,27 @@
+02:48:33
+BUILD EXIT=0
+== cfg: default
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+MOE_GEMM_TIMING M=1 active=8 rows=8 gate‖up dual:        12.33 us    1447 GB/s  (DRAM 下限 9.97 us @1.79TB/s)
+MOE_GEMM_TIMING M=1 active=8 rows=8 gate‖up 2×grouped:   16.44 us    1086 GB/s
+MOE_GEMM_TIMING M=1 active=8 rows=8 down grouped:         8.23 us    1084 GB/s  (DRAM 下限 4.98 us)
+MOE_GEMM_TIMING M=1 active=8 rows=8 B7 gateup_act:       74.50 us     239 GB/s
+MOE_GEMM_TIMING M=1 active=8 rows=8 B7 down gemv:        36.90 us     242 GB/s
+MOE_GEMM_TIMING M=8 active=28 rows=64 gate‖up dual:        20.53 us    3042 GB/s  (DRAM 下限 34.89 us @1.79TB/s)
+MOE_GEMM_TIMING M=8 active=28 rows=64 gate‖up 2×grouped:   24.60 us    2538 GB/s
+MOE_GEMM_TIMING M=8 active=28 rows=64 down grouped:        16.42 us    1902 GB/s  (DRAM 下限 17.44 us)
+MOE_GEMM_TIMING M=8 active=28 rows=64 B7 gateup_act:      227.19 us     275 GB/s
+MOE_GEMM_TIMING M=8 active=28 rows=64 B7 down gemv:        95.09 us     328 GB/s
+== cfg: MOE_GEMM_BN=32
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+MOE_GEMM_TIMING M=1 active=8 rows=8 gate‖up dual:        12.33 us    1447 GB/s  (DRAM 下限 9.97 us @1.79TB/s)
+MOE_GEMM_TIMING M=1 active=8 rows=8 gate‖up 2×grouped:   16.44 us    1086 GB/s
+MOE_GEMM_TIMING M=1 active=8 rows=8 down grouped:        10.28 us     868 GB/s  (DRAM 下限 4.98 us)
+MOE_GEMM_TIMING M=1 active=8 rows=8 B7 gateup_act:       74.51 us     239 GB/s
+MOE_GEMM_TIMING M=1 active=8 rows=8 B7 down gemv:        36.89 us     242 GB/s
+MOE_GEMM_TIMING M=8 active=28 rows=64 gate‖up dual:        20.55 us    3039 GB/s  (DRAM 下限 34.89 us @1.79TB/s)
+MOE_GEMM_TIMING M=8 active=28 rows=64 gate‖up 2×grouped:   24.61 us    2537 GB/s
+MOE_GEMM_TIMING M=8 active=28 rows=64 down grouped:        16.44 us    1900 GB/s  (DRAM 下限 17.44 us)
+MOE_GEMM_TIMING M=8 active=28 rows=64 B7 gateup_act:      227.28 us     275 GB/s
+MOE_GEMM_TIMING M=8 active=28 rows=64 B7 down gemv:        95.12 us     328 GB/s
+MOEBENCH_DONE

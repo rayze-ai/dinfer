@@ -78,11 +78,11 @@ __device__ __forceinline__ void load_a(const uint8_t* __restrict__ a_q, bf16* sa
 // 原版每轮迭代读 2 个 uint4 就等它回来，K=2816 时 5.5 轮串行 HBM 往返 ≈ 延迟绑定（qkv 16.5 us vs 带宽下限 4.8）。
 // 累加顺序与原版完全相同（同 c 升序）→ 逐位同。K ≤ 16·32·kMaxVecPerLane = 4096。
 constexpr int kMaxVecPerLane = 8;
-template <int M_TILE>
-__device__ __forceinline__ void dot2(const bf16* sa, int K, const uint8_t* __restrict__ w0,
-                                     const uint8_t* __restrict__ w1, float (&acc)[2][M_TILE], int lane) {
+// B42b（loop kaon3-decode-opt D185）：权重预取与点积拆开——kernel 先把本 warp 两行权重的 __ldg 发出去（寄存器在飞），
+// 再做 load_a（smem 装载 + barrier），让 DRAM 流不等 prologue。算术序不变 → 逐位同。
+__device__ __forceinline__ void prefetch2(int K, const uint8_t* __restrict__ w0, const uint8_t* __restrict__ w1,
+                                          uint4 (&r0)[kMaxVecPerLane], uint4 (&r1)[kMaxVecPerLane], int lane) {
   const int nvec = K / 16;
-  uint4 r0[kMaxVecPerLane], r1[kMaxVecPerLane];
 #pragma unroll
   for (int j = 0; j < kMaxVecPerLane; ++j) {
     const int c = lane + j * 32;
@@ -91,6 +91,11 @@ __device__ __forceinline__ void dot2(const bf16* sa, int K, const uint8_t* __res
       r1[j] = __ldg(reinterpret_cast<const uint4*>(w1 + c * 16));
     }
   }
+}
+template <int M_TILE>
+__device__ __forceinline__ void dot2(const bf16* sa, int K, const uint4 (&r0)[kMaxVecPerLane],
+                                     const uint4 (&r1)[kMaxVecPerLane], float (&acc)[2][M_TILE], int lane) {
+  const int nvec = K / 16;
 #pragma unroll
   for (int j = 0; j < kMaxVecPerLane; ++j) {
     const int c = lane + j * 32;
@@ -133,18 +138,9 @@ __device__ __forceinline__ void dot2(const bf16* sa, int K, const uint8_t* __res
 // ---- norm → fp8：q[r][i] = fp8(bf16(x·rsqrt(mean x²+eps)·w) · a_inv)。grid = m，block = 256。
 // A8 版 dot2：A 从 smem 以 e4m3 读（见 load_a8）。累加序与 dot2 完全相同。
 template <int M_TILE>
-__device__ __forceinline__ void dot2_a8(const uint8_t* sa, int K, const uint8_t* __restrict__ w0,
-                                     const uint8_t* __restrict__ w1, float (&acc)[2][M_TILE], int lane) {
+__device__ __forceinline__ void dot2_a8(const uint8_t* sa, int K, const uint4 (&r0)[kMaxVecPerLane],
+                                        const uint4 (&r1)[kMaxVecPerLane], float (&acc)[2][M_TILE], int lane) {
   const int nvec = K / 16;
-  uint4 r0[kMaxVecPerLane], r1[kMaxVecPerLane];
-#pragma unroll
-  for (int j = 0; j < kMaxVecPerLane; ++j) {
-    const int c = lane + j * 32;
-    if (c < nvec) {
-      r0[j] = __ldg(reinterpret_cast<const uint4*>(w0 + c * 16));
-      r1[j] = __ldg(reinterpret_cast<const uint4*>(w1 + c * 16));
-    }
-  }
 #pragma unroll
   for (int j = 0; j < kMaxVecPerLane; ++j) {
     const int c = lane + j * 32;
@@ -216,15 +212,18 @@ __global__ void __launch_bounds__(kMaxWarps * 32) gateup_act_kernel(const uint8_
                                                             float gs, float us, float dn_a_inv) {
   extern __shared__ __align__(16) uint8_t smem_raw[];
   bf16* sa = reinterpret_cast<bf16*>(smem_raw);
-  if constexpr (A8) load_a8<M_TILE>(a_q, smem_raw, m, K); else load_a<M_TILE>(a_q, sa, m, K);
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   const int n = blockIdx.x * (blockDim.x >> 5) + warp;
-  if (n >= I) return;  // load_a 已过 barrier，之后无 barrier
+  const bool active = n < I;
+  uint4 r0[kMaxVecPerLane], r1[kMaxVecPerLane];
+  if (active) prefetch2(K, gw + (long)n * K, uw + (long)n * K, r0, r1, lane);  // B42b：先发权重读
+  if constexpr (A8) load_a8<M_TILE>(a_q, smem_raw, m, K); else load_a<M_TILE>(a_q, sa, m, K);
+  if (!active) return;  // load_a 已过 barrier，之后无 barrier
   float acc[2][M_TILE];
 #pragma unroll
   for (int r = 0; r < M_TILE; ++r) acc[0][r] = acc[1][r] = 0.f;
-  if constexpr (A8) dot2_a8<M_TILE>(smem_raw, K, gw + (long)n * K, uw + (long)n * K, acc, lane);
-  else dot2<M_TILE>(sa, K, gw + (long)n * K, uw + (long)n * K, acc, lane);
+  if constexpr (A8) dot2_a8<M_TILE>(smem_raw, K, r0, r1, acc, lane);
+  else dot2<M_TILE>(sa, K, r0, r1, acc, lane);
 #pragma unroll
   for (int r = 0; r < M_TILE; ++r) {
     if (lane == r && r < m) {
@@ -243,16 +242,19 @@ __global__ void __launch_bounds__(kMaxWarps * 32) gemv_kernel(const uint8_t* __r
                                                       bf16* __restrict__ out, int m, int N, int K, float scale) {
   extern __shared__ __align__(16) uint8_t smem_raw[];
   bf16* sa = reinterpret_cast<bf16*>(smem_raw);
-  if constexpr (A8) load_a8<M_TILE>(a_q, smem_raw, m, K); else load_a<M_TILE>(a_q, sa, m, K);
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   const int n0 = (blockIdx.x * (blockDim.x >> 5) + warp) * 2;
-  if (n0 >= N) return;
+  const bool active = n0 < N;
   const bool two = n0 + 1 < N;
+  uint4 r0[kMaxVecPerLane], r1[kMaxVecPerLane];
+  if (active) prefetch2(K, w + (long)n0 * K, w + (long)(two ? n0 + 1 : n0) * K, r0, r1, lane);  // B42b：先发权重读
+  if constexpr (A8) load_a8<M_TILE>(a_q, smem_raw, m, K); else load_a<M_TILE>(a_q, sa, m, K);
+  if (!active) return;
   float acc[2][M_TILE];
 #pragma unroll
   for (int r = 0; r < M_TILE; ++r) acc[0][r] = acc[1][r] = 0.f;
-  if constexpr (A8) dot2_a8<M_TILE>(smem_raw, K, w + (long)n0 * K, w + (long)(two ? n0 + 1 : n0) * K, acc, lane);
-  else dot2<M_TILE>(sa, K, w + (long)n0 * K, w + (long)(two ? n0 + 1 : n0) * K, acc, lane);
+  if constexpr (A8) dot2_a8<M_TILE>(smem_raw, K, r0, r1, acc, lane);
+  else dot2<M_TILE>(sa, K, r0, r1, acc, lane);
 #pragma unroll
   for (int r = 0; r < M_TILE; ++r) {
     if (lane == r && r < m) {

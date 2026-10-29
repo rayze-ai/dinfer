@@ -1384,3 +1384,6 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - 预期：gate‖up CTA 616 → 1232、down 44 → 88 N 块；每 CTA smem 19 KB → 每 SM 常驻 CTA 翻倍；在飞字节翻倍。若赢则改默认 + 再测 BN=16。
 - **b42 定稿（两轮，B = `MOE_GEMM_BN=32`）**：c1 4.77/4.78 → **4.82/4.82（+1%）**，c8 7.18/7.19 → 7.18/7.17（持平）。微基准：gate‖up 不变（12.33 = 12.33），down **8.2 → 10.3 us 退化**（4 warp CTA 载 A/B 的线程减半，K=704 只 3 迭代，装载占比高）。**BN=32 不采用**，默认留 64（代码留着，开关 `MOE_GEMM_BN=32`）。门禁 ref/256/bn32 位同。
 - 结论：BK=256 之后 gate‖up 在 L2 热已 12.3 us（下限 10.0）、M=8 20.5（已低于 DRAM 下限 34.9，说明微基准形状全在 L2）——**再提 MoE 要看真实（DRAM 冷）场景**：下一刀应直接 A/B split-K×2（gate‖up K=2816 → 2×1408，grid 翻倍，fp32 partial + 固定序归约 kernel，多一次 launch）；或者换方向做 attention / 其余小 kernel（c8 nsys 表里 MoE 之外的 +0.9 ms）。
+
+## D185 2026-10-29 B42b：fp8 gemv / gateup 权重预取提前到 load_a 之前（c8 nsys 表第 2 名 `gemv_kernel<8>` 10407 call/122 步 = 85/步 × 15.2 us = 1.3 ms/步，M=1 也是 0.5 ms）
+- 现状 kernel 顺序：load_a（smem 装载 + barrier）→ 每 lane 发 8 个 uint4 权重 __ldg → 算。权重流在 prologue 期间不动。改成：先发权重 __ldg（寄存器在飞）→ load_a → 算；fma 序不变 → 逐位同（门禁 `mlp_fp8_decode_parity` A8 开/关 + `fp8_gemv_timing`）。链 b43（A = b41 二进制）。

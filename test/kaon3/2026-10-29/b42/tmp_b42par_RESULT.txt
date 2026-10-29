@@ -1,0 +1,17 @@
+02:47:58
+A_md5=b9e29cf71c8a
+TEST BUILD EXIT=0
+MOE_BK_DUMP tag=ref n=704 k=2816: dual-vs-single bad=0/15488
+MOE_BK_DUMP tag=ref n=2816 k=704: dual-vs-single bad=0/61952
+MOE_BK_DUMP tag=ref wrote 464640 bytes to /tmp/moe_bk_ref.bin
+MOE_BK_DUMP tag=256 n=704 k=2816: dual-vs-single bad=0/15488
+MOE_BK_DUMP tag=256 n=2816 k=704: dual-vs-single bad=0/61952
+MOE_BK_DUMP tag=256 wrote 464640 bytes to /tmp/moe_bk_256.bin
+MOE_BK_DUMP tag=bn32 n=704 k=2816: dual-vs-single bad=0/15488
+MOE_BK_DUMP tag=bn32 n=2816 k=704: dual-vs-single bad=0/61952
+MOE_BK_DUMP tag=bn32 wrote 464640 bytes to /tmp/moe_bk_bn32.bin
+BK=256 vs ref: SAME
+BK=bn32 vs ref: SAME
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.21s
+GATE=0
+B42_DONE
