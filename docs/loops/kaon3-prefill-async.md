@@ -90,3 +90,4 @@ E1 …（接 kaon3-decode-opt 的 D 编号体系，本 loop 用 E）
 - 原理：CUDA 流优先级在 CTA 边界抢占——高优先级流的 pending CTA 先于低优先级流的 pending CTA 被调度。p64 一个 CTA 几十 us、5052 个 CTA 排队 → decode 图的 ~800 小 kernel 应能插进去。
 - 链 b63：A = `PREFILL_ASYNC=1 XSTREAM=1`（E1 无优先级，= b62 B）；B = `PREFILL_ASYNC=1 XSTREAM=1 MAIN_STREAM_PRIO=1`。看 B 的纯 decode 步 exec 在 prefill 期间是否接近无 prefill 时（HOST_TIME 的 decode 步 p90 从 12.4 降），TPOT 是否真降。
 - **E4 第一版 SIGSEGV**（b63 r1 B serve 起到 "main stream prio = greatest least=0 greatest=-5" 后 Segmentation fault；本机 3090 `stream_prio_smoke` 复现）：按 cudarc 源码字段顺序 `transmute` 构造 `CudaStream`——`repr(Rust)` 字段顺序不保证，ctx 指针被当成流句柄。改法：正常 `new_stream()` 拿合法 `Arc<CudaStream>`，sys 建优先级流，在两个指针宽的字里**按值**找旧句柄、销毁旧流、原地替换（字段顺序无关）。`crates/kernels/tests/stream_prio_smoke.rs` 作门禁。
+- E4 v2 二进制 8eb03496，b63 重跑中。判据除 E2 预登记外，加一条机理判据：B 侧 HOST_TIME 纯 decode 步 **p90**（A 侧 12.4 ms，无 prefill 干扰时 ~8.5）必须明显回落，否则优先级没起作用（CUDA 流优先级只影响 pending CTA 的调度顺序，若 prefill CTA 已驻留满 SM，decode CTA 仍要等它们退出）。
