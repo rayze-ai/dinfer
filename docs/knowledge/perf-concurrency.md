@@ -50,3 +50,7 @@
 ## 26. "decode 不等 prefill" ≠ "decode 不被 prefill 拖"：大 M prefill GEMM 把 SM 驻留槽占满时，另一条流上的 decode 图照样排队（2026-10-29 kaon3 E3）
 - E1 异步收割机制完全正确（late_begin == late_harvest、输出同），TPOT 却持平 / 略升：p64 一次 launch 4752 CTA、每 SM 只驻 2 个（smem 49.5 KB）、14 波，decode 图的 800 个小 kernel 在 pending 队列里等 CTA 槽。两流并行的前提是**有空 SM**，不是"有另一条流"。
 - **怎么用**：做跨流并行前先算对方 kernel 的 CTA 数 / 驻留数 / 波数；波数 ≫ 1 时要么流优先级（只影响 pending 顺序，CTA 边界抢占，最多省一个 CTA 时长的等待），要么限对方每次 launch 的 CTA 数留口子，要么别做。E4 验证流优先级够不够。
+
+## 27. CUDA 流优先级能把 decode 图塞进 prefill 的 CTA 波之间，代价是 prefill 慢 ~50%（2026-10-29 kaon3 E5）
+- decode 主流最高优先级（-5）、prefill 副流默认（0）：c16 TPOT −2.7% / c32 −4.5% / c64 −5.2%，decode 步 p50 8.34 → 8.00；prefill 步 120 → 177 ms，TTFT c32 152 → 228（+50%）。
+- **判断**：这是 TPOT↔TTFT 的硬 tradeoff，不是免费的；只有 TTFT 有余量（我们对 vLLM 有 16–37%）时才开。合入前后都要用 stepA 口径核 TTFT 不越过基线；余量不够就把优先级差缩小（prefill 用 -2）。
