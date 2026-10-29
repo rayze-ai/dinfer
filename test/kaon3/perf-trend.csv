@@ -221,3 +221,9 @@ b44,2026-10-29,"B42c fp8 gemv 权重预取(M_TILE≤2) + B43 route softmax 并�
 b44,2026-10-29,"B42c fp8 gemv 权重预取(M_TILE≤2) + B43 route softmax 并行 exp + warp 扫描; vs b41: c1 4.78→4.65 -2.7%, c8 7.19→7.13; c1 首次低于 vLLM",c8,out_tok_per_s,870.300,956.000,0.910,,higher,main,5090,vllm,dinfer,kaon3
 b44,2026-10-29,"B42c fp8 gemv 权重预取(M_TILE≤2) + B43 route softmax 并行 exp + warp 扫描; vs b41: c1 4.78→4.65 -2.7%, c8 7.19→7.13; c1 首次低于 vLLM",c8,ttft_p50_ms,154.520,146.400,1.055,,lower,main,5090,vllm,dinfer,kaon3
 b44,2026-10-29,"B42c fp8 gemv 权重预取(M_TILE≤2) + B43 route softmax 并行 exp + warp 扫描; vs b41: c1 4.78→4.65 -2.7%, c8 7.19→7.13; c1 首次低于 vLLM",c8,tpot_p50_ms,7.130,6.240,1.143,,lower,main,5090,vllm,dinfer,kaon3
+b45,2026-10-29,"B44 split-K×2(MOE_SPLITK=2) envab on b44: c1 4.65→4.86 +4.5%, c8 7.13→7.42 +4% → 不采用, 默认关",c1,out_tok_per_s,192.000,200.000,0.960,,higher,main,5090,vllm,dinfer,kaon3
+b45,2026-10-29,"B44 split-K×2(MOE_SPLITK=2) envab on b44: c1 4.65→4.86 +4.5%, c8 7.13→7.42 +4% → 不采用, 默认关",c1,ttft_p50_ms,26.840,25.000,1.074,,lower,main,5090,vllm,dinfer,kaon3
+b45,2026-10-29,"B44 split-K×2(MOE_SPLITK=2) envab on b44: c1 4.65→4.86 +4.5%, c8 7.13→7.42 +4% → 不采用, 默认关",c1,tpot_p50_ms,4.860,4.690,1.036,,lower,main,5090,vllm,dinfer,kaon3
+b45,2026-10-29,"B44 split-K×2(MOE_SPLITK=2) envab on b44: c1 4.65→4.86 +4.5%, c8 7.13→7.42 +4% → 不采用, 默认关",c8,out_tok_per_s,844.700,956.000,0.884,,higher,main,5090,vllm,dinfer,kaon3
+b45,2026-10-29,"B44 split-K×2(MOE_SPLITK=2) envab on b44: c1 4.65→4.86 +4.5%, c8 7.13→7.42 +4% → 不采用, 默认关",c8,ttft_p50_ms,154.140,146.400,1.053,,lower,main,5090,vllm,dinfer,kaon3
+b45,2026-10-29,"B44 split-K×2(MOE_SPLITK=2) envab on b44: c1 4.65→4.86 +4.5%, c8 7.13→7.42 +4% → 不采用, 默认关",c8,tpot_p50_ms,7.420,6.240,1.189,,lower,main,5090,vllm,dinfer,kaon3

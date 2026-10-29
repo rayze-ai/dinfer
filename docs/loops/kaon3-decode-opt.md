@@ -1403,3 +1403,6 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 ## D190 2026-10-29 B44 split-K（待编待验）：decode gate‖up dual 的 pipe4 加 `ksplit`（grid.z = 2·ksplit，各 split 只算自己的 K 块段，写 fp32 部分和 P[2·ksplit][R][N]，不乘 alpha）；新 `gelu_grouped_quant_splitk` 在消费端做 Σ_s + alpha + bf16 舍入 + gelu + 量化（与 B34③ 同式）。`MOE_SPLITK=2|4`（默认 1 = 关，走原路径）。
 - 口径：ksplit=1 与原路径逐位同；ksplit≥2 fp32 加法序不同 → 非逐位，门禁 `moe_splitk_parity`：fp4 码差 ≤ 2% 且 worst ≤ 1、a_s 差 ≤ 2%；端到端看输出。归约序 split 升序固定 → 批不变。
 - 预期：gate‖up CTA 616 → 1232（M=8）/ 176 → 352（M=1），每 CTA 6 迭代；DRAM 冷场景在飞字节翻倍；c8 目标 7.13 → ~6.8。链 b45（B 侧 env MOE_SPLITK=2，A = b44）。
+
+## ★★★ D191 2026-10-29 b45 定稿（B44 split-K×2，B 侧 `MOE_SPLITK=2`，两轮）：c1 4.65 → **4.86（+4.5%）**，c8 7.13 → **7.42（+4%）** —— **退化，不采用**（默认 1 = 关，代码留作 A/B）。parity：ksplit 1/2/4 fp4 码差全 0（K 段对齐下 fp32 和恰好同）。
+- 解释：BK=256/STAGES=3 后每 CTA 只 11 迭代，再对半 → 6 迭代，prologue（首 2 stage 装载 + tile_lookup）占比过半，CTA 翻倍换不回；外加 fp32 部分和 2×4 B 写读。**MoE decode 的"链长"路线到此为止**，剩余差距要么是每 CTA 启动固定开销（tile_lookup 读 offsets/tile_off 两级二分 + 首 stage 延迟），要么回到 DRAM 并行度（需要 nsys b44 c8b 按 kernel 看 pipe4 现在的 us/call 再定）。
