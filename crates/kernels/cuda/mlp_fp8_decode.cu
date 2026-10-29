@@ -211,6 +211,10 @@ int pick_warps(int m_tile, long rows_total, int rows_per_warp) {
   }
   // D64：warp 多会把 block 数压到 < SM 数，权重流读并行度不够，c1 反慢 1.8 ms；小 M 下 block 数比 A 复用重要。
   // 上限 4 warp，且要求 block ≥ 4×SM。
+  // B31b（loop kaon3-decode-opt D155 gemvsweep）：M_TILE ≥ 4 时 smem 里的 A（M_TILE·K bf16，33–45 KB）要被足够多的 warp 摊，
+  // 每 block 8 warp 比自选的 2 warp 快 1.8×（m=8 dense_down 18.5 → 10.3 us，qkv 23.8 → 12.3；16 warp 与 8 同）。
+  // m=1/2 仍按 "block 数 ≥ 4×SM" 自选（m=1 已在带宽下限）。
+  if (m_tile >= 4) return 8;
   int w = 4;
   const long warps_total = (rows_total + rows_per_warp - 1) / rows_per_warp;
   while (w > 1 && warps_total / w < 4L * sms) w >>= 1;

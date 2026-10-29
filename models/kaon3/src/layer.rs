@@ -232,7 +232,8 @@ impl QLinear {
                 // B6（loop kaon3-decode-opt）：decode 小 M 走带宽型 fp8 GEMV（`mlp_fp8_gemv`，与 dense MLP 同 kernel），
                 // 条件：tokens ≤ 16、K % 16 == 0、A 的 bf16 驻留 M_TILE·K·2 ≤ 24 KB（≥ 4 block/SM 才能把权重流读的延迟藏住；
                 // D62 实测 45 KB（m=8,K=2816）时 c8 反而比 cuBLASLt 慢 5%）。K=2816 → m ≤ 4；K=8192 → m = 1。`FP8_GEMV=1` 开。
-                if fp8_gemv_enabled() && tokens <= 16 && kk % 16 == 0 && kk <= 4096 && fp8_gemv_m_tile(tokens) * kk * 2 <= 24 * 1024 {
+                // B31b：A 驻留门槛 24 KB → 48 KB（8 warp/block 后 m=8/K=2816 的 45 KB 实测 12.3 us < cuBLASLt nvjet 21.4 us；D62 的 45 KB 退化是 2 warp 时的）。
+                if fp8_gemv_enabled() && tokens <= 16 && kk % 16 == 0 && kk <= 4096 && fp8_gemv_m_tile(tokens) * kk * 2 <= fp8_gemv_smem_cap() {
                     return k::ops::mlp_fp8_gemv(stream, buf, w, &mut out.data, tokens, n, kk, *scale * *a_scale);
                 }
                 // 两个 per-tensor scale 以设备标量形式传给 cuBLASLt；按 shape 缓存一次即可（每层不同）。
@@ -702,6 +703,11 @@ fn fp8_gemv_enabled() -> bool {
     *V.get_or_init(|| env_eq!("FP8_GEMV", "1"))
 }
 /// 与 `mlp_fp8_decode.cu` 的 M_TILE 档位同式（{1,2,4,8,16}），用于算共享内存是否放得下。
+/// B31b：fp8 gemv 的 A 驻留（M_TILE·K·2 B）上限，默认 48 KB；`FP8_GEMV_SMEM_KB` 覆盖（A/B 用，24 = 旧门槛）。
+fn fp8_gemv_smem_cap() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("FP8_GEMV_SMEM_KB").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(48) * 1024)
+}
 fn fp8_gemv_m_tile(m: usize) -> usize {
     match m { 0 | 1 => 1, 2 => 2, 3 | 4 => 4, 5..=8 => 8, _ => 16 }
 }
