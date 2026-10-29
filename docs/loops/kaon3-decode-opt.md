@@ -1657,3 +1657,9 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - **结论**：M=16 的 MoE 已是带宽物理账（vLLM 同），不是靶子；**小 M fp8 GEMM（gemv<16> / gateup_act<16> / nvjet 64x32）合计 3.0 ms，下限 ~0.8 ms**，是 M=16 decode 步的真靶子（c16 TPOT 10.6 里 ~2 ms 可拿）；route 单 block 0.3 ms 次之。
 - **B51 候选（env 旋钮，零 kernel 改动先 A/B）**：`FP8_GEMV_MAX_M`（默认 16 → 8：M=9..16 不走 gemv 走 cuBLASLt）+ `FP8_LT_TUNE_MIN_M`（默认 64 → 9：M ≥ 9 自调优选大 tile）。parity 口径只锁 m=1（oracle c1），M=16 的 c≥2 输出本来批变。若 Lt 自调优在 M=16 选到 ~15 us 级 tile → qkv/o 1.9 → ~0.9 ms。
 - **B52 候选**：route 拆两段（D197 ②，grid=tokens），固定 −0.3 ms（c16），c32/c64 更多（32 us / 64 us 单 block）。
+
+## ★★★★★ D228 2026-10-29 b58 定稿：**B51 合入**（`FP8_GEMV_MAX_M` 8、`FP8_LT_TUNE_MIN_M` 9 改默认；A = gemv ≤ 16）：c16 TPOT 10.69/10.65 → **9.86/9.86（−7.6%）**，吞吐 1292 → 1378（+7%）；c32 13.16/13.1 → 12.82/12.90（−2%）；c8 / c64 持平（c8 仍 gemv<8>，c64 本就走 Lt）。CSV b58。
+- m=16 自调优选择：qkv n=8192/9216 → `id=67 tile=13 splitk=1`（14.5 / 15.6 us；gemv<16> 原 31.7 us）；o_proj n=2816 k=4096/8192 → **`id=35 tile=13 splitk=3`**（8.6 / 10.6 us）。即 cuBLASLt 的 tile=13 在 m=16 本来就比我们 gemv<16> 快 2×——gemv 只在 m ≤ 8 占优（b31b 定稿时只量过 m=8）。
+- 输出：英文 raw 同；中文 chat **措辞变**（"这里是…" → "以下是…"），是 o_proj split-K 累加序不同 → 近并列 token 翻转；c1 parity 口径（m=1）不受影响（m < 9 配置不变）。按 D62 / 批不变性结案口径接受。
+- 现状对 vLLM：c8 1.15× / **c16 1.39×** / c32 1.39× / c64 1.37×；吞吐 96% / **88%** / 83% / 79%。七刀累计 c16 11.36 → 9.86（−13%）。
+- B52（route 拆两段）b59 链跑中（parity 门禁 + ABAB，两侧带 B51）。
