@@ -156,3 +156,7 @@ GDN 的 chunk 内 GEMM（K=128 连续、state 现成在 smem）属于好的那�
 ## 21. decode 调出来的 GEMM tile 不要直接给 prefill 用：M > 1000 行时 BM=32 tile 只有算力峰值的 1/4（2026-10-29 kaon3 D211/D212）
 - MoE grouped NVFP4 GEMM 为 decode 优化到 BM=16/32（CTA 数多、单 CTA 工作少），prefill 17184 行时同一个 kernel 724 us = 190 TFLOPS；换 BM=64×BN=64、每 warp 2×2 片段（A 片段 n 向复用 4 次）→ 549 us（−24%）、端到端 c64 TPOT −4% / TTFT −8%，逐位一致（k 累加序不变）。
 - **判断**：grouped GEMM 至少两套 tile（decode 小 M 占用型 / prefill 大 M 算力型），按 R 阈值分派；两套的 k 累加序保持一致才能逐位互换。微基准（`moe_gemm_timing` P424/P2148）+ 两进程 CHECKSUM 是门禁。再往上是 BN=128 / ldmatrix，smem 片段读是下一瓶颈。
+
+## 22. cuBLASLt 启发式第 0 候选对 prefill 大 M 不是最快：m ≥ 64 实测选 algo、按 m 2 的幂桶缓存（2026-10-29 kaon3 D215）
+- fp8 Lt 为逐位对齐 vLLM 锁死的 `tile=13` 配置在 M=2148 走 nvjet 64x32 小 tile（153 us × 125 次/步）。m ≥ 64 对 32 候选各计时 5 次取最快 → c64 TPOT −7%、TTFT 全档 −15%、吞吐 +9%；m < 64 保持 parity 配置不动，输出逐字同。
+- **判断**：对拍口径的 algo 只锁 decode（m < 64）；prefill 形状必须实测。缓存 key 用 m 的 2 的幂桶（混批步 m 每步不同，逐 m 调会每步付 32×5 次计时）。调优应挪到启动 warmup（按桶 × 形状预跑），别在首批请求里付。
