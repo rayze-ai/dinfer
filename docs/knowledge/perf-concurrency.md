@@ -41,4 +41,4 @@
 
 ## 24. 自写 gemv 的优势区间要按 M 实测画边界，别从 m=8 外推到 m=16（2026-10-29 kaon3 D227/D228）
 - b31b 时只量了 m=8（gemv 比 Lt 快 1.8–5×）就把 gemv 门槛设成 `tokens ≤ 16`；nsys c16 发现 gemv<16> 31.7 us，而 cuBLASLt tile=13 在 m=16 只要 14.5 us（qkv）/ 8.6 us（o_proj split-K 3）。改门槛 8 + Lt 自调优 m ≥ 9 → c16 TPOT −7.6%。
-- **判断**：每条"小 M 快路径"的 M 上界必须在每个 2 的幂桶（1/2/4/8/16/32）上与 Lt 自调优实测比过；只量过一个点的门槛写进 loop 时标"仅 m=8 实测"。M=16 的 decode 步里 MoE（2.8 ms）已到带宽下限，剩下可拿的全在小 M dense GEMM（gemv / gateup_act / nvjet）。
+- **判断**：每条"小 M 快路径"的 M 上界必须在每个 2 的幂桶（1/2/4/8/16/32）上与 Lt 自调优实测比过；只量过一个点的门槛写进 loop 时标"仅 m=8 实测"。M=16 的 decode 步里 MoE（2.8 ms）已到带宽下限，剩下可拿的全在小 M dense GEMM：qkv/o（B51，−7.6%）+ dense MLP（B53，−3.5%）两刀把 M=9..16 全部交给 Lt 自调优，gemv 只留 m ≤ 8。
