@@ -1546,3 +1546,14 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 ## ★★★★★ D210 2026-10-29 b49 定稿：**B46 合入**（两轮同向：c8 6.95 / c16 10.97 / c32 14.03 / c64 24.88，TPOT −1.6% / −3.7% / −4.7% / −8.5%；TTFT −15–17%；吞吐 +5–11%；输出逐字同）；**B47 配额判负默认 0**（CSV round b49c 负结果）。CSV round b49，`test/kaon3/2026-10-29/b49/`。
 - 现状对 vLLM（stepA4 中位数）：c8 1.13× / c16 **1.54×** / c32 1.51× / c64 1.62×；吞吐 93% / 75% / 71% / 65%。停止条件 ①（c16 ≤ 1.10×、c32/64 ≤ 1.25×）未达，继续 Step B。
 - **B48 已写（commit a27b0989）**：`grouped_gemm_kernel_p64<BK128,STAGES3>` BM64×BN64、8 warp 4×2、每 warp 2×2 m16n8 片段（A 片段 n 向复用 4 次）；R > `MOE_DEC_RMAX` 且 K%128==0 时 grouped 与 dual 都走它；第三张 tile 表（scan_kernel / route_bucket_small 两处同步产出，`tile_off` 3(E+1)）。`MOE_PREFILL_P64=0` 回退。b50 链：微基准 P424/P2148 两进程 CHECKSUM 门禁 → ABAB c8–c64。
+
+## ★★★ D211 2026-10-29 b50 微基准（P64 关 / 开，两进程 CHECKSUM 全同 → 门禁过，GATE=0；二进制 md5 2e0a01ef）
+| 形状 | gate‖up dual 旧 BM32 | p64 BM64 | down 旧 | p64 |
+|---|---|---|---|---|
+| M=8（64 行 28 专家，decode） | 20.5 us | 20.5（不走，R ≤ 512） | 16.4 | 16.4 |
+| P424（3392 行 128 专家） | 263.6 | **237.2（−10%）** | 145.0 | 145.0（**K=704 % 128 ≠ 0 没走 p64**） |
+| P2148（17184 行） | 723.7 | **549.2（−24%）** | 495.2 | 500.0 |
+- 算力口径：P2148 gate‖up 2×17184×1408×2816 = 136 GFLOP / 549 us = **248 TFLOPS**（NVFP4 dense 峰值约 1 PFLOPS 的 1/4）；down 68 GFLOP / 495 us = 137 TFLOPS。还有 2–4× 空间。
+- p64 smem：3 stage × (64×80 + 64×80 + 64×8 + 64×8) B = 33.8 KB → 占用 2–3 CTA/SM；8 warp 每 BK=128 块每 warp 8 次 mma 对 16 次 32-bit smem 读（A 4 + B 8 + 2 scale），**smem 读仍是主要开销**（ldmatrix 没用、片段每次从 smem 取）。下一档：BN=128（每 warp 2×4 片段，B 片段再翻倍复用 A）或 ldmatrix.x4。
+- **down 要加 BK=64 实例**（K=704 = 11 × 64）：`grouped_gemm_kernel_p64<64, 4>`。
+- ABAB 跑中。
