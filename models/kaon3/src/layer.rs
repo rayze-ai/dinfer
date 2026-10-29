@@ -726,6 +726,11 @@ fn kv_fp8_fused_enabled() -> bool {
     *V.get_or_init(|| env_ne!("KV_FP8_FUSED", "0"))
 }
 /// B11b：MoE 输出合并融合（默认开；`MOE_COMBINE_OLD=1` 回退 scatter_add 链）。
+/// B45：combine + post_ff_norm_2 融合（`MOE_COMBINE_NORM=0` 回退两步）。
+fn moe_combine_norm_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_ne!("MOE_COMBINE_NORM", "0"))
+}
 fn moe_combine_fused_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_ne!("MOE_COMBINE_OLD", "1"))
@@ -1910,7 +1915,16 @@ impl Gemma4Layer {
             if let Some(ev) = &mt_ev { stream.record_timing(&ev[1])?; }  // 3×gemm完
             // 6) scatter_add（全 R 行一次，start=0）——累加序与 host 版（专家升序）由 atomic 决定，逐位须实测
             // B11b：一次 combine 替代 memset(acc)+scatter_add(atomic)+memset(y)+f32_add_to_bf16（`MOE_COMBINE_OLD=1` 回退）。
-            if moe_combine_fused_enabled() {
+            let mut combine_norm_done = false;
+            if moe_combine_fused_enabled() && moe_combine_norm_enabled() && sub_out.is_none() && h % 8 == 0 && h <= 4096 {
+                // B45（D192）：combine + post_ff_norm_2 一次 launch（逐位同；`MOE_COMBINE_NORM=0` 回退）。
+                let (y, h2) = (&mut sc.y, &mut sc.h2);
+                k::ops::moe_combine_norm_bf16(
+                    stream, &sc.yg.data, &sc.topk_w.data, &sc.buckets.inv, None, &sc.topk_ids.data, 1.0, &mut y.data,
+                    &self.post_ff_norm_2.data, &mut h2.data, tokens, kk, h, if moe_combine_f32() { 0 } else { 1 }, eps, norm_mode(),
+                )?;
+                combine_norm_done = true;
+            } else if moe_combine_fused_enabled() {
                 k::ops::moe_combine_bf16(
                     stream, &sc.yg.data, &sc.topk_w.data, &sc.buckets.inv, None, &sc.topk_ids.data, 1.0, &mut sc.y.data,
                     tokens, kk, h, if moe_combine_f32() { 0 } else { 1 },
@@ -1932,7 +1946,9 @@ impl Gemma4Layer {
             }
             sub_dump(stream, sub_out, "moe_y", &sc.y, tokens, h)?;
             if let Some(ev) = &mt_ev { stream.record_timing(&ev[2])?; }  // scatter+合并完
-            rmsnorm_into(stream, ops, &sc.y, &self.post_ff_norm_2, &mut sc.h2, h, tokens, eps)?;
+            if !combine_norm_done {
+                rmsnorm_into(stream, ops, &sc.y, &self.post_ff_norm_2, &mut sc.h2, h, tokens, eps)?;
+            }
             sub_dump(stream, sub_out, "ff2", &sc.h2, tokens, h)?;
             if let Some(ev) = &mt_ev {
                 stream.synchronize()?;

@@ -5694,6 +5694,46 @@ pub fn moe_combine_bf16(
     )
 }
 
+/// B45：combine + post_ff_norm_2 一次 launch（与 `moe_combine_bf16 → rmsnorm_bf16_n` 逐位同）。`nmode` = RMSNORM 口径（调用方传 norm_mode()）。
+#[allow(clippy::too_many_arguments)]
+pub fn moe_combine_norm_bf16(
+    stream: &Stream,
+    y: &CudaSlice<bf16>,
+    topk_w: &CudaSlice<f32>,
+    inv: &CudaSlice<i32>,
+    per_expert: Option<&CudaSlice<bf16>>,
+    topk_ids: &CudaSlice<i32>,
+    w_scale: f32,
+    y_out: &mut CudaSlice<bf16>,
+    w: &CudaSlice<bf16>,
+    h2: &mut CudaSlice<bf16>,
+    tokens: usize,
+    topk: usize,
+    hidden: usize,
+    mode: i32,
+    eps: f32,
+    nmode: i32,
+) -> Result<()> {
+    ensure!(hidden % 8 == 0 && hidden <= 4096, "moe_combine_norm: hidden % 8 == 0 且 ≤ 4096");
+    ensure!(
+        y.len() >= tokens * topk * hidden && topk_w.len() >= tokens * topk && inv.len() >= tokens * topk && topk_ids.len() >= tokens * topk
+            && y_out.len() >= tokens * hidden && w.len() >= hidden && h2.len() >= tokens * hidden,
+        "moe_combine_norm: capacity"
+    );
+    let pp = per_expert.map_or(std::ptr::null(), |p| stream.ptr(p) as *const c_void);
+    // SAFETY: 容量已校验；inv[·] < tokens·topk 由路由保证。
+    check(
+        unsafe {
+            ffi::moe_combine_norm_bf16(
+                stream.ptr(y) as *const c_void, stream.ptr(topk_w) as *const f32, stream.ptr(inv) as *const i32, pp, stream.ptr(topk_ids) as *const i32,
+                w_scale, stream.ptr_mut(y_out) as *mut c_void, stream.ptr(w) as *const c_void, stream.ptr_mut(h2) as *mut c_void,
+                tokens as i64, topk as i64, hidden as i64, mode, eps, nmode, stream.raw() as _,
+            )
+        },
+        "moe_combine_norm_bf16",
+    )
+}
+
 /// B12：FP8 KV 层：q/k/v 原地 fp8 往返（口径同 `fp8_e4m3_roundtrip_bf16_n(·, 1.0)`）+ k/v 写 cache，一次 launch。
 #[allow(clippy::too_many_arguments)]
 pub fn gqa_cache_write_fp8rt_bf16(

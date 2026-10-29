@@ -382,6 +382,10 @@ int moe_bucket(const int32_t* topk_ids, int32_t* counts, int32_t* offsets, int32
 int moe_combine_bf16(const void* y, const float* topk_w, const int32_t* inv, const void* per_expert,
                      const int32_t* topk_ids, float w_scale, void* out, int64_t tokens, int64_t topk, int64_t hidden,
                      int mode, cudaStream_t stream);
+// B45：combine + post_ff_norm_2（rmsnorm layout 2 / nmode）一次 launch；y_out 仍写（dump 用），h2 = rmsnorm(y)·w。hidden % 8 == 0 且 ≤ 4096。
+int moe_combine_norm_bf16(const void* y, const float* topk_w, const int32_t* inv, const void* per_expert, const int32_t* topk_ids,
+                          float w_scale, void* y_out, const void* w, void* h2, int64_t tokens, int64_t topk, int64_t hidden,
+                          int mode, float eps, int nmode, cudaStream_t stream);
 // B10：decode 小 batch（tokens ≤ 64）路由前处理一次 launch：top-k + 权重 + counts/offsets/cursor/tile_off + sorted + row2e。
 // B33c：logits_bf16=1 时 logits 是 bf16（router GEMM 的 bf16 输出），kernel 内 cast（与 bf16_to_f32_n 逐位同），省一次 launch。
 int moe_route_bucket_small(const void* logits, int logits_bf16, const void* per_expert_scale, int32_t* topk_ids, float* topk_w,

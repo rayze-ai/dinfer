@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include "common.cuh"
 #include "kernels.h"
+#include "rmsnorm_core.cuh"
 
 using namespace dinfer;
 
@@ -677,6 +678,77 @@ extern "C" int moe_scatter_add_f32(const void* y, float* acc, const int32_t* sor
   return last_err();
 }
 
+// B45（loop kaon3-decode-opt D192）：combine + post_ff_norm_2 一次 launch。block = token，256 线程；线程 t 持向量 t、t+256
+// （8 元素一组，与 rmsnorm_vec_kernel<256,2> 的持有方式同）：先按 combine_kernel 同式算 y 的 8 个元素（bf16 舍入点同），
+// 写 y（下游 dump 用）；再平方和（1,0,2..7 序 + rms_ss_triton<256,2>）→ rms_inv(mode) → h2 = bf16(norm_mid(y·inv)·w)。
+// 与 combine_kernel → rmsnorm_bf16(layout 2, mode) 两步逐位同（`moe_combine_norm_parity`）。hidden % 8 == 0 且 ≤ 4096。
+__global__ void __launch_bounds__(256) combine_norm_kernel(const bf16* __restrict__ y_in, const float* __restrict__ topk_w,
+                                                           const int32_t* __restrict__ inv_idx, const void* __restrict__ per_expert,
+                                                           const int32_t* __restrict__ topk_ids, float w_scale,
+                                                           bf16* __restrict__ y_out, const bf16* __restrict__ w,
+                                                           bf16* __restrict__ h2, int K, int H, int mode, float eps, int nmode) {
+  constexpr int BLOCK = 256, VPT = 2;
+  const int64_t tok = blockIdx.x;
+  float wk[MAX_K];
+  int32_t pos[MAX_K];
+  for (int k = 0; k < K; ++k) {
+    float ww = topk_w[tok * K + k];
+    if (per_expert) ww *= to_f32(static_cast<const bf16*>(per_expert)[topk_ids[tok * K + k]]) * w_scale;
+    else ww *= w_scale;
+    wk[k] = mode == 1 ? to_f32(to_bf16(ww)) : ww;
+    pos[k] = inv_idx[tok * K + k];
+  }
+  const int nvec = H / 8;
+  float v[VPT][8];
+  float gs[VPT];
+#pragma unroll
+  for (int j = 0; j < VPT; ++j) {
+    const int i = threadIdx.x + j * BLOCK;
+    gs[j] = 0.f;
+    if (i < nvec) {
+      uint4 ob;
+      __nv_bfloat162* op = reinterpret_cast<__nv_bfloat162*>(&ob);
+#pragma unroll
+      for (int e = 0; e < 8; ++e) {
+        const int d = i * 8 + e;
+        float acc = 0.f;
+        for (int k = 0; k < K; ++k) {
+          const float t = to_f32(y_in[(int64_t)pos[k] * H + d]);
+          acc += mode == 1 ? to_f32(to_bf16(wk[k] * t)) : wk[k] * t;
+        }
+        const bf16 yb = to_bf16(to_f32(to_bf16(acc)));
+        v[j][e] = to_f32(yb);
+        if (e & 1) op[e >> 1] = __floats2bfloat162_rn(v[j][e - 1], v[j][e]);
+      }
+      reinterpret_cast<uint4*>(y_out + tok * H)[i] = ob;
+      float acc = __fmul_rn(v[j][1], v[j][1]);
+      acc = __fmaf_rn(v[j][0], v[j][0], acc);
+#pragma unroll
+      for (int e = 2; e < 8; ++e) acc = __fmaf_rn(v[j][e], v[j][e], acc);
+      gs[j] = acc;
+    }
+  }
+  const float inv = rms_inv(rms_ss_triton<BLOCK, VPT>(gs, nvec), H, eps, nmode);
+  const uint4* wv = reinterpret_cast<const uint4*>(w);
+  uint4* orow = reinterpret_cast<uint4*>(h2 + tok * H);
+#pragma unroll
+  for (int j = 0; j < VPT; ++j) {
+    const int i = threadIdx.x + j * BLOCK;
+    if (i < nvec) {
+      const uint4 wa = wv[i];
+      const __nv_bfloat162* wp = reinterpret_cast<const __nv_bfloat162*>(&wa);
+      uint4 ob;
+      __nv_bfloat162* op = reinterpret_cast<__nv_bfloat162*>(&ob);
+#pragma unroll
+      for (int c = 0; c < 4; ++c) {
+        const float2 g = __bfloat1622float2(wp[c]);
+        op[c] = __floats2bfloat162_rn(norm_mid(v[j][2 * c] * inv, nmode) * g.x, norm_mid(v[j][2 * c + 1] * inv, nmode) * g.y);
+      }
+      orow[i] = ob;
+    }
+  }
+}
+
 // out[:n] (bf16) += acc[:n] (fp32)
 // B11：MoE 输出合并一次 launch：out[tok,:] = bf16(Σ_k w·y[inv[tok,k],:])，替代 memset(acc)+scatter_add(atomic)+memset(y)+f32_add_to_bf16。
 // mode 同 scatter_add_kernel（1 = vLLM bf16 权重口径：Σ f32(bf16(bf16(w)·v))；0 = f32）。末尾与 f32_add_to_bf16 同：
@@ -703,6 +775,17 @@ __global__ void combine_kernel(const bf16* __restrict__ y, const float* __restri
     }
     out[tok * H + d] = to_bf16(to_f32(to_bf16(acc)));
   }
+}
+extern "C" int moe_combine_norm_bf16(const void* y, const float* topk_w, const int32_t* inv, const void* per_expert,
+                                     const int32_t* topk_ids, float w_scale, void* y_out, const void* w, void* h2,
+                                     int64_t tokens, int64_t topk, int64_t hidden, int mode, float eps, int nmode,
+                                     cudaStream_t stream) {
+  if (tokens <= 0) return 0;
+  if (topk <= 0 || topk > MAX_K || hidden % 8 != 0 || hidden > 4096) return err(cudaErrorInvalidValue);
+  combine_norm_kernel<<<(unsigned)tokens, 256, 0, stream>>>(static_cast<const bf16*>(y), topk_w, inv, per_expert, topk_ids, w_scale,
+                                                            static_cast<bf16*>(y_out), static_cast<const bf16*>(w), static_cast<bf16*>(h2),
+                                                            (int)topk, (int)hidden, mode, eps, nmode);
+  return last_err();
 }
 extern "C" int moe_combine_bf16(const void* y, const float* topk_w, const int32_t* inv, const void* per_expert,
                                 const int32_t* topk_ids, float w_scale, void* out, int64_t tokens, int64_t topk,

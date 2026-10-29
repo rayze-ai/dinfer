@@ -1406,3 +1406,5 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 
 ## ★★★ D191 2026-10-29 b45 定稿（B44 split-K×2，B 侧 `MOE_SPLITK=2`，两轮）：c1 4.65 → **4.86（+4.5%）**，c8 7.13 → **7.42（+4%）** —— **退化，不采用**（默认 1 = 关，代码留作 A/B）。parity：ksplit 1/2/4 fp4 码差全 0（K 段对齐下 fp32 和恰好同）。
 - 解释：BK=256/STAGES=3 后每 CTA 只 11 迭代，再对半 → 6 迭代，prologue（首 2 stage 装载 + tile_lookup）占比过半，CTA 翻倍换不回；外加 fp32 部分和 2×4 B 写读。**MoE decode 的"链长"路线到此为止**，剩余差距要么是每 CTA 启动固定开销（tile_lookup 读 offsets/tile_off 两级二分 + 首 stage 延迟），要么回到 DRAM 并行度（需要 nsys b44 c8b 按 kernel 看 pipe4 现在的 us/call 再定）。
+
+## D192 2026-10-29 B45（待编待验）：combine + post_ff_norm_2 一次 launch（`combine_norm_kernel`：block=token、256 线程持 2 个 8 元素组，combine 同式 → 写 y → 平方和同序 → rms_inv(nmode) → h2），与 `combine_kernel → rmsnorm_vec<256,2>` 逐位同；`MOE_COMBINE_NORM=0` 回退；-30 launch/步。门禁 `moe_combine_norm_parity`。链 b46（A = b44）。
