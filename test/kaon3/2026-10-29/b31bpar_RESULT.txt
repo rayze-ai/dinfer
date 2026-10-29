@@ -1,0 +1,22 @@
+00:23:21
+EXIT=0
+FP8_GEMV_TIMING dense_down N=2816 K=2112 m=1: 4.12 us  1442 GB/s  (下限 3.32 us @1.79TB/s)
+FP8_GEMV_TIMING dense_down N=2816 K=2112 m=8: 10.26 us  580 GB/s  (下限 3.32 us @1.79TB/s)
+FP8_GEMV_TIMING qkv_sliding N=3072 K=2816 m=1: 6.16 us  1405 GB/s  (下限 4.83 us @1.79TB/s)
+FP8_GEMV_TIMING qkv_sliding N=3072 K=2816 m=8: 12.31 us  703 GB/s  (下限 4.83 us @1.79TB/s)
+FP8_GEMV_TIMING oproj_sliding N=2816 K=4096 m=1: 6.17 us  1870 GB/s  (下限 6.44 us @1.79TB/s)
+FP8_GEMV_TIMING oproj_sliding N=2816 K=4096 m=8: 16.41 us  703 GB/s  (下限 6.44 us @1.79TB/s)
+FP8_GEMV_TIMING dense_gateup_half N=2112 K=2816 m=1: 6.16 us  966 GB/s  (下限 3.32 us @1.79TB/s)
+FP8_GEMV_TIMING dense_gateup_half N=2112 K=2816 m=8: 8.21 us  724 GB/s  (下限 3.32 us @1.79TB/s)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.62s
+m=1 h=2816 inter=2112: norm_q 全同 2816/2816 最大码差 0 超差 0 | act_q 全同 2112/2112 最大码差 0 超差 0 | down 最大误差 0.0073 超差 0/2816 => ok
+m=3 h=2816 inter=2112: norm_q 全同 8448/8448 最大码差 0 超差 0 | act_q 全同 6332/6336 最大码差 0 超差 0 | down 最大误差 0.0076 超差 0/8448 => ok
+m=8 h=2816 inter=2112: norm_q 全同 22528/22528 最大码差 0 超差 0 | act_q 全同 16887/16896 最大码差 0 超差 0 | down 最大误差 0.0072 超差 0/22528 => ok
+m=16 h=2816 inter=2112: norm_q 全同 45055/45056 最大码差 0 超差 0 | act_q 全同 33768/33792 最大码差 0 超差 0 | down 最大误差 0.0077 超差 0/45056 => ok
+m=5 h=256 inter=160: norm_q 全同 1280/1280 最大码差 0 超差 0 | act_q 全同 797/800 最大码差 0 超差 0 | down 最大误差 0.0001 超差 0/1280 => ok
+gemv N=3072 K=2816 m=16: 最大误差 0.0078 超差 0/49152 => ok
+gemv N=2816 K=4096 m=8: 最大误差 0.0078 超差 0/22528 => ok
+gemv N=2816 K=4096 m=1: 最大误差 0.0067 超差 0/2816 => ok
+gemv N=3072 K=2816 m=1: 最大误差 0.0072 超差 0/3072 => ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 26.31s
+DONE
