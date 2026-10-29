@@ -58,8 +58,6 @@ pub enum QLinear {
         a_scale: f32,
         n: usize,
         k: usize,
-        /// 量化暂存（按 `max_tokens × k` 容量），`Mutex` 只为内部可变性，无跨线程竞争。
-        quant: std::sync::Mutex<Option<dinfer_kernels::cudarc::driver::CudaSlice<u8>>>,
         /// 两个 per-tensor scale 的设备副本（cuBLASLt 要设备指针），首次调用时建一次。
         scache: std::sync::Mutex<
             Option<(
@@ -98,7 +96,6 @@ impl QLinear {
             QWeight::Fp8 { w, scale, a_scale, n, k } => {
                 Self::Fp8 {
                     w, scale, a_scale, n, k,
-                    quant: std::sync::Mutex::new(None),
                     scache: std::sync::Mutex::new(None),
                 }
             }
@@ -203,6 +200,12 @@ impl QLinear {
         }
     }
 
+    /// 测试 / 探针用：自带临时量化暂存的 `forward`（热路径用 `forward` + `LayerScratch.quant_a`）。
+    pub fn forward_alloc(&self, gemm: &Gemm, stream: &Stream, x: &Tensor<bf16>, out: &mut Tensor<bf16>, tokens: usize) -> Result<()> {
+        let (_, kk) = self.shape();
+        let mut tmp = stream.alloc_zeros::<u8>(tokens.max(1) * kk)?;
+        self.forward(gemm, stream, x, out, tokens, &mut tmp)
+    }
     /// `out[..tokens, ..] = x[..tokens, :] · Wᵀ`；`x`/`out` 允许按 max_tokens 预分配。
     pub fn forward(
         &self,
@@ -211,27 +214,23 @@ impl QLinear {
         x: &Tensor<bf16>,
         out: &mut Tensor<bf16>,
         tokens: usize,
+        // B35：FP8 激活量化暂存由调用方（LayerScratch.quant_a）提供——每条流一套，跨流 prefill/decode 并行时不共享。
+        qbuf: &mut dinfer_kernels::cudarc::driver::CudaSlice<u8>,
     ) -> Result<()> {
         let (n, kk) = self.shape();
         ensure!(x.numel() >= tokens * kk, "QLinear: x 太小");
         ensure!(out.numel() >= tokens * n, "QLinear: out 太小");
         match self {
             Self::Bf16 { w, .. } => gemm.forward_bf16(&x.data, &w.data, None, &mut out.data, tokens, n, kk),
-            Self::Fp8 { w, scale, a_scale, quant, scache, .. } => {
+            Self::Fp8 { w, scale, a_scale, scache, .. } => {
                 // 自写 kernel 做 A/B 用（`FP8_SELF_KERNEL=1`）；默认走 cuBLASLt，与 vLLM 逐位一致。
                 let self_kernel = env_eq!("FP8_SELF_KERNEL", "1");
                 if self_kernel {
                     return gemm.forward_fp8(&x.data, *a_scale, w, *scale, &mut out.data, tokens, n, kk);
                 }
-                let mut g = quant.lock().unwrap();
                 let need = tokens * kk;
-                let buf = match g.as_mut() {
-                    Some(b) if b.len() >= need => b,
-                    _ => {
-                        *g = Some(stream.alloc_zeros::<u8>(need)?);
-                        g.as_mut().unwrap()
-                    }
-                };
+                ensure!(qbuf.len() >= need, "QLinear: quant_a 暂存 {} < {need}", qbuf.len());
+                let buf = qbuf;
                 gemm.quant_fp8(&x.data, *a_scale, buf, need)?;
                 // B6（loop kaon3-decode-opt）：decode 小 M 走带宽型 fp8 GEMV（`mlp_fp8_gemv`，与 dense MLP 同 kernel），
                 // 条件：tokens ≤ 16、K % 16 == 0、A 的 bf16 驻留 M_TILE·K·2 ≤ 24 KB（≥ 4 block/SM 才能把权重流读的延迟藏住；
@@ -862,6 +861,8 @@ pub struct LayerScratch {
     pub buckets: k::ops::MoeBuckets,
     /// compile 口径下 input_norm 的**融合量化**结果（e4m3 `[max_tokens, hidden]`），q/k/v 三个投影共用。
     pub preq: std::sync::Mutex<Option<dinfer_kernels::cudarc::driver::CudaSlice<u8>>>,
+    /// B35：QLinear FP8 激活量化暂存（原在每个 QLinear 里 lazy 分配、全层共享）；按 max_tokens × max K 固定分配，每套 scratch 一份。
+    pub quant_a: dinfer_kernels::cudarc::driver::CudaSlice<u8>,
     /// `KAON3_MEGA=1` 时 dense MLP 支路的中间缓冲；关时为空（不占显存）。
     pub mega: Option<MegaBufs>,
     /// `MOE_GROUPED=1` 时 device-grouped MoE 的中间缓冲（R=max_tokens·top_k 行）；关时为空。
@@ -946,6 +947,7 @@ impl LayerScratch {
             topk_w: Tensor::uninit(stream, &[max_tokens * cfg.top_k])?,
             buckets: k::ops::MoeBuckets::new(stream, cfg.num_experts, max_tokens, cfg.top_k)?,
             preq: std::sync::Mutex::new(None),
+            quant_a: stream.alloc_zeros::<u8>(max_tokens * [cfg.hidden, cfg.num_heads * cfg.head_dim_full, cfg.num_heads * cfg.head_dim_sliding, cfg.dense_inter, cfg.moe_inter].into_iter().max().unwrap())?,
             mega: if mega_enabled() { Some(MegaBufs::new(stream, cfg)?) } else { None },
             grouped: if moe_grouped_enabled() { Some(GroupedBufs::new(stream, cfg, max_tokens)?) } else { None },
             dq16: stream.alloc_zeros::<u8>(DENSE_GEMV_ROWS * cfg.hidden)?,
@@ -1199,7 +1201,7 @@ impl Gemma4Layer {
             let buf = g.as_ref().unwrap();
             self.qkv.forward_preq(gemm, stream, buf, &mut sc.qkv, tokens)?;
         } else {
-            self.qkv.forward(gemm, stream, &sc.norm, &mut sc.qkv, tokens)?;
+            self.qkv.forward(gemm, stream, &sc.norm, &mut sc.qkv, tokens, &mut sc.quant_a)?;
         }
         // ---- 2b. 切列段：q=[0,q_n) k=[q_n,q_n+k_n) v=... ；k_eq_v 时 v 复用 k 段 ----
         let merged_n = self.qkv_widths.iter().sum::<usize>();
@@ -1431,7 +1433,7 @@ impl Gemma4Layer {
         if let Some(e) = &st_ev { stream.record_timing(&e[1])?; }  // 段1完=attn(qkv/norm/rope/paged)
         // ATTN_SKIP_OPROJ=1（纯计时,结果错）：跳过 o_proj GEMM。
         if env_ne!("ATTN_SKIP_OPROJ", "1") {
-            self.o_proj.forward(gemm, stream, attn, &mut sc.o, tokens)?;
+            self.o_proj.forward(gemm, stream, attn, &mut sc.o, tokens, &mut sc.quant_a)?;
         }
         sub_dump(stream, sub_out, "o_proj", &sc.o, tokens, h)?;
         // B13：norm_mode 1（默认）且非对拍 dump 时，post_attn_norm 直接加到 x（一次 launch）；`NORM_ADD_FUSED=0` 回退。
@@ -1458,8 +1460,8 @@ impl Gemma4Layer {
         if !mega_done {
             rmsnorm_into(stream, ops, &sc.x, &self.pre_ff_norm, &mut sc.norm, h, tokens, eps)?;
             sub_dump(stream, sub_out, "pre_ff_norm", &sc.norm, tokens, h)?;
-            self.dense_gate.forward(gemm, stream, &sc.norm, &mut sc.gate_up, tokens)?;
-            self.dense_up.forward(gemm, stream, &sc.norm, &mut sc.act, tokens)?;
+            self.dense_gate.forward(gemm, stream, &sc.norm, &mut sc.gate_up, tokens, &mut sc.quant_a)?;
+            self.dense_up.forward(gemm, stream, &sc.norm, &mut sc.act, tokens, &mut sc.quant_a)?;
             if let Some((dir, _)) = sub_out {
                 // mlp_gate_up = [gate | up] 拼起来（vLLM 的 MergedColumnParallelLinear 输出布局）
                 let (g, u) = (sc.gate_up.to_vec_f32(stream)?, sc.act.to_vec_f32(stream)?);
@@ -1475,7 +1477,7 @@ impl Gemma4Layer {
             }
             gelu_mul(stream, ops, &sc.gate_up.data, &sc.act.data, &mut sc.gelu.data, tokens, cfg.dense_inter)?;
             sub_dump(stream, sub_out, "mlp_gelu", &sc.gelu, tokens, cfg.dense_inter)?;
-            self.dense_down.forward(gemm, stream, &sc.gelu, &mut sc.dense, tokens)?;
+            self.dense_down.forward(gemm, stream, &sc.gelu, &mut sc.dense, tokens, &mut sc.quant_a)?;
             sub_dump(stream, sub_out, "dense", &sc.dense, tokens, h)?;
             rmsnorm_into(stream, ops, &sc.dense, &self.post_ff_norm_1, &mut sc.norm, h, tokens, eps)?;
         }
@@ -1859,11 +1861,11 @@ impl Gemma4Layer {
             }
             k::ops::moe_gather_bf16(stream, &sc.h2.data, &mut sc.xg.data, &sc.buckets.sorted_tok, start, len, h)?;
             let ex = &self.experts[eid];
-            ex.gate.forward(gemm, stream, &sc.xg, &mut sc.gate_up, len)?;
-            ex.up.forward(gemm, stream, &sc.xg, &mut sc.act, len)?;
+            ex.gate.forward(gemm, stream, &sc.xg, &mut sc.gate_up, len, &mut sc.quant_a)?;
+            ex.up.forward(gemm, stream, &sc.xg, &mut sc.act, len, &mut sc.quant_a)?;
             gelu_mul(stream, ops, &sc.gate_up.data, &sc.act.data, &mut sc.gelu.data, len, cfg.moe_inter)?;
             let g = Tensor { data: sc.gelu.data.clone(), shape: vec![len.max(1), cfg.moe_inter] };
-            ex.down.forward(gemm, stream, &g, &mut sc.yg, len)?;
+            ex.down.forward(gemm, stream, &g, &mut sc.yg, len, &mut sc.quant_a)?;
             // 子 loop C-5：逐专家中间量（gate / up / 激活 / down 输出 + 该专家的 token 列表），按专家 id 与 vLLM 对齐比较
             if let Some((dir, _)) = sub_out {
                 let m = cfg.moe_inter;

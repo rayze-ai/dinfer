@@ -123,13 +123,13 @@ fn moe_stage_matches_vllm() {
         let inter = cfg.moe_inter;
         let mut g = Tensor::<bf16>::uninit(&st, &[t, inter]).unwrap();
         let mut u = Tensor::<bf16>::uninit(&st, &[t, inter]).unwrap();
-        gate.forward(&gemm, &st, &Tensor { data: dstd.clone(), shape: vec![t, h] }, &mut g, t).expect("gate fwd");
-        up.forward(&gemm, &st, &Tensor { data: dstd.clone(), shape: vec![t, h] }, &mut u, t).expect("up fwd");
+        gate.forward_alloc(&gemm, &st, &Tensor { data: dstd.clone(), shape: vec![t, h] }, &mut g, t).expect("gate fwd");
+        up.forward_alloc(&gemm, &st, &Tensor { data: dstd.clone(), shape: vec![t, h] }, &mut u, t).expect("up fwd");
         // gelu(tanh)·mul（compile 口径：全 f32 一次舍入）
         let mut act = Tensor::<bf16>::uninit(&st, &[t, inter]).unwrap();
         dinfer_kernels::ops::gelu_tanh_mul_bf16(&st, &g.data, &u.data, &mut act.data, t, inter).expect("gelu");
         let mut y = Tensor::<bf16>::uninit(&st, &[t, h]).unwrap();
-        down.forward(&gemm, &st, &act, &mut y, t).expect("down fwd");
+        down.forward_alloc(&gemm, &st, &act, &mut y, t).expect("down fwd");
         let yv = st.dtoh_sync_copy(&y.data).expect("y d2h");
         let yv: Vec<f32> = yv.iter().map(|b| f32::from(*b)).collect();
         per_expert_y.push(yv.clone());

@@ -128,11 +128,11 @@ fn mega_real_weights_matches_eager() {
         let mut act_bf = Tensor::zeros(&st, &[m, inter]).unwrap();
         let mut dn_out = Tensor::zeros(&st, &[m, h]).unwrap();
         let mut ref_ff1 = Tensor::zeros(&st, &[m, h]).unwrap();
-        gate.forward(&gemm, &st, &ref_norm1, &mut gate_out, m).unwrap();
-        up.forward(&gemm, &st, &ref_norm1, &mut up_out, m).unwrap();
+        gate.forward_alloc(&gemm, &st, &ref_norm1, &mut gate_out, m).unwrap();
+        up.forward_alloc(&gemm, &st, &ref_norm1, &mut up_out, m).unwrap();
         dinfer_kernels::ops::gelu_tanh_mul_round2_bf16(&st, &gate_out.data, &up_out.data, &mut act_bf.data, m, inter)
             .unwrap();
-        down.forward(&gemm, &st, &act_bf, &mut dn_out, m).unwrap();
+        down.forward_alloc(&gemm, &st, &act_bf, &mut dn_out, m).unwrap();
         ops.norm().rmsnorm(&st, &dn_out.data, &post_w.data, &mut ref_ff1.data, m, h, eps).unwrap();
         st.synchronize().unwrap();
 

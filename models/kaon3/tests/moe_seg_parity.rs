@@ -99,11 +99,11 @@ fn moe_seg_matches_vllm() {
     let up = QLinear::load(&st, &src, &format!("{ep}.up_proj.weight")).expect("up");
 
     let mut g = Tensor::<bf16>::uninit(&st, &[cnt, inter]).unwrap();
-    gate.forward(&gemm, &st, &xt, &mut g, cnt).expect("gate fwd");
+    gate.forward_alloc(&gemm, &st, &xt, &mut g, cnt).expect("gate fwd");
     diff("gate", &st.dtoh_sync_copy(&g.data).expect("d2h"), 0);
 
     let mut u = Tensor::<bf16>::uninit(&st, &[cnt, inter]).unwrap();
-    up.forward(&gemm, &st, &xt, &mut u, cnt).expect("up fwd");
+    up.forward_alloc(&gemm, &st, &xt, &mut u, cnt).expect("up fwd");
     diff("up  ", &st.dtoh_sync_copy(&u.data).expect("d2h"), inter);
 
     // ---- gelu(tanh)·mul：与参照的 `c2`（activation 之后）逐位比 ----
@@ -150,7 +150,7 @@ fn moe_seg_matches_vllm() {
         let dact = st.htod_copy(act_ref.clone()).expect("act");
         let at = Tensor { data: dact, shape: vec![cnt, inter] };
         let mut y = Tensor::<bf16>::uninit(&st, &[cnt, h]).unwrap();
-        down.forward(&gemm, &st, &at, &mut y, cnt).expect("down fwd");
+        down.forward_alloc(&gemm, &st, &at, &mut y, cnt).expect("down fwd");
         let yv = st.dtoh_sync_copy(&y.data).expect("d2h");
         let mut nd = 0usize;
         let mut maxd = 0f32;
