@@ -10,6 +10,10 @@
 (a) decode 流 `cudaStreamCreateWithPriority` 高优先级、prefill 流低优先级；(b) prefill 的 grid 不要一次把 SM 填满（p64 的 grid.y = R/64 + E 对 2148 tok 是 421 × 6 × 2 = 5052 CTA，占满 170 SM ×2 CTA 多轮；可能要分块 launch 让调度器交错）；(c) 收割语义同下。
 先做一个**最小探针**：prefill 流低优先级 + decode 流高优先级，不改收割，只看 pair 步 exec 是否从 65 ms 降（decode 子批被优先调度 → decode 行先 publish 仍要等… 不会降）。所以探针无意义，直接做收割 + 优先级。
 
+## D236 补充量化（2026-10-29）
+混批步时间 ≈ prefill token 数 / 37 tok/ms，与 decode 行数无关（3800 tok：11 请求 95 ms、55 请求 101 ms）。vLLM 同形状 1500 tok 步 ~30 ms（50 tok/ms）。
+→ 收割收益上限 = 混批步全部时间（c16 1.65 ms/步、c64 7.8 ms/步 摊到 TPOT）；prefill GEMM 再提速 1.35× 则另拿一半。两条路并行：本 loop 做收割，MoE p64 / attention prefill 另起。
+
 ## 目标
 pair 步只等 decode 子批；prefill 子批在副流上跑完后，其首 token 在**之后某个 decode 步**的 publish 里并入（"晚到结果"）。
 decode 步照常走 CUDA graph；prefill 期间 decode 不停。
