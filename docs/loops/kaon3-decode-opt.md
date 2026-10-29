@@ -1218,3 +1218,13 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - D151：bN b23（独立 + trace）A 组完成（c1 5.99 / c8 TTFT 101（排队态噢动）/ TPOT 10.42），B 组（B23 二进制）跑中。B30 链等其 DONE。
 - **D152 b23 bN B 组 NOTUP**：bN 的 `cargo build` 把我已推上去的 B30 源也编进了（B = B23+B30），serve 起来 warmup 报 `rmsnorm_scale2_bf16 failed: cudaError 1`（InvalidValue）→ `model.rs:209` 下标 panic。B30b 的 `rmsnorm_scale2` 在 mode 1 路径被调用时参数不合法——查 launcher 校验（hidden 2816 合法；疑 `scale` 指针对齐 / `rs` / mode 范围）。修好后 b23 与 b30 要分开测：先 `ROUTER_PRE_FUSED=0` 跑 b23+B30a，再开。
 - 修：`rmsnorm_scale2_bf16` 入口放开 mode 1。链 `b2330.sh`：parity（attn_pre + layer_tail）+ `fp8_gemv_timing` 微基准 → bN TAG=b2330（A = b29 二进制，B = B23+B30a+B30b）。b23 单独的 bN 作废（B 组 NOTUP）。
+
+## ★★★★★ D153 2026-10-29 b2330 门禁全过（attn_pre 8 组 + layer_tail 9 组位差 0）；**fp8 gemv 微基准推翻 D148 的"3.6×"**
+| 形状 | m=1 us（下限） | 有效带宽 | m=8 us | 有效带宽 |
+|---|---|---|---|---|
+| dense down 2816×2112 | 4.12（3.32） | 1443 GB/s | **18.5** | 322 |
+| qkv 3072×2816 | 6.16（4.83） | 1405 | **23.8** | 363 |
+| o_proj 2816×4096 | 6.17（6.44） | 1870 | **47.1** | 245 |
+| gate/up 一半 2112×2816 | 6.16（3.32） | 966 | **43.0** | 138 |
+- **m=1 已在带宽下限 0.8–1.0×**（nsys 的 10.7 us 是 nsys 态膨胀，D75 教训再犯一次：小 kernel 的 nsys 时长不能当真）。c1 的 fp8 gemv 没有 0.65 ms 可省，B31 对 c1 **作废**。
+- **m=8 慢 4.5–7.6×**：M_TILE=8 时 smem 45 KB/块、每 warp 8 行 FMA 串行、occupancy 掉到 1–2 block/SM。这正是 D62 加 24 KB 门槛的原因——所以 c8 的 dense/qkv 实际走哪条？nsys c8 显示 `gemv_kernel<1>` 84/步与 c1 同 → **c8 里 dense_decode_gemv 可能按行拆成 m=1 调用**（或模板实参被 nsys 截断）。要核 `dense_decode_gemv` / `launch_gemv` 对 m=8 的分派；若 c8 真走 m=8 慢路径，修它是 c8 TPOT 的大刀（85 次 × (25−6) us ≈ 1.6 ms/步）。
