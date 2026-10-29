@@ -691,6 +691,11 @@ fn route_logits_bf16_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_ne!("ROUTER_LOGITS_BF16", "0"))
 }
+/// D178 诊断：每 200 次 MoE 调用打印激活专家数（`MOE_EXPERT_STATS=1`，会 D2H 同步，默认关）。
+fn moe_expert_stats_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_eq!("MOE_EXPERT_STATS", "1"))
+}
 /// B34③：MoE 的 gelu·mul 融进 down 的 grouped quant（`MOE_GELU_QUANT_FUSED=0` 回退）。
 fn moe_gelu_quant_fused_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1786,6 +1791,18 @@ impl Gemma4Layer {
             // 1) row2e[R]：device offsets → 每行专家 id（E blocks，无 D2H）
             if !route_fused {
                 k::ops::moe_row2expert(stream, &sc.buckets.offsets, &mut g.row2e, e, r)?;
+            }
+            // D178 诊断（`MOE_EXPERT_STATS=1`，会同步，只做诊断不做 bench）：每 200 次调用 D2H 一次 counts，
+            // 记录本步本层激活的专家数（count>0 的个数）与行数——用来校准"M=8 读多少专家权重"的带宽下限。
+            if moe_expert_stats_enabled() {
+                static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let n = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if n % 200 == 0 {
+                    let c = sc.buckets.counts.to_vec(stream)?;
+                    let active = c.iter().take(e).filter(|&&v| v > 0).count();
+                    let max_c = c.iter().take(e).copied().max().unwrap_or(0);
+                    tracing::info!(tokens, rows = r, active_experts = active, max_rows_per_expert = max_c, "moe expert stats");
+                }
             }
             // 2) gather 已融进量化（B11a：量化直接按 sorted_tok 读 h2 行，不再写 xg）
             // MoE 内部细分计时（KAON3_MOE_TIME=1）：量 3×grouped_gemm vs 其余。

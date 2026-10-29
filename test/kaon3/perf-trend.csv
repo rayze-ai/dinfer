@@ -203,3 +203,9 @@ b38,2026-10-29,"B34③ gelu·mul + down 量化融合(moe_gelu_grouped_quant 默�
 b38,2026-10-29,"B34③ gelu·mul + down 量化融合(moe_gelu_grouped_quant 默认开); A=b37b: c1 4.99→4.96, c8 8.43→8.42",c8,out_tok_per_s,767.200,956.000,0.803,,higher,main,5090,vllm,dinfer,kaon3
 b38,2026-10-29,"B34③ gelu·mul + down 量化融合(moe_gelu_grouped_quant 默认开); A=b37b: c1 4.99→4.96, c8 8.43→8.42",c8,ttft_p50_ms,154.450,146.400,1.055,,lower,main,5090,vllm,dinfer,kaon3
 b38,2026-10-29,"B34③ gelu·mul + down 量化融合(moe_gelu_grouped_quant 默认开); A=b37b: c1 4.99→4.96, c8 8.43→8.42",c8,tpot_p50_ms,8.390,6.240,1.345,,lower,main,5090,vllm,dinfer,kaon3
+b39,2026-10-29,"A8: fp8 gemv A 以 e4m3 驻留 smem(M=8/K=4096 o_proj 回 gemv, FP8_GEMV_A8 默认开); A=b38: c1 4.97 不变, c8 8.34→8.04 -4%, 吞吐 767→795",c1,out_tok_per_s,188.100,200.000,0.941,,higher,main,5090,vllm,dinfer,kaon3
+b39,2026-10-29,"A8: fp8 gemv A 以 e4m3 驻留 smem(M=8/K=4096 o_proj 回 gemv, FP8_GEMV_A8 默认开); A=b38: c1 4.97 不变, c8 8.34→8.04 -4%, 吞吐 767→795",c1,ttft_p50_ms,26.970,25.000,1.079,,lower,main,5090,vllm,dinfer,kaon3
+b39,2026-10-29,"A8: fp8 gemv A 以 e4m3 驻留 smem(M=8/K=4096 o_proj 回 gemv, FP8_GEMV_A8 默认开); A=b38: c1 4.97 不变, c8 8.34→8.04 -4%, 吞吐 767→795",c1,tpot_p50_ms,4.970,4.690,1.060,,lower,main,5090,vllm,dinfer,kaon3
+b39,2026-10-29,"A8: fp8 gemv A 以 e4m3 驻留 smem(M=8/K=4096 o_proj 回 gemv, FP8_GEMV_A8 默认开); A=b38: c1 4.97 不变, c8 8.34→8.04 -4%, 吞吐 767→795",c8,out_tok_per_s,795.000,956.000,0.832,,higher,main,5090,vllm,dinfer,kaon3
+b39,2026-10-29,"A8: fp8 gemv A 以 e4m3 驻留 smem(M=8/K=4096 o_proj 回 gemv, FP8_GEMV_A8 默认开); A=b38: c1 4.97 不变, c8 8.34→8.04 -4%, 吞吐 767→795",c8,ttft_p50_ms,154.010,146.400,1.052,,lower,main,5090,vllm,dinfer,kaon3
+b39,2026-10-29,"A8: fp8 gemv A 以 e4m3 驻留 smem(M=8/K=4096 o_proj 回 gemv, FP8_GEMV_A8 默认开); A=b38: c1 4.97 不变, c8 8.34→8.04 -4%, 吞吐 767→795",c8,tpot_p50_ms,8.040,6.240,1.288,,lower,main,5090,vllm,dinfer,kaon3
