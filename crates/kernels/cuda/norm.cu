@@ -309,7 +309,7 @@ __global__ void rmsnorm_kernel(const bf16* __restrict__ x, bf16* __restrict__ re
 template <int BLOCK, int VPT>
 __global__ void __launch_bounds__(BLOCK) rmsnorm_quant_kernel(const bf16* __restrict__ x, const bf16* __restrict__ w,
                                                              uint8_t* __restrict__ out, int hidden, float eps,
-                                                             float inv_scale) {
+                                                             float inv_scale, int mode) {
   const int64_t row = blockIdx.x;
   const uint4* xr = reinterpret_cast<const uint4*>(x + row * hidden);
   const uint4* wv = reinterpret_cast<const uint4*>(w);
@@ -337,7 +337,9 @@ __global__ void __launch_bounds__(BLOCK) rmsnorm_quant_kernel(const bf16* __rest
       gs[j] = acc;
     }
   }
-  const float inv = rms_inv_compile(rms_ss_triton<BLOCK, VPT>(gs, nvec), hidden, eps);
+  // B33a：mode 1（eager BI）= 复刻 `rmsnorm_vec_kernel` 的 bf16 输出 `bf16(norm_mid(x·inv)·w)` 再 `quant_fp8_kernel` 的 `f32(bf16)·inv_scale`
+  // —— 两步逐位同（`norm_quant_fused_parity`）；mode 0/2 = compile 口径 fp32 一路到 fp8。
+  const float inv = rms_inv(rms_ss_triton<BLOCK, VPT>(gs, nvec), hidden, eps, mode);
 #pragma unroll
   for (int j = 0; j < VPT; ++j) {
     const int i = threadIdx.x + j * BLOCK;
@@ -347,9 +349,15 @@ __global__ void __launch_bounds__(BLOCK) rmsnorm_quant_kernel(const bf16* __rest
 #pragma unroll
       for (int c = 0; c < 4; ++c) {
         const float2 g = __bfloat1622float2(wp[c]);
-        // fp32 一路算到 fp8：不做 bf16 往返（这正是与 eager 的差别所在）
-        const float y0 = v[j][2 * c] * inv * g.x * inv_scale;
-        const float y1 = v[j][2 * c + 1] * inv * g.y * inv_scale;
+        float y0, y1;
+        if (mode == 1) {
+          y0 = __bfloat162float(__float2bfloat16_rn(norm_mid(v[j][2 * c] * inv, mode) * g.x)) * inv_scale;
+          y1 = __bfloat162float(__float2bfloat16_rn(norm_mid(v[j][2 * c + 1] * inv, mode) * g.y)) * inv_scale;
+        } else {
+          // fp32 一路算到 fp8：不做 bf16 往返（这正是与 eager 的差别所在）
+          y0 = v[j][2 * c] * inv * g.x * inv_scale;
+          y1 = v[j][2 * c + 1] * inv * g.y * inv_scale;
+        }
         orow[i * 8 + 2 * c] =
             static_cast<uint8_t>(__nv_cvt_float_to_fp8(y0, __NV_SATFINITE, __NV_E4M3));
         orow[i * 8 + 2 * c + 1] =
@@ -480,11 +488,11 @@ int launch(const void* x, void* res, const void* w, void* out, const int32_t* ro
 // norm → fp8（compile 口径）。`a_scale` 是静态激活 scale：输出 = fp8(norm(x) · (1/a_scale))。
 template <int BLOCK, int VPT>
 static int launch_quant(const void* x, const void* w, void* out, int64_t tokens, int64_t hidden, float eps, float a_scale,
-                        cudaStream_t s) {
+                        int mode, cudaStream_t s) {
   if (!(a_scale > 0.f)) return err(cudaErrorInvalidValue);
   const dim3 grid((unsigned)tokens);
   rmsnorm_quant_kernel<BLOCK, VPT><<<grid, BLOCK, 0, s>>>(static_cast<const bf16*>(x), static_cast<const bf16*>(w),
-                                                          static_cast<uint8_t*>(out), (int)hidden, eps, 1.f / a_scale);
+                                                          static_cast<uint8_t*>(out), (int)hidden, eps, 1.f / a_scale, mode);
   return last_err();
 }
 
@@ -651,13 +659,13 @@ extern "C" int fused_add_rmsnorm_bf16(const void* x, void* res, const void* w, v
 // norm + 量化融合：`out[i] = fp8(norm(x)[i] * (1/a_scale))`，out 是 e4m3 字节。
 // 与 vLLM compile（inductor 融合 norm+quant）同口径；eager BI 口径请用 rmsnorm_bf16 + quant_fp8_bf16 两步。
 extern "C" int rmsnorm_quant_fp8_bf16(const void* x, const void* w, void* out, int64_t tokens, int64_t hidden, float eps,
-                                      float a_scale, cudaStream_t stream) {
+                                      float a_scale, int mode, cudaStream_t stream) {
   if (tokens <= 0) return 0;
   if (hidden <= 0 || hidden > 8192 || (hidden % 8) != 0) return err(cudaErrorInvalidValue);
-  if (hidden <= 1024) return launch_quant<128, 1>(x, w, out, tokens, hidden, eps, a_scale, stream);
-  if (hidden <= 2048) return launch_quant<256, 1>(x, w, out, tokens, hidden, eps, a_scale, stream);
-  if (hidden <= 4096) return launch_quant<256, 2>(x, w, out, tokens, hidden, eps, a_scale, stream);
-  return launch_quant<256, 4>(x, w, out, tokens, hidden, eps, a_scale, stream);
+  if (hidden <= 1024) return launch_quant<128, 1>(x, w, out, tokens, hidden, eps, a_scale, mode, stream);
+  if (hidden <= 2048) return launch_quant<256, 1>(x, w, out, tokens, hidden, eps, a_scale, mode, stream);
+  if (hidden <= 4096) return launch_quant<256, 2>(x, w, out, tokens, hidden, eps, a_scale, mode, stream);
+  return launch_quant<256, 4>(x, w, out, tokens, hidden, eps, a_scale, mode, stream);
 }
 
 // router 预处理融合（vLLM compile 口径）：`out = bf16(norm(x) · rs · scale)`，norm 无权重。

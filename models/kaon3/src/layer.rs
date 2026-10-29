@@ -192,6 +192,10 @@ impl QLinear {
                     *sc = Some((stream.htod_copy(vec![*a_scale])?, stream.htod_copy(vec![*scale])?));
                 }
                 let (a_s, w_s) = sc.as_ref().unwrap();
+                // B33a：预量化路径同样走 fp8 gemv（条件与 forward 同），否则 NORM_FUSE_QUANT 会把 qkv 退回 cuBLASLt。
+                if fp8_gemv_enabled() && tokens <= 16 && kk % 16 == 0 && kk <= 4096 && fp8_gemv_m_tile(tokens) * kk * 2 <= fp8_gemv_smem_cap() {
+                    return k::ops::mlp_fp8_gemv(stream, a, w, &mut out.data, tokens, n, kk, *scale * *a_scale);
+                }
                 gemm.forward_fp8_cublaslt(a, a_s, w, w_s, &mut out.data, tokens, n, kk)
             }
             // 非 FP8 权重没有可复用的量化结果，退回普通路径
@@ -598,7 +602,8 @@ fn norm_mode() -> i32 {
 /// 说明 inductor 融合链的真实语义还没对上（见 `docs/loops/kaon3-parity.md` 第 20 轮）。留着供继续排查。
 fn fuse_norm_quant() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| env_eq!("NORM_FUSE_QUANT", "1"))
+    // B33a（2026-10-29）：mode 1 口径逐位复刻后默认开；上面"反而更差"的记录是 compile 口径（mode 0/2）下的，仍可用 RMSNORM_MODE=0/2 复查。
+    *V.get_or_init(|| env_ne!("NORM_FUSE_QUANT", "0"))
 }
 
 fn rmsnorm_into(
@@ -1156,7 +1161,8 @@ impl Gemma4Layer {
         // 所以这里量化一次、三个投影复用。eager 口径（`RMSNORM_MODE=1`）走原来的两步。
         // q/k/v 合并成一次 GEMM，共用一个 `input_scale`（= 合并组 input_scale 的 max，见 `load_fp8_group_merged`）。
         let mut qkv_preq = false;
-        if norm_mode() != 1 && fuse_norm_quant() {
+        // B33a：mode 1 下 kernel 复刻 bf16 中间（`norm_quant_fused_parity` 逐位），也可融合；`NORM_FUSE_QUANT=0` 回退两步。
+        if fuse_norm_quant() {
             if let Some(qs) = self.qkv.a_scale() {
                 let need = tokens * h;
                 let mut g = sc.preq.lock().unwrap();

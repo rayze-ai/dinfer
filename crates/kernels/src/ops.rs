@@ -708,6 +708,7 @@ pub fn rmsnorm_quant_fp8(
                 hidden as i64,
                 eps,
                 a_scale,
+                norm_mode(),
                 stream.raw() as _,
             )
         },
