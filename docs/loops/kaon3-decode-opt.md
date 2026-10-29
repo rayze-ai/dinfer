@@ -1234,3 +1234,8 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - 注意口径：bN 的 A/B 都没带 `FP8_GEMV=1`；之前 c1 5.57 是带它的数。B23+B30 叠加 FP8_GEMV 预计 ~5.2，等 A2/B2 后用 envab 补一组。
 - **b2330 定稿（两轮 ABAB）**：A c1 5.98/5.99、c8 TPOT 10.05/9.82、吞吐 678/673 → B c1 **5.57/5.57（-7%）**、吞吐 169/169；c8 TPOT **9.37/9.37（-6.8%）**、吞吐 **703/703（+4.4%）**、TTFT 151/152（≈ A2 的 155.6）；B/B2 英文 raw、中文输出与 A 逐字同。**合入**（默认开：`ATTN_PRE_FUSED` / `LAYER_TAIL_FUSED` / `ROUTER_PRE_FUSED`）。CSV round b2330。下一步 envab 叠加 `FP8_GEMV=1` 看 c1 绝对值。
 - **D155 gemvsweep（m=1 不变，m=8 看 warps）**：warps=1 比自选（0）慢 2–3×（m=8 dense_down 41.9 vs 18.5）→ 占用率确实是 m=8 的瓶颈方向；其余档位见 `tmp_gemvsweep_RESULT.txt`。envab `fp8gemv_b2330`（A 默认 / B `FP8_GEMV=1`，b2330 二进制）排队。c8 是否真走 `gemv_kernel<8>` 用 python sqlite3 直接查 nsys c8 库。
+
+## ★★★★ D156 2026-10-29 gemvsweep 定论 + c8 分派核实
+- m=8：warps 2（自选）18.5 / 23.8 us → **warps 8：10.3 / 12.3 us（1.8×）**，16 与 8 同；m=1 不受 warps 影响（已在下限）。根因：M_TILE=8 的 A 驻留 45 KB 只被 2 个 warp 摊，occupancy 1 block/SM 且每 warp 串行 8 行 FMA。
+- c8 nsys sqlite（python）：`gemv_kernel<1>` 5355 次 + **`gemv_kernel<4>` 2073 次（13.8 us）、`gateup_act<4>` 1036 次（15 us）**，nvjet qkv 315 次 21.4 us ⇒ c8 的 decode 步里 dense/qkv 走 M_TILE 4（24 KB 门槛下 K=2112 m=8 → 33 KB 超 → 实际是 n<8 的步？或 K=2816 的 m≤4）+ 一部分 cuBLASLt nvjet（21 us，比 8-warp gemv 的 12 us 慢 1.7×）。
+- **B31b**：`pick_warps` 对 M_TILE ≥ 4 固定 8 warp；A 驻留门槛 24 → 48 KB（`FP8_GEMV_SMEM_KB` 覆盖）。预期 c8：85 次 gemv 中走 <4>/<8> 的 -3~5 us、qkv 从 nvjet 21 → 12 us；c1 不变。门禁 `mlp_fp8_decode_parity`（m 1/3/8/16）；链 `b31b.sh`（bN 两侧 FP8_GEMV=1，A=b2330）。
