@@ -1582,3 +1582,5 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 ## ★★★ D217 2026-10-29 b53 定稿：**B48c 合入**（BN=128 默认，`MOE_PREFILL_BN=64` 回退；A = BN64，二进制 8db4c1a2 = FP8_LT_TUNE 仍是默认关的版本）：c8 7.01（持平）、c16 10.78（持平）、c32 13.48（−1%）、c64 **23.05（−1.7%）**；TTFT −4%；吞吐 +1…+2%；输出逐字同。CSV b53。小刀，但两轮同向、微基准 −6/−9%，合入。
 - 注意 b53 的 A/B 都在 FP8_LT_TUNE 关的二进制上；B49 默认开后的合成基线以 b54 nsys 链的 serve 为准。
 - **疑点**（D218 查）：b52 B 侧 serve 日志里 `grep "gemm fp8"` = 0 行 —— `[gemm fp8 tune]` 的 eprintln 没出现在日志。要么 stderr 没进 serve.log（但 `[kaon3-host]` 等 eprintln 都在），要么 `tune_enabled()` 为假、tune 分支没走 → 那 B49 的收益来自别处（2 的幂桶 key 让 m ≥ 64 的形状第一次走 `parity_pick` 查表时… 不对，parity_pick 不依赖 key）。必须查清再说"B49 是自调优的功劳"。
+
+## D218 2026-10-29 疑点解除：`[gemm fp8 tune]` 的 eprintln 在 `GEMM_FP8_DEBUG` 门控内（gemm.rs ~836），b52 没设所以 0 行；tune 分支条件 `tune_on && m >= 64 && tune_enabled()`，`GEMM_TUNE` 默认开。B49 收益确属自调优。b54 链 serve 带 `GEMM_FP8_DEBUG=1`，日志会给每个 (m 桶, n, k) 的 best / parity algo 对照——同时验证"m 2 的幂桶"下调了几次。
