@@ -3,8 +3,8 @@
 # 结果 tmp_g3_RESULT.txt，标记 G3_DONE。
 R=/w/dinfer/tmp_g3_RESULT.txt; : > $R; date +%T >> $R
 for side in A B; do
-  if [ $side = A ]; then EX=""; else EX="FP8_LT_PREFER_SMALL_TILE=1"; fi
-  EXTRA_ENV="$EX GEMM_FP8_DEBUG=1" TAG=nsysg3$side PORT=$((8368 + ([ $side = B ] && echo 1 || echo 0))) bash /w/nsysp16.sh
+  if [ $side = A ]; then EX=""; P=8368; else EX="FP8_LT_PREFER_SMALL_TILE=1"; P=8369; fi
+  EXTRA_ENV="$EX GEMM_FP8_DEBUG=1" TAG=nsysg3$side PORT=$P bash /w/nsysp16.sh
   echo "== $side ($EX)" >> $R
   grep -E "throughput|host-time:" /w/dinfer/tmp_nsysg3${side}_RESULT.txt | sed -E "s/client:.*//" | cut -c1-160 >> $R
   taskset -c 100-127 python3 -I - /w/dinfer/tmp_nsysg3${side}.sqlite <<'PY' >> $R 2>&1
