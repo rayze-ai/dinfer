@@ -1,0 +1,26 @@
+00:28:11
+EXIT=0
+1371 | | /// 一次 launch 持久 CTA 调度，数值走与 v3 同一 core（`gqa_decode_v3_core`），应与 gqa_decode_v3_bf16 逐位一致。
+rmsnorm_add tokens=1 amp=1: 位差 0/2816 => ok
+  combine mode=1: 位同 2816/2816 最大差 0.00000 超 1ulp 0
+rmsnorm_add tokens=8 amp=1: 位差 0/22528 => ok
+  combine mode=0: 位同 2816/2816 最大差 0.00000 超 1ulp 0
+tokens=1 pes=false: ids true | w 位差 0/8 | offsets/tile_off/counts/cursor true | row2e true | sorted 区间集合 true | combine true => ok
+  combine mode=1: 位同 19712/19712 最大差 0.00000 超 1ulp 0
+  combine mode=0: 位同 19712/19712 最大差 0.00000 超 1ulp 0
+tokens=7 pes=true: ids true | w 位差 0/56 | offsets/tile_off/counts/cursor true | row2e true | sorted 区间集合 true | combine true => ok
+rmsnorm_add tokens=33 amp=30: 位差 0/92928 => ok
+rmsnorm_add tokens=8 amp=0.01: 位差 0/22528 => ok
+test rmsnorm_add_bitwise ... ok
+  combine mode=1: 位同 180224/180224 最大差 0.00000 超 1ulp 0
+  combine mode=0: 位同 180215/180224 最大差 0.00195 超 1ulp 0
+tokens=64 pes=true: ids true | w 位差 0/512 | offsets/tile_off/counts/cursor true | row2e true | sorted 区间集合 true | combine true => ok
+  combine mode=1: 位同 180224/180224 最大差 0.00000 超 1ulp 0
+  combine mode=0: 位同 180210/180224 最大差 0.00195 超 1ulp 0
+tokens=64 pes=false: ids true | w 位差 0/512 | offsets/tile_off/counts/cursor true | row2e true | sorted 区间集合 true | combine true => ok
+  combine mode=1: 位同 92928/92928 最大差 0.00000 超 1ulp 0
+  combine mode=0: 位同 92923/92928 最大差 0.00195 超 1ulp 0
+tokens=33 pes=true: ids true | w 位差 0/264 | offsets/tile_off/counts/cursor true | row2e true | sorted 区间集合 true | combine true => ok
+test moe_route_fused_parity ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+DONE
