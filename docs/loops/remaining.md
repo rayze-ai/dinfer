@@ -25,7 +25,7 @@
 | K7 | **NVFP4 GEMM 真实形状 141 TF/s vs 探针 330**：512×2816×2816 只有 704 block / 148 SM，需改 tile 形状或 split-K；剩余是两路动态 smem scale 读的寄存器压力（48 reg） | 待做 | `loops/kaon-v3.md` 阶段 3 续 |
 | K8 | **阶段 4 服务**：serve / API / bench 全未接 Kaon | 待做 | `loops/kaon-v3.md` |
 | K9 | 性能正式测（c1/c8/c32/6K TTFT 对基线 1.2×） | **进行中**：stepA4/A5 口径（c1–64 × 5 轮、两端非 eager 对齐）已是常规；a5 行在 `test/kaon3/e2e-rounds.csv` | `loops/kaon3-decode-opt.md` D202/D221 |
-| K10 | **c16–c64 TPOT 差距（1.4–1.5×）**：剩余 = 混批 prefill 步期间 decode 全停（c16 1.9 / c64 9.4 ms/步）+ prefill 步 GEMM 36 tok/ms（vLLM 50） | 下一轮主攻 | `loops/kaon3-prefill-async.md`（异步收割）；MoE p64 再 1.5–2×（ldmatrix / BM128） |
+| K10 | **c16–c64 TPOT 差距**：2026-10-29 E6 后约 1.25× / 1.29× / 1.20×（异步收割 + decode 流优先级已合入默认开）；剩余 = prefill 单步吞吐 37 vs vLLM 50 tok/ms + 优先级压 prefill 的 TTFT 代价 | 下一轮：MoE p64 ldmatrix / BM128；E7 优先级差微调 | `loops/kaon3-prefill-async.md` E6/E7；`loops/kaon3-decode-opt.md` D227 |
 | K11 | fp8 Lt 自调优挪到启动 warmup（现在首个 m ≥ 64 形状出现时付 32×5 次计时）；`XSTREAM` 默认按 b56 定 | 待做（小） | `loops/kaon3-decode-opt.md` D215 / D224 |
 
 ## B. Qwen3.5-27B（B300）
