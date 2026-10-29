@@ -120,3 +120,4 @@ G 编号（接 D/E）。
 - 已定：G1 ldmatrix 中性（默认关）、G3a 实现错 + nvjet 在副流非大头（默认关）、G5 撤回（autotune 探针）。**本 loop 至今 0 刀合入**，连续 3 刀中性 → 按停止条件回 Step A。
 - Step A 缺口两项并行补：① 我们副流稳态 kernel 表（`nsysp16s`，delay 20 s，32×16 请求）；② vLLM 同口径 kernel 表（`vllm-nsys` @GPU4）。对比脚本 `nsys_family_compare.py`。
 - 判据不变：`[late-harvest] wall_ms` tok/ms（G0：2.5K 档 28 → ≥ 36）与 c16 TPOT ≤ 8.5。
+- vLLM 在 nsys 下的 c16 bench（GPU4，同 bench 参数）：TPOT p50 **8.08 / 8.13**（无 nsys 基线 :28201 是 7.1–7.2）、TTFT 261、1320 tok/s；我们在 nsys 下（nsysp16s）TPOT ~8.9、1419 tok/s。**nsys 态两边都膨胀**（vLLM +13%，我们 +0 ~ −1%——我们 decode 走图、nsys 节点级开销小；vLLM 的 FULL cudagraph 同理但 prefill eager 多）。kernel 表只比相对占比与同形状 us，不比绝对 TPOT。
