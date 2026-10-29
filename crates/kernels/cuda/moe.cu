@@ -452,6 +452,55 @@ extern "C" int moe_route_softmax_f32(const float* logits, int32_t* topk_ids, con
 //   top-k（照 route_topk_ids_kernel 的选择顺序）→ 权重（route_softmax_row，逐位同）→ counts/offsets/cursor/tile_off
 //   → sorted_tok/sorted_k → row2e。替代 route_topk_ids + route_softmax + memset + count + scan + fill + row2expert 7 次。
 // 单 block；tokens ≤ kRouteSmallMaxTok；每线程一个 token（≤ blockDim）。sorted 区间内顺序由 smem 原子决定（与旧版一样"不定"）。
+// B43（loop kaon3-decode-opt D186）：route_softmax_row 的"并行 exp + 串行序求和"版，与单线程版**逐位同**：
+//   ① m = warp fmaxf 归约（fmaxf 可交换可结合，精确）；② 各 lane 并行算 ex[e] = route_exp_e(lg[e]−m) 写回 smem 行
+//   （原地覆盖 s_raw 行，该行只属于本 warp 的 token）；③ lane 0 按 e=0..E−1 串行 __fadd_rn 求 Z（序与单线程版同），
+//   raw[k] = ex[ids[k]]·invZ，其余（32-lane 树归一化、per-expert scale）与单线程版同一段代码。
+// 单线程版的 128 次串行 exp（MUFU 链）是 route kernel 的大头（D161 的 warp 版把 Z 也并行化了才破坏了序）。
+__device__ __forceinline__ void route_softmax_row_par(float* __restrict__ row, const int32_t* __restrict__ ids,
+                                                      const void* __restrict__ per_expert_scale, float* __restrict__ w,
+                                                      int E, int K, int exact_rcp, int lane) {
+  float m = -INFINITY;
+  for (int e = lane; e < E; e += 32) m = fmaxf(m, row[e]);
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1) m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, o));
+  for (int e = lane; e < E; e += 32) row[e] = route_exp_e(__fsub_rn(row[e], m), exact_rcp);
+  __syncwarp();
+  if (lane != 0) return;
+  float Z = 0.f;
+  for (int e = 0; e < E; ++e) Z = __fadd_rn(Z, row[e]);
+  const float invZ = route_inv(Z, exact_rcp);
+  float raw[MAX_K];
+  for (int k = 0; k < K; ++k) raw[k] = __fmul_rn(row[ids[k]], invZ);
+  int block_e = 1;
+  while (block_e < E) block_e <<= 1;
+  const int ept = block_e >= 32 ? block_e / 32 : 1;
+  float lanev[32];
+  for (int l = 0; l < 32; ++l) {
+    float acc = 0.f;
+    bool first = true;
+    for (int j = 0; j < ept; ++j) {
+      const int pos = l * ept + j;
+      if (pos >= K) continue;
+      acc = first ? raw[pos] : __fadd_rn(acc, raw[pos]);
+      first = false;
+    }
+    lanev[l] = acc;
+  }
+  for (int o = 16; o > 0; o >>= 1) {
+    float nxt[32];
+    for (int l = 0; l < 32; ++l) nxt[l] = __fadd_rn(lanev[l], lanev[l ^ o]);
+    for (int l = 0; l < 32; ++l) lanev[l] = nxt[l];
+  }
+  const float renorm = lanev[0] > 0.f ? lanev[0] : 1.f;
+  const float inv = route_inv(renorm, exact_rcp);
+  for (int k = 0; k < K; ++k) {
+    const int e = ids[k];
+    const float sc = per_expert_scale ? to_f32(static_cast<const bf16*>(per_expert_scale)[e]) : 1.f;
+    w[k] = __fmul_rn(__fmul_rn(raw[k], inv), sc);
+  }
+}
+
 constexpr int kRouteSmallMaxTok = 64;
 __global__ void __launch_bounds__(256) route_bucket_small_kernel(
     const void* __restrict__ logits, const void* __restrict__ per_expert_scale, int32_t* __restrict__ topk_ids,
@@ -496,30 +545,49 @@ __global__ void __launch_bounds__(256) route_bucket_small_kernel(
     __syncwarp();
     // B32（D161）：warp 版 softmax 实测 c1 +3.5% / c8 +2.7%（Z 串行 shfl 链 + ex[32] 寄存器压力），默认关；`ROUTE_SOFTMAX_WARP=1` 开。
     // D166：softmax 读 smem 里已 cast 的整行副本 s_raw（与 s_val 同源、未被 top-k 置 -inf），bf16/f32 入口一致，无 local 数组。
-    const float* lgrow = s_raw + (size_t)t * E;
-    if (warp_softmax) {
+    float* lgrow = s_raw + (size_t)t * E;
+    if (warp_softmax == 2) {
+      route_softmax_row_par(lgrow, ids, per_expert_scale, topk_w + (size_t)t * K, E, K, exact_rcp, lane);  // B43 默认
+    } else if (warp_softmax == 1) {
       route_softmax_row_warp(lgrow, ids, per_expert_scale, topk_w + (size_t)t * K, E, K, exact_rcp, lane, 0);
     } else if (lane == 0) {
       route_softmax_row(lgrow, ids, per_expert_scale, topk_w + (size_t)t * K, E, K, exact_rcp);
     }
   }
   __syncthreads();
-  if (tid == 0) {
-    int acc = 0, tacc = 0, tacc16 = 0;
+  // B43：前缀和（counts → offsets / tile_off / tile_off16 / cursor）由 warp 0 做整数扫描（每 lane 连续 ceil(E/32) 个专家，
+  // 段内串行 + warp shfl_up 包含扫描）；整数运算，与单线程串行完全同值。
+  if (warp == 0) {
     int32_t* tile_off16 = tile_off + (E + 1);
-    for (int e = 0; e < E; ++e) {
-      counts[e] = s_cnt[e];
-      offsets[e] = acc;
-      s_cur[e] = acc;
-      tile_off[e] = tacc;
-      tile_off16[e] = tacc16;
-      tacc += (s_cnt[e] + 31) / 32;
-      tacc16 += (s_cnt[e] + 15) / 16;
-      acc += s_cnt[e];
+    const int ept = (E + 31) / 32;
+    const int e0 = lane * ept;
+    int la = 0, lt = 0, lt16 = 0;
+    for (int j = 0; j < ept; ++j) {
+      const int e = e0 + j;
+      if (e < E) { const int c = s_cnt[e]; la += c; lt += (c + 31) / 32; lt16 += (c + 15) / 16; }
     }
-    offsets[E] = acc;
-    tile_off[E] = tacc;
-    tile_off16[E] = tacc16;
+    int ia = la, it = lt, it16 = lt16;
+#pragma unroll
+    for (int o = 1; o < 32; o <<= 1) {
+      const int pa = __shfl_up_sync(0xffffffffu, ia, o), pt = __shfl_up_sync(0xffffffffu, it, o), p16 = __shfl_up_sync(0xffffffffu, it16, o);
+      if (lane >= o) { ia += pa; it += pt; it16 += p16; }
+    }
+    int acc = ia - la, tacc = it - lt, tacc16 = it16 - lt16;  // exclusive
+    for (int j = 0; j < ept; ++j) {
+      const int e = e0 + j;
+      if (e < E) {
+        const int c = s_cnt[e];
+        counts[e] = c;
+        offsets[e] = acc;
+        s_cur[e] = acc;
+        tile_off[e] = tacc;
+        tile_off16[e] = tacc16;
+        tacc += (c + 31) / 32;
+        tacc16 += (c + 15) / 16;
+        acc += c;
+      }
+    }
+    if (lane == 31) { offsets[E] = ia; tile_off[E] = it; tile_off16[E] = it16; }
   }
   __syncthreads();
   for (int t = warp; t < tokens; t += nwarp) {
@@ -550,7 +618,8 @@ extern "C" int moe_route_bucket_small(const void* logits, int logits_bf16, const
                                       int32_t* sorted_tok, int32_t* sorted_k, int32_t* tile_off, int32_t* row2e,
                                       int32_t* inv, int64_t tokens, int64_t num_experts, int64_t topk,
                                       cudaStream_t stream) {
-  static const int warp_sm = []{ const char* v = getenv("ROUTE_SOFTMAX_WARP"); return (v && v[0] == '1') ? 1 : 0; }();
+  // B43：默认 2 = 并行 exp + 串行序求和（逐位同）；1 = B32 warp 版（已知退化）；0 = 单线程版。
+  static const int warp_sm = []{ const char* v = getenv("ROUTE_SOFTMAX_WARP"); return v ? ((v[0] == '1') ? 1 : (v[0] == '0' ? 0 : 2)) : 2; }();
   if (tokens <= 0) return 0;
   if (tokens > kRouteSmallMaxTok || num_experts <= 0 || num_experts > MAX_E || topk <= 0 || topk > MAX_K ||
       topk > num_experts)

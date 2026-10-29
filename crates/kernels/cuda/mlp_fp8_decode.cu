@@ -216,9 +216,12 @@ __global__ void __launch_bounds__(kMaxWarps * 32) gateup_act_kernel(const uint8_
   const int n = blockIdx.x * (blockDim.x >> 5) + warp;
   const bool active = n < I;
   uint4 r0[kMaxVecPerLane], r1[kMaxVecPerLane];
-  if (active) prefetch2(K, gw + (long)n * K, uw + (long)n * K, r0, r1, lane);  // B42b：先发权重读
+  // B42b（D186）：只在 M_TILE ≤ 2 时把权重读提前到 load_a 前（c1 -0.8%）；M_TILE ≥ 4 时 16 个 uint4 跨 barrier 常驻把占用压掉，c8 +4.9%，保持原序。
+  constexpr bool PRE = M_TILE <= 2;
+  if (PRE && active) prefetch2(K, gw + (long)n * K, uw + (long)n * K, r0, r1, lane);
   if constexpr (A8) load_a8<M_TILE>(a_q, smem_raw, m, K); else load_a<M_TILE>(a_q, sa, m, K);
   if (!active) return;  // load_a 已过 barrier，之后无 barrier
+  if (!PRE) prefetch2(K, gw + (long)n * K, uw + (long)n * K, r0, r1, lane);
   float acc[2][M_TILE];
 #pragma unroll
   for (int r = 0; r < M_TILE; ++r) acc[0][r] = acc[1][r] = 0.f;
@@ -247,9 +250,11 @@ __global__ void __launch_bounds__(kMaxWarps * 32) gemv_kernel(const uint8_t* __r
   const bool active = n0 < N;
   const bool two = n0 + 1 < N;
   uint4 r0[kMaxVecPerLane], r1[kMaxVecPerLane];
-  if (active) prefetch2(K, w + (long)n0 * K, w + (long)(two ? n0 + 1 : n0) * K, r0, r1, lane);  // B42b：先发权重读
+  constexpr bool PRE = M_TILE <= 2;  // B42b（D186）：同 gateup，只对小 M_TILE 提前预取
+  if (PRE && active) prefetch2(K, w + (long)n0 * K, w + (long)(two ? n0 + 1 : n0) * K, r0, r1, lane);
   if constexpr (A8) load_a8<M_TILE>(a_q, smem_raw, m, K); else load_a<M_TILE>(a_q, sa, m, K);
   if (!active) return;
+  if (!PRE) prefetch2(K, w + (long)n0 * K, w + (long)(two ? n0 + 1 : n0) * K, r0, r1, lane);
   float acc[2][M_TILE];
 #pragma unroll
   for (int r = 0; r < M_TILE; ++r) acc[0][r] = acc[1][r] = 0.f;
@@ -361,7 +366,7 @@ int mlp_fp8_gateup_act(const void* a_q, const void* gate_w, const void* up_w, vo
 // A8 口径查询：每个 A 元素在 smem 里占几字节（1 = e4m3 驻留，2 = bf16 驻留）。Rust 侧据此算 M_TILE·K·bytes ≤ 门槛。
 int mlp_fp8_gemv_a_bytes() { return dinfer::a8_enabled() ? 1 : 2; }
 // 构建标记（bN 链用 strings 验二进制是否含本版 kernel）。
-const char* mlp_fp8_build_tag() { return "fp8gemv_b42b_prefetch"; }
+const char* mlp_fp8_build_tag() { return "fp8gemv_b42c_prefetch_small"; }
 int mlp_fp8_gemv(const void* a_q, const void* w, void* out, int64_t m, int64_t n, int64_t k, float scale,
                  cudaStream_t stream) {
   using namespace dinfer;

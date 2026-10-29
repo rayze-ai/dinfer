@@ -1387,3 +1387,6 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 
 ## D185 2026-10-29 B42b：fp8 gemv / gateup 权重预取提前到 load_a 之前（c8 nsys 表第 2 名 `gemv_kernel<8>` 10407 call/122 步 = 85/步 × 15.2 us = 1.3 ms/步，M=1 也是 0.5 ms）
 - 现状 kernel 顺序：load_a（smem 装载 + barrier）→ 每 lane 发 8 个 uint4 权重 __ldg → 算。权重流在 prologue 期间不动。改成：先发权重 __ldg（寄存器在飞）→ load_a → 算；fma 序不变 → 逐位同（门禁 `mlp_fp8_decode_parity` A8 开/关 + `fp8_gemv_timing`）。链 b43（A = b41 二进制）。
+
+## ★★★ D186 2026-10-29 b43 定稿（B42b 权重预取提前，两轮）：c1 4.77/4.78 → **4.73/4.73（-0.8%）**，c8 7.19/7.19 → **7.54/7.54（+4.9%）**。微基准 m=8 不变（10.3/12.3/14.4/8.2）—— 退化只在端到端：M_TILE=8 时每线程 16 个 uint4（64 寄存器）跨 barrier 常驻，占用掉一档，权重流并行度反降。**改法**：`PRE = M_TILE <= 2` 编译期选（c1 路径预取、M≥4 原序）。与 B43 一起进 b44。
+## D187 2026-10-29 B43：route_bucket_small 两处并行化（逐位同）：① softmax 的 128 次串行 exp 改 warp 并行算到 smem 行，Z 仍 lane 0 按 e 升序 `__fadd_rn`（序不变）；② counts → offsets/tile_off/tile_off16/cursor 的单线程 128 轮前缀和改 warp 0 整数 shfl_up 扫描。`ROUTE_SOFTMAX_WARP=2`（默认）/1（B32）/0（单线程）。门禁 `moe_route_fused_parity`（与 route_softmax 单线程路径逐位比）。预期 route 11.8 → ~6 us ⇒ c1/c8 各 -0.17 ms。
