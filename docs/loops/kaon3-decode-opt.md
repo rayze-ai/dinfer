@@ -1611,3 +1611,6 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - **环节判定更新**：✓ 领先：TTFT 全档、c1–c4 TPOT、host 各段、启动 36 s。✗ 仍落后：① **TPOT − 纯 decode 步**（c16 1.9 / c32 3.7 / c64 9.4 ms = pair 步 decode 等 prefill 的结构性代价，占剩余差额的 **53% / 95% / 160%**）；② 纯 decode 步 M=16 8.74 vs vLLM 全步 7.09（M≥32 持平/领先）。
 - **停止条件 ①（c16 ≤ 1.10×、c32/64 ≤ 1.25×）未达**；Step B 五刀都正向，本轮不回 Step A，下一轮按 D219/D220：b55/b56 结果后进 `kaon3-prefill-async`（消 ①），再看 M=16 decode 步（②，MoE 快路径 R ≤ 128 对 M=16 的 128 行…）。
 - CSV：stepA5 作 round `a5`（五刀合成，vLLM 同窗口实测）。
+
+## D222 2026-10-29 b55 微基准：**B48d STAGES=4 判负**（P2148 gate‖up 503 → 526 us（+5%），down 373 → 375，P424 持平；CHECKSUM 同）。4 级 smem 45 KB 把 BN128 的占用从 2 CTA/SM 压到 1。默认留 3，env 实例保留（A/B 用）。ABAB 不跑（微基准已负），链停，直接起 b56。CSV 不记（没跑端到端）。
+- p64 的下一档不是 stage 数，是 **ldmatrix / 更大 BM（128）** 或 **A 片段驻寄存器复用 2 个 n 半区**——留给下一轮；当前 MoE prefill GEMM 在混批步里 ~40%，但混批步本身只占 c16 TPOT 的 18%（1.9/10.6），结构性差额优先。
