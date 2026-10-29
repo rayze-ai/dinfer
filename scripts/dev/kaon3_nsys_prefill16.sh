@@ -12,7 +12,7 @@ export LD_LIBRARY_PATH=$NV/nccl/lib:$NV/cu13/lib
 cd /w/dinfer
 M=/hf_data/hub/models--kaon-release--Kaon-V3-nvpf4-mixed/snapshots/e268bef12555d299ed7ca02ade5e77f239f27478
 echo "bin=$(stat -c %y target/release/dinfer | cut -c1-16) md5=$(md5sum target/release/dinfer | cut -c1-12) c=$C env=[${EXTRA_ENV:-}]" >> $R
-export MOE_GROUPED=1 KAON3_MEGA=1 MEGA_SPGU=4 MEGA_SPDN=4 ROUTER_GEMM_BI=0 CUDA_VISIBLE_DEVICES=0 ${EXTRA_ENV:-}
+export MOE_GROUPED=1 KAON3_MEGA=1 MEGA_SPGU=4 MEGA_SPDN=4 ROUTER_GEMM_BI=0 CUDA_VISIBLE_DEVICES=0 HOST_TIME=1 ${EXTRA_ENV:-}
 rm -f /w/dinfer/tmp_${TAG}.nsys-rep /w/dinfer/tmp_${TAG}.sqlite
 taskset -c 0-31 "$NSYS" profile -o /w/dinfer/tmp_${TAG} --force-overwrite true -t cuda --cuda-graph-trace=node --cuda-flush-interval=1000 --sample none --cpuctxsw none \
   ./target/release/dinfer serve --model "$M" --tokenizer "$M" --port $PORT --max-model-len 16384 --max-num-seqs 64 --max-num-batched-tokens 4096 >/w/dinfer/tmp_${TAG}_serve.log 2>&1 &
@@ -24,3 +24,15 @@ kill -INT $(pgrep -x dinfer) 2>/dev/null; wait $NP 2>/dev/null; sleep 2; ls -la 
 "$NSYS" export --type sqlite --force-overwrite true -o /w/dinfer/tmp_${TAG}.sqlite /w/dinfer/tmp_${TAG}.nsys-rep >/dev/null 2>&1
 taskset -c 100-127 python3 -I /w/nsys_prefill_steps.py /w/dinfer/tmp_${TAG}.sqlite 400 30 20 >> $R 2>&1
 echo NSYSP16_DONE >> $R
+# host-time 对账：混批步（tokens != nreq）数与均值
+sed "s/\x1b\[[0-9;]*m//g" /w/dinfer/tmp_${TAG}_serve.log | grep -E "host-time" | python3 -I -c '
+import sys,re
+mixed=[];dec=[]
+for l in sys.stdin:
+    f=dict(re.findall(r"(\w+(?:\(begin\+finish\))?)=([\d.]+)",l))
+    if "total" not in f: continue
+    t,n,e=int(f["tokens"]),int(f["nreq"]),float(f["exec(begin+finish)"])
+    (dec if t==n else mixed).append((t,n,e))
+import statistics as st
+print(f"host-time: decode steps={len(dec)} exec_mean={st.mean([e for *_,e in dec])/1e3 if dec else 0:.2f}ms | mixed steps={len(mixed)} toks_mean={st.mean([t for t,_,_ in mixed]) if mixed else 0:.0f} nreq_mean={st.mean([n for _,n,_ in mixed]) if mixed else 0:.1f} exec_mean={st.mean([e for *_,e in mixed])/1e3 if mixed else 0:.1f}ms exec_max={max([e for *_,e in mixed])/1e3 if mixed else 0:.1f}ms")
+' >> $R
