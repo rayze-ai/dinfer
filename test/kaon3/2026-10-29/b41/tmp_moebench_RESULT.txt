@@ -1,0 +1,39 @@
+02:36:47
+BUILD EXIT=0
+== cfg: default
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+MOE_GEMM_TIMING M=1 active=8 rows=8 gate‖up dual:        12.33 us    1447 GB/s  (DRAM 下限 9.97 us @1.79TB/s)
+MOE_GEMM_TIMING M=1 active=8 rows=8 gate‖up 2×grouped:   16.44 us    1086 GB/s
+MOE_GEMM_TIMING M=1 active=8 rows=8 down grouped:         8.23 us    1084 GB/s  (DRAM 下限 4.98 us)
+MOE_GEMM_TIMING M=1 active=8 rows=8 B7 gateup_act:       74.42 us     240 GB/s
+MOE_GEMM_TIMING M=1 active=8 rows=8 B7 down gemv:        36.89 us     242 GB/s
+MOE_GEMM_TIMING M=8 active=28 rows=64 gate‖up dual:        20.53 us    3042 GB/s  (DRAM 下限 34.89 us @1.79TB/s)
+MOE_GEMM_TIMING M=8 active=28 rows=64 gate‖up 2×grouped:   24.60 us    2539 GB/s
+MOE_GEMM_TIMING M=8 active=28 rows=64 down grouped:        16.42 us    1902 GB/s  (DRAM 下限 17.44 us)
+MOE_GEMM_TIMING M=8 active=28 rows=64 B7 gateup_act:      227.08 us     275 GB/s
+MOE_GEMM_TIMING M=8 active=28 rows=64 B7 down gemv:        95.05 us     329 GB/s
+== cfg: MOE_GEMM_BK=128
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+MOE_GEMM_TIMING M=1 active=8 rows=8 gate‖up dual:        14.39 us    1240 GB/s  (DRAM 下限 9.97 us @1.79TB/s)
+MOE_GEMM_TIMING M=1 active=8 rows=8 gate‖up 2×grouped:   24.60 us     725 GB/s
+MOE_GEMM_TIMING M=1 active=8 rows=8 down grouped:        10.06 us     887 GB/s  (DRAM 下限 4.98 us)
+MOE_GEMM_TIMING M=1 active=8 rows=8 B7 gateup_act:       74.33 us     240 GB/s
+MOE_GEMM_TIMING M=1 active=8 rows=8 B7 down gemv:        36.89 us     242 GB/s
+MOE_GEMM_TIMING M=8 active=28 rows=64 gate‖up dual:        26.66 us    2342 GB/s  (DRAM 下限 34.89 us @1.79TB/s)
+MOE_GEMM_TIMING M=8 active=28 rows=64 gate‖up 2×grouped:   28.72 us    2174 GB/s
+MOE_GEMM_TIMING M=8 active=28 rows=64 down grouped:        18.87 us    1655 GB/s  (DRAM 下限 17.44 us)
+MOE_GEMM_TIMING M=8 active=28 rows=64 B7 gateup_act:      227.23 us     275 GB/s
+MOE_GEMM_TIMING M=8 active=28 rows=64 B7 down gemv:        95.03 us     329 GB/s
+== cfg: MOE_GEMM_BK=64
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+MOE_GEMM_TIMING M=1 active=8 rows=8 gate‖up dual:        28.02 us     637 GB/s  (DRAM 下限 9.97 us @1.79TB/s)
+MOE_GEMM_TIMING M=1 active=8 rows=8 gate‖up 2×grouped:   43.31 us     412 GB/s
+MOE_GEMM_TIMING M=1 active=8 rows=8 down grouped:         9.98 us     893 GB/s  (DRAM 下限 4.98 us)
+MOE_GEMM_TIMING M=1 active=8 rows=8 B7 gateup_act:       74.35 us     240 GB/s
+MOE_GEMM_TIMING M=1 active=8 rows=8 B7 down gemv:        36.88 us     242 GB/s
+MOE_GEMM_TIMING M=8 active=28 rows=64 gate‖up dual:        43.49 us    1436 GB/s  (DRAM 下限 34.89 us @1.79TB/s)
+MOE_GEMM_TIMING M=8 active=28 rows=64 gate‖up 2×grouped:   45.12 us    1384 GB/s
+MOE_GEMM_TIMING M=8 active=28 rows=64 down grouped:        18.78 us    1662 GB/s  (DRAM 下限 17.44 us)
+MOE_GEMM_TIMING M=8 active=28 rows=64 B7 gateup_act:      227.27 us     275 GB/s
+MOE_GEMM_TIMING M=8 active=28 rows=64 B7 down gemv:        94.90 us     329 GB/s
+MOEBENCH_DONE

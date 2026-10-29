@@ -1,0 +1,112 @@
+NSYS=/opt/nvidia/nsight-systems/2026.3.2/target-linux-x64/nsys
+   TPOT     mean     8.49  p50     8.16  p90    10.12  p99    10.44  max    10.44  (ms)
+-rw-rw-r-- 1 root root 7996706 Oct 29 02:20 /w/dinfer/tmp_nsys_c8b.nsys-rep
+cols: ['start', 'end', 'streamId', 'demangledName', 'shortName', 'mangledName', 'gridX', 'gridY', 'gridZ', 'blockX', 'blockY', 'blockZ', 'gridId', 'graphNodeId', 'graphId']
+kernels total: 126874 graph col: graphId
+graph instances by kernel-count: [(43420, 1), (81780, 1)]
+eager segments by kernel-count: [(1, 3), (2, 3), (18, 1), (30, 1), (73, 1), (341, 1)]
+
+== decode graph instance (kernel-count=43420, 1 instances, middle one): kernels=43420 span=1082610us kernel_sum=294065us gaps=788545us
+   58852us  20.0% n=5525 avg=10652.0us grid=(1024, 1, 1, 128) void dinfer::<unnamed>::gemv_kernel<(int)1, (bool)1>(const unsigned char *, const unsigned
+   56590us  19.2% n=  65 avg=870620.6us grid=(65536, 1, 1, 32) std::enable_if<!T7, void>::type internal::gemvx::kernel<int, int, __nv_bfloat16, __nv_bflo
+   39469us  13.4% n=1950 avg=20240.7us grid=(11, 129, 2, 256) void <unnamed>::grouped_gemm_kernel_pipe4<(int)128, (int)4, (int)16>(const unsigned char *
+   22349us   7.6% n=1950 avg=11460.9us grid=(1, 1, 1, 256) route_bucket_small_kernel(const void *, const void *, int *, float *, int *, int *, int *,
+   20813us   7.1% n=1950 avg=10673.1us grid=(44, 129, 1, 256) void <unnamed>::grouped_gemm_kernel_pipe4<(int)64, (int)4, (int)16>(const unsigned char *,
+   19122us   6.5% n=1950 avg=9806.2us grid=(1056, 1, 1, 64) void dinfer::<unnamed>::gateup_act_kernel<(int)1, (bool)1>(const unsigned char *, const un
+    8131us   2.8% n=1950 avg=4169.5us grid=(1, 1, 1, 256) combine_kernel(const __nv_bfloat16 *, const float *, const int *, const void *, const int 
+    7571us   2.6% n=1625 avg=4658.9us grid=(1, 8, 32, 128) void <unnamed>::gqa_decode_v3_kernel<(int)2, (int)256, (bool)1>(const __nv_bfloat16 *, con
+    7183us   2.4% n= 325 avg=22102.9us grid=(352, 1, 1, 64) nvjet_sm120_qqtst_mma_64x32x64_16_32x16x64_tmaAB_bz_TNNN
+    6198us   2.1% n=1950 avg=3178.6us grid=(1, 1, 1, 256) dinfer::<unnamed>::norm_quant_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, unsigne
+    5871us   2.0% n= 325 avg=18065.2us grid=(1, 2, 32, 256) void <unnamed>::gqa_decode_d512_kernel<(int)8, (bool)1>(const __nv_bfloat16 *, const __nv_
+    5078us   1.7% n=3965 avg=1280.6us grid=(1, 1, 1, 256) void <unnamed>::rmsnorm_vec_kernel<(int)256, (int)2, (bool)0, (bool)0>(const __nv_bfloat16
+    4264us   1.5% n=1950 avg=2186.8us grid=(1, 16, 1, 256) <unnamed>::gqa_decode_merge_v2_kernel(const float *, const int *, const int *, __nv_bfloat
+    4066us   1.4% n=1950 avg=2085.3us grid=(2, 1, 1, 256) <unnamed>::gelu_grouped_quant_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, const i
+    3966us   1.3% n=1950 avg=2033.9us grid=(8, 1, 1, 256) <unnamed>::rmsnorm_grouped_quant_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, cons
+    3800us   1.3% n=1625 avg=2338.6us grid=(1, 1, 1, 1024) void <unnamed>::attn_pre_fused_kernel<(int)1, (bool)1>(__nv_bfloat16 *, __nv_bfloat16 *, _
+    3680us   1.3% n=1950 avg=1887.1us grid=(1, 1, 1, 256) void <unnamed>::rmsnorm_vec_kernel<(int)256, (int)2, (bool)1, (bool)1>(const __nv_bfloat16
+    3659us   1.2% n=1950 avg=1876.4us grid=(1, 1, 1, 256) void <unnamed>::rmsnorm_quant_kernel<(int)256, (int)2>(const __nv_bfloat16 *, const __nv_b
+    3471us   1.2% n=1950 avg=1779.9us grid=(1, 1, 1, 256) void <unnamed>::rmsnorm_scale2_kernel<(int)256, (int)2>(const __nv_bfloat16 *, const __nv_
+    3371us   1.1% n=1950 avg=1728.9us grid=(128, 1, 1, 256) void <unnamed>::router_gemv_kernel<(int)1>(const __nv_bfloat16 *, const __nv_bfloat16 *, _
+    3116us   1.1% n=1950 avg=1597.8us grid=(1, 1, 1, 256) void <unnamed>::rmsnorm_vec_kernel<(int)256, (int)2, (bool)0, (bool)1>(const __nv_bfloat16
+    1095us   0.4% n=1950 avg= 561.4us grid=(16, 1, 1, 256) <unnamed>::quant_fp8_kernel(const __nv_bfloat16 *, unsigned char *, unsigned long, float)
+     942us   0.3% n= 325 avg=2897.9us grid=(1, 1, 1, 640) void <unnamed>::attn_pre_fused_kernel<(int)2, (bool)1>(__nv_bfloat16 *, __nv_bfloat16 *, _
+     837us   0.3% n=  65 avg=12871.0us grid=(1, 1, 1, 1024) <unnamed>::argmax_kernel(const float *, int *, int)
+     305us   0.1% n=  65 avg=4686.3us grid=(1, 1, 1, 256) <unnamed>::embedding_kernel(const int *, const __nv_bfloat16 *, __nv_bfloat16 *, int, int)
+      78us   0.0% n=  65 avg=1197.3us grid=(1024, 1, 1, 256) <unnamed>::softcap_bf16_kernel(__nv_bfloat16 *, long, float)
+      70us   0.0% n=  65 avg=1075.2us grid=(1024, 1, 1, 256) <unnamed>::bf16_to_f32_kernel(const __nv_bfloat16 *, float *, long)
+      63us   0.0% n=  65 avg= 964.0us grid=(128, 1, 1, 256) void <unnamed>::gather_rows_kernel<(bool)1>(const __nv_bfloat16 *, __nv_bfloat16 *, const 
+      56us   0.0% n=  65 avg= 866.0us grid=(11, 1, 1, 256) <unnamed>::scale_bf16_kernel(__nv_bfloat16 *, long, float)
+
+== graph id=11 kernels=81780: kernels=81780 span=1168520us kernel_sum=921490us gaps=247030us
+  236058us  25.6% n=3673 avg=64268.5us grid=(11, 132, 2, 256) void <unnamed>::grouped_gemm_kernel_pipe4<(int)128, (int)4, (int)16>(const unsigned char *
+  158166us  17.2% n=10407 avg=15198.0us grid=(512, 1, 1, 256) void dinfer::<unnamed>::gemv_kernel<(int)8, (bool)1>(const unsigned char *, const unsigned
+  138415us  15.0% n=3672 avg=37694.7us grid=(44, 132, 1, 256) void <unnamed>::grouped_gemm_kernel_pipe4<(int)64, (int)4, (int)16>(const unsigned char *,
+  107717us  11.7% n= 122 avg=882930.2us grid=(8, 2048, 1, 32) void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_128x1_tn_align8
+   45766us   5.0% n=3673 avg=12460.1us grid=(264, 1, 1, 256) void dinfer::<unnamed>::gateup_act_kernel<(int)8, (bool)1>(const unsigned char *, const un
+   43169us   4.7% n=3673 avg=11753.0us grid=(1, 1, 1, 256) route_bucket_small_kernel(const void *, const void *, int *, float *, int *, int *, int *,
+   37186us   4.0% n=3061 avg=12148.3us grid=(8, 8, 32, 128) void <unnamed>::gqa_decode_v3_kernel<(int)2, (int)256, (bool)1>(const __nv_bfloat16 *, con
+   23909us   2.6% n= 612 avg=39066.6us grid=(8, 2, 32, 256) void <unnamed>::gqa_decode_d512_kernel<(int)8, (bool)1>(const __nv_bfloat16 *, const __nv_
+   16743us   1.8% n=3672 avg=4559.7us grid=(8, 1, 1, 256) combine_kernel(const __nv_bfloat16 *, const float *, const int *, const void *, const int 
+   13164us   1.4% n= 612 avg=21510.1us grid=(352, 1, 1, 64) nvjet_sm120_qqtst_mma_64x32x64_16_32x16x64_tmaAB_bz_TNNN
+   11543us   1.3% n=3673 avg=3142.8us grid=(8, 1, 1, 256) dinfer::<unnamed>::norm_quant_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, unsigne
+   11340us   1.2% n=3673 avg=3087.3us grid=(128, 1, 1, 256) void <unnamed>::router_gemv_kernel<(int)8>(const __nv_bfloat16 *, const __nv_bfloat16 *, _
+   10244us   1.1% n=7467 avg=1371.9us grid=(8, 1, 1, 256) void <unnamed>::rmsnorm_vec_kernel<(int)256, (int)2, (bool)0, (bool)0>(const __nv_bfloat16
+    9028us   1.0% n=3672 avg=2458.6us grid=(8, 1, 1, 256) void <unnamed>::rmsnorm_vec_kernel<(int)256, (int)2, (bool)1, (bool)1>(const __nv_bfloat16
+    8130us   0.9% n=3061 avg=2656.0us grid=(8, 1, 1, 1024) void <unnamed>::attn_pre_fused_kernel<(int)1, (bool)1>(__nv_bfloat16 *, __nv_bfloat16 *, _
+    8021us   0.9% n=3673 avg=2183.8us grid=(8, 16, 1, 256) <unnamed>::gqa_decode_merge_v2_kernel(const float *, const int *, const int *, __nv_bfloat
+    7875us   0.9% n=3673 avg=2143.9us grid=(64, 1, 1, 256) <unnamed>::rmsnorm_grouped_quant_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, cons
+    7794us   0.8% n=3673 avg=2122.0us grid=(11, 1, 1, 256) <unnamed>::gelu_grouped_quant_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, const i
+    6888us   0.7% n=3673 avg=1875.3us grid=(8, 1, 1, 256) void <unnamed>::rmsnorm_quant_kernel<(int)256, (int)2>(const __nv_bfloat16 *, const __nv_b
+    6651us   0.7% n=3673 avg=1810.7us grid=(8, 1, 1, 256) void <unnamed>::rmsnorm_scale2_kernel<(int)256, (int)2>(const __nv_bfloat16 *, const __nv_
+    6189us   0.7% n=3673 avg=1685.1us grid=(8, 1, 1, 256) void <unnamed>::rmsnorm_vec_kernel<(int)256, (int)2, (bool)0, (bool)1>(const __nv_bfloat16
+    2042us   0.2% n=3673 avg= 556.1us grid=(128, 1, 1, 256) <unnamed>::quant_fp8_kernel(const __nv_bfloat16 *, unsigned char *, unsigned long, float)
+    1921us   0.2% n= 612 avg=3138.7us grid=(8, 1, 1, 640) void <unnamed>::attn_pre_fused_kernel<(int)2, (bool)1>(__nv_bfloat16 *, __nv_bfloat16 *, _
+    1509us   0.2% n= 122 avg=12367.0us grid=(8, 1, 1, 1024) <unnamed>::argmax_kernel(const float *, int *, int)
+     639us   0.1% n= 122 avg=5234.4us grid=(4096, 1, 1, 256) <unnamed>::softcap_bf16_kernel(__nv_bfloat16 *, long, float)
+     589us   0.1% n= 123 avg=4786.5us grid=(8, 1, 1, 256) <unnamed>::embedding_kernel(const int *, const __nv_bfloat16 *, __nv_bfloat16 *, int, int)
+     433us   0.0% n= 122 avg=3547.3us grid=(4096, 1, 1, 256) <unnamed>::bf16_to_f32_kernel(const __nv_bfloat16 *, float *, long)
+     260us   0.0% n= 122 avg=2128.5us grid=(128, 8, 1, 256) void <unnamed>::gather_rows_kernel<(bool)1>(const __nv_bfloat16 *, __nv_bfloat16 *, const 
+     102us   0.0% n= 123 avg= 831.5us grid=(88, 1, 1, 256) <unnamed>::scale_bf16_kernel(__nv_bfloat16 *, long, float)
+
+== largest eager segment (prefill?): kernels=600 span=603941us kernel_sum=600693us gaps=3248us
+   66293us  11.0% n=  72 avg=920734.2us grid=(8, 2048, 1, 32) void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_128x2_tn_align8
+   64616us  10.8% n=  48 avg=1346163.7us grid=(1024, 1, 1, 256) void dinfer::<unnamed>::small_m_mma_kernel<(int)8, (int)8, (int)4>(const __nv_bfloat16 *, 
+   33544us   5.6% n=  36 avg=931778.3us grid=(8, 512, 1, 128) void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_tn_align8>(
+   23263us   3.9% n=  24 avg=969299.4us grid=(2048, 1, 1, 128) void dinfer::<unnamed>::small_m_mma_kernel<(int)8, (int)4, (int)4>(const __nv_bfloat16 *, 
+   22349us   3.7% n=  24 avg=931193.8us grid=(8, 256, 1, 128) void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x64_64x3_tn_align8>
+   22129us   3.7% n=  24 avg=922041.8us grid=(2048, 1, 1, 256) void dinfer::<unnamed>::small_m_mma_kernel<(int)8, (int)8, (int)2>(const __nv_bfloat16 *, 
+   21462us   3.6% n=  24 avg=894260.2us grid=(4096, 1, 1, 128) void dinfer::<unnamed>::small_m_mma_kernel<(int)8, (int)4, (int)2>(const __nv_bfloat16 *, 
+   21414us   3.6% n=  24 avg=892238.9us grid=(8, 2048, 1, 32) void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_32x1_tn_align8>
+   21396us   3.6% n=  24 avg=891482.9us grid=(8, 1024, 1, 128) void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_32x1_tn_align8>
+   21248us   3.5% n=  24 avg=885352.2us grid=(4096, 1, 1, 256) void dinfer::<unnamed>::small_m_mma_kernel<(int)8, (int)8, (int)1>(const __nv_bfloat16 *, 
+   21157us   3.5% n=  24 avg=881532.2us grid=(8192, 1, 1, 128) void dinfer::<unnamed>::small_m_mma_kernel<(int)8, (int)4, (int)1>(const __nv_bfloat16 *, 
+   21146us   3.5% n=  24 avg=881073.4us grid=(8, 2048, 1, 32) void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_128x1_tn_align8
+   20604us   3.4% n=   6 avg=3433994.8us grid=(65536, 1, 1, 32) std::enable_if<T7, void>::type internal::gemvx::kernel<int, int, __nv_bfloat16, __nv_bfloa
+   19673us   3.3% n=  12 avg=1639423.5us grid=(8, 512, 1, 128) void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x256_32x4_tn_align8>
+   16489us   2.7% n=  12 avg=1374112.5us grid=(1024, 1, 1, 256) void dinfer::<unnamed>::small_m_mma_kernel<(int)16, (int)8, (int)4>(const __nv_bfloat16 *,
+   15318us   2.6% n=  12 avg=1276482.6us grid=(1024, 1, 1, 256) void dinfer::<unnamed>::small_m_mma_kernel<(int)32, (int)8, (int)4>(const __nv_bfloat16 *,
+   14662us   2.4% n=   6 avg=2443727.2us grid=(65536, 1, 1, 128) void dinfer::<unnamed>::small_m_kernel<(int)32>(const __nv_bfloat16 *, const __nv_bfloat16
+   11746us   2.0% n=  12 avg=978800.8us grid=(8, 1024, 1, 128) void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_tn_align8
+   11385us   1.9% n=  12 avg=948771.2us grid=(65536, 1, 1, 16) std::enable_if<!T7, void>::type internal::gemvx::kernel<int, int, __nv_bfloat16, __nv_bflo
+   11339us   1.9% n=   6 avg=1889889.0us grid=(65536, 1, 1, 8) std::enable_if<!T7, void>::type internal::gemvx::kernel<int, int, __nv_bfloat16, __nv_bflo
+   11010us   1.8% n=  12 avg=917485.7us grid=(8, 512, 1, 128) void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x10_tn_align8>
+   10800us   1.8% n=  12 avg=899973.6us grid=(32768, 1, 1, 16) std::enable_if<!T7, void>::type internal::gemvx::kernel<int, int, __nv_bfloat16, __nv_bflo
+    8962us   1.5% n=   6 avg=1493748.0us grid=(65536, 1, 1, 128) void dinfer::<unnamed>::small_m_kernel<(int)16>(const __nv_bfloat16 *, const __nv_bfloat16
+    6882us   1.1% n=   6 avg=1147079.0us grid=(2048, 1, 1, 128) void dinfer::<unnamed>::small_m_mma_kernel<(int)32, (int)4, (int)4>(const __nv_bfloat16 *,
+    5811us   1.0% n=   6 avg=968571.3us grid=(2048, 1, 1, 128) void dinfer::<unnamed>::small_m_mma_kernel<(int)16, (int)4, (int)4>(const __nv_bfloat16 *,
+    5631us   0.9% n=   6 avg=938512.7us grid=(4096, 1, 1, 128) void dinfer::<unnamed>::small_m_mma_kernel<(int)32, (int)4, (int)2>(const __nv_bfloat16 *,
+    5562us   0.9% n=   6 avg=927061.8us grid=(2048, 1, 1, 256) void dinfer::<unnamed>::small_m_mma_kernel<(int)16, (int)8, (int)2>(const __nv_bfloat16 *,
+    5505us   0.9% n=   6 avg=917477.7us grid=(8192, 1, 1, 128) void dinfer::<unnamed>::small_m_mma_kernel<(int)32, (int)4, (int)1>(const __nv_bfloat16 *,
+    5468us   0.9% n=   6 avg=911355.0us grid=(2048, 1, 1, 256) void dinfer::<unnamed>::small_m_mma_kernel<(int)32, (int)8, (int)2>(const __nv_bfloat16 *,
+    5467us   0.9% n=   6 avg=911125.7us grid=(65536, 1, 1, 128) void dinfer::<unnamed>::small_m_kernel<(int)8>(const __nv_bfloat16 *, const __nv_bfloat16 
+    5395us   0.9% n=   6 avg=899157.7us grid=(4096, 1, 1, 128) void dinfer::<unnamed>::small_m_mma_kernel<(int)16, (int)4, (int)2>(const __nv_bfloat16 *,
+    5394us   0.9% n=   6 avg=898944.2us grid=(4096, 1, 1, 256) void dinfer::<unnamed>::small_m_mma_kernel<(int)32, (int)8, (int)1>(const __nv_bfloat16 *,
+    5355us   0.9% n=   6 avg=892432.2us grid=(4096, 1, 1, 256) void dinfer::<unnamed>::small_m_mma_kernel<(int)16, (int)8, (int)1>(const __nv_bfloat16 *,
+    5339us   0.9% n=   6 avg=889792.2us grid=(8192, 1, 1, 128) void dinfer::<unnamed>::small_m_mma_kernel<(int)16, (int)4, (int)1>(const __nv_bfloat16 *,
+    5318us   0.9% n=   6 avg=886293.7us grid=(8, 1024, 1, 128) void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_64x1_tn_align8>
+    5280us   0.9% n=   6 avg=879968.0us grid=(65536, 1, 1, 128) void dinfer::<unnamed>::small_m_kernel<(int)4>(const __nv_bfloat16 *, const __nv_bfloat16 
+    5276us   0.9% n=   6 avg=879413.5us grid=(8, 1024, 1, 128) void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x1_tn_align8
+    5265us   0.9% n=   6 avg=877488.2us grid=(65536, 1, 1, 128) void dinfer::<unnamed>::small_m_kernel<(int)1>(const __nv_bfloat16 *, const __nv_bfloat16 
+    5264us   0.9% n=   6 avg=877312.2us grid=(65536, 1, 1, 128) void dinfer::<unnamed>::small_m_kernel<(int)2>(const __nv_bfloat16 *, const __nv_bfloat16 
+     476us   0.1% n=  24 avg=19834.7us grid=(8192, 1, 1, 32) void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, __nv_bfloat16, __nv_bfloat16, fl
+DONE

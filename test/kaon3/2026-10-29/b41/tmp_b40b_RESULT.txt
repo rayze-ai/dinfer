@@ -1,0 +1,15 @@
+02:18:27
+bin=2026-10-29 02:16 md5=888da7fbffbe marker=1 02:18:31
+c1:    TPOT     mean     5.98  p50     5.98  p90     5.98  p99     5.98  max     5.98  (ms) 
+c8:    TPOT     mean     9.17  p50     9.01  p90    10.52  p99    10.95  max    10.95  (ms) 
+tokens=1: n=47 active_experts p50=8 mean=8.0 min=8 max=8 | max_rows_per_expert=1
+tokens=7: n=1 active_experts p50=26 mean=26.0 min=26 max=26 | max_rows_per_expert=4
+tokens=8: n=27 active_experts p50=29 mean=28.3 min=19 max=36 | max_rows_per_expert=8
+tokens=428: n=1 active_experts p50=55 mean=55.0 min=55 max=55 | max_rows_per_expert=410
+tokens=432: n=1 active_experts p50=59 mean=59.0 min=59 max=59 | max_rows_per_expert=415
+tokens=4160: n=1 active_experts p50=8 mean=8.0 min=8 max=8 | max_rows_per_expert=4160
+DONE
+bin=2026-10-29 02:16 md5=888da7fbffbe marker=1 02:19:18
+NOTUP
+DONE
+DONE
