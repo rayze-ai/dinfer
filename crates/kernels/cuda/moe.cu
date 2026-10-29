@@ -332,6 +332,17 @@ __device__ __forceinline__ void route_softmax_row_warp(const void* __restrict__ 
     w[lane] = __fmul_rn(__fmul_rn(rawk, inv), sc);
   }
 }
+// 单 lane 版（原 route_softmax_row）对 bf16 logits 的包装：行先 cast 进寄存器数组再走原函数（E ≤ MAX_E）。
+__device__ __forceinline__ void route_softmax_row_any(const void* __restrict__ logits, int lg_bf16, int t,
+                                                      const int32_t* __restrict__ ids, const void* __restrict__ pes,
+                                                      float* __restrict__ w, int E, int K, int exact_rcp) {
+  if (!lg_bf16) { route_softmax_row(static_cast<const float*>(logits) + (size_t)t * E, ids, pes, w, E, K, exact_rcp); return; }
+  // bf16：逐元素 cast 的值与 bf16_to_f32_n 相同；route_softmax_row 只按下标读 lg[e]，用局部数组承接（E ≤ 1024 → 4 KB 局部，仅 lane 0）
+  float row[MAX_E];
+  const bf16* src = static_cast<const bf16*>(logits) + (size_t)t * E;
+  for (int e = 0; e < E; ++e) row[e] = to_f32(src[e]);
+  route_softmax_row(row, ids, pes, w, E, K, exact_rcp);
+}
 __global__ void route_softmax_kernel(const float* __restrict__ logits, const int32_t* __restrict__ topk_ids,
                                      const void* __restrict__ per_expert_scale, float* __restrict__ topk_w, int E,
                                      int K, int exact_rcp) {
@@ -391,7 +402,7 @@ __global__ void __launch_bounds__(256) route_bucket_small_kernel(
     float* __restrict__ topk_w, int32_t* __restrict__ counts, int32_t* __restrict__ offsets,
     int32_t* __restrict__ cursor, int32_t* __restrict__ sorted_tok, int32_t* __restrict__ sorted_k,
     int32_t* __restrict__ tile_off, int32_t* __restrict__ row2e, int32_t* __restrict__ inv, int tokens, int E, int K,
-    int exact_rcp, int lg_bf16) {
+    int exact_rcp, int lg_bf16, int warp_softmax) {
   extern __shared__ __align__(16) uint8_t smem_raw[];
   float* s_val = reinterpret_cast<float*>(smem_raw);           // [tokens][E] 工作副本（top-k 时置 -inf）
   int32_t* s_cnt = reinterpret_cast<int32_t*>(s_val + (size_t)tokens * E);  // [E]
@@ -426,9 +437,14 @@ __global__ void __launch_bounds__(256) route_bucket_small_kernel(
       __syncwarp();
     }
     __syncwarp();
-    route_softmax_row_warp(lg_bf16 ? static_cast<const void*>(static_cast<const bf16*>(logits) + (size_t)t * E)
-                                   : static_cast<const void*>(static_cast<const float*>(logits) + (size_t)t * E),
-                           ids, per_expert_scale, topk_w + (size_t)t * K, E, K, exact_rcp, lane, lg_bf16);
+    // B32（D161）：warp 版 softmax 实测 c1 +3.5% / c8 +2.7%（Z 串行 shfl 链 + ex[32] 寄存器压力），默认关；`ROUTE_SOFTMAX_WARP=1` 开。
+    if (warp_softmax) {
+      route_softmax_row_warp(lg_bf16 ? static_cast<const void*>(static_cast<const bf16*>(logits) + (size_t)t * E)
+                                     : static_cast<const void*>(static_cast<const float*>(logits) + (size_t)t * E),
+                             ids, per_expert_scale, topk_w + (size_t)t * K, E, K, exact_rcp, lane, lg_bf16);
+    } else if (lane == 0) {
+      route_softmax_row_any(logits, lg_bf16, t, ids, per_expert_scale, topk_w + (size_t)t * K, E, K, exact_rcp);
+    }
   }
   __syncthreads();
   if (tid == 0) {
@@ -477,6 +493,7 @@ extern "C" int moe_route_bucket_small(const void* logits, int logits_bf16, const
                                       int32_t* sorted_tok, int32_t* sorted_k, int32_t* tile_off, int32_t* row2e,
                                       int32_t* inv, int64_t tokens, int64_t num_experts, int64_t topk,
                                       cudaStream_t stream) {
+  static const int warp_sm = []{ const char* v = getenv("ROUTE_SOFTMAX_WARP"); return (v && v[0] == '1') ? 1 : 0; }();
   if (tokens <= 0) return 0;
   if (tokens > kRouteSmallMaxTok || num_experts <= 0 || num_experts > MAX_E || topk <= 0 || topk > MAX_K ||
       topk > num_experts)
@@ -497,7 +514,7 @@ extern "C" int moe_route_bucket_small(const void* logits, int logits_bf16, const
   }
   route_bucket_small_kernel<<<1, 256, smem, stream>>>(logits, per_expert_scale, topk_ids, topk_w, counts, offsets,
                                                       cursor, sorted_tok, sorted_k, tile_off, row2e, inv, (int)tokens,
-                                                      (int)num_experts, (int)topk, exact_rcp, logits_bf16);
+                                                      (int)num_experts, (int)topk, exact_rcp, logits_bf16, warp_sm);
   return last_err();
 }
 
