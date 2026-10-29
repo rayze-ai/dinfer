@@ -299,6 +299,9 @@ struct LatePrefill {
     handle: Box<dyn std::any::Any + Send>,
     rows: Vec<PendingRow>,
     req_ids: Vec<RequestId>,
+    /// 诊断：下发时刻与 token 数（HOST_TIME 下收割时打 `[late-harvest] ... wall_ms=` = prefill 在副流上的墙钟上界）。
+    t0: std::time::Instant,
+    tokens: usize,
 }
 
 impl<E: ModelExecutor> Runner<E> {
@@ -560,13 +563,13 @@ impl<E: ModelExecutor> Runner<E> {
         let mut dr = Vec::with_capacity(late.rows.len());
         match self.exec.harvest_prefill(late.handle, &mut gen, &mut dr)? {
             Some(h) => {
-                self.late = Some(LatePrefill { handle: h, rows: late.rows, req_ids: late.req_ids });
+                self.late = Some(LatePrefill { handle: h, rows: late.rows, req_ids: late.req_ids, t0: late.t0, tokens: late.tokens });
             }
             None => {
                 ensure!(gen.len() == late.rows.len(), "harvest_prefill returned {} entries for {} requests", gen.len(), late.rows.len());
                 self.steps_late_harvest += 1;
                 if std::env::var("HOST_TIME").ok().as_deref() == Some("1") {
-                    eprintln!("[late-harvest] reqs={}", late.rows.len());
+                    eprintln!("[late-harvest] reqs={} tokens={} wall_ms={:.1}", late.rows.len(), late.tokens, late.t0.elapsed().as_secs_f64() * 1e3);
                 }
                 for (i, row) in late.rows.iter().enumerate() {
                     let g = std::mem::take(&mut gen[i]);
@@ -691,7 +694,7 @@ impl<E: ModelExecutor> Runner<E> {
                 if std::env::var("HOST_TIME").ok().as_deref() == Some("1") {
                     eprintln!("[late-begin] prefill_tokens={} prefill_reqs={} decode_reqs={}", plan_p.total_tokens(), plan_p.num_reqs(), decode_mask.iter().filter(|&&d| d).count());
                 }
-                self.late = Some(LatePrefill { handle: h, rows: lrows, req_ids: plan_p.req_ids.clone() });
+                self.late = Some(LatePrefill { handle: h, rows: lrows, req_ids: plan_p.req_ids.clone(), t0: std::time::Instant::now(), tokens: plan_p.total_tokens() });
                 // 主 plan 只剩 decode 行，照常（图）执行；本步 Pending 只含 decode 行
                 self.build_plan(&Self::filter_output(so, |i| decode_mask[i]))?;
                 self.exec.forward_sample(&self.plan, &mut self.generated, &mut self.drafts)?;
