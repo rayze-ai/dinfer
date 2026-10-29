@@ -33,3 +33,7 @@
 - **判断**：`remote_b300.sh status` 的 alive 只看 ControlMaster 进程在，JumpServer 侧会话失效后 run 仍 rc=0、stdout 0 字节。2026-10-19 起所有工作都在 TAG=50（host-172-16-3-50，8 × B300，有 nerdctl 容器、口径与 vLLM 对齐）。
 - **怎么用**：子代理 brief 里写死 `export B300_TAG=50`；`run 'hostname'` 返回空就是会话失效，不要以为是远端卡；旧 memory "TAG=50 无容器、口径不同"已过时。
 - **证据**：`docs/progress.md` 2026-10-20 r8b 条目。
+
+## 5090 容器里"GPU 空了没"别用 `pgrep -x dinfer`（2026-10-29）
+- `docker exec -d` 起的 serve 被 KILL 后是 `<defunct>`，`pgrep -x dinfer | wc -l` 永远 ≥ 40；链里的 GPU 空闲门因此卡死 20 分钟（pitfalls 2026-10-29）。
+- 判据：`nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i 0` < 500，或 `ps -eo stat,args | grep -w dinfer | grep -vc Z`。
