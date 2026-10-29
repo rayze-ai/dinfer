@@ -705,7 +705,8 @@ fn moe_decode_gemv_enabled() -> bool {
 /// B6 回滚中（D62：输出坏）：默认关，`FP8_GEMV=1` 才开（排查用）。
 fn fp8_gemv_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| env_eq!("FP8_GEMV", "1"))
+    // D158：b2330 上 envab 两轮 c1 5.57 → 5.16（-7.4%）、c8 持平、输出同 → 默认开；`FP8_GEMV=0` 关。
+    *V.get_or_init(|| env_ne!("FP8_GEMV", "0"))
 }
 /// 与 `mlp_fp8_decode.cu` 的 M_TILE 档位同式（{1,2,4,8,16}），用于算共享内存是否放得下。
 /// B31b：fp8 gemv 的 A 驻留（M_TILE·K·2 B）上限，默认 48 KB；`FP8_GEMV_SMEM_KB` 覆盖（A/B 用，24 = 旧门槛）。

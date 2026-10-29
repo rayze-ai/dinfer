@@ -1247,3 +1247,4 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - D157 补：远端 envab.sh 的 serve 行文本与我 sed 的模式不同没打上补丁（已在跑的这次是独立 setsid 起的，预期能活）；另存 `envab_setsid.sh` 供后续链（envab_dual 已改指向）。bN.sh 已打上 setsid。
 
 ## ★★★★★ D158 2026-10-29 envab fp8gemv_b2330 首批（b2330 二进制）：`FP8_GEMV=1` c1 TPOT **5.57 → 5.16（-7.4%）**，吞吐 169 → 182；c8 9.37 → 9.39（持平，c8 走 M_TILE 4/nvjet 未受益——B31b 的靶）。**c1 5.16 ms = vLLM 4.69 的 1.10×**（开工时 1.19×）。
+- **fp8gemv_b2330 定稿（两轮，setsid 起的链完整跑完 → D157 判断成立）**：A（无 FP8_GEMV）c1 5.57/5.58、c8 9.37/9.37；B（FP8_GEMV=1）c1 **5.16/5.16**、c8 9.39/9.37。c1 -7.4%，c8 持平。**`FP8_GEMV` 应改默认开**（c1 稳定收益、c8 中性、输出同 — mlp_fp8 parity 已过）；c8 的收益等 B31b（M_TILE≥4 8 warp + 48 KB 门槛）。
