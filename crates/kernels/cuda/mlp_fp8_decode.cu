@@ -199,6 +199,9 @@ __global__ void __launch_bounds__(kMaxWarps * 32) gemv_kernel(const uint8_t* __r
 // host 选每 block warp 数：A 装载摊到尽量多行（16 warp），但 M_TILE=16 时寄存器压力大用 8；
 // 并保证 grid 至少 ~2×SM 数的 block（小 N 不丢并行度）。不是卡型调优数值：按 SM 数与形状算。
 int pick_warps(int m_tile, long rows_total, int rows_per_warp) {
+  // B31 探针：FP8_GEMV_WARPS=1/2/4/8/16 强制每 block warp 数（微基准扫参用；默认按 SM 数自选）。
+  static const int force = []{ const char* v = getenv("FP8_GEMV_WARPS"); const int n = v ? atoi(v) : 0; return (n == 1 || n == 2 || n == 4 || n == 8 || n == 16) ? n : 0; }();
+  if (force) return force;
   static int sms = 0;
   if (!sms) {
     int dev = 0;
