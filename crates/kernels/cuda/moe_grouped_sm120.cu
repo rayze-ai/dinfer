@@ -110,6 +110,15 @@ __device__ __forceinline__ uint32_t smem_u32(const void* p) {
 __device__ __forceinline__ void cp16(uint32_t s, const void* g, int bytes) {
   asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(s), "l"(g), "r"(bytes));
 }
+// G1（loop kaon3-prefill-gemm）：ldmatrix 取片段。m8n8.x4.b16：lane 8i..8i+7 给第 i 个 8×8 tile 的 8 行地址（每行 16 B），
+// 结果 r[i] 在 lane t 持第 i 个 tile 的 (行 t/4, 列对 t%4) 这 4 字节 —— 与 mma e2m1 m16n8k64 的 A 片段 a[g]（行 lane/4 + 8(g%2)、
+// k 偏 8(lane%4) + 32(g/2) 个 fp4 = 字节 4(lane%4) + 16(g/2)）逐字节相同，所以换 ldmatrix 是纯指令数变化，逐位不变。
+__device__ __forceinline__ void ldm_x4(uint32_t (&r)[4], uint32_t a) {
+  asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n" : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(a));
+}
+__device__ __forceinline__ void ldm_x2(uint32_t (&r)[2], uint32_t a) {
+  asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\n" : "=r"(r[0]), "=r"(r[1]) : "r"(a));
+}
 // 4 B 异步拷贝（ca）：sfb 每元素 4 B；bytes=0 → zero-fill（越界 sfb fill 0，一致）。
 __device__ __forceinline__ void cp4(uint32_t s, const void* g, int bytes) {
   asm volatile("cp.async.ca.shared.global [%0], [%1], 4, %2;\n" ::"r"(s), "l"(g), "r"(bytes));
@@ -708,7 +717,7 @@ __global__ void __launch_bounds__(256)
 // 每 warp 2×2 个 m16n8 片段（A 片段在 n 向复用、B 片段在 m 向复用 → 每 mma 的 smem 读量减半，算力型形状下 CTA 数不再是
 // 2148 行 × 11 列 × 2 = 2.4 万个 BM=32 小块）。K 累加序仍按 k 升序、每输出元素与 BM=32/BM=16 版同一条 mma 链 → 逐位一致。
 // tile 表用第三张（BM=64，tile_off + 2(E+1)）。grid.z=2 时 half=1 走 up 指针（与 pipe4 同）。
-template <int BK, int STAGES, int BN_T = 64>
+template <int BK, int STAGES, int BN_T = 64, bool LDSM = false>
 __global__ void __launch_bounds__(256)
     grouped_gemm_kernel_p64(const uint8_t* __restrict__ A, const uint8_t* __restrict__ Asc,
                             const uint8_t* const* __restrict__ Bptr, const uint8_t* const* __restrict__ Sptr,
@@ -784,11 +793,18 @@ __global__ void __launch_bounds__(256)
     for (int b = 0; b < nbk; ++b) {
       const int kb0 = b * 64;
       uint32_t a[4];
+      if constexpr (LDSM) {
+        // 与 gemm_fp8_sm120.cu 同口径：lane 0..15 给行 mrow + lane 的 k 前半（字节 kb0/2），lane 16..31 给行 mrow + (lane-16) 的
+        // k 后半（+16 B）。x4 的 tile 顺序 = (行 0-7,k0) (行 8-15,k0) (行 0-7,k1) (行 8-15,k1) = a[0..3] 的 mma 片段顺序。
+        const int r = lane & 15, c = (lane >= 16) ? 16 : 0;
+        ldm_x4(a, smem_u32(&sA[cur][(mrow + r) * RSA + kb0 / 2 + c]));
+      } else {
 #pragma unroll
-      for (int g = 0; g < 4; ++g) {
-        const int m = (lane / 4) + 8 * (g % 2);
-        const int kb_ = kb0 + 8 * (lane % 4) + 32 * (g / 2);
-        a[g] = *reinterpret_cast<const uint32_t*>(&sA[cur][(mrow + m) * RSA + kb_ / 2]);
+        for (int g = 0; g < 4; ++g) {
+          const int m = (lane / 4) + 8 * (g % 2);
+          const int kb_ = kb0 + 8 * (lane % 4) + 32 * (g / 2);
+          a[g] = *reinterpret_cast<const uint32_t*>(&sA[cur][(mrow + m) * RSA + kb_ / 2]);
+        }
       }
       const int sam = (8 * (lane & 1) + (lane >> 2)) & 15;
       const uint32_t sa = sfa[cur][(mrow + sam) * NQ4 + b];
@@ -796,10 +812,16 @@ __global__ void __launch_bounds__(256)
 #pragma unroll
       for (int j = 0; j < NJ; ++j) {
         uint32_t bb[2];
+        if constexpr (LDSM) {
+          // x2（同 fp8 参考）：lane&7 行、lane&8 选 k 半；lane 16..31 地址不参与（给合法地址）
+          const int rb = lane & 7, cb = (lane & 8) ? 16 : 0;
+          ldm_x2(bb, smem_u32(&sB[cur][(ncol + 8 * j + rb) * RSB + kb0 / 2 + cb]));
+        } else {
 #pragma unroll
-        for (int g = 0; g < 2; ++g) {
-          const int kb_ = kb0 + 8 * (lane % 4) + 32 * g;
-          bb[g] = *reinterpret_cast<const uint32_t*>(&sB[cur][(ncol + 8 * j + brow) * RSB + kb_ / 2]);
+          for (int g = 0; g < 2; ++g) {
+            const int kb_ = kb0 + 8 * (lane % 4) + 32 * g;
+            bb[g] = *reinterpret_cast<const uint32_t*>(&sB[cur][(ncol + 8 * j + brow) * RSB + kb_ / 2]);
+          }
         }
         const uint32_t sb = sfb[cur][(ncol + 8 * j + brow) * NQ4 + b];
         mma_fp4(a, bb, sa, sb, acc[j]);
@@ -834,6 +856,13 @@ static int prefill_bn() {
   return v;
 }
 // B48d：p64 BK=128 路径的 cp.async 级数（3 默认 | 4；`MOE_PREFILL_STAGES=4` A/B 用。4 级 smem ≈ 45 KB（BN128）→ 2 CTA/SM 仍成立）。
+// G1：p64 片段用 ldmatrix（默认关；`MOE_P64_LDSM=1` 开，A/B 用；赢了改默认）。
+static bool prefill_ldsm() {
+  static const bool v = []{ const char* e = getenv("MOE_P64_LDSM"); return e && e[0] == '1'; }();
+  return v;
+}
+// 按 MOE_P64_LDSM 选 ldmatrix 实例（模板 bool），其余参数透传
+#define P64_LAUNCH(BK_, ST_, BN_) (prefill_ldsm() ? grouped_gemm_kernel_p64<BK_, ST_, BN_, true> : grouped_gemm_kernel_p64<BK_, ST_, BN_, false>)<<<
 static int prefill_stages() {
   static const int v = []{ const char* e = getenv("MOE_PREFILL_STAGES"); return (e && atoi(e) == 4) ? 4 : 3; }();
   return v;
@@ -1089,12 +1118,12 @@ int moe_grouped_gemm(const void* aq, const void* a_s, const void* const* Bptr, c
       const dim3 g64((unsigned)((N + bn - 1) / bn), (unsigned)((R + 63) / 64 + num_experts), 1u);
       if (bn == 128) {
         if (K % 128 == 0) {
-          if (prefill_stages() == 4) grouped_gemm_kernel_p64<128, 4, 128><<<g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
-          else grouped_gemm_kernel_p64<128, 3, 128><<<g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
-        } else grouped_gemm_kernel_p64<64, 4, 128><<<g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+          if (prefill_stages() == 4) P64_LAUNCH(128, 4, 128)g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+          else P64_LAUNCH(128, 3, 128)g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+        } else P64_LAUNCH(64, 4, 128)g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
       } else {
-        if (K % 128 == 0) grouped_gemm_kernel_p64<128, 3><<<g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
-        else grouped_gemm_kernel_p64<64, 4><<<g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+        if (K % 128 == 0) P64_LAUNCH(128, 3, 64)g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+        else P64_LAUNCH(64, 4, 64)g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
       }
       return static_cast<int>(cudaGetLastError());
     }
@@ -1165,12 +1194,12 @@ int moe_grouped_gemm_dual(const void* aq, const void* a_s,
     const dim3 g64((unsigned)((N + bn - 1) / bn), (unsigned)((R + 63) / 64 + num_experts), 2u);
     if (bn == 128) {
       if (K % 128 == 0) {
-        if (prefill_stages() == 4) grouped_gemm_kernel_p64<128, 4, 128><<<g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
-        else grouped_gemm_kernel_p64<128, 3, 128><<<g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
-      } else grouped_gemm_kernel_p64<64, 4, 128><<<g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
+        if (prefill_stages() == 4) P64_LAUNCH(128, 4, 128)g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
+        else P64_LAUNCH(128, 3, 128)g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
+      } else P64_LAUNCH(64, 4, 128)g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
     } else {
-      if (K % 128 == 0) grouped_gemm_kernel_p64<128, 3><<<g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
-      else grouped_gemm_kernel_p64<64, 4><<<g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
+      if (K % 128 == 0) P64_LAUNCH(128, 3, 64)g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
+      else P64_LAUNCH(64, 4, 64)g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
     }
     return static_cast<int>(cudaGetLastError());
   }
