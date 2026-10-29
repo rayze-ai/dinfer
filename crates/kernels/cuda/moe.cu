@@ -136,20 +136,24 @@ __global__ void scan_kernel(const int32_t* __restrict__ counts, int32_t* __restr
   for (int e = threadIdx.x; e < E; e += blockDim.x) s[e] = counts[e];
   __syncthreads();
   if (threadIdx.x == 0) {
-    int acc = 0, tacc = 0, tacc16 = 0;
+    int acc = 0, tacc = 0, tacc16 = 0, tacc64 = 0;
     int32_t* tile_off16 = tile_off + (E + 1);  // B16b：第二张表 BM=16（decode 用），紧跟 BM=32 表之后
+    int32_t* tile_off64 = tile_off + 2 * (E + 1);  // B48：第三张表 BM=64（prefill 大 tile）
     for (int e = 0; e < E; ++e) {
       offsets[e] = acc;
       cursor[e] = acc;
       tile_off[e] = tacc;
       tile_off16[e] = tacc16;
+      tile_off64[e] = tacc64;
       tacc += (s[e] + 31) / 32;
       tacc16 += (s[e] + 15) / 16;
+      tacc64 += (s[e] + 63) / 64;
       acc += s[e];
     }
     offsets[E] = acc;
     tile_off[E] = tacc;
     tile_off16[E] = tacc16;
+    tile_off64[E] = tacc64;
   }
 }
 
@@ -560,20 +564,21 @@ __global__ void __launch_bounds__(256) route_bucket_small_kernel(
   // 段内串行 + warp shfl_up 包含扫描）；整数运算，与单线程串行完全同值。
   if (warp == 0) {
     int32_t* tile_off16 = tile_off + (E + 1);
+    int32_t* tile_off64 = tile_off + 2 * (E + 1);  // B48：第三张表 BM=64（prefill 大 tile）
     const int ept = (E + 31) / 32;
     const int e0 = lane * ept;
-    int la = 0, lt = 0, lt16 = 0;
+    int la = 0, lt = 0, lt16 = 0, lt64 = 0;
     for (int j = 0; j < ept; ++j) {
       const int e = e0 + j;
-      if (e < E) { const int c = s_cnt[e]; la += c; lt += (c + 31) / 32; lt16 += (c + 15) / 16; }
+      if (e < E) { const int c = s_cnt[e]; la += c; lt += (c + 31) / 32; lt16 += (c + 15) / 16; lt64 += (c + 63) / 64; }
     }
-    int ia = la, it = lt, it16 = lt16;
+    int ia = la, it = lt, it16 = lt16, it64 = lt64;
 #pragma unroll
     for (int o = 1; o < 32; o <<= 1) {
-      const int pa = __shfl_up_sync(0xffffffffu, ia, o), pt = __shfl_up_sync(0xffffffffu, it, o), p16 = __shfl_up_sync(0xffffffffu, it16, o);
-      if (lane >= o) { ia += pa; it += pt; it16 += p16; }
+      const int pa = __shfl_up_sync(0xffffffffu, ia, o), pt = __shfl_up_sync(0xffffffffu, it, o), p16 = __shfl_up_sync(0xffffffffu, it16, o), p64 = __shfl_up_sync(0xffffffffu, it64, o);
+      if (lane >= o) { ia += pa; it += pt; it16 += p16; it64 += p64; }
     }
-    int acc = ia - la, tacc = it - lt, tacc16 = it16 - lt16;  // exclusive
+    int acc = ia - la, tacc = it - lt, tacc16 = it16 - lt16, tacc64 = it64 - lt64;  // exclusive
     for (int j = 0; j < ept; ++j) {
       const int e = e0 + j;
       if (e < E) {
@@ -583,12 +588,14 @@ __global__ void __launch_bounds__(256) route_bucket_small_kernel(
         s_cur[e] = acc;
         tile_off[e] = tacc;
         tile_off16[e] = tacc16;
+        tile_off64[e] = tacc64;
         tacc += (c + 31) / 32;
         tacc16 += (c + 15) / 16;
+        tacc64 += (c + 63) / 64;
         acc += c;
       }
     }
-    if (lane == 31) { offsets[E] = ia; tile_off[E] = it; tile_off16[E] = it16; }
+    if (lane == 31) { offsets[E] = ia; tile_off[E] = it; tile_off16[E] = it16; tile_off64[E] = it64; }
   }
   __syncthreads();
   for (int t = warp; t < tokens; t += nwarp) {

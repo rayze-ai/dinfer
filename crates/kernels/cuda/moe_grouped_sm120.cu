@@ -704,6 +704,127 @@ __global__ void __launch_bounds__(256)
     }
   }
 }
+// B48（loop kaon3-decode-opt D208/D210）：prefill / 混批（R > dec_rmax）用的大 tile：BM=64 × BN=64，8 warp 布局 4(m)×2(n)，
+// 每 warp 2×2 个 m16n8 片段（A 片段在 n 向复用、B 片段在 m 向复用 → 每 mma 的 smem 读量减半，算力型形状下 CTA 数不再是
+// 2148 行 × 11 列 × 2 = 2.4 万个 BM=32 小块）。K 累加序仍按 k 升序、每输出元素与 BM=32/BM=16 版同一条 mma 链 → 逐位一致。
+// tile 表用第三张（BM=64，tile_off + 2(E+1)）。grid.z=2 时 half=1 走 up 指针（与 pipe4 同）。
+template <int BK, int STAGES>
+__global__ void __launch_bounds__(256)
+    grouped_gemm_kernel_p64(const uint8_t* __restrict__ A, const uint8_t* __restrict__ Asc,
+                            const uint8_t* const* __restrict__ Bptr, const uint8_t* const* __restrict__ Sptr,
+                            const float* __restrict__ alpha, const int32_t* __restrict__ offsets,
+                            const int32_t* __restrict__ tile_off, bf16* __restrict__ D, int N, int K, int E,
+                            const uint8_t* const* __restrict__ Bu = nullptr, const uint8_t* const* __restrict__ Su = nullptr,
+                            const float* __restrict__ alphaU = nullptr, bf16* __restrict__ Du = nullptr) {
+  constexpr int BM_T = 64, BN_T = 64;
+  int e, m_blk, row_hi;
+  if (!tile_lookup(offsets, tile_off + 2 * (E + 1), E, (int)blockIdx.y, e, m_blk, row_hi, BM_T)) return;
+  if (blockIdx.z) { Bptr = Bu; Sptr = Su; alpha = alphaU; D = Du; }
+  constexpr int RSA = BK / 2 + PAD, RSB = BK / 2 + PAD;
+  constexpr int NQ4 = BK / 64;
+  constexpr int NB16 = BK / 16;
+  __shared__ __align__(16) uint8_t sA[STAGES][BM_T * RSA];
+  __shared__ __align__(16) uint8_t sB[STAGES][BN_T * RSB];
+  __shared__ __align__(16) uint32_t sfa[STAGES][BM_T * NQ4];
+  __shared__ __align__(16) uint32_t sfb[STAGES][BN_T * NQ4];
+  const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+  const int wm = warp >> 1, wn = warp & 1;                  // 4 × 2 warps；warp tile 16 行 × 32 列
+  const int n_blk = blockIdx.x * BN_T;
+  const uint8_t* B = Bptr[e];
+  const uint8_t* S = Sptr[e];
+  const float global = alpha[e];
+  const int M = row_hi;
+  float acc[4][4] = {};                                      // [n 片段 j=0..3][4]
+  const int nk = (K + BK - 1) / BK;
+  const int rb = BK / 32;
+  auto load_stage = [&](int st, int kb) {
+    const uint8_t* asrc = A + static_cast<size_t>(m_blk) * (K / 2) + kb * (BK / 2);
+    for (int i = tid; i < (BM_T * BK / 2) / 16; i += blockDim.x) {
+      const int r = i / rb, c = i % rb;
+      const bool ok = (m_blk + r < M) && (kb * BK + c * 32 < K);
+      cp16(smem_u32(&sA[st][r * RSA + c * 16]), asrc + (static_cast<size_t>(r) * (K / 32) + c) * 16, ok ? 16 : 0);
+    }
+    for (int i = tid; i < BM_T * NQ4; i += blockDim.x) {
+      const int r = i / NQ4, q = i % NQ4;
+      const bool ok = (m_blk + r < M) && (kb * NB16 + q * 4 < K / 16);
+      cp4(smem_u32(&sfa[st][r * NQ4 + q]), Asc + static_cast<size_t>(m_blk + r) * (K / 16) + kb * NB16 + q * 4, ok ? 4 : 0);
+    }
+    const uint8_t* bsrc = B + static_cast<size_t>(n_blk) * (K / 2) + kb * (BK / 2);
+    for (int i = tid; i < (BN_T * BK / 2) / 16; i += blockDim.x) {
+      const int r = i / rb, c = i % rb;
+      const bool ok = (n_blk + r < N) && (kb * BK + c * 32 < K);
+      cp16(smem_u32(&sB[st][r * RSB + c * 16]), bsrc + (static_cast<size_t>(r) * (K / 32) + c) * 16, ok ? 16 : 0);
+    }
+    for (int i = tid; i < BN_T * NQ4; i += blockDim.x) {
+      const int r = i / NQ4, q = i % NQ4;
+      const bool ok = (n_blk + r < N) && (kb * NB16 + q * 4 < K / 16);
+      cp4(smem_u32(&sfb[st][r * NQ4 + q]), S + static_cast<size_t>(n_blk + r) * (K / 16) + kb * NB16 + q * 4, ok ? 4 : 0);
+    }
+    asm volatile("cp.async.commit_group;\n");
+  };
+#pragma unroll
+  for (int st = 0; st < STAGES - 1; ++st) {
+    if (st < nk) load_stage(st, st);
+    else asm volatile("cp.async.commit_group;\n");
+  }
+  for (int kb = 0; kb < nk; ++kb) {
+    {
+      const int kn = kb + STAGES - 1;
+      if (kn < nk) load_stage(kn % STAGES, kn);
+      else asm volatile("cp.async.commit_group;\n");
+    }
+    asm volatile("cp.async.wait_group %0;\n" ::"n"(STAGES - 1));
+    __syncthreads();
+    const int cur = kb % STAGES;
+    constexpr int nbk = BK / 64;
+    const int mrow = wm * 16, ncol = wn * 32;
+#pragma unroll
+    for (int b = 0; b < nbk; ++b) {
+      const int kb0 = b * 64;
+      uint32_t a[4];
+#pragma unroll
+      for (int g = 0; g < 4; ++g) {
+        const int m = (lane / 4) + 8 * (g % 2);
+        const int kb_ = kb0 + 8 * (lane % 4) + 32 * (g / 2);
+        a[g] = *reinterpret_cast<const uint32_t*>(&sA[cur][(mrow + m) * RSA + kb_ / 2]);
+      }
+      const int sam = (8 * (lane & 1) + (lane >> 2)) & 15;
+      const uint32_t sa = sfa[cur][(mrow + sam) * NQ4 + b];
+      const int brow = lane / 4;
+#pragma unroll
+      for (int j = 0; j < 4; ++j) {
+        uint32_t bb[2];
+#pragma unroll
+        for (int g = 0; g < 2; ++g) {
+          const int kb_ = kb0 + 8 * (lane % 4) + 32 * g;
+          bb[g] = *reinterpret_cast<const uint32_t*>(&sB[cur][(ncol + 8 * j + brow) * RSB + kb_ / 2]);
+        }
+        const uint32_t sb = sfb[cur][(ncol + 8 * j + brow) * NQ4 + b];
+        mma_fp4(a, bb, sa, sb, acc[j]);
+      }
+    }
+    __syncthreads();
+  }
+  const int r0 = lane / 4, cg = (lane % 4) * 2;
+  const int g0 = m_blk + wm * 16 + r0, g1 = g0 + 8;
+#pragma unroll
+  for (int j = 0; j < 4; ++j) {
+    const int c = n_blk + wn * 32 + 8 * j + cg;
+    if (g0 < M && c < N) {
+      D[static_cast<size_t>(g0) * N + c] = to_bf16(acc[j][0] * global);
+      if (c + 1 < N) D[static_cast<size_t>(g0) * N + c + 1] = to_bf16(acc[j][1] * global);
+    }
+    if (g1 < M && c < N) {
+      D[static_cast<size_t>(g1) * N + c] = to_bf16(acc[j][2] * global);
+      if (c + 1 < N) D[static_cast<size_t>(g1) * N + c + 1] = to_bf16(acc[j][3] * global);
+    }
+  }
+}
+// B48：prefill 大 tile 开关（默认开；`MOE_PREFILL_P64=0` 回退 BM=32 旧体，A/B 用）。
+static bool prefill_p64() {
+  static const bool v = []{ const char* e = getenv("MOE_PREFILL_P64"); return !e || e[0] != '0'; }();
+  return v;
+}
 // 第二刀（R89+）：gate+up 融合单 launch。grid.z = 2E：z<E 跑 gate（Bg/Sg/alphaG/Dg），z>=E 跑 up（Bu/Su/alphaU/Du）。
 // decode grid 小（~8激活×N/BN）占不满 170 SM；翻倍 grid.z 填满 SM = graph 吃不掉的并行度。
 // body 与 grouped_gemm_kernel_pipe 逐字相同（仅 e/B/S/global/D 按 half 选）→ 逐位天然一致。
@@ -950,6 +1071,11 @@ int moe_grouped_gemm(const void* aq, const void* a_s, const void* const* Bptr, c
       else grouped_gemm_kernel_pipe4<64, 4, 16><<<g16, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
       return gerr();
     }
+    if (prefill_p64() && R > dec_rmax() && K % 128 == 0) {  // B48：prefill 大 tile
+      const dim3 g64((unsigned)((N + 63) / 64), (unsigned)((R + 63) / 64 + num_experts), 1u);
+      grouped_gemm_kernel_p64<128, 3><<<g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+      return static_cast<int>(cudaGetLastError());
+    }
     if (K % 128 == 0) {
       if (stages == 3) grouped_gemm_kernel_pipe4<128, 3><<<grid, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
       // STAGES=6 × BK=128 静态 smem 50.7 KB > 48 KB 上限 → BK=128 最多 4 级
@@ -1011,6 +1137,11 @@ int moe_grouped_gemm_dual(const void* aq, const void* a_s,
     else
       grouped_gemm_kernel_pipe4<64, 4, 16><<<g16, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
     return gerr();
+  }
+  if (prefill_p64() && R > dec_rmax() && K % 128 == 0) {  // B48：prefill 大 tile（gate‖up grid.z=2）
+    const dim3 g64((unsigned)((N + 63) / 64), (unsigned)((R + 63) / 64 + num_experts), 2u);
+    grouped_gemm_kernel_p64<128, 3><<<g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
+    return static_cast<int>(cudaGetLastError());
   }
   if (K % 128 == 0) {
     grouped_gemm_kernel_dual<128><<<grid, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, static_cast<bf16*>(outG),

@@ -1970,9 +1970,9 @@ pub struct MoeBuckets {
 
 /// `tile_off` 的 CPU 口径（测试 / 自建 offsets 时用）：tile_off[e] = Σ_{e'<e} ceil(len_e'/32)。
 pub fn moe_tile_off_cpu(offsets: &[i32]) -> Vec<i32> {
-    // B16b：两张表拼接 [BM=32 (E+1) | BM=16 (E+1)]
-    let mut t = Vec::with_capacity(2 * offsets.len());
-    for bm in [32i32, 16] {
+    // B16b：两张表拼接 [BM=32 (E+1) | BM=16 (E+1)]；B48：第三张 BM=64。
+    let mut t = Vec::with_capacity(3 * offsets.len());
+    for bm in [32i32, 16, 64] {
         let mut acc = 0i32;
         for w in offsets.windows(2) {
             t.push(acc);
@@ -1992,7 +1992,7 @@ impl MoeBuckets {
             cursor: stream.alloc_zeros::<i32>(num_experts)?,
             sorted_tok: stream.alloc_zeros::<i32>(max_pairs)?,
             sorted_k: stream.alloc_zeros::<i32>(max_pairs)?,
-            tile_off: stream.alloc_zeros::<i32>(2 * (num_experts + 1))?,  // B16b：[BM=32 表 | BM=16 表]
+            tile_off: stream.alloc_zeros::<i32>(3 * (num_experts + 1))?,  // B16b：[BM=32 表 | BM=16 表]；B48：| BM=64 表
             inv: stream.alloc_zeros::<i32>(max_pairs)?,
             num_experts,
             max_pairs,
@@ -2322,7 +2322,7 @@ pub fn moe_grouped_gemm_dual_splitk(
         aq.len() >= rows * (k / 2) && a_s.len() >= rows * (k / 16) && p.len() >= 2 * ksplit * rows * n
             && bg.len() >= num_experts && sg.len() >= num_experts && alpha_g.len() >= num_experts
             && bu.len() >= num_experts && su.len() >= num_experts && alpha_u.len() >= num_experts
-            && offsets.len() >= num_experts + 1 && tile_off.len() >= 2 * (num_experts + 1),
+            && offsets.len() >= num_experts + 1 && tile_off.len() >= 3 * (num_experts + 1),
         "moe_grouped_gemm_dual_splitk: capacity"
     );
     // SAFETY: 容量已校验；指针表内地址由 layer 建表时保证。
@@ -2392,7 +2392,7 @@ pub fn moe_grouped_gemm(
     num_experts: usize,
 ) -> Result<()> {
     ensure!(k % 64 == 0, "moe_grouped_gemm: k {k} 不是 64 的倍数");
-    ensure!(tile_off.len() >= 2 * (num_experts + 1), "moe_grouped_gemm: tile_off(2 表)");
+    ensure!(tile_off.len() >= 3 * (num_experts + 1), "moe_grouped_gemm: tile_off(2 表)");
     ensure!(
         aq.len() >= rows * (k / 2)
             && a_s.len() >= rows * (k / 16)

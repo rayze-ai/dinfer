@@ -63,6 +63,12 @@ fn moe_gemm_timing() {
         ("M=8", { let mut c = vec![0usize; e]; let mut lens = vec![5usize; 4]; lens.extend(vec![4; 4]); lens.extend(vec![2; 8]); lens.extend(vec![1; 12]);
                   for (i, l) in lens.iter().enumerate() { c[(i * 13 + 7) % e] = *l; } c }),
     ];
+    // B48：prefill 混批形状（c16 一步 2148 tok × top-8 = 17184 行，全部 128 专家 ~134 行/专家，照 nsys 态 424 tok 片段也给一档）
+    let mut scenarios = scenarios;
+    for (name, tok) in [("P424", 424usize), ("P2148", 2148usize)] {
+        let rows = tok * 8; let base = rows / e; let rem = rows % e;
+        scenarios.push((name, (0..e).map(|i| base + if i < rem { 1 } else { 0 }).collect()));
+    }
     for (name, counts) in &scenarios {
         let active = counts.iter().filter(|&&c| c > 0).count();
         let rows: usize = counts.iter().sum();
@@ -89,6 +95,11 @@ fn moe_gemm_timing() {
             k::ops::moe_grouped_gemm(&st, &daq_gu, &das_gu, &pbu, &psu, &dal, &doff, &dtoff, &mut ou, rows, n_gu, k_gu, e).unwrap();
         });
         eprintln!("MOE_GEMM_TIMING {name} active={active} rows={rows} gate‖up 2×grouped: {us:7.2} us  {:6.0} GB/s", gbs(bytes_gu, us));
+        // B48 对拍口径：输出校验和（跨进程 MOE_PREFILL_P64=0/1 两次跑，同形状校验和必须逐位同）
+        let hg: Vec<bf16> = st.dtoh_sync_copy(&og).unwrap();
+        let hu: Vec<bf16> = st.dtoh_sync_copy(&ou).unwrap();
+        let ck = |v: &[bf16]| v.iter().fold(0u64, |a, x| a.wrapping_mul(1099511628211).wrapping_add(x.to_bits() as u64));
+        eprintln!("MOE_GEMM_TIMING {name} rows={rows} CHECKSUM gate={:016x} up={:016x}", ck(&hg), ck(&hu));
         let us = time(&mut || { k::ops::moe_grouped_gemm(&st, &daq_dn, &das_dn, &pbd, &psd, &dal, &doff, &dtoff, &mut od, rows, n_dn, k_dn, e).unwrap(); });
         eprintln!("MOE_GEMM_TIMING {name} active={active} rows={rows} down grouped:      {us:7.2} us  {:6.0} GB/s  (DRAM 下限 {:.2} us)", gbs(bytes_dn, us), bytes_dn / 1.79e6);
         let mut oact = st.alloc_zeros::<bf16>(rows * n_gu).unwrap();
