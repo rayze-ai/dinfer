@@ -42,3 +42,6 @@ kaon3 5090 的 bN/envab 只钉了 bench（60-91），serve 浮动 128 核跑了�
 - kernel 改动前置门禁：微基准（`moe_gemm_timing` 的 P424/P2148 形状）两进程 env 开/关各跑一次，**输出 CHECKSUM 必须逐位同**（`GATE=0`）才编主二进制起 ABAB；门禁失败链直接退出不占 GPU。
 - 结果入库：`scripts/dev/e2e_round.sh kaon3 <round> "<一句话>" <group> d_tps v_tps d_ttft v_ttft d_tpot v_tpot`（vLLM 列用 stepA4 中位数、注明），每刀 4 行（c8/16/32/64），负结果也进（round 名加后缀如 `b49c`）。
 - 一天 5 刀的节奏：写 → 本地 `cargo check`（Rust 侧）+ `CUDA_ARCHS=86 cargo build -p dinfer-kernels`（nvcc 语法）→ `sync` → 远端链 → 等的时候写下一刀 / 记录 / 知识。
+
+## 24. 同配置 c16 TPOT 单轮噪声 ±0.15 ms（±1.5%）；判 < 2% 的刀要 ≥ 3 轮或顺序反转复测（2026-10-29 kaon3 D231/D237）
+- b59 B 侧 9.60/9.60、b60 A 侧（同配置）9.85/9.78、b61 A 9.77：同一二进制同一 env 同 seed，跨链 ±0.15。两轮 ABAB 只能判 ≥ 2% 的差；更小的差做第三轮或把 A/B 顺序反过来再跑一遍（b61 模式）。c32/c64 噪声更小（±0.5%）。
