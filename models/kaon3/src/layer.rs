@@ -692,6 +692,11 @@ fn moe_norm_quant_fused_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_ne!("MOE_NORM_QUANT_FUSED", "0"))
 }
+/// MoE gate+up 单 launch（grid.z=2E）。D167（2026-10-29）：envab 两轮 c1 -1.3% / c8 -1.2%，逐位（`moe_dual_matches_separate`）→ 默认开；`MOE_GEMM_DUAL=0` 关。
+fn moe_gemm_dual_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_ne!("MOE_GEMM_DUAL", "0"))
+}
 fn kv_fp8_fused_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_ne!("KV_FP8_FUSED", "0"))
@@ -1793,7 +1798,7 @@ impl Gemma4Layer {
                     r, mg.n_gate, mg.k_gate, e,
                 )?;
             } else if skip_gu {
-            } else if env_eq!("MOE_GEMM_DUAL", "1") {
+            } else if moe_gemm_dual_enabled() {
                 let (gate_o, up_o) = (&mut g.gate_o, &mut g.up_o);
                 k::ops::moe_grouped_gemm_dual(
                     stream, &g.aq_gu, &g.as_gu,
