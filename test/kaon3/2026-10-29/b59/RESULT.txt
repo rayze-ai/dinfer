@@ -1,0 +1,36 @@
+07:59:44
+TEST BUILD EXIT=0
+bf16-logits tokens=33: ids_eq=true w_bits_diff=0
+tokens=33 pes=true: ids true | w 位差 0/264 | offsets/tile_off/counts/cursor true | row2e true | sorted 区间集合 true | combine true => ok
+test moe_route_fused_parity ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+BUILD EXIT=0 md5=2f06f08d5082 marker=1 08:00:32
+r1 A startup: model_load_ms=34637
+r1 A c8:   tps=946.5 ttft_p50=94.48 ttft_p99=96.07 tpot_p50=7.09 tpot_p99=8.27
+r1 A c16:   tps=1371.4 ttft_p50=115.98 ttft_p99=183.14 tpot_p50=9.90 tpot_p99=11.48
+r1 A c32:   tps=2033.2 ttft_p50=193.22 ttft_p99=327.12 tpot_p50=12.93 tpot_p99=15.45
+r1 A c64:   tps=2651.8 ttft_p50=205.23 ttft_p99=723.56 tpot_p50=21.09 tpot_p99=23.72
+r1 A out:  is is is is is is is is is is is is is is is is is is is is is is is is
+r1 A out2: 以下是为您准备的三句话介绍：  1. 长城的修建始于春秋战国时期，最初是为了抵御各方势力而建。 2. 到了秦汉时期，长城得到了大规模的扩建与整合，成为了重要的防御体系。 3. 历
+r1 B startup: model_load_ms=34681
+r1 B c8:   tps=946.7 ttft_p50=94.52 ttft_p99=96.42 tpot_p50=7.08 tpot_p99=8.23
+r1 B c16:   tps=1400.9 ttft_p50=120.85 ttft_p99=183.06 tpot_p50=9.60 tpot_p99=11.17
+r1 B c32:   tps=2125.6 ttft_p50=194.34 ttft_p99=330.01 tpot_p50=12.17 tpot_p99=14.78
+r1 B c64:   tps=2812.5 ttft_p50=205.73 ttft_p99=724.15 tpot_p50=19.73 tpot_p99=22.40
+r1 B out:  is is is is is is is is is is is is is is is is is is is is is is is is
+r1 B out2: 以下是为您准备的三句话介绍：  1. 长城的修建始于春秋战国时期，最初是为了抵御各方势力而建。 2. 到了秦汉时期，长城得到了大规模的扩建与整合，成为了重要的防御体系。 3. 历
+r2 A startup: model_load_ms=34612
+r2 A c8:   tps=948.9 ttft_p50=95.24 ttft_p99=97.23 tpot_p50=7.08 tpot_p99=8.19
+r2 A c16:   tps=1368.6 ttft_p50=116.91 ttft_p99=183.36 tpot_p50=9.92 tpot_p99=11.48
+r2 A c32:   tps=2022.6 ttft_p50=196.41 ttft_p99=330.63 tpot_p50=12.86 tpot_p99=15.44
+r2 A c64:   tps=2641.5 ttft_p50=206.72 ttft_p99=725.77 tpot_p50=21.23 tpot_p99=23.81
+r2 A out:  is is is is is is is is is is is is is is is is is is is is is is is is
+r2 A out2: 以下是为您准备的三句话介绍：  1. 长城的修建始于春秋战国时期，最初是为了抵御各方势力而建。 2. 到了秦汉时期，长城得到了大规模的扩建与整合，成为了重要的防御体系。 3. 历
+r2 B startup: model_load_ms=34708
+r2 B c8:   tps=954.3 ttft_p50=94.38 ttft_p99=96.56 tpot_p50=7.03 tpot_p99=8.17
+r2 B c16:   tps=1412.0 ttft_p50=116.13 ttft_p99=183.02 tpot_p50=9.60 tpot_p99=11.12
+r2 B c32:   tps=2113.2 ttft_p50=194.47 ttft_p99=330.20 tpot_p50=12.26 tpot_p99=14.83
+r2 B c64:   tps=2810.0 ttft_p50=206.25 ttft_p99=726.96 tpot_p50=19.73 tpot_p99=22.38
+r2 B out:  is is is is is is is is is is is is is is is is is is is is is is is is
+r2 B out2: 以下是为您准备的三句话介绍：  1. 长城的修建始于春秋战国时期，最初是为了抵御各方势力而建。 2. 到了秦汉时期，长城得到了大规模的扩建与整合，成为了重要的防御体系。 3. 历
+B59_DONE
