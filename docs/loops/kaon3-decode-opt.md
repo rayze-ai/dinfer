@@ -1495,3 +1495,18 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - ✗ 落后 ②：纯 decode 步 M=16/32/64 = 8.67 / 9.31 / 11.83 vs vLLM 全步（含 prefill 摊入）7.1 / 9.3 / 15.3 → M=16 慢 ~1.2×，M≥32 已持平或领先。先放着。
 - 两者机理不同：dinfer 的 pair 步让 prefill 子批独占副流，**decode 主流必须等 prefill 完**（`forward_sample_pair` wait_event）→ 一步 98 ms 直接抬 10 个请求的 TPOT；vLLM 把 prefill 切成小 chunk 混进每个 decode 步，每步只慢 1–2 ms。
 - **Step B 方向（两条，按 ROI 排）**：(a) **prefill 步本身 22 tok/ms → 单请求 62 tok/ms 的差距**（nsysp16 抓 kernel 表定是 attention 按请求 / MoE 大 M / GEMM 形状哪个）；(b) **调度：限制每步 prefill 新 token 数**（vLLM `long_prefill_token_threshold` 思路：dinfer 已有同名参数默认 0 = 不限；先 A/B `--long-prefill-token-threshold 512`，零代码），让 prefill 分摊到多步而不是一步塞 10 个请求 2146 tok。(b) 是"采用 vLLM 做得对的"，进 design.md §11 台账。
+
+## ★★★★★ D204 2026-10-29 nsysp16：c16 混批步（2148 tok × 10 请求，host exec 101.5 ms，26 步）kernel 表（nsys 2 ms 间隙切步，3 步聚合 ÷3）
+| 段 | 每步 ms | 占比 | 每层 us / 次数 | 备注 |
+|---|---|---|---|---|
+| MoE gate‖up `grouped_gemm_kernel_dual` | 24.0 | 23% | 791 × 30 | 旧 BM=32/BK=128 pipe 体（R ≈ 2148×K 行 > RMAX 512） |
+| MoE down `grouped_gemm_kernel_pipe4` | 16.0 | 16% | 532 × 30 | 同上 |
+| fp8 Lt `nvjet 64x32x64` | 19.1 | 19% | 153 × 125 | qkv / o_proj / dense？（M=2148 走 cuBLASLt） |
+| `Kernel2`（cuBLAS） | 16.8 | 17% | 543 × 31 | 待定名（grid 见下条） |
+| `nvjet 64x64x64` | 7.1 | 7% | 282 × 25 | |
+| attention（fa_v5 103 × 25 + fa_v6 327 × 5） | 4.2 | 4% | | **不是瓶颈**（prefill attention 2148 tok 仅 4%） |
+| softcap_bf16（**2.04 ms × 1**） | 2.0 | 2% | tokens × vocab | 疑按全部 tokens 行算 logits（应只算 10 行）→ 待查 |
+| norm / quant / route / combine / gelu 等 | ~10 | 10% | | |
+| kernel 和 / span | 102 / 108 | | gaps 6 ms | |
+- **结论**：混批 prefill 步 = **GEMM 吞吐问题，不是 attention**。MoE 占 39%（40 ms）、GEMM 43%。M=2148 的 MoE：行数 ≈ 2148 × 8 = 17 K 行分到 ~全部专家，dual 791 us/层 → 算力利用率低（NVFP4 5090 峰值远高）；fp8 Lt 的 nvjet 153 us × 125 次也偏慢（qkv 2148×2816×(q+k+v) 应 < 50 us）。
+- **Step B 排序**：(b) 调度限流（`--long-prefill-token-threshold`）零代码先跑（lpt 链已起）→ 期望把 98 ms 大步切成 ≤ 512 tok 的小步，TPOT 差额 2.7 / 5.4 / 15 ms 大部分回收；(a) 再做 MoE prefill tile（BM=64/128 大 tile + 更多 stage）与 fp8 Lt M>64 自调优（FP8_LT_TUNE）。
