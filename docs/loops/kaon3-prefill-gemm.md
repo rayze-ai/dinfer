@@ -115,3 +115,8 @@ G 编号（接 D/E）。
 - **G5 撤回**（自我纠错）：`Kernel2 grid (8,2048)` 131 次里 90 次前一个 kernel 也是它自己、gap 0.9 ms 连发——这是 **alt `Gemm` 的 autotune 候选扫描**（m=2048 桶 × 候选，启动期 0.1–5.9 s 整段都是 warmup / 自调优时间窗，g3 的 nsys 只跑 ~6 s）。B46 在 late 路径**没问题**。
 - 由此 g3 的 "eager 口径" 几乎全是启动期（autotune + warmup prefill 4096 tok），**稳态的副流 prefill 样本太少**——nsysp16 口径 c16 × 128 请求只 ~6 s，自调优就占一半。要看稳态副流表，nsys 抓取要么跳过前 10 s（`--capture-range` / `--delay`），要么把 bench 拉到 512 请求。之前 D219/G0 的副流表同样含启动期，**p64 27% / nvjet 55% 的比例不可信**。
 - **口径修正进 Step A**：nsysp16 加 `--delay 15`（跳过 autotune / warmup），请求数 ×4。
+
+## 中途小结（2026-10-29，两份稳态 nsys 抓取中）
+- 已定：G1 ldmatrix 中性（默认关）、G3a 实现错 + nvjet 在副流非大头（默认关）、G5 撤回（autotune 探针）。**本 loop 至今 0 刀合入**，连续 3 刀中性 → 按停止条件回 Step A。
+- Step A 缺口两项并行补：① 我们副流稳态 kernel 表（`nsysp16s`，delay 20 s，32×16 请求）；② vLLM 同口径 kernel 表（`vllm-nsys` @GPU4）。对比脚本 `nsys_family_compare.py`。
+- 判据不变：`[late-harvest] wall_ms` tok/ms（G0：2.5K 档 28 → ≥ 36）与 c16 TPOT ≤ 8.5。
