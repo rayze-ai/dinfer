@@ -1691,3 +1691,6 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - **九刀累计**对 stepA4：c16 11.36 → **9.48（−16.5%）**、c32 14.67 → 12.33（−16%）、c64 27.07 → 19.73（−27%）。对 vLLM：c8 1.15× / **c16 1.34× / c32 1.34× / c64 1.28×**；吞吐 96% / 91% / 86% / 84%；TTFT 全档反超。
 - M=16 decode 步小 M fp8 GEMM 这一组（B51 + B53）合计 c16 −1.2 ms；剩余（D227 表）：attention v3 0.84 ms（离下限 1.5×）、norm/quant/merge 小 kernel ~0.9 ms、lm_head 0.89（不动）、MoE 2.8（下限）。
 - b61（route split 顺序反转复测）跑中，结果决定 D229 的 c16 注。
+
+## D235 2026-10-29 b61 第 1 轮 A（split 9，九刀二进制 8664d06c）：c16 TPOT 9.77，纯 decode 步 exec **8.12 ms**（stepA5 时 8.74 → B51/B52/B53 共 −0.62）；混批步 58.5 ms（不变）；TPOT − decode 步 = **1.65 ms**（stepA5 1.89）。c16 剩余对 vLLM 7.09 的差额 2.7 ms 里：混批步插入 1.65（结构性）+ 纯 decode 步 1.0（8.12 vs vLLM 全步 7.09 已含它的 prefill 摊入，所以纯 decode 本身差距可能已 ≤ 0.5）。
+- 由此：**c16 下一步的 ROI 排序 = 异步收割（1.65）≫ 任何单 kernel**。c64：TPOT 19.73 − decode 步 11.9 = 7.8 ms 全是混批步插入。
