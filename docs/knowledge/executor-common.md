@@ -46,3 +46,7 @@
 ## 同步 executor 的两段式结果必须随 Pending 走（2026-10-28，kaon3 B28）
 - engine 在 `finish(pend_n)` 之前会 ① 跑 cut-in（`begin_cut_in` → forward_sample）② `async_sched` 下提前 `begin(n+1)`（同步 runner 上立刻 forward）。结果若留在 runner 共享字段（`self.generated`），步 n 的 token 被覆盖且 `ensure!(len)` 查不出（行数相同）。修法：`Pending.sync_result` 随 Pending 走（runner.rs，单测 `sync_cut_in_does_not_overwrite_pending_step_result`）。
 - 不实现 `supports_async` 的 executor 是放大器：每步都走同步分支。kaon3 应补 async（prev_chosen gather + `save_chosen`），省一步 host 等待（TODO）。
+
+## 跨流 pair 步（decode 主流 + prefill 副流）的隐藏代价：decode 等 prefill（2026-10-29 kaon3 D219）
+- **判断**：pair 步让 prefill 不抢 decode 的 SM，但 `forward_sample_pair` 末尾主流 `wait_event(prefill_done)` 再 collect → 这一步的 decode 行要等整个 prefill 子批（c16 65 ms）才 publish。闭环 bench 下每 64 步一次 ≈ TPOT +1.0 ms（c16）/ +2.3 ms（c64），是对 vLLM 剩余差额里"调度结构"的那一半。
+- **怎么用**：量法 = bench TPOT − HOST_TIME 纯 decode 步 exec；> 1 ms 就是这个。解法是"prefill 异步收割"（结果晚到：Pending 允许部分请求在后续步并入），规格 `docs/loops/kaon3-prefill-async.md`。切步配额（B47）不是解法（每个混批步固定开销 5–8 ms，切 N 段付 N 次）。
