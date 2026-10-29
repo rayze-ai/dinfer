@@ -320,8 +320,8 @@ impl<E: ModelExecutor> Runner<E> {
             late_started: Vec::new(),
             steps_late_begin: 0,
             steps_late_harvest: 0,
-            // E1：默认关；`PREFILL_ASYNC=1` 开（A/B 期用 env，定稿后改 CLI）。
-            prefill_async: std::env::var("PREFILL_ASYNC").map(|v| v == "1").unwrap_or(false),
+            // E1：b63 两轮定稿（loop kaon3-prefill-async E6）**默认开**；`PREFILL_ASYNC=0` 关。执行器不支持时（`supports_prefill_async` 假）自动退回。
+            prefill_async: std::env::var("PREFILL_ASYNC").map(|v| v != "0").unwrap_or(true),
         }
     }
 

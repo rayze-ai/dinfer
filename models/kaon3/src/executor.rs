@@ -116,7 +116,8 @@ impl KaonExecutor {
         dev.disable_event_tracking();
         // E4（loop kaon3-prefill-async）：`MAIN_STREAM_PRIO=1` → decode 主流用最高优先级建（prefill 副流 AltSet 默认最低），
         // 让 decode 图的 CTA 在 prefill 大 GEMM 的 CTA 之前被调度。默认关（A/B 用）。
-        let stream = if std::env::var("MAIN_STREAM_PRIO").map(|v| v == "1").unwrap_or(false) {
+        // b63 两轮定稿（E6）：**默认开**；`MAIN_STREAM_PRIO=0` 关。
+        let stream = if std::env::var("MAIN_STREAM_PRIO").map(|v| v != "0").unwrap_or(true) {
             let (least, greatest) = dev.stream_priority_range()?;
             tracing::info!(least, greatest, "kaon3: main stream prio = greatest (decode 图流高优先级)");
             dev.new_stream_with_priority(greatest)?
@@ -169,7 +170,9 @@ impl KaonExecutor {
         };
         // B35：副套（跨流 prefill/decode 并行）。B50（loop kaon3-decode-opt D225，b56 两轮）：**默认关**——c16–c64 下 prefill 2148 tok
         // 占满 SM，decode 图挤不进，pair 步只多付两流同步 + 一套 AltSet；单流 Paged 混批全档 TPOT 低 0.4–1.3%。`XSTREAM=1` 开（A/B 用）。
-        if std::env::var("XSTREAM").map(|v| v == "1").unwrap_or(false) {
+        // E6：异步收割（默认开）需要 AltSet → XSTREAM 默认改回**开**；`XSTREAM=0` 关（同时退回单流混批）。B50 的"pair 步无收益"
+        // 结论仍成立，但 late 路径取代了 pair 路径（混批步里 pair 只剩中间 chunk 的情况）。
+        if std::env::var("XSTREAM").map(|v| v != "0").unwrap_or(true) {
             let t0 = std::time::Instant::now();
             match AltSet::new(&dev, &ex.model, max_tokens, max_rows, max_blocks) {
                 Ok(a) => {
@@ -547,7 +550,15 @@ impl ModelExecutor for KaonExecutor {
 
 impl AltSet {
     fn new(dev: &dinfer_kernels::Device, model: &KaonModel, max_tokens: usize, max_rows: usize, max_blocks: usize) -> Result<Self> {
-        let stream = dev.new_stream()?;
+        // E7（loop kaon3-prefill-async）：`PREFILL_STREAM_PRIO=<int>` 给 prefill 副流一个中间优先级（least=0 … greatest=-5），
+        // 用来缩小与 decode 主流（MAIN_STREAM_PRIO=1 → greatest）的优先级差、换回一部分 TTFT。未设 = 普通流（= least）。
+        let stream = match std::env::var("PREFILL_STREAM_PRIO").ok().and_then(|v| v.parse::<i32>().ok()) {
+            Some(p) => {
+                tracing::info!(prio = p, "kaon3: prefill (alt) stream priority");
+                dev.new_stream_with_priority(p)?
+            }
+            None => dev.new_stream()?,
+        };
         let gemm = Gemm::new(&stream).context("cublasLt on alt stream")?;
         if gemm.tune_enabled() {
             if let Err(e) = gemm.autotune(&model.gemm_tune_entries()) {
