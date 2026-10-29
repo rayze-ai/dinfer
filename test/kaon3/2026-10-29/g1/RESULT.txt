@@ -1,0 +1,52 @@
+10:08:18
+TEST BUILD EXIT=0
+LDSM=0 MOE_GEMM_TIMING M=8 active=28 rows=64 gate‖up dual:        20.52 us    3043 GB/s  (DRAM 下限 34.89 us @1.79TB/s)
+LDSM=0 MOE_GEMM_TIMING M=8 rows=64 CHECKSUM gate=8528a063422fd45d up=5f57f906d2184a33
+LDSM=0 MOE_GEMM_TIMING M=8 active=28 rows=64 down grouped:        16.43 us    1900 GB/s  (DRAM 下限 17.44 us)
+LDSM=0 MOE_GEMM_TIMING P424 active=128 rows=3392 gate‖up dual:       230.17 us    1240 GB/s  (DRAM 下限 159.48 us @1.79TB/s)
+LDSM=0 MOE_GEMM_TIMING P424 rows=3392 CHECKSUM gate=75c33e8071b4d486 up=6bd3823a1d813a13
+LDSM=0 MOE_GEMM_TIMING P424 active=128 rows=3392 down grouped:       147.44 us     968 GB/s  (DRAM 下限 79.74 us)
+LDSM=0 MOE_GEMM_TIMING P2148 active=128 rows=17184 gate‖up dual:       500.53 us     570 GB/s  (DRAM 下限 159.48 us @1.79TB/s)
+LDSM=0 MOE_GEMM_TIMING P2148 rows=17184 CHECKSUM gate=dff8babb267a72fd up=7359d2bcd51f4e0f
+LDSM=0 MOE_GEMM_TIMING P2148 active=128 rows=17184 down grouped:       371.82 us     384 GB/s  (DRAM 下限 79.74 us)
+LDSM=1 MOE_GEMM_TIMING M=8 active=28 rows=64 gate‖up dual:        20.53 us    3042 GB/s  (DRAM 下限 34.89 us @1.79TB/s)
+LDSM=1 MOE_GEMM_TIMING M=8 rows=64 CHECKSUM gate=8528a063422fd45d up=5f57f906d2184a33
+LDSM=1 MOE_GEMM_TIMING M=8 active=28 rows=64 down grouped:        16.43 us    1901 GB/s  (DRAM 下限 17.44 us)
+LDSM=1 MOE_GEMM_TIMING P424 active=128 rows=3392 gate‖up dual:       228.52 us    1249 GB/s  (DRAM 下限 159.48 us @1.79TB/s)
+LDSM=1 MOE_GEMM_TIMING P424 rows=3392 CHECKSUM gate=75c33e8071b4d486 up=6bd3823a1d813a13
+LDSM=1 MOE_GEMM_TIMING P424 active=128 rows=3392 down grouped:       146.66 us     973 GB/s  (DRAM 下限 79.74 us)
+LDSM=1 MOE_GEMM_TIMING P2148 active=128 rows=17184 gate‖up dual:       466.40 us     612 GB/s  (DRAM 下限 159.48 us @1.79TB/s)
+LDSM=1 MOE_GEMM_TIMING P2148 rows=17184 CHECKSUM gate=dff8babb267a72fd up=7359d2bcd51f4e0f
+LDSM=1 MOE_GEMM_TIMING P2148 active=128 rows=17184 down grouped:       372.23 us     383 GB/s  (DRAM 下限 79.74 us)
+GATE=0 mismatch=
+BUILD EXIT=0 md5=599a54fac69d marker=1 10:09:27
+serve_taskset=0-31 bench_taskset=60-91 bin=2026-10-29 10:09 md5=599a54fac69d A=[MOE_P64_LDSM=0 ] B=[MOE_P64_LDSM=1 ] 10:09:28
+r1 A startup: model_load_ms=34839
+r1 A c8:   tps=904.8 ttft_p50=105.60 ttft_p99=131.18 tpot_p50=7.29 tpot_p99=7.51
+r1 A c16:   tps=1424.6 ttft_p50=108.97 ttft_p99=213.66 tpot_p50=8.97 tpot_p99=10.11
+r1 A c32:   tps=2115.3 ttft_p50=227.02 ttft_p99=408.63 tpot_p50=11.92 tpot_p99=13.78
+r1 A c64:   tps=2741.4 ttft_p50=221.80 ttft_p99=787.85 tpot_p50=18.42 tpot_p99=21.98
+r1 A out:  is is is is is is is is is is is is is is is is is is is is is is is is
+r1 A out2: 以下是为您准备的三句话介绍：  1. 长城的修建始于春秋战国时期，最初是为了抵御各方势力而建。 2. 到了秦汉时期，长城得到了大规模的扩建与整合，成为了重要的防御体系。 3. 历
+r1 B startup: model_load_ms=34826
+r1 B c8:   tps=904.4 ttft_p50=96.66 ttft_p99=143.21 tpot_p50=7.40 tpot_p99=7.71
+r1 B c16:   tps=1406.4 ttft_p50=107.88 ttft_p99=204.20 tpot_p50=9.11 tpot_p99=10.29
+r1 B c32:   tps=2136.2 ttft_p50=224.91 ttft_p99=375.40 tpot_p50=11.80 tpot_p99=13.61
+r1 B c64:   tps=2759.3 ttft_p50=219.81 ttft_p99=780.73 tpot_p50=18.44 tpot_p99=21.92
+r1 B out:  is is is is is is is is is is is is is is is is is is is is is is is is
+r1 B out2: 以下是为您准备的三句话介绍：  1. 长城的修建始于春秋战国时期，最初是为了抵御各方势力而建。 2. 到了秦汉时期，长城得到了大规模的扩建与整合，成为了重要的防御体系。 3. 历
+r2 A startup: model_load_ms=34822
+r2 A c8:   tps=907.7 ttft_p50=105.87 ttft_p99=122.41 tpot_p50=7.27 tpot_p99=7.55
+r2 A c16:   tps=1421.4 ttft_p50=109.26 ttft_p99=214.18 tpot_p50=8.99 tpot_p99=10.11
+r2 A c32:   tps=2080.6 ttft_p50=187.97 ttft_p99=371.27 tpot_p50=12.14 tpot_p99=14.68
+r2 A c64:   tps=2723.6 ttft_p50=223.37 ttft_p99=795.44 tpot_p50=18.61 tpot_p99=22.23
+r2 A out:  is is is is is is is is is is is is is is is is is is is is is is is is
+r2 A out2: 以下是为您准备的三句话介绍：  1. 长城的修建始于春秋战国时期，最初是为了抵御各方势力而建。 2. 到了秦汉时期，长城得到了大规模的扩建与整合，成为了重要的防御体系。 3. 历
+r2 B startup: model_load_ms=34805
+r2 B c8:   tps=910.6 ttft_p50=97.28 ttft_p99=143.80 tpot_p50=7.33 tpot_p99=7.51
+r2 B c16:   tps=1406.6 ttft_p50=107.39 ttft_p99=205.06 tpot_p50=9.05 tpot_p99=10.07
+r2 B c32:   tps=2120.3 ttft_p50=224.52 ttft_p99=371.04 tpot_p50=11.90 tpot_p99=13.56
+r2 B c64:   tps=2754.4 ttft_p50=219.13 ttft_p99=780.65 tpot_p50=18.36 tpot_p99=21.97
+r2 B out:  is is is is is is is is is is is is is is is is is is is is is is is is
+r2 B out2: 以下是为您准备的三句话介绍：  1. 长城的修建始于春秋战国时期，最初是为了抵御各方势力而建。 2. 到了秦汉时期，长城得到了大规模的扩建与整合，成为了重要的防御体系。 3. 历
+G1_DONE
