@@ -621,6 +621,116 @@ __global__ void __launch_bounds__(256) route_bucket_small_kernel(
   }
 }
 
+// B52（loop kaon3-decode-opt D227/D197 ②）：tokens > 8 时把 route_bucket_small 拆两段。
+// 段 1 `route_topk_only_kernel`：grid = tokens，block = 32（一 warp 一 token），top-k + softmax 的代码**逐字同** fused 版（同一条
+// warp 归约 / 同一 route_softmax_row_par），输出 topk_ids / topk_w；smem 2×E f32。
+// 段 2 `route_bucket_only_kernel`：单 block 256 线程，读 topk_ids 做 counts / 前缀和（同 fused 的 warp-0 整数扫描）/ 原子游标填 sorted / row2e。
+// 两段合起来与 fused 版逐位同（整数运算 + 相同浮点序）；区间内 sorted 顺序本来就不定。
+__global__ void __launch_bounds__(32) route_topk_only_kernel(const void* __restrict__ logits, const void* __restrict__ per_expert_scale,
+                                                             int32_t* __restrict__ topk_ids, float* __restrict__ topk_w, int E, int K,
+                                                             int exact_rcp, int lg_bf16, int warp_softmax) {
+  extern __shared__ __align__(16) uint8_t smem_raw[];
+  float* row = reinterpret_cast<float*>(smem_raw);   // [E] 工作副本
+  float* lgrow = row + E;                            // [E] 原始
+  const int t = blockIdx.x, lane = threadIdx.x;
+  for (int e = lane; e < E; e += 32) { const float v = route_lg(logits, t * E + e, lg_bf16); row[e] = v; lgrow[e] = v; }
+  __syncwarp();
+  int32_t* ids = topk_ids + (size_t)t * K;
+  for (int k = 0; k < K; ++k) {
+    float bv = -INFINITY;
+    int bi = 0x7fffffff;
+    for (int e = lane; e < E; e += 32) {
+      const float v = row[e];
+      if (v > bv) { bv = v; bi = e; }
+    }
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) {
+      const float ov = __shfl_xor_sync(0xffffffffu, bv, off);
+      const int oi = __shfl_xor_sync(0xffffffffu, bi, off);
+      if (ov > bv || (ov == bv && oi < bi)) { bv = ov; bi = oi; }
+    }
+    if (lane == 0) ids[k] = bi;
+    if (bi >= lane && ((bi - lane) & 31) == 0) row[bi] = -INFINITY;
+    __syncwarp();
+  }
+  __syncwarp();
+  if (warp_softmax == 2) {
+    route_softmax_row_par(lgrow, ids, per_expert_scale, topk_w + (size_t)t * K, E, K, exact_rcp, lane);
+  } else if (warp_softmax == 1) {
+    route_softmax_row_warp(lgrow, ids, per_expert_scale, topk_w + (size_t)t * K, E, K, exact_rcp, lane, 0);
+  } else if (lane == 0) {
+    route_softmax_row(lgrow, ids, per_expert_scale, topk_w + (size_t)t * K, E, K, exact_rcp);
+  }
+}
+__global__ void __launch_bounds__(256) route_bucket_only_kernel(const int32_t* __restrict__ topk_ids, int32_t* __restrict__ counts,
+                                                                int32_t* __restrict__ offsets, int32_t* __restrict__ cursor,
+                                                                int32_t* __restrict__ sorted_tok, int32_t* __restrict__ sorted_k,
+                                                                int32_t* __restrict__ tile_off, int32_t* __restrict__ row2e,
+                                                                int32_t* __restrict__ inv, int tokens, int E, int K) {
+  __shared__ int32_t s_cnt[MAX_E];
+  __shared__ int32_t s_cur[MAX_E];
+  const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, nwarp = blockDim.x >> 5;
+  for (int e = tid; e < E; e += blockDim.x) s_cnt[e] = 0;
+  __syncthreads();
+  for (int i = tid; i < tokens * K; i += blockDim.x) atomicAdd(&s_cnt[topk_ids[i]], 1);
+  __syncthreads();
+  if (warp == 0) {
+    int32_t* tile_off16 = tile_off + (E + 1);
+    int32_t* tile_off64 = tile_off + 2 * (E + 1);
+    const int ept = (E + 31) / 32;
+    const int e0 = lane * ept;
+    int la = 0, lt = 0, lt16 = 0, lt64 = 0;
+    for (int j = 0; j < ept; ++j) {
+      const int e = e0 + j;
+      if (e < E) { const int c = s_cnt[e]; la += c; lt += (c + 31) / 32; lt16 += (c + 15) / 16; lt64 += (c + 63) / 64; }
+    }
+    int ia = la, it = lt, it16 = lt16, it64 = lt64;
+#pragma unroll
+    for (int o = 1; o < 32; o <<= 1) {
+      const int pa = __shfl_up_sync(0xffffffffu, ia, o), pt = __shfl_up_sync(0xffffffffu, it, o), p16 = __shfl_up_sync(0xffffffffu, it16, o), p64 = __shfl_up_sync(0xffffffffu, it64, o);
+      if (lane >= o) { ia += pa; it += pt; it16 += p16; it64 += p64; }
+    }
+    int acc = ia - la, tacc = it - lt, tacc16 = it16 - lt16, tacc64 = it64 - lt64;
+    for (int j = 0; j < ept; ++j) {
+      const int e = e0 + j;
+      if (e < E) {
+        const int c = s_cnt[e];
+        counts[e] = c;
+        offsets[e] = acc;
+        s_cur[e] = acc;
+        tile_off[e] = tacc;
+        tile_off16[e] = tacc16;
+        tile_off64[e] = tacc64;
+        tacc += (c + 31) / 32;
+        tacc16 += (c + 15) / 16;
+        tacc64 += (c + 63) / 64;
+        acc += c;
+      }
+    }
+    if (lane == 31) { offsets[E] = ia; tile_off[E] = it; tile_off16[E] = it16; tile_off64[E] = it64; }
+  }
+  __syncthreads();
+  for (int t = warp; t < tokens; t += nwarp) {
+    if (lane < K) {
+      const int e = topk_ids[(size_t)t * K + lane];
+      const int pos = atomicAdd(&s_cur[e], 1);
+      sorted_tok[pos] = t;
+      sorted_k[pos] = lane;
+      inv[(size_t)t * K + lane] = pos;
+    }
+  }
+  __syncthreads();
+  for (int e = tid; e < E; e += blockDim.x) cursor[e] = s_cur[e];
+  const int R = tokens * K;
+  for (int r = tid; r < R; r += blockDim.x) {
+    int lo = 0, hi = E;
+    while (hi - lo > 1) {
+      const int mid = (lo + hi) >> 1;
+      if (offsets[mid] <= r) lo = mid; else hi = mid;
+    }
+    row2e[r] = lo;
+  }
+}
 extern "C" int moe_route_bucket_small(const void* logits, int logits_bf16, const void* per_expert_scale, int32_t* topk_ids,
                                       float* topk_w, int32_t* counts, int32_t* offsets, int32_t* cursor,
                                       int32_t* sorted_tok, int32_t* sorted_k, int32_t* tile_off, int32_t* row2e,
@@ -636,6 +746,14 @@ extern "C" int moe_route_bucket_small(const void* logits, int logits_bf16, const
     const char* e = getenv("ROUTER_RCP_EXACT");
     return (e && e[0] == '1') ? 1 : 0;
   }();
+  // B52：tokens ≥ ROUTE_SPLIT_MIN_TOK（默认 9）走两段（grid=tokens 的 top-k + 单 block 分桶）；`=0` 关（全走 fused）。M=16 单 block 17.7 us → 预期 ~8。
+  static const int split_min = []{ const char* v = getenv("ROUTE_SPLIT_MIN_TOK"); return v ? atoi(v) : 9; }();
+  if (split_min > 0 && tokens >= split_min) {
+    const size_t sm1 = 2 * (size_t)num_experts * sizeof(float);
+    route_topk_only_kernel<<<(unsigned)tokens, 32, sm1, stream>>>(logits, per_expert_scale, topk_ids, topk_w, (int)num_experts, (int)topk, exact_rcp, logits_bf16, warp_sm);
+    route_bucket_only_kernel<<<1, 256, 0, stream>>>(topk_ids, counts, offsets, cursor, sorted_tok, sorted_k, tile_off, row2e, inv, (int)tokens, (int)num_experts, (int)topk);
+    return last_err();
+  }
   const size_t smem = 2 * (size_t)tokens * num_experts * sizeof(float) + 2 * (size_t)num_experts * sizeof(int32_t);  // D166：s_val + s_raw
   if (smem > 48 * 1024) {
     static size_t attr = 0;
