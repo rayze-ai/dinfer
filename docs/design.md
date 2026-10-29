@@ -591,6 +591,7 @@ finish, stash_sync_result}` 与 pinned 原语 `PinnedSlot` 本来就是公共的
 | 2026-10-29 | cuBLASLt fp8 GEMM algo 按形状实测选（vLLM 走 torch `_scaled_mm` 启发式默认） | **改进**：m ≥ 64 时 32 候选实测取最快，按 (m 2 的幂桶, n, k) 缓存；m < 64 保持与 vLLM 逐位对齐的 parity algo（B49） | c64 TPOT −7%、TTFT 全档 −15%、吞吐 +9%（b52，loop D215）；TODO 挪到启动 warmup |
 | 2026-10-29 | 混批 = 一个前向（vLLM 把 prefill chunk 与 decode 行放同一 batch 单次 forward） | **采用**：kaon3 `XSTREAM` 默认关，回到单流 Paged 混批；自研的 pair 步（prefill 副流 ‖ decode 主流图，B35）在大 M prefill 下无并行收益（SM 已满）反多付同步（B50） | c64 TPOT −1.1%、少一套 AltSet 显存（b56，loop D225）；pair 代码留 `XSTREAM=1` |
 | 2026-10-29 | decode 小 M fp8 GEMM：vLLM 全走 cuBLASLt（`_scaled_mm`）启发式 | **改进 + 回采**：m ≤ 8 自写 gemv（b31b，比 Lt 快 1.8–5×）；m = 9..16 回到 cuBLASLt 并实测选 algo（B51：Lt tile=13 在 m=16 本就比我们 gemv<16> 快 2×） | c16 TPOT −7.6%、吞吐 +7%（b58，loop D228） |
+| 2026-10-29 | MoE 路由 top-k / 分桶（vLLM 用 Triton `moe_align_block_size` 多 block） | **改进**：自写 fused 单 block 路由（B10）在 tokens ≤ 8 最快；tokens ≥ 9 拆两段（grid=tokens top-k + 单 block 分桶，B52），整数路径与 fused 逐位同 | c16 −3% / c32 −5% / c64 −6.8%（b59，loop D229） |
 
 ## 12. 整体功能待办路线图（2026-10-18 盘点，不分模型）
 
