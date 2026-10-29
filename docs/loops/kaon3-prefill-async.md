@@ -91,3 +91,13 @@ E1 …（接 kaon3-decode-opt 的 D 编号体系，本 loop 用 E）
 - 链 b63：A = `PREFILL_ASYNC=1 XSTREAM=1`（E1 无优先级，= b62 B）；B = `PREFILL_ASYNC=1 XSTREAM=1 MAIN_STREAM_PRIO=1`。看 B 的纯 decode 步 exec 在 prefill 期间是否接近无 prefill 时（HOST_TIME 的 decode 步 p90 从 12.4 降），TPOT 是否真降。
 - **E4 第一版 SIGSEGV**（b63 r1 B serve 起到 "main stream prio = greatest least=0 greatest=-5" 后 Segmentation fault；本机 3090 `stream_prio_smoke` 复现）：按 cudarc 源码字段顺序 `transmute` 构造 `CudaStream`——`repr(Rust)` 字段顺序不保证，ctx 指针被当成流句柄。改法：正常 `new_stream()` 拿合法 `Arc<CudaStream>`，sys 建优先级流，在两个指针宽的字里**按值**找旧句柄、销毁旧流、原地替换（字段顺序无关）。`crates/kernels/tests/stream_prio_smoke.rs` 作门禁。
 - E4 v2 二进制 8eb03496，b63 重跑中。判据除 E2 预登记外，加一条机理判据：B 侧 HOST_TIME 纯 decode 步 **p90**（A 侧 12.4 ms，无 prefill 干扰时 ~8.5）必须明显回落，否则优先级没起作用（CUDA 流优先级只影响 pending CTA 的调度顺序，若 prefill CTA 已驻留满 SM，decode CTA 仍要等它们退出）。
+
+## E5 2026-10-29 b63 第 1 轮 B 侧（MAIN_STREAM_PRIO=1，二进制 8eb03496）中途读数
+| c | A（E1 无优先级） tpot / ttft | B（+优先级） tpot / ttft | 混批步 exec A→B |
+|---|---|---|---|
+| 8 | 7.30 / 86 | 7.28 / 106 | 44 → 18 ms |
+| 16 | 9.21 / 108 | **8.96 / 110** | 58 → **44 ms** |
+| 32 | 12.43 / 152 | **11.87 / 228** | 70 → 71 ms |
+- **优先级起作用了**：c16 TPOT −2.7%、c32 −4.5%（b62 的 E1 是 +1.3% / +4%，现在反过来）；c8 混批步 exec 44 → 18 ms 说明 decode 图真的插进了 prefill 之间（混批步的 host exec 现在只量 decode 子批）。
+- **代价**：TTFT 升（c8 86 → 106、c32 152 → 228）——prefill 被压到低优先级，首 token 晚。这是 TPOT↔TTFT 的直接 tradeoff；我们 TTFT 本来反超 vLLM 很多（c32 192 vs 231），有空间让。
+- 等 r1 c64 + r2 定稿；若两轮同向，合入时要同时看 TTFT 不超 vLLM（c32 228 vs vLLM 231 刚好贴边）。
