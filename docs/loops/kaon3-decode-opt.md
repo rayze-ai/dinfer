@@ -1341,3 +1341,7 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - 微基准 oproj m=8 14.1 us 看着没赢 Lt 的 nsys 态 11.7，端到端却 -0.3 ms/步 —— 又一次印证 nsys 态数字不能直接当真实（D153 教训）；端到端 A/B 才算数。
 - 当前：c1 **4.97**（vLLM 4.69 的 1.06×，停止条件 ≤ 5.0 ✓），c8 **8.04**（vLLM 6.24 的 1.29×）。下一步只剩 c8：先用 `MOE_EXPERT_STATS=1` 数 M=8 真实激活专家数（校准带宽下限，解释 vLLM 6.24），再决定 MoE M=8 的刀。
 - **D178 第一次 expstats 作废**：只抓到启动期 4 条（capture 桶 4160/64/4 + 一条 prefill）—— decode 步走 graph 回放，Rust 层代码不执行，`MOE_EXPERT_STATS` / `KAON3_MOE_TIME` 这类层内诊断**必须配 `NO_GRAPH=1`**（脚本已改，b40b 重跑：expstats2 → moetime）。顺带：graph capture 期 counts 未初始化（max_rows 2016817528），诊断忽略 capture 样本。
+
+## ★★★★★ D179 2026-10-29 expstats2（NO_GRAPH，b39 二进制 + 诊断）：**M=8 decode 步每层真实激活专家 p50 = 29（mean 28.3，19–36）**，不是独立近似的 52；M=1 恒 8；prefill 428 tok 激活 55–59，且极偏（单专家 410/3424 行）
+- 带宽下限重算：M=8 MoE 权重 28.3 × 3.35 MB × 30 = 2.84 GB → **1.59 ms**；M=1 0.45 ms；**M=8 比 M=1 物理多读 ≈ 1.14 ms**。vLLM c8 − c1 = 6.24 − 4.69 = **1.55**（贴下限）；我们 8.04 − 4.97 = **3.07** ⇒ M=8 下 **≈ 1.9 ms 是 kernel 效率**，不是物理。这就是 c8 剩余差距的全部，目标 c8 ≤ 6.5。
+- 嫌疑排序（D171 表 + D177 微基准）：① fp8 gemv M=8（qkv 12.2 / oproj 14.1 / dense_down 10.3 / gateup 8.2 us，均为 m=1 的 2×；带宽型应 ≈1×；30 层 × (12.2+14.1+10.3+8.2×2 − m1 值) ≈ **+0.8 ms**）；② MoE pipe4 M=8（每 call 22/24.6 vs 10.7/10.5 us，30 层 × 2 call ≈ +0.75 ms，其中物理 ≈ +1.1 ms 的一部分…需 nsys c8b 校准）；③ attention 8 行 d512/v3；④ route/combine 小 kernel。等 nsys c8b（真 M=8，`--all`）给每 kernel 的 M=8 增量，再按增量排刀。
