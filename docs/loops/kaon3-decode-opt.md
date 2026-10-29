@@ -1542,3 +1542,7 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - **B46 全档正收益**（TPOT −1.7…−8.8%、TTFT −15…−17%、吞吐 +5…+11%），输出与 A 逐字同。等第 2 轮同向即定稿。
 - **B47 配额 1024 判负**：TTFT p50 掉 60–75%（prefill 分摊、首 token 早出）但 **TPOT 全档涨 10–26%**、吞吐降。机理：配额把一波 prefill 切成 N 段 → N 个混批步，每个混批步都走 eager 副流 + 主流等待（pair 步的 decode 也不进图：`forward_sample_pair` 里 decode 走 `enqueue(decode, true)` 虽可进图，但每个混批步固定开销 ~5–8 ms 没省），**混批步数 ×N，每步固定开销不摊**。默认 0 保留旋钮；SLO 偏 TTFT 的场景可开。进 CSV 作负结果。
 - 结论复述：根治仍是 **prefill 步 GEMM 效率**（B48 MoE 大 tile / B49 fp8 Lt 自调优）。
+
+## ★★★★★ D210 2026-10-29 b49 定稿：**B46 合入**（两轮同向：c8 6.95 / c16 10.97 / c32 14.03 / c64 24.88，TPOT −1.6% / −3.7% / −4.7% / −8.5%；TTFT −15–17%；吞吐 +5–11%；输出逐字同）；**B47 配额判负默认 0**（CSV round b49c 负结果）。CSV round b49，`test/kaon3/2026-10-29/b49/`。
+- 现状对 vLLM（stepA4 中位数）：c8 1.13× / c16 **1.54×** / c32 1.51× / c64 1.62×；吞吐 93% / 75% / 71% / 65%。停止条件 ①（c16 ≤ 1.10×、c32/64 ≤ 1.25×）未达，继续 Step B。
+- **B48 已写（commit a27b0989）**：`grouped_gemm_kernel_p64<BK128,STAGES3>` BM64×BN64、8 warp 4×2、每 warp 2×2 m16n8 片段（A 片段 n 向复用 4 次）；R > `MOE_DEC_RMAX` 且 K%128==0 时 grouped 与 dual 都走它；第三张 tile 表（scan_kernel / route_bucket_small 两处同步产出，`tile_off` 3(E+1)）。`MOE_PREFILL_P64=0` 回退。b50 链：微基准 P424/P2148 两进程 CHECKSUM 门禁 → ABAB c8–c64。
