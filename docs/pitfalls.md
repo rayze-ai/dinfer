@@ -1315,6 +1315,6 @@
 - 解法：GPU 空闲判据用 `nvidia-smi --query-gpu=memory.used -i 0` < 500 MiB，或 `ps -eo stat,args | grep -w dinfer | grep -vc Z`；`pgrep` 只用来找要 kill 的活进程。链脚本模板已改。
 - 补（同日）：KILL 掉 serve 后显存回收要 10–30 s，"一次性判 < 500 MiB 再起链"会直接跳过（b56 第一次没起）。链前门改成容器内循环等（`for i in 1..60: nvidia-smi … -lt 500 && break; sleep 5`），再起脚本。
 
-## 2026-10-29 按 1 分钟前 `ps` 看到的 pid 杀"孤儿 serve"，杀的是刚起的 b56 A 侧（r1 A NOTUP）
-- 现象：b55 停链后 ps 见一个 serve（etimes 179 s）+ 排队中的 b56 等待循环；我随后 kill 该 pid —— 但等待循环在我 kill 之前已过门（旧 serve 自己退了、显存降到 < 500）并起了 b56 的 serve，**pid 已换人**。
-- 规矩：kill 前**同一条命令里**重新 `ps` 并核对 `--port` / 启动时间，再 kill；或者直接按端口杀（`fuser -k <port>/tcp`）。链里的 serve 都带唯一端口，端口比 pid 可靠。
+## 2026-10-29 "按旧 pid 杀 serve" 差点杀错：b56 的等待循环与我手动 kill 竞争
+- 现象：b55 停链后残留一个 serve（pid 218105，etimes 179 s），b56 的"等显存 < 500 再起"循环在排队。我手动 kill 218105 的同时循环过门起了 b56 serve（pid 218430）。这次没杀错（b56 r1 A 正常），但两件事并发就是赌。
+- 规矩：kill 前**同一条命令里**重新 `ps` 核对 `--port` / etimes；链里的 serve 都带唯一端口，优先 `fuser -k <port>/tcp`；排队链已在跑时不要再手动动 GPU 进程。
