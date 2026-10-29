@@ -1340,3 +1340,4 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 ## ★★★★★ D178 2026-10-29 **b39 定稿（A8：fp8 gemv A 以 e4m3 驻留 smem，默认开；A = b38 二进制）**：c1 4.96/4.97 → 4.97/4.97（不变），c8 TPOT **8.34/8.43 → 8.04/8.04（-4%）**，c8 吞吐 767 → **795**（vLLM 956 的 83%）；parity A8 开/关全过。**合入**（CSV round b39）。
 - 微基准 oproj m=8 14.1 us 看着没赢 Lt 的 nsys 态 11.7，端到端却 -0.3 ms/步 —— 又一次印证 nsys 态数字不能直接当真实（D153 教训）；端到端 A/B 才算数。
 - 当前：c1 **4.97**（vLLM 4.69 的 1.06×，停止条件 ≤ 5.0 ✓），c8 **8.04**（vLLM 6.24 的 1.29×）。下一步只剩 c8：先用 `MOE_EXPERT_STATS=1` 数 M=8 真实激活专家数（校准带宽下限，解释 vLLM 6.24），再决定 MoE M=8 的刀。
+- **D178 第一次 expstats 作废**：只抓到启动期 4 条（capture 桶 4160/64/4 + 一条 prefill）—— decode 步走 graph 回放，Rust 层代码不执行，`MOE_EXPERT_STATS` / `KAON3_MOE_TIME` 这类层内诊断**必须配 `NO_GRAPH=1`**（脚本已改，b40b 重跑：expstats2 → moetime）。顺带：graph capture 期 counts 未初始化（max_rows 2016817528），诊断忽略 capture 样本。

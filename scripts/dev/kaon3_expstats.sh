@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# D178：数 M=8 decode 步每层激活的专家数。服务开 MOE_EXPERT_STATS=1（每 200 次 MoE 调用 D2H 一次，会拖慢，数字不做 bench），
+# D178：数 M=8 decode 步每层激活的专家数。**必须 NO_GRAPH=1**：graph 回放不执行 Rust 层代码，诊断只在 eager 步生效（b40 第一次只抓到启动期 4 条）。服务开 MOE_EXPERT_STATS=1（每 200 次 MoE 调用 D2H 一次，会拖慢，数字不做 bench），
 # 跑 c8×24 bench，解析日志 "moe expert stats" 按 tokens 分组给 active_experts 的 p50/mean/max。
 # 用法：BIN=... bash /w/expstats.sh（docker exec -d 时输出必须重定向）
 NV=/usr/local/lib/python3.12/dist-packages/nvidia
@@ -10,7 +10,7 @@ R=/w/dinfer/tmp_${TAG}_RESULT.txt; : > $R; L=/w/dinfer/tmp_${TAG}_serve.log
 M=/hf_data/hub/models--kaon-release--Kaon-V3-nvpf4-mixed/snapshots/e268bef12555d299ed7ca02ade5e77f239f27478
 echo "bin=$(stat -c %y $BIN | cut -c1-16) md5=$(md5sum $BIN | cut -c1-12) marker=$(strings $BIN | grep -c MOE_EXPERT_STATS) $(date +%T)" >> $R
 export MOE_GROUPED=1 KAON3_MEGA=1 MEGA_SPGU=4 MEGA_SPDN=4 ROUTER_GEMM_BI=0 CUDA_VISIBLE_DEVICES=0
-taskset -c ${SERVE_TASKSET:-0-31} env MOE_EXPERT_STATS=1 $BIN serve --model "$M" --tokenizer "$M" --port $PORT --max-model-len 16384 --max-num-seqs 64 --max-num-batched-tokens 4096 >$L 2>&1 &
+taskset -c ${SERVE_TASKSET:-0-31} env NO_GRAPH=1 MOE_EXPERT_STATS=1 $BIN serve --model "$M" --tokenizer "$M" --port $PORT --max-model-len 16384 --max-num-seqs 64 --max-num-batched-tokens 4096 >$L 2>&1 &
 sp=$!
 for i in $(seq 1 150); do sed "s/\x1b\[[0-9;]*m//g" $L | grep -q "listening addr" && break; sleep 1; done
 sed "s/\x1b\[[0-9;]*m//g" $L | grep -q "listening addr" || { echo "NOTUP" >> $R; kill -KILL $sp 2>/dev/null; echo DONE >> $R; exit 1; }

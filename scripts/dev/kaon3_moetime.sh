@@ -10,7 +10,7 @@ R=/w/dinfer/tmp_${TAG}_RESULT.txt; : > $R; L=/w/dinfer/tmp_${TAG}_serve.log
 M=/hf_data/hub/models--kaon-release--Kaon-V3-nvpf4-mixed/snapshots/e268bef12555d299ed7ca02ade5e77f239f27478
 echo "bin=$(stat -c %y $BIN | cut -c1-16) md5=$(md5sum $BIN | cut -c1-12) marker=$(strings $BIN | grep -c MOE_EXPERT_STATS) $(date +%T)" >> $R
 export MOE_GROUPED=1 KAON3_MEGA=1 MEGA_SPGU=4 MEGA_SPDN=4 ROUTER_GEMM_BI=0 CUDA_VISIBLE_DEVICES=0
-taskset -c ${SERVE_TASKSET:-0-31} env KAON3_MOE_TIME=1 $BIN serve --model "$M" --tokenizer "$M" --port $PORT --max-model-len 16384 --max-num-seqs 64 --max-num-batched-tokens 4096 >$L 2>&1 &
+taskset -c ${SERVE_TASKSET:-0-31} env NO_GRAPH=1 KAON3_MOE_TIME=1 $BIN serve --model "$M" --tokenizer "$M" --port $PORT --max-model-len 16384 --max-num-seqs 64 --max-num-batched-tokens 4096 >$L 2>&1 &
 sp=$!
 for i in $(seq 1 150); do sed "s/\x1b\[[0-9;]*m//g" $L | grep -q "listening addr" && break; sleep 1; done
 sed "s/\x1b\[[0-9;]*m//g" $L | grep -q "listening addr" || { echo "NOTUP" >> $R; kill -KILL $sp 2>/dev/null; echo DONE >> $R; exit 1; }
