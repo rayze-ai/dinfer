@@ -72,3 +72,4 @@
 - 用 `sed s/b28/b29/g` 复制链脚本时，**先 `grep -n "^for i"` 核 watcher 等的是哪个文件再启动**；我把 "等 pair2 DONE" 改成了 "等 b29 自己的 DONE"，watcher 立刻放行。
 - `remote_5090.sh run` **不透传退出码**（README 已记），所以 `until remote run 'grep -q …'` 会立刻放行——等远端条件要先 `run 'cat 文件'` 拉回本地再 grep（`/tmp/wait_remote.sh` 模式）。2026-10-29 三次背景等待提前返回都是这个原因。
 - **`docker exec -d` 起的脚本必须把 stdout/stderr 重定向到文件**（2026-10-29 D162，一晚上 6 条链死在同一处）：exec 管道断开后任何一次写（哪怕是 `kill` 的 "No such process" 报错）都让 bash 收 SIGPIPE 静默退出。模板：`docker exec -d C bash -c "setsid bash /w/x.sh </dev/null >/w/dinfer/tmp_x.out 2>&1 &"`。
+- **不要用 `setsid` 起 serve**（2026-10-29 D164）：`$!` 可能指向已退出的 setsid 父进程，`kill -INT $sp` 杀不到 serve → 残留服务与下一组同卡争算力，bench 数字全污染（A 侧 5.15 → 5.76）。链尾静默退出的真因是 D162（输出重定向），与 setsid 无关。每条链开头 `nvidia-smi --query-compute-apps` 核无残留。
