@@ -22,3 +22,4 @@
 | g1/ | G1 p64 ldmatrix | 微基准 −7%，端到端噪声内，默认关 |
 | g2/ | G3a Lt 小 tile 偏好 | 过滤生效，端到端噪声内，默认关 |
 | g3/ | G3a 机理核 nsys A/B | 过滤靶子错（tile=20≠128x128）；副流 eager 口径待校正 |
+| g6/ | 稳态 nsys 双表 | 我们 nsysp16s（delay 20，c16×512）+ vLLM vnsys（GPU4 基线镜像）RESULT；对比见 loop G6/G7 |

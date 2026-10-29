@@ -1,0 +1,8 @@
+18:27:42
+235ba0e5ab53da3969df28b0fc0ed5021f35675cc7ab709af05460d68b993fbb
+vllm up 18:32:59
+vllm up 18:33:00
+   throughput: 20.65 req/s   1321.7 output tok/s   10194.5 total tok/s    TTFT     mean   249.65  p50   262.63  p90   301.57  p99   319.30  max   319.34  (ms)    TPOT     mean     8.33  p50     8.08  p90     9.41  p99     9.63  max     9.64  (ms) 
+   throughput: 20.63 req/s   1320.0 output tok/s   10181.7 total tok/s    TTFT     mean   236.43  p50   260.94  p90   286.53  p99   319.13  max   319.23  (ms)    TPOT     mean     8.55  p50     8.13  p90     9.41  p99    10.48  max    10.50  (ms) 
+
+
