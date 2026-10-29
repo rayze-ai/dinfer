@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Step A（loop kaon3-prefill-gemm）：在**宿主**跑。用基线镜像起临时容器 vllm-nsys（GPU3），bind kaon3-full 的 nsys 目录，
+# Step A（loop kaon3-prefill-gemm）：在**宿主**跑。用基线镜像起临时容器 vllm-nsys（GPU4；GPU3 是 vllm-eager 基线，占 28 GB），bind kaon3-full 的 nsys 目录，
 # 容器内 `nsys profile vllm serve …`（参数照 vllm-noneager），用 kaon3-full 里的 bench 打 c16 同口径，INT 停，报告落 /hf_data/yaochen/dinfer/tmp_vnsys.nsys-rep，
 # 再在 kaon3-full 里 export sqlite + 两张 kernel 表。结果 /hf_data/yaochen/dinfer/tmp_vnsys_RESULT.txt，标记 VNSYS_DONE。
 # 用法（宿主）：nohup bash /hf_data/yaochen/vllm_nsys2.sh > /hf_data/yaochen/dinfer/tmp_vnsys_run.log 2>&1 &
@@ -11,7 +11,7 @@ NSYS_DIR=$(docker exec kaon3-full bash -c 'ls -d /opt/nvidia/nsight-systems/2026
 # nsys 目录在 kaon3-full 的 overlay 里，宿主路径不直观 → 先拷到 /hf_data/yaochen/nsys（一次，1.2G）
 [ -d $W/nsys/target-linux-x64 ] || { docker cp kaon3-full:${NSYS_DIR%/} $W/nsys_tmp && mv $W/nsys_tmp $W/nsys; }
 docker rm -f vllm-nsys >/dev/null 2>&1
-docker run -d --name vllm-nsys --runtime nvidia --gpus '"device=3"' --ipc=host --net host --cap-add=SYS_ADMIN \
+docker run -d --name vllm-nsys --runtime nvidia --gpus '"device=4"' --ipc=host --net host --cap-add=SYS_ADMIN \
   -v /hf_data/hub:/hf_data/hub:ro -v $W:/w -e HF_HUB_OFFLINE=1 -e VLLM_LOGGING_LEVEL=INFO --entrypoint bash $IMG -c \
   "/w/nsys/target-linux-x64/nsys profile -o /w/dinfer/tmp_vnsys --force-overwrite true -t cuda --cuda-graph-trace=node --cuda-flush-interval=1000 --sample none --cpuctxsw none \
    vllm serve $M --port 28301 --served-model-name kaon-vllm --max-model-len 16384 --max-num-batched-tokens 4096 --block-size 32 --gpu-memory-utilization 0.85 --chat-template $M/chat_template.jinja" >> $R 2>&1
