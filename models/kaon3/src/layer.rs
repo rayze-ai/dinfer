@@ -775,7 +775,8 @@ fn fp8_gemv_m_tile(m: usize) -> usize {
 /// B53（loop kaon3-decode-opt D229）：dense MLP gemv 路径的 token 上限（默认 = DENSE_GEMV_ROWS 16；`DENSE_GEMV_MAX_M=8` 让 M=9..16 走 cuBLASLt 自调优 A/B）。
 fn dense_gemv_max_m() -> usize {
     static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("DENSE_GEMV_MAX_M").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(DENSE_GEMV_ROWS).min(DENSE_GEMV_ROWS))
+    // b60 定稿（D234，两轮）：默认 8——M=9..16 的 dense MLP 走 cuBLASLt 自调优（gateup_act<16> 24 us → Lt ~10 us）：c16 TPOT −3.7%；c8/c32/c64 持平。
+    *V.get_or_init(|| std::env::var("DENSE_GEMV_MAX_M").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(8).min(DENSE_GEMV_ROWS))
 }
 fn dense_gemv_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
