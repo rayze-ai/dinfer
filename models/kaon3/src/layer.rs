@@ -687,6 +687,11 @@ fn route_logits_bf16_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_ne!("ROUTER_LOGITS_BF16", "0"))
 }
+/// B34①：MoE 的 pre_ff_norm_2 融进 grouped quant（`MOE_NORM_QUANT_FUSED=0` 回退）。
+fn moe_norm_quant_fused_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_ne!("MOE_NORM_QUANT_FUSED", "0"))
+}
 fn kv_fp8_fused_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_ne!("KV_FP8_FUSED", "0"))
@@ -1716,7 +1721,13 @@ impl Gemma4Layer {
 
         // 专家输入 = pre_feedforward_layernorm_2(residual)（router 用自己的无权重 norm，两者不同）；
         // 借 sc.h2 存，循环结束后才被 post_ff_norm_2 的输出覆盖
-        rmsnorm_into(stream, ops, &sc.x, &self.pre_ff_norm_2, &mut sc.h2, h, tokens, eps)?;
+        // B34①：grouped 路径且非对拍/非 moe_iso 时，pre_ff_norm_2 融进 grouped quant（`moe_rmsnorm_grouped_quant`），
+        // 不再物化 h2（省 1 launch + h2 一写一读）。`MOE_NORM_QUANT_FUSED=0` 回退。
+        let moe_norm_quant_fused = moe_norm_quant_fused_enabled() && moe_grouped_enabled() && sc.grouped.is_some()
+            && moe_iso.is_none() && sub_out.is_none();
+        if !moe_norm_quant_fused {
+            rmsnorm_into(stream, ops, &sc.x, &self.pre_ff_norm_2, &mut sc.h2, h, tokens, eps)?;
+        }
         if moe_iso.is_some() {
             // 专家输入用 vLLM 真实 moe_hidden（覆盖我方 pre_ff2_norm），纯测专家 GEMM
             let hid = rdf_iso("vllm_moe_hidden.bin")?;
@@ -1752,9 +1763,16 @@ impl Gemma4Layer {
             let moe_time = env_eq!("KAON3_MOE_TIME", "1");
             let mt_ev = if moe_time { Some(stream.new_timing_events(3)?) } else { None };
             // 3) gate/up 共用一次量化（a_scale 相等），再两次 grouped GEMM
-            k::ops::moe_grouped_quant(
-                stream, &sc.h2.data, &g.row2e, Some(&sc.buckets.sorted_tok), &mg.agscale_gu, &mut g.aq_gu, &mut g.as_gu, r, mg.k_gate, exact_rq,
-            )?;
+            if moe_norm_quant_fused {
+                k::ops::moe_rmsnorm_grouped_quant(
+                    stream, &sc.x.data, &self.pre_ff_norm_2.data, &g.row2e, Some(&sc.buckets.sorted_tok), &mg.agscale_gu,
+                    &mut g.aq_gu, &mut g.as_gu, r, mg.k_gate, eps, exact_rq,
+                )?;
+            } else {
+                k::ops::moe_grouped_quant(
+                    stream, &sc.h2.data, &g.row2e, Some(&sc.buckets.sorted_tok), &mg.agscale_gu, &mut g.aq_gu, &mut g.as_gu, r, mg.k_gate, exact_rq,
+                )?;
+            }
             if let Some(ev) = &mt_ev { stream.record_timing(&ev[0])?; }  // 量化后=3gemm前
             if let Some(e) = &moe_pre_ev { stream.record_timing(&e[3])?; }  // norm+row2e+gather+quant完
             // MOE_GEMM_SKIP=gu|dn|all（纯计时，结果错）：只跳 grouped GEMM 本身，路由 / gather / quant / gelu / combine
