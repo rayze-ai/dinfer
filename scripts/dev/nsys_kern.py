@@ -51,6 +51,11 @@ if sizes:
     want = sizes.most_common(1)[0][0]
     insts = [v for k, v in groups.items() if k[0] == "g" and len(v) == want]
     report(insts[len(insts) // 2], f"decode graph instance (kernel-count={want}, {len(insts)} instances, middle one)")
+    # --all（D171）：每个 graphId 一组（不同桶 = 不同 graphId，c8 的 M=8 步在另一组里；只报最常见的那组会漏掉它）
+    if "--all" in sys.argv:
+        for k, v in groups.items():
+            if k[0] == "g" and len(v) != want:
+                report(v, f"graph id={k[1]} kernels={len(v)}")
 if esizes:
     big = max((v for k, v in groups.items() if k[0] == "e"), key=len)
     report(big, "largest eager segment (prefill?)")

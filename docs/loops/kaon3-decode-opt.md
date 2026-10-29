@@ -1295,3 +1295,18 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - `[host-time]` 按 (tokens,nreq) 分组：(1,1) 756 步 total p50 **5207 us**（cadence 5.21 = bench TPOT 5.21）；**(8,8) 496 步 total p50 8970 / p90 9256 us，cadence p50 8.98 ms = bench c8 TPOT 8.95**；prefill (429,1) 25.3 ms ×13、(3003,8) 143.9 ms ×2（chunk 一次塞 8 条 → TTFT 151）；host sched/publish 都 < 10 us。
 - 结论：**c8 的 TPOT 全部由 M=8 的 decode 步构成**（exec 8.96 ms），D78 的"插队 prefill 摊进 TPOT"定性**错误**（那时没有按批形状分组）。M=8 比 M=1 慢 3.75 ms（+72%），而权重带宽型 kernel 对 M=8 应近免费 —— **这 3.75 ms 是 M=8 时某些 kernel 退化**，优先级最高。嫌疑：① MoE grouped GEMM：M=8 → top-8 ×8 = 64 行散到 ≤64 个专家，激活专家数 ~50（vs M=1 的 8），**专家权重读取量 ×6**（每层 gate/up/down 704×2816×3×0.5 B ≈ 3 MB/专家 → 50 专家 150 MB/层 × 30 层 = 4.5 GB/步 ÷ 1.8 TB/s = **2.5 ms**）—— 这才是 c8 的物理下限来源，不是 bug，但要确认实际是否贴近；② fp8 gemv M=8：M_TILE=8 的路径（pick_warps / smem）效率；③ attention d512/v6 在 8 行时。下一步：nsys c8 按 kernel 名比 c1 的 us/call（D148 c8 表说"每 kernel us 与 c1 持平"——与本条矛盾，需重抓；D148 c8 可能抓的是 bench 尾部 M<8 段）。
 - 修 b36 编译错：`moe_grouped_sm120.cu` 的 B34① launcher 被 D166 的编辑误插到文件头（吃掉首行 `//`），nvcc "extended character 。 is not valid in an identifier"。挪回文件尾（`}  // extern "C"` 前）。
+
+## ★★★★★ D171 2026-10-29 重读 nsys c8（D148 抓的 `tmp_nsys_c8.sqlite`，`nsys_kern.py --all`）：**M=8 的 decode 步在另一个 graphId（桶 8）里，D148/D78 只看了"最常见 kernel 数"的那组 = M=1 尾段**，所以得出"每 kernel us 与 c1 持平"的错误结论
+- graph id=8（M=8，34 步）vs graph id=2（M=1，63 步），每 call p50（nsys 态）：
+  | kernel | M=1 | M=8 | 每步差（×30 层） |
+  |---|---|---|---|
+  | MoE gate/up `pipe4<128,4,16>` | 10.7 us | **22.0** | +340 us（+3780 call 的 2.1×） |
+  | MoE down `pipe4<64,4,16>` | 10.5 | **24.6** | +420 |
+  | **router GEMM**（bf16 cuBLAS）| gemvx 3.4 | **cutlass wmma 16x16 grid=(8,1,1,32) 16.7** | **+400**（8 个 CTA 串行吃 K=2816；M=8/N=128 形状被 cuBLAS 选了最差 kernel） |
+  | o_proj fp8（sliding，K=4096）| gemv 6.1（`(704,64)`）| **nvjet split-K 11.7，30 call/步**（M=1 只 5 call）| **+245**：M_TILE=8×K4096×2 = 64 KB > 48 KB smem 门槛 → 退回 cuBLASLt |
+  | dense `gateup_act<4>` | 9.4 | 15.0 | +170（11.9 MB → 6.6 us 下限，M=8 2.3× 离） |
+  | qkv gemv `(1024,128)` | 16.0 | 19.6（`gemv<4>`） | +90（带宽型，正常） |
+  | lm_head（tied bf16 262144×2816 = 1.48 GB）| gemvx **870 us** | cutlass 880 | 0；但它占 c1 一步的 **17%**，就是带宽下限（820 us） |
+  nsys 态合计 ≈ +1.7 ms（真实 ≈ ×0.6 ≈ 1.0 ms）+ 其余小 kernel 的 M=8 增量 + 间隙增量 ⇒ 对应 hosttime 的 +3.75 ms 的主体。
+- **刀（按收益/代价）**：R1 router 自写 bf16 gemv（M ≤ 16：warp 一列，K 切 lane；720 KB 权重，目标 ≤ 4 us；逐位：fp32 累加序固定）→ c8 -0.3 ms；R2 `FP8_GEMV_SMEM_KB=64` 让 M_TILE=8 的 o_proj 留在 gemv（零代码 envab）→ c8 -0.2 ms；R3 dense gateup M=8 的 warp 编排（2 warp/块 → 8）；R4 MoE pipe4 M=8：64 行散到 ~50 专家 ⇒ 权重读 ~6×（物理），要先算实际激活专家数定下限再决定是否值得。
+- c1 的硬事实：lm_head 870 + MoE 1270 + fp8 gemv 1150 + router 100 + … ；lm_head 若做 fp8（per-channel）可省 ~430 us（c1 5.2 → ~4.8，**达 c1 ≤ 5.0 停止条件**），但 vLLM 对该 checkpoint 保持 bf16 lm_head，这是数值口径变更，**要用户拍板**（候选 ⑤）。
