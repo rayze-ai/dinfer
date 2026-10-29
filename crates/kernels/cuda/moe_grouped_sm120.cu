@@ -884,7 +884,8 @@ static int dec_bn() {
 // D197：decode 快路径（BM16 / BK256 / STAGES3，dual pipe4）的行数上限。默认 128；`MOE_DEC_RMAX=512` 让 c16–c64（R ≤ 512）也走它
 // （M=32 激活 ~100 专家、每专家 2–3 行，BM=32 旧体 tile 93% 空：nsys M=32 dual<128> 108 us/层）。
 static int dec_rmax() {
-  static const int v = []{ const char* e = getenv("MOE_DEC_RMAX"); const int n = e ? atoi(e) : 128; return (n >= 16 && n <= 4096) ? n : 128; }();
+  // D198（2026-10-29 b48 两轮）：默认 512（c32 TPOT -14% / 吞吐 +10%，c64 -6%，c16 持平；R=264 与旧体逐位同）。`MOE_DEC_RMAX=128` 回旧默认。
+  static const int v = []{ const char* e = getenv("MOE_DEC_RMAX"); const int n = e ? atoi(e) : 512; return (n >= 16 && n <= 4096) ? n : 512; }();
   return v;
 }
 static int dec_bk() {

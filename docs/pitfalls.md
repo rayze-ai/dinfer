@@ -1304,3 +1304,8 @@
 - 根因：为了复用 rmsnorm_vec<256,2> 的"线程持 8 元素组"布局，gather 写成 `y[pos*H + i*8 + e]` 标量 bf16 读：lane 间步长 16 B、每次 2 B，一个 warp 一次事务只用 1/8；K=8 × 2 组 = 16 次坏读/线程。原 combine_kernel 按 d 跨线程读是合并的。
 - 解法：每 k 一次 `uint4`（8 bf16）读，再逐元素按 k 升序累加（序不变 → 仍逐位同）。
 - 避免：融合时若改变线程→元素映射，先核对每条全局读的 warp 合并率（lane 步长 = 元素大小 × 连续）；"parity 过"不代表访存模式没变。
+
+## 2026-10-29 envab 多档并发同一个 seed：高档的前 N 条 prompt 命中低档留下的 prefix cache，TTFT p50 45 ms 才暴露
+- 现象：`envab_cN.sh` c16 → c32 → c64 同 seed 7，c32 的 TTFT p50 从 cN 表的 345 ms 变 45 ms，TPOT 也低 30%。
+- 根因：bench 的 prompt 由 (seed, idx) 决定性生成，c32 的 128 条里前 64 条与 c16 完全同文；同服务连跑 = cache 态（同 [[dinfer-bench-same-seed-prefix-cache]]）。
+- 解法：每档 `--seed $((7 + c))`（已改）；对照表只认 `cN.sh`（每档每轮独立 seed）口径；同 seed 的 A/B 仍可看方向。

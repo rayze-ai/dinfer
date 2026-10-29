@@ -16,7 +16,7 @@ run_one() {
   sed "s/\x1b\[[0-9;]*m//g" /w/dinfer/tmp_${TAG}_$tag.log | grep -q "listening addr" || { echo "$tag NOTUP" >> $R; sed "s/\x1b\[[0-9;]*m//g" /w/dinfer/tmp_${TAG}_$tag.log | grep -iE "error|panic" | tail -2 | cut -c1-200 >> $R; kill -9 $sp; return; }
   for c in 16 32 64; do
     echo -n "$tag c$c: " >> $R
-    taskset -c 60-91 ./target/release/bench --url http://127.0.0.1:$PORT --concurrency $c --num-requests $((c*4)) --prompt-len 400 --max-tokens 64 --prefix-repeat 0 --warmup 2 --seed 7 2>&1 | grep -E "throughput|TTFT |TPOT " | tr "\n" " " | sed "s/  */ /g; s/throughput: \([0-9.]* req\/s [0-9.]* output\) tok\/s [0-9.]* total tok\/s/\1/; s/ p90 [0-9.]* p99 [0-9.]* max [0-9.]* (ms)//g" | cut -c1-160 >> $R; echo >> $R
+    taskset -c 60-91 ./target/release/bench --url http://127.0.0.1:$PORT --concurrency $c --num-requests $((c*4)) --prompt-len 400 --max-tokens 64 --prefix-repeat 0 --warmup 2 --seed $((7 + c)) 2>&1 | grep -E "throughput|TTFT |TPOT " | tr "\n" " " | sed "s/  */ /g; s/throughput: \([0-9.]* req\/s [0-9.]* output\) tok\/s [0-9.]* total tok\/s/\1/; s/ p90 [0-9.]* p99 [0-9.]* max [0-9.]* (ms)//g" | cut -c1-160 >> $R; echo >> $R
   done
   echo -n "$tag out: " >> $R
   curl -s -m30 http://127.0.0.1:$PORT/v1/completions -H "content-type: application/json" -d '{"model":"kaon3","prompt":"The capital of France is","max_tokens":24,"temperature":0}' | python3 -c "import sys,json;print(json.load(sys.stdin)['choices'][0]['text'].replace(chr(10),' ')[:120])" >> $R 2>&1

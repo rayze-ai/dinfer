@@ -1,0 +1,16 @@
+05:54:10
+TEST BUILD EXIT=0
+MOE_BK_DUMP tag=ref264 n=704 k=2816: dual-vs-single bad=0/185856
+MOE_BK_DUMP tag=ref264 n=2816 k=704: dual-vs-single bad=0/743424
+MOE_BK_DUMP tag=ref264 wrote 5575680 bytes to /tmp/moe_bk_ref264.bin
+MOE_BK_DUMP tag=old264 n=704 k=2816: dual-vs-single bad=0/185856
+MOE_BK_DUMP tag=old264 n=2816 k=704: dual-vs-single bad=0/743424
+MOE_BK_DUMP tag=old264 wrote 5575680 bytes to /tmp/moe_bk_old264.bin
+MOE_BK_DUMP tag=rmax264 n=704 k=2816: dual-vs-single bad=0/185856
+MOE_BK_DUMP tag=rmax264 n=2816 k=704: dual-vs-single bad=0/743424
+MOE_BK_DUMP tag=rmax264 wrote 5575680 bytes to /tmp/moe_bk_rmax264.bin
+old264 vs ref264: SAME
+rmax264 vs ref264: SAME
+GATE=0
+BUILD EXIT=0 md5=f05df420f737
+B48_DONE
