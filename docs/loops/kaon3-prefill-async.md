@@ -4,6 +4,12 @@
 > 要等 prefill 副流（65 ms）完才 publish → 10 个在飞请求每 64 步被卡一次 65 ms ≈ 每步 +1.0 ms（c16）、c64 每步 +2.3 ms。
 > 这是对 vLLM 剩余差额（c16 1.5×）里**调度结构**那一半；另一半是 prefill 步 GEMM 本身（MoE p64 57 TFLOPS 还有 1.5–2×）。
 
+## D224 修正（2026-10-29 b56）
+单流混批（`XSTREAM=0`）≥ pair 步（全档 0.4–1.3%）：pair 的"prefill 副流 ‖ decode 主流图"在 c16–c64 没拿到并行（prefill 65 ms 把 SM 占满，decode 图挤不进），还多付两流同步。
+所以**基座改为单流混批**；异步收割要解决的不是同步点，是"prefill 跑着的时候 decode 图能不能真的并行推进"——需要：
+(a) decode 流 `cudaStreamCreateWithPriority` 高优先级、prefill 流低优先级；(b) prefill 的 grid 不要一次把 SM 填满（p64 的 grid.y = R/64 + E 对 2148 tok 是 421 × 6 × 2 = 5052 CTA，占满 170 SM ×2 CTA 多轮；可能要分块 launch 让调度器交错）；(c) 收割语义同下。
+先做一个**最小探针**：prefill 流低优先级 + decode 流高优先级，不改收割，只看 pair 步 exec 是否从 65 ms 降（decode 子批被优先调度 → decode 行先 publish 仍要等… 不会降）。所以探针无意义，直接做收割 + 优先级。
+
 ## 目标
 pair 步只等 decode 子批；prefill 子批在副流上跑完后，其首 token 在**之后某个 decode 步**的 publish 里并入（"晚到结果"）。
 decode 步照常走 CUDA graph；prefill 期间 decode 不停。
