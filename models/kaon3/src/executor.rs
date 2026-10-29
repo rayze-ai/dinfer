@@ -114,7 +114,15 @@ impl KaonExecutor {
         stream.synchronize()?;
         let dev = stream.device();
         dev.disable_event_tracking();
-        let stream = dev.new_stream()?;
+        // E4（loop kaon3-prefill-async）：`MAIN_STREAM_PRIO=1` → decode 主流用最高优先级建（prefill 副流 AltSet 默认最低），
+        // 让 decode 图的 CTA 在 prefill 大 GEMM 的 CTA 之前被调度。默认关（A/B 用）。
+        let stream = if std::env::var("MAIN_STREAM_PRIO").map(|v| v == "1").unwrap_or(false) {
+            let (least, greatest) = dev.stream_priority_range()?;
+            tracing::info!(least, greatest, "kaon3: main stream prio = greatest (decode 图流高优先级)");
+            dev.new_stream_with_priority(greatest)?
+        } else {
+            dev.new_stream()?
+        };
         let gemm = Gemm::new(&stream).context("cublasLt on executor stream")?;
         // GEMM 自调优（方案2，kaon3-mega R44）：新 stream 的 gemm 必须在 CUDA graph 捕获前 autotune，
         // 否则 lm_head(唯一 cuBLASLt bf16 GEMM) 走启发式——graph 捕获烧进一个 algo、eager fallback 另选一个

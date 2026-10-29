@@ -39,6 +39,45 @@ impl Device {
         Ok(Stream { inner: self.ctx.new_stream()? })
     }
 
+    /// 本设备的流优先级区间 `(least, greatest)`（数值越小优先级越高；通常 (0, -5)）。
+    pub fn stream_priority_range(&self) -> Result<(i32, i32)> {
+        self.ctx.bind_to_thread()?;
+        let (mut least, mut greatest) = (0i32, 0i32);
+        // SAFETY: 两个出参有效。
+        let r = unsafe { sys::cuCtxGetStreamPriorityRange(&mut least, &mut greatest) };
+        anyhow::ensure!(r == sys::cudaError_enum::CUDA_SUCCESS, "cuCtxGetStreamPriorityRange: {r:?}");
+        Ok((least, greatest))
+    }
+
+    /// 带优先级的非阻塞流（loop kaon3-prefill-async E4：decode 图流高优先级 / prefill 副流低优先级）。
+    ///
+    /// cudarc 0.18 没暴露 `cuStreamCreateWithPriority`，`CudaStream` 的字段是 `pub(crate)`：这里用 sys 建流，再按 cudarc
+    /// 0.18.2 的 `CudaStream { cu_stream: CUstream, ctx: Arc<CudaContext> }` 布局构造（`size_of` 断言守着；Cargo.lock 锁 0.18.2）。
+    /// Drop 仍由 cudarc 走 `cuStreamDestroy`（它检查非空且非 legacy 句柄），与普通流一致。
+    pub fn new_stream_with_priority(&self, priority: i32) -> Result<Stream> {
+        self.ctx.bind_to_thread()?;
+        let mut cu_stream: sys::CUstream = std::ptr::null_mut();
+        // SAFETY: 出参有效；flags = NON_BLOCKING（与 cudarc new_stream 同）。
+        let r = unsafe {
+            sys::cuStreamCreateWithPriority(&mut cu_stream, sys::CUstream_flags::CU_STREAM_NON_BLOCKING as u32, priority)
+        };
+        anyhow::ensure!(r == sys::cudaError_enum::CUDA_SUCCESS, "cuStreamCreateWithPriority({priority}): {r:?}");
+        #[repr(C)]
+        struct Raw {
+            cu_stream: sys::CUstream,
+            ctx: Arc<CudaContext>,
+        }
+        const _: () = assert!(std::mem::size_of::<Raw>() == std::mem::size_of::<CudaStream>());
+        const _: () = assert!(std::mem::align_of::<Raw>() == std::mem::align_of::<CudaStream>());
+        let raw = Raw { cu_stream, ctx: self.ctx.clone() };
+        // SAFETY: 大小 / 对齐已静态断言；字段顺序与 cudarc 0.18.2 `CudaStream` 源码一致（cu_stream, ctx）。Rust 对 repr(Rust)
+        // 结构体字段顺序不作保证，但两个字段大小不同（8 vs 8 的 Arc 指针…同为 8 字节），若重排则 Drop 会把 ctx 指针当流销毁 —
+        // 因此下面做一次运行时自检：通过 `cu_stream()` 读回必须等于我们创建的句柄。
+        let inner: CudaStream = unsafe { std::mem::transmute::<Raw, CudaStream>(raw) };
+        anyhow::ensure!(inner.cu_stream() == cu_stream, "CudaStream 字段布局与 cudarc 0.18.2 不一致（升级 cudarc 后请改用其公开 API）");
+        Ok(Stream { inner: Arc::new(inner) })
+    }
+
     pub fn name(&self) -> Result<String> {
         Ok(self.ctx.name()?)
     }
