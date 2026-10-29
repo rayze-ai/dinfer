@@ -41,16 +41,14 @@
 | 某 kernel 次数/步异常高 | 分发 bug | nsys 把 warmup 段算进来 | loop 9 疑点 1 |
 | decode 步 31% 是 H2D memcpy | 上传路径有问题 | 切步脚本把**加载期权重 H2D** 摊进了 decode 步；稳态每步 H2D < 0.5% | engine-gap 6c |
 
-## 7. 引擎层面 vs 模型层面，以及测试程序本身（用户 2026-10-20）
-- **模型层面**（四组闭环、固定长度、ignore_eos）量 kernel + graph；**引擎层面**（泊松 + 长度分布 + 多轮前缀 + 不 ignore_eos）量调度 / prefix cache / 尾部 / 容量，口径 `requirements.md` 验收 v2 / `design.md` §15。Qwen3.5 四组 1.10× 时引擎层面 goodput 只有 vLLM 的 0.07–0.44×——两者可以完全脱节，**只报引擎层面的 goodput / p99 给用户**。
-- **先怀疑工具再怀疑引擎**：首个引擎数据点里 TTFT 5 ms 是 server 提前发空 role chunk 的伪像；goodput 0.00 是编错 feature 的二进制。每轮必带：压测端 CPU 集合与 `getrusage`、`--self-check` 的计时误差、与第三方工具的交叉差、客户端 vs 服务端自报的对账。压测端与服务共核 / CPU > 1 核 → 数据作废。
-
 ## 7. 引擎层面 vs 模型层面：两套口径，各管一件事（用户 2026-10-20）
 - **判断**：四组闭环（固定并发 / 固定长度 / ignore_eos，`bench_compare.sh`）是**模型层面**——量 kernel + graph + 自调优，每步 batch 恒定、prefill/decode 天然错开、prefix cache 只命中模板、无尾部。它只做每轮性能改动的**回归门禁**。"超越 vLLM" 的判定用**引擎层面**：泊松开环到达率扫描 + prompt / 输出长度分布 + 不 ignore_eos + 共享前缀 / 多轮，指标 = SLO 下 goodput（首要：**SLO 下最大 req/s**）、TTFT / TPOT 的 p99 / max、prefix cache 命中率、饱和后行为、长跑漂移（`bench_engine.sh` → `engine-trend.*`）。
 - **为什么**：Qwen3.5 四组 1.10× 的数字下，调度器 / 抢占 / prefix cache / 尾部 / 容量全被抹平；B300 首个 `vllm bench serve` 点（rate 8）TPOT p50/p99 29.5/45 vs vLLM 16.6/19.4——差距在尾部而非均值，闭环看不到。
 - **怎么用**：改 kernel → 跑四组门禁；改调度 / cache / 抢占 → 跑 `bench_engine.sh`，两边各自最佳配置写进 summary 头；两边同 seed（同到达序列）；先 `bench_engine_vllm_tool.sh` 对账一次（同 rate 同长度 p50/p99 差 < 10%）再信自己的数字。对账 TTFT 用 `ttft_first_chunk_ms`（vLLM 工具把 dinfer 的空 role delta 当首 token → ~5 ms 伪像）。
 - **误读**：goodput ≥ 0.95×名义 rate 判"扛住"会把短跑（每率 96 条）全好的点判掉——收尾长尾压低实际 req/s；用 good/completed ≥ 0.95。
 - 证据：`docs/design.md` §15；`docs/loops/engine-bench.md`；`test/qwen35/2026-10-20/engine_smoke`。
+
+- **先怀疑工具再怀疑引擎**：首个引擎数据点里 TTFT 5 ms 是 server 提前发空 role chunk 的伪像；goodput 0.00 是编错 feature 的二进制。每轮必带：压测端 CPU 集合 / 二进制 `/v1/models` id 核对。
 
 ## 8. 引擎层面差距的定位顺序（engine-gap 第 1–4 轮沉淀，2026-10-20）
 1. **先把工具做可信**（§7）：钉核、Rust bench、交叉、对账。前两轮数字因此作废。
@@ -65,14 +63,14 @@
 - 教训：闭环 bench 的短 prompt / 固定并发把"随长度 / 在飞数增长的 host 成本"全藏住了；引擎口径下先看 memcpy / memset / host 空转，再看 kernel。
 - **第 7 轮收口（2026-10-20）**：按 correlationId 关联 RUNTIME↔MEMCPY 后，"H2D 31%"（加载期拷贝摊入）、"步间 8 ms host 空转"（= 等别人的 prefill/mixed 步）两条都被证伪；四段计时（`engine_step_phase_{upload,launch,wait}_{mode}`）显示 decode upload 0.06 / launch 0.9 ms，**host 侧已无可观空转**；服务期一次性开销（kernel 懒加载 71 ms + 首捕获 35 ms + alloc）用 warmup + 全桶预捕获 + 一次分配清零。**引擎口径的剩余差距回到 kernel**：decode 步 11.6 ms（与闭环同）、1024-token prefill ≈ 100 ms kernel（vLLM 更快 + prefix cache 命中），decode 请求在等这些步。教训：引擎口径下"GPU 忙 / 不忙"要用稳态窗口 + 按 correlationId 的 API↔GPU 关联判，切步脚本的粗分类只能当线索。
 
-## 8. 三类趋势表，测量必落其一（用户 2026-10-20）
+## 8b. 三类趋势表，测量必落其一（用户 2026-10-20）
 
 - **判断**：任何性能测量都要进 CSV 并由脚本生成页面，页面刷新可见；只写 loop 表行视为未完成。三类：`perf-trend`（四组闭环，`bench_compare.sh`）、`engine-trend`（开环泊松 / SLO goodput，`engine_trend.py`）、`probe-trend`（TTFT-长度曲线、kernel 分解、微基准伸缩、第三方 kernel 对照，`probe_trend.py`，输入 `test/<model>/<日期>/probe_*/probe.csv` 长表）。`test/index.html` 每模型一行链到三页。
 - **为什么**：2026-10-20 engine-gap 8c–8g 四组探针测量只写了 markdown 表行，用户看页面发现没有；形状不同不是不进 CSV 的理由，长表（group/metric/side/x/value）能装任何探针。
 - **怎么用**：探针开始前先建 `probe_<名>/probe.csv` 写表头，**一个目录只放一个对比项**（kernel 微基准 / 单发 TTFT-长度 / kernel 分解各自成目录，group 名分别用 `gdn_scale`-类 / `ttft_len` / `kernel_1k`，页面按 group 名归类），每拿到一组数就追加一行，结束跑 `python3 scripts/dev/probe_trend.py --root test/<model> && python3 scripts/dev/bench_index.py`，commit 生成物。
 - **证据**：`docs/loops/engine-gap.md` 8h；`test/qwen35/2026-10-20/probe_prefill_1/`。
 
-## 9. 调度策略改动必测"单发长 prompt 的 prefill 步数"（2026-10-20 r8 切步）
+## 9b. 调度策略改动必测"单发长 prompt 的 prefill 步数"（2026-10-20 r8 切步）
 
 - **判断**：任何改 prefill chunk 边界 / 对齐 / 预算的调度改动，合入前除了 engine 口径（多请求、prefix-repeat），还要测**单发 6 K prompt** 的 TTFT 与 `/metrics` 的 engine_steps 增量；步数变了就有每步 ~6 ms 的固定开销乘进去。
 - **为什么**：r8 的 1024 对齐切步让 6 K 单发从 1 步变 6 步，TTFT +32 ms（+10%），把 r9 kernel 的 −80 ms 实效遮掉一半；engine 口径（64 请求混批）和四组闭环（p128 / p1024）都看不出来，因为那些 prompt 要么短于粒度、要么多请求本来就多步。A/B 时只关池（`--gdn-snapshot-gib 0`）不关粒度，第一轮误判为"不是快照"的同时也差点把切步放过。
