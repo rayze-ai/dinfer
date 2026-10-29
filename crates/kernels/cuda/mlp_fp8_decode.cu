@@ -360,6 +360,8 @@ int mlp_fp8_gateup_act(const void* a_q, const void* gate_w, const void* up_w, vo
 }
 // A8 口径查询：每个 A 元素在 smem 里占几字节（1 = e4m3 驻留，2 = bf16 驻留）。Rust 侧据此算 M_TILE·K·bytes ≤ 门槛。
 int mlp_fp8_gemv_a_bytes() { return dinfer::a8_enabled() ? 1 : 2; }
+// 构建标记（bN 链用 strings 验二进制是否含本版 kernel）。
+const char* mlp_fp8_build_tag() { return "fp8gemv_b42b_prefetch"; }
 int mlp_fp8_gemv(const void* a_q, const void* w, void* out, int64_t m, int64_t n, int64_t k, float scale,
                  cudaStream_t stream) {
   using namespace dinfer;
