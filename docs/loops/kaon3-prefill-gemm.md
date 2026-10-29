@@ -51,3 +51,7 @@ G 编号（接 D/E）。
 ## G1 2026-10-29 第一版编译失败：`(cond ? kernel<…,true> : kernel<…,false>)<<<…>>>(args)` 三目取到的是函数指针，kernel 的默认实参（Bu/Su/alphaU/Du）随之丢失 → "too few arguments"。改成变参模板 `p64_launch<BK,ST,BN>(grid, stream, args...)` 内部两分支各自 `<<<>>>`。本机 nvcc（sm86）过，重传。
 - 校正：nsysp16b 日志里 m=428 与 m=432 都调了一遍——那枚二进制（85b85d5a，14:5x）在 2 的幂桶 key（09d077a7，14:58）之前；现在的二进制每桶只调一次。m=428/432 桶的选择：n=2112/2816 → `tile=15/18`（64x32 / 64x64），n=8192/9216 → `tile=20`（128x128）；m=4096/4160 全 tile=20。即 **512 桶的 qkv（n=8192/9216）已选 128x128**，副流 nsys 看到的 (176,4) / (512,4) 大 tile 就是它们——在空 GPU 上 40 us 最快，但在被 decode 图抢占的副流上 145 us（3.6×）。
 - **G3a**：自调优的计时环境要像生产：在 `tune` 时让主流同时跑一个 decode 图（或用 `cudaStreamCreateWithPriority` 低优先级流计时 + 主流 busy kernel）。更简单的替代：对 m ≥ 64 桶把"最快"换成"最快且 CTA 数 ≥ 2 × SM 数"（小 tile 多 CTA 在抢占下恢复快）——先用 env `FP8_LT_PREFER_SMALL_TILE=1` 过滤掉 tile=20 看端到端。
+
+## G3a 2026-10-29 设计（b60 B 侧 debug 日志证据：桶 64 → tile 15、183 → 18、**426 / 637 / 1284 / 3854 / 4160 → tile 20（128x128）**，n=8192）
+- 空 GPU 计时下 m ≥ 426 都选 128x128；副流抢占环境下这个 tile CTA 少（m=430：4 行块 × 64 列块 = 256 CTA，1.5 波）、每 CTA 长（145 us 实测 vs 空 GPU 40 us），被 decode 图抢占后尾部等待大。
+- **实现**：`FP8_LT_PREFER_SMALL_TILE=1` → tune 候选过滤：m 桶 ∈ [64, 2048] 时排除 `CUBLASLT_ALGO_CONFIG_TILE_ID == 20` 的候选（128x128），剩下的照常实测取最快（通常落 tile 18 = 64x64 或 15 = 64x32，CTA 数 ×4–8）。≥ 4096 桶不动（单流大混批仍以吞吐为先）。默认关，g2 链 A/B；赢了再考虑把"抢占环境计时"做进 autotune。
