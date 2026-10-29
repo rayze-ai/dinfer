@@ -79,3 +79,7 @@ G 编号（接 D/E）。
 - 单 kernel 拉伸 1.1–1.7×，但**整步 2.8×**：差额是 kernel 之间的空隙——副流 kernel 排队等 SM 时主流 decode 图在跑，nsys 看到的是副流 kernel 的 start→end（含被抢占等待）加上 kernel 间 gap。这就是 E6 的代价结构：prefill 让出的不是"每个 kernel 慢一点"，是"整条流被插队"。
 - **推论**：改 prefill kernel 的 tile（G1/G3a）只动 1.1–1.7× 里的那部分，对 2.8× 的整体影响小，与 g1/g2 端到端无差一致。要缩短副流 prefill 墙钟，杠杆是 **(a) 减少 prefill 的 kernel 数 / launch 数**（gap 多来自 launch 粒度：每层 ~30 个小 kernel 各排一次队），**(b) 减少 FLOPs**（没有），**(c) 让 decode 图别那么密地插**（反向：会还回 TPOT）。(a) 可做：prefill 路径的 norm / quant / route / gelu 小 kernel 融合（D219 表里 norm 7.2 + quant 4.5 + moe_misc 4.4 + route 1.5 = 18 ms 的"小 kernel"在副流上每个都要排队）。
 - 停止条件 ① 的"微基准 −25%"对端到端无意义（g1 微基准 −7% → 端到端 0），**改判据**：以 `[late-harvest] wall_ms` 的 tok/ms（G0：2.5K tok 档 28 → 目标 ≥ 36）与 c16 TPOT 为准。
+
+## G4（新候选，取代原 attention 项）：prefill 路径减 launch 数
+- 依据：副流上每个 kernel 都要在 decode 图的 CTA 间排队，整步 2.8× 拉伸主要是 gap；一个 2148 tok prefill 步 ~1175 个 kernel（nsys 片段）≈ 39 个/层。目标：把每层 prefill 的小 kernel（norm → quant 已融；attn_pre_fused 已融；route_topk + softmax、combine_norm、rmsnorm_vec ×2、quant_fp8 ×2、gelu_grouped_quant、rmsnorm_grouped_quant）再合，每层 ≤ 25 个 launch。
+- 先列清单（stream 15 kernel 名 × 次数），再定融合对象。
