@@ -66,3 +66,16 @@ G 编号（接 D/E）。
 - 过滤生效：B 侧 426/429/850 桶 → `tile=18`（64x64，空 GPU 计时 52.0 us vs A 的 tile=20 39.7 us）。
 - 端到端 **无差**：c8 7.29 / 7.29、c16 8.97 / 9.11、c32 11.92 / 11.84、c64 18.29 / 18.38；TTFT 同。
 - 解释待定：① 128x128 在抢占下 145 us 的读数来自 nsys（膨胀 + 只抓了一次），小 tile 可能同样被拖；② qkv/o 的 Lt 只占副流 55% 里的一部分，n=2816 K=2112/4096 的形状本来就选 tile 15/18。等 r2；若仍无差，判负默认留关，并改用 nsys A/B 直接比两侧副流上同形状 nvjet 的实测时长（g3 链：nsysp16 口径跑 A/B 各一次，按 grid 归类对比）。
+
+## G0 补：抢占把副流 prefill 的每个 kernel 拉长多少（已有数据对比：b54 = 单流混批无抢占；nsysp16c = E6 副流被 decode 图抢占）
+| kernel（同形状） | b54 单流 us | p16c 副流 us | 拉伸 |
+|---|---|---|---|
+| p64 gate‖up（grid 6×421×2） | 474 | 742 | **1.57×** |
+| nvjet 128x128 (176,3) | 100 | 113 | 1.13× |
+| nvjet 128x128 (512,3) | 177 | 216 | 1.22× |
+| nvjet 128x128 (136,3) | 46 | 78 | 1.70× |
+| gqa_fa_v5 | 106 | 105 | 1.0× |
+| 副流 kernel 和（一个 ~2148 tok prefill） | ~58（HOST_TIME 混批步） | 164 | **2.8×** |
+- 单 kernel 拉伸 1.1–1.7×，但**整步 2.8×**：差额是 kernel 之间的空隙——副流 kernel 排队等 SM 时主流 decode 图在跑，nsys 看到的是副流 kernel 的 start→end（含被抢占等待）加上 kernel 间 gap。这就是 E6 的代价结构：prefill 让出的不是"每个 kernel 慢一点"，是"整条流被插队"。
+- **推论**：改 prefill kernel 的 tile（G1/G3a）只动 1.1–1.7× 里的那部分，对 2.8× 的整体影响小，与 g1/g2 端到端无差一致。要缩短副流 prefill 墙钟，杠杆是 **(a) 减少 prefill 的 kernel 数 / launch 数**（gap 多来自 launch 粒度：每层 ~30 个小 kernel 各排一次队），**(b) 减少 FLOPs**（没有），**(c) 让 decode 图别那么密地插**（反向：会还回 TPOT）。(a) 可做：prefill 路径的 norm / quant / route / gelu 小 kernel 融合（D219 表里 norm 7.2 + quant 4.5 + moe_misc 4.4 + route 1.5 = 18 ms 的"小 kernel"在副流上每个都要排队）。
+- 停止条件 ① 的"微基准 −25%"对端到端无意义（g1 微基准 −7% → 端到端 0），**改判据**：以 `[late-harvest] wall_ms` 的 tok/ms（G0：2.5K tok 档 28 → 目标 ≥ 36）与 c16 TPOT 为准。
