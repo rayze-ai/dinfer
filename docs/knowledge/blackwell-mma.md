@@ -61,3 +61,8 @@ attn 的 QK 是"16 条 K=16 全部累加到同一个 TMEM 累加器 → 必须�
 
 **用法**：给 GEMM 选结构时先看"发射/依赖比"——K 越长、commit 越少，越适合 1 CTA/SM 的 UMMA。
 GDN 的 chunk 内 GEMM（K=128 连续、state 现成在 smem）属于好的那一类；attention 的 QK/PV 属于坏的那一类。
+
+# 附：从 kernel-rules 移来的指针段
+## Blackwell 低精度 MMA（sm_100/103/120）
+架构专用指令的 gencode、NVFP4/FP8 指令形式与寄存器布局、5090 实测吞吐与硬件常量，全部在 **[blackwell-mma.md](blackwell-mma.md)**。动 `crates/kernels` 里任何 sm_100+ 的 MMA 前先读它。
+

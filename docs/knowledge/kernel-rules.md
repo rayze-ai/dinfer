@@ -83,9 +83,6 @@ chunk 0 正确（`tmp0 = 0.95790` 与参考一致），但 chunk 1 起等的是*
 **为什么容易漏**：只有跨多次到达（chunk 循环、stage 流水）时才会暴露；单次 kernel 永远看不出问题。
 而且它不报错、不崩溃，只是数值随机 —— 很容易被误判成"布局还不对"去改描述符。
 
-## Blackwell 低精度 MMA（sm_100/103/120）
-架构专用指令的 gencode、NVFP4/FP8 指令形式与寄存器布局、5090 实测吞吐与硬件常量，全部在 **[blackwell-mma.md](blackwell-mma.md)**。动 `crates/kernels` 里任何 sm_100+ 的 MMA 前先读它。
-
 ## 给已有的 attention kernel 加滑窗（mask）时
 - **三件事一起改，少一件就退化**：① 可见性加**下界**（`key >= vis - window + 1`，用 `INT_MIN` 表示无窗口）；
   ② **起始 tile 跳读** `tile0 = max(0,(min_vis-window+1)/TILE)`，否则滑窗层照样扫全部历史，
