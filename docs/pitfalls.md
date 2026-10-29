@@ -1313,3 +1313,4 @@
 ## 2026-10-29 "等 GPU 空"的门用 `pgrep -x dinfer | wc -l` 判，41 个 `<defunct>` 僵尸让它永远非 0，链卡了 20 分钟
 - 现象：b54 结束后 stepA5 没起；`pgrep -x dinfer` = 41 但 nvidia-smi 1 MiB、`ps` 全是 `Z`（容器里 `docker exec -d` 起的 serve 被 KILL 后无人 wait）。
 - 解法：GPU 空闲判据用 `nvidia-smi --query-gpu=memory.used -i 0` < 500 MiB，或 `ps -eo stat,args | grep -w dinfer | grep -vc Z`；`pgrep` 只用来找要 kill 的活进程。链脚本模板已改。
+- 补（同日）：KILL 掉 serve 后显存回收要 10–30 s，"一次性判 < 500 MiB 再起链"会直接跳过（b56 第一次没起）。链前门改成容器内循环等（`for i in 1..60: nvidia-smi … -lt 500 && break; sleep 5`），再起脚本。
