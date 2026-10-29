@@ -861,8 +861,12 @@ static bool prefill_ldsm() {
   static const bool v = []{ const char* e = getenv("MOE_P64_LDSM"); return e && e[0] == '1'; }();
   return v;
 }
-// 按 MOE_P64_LDSM 选 ldmatrix 实例（模板 bool），其余参数透传
-#define P64_LAUNCH(BK_, ST_, BN_) (prefill_ldsm() ? grouped_gemm_kernel_p64<BK_, ST_, BN_, true> : grouped_gemm_kernel_p64<BK_, ST_, BN_, false>)<<<
+// 按 MOE_P64_LDSM 选 ldmatrix 实例（模板 bool）；用模板函数转发所有 kernel 实参（避免函数指针三目丢默认参）。
+template <int BK_, int ST_, int BN_, typename... Args>
+static inline void p64_launch(dim3 grid, cudaStream_t stream, Args... args) {
+  if (prefill_ldsm()) grouped_gemm_kernel_p64<BK_, ST_, BN_, true><<<grid, 256, 0, stream>>>(args...);
+  else grouped_gemm_kernel_p64<BK_, ST_, BN_, false><<<grid, 256, 0, stream>>>(args...);
+}
 static int prefill_stages() {
   static const int v = []{ const char* e = getenv("MOE_PREFILL_STAGES"); return (e && atoi(e) == 4) ? 4 : 3; }();
   return v;
@@ -1118,12 +1122,12 @@ int moe_grouped_gemm(const void* aq, const void* a_s, const void* const* Bptr, c
       const dim3 g64((unsigned)((N + bn - 1) / bn), (unsigned)((R + 63) / 64 + num_experts), 1u);
       if (bn == 128) {
         if (K % 128 == 0) {
-          if (prefill_stages() == 4) P64_LAUNCH(128, 4, 128)g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
-          else P64_LAUNCH(128, 3, 128)g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
-        } else P64_LAUNCH(64, 4, 128)g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+          if (prefill_stages() == 4) p64_launch<128, 4, 128>(g64, stream, pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+          else p64_launch<128, 3, 128>(g64, stream, pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+        } else p64_launch<64, 4, 128>(g64, stream, pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
       } else {
-        if (K % 128 == 0) P64_LAUNCH(128, 3, 64)g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
-        else P64_LAUNCH(64, 4, 64)g64, 256, 0, stream>>>(pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+        if (K % 128 == 0) p64_launch<128, 3, 64>(g64, stream, pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
+        else p64_launch<64, 4, 64>(g64, stream, pa, psa, pb, ps, alpha, offsets, tile_off, static_cast<bf16*>(out), (int)N, (int)K, (int)num_experts);
       }
       return static_cast<int>(cudaGetLastError());
     }
@@ -1194,12 +1198,12 @@ int moe_grouped_gemm_dual(const void* aq, const void* a_s,
     const dim3 g64((unsigned)((N + bn - 1) / bn), (unsigned)((R + 63) / 64 + num_experts), 2u);
     if (bn == 128) {
       if (K % 128 == 0) {
-        if (prefill_stages() == 4) P64_LAUNCH(128, 4, 128)g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
-        else P64_LAUNCH(128, 3, 128)g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
-      } else P64_LAUNCH(64, 4, 128)g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
+        if (prefill_stages() == 4) p64_launch<128, 4, 128>(g64, stream, pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
+        else p64_launch<128, 3, 128>(g64, stream, pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
+      } else p64_launch<64, 4, 128>(g64, stream, pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
     } else {
-      if (K % 128 == 0) P64_LAUNCH(128, 3, 64)g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
-      else P64_LAUNCH(64, 4, 64)g64, 256, 0, stream>>>(pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
+      if (K % 128 == 0) p64_launch<128, 3, 64>(g64, stream, pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
+      else p64_launch<64, 4, 64>(g64, stream, pa, psa, pbg, psg, alphaG, offsets, tile_off, static_cast<bf16*>(outG), (int)N, (int)K, (int)num_experts, pbu, psu, alphaU, static_cast<bf16*>(outU));
     }
     return static_cast<int>(cudaGetLastError());
   }
