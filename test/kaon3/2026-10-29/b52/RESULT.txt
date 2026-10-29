@@ -1,0 +1,46 @@
+serve_taskset=0-31 bench_taskset=60-91 bin=2026-10-29 07:00 md5=0c18bcb8630d A=[FP8_LT_TUNE=0 ] B=[FP8_LT_TUNE=1 ] 07:05:20
+r1 A startup: model_load_ms=35103
+r1 A c8:   tps=924.8 ttft_p50=116.50 ttft_p99=118.01 tpot_p50=7.00 tpot_p99=8.47
+ || prefill: steps=18 toks/step=1570 nreq=4.1 sched=41 exec=54153|| decode: steps=630 toks/step=7 nreq=6.6 sched=1 exec=6467
+r1 A c16:   tps=1222.6 ttft_p50=147.53 ttft_p99=233.36 tpot_p50=10.86 tpot_p99=12.85
+ || prefill: steps=26 toks/step=2148 nreq=10.0 sched=60 exec=73781|| decode: steps=623 toks/step=13 nreq=12.9 sched=1 exec=8663
+r1 A c32:   tps=1839.4 ttft_p50=255.70 ttft_p99=426.89 tpot_p50=13.57 tpot_p99=17.04
+ || prefill: steps=42 toks/step=2648 nreq=23.8 sched=60 exec=91537|| decode: steps=609 toks/step=25 nreq=25.5 sched=2 exec=9311
+r1 A c64:   tps=2338.2 ttft_p50=265.47 ttft_p99=941.34 tpot_p50=23.39 tpot_p99=26.91
+ || prefill: steps=66 toks/step=3379 nreq=51.8 sched=87 exec=116117|| decode: steps=588 toks/step=50 nreq=50.2 sched=5 exec=11805
+r1 A out:  is is is is is is is is is is is is is is is is is is is is is is is is
+r1 A out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到春秋战国时期，最初是为了抵御外敌而修建的。 随着秦朝的统一，大规模的修筑工作开始，并逐渐演变为防御体系。 在明朝时期，长城
+r1 B startup: model_load_ms=35146
+r1 B c8:   tps=936.6 ttft_p50=99.92 ttft_p99=101.38 tpot_p50=7.09 tpot_p99=8.35
+ || prefill: steps=18 toks/step=1570 nreq=4.1 sched=43 exec=47300|| decode: steps=630 toks/step=7 nreq=6.6 sched=1 exec=6586
+r1 B c16:   tps=1264.0 ttft_p50=124.79 ttft_p99=197.12 tpot_p50=10.77 tpot_p99=12.43
+ || prefill: steps=26 toks/step=2146 nreq=10.0 sched=57 exec=62742|| decode: steps=623 toks/step=13 nreq=12.9 sched=2 exec=8764
+r1 B c32:   tps=1941.7 ttft_p50=213.43 ttft_p99=360.80 tpot_p50=13.57 tpot_p99=16.06
+ || prefill: steps=42 toks/step=2648 nreq=23.8 sched=67 exec=78670|| decode: steps=609 toks/step=25 nreq=25.5 sched=2 exec=9415
+r1 B c64:   tps=2541.5 ttft_p50=224.18 ttft_p99=791.79 tpot_p50=21.88 tpot_p99=24.77
+ || prefill: steps=66 toks/step=3378 nreq=51.8 sched=84 exec=98170|| decode: steps=588 toks/step=50 nreq=50.2 sched=5 exec=11906
+r1 B out:  is is is is is is is is is is is is is is is is is is is is is is is is
+r1 B out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到春秋战国时期，最初是为了抵御外敌而修建的。 随着秦朝的统一，大规模的修筑工作开始，并逐渐演变为防御体系。 在明朝时期，长城
+r2 A startup: model_load_ms=34981
+r2 A c8:   tps=926.2 ttft_p50=116.51 ttft_p99=118.54 tpot_p50=6.96 tpot_p99=8.46
+ || prefill: steps=18 toks/step=1569 nreq=4.1 sched=44 exec=54182|| decode: steps=630 toks/step=7 nreq=6.6 sched=1 exec=6455
+r2 A c16:   tps=1232.4 ttft_p50=146.60 ttft_p99=232.55 tpot_p50=10.70 tpot_p99=12.74
+ || prefill: steps=26 toks/step=2146 nreq=10.0 sched=53 exec=73603|| decode: steps=623 toks/step=13 nreq=12.9 sched=1 exec=8585
+r2 A c32:   tps=1841.7 ttft_p50=254.59 ttft_p99=425.66 tpot_p50=13.61 tpot_p99=17.02
+ || prefill: steps=42 toks/step=2647 nreq=23.8 sched=68 exec=91275|| decode: steps=609 toks/step=25 nreq=25.5 sched=2 exec=9311
+r2 A c64:   tps=2332.8 ttft_p50=266.02 ttft_p99=938.63 tpot_p50=23.49 tpot_p99=27.01
+ || prefill: steps=66 toks/step=3379 nreq=51.8 sched=89 exec=116174|| decode: steps=588 toks/step=50 nreq=50.2 sched=5 exec=11852
+r2 A out:  is is is is is is is is is is is is is is is is is is is is is is is is
+r2 A out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到春秋战国时期，最初是为了抵御外敌而修建的。 随着秦朝的统一，大规模的修筑工作开始，并逐渐演变为防御体系。 在明朝时期，长城
+r2 B startup: model_load_ms=35172
+r2 B c8:   tps=942.4 ttft_p50=99.70 ttft_p99=101.67 tpot_p50=7.03 tpot_p99=8.29
+ || prefill: steps=18 toks/step=1571 nreq=4.1 sched=41 exec=47251|| decode: steps=630 toks/step=7 nreq=6.6 sched=1 exec=6547
+r2 B c16:   tps=1266.3 ttft_p50=127.26 ttft_p99=196.74 tpot_p50=10.75 tpot_p99=12.31
+ || prefill: steps=26 toks/step=2147 nreq=10.0 sched=55 exec=63229|| decode: steps=623 toks/step=13 nreq=12.9 sched=1 exec=8726
+r2 B c32:   tps=1944.7 ttft_p50=213.25 ttft_p99=358.75 tpot_p50=13.30 tpot_p99=16.06
+ || prefill: steps=42 toks/step=2649 nreq=23.8 sched=66 exec=78070|| decode: steps=609 toks/step=25 nreq=25.5 sched=2 exec=9440
+r2 B c64:   tps=2540.7 ttft_p50=224.25 ttft_p99=790.71 tpot_p50=21.88 tpot_p99=24.75
+ || prefill: steps=66 toks/step=3380 nreq=51.8 sched=81 exec=98213|| decode: steps=588 toks/step=50 nreq=50.2 sched=5 exec=11909
+r2 B out:  is is is is is is is is is is is is is is is is is is is is is is is is
+r2 B out2: 这里是为您准备的三句话介绍：  长城的历史可以追溯到春秋战国时期，最初是为了抵御外敌而修建的。 随着秦朝的统一，大规模的修筑工作开始，并逐渐演变为防御体系。 在明朝时期，长城
+B52_DONE
