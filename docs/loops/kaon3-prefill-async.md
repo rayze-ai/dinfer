@@ -135,3 +135,6 @@ E1 …（接 kaon3-decode-opt 的 D 编号体系，本 loop 用 E）
 - **TTFT 全档仍反超**（c32 226 vs 233 余量 7 ms）。
 - 停止条件（c16 ≤ 1.10×、c32/64 ≤ 1.25×）：c64 **1.19× ✓**，c32 1.29× ✗，c16 1.25× ✗。
 - 剩余差额去向：c16 2.6 → 1.8 ms（其中混批插入 1.2，纯 decode 步 7.72 vs vLLM 全步 7.17 = 0.55）；c32 2.6 ms（插入 2.7，纯 decode 步 9.18 已快于 vLLM 9.24）。→ 下一步仍是 **prefill 单步吞吐**（混批步 43 ms / 2149 tok = 50 tok/ms 口径已接近 vLLM 的 50？——注意现在混批步 exec 只量 decode 子批，prefill 真实时长在副流上不可见；要用 nsys 或 late-begin→harvest 的墙钟差量）。
+
+## E7 2026-10-29 b64 跑中（A = 默认 prio（prefill least） / B = `PREFILL_STREAM_PRIO=-2`）
+- r1 A：c8 7.34 / 97、c16 9.20 / 109、c32 12.34 / **187**、c64 18.52 / 223。注意同配置 c32 TTFT 在 stepA7 是 226、b63 B 228、这里 187——**TTFT 的轮间噪声在 c32 达 ±20%**（闭环 bench 一波 32 请求同时到，谁先被 prefill 取决于调度到达相位），TPOT 噪声 ±1%。判 E7 只认 TPOT 与同链 A/B 的 TTFT 差，不跨链比 TTFT 绝对值。
