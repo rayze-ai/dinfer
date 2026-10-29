@@ -666,10 +666,8 @@ extern "C" int rmsnorm_scale2_bf16(const void* x, const void* scale, void* out, 
                                    float eps, float rs, int mode, cudaStream_t stream) {
   if (tokens <= 0) return 0;
   if (hidden <= 0 || hidden > 8192 || (hidden % 8) != 0) return err(cudaErrorInvalidValue);
-  if (mode != 0 && mode != 2) {
-    // eager 口径（1）没有实测过这条融合，退回三步由调用方负责 → 这里直接不支持
-    return err(cudaErrorInvalidValue);
-  }
+  // B30b：mode 1（eager BI）也支持——kernel 内按 BI 口径取 inv、三次 bf16 舍入复刻 noweight-norm → scale → mul（`layer_tail_fused_parity` 逐位）。
+  if (mode != 0 && mode != 1 && mode != 2) return err(cudaErrorInvalidValue);
   if (hidden <= 1024) return launch_scale2<128, 1>(x, scale, out, tokens, hidden, eps, rs, mode, stream);
   if (hidden <= 2048) return launch_scale2<256, 1>(x, scale, out, tokens, hidden, eps, rs, mode, stream);
   if (hidden <= 4096) return launch_scale2<256, 2>(x, scale, out, tokens, hidden, eps, rs, mode, stream);
