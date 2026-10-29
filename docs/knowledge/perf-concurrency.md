@@ -38,3 +38,7 @@
 ## 23. "prefill 副流 ‖ decode 主流图" 在 prefill 占满 SM 时没有并行收益，单流混批反而略好（2026-10-29 kaon3 b56 D224）
 - 同二进制 ABAB：`XSTREAM=0`（单流 Paged 混批，decode 行并进 prefill 的 eager 前向）比 `XSTREAM=1`（pair 步）全档 TPOT 低 0.4–1.3%、吞吐高 1–2%。prefill 2148 tok 的 GEMM 把 170 SM 填满，decode 图只能排队；两流还多付事件同步 + 一套 AltSet 显存。
 - **判断**：跨流并行只在"小 kernel 填不满 SM"时有收益（Q3 qwen3 小模型是这种）；大 M prefill 场景下要并行就得让 prefill **让 SM**（低优先级流 + 限 grid / 分块 launch），否则不如单流。先量 prefill 步的 SM 占用再决定两流。
+
+## 24. 自写 gemv 的优势区间要按 M 实测画边界，别从 m=8 外推到 m=16（2026-10-29 kaon3 D227/D228）
+- b31b 时只量了 m=8（gemv 比 Lt 快 1.8–5×）就把 gemv 门槛设成 `tokens ≤ 16`；nsys c16 发现 gemv<16> 31.7 us，而 cuBLASLt tile=13 在 m=16 只要 14.5 us（qkv）/ 8.6 us（o_proj split-K 3）。改门槛 8 + Lt 自调优 m ≥ 9 → c16 TPOT −7.6%。
+- **判断**：每条"小 M 快路径"的 M 上界必须在每个 2 的幂桶（1/2/4/8/16/32）上与 Lt 自调优实测比过；只量过一个点的门槛写进 loop 时标"仅 m=8 实测"。M=16 的 decode 步里 MoE（2.8 ms）已到带宽下限，剩下可拿的全在小 M dense GEMM（gemv / gateup_act / nvjet）。
