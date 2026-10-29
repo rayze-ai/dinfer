@@ -593,6 +593,7 @@ finish, stash_sync_result}` 与 pinned 原语 `PinnedSlot` 本来就是公共的
 | 2026-10-29 | decode 小 M fp8 GEMM：vLLM 全走 cuBLASLt（`_scaled_mm`）启发式 | **改进 + 回采**：m ≤ 8 自写 gemv（b31b，比 Lt 快 1.8–5×）；m = 9..16 回到 cuBLASLt 并实测选 algo（B51：Lt tile=13 在 m=16 本就比我们 gemv<16> 快 2×） | c16 TPOT −7.6%、吞吐 +7%（b58，loop D228）；dense MLP 同口径（B53，`DENSE_GEMV_MAX_M` 8）再 −3.5%（b60，D234） |
 | 2026-10-29 | MoE 路由 top-k / 分桶（vLLM 用 Triton `moe_align_block_size` 多 block） | **改进**：自写 fused 单 block 路由（B10）在 tokens ≤ 8 最快；tokens ≥ 9 拆两段（grid=tokens top-k + 单 block 分桶，B52），整数路径与 fused 逐位同 | c16 −3% / c32 −5% / c64 −6.8%（b59，loop D229） |
 | 2026-10-29 | 混批步里 decode 行等 prefill（vLLM：chunked prefill 同一前向，decode 行同样等；靠 prefill 单步快摊薄） | **改进（E1，验证中）**：prefill 子批下发到副流**不等**，decode 步继续走图，首 token 在后续步 `harvest` 并入；core：`ModelExecutor::{begin_prefill_async, harvest_prefill}` + `Runner.late` + `Scheduler.awaiting`；模型 crate 只实现两个方法 | E1 单独无收益（decode 图抢不到 SM，b62）；**+E4 decode 主流最高优先级后 c16 −8.6% / c32 −3.3% / c64 −5.7%**，TTFT 用掉对 vLLM 的部分余量仍反超（b63，`loops/kaon3-prefill-async.md` E6）；默认开 |
+| 2026-10-29 | CUDA 流优先级（vLLM 单流无此概念） | **改进（E4）**：decode 主流 greatest 优先级、prefill 副流 least；`Device::new_stream_with_priority`（cudarc 0.18 未暴露，sys 建流 + 按值替换句柄字）；kaon3 `MAIN_STREAM_PRIO` / `PREFILL_STREAM_PRIO` | 让 decode 图插进 prefill CTA 波之间：c16 −4.8% / c64 −5.7%，prefill 慢 50%（TTFT 用余量）；默认开（b63，E6） |
 
 ## 12. 整体功能待办路线图（2026-10-18 盘点，不分模型）
 
