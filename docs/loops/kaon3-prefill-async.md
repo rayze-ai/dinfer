@@ -40,3 +40,18 @@ vLLM 基线 :28201（GPU2）。stepA5 的五刀二进制为 A 侧基线。
 
 ## 记录
 E1 …（接 kaon3-decode-opt 的 D 编号体系，本 loop 用 E）
+
+## E1 2026-10-29 定稿设计（开工版，用户：模型相关配置放各自 crate，公共部分直接改 core）
+**core（模型无关）**
+- `runner::ModelExecutor` 新增两个可选方法（默认实现 = 不支持）：
+  - `fn begin_prefill_async(&mut self, plan: &BatchPlan) -> Result<Option<Box<dyn Any>>>`：把 prefill 子批入队到执行器自己的副流，**不等**，返回句柄；`None` = 这次不能异步（副流忙 / 不支持），调用方退回同步。
+  - `fn harvest_prefill(&mut self, h: Box<dyn Any>, gen: &mut Vec<Vec<u32>>, dr: &mut Vec<Vec<u32>>) -> Result<Option<Box<dyn Any>>>`：非阻塞查完成事件；完成 → 读回采样、返回 `None`；未完成 → 原句柄返还。
+- `Runner`：
+  - `try_execute_pair` 在 `PREFILL_ASYNC=1`（env，后续改 CLI）且 `late.is_none()` 且 prefill 子批全是 `end_of_seq`（最后一个 chunk；中间 chunk 没有 token 可收割，照旧同步）时：decode 子批 `forward_sample`（图），prefill 子批 `begin_prefill_async`；成功则把 prefill 行**从本步 Pending 里剔除**（`req_ids`/`rows` 只留 decode 行），prefill 的 (rid, n, num_draft) 存 `self.late`。
+  - `finish()` 末尾：若 `self.late` 有 → `harvest_prefill` 非阻塞；完成则把这些请求的 token 追加进本步 `ModelRunnerOutput`（`req_ids`/`sampled`/`drafts`/`logprobs` 各追加一项）并更新 `states[rid].token_ids` / `num_computed`。
+- `Scheduler`：不加状态位。"已调度未收割"的请求天然 `num_computed_tokens == num_tokens`（prefill 整段已记成算完），`schedule()` 的 running 循环算出 `num_new == 0` → `continue`（已有逻辑），不会再被调度；`update_from_output` 按 mro 的 `req_ids` 驱动，晚到的请求照常 `append_output` + 停止判定。只加一条防御：抢占受害者选择跳过 `num_new == 0` 的 running 请求（它的 KV 还在被副流写）。
+**kaon3 crate（模型相关）**
+- `KaonExecutor::begin_prefill_async`：`alt` 存在且 `self.late_busy == false` → `swap_alt`；`enqueue(prefill, false)`；`record_event` → 句柄 `{ rows, done: Event }`；`swap_alt` 回；`late_busy = true`。不再让主流 `wait_event(prefill_done)`，也不让副流等 `main_done`（两流只共享只读权重与不同 slot 的 KV，无需同步）。
+- `harvest_prefill`：`done.is_done()?` 假 → 返还；真 → `swap_alt`；`collect(rows)`；`swap_alt`；`late_busy = false`；按 `logits_row_start` 填 gen/dr。
+- 流优先级：第一版不做（cudarc 0.18 没暴露 `cuStreamCreateWithPriority`，CudaStream 字段私有）；若 A/B 显示 decode 图被 prefill 挤（decode 步 exec 从 8 ms 涨到 ≫ 8），再在 kernels crate 加 `Stream::with_priority`（走 sys）。
+**门禁 / 观察**：`envab_c` ABAB `PREFILL_ASYNC=0/1`，c8–c64 两轮；HOST_TIME 看混批步 exec 应降到 ≈ 纯 decode 步 + 收割步出现；TTFT 不升 > 5%；固定 prompt 输出同；核心单测 + `cargo test -p dinfer-kaon3`。
