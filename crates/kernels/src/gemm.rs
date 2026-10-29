@@ -830,7 +830,16 @@ impl Gemm {
                 let pick = if tune_on && m >= min_m && self.tune_enabled() {
                     let iters = self.profile.gemm_tune.timing_iters.max(1);
                     let mut best = (f32::INFINITY, parity_pick);
+                    // G3a（loop kaon3-prefill-gemm）：`FP8_LT_PREFER_SMALL_TILE=1` → m 桶 ∈ [64, 2048] 排除 128x128 tile（TILE_ID 20）。
+                    // 空 GPU 计时下 m ≥ 426 都选它，但 prefill 副流被 decode 图（高优先级）抢占时它 CTA 少、单 CTA 长，
+                    // 实测 40 → 145 us；小 tile CTA 多恢复快。默认关（A/B 用）。
+                    static SMALL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                    let prefer_small = *SMALL.get_or_init(|| std::env::var("FP8_LT_PREFER_SMALL_TILE").map_or(false, |v| v == "1"))
+                        && (64..=2048).contains(&m.next_power_of_two());
                     for h in &hs {
+                        if prefer_small && Self::algo_tile_id(&h.algo) == 20 {
+                            continue;
+                        }
                         let Ok(us) = self.time_us(iters, || self.run_lt_fp8(&d, &h.algo, a, w, out)) else { continue };
                         if us < best.0 {
                             best = (us, h.algo);
@@ -1086,6 +1095,17 @@ impl Gemm {
 
     /// 完整配置串：`id/tile/splitk` 相同的候选仍可能累加序不同（reduction / stages / swizzle 等），
     /// 2026-10-23 router 实测 [2] 与 [3] 短描述同为 `id=21 tile=11 splitk=8`，一个差 801/3072、一个 0。
+    /// `CUBLASLT_ALGO_CONFIG_TILE_ID`（G3a 过滤用；读失败返回 u32::MAX）。
+    fn algo_tile_id(algo: &sys::cublasLtMatmulAlgo_t) -> u32 {
+        use sys::cublasLtMatmulAlgoConfigAttributes_t as C;
+        let mut v: u32 = u32::MAX;
+        let mut sz: usize = 0;
+        // SAFETY: algo 有效，出参类型 u32 与属性定义一致。
+        let st = unsafe {
+            sys::cublasLtMatmulAlgoConfigGetAttribute(algo, C::CUBLASLT_ALGO_CONFIG_TILE_ID, &mut v as *mut u32 as *mut c_void, 4, &mut sz)
+        };
+        if st != sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS { u32::MAX } else { v }
+    }
     fn algo_desc_full(algo: &sys::cublasLtMatmulAlgo_t) -> String {
         use sys::cublasLtMatmulAlgoConfigAttributes_t as C;
         let get = |attr: C| -> u32 {
