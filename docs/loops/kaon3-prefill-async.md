@@ -61,3 +61,8 @@ E1 …（接 kaon3-decode-opt 的 D 编号体系，本 loop 用 E）
 - kaon3：`late_busy` + `LateHandle{rows, done: Event, starts}`；`begin_prefill_async` = swap_alt → enqueue(eager) → record_event → swap 回（**不**等 main_done，主流**不**等 prefill_done）；`harvest_prefill` = `done.is_done()` → collect → 填 gen。
 - 流优先级未做（cudarc 0.18 不暴露）。第一轮 A/B 看 decode 步 exec 是否被 prefill 挤。
 - 链 b62：A = `XSTREAM=0`（现状）/ B = `PREFILL_ASYNC=1 XSTREAM=1`。
+
+## E2 预登记判据（b62 出结果前）
+- 合入默认开的条件：两轮同向 c16 TPOT −8% 以上、c64 −8% 以上；TTFT 不升 > 5%；c1/c8 不退化 > 2%；固定 prompt 输出同；B 侧 `runner step mix` 的 `late_begin` ≈ 混批步数、`late_harvest == late_begin`。
+- 收益显著小于上限（c16 1.7 / c64 8.9 ms）的解释顺序：① decode 图被 prefill 副流挤（HOST_TIME decode 步 exec 在 prefill 期间涨多少）→ 流优先级 / 限 grid；② `can_late` 条件没命中（中间 chunk / 副流忙）→ late_begin ≪ mixed；③ 收割晚一步的 TTFT 代价。
+- 任一退化 → 默认留关，记负结果进 CSV。
