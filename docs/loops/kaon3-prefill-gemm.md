@@ -88,3 +88,7 @@ G 编号（接 D/E）。
 - **GEMM 82% 里**：nvjet 90 ms（Lt，各 tile 已自调优）+ p64 44.5 ms。Lt 这头 G3a 换 tile 端到端无差（r1）；真正能动的是 **FLOPs 本身**——qkv n=8192/9216 K=2816 与 o_proj K=4096/8192（full 层 D=512 ×16 头 = 8192）是 Kaon-V3 的模型形状，vLLM 同样要算。所以 prefill 单步 37 vs 50 tok/ms 的差距可能主要来自 **vLLM 的 fp8 GEMM 走 cutlass/FlashInfer 更快的 kernel**，而不是我们的调度。下一步：**用 nsys 抓 vLLM 的 prefill kernel 表**（GPU2 基线容器 :28201 不能动；在 GPU3 起一个 nsys 包着的 vLLM 实例跑 c16 同 bench），比同形状 fp8 GEMM 的 us。这是 Step A 的缺口。
 - **G3a 定稿（g2 两轮）**：无差（c16 8.97/9.10 vs 9.11/9.01、c32 11.92/11.78 vs 11.84/11.89、c64 18.29/18.52 vs 18.38/18.38；TTFT 同）。默认留关，旋钮保留。CSV g2 中性。**Lt tile 不是杠杆**。
 - 连续两刀（G1、G3a）中性 → 按停止条件回 Step A：缺的是 **vLLM 同形状 prefill kernel 表**（它 50 tok/ms 我们 37 的差在哪个 kernel）。g3（我们自己的 A/B nsys）先跑完给数据，再在 GPU3 起 nsys 包的 vLLM。
+
+## Step A 补（2026-10-29）：vLLM 同口径 kernel 表
+- 容器 kaon3-full 自带 vllm 0.26.1rc1（与基线镜像同版）+ nsys；在 **GPU3**（空）起 `vllm serve` 同基线参数、c16 × 128 请求同 bench，`--cuda-graph-trace=node`。产出：decode 图 kernel 表（`nsys_kern.py --all`）+ eager prefill 步 kernel 表（`nsys_prefill_steps.py`）。与我们的 b57（decode）/ nsysp16c（prefill 副流）对照：同形状 fp8 GEMM 各走什么 kernel、多少 us；MoE NVFP4 走 cutlass/flashinfer 哪个、每层 us。
+- 这是本 loop 真正的 Step A 缺口：之前所有判断都只看我们自己的表。
