@@ -136,3 +136,16 @@ G 编号（接 D/E）。
 - 等 vLLM 表（export 中）对比同家族。
 - G6 校正：`small_m_mma 1039 us × 505` 全在 0.1–1.6 s（autotune 残留，delay 20 s 没盖住——nsys `--delay` 从进程起算，模型加载 35 s 后 autotune 才跑；下次 delay 60）；`Kernel2 (8,2048)` 分三路：s20 主流 2006 次 gap 8.4 ms = decode 步 lm_head（图内）；**s15 副流 152 次 897 us gap 0.9 ms = late prefill 子批的 lm_head**（B46 后只算采样行 → grid.y=2048 不是行数而是词表 262144/128 = 2048 列块；m 小 → 这是 cuBLAS 对 m=1..16 的 wmma 选择，897 us 与 decode 同）；s14 启动期。即每个 late prefill 步付一次 ~0.9 ms lm_head（词表 bf16 GEMM 的带宽下限 0.83 ms），**无可省**。
 - vLLM sqlite 落盘（53 MB rep / 143 MB sqlite，275 s 全程）。整程 eager 表被启动期污染（`delayStreamKernel` 54% = vLLM cudagraph 捕获 / warmup 的占位 kernel；`device_kernel` 是 CUTLASS 统一入口名，要看 demangled）。按 kernel 密度切出 bench 窗口再比（`vprobe.py`）。
+
+## ★★★★ G7 2026-10-29 vLLM nsys（GPU4 基线镜像，c16 × 128 请求，bench 窗口 264 s 含 warmup / 捕获）
+- eager（prefill）侧 18.9 s（去掉 `delayStreamKernel` 10.2 s = cudagraph 捕获占位）≈ 8.7 s：**CUTLASS `device_kernel<GemmUniversal<cutlass…>>` 3.11 s（19800 × 157 us）= MoE NVFP4 grouped GEMM**（vLLM 走 CUTLASS grouped，不是 FlashInfer）；`vectorized_elementwise` 1.17 s（38241 × 30 us）；nvjet 128x128 / 64x64 / 128x64 / 64x32 共 1.6 s（fp8 dense：qkv/o/dense MLP 与我们同 cuBLASLt 家族）；`Kernel2` bf16 wmma 0.5 + 0.13 s（router / lm_head）；`triton_` 0.42 s；`finalizeMoeRouting` 0.19；`doActivation` 0.18；`kernel_unified_attention` 0.11 s（**prefill attention 只 2340 × 48 us**——我们 fa_v5 2310 × 110 + fa_v6 462 × 390 = 0.43 s，**我们 attention 慢 4×**）；另一个 CUTLASS `GemmUniversal<cute::…>` 0.26 s（2280 × 115）。
+- graph（decode）侧 4.08 s / ~20100 步 = **0.2 ms/步 kernel 和**？与 TPOT 8 ms 不符 → vLLM 用 PIECEWISE：图里只有 GEMM/MoE 片段，attention 等走 eager（上面的 `kernel_unified_attention` 2340 次在 eager 里但 decode 步应有 ~20000 次 → 不对）。**graph kernel 数 503530 / 25 kernel 每步 = 20100 步，而 eager attention 只 2340**——说明 decode 的 attention 也在图里但名字不同（`kernel_unified_attention` 19680 × 24.6 us 在 graph 表第三行 ✓）。那 decode 步 kernel 和 0.2 ms 还是太小：**节点级 nsys 对 vLLM 的 FULL 图可能只记录了部分节点**（CUTLASS device_kernel 40200 × 45.6 us = 2 次/步 × 30 层？不：2 次/步 → 它的 MoE 是**每步 2 个 kernel 覆盖全部 30 层？** 不可能）。→ vLLM 的 decode 图统计不可信（CUPTI 对其 PIECEWISE+FULL 混合图的节点计数口径不同），**只比 prefill eager 侧**。
+- **prefill 侧可比项（同 bench、同 tok 数量级）**：
+  | 家族 | vLLM（bench 窗口总） | 我们（nsysp16s 26 s 窗口总，98 步 × 2254 tok） | 注 |
+  |---|---|---|---|
+  | MoE grouped GEMM | 3.11 s / 19800 次 = 157 us | 2.93 s / 5542 次 = 529 us（p64 gate‖up+down） | vLLM 每层 2–3 个 CUTLASS kernel 各 157 us；我们每层 2 个 529 us → **我们每层 MoE GEMM ≈ 1.06 ms vs vLLM ≈ 0.4 ms（2.7×）** |
+  | fp8 dense（nvjet） | 1.6 s | 1.36 s | 同家族同 tile（128x128 为主） |
+  | attention | 0.11 s（48 us/次） | 0.43 s（fa_v5 110 + fa_v6 390） | **我们 4×** |
+  | elementwise / norm / quant 等 | 1.17 + 0.42 + 0.37 ≈ 2.0 s | norm 0.68 + quant 0.23 + combine 0.23 + other 0.47 ≈ 1.6 s | 持平 |
+  - 两边窗口不同（vLLM 264 s 含大量空闲；我们 26 s 稳态），**总量不能直接比**，只比 **单次 kernel us 与每层次数**。
+- **结论（Step A 定靶）**：① **MoE prefill GEMM 每层 1.06 ms vs 0.4 ms**——CUTLASS grouped NVFP4 在 M≈2148×8 行上是我们 p64 的 2.7×；这是本 loop 真正的刀：要么把 p64 做到 BM128 + TMA + 多 stage（CUTLASS 水平），要么**直接接 CUTLASS grouped GEMM**（vLLM 用的就是它，`采用`）；② prefill attention 4×（fa_v5/v6 vs `kernel_unified_attention`）：第二刀。
