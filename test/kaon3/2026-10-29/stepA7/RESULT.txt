@@ -1,0 +1,174 @@
+serve_taskset=0-31 bench_taskset=60-91 vllm=container(GPU2) 09:33:43
+bin=2026-10-29 09:33 md5=6dd3a6b3cb68 probes=3
+vllm_models=['kaon-vllm']
+startup: wall=36.1s model_load_ms=35379 num_blocks=2048
+dinfer_models=['kaon3']
+=== round=1 c=1 seed=1001 09:34:27 ===
+  [dinfer]  throughput: 3.19 req/s 204.0 output tok/s 1568.3 total tok/s client: cpu 0.01s (user 0.00 sys 0.01) = 0.00 cores avg over 2.5s wall; rss 4 MiB; 33 threads; cpus 60-91 (32); parse 1.2 ms total / 0.156 ms per req TTFT mean 20.95 p50 20.88 p90 20.99 p99 21.63 max 21.63 (ms) TPOT mean 4.65 p50 4.65 p90 4.65 p99 4.65 max 4.65 (ms) 
+  [dinfer-gpu] sm=99% mem=58% n=13
+  [dinfer-metrics] steps=640 step_ms=4.87 sched=0us exec=4.87ms | per_req ttft=19.2ms e2e=0.0ms tpot=4.65ms | gen_tok=640 prompt_tok=4277 prefix_hit=0/4267 preempt=0
+  [dinfer-host] render=1016us(n=10) || prefill: steps=10 toks/step=428 nreq=1.0 sched=16 exec=19182 publish=8 total=19206 | upd=nan build=nan fwd=nan | htod=nan launch=nan wait=nan || decode: steps=630 toks/step=1 nreq=1.0 sched=0 exec=4641 publish=3 total=4645 | upd=0 build=1 fwd=4851 | htod=16 launch=63 wait=4759
+  [vllm]  throughput: 3.13 req/s 200.2 output tok/s 1542.9 total tok/s client: cpu 0.01s (user 0.00 sys 0.01) = 0.00 cores avg over 2.6s wall; rss 4 MiB; 33 threads; cpus 60-91 (32); parse 1.4 ms total / 0.178 ms per req TTFT mean 24.86 p50 24.83 p90 25.05 p99 25.43 max 25.43 (ms) TPOT mean 4.68 p50 4.68 p90 4.68 p99 4.68 max 4.68 (ms) 
+  [vllm-gpu] 
+  [vllm-metrics] steps prefill=10 decode=630 | per_req queue=0.0ms prefill=22.0ms decode=290.0ms infer=320.0ms | decode_step=4.60ms(req-sum/steps) | sched=84us/call n=660 | iter_tokens_mean=7.7 | read_bytes=0.0GB gen_tok=640 prefix_hit=0/4290 preempt=0
+=== round=1 c=2 seed=1002 09:34:33 ===
+  [dinfer]  throughput: 5.49 req/s 351.1 output tok/s 2694.2 total tok/s client: cpu 0.03s (user 0.01 sys 0.02) = 0.01 cores avg over 2.9s wall; rss 4 MiB; 33 threads; cpus 60-91 (32); parse 3.1 ms total / 0.196 ms per req TTFT mean 33.63 p50 29.92 p90 49.82 p99 64.95 max 64.95 (ms) TPOT mean 5.25 p50 5.25 p90 5.34 p99 5.51 max 5.51 (ms) 
+  [dinfer-gpu] sm=98% mem=57% n=15
+  [dinfer-metrics] steps=662 step_ms=5.32 sched=0us exec=5.32ms | per_req ttft=27.9ms e2e=0.0ms tpot=5.18ms | gen_tok=1152 prompt_tok=7693 prefix_hit=0/7675 preempt=0
+  [dinfer-host] render=1044us(n=18) || prefill: steps=14 toks/step=550 nreq=1.6 sched=20 exec=20379 publish=9 total=20408 | upd=nan build=nan fwd=nan | htod=nan launch=nan wait=nan || decode: steps=634 toks/step=2 nreq=1.8 sched=0 exec=5102 publish=4 total=5106 | upd=0 build=1 fwd=5414 | htod=16 launch=63 wait=5272
+  [vllm]  throughput: 5.46 req/s 349.4 output tok/s 2686.9 total tok/s client: cpu 0.03s (user 0.02 sys 0.01) = 0.01 cores avg over 2.9s wall; rss 4 MiB; 33 threads; cpus 60-91 (32); parse 3.4 ms total / 0.214 ms per req TTFT mean 32.34 p50 36.21 p90 36.50 p99 41.12 max 41.12 (ms) TPOT mean 5.30 p50 5.29 p90 5.42 p99 5.43 max 5.43 (ms) 
+  [vllm-gpu] 
+  [vllm-metrics] steps prefill=18 decode=638 | per_req queue=0.0ms prefill=21.7ms decode=327.8ms infer=350.0ms | decode_step=9.25ms(req-sum/steps) | sched=144us/call n=661 | iter_tokens_mean=13.7 | read_bytes=0.0GB gen_tok=1160 prefix_hit=0/7710 preempt=0
+=== round=1 c=4 seed=1004 09:34:40 ===
+  [dinfer]  throughput: 9.23 req/s 590.8 output tok/s 4543.1 total tok/s client: cpu 0.06s (user 0.03 sys 0.03) = 0.02 cores avg over 3.5s wall; rss 5 MiB; 33 threads; cpus 60-91 (32); parse 6.4 ms total / 0.201 ms per req TTFT mean 52.61 p50 57.20 p90 57.62 p99 74.41 max 74.41 (ms) TPOT mean 5.94 p50 5.97 p90 6.08 p99 6.10 max 6.10 (ms) 
+  [dinfer-gpu] sm=95% mem=60% n=18
+  [dinfer-metrics] steps=696 step_ms=5.87 sched=1us exec=5.87ms | per_req ttft=44.8ms e2e=0.0ms tpot=5.86ms | gen_tok=2176 prompt_tok=14554 prefix_hit=0/14520 preempt=0
+  [dinfer-host] render=1071us(n=34) || prefill: steps=18 toks/step=810 nreq=3.5 sched=30 exec=12770 publish=6 total=12807 | upd=nan build=nan fwd=nan | htod=nan launch=nan wait=nan || decode: steps=678 toks/step=3 nreq=3.1 sched=1 exec=5682 publish=4 total=5687 | upd=0 build=2 fwd=5845 | htod=17 launch=21 wait=5706
+  [vllm]  throughput: 8.51 req/s 544.4 output tok/s 4195.1 total tok/s client: cpu 0.07s (user 0.02 sys 0.04) = 0.02 cores avg over 3.8s wall; rss 5 MiB; 33 threads; cpus 60-91 (32); parse 7.1 ms total / 0.223 ms per req TTFT mean 89.39 p50 87.91 p90 91.88 p99 95.48 max 95.48 (ms) TPOT mean 6.04 p50 6.04 p90 6.10 p99 6.12 max 6.12 (ms) 
+  [vllm-gpu] 
+  [vllm-metrics] steps prefill=18 decode=638 | per_req queue=0.0ms prefill=72.6ms decode=376.5ms infer=447.1ms | decode_step=20.06ms(req-sum/steps) | sched=187us/call n=661 | iter_tokens_mean=25.9 | read_bytes=0.0GB gen_tok=2170 prefix_hit=0/14590 preempt=0
+=== round=1 c=8 seed=1008 09:34:49 ===
+  [dinfer]  throughput: 14.20 req/s 908.7 output tok/s 6989.7 total tok/s client: cpu 0.11s (user 0.05 sys 0.06) = 0.02 cores avg over 4.5s wall; rss 5 MiB; 33 threads; cpus 60-91 (32); parse 12.8 ms total / 0.199 ms per req TTFT mean 98.89 p50 105.60 p90 122.34 p99 122.44 max 122.47 (ms) TPOT mean 7.21 p50 7.24 p90 7.36 p99 7.37 max 7.37 (ms) 
+  [dinfer-gpu] sm=99% mem=61% n=23
+  [dinfer-metrics] steps=741 step_ms=6.91 sched=2us exec=6.90ms | per_req ttft=88.6ms e2e=0.0ms tpot=7.13ms | gen_tok=4224 prompt_tok=28264 prefix_hit=0/28198 preempt=0
+  [dinfer-host] render=1066us(n=66) || prefill: steps=19 toks/step=1490 nreq=6.1 sched=47 exec=16260 publish=8 total=16314 | upd=nan build=nan fwd=nan | htod=nan launch=nan wait=nan || decode: steps=715 toks/step=6 nreq=5.7 sched=1 exec=6724 publish=6 total=6731 | upd=0 build=3 fwd=6951 | htod=18 launch=30 wait=6772
+  [vllm]  throughput: 14.84 req/s 949.9 output tok/s 7321.0 total tok/s client: cpu 0.12s (user 0.05 sys 0.07) = 0.03 cores avg over 4.3s wall; rss 5 MiB; 33 threads; cpus 60-91 (32); parse 14.2 ms total / 0.222 ms per req TTFT mean 135.59 p50 149.11 p90 161.20 p99 165.18 max 165.20 (ms) TPOT mean 6.39 p50 6.21 p90 7.10 p99 8.19 max 8.24 (ms) 
+  [vllm-gpu] 
+  [vllm-metrics] steps prefill=25 decode=651 | per_req queue=0.0ms prefill=93.8ms decode=400.0ms infer=493.9ms | decode_step=40.55ms(req-sum/steps) | sched=293us/call n=663 | iter_tokens_mean=49.6 | read_bytes=0.0GB gen_tok=4230 prefix_hit=0/28330 preempt=0
+=== round=1 c=16 seed=1016 09:34:59 ===
+  [dinfer]  throughput: 22.58 req/s 1445.2 output tok/s 11118.0 total tok/s client: cpu 0.21s (user 0.05 sys 0.16) = 0.04 cores avg over 5.7s wall; rss 6 MiB; 33 threads; cpus 60-91 (32); parse 26.2 ms total / 0.205 ms per req TTFT mean 118.01 p50 108.39 p90 131.99 p99 212.36 max 212.37 (ms) TPOT mean 9.01 p50 8.81 p90 9.74 p99 9.82 max 10.17 (ms) 
+  [dinfer-gpu] sm=99% mem=63% n=29
+  [dinfer-metrics] steps=697 step_ms=9.01 sched=3us exec=9.01ms | per_req ttft=107.3ms e2e=0.0ms tpot=8.94ms | gen_tok=8320 prompt_tok=55687 prefix_hit=0/55557 preempt=0
+  [dinfer-host] render=1017us(n=130) || prefill: steps=26 toks/step=2149 nreq=12.7 sched=63 exec=43409 publish=24 total=43495 | upd=nan build=nan fwd=nan | htod=nan launch=nan wait=nan || decode: steps=671 toks/step=12 nreq=11.9 sched=2 exec=7674 publish=10 total=7685 | upd=0 build=5 fwd=8983 | htod=21 launch=69 wait=7678
+  [vllm]  throughput: 24.17 req/s 1546.6 output tok/s 11921.8 total tok/s client: cpu 0.24s (user 0.10 sys 0.14) = 0.04 cores avg over 5.3s wall; rss 6 MiB; 33 threads; cpus 60-91 (32); parse 31.3 ms total / 0.245 ms per req TTFT mean 188.48 p50 185.50 p90 238.60 p99 245.82 max 245.83 (ms) TPOT mean 7.50 p50 7.17 p90 8.38 p99 10.27 max 10.28 (ms) 
+  [vllm-gpu] 
+  [vllm-metrics] steps prefill=38 decode=661 | per_req queue=5.2ms prefill=124.9ms decode=470.0ms infer=594.6ms | decode_step=92.44ms(req-sum/steps) | sched=498us/call n=671 | iter_tokens_mean=96.5 | read_bytes=0.0GB gen_tok=8320 prefix_hit=0/55820 preempt=0
+=== round=1 c=32 seed=1032 09:35:12 ===
+  [dinfer]  throughput: 33.23 req/s 2126.6 output tok/s 16358.6 total tok/s client: cpu 0.41s (user 0.19 sys 0.22) = 0.05 cores avg over 7.7s wall; rss 9 MiB; 33 threads; cpus 60-91 (32); parse 55.7 ms total / 0.218 ms per req TTFT mean 214.87 p50 227.27 p90 334.89 p99 377.65 max 391.59 (ms) TPOT mean 11.82 p50 11.88 p90 12.96 p99 13.47 max 14.66 (ms) 
+  [dinfer-gpu] sm=97% mem=49% n=39
+  [dinfer-metrics] steps=671 step_ms=12.39 sched=6us exec=12.38ms | per_req ttft=191.0ms e2e=0.0ms tpot=11.76ms | gen_tok=16512 prompt_tok=110506 prefix_hit=0/110248 preempt=0
+  [dinfer-host] render=1026us(n=258) || prefill: steps=36 toks/step=3085 nreq=23.4 sched=83 exec=68761 publish=37 total=68881 | upd=nan build=nan fwd=nan | htod=nan launch=nan wait=nan || decode: steps=635 toks/step=25 nreq=24.7 sched=3 exec=9183 publish=16 total=9202 | upd=1 build=8 fwd=12350 | htod=29 launch=77 wait=9197
+  [vllm]  throughput: 38.23 req/s 2446.8 output tok/s 18860.2 total tok/s client: cpu 0.47s (user 0.18 sys 0.29) = 0.07 cores avg over 6.7s wall; rss 9 MiB; 33 threads; cpus 60-91 (32); parse 59.0 ms total / 0.230 ms per req TTFT mean 228.38 p50 231.59 p90 326.44 p99 343.04 max 343.15 (ms) TPOT mean 9.64 p50 9.38 p90 11.39 p99 12.48 max 13.36 (ms) 
+  [vllm-gpu] 
+  [vllm-metrics] steps prefill=52 decode=663 | per_req queue=20.5ms prefill=128.9ms decode=605.4ms infer=734.5ms | decode_step=235.60ms(req-sum/steps) | sched=849us/call n=672 | iter_tokens_mean=191.1 | read_bytes=0.0GB gen_tok=16510 prefix_hit=0/110760 preempt=0
+=== round=1 c=64 seed=1064 09:35:27 ===
+  [dinfer]  throughput: 43.23 req/s 2766.8 output tok/s 21276.8 total tok/s client: cpu 0.84s (user 0.36 sys 0.47) = 0.07 cores avg over 11.8s wall; rss 13 MiB; 33 threads; cpus 60-91 (32); parse 118.0 ms total / 0.231 ms per req TTFT mean 279.74 p50 218.49 p90 434.63 p99 773.41 max 773.52 (ms) TPOT mean 18.50 p50 18.31 p90 21.00 p99 21.83 max 21.98 (ms) 
+  [dinfer-gpu] sm=96% mem=57% n=60
+  [dinfer-metrics] steps=701 step_ms=17.75 sched=14us exec=17.73ms | per_req ttft=248.8ms e2e=0.0ms tpot=18.45ms | gen_tok=32896 prompt_tok=220079 prefix_hit=0/219565 preempt=0
+  [dinfer-host] render=1022us(n=514) || prefill: steps=67 toks/step=3328 nreq=51.0 sched=98 exec=81588 publish=63 total=81749 | upd=nan build=nan fwd=nan | htod=nan launch=nan wait=nan || decode: steps=634 toks/step=47 nreq=46.5 sched=5 exec=10981 publish=28 total=11014 | upd=1 build=13 fwd=17691 | htod=37 launch=67 wait=11198
+  [vllm]  throughput: 51.94 req/s 3324.0 output tok/s 25613.6 total tok/s client: cpu 0.96s (user 0.36 sys 0.60) = 0.10 cores avg over 9.9s wall; rss 13 MiB; 33 threads; cpus 60-91 (32); parse 117.7 ms total / 0.230 ms per req TTFT mean 277.39 p50 240.85 p90 343.80 p99 635.94 max 640.43 (ms) TPOT mean 15.11 p50 15.33 p90 16.51 p99 18.43 max 18.63 (ms) 
+  [vllm-gpu] 
+  [vllm-metrics] steps prefill=79 decode=662 | per_req queue=42.7ms prefill=152.4ms decode=950.4ms infer=1102.7ms | decode_step=737.92ms(req-sum/steps) | sched=1506us/call n=671 | iter_tokens_mean=381.2 | read_bytes=0.0GB gen_tok=32890 prefix_hit=0/220590 preempt=0
+=== round=2 c=1 seed=2001 09:35:51 ===
+  [dinfer]  throughput: 3.18 req/s 203.7 output tok/s 1571.0 total tok/s client: cpu 0.01s (user 0.00 sys 0.01) = 0.00 cores avg over 2.5s wall; rss 4 MiB; 33 threads; cpus 60-91 (32); parse 1.2 ms total / 0.155 ms per req TTFT mean 21.23 p50 21.20 p90 21.30 p99 21.55 max 21.55 (ms) TPOT mean 4.65 p50 4.65 p90 4.65 p99 4.65 max 4.65 (ms) 
+  [dinfer-gpu] sm=91% mem=53% n=13
+  [dinfer-metrics] steps=640 step_ms=4.87 sched=0us exec=4.87ms | per_req ttft=19.4ms e2e=0.0ms tpot=4.65ms | gen_tok=640 prompt_tok=4299 prefix_hit=0/4289 preempt=0
+  [dinfer-host] render=1127us(n=10) || prefill: steps=10 toks/step=430 nreq=1.0 sched=20 exec=19408 publish=8 total=19436 | upd=nan build=nan fwd=nan | htod=nan launch=nan wait=nan || decode: steps=630 toks/step=1 nreq=1.0 sched=0 exec=4642 publish=3 total=4645 | upd=0 build=1 fwd=4855 | htod=16 launch=62 wait=4764
+  [vllm]  throughput: 3.12 req/s 199.9 output tok/s 1544.3 total tok/s client: cpu 0.02s (user 0.00 sys 0.02) = 0.01 cores avg over 2.6s wall; rss 4 MiB; 33 threads; cpus 60-91 (32); parse 1.4 ms total / 0.178 ms per req TTFT mean 24.84 p50 24.75 p90 25.10 p99 25.48 max 25.48 (ms) TPOT mean 4.69 p50 4.69 p90 4.69 p99 4.70 max 4.70 (ms) 
+  [vllm-gpu] 
+  [vllm-metrics] steps prefill=10 decode=630 | per_req queue=0.0ms prefill=21.0ms decode=300.0ms infer=320.0ms | decode_step=4.76ms(req-sum/steps) | sched=85us/call n=660 | iter_tokens_mean=7.7 | read_bytes=0.0GB gen_tok=640 prefix_hit=0/4310 preempt=0
+=== round=2 c=2 seed=2002 09:35:57 ===
+  [dinfer]  throughput: 5.51 req/s 352.8 output tok/s 2712.6 total tok/s client: cpu 0.03s (user 0.00 sys 0.03) = 0.01 cores avg over 2.9s wall; rss 4 MiB; 33 threads; cpus 60-91 (32); parse 3.0 ms total / 0.190 ms per req TTFT mean 34.67 p50 29.96 p90 49.89 p99 49.94 max 49.94 (ms) TPOT mean 5.19 p50 5.15 p90 5.34 p99 5.36 max 5.36 (ms) 
+  [dinfer-gpu] sm=99% mem=58% n=15
+  [dinfer-metrics] steps=677 step_ms=5.18 sched=1us exec=5.18ms | per_req ttft=26.7ms e2e=0.0ms tpot=5.13ms | gen_tok=1152 prompt_tok=7703 prefix_hit=0/7685 preempt=0
+  [dinfer-host] render=989us(n=18) || prefill: steps=17 toks/step=454 nreq=1.5 sched=19 exec=16177 publish=8 total=16204 | upd=nan build=nan fwd=nan | htod=nan launch=nan wait=nan || decode: steps=639 toks/step=2 nreq=1.8 sched=0 exec=5058 publish=4 total=5062 | upd=0 build=1 fwd=5328 | htod=16 launch=62 wait=5195
+  [vllm]  throughput: 5.42 req/s 347.0 output tok/s 2673.5 total tok/s client: cpu 0.03s (user 0.01 sys 0.02) = 0.01 cores avg over 3.0s wall; rss 4 MiB; 33 threads; cpus 60-91 (32); parse 3.4 ms total / 0.211 ms per req TTFT mean 32.76 p50 35.95 p90 37.34 p99 40.78 max 40.78 (ms) TPOT mean 5.33 p50 5.30 p90 5.44 p99 5.45 max 5.45 (ms) 
+  [vllm-gpu] 
+  [vllm-metrics] steps prefill=18 decode=638 | per_req queue=0.0ms prefill=22.2ms decode=327.8ms infer=355.6ms | decode_step=9.25ms(req-sum/steps) | sched=146us/call n=661 | iter_tokens_mean=13.7 | read_bytes=0.0GB gen_tok=1160 prefix_hit=0/7720 preempt=0
+=== round=2 c=4 seed=2004 09:36:04 ===
+  [dinfer]  throughput: 9.21 req/s 589.5 output tok/s 4533.9 total tok/s client: cpu 0.05s (user 0.02 sys 0.04) = 0.02 cores avg over 3.5s wall; rss 5 MiB; 33 threads; cpus 60-91 (32); parse 6.2 ms total / 0.194 ms per req TTFT mean 53.16 p50 57.31 p90 60.77 p99 74.39 max 74.39 (ms) TPOT mean 5.95 p50 5.98 p90 6.06 p99 6.07 max 6.07 (ms) 
+  [dinfer-gpu] sm=88% mem=56% n=18
+  [dinfer-metrics] steps=697 step_ms=5.87 sched=1us exec=5.87ms | per_req ttft=45.3ms e2e=0.0ms tpot=5.87ms | gen_tok=2176 prompt_tok=14562 prefix_hit=0/14528 preempt=0
+  [dinfer-host] render=987us(n=34) || prefill: steps=18 toks/step=811 nreq=3.5 sched=36 exec=12816 publish=6 total=12858 | upd=nan build=nan fwd=nan | htod=nan launch=nan wait=nan || decode: steps=679 toks/step=3 nreq=3.1 sched=1 exec=5684 publish=4 total=5689 | upd=0 build=1 fwd=5849 | htod=17 launch=20 wait=5713
+  [vllm]  throughput: 8.50 req/s 544.3 output tok/s 4194.0 total tok/s client: cpu 0.06s (user 0.03 sys 0.04) = 0.02 cores avg over 3.8s wall; rss 5 MiB; 33 threads; cpus 60-91 (32); parse 7.2 ms total / 0.225 ms per req TTFT mean 89.74 p50 88.62 p90 93.26 p99 96.39 max 96.39 (ms) TPOT mean 6.04 p50 6.05 p90 6.08 p99 6.10 max 6.10 (ms) 
+  [vllm-gpu] 
+  [vllm-metrics] steps prefill=18 decode=638 | per_req queue=0.0ms prefill=72.9ms decode=376.5ms infer=447.1ms | decode_step=20.06ms(req-sum/steps) | sched=188us/call n=661 | iter_tokens_mean=25.9 | read_bytes=0.0GB gen_tok=2170 prefix_hit=0/14600 preempt=0
+=== round=2 c=8 seed=2008 09:36:13 ===
+  [dinfer]  throughput: 14.21 req/s 909.4 output tok/s 6996.8 total tok/s client: cpu 0.11s (user 0.05 sys 0.06) = 0.02 cores avg over 4.5s wall; rss 5 MiB; 33 threads; cpus 60-91 (32); parse 12.2 ms total / 0.191 ms per req TTFT mean 98.33 p50 105.24 p90 121.69 p99 121.74 max 121.81 (ms) TPOT mean 7.22 p50 7.29 p90 7.43 p99 7.44 max 7.45 (ms) 
+  [dinfer-gpu] sm=99% mem=61% n=23
+  [dinfer-metrics] steps=740 step_ms=6.91 sched=2us exec=6.91ms | per_req ttft=88.2ms e2e=0.0ms tpot=7.14ms | gen_tok=4224 prompt_tok=28278 prefix_hit=0/28212 preempt=0
+  [dinfer-host] render=1020us(n=66) || prefill: steps=19 toks/step=1491 nreq=6.1 sched=50 exec=16282 publish=8 total=16340 | upd=nan build=nan fwd=nan | htod=nan launch=nan wait=nan || decode: steps=714 toks/step=6 nreq=5.8 sched=1 exec=6730 publish=6 total=6737 | upd=0 build=2 fwd=6958 | htod=18 launch=28 wait=6779
+  [vllm]  throughput: 14.94 req/s 956.4 output tok/s 7373.3 total tok/s client: cpu 0.13s (user 0.05 sys 0.08) = 0.03 cores avg over 4.3s wall; rss 6 MiB; 33 threads; cpus 60-91 (32); parse 17.2 ms total / 0.269 ms per req TTFT mean 143.73 p50 153.52 p90 160.09 p99 162.15 max 162.17 (ms) TPOT mean 6.21 p50 6.15 p90 6.36 p99 7.16 max 7.16 (ms) 
+  [vllm-gpu] 
+  [vllm-metrics] steps prefill=23 decode=643 | per_req queue=0.0ms prefill=96.7ms decode=387.9ms infer=484.8ms | decode_step=39.81ms(req-sum/steps) | sched=292us/call n=662 | iter_tokens_mean=49.9 | read_bytes=0.0GB gen_tok=4230 prefix_hit=0/28340 preempt=0
+=== round=2 c=16 seed=2016 09:36:23 ===
+  [dinfer]  throughput: 22.49 req/s 1439.1 output tok/s 11067.3 total tok/s client: cpu 0.21s (user 0.09 sys 0.12) = 0.04 cores avg over 5.7s wall; rss 6 MiB; 33 threads; cpus 60-91 (32); parse 26.3 ms total / 0.205 ms per req TTFT mean 118.11 p50 108.78 p90 131.91 p99 212.56 max 212.57 (ms) TPOT mean 9.06 p50 8.94 p90 9.81 p99 9.94 max 10.03 (ms) 
+  [dinfer-gpu] sm=91% mem=60% n=29
+  [dinfer-metrics] steps=697 step_ms=9.05 sched=3us exec=9.04ms | per_req ttft=107.4ms e2e=0.0ms tpot=8.99ms | gen_tok=8320 prompt_tok=55670 prefix_hit=0/55540 preempt=0
+  [dinfer-host] render=1013us(n=130) || prefill: steps=26 toks/step=2149 nreq=12.7 sched=71 exec=43041 publish=24 total=43136 | upd=nan build=nan fwd=nan | htod=nan launch=nan wait=nan || decode: steps=671 toks/step=12 nreq=11.9 sched=1 exec=7725 publish=9 total=7735 | upd=0 build=5 fwd=9019 | htod=21 launch=68 wait=7730
+  [vllm]  throughput: 24.60 req/s 1574.7 output tok/s 12134.6 total tok/s client: cpu 0.24s (user 0.11 sys 0.13) = 0.05 cores avg over 5.2s wall; rss 6 MiB; 33 threads; cpus 60-91 (32); parse 31.8 ms total / 0.249 ms per req TTFT mean 178.21 p50 178.26 p90 237.65 p99 248.80 max 248.90 (ms) TPOT mean 7.47 p50 7.16 p90 8.37 p99 10.33 max 10.35 (ms) 
+  [vllm-gpu] 
+  [vllm-metrics] steps prefill=36 decode=663 | per_req queue=3.5ms prefill=114.7ms decode=469.2ms infer=583.8ms | decode_step=92.01ms(req-sum/steps) | sched=485us/call n=673 | iter_tokens_mean=96.1 | read_bytes=0.0GB gen_tok=8320 prefix_hit=0/55800 preempt=0
+=== round=2 c=32 seed=2032 09:36:36 ===
+  [dinfer]  throughput: 33.28 req/s 2130.0 output tok/s 16378.7 total tok/s client: cpu 0.42s (user 0.16 sys 0.26) = 0.05 cores avg over 7.7s wall; rss 9 MiB; 33 threads; cpus 60-91 (32); parse 56.1 ms total / 0.219 ms per req TTFT mean 213.85 p50 226.27 p90 333.42 p99 374.12 max 389.88 (ms) TPOT mean 11.81 p50 11.92 p90 12.97 p99 13.42 max 14.62 (ms) 
+  [dinfer-gpu] sm=96% mem=49% n=39
+  [dinfer-metrics] steps=671 step_ms=12.37 sched=7us exec=12.36ms | per_req ttft=190.1ms e2e=0.0ms tpot=11.75ms | gen_tok=16512 prompt_tok=110457 prefix_hit=0/110199 preempt=0
+  [dinfer-host] render=1018us(n=258) || prefill: steps=36 toks/step=3084 nreq=23.4 sched=95 exec=68468 publish=39 total=68601 | upd=nan build=nan fwd=nan | htod=nan launch=nan wait=nan || decode: steps=635 toks/step=25 nreq=24.7 sched=3 exec=9180 publish=16 total=9199 | upd=1 build=8 fwd=12332 | htod=28 launch=75 wait=9198
+  [vllm]  throughput: 39.12 req/s 2503.8 output tok/s 19292.3 total tok/s client: cpu 0.48s (user 0.20 sys 0.29) = 0.07 cores avg over 6.5s wall; rss 10 MiB; 33 threads; cpus 60-91 (32); parse 68.3 ms total / 0.267 ms per req TTFT mean 214.23 p50 233.12 p90 267.24 p99 343.82 max 344.16 (ms) TPOT mean 9.56 p50 9.24 p90 10.45 p99 11.38 max 11.59 (ms) 
+  [vllm-gpu] 
+  [vllm-metrics] steps prefill=46 decode=656 | per_req queue=7.0ms prefill=131.9ms decode=600.4ms infer=732.2ms | decode_step=236.13ms(req-sum/steps) | sched=835us/call n=665 | iter_tokens_mean=193.1 | read_bytes=0.0GB gen_tok=16510 prefix_hit=0/110720 preempt=0
+=== round=2 c=64 seed=2064 09:36:51 ===
+  [dinfer]  throughput: 43.23 req/s 2767.0 output tok/s 21282.6 total tok/s client: cpu 0.83s (user 0.35 sys 0.48) = 0.07 cores avg over 11.8s wall; rss 13 MiB; 33 threads; cpus 60-91 (32); parse 118.2 ms total / 0.231 ms per req TTFT mean 280.60 p50 219.37 p90 436.20 p99 775.44 max 776.10 (ms) TPOT mean 18.50 p50 18.27 p90 20.96 p99 21.80 max 21.81 (ms) 
+  [dinfer-gpu] sm=96% mem=57% n=60
+  [dinfer-metrics] steps=700 step_ms=17.77 sched=13us exec=17.75ms | per_req ttft=249.5ms e2e=0.0ms tpot=18.44ms | gen_tok=32896 prompt_tok=220134 prefix_hit=0/219620 preempt=0
+  [dinfer-host] render=1001us(n=514) || prefill: steps=67 toks/step=3328 nreq=51.0 sched=94 exec=81808 publish=66 total=81968 | upd=nan build=nan fwd=nan | htod=nan launch=nan wait=nan || decode: steps=633 toks/step=47 nreq=46.6 sched=5 exec=10971 publish=28 total=11005 | upd=1 build=13 fwd=17712 | htod=37 launch=66 wait=11192
+  [vllm]  throughput: 52.33 req/s 3348.9 output tok/s 25810.8 total tok/s client: cpu 0.97s (user 0.39 sys 0.58) = 0.10 cores avg over 9.8s wall; rss 14 MiB; 33 threads; cpus 60-91 (32); parse 136.8 ms total / 0.267 ms per req TTFT mean 271.15 p50 241.55 p90 349.96 p99 645.46 max 649.77 (ms) TPOT mean 15.06 p50 15.43 p90 16.37 p99 18.48 max 18.71 (ms) 
+  [vllm-gpu] 
+  [vllm-metrics] steps prefill=78 decode=661 | per_req queue=36.2ms prefill=152.3ms decode=947.5ms infer=1099.8ms | decode_step=736.76ms(req-sum/steps) | sched=1501us/call n=670 | iter_tokens_mean=381.8 | read_bytes=0.0GB gen_tok=32890 prefix_hit=0/220650 preempt=0
+=== round=3 c=1 seed=3001 09:37:14 ===
+  [dinfer]  throughput: 3.18 req/s 203.7 output tok/s 1566.4 total tok/s client: cpu 0.01s (user 0.01 sys 0.00) = 0.00 cores avg over 2.5s wall; rss 4 MiB; 33 threads; cpus 60-91 (32); parse 1.2 ms total / 0.156 ms per req TTFT mean 21.16 p50 21.21 p90 21.23 p99 21.34 max 21.34 (ms) TPOT mean 4.65 p50 4.65 p90 4.65 p99 4.66 max 4.66 (ms) 
+  [dinfer-gpu] sm=83% mem=47% n=13
+  [dinfer-metrics] steps=640 step_ms=4.88 sched=0us exec=4.87ms | per_req ttft=19.4ms e2e=0.0ms tpot=4.65ms | gen_tok=640 prompt_tok=4285 prefix_hit=0/4275 preempt=0
+  [dinfer-host] render=1079us(n=10) || prefill: steps=10 toks/step=428 nreq=1.0 sched=19 exec=19402 publish=7 total=19427 | upd=nan build=nan fwd=nan | htod=nan launch=nan wait=nan || decode: steps=630 toks/step=1 nreq=1.0 sched=0 exec=4644 publish=3 total=4647 | upd=0 build=1 fwd=4856 | htod=16 launch=62 wait=4764
+  [vllm]  throughput: 3.12 req/s 199.7 output tok/s 1539.4 total tok/s client: cpu 0.02s (user 0.00 sys 0.01) = 0.01 cores avg over 2.6s wall; rss 4 MiB; 33 threads; cpus 60-91 (32); parse 1.5 ms total / 0.188 ms per req TTFT mean 25.02 p50 24.96 p90 25.22 p99 25.62 max 25.62 (ms) TPOT mean 4.69 p50 4.69 p90 4.69 p99 4.71 max 4.71 (ms) 
+  [vllm-gpu] 
+  [vllm-metrics] steps prefill=10 decode=630 | per_req queue=0.0ms prefill=20.0ms decode=290.0ms infer=310.0ms | decode_step=4.60ms(req-sum/steps) | sched=85us/call n=660 | iter_tokens_mean=7.7 | read_bytes=0.0GB gen_tok=640 prefix_hit=0/4290 preempt=0
+=== round=3 c=2 seed=3002 09:37:21 ===
+  [dinfer]  throughput: 5.54 req/s 354.8 output tok/s 2727.3 total tok/s client: cpu 0.03s (user 0.01 sys 0.02) = 0.01 cores avg over 2.9s wall; rss 4 MiB; 33 threads; cpus 60-91 (32); parse 2.9 ms total / 0.183 ms per req TTFT mean 35.32 p50 48.40 p90 49.70 p99 49.95 max 49.95 (ms) TPOT mean 5.17 p50 5.19 p90 5.27 p99 5.29 max 5.29 (ms) 
+  [dinfer-gpu] sm=98% mem=57% n=15
+  [dinfer-metrics] steps=684 step_ms=5.10 sched=1us exec=5.10ms | per_req ttft=27.1ms e2e=0.0ms tpot=5.11ms | gen_tok=1152 prompt_tok=7710 prefix_hit=0/7692 preempt=0
+  [dinfer-host] render=1089us(n=18) || prefill: steps=18 toks/step=429 nreq=1.4 sched=20 exec=15371 publish=7 total=15399 | upd=nan build=nan fwd=nan | htod=nan launch=nan wait=nan || decode: steps=638 toks/step=2 nreq=1.8 sched=0 exec=5038 publish=4 total=5042 | upd=0 build=1 fwd=5303 | htod=16 launch=62 wait=5164
+  [vllm]  throughput: 5.39 req/s 345.2 output tok/s 2658.9 total tok/s client: cpu 0.03s (user 0.01 sys 0.02) = 0.01 cores avg over 3.0s wall; rss 4 MiB; 33 threads; cpus 60-91 (32); parse 3.7 ms total / 0.233 ms per req TTFT mean 32.55 p50 36.30 p90 37.26 p99 40.72 max 40.72 (ms) TPOT mean 5.36 p50 5.40 p90 5.46 p99 5.46 max 5.46 (ms) 
+  [vllm-gpu] 
+  [vllm-metrics] steps prefill=18 decode=638 | per_req queue=0.0ms prefill=22.2ms decode=333.3ms infer=355.6ms | decode_step=9.40ms(req-sum/steps) | sched=146us/call n=661 | iter_tokens_mean=13.7 | read_bytes=0.0GB gen_tok=1160 prefix_hit=0/7730 preempt=0
+=== round=3 c=4 seed=3004 09:37:28 ===
+  [dinfer]  throughput: 9.32 req/s 596.3 output tok/s 4591.3 total tok/s client: cpu 0.05s (user 0.03 sys 0.03) = 0.02 cores avg over 3.4s wall; rss 5 MiB; 33 threads; cpus 60-91 (32); parse 6.2 ms total / 0.193 ms per req TTFT mean 54.65 p50 56.28 p90 61.03 p99 73.38 max 73.38 (ms) TPOT mean 5.85 p50 5.83 p90 5.97 p99 6.00 max 6.00 (ms) 
+  [dinfer-gpu] sm=93% mem=59% n=18
+  [dinfer-metrics] steps=700 step_ms=5.79 sched=1us exec=5.79ms | per_req ttft=46.8ms e2e=0.0ms tpot=5.78ms | gen_tok=2176 prompt_tok=14573 prefix_hit=0/14539 preempt=0
+  [dinfer-host] render=1027us(n=34) || prefill: steps=18 toks/step=811 nreq=3.5 sched=32 exec=12566 publish=6 total=12605 | upd=nan build=nan fwd=nan | htod=nan launch=nan wait=nan || decode: steps=682 toks/step=3 nreq=3.1 sched=1 exec=5609 publish=4 total=5613 | upd=0 build=1 fwd=5769 | htod=17 launch=19 wait=5633
+  [vllm]  throughput: 8.53 req/s 545.8 output tok/s 4211.5 total tok/s client: cpu 0.07s (user 0.04 sys 0.03) = 0.02 cores avg over 3.8s wall; rss 5 MiB; 33 threads; cpus 60-91 (32); parse 7.3 ms total / 0.227 ms per req TTFT mean 90.39 p50 89.86 p90 93.58 p99 97.08 max 97.08 (ms) TPOT mean 6.01 p50 6.02 p90 6.11 p99 6.12 max 6.12 (ms) 
+  [vllm-gpu] 
+  [vllm-metrics] steps prefill=18 decode=638 | per_req queue=0.0ms prefill=73.2ms decode=373.5ms infer=447.1ms | decode_step=19.91ms(req-sum/steps) | sched=190us/call n=661 | iter_tokens_mean=25.9 | read_bytes=0.0GB gen_tok=2170 prefix_hit=0/14610 preempt=0
+=== round=3 c=8 seed=3008 09:37:37 ===
+  [dinfer]  throughput: 14.23 req/s 910.5 output tok/s 6999.9 total tok/s client: cpu 0.11s (user 0.06 sys 0.05) = 0.02 cores avg over 4.5s wall; rss 5 MiB; 33 threads; cpus 60-91 (32); parse 13.2 ms total / 0.207 ms per req TTFT mean 99.49 p50 108.56 p90 125.72 p99 125.87 max 125.87 (ms) TPOT mean 7.18 p50 7.16 p90 7.32 p99 7.32 max 7.47 (ms) 
+  [dinfer-gpu] sm=99% mem=62% n=23
+  [dinfer-metrics] steps=746 step_ms=6.85 sched=2us exec=6.85ms | per_req ttft=90.9ms e2e=0.0ms tpot=7.10ms | gen_tok=4224 prompt_tok=28255 prefix_hit=0/28189 preempt=0
+  [dinfer-host] render=1055us(n=66) || prefill: steps=19 toks/step=1490 nreq=6.5 sched=57 exec=16050 publish=8 total=16114 | upd=nan build=nan fwd=nan | htod=nan launch=nan wait=nan || decode: steps=720 toks/step=6 nreq=5.7 sched=1 exec=6674 publish=6 total=6681 | upd=0 build=2 fwd=6895 | htod=18 launch=25 wait=6712
+  [vllm]  throughput: 15.20 req/s 972.7 output tok/s 7493.3 total tok/s client: cpu 0.13s (user 0.04 sys 0.09) = 0.03 cores avg over 4.2s wall; rss 5 MiB; 33 threads; cpus 60-91 (32); parse 16.5 ms total / 0.258 ms per req TTFT mean 137.76 p50 156.26 p90 161.17 p99 162.13 max 162.50 (ms) TPOT mean 6.16 p50 6.11 p90 6.32 p99 7.10 max 7.21 (ms) 
+  [vllm-gpu] 
+  [vllm-metrics] steps prefill=23 decode=643 | per_req queue=0.0ms prefill=98.5ms decode=386.4ms infer=484.8ms | decode_step=39.66ms(req-sum/steps) | sched=293us/call n=663 | iter_tokens_mean=49.8 | read_bytes=0.0GB gen_tok=4230 prefix_hit=0/28320 preempt=0
+=== round=3 c=16 seed=3016 09:37:47 ===
+  [dinfer]  throughput: 22.15 req/s 1417.5 output tok/s 10901.8 total tok/s client: cpu 0.21s (user 0.08 sys 0.13) = 0.04 cores avg over 5.8s wall; rss 7 MiB; 33 threads; cpus 60-91 (32); parse 26.2 ms total / 0.204 ms per req TTFT mean 118.77 p50 109.36 p90 132.71 p99 213.29 max 213.29 (ms) TPOT mean 9.20 p50 9.08 p90 10.02 p99 10.20 max 10.53 (ms) 
+  [dinfer-gpu] sm=99% mem=64% n=29
+  [dinfer-metrics] steps=697 step_ms=9.17 sched=4us exec=9.16ms | per_req ttft=108.0ms e2e=0.0ms tpot=9.13ms | gen_tok=8320 prompt_tok=55666 prefix_hit=0/55534 preempt=0
+  [dinfer-host] render=1001us(n=130) || prefill: steps=26 toks/step=2148 nreq=12.7 sched=75 exec=43270 publish=25 total=43369 | upd=nan build=nan fwd=nan | htod=nan launch=nan wait=nan || decode: steps=671 toks/step=12 nreq=11.9 sched=2 exec=7845 publish=10 total=7856 | upd=0 build=5 fwd=9142 | htod=21 launch=68 wait=7851
+  [vllm]  throughput: 24.83 req/s 1588.8 output tok/s 12244.6 total tok/s client: cpu 0.24s (user 0.10 sys 0.14) = 0.05 cores avg over 5.2s wall; rss 6 MiB; 33 threads; cpus 60-91 (32); parse 32.7 ms total / 0.256 ms per req TTFT mean 170.82 p50 175.89 p90 224.88 p99 245.90 max 245.91 (ms) TPOT mean 7.49 p50 7.22 p90 8.43 p99 10.31 max 10.37 (ms) 
+  [vllm-gpu] 
+  [vllm-metrics] steps prefill=39 decode=664 | per_req queue=6.4ms prefill=111.1ms decode=469.2ms infer=580.8ms | decode_step=91.87ms(req-sum/steps) | sched=499us/call n=674 | iter_tokens_mean=96.0 | read_bytes=0.0GB gen_tok=8320 prefix_hit=0/55790 preempt=0
+=== round=3 c=32 seed=3032 09:38:00 ===
+  [dinfer]  throughput: 33.31 req/s 2132.0 output tok/s 16404.0 total tok/s client: cpu 0.42s (user 0.18 sys 0.24) = 0.05 cores avg over 7.7s wall; rss 9 MiB; 33 threads; cpus 60-91 (32); parse 56.3 ms total / 0.220 ms per req TTFT mean 213.33 p50 226.27 p90 333.31 p99 374.90 max 389.77 (ms) TPOT mean 11.80 p50 11.80 p90 13.04 p99 13.52 max 14.70 (ms) 
+  [dinfer-gpu] sm=94% mem=52% n=39
+  [dinfer-metrics] steps=671 step_ms=12.36 sched=7us exec=12.35ms | per_req ttft=189.6ms e2e=0.0ms tpot=11.75ms | gen_tok=16512 prompt_tok=110540 prefix_hit=0/110280 preempt=0
+  [dinfer-host] render=1069us(n=258) || prefill: steps=36 toks/step=3086 nreq=23.4 sched=97 exec=68223 publish=38 total=68358 | upd=nan build=nan fwd=nan | htod=nan launch=nan wait=nan || decode: steps=635 toks/step=25 nreq=24.7 sched=3 exec=9181 publish=16 total=9200 | upd=0 build=8 fwd=12320 | htod=28 launch=76 wait=9203
+  [vllm]  throughput: 39.15 req/s 2505.4 output tok/s 19315.8 total tok/s client: cpu 0.47s (user 0.20 sys 0.27) = 0.07 cores avg over 6.5s wall; rss 9 MiB; 33 threads; cpus 60-91 (32); parse 65.0 ms total / 0.254 ms per req TTFT mean 225.33 p50 234.11 p90 309.02 p99 343.36 max 343.56 (ms) TPOT mean 9.38 p50 9.18 p90 10.36 p99 11.34 max 12.25 (ms) 
+  [vllm-gpu] 
+  [vllm-metrics] steps prefill=46 decode=658 | per_req queue=15.9ms prefill=133.4ms decode=589.1ms infer=722.5ms | decode_step=231.00ms(req-sum/steps) | sched=839us/call n=667 | iter_tokens_mean=192.6 | read_bytes=0.0GB gen_tok=16510 prefix_hit=0/110800 preempt=0
+=== round=3 c=64 seed=3064 09:38:15 ===
+  [dinfer]  throughput: 43.19 req/s 2764.2 output tok/s 21257.1 total tok/s client: cpu 0.84s (user 0.33 sys 0.51) = 0.07 cores avg over 11.9s wall; rss 13 MiB; 33 threads; cpus 60-91 (32); parse 118.5 ms total / 0.231 ms per req TTFT mean 279.01 p50 218.32 p90 434.85 p99 776.49 max 776.96 (ms) TPOT mean 18.62 p50 18.32 p90 21.05 p99 21.88 max 22.07 (ms) 
+  [dinfer-gpu] sm=99% mem=57% n=60
+  [dinfer-metrics] steps=694 step_ms=17.94 sched=14us exec=17.92ms | per_req ttft=247.8ms e2e=0.0ms tpot=18.57ms | gen_tok=32896 prompt_tok=220070 prefix_hit=0/219560 preempt=0
+  [dinfer-host] render=1012us(n=514) || prefill: steps=67 toks/step=3328 nreq=51.0 sched=98 exec=81638 publish=68 total=81804 | upd=nan build=nan fwd=nan | htod=nan launch=nan wait=nan || decode: steps=627 toks/step=47 nreq=47.1 sched=5 exec=11113 publish=28 total=11147 | upd=1 build=13 fwd=17883 | htod=37 launch=64 wait=11345
+  [vllm]  throughput: 51.88 req/s 3320.4 output tok/s 25585.6 total tok/s client: cpu 0.96s (user 0.27 sys 0.69) = 0.10 cores avg over 9.9s wall; rss 13 MiB; 33 threads; cpus 60-91 (32); parse 115.8 ms total / 0.226 ms per req TTFT mean 276.36 p50 240.78 p90 348.55 p99 645.34 max 649.49 (ms) TPOT mean 15.14 p50 15.45 p90 16.54 p99 18.64 max 18.70 (ms) 
+  [vllm-gpu] 
+  [vllm-metrics] steps prefill=84 decode=662 | per_req queue=42.6ms prefill=151.8ms decode=952.5ms infer=1104.3ms | decode_step=739.58ms(req-sum/steps) | sched=1518us/call n=671 | iter_tokens_mean=381.2 | read_bytes=0.0GB gen_tok=32890 prefix_hit=0/220590 preempt=0
+STEPA4_DONE
