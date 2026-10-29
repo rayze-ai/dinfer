@@ -1,0 +1,46 @@
+serve_taskset=0-31 bench_taskset=60-91 bin=2026-10-29 09:33 md5=6dd3a6b3cb68 A=[PREFILL_ASYNC=1 ] B=[PREFILL_ASYNC=1 PREFILL_STREAM_PRIO=-2 ] 09:38:53
+r1 A startup: model_load_ms=35332
+r1 A c8:   tps=909.3 ttft_p50=97.09 ttft_p99=142.86 tpot_p50=7.34 tpot_p99=7.76
+ || prefill: steps=18 toks/step=1573 nreq=6.9 sched=41 exec=19509|| decode: steps=702 toks/step=6 nreq=5.8 sched=1 exec=6810
+r1 A c16:   tps=1402.0 ttft_p50=109.06 ttft_p99=212.97 tpot_p50=9.20 tpot_p99=10.33
+ || prefill: steps=26 toks/step=2150 nreq=12.7 sched=59 exec=44142|| decode: steps=671 toks/step=12 nreq=11.9 sched=1 exec=7907
+r1 A c32:   tps=2079.3 ttft_p50=187.53 ttft_p99=346.25 tpot_p50=12.34 tpot_p99=14.81
+ || prefill: steps=47 toks/step=2371 nreq=25.7 sched=53 exec=61739|| decode: steps=626 toks/step=24 nreq=24.5 sched=2 exec=8914
+r1 A c64:   tps=2728.4 ttft_p50=222.87 ttft_p99=793.89 tpot_p50=18.52 tpot_p99=22.14
+ || prefill: steps=67 toks/step=3328 nreq=51.0 sched=82 exec=83112|| decode: steps=627 toks/step=47 nreq=47.1 sched=5 exec=11206
+r1 A out:  is is is is is is is is is is is is is is is is is is is is is is is is
+r1 A out2: 以下是为您准备的三句话介绍：  1. 长城的修建始于春秋战国时期，最初是为了抵御各方势力而建。 2. 到了秦汉时期，长城得到了大规模的扩建与整合，成为了重要的防御体系。 3. 历
+r1 B startup: model_load_ms=35282
+r1 B c8:   tps=903.7 ttft_p50=105.89 ttft_p99=131.81 tpot_p50=7.28 tpot_p99=7.57
+ || prefill: steps=19 toks/step=1490 nreq=6.2 sched=40 exec=19532|| decode: steps=712 toks/step=6 nreq=5.8 sched=1 exec=6719
+r1 B c16:   tps=1420.4 ttft_p50=109.28 ttft_p99=209.82 tpot_p50=8.95 tpot_p99=10.40
+ || prefill: steps=26 toks/step=2148 nreq=12.6 sched=58 exec=44692|| decode: steps=667 toks/step=12 nreq=12.0 sched=1 exec=7819
+r1 B c32:   tps=2123.7 ttft_p50=229.13 ttft_p99=381.77 tpot_p50=11.81 tpot_p99=13.67
+ || prefill: steps=36 toks/step=3085 nreq=23.4 sched=71 exec=70154|| decode: steps=634 toks/step=25 nreq=24.7 sched=2 exec=9135
+r1 B c64:   tps=2737.0 ttft_p50=223.30 ttft_p99=794.31 tpot_p50=18.48 tpot_p99=21.99
+ || prefill: steps=67 toks/step=3328 nreq=51.0 sched=85 exec=83423|| decode: steps=628 toks/step=47 nreq=47.0 sched=5 exec=11096
+r1 B out:  is is is is is is is is is is is is is is is is is is is is is is is is
+r1 B out2: 以下是为您准备的三句话介绍：  1. 长城的修建始于春秋战国时期，最初是为了抵御各方势力而建。 2. 到了秦汉时期，长城得到了大规模的扩建与整合，成为了重要的防御体系。 3. 历
+r2 A startup: model_load_ms=35325
+r2 A c8:   tps=904.5 ttft_p50=105.99 ttft_p99=132.11 tpot_p50=7.27 tpot_p99=7.59
+ || prefill: steps=19 toks/step=1489 nreq=6.2 sched=40 exec=19546|| decode: steps=712 toks/step=6 nreq=5.8 sched=1 exec=6715
+r2 A c16:   tps=1404.8 ttft_p50=109.39 ttft_p99=212.79 tpot_p50=9.17 tpot_p99=10.35
+ || prefill: steps=26 toks/step=2148 nreq=12.7 sched=56 exec=43761|| decode: steps=671 toks/step=12 nreq=11.9 sched=1 exec=7905
+r2 A c32:   tps=2115.7 ttft_p50=227.79 ttft_p99=375.10 tpot_p50=11.84 tpot_p99=13.62
+ || prefill: steps=36 toks/step=3084 nreq=23.4 sched=68 exec=71066|| decode: steps=634 toks/step=25 nreq=24.7 sched=2 exec=9132
+r2 A c64:   tps=2726.4 ttft_p50=223.39 ttft_p99=794.32 tpot_p50=18.58 tpot_p99=22.23
+ || prefill: steps=67 toks/step=3328 nreq=51.0 sched=86 exec=83339|| decode: steps=627 toks/step=47 nreq=47.1 sched=5 exec=11197
+r2 A out:  is is is is is is is is is is is is is is is is is is is is is is is is
+r2 A out2: 以下是为您准备的三句话介绍：  1. 长城的修建始于春秋战国时期，最初是为了抵御各方势力而建。 2. 到了秦汉时期，长城得到了大规模的扩建与整合，成为了重要的防御体系。 3. 历
+r2 B startup: model_load_ms=35259
+r2 B c8:   tps=908.1 ttft_p50=105.92 ttft_p99=122.75 tpot_p50=7.21 tpot_p99=7.42
+ || prefill: steps=19 toks/step=1491 nreq=6.1 sched=38 exec=17872|| decode: steps=715 toks/step=6 nreq=5.7 sched=1 exec=6704
+r2 B c16:   tps=1435.6 ttft_p50=108.42 ttft_p99=212.67 tpot_p50=8.92 tpot_p99=9.98
+ || prefill: steps=26 toks/step=2150 nreq=12.7 sched=54 exec=43627|| decode: steps=671 toks/step=12 nreq=11.9 sched=1 exec=7723
+r2 B c32:   tps=2112.0 ttft_p50=229.03 ttft_p99=395.64 tpot_p50=11.89 tpot_p99=13.87
+ || prefill: steps=36 toks/step=3086 nreq=23.4 sched=70 exec=70223|| decode: steps=635 toks/step=25 nreq=24.7 sched=2 exec=9185
+r2 B c64:   tps=2737.6 ttft_p50=223.73 ttft_p99=795.44 tpot_p50=18.57 tpot_p99=22.00
+ || prefill: steps=67 toks/step=3329 nreq=51.0 sched=82 exec=83360|| decode: steps=627 toks/step=47 nreq=47.1 sched=5 exec=11117
+r2 B out:  is is is is is is is is is is is is is is is is is is is is is is is is
+r2 B out2: 以下是为您准备的三句话介绍：  1. 长城的修建始于春秋战国时期，最初是为了抵御各方势力而建。 2. 到了秦汉时期，长城得到了大规模的扩建与整合，成为了重要的防御体系。 3. 历
+B64AB_DONE

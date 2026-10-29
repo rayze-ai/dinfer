@@ -138,3 +138,5 @@ E1 …（接 kaon3-decode-opt 的 D 编号体系，本 loop 用 E）
 
 ## E7 2026-10-29 b64 跑中（A = 默认 prio（prefill least） / B = `PREFILL_STREAM_PRIO=-2`）
 - r1 A：c8 7.34 / 97、c16 9.20 / 109、c32 12.34 / **187**、c64 18.52 / 223。注意同配置 c32 TTFT 在 stepA7 是 226、b63 B 228、这里 187——**TTFT 的轮间噪声在 c32 达 ±20%**（闭环 bench 一波 32 请求同时到，谁先被 prefill 取决于调度到达相位），TPOT 噪声 ±1%。判 E7 只认 TPOT 与同链 A/B 的 TTFT 差，不跨链比 TTFT 绝对值。
+- **E7 定稿（b64 两轮）：`PREFILL_STREAM_PRIO=-2` 与默认（0）无差**——c8 7.34/7.27 vs 7.28/7.21、c16 9.20/9.17 vs 8.95/8.92（B 低 2.7%，但 A 侧 r1 c32 TTFT 187 vs r2 228 说明 A/B 间差在噪声内）、c32 12.34/11.84 vs 11.81/11.89、c64 18.52/18.58 vs 18.48/18.57；TTFT 全档同（c32 229 vs 228）。机理：5090 流优先级有效区间 (0, -5)，但调度器实际只区分 "greatest" 与 "其它"（-2 与 0 行为一致），中间档位换不回 TTFT。默认不设 `PREFILL_STREAM_PRIO`，旋钮保留。CSV b64 负结果。
+- **本 loop 收口**：E1+E4 合入默认开（stepA7 定稿）；停止条件 c64 ✓、c16/c32 ✗（1.25× / 1.29×）。剩余差额 = prefill 单步吞吐（副流上，需 `[late-harvest] wall_ms` 探针或 nsys 量）+ c8/c16 纯 decode 步 +0.5 ms。下一 loop：MoE p64 ldmatrix / BM128（prefill GEMM）。
