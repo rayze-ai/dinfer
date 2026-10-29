@@ -13,7 +13,7 @@ OUT=/w/dinfer/tmp_${TAG}_out; mkdir -p $OUT
 run_one() { # $1 tag $2 env
 ( local tag=$1; shift
   LOG=/w/dinfer/tmp_${TAG}_$tag.log
-  setsid env $* taskset -c 0-31 $BIN serve --model "$M" --tokenizer "$M" --port $PORT --max-model-len 16384 --max-num-seqs 64 --max-num-batched-tokens 4096 --no-prefix-caching >$LOG 2>&1 &
+  env $* taskset -c 0-31 $BIN serve --model "$M" --tokenizer "$M" --port $PORT --max-model-len 16384 --max-num-seqs 64 --max-num-batched-tokens 4096 --no-prefix-caching >$LOG 2>&1 &
   SP=$!
   for i in $(seq 1 150); do sed "s/\x1b\[[0-9;]*m//g" $LOG | grep -q "listening addr" && break; sleep 1; done
   sed "s/\x1b\[[0-9;]*m//g" $LOG | grep -q "listening addr" || { echo "$tag NOTUP" >> $R; kill -9 $SP; exit 0; }

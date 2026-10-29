@@ -10,7 +10,7 @@ echo "bin=$(stat -c %y target/release/dinfer | cut -c1-16) A=[$AENV] B=[$BENV]" 
 run_one() {
   local tag=$1; shift
   export MOE_GROUPED=1 KAON3_MEGA=1 MEGA_SPGU=4 MEGA_SPDN=4 ROUTER_GEMM_BI=0 CUDA_VISIBLE_DEVICES=0
-  setsid env $* ./target/release/dinfer serve --model "$M" --tokenizer "$M" --port $PORT --max-model-len 16384 --max-num-seqs 64 --max-num-batched-tokens 4096 >/w/dinfer/tmp_${TAG}_$tag.log 2>&1 &
+  env $* ./target/release/dinfer serve --model "$M" --tokenizer "$M" --port $PORT --max-model-len 16384 --max-num-seqs 64 --max-num-batched-tokens 4096 >/w/dinfer/tmp_${TAG}_$tag.log 2>&1 &
   local sp=$!
   for i in $(seq 1 150); do sed "s/\x1b\[[0-9;]*m//g" /w/dinfer/tmp_${TAG}_$tag.log | grep -q "listening addr" && break; sleep 1; done
   sed "s/\x1b\[[0-9;]*m//g" /w/dinfer/tmp_${TAG}_$tag.log | grep -q "listening addr" || { echo "$tag NOTUP" >> $R; sed "s/\x1b\[[0-9;]*m//g" /w/dinfer/tmp_${TAG}_$tag.log | grep -iE "error|panic" | tail -2 | cut -c1-200 >> $R; kill -9 $sp; return; }
