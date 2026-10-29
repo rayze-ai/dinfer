@@ -1288,3 +1288,8 @@
 - 根因：① `nsys_kern.py` 只报"kernel 数最常见"的 graph 实例，c8 bench 尾段 M=1 的步最多，M=8 的桶在另一个 graphId 里没看；② 旧 `nsys_c8.sh` 是 `--num-requests 3`，实际并发 3；③ 没有按 (tokens,nreq) 分组看每步 wall 时间。
 - 解法：`HOST_TIME=1` + `scripts/dev/kaon3_hosttime.sh` 按批形状分组 p50/p90 + cadence；`nsys_kern.py --all` 每个 graphId 一组；nsys 抓 c8 用 `--num-requests ≥ 3×并发`。
 - 避免：说"X 占 Y ms"之前先问三件事——这一组样本的 M 是多少、二进制是哪个、分组键是什么。
+
+## 2026-10-29 排队脚本用 `grep '^DONE'` 等上一条链结束，被内层拼接进来的 DONE 提前触发，pkill 掉了正在跑的探针
+- 现象：b40b 串行跑 expstats2 → moetime，我另起的 nsys 链 `until grep -q '^DONE' tmp_b40b_RESULT.txt` 在 expstats2 的 RESULT（自带 DONE）被 cat 进 b40b_RESULT 时就放行，`pkill -x dinfer` 杀了 moetime 的服务，moetime RESULT 只剩表头。
+- 根因：子脚本 RESULT 各自以 DONE 结尾，父脚本原样拼接；等待方的匹配串没有唯一性。
+- 解法 / 避免：父链结束标记用唯一字面量（`B40B_DONE` / `MOETIME_DONE`），等待方匹配唯一标记；拼接子 RESULT 时 `grep -v '^DONE'`；排队前 `grep -c` 看目标文件里该标记当前出现几次。
