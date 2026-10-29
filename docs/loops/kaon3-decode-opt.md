@@ -1632,3 +1632,7 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - **单流混批 ≥ pair（B 全档略好 0.4–1.3%，待第 2 轮）**。意味着：B35 的"prefill 副流 ‖ decode 主流图"在 c16–c64 没拿到并行收益（prefill 65 ms 占满 SM，decode 图挤不进去），还多付两流同步；而单流混批里 decode 行走 eager 的额外代价也小（decode 行 10–50 行并进 2148 行的 GEMM 几乎免费）。
 - **对 D219 结论的修正**：剩余差额（c16 1.9 / c64 9.4 ms）不是"pair 同步"，是**混批步本身 60–90 ms 期间所有在飞 decode 行都停**——两种结构都如此。异步收割（`kaon3-prefill-async`）的目标不变（让 decode 步在 prefill 期间继续），但实现应基于**单流 + 第二条流只跑 prefill、decode 步继续走图**，并且 decode 图与 prefill eager 在 SM 上会抢——真正能拿回多少取决于 prefill 的 SM 占用能否让出（限 prefill 的 grid / stream priority：decode 流高优先级）。vLLM 的做法（chunk 混批、单步多 1–2 ms）之所以行，是它 prefill 单步 50 tok/ms 且被 decode 步数摊薄；我们 36 tok/ms 仍是根。
 - 若第 2 轮同向：`XSTREAM` 默认改 0（少一套 AltSet 显存 + 少一类路径），pair 代码留作 A/B。
+
+## ★★★ D225 2026-10-29 b56 定稿：**B50 合入**（`XSTREAM` 默认关 = 单流 Paged 混批；`=1` 回退 pair）。两轮同向：c8 7.09 → 7.05、c16 10.68 → **10.60**、c32 13.06 → 12.98、c64 21.40 → **21.17（−1.1%）**；TTFT −1…−3%；吞吐 +1…+2%；输出逐字同。CSV b56，`test/kaon3/2026-10-29/b56/`。
+- 六刀累计（B46/B48/B48b/B48c/B49/B50）对 stepA4：c16 11.36 → 10.60（−6.7%）、c32 14.67 → 12.98（−11.5%）、c64 27.07 → 21.17（−21.8%）。对 vLLM：c16 1.49× / c32 1.41× / c64 1.37×。
+- 剩下的 b57（nsys c16 纯 decode 步）看 M=16 的 +2.2 ms 在哪。
