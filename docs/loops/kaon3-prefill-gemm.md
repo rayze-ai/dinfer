@@ -134,3 +134,4 @@ G 编号（接 D/E）。
 - 每个 prefill 步（98 步）：eager 和 81 ms / 步 ≈ 2254 tok → **28 tok/ms（nsys 态）**，host-time 47 ms（主流视角，不含副流）；G0 的 late 墙钟 28–30 tok/ms 一致。
 - 与启动期污染的 D219/G0 表比：p64 从 27% 回到 38%、Lt 55% → 30%。**MoE p64 是稳态第一项**（3053 ms / 98 步 = 31 ms/步，占 prefill 步 38%）。
 - 等 vLLM 表（export 中）对比同家族。
+- G6 校正：`small_m_mma 1039 us × 505` 全在 0.1–1.6 s（autotune 残留，delay 20 s 没盖住——nsys `--delay` 从进程起算，模型加载 35 s 后 autotune 才跑；下次 delay 60）；`Kernel2 (8,2048)` 分三路：s20 主流 2006 次 gap 8.4 ms = decode 步 lm_head（图内）；**s15 副流 152 次 897 us gap 0.9 ms = late prefill 子批的 lm_head**（B46 后只算采样行 → grid.y=2048 不是行数而是词表 262144/128 = 2048 列块；m 小 → 这是 cuBLAS 对 m=1..16 的 wmma 选择，897 us 与 decode 同）；s14 启动期。即每个 late prefill 步付一次 ~0.9 ms lm_head（词表 bf16 GEMM 的带宽下限 0.83 ms），**无可省**。
