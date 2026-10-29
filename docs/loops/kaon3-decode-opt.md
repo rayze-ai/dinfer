@@ -4,7 +4,7 @@
 > 根因:靠 NO_GRAPH 分段定靶子(说 MoE 占 63%)是假象,被 cudagraph 摊薄。**改任何 kernel 前必须先验证那段是 graph 态真大头**。
 > 用户批评:"做之前反复强调验证,方案是屁股想出来的" —— 不再未验证就动手。
 
-> **快速入口（2026-10-29 第四轮）**：小结 D223 / Step A 表 D202、D221 / M=16 decode 步 profile D227 / 判据预登记 D232。**当前默认（全部进代码）**：`LM_HEAD_ROWS_ONLY=1`、`MOE_PREFILL_P64=1 BN=128 STAGES=3`、`MOE_DEC_RMAX=512`、`FP8_LT_TUNE=1`（m ≥ 9）、`FP8_GEMV_MAX_M=8`、`XSTREAM=0`、`ROUTE_SPLIT_MIN_TOK=9`、`DENSE_GEMV_MAX_M`（b60 定）。回退用相应 env。
+> **快速入口（2026-10-29 第四轮）**：小结 D223 / Step A 表 D202、D221 / M=16 decode 步 profile D227 / 判据预登记 D232。**当前默认（全部进代码）**：`LM_HEAD_ROWS_ONLY=1`、`MOE_PREFILL_P64=1 BN=128 STAGES=3`、`MOE_DEC_RMAX=512`、`FP8_LT_TUNE=1`（m ≥ 9）、`FP8_GEMV_MAX_M=8`、`ROUTE_SPLIT_MIN_TOK=9`、`DENSE_GEMV_MAX_M=8`、**`PREFILL_ASYNC=1 XSTREAM=1 MAIN_STREAM_PRIO=1`**（E6，异步收割 + decode 流最高优先级；`PREFILL_STREAM_PRIO` 备用）。回退用相应 env `=0`。
 
 ## 用户定的流程（严格按此，用户 2026-10-28 两次完善）
 **★★ 前置条件（必先对齐,否则结论作废——D33 血的教训）**:dinfer 与 vLLM **两端都非 eager**,且 **max-model-len / max-num-batched-tokens / concurrency 全一致**。vLLM 现 :28201 是 `--enforce-eager`(eager)+max-model-len 16384,**不能直接用**,要起**非 eager** vLLM 且参数对齐 dinfer。bench prompt 的 **token 数**(非词数,词×~3.9)必须 ≤ max-model-len,否则超限走慢路径(D32 的 2 秒假象)。开跑前核对两端 cmdline。
