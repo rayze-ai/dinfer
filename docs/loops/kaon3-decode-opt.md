@@ -1437,3 +1437,26 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 ## ★★★★ D198 2026-10-29 b48 定稿（`MOE_DEC_RMAX=512`，envab_cN 两轮，b47 源 + RMAX 开关）：c16 11.03/11.27 → 11.28/11.27（持平）、**c32 TPOT 12.20/12.10 → 10.47/10.50（-14%），吞吐 1882 → 2070（+10%）**、**c64 28.43/28.60 → 26.74/26.82（-6%），1883 → 1981**；门禁 R=264 old/rmax 与 ref 逐位 SAME。**默认改 512**（代码已改，远端 target f05df420f737 是"默认 128 + 开关"版，下一轮第一条链先编默认 512 版并用 cN.sh 干净口径复测）。
 - **口径注意**：`envab_cN.sh` 三档同 seed 7，c32/c64 的前 64/128 条 prompt 命中 c16 留下的 prefix cache（TTFT p50 45 ms 暴露），绝对值低于 cN 表（c32 16.1），只能看 A/B 方向；下一轮把 envab_cN 的 seed 按档错开（已列待办）。
 - **收工（用户：连 vLLM 都没达到、差距大，下一轮再优化）**。c16–c64 剩余刀按 D197：② route 拆两段（grid=tokens）③ 混批 prefill 22 tok/ms 定位（c64 TPOT 44% 是它）④ M>16 fp8 Lt 自调优重开 ⑤ attention v3 M=32 40 us/层。
+
+## ★★★★★ D199 2026-10-29 第四轮开工：用户重申 step A/B/C 流程 + 新原则"先对标 vLLM 逐环节"
+**用户原话要点（2026-10-29）**：
+- 前置：拉齐 vLLM 测试条件，两端都非 eager，concurrency / max-model-len / max-num-batched-tokens 一致。
+- Step A：跑 5 轮 c=1,2,4,8,16，测 dinfer 启动时间 / TTFT / TPOT / 带宽 / GPU 利用率，每步 tokenize / chat 模板 / htod / block 分配 / schedule / exec / wait。
+- Step B：针对耗时最长的做深入分析和优化，提交，编译最新代码运行。
+- Step C：端到端测试，收益差则回滚，**数据必须进 CSV 和 dashboard**。回 Step B 重复 5 次（我明确认为需要可适当加轮次）；没进展回 Step A 重新分析。
+- **新原则**：要超越，先对齐参照做得好的点。现在还没达到 vLLM，所以 Step A 要**逐环节与 vLLM 比**：哪一环节比 vLLM 慢 → 劣势优化；哪一环节已领先 → 优势保留（改动不许把它丢掉）。
+
+**本轮环境事实（开工核对）**
+- vLLM 基线 `vllm-noneager` :28201（GPU 2，`--max-model-len 16384 --max-num-batched-tokens 4096 --block-size 32 --gpu-memory-utilization 0.85`，**max-num-seqs 默认 256**；dinfer 64——c ≤ 64 时不影响批形状，记录在案）。`vllm-eager` :28200 不用。
+- dinfer：GPU 0，`--max-model-len 16384 --max-num-seqs 64 --max-num-batched-tokens 4096`，graph 态（非 eager），env `MOE_GROUPED=1 KAON3_MEGA=1 MEGA_SPGU=4 MEGA_SPDN=4 ROUTER_GEMM_BI=0`。
+- 远端二进制 05:54 md5 f05df420 = b48 源（RMAX 默认仍 128）；本地 HEAD 默认 512 **先同步编译**（本轮基线 = HEAD）。
+- 钉核：serve 0-31、bench 60-91、vLLM 容器自己的核；写进 RESULT 头部。
+
+**Step A v4 怎么测（`scripts/dev/kaon3_stepA4.sh`，put 到 `/w/stepA4.sh`，`docker exec -d kaon3-full bash -c 'bash /w/stepA4.sh > /w/dinfer/tmp_stepA4_run.log 2>&1'`）**
+- 5 轮 × c ∈ {1,2,4,8,16}（主口径）+ c ∈ {32,64}（差距所在，附加行），每窗口 dinfer / vLLM 交错，**同窗口同 seed，跨窗口换 seed**（`seed=1000·r+c`，避免 prefix cache 命中假象）。400 tok prompt / 64 out / `num_requests=8c` / warmup 2。
+- dinfer 环节：启动 wall + `model_load_ms`；`[render-time]`（chat 模板 + tokenize）；`[host-time]` sched / exec / publish 按 (tokens,nreq) 分组；`[begin-split]` update_states（含 block 分配）/ build_plan / forward_sample；`[kaon3-host]` upload（htod）/ launch / collect（wait = collect(dtoh_sync)）；nvidia-smi 200 ms 采样 sm / mem util。
+- **vLLM 对标环节（`/metrics` 窗口增量）**：`request_queue_time`（≈ 我们 sched 排队）、`request_prefill_time` / `request_decode_time` / `request_inference_time`、`scheduler_time_seconds`（host 调度）、`prefill_steps` / `decode_steps`（步数 → 每步 ms = decode_time/decode_steps）、`iteration_tokens_total`（批形状）、`estimated_read_bytes_per_gpu`（带宽估计）、`prefix_cache_hits/queries`。dinfer 侧 `engine_steps_total` / `generation_tokens_total` / `prefix_cache_hits_total` 同口径取增量。
+- 产出：一张"环节 × 并发"对比表：每环节 dinfer / vLLM / 比值，标 ✓领先 / ✗落后；Step B 只打 ✗ 里最大的一项。
+- 带宽：vLLM 用其自报 read bytes / 窗口时间；dinfer 用权重字节/步（= 已知 ~2.6 GB fp4+fp8 混合 / 步）÷ 步时间反推；两边都标"估计"。
+
+**停止条件（本轮）**：① c16 TPOT ≤ vLLM × 1.10 且 c32 / c64 ≤ 1.25×（吞吐 ≥ 80%）；② c1 / c8 不退化（> 3% 回滚）；③ 每刀进 CSV（含负结果）。Step B 连续 5 刀无进展 → 回 Step A。
