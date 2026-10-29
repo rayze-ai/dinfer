@@ -137,3 +137,14 @@ GDN 的 chunk 内 GEMM（K=128 连续、state 现成在 smem）属于好的那�
 - c8 TTFT 545 ms（vLLM 146）根因是 `gqa_paged_win` 对 D=512 没有快分支，落到 grid=(req,head) 的串行标量 kernel；一个 Paged 步 476 ms vs 同 token 纯 Prefill 127 ms。补 v6 PAGED 分支后 TTFT -71%、吞吐 +45%。
 - **判法**：某类步（混批 / chunked / 某 head_dim）比同 token 数的"正常"步慢 ≥ 3× 且有固定开销，先 grep 分派函数里每个 `head_dim ==` / `cfg >=` 分支，列"形状 × 路径"表，找落到 `_ref` / `generic` 的格子；比 nsys 快。
 - **§15 补（2026-10-29）**：并发 / cache 命中 / chunked prefill 三种触发下的输出差异，先用 `--no-prefix-caching` + 同批构成重复（c8 vs c8）判**确定性**；确定 + 语义等价 ⇒ 批不变性（m 依赖数值），不是功能 bug。真正的功能 bug 形态：同批构成不确定、或乱码 / 语义崩坏（如 B27 修前的混批 decode 行）。
+
+## 17. 追并发差距先做"环节 × 并发"对标表，TPOT − 纯 decode 步 = prefill 插入量（2026-10-29 kaon3 D202）
+- **判断**：bench TPOT 与 `HOST_TIME` 的纯 decode 步 exec 之差就是 prefill / 混批步摊进来的量；把它和 vLLM 的 `/metrics`（prefill_steps、request_prefill_time、iteration_tokens）并排，一眼看出差在"prefill 步本身慢"还是"调度把它堆成一大步"。c16/32/64 的差额 64% / 100% / 130% 都在这里，纯 decode 步 M≥32 其实已持平。
+- **怎么用**：`scripts/dev/kaon3_stepA4.sh`（两端交错、同窗口同 seed、两端 /metrics 增量）；表格模板见 loop D202。领先的环节列出来，后续改动不许退化它们。
+- **证据**：`test/kaon3/2026-10-29/stepA4/`。
+
+## 18. 调度旋钮 A/B 前先核它的语义对不对得上负载（2026-10-29 kaon3 D206）
+- `long_prefill_token_threshold` 是**单请求**上限，prompt 428 tok < 512 时形同虚设，两轮白跑；一步 2148 tok 是 10 个整请求，要的是**整步 prefill 配额**（B47 `--prefill-tokens-per-step`）。零代码 A/B 便宜，但先花 1 分钟读 scheduler 那几行，别靠参数名猜。
+
+## 19. prefill / 混批步的 lm_head 要只算采样行（2026-10-29 kaon3 D205）
+- nsys 混批步里 `cutlass Kernel2 grid (56,256)` = 2148 行 × 262144 词表全算再 gather，占步时 14%（c64 1/6）。按 grid 复核"行数是不是 tokens"这一条（perf-tooling §21）对 lm_head 同样适用。vLLM 用 `logits_indices` 只算最后行；接新模型时 lm_head 一律按采样行算（B46 模式：gather hidden → GEMM nrows 行）。
