@@ -1274,3 +1274,4 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 
 ## ★★★★ D164 2026-10-29 **b33 bN 作废 + D157 的 setsid 是有害的**：nvidia-smi 在 B 组跑时仍见 A 的 `dinfer_prev_b33` 占 8 GB —— `setsid prog &` 在非交互 bash 下若 bash 把后台作业放进独立 pgrp，setsid 会 fork 后父退出，`$!` 指向已退出的父 → `kill -INT $sp` 杀不到 serve → **上一组的 serve 留在 GPU 上与下一组争算力**（b33 A c1 5.76 vs 应有 5.15 = 与残留的 dual_b32 服务同卡）。D162 的输出重定向才是链尾死因的修法；setsid 全部撤回（bN.sh / tail_wrap→envab.sh）。已杀全部残留，重起 b33 bN（独立、重定向、无 setsid）。
 - 规则更新（knowledge/subagent-ops）：serve 直接 `prog &`，不用 setsid；链起法只靠 `>log 2>&1`；每条链开头 `nvidia-smi` 核无残留 dinfer 进程，有则先清。
+- **D165 队列重置**：发现同时有 3 个脚本在起 serve（旧 b35 watcher、tail_wrap 残留的 envab_setsid、after_b33 因旧 RESULT 含 NOTUP 提前放行），GPU 上两套 serve 并存 → 全部杀掉，改为**单编排器 `master.sh`** 串行：b33 bN → dual envab → smemcap_nat → b35，每段前 `pkill -x dinfer/bench`，全部输出落文件，不再用 watcher。**规则**：同一时间只允许一个编排脚本在跑；起新链前 `ps` 核无旧编排器。
