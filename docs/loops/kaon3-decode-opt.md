@@ -1315,3 +1315,6 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - hosttime（b36 二进制）：(1,1) 5059 us、(8,8) 8475 us；c8 混批仍 4/1000，B35 在此 bench 形态下不贡献（留着，线上流量混批多）。
 - c1 5.04，**离停止条件 c1 ≤ 5.0 还差 0.04 ms**；c8 8.46 对 vLLM 6.24 还差 1.36×。按 D171 的刀：R2 `FP8_GEMV_SMEM_KB=64`（o_proj M=8 留 gemv）envab 跑中 → R1 router bf16 gemv（M ≤ 16）→ R3 dense gateup M=8 warp 编排。
 - 归档 `test/kaon3/2026-10-29/b36/`（bN / parity / hosttime ×2 / b35 / binnat / nsys c8 --all）。
+
+## ★★ D173 2026-10-29 R2 envab smem64_b36（b36 二进制，`FP8_GEMV_SMEM_KB=64`：让 M_TILE=8×K=4096 的 o_proj 留在自写 gemv）：c1 5.05 = 5.05（不涉及），c8 **8.45 → 8.65（+2.4%）退化** → **不采用**，48 KB 门槛保留
+- 解释：M_TILE=8、K=4096 时 smem 64 KB/块 → 每 SM 只能放 3 块（228 KB），8 warp 块 × 3 = 24 warp/SM，权重流并行度不够；cuBLASLt nvjet split-K（11.7 us）反而更好。真正的解法是 gemv 做 K 切分（split-K 两段 + 归约）或 A 放寄存器而不是 smem；先做 R1/R3，再回头。
