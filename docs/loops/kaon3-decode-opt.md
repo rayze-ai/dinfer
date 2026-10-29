@@ -1245,3 +1245,5 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 - **B33c 落地（commit）**：`route_bucket_small` 接受 bf16 logits（`RouteLogits::Bf16`，kernel 内 `to_f32` cast = `bf16_to_f32_n` 同值），kaon3 在 route_fused 且非 BI router 且非 dump 时跳过 `bf16_to_f32_n`（-1 launch/层）。parity 测试加 bf16 vs f32 入口比对（ids 同、w 位同）。远端放 `stage33/`，等 b32 链后入树。
 - **D157 链尾死因候选（第 4 次复现：envab fp8gemv_b2330 也在 A 组后无声退出，无 B log）**：共同点 = `run_one` 里 `kill -INT $sp` 杀同进程组的 serve 后脚本立即消失。推断 dinfer serve 收 SIGINT 时对**进程组**发了信号（或 bash 把 SIGINT 传给了前台组），把同 pgrp 的脚本一并带走；之前"独立起 + bash -x"的能活是巧合（pgrp 关系不同）。修：bN.sh / envab.sh 里 serve 用 `setsid` 起（独立 pgrp）。envab fp8gemv_b2330 重起；b31b 链等它 DONE 后用新 bN.sh 生成 bN_b31b.sh。
 - D157 补：远端 envab.sh 的 serve 行文本与我 sed 的模式不同没打上补丁（已在跑的这次是独立 setsid 起的，预期能活）；另存 `envab_setsid.sh` 供后续链（envab_dual 已改指向）。bN.sh 已打上 setsid。
+
+## ★★★★★ D158 2026-10-29 envab fp8gemv_b2330 首批（b2330 二进制）：`FP8_GEMV=1` c1 TPOT **5.57 → 5.16（-7.4%）**，吞吐 169 → 182；c8 9.37 → 9.39（持平，c8 走 M_TILE 4/nvjet 未受益——B31b 的靶）。**c1 5.16 ms = vLLM 4.69 的 1.10×**（开工时 1.19×）。
