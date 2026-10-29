@@ -1232,3 +1232,4 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
 ## ★★★★★ D154 2026-10-29 b2330 首批 B（B23 + B30a + B30b，bN 口径不带 FP8_GEMV）：c1 TPOT 5.98 → **5.57（-6.9%）**，吞吐 158 → 169；c8 TPOT 10.05 → **9.37（-6.8%）**，吞吐 678 → 703，c8 TTFT 133 → 151（A 侧 133 是排队态噢动，正常 ~155）；英文/中文输出与 A 逐字同
 - -8 launch/层 = -240 launch/步，实测 -0.41 ms/步 ≈ 每 launch 1.7 us（含 kernel 自身 + 间隙），与 D148 估的 1.25 us 间隙 + 小 kernel 时长吻合。**launch 数路线验证成立**：剩余 ~800 launch 还有 ~1 ms 可挖。
 - 注意口径：bN 的 A/B 都没带 `FP8_GEMV=1`；之前 c1 5.57 是带它的数。B23+B30 叠加 FP8_GEMV 预计 ~5.2，等 A2/B2 后用 envab 补一组。
+- **b2330 定稿（两轮 ABAB）**：A c1 5.98/5.99、c8 TPOT 10.05/9.82、吞吐 678/673 → B c1 **5.57/5.57（-7%）**、吞吐 169/169；c8 TPOT **9.37/9.37（-6.8%）**、吞吐 **703/703（+4.4%）**、TTFT 151/152（≈ A2 的 155.6）；B/B2 英文 raw、中文输出与 A 逐字同。**合入**（默认开：`ATTN_PRE_FUSED` / `LAYER_TAIL_FUSED` / `ROUTER_PRE_FUSED`）。CSV round b2330。下一步 envab 叠加 `FP8_GEMV=1` 看 c1 绝对值。
