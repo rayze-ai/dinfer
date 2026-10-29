@@ -1310,3 +1310,8 @@ nsys c1b prefill 段（1560 tok，nsys 态 83 ms；真实 ≈ 25）：grouped_ge
   nsys 态合计 ≈ +1.7 ms（真实 ≈ ×0.6 ≈ 1.0 ms）+ 其余小 kernel 的 M=8 增量 + 间隙增量 ⇒ 对应 hosttime 的 +3.75 ms 的主体。
 - **刀（按收益/代价）**：R1 router 自写 bf16 gemv（M ≤ 16：warp 一列，K 切 lane；720 KB 权重，目标 ≤ 4 us；逐位：fp32 累加序固定）→ c8 -0.3 ms；R2 `FP8_GEMV_SMEM_KB=64` 让 M_TILE=8 的 o_proj 留在 gemv（零代码 envab）→ c8 -0.2 ms；R3 dense gateup M=8 的 warp 编排（2 warp/块 → 8）；R4 MoE pipe4 M=8：64 行散到 ~50 专家 ⇒ 权重读 ~6×（物理），要先算实际激活专家数定下限再决定是否值得。
 - c1 的硬事实：lm_head 870 + MoE 1270 + fp8 gemv 1150 + router 100 + … ；lm_head 若做 fp8（per-channel）可省 ~430 us（c1 5.2 → ~4.8，**达 c1 ≤ 5.0 停止条件**），但 vLLM 对该 checkpoint 保持 bf16 lm_head，这是数值口径变更，**要用户拍板**（候选 ⑤）。
+
+## ★★★★★ D172 2026-10-29 **b36 定稿（两轮 ABAB，A = b33 二进制 `prev_b35`，B = stage36 = B33 修正 + B34① norm+grouped_quant 融合 + B35 xstream + dual 默认开 + B36 dual→pipe4<BM16>）**：c1 TPOT **5.15/5.15 → 5.04/5.04（-2.1%）**，c8 TPOT **8.66/8.70 → 8.46/8.43（-2.5%）**，吞吐 c8 750 → **761**，TTFT 持平；中文 chat / raw 输出 A/B 逐字同；parity 6 个测试组全过（含 `moe_pipe_parity` dual 用例覆盖 pipe4 dual）
+- hosttime（b36 二进制）：(1,1) 5059 us、(8,8) 8475 us；c8 混批仍 4/1000，B35 在此 bench 形态下不贡献（留着，线上流量混批多）。
+- c1 5.04，**离停止条件 c1 ≤ 5.0 还差 0.04 ms**；c8 8.46 对 vLLM 6.24 还差 1.36×。按 D171 的刀：R2 `FP8_GEMV_SMEM_KB=64`（o_proj M=8 留 gemv）envab 跑中 → R1 router bf16 gemv（M ≤ 16）→ R3 dense gateup M=8 warp 编排。
+- 归档 `test/kaon3/2026-10-29/b36/`（bN / parity / hosttime ×2 / b35 / binnat / nsys c8 --all）。

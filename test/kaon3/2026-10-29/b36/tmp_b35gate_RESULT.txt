@@ -1,0 +1,7 @@
+00:55:49
+BUILD EXIT=0
+marker=1
+ serial×2 (no cache): 0/8 differ
+   nat4 serial='Here are three key differences between TCP and UDP:\n\n### 1. '
+         c8    ='Here are three key differences between TCP and UDP:\n\n### 1. '
+GATES DONE 00:56:45
