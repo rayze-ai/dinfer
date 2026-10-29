@@ -1319,3 +1319,7 @@
 - 现象：b55 停链后残留一个 serve（pid 218105，etimes 179 s），b56 的"等显存 < 500 再起"循环在排队。我手动 kill 218105 的同时循环过门起了 b56 serve（pid 218430）。这次没杀错（b56 r1 A 正常），但两件事并发就是赌。
 - 规矩：kill 前**同一条命令里**重新 `ps` 核对 `--port` / etimes；链里的 serve 都带唯一端口，优先 `fuser -k <port>/tcp`；排队链已在跑时不要再手动动 GPU 进程。
 - 补（同日，b57）：nsys 链里 `kill -INT $(pgrep -x dinfer)` 在有 40 个 `<defunct>` dinfer 时把一串僵尸 pid 传给 kill，真 serve 没收到 INT → nsys 等不到退出、报告只有 autotune 段（graph instances 空）。**找 pid 一律按端口从 `/proc/*/cmdline` 匹配 `--port <唯一端口>`**（`fuser`/`ss` 容器里没有）。
+
+## 2026-10-29 transmute 构造第三方 `repr(Rust)` 结构体 → SIGSEGV（cudarc CudaStream）
+- 现象：按 cudarc 0.18.2 源码里 `CudaStream { cu_stream, ctx }` 的顺序 transmute 一个 `#[repr(C)]` 同形结构，`cu_stream()` 回读正确（碰巧），下一次用 ctx 就段错误——编译器把两个字段换了位置。
+- 规矩：对 `repr(Rust)` 外部类型不假设字段顺序。要塞一个值进去，先用正常构造函数拿合法实例，再按**值**定位要改的字（两个字段值域不重叠时可行）原地替换；不行就 `[patch]` 该 crate。
