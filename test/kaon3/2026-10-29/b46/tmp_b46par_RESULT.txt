@@ -1,0 +1,12 @@
+04:05:35
+A_md5=25177d14f83b
+EXIT=0
+combine+norm tokens=1 mode=1 nmode=1: y 位差 0/2816 | h2 位差 0/2816 => ok
+combine+norm tokens=1 mode=0 nmode=1: y 位差 0/2816 | h2 位差 0/2816 => ok
+combine+norm tokens=8 mode=1 nmode=1: y 位差 0/22528 | h2 位差 0/22528 => ok
+combine+norm tokens=8 mode=0 nmode=1: y 位差 0/22528 | h2 位差 0/22528 => ok
+combine+norm tokens=64 mode=1 nmode=1: y 位差 0/180224 | h2 位差 0/180224 => ok
+combine+norm tokens=64 mode=0 nmode=1: y 位差 0/180224 | h2 位差 0/180224 => ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+B46_DONE
