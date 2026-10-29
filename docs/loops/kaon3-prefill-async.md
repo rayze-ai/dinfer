@@ -68,3 +68,5 @@ E1 …（接 kaon3-decode-opt 的 D 编号体系，本 loop 用 E）
 - 任一退化 → 默认留关，记负结果进 CSV。
 
 ## E2 2026-10-29 b62 第 1 轮：A 侧正常（c16 9.50 / c64 19.62）；**B 侧（PREFILL_ASYNC=1 XSTREAM=1）serve 起来后 bench 全空**（c8–c64 四档 `prefill: none || decode: none`，固定 prompt 无输出）→ 请求进了引擎没出来。链已停，先定位（serve 日志 / 是否 panic / 是否 late 永不收割 → 请求卡在 awaiting）。
+- **E2 根因**：`engine step failed: req 12: in-flight token without last_row`。late 路径把 prefill 行从本步 Pending 剔除后，runner 的 `states[rid].num_computed` **没推进**（原 pair 路径由 `finish` 的 `st.num_computed += base` 推进），而 scheduler 在 schedule 时已记成算完 → 下一步 scheduler 给它排 1 个 decode token，runner 这边 `start + 1 == len + 1` 被当成异步在飞行、要 `last_row` → ensure 失败 → 整步失败、后续请求全挂。**修**：`begin_prefill_async` 成功后立刻 `st.num_computed += n − num_draft`（与 scheduler 同步）；收割只 `+= 接受的 draft 数` 并 append token。
+- 单测：`late_prefill_advances_state_and_harvests`（Echo 式 mock 执行器：`supports_prefill_async` 真、`begin` 存句柄、第二次 `harvest` 才完成）。

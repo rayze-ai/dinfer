@@ -558,7 +558,7 @@ impl<E: ModelExecutor> Runner<E> {
                     let d = if i < dr.len() { std::mem::take(&mut dr[i]) } else { Vec::new() };
                     if let Some(st) = self.states.get_mut(&row.rid) {
                         ensure!(!g.is_empty() && g.len() <= 1 + row.num_draft, "late req {}: executor returned {} tokens", row.rid, g.len());
-                        st.num_computed += row.n - row.num_draft + (g.len() - 1);
+                        st.num_computed += g.len() - 1; // base 已在 begin 时推进；这里只加接受的 draft 数
                         st.token_ids.extend_from_slice(&g);
                     }
                     out.req_ids.push(row.rid);
@@ -664,7 +664,13 @@ impl<E: ModelExecutor> Runner<E> {
                 let mut lrows = Vec::with_capacity(plan_p.num_reqs());
                 for (i, &rid) in plan_p.req_ids.iter().enumerate() {
                     let n = plan_p.num_tokens[i] as usize;
-                    lrows.push(PendingRow { rid, n, num_draft: plan_p.spec_tokens[i].len(), end_of_seq: true });
+                    let num_draft = plan_p.spec_tokens[i].len();
+                    // 与 scheduler 同步推进（它在 schedule 时已把这段 prefill 记成算完）；token 本身收割时再 append。
+                    // 否则下一步 scheduler 给它排 decode 行时 runner 这边 start+1 == len+1 → "in-flight token without last_row"（E2 第一次 hang）。
+                    if let Some(st) = self.states.get_mut(&rid) {
+                        st.num_computed += n - num_draft;
+                    }
+                    lrows.push(PendingRow { rid, n, num_draft, end_of_seq: true });
                 }
                 self.late = Some(LatePrefill { handle: h, rows: lrows, req_ids: plan_p.req_ids.clone() });
                 // 主 plan 只剩 decode 行，照常（图）执行；本步 Pending 只含 decode 行
