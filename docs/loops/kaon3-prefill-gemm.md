@@ -149,3 +149,4 @@ G 编号（接 D/E）。
   | elementwise / norm / quant 等 | 1.17 + 0.42 + 0.37 ≈ 2.0 s | norm 0.68 + quant 0.23 + combine 0.23 + other 0.47 ≈ 1.6 s | 持平 |
   - 两边窗口不同（vLLM 264 s 含大量空闲；我们 26 s 稳态），**总量不能直接比**，只比 **单次 kernel us 与每层次数**。
 - **结论（Step A 定靶）**：① **MoE prefill GEMM 每层 1.06 ms vs 0.4 ms**——CUTLASS grouped NVFP4 在 M≈2148×8 行上是我们 p64 的 2.7×；这是本 loop 真正的刀：要么把 p64 做到 BM128 + TMA + 多 stage（CUTLASS 水平），要么**直接接 CUTLASS grouped GEMM**（vLLM 用的就是它，`采用`）；② prefill attention 4×（fa_v5/v6 vs `kernel_unified_attention`）：第二刀。
+- **G7 读数修正**：按"≥600 kernel 的最长步"挑出的两个 vLLM 步分别是 **视觉塔 warmup**（`fmha_cutlassF_bf16`、`relu_bf16_256x128` CUTLASS、grid (632,3)——不是 Kaon 文本层）和 **启动期 elementwise/triton 风暴**；都不是文本 prefill。G7 表里 "CUTLASS device_kernel 19800 × 157 us = MoE" 的归因也要重核——改用 **gridY 代理（GEMM 行块数 14..26 ≈ 1800–3300 行）筛文本 prefill 步**再聚合（`vstep2.py`）。前面写的 "MoE 2.7× / attention 4×" 暂作疑点，等 vstep2。
