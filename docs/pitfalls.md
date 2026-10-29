@@ -1326,3 +1326,7 @@
 
 ## 2026-10-29 链脚本里 `$((8368 + ([ $side = B ] && echo 1 || echo 0)))` 语法错 → 两侧都没跑，RESULT 只剩 DONE
 - bash 算术展开里不能放 `[ ]` 命令替换（要 `$(...)`）。链脚本 `bash -n` 过不了这种运行期错误。规矩：端口 / 变体表用 `if/else` 或关联数组写死，链开头 `set -u` 并在每个变体结束后 `grep -q` 自己的结果行，缺了就 echo FAIL 退出，别让 DONE 标记掩盖空跑。
+
+## 2026-10-29 G3a 用没验证的 "tile=20 == 128x128" 映射写过滤，排除掉的其实是 64x64
+- 现象：`FP8_LT_PREFER_SMALL_TILE` 过滤 `CUBLASLT_ALGO_CONFIG_TILE_ID == 20`，nsys 显示 B 侧 128x128 nvjet 原样在，反而把 n=2816 的小 GEMM 推去更慢的 128x64。
+- 规矩：cuBLASLt 的 TILE_ID 枚举值与 nvjet kernel 名里的 tile 尺寸没有公开对应表，要用 `GEMM_FP8_DEBUG=1` 把每个候选的 desc 与同一次 nsys 里出现的 kernel 名按时序对上再写规则；或直接按实测 us 排除而不是按 id。

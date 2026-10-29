@@ -97,3 +97,13 @@ G 编号（接 D/E）。
 - Step A 补 v2（`kaon3_vllm_nsys2.sh`，宿主）：基线镜像临时容器 `vllm-nsys` @ GPU3，nsys 目录从 kaon3-full `docker cp` 到 `/hf_data/yaochen/nsys` 再 bind；nsys 自带 libcupti，目标镜像不需装。与 g3（GPU0）并行。
 - g3 脚本的 "alt stream = nvjet 最多的流" 选错（选到了 decode 图所在的主流 20：图内 nvjet 小 tile 每步都有）；正确的副流是 **stream 15**（eager、16302 kernel）。用 graphId==0 过滤重算 A/B。
 - vllm_nsys2 第一跑：`--gpus device=3` 撞上 vllm-eager 基线（GPU3 占 28 GB），`Free memory 2.89/31.36 GiB` 起不来。**低级错误**：launch 前没看 `nvidia-smi` 的 GPU3 占用（之前 D199 环境事实里写的是 GPU2 基线，GPU3 是 eager 基线也写了）。改 GPU4 重跑。
+
+## G3a 机理核（g3，nsys A/B 副流 eager nvjet 按 grid；二进制 42dfba32，LDSM=1 两侧）
+| grid（m 块, n 块） | A 128x128 us | B（过滤后应换 tile） |
+|---|---|---|
+| (176,4) qkv n=8192 m≈430 | 143.5 × 384 | **143.8 × 324（仍 128x128）** |
+| (512,4) o_proj k=8192 | 290.6 × 162 | 291.5 × 137（仍） |
+| (136,4) / (176,3) / (512,3) / (136,3) | 89 / 110 / 218 / 78 | 89 / 110 / 229 / 80（仍） |
+- **B 侧副流上的大 GEMM 没换 tile**。原因：这些 m≈430–512 的调用的 m 桶是 512（在 [64, 2048] 内）——但过滤只在 **tune 时**生效，而**副流的 `Gemm` 实例**是在 `AltSet::new` 里独立建的，它的 autotune / 首次 tune 发生在……两边各调一次（D"同桶两条"），应该都走了过滤。再看：B 的 (176,4) 仍是 `128x128x64_6`——说明 **tile=20 不是 128x128**；`algo_desc_full` 的 `tile=20` 与 nvjet 名字里的 `128x128` 的对应是我从 D215 推的，没验证。B 侧确实多了一类 `128x64x64_8`（n=211，45.9 us，grid (512,1)）——那才是被过滤后换上的（原 A 对应项 `64x64x64_12` 20.7 us → 变慢了 2×）。即：**过滤排除的 tile=20 实际是 64x64 那一档，把 m 桶 512 的 n=2816 小 GEMM 推去了更差的 128x64**；而真正的 128x128（nvjet `_6_`）对应别的 tile id。G3a 的实现靶子就错了。
+- 另外 eager 总时长 A 2544 vs B 2436 ms（nvjet 只 16%，p64 21%，**other 62%**）——副流上大头是 "other"，下条查。
+- 结论：G3a 判负不是"tile 不是杠杆"，是实现错；但要重做得先把 TILE_ID ↔ 实际 tile 名的映射用 `GEMM_FP8_DEBUG` 的 cands 列表对上。鉴于 nvjet 在副流只占 16%，**不重做**，记入 pitfalls（没验证的映射别当事实用）。
