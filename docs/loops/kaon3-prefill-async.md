@@ -102,3 +102,8 @@ E1 …（接 kaon3-decode-opt 的 D 编号体系，本 loop 用 E）
 - **代价**：TTFT 升（c8 86 → 106、c32 152 → 228）——prefill 被压到低优先级，首 token 晚。这是 TPOT↔TTFT 的直接 tradeoff；我们 TTFT 本来反超 vLLM 很多（c32 192 vs 231），有空间让。
 - 等 r1 c64 + r2 定稿；若两轮同向，合入时要同时看 TTFT 不超 vLLM（c32 228 vs vLLM 231 刚好贴边）。
 - r1 c64：A 19.56 / 220 → B **18.54 / 223**（TPOT −5.2%，TTFT +1.4%）。HOST_TIME：B 的纯 decode 步 p50 8.34 → 8.00（优先级让 decode 图在 prefill 期间少等），p90 持平 12.5（prefill 第一个 CTA 波仍挡住）；B 的混批步（现在只量 decode 子批 + 收割）(4000 tok, 40 req) 120 → 177 ms——prefill 被压慢了 50%，就是 TTFT 升的来源。
+
+## E6 预登记（b63 r2 B 出来前）：合入规则
+- 两轮同向 c16 / c32 / c64 TPOT 各 ≥ −2.5%、c8 不升 > 1% → **E1 + E4 一起合入默认开**（`PREFILL_ASYNC` 默认 1、kaon3 `MAIN_STREAM_PRIO` 默认 1；XSTREAM 默认改回 1 因为 late 需要 AltSet）。
+- TTFT 约束：合入后各档 TTFT 仍 ≤ vLLM 同窗口值（stepA6：c8 147 / c16 181 / c32 231 / c64 242）；c32 B 侧 228 贴边——合入后用 stepA 口径复测 3 轮确认，超了就把优先级差缩小（prefill 用中间优先级 -2 而不是 0）作 E7。
+- 不满足 → 默认留关，只记 CSV。
