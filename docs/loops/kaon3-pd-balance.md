@@ -37,3 +37,8 @@ k 取 0.1，死区 ±5%。两个误差都 ≤ 0 时 u 向默认（0.5）回归�
 
 ## 记录
 H 编号。
+
+## H1 2026-10-29 实现（core，模型无关）
+- `Scheduler::{set_prefill_tokens_per_step, prefill_tokens_per_step, oldest_wait_ns(now_ns)}`。
+- `engine::PdBalance`：`PD_BALANCE_SLO_TTFT_MS` / `PD_BALANCE_SLO_TPOT_MS` 都 > 0 启用（A/B 期 env）；`PD_BALANCE_K`（0.1）、`PD_BALANCE_PERIOD`（20 步）；每步末喂纯 decode 步 exec（滑动 64）与 waiting 队首等待；u 初值 0.5 → quota 2304；输出 `[pd-balance] u quota e_ttft e_tpot …`（HOST_TIME）。
+- h1 链：开环泊松 rate 12/16/20、160 请求、混合 prompt、SLO 200/12，A（关）B（开）两轮交错，看 goodput / p99。
