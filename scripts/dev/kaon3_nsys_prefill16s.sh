@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # D201：抓 c16 混批（pair 步 prefill 副流）的 eager kernel 清单。stepA4 口径（400 tok prompt / 64 out / c16 / 128 请求），
+# 稳态口径：NSYS_DELAY ≥ 60（模型加载 ~35 s + alt/main Gemm autotune ~2 s + warmup；delay 从 nsys 进程起算）；NREQ_MULT 32 → c16 × 512 请求。
 # nsys --cuda-graph-trace=node；结束后 nsys_prefill_steps.py 按 20 ms 间隙切步、取最长 3 步聚合。结果 tmp_nsysp16_RESULT.txt，标记 NSYSP16_DONE。
 # 容器内：docker exec -d kaon3-full bash -c 'bash /w/nsysp16.sh > /w/dinfer/tmp_nsysp16_run.log 2>&1'
 TAG=${TAG:-nsysp16}; C=${C:-16}; PORT=${PORT:-8341}
