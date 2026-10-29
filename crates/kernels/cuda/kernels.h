@@ -368,6 +368,9 @@ int moe_gate_f32(const void* x, const void* w, float* logits, int64_t tokens, in
 // out[T,E] f32 = x[T,H] bf16 · w[E,H]^T bf16，K 方向严格顺序累加、末尾舍 bf16 再转 f32。
 int router_gemm_bi_f32(const void* x, const void* w, float* out, int64_t tokens, int64_t num_experts, int64_t hidden,
                        cudaStream_t stream);
+// R1：router 小 M（≤16）bf16 gemv，out[T,E] bf16 = x[T,H]·w[E,H]^T（fp32 累加，固定序）。H % 8 == 0。
+int router_gemv_bf16(const void* x, const void* w, void* out, int64_t tokens, int64_t num_experts, int64_t hidden,
+                     cudaStream_t stream);
 // logits[T,E] f32 → topk_ids[T,K] i32, topk_w[T,K] f32。语义 = vLLM grouped_topk(n_group=1, sigmoid, bias)。
 int moe_route_f32(const float* logits, const float* bias, int32_t* topk_ids, float* topk_w, int64_t tokens,
                   int64_t num_experts, int64_t topk, int renormalize, float scale, cudaStream_t stream);

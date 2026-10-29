@@ -71,6 +71,49 @@ __global__ void gate_kernel(const bf16* __restrict__ x, const bf16* __restrict__
   if (threadIdx.x == 0) logits[t * E + e] = acc;
 }
 
+// R1（loop kaon3-decode-opt D171）：router 小 M bf16 gemv。logits_bf16[t,e] = bf16(Σ_d f32(x[t,d])·f32(w[e,d]))。
+// 为什么：M=8/N=128/K=2816 这个形状 cuBLAS 选 cutlass wmma 16x16（grid 8 个 CTA）16.7 us，M=1 的 gemvx 3.4 us；
+// 权重只有 720 KB，带宽下限 < 1 us，是 launch/并行度问题不是带宽问题。
+// 一个 warp 一个专家行：lane 按 8 个 bf16（16 B）跨步读 w 与 M 行 x（x 共 ≤ 90 KB，L1/L2 命中），fp32 累加，
+// xor 树归约——累加序固定（与 M、grid 无关）→ 批不变。M_TILE ∈ {1,2,4,8,16}，H % 8 == 0。
+template <int M_TILE>
+__global__ void __launch_bounds__(128) router_gemv_kernel(const bf16* __restrict__ x, const bf16* __restrict__ w,
+                                                          bf16* __restrict__ out, int M, int E, int H) {
+  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+  const int e = blockIdx.x * (blockDim.x >> 5) + warp;
+  if (e >= E) return;
+  const uint4* wr = reinterpret_cast<const uint4*>(w + (int64_t)e * H);
+  const int nchunk = H >> 3;
+  float acc[M_TILE];
+#pragma unroll
+  for (int t = 0; t < M_TILE; ++t) acc[t] = 0.f;
+#pragma unroll 4
+  for (int c = lane; c < nchunk; c += 32) {
+    const uint4 wv = __ldg(wr + c);
+    const bf16* w8 = reinterpret_cast<const bf16*>(&wv);
+#pragma unroll
+    for (int t = 0; t < M_TILE; ++t) {
+      if (t < M) {
+        const uint4 xv = __ldg(reinterpret_cast<const uint4*>(x + (int64_t)t * H) + c);
+        const bf16* x8 = reinterpret_cast<const bf16*>(&xv);
+#pragma unroll
+        for (int i = 0; i < 8; ++i) acc[t] = fmaf(to_f32(x8[i]), to_f32(w8[i]), acc[t]);
+      }
+    }
+  }
+#pragma unroll
+  for (int t = 0; t < M_TILE; ++t) {
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) acc[t] += __shfl_xor_sync(0xffffffffu, acc[t], o);
+  }
+  if (lane < M_TILE && lane < M) {
+    float v = 0.f;
+#pragma unroll
+    for (int t = 0; t < M_TILE; ++t) if (t == lane) v = acc[t];
+    out[(int64_t)lane * E + e] = to_bf16(v);
+  }
+}
+
 __global__ void count_kernel(const int32_t* __restrict__ topk_ids, int32_t* __restrict__ counts, int64_t n) {
   int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
   const int64_t stride = (int64_t)gridDim.x * blockDim.x;
@@ -178,6 +221,24 @@ extern "C" int moe_gate_f32(const void* x, const void* w, float* logits, int64_t
   gate_kernel<<<(unsigned)(tokens * num_experts), 128, 0, stream>>>(static_cast<const bf16*>(x),
                                                                     static_cast<const bf16*>(w), logits,
                                                                     (int)num_experts, (int)hidden);
+  return last_err();
+}
+
+extern "C" int router_gemv_bf16(const void* x, const void* w, void* out, int64_t tokens, int64_t num_experts,
+                                int64_t hidden, cudaStream_t stream) {
+  if (tokens <= 0) return 0;
+  if (tokens > 16 || hidden % 8 != 0 || num_experts <= 0) return err(cudaErrorInvalidValue);
+  const int warps = 4;
+  const dim3 grid((unsigned)((num_experts + warps - 1) / warps));
+  const bf16* px = static_cast<const bf16*>(x);
+  const bf16* pw = static_cast<const bf16*>(w);
+  bf16* po = static_cast<bf16*>(out);
+  const int M = (int)tokens, E = (int)num_experts, H = (int)hidden;
+  if (M <= 1) router_gemv_kernel<1><<<grid, warps * 32, 0, stream>>>(px, pw, po, M, E, H);
+  else if (M <= 2) router_gemv_kernel<2><<<grid, warps * 32, 0, stream>>>(px, pw, po, M, E, H);
+  else if (M <= 4) router_gemv_kernel<4><<<grid, warps * 32, 0, stream>>>(px, pw, po, M, E, H);
+  else if (M <= 8) router_gemv_kernel<8><<<grid, warps * 32, 0, stream>>>(px, pw, po, M, E, H);
+  else router_gemv_kernel<16><<<grid, warps * 32, 0, stream>>>(px, pw, po, M, E, H);
   return last_err();
 }
 

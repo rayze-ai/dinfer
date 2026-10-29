@@ -1803,6 +1803,31 @@ pub fn moe_gate_f32(
     )
 }
 
+/// R1：router 小 M（≤16）bf16 gemv，`out[T,E] = bf16(fp32 Σ x·w)`，固定累加序（批不变）。
+pub fn router_gemv_bf16(
+    stream: &Stream,
+    x: &CudaSlice<bf16>,
+    w: &CudaSlice<bf16>,
+    out: &mut CudaSlice<bf16>,
+    tokens: usize,
+    num_experts: usize,
+    hidden: usize,
+) -> Result<()> {
+    ensure!(tokens <= 16 && hidden % 8 == 0, "router_gemv: tokens ≤ 16 且 hidden % 8 == 0");
+    ensure!(x.len() >= tokens * hidden && w.len() == num_experts * hidden, "router_gemv: input");
+    ensure!(out.len() >= tokens * num_experts, "router_gemv: out");
+    let px = stream.ptr(x) as *const c_void;
+    let pw = stream.ptr(w) as *const c_void;
+    let po = stream.ptr_mut(out) as *mut c_void;
+    // SAFETY: 容量已校验。
+    check(
+        unsafe {
+            ffi::router_gemv_bf16(px, pw, po, tokens as i64, num_experts as i64, hidden as i64, stream.raw() as _)
+        },
+        "router_gemv_bf16",
+    )
+}
+
 /// router 的 **BI persistent matmul**（复刻 vLLM `matmul_persistent`）：
 /// `out[T,E] f32 = x[T,H] bf16 · w[E,H]ᵀ bf16`，**K 方向严格顺序累加、末尾舍 bf16 再转 f32**。
 ///

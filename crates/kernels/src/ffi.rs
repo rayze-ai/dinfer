@@ -677,6 +677,15 @@ extern "C" {
         hidden: i64,
         stream: cudaStream_t,
     ) -> i32;
+    pub fn router_gemv_bf16(
+        x: *const c_void,
+        w: *const c_void,
+        out: *mut c_void,
+        tokens: i64,
+        num_experts: i64,
+        hidden: i64,
+        stream: cudaStream_t,
+    ) -> i32;
     pub fn moe_route_f32(
         logits: *const f32,
         bias: *const f32,
@@ -1741,6 +1750,7 @@ mod stubs {
     stub!(gather_head_bf16(a: *const c_void, b: *mut c_void, t: i64, h: i64, w: i64, hd: i64, c0: i64, wd: i64, s: cudaStream_t));
     stub!(scatter_head_bf16(a: *const c_void, b: *mut c_void, t: i64, h: i64, w: i64, hd: i64, c0: i64, wd: i64, s: cudaStream_t));
     stub!(moe_gate_f32(x: *const c_void, w: *const c_void, l: *mut f32, t: i64, e: i64, h: i64, s: cudaStream_t));
+    stub!(router_gemv_bf16(x: *const c_void, w: *const c_void, o: *mut c_void, t: i64, e: i64, h: i64, s: cudaStream_t));
     stub!(router_gemm_bi_f32(x: *const c_void, w: *const c_void, o: *mut f32, t: i64, e: i64, h: i64, s: cudaStream_t));
     stub!(moe_combine_bf16(y: *const c_void, tw: *const f32, iv: *const i32, pe: *const c_void, ti: *const i32, ws: f32, o: *mut c_void, t: i64, k: i64, h: i64, m: i32, s: cudaStream_t));
     stub!(moe_route_bucket_small(l: *const c_void, lb: i32, pes: *const c_void, ti: *mut i32, tw: *mut f32, c: *mut i32, o: *mut i32, cu: *mut i32, st: *mut i32, sk: *mut i32, to: *mut i32, r2e: *mut i32, iv: *mut i32, t: i64, e: i64, k: i64, s: cudaStream_t));

@@ -683,6 +683,10 @@ fn router_pre_fused_enabled() -> bool {
     *V.get_or_init(|| env_ne!("ROUTER_PRE_FUSED", "0"))
 }
 /// B33c：route_fused 直接读 router GEMM 的 bf16 logits，省 bf16→f32 cast 一次 launch（`ROUTER_LOGITS_BF16=0` 回退）。
+fn router_gemv_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_ne!("ROUTER_GEMV", "0"))
+}
 fn route_logits_bf16_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_ne!("ROUTER_LOGITS_BF16", "0"))
@@ -1657,7 +1661,12 @@ impl Gemma4Layer {
                     h,
                 )?;
             } else {
-                gemm.forward_bf16(&sc.routed.data, &self.router.bf16_weight()?.data, None, &mut sc.logits_bf16.data, tokens, e, h)?;
+                // R1（D171）：M ≤ 16 走自写 bf16 gemv（cuBLAS 对 M=8/N=128 选 16.7 us 的 wmma kernel）；`ROUTER_GEMV=0` 回 cuBLASLt。
+                if router_gemv_enabled() && tokens <= 16 && h % 8 == 0 {
+                    k::ops::router_gemv_bf16(stream, &sc.routed.data, &self.router.bf16_weight()?.data, &mut sc.logits_bf16.data, tokens, e, h)?;
+                } else {
+                    gemm.forward_bf16(&sc.routed.data, &self.router.bf16_weight()?.data, None, &mut sc.logits_bf16.data, tokens, e, h)?;
+                }
                 // B33c：route_fused 路径直接读 bf16 logits（kernel 内 cast，逐位同），省这一次 launch；dump / 旧链仍需 f32。
                 if !(route_logits_bf16_ok && sub_out.is_none()) {
                     k::ops::bf16_to_f32_n(stream, &sc.logits_bf16.data, &mut sc.logits.data, tokens * e)?;
